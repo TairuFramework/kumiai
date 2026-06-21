@@ -1,0 +1,34 @@
+packages:
+  - packages/*
+
+allowBuilds:
+  '@swc/core': true
+  esbuild: false
+
+nodeLinker: hoisted
+
+catalog:
+  '@noble/ciphers': ^2.1.1
+  '@noble/curves': ^2.0.1
+  '@noble/hashes': ^2.0.0
+  'ts-mls': 2.0.0-rc.13
+  'vitest': ^4.1.9
+
+minimumReleaseAgeExclude:
+  - '@kigu/dev@0.1.0'
+  - '@enkaku/client@0.18.0'
+  - '@enkaku/protocol@0.18.0'
+  - '@enkaku/server@0.18.0'
+  - '@enkaku/transport@0.18.0'
+  - '@kokuin/capability@0.1.0'
+  - '@kokuin/token@0.1.0'
+  - '@sozai/async@0.1.0'
+  - '@sozai/codec@0.1.0'
+  - '@sozai/event@0.1.0'
+  - '@sozai/execution@0.1.0'
+  - '@sozai/log@0.1.0'
+  - '@sozai/otel@0.1.0'
+  - '@sozai/result@0.1.0'
+  - '@sozai/runtime@0.1.0'
+  - '@sozai/schema@0.1.0'
+  - '@sozai/stream@0.1.0'

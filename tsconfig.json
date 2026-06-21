@@ -1,0 +1,9 @@
+{
+  "extends": "@kigu/dev/tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "@kumiai/*": ["./packages/*"]
+    },
+    "noEmit": true
+  }
+}
