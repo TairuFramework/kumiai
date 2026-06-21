@@ -2,6 +2,42 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+---
+
+## ⚠️ STATUS — revised direction (paused 2026-06-21), READ FIRST
+
+The original 3-task plan below is **partly superseded**. What actually happened:
+
+- **Task 1 (catalog) — DONE & kept.** Commit `5699426`. All `@enkaku/*`/`@kokuin/*`/`@sozai/*` deps now `catalog:` across the 7 packages; reviewed clean. Workspace green.
+- **Task 2 (verbatim import of the 2 `integration-mls` hub tests) — ATTEMPTED then REVERTED.** Commits `c615a7a` (import) + `a4a01e4` (revert). Reason: those tests target kumiai's **old hub API**. Kumiai's hub is now **topic-based pub/sub** (`HubClient.publish(topicID)/subscribe/receive({after})`; `HubStore.publish/fetch/ack/purge`; routing by `topicID`, not recipient-DID/group). Group ops moved to `@kumiai/rpc` `GroupPeer`. The staged tests don't compile and are ~fully duplicated by existing kumiai tests anyway.
+- **Task 3 (lint scope) — NOT DONE.** Deferred; revisit once `tests/` exists again.
+
+### Coverage finding (why the import was abandoned)
+
+The 2 `integration-mls` tests' behaviors are already covered by `hub-server/test/hub.test.ts`, `hub-server/test/memoryStore.test.ts`, `hub-client/test/client.test.ts`, `rpc/test/integration.test.ts`, `hub-tunnel/test/{echo-protocol,encrypted-transport-e2e}.test.ts`. Only **2 real gaps** remain (see Remaining Work).
+
+### Remaining work (agreed with user — DO THIS NEXT)
+
+**R1 — Add 2 gap tests at the current topic-based API** to `packages/hub-server/test/hub.test.ts` (follow its `createTestHub`/`connect`/`createChannel('hub/receive')` fixture patterns; `encodePayload` helper; `TOPIC` const):
+  - **B5 — unacked re-delivery on reconnect:** `connect(bob)` + `hub/subscribe` to TOPIC; `connect(alice)` publishes; bob opens `hub/receive`, reads the message but does **NOT** `channel.send({ ack: [...] })`; close + (re)`connect(bobIdentity)`; open `hub/receive` again → the same message is delivered again. (Contrast with the existing "ack drains the store" test at hub.test.ts:181.)
+  - **B9 — topic-exclusion negative:** bob `hub/subscribe` to `topic:A` only; alice `hub/publish` to `topic:B`; after a `delay`, bob's receive yields nothing AND `store.fetch({ recipientDID: bobIdentity.id })` is empty.
+
+**R2 — Import the e2e-expo MLS harness (group-e2ee flow only)** as a new `tests/e2e-expo` workspace. Source: `/Users/paul/dev/yulsi/enkaku/tests/_ported/e2e-expo/`. This flow is a **CLEAN MATCH** against current `@kumiai/mls` (verified) and is the one genuinely-unique import: it proves the MLS group lifecycle (`createGroup→createInvite→createKeyPackageBundle→commitInvite→processWelcome→encrypt/decrypt` with `nobleCryptoProvider`) runs on **Hermes/React Native** — no kumiai Node test can. Recipe:
+  - Add `tests/*` to the `pnpm-workspace.yaml` `packages:` glob.
+  - Copy verbatim: `components/GroupEncryption.tsx`, `.maestro/group-e2ee.yaml`, `app.json`, `tsconfig.json`, `index.ts`, `assets/`.
+  - **Trim (kokuin, not kumiai):** drop `components/SignVerify.tsx` and `.maestro/sign-verify.yaml`; edit `App.tsx` to remove the `SignVerify` import + `<SignVerify />` usage.
+  - `package.json`: private; `@kumiai/mls` → `workspace:^`; `@kokuin/expo`, `@sozai/runtime-expo`, `@kokuin/token` → `catalog:`; `expo`/`react`/`react-native`/`expo-status-bar`/`@types/react`/`typescript` → `catalog:`. **These deps are NOT yet in kumiai's catalog or in `minimumReleaseAgeExclude`** — add them (pull versions from `enkaku`'s `pnpm-workspace.yaml` catalog). `test` script = `maestro test .maestro/` (NOT vitest; NOT part of turbo `test:unit`, so `pnpm test` stays green without a simulator).
+  - Note: `app.json`/maestro `appId` use `dev.enkaku.e2e` — decide whether to rebrand to a kumiai id.
+
+**R3 — Extend lint scope** (old Task 3): root `package.json` `lint` → `biome check --write ./packages ./tests` once `tests/` exists.
+
+### Resume pointers
+- Branch: `chore/import-tests`. HEAD after revert: `a4a01e4` (net change vs base = catalog only).
+- Scratch ledger (gitignored): `.superpowers/sdd/progress.md`.
+- The original Task 1/2/3 bodies below are kept for reference; **Task 1 is done, Task 2 is void, Task 3 → R3**.
+
+---
+
 **Goal:** Import the two cross-package hub/MLS integration tests from `enkaku` into a new `tests/` workspace in `kumiai`, and centralize all cross-repo dependency versions through the pnpm catalog.
 
 **Architecture:** Three independent changes. (1) Move every `@enkaku/*`/`@kokuin/*`/`@sozai/*` version range out of individual `package.json` files into the `pnpm-workspace.yaml` catalog, replacing each with `catalog:`. (2) Add a private `tests/integration` workspace package holding the two ported test files (copied verbatim) plus vitest/tsconfig config. (3) Extend the root `lint` script to cover `tests/`.
