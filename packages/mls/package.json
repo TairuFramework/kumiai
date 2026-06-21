@@ -35,9 +35,9 @@
     "prepublishOnly": "pnpm run build"
   },
   "dependencies": {
-    "@kokuin/capability": "^0.1.0",
-    "@sozai/runtime": "^0.1.0",
-    "@kokuin/token": "^0.1.0",
+    "@kokuin/capability": "catalog:",
+    "@sozai/runtime": "catalog:",
+    "@kokuin/token": "catalog:",
     "@noble/ciphers": "catalog:",
     "@noble/curves": "catalog:",
     "@noble/hashes": "catalog:",
