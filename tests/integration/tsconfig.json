@@ -1,0 +1,9 @@
+{
+  "extends": "@kigu/dev/tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "lib": ["es2025", "dom"],
+    "noEmit": true
+  },
+  "include": ["./**/*.test.ts"]
+}
