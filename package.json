@@ -7,7 +7,7 @@
   "packageManager": "pnpm@11.8.0",
   "scripts": {
     "prepare": "git config core.hooksPath .githooks",
-    "lint": "biome check --write ./packages",
+    "lint": "biome check --write ./packages ./tests",
     "format": "biome format --write .",
     "test": "turbo run test:types test:unit",
     "build:js": "turbo run build:js",
