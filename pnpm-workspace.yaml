@@ -1,5 +1,6 @@
 packages:
   - packages/*
+  - tests/*
 
 allowBuilds:
   '@swc/core': true
@@ -25,8 +26,26 @@ catalog:
   '@sozai/runtime': ^0.1.0
   '@sozai/schema': ^0.1.0
   '@sozai/stream': ^0.1.0
+  '@kokuin/expo': ^0.1.0
+  '@sozai/runtime-expo': ^0.1.0
+  'expo': ^56.0.3
+  'expo-status-bar': ^56.0.0
+  'react': 19.2.3
+  'react-native': ^0.85.3
+  '@types/react': ^19.2.17
+  'typescript': ^6.0.3
 
 minimumReleaseAgeExclude:
+  - '@expo/cli@56.1.10'
+  - '@expo/fingerprint@0.19.1'
+  - '@expo/prebuild-config@56.0.12'
+  - '@expo/router-server@56.0.11'
+  - babel-preset-expo@56.0.11
+  - expo-asset@56.0.13
+  - expo-constants@56.0.14
+  - expo-modules-autolinking@56.0.11
+  - expo-modules-core@56.0.12
+  - expo@56.0.3
   - '@kigu/dev@0.1.0'
   - '@enkaku/client@0.18.0'
   - '@enkaku/protocol@0.18.0'
