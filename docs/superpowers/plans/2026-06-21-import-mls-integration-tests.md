@@ -4,7 +4,20 @@
 
 ---
 
-## ⚠️ STATUS — revised direction (paused 2026-06-21), READ FIRST
+## ✅ STATUS — COMPLETE (2026-06-22)
+
+All remaining work (R1/R2/R3) landed on `chore/import-tests`:
+- **R1 — 2 gap tests** — commit `9299380`. `hub-server/test/hub.test.ts` now covers unacked redelivery on reconnect (B5) and topic exclusion (B9). 13 tests pass.
+- **R2 — e2e-expo MLS harness** — commit `54263f5`. New private `tests/e2e-expo` workspace (group-e2ee Maestro flow only; kokuin sign-verify dropped; appId rebranded `dev.kumiai.e2e`). expo SDK 56 / RN 0.85.3 added to catalog + release-age excludes; `@kumiai/mls` linked `workspace:^`. `tsc -p` clean → MLS API confirmed a match on Hermes. `test` = maestro (needs simulator), not in turbo `test:unit`, so `pnpm test` stays green headless.
+- **R3 — lint scope** — commit `2fff52c`. Root `lint` → `biome check --write ./packages ./tests`.
+
+Full suite green: `turbo run test:types test:unit` = 14/14 tasks pass; biome clean over packages + tests.
+
+Branch ready for PR. Historical context below.
+
+---
+
+## ⚠️ STATUS — revised direction (paused 2026-06-21)
 
 The original 3-task plan below is **partly superseded**. What actually happened:
 
