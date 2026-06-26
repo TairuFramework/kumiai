@@ -1,0 +1,12 @@
+name: iOS E2E
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  test:
+    uses: TairuFramework/kigu/.github/workflows/e2e-ios.yml@main
+    with:
+      working-directory: tests/e2e-expo
+      runs-on: macos-26
+      node-version: '24'
