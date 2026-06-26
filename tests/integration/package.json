@@ -1,0 +1,22 @@
+{
+  "name": "@kumiai/integration-tests",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "tsc --noEmit --skipLibCheck && vitest run"
+  },
+  "devDependencies": {
+    "@kumiai/mls": "workspace:^",
+    "@kumiai/hub-client": "workspace:^",
+    "@kumiai/hub-protocol": "workspace:^",
+    "@kumiai/hub-server": "workspace:^",
+    "@kumiai/hub-tunnel": "workspace:^",
+    "@enkaku/client": "catalog:",
+    "@enkaku/protocol": "catalog:",
+    "@enkaku/transport": "catalog:",
+    "@enkaku/server": "catalog:",
+    "@kokuin/token": "catalog:",
+    "vitest": "catalog:"
+  }
+}

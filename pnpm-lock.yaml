@@ -309,6 +309,42 @@ importers:
         specifier: 'catalog:'
         version: 6.0.3
 
+  tests/integration:
+    devDependencies:
+      '@enkaku/client':
+        specifier: 'catalog:'
+        version: 0.18.0
+      '@enkaku/protocol':
+        specifier: 'catalog:'
+        version: 0.18.0
+      '@enkaku/server':
+        specifier: 'catalog:'
+        version: 0.18.0
+      '@enkaku/transport':
+        specifier: 'catalog:'
+        version: 0.18.0
+      '@kokuin/token':
+        specifier: 'catalog:'
+        version: 0.1.0
+      '@kumiai/hub-client':
+        specifier: workspace:^
+        version: link:../../packages/hub-client
+      '@kumiai/hub-protocol':
+        specifier: workspace:^
+        version: link:../../packages/hub-protocol
+      '@kumiai/hub-server':
+        specifier: workspace:^
+        version: link:../../packages/hub-server
+      '@kumiai/hub-tunnel':
+        specifier: workspace:^
+        version: link:../../packages/hub-tunnel
+      '@kumiai/mls':
+        specifier: workspace:^
+        version: link:../../packages/mls
+      vitest:
+        specifier: 'catalog:'
+        version: 4.1.9(@opentelemetry/api@1.9.1)(@types/node@26.0.1)(@vitest/ui@4.1.9)(vite@8.0.16(@types/node@26.0.1)(esbuild@0.28.1)(terser@5.48.0)(tsx@4.22.4)(yaml@2.9.0))
+
 packages:
 
   '@babel/code-frame@7.29.7':

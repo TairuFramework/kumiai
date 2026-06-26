@@ -8,4 +8,5 @@ jobs:
     uses: TairuFramework/kigu/.github/workflows/build-test.yml@main
     with:
       node-versions: '[24, 26]'
+      integration-tests-dir: tests/integration
       ts-readiness-check: true
