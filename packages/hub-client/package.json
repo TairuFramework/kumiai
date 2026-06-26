@@ -34,15 +34,15 @@
     "prepublishOnly": "pnpm run build"
   },
   "dependencies": {
-    "@enkaku/client": "^0.18.0",
+    "@enkaku/client": "catalog:",
     "@kumiai/hub-protocol": "workspace:^"
   },
   "devDependencies": {
-    "@sozai/codec": "^0.1.0",
+    "@sozai/codec": "catalog:",
     "@kumiai/mls": "workspace:^",
     "@kumiai/hub-server": "workspace:^",
-    "@enkaku/protocol": "^0.18.0",
-    "@kokuin/token": "^0.1.0",
-    "@enkaku/transport": "^0.18.0"
+    "@enkaku/protocol": "catalog:",
+    "@kokuin/token": "catalog:",
+    "@enkaku/transport": "catalog:"
   }
 }

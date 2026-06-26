@@ -205,6 +205,74 @@ describe('hub pub/sub', () => {
     await ctx.dispose()
   })
 
+  test('redelivers unacked messages on reconnect', async () => {
+    const ctx = createTestHub()
+    const { client: alice } = ctx.connect()
+    const bobIdentity = randomIdentity()
+    const { client: bobSetup } = ctx.connect(bobIdentity)
+    await bobSetup.request('hub/subscribe', { param: { topicID: TOPIC } })
+
+    await alice.request('hub/publish', { param: { topicID: TOPIC, payload: encodePayload('m1') } })
+    await delay(20)
+
+    // First connect: read the message but do NOT ack it.
+    const { client: bobFirst } = ctx.connect(bobIdentity)
+    const firstChannel = bobFirst.createChannel('hub/receive', { param: {} })
+    const firstReader = firstChannel.readable.getReader()
+    const firstMsg = await firstReader.read()
+    expect(firstMsg.value?.payload).toBe(encodePayload('m1'))
+    firstChannel.close()
+    await expect(firstChannel).rejects.toEqual('Close')
+    await delay(20)
+
+    // Reconnect the same identity: the unacked message is delivered again.
+    const { client: bobSecond } = ctx.connect(bobIdentity)
+    const secondChannel = bobSecond.createChannel('hub/receive', { param: {} })
+    const secondReader = secondChannel.readable.getReader()
+    const secondMsg = await secondReader.read()
+    expect(secondMsg.value?.payload).toBe(encodePayload('m1'))
+
+    secondChannel.close()
+    await expect(secondChannel).rejects.toEqual('Close')
+    await delay(20)
+    await ctx.dispose()
+  })
+
+  test('does not deliver or store messages for unsubscribed topics', async () => {
+    const ctx = createTestHub()
+    const { client: alice } = ctx.connect()
+    const bobIdentity = randomIdentity()
+    const { client: bob } = ctx.connect(bobIdentity)
+
+    await bob.request('hub/subscribe', { param: { topicID: 'topic:A' } })
+    const channel = bob.createChannel('hub/receive', { param: {} })
+    const reader = channel.readable.getReader()
+    let delivered = false
+    // Floating read: it stays pending (no matching topic), then settles when the
+    // channel closes below. Swallow the close-time rejection so it can't surface
+    // as an unhandled rejection.
+    void reader.read().then(
+      () => {
+        delivered = true
+      },
+      () => {},
+    )
+    await delay(20)
+
+    await alice.request('hub/publish', {
+      param: { topicID: 'topic:B', payload: encodePayload('other') },
+    })
+    await delay(20)
+
+    expect(delivered).toBe(false)
+    expect((await ctx.store.fetch({ recipientDID: bobIdentity.id })).messages).toHaveLength(0)
+
+    channel.close()
+    await expect(channel).rejects.toEqual('Close')
+    await delay(20)
+    await ctx.dispose()
+  })
+
   test('unsubscribe stops further delivery', async () => {
     const ctx = createTestHub()
     const { client: alice } = ctx.connect()

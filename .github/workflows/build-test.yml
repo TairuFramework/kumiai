@@ -1,0 +1,11 @@
+name: Build and test
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  build-test:
+    uses: TairuFramework/kigu/.github/workflows/build-test.yml@main
+    with:
+      node-versions: '[24, 26]'
+      ts-readiness-check: true

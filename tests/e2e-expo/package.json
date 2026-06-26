@@ -1,0 +1,29 @@
+{
+  "name": "e2e-expo",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.ts",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "android:release": "expo run:android --no-bundler --variant release",
+    "ios": "expo run:ios",
+    "ios:release": "expo run:ios --no-bundler --configuration Release",
+    "test:types": "tsc --noEmit -p tsconfig.json",
+    "test": "MAESTRO_CLI_NO_ANALYTICS=true MAESTRO_CLI_ANALYSIS_NOTIFICATION_DISABLED=true maestro test .maestro/"
+  },
+  "dependencies": {
+    "@kumiai/mls": "workspace:^",
+    "@kokuin/expo": "catalog:",
+    "@kokuin/token": "catalog:",
+    "@sozai/runtime-expo": "catalog:",
+    "expo": "catalog:",
+    "expo-status-bar": "catalog:",
+    "react": "catalog:",
+    "react-native": "catalog:"
+  },
+  "devDependencies": {
+    "@types/react": "catalog:",
+    "typescript": "catalog:"
+  }
+}

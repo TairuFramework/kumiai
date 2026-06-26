@@ -1,0 +1,11 @@
+name: Android E2E
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  test:
+    uses: TairuFramework/kigu/.github/workflows/e2e-android.yml@main
+    with:
+      working-directory: tests/e2e-expo
+      node-version: '24'

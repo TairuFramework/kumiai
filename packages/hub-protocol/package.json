@@ -35,7 +35,7 @@
     "prepublishOnly": "pnpm run build"
   },
   "dependencies": {
-    "@sozai/event": "^0.1.0",
-    "@enkaku/protocol": "^0.18.0"
+    "@sozai/event": "catalog:",
+    "@enkaku/protocol": "catalog:"
   }
 }
