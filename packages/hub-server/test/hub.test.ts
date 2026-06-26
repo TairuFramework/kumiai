@@ -248,9 +248,15 @@ describe('hub pub/sub', () => {
     const channel = bob.createChannel('hub/receive', { param: {} })
     const reader = channel.readable.getReader()
     let delivered = false
-    void reader.read().then(() => {
-      delivered = true
-    })
+    // Floating read: it stays pending (no matching topic), then settles when the
+    // channel closes below. Swallow the close-time rejection so it can't surface
+    // as an unhandled rejection.
+    void reader.read().then(
+      () => {
+        delivered = true
+      },
+      () => {},
+    )
     await delay(20)
 
     await alice.request('hub/publish', {
