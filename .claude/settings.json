@@ -1,0 +1,14 @@
+{
+  "extraKnownMarketplaces": {
+    "kigu": {
+      "source": {
+        "source": "github",
+        "repo": "TairuFramework/kigu"
+      },
+      "autoUpdate": true
+    }
+  },
+  "enabledPlugins": {
+    "kigu@kigu": true
+  }
+}

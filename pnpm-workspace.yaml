@@ -19,19 +19,19 @@ catalog:
   '@enkaku/server': ^0.18.0
   '@enkaku/transport': ^0.18.0
   '@kokuin/capability': ^0.1.0
-  '@kokuin/token': ^0.1.0
+  '@kokuin/token': ^0.1.1
   '@sozai/async': ^0.1.0
   '@sozai/codec': ^0.1.0
   '@sozai/event': ^0.1.0
   '@sozai/runtime': ^0.1.0
   '@sozai/schema': ^0.1.0
   '@sozai/stream': ^0.1.0
-  '@kokuin/expo': ^0.1.0
+  '@kokuin/expo': ^0.1.1
   '@sozai/runtime-expo': ^0.1.0
-  'expo': ^56.0.3
-  'expo-status-bar': ^56.0.0
+  'expo': ^57.0.0
+  'expo-status-bar': ^57.0.0
   'react': 19.2.3
-  'react-native': ^0.85.3
+  'react-native': ^0.86.0
   '@types/react': ^19.2.17
   'typescript': ^6.0.3
 
@@ -40,13 +40,15 @@ minimumReleaseAgeExclude:
   - '@kigu/*'
   - '@kokuin/*'
   - '@sozai/*'
-  - '@expo/cli@56.1.10'
-  - '@expo/fingerprint@0.19.1'
-  - '@expo/prebuild-config@56.0.12'
-  - '@expo/router-server@56.0.11'
-  - babel-preset-expo@56.0.11
-  - expo-asset@56.0.13
-  - expo-constants@56.0.14
-  - expo-modules-autolinking@56.0.11
-  - expo-modules-core@56.0.12
-  - expo@56.0.3
+  - '@expo/cli@57.0.2'
+  - '@expo/fingerprint@0.20.1'
+  - '@expo/inline-modules@0.1.1'
+  - '@expo/local-build-cache-provider@57.0.1'
+  - '@expo/metro-config@57.0.2'
+  - '@expo/prebuild-config@57.0.2'
+  - '@expo/router-server@57.0.1'
+  - babel-preset-expo@57.0.1
+  - expo-asset@57.0.2
+  - expo-constants@57.0.2
+  - expo-modules-autolinking@57.0.2
+  - expo@57.0.0
