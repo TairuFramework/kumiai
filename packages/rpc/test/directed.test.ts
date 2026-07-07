@@ -1,6 +1,7 @@
 import type { Client } from '@enkaku/client'
 import type { ProtocolDefinition } from '@enkaku/protocol'
 import type { ProcedureHandlers } from '@enkaku/server'
+import type { Unwrap } from '@kumiai/broadcast'
 import { describe, expect, test } from 'vitest'
 
 import { createDirectedClient, createInboxAcceptor } from '../src/directed.js'
@@ -190,5 +191,73 @@ describe('directed RPC security', () => {
     await aliceMux.dispose()
     await bob.acceptor.dispose()
     await bob.mux.dispose()
+  })
+
+  test('an async unwrap with variable latency does not reorder inbound frames', async () => {
+    const hub = new FakeHub()
+    const calls: Array<number> = []
+    const bobCrypto = createFakeCrypto({ localDID: 'bob' })
+    const bobMux = createHubMux({ hub, localDID: 'bob' })
+
+    // Real MLS decrypt has variable latency. Delay the *first* frame's unwrap
+    // longer than the second's: if inbound processing were not serialized,
+    // the second frame would win the race and dispatch before the first —
+    // either double-creating a session for a still-unseen sessionID, or
+    // feeding the established tunnel a frame out of wire order (dropped as
+    // stale seq). Serializing onto a tail promise means the second frame's
+    // unwrap cannot even *start* until the first has fully dispatched, so no
+    // amount of latency skew can reorder them.
+    let seen = 0
+    const delayedUnwrap: Unwrap = async (bytes) => {
+      const index = seen++
+      const delayMs = index === 0 ? 20 : 2
+      await new Promise((resolve) => setTimeout(resolve, delayMs))
+      return bobCrypto.unwrap(bytes)
+    }
+
+    const bobAcceptor = createInboxAcceptor({
+      mux: bobMux,
+      localDID: 'bob',
+      selfInboxTopic: inboxTopic(SECRET, EPOCH, 'bob'),
+      resolveSendTopic: (senderDID) => inboxTopic(SECRET, EPOCH, senderDID),
+      protocol,
+      handlers: {
+        'rpc/double': (ctx: { param: { n: number } }) => {
+          calls.push(ctx.param.n)
+          return { n: ctx.param.n * 2 }
+        },
+      } as unknown as Handlers,
+      wrap: bobCrypto.wrap,
+      unwrap: delayedUnwrap,
+    })
+
+    const aliceCrypto = createFakeCrypto({ localDID: 'alice' })
+    const aliceMux = createHubMux({ hub, localDID: 'alice' })
+    const { client, dispose } = createDirectedClient<Protocol>({
+      mux: aliceMux,
+      localDID: 'alice',
+      memberDID: 'bob',
+      secret: SECRET,
+      epoch: EPOCH,
+      getRandomID: () => 'session-a-b',
+      wrap: aliceCrypto.wrap,
+      unwrap: aliceCrypto.unwrap,
+    })
+
+    // Fire both requests on the same session without awaiting the first, so
+    // both frames land on bob's inbox back-to-back and race at the unwrap
+    // layer (the first frame is the slow one).
+    const [first, second] = await Promise.all([
+      client.request('rpc/double', { param: { n: 5 } }),
+      client.request('rpc/double', { param: { n: 9 } }),
+    ])
+    expect(first).toEqual({ n: 10 })
+    expect(second).toEqual({ n: 18 })
+    expect(calls).toEqual([5, 9]) // handler invoked in wire order, not unwrap-completion order
+
+    await dispose()
+    await aliceMux.dispose()
+    await bobAcceptor.dispose()
+    await bobMux.dispose()
   })
 })

@@ -122,6 +122,11 @@ export function createInboxAcceptor<Protocol extends ProtocolDefinition>(
           },
           return() {
             closed = true
+            if (resolveNext != null) {
+              const resolve = resolveNext
+              resolveNext = undefined
+              resolve({ value: undefined as unknown as StoredMessage, done: true })
+            }
             return Promise.resolve({ value: undefined as unknown as StoredMessage, done: true })
           },
         }
@@ -175,39 +180,49 @@ export function createInboxAcceptor<Protocol extends ProtocolDefinition>(
     }
   }
 
+  // Serialize inbound processing: `unwrap` is async (real MLS decrypt has
+  // variable latency), so independent concurrent tasks could resolve out of
+  // dispatch order — racing to double-create a session, or feeding frames to a
+  // tunnel out of wire order (which drops them as stale seq). Chaining each
+  // message onto a running tail keeps processing in arrival order.
+  let inboundTail: Promise<void> = Promise.resolve()
   const unsubscribe = mux.onInbound(selfInboxTopic, (message) => {
-    void (async () => {
-      let opened: UnwrapResult
-      try {
-        opened = normalizeUnwrap(await unwrap(message.payload))
-      } catch {
-        return // un-openable — drop
-      }
-      const senderDID = opened.senderDID
-      if (senderDID == null) return // no authenticated sender — drop
-      let frame: ReturnType<typeof decodeFrame>
-      try {
-        frame = decodeFrame(opened.payload)
-      } catch {
-        return
-      }
-      const existing = sessions.get(frame.sessionID)
-      if (frame.kind === 'session-end') {
-        if (existing != null && existing.senderDID === senderDID) {
-          sessions.delete(frame.sessionID)
-          void existing.dispose()
+    inboundTail = inboundTail
+      .then(async () => {
+        let opened: UnwrapResult
+        try {
+          opened = normalizeUnwrap(await unwrap(message.payload))
+        } catch {
+          return // un-openable — drop
         }
-        return
-      }
-      if (frame.kind !== 'message') return
-      if (existing != null) {
-        if (existing.senderDID === senderDID) existing.feed(opened.payload)
-        return // sender mismatch on an established session — splice attempt, drop
-      }
-      const session = createSession(senderDID)
-      sessions.set(frame.sessionID, session)
-      session.feed(opened.payload)
-    })()
+        const senderDID = opened.senderDID
+        if (senderDID == null) return // no authenticated sender — drop
+        let frame: ReturnType<typeof decodeFrame>
+        try {
+          frame = decodeFrame(opened.payload)
+        } catch {
+          return
+        }
+        const existing = sessions.get(frame.sessionID)
+        if (frame.kind === 'session-end') {
+          if (existing != null && existing.senderDID === senderDID) {
+            sessions.delete(frame.sessionID)
+            void existing.dispose()
+          }
+          return
+        }
+        if (frame.kind !== 'message') return
+        if (existing != null) {
+          if (existing.senderDID === senderDID) existing.feed(opened.payload)
+          return // sender mismatch on an established session — splice attempt, drop
+        }
+        const session = createSession(senderDID)
+        sessions.set(frame.sessionID, session)
+        session.feed(opened.payload)
+      })
+      .catch(() => {
+        // a single message's processing failure must not break the chain
+      })
   })
 
   return {
