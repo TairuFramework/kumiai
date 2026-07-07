@@ -14,4 +14,14 @@ describe('recovery request codec', () => {
   test('rejects an over-long requestID', () => {
     expect(() => encodeRecoveryRequest('x'.repeat(200), 'did:key:alice')).toThrow(/requestID/)
   })
+
+  test('rejects an over-long requesterDID', () => {
+    expect(() => encodeRecoveryRequest('req-1', 'x'.repeat(600))).toThrow(/requesterDID/)
+  })
+
+  test('rejects a truncated request buffer', () => {
+    const valid = encodeRecoveryRequest('req-1', 'did:key:alice')
+    // Drop the trailing requesterDID bytes so the declared didLen overruns the buffer.
+    expect(() => decodeRecoveryRequest(valid.subarray(0, valid.length - 3))).toThrow()
+  })
 })

@@ -348,7 +348,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     if (groupInfo == null) return { advanced: false }
     let result = { advanced: false }
     const op = handshakeTail.then(async () => {
-      const r = await port.applyRecovery(groupInfo)
+      let r: { advanced: boolean }
+      try {
+        r = await port.applyRecovery(groupInfo)
+      } catch {
+        // A hub-injected or wrong-leaf reply fails to open; treat as no recovery
+        // rather than rejecting the public recover() call.
+        return
+      }
       if (r.advanced) await rebuildEpoch()
       result = r
     })

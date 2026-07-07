@@ -52,7 +52,12 @@ export type GroupMLS = {
    * members) can open it.
    */
   exportGroupInfo(requesterDID: string): Promise<Uint8Array>
-  /** Re-sync from a sealed recovery reply, returning whether the epoch advanced. */
+  /**
+   * Re-sync from a sealed recovery reply, returning whether the epoch advanced.
+   * The bytes may be hub-injected or sealed to a different member; implementations
+   * SHOULD return `{ advanced: false }` for input they cannot open. A throw is also
+   * tolerated — the caller treats it as no advance — but returning is preferred.
+   */
   applyRecovery(groupInfo: Uint8Array): Promise<{ advanced: boolean }>
   /**
    * The epoch-independent secret for the non-rotating handshake/recovery topic.
