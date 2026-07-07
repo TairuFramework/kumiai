@@ -202,7 +202,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   // Responder: after a jitter delay, answer a recovery request with current
   // GroupInfo — unless another responder's reply has already been observed
   // (storm-collapse), in which case the scheduled reply is cancelled.
-  const handleRecoveryRequest = (requestID: string): void => {
+  const handleRecoveryRequest = (request: { requestID: string; requesterDID: string }): void => {
+    const { requestID, requesterDID } = request
     if (mls == null || handshakeTopicID == null) return
     if (suppressedRequests.has(requestID) || pendingReplies.has(requestID)) return
     const port = mls
@@ -211,7 +212,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       pendingReplies.delete(requestID)
       void (async () => {
         try {
-          const groupInfo = await port.exportGroupInfo()
+          const groupInfo = await port.exportGroupInfo(requesterDID)
           await mux.bus.publish(
             topicID,
             encodeHandshakeFrame(
@@ -337,7 +338,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       void Promise.resolve(
         mux.bus.publish(
           topicID,
-          encodeHandshakeFrame(HANDSHAKE_KIND.recoveryRequest, encodeRecoveryRequest(requestID)),
+          encodeHandshakeFrame(
+            HANDSHAKE_KIND.recoveryRequest,
+            encodeRecoveryRequest(requestID, localDID),
+          ),
         ),
       ).catch(() => {})
     })

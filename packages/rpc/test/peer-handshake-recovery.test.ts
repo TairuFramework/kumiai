@@ -24,7 +24,12 @@ function makePeer(
   recovery?: { timeoutMs?: number; getDelayMs?: () => number },
 ) {
   const crypto = createFakeCrypto({ epoch, localDID })
-  const mls = createMemoryGroupMLS({ recoverySecret, epoch, onAdvance: (e) => crypto.setEpoch(e) })
+  const mls = createMemoryGroupMLS({
+    recoverySecret,
+    epoch,
+    localDID,
+    onAdvance: (e) => crypto.setEpoch(e),
+  })
   const peer = createGroupPeer<Protocols>({
     hub,
     crypto,
