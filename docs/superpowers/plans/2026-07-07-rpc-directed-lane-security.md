@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Stage:** executing
+**Stage:** qa
 **Mode:** tasks
 
 **Goal:** Encrypt and authenticate the `@kumiai/rpc` directed 1:1 lane against a malicious hub, seal recovery replies to the requesting member, and cap the recovery requestID.
