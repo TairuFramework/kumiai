@@ -130,6 +130,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         resolveSendTopic: (senderDID) => inboxTopic(secret, epoch, senderDID),
         protocol: protocol as ProtocolDefinition,
         handlers: handlers[name] as unknown as ProcedureHandlers<ProtocolDefinition>,
+        wrap: crypto.wrap,
+        unwrap: crypto.unwrap,
       })
       next.set(name, { client, busServer, acceptor, directed: new Map() })
     }
@@ -172,6 +174,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           memberDID,
           secret,
           epoch,
+          wrap: crypto.wrap,
+          unwrap: crypto.unwrap,
           ...(getRandomID != null ? { getRandomID } : {}),
         })
         runtime.directed.set(memberDID, created)
@@ -198,7 +202,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   // Responder: after a jitter delay, answer a recovery request with current
   // GroupInfo — unless another responder's reply has already been observed
   // (storm-collapse), in which case the scheduled reply is cancelled.
-  const handleRecoveryRequest = (requestID: string): void => {
+  const handleRecoveryRequest = (request: { requestID: string; requesterDID: string }): void => {
+    const { requestID, requesterDID } = request
     if (mls == null || handshakeTopicID == null) return
     if (suppressedRequests.has(requestID) || pendingReplies.has(requestID)) return
     const port = mls
@@ -207,7 +212,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       pendingReplies.delete(requestID)
       void (async () => {
         try {
-          const groupInfo = await port.exportGroupInfo()
+          const groupInfo = await port.exportGroupInfo(requesterDID)
           await mux.bus.publish(
             topicID,
             encodeHandshakeFrame(
@@ -333,14 +338,24 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       void Promise.resolve(
         mux.bus.publish(
           topicID,
-          encodeHandshakeFrame(HANDSHAKE_KIND.recoveryRequest, encodeRecoveryRequest(requestID)),
+          encodeHandshakeFrame(
+            HANDSHAKE_KIND.recoveryRequest,
+            encodeRecoveryRequest(requestID, localDID),
+          ),
         ),
       ).catch(() => {})
     })
     if (groupInfo == null) return { advanced: false }
     let result = { advanced: false }
     const op = handshakeTail.then(async () => {
-      const r = await port.applyRecovery(groupInfo)
+      let r: { advanced: boolean }
+      try {
+        r = await port.applyRecovery(groupInfo)
+      } catch {
+        // A hub-injected or wrong-leaf reply fails to open; treat as no recovery
+        // rather than rejecting the public recover() call.
+        return
+      }
       if (r.advanced) await rebuildEpoch()
       result = r
     })

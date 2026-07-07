@@ -1,9 +1,12 @@
 import { Client } from '@enkaku/client'
 import type { ClientTransportOf, ProtocolDefinition, ServerTransportOf } from '@enkaku/protocol'
 import { type ProcedureHandlers, Server } from '@enkaku/server'
+import type { ByteTransform, Unwrap, UnwrapResult } from '@kumiai/broadcast'
 import { defaultRandomID } from '@kumiai/broadcast'
-import { createHubTunnelTransport, decodeFrame } from '@kumiai/hub-tunnel'
+import type { StoredMessage } from '@kumiai/hub-protocol'
+import { createHubTunnelTransport, decodeFrame, type HubLike } from '@kumiai/hub-tunnel'
 
+import { sealDirectedHub } from './directed-crypto.js'
 import type { HubMux } from './hub-mux.js'
 import { inboxTopic } from './topic.js'
 
@@ -13,6 +16,8 @@ export type DirectedClientParams = {
   memberDID: string
   secret: Uint8Array
   epoch: number
+  wrap: ByteTransform
+  unwrap: Unwrap
   getRandomID?: () => string
 }
 
@@ -23,10 +28,18 @@ export type DirectedClientParams = {
 export function createDirectedClient<Protocol extends ProtocolDefinition>(
   params: DirectedClientParams,
 ): { client: Client<Protocol>; dispose: () => Promise<void> } {
-  const { mux, localDID, memberDID, secret, epoch } = params
+  const { mux, localDID, memberDID, secret, epoch, wrap, unwrap } = params
   const getRandomID = params.getRandomID ?? defaultRandomID
-  const transport = createHubTunnelTransport({
+  // Replies are authored by `memberDID`; drop anything a lying hub injects under
+  // a different MLS sender.
+  const sealedHub = sealDirectedHub({
     hub: mux.hubLike,
+    wrap,
+    unwrap,
+    expectedSenderDID: memberDID,
+  })
+  const transport = createHubTunnelTransport({
+    hub: sealedHub,
     sessionID: getRandomID(),
     localDID,
     sendTopicID: inboxTopic(secret, epoch, memberDID),
@@ -41,62 +54,183 @@ export function createDirectedClient<Protocol extends ProtocolDefinition>(
   }
 }
 
+function normalizeUnwrap(result: Uint8Array | UnwrapResult): UnwrapResult {
+  return result instanceof Uint8Array ? { payload: result } : result
+}
+
 export type InboxAcceptorParams<Protocol extends ProtocolDefinition> = {
   mux: HubMux
   localDID: string
   selfInboxTopic: string
-  /** Map an inbound senderDID to the topic we send replies on (their inbox). */
+  /** Map an authenticated senderDID to the topic we send replies on (their inbox). */
   resolveSendTopic: (senderDID: string) => string
   protocol: Protocol
   handlers: ProcedureHandlers<Protocol>
+  wrap: ByteTransform
+  unwrap: Unwrap
+}
+
+type ServerSession = {
+  senderDID: string
+  feed: (frameBytes: Uint8Array) => void
+  dispose: () => Promise<void>
 }
 
 /**
- * Accept directed RPC: one shared inbox `Server` plus a lazily-created
- * server-side hub-tunnel per inbound session. Relies on the mux delivering the
- * triggering frame to the new tunnel's sink (onInbound fires before sinks).
+ * Accept directed RPC. A single sealed drain of `selfInboxTopic` opens each
+ * inbound frame with `unwrap`, binds every session to the MLS-authenticated
+ * sender recovered from the ciphertext, and feeds decrypted frame bytes into a
+ * per-session in-memory transport whose replies are sealed with `wrap`. Frames
+ * whose recovered sender does not match the session binding are dropped, so a
+ * malicious hub can neither read the lane nor forge/splice a sender.
  */
 export function createInboxAcceptor<Protocol extends ProtocolDefinition>(
   params: InboxAcceptorParams<Protocol>,
 ): { dispose: () => Promise<void> } {
-  const { mux, localDID, selfInboxTopic, resolveSendTopic, protocol, handlers } = params
+  const { mux, localDID, selfInboxTopic, resolveSendTopic, protocol, handlers, wrap, unwrap } =
+    params
   const server = new Server<Protocol>({ protocol, handlers, requireAuth: false })
-  const tunnels = new Map<string, ReturnType<typeof createHubTunnelTransport>>()
+  const sessions = new Map<string, ServerSession>()
 
-  const unsubscribe = mux.onInbound(selfInboxTopic, (message) => {
-    let sessionID: string
-    try {
-      const frame = decodeFrame(message.payload)
-      sessionID = frame.sessionID
-      if (frame.kind === 'session-end') {
-        const existing = tunnels.get(sessionID)
-        if (existing != null) {
-          tunnels.delete(sessionID)
-          void existing.dispose()
+  const createSession = (senderDID: string): ServerSession => {
+    const queue: Array<StoredMessage> = []
+    let resolveNext: ((result: IteratorResult<StoredMessage>) => void) | undefined
+    let closed = false
+    const sessionHub: HubLike = {
+      async publish(publishParams) {
+        const sealed = await wrap(publishParams.payload)
+        return mux.hubLike.publish({
+          senderDID: publishParams.senderDID,
+          topicID: publishParams.topicID,
+          payload: sealed,
+        })
+      },
+      subscribe() {},
+      unsubscribe() {},
+      receive() {
+        const iter: AsyncIterator<StoredMessage> = {
+          next() {
+            if (queue.length > 0) {
+              return Promise.resolve({ value: queue.shift() as StoredMessage, done: false })
+            }
+            if (closed) {
+              return Promise.resolve({ value: undefined as unknown as StoredMessage, done: true })
+            }
+            return new Promise((resolve) => {
+              resolveNext = resolve
+            })
+          },
+          return() {
+            closed = true
+            if (resolveNext != null) {
+              const resolve = resolveNext
+              resolveNext = undefined
+              resolve({ value: undefined as unknown as StoredMessage, done: true })
+            }
+            return Promise.resolve({ value: undefined as unknown as StoredMessage, done: true })
+          },
         }
-        return
-      }
-      if (frame.kind !== 'message') return
-    } catch {
-      return
+        return {
+          [Symbol.asyncIterator]: () => iter,
+          return() {
+            closed = true
+            if (resolveNext != null) {
+              const resolve = resolveNext
+              resolveNext = undefined
+              resolve({ value: undefined as unknown as StoredMessage, done: true })
+            }
+          },
+        }
+      },
     }
-    if (tunnels.has(sessionID)) return
     const tunnel = createHubTunnelTransport({
-      hub: mux.hubLike,
+      hub: sessionHub,
       sessionID: { auto: true },
       localDID,
-      sendTopicID: resolveSendTopic(message.senderDID),
+      sendTopicID: resolveSendTopic(senderDID),
       receiveTopicID: selfInboxTopic,
     })
-    tunnels.set(sessionID, tunnel)
     void server.handle(tunnel as ServerTransportOf<Protocol>)
+    return {
+      senderDID,
+      feed: (frameBytes) => {
+        const message: StoredMessage = {
+          sequenceID: '',
+          senderDID,
+          topicID: selfInboxTopic,
+          payload: frameBytes,
+        }
+        if (resolveNext != null) {
+          const resolve = resolveNext
+          resolveNext = undefined
+          resolve({ value: message, done: false })
+        } else {
+          queue.push(message)
+        }
+      },
+      dispose: async () => {
+        closed = true
+        if (resolveNext != null) {
+          const resolve = resolveNext
+          resolveNext = undefined
+          resolve({ value: undefined as unknown as StoredMessage, done: true })
+        }
+        await tunnel.dispose()
+      },
+    }
+  }
+
+  // Serialize inbound processing: `unwrap` is async (real MLS decrypt has
+  // variable latency), so independent concurrent tasks could resolve out of
+  // dispatch order — racing to double-create a session, or feeding frames to a
+  // tunnel out of wire order (which drops them as stale seq). Chaining each
+  // message onto a running tail keeps processing in arrival order.
+  let inboundTail: Promise<void> = Promise.resolve()
+  const unsubscribe = mux.onInbound(selfInboxTopic, (message) => {
+    inboundTail = inboundTail
+      .then(async () => {
+        let opened: UnwrapResult
+        try {
+          opened = normalizeUnwrap(await unwrap(message.payload))
+        } catch {
+          return // un-openable — drop
+        }
+        const senderDID = opened.senderDID
+        if (senderDID == null) return // no authenticated sender — drop
+        let frame: ReturnType<typeof decodeFrame>
+        try {
+          frame = decodeFrame(opened.payload)
+        } catch {
+          return
+        }
+        const existing = sessions.get(frame.sessionID)
+        if (frame.kind === 'session-end') {
+          if (existing != null && existing.senderDID === senderDID) {
+            sessions.delete(frame.sessionID)
+            void existing.dispose()
+          }
+          return
+        }
+        if (frame.kind !== 'message') return
+        if (existing != null) {
+          if (existing.senderDID === senderDID) existing.feed(opened.payload)
+          return // sender mismatch on an established session — splice attempt, drop
+        }
+        const session = createSession(senderDID)
+        sessions.set(frame.sessionID, session)
+        session.feed(opened.payload)
+      })
+      .catch(() => {
+        // a single message's processing failure must not break the chain
+      })
   })
 
   return {
     dispose: async () => {
       unsubscribe()
-      for (const tunnel of tunnels.values()) void tunnel.dispose()
-      tunnels.clear()
+      const pending = [...sessions.values()].map((session) => session.dispose())
+      sessions.clear()
+      await Promise.allSettled(pending)
       await server.dispose()
     },
   }
