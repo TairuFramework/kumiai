@@ -17,8 +17,9 @@ function normalizeUnwrap(result: Uint8Array | UnwrapResult): UnwrapResult {
 /**
  * Wrap a HubLike so directed frames are sealed with `wrap` on publish and opened
  * with `unwrap` on receive. The recovered MLS `senderDID` replaces the
- * hub-asserted one (a lying hub cannot forge it); frames that fail to open, or
- * whose recovered sender != `expectedSenderDID`, are dropped.
+ * hub-asserted one (a lying hub cannot forge it); frames that fail to open,
+ * that unwrap without a recovered sender, or whose recovered sender !=
+ * `expectedSenderDID`, are dropped.
  */
 export function sealDirectedHub(params: SealDirectedHubParams): HubLike {
   const { hub, wrap, unwrap, expectedSenderDID } = params
@@ -50,13 +51,16 @@ export function sealDirectedHub(params: SealDirectedHubParams): HubLike {
             } catch {
               continue // un-openable (garbage / another lane) — drop
             }
+            if (opened.senderDID == null) {
+              continue // no authenticated sender — never fall back to the hub-asserted one
+            }
             if (expectedSenderDID != null && opened.senderDID !== expectedSenderDID) {
               continue
             }
             return {
               value: {
                 sequenceID: message.sequenceID,
-                senderDID: opened.senderDID ?? message.senderDID,
+                senderDID: opened.senderDID,
                 topicID: message.topicID,
                 payload: opened.payload,
               },

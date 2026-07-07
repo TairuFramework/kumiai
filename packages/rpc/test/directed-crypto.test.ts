@@ -59,4 +59,26 @@ describe('sealDirectedHub', () => {
     const got = await drainOne(sub)
     expect(got.senderDID).toBe('alice') // mallory's frame was skipped
   })
+
+  test('receive drops frames that unwrap without a recovered sender', async () => {
+    const hub = new FakeHub()
+    const alice = createFakeCrypto({ localDID: 'alice' })
+    const bob = createFakeCrypto({ localDID: 'bob' })
+    // An unwrap that discards the recovered sender (returns bare bytes, no senderDID).
+    const senderlessUnwrap = async (bytes: Uint8Array): Promise<Uint8Array> => {
+      const result = await bob.unwrap(bytes)
+      return result instanceof Uint8Array ? result : result.payload
+    }
+    const bobView = sealDirectedHub({ hub, wrap: bob.wrap, unwrap: senderlessUnwrap })
+    hub.subscribe('bob', 't')
+    const sub = bobView.receive('bob')
+    await hub.publish({ senderDID: 'hub', topicID: 't', payload: await alice.wrap(PLAINTEXT) })
+    const race = await Promise.race([
+      sub[Symbol.asyncIterator]()
+        .next()
+        .then(() => 'delivered'),
+      new Promise((resolve) => setTimeout(() => resolve('dropped'), 50)),
+    ])
+    expect(race).toBe('dropped')
+  })
 })
