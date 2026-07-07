@@ -13,11 +13,11 @@ catalog:
   '@noble/curves': ^2.0.1
   '@noble/hashes': ^2.0.0
   'ts-mls': 2.0.0-rc.13
-  'vitest': ^4.1.9
-  '@enkaku/client': ^0.18.0
-  '@enkaku/protocol': ^0.18.0
-  '@enkaku/server': ^0.18.0
-  '@enkaku/transport': ^0.18.0
+  'vitest': ^4.1.10
+  '@enkaku/client': ^0.18.1
+  '@enkaku/protocol': ^0.18.1
+  '@enkaku/server': ^0.18.1
+  '@enkaku/transport': ^0.18.1
   '@kokuin/capability': ^0.1.0
   '@kokuin/token': ^0.1.1
   '@sozai/async': ^0.1.0
@@ -26,9 +26,9 @@ catalog:
   '@sozai/runtime': ^0.1.0
   '@sozai/schema': ^0.1.0
   '@sozai/stream': ^0.1.0
-  '@kokuin/expo': ^0.1.1
-  '@sozai/runtime-expo': ^0.1.0
-  'expo': ^57.0.0
+  '@kokuin/expo': ^0.2.0
+  '@sozai/runtime-expo': ^0.2.1
+  'expo': ^57.0.2
   'expo-status-bar': ^57.0.0
   'react': 19.2.3
   'react-native': ^0.86.0
