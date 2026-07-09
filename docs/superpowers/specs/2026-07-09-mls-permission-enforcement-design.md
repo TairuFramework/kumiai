@@ -7,13 +7,13 @@ enkaku audit merged with the 2026-07-02 kumiai audit, commit `bb343d9`), milesto
 
 ## Problem
 
-`GroupPermission` (`admin` / `member` / `read`) travels in group capabilities but is never
-enforced on MLS operations. Absent a caller-supplied `commitPolicy`, `processMessage`
-accepts add and remove commits from any leaf: a `read`-level member can remove members and
-every peer accepts it. `processWelcome` additionally trusts inviter-controlled fields —
-it never checks the validated capability's `aud` against the joining identity, and copies
-`invite.permission` verbatim into the stored `MemberCredential`, so a token granting `read`
-can yield a locally trusted `admin` credential.
+`GroupPermission` travels in group capabilities but is never enforced on MLS operations.
+Absent a caller-supplied `commitPolicy`, `processMessage` accepts add and remove commits
+from any leaf: a non-admin member can remove members and every peer accepts it.
+`processWelcome` additionally trusts inviter-controlled fields — it never checks the
+validated capability's `aud` against the joining identity, and copies `invite.permission`
+verbatim into the stored `MemberCredential`, so a token granting a lesser permission can
+yield a locally trusted `admin` credential.
 
 Enforcing a committer's permission requires every member to resolve *committer leaf → DID →
 permission*. Today `MemberCredential` is local state, never distributed. That missing
@@ -73,7 +73,7 @@ are genuinely application-specific.
 | `GroupAnchor` GroupContext extension | kubun, with kubun's `recoverySecret` field | `@kumiai/mls`, generic (`creatorDID`, `version`, opaque `app`) |
 | `signLedgerEntry` / `verifyLedgerEntry` / `ledgerEntryDigest` | kubun | `@kumiai/mls` (depends only on `@kokuin/token`) |
 | `foldLedger` / `LedgerReducer` | kubun, sorts internally by `(hlc, entryID)` | `@kumiai/mls`, ordering supplied by the caller |
-| role reducer | kubun, `admin` / `revoked` over a `Set` | `@kumiai/mls`, `GroupPermission` over a `Map` |
+| role reducer | kubun, `admin` / `revoked` over a `Set` | `@kumiai/mls`, `GroupPermission` (`admin` / `member`) over a `Map` |
 | ledger persistence, HLC clock, `role`-column projection, broadcast fan-out | kubun (`P2PStoreAPI`) | unchanged, stays kubun |
 | **default commit policy** | *nobody* | `@kumiai/mls` — new |
 
@@ -187,15 +187,20 @@ state-so-far, drops rather than throws on an unauthorized or unrelated entry.
 
 ## Roster and authority rules
 
+`GroupPermission` narrows to `'admin' | 'member'`. The `'read'` level is removed — see
+"There is no read-only member" below.
+
 Roster state is `Map<normalizedDID, GroupPermission>`, seeded from the anchor as
 `{creatorDID: 'admin'}`. The anchor is therefore load-bearing: `createGroup` always writes
 it, and `createKeyPackageBundle` always advertises its extension type so an anchored group
 can be joined. A handle whose GroupContext carries no anchor has no seed and cannot fold a
 roster — `restoreGroup` and `processWelcome` throw rather than silently installing a policy
 that would accept everything. Groups created before this change must be recreated; kumiai is
-pre-1.0 and kubun writes the anchor already. The role entry is `{type: 'group.role', groupID, subject, value:
-GroupPermission}`. `verifyAuthority` is kubun's rule unchanged: the issuer must be an admin
-in the state accumulated from strictly-earlier entries. Any admin may demote any admin.
+pre-1.0 and kubun writes the anchor already.
+
+The role entry is `{type: 'group.role', groupID, subject, value: GroupPermission}`.
+`verifyAuthority` is kubun's rule unchanged: the issuer must be an admin in the state
+accumulated from strictly-earlier entries. Any admin may demote any admin.
 
 Demotion is `value: 'member'`; kubun's separate `'revoked'` value disappears, because
 leaving a group is an MLS Remove, not a roster operation. One additional fold guard: an
@@ -232,13 +237,32 @@ cleartext, so `processMessage` decodes it in the async pre-pass, resolves the pa
 DID, and hands the callback a precomputed verdict. This is the same hook
 `backlog/mls-capability-revocation.md` needs: a revoked DID's resync is refused here.
 
-### `read` is advisory at the MLS layer
+### There is no read-only member
 
-A `read` member holds the epoch secrets. Nothing in MLS stops them encrypting an application
-message. At this boundary the roster is really admin vs non-admin; the `member` / `read`
-split exists for the application layer to enforce. `@kumiai/mls` documents this explicitly
-rather than implying a guarantee it cannot make. (This is the origin item's third
-design-sketch point.)
+`GroupPermission` loses its `'read'` level. Two independent reasons.
+
+It is unenforceable. A group member holds the epoch secrets — that is what membership *is*
+in MLS. A `read` member derives the same application keys as anyone else and can encrypt a
+valid message that every peer decrypts and accepts. No receiver can reject it on role
+grounds without first decrypting it, and by then the sender has already demonstrated it
+holds the key. MLS cannot express read-only membership. Shipping the level is a promise the
+library cannot keep: a caller grants `read`, believes they created an observer, and did not.
+
+It is also dead. `'read'` is produced in exactly one place (`credential.ts:91`) and named in
+one type (`capability.ts:11`). No caller anywhere passes it — kubun's single invite site
+passes `'member'` (`context/group.ts:626`), and its roster reducer only ever knew
+`admin`/`revoked`. Kubun's own `'read' | 'write'` (`access-default-token.ts`, `broadcast.ts`)
+is a different axis — per-document access — unrelated to `GroupPermission`.
+
+Removing it makes every distinction the type expresses one the commit policy actually
+enforces: `admin` gates add/remove/psk/reinit/gce, `member` may send and self-remove. Nothing
+is left advisory. This resolves the origin item's third design-sketch point ("document
+advisory semantics") by deleting the advisory semantics instead of documenting them. The
+docs state plainly that observers do not belong in the group.
+
+Cost: a breaking change to `GroupPermission` and one branch out of `extractPermission`
+(`act: '*'` still maps to `admin`). Pre-1.0, one consumer, and that consumer never used the
+value.
 
 ## Module layout
 
@@ -314,13 +338,13 @@ Unit:
 - an entry that would empty the admin set is dropped
 - a cross-group entry (mismatched `groupID`) is dropped
 - unknown envelope `v` rejects the commit
-- per-proposal sender: an admin committing a `read` member's by-reference Remove is rejected
+- per-proposal sender: an admin committing a `member`'s by-reference Remove is rejected
 - a handle restored over an anchorless GroupContext throws rather than accepting everything
 
 Integration (`tests/integration/`):
 
-- three-member group; a `read` member's Remove is rejected by every peer and the group stays
-  at its epoch
+- three-member group; a `member`'s Remove of a third party is rejected by every peer and the
+  group stays at its epoch, while their self-removal is accepted
 - promote-then-commit in a single round trip (entry rides the commit that uses it)
 - `MissingLedgerEntriesError` thrown, bodies resolved, retry succeeds
 - resync by a roster member accepted; by a stranger rejected
@@ -328,6 +352,10 @@ Integration (`tests/integration/`):
 ## Migration
 
 `@kumiai/mls` is pre-1.0 and kubun is its only consumer, so this lands as a coordinated bump.
+
+`GroupPermission` narrows to `'admin' | 'member'`. Kubun imports the type
+(`groups/manager.ts:9`) but only ever passes `'member'`, so the narrowing is source-
+compatible there.
 
 Kubun deletes `group-anchor.ts`, `ledger-entry.ts`, `ledger-fold.ts`, and the reducer half of
 `admin-roster.ts`, importing them from `@kumiai/mls` instead. It keeps its store, HLC clock,
