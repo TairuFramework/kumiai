@@ -15,7 +15,12 @@ import type { RosterState } from './roster.js'
  * the caller); undefined for a non-external commit.
  */
 export type CommitPolicyContext = {
-  roster: RosterState
+  /** Roster before this commit applies. Judges every proposal sender's authority:
+   *  a promotion riding this same commit does not grant its subject commit authority. */
+  baseRoster: RosterState
+  /** Roster after foldEnvelope applies this commit's group.role entries. Judges the
+   *  removed target: a Remove of a leaf still `admin` here carried no demotion and is rejected. */
+  candidateRoster: RosterState
   didOfLeaf: (leafIndex: number) => string | undefined
   anchorExtensionData: Uint8Array
   externalCommitDID?: string
@@ -51,7 +56,7 @@ function isAdmin(context: CommitPolicyContext, leafIndex: number | undefined): b
   if (did === undefined) {
     return false
   }
-  return context.roster.roles.get(normalizeDID(did)) === 'admin'
+  return context.baseRoster.roles.get(normalizeDID(did)) === 'admin'
 }
 
 /**
@@ -93,13 +98,25 @@ function evaluateProposal(
     case defaultProposalTypes.psk:
     case defaultProposalTypes.reinit:
       return isAdmin(context, effectiveSender) ? 'accept' : 'reject'
-    case defaultProposalTypes.remove:
+    case defaultProposalTypes.remove: {
+      // A removed admin must have been demoted in this same envelope: the candidate
+      // roster then shows them `member`. Still `admin` here means no demotion rode the
+      // commit. Checked before the self-removal shortcut, so an admin cannot self-remove
+      // without demoting itself.
+      const removedDID = context.didOfLeaf(proposal.remove.removed)
+      if (
+        removedDID !== undefined &&
+        context.candidateRoster.roles.get(normalizeDID(removedDID)) === 'admin'
+      ) {
+        return 'reject'
+      }
       if (isAdmin(context, effectiveSender)) {
         return 'accept'
       }
       return effectiveSender !== undefined && proposal.remove.removed === effectiveSender
         ? 'accept'
         : 'reject'
+    }
     case defaultProposalTypes.update:
       return 'accept'
     case defaultProposalTypes.group_context_extensions:
@@ -123,7 +140,7 @@ function evaluateExternalCommit(
   context: CommitPolicyContext,
 ): IncomingMessageAction {
   const did = context.externalCommitDID
-  if (did === undefined || !context.roster.roles.has(normalizeDID(did))) {
+  if (did === undefined || !context.baseRoster.roles.has(normalizeDID(did))) {
     return 'reject'
   }
   if (proposals.length !== 2) {

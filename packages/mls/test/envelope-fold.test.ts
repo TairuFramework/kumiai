@@ -260,6 +260,33 @@ describe('foldEnvelope', () => {
     }
   })
 
+  test('a demoted admin cannot relay a ledger entry back in through a colluding admin', () => {
+    const base = roster([
+      [CREATOR_DID, 'admin'],
+      [BOB_DID, 'member'],
+    ])
+    const colluderEntry = input({
+      issuer: CREATOR_DID,
+      type: 'circle.member',
+      value: { note: 'cover' },
+      entryID: 'cover',
+    })
+    const relayed = input({
+      issuer: BOB_DID,
+      type: 'circle.member',
+      value: { note: 'relayed' },
+      entryID: 'relayed',
+    })
+
+    const result = foldEnvelope(base, [colluderEntry, relayed], GROUP_ID)
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.reason).toContain(normalizeDID(BOB_DID))
+      expect(result.entryID).toBe('relayed')
+    }
+  })
+
   test('never throws across any of these inputs', () => {
     const base = roster([
       [CREATOR_DID, 'admin'],

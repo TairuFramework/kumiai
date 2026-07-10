@@ -1201,3 +1201,37 @@ reimplementation, no behaviour change).
 *before* the full-suite run or its report file. I read the code, ran all four verify commands myself
 (green), and recorded the finding here in place of the probe report. The learning-loop's "I verify,
 not the probe" step caught this cleanly — the probe's own claim of success was never load-bearing.
+
+### 2026-07-10 — Question 2.8: removal demotes the removed
+
+**Findings:** CONFIRMED. A Remove is rejected unless the target's DID is `member` in the *candidate*
+roster (post-`foldEnvelope`), checked before the self-removal shortcut, so an admin cannot self-remove
+without a demotion in the same envelope. `CommitPolicyContext` split its single `roster` into
+`baseRoster` (sender authority) and `candidateRoster` (removed-target demotion), making explicit the
+distinction Q4.3 parked: a promotion riding a commit grants no commit authority (base), but a demotion
+riding a commit does count against the removed target (candidate). 6 new tests; full suite 209 (+6);
+tsc and biome clean.
+
+**Layer separation.** The last-admin brick is rejected **upstream in `foldEnvelope`** (the required
+self-demotion trips the empty-admin guard before any candidate roster exists), never in the policy.
+`foldEnvelope` guarantees ≥1 admin survives; the policy enforces demote-before-remove. A colluding
+admin cannot launder a demoted ex-admin's relayed ledger entry — `foldEnvelope` rejects it on
+`non-admin issuer` (an explicit relay test was added).
+
+**Spec impact:** none to the design. The base/candidate roster split is a Phase-4 wiring contract now
+written into the type: the pre-pass folds `baseRoster` from `#ledger` and `candidateRoster` from
+`#ledger ∪ envelope`, and hands both to the policy.
+
+**Learned:** the demotion requirement collapses to a single candidate-roster predicate ("removed DID
+is not still `admin`"), no separate "envelope carries a matching demotion entry" scan — because
+`foldEnvelope` already applied the demotion into the candidate. Composition did the work a bespoke
+check would have duplicated.
+
+### 2026-07-10 — Phase 3 exit
+
+All Phase 3 questions answered: 3.1 (envelope codec), 3.2 (pure policy table), 2.4b (admin-issuer
+invariant), 2.8 (removal demotes). Exit criterion — *"the policy table is enforced by a function whose
+only inputs are already-folded local state"* — is met: `defaultCommitPolicy` and `foldEnvelope` are
+both pure over caller-supplied rosters and verified entries, no handle, no I/O, no live group. New
+modules: `envelope.ts`, `policy.ts`, `envelope-fold.ts`. The base/candidate roster contract and the
+`isDefaultProposal` narrowing guard are the two hand-offs into Phase 4. Full suite 209.

@@ -23,19 +23,23 @@ const THIRD_LEAF = 2
 
 const ANCHOR_BYTES = new Uint8Array([0xf1, 0x00, 0x01, 0x02, 0x03])
 
+function roster(entries: Array<[string, GroupPermission]>): RosterState {
+  return { roles: new Map(entries.map(([did, permission]) => [normalizeDID(did), permission])) }
+}
+
 function context(overrides: Partial<CommitPolicyContext> = {}): CommitPolicyContext {
-  const roles = new Map<string, GroupPermission>([
-    [normalizeDID(ADMIN_DID), 'admin'],
-    [normalizeDID(MEMBER_DID), 'member'],
+  const baseRoster = roster([
+    [ADMIN_DID, 'admin'],
+    [MEMBER_DID, 'member'],
   ])
-  const roster: RosterState = { roles }
   const leaves = new Map<number, string>([
     [ADMIN_LEAF, ADMIN_DID],
     [MEMBER_LEAF, MEMBER_DID],
     [THIRD_LEAF, THIRD_DID],
   ])
   return {
-    roster,
+    baseRoster,
+    candidateRoster: baseRoster,
     didOfLeaf: (leafIndex) => leaves.get(leafIndex),
     anchorExtensionData: ANCHOR_BYTES,
     ...overrides,
@@ -260,6 +264,66 @@ describe('defaultCommitPolicy', () => {
         context(),
       ),
     ).not.toThrow()
+  })
+
+  test('an admin may remove a plain member', () => {
+    const remove = removeProposal(MEMBER_LEAF)
+    expect(
+      defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(remove, undefined)]), context()),
+    ).toBe('accept')
+  })
+
+  test('removing a target still admin in the candidate roster is rejected', () => {
+    // No demotion rode this commit, so the target is still admin after the fold.
+    const roles = roster([
+      [ADMIN_DID, 'admin'],
+      [THIRD_DID, 'admin'],
+    ])
+    const remove = removeProposal(THIRD_LEAF)
+    expect(
+      defaultCommitPolicy(
+        commit(ADMIN_LEAF, [withSender(remove, undefined)]),
+        context({ baseRoster: roles, candidateRoster: roles }),
+      ),
+    ).toBe('reject')
+  })
+
+  test('removing an admin the same envelope demoted to member is accepted', () => {
+    const remove = removeProposal(THIRD_LEAF)
+    expect(
+      defaultCommitPolicy(
+        commit(ADMIN_LEAF, [withSender(remove, undefined)]),
+        context({
+          baseRoster: roster([
+            [ADMIN_DID, 'admin'],
+            [THIRD_DID, 'admin'],
+          ]),
+          candidateRoster: roster([
+            [ADMIN_DID, 'admin'],
+            [THIRD_DID, 'member'],
+          ]),
+        }),
+      ),
+    ).toBe('accept')
+  })
+
+  test('an admin cannot self-remove while still admin in the candidate roster', () => {
+    // The candidate-admin check precedes the self-removal shortcut, so an admin
+    // must demote itself in the same envelope before it may remove its own leaf.
+    const remove = removeProposal(ADMIN_LEAF)
+    expect(
+      defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(remove, undefined)]), context()),
+    ).toBe('reject')
+  })
+
+  test('an admin may self-remove when the same envelope demotes it to member', () => {
+    const remove = removeProposal(ADMIN_LEAF)
+    expect(
+      defaultCommitPolicy(
+        commit(ADMIN_LEAF, [withSender(remove, undefined)]),
+        context({ candidateRoster: roster([[ADMIN_DID, 'member']]) }),
+      ),
+    ).toBe('accept')
   })
 })
 
