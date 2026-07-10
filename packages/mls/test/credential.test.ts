@@ -85,20 +85,11 @@ describe('credential', () => {
     expect(extractPermission(memberCap)).toBe('member')
   })
 
-  test('extracts read permission', async () => {
-    const alice = randomIdentity()
-    const bob = randomIdentity()
-    const rootCap = await createGroupCapability(alice, 'test-group')
-    const rootCapStr = stringifyToken(rootCap)
-
-    const readCap = await delegateGroupMembership({
-      identity: alice,
-      groupID: 'test-group',
-      recipientDID: bob.id,
-      permission: 'read',
-      parentCapability: rootCapStr,
-    })
-    expect(extractPermission(readCap)).toBe('read')
+  test('extractPermission throws for a read-only capability', () => {
+    // `read` is not a permission level: a capability whose only action is `read`
+    // maps to no level and is rejected rather than silently downgraded.
+    const token = makeSignedTokenWithAct(['read'])
+    expect(() => extractPermission(token)).toThrow('no recognized permission level')
   })
 
   test('extractPermission throws for unrecognized action', () => {
@@ -183,8 +174,8 @@ describe('makeMLSCredential', () => {
 const _typeCheck: MemberCredential = {
   id: 'did:key:z...',
   capabilityChain: [],
-  capability: { payload: { act: 'read', res: 'foo' } } as never,
-  permission: 'read',
+  capability: { payload: { act: 'member', res: 'foo' } } as never,
+  permission: 'member',
   groupID: 'group-1',
 }
 void _typeCheck

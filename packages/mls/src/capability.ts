@@ -8,7 +8,7 @@ import {
 } from '@kokuin/capability'
 import { normalizeDID, type SigningIdentity, verifyToken } from '@kokuin/token'
 
-export type GroupPermission = 'admin' | 'member' | 'read'
+export type GroupPermission = 'admin' | 'member'
 
 export type GroupCapabilityPayload = CapabilityPayload & {
   act: Array<GroupPermission>

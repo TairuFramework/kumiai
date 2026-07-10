@@ -89,4 +89,11 @@ export {
   type VerifiedLedgerEntry,
   verifyLedgerEntry,
 } from './ledger.js'
+export {
+  foldRoster,
+  ROLE_ENTRY_TYPE,
+  type RoleValue,
+  type RosterState,
+  roleReducer,
+} from './roster.js'
 export type { GroupOptions, GroupSyncScope, Invite, KeyPackageBundle } from './types.js'

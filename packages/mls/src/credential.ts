@@ -88,7 +88,6 @@ export function extractPermission(token: SignedToken): GroupPermission {
   if (actions.includes('*')) return 'admin'
   if (actions.includes('admin')) return 'admin'
   if (actions.includes('member')) return 'member'
-  if (actions.includes('read')) return 'read'
 
   throw new Error('Invalid capability: no recognized permission level')
 }

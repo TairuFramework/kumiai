@@ -539,6 +539,13 @@ pre-change code.
 
 ### Question 5.1: Does narrowing `GroupPermission` to `'admin' | 'member'` break anything?
 
+**Note (2026-07-10):** the *type* narrowing is pulled forward into Question 2.4, because
+`roster.ts`'s value type must be exactly `'admin' | 'member'` and cannot import a `GroupPermission`
+that still admits `'read'`. Q2.4 changes `capability.ts:11`, removes the dead `'read'` branch in
+`extractPermission`, and fixes the two `credential.test.ts` cases. What remains for 5.1: the grep
+sweep across `packages/` and `../kubun` proving no live reference survives, and the doc statement
+that MLS cannot express read-only membership.
+
 - **Assumption:** `'read'` has no producer outside `extractPermission` and no consumer
   anywhere; removing it is source-compatible for kubun, which only ever passes `'member'`.
 - **Done when:** `GroupPermission = 'admin' | 'member'`; `extractPermission` maps `act: '*'`
@@ -1037,6 +1044,41 @@ corrected the same wording in the spec's testing section, where it originated.
 **Learned:** a state-so-far test is only real when the revoked party is the grantor of the entry
 whose survival is asserted. The naive phrasing looks right and tests nothing — worth stating in the
 roster step (Question 2.4), which reuses the same actors.
+
+### 2026-07-10 — Question 2.4: the roster reducer
+
+**Findings:** DONE. `roster.ts` generalizes kubun's admin reducer from an `admin`/`revoked` `Set`
+to a `GroupPermission` `Map`, on the `foldLedger` from 2.3. `roleReducer` is the composable
+seed/authority/apply; `foldRoster(entries, anchor, groupID, onDrop?)` is the safe entry point that
+closes the two things the bare reducer cannot: `groupID` scoping (the anchor carries no group id,
+so the group is passed explicitly — decision (a)) and the empty-admin guard. 25 tests across
+roster + credential, full suite 149, all four verify green. The rotation test uses the corrected
+form (Alice→Bob→Carol, Alice demotes Bob, Carol survives).
+
+**Step 0 narrowing landed:** `GroupPermission = 'admin' | 'member'`; the dead `'read'` branch of
+`extractPermission` removed (an `act:'read'` capability now throws "no recognized permission
+level"); the two `credential.test.ts` cases assert the throw rather than losing coverage. Phase 5.1
+keeps only the `../kubun` grep sweep and the docs prose.
+
+**Two API-shape notes, neither blocking:**
+- The empty-admin guard sits in `verifyAuthority` (it computes the would-be next state and checks
+  the admin count survives), because `foldLedger` only routes `onDrop` from its type/authority
+  checks. Side effect: a guard-drop reports reason `"issuer not authorized"`, which is misleading —
+  the issuer *was* authorized; the entry would brick the group. Honest messaging needs `foldLedger`
+  to carry a caller-supplied drop reason, which is a fold API change deferred rather than made
+  mid-step. **Follow-up: give the empty-admin drop its own reason once the policy layer needs
+  richer `onDrop` anyway.**
+- `roleReducer` is exported bare, without scoping or the guard, mirroring kubun's
+  `adminRosterReducer` / `foldAdminRoster` split. The doc comment warns it is the composable piece
+  and `foldRoster` is the safe entry. Since the fold is replay-only there is no incremental-applier
+  reason to need the bare reducer; the only consumer is someone building their own scoped fold.
+  Left exported with the warning; revisit if nothing outside the package uses it.
+
+**Spec impact:** none. Matches "Roster and authority rules".
+
+**Learned:** decision (a) added a `groupID` parameter the spec's sketched `foldRoster` signature did
+not show — because the anchor deliberately has no group id, and adding one would have been the wrong
+fix (the probe correctly stopped short of touching the anchor).
 
 ### 2026-07-10 — Phase 1 exit
 
