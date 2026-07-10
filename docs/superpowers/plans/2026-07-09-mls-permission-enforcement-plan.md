@@ -1172,3 +1172,32 @@ row *and* the narrowing guard that lets a `switch` on `proposalType` see only de
 Crypto-bearing proposal payloads (add/update/psk/reinit/external_init) need no fabrication in tests:
 the policy reads only the type tag and sender for those rows, so a tag-only literal with an opaque
 cast, confined to unread fields, is sound; `remove`/GCE (the inspected payloads) are fully typed.
+
+### 2026-07-10 — Question 2.4b: the admin-issuer invariant across every entry type
+
+**Findings:** CONFIRMED. `envelope-fold.ts` exports `foldEnvelope(baseRoster, entries, groupID)` and
+`EnvelopeFoldResult`. One pass over the envelope's ordered entries, one rule: every issuer must be an
+admin in the state-so-far (a mutating copy of the base roster), whatever the type. `group.role`
+entries additionally mutate the roster (with the empty-admin guard); an unknown `group.*` rejects;
+any non-`group.` type is surfaced verbatim, its `value` never inspected. 12 tests; full suite 203
+(+12); tsc and biome clean.
+
+**The strict/permissive split is the whole point.** `foldRoster` *drops* an unauthorized entry
+silently (right for kubun's hostile ingest); `foldEnvelope` *rejects the commit* the moment one is
+off (right for a kumiai envelope, so `ledger_head` never covers an entry the ledger does not hold).
+A member-issued app entry rejects with the issuer named — a real test, not a drop.
+
+**State-so-far proven by a pair.** `[promote Bob, entry-by-Bob]` accepts; the reorder rejects on
+`bob-app`. The invariant subsumes `group.role`'s own authority rule — both are "issuer is admin in
+state-so-far" — so there is exactly one check, not two.
+
+**Spec impact:** none. Matches the "admin-issuer invariant" and "type namespace" spec sections.
+`EnvelopeFoldResult` carries `entryID` on reject so the caller can log which entry failed.
+
+**`roster.ts` touched:** `adminCount` promoted from module-private to exported and reused (no
+reimplementation, no behaviour change).
+
+**Process note:** the probe subagent died on a session limit *after* writing the module + tests but
+*before* the full-suite run or its report file. I read the code, ran all four verify commands myself
+(green), and recorded the finding here in place of the probe report. The learning-loop's "I verify,
+not the probe" step caught this cleanly — the probe's own claim of success was never load-bearing.

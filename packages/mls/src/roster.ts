@@ -18,7 +18,7 @@ export type RoleValue = GroupPermission
 export type RosterState = { roles: ReadonlyMap<string, GroupPermission> }
 
 /** Count the admins in a roster state. */
-function adminCount(state: RosterState): number {
+export function adminCount(state: RosterState): number {
   let count = 0
   for (const permission of state.roles.values()) {
     if (permission === 'admin') {

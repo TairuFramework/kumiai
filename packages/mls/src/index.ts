@@ -53,6 +53,7 @@ export {
   decodeControlEnvelope,
   encodeControlEnvelope,
 } from './envelope.js'
+export { type EnvelopeFoldResult, foldEnvelope } from './envelope-fold.js'
 export {
   type FoldDrop,
   type FoldInput,
@@ -116,6 +117,7 @@ export {
   MissingLedgerEntriesError,
 } from './policy.js'
 export {
+  adminCount,
   foldRoster,
   ROLE_ENTRY_TYPE,
   type RoleValue,
