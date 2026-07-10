@@ -724,8 +724,9 @@ gains a depth cap, and transitive revocation goes to `backlog/mls-capability-rev
 Unit:
 
 - fold determinism under shuffled entry order
-- authority against state-so-far: Bob, granted by Alice, revokes Alice; Bob's earlier grants
-  survive
+- authority against state-so-far: Alice grants Bob, Bob grants Carol, Alice revokes Bob; Carol
+  survives because Bob was an admin when he granted her (the surviving grant's issuer must be the
+  party later revoked, or the test cannot tell state-so-far from final-state)
 - an entry that would empty the admin set is dropped
 - a cross-group entry (mismatched `groupID`) is dropped, not thrown
 - unknown envelope `v` rejects the commit

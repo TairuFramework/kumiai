@@ -1015,6 +1015,29 @@ defence holds.
 the first gate, and the two must both be tested because the defence is usually attributed only to
 the second.
 
+### 2026-07-10 — Question 2.3: `foldLedger`, full-replay, caller-ordered
+
+**Findings:** DONE. `fold.ts` ports kubun's fold with both decided departures — no internal sort
+(`compareFoldInputs` deleted; folds in caller order) and replay-only (single `foldLedger` entry
+point, no incremental applier). Seeds from the anchor, evaluates authority against state-so-far,
+drops-never-throws with an `onDrop` observer, does not mutate the input. 8 tests, full suite 140,
+all four verify commands green. Replay-only surface asserted at runtime
+(`Object.keys(namespace) === ['foldLedger']`), chosen over a type-level check because value exports
+*are* the runtime surface.
+
+**My brief had a bug the probe caught.** The rotation example — "Alice grants Bob; Bob revokes
+Alice; Bob's grant of Carol survives" — does not distinguish state-so-far from final state, because
+Bob stays an admin throughout, so nothing separates the two semantics. For the property to bite,
+the *issuer* of the surviving grant must be the party later revoked. The probe flipped it to Alice
+grants Bob → Bob grants Carol → **Alice revokes Bob**: Carol survives only under state-so-far. I
+corrected the same wording in the spec's testing section, where it originated.
+
+**Spec impact:** the testing bullet corrected. No design change.
+
+**Learned:** a state-so-far test is only real when the revoked party is the grantor of the entry
+whose survival is asserted. The naive phrasing looks right and tests nothing — worth stating in the
+roster step (Question 2.4), which reuses the same actors.
+
 ### 2026-07-10 — Phase 1 exit
 
 All four claims confirmed on first attempt; no `BLOCKED`. The architecture stands. One piece of

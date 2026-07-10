@@ -47,6 +47,12 @@ export {
   nobleCryptoProvider,
 } from './crypto.js'
 export {
+  type FoldDrop,
+  type FoldInput,
+  foldLedger,
+  type LedgerReducer,
+} from './fold.js'
+export {
   type CommitInviteResult,
   CommitRejectedError,
   type CreateGroupResult,
