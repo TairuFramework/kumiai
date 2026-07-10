@@ -6,6 +6,18 @@ export type {
   ProposalWithSender,
 } from 'ts-mls'
 export { defaultCapabilities, defaultProposalTypes, makeCustomExtension } from 'ts-mls'
+export {
+  buildCurrentGroupAnchorExtension,
+  buildGroupAnchorExtension,
+  controlCapabilities,
+  decodeGroupAnchor,
+  encodeGroupAnchor,
+  GROUP_ANCHOR_EXTENSION_TYPE,
+  type GroupAnchor,
+  LEDGER_HEAD_EXTENSION_TYPE,
+  readGroupAnchor,
+  readGroupAnchorExtension,
+} from './anchor.js'
 export { createDIDAuthenticationService } from './authentication.js'
 export {
   createGroupCapability,

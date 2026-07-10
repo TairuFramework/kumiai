@@ -134,8 +134,11 @@ export type ControlEnvelope = {
    *  fold order. Every entry is admin-issued and covered by `ledger_head`.
    *  Absent when the commit writes no ledger entries. */
   entries?: Array<string>
-  /** Opaque consumer payload. Never verified, never ordered, never chained. */
-  app?: Uint8Array
+  /** Opaque consumer payload. Never verified, never ordered, never chained.
+   *  A JSON value, not bytes — the container is already JSON, so a byte field
+   *  would be base64 in JSON. `unknown`, not `any`: the library must not be
+   *  able to read it by accident. */
+  app?: unknown
 }
 ```
 
@@ -205,6 +208,15 @@ re-includes the anchor. A policy rejecting "any GCE touching the anchor type" wo
 head update. The rule: the anchor extension must be present and byte-identical to the current
 one, and nothing but `ledger_head` may differ.
 
+**Re-include the anchor by copying its `extensionData`; never by re-encoding a decoded
+`GroupAnchor`.** The decoded form is for reading. Anchor and envelope are JSON, and JSON does not
+round-trip canonically — key order, number formatting, and dropped `undefined` keys can all
+produce different bytes for identical content. A GCE builder that rebuilds the anchor from a
+decoded object would make the receiving byte-comparison fail intermittently on honest commits, and
+the failure would look exactly like an attack. `anchor.ts` therefore exposes the raw extension, not
+only the parsed value, and the same discipline applies to the envelope: decode it to read
+`entries`, never to re-emit it.
+
 **Leaf capabilities advertise both extension types.** RFC 9420 requires a member's leaf to
 advertise every custom GroupContext extension type or the added leaf is refused. The helper
 formerly called `groupAnchorCapabilities()` advertises `0xf100` and `0xf101`, at both
@@ -224,7 +236,14 @@ surfaces it to the consumer, which folds it with its own reducer through the exp
 `foldLedger`. Transport and interpretation are different jobs, and only the second requires
 understanding the type.
 
-Alongside sits `app`: opaque bytes, unverified, unordered, uncovered by the head.
+Alongside sits `app`: an opaque consumer payload, unverified, unordered, uncovered by the head.
+
+The same slot appears three times — `GroupAnchor.app` (written once at creation),
+`ControlEnvelope.app` (per commit), `Invite.app` (host seeding) — and is `unknown` in each. A JSON
+value, not bytes: every container here is already JSON, so a byte field would only be base64 inside
+JSON, taxing size and forcing a decode step on the consumer for nothing. Kubun's real payload, a
+base64 `recoverySecret`, is a string already. `unknown` rather than `any` so that the library cannot
+read the value by accident; a consumer narrows it before use.
 
 ### Which slot?
 
@@ -529,9 +548,10 @@ value.
 
 New files in `packages/mls/src/`:
 
-- `anchor.ts` — `GroupAnchor` (`creatorDID`, `version`, `app?: Uint8Array`), extension type
-  `0xf100`, encode/decode, `controlCapabilities()` (advertises `0xf100` and `0xf101`),
-  `readGroupAnchor(handle)`.
+- `anchor.ts` — `GroupAnchor` (`creatorDID`, `version`, `app?: unknown`), extension types
+  `0xf100` and `0xf101`, encode/decode, `controlCapabilities()` (advertises both),
+  `readGroupAnchor(handle)` and `readGroupAnchorExtension(handle)` — the latter returning the
+  extension verbatim, so a GCE builder copies rather than re-encodes.
 - `head.ts` — `LedgerHead`, extension type `0xf101`, genesis constant, `extendHead(head, ids)`,
   `readLedgerHead(context)`, `LedgerIncompleteError`.
 - `ledger.ts` — `LedgerEntry`, `VerifiedLedgerEntry`, `signLedgerEntry`,
@@ -602,7 +622,7 @@ export type Invite = {
   ledgerEntries: Array<string>
   /** Opaque host seeding. Unverified — an inviter may omit or corrupt it, and the
    *  consumer must be able to fail closed when it does. */
-  app?: Uint8Array
+  app?: unknown
 }
 ```
 

@@ -126,10 +126,11 @@ New files: `packages/mls/src/anchor.ts`, `ledger.ts`, `fold.ts`, `roster.ts`.
 Exit criteria: `foldRoster` reproduces kubun's `foldAdminRoster` semantics, plus `groupID`
 scoping and the empty-admin guard, with no clock anywhere in the module.
 
-**Added by Phase 1 (Q1.1).** kumiai's `commitInvite` and `removeMember` do not forward
-`authenticatedData` to ts-mls's `createCommit` — only `joinGroupExternal` does. They need a
-passthrough, or the control envelope has a carrier nothing can load. Land it with Question 2.1,
-whichever probe touches `group.ts` first.
+**Added by Phase 1 (Q1.1) and Q2.6.** Three gaps in kumiai's commit wrappers, all on the same
+rewrite: `commitInvite` and `removeMember` do not forward `authenticatedData` to ts-mls's
+`createCommit` (only `joinGroupExternal` does); no wrapper builds a mixed Add+GCE commit; none
+issues or relays a standalone by-reference proposal. That rewrite lands in Phase 3 with the
+envelope, which is the first thing that needs to *write* `authenticatedData`. Phase 2 stays pure.
 
 ### Question 2.1: Can `GroupAnchor` be made generic without breaking kubun's `recoverySecret`?
 
@@ -943,6 +944,52 @@ State-so-far, not a pre-commit snapshot, or `[promote Bob, entry-issued-by-Bob]`
 **Learned:** "verified" is not a property everything wants more of. The question is what an
 omission does. We had been about to buy completeness for data whose loss fails closed, and pay for
 it with an un-prunable chain over the fastest-growing entries in the system.
+
+### 2026-07-10 — `app` is a JSON value, and the anchor must never be re-encoded
+
+**Findings:** the Q2.1 brief asked the probe to "pick an encoding that round-trips arbitrary bytes"
+for `GroupAnchor.app`. The user asked why `app` needed to be bytes at all when the container is
+already JSON. It doesn't: a `Uint8Array` field would be base64 inside JSON — a size tax and a
+decode step on every consumer, for nothing — and kubun's actual payload (`recoverySecret`, base64
+of 32 bytes) is a string already. There was no design decision, only an invented one.
+
+All three slots become `app?: unknown`. `unknown` and not `any`, so the library cannot read the
+value by accident; and not `extension`, which would collide with `GroupContextExtension` and with
+`readGroupAnchorExtension` in the same file.
+
+**Spec impact:** chasing the encoding surfaced a real hazard, unrelated to the answer. Every
+`ledger_head` update is a GCE proposal, and a GCE proposal replaces the whole extension list, so
+each one re-includes the anchor — which the receiving policy then byte-compares. **JSON does not
+round-trip canonically.** A builder that re-encodes a decoded `GroupAnchor` rather than copying its
+`extensionData` verbatim would make honest commits fail the comparison intermittently, and the
+failure would look exactly like an attack. `anchor.ts` now exposes `readGroupAnchorExtension`, and
+the discipline is written into the spec: decode to read, never to re-emit.
+
+**Learned:** a question about a type surfaced a bug in a mechanism two sections away. The
+byte-comparison guard was specified before anything that had to *produce* the bytes it compares,
+so nothing had yet asked who builds them.
+
+### 2026-07-10 — Question 2.1: generic `GroupAnchor`
+
+**Findings:** DONE. `anchor.ts` ports kubun's anchor generically — `{creatorDID, version,
+app?: unknown}`, both extension type constants, tolerant `null`-on-malformed decode,
+`readGroupAnchor` (throws on corruption, null on absence), `readGroupAnchorExtension` (verbatim
+bytes), `controlCapabilities()` advertising both `0xf100` and `0xf101`. Test-first, 8 tests, all
+four verify commands green, full 120-test suite unregressed.
+
+**Surprise:** `defaultCapabilities()` seeds *random GREASE values* into `.extensions`, so
+`controlCapabilities()` output is non-deterministic beyond the two control types. Caught a flake in
+the probe's own first-draft test. **Repo rule for the rest of Phase 2 and beyond: no test may
+assert the exact contents of a capabilities `extensions` array — only that a specific type is
+present, and its occurrence count.**
+
+**Spec impact:** none beyond what the `app?: unknown` correction already recorded. `createGroup`'s
+"always write an anchor" is deliberately *not* here — it arrives with the roster, when the anchor
+becomes load-bearing as the seed.
+
+**Learned:** the verbatim-bytes discipline read fine as usage (`readGroupAnchorExtension` did not
+need renaming), so the anchor half of the byte-comparison guard is now real code with a doc comment
+carrying the reason.
 
 ### 2026-07-10 — Phase 1 exit
 
