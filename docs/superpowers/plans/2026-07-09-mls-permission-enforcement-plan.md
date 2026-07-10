@@ -1080,6 +1080,33 @@ keeps only the `../kubun` grep sweep and the docs prose.
 not show — because the anchor deliberately has no group id, and adding one would have been the wrong
 fix (the probe correctly stopped short of touching the anchor).
 
+### 2026-07-10 — Question 2.7: the ledger head hash chain
+
+**Findings:** DONE. `head.ts` — pure `genesisHead` / `extendHead` / `computeHead`, a binary
+encode/decode codec, the two `read*` handle helpers mirroring the anchor, and
+`LedgerIncompleteError` / `assertHeadMatches`. 12 tests, full suite 161, all four verify green.
+Domain separator `utf8("kumiai/mls/ledger-head/v1")`; each id length-framed with a 4-byte
+big-endian prefix (proves `['ab','c'] ≠ ['a','bc']`); head extension is 33 bytes — one version byte
+plus the 32 digest bytes, a canonical binary form so it can be byte-compared without the JSON
+re-encode hazard.
+
+**The probe caught a second bug in my spec.** The formula `headₙ = SHA256(headₙ₋₁ ‖ id₁ ‖ … ‖ idₖ)`
+reads as one hash per batch, but that fails the composition property the design needs: a joiner
+folds the whole `Invite.ledgerEntries` list at once, while existing members extend batch by batch,
+and `SHA256(SHA256(h‖a)‖b) ≠ SHA256(h‖a‖b)`. Only a **per-id chain link** (`head ← SHA256(head ‖
+frame(id))`, folded left to right) makes the two agree. The probe implemented per-id linking as the
+only construction satisfying requirement #4 and flagged the spec's shorthand. Spec formula
+corrected.
+
+**Spec impact:** the head formula rewritten to per-id linking, with the composition reasoning
+stated. No behavioural change to anything downstream — the corrected formula is what the code
+already does.
+
+**Learned:** two spec bugs now (2.3 rotation, 2.7 head formula), both mathematical shorthands that
+looked right and were wrong, both caught by a probe writing the property as an executable test. The
+learning loop is doing exactly what it is for — the assumptions that never ran are the ones that
+were subtly false.
+
 ### 2026-07-10 — Phase 1 exit
 
 All four claims confirmed on first attempt; no `BLOCKED`. The architecture stands. One piece of

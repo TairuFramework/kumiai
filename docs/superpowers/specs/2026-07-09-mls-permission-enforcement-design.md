@@ -179,9 +179,16 @@ export type LedgerHead = { v: 1; head: Uint8Array }
 
 // genesis, written by createGroup:
 head₀ = SHA256(domainSeparator ‖ groupID)
-// each commit whose envelope carries entries, in envelope order:
-headₙ = SHA256(headₙ₋₁ ‖ id₁ ‖ … ‖ idₖ)
+// each id is a separate chain link, folded left to right, in envelope order:
+head  = SHA256(head ‖ frame(id))   for each id
 ```
+
+Each id is a **separate chain link**, not one hash over a batch. That distinction is load-bearing:
+it is the only construction under which a joiner (recomputing across the whole
+`Invite.ledgerEntries` list at once) and an existing member (extending its chain batch by batch as
+commits arrive) reach the same head — `SHA256(SHA256(h‖a)‖b)` composes across a batch boundary
+where `SHA256(h‖a‖b)` does not. `frame(id)` length-prefixes each id so `['ab','c']` and
+`['a','bc']` cannot fold to the same head.
 
 A hash **chain** over ordered ids, not a digest over a set. An existing member verifies a head
 update by extending its own chain by the arriving ids — `O(k)`, no refold. A joiner recomputes

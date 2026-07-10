@@ -83,6 +83,20 @@ export {
   restoreGroup,
 } from './group.js'
 export {
+  assertHeadMatches,
+  buildLedgerHeadExtension,
+  computeHead,
+  decodeLedgerHead,
+  encodeLedgerHead,
+  extendHead,
+  genesisHead,
+  LEDGER_HEAD_VERSION,
+  type LedgerHead,
+  LedgerIncompleteError,
+  readLedgerHead,
+  readLedgerHeadExtension,
+} from './head.js'
+export {
   type LedgerEntry,
   ledgerEntryDigest,
   signLedgerEntry,
