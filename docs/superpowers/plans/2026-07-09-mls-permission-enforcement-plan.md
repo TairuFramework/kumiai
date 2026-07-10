@@ -1114,3 +1114,30 @@ added Phase 2 scope (the `authenticatedData` passthrough), two refinements (narr
 guard, direct ts-mls calls for by-reference proposals). The throwaway probe
 (`packages/mls/test/ts-mls-probe.test.ts`) is deleted; its evidence is in
 `docs/superpowers/probes/phase-1-report.md`.
+
+### 2026-07-10 — Question 3.1: fail-closed `ControlEnvelope` decode
+
+**Findings:** CONFIRMED. `v` alone is fail-closed; no `requires` field. `envelope.ts` exports
+`ControlEnvelope`, `CONTROL_ENVELOPE_VERSION`, `DecodeResult`, `encodeControlEnvelope`,
+`decodeControlEnvelope`. Decode is total — never throws — over 9 tests; full suite 170 (+9), tsc and
+biome clean.
+
+**Decisions recorded:**
+- `DecodeResult = { ok: true; envelope } | { ok: false; reason }`. A rejection is a *value*, not a
+  throw: an uninterpretable envelope is a normal outcome that maps to reject-the-commit, and the
+  policy must decide without a try/catch. `reason` is log-only.
+- **Empty/zero-length `authenticatedData` decodes to `{ v: 1 }`** — accept, not reject. An ordinary
+  commit that writes no ledger entries (key rotation, Update, self-Remove, or a pre-envelope client)
+  carries empty bytes; the anchor is load-bearing so every group has one, and rejecting empty would
+  reject every ordinary commit.
+- **Unknown extra JSON keys are tolerated and dropped** (carry only `v`/`entries`/`app`), matching
+  the anchor/head tolerant-decode discipline. Rejecting unrecognized keys would be a `v` bump, not a
+  change here.
+
+**Spec impact:** none. The codec matches the spec's `ControlEnvelope` block verbatim, `app?: unknown`
+included.
+
+**Learned (machine note):** the `rtk` shim intercepts `pnpm exec biome check …` as well as
+`pnpm run` — both print a fake pass and exit non-zero. Real biome output comes from
+`rtk proxy pnpm run lint` (which runs `biome check --write`, so run it *before* staging) or the
+binary directly. Brief verify lines updated to stop hard-coding `pnpm exec biome`.

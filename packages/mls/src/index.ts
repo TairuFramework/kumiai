@@ -47,6 +47,13 @@ export {
   nobleCryptoProvider,
 } from './crypto.js'
 export {
+  CONTROL_ENVELOPE_VERSION,
+  type ControlEnvelope,
+  type DecodeResult,
+  decodeControlEnvelope,
+  encodeControlEnvelope,
+} from './envelope.js'
+export {
   type FoldDrop,
   type FoldInput,
   foldLedger,
