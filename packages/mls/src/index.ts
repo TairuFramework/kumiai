@@ -76,4 +76,11 @@ export {
   removeMember,
   restoreGroup,
 } from './group.js'
+export {
+  type LedgerEntry,
+  ledgerEntryDigest,
+  signLedgerEntry,
+  type VerifiedLedgerEntry,
+  verifyLedgerEntry,
+} from './ledger.js'
 export type { GroupOptions, GroupSyncScope, Invite, KeyPackageBundle } from './types.js'

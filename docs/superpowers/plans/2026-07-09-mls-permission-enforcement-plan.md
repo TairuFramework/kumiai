@@ -991,6 +991,30 @@ becomes load-bearing as the seed.
 need renaming), so the anchor half of the byte-comparison guard is now real code with a doc comment
 carrying the reason.
 
+### 2026-07-10 — Question 2.2: `LedgerEntry` with `groupID`
+
+**Findings:** DONE. `ledger.ts` ports kubun's `ledger-entry.ts` faithfully — `signLedgerEntry`
+(`embedLongForm: true`), `verifyLedgerEntry` (null-never-throws), `ledgerEntryDigest` — with
+`groupID` woven through the signed claim, the verify shape check, and the `VerifiedLedgerEntry`.
+`ord` is conditional on both sides, so no `undefined` key is ever signed. 12 tests, full suite 132,
+all four verify commands green. The replay test proves both halves: the group-A entry verifies
+fine (validity was never the defence), a group-B fold drops it, and both folds see the *same*
+`ledgerEntryDigest` — content-addressing is no defence, identical bytes.
+
+**Surprise, and it is worth keeping:** the `alg: 'none'` rejection happens in two layers, not one.
+A 2-segment unsigned token (`createUnsignedToken` + `stringifyToken`) is rejected by `verifyToken`
+at the JWT *format* check ("expected 3 parts") — **before** the header's `alg` is read, so
+`isVerifiedToken` is not what stops it. Only a well-formed 3-segment `alg: 'none'` token reaches the
+header and is rejected by `isVerifiedToken`. The test asserts both paths, so a refactor of either
+layer cannot silently reopen the hole. The forgery is constructible through the public API; the
+defence holds.
+
+**Spec impact:** none. The port matches the spec's `LedgerEntry` block exactly.
+
+**Learned:** "`isVerifiedToken` rejects `alg: 'none'`" is true but incomplete — the format check is
+the first gate, and the two must both be tested because the defence is usually attributed only to
+the second.
+
 ### 2026-07-10 — Phase 1 exit
 
 All four claims confirmed on first attempt; no `BLOCKED`. The architecture stands. One piece of
