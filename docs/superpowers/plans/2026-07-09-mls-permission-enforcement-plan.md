@@ -1338,3 +1338,45 @@ supplies the token so it exercises the authority path and rejects with `CommitRe
 **Learned:** writing the behavioral test directly (rather than via a probe) caught a subtlety a green
 probe would have hidden — the two fail-closed gates are ordered, and a naive test conflates them. The
 gap was in my test, not the code, but surfacing it clarified the pre-pass's contract.
+
+### 2026-07-10 — Question 5.2 decomposed (approved, not yet built)
+
+Q5.2 as written in the plan is a convergence of many deferred pieces: dropping the capability chain
+(Q2.5), the mixed Add+GCE write side (Q2.6), head write+verify (Q2.7), roster bootstrap, and
+`MemberCredential` surgery. Too coupled for one probe. Decomposed, user-approved:
+
+- **Q5.2a — invite seeds the roster (additive, next).** `Invite` gains `ledgerEntries: Array<string>`
+  (keep `capabilityToken`/`capabilityChain`/`permission` for now — redundant per Q2.5, removed later).
+  `createInvite` *additionally* signs a `group.role: member` entry for `recipientDID` (via
+  `signLedgerEntry`, inviter identity) into `ledgerEntries`; the existing capability delegation stays.
+  `commitInvite` forwards `authenticatedData = encodeControlEnvelope({ v:1, entries:[roleEntryId] })`
+  to `createCommit` (the write-side passthrough — the Q1.1 gap) and guards that the committer is admin
+  in its own roster. `processWelcome` folds `invite.ledgerEntries` into the roster
+  (`applyLedgerEntries`) and asserts `recipientDID === identity.id`; existing chain validation stays.
+  After this every invited member is in the roster as `member`, which is what makes Q4.1b's
+  external-init roster check meaningful. Works *now* because the GCE-head coupling is still deferred,
+  so a commit carrying entries without a head GCE is accepted by the Q4.1 pre-pass.
+- **Then Q4.1b — external-init verdict.** Reopens the PublicMessage path the pre-pass passes through:
+  resolve the UpdatePath-leaf DID into `externalCommitDID`, let `defaultCommitPolicy` run the
+  external row (committer DID ∈ roster + exactly `{external_init, remove-of-self}`).
+- **Deferred follow-ups (tracked):** head write+verify (Q2.7 wiring — commitInvite moves the head,
+  processWelcome recomputes it; interim gap: an inviter can omit entries undetected) and the chain
+  removal (Q2.5 subtraction — gut `capabilityToken`/`capabilityChain`/`permission` from `Invite` and
+  `MemberCredential`, once roster-seeding is proven).
+
+### Session handoff — 2026-07-10
+
+**Where we are.** Phase 1 (ts-mls probes) ✓, Phase 2 (ledger primitives) ✓, Phase 3 (envelope +
+policy) ✓, Phase 4 core ✓ (4.0/4.4 anchored handle state, 4.1 pre-pass, 4.2 rollback satisfied
+structurally, 4.3 state-so-far authority). Full suite **227 green**, tree clean. Last commit
+`dd9ad41`.
+
+**Commits so far (feature):** `84f0114` anchor · `1cfdd5d` ledger · `1106382` fold · `940bacd` roster
+· `722613d` head · `3ddaab0` envelope · `5344dcd` policy · `219b08a` admin-issuer invariant · `c89bf12`
+removal-demotes · `cf57ff6` anchor-at-creation · `0a33475` pre-pass · `dd9ad41` state-so-far tests.
+
+**Next session, in order:** Q5.2a (invite seeds the roster — brief above), then Q4.1b (external-init
+verdict), then head write+verify, then chain removal (Q2.5), then Phase 5 residuals (5.1 grep sweep,
+5.3 dissolved, 5.4 non-creator-admin invite tests) and Phase 6 (integration tests, delete origin
+`next/` items, write the kubun migration item). Ephemeral kubun-impact notes remain untracked in
+`docs/superpowers/notes/` for eventual reconciliation.
