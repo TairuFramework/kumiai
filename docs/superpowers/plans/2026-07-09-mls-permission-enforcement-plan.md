@@ -332,8 +332,29 @@ A ts-mls capability probe, Phase-1 shaped, forced by the `ledger_head` design. T
   envelope carries a `group.role` entry demoting that DID. Tests: removing a plain member needs
   no entry; removing an admin without one is rejected; with one, accepted, and the roster no
   longer lists them as admin; a removed admin's later role entry, relayed by a colluding member
-  in that member's own commit, is dropped by every peer; the last admin self-removing leaves the
-  roster's admin set non-empty (guard) and the group with no admin member (documented).
+  in that member's own commit, is dropped by every peer; removing the **last** admin is rejected,
+  self-removal included, and succeeds once another admin has been promoted.
+
+### Question 2.9: Does the committer filter pending proposals?
+
+Forced by Q2.6's third finding. Sender-side half of the policy.
+
+- **Assumption:** ts-mls absorbs pending by-reference proposals into the next commit
+  (`createCommit.js:111`), so any member can poison any other member's next commit. Filtering the
+  pending set against the same `defaultCommitPolicy` before `createCommit` closes it, and the
+  filter and the receiver can never disagree because they are the same function.
+- **Done when:** kumiai's commit wrappers drop, before committing, every pending proposal the
+  local policy would reject on receipt. Tests: non-admin Carol proposes a GCE by reference; admin
+  Alice's next commit excludes it and is accepted by every peer; without the filter, that same
+  commit is rejected by every peer (assert both, so the test proves the griefing vector exists
+  rather than merely that the fix works); a legitimate by-reference proposal from an admin is
+  still absorbed; the filter emits an observable notice per dropped proposal.
+- **Spec excerpt:**
+  > So the commit wrappers filter the pending-proposal set before calling `createCommit`, dropping
+  > any proposal that the local policy would reject on receipt. Sender-side filtering,
+  > receiver-side enforcement — the same division as the honest-client guards on `createInvite`
+  > and `removeMember`.
+- **Verify:** `pnpm --filter @kumiai/mls exec vitest run test/policy.test.ts test/group.test.ts`
 - **Spec excerpt:**
   > A removed admin therefore keeps ledger authority forever: it cannot commit, having no leaf,
   > but a colluding current member can carry its signed role entry in that member's own commit
@@ -801,6 +822,69 @@ refusing to let the last admin leave would be worse.
 
 **Learned:** a defect in *this* spec, not a feature missing from the revocation backlog. The
 question "who may write the head" is what made it visible; the head itself did not cause it.
+
+### 2026-07-10 — Question 2.6: GCE + Add in one commit
+
+**Findings:** all three CONFIRMED, no stop condition tripped. `createCommit` accepts
+`[Add(bob), GroupContextExtensions([anchor, ledgerHead'])]` in one commit and the receiving
+callback sees both proposals. `extensionData` is reachable as a `Uint8Array` and byte-comparable
+against the handle's own pre-commit `groupContext.extensions`; a single flipped anchor byte is
+detected inside the synchronous callback and rejected, epoch unchanged. A standalone GCE proposal
+issued by a non-admin and absorbed into another member's commit reports the *proposer's*
+`senderLeafIndex`, as Q1.4 showed for Remove.
+
+**Spec impact:** the `ledger_head` design stands unchanged. But Q3 exposed a defect that was not
+on any list — see the next entry.
+
+**Learned:** the anchor guard is enforceable entirely inside the synchronous callback, which is
+what the whole head design was resting on. Two more kumiai wrapper gaps: no wrapper builds a mixed
+Add+GCE commit, and none issues or relays a standalone GCE proposal. Both join the
+`authenticatedData` passthrough on the Phase 2 commit-wrapper rewrite.
+
+### 2026-07-10 — pending-proposal griefing
+
+**Findings:** ts-mls absorbs pending by-reference proposals into the next commit automatically
+(`createCommit.js:111`, demonstrated end to end by Q2.6's third test). A non-admin proposes a GCE
+— or an `add`, or a `psk` — and the next member to commit, however innocently, has it folded in.
+Every peer rejects that commit for a proposal its sender lacked permission to make. The committer
+did nothing wrong; the group stalls.
+
+**Spec impact:** new section "The committer filters pending proposals". The commit wrappers filter
+the pending set against the same `defaultCommitPolicy` before calling `createCommit`. Sender-side
+filtering, receiver-side enforcement.
+
+**Learned:** a receiving-side policy is necessary and not sufficient. Anything the receiver rejects,
+the sender must decline to carry — otherwise the rejection becomes a weapon aimed at the wrong
+member. This generalizes: every row of the policy table is also a filter rule.
+
+### 2026-07-10 — kubun's second reply
+
+**Findings:**
+
+1. Our suspicion about kubun's `admin.role` was **wrong at authorship**: `removeMember`
+   (`context/group.ts:875-935`) already resolves `removedIsAdmin` before the tombstone, refuses to
+   remove the last admin, and signs an `admin.role: 'revoked'` entry sharing one HLC with it. The
+   record is corrected.
+2. But kubun couples demotion to removal by **HLC**, and ships it as a separate broadcast over a
+   fan-out that silently drops without a live hub binding. A peer can process the Remove and never
+   receive the revocation; its pure-ledger circle folds (which cannot read membership rows without
+   diverging) then fold the ex-admin's entries as authorized. Envelope coupling removes the failure
+   mode rather than narrowing it.
+3. Kubun asks us to refuse a last-admin removal outright rather than document the brick. They are
+   right, and they had the rule already.
+4. Their cross-ledger fix (`e8308b64`) found *both* dependencies broken, not one, and surfaced a
+   direction asymmetry: rebuilding on authority change revives dropped entries but never prunes
+   rows invalidated by a later-arriving, earlier-HLC revocation.
+
+**Spec impact:** three edits. Same-commit delivery stated as a design property, not an incidental.
+Last-admin removal refused, self-removal included. `foldLedger`'s docs must say the projection is
+the complete state, not a delta — a host that merges rather than replaces is silently wrong in the
+remove direction only.
+
+**Learned:** the remove direction needs a revocation claiming an earlier point than the entries it
+invalidates, while arriving later. Signer-asserted HLC permits it; epoch-assigned order does not.
+kumiai cannot reach the state at all. That is the third distinct bug the no-clock decision has
+retired, after fork divergence and backdating.
 
 ### 2026-07-10 — Phase 1 exit
 

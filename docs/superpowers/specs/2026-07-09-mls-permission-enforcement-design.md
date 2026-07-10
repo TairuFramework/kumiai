@@ -275,6 +275,20 @@ host a footgun the library never needed. Hosts that want speed cache the project
 own the invalidation. If a future reducer genuinely needs cross-type authority, the fold gains a
 declared `dependsOn` before it gains an incremental applier — not after.
 
+**What `foldLedger` returns is the complete state, not a delta.** This is stated in its docs
+because the type cannot say it and a host will otherwise get it wrong in one direction only.
+Rebuilding a projection on authority change fixes the *add* direction — an entry dropped as
+unauthorized revives once its author's grant arrives. It does not fix the *remove* direction: a
+host that upserts the fold's result into a table and prunes nothing keeps rows for entries that a
+later-arriving revocation invalidated. The projection is silently wrong, and nothing in the
+signature warns you. A host replacing its projection wholesale is correct; a host merging into it
+is not.
+
+Kubun hit exactly this (`kubun/docs/agents/plans/next/2026-07-10-projection-prune-on-revoked-authority.md`).
+Note that the remove direction requires a revocation claiming an *earlier* point than the entries
+it invalidates while arriving later — which a signer-asserted HLC permits and an epoch-assigned
+order does not. kumiai cannot reach the state; a host with a clock can.
+
 ## Roster and authority rules
 
 `GroupPermission` narrows to `'admin' | 'member'`. The `'read'` level is removed — see
@@ -316,11 +330,22 @@ without it is rejected. Removing a plain member needs no entry — the roster al
 Resolving the removed leaf's DID needs the *pre-commit* ratchet tree, which the pre-pass already
 walks to map each proposal's `senderLeafIndex`.
 
-The empty-admin guard interacts here. The last admin self-removing would emit a demotion that
-empties the admin set, so the guard drops the entry and the roster keeps them — while the group
-itself is left with no admin member and can never add or remove again. The guard cannot prevent
-that; only a policy refusing the self-removal could, and refusing to let the last admin leave is
-worse. The group is bricked either way, with or without the ledger. Documented, not fixed.
+Coupling the demotion to the removal **by envelope** rather than by timestamp is a property of the
+design, not an implementation detail. The entry that strips authority arrives inside the commit
+that strips membership, over the same authenticated channel, or neither arrives. Kubun couples the
+two by HLC and ships the demotion as a separate broadcast, over a fan-out that silently drops when
+a group has no live hub binding; a peer can process the Remove and never receive the revocation,
+and its pure-ledger circle folds — which cannot read membership rows without diverging — then fold
+the ex-admin's entries as authorized. Same-commit delivery removes that failure mode instead of
+narrowing it.
+
+**Removing the last admin is refused.** The empty-admin fold guard drops an entry that would empty
+the admin set, which would leave the roster naming an admin who is no longer a member — the
+inconsistency in miniature. The policy therefore rejects the Remove itself, self-removal included:
+a last admin must promote someone before leaving. Fail-closed, and cheap — fold, drop the removed
+DID, check the admin set is non-empty. A group with no admin can never add, remove, or promote
+again, so an unrecoverable group is a worse outcome than a trapped admin who has one obvious way
+out. (Kubun reached the same rule independently at `context/group.ts:875-935`.)
 
 ### The default commit policy
 
@@ -339,6 +364,29 @@ never checked.
 A commit whose envelope carries `entries` must also carry the matching `ledger_head` GCE
 proposal, and a `ledger_head` GCE proposal without `entries` is rejected. The two move together
 or not at all.
+
+### The committer filters pending proposals
+
+Receiver-side rejection alone lets any member stall the group.
+
+ts-mls absorbs pending by-reference proposals into the next commit automatically
+(`createCommit.js:111`). So a non-admin proposes a `group_context_extensions` — or an `add`, or a
+`psk` — and the next member to commit, however innocently, has it folded into their commit. Every
+peer evaluates that commit, finds a proposal whose sender lacks the permission for it, and rejects
+the whole thing. The committer did nothing wrong and their commit is refused by the entire group.
+Repeat the proposal and no epoch ever advances.
+
+This is authenticated griefing, not a break: the proposal names its author, and an admin can
+remove them. But the victim looks like the offender, and the group stalls until someone reads the
+proposal set.
+
+So the commit wrappers filter the pending-proposal set before calling `createCommit`, dropping any
+proposal that the local policy would reject on receipt. Sender-side filtering, receiver-side
+enforcement — the same division as the honest-client guards on `createInvite` and `removeMember`.
+A modified client that skips the filter produces a commit the group refuses, which is the correct
+outcome and costs only the modified client.
+
+The filter runs against the same `defaultCommitPolicy`, so the two can never disagree.
 
 ### There is no `invite` permission
 
