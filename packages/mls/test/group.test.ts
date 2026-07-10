@@ -2,6 +2,7 @@ import { createIdentity, normalizeDID, randomIdentity } from '@kokuin/token'
 import {
   createCommit,
   decode,
+  defaultProposalTypes,
   encode,
   mlsMessageDecoder,
   mlsMessageEncoder,
@@ -1159,6 +1160,31 @@ async function pathCommitBytes(
   return encode(mlsMessageEncoder, result.commit)
 }
 
+/** A commit proposing an Add of `keyPackage`, optionally carrying an envelope. */
+async function addCommitBytes(
+  group: { context: unknown; state: unknown },
+  keyPackage: unknown,
+  authenticatedData?: Uint8Array,
+): Promise<Uint8Array> {
+  const result = await createCommit({
+    context: group.context as Parameters<typeof createCommit>[0]['context'],
+    state: group.state as Parameters<typeof createCommit>[0]['state'],
+    extraProposals: [
+      {
+        proposalType: defaultProposalTypes.add,
+        add: { keyPackage: keyPackage as never },
+      },
+    ] as Parameters<typeof createCommit>[0]['extraProposals'],
+    ...(authenticatedData != null && { authenticatedData }),
+  })
+  return encode(mlsMessageEncoder, result.commit)
+}
+
+/** A resolver backed by a mutable token map the test fills after signing. */
+function mapResolver(tokens: Map<string, string>): GroupOptions['resolveLedgerEntries'] {
+  return async (ids) => ids.map((id) => tokens.get(id)).filter((t): t is string => t != null)
+}
+
 describe('GroupHandle commit enforcement (default-on)', () => {
   test("rejects a non-admin member's privileged commit with no caller policy", async () => {
     const { bob, aliceGroup, bobGroup } = await twoMemberGroup()
@@ -1377,5 +1403,99 @@ describe('GroupHandle commit enforcement (caller policy override)', () => {
     const epochBefore = bobGroup.epoch
     await expect(bobGroup.processMessage(bytes)).rejects.toThrow(MissingLedgerEntriesError)
     expect(bobGroup.epoch).toBe(epochBefore)
+  })
+})
+
+describe('GroupHandle authority is state-so-far, not post-commit', () => {
+  test('a member cannot self-bootstrap: a self-signed promotion in its own commit is rejected', async () => {
+    const tokens = new Map<string, string>()
+    const { bob, aliceGroup, bobGroup, groupID } = await twoMemberGroup({
+      aliceOptions: { resolveLedgerEntries: mapResolver(tokens) },
+    })
+
+    // Bob signs his own promotion to admin and rides it in his own commit. The
+    // entry resolves — so the rejection is the fold's authority rule, not a
+    // missing body: the issuer is judged against the state so far, where Bob is
+    // not an admin, so the whole commit is rejected. Bob cannot lift himself.
+    const selfPromote = await signLedgerEntry(bob, {
+      type: 'group.role',
+      groupID,
+      subject: bob.id,
+      value: 'admin',
+    })
+    tokens.set(ledgerEntryDigest(selfPromote), selfPromote)
+    const bytes = await pathCommitBytes(
+      bobGroup,
+      encodeControlEnvelope({ v: 1, entries: [ledgerEntryDigest(selfPromote)] }),
+    )
+
+    const epochBefore = aliceGroup.epoch
+    await expect(aliceGroup.processMessage(bytes)).rejects.toThrow(CommitRejectedError)
+    expect(aliceGroup.epoch).toBe(epochBefore)
+    expect(aliceGroup.roster.roles.get(normalizeDID(bob.id))).toBeUndefined()
+  })
+
+  test('a valid promotion cannot authorize the same committer in the same commit', async () => {
+    const tokens = new Map<string, string>()
+    const { alice, bob, aliceGroup, bobGroup, groupID } = await twoMemberGroup({
+      aliceOptions: { resolveLedgerEntries: mapResolver(tokens) },
+    })
+
+    // Alice (admin) validly promotes Bob, but the promotion rides a commit Bob
+    // himself authors to Add Carol. The entry folds (Alice is admin), so the
+    // candidate roster makes Bob admin — but the Add's sender authority is judged
+    // against the base roster, where Bob is still a member, so it is rejected.
+    const promoteBob = await signLedgerEntry(alice, {
+      type: 'group.role',
+      groupID,
+      subject: bob.id,
+      value: 'admin',
+    })
+    tokens.set(ledgerEntryDigest(promoteBob), promoteBob)
+
+    const carol = randomIdentity()
+    const carolKP = await createKeyPackageBundle(carol)
+    const bobAddCommit = await addCommitBytes(
+      bobGroup,
+      carolKP.publicPackage,
+      encodeControlEnvelope({ v: 1, entries: [ledgerEntryDigest(promoteBob)] }),
+    )
+
+    const epochBefore = aliceGroup.epoch
+    await expect(aliceGroup.processMessage(bobAddCommit)).rejects.toThrow(CommitRejectedError)
+    expect(aliceGroup.epoch).toBe(epochBefore)
+    // The rejected commit applied nothing: Bob is not admin, Carol was not added.
+    expect(aliceGroup.roster.roles.get(normalizeDID(bob.id))).toBeUndefined()
+  })
+
+  test('the control: an admin committing the same Add and promotion is accepted', async () => {
+    const tokens = new Map<string, string>()
+    const { alice, bob, aliceGroup, bobGroup, groupID } = await twoMemberGroup({
+      bobOptions: { resolveLedgerEntries: mapResolver(tokens) },
+    })
+
+    const promoteBob = await signLedgerEntry(alice, {
+      type: 'group.role',
+      groupID,
+      subject: bob.id,
+      value: 'admin',
+    })
+    tokens.set(ledgerEntryDigest(promoteBob), promoteBob)
+
+    const carol = randomIdentity()
+    const carolKP = await createKeyPackageBundle(carol)
+    // Alice — an admin in the base roster — authors the Add carrying the promotion.
+    const aliceAddCommit = await addCommitBytes(
+      aliceGroup,
+      carolKP.publicPackage,
+      encodeControlEnvelope({ v: 1, entries: [ledgerEntryDigest(promoteBob)] }),
+    )
+
+    await bobGroup.processMessage(aliceAddCommit)
+    expect(bobGroup.epoch).toBe(2n)
+    expect(bobGroup.roster.roles.get(normalizeDID(bob.id))).toBe('admin')
+    expect(bobGroup.listMembers().some((m) => normalizeDID(m.id) === normalizeDID(carol.id))).toBe(
+      true,
+    )
   })
 })

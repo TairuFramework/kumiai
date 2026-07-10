@@ -1312,3 +1312,29 @@ pre-pass precomputes every input the callback needs — the callback never await
 folds. And "commit by assignment" makes rollback free: there is no undo because nothing is mutated
 until the accept path runs `applyOnAccept`. One judgment call: `onLedgerEntries` fires only when
 `surfaced` is non-empty (a no-op otherwise), rather than calling the sink with `[]`.
+
+### 2026-07-10 — Question 4.3: authority is state-so-far, not post-commit
+
+**Findings:** CONFIRMED on a live handle, test-only, no production change (the pre-pass already
+implements it). Three tests in `group.test.ts`. Full suite 227.
+
+**The property that matters:** a *validly* Alice-signed promotion of Bob, riding a commit **Bob**
+authors to Add Carol, is **rejected** — `foldEnvelope` accepts the entry (candidate roster → Bob
+admin), but the Add's sender authority is judged against the **base** roster (Bob still a member).
+Promotion and its exercise cannot be atomic in one commit. This is the Q2.8 base/candidate split
+composing exactly as intended; it passed on the first run. A member self-signing its own promotion is
+rejected by the admin-issuer invariant (issuer not admin in state-so-far).
+
+**Ordering finding (recorded):** entry **resolution precedes authority evaluation** — the pre-pass
+gates in a fixed order: **resolve → fold/authority → policy**. The first draft of the self-bootstrap
+test gave the receiver no resolver, so it threw `MissingLedgerEntriesError` (unresolvable body)
+*before* `foldEnvelope` could reject the entry on admin-issuer grounds. Both fail closed, but they are
+different errors in a fixed order: an *unresolvable* entry and an *unauthorized* entry surface
+differently, and resolution wins. A caller that distinguishes them must know this. (The test now
+supplies the token so it exercises the authority path and rejects with `CommitRejectedError`.)
+
+**Spec impact:** none. Confirms "the candidate roster is folded before the commit is applied."
+
+**Learned:** writing the behavioral test directly (rather than via a probe) caught a subtlety a green
+probe would have hidden — the two fail-closed gates are ordered, and a naive test conflates them. The
+gap was in my test, not the code, but surfacing it clarified the pre-pass's contract.
