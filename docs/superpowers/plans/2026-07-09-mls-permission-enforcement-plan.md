@@ -1276,3 +1276,39 @@ the fold drops non-role by type; the strict value/issuer gate is `foldEnvelope`)
 two-function check into a structural invariant — the fail-closed property is now a consequence of the
 type existing, not a guard someone can forget to call. And auto-anchoring flushed out a test fixture
 that had been squatting on a reserved extension type in silence.
+
+### 2026-07-10 — Question 4.1: the async pre-pass for internal commits (+ 4.2 satisfied)
+
+**Decisions taken (user-approved):** enforcement is **on by default** for anchored groups (a caller
+`commitPolicy` overrides); the external-commit (PublicMessage) verdict is split to Q4.1b.
+
+**Findings:** CONFIRMED. The async pre-pass composes with the synchronous ts-mls callback.
+`processMessage` and `decrypt` share `#prepareCommitPipeline(decoded, opts)` → `{callback, capture,
+applyOnAccept}`. A non-PrivateMessage-commit frame takes the exact pre-envelope path (caller policy
+only), so external/PublicMessage and application messages are untouched. For a private commit the
+pre-pass decodes the envelope, resolves + verifies entry bodies (content-addressing binds the
+untrusted resolver's body to the requested id), folds a candidate roster off the pre-commit state,
+and precomputes `didOfLeaf`/`anchorExtensionData`; the sync callback is a pure lookup
+(`precomputedReject ? reject : callerPolicy ? caller : defaultCommitPolicy`). 10 new tests; full
+suite 224; **0 existing tests changed** (every existing receiver-processed commit is admin-authored,
+which the default policy accepts).
+
+**Q4.2 (three-field rollback) is satisfied structurally, not by a separate probe.** `applyOnAccept`
+— merge `#ledger`, adopt `#roster`, fire `onLedgerEntries` — runs only on accept; a reject or any
+throw mutates nothing but `#state` (which ts-mls returns as the pre-commit state). `MissingLedgerEntriesError`
+throws *inside the pre-pass, before `mlsProcessMessage`*, so the handle stays at its pre-commit epoch,
+and it is not overridable by a caller policy (a test asserts it still throws under accept-all). The
+Q4.1 test set already covers the reject-leaves-epoch and throw-then-retry cases Q4.2 named; a
+dedicated 4.2 probe would be redundant. Mark 4.2 answered here.
+
+**Spec impact:** none. Realizes the spec's three-phase `processMessage` (async pre-pass → sync
+callback → commit-by-assignment) and "the default policy" being on by default.
+
+**Deferred:** ledger-head/GCE coupling (a commit with `entries` but no matching head is accepted for
+now), external-commit verdict (Q4.1b), standalone-proposal gating, commit-wrapper write side.
+
+**Learned:** the sync/async tension the whole design was shaped around dissolves cleanly once the
+pre-pass precomputes every input the callback needs — the callback never awaits, never resolves, never
+folds. And "commit by assignment" makes rollback free: there is no undo because nothing is mutated
+until the accept path runs `applyOnAccept`. One judgment call: `onLedgerEntries` fires only when
+`surfaced` is non-empty (a no-op otherwise), rather than calling the sink with `[]`.

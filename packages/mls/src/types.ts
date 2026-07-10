@@ -9,6 +9,7 @@ import type {
 } from 'ts-mls'
 
 import type { GroupPermission } from './capability.js'
+import type { VerifiedLedgerEntry } from './ledger.js'
 
 export type GroupOptions = {
   /** Custom CryptoProvider for ts-mls. Defaults to nobleCryptoProvider. */
@@ -30,6 +31,21 @@ export type GroupOptions = {
    * throws CommitRejectedError). Overridable per call.
    */
   commitPolicy?: IncomingMessageCallback
+  /**
+   * Fetch control-ledger entry bodies the local ledger lacks. Invoked in the
+   * commit pre-pass with the content ids an incoming commit's envelope names but
+   * the handle does not hold. Returns signed tokens; the pre-pass keeps only a
+   * token whose content-addressed digest matches the requested id and whose
+   * signature verifies, so the resolver is untrusted. When absent, a commit that
+   * names an unheld entry throws MissingLedgerEntriesError.
+   */
+  resolveLedgerEntries?: (ids: Array<string>) => Promise<Array<string>>
+  /**
+   * Surface the notarized non-`group.role` ledger entries an accepted commit
+   * carried, in envelope order. Never read by kumiai — `group.role` entries fold
+   * into the roster, everything else is handed to the consumer here.
+   */
+  onLedgerEntries?: (entries: Array<VerifiedLedgerEntry>) => void
   /** Optional DID cache for resolving did:peer:4 issuers in capability chains. Default: in-memory. */
   cache?: DIDCache
   /** Optional resolver for did:peer:4 short forms not in cache. */

@@ -1,5 +1,14 @@
 import { createIdentity, normalizeDID, randomIdentity } from '@kokuin/token'
-import { decode, mlsMessageDecoder, type NodeLeaf, nodeTypes, wireformats } from 'ts-mls'
+import {
+  createCommit,
+  decode,
+  encode,
+  mlsMessageDecoder,
+  mlsMessageEncoder,
+  type NodeLeaf,
+  nodeTypes,
+  wireformats,
+} from 'ts-mls'
 import { describe, expect, it, test } from 'vitest'
 
 import {
@@ -7,7 +16,9 @@ import {
   LEDGER_HEAD_EXTENSION_TYPE,
   readGroupAnchor,
 } from '../src/anchor.js'
+import { encodeControlEnvelope } from '../src/envelope.js'
 import {
+  CommitRejectedError,
   commitInvite,
   createGroup,
   createInvite,
@@ -18,7 +29,9 @@ import {
   restoreGroup,
 } from '../src/group.js'
 import { readLedgerHead } from '../src/head.js'
-import { signLedgerEntry } from '../src/ledger.js'
+import { ledgerEntryDigest, signLedgerEntry, type VerifiedLedgerEntry } from '../src/ledger.js'
+import { MissingLedgerEntriesError } from '../src/policy.js'
+import type { GroupOptions } from '../src/types.js'
 
 describe('GroupHandle lifecycle', () => {
   test('creates a group with single member', async () => {
@@ -1097,5 +1110,272 @@ describe('GroupHandle control state', () => {
 
     expect(restored.roster.roles.get(normalizeDID(bob.id))).toBe('admin')
     expect(restored.roster.roles.get(normalizeDID(alice.id))).toBe('admin')
+  })
+})
+
+/**
+ * Build an Alice(admin) + Bob(member) group at epoch 1, both handles live on the
+ * same commit chain. `bobOptions`/`aliceOptions` seed each side's GroupHandle so a
+ * test can install a resolver, an onLedgerEntries sink, or a caller commitPolicy.
+ */
+async function twoMemberGroup(opts?: { aliceOptions?: GroupOptions; bobOptions?: GroupOptions }) {
+  const alice = randomIdentity()
+  const bob = randomIdentity()
+  const groupID = `enforce-${Math.random().toString(36).slice(2)}`
+  const { group: aliceGroup0 } = await createGroup(alice, groupID, opts?.aliceOptions)
+  const { invite } = await createInvite({
+    group: aliceGroup0,
+    identity: alice,
+    recipientDID: bob.id,
+    permission: 'member',
+  })
+  const bobKP = await createKeyPackageBundle(bob)
+  const { welcomeMessage, newGroup: aliceGroup } = await commitInvite(
+    aliceGroup0,
+    bobKP.publicPackage,
+  )
+  const { group: bobGroup } = await processWelcome({
+    identity: bob,
+    invite,
+    welcome: welcomeMessage,
+    keyPackageBundle: bobKP,
+    ratchetTree: aliceGroup.state.ratchetTree,
+    options: opts?.bobOptions,
+  })
+  return { alice, bob, aliceGroup, bobGroup, groupID }
+}
+
+/** Build a PrivateMessage commit (path-only key rotation) carrying `authenticatedData`. */
+async function pathCommitBytes(
+  group: { context: unknown; state: unknown },
+  authenticatedData?: Uint8Array,
+): Promise<Uint8Array> {
+  const result = await createCommit({
+    context: group.context as Parameters<typeof createCommit>[0]['context'],
+    state: group.state as Parameters<typeof createCommit>[0]['state'],
+    extraProposals: [],
+    ...(authenticatedData != null && { authenticatedData }),
+  })
+  return encode(mlsMessageEncoder, result.commit)
+}
+
+describe('GroupHandle commit enforcement (default-on)', () => {
+  test("rejects a non-admin member's privileged commit with no caller policy", async () => {
+    const { bob, aliceGroup, bobGroup } = await twoMemberGroup()
+    const carol = randomIdentity()
+
+    // Bob (member) commits an Add of Carol — commitInvite does not guard the sender.
+    const carolKP = await createKeyPackageBundle(carol)
+    const bobCommit = await commitInvite(bobGroup, carolKP.publicPackage)
+
+    const epochBefore = aliceGroup.epoch
+    const rosterBefore = [...aliceGroup.roster.roles.entries()]
+    await expect(aliceGroup.processMessage(bobCommit.commitMessage)).rejects.toThrow(
+      CommitRejectedError,
+    )
+    expect(aliceGroup.epoch).toBe(epochBefore)
+    expect([...aliceGroup.roster.roles.entries()]).toEqual(rosterBefore)
+    // Bob is still not an admin — nothing was applied.
+    expect(aliceGroup.roster.roles.get(normalizeDID(bob.id))).toBeUndefined()
+  })
+
+  test("accepts an admin's Add", async () => {
+    const { aliceGroup, bobGroup } = await twoMemberGroup()
+    const carol = randomIdentity()
+
+    const carolKP = await createKeyPackageBundle(carol)
+    const addCarol = await commitInvite(aliceGroup, carolKP.publicPackage)
+
+    await bobGroup.processMessage(addCarol.commitMessage)
+    expect(bobGroup.epoch).toBe(2n)
+    expect(bobGroup.findMemberLeafIndex(carol.id)).toBeDefined()
+  })
+
+  test('a role entry updates the roster on accept; a non-role entry surfaces', async () => {
+    const tokens = new Map<string, string>()
+    const surfaced: Array<VerifiedLedgerEntry> = []
+    const { alice, bob, aliceGroup, bobGroup, groupID } = await twoMemberGroup({
+      bobOptions: {
+        resolveLedgerEntries: async (ids) =>
+          ids.map((id) => tokens.get(id)).filter((t): t is string => t != null),
+        onLedgerEntries: (entries) => {
+          surfaced.push(...entries)
+        },
+      },
+    })
+
+    const roleToken = await signLedgerEntry(alice, {
+      type: 'group.role',
+      groupID,
+      subject: bob.id,
+      value: 'admin',
+    })
+    const appToken = await signLedgerEntry(alice, {
+      type: 'note',
+      groupID,
+      subject: bob.id,
+      value: 'welcome',
+    })
+    const roleID = ledgerEntryDigest(roleToken)
+    const appID = ledgerEntryDigest(appToken)
+    tokens.set(roleID, roleToken)
+    tokens.set(appID, appToken)
+
+    const ad = encodeControlEnvelope({ v: 1, entries: [roleID, appID] })
+    const bytes = await pathCommitBytes(aliceGroup, ad)
+
+    await bobGroup.processMessage(bytes)
+
+    expect(bobGroup.epoch).toBe(2n)
+    expect(bobGroup.roster.roles.get(normalizeDID(bob.id))).toBe('admin')
+    // Only the non-role entry surfaces to the consumer.
+    expect(surfaced.map((e) => e.entry.type)).toEqual(['note'])
+    expect(surfaced.map((e) => e.entry.value)).toEqual(['welcome'])
+  })
+
+  test('MissingLedgerEntriesError names the entry, leaves epoch, then retries green', async () => {
+    const { alice, bob, aliceGroup, bobGroup, groupID } = await twoMemberGroup()
+
+    const roleToken = await signLedgerEntry(alice, {
+      type: 'group.role',
+      groupID,
+      subject: bob.id,
+      value: 'admin',
+    })
+    const roleID = ledgerEntryDigest(roleToken)
+    const bytes = await pathCommitBytes(
+      aliceGroup,
+      encodeControlEnvelope({ v: 1, entries: [roleID] }),
+    )
+
+    const epochBefore = bobGroup.epoch
+    await expect(bobGroup.processMessage(bytes)).rejects.toMatchObject({
+      name: 'MissingLedgerEntriesError',
+      ids: [roleID],
+    })
+    expect(bobGroup.epoch).toBe(epochBefore)
+
+    // Supply the body and re-process the same commit — now accepted.
+    await bobGroup.applyLedgerEntries([roleToken])
+    await bobGroup.processMessage(bytes)
+    expect(bobGroup.epoch).toBe(2n)
+    expect(bobGroup.roster.roles.get(normalizeDID(bob.id))).toBe('admin')
+  })
+
+  test('rejects an unknown envelope version', async () => {
+    const { aliceGroup, bobGroup } = await twoMemberGroup()
+
+    const ad = new TextEncoder().encode(JSON.stringify({ v: 2 }))
+    const bytes = await pathCommitBytes(aliceGroup, ad)
+
+    const epochBefore = bobGroup.epoch
+    await expect(bobGroup.processMessage(bytes)).rejects.toThrow(CommitRejectedError)
+    expect(bobGroup.epoch).toBe(epochBefore)
+  })
+
+  test('rejects a commit carrying a member-signed ledger entry', async () => {
+    // Bob (a member) signs a role entry: the signature verifies, but the issuer is
+    // not an admin, so the envelope fold rejects and the commit is refused.
+    const surfaced: Array<VerifiedLedgerEntry> = []
+    const bobTokenBox: { token?: string } = {}
+    const { bob, aliceGroup, bobGroup, groupID } = await twoMemberGroup({
+      bobOptions: {
+        resolveLedgerEntries: async () => (bobTokenBox.token != null ? [bobTokenBox.token] : []),
+        onLedgerEntries: (entries) => {
+          surfaced.push(...entries)
+        },
+      },
+    })
+
+    const bobToken = await signLedgerEntry(bob, {
+      type: 'group.role',
+      groupID,
+      subject: bob.id,
+      value: 'admin',
+    })
+    bobTokenBox.token = bobToken
+    const bobID = ledgerEntryDigest(bobToken)
+
+    const bytes = await pathCommitBytes(
+      aliceGroup,
+      encodeControlEnvelope({ v: 1, entries: [bobID] }),
+    )
+
+    const epochBefore = bobGroup.epoch
+    await expect(bobGroup.processMessage(bytes)).rejects.toThrow(CommitRejectedError)
+    expect(bobGroup.epoch).toBe(epochBefore)
+    expect(surfaced).toEqual([])
+  })
+
+  test('application messages run no envelope work', async () => {
+    const { aliceGroup, bobGroup } = await twoMemberGroup({
+      bobOptions: {
+        // If the pre-pass ran on an application message it would call this resolver.
+        resolveLedgerEntries: async () => {
+          throw new Error('resolver must not run for application messages')
+        },
+      },
+    })
+
+    const { message } = await aliceGroup.encrypt(new TextEncoder().encode('hi'))
+    const decrypted = await bobGroup.decrypt(message)
+    expect(new TextDecoder().decode(decrypted)).toBe('hi')
+  })
+})
+
+describe('GroupHandle commit enforcement (caller policy override)', () => {
+  test("a reject-all caller policy refuses an admin's valid commit", async () => {
+    const { aliceGroup, bobGroup } = await twoMemberGroup({
+      bobOptions: { commitPolicy: () => 'reject' },
+    })
+    const carol = randomIdentity()
+
+    const carolKP = await createKeyPackageBundle(carol)
+    const addCarol = await commitInvite(aliceGroup, carolKP.publicPackage)
+
+    const epochBefore = bobGroup.epoch
+    await expect(bobGroup.processMessage(addCarol.commitMessage)).rejects.toThrow(
+      CommitRejectedError,
+    )
+    expect(bobGroup.epoch).toBe(epochBefore)
+  })
+
+  test("an accept-all caller policy accepts a member's commit the default would reject", async () => {
+    // Alice receives with an accept-all policy; Bob (member) commits the Add.
+    const { bob, aliceGroup, bobGroup } = await twoMemberGroup({
+      aliceOptions: { commitPolicy: () => 'accept' },
+    })
+    const carol = randomIdentity()
+    void bob
+
+    const carolKP = await createKeyPackageBundle(carol)
+    const bobCommit = await commitInvite(bobGroup, carolKP.publicPackage)
+
+    await aliceGroup.processMessage(bobCommit.commitMessage)
+    expect(aliceGroup.epoch).toBe(2n)
+    expect(aliceGroup.findMemberLeafIndex(carol.id)).toBeDefined()
+  })
+
+  test('MissingLedgerEntriesError still throws under an accept-all caller policy', async () => {
+    const { alice, bob, aliceGroup, bobGroup, groupID } = await twoMemberGroup({
+      bobOptions: { commitPolicy: () => 'accept' },
+    })
+    void bob
+
+    const roleToken = await signLedgerEntry(alice, {
+      type: 'group.role',
+      groupID,
+      subject: bob.id,
+      value: 'admin',
+    })
+    const roleID = ledgerEntryDigest(roleToken)
+    const bytes = await pathCommitBytes(
+      aliceGroup,
+      encodeControlEnvelope({ v: 1, entries: [roleID] }),
+    )
+
+    const epochBefore = bobGroup.epoch
+    await expect(bobGroup.processMessage(bytes)).rejects.toThrow(MissingLedgerEntriesError)
+    expect(bobGroup.epoch).toBe(epochBefore)
   })
 })

@@ -13,6 +13,7 @@ import {
   type CiphersuiteName,
   type ClientState,
   type Credential,
+  contentTypes,
   createApplicationMessage,
   createCommit,
   createGroupInfoWithExternalPubAndRatchetTree,
@@ -49,6 +50,7 @@ import {
   type GroupAnchor,
   LEDGER_HEAD_EXTENSION_TYPE,
   readGroupAnchor,
+  readGroupAnchorExtension,
 } from './anchor.js'
 import { createDIDAuthenticationService } from './authentication.js'
 import {
@@ -64,9 +66,12 @@ import {
   parseMLSCredentialIdentity,
 } from './credential.js'
 import { nobleCryptoProvider } from './crypto.js'
+import { decodeControlEnvelope } from './envelope.js'
+import { foldEnvelope } from './envelope-fold.js'
 import type { FoldInput } from './fold.js'
 import { buildLedgerHeadExtension, genesisHead } from './head.js'
 import { ledgerEntryDigest, type VerifiedLedgerEntry, verifyLedgerEntry } from './ledger.js'
+import { defaultCommitPolicy, MissingLedgerEntriesError } from './policy.js'
 import { foldRoster, type RoleValue, type RosterState } from './roster.js'
 import type { GroupOptions, Invite, KeyPackageBundle } from './types.js'
 
@@ -151,6 +156,26 @@ function wrapCommitPolicy(
   }
 }
 
+/**
+ * Read the cleartext commit fields a PrivateMessage commit exposes before any
+ * epoch secret is available: its `authenticatedData` carrier. Returns undefined
+ * for anything that is not a PrivateMessage of contentType commit (application
+ * message, proposal, PublicMessage, or a pre-decoded non-frame) — those keep the
+ * pre-envelope code path. The decoded frame is widened to `unknown` on both
+ * public entry points, so this narrows structurally rather than by cast.
+ */
+function readPrivateCommit(decoded: unknown): { authenticatedData: Uint8Array } | undefined {
+  if (decoded == null || typeof decoded !== 'object') return undefined
+  const frame = decoded as { wireformat?: unknown; privateMessage?: unknown }
+  if (frame.wireformat !== wireformats.mls_private_message) return undefined
+  const pm = frame.privateMessage as
+    | { contentType?: unknown; authenticatedData?: unknown }
+    | undefined
+  if (pm == null || pm.contentType !== contentTypes.commit) return undefined
+  const data = pm.authenticatedData
+  return { authenticatedData: data instanceof Uint8Array ? data : new Uint8Array() }
+}
+
 export type GroupHandleParams = {
   state: ClientState
   credential: MemberCredential
@@ -161,6 +186,10 @@ export type GroupHandleParams = {
   resolver?: DIDResolver
   /** Default commit policy applied by processMessage/decrypt. */
   commitPolicy?: IncomingMessageCallback
+  /** Fetch control-ledger entry bodies the local ledger lacks (commit pre-pass). */
+  resolveLedgerEntries?: (ids: Array<string>) => Promise<Array<string>>
+  /** Surface an accepted commit's notarized non-`group.role` entries to the consumer. */
+  onLedgerEntries?: (entries: Array<VerifiedLedgerEntry>) => void
 }
 
 /**
@@ -174,6 +203,8 @@ export class GroupHandle {
   #cache: DIDCache
   #resolver?: DIDResolver
   #commitPolicy?: IncomingMessageCallback
+  #resolveLedgerEntries?: (ids: Array<string>) => Promise<Array<string>>
+  #onLedgerEntries?: (entries: Array<VerifiedLedgerEntry>) => void
   #anchor: GroupAnchor
   #ledger: Map<string, VerifiedLedgerEntry>
   #roster: RosterState
@@ -186,6 +217,8 @@ export class GroupHandle {
     this.#cache = params.cache
     this.#resolver = params.resolver
     this.#commitPolicy = params.commitPolicy
+    this.#resolveLedgerEntries = params.resolveLedgerEntries
+    this.#onLedgerEntries = params.onLedgerEntries
     // Seed the control state from the genesis anchor baked into the group's own
     // GroupContext. The anchor survives every epoch, so reading it here makes the
     // constructor the single choke that no anchorless handle can slip through: an
@@ -239,6 +272,16 @@ export class GroupHandle {
    *  onto handles derived from this one (commitInvite/removeMember). */
   get commitPolicy(): IncomingMessageCallback | undefined {
     return this.#commitPolicy
+  }
+
+  /** The ledger-entry resolver, carried onto handles derived from this one. */
+  get resolveLedgerEntries(): ((ids: Array<string>) => Promise<Array<string>>) | undefined {
+    return this.#resolveLedgerEntries
+  }
+
+  /** The accepted-commit entry sink, carried onto handles derived from this one. */
+  get onLedgerEntries(): ((entries: Array<VerifiedLedgerEntry>) => void) | undefined {
+    return this.#onLedgerEntries
   }
 
   /** The genesis anchor seeded into this handle at construction. */
@@ -330,6 +373,132 @@ export class GroupHandle {
   }
 
   /**
+   * The async pre-pass feeding the synchronous ts-mls commit callback. Both
+   * decrypt and processMessage run this before mlsProcessMessage, since either
+   * may receive a commit. For anything that is not a PrivateMessage commit
+   * (application message, proposal, PublicMessage, pre-decoded non-frame) it does
+   * exactly what the code did before this step — resolve the caller policy, wrap
+   * it for the rejected-proposal capture, and apply nothing on accept.
+   *
+   * For a PrivateMessage commit it decodes the control envelope, resolves and
+   * verifies the entry bodies the envelope names, folds a candidate roster off
+   * the pre-commit state, and precomputes the pure inputs the sync callback
+   * reads. The returned callback is a pure lookup over that precomputed state:
+   * a decode/fold failure is a hard reject; otherwise a caller policy wins the
+   * permission decision, and with no caller policy the anchored default policy
+   * runs. Missing entry bodies with no resolver throw MissingLedgerEntriesError
+   * here — before mlsProcessMessage — so the handle stays at its pre-commit epoch.
+   */
+  async #prepareCommitPipeline(
+    decoded: unknown,
+    opts?: { commitPolicy?: IncomingMessageCallback },
+  ): Promise<{
+    callback: IncomingMessageCallback | undefined
+    capture: { rejected?: RejectedCommit }
+    applyOnAccept: () => void
+  }> {
+    const callerPolicy = opts?.commitPolicy ?? this.#commitPolicy
+    const capture: { rejected?: RejectedCommit } = {}
+
+    const commit = readPrivateCommit(decoded)
+    if (commit == null) {
+      // Not a PrivateMessage commit — preserve the pre-envelope behaviour exactly.
+      return { callback: wrapCommitPolicy(callerPolicy, capture), capture, applyOnAccept: () => {} }
+    }
+
+    let precomputedReject = false
+    let candidateRoster: RosterState = this.#roster
+    let surfaced: Array<VerifiedLedgerEntry> = []
+    let acceptedEntries: Array<FoldInput> = []
+
+    const env = decodeControlEnvelope(commit.authenticatedData)
+    if (!env.ok) {
+      precomputedReject = true
+    } else {
+      const ids = env.envelope.entries ?? []
+      const resolved = new Map<string, FoldInput>()
+      const missing: Array<string> = []
+      for (const id of ids) {
+        const held = this.#ledger.get(id)
+        if (held != null) {
+          resolved.set(id, { verified: held, entryID: id })
+        } else {
+          missing.push(id)
+        }
+      }
+      if (missing.length > 0) {
+        if (this.#resolveLedgerEntries == null) {
+          throw new MissingLedgerEntriesError(missing)
+        }
+        const tokens = await this.#resolveLedgerEntries(missing)
+        for (const token of tokens) {
+          const id = ledgerEntryDigest(token)
+          // Content-addressing binds the untrusted body to the requested id.
+          if (resolved.has(id) || !missing.includes(id)) continue
+          const verified = await verifyLedgerEntry(token)
+          if (verified == null) continue
+          resolved.set(id, { verified, entryID: id })
+        }
+        const stillMissing = missing.filter((id) => !resolved.has(id))
+        if (stillMissing.length > 0) {
+          throw new MissingLedgerEntriesError(stillMissing)
+        }
+      }
+      const ordered: Array<FoldInput> = ids.map((id) => {
+        const input = resolved.get(id)
+        if (input == null) throw new MissingLedgerEntriesError([id])
+        return input
+      })
+
+      const foldResult = foldEnvelope(this.#roster, ordered, this.groupID)
+      if (!foldResult.ok) {
+        precomputedReject = true
+      } else {
+        candidateRoster = foldResult.roster
+        surfaced = foldResult.surfaced
+        acceptedEntries = ordered
+      }
+    }
+
+    // Precompute the pure sync inputs off the pre-commit ratchet tree.
+    const leafToDID = new Map<number, string>()
+    for (const member of this.#iterateMembers()) {
+      leafToDID.set(member.leafIndex, member.id)
+    }
+    const didOfLeaf = (leafIndex: number): string | undefined => leafToDID.get(leafIndex)
+    const anchorExt = readGroupAnchorExtension(this)
+    const anchorExtensionData =
+      anchorExt != null && anchorExt.extensionData instanceof Uint8Array
+        ? anchorExt.extensionData
+        : new Uint8Array()
+    const baseRoster = this.#roster
+
+    const combined: IncomingMessageCallback = (incoming) => {
+      // A decode/fold failure is a hard reject even under a caller policy: the
+      // ledger the commit depends on is unresolvable or malformed.
+      if (precomputedReject) return 'reject'
+      if (callerPolicy != null) return callerPolicy(incoming)
+      return defaultCommitPolicy(incoming, {
+        baseRoster,
+        candidateRoster,
+        didOfLeaf,
+        anchorExtensionData,
+        externalCommitDID: undefined,
+      })
+    }
+
+    const applyOnAccept = () => {
+      for (const { verified, entryID } of acceptedEntries) {
+        if (!this.#ledger.has(entryID)) this.#ledger.set(entryID, verified)
+      }
+      this.#roster = candidateRoster
+      if (surfaced.length > 0) this.#onLedgerEntries?.(surfaced)
+    }
+
+    return { callback: wrapCommitPolicy(combined, capture), capture, applyOnAccept }
+  }
+
+  /**
    * Decrypt an application message from the group.
    *
    * Accepts either wire-form bytes (framed MLSMessage `Uint8Array`) or a
@@ -351,14 +520,12 @@ export class GroupHandle {
       }
       decoded = parsed
     }
-    const callback = opts?.commitPolicy ?? this.#commitPolicy
-    const capture: { rejected?: RejectedCommit } = {}
-    const wrapped = wrapCommitPolicy(callback, capture)
+    const { callback, capture, applyOnAccept } = await this.#prepareCommitPipeline(decoded, opts)
     const result = await mlsProcessMessage({
       context: this.#context,
       state: this.#state,
       message: decoded as Parameters<typeof mlsProcessMessage>[0]['message'],
-      ...(wrapped != null && { callback: wrapped }),
+      ...(callback != null && { callback }),
     })
     if (result.kind === 'applicationMessage') {
       this.#state = result.newState
@@ -372,6 +539,9 @@ export class GroupHandle {
         capture.rejected?.senderLeafIndex,
       )
     }
+    // An accepted commit reaching decrypt still advances the group (as before);
+    // apply its control-ledger effects too before reporting the type mismatch.
+    applyOnAccept()
     throw new Error('Expected application message but received handshake message')
   }
 
@@ -396,14 +566,12 @@ export class GroupHandle {
       }
       decoded = parsed
     }
-    const callback = opts?.commitPolicy ?? this.#commitPolicy
-    const capture: { rejected?: RejectedCommit } = {}
-    const wrapped = wrapCommitPolicy(callback, capture)
+    const { callback, capture, applyOnAccept } = await this.#prepareCommitPipeline(decoded, opts)
     const result = await mlsProcessMessage({
       context: this.#context,
       state: this.#state,
       message: decoded as Parameters<typeof mlsProcessMessage>[0]['message'],
-      ...(wrapped != null && { callback: wrapped }),
+      ...(callback != null && { callback }),
     })
     // On reject, ts-mls returns the pre-commit state, so the handle stays put.
     this.#state = result.newState
@@ -416,6 +584,10 @@ export class GroupHandle {
     if (result.kind === 'applicationMessage') {
       return result.message
     }
+    // Accepted handshake (commit or proposal): merge the commit's ledger entries,
+    // adopt the folded roster, and surface its notarized entries. A no-op for a
+    // non-envelope commit or a standalone proposal.
+    applyOnAccept()
     return null
   }
 }
@@ -506,6 +678,8 @@ export async function createGroup(
     cache,
     resolver: options?.resolver,
     commitPolicy: options?.commitPolicy,
+    resolveLedgerEntries: options?.resolveLedgerEntries,
+    onLedgerEntries: options?.onLedgerEntries,
   })
 
   return { group, credential }
@@ -532,6 +706,8 @@ export async function restoreGroup(params: RestoreGroupParams): Promise<GroupHan
     cache,
     resolver: params.options?.resolver,
     commitPolicy: params.options?.commitPolicy,
+    resolveLedgerEntries: params.options?.resolveLedgerEntries,
+    onLedgerEntries: params.options?.onLedgerEntries,
   })
   await group.applyLedgerEntries(params.ledgerEntries ?? [])
   return group
@@ -615,6 +791,8 @@ export async function commitInvite(
     cache: group.cache,
     resolver: group.resolver,
     commitPolicy: group.commitPolicy,
+    resolveLedgerEntries: group.resolveLedgerEntries,
+    onLedgerEntries: group.onLedgerEntries,
   })
 
   if (result.welcome == null) {
@@ -706,6 +884,8 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
     cache,
     resolver: options?.resolver,
     commitPolicy: options?.commitPolicy,
+    resolveLedgerEntries: options?.resolveLedgerEntries,
+    onLedgerEntries: options?.onLedgerEntries,
   })
 
   return { group, credential }
@@ -748,6 +928,8 @@ export async function removeMember(
     cache: group.cache,
     resolver: group.resolver,
     commitPolicy: group.commitPolicy,
+    resolveLedgerEntries: group.resolveLedgerEntries,
+    onLedgerEntries: group.onLedgerEntries,
   })
 
   return {
@@ -971,6 +1153,8 @@ export async function joinGroupExternal(
     cache,
     resolver: options?.resolver,
     commitPolicy: options?.commitPolicy,
+    resolveLedgerEntries: options?.resolveLedgerEntries,
+    onLedgerEntries: options?.onLedgerEntries,
   })
 
   return { commitMessage, group }
