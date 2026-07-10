@@ -440,7 +440,7 @@ local state.
   > | `remove` | `admin`, or self-removal (removed leaf == sender leaf) |
   > | `update` | nothing — MLS already binds an Update to its own leaf |
   > | `psk`, `reinit` | `admin` |
-  > | `group_context_extensions` | `admin`, and rejected outright if it touches the anchor extension type |
+  > | `group_context_extensions` | `admin`, and the anchor extension present and byte-identical to the current one (the head redesign superseded the old "rejected if it touches the anchor type" rule, which would reject every legitimate head update) |
   > | `external_init` | committer DID ∈ roster, and the commit carries only `external_init` plus a Remove of that same DID's prior leaf |
   >
   > A commit with no proposals (key rotation) is allowed to any member. Application messages are
@@ -1141,3 +1141,34 @@ included.
 `pnpm run` — both print a fake pass and exit non-zero. Real biome output comes from
 `rtk proxy pnpm run lint` (which runs `biome check --write`, so run it *before* staging) or the
 binary directly. Brief verify lines updated to stop hard-coding `pnpm exec biome`.
+
+### 2026-07-10 — Question 3.2: the commit policy as a pure function
+
+**Findings:** CONFIRMED. `defaultCommitPolicy` decides every table row from `(roster, didOfLeaf,
+anchorExtensionData, externalCommitDID, incoming)` with no I/O, live group, or crypto. `policy.ts`
+exports `CommitPolicyContext`, `defaultCommitPolicy`, `MissingLedgerEntriesError`. 21 tests; full
+suite 191 (+21); tsc and biome clean.
+
+**The laundering attack (Q1.4) is closed in code.** Per proposal the effective sender is
+`proposal.senderLeafIndex ?? commit.senderLeafIndex`; a test drives the real attack (admin
+committer, member-authored by-reference Remove of a third party) and it rejects.
+
+**`external_init` is judged at the commit level**, not per-proposal: `externalCommitDID` must be a
+roster member and the commit's proposals must be exactly `{external_init, remove-of-that-DID's-leaf}`.
+
+**GCE row — implemented:** admin sender + anchor present and byte-identical to `anchorExtensionData`
+(mutation/absence/non-admin all reject). **Deferred** to Q2.4b / head-wiring: "nothing but
+`ledger_head` may differ" and "a head move requires a matching envelope `entries` list", both of
+which bind the policy to the envelope/head chain and are not resolvable in the pure table.
+
+**Spec impact:** none to the design. The plan's own Q3.2 excerpt carried the *old* GCE rule
+("rejected outright if it touches the anchor extension type"), which the ledger-head redesign
+superseded — corrected in place to the byte-comparison rule, since the old rule would reject every
+legitimate head update.
+
+**Learned:** `isDefaultProposal()` does double duty — it is the fail-closed unknown-`group.*`/custom
+row *and* the narrowing guard that lets a `switch` on `proposalType` see only default variants
+(`ProposalCustom.proposalType` is a bare `number`). Worth reusing verbatim in the Phase-4 pre-pass.
+Crypto-bearing proposal payloads (add/update/psk/reinit/external_init) need no fabrication in tests:
+the policy reads only the type tag and sender for those rows, so a tag-only literal with an opaque
+cast, confined to unread fields, is sound; `remove`/GCE (the inspected payloads) are fully typed.

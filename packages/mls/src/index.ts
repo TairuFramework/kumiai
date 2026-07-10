@@ -111,6 +111,11 @@ export {
   verifyLedgerEntry,
 } from './ledger.js'
 export {
+  type CommitPolicyContext,
+  defaultCommitPolicy,
+  MissingLedgerEntriesError,
+} from './policy.js'
+export {
   foldRoster,
   ROLE_ENTRY_TYPE,
   type RoleValue,
