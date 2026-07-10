@@ -233,6 +233,27 @@ whichever probe touches `group.ts` first.
   inside a single envelope. If it turns out an invite's role entry must land *after* the Add,
   say so — it constrains `createInvite`.
 
+### Question 2.4b: Is the admin-issuer invariant enforced across every entry type?
+
+- **Assumption:** kumiai can guarantee "the ledger is admin-authored" without understanding a
+  single application entry type, by asserting during the fold that every entry's issuer is an
+  admin in the state accumulated from strictly-earlier entries — whatever the type — and rejecting
+  the commit otherwise.
+- **Done when:** the fold over an envelope's ordered entries checks the issuer of *every* entry
+  against the running roster, and `group.role` entries additionally mutate it. Tests: an
+  app-typed entry issued by an admin is stored and surfaced; the same entry issued by a member is
+  **rejected**, not dropped (asserting the commit fails, and that `ledger_head` never covers an
+  entry the ledger does not hold); `[promote Bob, entry-issued-by-Bob]` in one envelope is
+  accepted, proving the check reads state-so-far rather than a pre-commit snapshot; an unknown
+  `group.*` type rejects the commit; a non-`group.` type is passed through unread.
+- **Spec excerpt:**
+  > So, while folding an envelope's entries in order, kumiai asserts that **every** entry's issuer
+  > is an admin in the state accumulated from strictly-earlier entries, whatever the entry's type,
+  > and **rejects the commit** if one is not. Not a silent drop: a non-admin entry in an envelope
+  > is anomalous, and dropping it would leave `ledger_head` covering an entry the ledger does not
+  > hold.
+- **Verify:** `pnpm --filter @kumiai/mls exec vitest run test/roster.test.ts test/policy.test.ts`
+
 ### Question 2.5: Does the roster subsume the capability chain as the membership proof? — **ANSWERED: yes**
 
 Read-only research, completed 2026-07-10. See the decision log. The chain is removed; `Invite`
@@ -885,6 +906,43 @@ remove direction only.
 invalidates, while arriving later. Signer-asserted HLC permits it; epoch-assigned order does not.
 kumiai cannot reach the state at all. That is the third distinct bug the no-clock decision has
 retired, after fork divergence and backdating.
+
+### 2026-07-10 — the ledger notarizes; `app` does not
+
+**Findings:** kubun asked whether `Invite.ledgerEntries` is roster-only. Three options were put up
+(split the slot / one list with a typed filter / one list and one chain). All three were wrong,
+and the user proposed the fourth: the ledger carries **every** entry type with identical
+guarantees, kumiai interprets only `group.role` and surfaces the rest to the consumer, and a
+separate opaque `app` slot carries whatever does not want to be an entry.
+
+The reason it is right emerged while checking it. Omission of an admin-authored entry **grants** —
+a dropped demotion leaves stale admin authority, a dropped circle-closing leaves later self-joins
+folding as valid. Omission of a member's self-claim **denies** — a peer that never learns of a
+self-join simply serves that member nothing. So the admin/member line is exactly where omission
+stops being safe, and the verification boundary belongs there. Kubun's own spec already concedes
+the self-join premise is not fold-verifiable and enforces it at the serve gate, so self-joins lose
+nothing by moving to `app`.
+
+Two things fell out that we had been treating as costs. The GCE row stays single-clause (entries →
+head → GCE → admin), so the conditional that killed the `invite` level is not reintroduced. And
+the un-prunable head chain now covers only the *rare* data: admin actions. The fast-growing
+per-member claims live in the prunable slot. Compaction stops being urgent.
+
+**Spec impact:** new section "Two slots: the ledger notarizes, `app` does not", carrying the
+choice rule (**if losing an entry would grant something, it is a ledger entry and an admin signs
+it**), the admin-issuer invariant, the `group.*` reserved namespace, and the growth argument.
+`Invite` gains `app?`. `GroupOptions` gains `onLedgerEntries`. `ControlEnvelope.entries` documented
+as any-type. Migration section now splits kubun's four sub-ledgers along the rule.
+
+Added refinement, not in the original proposal: the admin-issuer invariant is **enforced** rather
+than arranged. While folding an envelope's entries in order, every entry's issuer must be an admin
+in the state accumulated so far, whatever its type, and the commit is **rejected** if one is not —
+not silently dropped, which would leave `ledger_head` covering an entry the ledger does not hold.
+State-so-far, not a pre-commit snapshot, or `[promote Bob, entry-issued-by-Bob]` would fail.
+
+**Learned:** "verified" is not a property everything wants more of. The question is what an
+omission does. We had been about to buy completeness for data whose loss fails closed, and pay for
+it with an un-prunable chain over the fastest-growing entries in the system.
 
 ### 2026-07-10 — Phase 1 exit
 

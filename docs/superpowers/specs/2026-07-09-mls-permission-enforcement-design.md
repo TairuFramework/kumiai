@@ -131,9 +131,10 @@ export type ControlEnvelope = {
    *  authority-bearing data must not accept a commit that depends on it. */
   v: 1
   /** Content-addressed ids of the control-ledger entries this commit enacts, in
-   *  fold order. Absent when the commit changes no roles. */
+   *  fold order. Every entry is admin-issued and covered by `ledger_head`.
+   *  Absent when the commit writes no ledger entries. */
   entries?: Array<string>
-  /** Opaque consumer payload. */
+  /** Opaque consumer payload. Never verified, never ordered, never chained. */
   app?: Uint8Array
 }
 ```
@@ -213,6 +214,82 @@ formerly called `groupAnchorCapabilities()` advertises `0xf100` and `0xf101`, at
 carries no entries, so no head change and no GCE proposal. Otherwise every member commit would
 require `admin`, which is exactly the restriction we do not want. Symmetrically, a GCE proposal
 that moves the head without a corresponding `entries` list in the envelope is rejected.
+
+## Two slots: the ledger notarizes, `app` does not
+
+The ledger carries entries of **any** type. `@kumiai/mls` interprets exactly one — `group.role` —
+and for every other type it acts as notary and transport: it verifies the signature, binds the
+entry to the group, orders it by the epoch chain, covers it with `ledger_head`, stores it, and
+surfaces it to the consumer, which folds it with its own reducer through the exported
+`foldLedger`. Transport and interpretation are different jobs, and only the second requires
+understanding the type.
+
+Alongside sits `app`: opaque bytes, unverified, unordered, uncovered by the head.
+
+### Which slot?
+
+**If losing an entry would grant something, it is a ledger entry and an admin signs it.**
+
+That rule is the whole of the split, and it is not arbitrary — it is where omission stops being
+safe. Consider what an omission actually does:
+
+| Omitted | Effect on the joiner |
+|---|---|
+| a `group.role` demotion | grants stale admin authority to a demoted member |
+| an admin entry closing a circle | grants: the joiner thinks it is still open, and folds later self-joins as valid |
+| a member's self-join claim | denies: the joiner does not know the member is in the circle, and serves it nothing |
+
+The dangerous omissions are exactly the admin-authored ones. A self-claim can only attenuate or
+exercise its own author's standing, so losing it fails closed. The admin/member line is therefore
+not an arbitrary place to draw the verification boundary — it is precisely where completeness
+starts to matter.
+
+This lands the authorization and its exercise in different slots, which is correct.
+**The admin opens the circle** — a verified ledger entry, omission-detectable. **The member
+exercises it** — an `app` payload, omission-safe. Kubun's open-circle design already relies on
+this: its own spec concedes that the self-join premise ("the issuer is a group member") is not
+ledger-derivable, cannot be verified by a fold, and cannot be enforced at ingest; enforcement
+lives in the serve gate, local to the victim. Self-joins were never authority-bearing, and lose
+nothing by living in `app`.
+
+**The exception to watch.** A self-claim whose omission *grants* breaks the reasoning. The shape is
+self-revocation — "X revokes X's own key" — where dropping it leaves peers trusting X. A consumer
+that puts self-revocation in `app` has put grant-bearing state in the unverified slot. kumiai's own
+revocation is admin demotion, so the library is consistent by construction; a consumer must apply
+the rule for itself.
+
+### The admin-issuer invariant
+
+"The ledger is admin-authored" is enforced, not merely arranged. Without enforcement it would hold
+only as a side effect of the GCE gate — and an admin could then carry a member-signed entry of an
+app type, which kumiai, not knowing that type's rules, would store as verified.
+
+So, while folding an envelope's entries in order, kumiai asserts that **every** entry's issuer is
+an admin in the state accumulated from strictly-earlier entries, whatever the entry's type, and
+**rejects the commit** if one is not. Not a silent drop: a non-admin entry in an envelope is
+anomalous, and dropping it would leave `ledger_head` covering an entry the ledger does not hold.
+
+It must be state-so-far and not a pre-commit snapshot, or an envelope carrying
+`[promote Bob, entry-issued-by-Bob]` would fail. One pass, one rule: fold the roster across the
+whole ordered list; every entry's issuer must be an admin at its own position; `group.role` entries
+additionally mutate the roster.
+
+The library therefore guarantees the invariant without understanding a single application entry
+type.
+
+### Type namespace
+
+`group.*` is reserved for `@kumiai/mls`. An unknown `group.*` type rejects the commit — fail-closed,
+like an unknown envelope `v`. Any other type is passed through to the consumer unread.
+
+### Growth
+
+`ledger_head` chains from genesis, so a joiner recomputes across every entry that ever rode an
+envelope, and the ledger cannot be pruned without breaking the recomputation. Admin actions are
+rare, so the un-prunable set is the small one — while per-member claims, which are not, live in
+`app` and are prunable at will. A signed checkpoint (`(head, roster snapshot, count)` an admin
+attests, letting a joiner start from it) goes to `backlog/mls-ledger-checkpoint.md`, to be designed
+against a real growth measurement rather than speculatively.
 
 ## `LedgerEntry` must carry `groupID`
 
@@ -474,6 +551,15 @@ Both are derived, never authoritative: the ledger is the source of truth, the ro
 fold. `roster` gains a public getter. `applyLedgerEntries(tokens)` verifies, folds, and
 merges — this is what kubun calls from its broadcast handler.
 
+The ledger holds entries of every type, so the consumer needs them. `GroupOptions` gains
+`onLedgerEntries?: (entries: Array<VerifiedLedgerEntry>) => void`, invoked **after** a commit is
+accepted, with the entries that commit admitted, in fold order. It cannot influence acceptance:
+application entry types never gate a commit, only `group.role` does. The consumer folds what it
+receives with its own `LedgerReducer` through the exported `foldLedger`, and the entries it is
+handed are already signature-verified, group-bound, admin-issued, ordered, and head-covered.
+
+`ControlEnvelope.app` is surfaced the same way and carries none of those guarantees.
+
 `processMessage` becomes three phases.
 
 1. **Async pre-pass.** Decode the framed message. Read `authenticatedData` into a
@@ -511,8 +597,12 @@ export type Invite = {
   /** The DID this invite was minted for. Checked against the key package at commitInvite. */
   recipientDID: string
   inviterID: string
-  /** The joiner's roster bootstrap, in fold order. Verified against `ledger_head`. */
+  /** The complete control ledger, every type, in fold order. Verified against
+   *  `ledger_head`, so an inviter cannot omit an entry. */
   ledgerEntries: Array<string>
+  /** Opaque host seeding. Unverified — an inviter may omit or corrupt it, and the
+   *  consumer must be able to fail closed when it does. */
+  app?: Uint8Array
 }
 ```
 
@@ -661,6 +751,23 @@ call sites (`groups/manager.ts:172`, `context/join.ts:26`).
 
 `authenticatedData` is unused in `plugin-p2p`, so claiming it for `ControlEnvelope` costs kubun
 nothing.
+
+Its four sub-ledgers split along the rule above. `admin.role` becomes `group.role` and is ours.
+`circle.def` and `group.settings` are admin-authored — omitting either grants — so they become
+ledger entries of kubun's own types, notarized by kumiai and folded by kubun's reducers via
+`onLedgerEntries`. They inherit `groupID` binding, epoch ordering, and omission-proofing for free.
+`circle.member` splits: an admin-issued designation is a ledger entry; a member's self-join is an
+`app` payload, where its omission denies rather than grants, and where kubun's serve gate already
+enforces what a fold never could.
+
+Two consequences kubun should weigh, neither of which this spec decides for it:
+
+- Entries riding envelopes are ordered by the epoch chain rather than by a self-reported `hlc`.
+  Migrating `circle.def` and `group.settings` onto envelopes retires the backdating vulnerability
+  and the prune-direction bug for those ledgers, because both require asserting a position the
+  protocol would otherwise assign. `isOpenAtHLC` becomes "at the entry's epoch position", which is
+  the same predicate with a stronger clock.
+- `ord` remains on the shared type for whatever kubun keeps on its HLC-ordered broadcast path.
 
 Three kubun-side follow-ups this spec surfaces but does not fix:
 
