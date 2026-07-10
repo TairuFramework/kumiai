@@ -44,13 +44,28 @@ R serving the invite is the only difference from the passing two-engine case. R'
 
 ## Requirements
 
-1. **`createInvite` must chain from the inviter's own capability, not from the group's root.** The invitee's chain must be the inviter's full validated chain plus the new delegation — `[...inviterChain, inviterCap, newDelegation]` in whatever shape keeps `assertValidDelegation` true for every adjacent pair, terminating at the creator's self-issued root.
-2. ~~**`GroupHandle` must retain the full capability chain, not just element zero.**~~ **WITHDRAWN — already satisfied.** The handle keeps `credential.capabilityChain`, and kubun persists it (`groups/mls-state.ts` serializes `credential` alongside `rootCapability`). Nothing is lost; `createInvite` simply reads the wrong field. The fix is two lines, not a structural change.
-3. **Chain depth must be bounded and validated** — *contingent on Question 2.5.* A chain grows one link per hop; verification is linear in depth and a malicious inviter can inflate it. Only needed while the chain is load-bearing.
-4. **Revocation semantics must be stated** — *contingent on Question 2.5.* With multi-hop chains, revoking `A→R` must invalidate `R→B` transitively, which `backlog/mls-capability-revocation.md` does not assume.
+**Resolved 2026-07-10 by Question 2.5.** The capability chain is removed from the invite entirely.
+Nothing it proves is lost — a signed, anchor-rooted `group.role` entry carries signature, group
+scoping, permission level, and root-from-creator at equal or greater strength, with a total order
+and a revocation primitive the chain never had. Its `aud`-to-joiner binding was never enforced
+(`validateGroupCapability` does not read `aud`). Kubun references the chain in zero places.
 
-   Requirements 3 and 4 exist only because the capability chain is a membership proof. If the admin-signed, anchor-rooted `group.role` roster subsumes it, `Invite` drops `capabilityChain` and both dissolve. **Kubun's input, per `notes/kubun-response.md` §1: kubun does not depend on group capabilities for anything beyond membership** — `parentCapability` appears nowhere, `groupAnchorCapabilities()` is called only at create/join, and `rootCapability` is persisted solely to restore the MLS handle. Nothing reads a capability to authorize anything. So from kubun's side, drop it.
-5. **Test the non-creator invite path directly.** The defect survived because no test has anyone but the creator invite. Add: creator promotes a member to admin; that admin invites a third party; the third party's `processWelcome` validates; a plain member's invite is refused by the commit policy (not by chain validation); an admin whose own grant was revoked cannot serve a valid invite.
+So requirements 1, 3, and 4 do not get fixed — they cease to exist. There is no chain to build
+from the inviter's own link, no depth to bound, no transitive revocation to design.
+
+1. ~~**`createInvite` must chain from the inviter's own capability.**~~ **DISSOLVED.** `Invite`
+   becomes `{groupID, recipientDID, inviterID, ledgerEntries}`.
+2. ~~**`GroupHandle` must retain the full capability chain.**~~ **WITHDRAWN — already satisfied**
+   (and now removed along with the chain).
+3. ~~**Chain depth must be bounded.**~~ **DISSOLVED.** (For the record: a cap already existed —
+   `DEFAULT_MAX_DELEGATION_DEPTH = 20`, configurable through `validateGroupCapability`'s existing
+   `options`, no dependency change needed.)
+4. ~~**Revocation semantics must be stated.**~~ **DISSOLVED.** Roster demotion, ordered by the
+   epoch chain, is the revocation primitive.
+5. **Test the non-creator invite path directly.** **STANDS**, and is the reason the defect went
+   unseen. Add: creator promotes a member to admin; that admin invites a third party who joins; a
+   plain member's invite is refused by the commit policy; a demoted admin cannot serve a valid
+   invite.
 
 ## Interaction with permission enforcement
 

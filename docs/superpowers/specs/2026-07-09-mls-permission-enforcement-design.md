@@ -81,7 +81,10 @@ are genuinely application-specific.
 
 **A permission map inside a GroupContext extension.** Mutating it requires a
 `group_context_extensions` proposal on every role change, which collides head-on with the
-anchor immutability that kubun depends on, and grows the GroupContext without bound.
+anchor immutability that kubun depends on, and grows the GroupContext without bound. (A
+fixed-size *digest* in the GroupContext is a different proposition and is adopted below — see
+"The ledger head". The objection was to the unbounded map, and to blanket anchor immutability,
+which Q1.3 showed is unnecessary.)
 
 **The capability chain embedded in the MLS leaf credential.** Distribution would be free and
 self-authenticating, but a leaf is signed by its own owner, so no admin could ever demote
@@ -152,6 +155,65 @@ retries. New joiners bootstrap from `Invite.ledgerEntries`, as kubun already doe
 considered and cut. `v` alone gives fail-closed behaviour, and introducing an authority-
 relevant entry type is exactly the occasion to bump `v`.
 
+## The ledger head
+
+Every entry is individually signed, so a malicious inviter cannot forge one. It can **omit** one.
+Drop the entry demoting Mallory from `Invite.ledgerEntries` and the joiner folds a stale roster
+that disagrees with every other peer, permanently. Absence has no signature.
+
+The commit transcript already commits to every envelope — `ConfirmedTranscriptHashInput.content`
+is a `FramedContentCommit`, and `FramedContent` carries `authenticatedData`
+(`framedContent.d.ts:39`). So an *existing member*, who saw every commit, can detect a gap. A
+*joiner* holds only the final `confirmed_transcript_hash` and cannot invert it. The party that
+needs the property does not have it.
+
+A second GroupContext extension, `0xf101`, carries a running hash over the ledger:
+
+```ts
+/** GroupContext extension 0xf101. Fixed size, rewritten on every role-changing commit. */
+export type LedgerHead = { v: 1; head: Uint8Array }
+
+// genesis, written by createGroup:
+head₀ = SHA256(domainSeparator ‖ groupID)
+// each commit whose envelope carries entries, in envelope order:
+headₙ = SHA256(headₙ₋₁ ‖ id₁ ‖ … ‖ idₖ)
+```
+
+A hash **chain** over ordered ids, not a digest over a set. An existing member verifies a head
+update by extending its own chain by the arriving ids — `O(k)`, no refold. A joiner recomputes
+from the genesis constant across `Invite.ledgerEntries` in order and compares against the head it
+reads from its GroupContext after `mlsJoinGroup`. Omission, reordering, and truncation all break
+the recomputation. This is incremental *hashing*, not incremental *folding* — it does not reopen
+the hazard that keeps `foldLedger` full-replay only.
+
+**The head is not trusted because an admin wrote it.** It is trusted because the group would
+otherwise have rejected the commit. Every receiving member checks the proposed head against the
+chain extension it computes from its own ledger, and rejects on mismatch. It lives in the
+GroupContext, not in GroupInfo, precisely because GroupInfo is signed by whoever exported it —
+and for a Welcome that is the inviter, the party being defended against. The GroupContext enters
+the confirmed transcript hash, so a lie forks the epoch.
+
+The inviter's choice becomes: deliver the complete ledger, or the joiner refuses to join
+(`LedgerIncompleteError`).
+
+Three consequences.
+
+**The anchor guard is a byte comparison, not a type check.** A `group_context_extensions`
+proposal replaces the entire extensions list rather than patching one entry, so every head update
+re-includes the anchor. A policy rejecting "any GCE touching the anchor type" would reject every
+head update. The rule: the anchor extension must be present and byte-identical to the current
+one, and nothing but `ledger_head` may differ.
+
+**Leaf capabilities advertise both extension types.** RFC 9420 requires a member's leaf to
+advertise every custom GroupContext extension type or the added leaf is refused. The helper
+formerly called `groupAnchorCapabilities()` advertises `0xf100` and `0xf101`, at both
+`createGroup` and `createKeyPackageBundle`.
+
+**Head updates ride only role-changing commits.** An empty commit, an Update, a self-Remove
+carries no entries, so no head change and no GCE proposal. Otherwise every member commit would
+require `admin`, which is exactly the restriction we do not want. Symmetrically, a GCE proposal
+that moves the head without a corresponding `entries` list in the envelope is rejected.
+
 ## `LedgerEntry` must carry `groupID`
 
 Kubun's entry is `{type, subject, value, hlc}` — nothing binds it to a group. `foldLedger`
@@ -178,12 +240,40 @@ export type LedgerEntry<TValue = unknown> = {
 }
 ```
 
+`ord` is a kubun requirement, not a speculative one. Every kubun application fold evaluates
+authority at the entry's own HLC rather than at fold time — `isAdminAtHLC`, `isOpenAtHLC`, and
+the circle-member rule that composes them — across four sub-ledgers (`admin.role`, `circle.def`,
+`circle.member`, `group.settings`). Kubun needs the shared signer to cover the field and hand it
+back; it does not need kumiai to interpret it, exactly as with the anchor's `app` slot.
+
 `foldLedger` does not sort. It folds the entries in the order the caller supplies, because
 the two consumers derive order from different places: kumiai from the authenticated epoch
 chain, kubun from `ord` (its HLC) with the entry id as tie-break. Pushing the sort out of
 the fold is what lets one fold serve both without kumiai taking a clock. `foldLedger` keeps
 its other properties unchanged — pure, seeds from the anchor, evaluates authority against
-state-so-far, drops rather than throws on an unauthorized or unrelated entry.
+state-so-far, drops rather than throws on an unauthorized or unrelated entry. The drop is
+non-throwing by contract: kubun folds hostile input on its ingest path and must not abort a
+batch.
+
+### The fold is full-replay only
+
+`foldLedger` takes the whole entry set and replays it. No incremental apply is exported, and no
+per-type watermark.
+
+This is a deliberate refusal, prompted by a defect kubun shipped and found in review. A reducer
+whose `verifyAuthority` reads state derived from *another* entry type cannot be driven safely by
+a per-type incremental applier. Kubun's `circle.member` self-join is authorized only if the
+circle was open at the entry's HLC, which is a `group.settings` fact; deliver the self-join before
+the settings entry and it folds against empty settings, is dropped as unauthorized, and the
+watermark advances anyway. Nothing re-triggers the projection. A re-broadcast is a digest
+duplicate and reprojects nothing. Two peers holding identical ledgers hold permanently different
+state, healed only by a full catch-up.
+
+kumiai has one reducer and no cross-ledger dependency, so its own roster fold is already a full
+replay of `#ledger ∪ new` on every pre-pass. Exporting an incremental applier would hand every
+host a footgun the library never needed. Hosts that want speed cache the projection themselves and
+own the invalidation. If a future reducer genuinely needs cross-type authority, the fold gains a
+declared `dependsOn` before it gains an incremental applier — not after.
 
 ## Roster and authority rules
 
@@ -202,24 +292,70 @@ The role entry is `{type: 'group.role', groupID, subject, value: GroupPermission
 `verifyAuthority` is kubun's rule unchanged: the issuer must be an admin in the state
 accumulated from strictly-earlier entries. Any admin may demote any admin.
 
-Demotion is `value: 'member'`; kubun's separate `'revoked'` value disappears, because
-leaving a group is an MLS Remove, not a roster operation. One additional fold guard: an
-entry that would empty the admin set is dropped, so a group cannot be bricked into a state
-where nobody can add or remove.
+Demotion is `value: 'member'`; kubun's separate `'revoked'` value disappears. One additional fold
+guard: an entry that would empty the admin set is dropped, so the roster cannot be emptied.
 
-The default commit policy enforces:
+### Removal demotes the removed
+
+Leaving the MLS group is not, by itself, a roster operation — and that is a hole. The fold's
+authority rule asks only whether the *issuer* was an admin in the state so far. A removed admin
+therefore keeps ledger authority forever: it cannot commit, having no leaf, but a colluding
+current member can carry its signed role entry in that member's own commit envelope, and every
+peer folds it as authorized.
+
+The blast radius is narrow — `add` checks the proposal's sender, so the colluder adds nobody, and
+`external_init` demands a prior leaf the removed admin no longer has. What it yields is a roster
+corrupted indefinitely by someone the group evicted. That reads as a defect in this spec, not as
+a feature missing from `backlog/mls-capability-revocation.md`.
+
+So: **a Remove of a leaf whose DID holds `admin` must be accompanied, in the same commit's
+envelope, by a `group.role` entry demoting that DID to `member`.** A commit that removes an admin
+without it is rejected. Removing a plain member needs no entry — the roster already says
+`member`, so envelopes stay small.
+
+Resolving the removed leaf's DID needs the *pre-commit* ratchet tree, which the pre-pass already
+walks to map each proposal's `senderLeafIndex`.
+
+The empty-admin guard interacts here. The last admin self-removing would emit a demotion that
+empties the admin set, so the guard drops the entry and the roster keeps them — while the group
+itself is left with no admin member and can never add or remove again. The guard cannot prevent
+that; only a policy refusing the self-removal could, and refusing to let the last admin leave is
+worse. The group is bricked either way, with or without the ledger. Documented, not fixed.
+
+### The default commit policy
 
 | Proposal | Required of the proposal's sender |
 |---|---|
 | `add` | `admin` |
-| `remove` | `admin`, or self-removal (removed leaf == sender leaf) |
+| `remove` | `admin`, or self-removal (removed leaf == sender leaf). Removing an `admin` additionally requires a demotion entry for that DID in the envelope |
 | `update` | nothing — MLS already binds an Update to its own leaf |
 | `psk`, `reinit` | `admin` |
-| `group_context_extensions` | `admin`, and rejected outright if it touches the anchor extension type |
+| `group_context_extensions` | `admin`; the anchor extension must be present and byte-identical to the current one; only `ledger_head` may differ; and the head must equal the receiver's own chain extended by the envelope's ids |
 | `external_init` | committer DID ∈ roster, and the commit carries only `external_init` plus a Remove of that same DID's prior leaf |
 
 A commit with no proposals (key rotation) is allowed to any member. Application messages are
 never checked.
+
+A commit whose envelope carries `entries` must also carry the matching `ledger_head` GCE
+proposal, and a `ledger_head` GCE proposal without `entries` is rejected. The two move together
+or not at all.
+
+### There is no `invite` permission
+
+Kubun asked whether `add` should require full `admin`, or a narrower `invite` level — Add without
+Remove — so that a hub or CLI could onboard joiners without being trusted to evict members.
+
+It is enforceable, unlike `'read'`, so the argument that killed that level does not apply. It is
+declined on cost. The roster's authority rule stops being "the issuer is an admin" and becomes
+"an admin for any value, or an `invite` holder when the value is `member` and the subject is not
+already in the roster" — the second clause existing solely to stop an inviter demoting an admin.
+The `group_context_extensions` row acquires a matching exception, since an `invite` holder must
+move the `ledger_head`. Two conditionals in the two places that most want one obvious rule, for a
+level whose only named consumer (kubun's shopping-lists CLI) is the group creator and therefore
+already an admin.
+
+Invites are admin-only. Widening the union later is additive for value producers; the rule it
+would complicate is the one we would rather keep simple until a topology demands otherwise.
 
 ### Per-proposal sender, not committer
 
@@ -269,15 +405,19 @@ value.
 New files in `packages/mls/src/`:
 
 - `anchor.ts` — `GroupAnchor` (`creatorDID`, `version`, `app?: Uint8Array`), extension type
-  `0xf100`, encode/decode, `groupAnchorCapabilities()`, `readGroupAnchor(handle)`.
+  `0xf100`, encode/decode, `controlCapabilities()` (advertises `0xf100` and `0xf101`),
+  `readGroupAnchor(handle)`.
+- `head.ts` — `LedgerHead`, extension type `0xf101`, genesis constant, `extendHead(head, ids)`,
+  `readLedgerHead(context)`, `LedgerIncompleteError`.
 - `ledger.ts` — `LedgerEntry`, `VerifiedLedgerEntry`, `signLedgerEntry`,
   `verifyLedgerEntry`, `ledgerEntryDigest`.
-- `fold.ts` — `LedgerReducer`, `FoldInput`, `FoldDrop`, `foldLedger`.
+- `fold.ts` — `LedgerReducer`, `FoldInput`, `FoldDrop`, `foldLedger` (full replay only).
 - `roster.ts` — role entry type, `RosterState`, `roleReducer`, `foldRoster`.
 - `envelope.ts` — `ControlEnvelope`, encode/decode.
 - `policy.ts` — `defaultCommitPolicy`, `MissingLedgerEntriesError`.
 
-`capability.ts` and `group.ts` change in place.
+`group.ts` changes in place. `capability.ts` keeps `GroupPermission` and loses the group
+membership capability machinery, pending the consumer trace.
 
 ## `GroupHandle` changes
 
@@ -308,27 +448,90 @@ how the existing reject path already behaves (`group.ts:350-357`).
 
 `decrypt` shares the same pre-pass, since it too may encounter a commit.
 
+## The roster replaces the capability chain
+
+Membership is today an Enkaku capability delegation chain rooted at the creator, carried in the
+invite and validated once by `processWelcome`. Once every member holds an admin-signed,
+anchor-rooted `group.role` entry, that chain is a *second* membership proof with strictly worse
+properties: it grows one link per relay hop, has no total order, and has no revocation primitive.
+
+It is removed. `Invite` becomes:
+
+```ts
+export type Invite = {
+  groupID: string
+  /** The DID this invite was minted for. Checked against the key package at commitInvite. */
+  recipientDID: string
+  inviterID: string
+  /** The joiner's roster bootstrap, in fold order. Verified against `ledger_head`. */
+  ledgerEntries: Array<string>
+}
+```
+
+`permission` leaves the invite too — it is a claim in the joiner's signed role entry, which is the
+only place it can be trusted. Two sources that can disagree is how a confused deputy is built.
+
+Evidence for the removal, gathered in Q2.5:
+
+- Nothing that the chain proves is lost. Signature, group scoping, permission level, and
+  root-from-creator are each carried by a signed role entry at equal or greater strength. The
+  only chain-exclusive properties are `exp` (supported at `capability.ts:39,59-60`, set by no mint
+  site, and out of scope here) and `jti` revocation (present in `@kokuin/capability`, never wired,
+  and weaker than the roster's demotion, which the epoch chain orders).
+- The `aud`-to-joiner binding is **not enforced today**. `capability.ts:28,55` mint it;
+  `validateGroupCapability` (`capability.ts:95-124`) never reads it. The chain does not bind the
+  capability to the joiner.
+- The chain's entire authorization value is spent at one call site: `validateGroupCapability`
+  inside `processWelcome` (`group.ts:587`).
+- Kubun does not depend on group capabilities for anything beyond membership. `parentCapability`
+  appears nowhere in it; `groupAnchorCapabilities()` is called only at create and join;
+  `rootCapability` is persisted (`groups/mls-state.ts:20,33`) solely to restore the MLS handle.
+  Per-document `document/write` grants are self-issued with a document `res` and no
+  `parentCapability` (`kubun/…/context/group.ts:1349-1357`); read grants chain off the document
+  owner (`sync/authorize.ts:33`). Neither touches a group capability.
+
+`GroupHandle.rootCapability` and `MemberCredential.capabilityChain` / `.capability` go with it.
+Kubun stops serializing `rootCapability` in `groups/mls-state.ts` and stops passing it to
+`restoreGroup`.
+
+`processWelcome` no longer validates a chain. It joins, reads `ledger_head` from the resulting
+GroupContext, recomputes the chain over `invite.ledgerEntries`, and asserts its own DID appears in
+the folded roster. The anchor is not readable before `mlsJoinGroup` — the Welcome's GroupInfo is
+encrypted to the joiner's key package and ts-mls exposes no decrypt-without-join helper — so
+authorization moves after the join rather than before it. That is sound because `mlsJoinGroup`
+verifies the GroupInfo signature, the signer's credential, the ratchet tree, and the confirmation
+tag before returning any state; a joiner that fails the roster check discards it.
+
+This dissolves the first four requirements of
+`docs/agents/plans/next/2026-07-10-member-relay-invite.md`. There is no chain to build from the
+inviter's own link, no depth to bound, and no transitive revocation to design. Its fifth — test
+the non-creator invite path — stands, and is the reason the defect was never seen.
+
 ## Hardening folded in
 
-These close the origin item's Medium and Low findings and its sender-side design point.
+What survives of the origin item's Medium and Low findings, once the chain is gone.
 
-- `createInvite` signs the invitee's role entry and returns it. `Invite` gains two fields:
-  `recipientDID` (the DID the capability was minted for — today the invite carries only
-  `inviterID`, so there is nothing to check a key package against) and `ledgerEntries` (the
-  joiner's roster bootstrap).
-- `commitInvite` asserts the key package credential's DID equals `invite.recipientDID`, and
-  that the committer holds `admin`.
-- `createInvite` and `removeMember` check `group.credential.permission` locally. These are
-  honest-client guards — a modified client skips them — and are documented as such. The
-  receiving-side policy is the real enforcement.
-- `processWelcome` asserts `normalizeDID(capToken.payload.aud) === normalizeDID(identity.id)`,
-  derives `permission` via `extractPermission(capToken)` rather than trusting
-  `invite.permission`, and asserts `chain.at(-1) === invite.capabilityToken`.
-- `capability.ts` rejects a `groupID` containing `/` or `*` in both create and validate,
-  closing the prefix confusion where `res: 'group/a/x/*'` satisfies the
-  `res.startsWith('group/a/')` check for group `a`.
+- `createInvite` signs the invitee's role entry and returns it in `Invite.ledgerEntries`. It
+  checks `group.roster` for its own `admin` locally — an honest-client guard, documented as such;
+  the receiving-side policy is the real enforcement. `removeMember` does the same.
+- `commitInvite` asserts the key package credential's DID equals `invite.recipientDID`, and that
+  the committer holds `admin`. Kubun enforces the first by hand today
+  (`context/peer.ts:124`); this is the same semantics, better placed.
+- `processWelcome` asserts the joiner's own DID is in the roster it folds, and that
+  `invite.ledgerEntries` reproduces the authenticated `ledger_head`.
+- The `aud` check, `extractPermission`, and the `chain.at(-1) === invite.capabilityToken`
+  assertion are all moot — there is no chain and no capability token to check.
+- `capability.ts`'s `groupID` prefix confusion (`res: 'group/a/x/*'` satisfying
+  `res.startsWith('group/a/')`) is likewise moot on the membership path. The file's remaining
+  users, if any, are traced before it is deleted or narrowed.
 
 ## Folded in: member-relay invites
+
+> **Superseded in part.** Written before Q2.5 was answered. The capability chain is removed
+> entirely — see "The roster replaces the capability chain". Requirements 1, 3, and 4 of the
+> origin item dissolve rather than getting fixed; the two corrections below stand, and its
+> requirement 5 (test the non-creator invite path) stands.
+
 
 `docs/agents/plans/next/2026-07-10-member-relay-invite.md` (2026-07-10) reports that
 `createInvite` chains the invitee's capability from `group.rootCapability` rather than from the
@@ -366,10 +569,13 @@ Unit:
 - authority against state-so-far: Bob, granted by Alice, revokes Alice; Bob's earlier grants
   survive
 - an entry that would empty the admin set is dropped
-- a cross-group entry (mismatched `groupID`) is dropped
+- a cross-group entry (mismatched `groupID`) is dropped, not thrown
 - unknown envelope `v` rejects the commit
 - per-proposal sender: an admin committing a `member`'s by-reference Remove is rejected
 - a handle restored over an anchorless GroupContext throws rather than accepting everything
+- a Remove of an admin without a demotion entry is rejected
+- a GCE proposal altering the anchor's bytes is rejected; one altering only `ledger_head` is not
+- `entries` without a head update, and a head update without `entries`, are both rejected
 
 Integration (`tests/integration/`):
 
@@ -378,6 +584,11 @@ Integration (`tests/integration/`):
 - promote-then-commit in a single round trip (entry rides the commit that uses it)
 - `MissingLedgerEntriesError` thrown, bodies resolved, retry succeeds
 - resync by a roster member accepted; by a stranger rejected
+- a creator promotes a member to admin; that admin invites a third party who joins (the
+  non-creator invite path, which no test in either repo has ever driven)
+- an inviter that omits one entry from `Invite.ledgerEntries` produces a joiner that throws
+  `LedgerIncompleteError` rather than folding a stale roster
+- a removed admin's role entry, relayed by a colluding member, is dropped by every peer
 
 ## Migration
 
@@ -390,14 +601,31 @@ compatible there.
 Kubun deletes `group-anchor.ts`, `ledger-entry.ts`, `ledger-fold.ts`, and the reducer half of
 `admin-roster.ts`, importing them from `@kumiai/mls` instead. It keeps its store, HLC clock,
 `role`-column projection, and `isLedgerAdminAtHLC`. Its `recoverySecret` moves into the
-anchor's `app` slot. `anchorImmutabilityPolicy` is deleted — the default policy subsumes it.
-Its own `LedgerEntry` gains `groupID` via the shared type.
+anchor's `app` slot. `anchorImmutabilityPolicy` is deleted — the default policy subsumes it, and
+narrows it: a GCE proposal that leaves the anchor bytes untouched is now legal, which is what
+lets the `ledger_head` move at all.
 
-Two kubun-side follow-ups this spec surfaces but does not fix:
+Kubun stops serializing `rootCapability` (`groups/mls-state.ts:20,33`) and stops passing it to
+`restoreGroup` (`groups/mls-group-handle.ts:10`). It reads no capability to authorize anything, so
+nothing else changes on its invite or join path; it already ships ledger entries in the invite
+(`context/join.ts:88-92`). `groupAnchorCapabilities()` becomes `controlCapabilities()` at its two
+call sites (`groups/manager.ts:172`, `context/join.ts:26`).
 
-- the self-reported `hlc` backdating exposure described above, for its application-level
-  ledger, which keeps its HLC ordering
+`authenticatedData` is unused in `plugin-p2p`, so claiming it for `ControlEnvelope` costs kubun
+nothing.
+
+Three kubun-side follow-ups this spec surfaces but does not fix:
+
+- **HLC backdating**, for its application ledgers, which keep their HLC ordering.
+  `foldAdminRoster.verifyAuthority` is `state.admins.has(verified.issuer)` over entries sorted by
+  a self-reported `hlc` (`groups/admin-roster.ts:38-39`). A demoted admin signs "grant Mallory
+  admin" claiming an `hlc` from when it still held the role; the fold reaches that point with the
+  issuer still in the set and applies it, and the later revoke does not remove Mallory. **A
+  demoted admin can retroactively promote anyone, permanently.** kumiai is not exposed: the
+  protocol assigns epoch order rather than the signer asserting it.
 - whether its existing application ledgers need a `groupID` backfill
+- the cross-ledger incremental-projection defect (`groups/broadcast.ts:717-793`), which is
+  host-side and which the full-replay-only fold declines to enable
 
 ## Out of scope
 
