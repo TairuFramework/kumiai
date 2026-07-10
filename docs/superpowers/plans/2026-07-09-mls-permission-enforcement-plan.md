@@ -126,6 +126,11 @@ New files: `packages/mls/src/anchor.ts`, `ledger.ts`, `fold.ts`, `roster.ts`.
 Exit criteria: `foldRoster` reproduces kubun's `foldAdminRoster` semantics, plus `groupID`
 scoping and the empty-admin guard, with no clock anywhere in the module.
 
+**Added by Phase 1 (Q1.1).** kumiai's `commitInvite` and `removeMember` do not forward
+`authenticatedData` to ts-mls's `createCommit` — only `joinGroupExternal` does. They need a
+passthrough, or the control envelope has a carrier nothing can load. Land it with Question 2.1,
+whichever probe touches `group.ts` first.
+
 ### Question 2.1: Can `GroupAnchor` be made generic without breaking kubun's `recoverySecret`?
 
 - **Assumption:** kubun's `recoverySecret` is not read by anything generic, so an opaque
@@ -559,3 +564,71 @@ Exit criteria: full suite green; the origin item deleted; the kubun follow-up wr
 <!-- One entry per question, filled in after the probe runs, before the next question starts.
      Format: ### Q<n.n>: <one-line finding> — then what was learned, and what (if anything)
      it changed in the spec. -->
+
+### 2026-07-10 — Question 1.1: `authenticatedData` round trip
+
+**Findings:** CONFIRMED. The decoded `PrivateMessage.authenticatedData` is byte-equal to the
+input, read off the framed message before `processMessage` and without epoch secrets. The frame
+still decrypts and applies. Flipping one byte makes `processMessage` reject and the receiver
+stays at its pre-commit epoch — `PrivateContentAAD` genuinely covers the field.
+
+**Spec impact:** needs update. The spec says "`createCommit` and `joinGroupExternal` already
+accept it." That is true of **ts-mls's** `createCommit`, not of kumiai's wrappers:
+`commitInvite` and `removeMember` call through without `authenticatedData`, and there is no
+generic commit wrapper. Only `joinGroupExternal` forwards it. Phase 2 gains a passthrough on the
+commit wrappers, or the envelope has a carrier nothing can load.
+
+**Learned:** the control envelope has a real, verified carrier at the ts-mls layer. The gap is
+one level up, in kumiai's own API surface, and it is additive.
+
+### 2026-07-10 — Question 1.2: external commit reachability
+
+**Findings:** CONFIRMED. An external join decodes as `wireformats.mls_public_message` with no
+epoch secrets; the joiner's DID parses out of `commit.path.leafNode.credential`; the receiving
+`commitPolicy` is invoked with `senderLeafIndex === undefined`. The commit's inline proposal
+types were `[3, 6]` — `remove` + `external_init`, **no Add**.
+
+**Spec impact:** none. Confirms the design.
+
+**Learned:** the joiner's credential is genuinely absent from `proposals`, so a synchronous
+callback cannot see who is committing an external join. Resolving the path-leaf DID in the async
+pre-pass is not one option among several — it is the only place the information exists.
+
+### 2026-07-10 — Question 1.3: handle usable after a rejected commit
+
+**Findings:** CONFIRMED, and more than asked. Bob and Carol both reject the same anchor-touching
+`group_context_extensions` commit, both throw `CommitRejectedError`, both stay at epoch 2, and
+Bob's next application message decrypts on Carol. Separately: the callback can read
+`proposal.groupContextExtensions.extensions[].extensionType`, and the probe observed the anchor
+type there.
+
+**Spec impact:** none, but it upgrades a hope to a fact. The policy table's
+"rejected outright if it touches the anchor extension type" is implementable; the anchor guard
+does not have to blanket-reject every `group_context_extensions` proposal the way kubun's
+`anchorImmutabilityPolicy` does.
+
+**Learned:** rollback-by-non-assignment holds under a real two-peer reject, and peers that reject
+the same commit converge rather than diverging.
+
+### 2026-07-10 — Question 1.4: per-proposal sender
+
+**Findings:** CONFIRMED. Bob (leaf 1) proposes Dave's removal by reference; Alice (leaf 0)
+commits it; Carol's policy sees `proposals[0].senderLeafIndex === 1` against a commit
+`senderLeafIndex === 0`.
+
+**Spec impact:** none.
+
+**Learned:** the laundering attack is preventable exactly as designed —
+`p.senderLeafIndex ?? commit.senderLeafIndex` per proposal is sound. Mechanically, there is no
+kumiai wrapper for a standalone by-reference proposal (`createProposal` must be called on ts-mls
+directly), and every receiver must process the proposal before the commit that references it,
+because the sender is resolved from the receiver's own `unappliedProposals`. The Phase 3
+laundering test therefore drives ts-mls directly.
+
+### 2026-07-10 — Phase 1 exit
+
+All four claims confirmed on first attempt; no `BLOCKED`. The architecture stands. One piece of
+added Phase 2 scope (the `authenticatedData` passthrough), two refinements (narrowed anchor
+guard, direct ts-mls calls for by-reference proposals). The throwaway probe
+(`packages/mls/test/ts-mls-probe.test.ts`) is deleted; its evidence is in
+`docs/superpowers/probes/phase-1-report.md`.
