@@ -1235,3 +1235,44 @@ only inputs are already-folded local state"* — is met: `defaultCommitPolicy` a
 both pure over caller-supplied rosters and verified entries, no handle, no I/O, no live group. New
 modules: `envelope.ts`, `policy.ts`, `envelope-fold.ts`. The base/candidate roster contract and the
 `isDefaultProposal` narrowing guard are the two hand-offs into Phase 4. Full suite 209.
+
+### 2026-07-10 — Question 4.0 (split) + 4.4: handle control state, anchored at creation, fails closed
+
+**Split rationale:** plan-Q4.1 bundled the handle's *state* with the *pre-pass* that reads it. The
+pre-pass has nothing to fold a candidate roster from until the handle holds a ledger, so state was
+peeled off as Q4.0 (absorbing Q4.4's anchorless-fail-closed — same surface). User approved the split
+and "keep driving through probes."
+
+**Findings:** CONFIRMED, both. `GroupHandle` gains `#anchor`/`#ledger`/`#roster`, seeded in the
+constructor from the anchor baked into the group's own GroupContext; getters `anchor`/`roster`; an
+async `applyLedgerEntries(tokens)` (verify → dedup by content id → drop null/cross-group → refold
+roster). `createGroup` now injects the default anchor + genesis head when absent (a caller-supplied
+anchor with an `app` payload is left untouched); `createKeyPackageBundle` advertises the control
+types via `controlCapabilities()`; `restoreGroup` gains `ledgerEntries?` and rehydrates. Full suite
+214 (+5); tsc and biome clean.
+
+**The anchorless guard lives in the constructor** — the single choke every construction path
+(`createGroup`, `restoreGroup`, `processWelcome`, `commitInvite`, `removeMember`, `joinGroupExternal`)
+flows through. `readGroupAnchor(this)` returns `null` → throw; corrupt → its own throw propagates.
+Structurally impossible to hold an anchorless handle. This is stronger than the plan's "restoreGroup
+and processWelcome throw" — every path is covered by construction, for free.
+
+**Spec impact:** none to the design. It realizes the spec's "a handle whose GroupContext carries no
+anchor has no seed and cannot fold a roster — throw rather than install a permissive policy."
+
+**Surfaced a latent bug.** `external-rejoin.test.ts` used `0xf100` as an "arbitrary custom extension"
+— which is now the real anchor type. The collision was invisible before this change (no group was
+anchored); the probe caught it because ts-mls's extension bookkeeping now sees two `0xf100`s. Moved
+the fixture to `0xf200`. Five test files changed meaning in total (anchor, head, group,
+groupcontext-extension, external-rejoin); each preserves intent, the "absent → null" cases flipping
+to "auto-anchored" and the corrupt-anchor throw moving from `readGroupAnchor` to `createGroup`.
+
+**Two caveats, both deferred to Q4.1 (the pre-pass) where they belong:** (1) `#ledger` folds in
+Map-insertion order, not the authenticated epoch-chain order the spec ultimately requires; (2) one
+`as FoldInput<RoleValue>` cast where the mixed-type ledger meets role-specialized `foldRoster` (safe:
+the fold drops non-role by type; the strict value/issuer gate is `foldEnvelope`).
+
+**Learned:** anchoring at creation and reading the anchor back in the constructor turned Q4.4 from a
+two-function check into a structural invariant — the fail-closed property is now a consequence of the
+type existing, not a guard someone can forget to call. And auto-anchoring flushed out a test fixture
+that had been squatting on a reserved extension type in silence.

@@ -1,7 +1,12 @@
-import { createIdentity, randomIdentity } from '@kokuin/token'
+import { createIdentity, normalizeDID, randomIdentity } from '@kokuin/token'
 import { decode, mlsMessageDecoder, type NodeLeaf, nodeTypes, wireformats } from 'ts-mls'
 import { describe, expect, it, test } from 'vitest'
 
+import {
+  GROUP_ANCHOR_EXTENSION_TYPE,
+  LEDGER_HEAD_EXTENSION_TYPE,
+  readGroupAnchor,
+} from '../src/anchor.js'
 import {
   commitInvite,
   createGroup,
@@ -10,7 +15,10 @@ import {
   processWelcome,
   readMessageEpoch,
   removeMember,
+  restoreGroup,
 } from '../src/group.js'
+import { readLedgerHead } from '../src/head.js'
+import { signLedgerEntry } from '../src/ledger.js'
 
 describe('GroupHandle lifecycle', () => {
   test('creates a group with single member', async () => {
@@ -973,5 +981,121 @@ describe('peer4 MLS group end-to-end', () => {
     const removeResult = await removeMember(addCommit.newGroup, bobLeaf)
     expect(removeResult.newGroup.memberCount).toBe(1)
     expect(removeResult.newGroup.findMemberLeafIndex(bob.id)).toBeUndefined()
+  })
+})
+
+/** The creator leaf's advertised GroupContext extension types. */
+function creatorLeafExtensions(state: { ratchetTree: ReadonlyArray<unknown> }): Array<number> {
+  const leaf = state.ratchetTree.find(
+    (node) => node != null && (node as NodeLeaf).nodeType === nodeTypes.leaf,
+  ) as NodeLeaf
+  return leaf.leaf.capabilities.extensions
+}
+
+describe('GroupHandle control state', () => {
+  test('createGroup seeds the roster, anchor, and ledger head from the genesis anchor', async () => {
+    const alice = randomIdentity()
+    const { group } = await createGroup(alice, 'seeded')
+
+    expect([...group.roster.roles.entries()]).toEqual([[normalizeDID(alice.id), 'admin']])
+    expect(group.anchor.creatorDID).toBe(alice.id)
+    expect(readLedgerHead(group)).not.toBeNull()
+    expect(readGroupAnchor(group)).not.toBeNull()
+
+    const extensions = creatorLeafExtensions(group.state)
+    expect(extensions).toContain(GROUP_ANCHOR_EXTENSION_TYPE)
+    expect(extensions).toContain(LEDGER_HEAD_EXTENSION_TYPE)
+  })
+
+  test('applyLedgerEntries promotes a member and dedups a repeated token', async () => {
+    const alice = randomIdentity()
+    const bob = randomIdentity()
+    const { group } = await createGroup(alice, 'promote')
+
+    const token = await signLedgerEntry(alice, {
+      type: 'group.role',
+      groupID: group.groupID,
+      subject: bob.id,
+      value: 'admin',
+    })
+
+    await group.applyLedgerEntries([token])
+    expect(group.roster.roles.get(normalizeDID(bob.id))).toBe('admin')
+
+    // A repeated token is a no-op (dedup by content id).
+    await group.applyLedgerEntries([token])
+    expect(group.roster.roles.get(normalizeDID(bob.id))).toBe('admin')
+    expect(group.roster.roles.size).toBe(2)
+  })
+
+  test('applyLedgerEntries drops cross-group and member-signed tokens without throwing', async () => {
+    const alice = randomIdentity()
+    const bob = randomIdentity()
+    const charlie = randomIdentity()
+    const { group } = await createGroup(alice, 'defensive')
+
+    // Signed for a different group — a replayed grant, dropped on the groupID guard.
+    const crossGroup = await signLedgerEntry(alice, {
+      type: 'group.role',
+      groupID: 'some-other-group',
+      subject: bob.id,
+      value: 'admin',
+    })
+    // Signed by a non-admin — authority fails against the seeded roster.
+    const memberSigned = await signLedgerEntry(bob, {
+      type: 'group.role',
+      groupID: group.groupID,
+      subject: charlie.id,
+      value: 'admin',
+    })
+
+    await expect(group.applyLedgerEntries([crossGroup, memberSigned])).resolves.toBeUndefined()
+    expect([...group.roster.roles.entries()]).toEqual([[normalizeDID(alice.id), 'admin']])
+  })
+
+  test('restoreGroup over an anchorless state fails closed', async () => {
+    const alice = randomIdentity()
+    const { group, credential } = await createGroup(alice, 'strip-anchor')
+
+    // Hand-strip the anchor extension from the restored state. Without a seed the
+    // roster cannot be established, so construction must throw rather than install
+    // a permissive policy.
+    const stripped = {
+      ...group.state,
+      groupContext: {
+        ...group.state.groupContext,
+        extensions: group.state.groupContext.extensions.filter(
+          (ext) => ext.extensionType !== GROUP_ANCHOR_EXTENSION_TYPE,
+        ),
+      },
+    }
+
+    await expect(
+      restoreGroup({ state: stripped, credential, rootCapability: group.rootCapability }),
+    ).rejects.toThrow(/anchor/)
+  })
+
+  test('restoreGroup rehydrates the roster from persisted ledger entries', async () => {
+    const alice = randomIdentity()
+    const bob = randomIdentity()
+    const { group, credential } = await createGroup(alice, 'rehydrate')
+
+    const token = await signLedgerEntry(alice, {
+      type: 'group.role',
+      groupID: group.groupID,
+      subject: bob.id,
+      value: 'admin',
+    })
+    await group.applyLedgerEntries([token])
+
+    const restored = await restoreGroup({
+      state: group.state,
+      credential,
+      rootCapability: group.rootCapability,
+      ledgerEntries: [token],
+    })
+
+    expect(restored.roster.roles.get(normalizeDID(bob.id))).toBe('admin')
+    expect(restored.roster.roles.get(normalizeDID(alice.id))).toBe('admin')
   })
 })

@@ -1,7 +1,6 @@
 import { randomIdentity } from '@kokuin/token'
 import {
   createCommit,
-  defaultCapabilities,
   defaultProposalTypes,
   encode,
   type IncomingMessageCallback,
@@ -10,6 +9,7 @@ import {
 } from 'ts-mls'
 import { describe, expect, test } from 'vitest'
 
+import { controlCapabilities } from '../src/anchor.js'
 import {
   CommitRejectedError,
   commitInvite,
@@ -28,6 +28,13 @@ function anchorExtension(did: string) {
     extensionType: ANCHOR_TYPE,
     extensionData: new TextEncoder().encode(did),
   })
+}
+
+// Every group is anchored at creation, so an invitee leaf must advertise the
+// control extension types alongside the group's own custom anchor type.
+function memberCapabilities() {
+  const base = controlCapabilities()
+  return { ...base, extensions: [...base.extensions, ANCHOR_TYPE] }
 }
 
 function readAnchor(
@@ -56,7 +63,7 @@ describe('Gap 1 — custom GroupContext extension capabilities', () => {
 
     // Invitee generates a KeyPackage advertising the anchor capability.
     const bobBundle = await createKeyPackageBundle(bob, {
-      capabilities: { ...defaultCapabilities(), extensions: [ANCHOR_TYPE] },
+      capabilities: memberCapabilities(),
     })
 
     const { invite } = await createInvite({
@@ -133,7 +140,7 @@ describe('Gap 2 — commit policy hook', () => {
       commitPolicy: rejectAnchorMutation,
     })
     const bobBundle = await createKeyPackageBundle(bob, {
-      capabilities: { ...defaultCapabilities(), extensions: [ANCHOR_TYPE] },
+      capabilities: memberCapabilities(),
     })
     const { invite } = await createInvite({
       group: aliceGroup,

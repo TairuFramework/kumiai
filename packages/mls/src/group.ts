@@ -42,6 +42,14 @@ import {
   wireformats,
 } from 'ts-mls'
 
+import {
+  buildCurrentGroupAnchorExtension,
+  controlCapabilities,
+  GROUP_ANCHOR_EXTENSION_TYPE,
+  type GroupAnchor,
+  LEDGER_HEAD_EXTENSION_TYPE,
+  readGroupAnchor,
+} from './anchor.js'
 import { createDIDAuthenticationService } from './authentication.js'
 import {
   createGroupCapability,
@@ -56,6 +64,10 @@ import {
   parseMLSCredentialIdentity,
 } from './credential.js'
 import { nobleCryptoProvider } from './crypto.js'
+import type { FoldInput } from './fold.js'
+import { buildLedgerHeadExtension, genesisHead } from './head.js'
+import { ledgerEntryDigest, type VerifiedLedgerEntry, verifyLedgerEntry } from './ledger.js'
+import { foldRoster, type RoleValue, type RosterState } from './roster.js'
 import type { GroupOptions, Invite, KeyPackageBundle } from './types.js'
 
 const DEFAULT_CIPHERSUITE = 'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519' as const
@@ -162,6 +174,9 @@ export class GroupHandle {
   #cache: DIDCache
   #resolver?: DIDResolver
   #commitPolicy?: IncomingMessageCallback
+  #anchor: GroupAnchor
+  #ledger: Map<string, VerifiedLedgerEntry>
+  #roster: RosterState
 
   constructor(params: GroupHandleParams) {
     this.#state = params.state
@@ -171,6 +186,17 @@ export class GroupHandle {
     this.#cache = params.cache
     this.#resolver = params.resolver
     this.#commitPolicy = params.commitPolicy
+    // Seed the control state from the genesis anchor baked into the group's own
+    // GroupContext. The anchor survives every epoch, so reading it here makes the
+    // constructor the single choke that no anchorless handle can slip through: an
+    // absent anchor fails closed rather than installing a permissive roster.
+    const anchor = readGroupAnchor(this)
+    if (anchor == null) {
+      throw new Error('group has no anchor extension; cannot seed a control roster')
+    }
+    this.#anchor = anchor
+    this.#ledger = new Map()
+    this.#roster = foldRoster([], anchor, this.groupID)
   }
 
   get groupID(): string {
@@ -213,6 +239,38 @@ export class GroupHandle {
    *  onto handles derived from this one (commitInvite/removeMember). */
   get commitPolicy(): IncomingMessageCallback | undefined {
     return this.#commitPolicy
+  }
+
+  /** The genesis anchor seeded into this handle at construction. */
+  get anchor(): GroupAnchor {
+    return this.#anchor
+  }
+
+  /** The control roster folded from the anchor and every applied ledger entry. */
+  get roster(): RosterState {
+    return this.#roster
+  }
+
+  /**
+   * Verify signed ledger tokens, store the valid ones by content id, and refold
+   * the roster. Tokens that fail verification or whose groupID does not match the
+   * group are dropped (defensive — this is the low-level apply primitive; the
+   * commit pre-pass does the strict admin-issuer enforcement). Idempotent by id.
+   */
+  async applyLedgerEntries(tokens: Array<string>): Promise<void> {
+    for (const token of tokens) {
+      const entryID = ledgerEntryDigest(token)
+      if (this.#ledger.has(entryID)) continue
+      const verified = await verifyLedgerEntry(token)
+      if (verified == null || verified.entry.groupID !== this.groupID) continue
+      this.#ledger.set(entryID, verified)
+    }
+    // foldRoster is the role projection: it drops every non-`group.role` entry by
+    // type, so the mixed-type ledger is fed in as role inputs and the fold filters.
+    const entries = [...this.#ledger.entries()].map(
+      ([entryID, verified]) => ({ verified, entryID }) as FoldInput<RoleValue>,
+    )
+    this.#roster = foldRoster(entries, this.#anchor, this.groupID)
   }
 
   get memberCount(): number {
@@ -403,7 +461,16 @@ export async function createGroup(
   const cache = options?.cache ?? createInMemoryDIDCache()
   const context = await resolveMlsContext(options)
 
-  const extensions = options?.extensions ?? []
+  // Every group is anchored at creation: the creator is the epoch-0 admin, and
+  // the ledger head starts at genesis. A caller-supplied anchor (e.g. one
+  // carrying an `app` payload) is left untouched — the caller owns its contents.
+  const extensions = [...(options?.extensions ?? [])]
+  if (!extensions.some((ext) => ext.extensionType === GROUP_ANCHOR_EXTENSION_TYPE)) {
+    extensions.push(buildCurrentGroupAnchorExtension(identity.id))
+  }
+  if (!extensions.some((ext) => ext.extensionType === LEDGER_HEAD_EXTENSION_TYPE)) {
+    extensions.push(buildLedgerHeadExtension(genesisHead(groupID)))
+  }
   const statePromise = generateKeyPackageWithKey({
     credential: makeMLSCredential(identity),
     signatureKeyPair: { signKey: identity.privateKey, publicKey: identity.publicKey },
@@ -448,12 +515,16 @@ export type RestoreGroupParams = {
   state: ClientState
   credential: MemberCredential
   rootCapability: string
+  /** Signed ledger tokens the host persisted, replayed to rebuild the roster. */
+  ledgerEntries?: Array<string>
   options?: GroupOptions
 }
 
 export async function restoreGroup(params: RestoreGroupParams): Promise<GroupHandle> {
   const cache = params.options?.cache ?? createInMemoryDIDCache()
-  return new GroupHandle({
+  // Construction reseeds `{creator: 'admin'}` from the anchor in the restored
+  // state — an anchorless state throws here, the same fail-closed guard.
+  const group = new GroupHandle({
     state: params.state,
     credential: params.credential,
     context: await resolveMlsContext(params.options),
@@ -462,6 +533,8 @@ export async function restoreGroup(params: RestoreGroupParams): Promise<GroupHan
     resolver: params.options?.resolver,
     commitPolicy: params.options?.commitPolicy,
   })
+  await group.applyLedgerEntries(params.ledgerEntries ?? [])
+  return group
 }
 
 export type CreateInviteParams = {
@@ -762,7 +835,9 @@ export async function createKeyPackageBundle(
     credential: makeMLSCredential(identity),
     signatureKeyPair: { signKey: identity.privateKey, publicKey: identity.publicKey },
     cipherSuite,
-    capabilities: options?.capabilities ?? defaultCapabilities(),
+    // An invitee leaf must advertise the control extension types or ts-mls
+    // refuses to add it to an anchored group. An explicit override still wins.
+    capabilities: options?.capabilities ?? controlCapabilities(),
   })
   return { ...result, ownerDID: identity.id }
 }

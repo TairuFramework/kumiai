@@ -61,27 +61,32 @@ describe('group anchor', () => {
     expect(read?.app).toBeUndefined()
   })
 
-  test('readGroupAnchor returns null when the anchor extension is genuinely absent', async () => {
+  test('createGroup without extensions auto-anchors with the default creator anchor', async () => {
     const alice = randomIdentity()
     const { group } = await createGroup(alice, 'plain')
-    expect(readGroupAnchor(group)).toBeNull()
-    expect(readGroupAnchorExtension(group)).toBeNull()
+    const read = readGroupAnchor(group)
+    expect(read?.creatorDID).toBe(alice.id)
+    expect(read?.version).toBe(1)
+    expect(read?.app).toBeUndefined()
+    expect(readGroupAnchorExtension(group)).not.toBeNull()
   })
 
-  test('readGroupAnchor throws when the anchor extension is present but undecodable', async () => {
+  test('createGroup fails closed when the anchor extension is present but undecodable', async () => {
     const alice = randomIdentity()
     // Present under the anchor type, but not decodable — corruption, not absence.
+    // The GroupHandle constructor reads the anchor to seed the roster, so
+    // creation itself throws rather than yielding a handle over an unreadable
+    // anchor.
     const corrupt = makeCustomExtension({
       extensionType: GROUP_ANCHOR_EXTENSION_TYPE,
       extensionData: new Uint8Array([0xff, 0xff, 0xff]),
     })
-    const { group } = await createGroup(alice, 'corrupt', {
-      extensions: [corrupt],
-      capabilities: controlCapabilities(),
-    })
-    expect(() => readGroupAnchor(group)).toThrow()
-    // The raw extension is still readable — corruption is not absence.
-    expect(readGroupAnchorExtension(group)).not.toBeNull()
+    await expect(
+      createGroup(alice, 'corrupt', {
+        extensions: [corrupt],
+        capabilities: controlCapabilities(),
+      }),
+    ).rejects.toThrow()
   })
 
   test('decodeGroupAnchor returns null (never throws) on malformed bytes or wrong shape', () => {

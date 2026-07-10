@@ -1,7 +1,6 @@
 import { createIdentity, randomIdentity } from '@kokuin/token'
 import {
   decode,
-  defaultCapabilities,
   defaultExtensionTypes,
   encode,
   makeCustomExtension,
@@ -13,6 +12,7 @@ import {
 } from 'ts-mls'
 import { describe, expect, test } from 'vitest'
 
+import { controlCapabilities } from '../src/anchor.js'
 import type { MemberCredential } from '../src/credential.js'
 
 import {
@@ -153,13 +153,14 @@ describe('joinGroupExternal — stale device recovery', () => {
     const carol = randomIdentity()
 
     // A custom GroupContext extension the group depends on. Every member leaf
-    // must advertise its type or ts-mls rejects the leaf.
-    const customExtensionType = 0xf100
+    // must advertise its type or ts-mls rejects the leaf. Chosen clear of the
+    // control extension types (0xf100/0xf101), which createGroup also injects.
+    const customExtensionType = 0xf200
     const customExtension = makeCustomExtension({
       extensionType: customExtensionType,
       extensionData: new TextEncoder().encode('genesis-anchor'),
     })
-    const base = defaultCapabilities()
+    const base = controlCapabilities()
     const extensionAwareCapabilities = {
       ...base,
       extensions: [...base.extensions, customExtensionType],

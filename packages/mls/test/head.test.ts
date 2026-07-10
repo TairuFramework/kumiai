@@ -114,11 +114,12 @@ describe('ledger head chain', () => {
     expect(extension?.extensionData).toEqual(encodeLedgerHead(head))
   })
 
-  test('readLedgerHead returns null when the head extension is genuinely absent', async () => {
+  test('createGroup auto-seeds the ledger head at genesis', async () => {
     const alice = randomIdentity()
     const { group } = await createGroup(alice, 'plain')
-    expect(readLedgerHead(group)).toBeNull()
-    expect(readLedgerHeadExtension(group)).toBeNull()
+    const read = readLedgerHead(group)
+    expect(read?.head).toEqual(genesisHead('plain'))
+    expect(readLedgerHeadExtension(group)).not.toBeNull()
   })
 
   test('readLedgerHead throws when the head extension is present but undecodable', async () => {
