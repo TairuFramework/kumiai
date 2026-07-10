@@ -328,6 +328,36 @@ These close the origin item's Medium and Low findings and its sender-side design
   closing the prefix confusion where `res: 'group/a/x/*'` satisfies the
   `res.startsWith('group/a/')` check for group `a`.
 
+## Folded in: member-relay invites
+
+`docs/agents/plans/next/2026-07-10-member-relay-invite.md` (2026-07-10) reports that
+`createInvite` chains the invitee's capability from `group.rootCapability` rather than from the
+inviter's own chain, dropping the inviter's membership link. Only the group creator — for whom
+the two coincide — produces a chain that validates. A member promoted to `admin` fails too, so
+this spec's central flow (promote, then invite) walks straight into it. It touches the same three
+surfaces as the hardening above, and lands here.
+
+The fix is small: the inviter's chain is already on the handle as
+`credential.capabilityChain`, so `createInvite` delegates from `chain.at(-1)` and ships
+`[...chain, memberCap]`. Nothing needs to be stored that is not stored today.
+
+Two corrections to that item. Its requirement that `GroupHandle` "retain the full capability
+chain" is already met (`types.ts:50`, `group.ts:618`, persisted by kubun's
+`groups/mls-state.ts`) — the chain is stored, just not read. And its framing, "a plain member
+cannot serve an invite at all", does not survive this spec: `add` requires `admin` in the roster,
+so a plain member's Add is refused by every peer however well-formed its chain. The defect is
+that a **non-creator admin** cannot invite. Kubun's own open-circles spec independently adopts
+the same precondition ("caller must be admin of the named `groupID`").
+
+**Open question, to be answered before the ledger types solidify.** Once every member holds an
+admin-signed, anchor-rooted `group.role` entry, the invite's capability chain is a second
+membership proof with worse properties: unbounded depth, no total order, no revocation primitive.
+The relay item's remaining two requirements — bound the chain depth, design transitive revocation
+so revoking `A→R` invalidates `R→B` — exist only because the chain is load-bearing. If the roster
+subsumes it, both dissolve, `Invite` drops `capabilityChain`, and kubun's backlogged
+"ledger-derivable group membership" line closes as a side effect. If it does not, the chain stays,
+gains a depth cap, and transitive revocation goes to `backlog/mls-capability-revocation.md`.
+
 ## Testing
 
 Unit:

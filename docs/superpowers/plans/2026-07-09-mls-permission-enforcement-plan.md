@@ -223,6 +223,52 @@ scoping and the empty-admin guard, with no clock anywhere in the module.
   inside a single envelope. If it turns out an invite's role entry must land *after* the Add,
   say so — it constrains `createInvite`.
 
+### Question 2.5: Does the roster subsume the capability chain as the membership proof?
+
+Read-only research. No code beyond a spike, if one is needed to settle it.
+
+- **Assumption:** once every member has an admin-signed, anchor-rooted `group.role` entry, the
+  invite's `capabilityChain` is a second, redundant membership proof with strictly worse
+  properties — unbounded depth, no total order, no revocation primitive. If so, `Invite` can
+  drop `capabilityChain`/`capabilityToken` in favour of the role entry, and the two hard
+  requirements of `docs/agents/plans/next/2026-07-10-member-relay-invite.md` (bounded chain
+  depth; transitive revocation of `A→R` invalidating `R→B`) dissolve rather than needing
+  designs.
+- **Context.** That item reports a real defect: `createInvite` chains the invitee's capability
+  from `group.rootCapability` (`group.ts:489,496`) rather than from the inviter's own chain, so
+  only the group creator can produce a chain that validates. A promoted admin fails too. Its
+  requirement 3 (bound the depth) and requirement 4 (design transitive revocation) exist *only
+  because the chain is load-bearing*. Kubun's open-circles spec independently lists
+  "ledger-derivable group membership (inviter-signed member entries, full joiner-verifiability)"
+  as blocked backlog, because "group membership lives in the MLS roster and store rows, not in
+  ledger entries, so it cannot be verified by a fold". This spec's roster is exactly that.
+- **Done when** the following are answered, with file:line evidence:
+  1. What does `validateGroupCapability` establish that a folded roster does not? (`aud` binding
+     to the joiner; `res`/`act` scoping; `exp`.) Which of those does the role entry already carry
+     or trivially gain?
+  2. Does anything outside membership consume a *group* capability? Trace `createGroupCapability`
+     / `delegateGroupMembership` consumers across `packages/` and `kubun/packages/plugin-p2p`.
+     Kubun's per-document `document/write` grants (`store-received-grant.ts`) are a different
+     capability axis — confirm they do not chain from the group root.
+  3. Can `processWelcome` fold a roster before trusting anything? It needs the anchor, which
+     lives in the GroupContext carried by the Welcome's GroupInfo. Establish whether the anchor
+     is readable *before* `mlsJoinGroup`, or only after.
+  4. If the chain stays: what is the depth cap, and where is it enforced?
+- **Spec excerpt:**
+  > Roster state is `Map<normalizedDID, GroupPermission>`, seeded from the anchor as
+  > `{creatorDID: 'admin'}`. […] `verifyAuthority` is kubun's rule unchanged: the issuer must be
+  > an admin in the state accumulated from strictly-earlier entries.
+  >
+  > - `createInvite` signs the invitee's role entry and returns it. `Invite` gains two fields:
+  >   `recipientDID` […] and `ledgerEntries` (the joiner's roster bootstrap).
+- **Verify:** no command — this question produces a written finding and, if the answer is yes, a
+  spec amendment before Phase 3 begins.
+- **Timing.** Asked *in* Phase 2, before the ledger and roster types solidify, because the answer
+  changes `Invite` and possibly `MemberCredential`. Answering it in Phase 5 means shipping an
+  unbounded-depth chain beside a roster that made it redundant.
+- **Default if unresolved:** keep the chain, fix it per Question 5.4, cap the depth, and hand
+  transitive revocation to `backlog/mls-capability-revocation.md`.
+
 ---
 
 ## Phase 3: Envelope and policy
@@ -374,7 +420,8 @@ Changes in place: `capability.ts`, `credential.ts`, `types.ts`, `group.ts`. Thes
 origin item's Medium and Low findings. No new design — each has a test that fails before.
 
 Exit criteria: every finding in `docs/agents/plans/next/2026-07-07-mls-permission-enforcement.md`
-has a test that fails on the pre-change code.
+**and** `docs/agents/plans/next/2026-07-10-member-relay-invite.md` has a test that fails on the
+pre-change code.
 
 ### Question 5.1: Does narrowing `GroupPermission` to `'admin' | 'member'` break anything?
 
@@ -429,6 +476,44 @@ has a test that fails on the pre-change code.
   > `res.startsWith('group/a/')` check for group `a`.
 - **Verify:** `pnpm --filter @kumiai/mls exec vitest run test/capability.test.ts`
 
+### Question 5.4: Can a non-creator admin serve an invite?
+
+Folds in `docs/agents/plans/next/2026-07-10-member-relay-invite.md`. Shape depends on the
+answer to Question 2.5 — if the chain is dropped, only the tests below survive.
+
+- **Assumption:** `createInvite` chains the invitee's capability from `group.rootCapability`
+  (`group.ts:489`) and ships `[group.rootCapability, memberCapStr]` (`group.ts:496`), so a
+  non-creator inviter's own membership link is missing and `checkDelegationChain` fails with an
+  audience mismatch. The inviter's own chain is already on the handle — `credential.capabilityChain`
+  (`types.ts:50`, populated at `group.ts:618`, exposed at `group.ts:188`, and already persisted by
+  kubun's `groups/mls-state.ts`). The fix is to read it, not to store it.
+- **Correction to the origin item.** Its requirement 2 ("`GroupHandle` must retain the full
+  capability chain, not just element zero") is already satisfied; nothing is lost. And its
+  headline — "a plain member cannot serve an invite at all" — is superseded by this spec: `add`
+  requires `admin` in the roster, so a plain member's Add is rejected by every peer no matter how
+  well-formed its chain. The defect is that a **non-creator admin** cannot invite. Kubun's
+  open-circles spec reaches the same precondition independently ("caller must be admin of the
+  named `groupID`").
+- **Done when:**
+  - `createInvite` delegates with `parentCapability = group.credential.capabilityChain.at(-1)`
+    and ships `capabilityChain: [...group.credential.capabilityChain, memberCapStr]`. For the
+    creator both reduce to today's values, since its chain is `[rootCapability]`.
+  - `checkDelegationChain` enforces a maximum chain depth, stated in the docs.
+  - Tests, each failing on the pre-change code: creator invites a member; that member is promoted
+    to admin and invites a third party, whose `processWelcome` validates; a fourth hop validates;
+    a plain member's invite produces a chain that validates but an Add commit that every peer
+    rejects (chain validity and commit authority are independent); depth beyond the cap is
+    refused.
+- **Spec excerpt** (from the origin item):
+  > `createInvite` builds the invitee's chain from the inviter's `rootCapability` rather than
+  > from the inviter's own chain, so the inviter's own membership link is dropped. Only the
+  > creator — for whom "root capability" and "own chain" coincide — can produce a chain that
+  > validates.
+  >
+  > The `GroupPermission` level is irrelevant here: a member promoted to `admin` still fails,
+  > because `rootCapability` is the creator's root regardless of permission.
+- **Verify:** `pnpm --filter @kumiai/mls exec vitest run test/group.test.ts test/capability.test.ts`
+
 ---
 
 ## Phase 6: Integration and close-out
@@ -453,9 +538,13 @@ Exit criteria: full suite green; the origin item deleted; the kubun follow-up wr
 ### Question 6.2: Close the loop
 
 - **Done when:**
-  - `docs/agents/plans/next/2026-07-07-mls-permission-enforcement.md` is deleted (brainstorming
-    produced a spec; the item's findings are all covered by Phase 5's criteria).
+  - `docs/agents/plans/next/2026-07-07-mls-permission-enforcement.md` and
+    `docs/agents/plans/next/2026-07-10-member-relay-invite.md` are deleted (brainstorming produced
+    a spec; both items' findings are covered by Phase 5's criteria).
   - A changeset records the breaking `GroupPermission` narrowing and the new `Invite` fields.
+  - Kubun's open-circles spec is told that `serveGroupInvite` is unblocked for any **admin**, not
+    only the creator, and that its backlogged "ledger-derivable group membership" line is now
+    satisfied by the roster.
   - The kubun migration item is written into kubun's `docs/agents/plans/next/` — **only now**,
     per the user's instruction, once the implementation has settled and the `ord` question is
     answered. It must name: the four files kubun deletes, `recoverySecret` → anchor `app`, the
