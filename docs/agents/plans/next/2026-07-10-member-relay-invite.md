@@ -1,7 +1,9 @@
-# Member-served invites: `createInvite` drops the inviter's own delegation link
+# Non-creator invites: `createInvite` drops the inviter's own delegation link
 
-**Priority:** 2 — a plain member cannot serve an invite at all, so no relay/hub topology can onboard a joiner.
+**Priority:** 2 — only the group's CREATOR can serve an invite. A promoted admin cannot, so admin rotation and any non-creator onboarding path are broken.
 **Origin:** kubun open-circles design (2026-07-09), Q3.2 bidirectional proof. First code path to drive a non-creator invite end to end; the defect was invisible because every invite test in kubun and kumiai has the group CREATOR do the inviting.
+
+**Revised 2026-07-10** after `docs/superpowers/notes/kubun-impact.md`. The original headline read "a plain member cannot serve an invite, so no relay/hub topology can onboard a joiner." That does not survive the permission-enforcement design: once the default commit policy lands, a plain member's Add is refused by every peer regardless of how well-formed its capability chain is, because `add` requires `admin` in the roster. Fixing the chain does not enable a plain-member relay — **a relay must be an admin.** The real defect is narrower and still real: a non-creator ADMIN cannot invite, which is exactly the flow that design creates (promote a member, have them invite). Whether `add` should require full `admin` rather than a narrower `invite` permission is raised in `notes/kubun-response.md` §4.
 
 ## Problem
 
@@ -43,10 +45,12 @@ R serving the invite is the only difference from the passing two-engine case. R'
 ## Requirements
 
 1. **`createInvite` must chain from the inviter's own capability, not from the group's root.** The invitee's chain must be the inviter's full validated chain plus the new delegation — `[...inviterChain, inviterCap, newDelegation]` in whatever shape keeps `assertValidDelegation` true for every adjacent pair, terminating at the creator's self-issued root.
-2. **`GroupHandle` must retain the full capability chain, not just element zero.** A joined member currently stores `rootCapability = chain[0]` and loses the links that prove its own membership. It needs both: the root (for `res`/`groupID` checks) and its own chain (to extend when inviting). `commitInvite`/`processWelcome` construct handles in at least two places (`lib/group.js:396,459,491`) — all must agree.
-3. **Chain depth must be bounded and validated.** A relay chain grows by one link per hop (`A→R→B→C…`). Verification cost is linear in depth; a malicious inviter can inflate it. Decide a maximum depth, enforce it in `checkDelegationChain`, and state it in the docs.
-4. **Revocation semantics must be stated.** With multi-hop chains, revoking `A→R` must invalidate `R→B` transitively. `backlog/mls-capability-revocation.md` currently assumes a single delegation level; that assumption breaks here. Design the two together.
-5. **Test the non-creator invite path directly.** The defect survived because no test has a member invite anyone. Add: creator invites member; member invites a third party; third party's `processWelcome` validates; a fourth hop still validates; a member whose own link was revoked cannot serve a valid invite.
+2. ~~**`GroupHandle` must retain the full capability chain, not just element zero.**~~ **WITHDRAWN — already satisfied.** The handle keeps `credential.capabilityChain`, and kubun persists it (`groups/mls-state.ts` serializes `credential` alongside `rootCapability`). Nothing is lost; `createInvite` simply reads the wrong field. The fix is two lines, not a structural change.
+3. **Chain depth must be bounded and validated** — *contingent on Question 2.5.* A chain grows one link per hop; verification is linear in depth and a malicious inviter can inflate it. Only needed while the chain is load-bearing.
+4. **Revocation semantics must be stated** — *contingent on Question 2.5.* With multi-hop chains, revoking `A→R` must invalidate `R→B` transitively, which `backlog/mls-capability-revocation.md` does not assume.
+
+   Requirements 3 and 4 exist only because the capability chain is a membership proof. If the admin-signed, anchor-rooted `group.role` roster subsumes it, `Invite` drops `capabilityChain` and both dissolve. **Kubun's input, per `notes/kubun-response.md` §1: kubun does not depend on group capabilities for anything beyond membership** — `parentCapability` appears nowhere, `groupAnchorCapabilities()` is called only at create/join, and `rootCapability` is persisted solely to restore the MLS handle. Nothing reads a capability to authorize anything. So from kubun's side, drop it.
+5. **Test the non-creator invite path directly.** The defect survived because no test has anyone but the creator invite. Add: creator promotes a member to admin; that admin invites a third party; the third party's `processWelcome` validates; a plain member's invite is refused by the commit policy (not by chain validation); an admin whose own grant was revoked cannot serve a valid invite.
 
 ## Interaction with permission enforcement
 
@@ -54,4 +58,11 @@ R serving the invite is the only difference from the passing two-engine case. R'
 
 ## Consumer status
 
-kubun's open-circles design assumed a member could relay an invite (a hub or CLI peer that is not the group admin onboarding a joiner). That claim has been narrowed to creator-only invite-serving in `kubun/docs/superpowers/specs/2026-07-09-open-circles-self-join-design.md` pending this fix. The circle self-join half of the design does not depend on it: a joiner self-joins open circles with no admin authorship, proven by documents crossing both ways in `kubun/packages/plugin-p2p/test/open-circle-doc-flow.test.ts`. Only the MLS invite-serving hop is creator-bound.
+kubun's open-circles design assumed a member could relay an invite (a hub or CLI peer that is not the group admin onboarding a joiner). Two separate limits kill that assumption, and only the first is a defect:
+
+1. **Today:** only the creator can serve an invite — this item's bug.
+2. **After the permission work:** `add` requires `admin`, so a plain member's invite is refused on the receiving side no matter how well-formed. This is by design, not a bug.
+
+kubun's spec (`docs/superpowers/specs/2026-07-09-open-circles-self-join-design.md`) records the constraint as invite-serving requiring admin authority, creator-only until this item lands. Kubun reaches the same precondition independently — `sharePeerGroup` now rejects a non-admin caller before any ledger write.
+
+The circle self-join half of the design does not depend on either limit: a joiner self-joins open circles with no admin authorship anywhere, proven by documents crossing both ways in `kubun/packages/plugin-p2p/test/open-circle-doc-flow.test.ts`. Circle membership is an application-ledger fact, not MLS group entry.
