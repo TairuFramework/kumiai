@@ -6,7 +6,6 @@ import {
   normalizeDID,
   type OwnIdentity,
   type SigningIdentity,
-  stringifyToken,
 } from '@kokuin/token'
 import {
   type Capabilities,
@@ -54,11 +53,6 @@ import {
   readGroupAnchorExtension,
 } from './anchor.js'
 import { createDIDAuthenticationService } from './authentication.js'
-import {
-  createGroupCapability,
-  delegateGroupMembership,
-  type GroupPermission,
-} from './capability.js'
 import { sanitizeRatchetTree } from './codec.js'
 import {
   type GroupMember,
@@ -88,7 +82,13 @@ import {
   verifyLedgerEntry,
 } from './ledger.js'
 import { defaultCommitPolicy, MissingLedgerEntriesError } from './policy.js'
-import { foldRoster, ROLE_ENTRY_TYPE, type RoleValue, type RosterState } from './roster.js'
+import {
+  foldRoster,
+  type GroupPermission,
+  ROLE_ENTRY_TYPE,
+  type RoleValue,
+  type RosterState,
+} from './roster.js'
 import type { GroupOptions, Invite, KeyPackageBundle } from './types.js'
 
 const DEFAULT_CIPHERSUITE = 'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519' as const
@@ -262,8 +262,6 @@ export type GroupHandleParams = {
   state: ClientState
   credential: MemberCredential
   context: MlsContext
-  /** Stringified root capability (for delegation) */
-  rootCapability: string
   /** The control-ledger log this handle starts from, in enactment order. A handle
    *  derived from another (commitInvite/removeMember) inherits the parent's, so the
    *  roster it folds does not revert to the anchor alone. */
@@ -285,7 +283,6 @@ export class GroupHandle {
   #state: ClientState
   #credential: MemberCredential
   #context: MlsContext
-  #rootCapability: string
   #cache: DIDCache
   #resolver?: DIDResolver
   #commitPolicy?: IncomingMessageCallback
@@ -306,7 +303,6 @@ export class GroupHandle {
     this.#state = params.state
     this.#credential = params.credential
     this.#context = params.context
-    this.#rootCapability = params.rootCapability
     this.#cache = params.cache
     this.#resolver = params.resolver
     this.#commitPolicy = params.commitPolicy
@@ -346,10 +342,6 @@ export class GroupHandle {
 
   get state(): ClientState {
     return this.#state
-  }
-
-  get rootCapability(): string {
-    return this.#rootCapability
   }
 
   get context(): MlsContext {
@@ -810,24 +802,16 @@ export async function createGroup(
       extensions,
     })
   })
-  const [state, rootCap] = await Promise.all([
-    statePromise,
-    createGroupCapability(identity, groupID),
-  ])
+  const state = await statePromise
 
-  const rootCapability = stringifyToken(rootCap)
   const credential: MemberCredential = {
     id: identity.id,
-    capabilityChain: [rootCapability],
-    capability: rootCap,
-    permission: 'admin',
     groupID,
   }
   const group = new GroupHandle({
     state,
     credential,
     context,
-    rootCapability,
     cache,
     resolver: options?.resolver,
     commitPolicy: options?.commitPolicy,
@@ -841,7 +825,6 @@ export async function createGroup(
 export type RestoreGroupParams = {
   state: ClientState
   credential: MemberCredential
-  rootCapability: string
   /** Signed ledger tokens the host persisted, replayed to rebuild the roster. */
   ledgerEntries?: Array<string>
   options?: GroupOptions
@@ -855,7 +838,6 @@ export async function restoreGroup(params: RestoreGroupParams): Promise<GroupHan
     state: params.state,
     credential: params.credential,
     context: await resolveMlsContext(params.options),
-    rootCapability: params.rootCapability,
     cache,
     resolver: params.options?.resolver,
     commitPolicy: params.options?.commitPolicy,
@@ -891,18 +873,8 @@ export async function createInvite(params: CreateInviteParams): Promise<CreateIn
     throw new Error('createInvite: the inviter must be an admin in the group roster')
   }
 
-  const memberCap = await delegateGroupMembership({
-    identity,
-    groupID: group.groupID,
-    recipientDID,
-    permission,
-    parentCapability: group.rootCapability,
-  })
-  const memberCapStr = stringifyToken(memberCap)
-
   // The role entry naming the invitee. Its issuer is the inviter (authenticated by
-  // the token signature) and its value is the permission the capability grants, so
-  // the two agree by construction.
+  // the token signature) and its value is the permission granted.
   const roleToken = await signLedgerEntry(identity, {
     type: ROLE_ENTRY_TYPE,
     groupID: group.groupID,
@@ -912,9 +884,6 @@ export async function createInvite(params: CreateInviteParams): Promise<CreateIn
 
   const invite: Invite = {
     groupID: group.groupID,
-    capabilityToken: memberCapStr,
-    capabilityChain: [group.rootCapability, memberCapStr],
-    permission,
     inviterID: identity.id,
     // The whole log, the new role entry last: a joiner handed only its own entry
     // would never learn of a role change made before its invite, and would reject
@@ -1049,7 +1018,6 @@ function deriveGroup(group: GroupHandle, state: ClientState): GroupHandle {
     state,
     credential: group.credential,
     context: group.context,
-    rootCapability: group.rootCapability,
     ledger: group.ledger,
     cache: group.cache,
     resolver: group.resolver,
@@ -1180,18 +1148,6 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
   const cache = options?.cache ?? createInMemoryDIDCache()
   const context = await resolveMlsContext(options)
 
-  // Validate the invite's capability chain before trusting it.
-  // validateGroupCapability internally calls verifyToken with cache/resolver and returns the
-  // verified token — reuse it instead of calling verifyToken a second time without cache/resolver.
-  const { validateGroupCapability } = await import('./capability.js')
-  const capToken = await validateGroupCapability({
-    tokenData: invite.capabilityToken,
-    groupID: invite.groupID,
-    delegationChain:
-      invite.capabilityChain.length > 1 ? invite.capabilityChain.slice(0, -1) : undefined,
-    options: { cache, resolver: options?.resolver },
-  })
-
   // A Welcome is only this member's when the invite carries a role entry naming
   // them: an invite minted for someone else is not an invitation to join.
   const selfDID = normalizeDID(identity.id)
@@ -1235,9 +1191,6 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
 
   const credential: MemberCredential = {
     id: identity.id,
-    capabilityChain: invite.capabilityChain,
-    capability: capToken as MemberCredential['capability'],
-    permission: invite.permission,
     groupID: invite.groupID,
   }
 
@@ -1245,11 +1198,6 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
     state,
     credential,
     context,
-    rootCapability:
-      invite.capabilityChain[0] ??
-      (() => {
-        throw new Error('Invalid invite: capability chain must not be empty')
-      })(),
     cache,
     resolver: options?.resolver,
     commitPolicy: options?.commitPolicy,
@@ -1467,11 +1415,6 @@ export async function joinGroupExternal(
     authenticatedData,
   } = params
 
-  const rootCapability = credential.capabilityChain[0]
-  if (rootCapability == null) {
-    throw new Error('Invalid credential: capability chain must not be empty')
-  }
-
   // Guard: resync requires the rejoining identity to match the leaf being
   // replaced. If `identity.id` does not match `credential.id`, ts-mls's
   // findIndex returns -1 and the downstream `removeLeafNodeMutable(tree, -1)`
@@ -1530,7 +1473,6 @@ export async function joinGroupExternal(
     state: newState,
     credential,
     context,
-    rootCapability,
     cache,
     resolver: options?.resolver,
     commitPolicy: options?.commitPolicy,

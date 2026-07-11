@@ -8,7 +8,6 @@ import type {
   PrivateKeyPackage,
 } from 'ts-mls'
 
-import type { GroupPermission } from './capability.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
 
 export type GroupOptions = {
@@ -60,12 +59,6 @@ export type GroupSyncScope = {
 export type Invite = {
   /** Group ID the invite is for */
   groupID: string
-  /** Delegated membership capability token (stringified) for the invitee */
-  capabilityToken: string
-  /** The full capability chain to validate the invite */
-  capabilityChain: Array<string>
-  /** Permission level being granted */
-  permission: GroupPermission
   /** Inviter's DID */
   inviterID: string
   /** The group's whole signed control ledger, in application order, so the joiner

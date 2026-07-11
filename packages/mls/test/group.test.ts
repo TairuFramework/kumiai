@@ -72,7 +72,6 @@ describe('GroupHandle lifecycle', () => {
     expect(group.epoch).toBe(0n)
     expect(group.memberCount).toBe(1)
     expect(credential.id).toBe(alice.id)
-    expect(credential.permission).toBe('admin')
     expect(credential.groupID).toBe('test-group-1')
   })
 
@@ -89,7 +88,6 @@ describe('GroupHandle lifecycle', () => {
       permission: 'member',
     })
     expect(invite.groupID).toBe('invite-group')
-    expect(invite.permission).toBe('member')
     expect(invite.inviterID).toBe(alice.id)
 
     const bobKeyBundle = await createKeyPackageBundle(bob)
@@ -114,7 +112,6 @@ describe('GroupHandle lifecycle', () => {
     expect(bobGroup.epoch).toBe(1n)
     expect(bobGroup.memberCount).toBe(2)
     expect(bobCred.id).toBe(bob.id)
-    expect(bobCred.permission).toBe('member')
   })
 
   test('encrypts and decrypts messages between members', async () => {
@@ -429,11 +426,17 @@ describe('GroupHandle lifecycle', () => {
     expect(bobGroup.findMemberLeafIndex(charlie.id)).toBeUndefined()
   })
 
-  test('processWelcome throws on invite with empty capability chain', async () => {
+  test('processWelcome rejects an invite whose role entry is signed by a non-admin', async () => {
+    // The join is authorized by the ledger, not by who hands over the invite. A role
+    // entry not issued by an admin is dead paper: it can never ride a real commit, so
+    // it never enters the authenticated ledger head, and the roster fold drops it. An
+    // invite carrying such an entry cannot reproduce the head the Welcome's GroupContext
+    // commits to, so processWelcome refuses the join.
     const alice = randomIdentity()
     const bob = randomIdentity()
+    const mallory = randomIdentity()
 
-    const { group: aliceGroup } = await createGroup(alice, 'empty-chain')
+    const { group: aliceGroup } = await createGroup(alice, 'nonadmin-invite')
     const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
@@ -441,24 +444,29 @@ describe('GroupHandle lifecycle', () => {
       permission: 'member',
     })
     const bobKP = await createKeyPackageBundle(bob)
-    const { welcomeMessage } = await commitInvite(aliceGroup, bobKP.publicPackage, invite)
+    const { welcomeMessage, newGroup } = await commitInvite(aliceGroup, bobKP.publicPackage, invite)
 
-    const badInvite = {
-      groupID: 'empty-chain',
-      capabilityToken: 'invalid',
-      capabilityChain: [],
-      permission: 'member' as const,
-      inviterID: alice.id,
-      ledgerEntries: invite.ledgerEntries,
+    // Mallory (never an admin) forges a role entry granting Bob membership and swaps
+    // it in for the admin-signed entry the real invite carried.
+    const forgedRole = await signLedgerEntry(mallory, {
+      type: ROLE_ENTRY_TYPE,
+      groupID: 'nonadmin-invite',
+      subject: bob.id,
+      value: 'member',
+    })
+    const forgedInvite: Invite = {
+      groupID: 'nonadmin-invite',
+      inviterID: mallory.id,
+      ledgerEntries: [forgedRole],
     }
 
     await expect(
       processWelcome({
         identity: bob,
-        invite: badInvite,
+        invite: forgedInvite,
         welcome: welcomeMessage,
         keyPackageBundle: bobKP,
-        ratchetTree: aliceGroup.state.ratchetTree,
+        ratchetTree: newGroup.state.ratchetTree,
       }),
     ).rejects.toThrow()
   })
@@ -1206,9 +1214,7 @@ describe('GroupHandle control state', () => {
       },
     }
 
-    await expect(
-      restoreGroup({ state: stripped, credential, rootCapability: group.rootCapability }),
-    ).rejects.toThrow(/anchor/)
+    await expect(restoreGroup({ state: stripped, credential })).rejects.toThrow(/anchor/)
   })
 
   test('restoreGroup rehydrates the roster from persisted ledger entries', async () => {
@@ -1227,7 +1233,6 @@ describe('GroupHandle control state', () => {
     const restored = await restoreGroup({
       state: group.state,
       credential,
-      rootCapability: group.rootCapability,
       ledgerEntries: [token],
     })
 
@@ -1983,7 +1988,6 @@ describe('an invite carries the group ledger', () => {
     const restored = await restoreGroup({
       state: newGroup.state,
       credential: newGroup.credential,
-      rootCapability: newGroup.rootCapability,
       ledgerEntries: newGroup.ledgerTokens,
     })
 
@@ -2476,7 +2480,7 @@ async function demotedThroughRepeat(groupID: string) {
   const granted = await commitLedgerEntries(group, [await role('member')])
   const promoted = await commitLedgerEntries(granted.newGroup, [await role('admin')])
   const demoted = await commitLedgerEntries(promoted.newGroup, [await role('member')])
-  return { alice, bob, credential, rootCapability: group.rootCapability, group: demoted.newGroup }
+  return { alice, bob, credential, group: demoted.newGroup }
 }
 
 describe('the ledger is an ordered log, not a set of claims', () => {
@@ -2646,12 +2650,11 @@ describe('the ledger is an ordered log, not a set of claims', () => {
 
   test('ledgerTokens round-trips a log with repeats through restoreGroup', async () => {
     const groupID = 'repeat-roundtrip'
-    const { bob, credential, rootCapability, group } = await demotedThroughRepeat(groupID)
+    const { bob, credential, group } = await demotedThroughRepeat(groupID)
 
     const restored = await restoreGroup({
       state: group.state,
       credential,
-      rootCapability,
       ledgerEntries: group.ledgerTokens,
     })
 

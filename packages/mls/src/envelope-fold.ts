@@ -1,8 +1,8 @@
-import type { GroupPermission } from './capability.js'
 import type { FoldInput } from './fold.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
 import {
   adminCount,
+  type GroupPermission,
   ROLE_ENTRY_TYPE,
   type RoleValue,
   type RosterState,

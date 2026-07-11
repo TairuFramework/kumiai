@@ -13,7 +13,6 @@ import {
 import { describe, expect, test } from 'vitest'
 
 import { controlCapabilities } from '../src/anchor.js'
-import type { MemberCredential } from '../src/credential.js'
 
 import {
   commitInvite,
@@ -281,28 +280,6 @@ describe('joinGroupExternal — stale device recovery', () => {
         resync: true,
       }),
     ).rejects.toThrow(/identity\.id.*must match credential\.id/)
-  })
-
-  test('rejects credential with empty capability chain', async () => {
-    const alice = randomIdentity()
-    const bob = randomIdentity()
-    const { group: aliceGroup } = await createGroup(alice, 'empty-chain-group')
-    const { groupInfo } = await exportGroupInfo({ group: aliceGroup })
-
-    await expect(
-      joinGroupExternal({
-        identity: bob,
-        groupInfo,
-        credential: {
-          id: bob.id,
-          capabilityChain: [],
-          capability: {} as MemberCredential['capability'],
-          permission: 'member',
-          groupID: 'empty-chain-group',
-        },
-        resync: true,
-      }),
-    ).rejects.toThrow('capability chain must not be empty')
   })
 
   test('peer4 identity can rejoin via groupInfo + resync', async () => {

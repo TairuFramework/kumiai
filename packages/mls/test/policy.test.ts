@@ -4,13 +4,12 @@ import { defaultProposalTypes, makeCustomExtension } from 'ts-mls'
 import { describe, expect, test } from 'vitest'
 
 import { GROUP_ANCHOR_EXTENSION_TYPE, LEDGER_HEAD_EXTENSION_TYPE } from '../src/anchor.js'
-import type { GroupPermission } from '../src/capability.js'
 import {
   type CommitPolicyContext,
   defaultCommitPolicy,
   MissingLedgerEntriesError,
 } from '../src/policy.js'
-import type { RosterState } from '../src/roster.js'
+import type { GroupPermission, RosterState } from '../src/roster.js'
 
 const ADMIN_DID = 'did:key:zAdmin'
 const MEMBER_DID = 'did:key:zMember'

@@ -1666,3 +1666,39 @@ extra proposals" cannot be re-proven at the integration layer, because mutating 
 commit's proposal set invalidates the ts-mls signature — ts-mls crypto rejects it before the policy is
 consulted. Those cases stay unit-tested against the pure rule in `policy.test.ts`, which is the correct
 layer for them.
+
+### 2026-07-11 — Question 2.5: remove the capability chain; the roster is the sole authority
+
+**Findings:** The capability chain was dead weight and is gone. Deleted `capability.ts` outright
+(`createGroupCapability`, `delegateGroupMembership`, `validateGroupCapability`); stripped
+`rootCapability` from the handle and all ~15 construction sites; shrank `MemberCredential` to
+`{id, groupID}` and `Invite` to `{groupID, inviterID, ledgerEntries}`. `GroupPermission` moved to its
+semantic home in `roster.ts` (`RoleValue = GroupPermission`). **No enforcement assertion changed** —
+every membership, rotation, and external-join test stayed green with intact assertions; the only edits
+to them were mechanical shape updates (literals dropping removed fields). mls suite **246 green**,
+integration hub-relay **10 green**, tsc clean, biome clean, zero dangling references.
+
+**Why it was safe, confirmed against the code.** `processWelcome`'s old `validateGroupCapability` call
+is fully subsumed by the ledger: the invite carries the full ordered ledger, the joiner verifies the
+head (`assertHeadMatches`) before folding, and the roster fold applies the invitee's role entry only if
+its issuer was admin-so-far. A forged invite from a non-admin yields a role entry the fold drops, and
+the "invite names this identity" guard then throws. So a join is authorized by the ledger, signed by an
+admin, and proven complete by the head — strictly stronger than a delegated token. A focused test now
+pins it: `processWelcome` rejects an invite whose role entry is signed by a non-admin.
+
+**Integration test rewired, not weakened.** `hub-relay.test.ts`'s capability-gated pub/sub block gated
+a group topic on a per-member `validateGroupCapability` call. Its real subject is the authorize hook and
+fan-out; `setupGroupHub` now takes the member DIDs directly (they were already known at the call site).
+The fan-out and "not authorized" assertions are unchanged; the block is renamed to "authorized-DID
+pub/sub" to match.
+
+**Spec impact:** none — the spec already treated the chain as transitional. The capability-chain defect
+recorded under 5.2b (a ledger-promoted admin minting an invite whose chain never authorized them) is
+**dissolved** by this removal rather than repaired: there is no chain to be inconsistent with the roster.
+
+**Verification caught lost coverage the probe missed.** The probe deleted `peer4-credential.test.ts`
+wholesale because 5 of its 6 tests exercised `validateGroupCapability`. But the 6th tested
+`populateCacheFromCredential` — a **surviving, exported** function — with no capability dependency.
+Deleting it dropped real coverage of live code. Restored (adapted, in `credential.test.ts`), which is
+why the final count is 246 not 245. The lesson: a probe's own green run does not surface *deleted*
+coverage; only auditing what left the tree does.

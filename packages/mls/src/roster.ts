@@ -1,8 +1,10 @@
 import { normalizeDID } from '@kokuin/token'
 
 import type { GroupAnchor } from './anchor.js'
-import type { GroupPermission } from './capability.js'
 import { type FoldDrop, type FoldInput, foldLedger, type LedgerReducer } from './fold.js'
+
+/** The permission a DID holds in the group: full control, or membership only. */
+export type GroupPermission = 'admin' | 'member'
 
 /** The ledger entry `type` the roster projects. */
 export const ROLE_ENTRY_TYPE = 'group.role'

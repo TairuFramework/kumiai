@@ -20,21 +20,12 @@ export {
 } from './anchor.js'
 export { createDIDAuthenticationService } from './authentication.js'
 export {
-  createGroupCapability,
-  type DelegateGroupMembershipParams,
-  delegateGroupMembership,
-  type GroupPermission,
-  type ValidateGroupCapabilityParams,
-  validateGroupCapability,
-} from './capability.js'
-export {
   type ClientState,
   decodeClientState,
   encodeClientState,
   sanitizeRatchetTree,
 } from './codec.js'
 export {
-  extractPermission,
   type GroupMember,
   type MemberCredential,
   type MLSCredentialIdentity,
@@ -123,6 +114,7 @@ export {
 export {
   adminCount,
   foldRoster,
+  type GroupPermission,
   ROLE_ENTRY_TYPE,
   type RoleValue,
   type RosterState,

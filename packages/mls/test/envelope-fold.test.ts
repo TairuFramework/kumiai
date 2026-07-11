@@ -1,10 +1,9 @@
 import { normalizeDID } from '@kokuin/token'
 import { describe, expect, test } from 'vitest'
 
-import type { GroupPermission } from '../src/capability.js'
 import { foldEnvelope } from '../src/envelope-fold.js'
 import type { FoldInput } from '../src/fold.js'
-import { ROLE_ENTRY_TYPE, type RosterState } from '../src/roster.js'
+import { type GroupPermission, ROLE_ENTRY_TYPE, type RosterState } from '../src/roster.js'
 
 const GROUP_ID = 'group-1'
 const OTHER_GROUP = 'group-2'

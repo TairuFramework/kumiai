@@ -1,17 +1,11 @@
-import type { CapabilityToken } from '@kokuin/capability'
-import { type DIDCache, decodePeer4, isPeer4, type SignedToken } from '@kokuin/token'
-
-import type { GroupPermission } from './capability.js'
+import { type DIDCache, decodePeer4, isPeer4 } from '@kokuin/token'
 
 /**
- * Local member state (never serialized to the MLS leaf). Tracks the capability
- * chain proving group membership.
+ * Local member state (never serialized to the MLS leaf). `id` is the member's own
+ * DID; `groupID` names the group the handle belongs to.
  */
 export type MemberCredential = {
   id: string
-  capabilityChain: Array<string>
-  capability: CapabilityToken
-  permission: GroupPermission
   groupID: string
 }
 
@@ -76,18 +70,4 @@ export async function populateCacheFromCredential(
     throw new Error('Credential longForm does not match credential.id')
   }
   await cache.set(shortForm, doc)
-}
-
-/**
- * Extracts the permission level from a capability token's actions.
- */
-export function extractPermission(token: SignedToken): GroupPermission {
-  const payload = token.payload as Record<string, unknown>
-  const actions = Array.isArray(payload.act) ? payload.act : [payload.act]
-
-  if (actions.includes('*')) return 'admin'
-  if (actions.includes('admin')) return 'admin'
-  if (actions.includes('member')) return 'member'
-
-  throw new Error('Invalid capability: no recognized permission level')
 }

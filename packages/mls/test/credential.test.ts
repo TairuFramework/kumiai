@@ -1,29 +1,13 @@
-import {
-  createIdentity,
-  createInMemoryDIDCache,
-  randomIdentity,
-  stringifyToken,
-} from '@kokuin/token'
+import { createIdentity, createInMemoryDIDCache } from '@kokuin/token'
 import { defaultCredentialTypes } from 'ts-mls'
-import { describe, expect, it, test } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
-import { createGroupCapability, delegateGroupMembership } from '../src/capability.js'
 import {
-  extractPermission,
   type MemberCredential,
   parseMLSCredentialIdentity,
   populateCacheFromCredential,
 } from '../src/credential.js'
 import { makeMLSCredential } from '../src/group.js'
-
-function makeSignedTokenWithAct(act: Array<string>) {
-  return {
-    header: { typ: 'JWT' as const, alg: 'EdDSA' as const },
-    payload: { iss: 'did:key:z...', sub: 'did:key:z...', aud: 'did:key:z...', act, res: ['*'] },
-    signature: 'fake',
-    data: 'fake',
-  }
-}
 
 describe('parseMLSCredentialIdentity', () => {
   it('accepts a minimal did:key credential', () => {
@@ -59,42 +43,6 @@ describe('parseMLSCredentialIdentity', () => {
   it('rejects JSON where longForm is not a string', () => {
     const bytes = new TextEncoder().encode(JSON.stringify({ id: 'did:key:z', longForm: 42 }))
     expect(() => parseMLSCredentialIdentity(bytes)).toThrow(/longForm/i)
-  })
-})
-
-describe('credential', () => {
-  test('extracts admin permission', async () => {
-    const alice = randomIdentity()
-    const rootCap = await createGroupCapability(alice, 'test-group')
-    expect(extractPermission(rootCap)).toBe('admin')
-  })
-
-  test('extracts member permission', async () => {
-    const alice = randomIdentity()
-    const bob = randomIdentity()
-    const rootCap = await createGroupCapability(alice, 'test-group')
-    const rootCapStr = stringifyToken(rootCap)
-
-    const memberCap = await delegateGroupMembership({
-      identity: alice,
-      groupID: 'test-group',
-      recipientDID: bob.id,
-      permission: 'member',
-      parentCapability: rootCapStr,
-    })
-    expect(extractPermission(memberCap)).toBe('member')
-  })
-
-  test('extractPermission throws for a read-only capability', () => {
-    // `read` is not a permission level: a capability whose only action is `read`
-    // maps to no level and is rejected rather than silently downgraded.
-    const token = makeSignedTokenWithAct(['read'])
-    expect(() => extractPermission(token)).toThrow('no recognized permission level')
-  })
-
-  test('extractPermission throws for unrecognized action', () => {
-    const token = makeSignedTokenWithAct(['write'])
-    expect(() => extractPermission(token)).toThrow('no recognized permission level')
   })
 })
 
@@ -170,12 +118,21 @@ describe('makeMLSCredential', () => {
   })
 })
 
-// Ensure MemberCredential type uses `id` field
+describe('populateCacheFromCredential', () => {
+  it('decodes a peer4 long form and writes the resolved doc to the cache', async () => {
+    const alice = await createIdentity({
+      keys: [{ purpose: 'sig', alg: 'EdDSA' }],
+      didMethod: 'peer:4',
+    })
+    const cache = createInMemoryDIDCache()
+    await populateCacheFromCredential({ id: alice.id, longForm: alice.longForm }, cache)
+    expect(await cache.get(alice.id)).toEqual(alice.doc)
+  })
+})
+
+// Ensure MemberCredential type carries `id` and `groupID`
 const _typeCheck: MemberCredential = {
   id: 'did:key:z...',
-  capabilityChain: [],
-  capability: { payload: { act: 'member', res: 'foo' } } as never,
-  permission: 'member',
   groupID: 'group-1',
 }
 void _typeCheck
