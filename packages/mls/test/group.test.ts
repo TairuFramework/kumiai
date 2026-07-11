@@ -2889,3 +2889,34 @@ describe('GroupHandle external-join commit enforcement', () => {
     expect(aliceAdvanced.roster.roles.get(normalizeDID(bob.id))).toBe('member')
   })
 })
+
+describe('a handle serializes its state mutations', () => {
+  test('concurrent encrypts each get a distinct generation and all decrypt on the peer', async () => {
+    const { aliceGroup, bobGroup } = await twoMemberGroup()
+    const enc = new TextEncoder()
+
+    // Fired together, without awaiting between them: the pre-serialization code
+    // lets both read the same #state and clobber one advance, reusing a
+    // secret-tree generation so one ciphertext fails to decrypt on the peer.
+    const [m1, m2] = await Promise.all([
+      aliceGroup.encrypt(enc.encode('one')),
+      aliceGroup.encrypt(enc.encode('two')),
+    ])
+
+    const d = new TextDecoder()
+    const got = new Set<string>()
+    for (const { message } of [m1, m2]) {
+      got.add(d.decode(await bobGroup.decrypt(message)))
+    }
+    expect(got).toEqual(new Set(['one', 'two']))
+  })
+
+  test('encrypt wipes the retired secrets it consumed', async () => {
+    const { aliceGroup } = await twoMemberGroup()
+    const { consumed } = await aliceGroup.encrypt(new TextEncoder().encode('x'))
+    expect(consumed.length).toBeGreaterThan(0)
+    for (const buffer of consumed) {
+      expect(buffer.every((byte) => byte === 0)).toBe(true)
+    }
+  })
+})

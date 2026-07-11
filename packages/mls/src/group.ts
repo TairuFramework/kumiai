@@ -81,6 +81,7 @@ import {
   type VerifiedLedgerEntry,
   verifyLedgerEntry,
 } from './ledger.js'
+import { createMutex, type Mutex } from './mutex.js'
 import { defaultCommitPolicy, MissingLedgerEntriesError } from './policy.js'
 import {
   foldRoster,
@@ -92,6 +93,26 @@ import {
 import type { GroupOptions, Invite, KeyPackageBundle } from './types.js'
 
 const DEFAULT_CIPHERSUITE = 'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519' as const
+
+/** One serializer per live handle, so its state-mutating operations run one at a
+ *  time in issue order. Keyed weakly: the entry is collected with the handle, and
+ *  the handle carries no reference back to it. */
+const MUTEXES = new WeakMap<GroupHandle, Mutex>()
+
+function mutexFor(handle: GroupHandle): Mutex {
+  let mutex = MUTEXES.get(handle)
+  if (mutex === undefined) {
+    mutex = createMutex()
+    MUTEXES.set(handle, mutex)
+  }
+  return mutex
+}
+
+/** Overwrite retired secret buffers ts-mls hands back as `consumed`, so key
+ *  material does not linger in the heap after the state that used it is replaced. */
+function zeroAll(buffers: Array<Uint8Array>): void {
+  for (const buffer of buffers) buffer.fill(0)
+}
 
 async function resolveMlsContext(options?: GroupOptions): Promise<MlsContext> {
   const name = (options?.ciphersuiteName ?? DEFAULT_CIPHERSUITE) as CiphersuiteName
@@ -469,13 +490,16 @@ export class GroupHandle {
    * Encrypt an application message for the group.
    */
   async encrypt(plaintext: Uint8Array): Promise<{ message: unknown; consumed: Array<Uint8Array> }> {
-    const { newState, message, consumed } = await createApplicationMessage({
-      context: this.#context,
-      state: this.#state,
-      message: plaintext,
+    return mutexFor(this).run(async () => {
+      const { newState, message, consumed } = await createApplicationMessage({
+        context: this.#context,
+        state: this.#state,
+        message: plaintext,
+      })
+      this.#state = newState
+      zeroAll(consumed)
+      return { message, consumed }
     })
-    this.#state = newState
-    return { message, consumed }
   }
 
   /**
@@ -665,29 +689,33 @@ export class GroupHandle {
       }
       decoded = parsed
     }
-    const { callback, capture, applyOnAccept } = await this.#prepareCommitPipeline(decoded, opts)
-    const result = await mlsProcessMessage({
-      context: this.#context,
-      state: this.#state,
-      message: decoded as Parameters<typeof mlsProcessMessage>[0]['message'],
-      ...(callback != null && { callback }),
-    })
-    if (result.kind === 'applicationMessage') {
+    return mutexFor(this).run(async () => {
+      const { callback, capture, applyOnAccept } = await this.#prepareCommitPipeline(decoded, opts)
+      const result = await mlsProcessMessage({
+        context: this.#context,
+        state: this.#state,
+        message: decoded as Parameters<typeof mlsProcessMessage>[0]['message'],
+        ...(callback != null && { callback }),
+      })
+      if (result.kind === 'applicationMessage') {
+        this.#state = result.newState
+        zeroAll(result.consumed)
+        return result.message
+      }
+      // On reject, ts-mls returns the pre-commit state, so the handle stays put.
       this.#state = result.newState
-      return result.message
-    }
-    // On reject, ts-mls returns the pre-commit state, so the handle stays put.
-    this.#state = result.newState
-    if (result.kind === 'newState' && result.actionTaken === 'reject') {
-      throw new CommitRejectedError(
-        capture.rejected?.proposals ?? [],
-        capture.rejected?.senderLeafIndex,
-      )
-    }
-    // An accepted commit reaching decrypt still advances the group (as before);
-    // apply its control-ledger effects too before reporting the type mismatch.
-    applyOnAccept()
-    throw new Error('Expected application message but received handshake message')
+      zeroAll(result.consumed)
+      if (result.kind === 'newState' && result.actionTaken === 'reject') {
+        throw new CommitRejectedError(
+          capture.rejected?.proposals ?? [],
+          capture.rejected?.senderLeafIndex,
+        )
+      }
+      // An accepted commit reaching decrypt still advances the group (as before);
+      // apply its control-ledger effects too before reporting the type mismatch.
+      applyOnAccept()
+      throw new Error('Expected application message but received handshake message')
+    })
   }
 
   /**
@@ -711,29 +739,28 @@ export class GroupHandle {
       }
       decoded = parsed
     }
-    const { callback, capture, applyOnAccept } = await this.#prepareCommitPipeline(decoded, opts)
-    const result = await mlsProcessMessage({
-      context: this.#context,
-      state: this.#state,
-      message: decoded as Parameters<typeof mlsProcessMessage>[0]['message'],
-      ...(callback != null && { callback }),
+    return mutexFor(this).run(async () => {
+      const { callback, capture, applyOnAccept } = await this.#prepareCommitPipeline(decoded, opts)
+      const result = await mlsProcessMessage({
+        context: this.#context,
+        state: this.#state,
+        message: decoded as Parameters<typeof mlsProcessMessage>[0]['message'],
+        ...(callback != null && { callback }),
+      })
+      this.#state = result.newState
+      zeroAll(result.consumed)
+      if (result.kind === 'newState' && result.actionTaken === 'reject') {
+        throw new CommitRejectedError(
+          capture.rejected?.proposals ?? [],
+          capture.rejected?.senderLeafIndex,
+        )
+      }
+      if (result.kind === 'applicationMessage') {
+        return result.message
+      }
+      applyOnAccept()
+      return null
     })
-    // On reject, ts-mls returns the pre-commit state, so the handle stays put.
-    this.#state = result.newState
-    if (result.kind === 'newState' && result.actionTaken === 'reject') {
-      throw new CommitRejectedError(
-        capture.rejected?.proposals ?? [],
-        capture.rejected?.senderLeafIndex,
-      )
-    }
-    if (result.kind === 'applicationMessage') {
-      return result.message
-    }
-    // Accepted handshake (commit or proposal): merge the commit's ledger entries,
-    // adopt the folded roster, and surface its notarized entries. A no-op for a
-    // non-envelope commit or a standalone proposal.
-    applyOnAccept()
-    return null
   }
 }
 
@@ -979,7 +1006,7 @@ async function commitWithEntries(
     })
   }
 
-  return await createCommit({
+  const commit = await createCommit({
     context: group.context,
     state: group.state,
     extraProposals: proposals,
@@ -988,6 +1015,7 @@ async function commitWithEntries(
       authenticatedData: encodeControlEnvelope({ v: 1, entries: entryIDs }),
     }),
   })
+  return commit
 }
 
 /**
@@ -1051,17 +1079,19 @@ export async function commitLedgerEntries(
   group: GroupHandle,
   tokens: Array<string>,
 ): Promise<CommitLedgerEntriesResult> {
-  if (tokens.length === 0) {
-    throw new Error('commitLedgerEntries: no ledger entries to commit')
-  }
-  const result = await commitWithEntries(group, [], tokens)
-  const newGroup = deriveGroup(group, result.newState)
-  await newGroup.applyLedgerEntries(tokens)
-  return {
-    commitMessage: encode(mlsMessageEncoder, result.commit),
-    newGroup,
-    epoch: newGroup.epoch,
-  }
+  return mutexFor(group).run(async () => {
+    if (tokens.length === 0) {
+      throw new Error('commitLedgerEntries: no ledger entries to commit')
+    }
+    const result = await commitWithEntries(group, [], tokens)
+    const newGroup = deriveGroup(group, result.newState)
+    await newGroup.applyLedgerEntries(tokens)
+    return {
+      commitMessage: encode(mlsMessageEncoder, result.commit),
+      newGroup,
+      epoch: newGroup.epoch,
+    }
+  })
 }
 
 export type CommitInviteResult = {
@@ -1097,30 +1127,32 @@ export async function commitInvite(
   keyPackage: KeyPackage,
   invite: Invite,
 ): Promise<CommitInviteResult> {
-  if (invite.groupID !== group.groupID) {
-    throw new Error(`commitInvite: invite is for group ${invite.groupID}, not ${group.groupID}`)
-  }
+  return mutexFor(group).run(async () => {
+    if (invite.groupID !== group.groupID) {
+      throw new Error(`commitInvite: invite is for group ${invite.groupID}, not ${group.groupID}`)
+    }
 
-  const enacted = entriesAddedByInvite(group, invite)
-  const addProposal: DefaultProposal = {
-    proposalType: defaultProposalTypes.add,
-    add: { keyPackage },
-  }
-  const result = await commitWithEntries(group, [addProposal], enacted, true)
+    const enacted = entriesAddedByInvite(group, invite)
+    const addProposal: DefaultProposal = {
+      proposalType: defaultProposalTypes.add,
+      add: { keyPackage },
+    }
+    const result = await commitWithEntries(group, [addProposal], enacted, true)
 
-  const newGroup = deriveGroup(group, result.newState)
+    const newGroup = deriveGroup(group, result.newState)
 
-  if (result.welcome == null) {
-    throw new Error('commitInvite: expected a Welcome message for the add proposal')
-  }
-  // The entries this commit enacts are now part of the group's ledger.
-  await newGroup.applyLedgerEntries(enacted)
-  return {
-    commitMessage: encode(mlsMessageEncoder, result.commit),
-    welcomeMessage: encode(mlsMessageEncoder, result.welcome),
-    newGroup,
-    epoch: newGroup.epoch,
-  }
+    if (result.welcome == null) {
+      throw new Error('commitInvite: expected a Welcome message for the add proposal')
+    }
+    // The entries this commit enacts are now part of the group's ledger.
+    await newGroup.applyLedgerEntries(enacted)
+    return {
+      commitMessage: encode(mlsMessageEncoder, result.commit),
+      welcomeMessage: encode(mlsMessageEncoder, result.welcome),
+      newGroup,
+      epoch: newGroup.epoch,
+    }
+  })
 }
 
 export type ProcessWelcomeResult = {
@@ -1250,22 +1282,24 @@ export async function removeMember(
   leafIndex: number,
   ledgerEntries?: Array<string>,
 ): Promise<RemoveMemberResult> {
-  const removeProposal: DefaultProposal = {
-    proposalType: defaultProposalTypes.remove,
-    remove: { removed: leafIndex },
-  }
+  return mutexFor(group).run(async () => {
+    const removeProposal: DefaultProposal = {
+      proposalType: defaultProposalTypes.remove,
+      remove: { removed: leafIndex },
+    }
 
-  const enacted = ledgerEntries ?? []
-  const result = await commitWithEntries(group, [removeProposal], enacted)
+    const enacted = ledgerEntries ?? []
+    const result = await commitWithEntries(group, [removeProposal], enacted)
 
-  const newGroup = deriveGroup(group, result.newState)
-  await newGroup.applyLedgerEntries(enacted)
+    const newGroup = deriveGroup(group, result.newState)
+    await newGroup.applyLedgerEntries(enacted)
 
-  return {
-    commitMessage: encode(mlsMessageEncoder, result.commit),
-    newGroup,
-    epoch: newGroup.epoch,
-  }
+    return {
+      commitMessage: encode(mlsMessageEncoder, result.commit),
+      newGroup,
+      epoch: newGroup.epoch,
+    }
+  })
 }
 
 /**
