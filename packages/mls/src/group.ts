@@ -419,6 +419,13 @@ export class GroupHandle {
   }
 
   /**
+   * Fold ledger entries into this handle's roster and ledger. This is a
+   * construction-time primitive — called on a freshly built handle before it is
+   * shared (restore, welcome, and the commit producers' derived handle). Unlike
+   * the state-mutating operations, it is not serialized on the handle's mutex, so
+   * do not call it on a live handle concurrently with encrypt/processMessage.
+   */
+  /**
    * Verify signed ledger tokens, append the valid ones to the log in the order
    * given, and refold the roster. Tokens that fail verification or whose groupID
    * does not match the group are dropped (defensive — this is the low-level apply
@@ -953,7 +960,7 @@ async function commitWithEntries(
     })
   }
 
-  const commit = await createCommit({
+  return await createCommit({
     context: group.context,
     state: group.state,
     extraProposals: proposals,
@@ -962,7 +969,6 @@ async function commitWithEntries(
       authenticatedData: encodeControlEnvelope({ v: 1, entries: entryIDs }),
     }),
   })
-  return commit
 }
 
 /**
