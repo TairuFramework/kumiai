@@ -19,6 +19,25 @@ import {
   processWelcome,
   removeMember,
 } from '../src/group.js'
+import { ledgerEntryDigest } from '../src/ledger.js'
+import type { Invite } from '../src/types.js'
+
+/**
+ * An add commit names the invitee's role entry by content id, so a receiver needs
+ * the body out of band. Serve the invites' tokens back from a map the test fills.
+ */
+function inviteLedger() {
+  const tokens = new Map<string, string>()
+  return {
+    publish: (invite: Invite) => {
+      for (const token of invite.ledgerEntries) {
+        tokens.set(ledgerEntryDigest(token), token)
+      }
+    },
+    resolveLedgerEntries: async (ids: Array<string>) =>
+      ids.map((id) => tokens.get(id)).filter((token): token is string => token != null),
+  }
+}
 
 // kubun's genesis-anchor extension type (custom, non-default).
 const ANCHOR_TYPE = 0xff00
@@ -77,6 +96,7 @@ describe('Gap 1 — custom GroupContext extension capabilities', () => {
     const { welcomeMessage, commitMessage } = await commitInvite(
       aliceGroup,
       bobBundle.publicPackage,
+      invite,
     )
     expect(commitMessage).toBeInstanceOf(Uint8Array)
 
@@ -101,7 +121,7 @@ describe('Gap 1 — custom GroupContext extension capabilities', () => {
       recipientDID: bob.id,
       permission: 'member',
     })
-    const { welcomeMessage } = await commitInvite(aliceGroup, bobBundle.publicPackage)
+    const { welcomeMessage } = await commitInvite(aliceGroup, bobBundle.publicPackage, invite)
     const { group: bobGroup } = await processWelcome({
       identity: bob,
       invite,
@@ -151,6 +171,7 @@ describe('Gap 2 — commit policy hook', () => {
     const { welcomeMessage, newGroup: aliceAfterBob } = await commitInvite(
       aliceGroup,
       bobBundle.publicPackage,
+      invite,
     )
     // Bob joins with the same policy seeded; both now at epoch 1.
     const { group: bobGroup } = await processWelcome({
@@ -187,6 +208,7 @@ describe('Gap 2 — commit policy hook', () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
     const carol = randomIdentity()
+    const ledger = inviteLedger()
     const { group: aliceGroup } = await createGroup(alice, 'g2-plain', {
       commitPolicy: rejectAnchorMutation,
     })
@@ -200,24 +222,33 @@ describe('Gap 2 — commit policy hook', () => {
     const { welcomeMessage, newGroup: aliceAfterBob } = await commitInvite(
       aliceGroup,
       bobBundle.publicPackage,
+      bobInvite,
     )
     const { group: bobGroup } = await processWelcome({
       identity: bob,
       invite: bobInvite,
       welcome: welcomeMessage,
       keyPackageBundle: bobBundle,
-      options: { commitPolicy: rejectAnchorMutation },
+      options: {
+        commitPolicy: rejectAnchorMutation,
+        resolveLedgerEntries: ledger.resolveLedgerEntries,
+      },
     })
 
     // Alice adds Carol; Bob applies the add commit cleanly under the policy.
     const carolBundle = await createKeyPackageBundle(carol)
-    await createInvite({
+    const { invite: carolInvite } = await createInvite({
       group: aliceAfterBob,
       identity: alice,
       recipientDID: carol.id,
       permission: 'member',
     })
-    const { commitMessage } = await commitInvite(aliceAfterBob, carolBundle.publicPackage)
+    ledger.publish(carolInvite)
+    const { commitMessage } = await commitInvite(
+      aliceAfterBob,
+      carolBundle.publicPackage,
+      carolInvite,
+    )
 
     await expect(bobGroup.processMessage(commitMessage)).resolves.toBeNull()
     expect(bobGroup.memberCount).toBe(3)
@@ -231,6 +262,7 @@ describe('Gap 2 — commit policy hook', () => {
     const acceptAll: IncomingMessageCallback = () => 'accept'
     const rejectAll: IncomingMessageCallback = () => 'reject'
 
+    const ledger = inviteLedger()
     const { group: aliceGroup } = await createGroup(alice, 'g2-override')
     const bobBundle = await createKeyPackageBundle(bob)
     const { invite: bobInvite } = await createInvite({
@@ -242,19 +274,31 @@ describe('Gap 2 — commit policy hook', () => {
     const { welcomeMessage, newGroup: aliceAfterBob } = await commitInvite(
       aliceGroup,
       bobBundle.publicPackage,
+      bobInvite,
     )
     const { group: bobGroup } = await processWelcome({
       identity: bob,
       invite: bobInvite,
       welcome: welcomeMessage,
       keyPackageBundle: bobBundle,
-      options: { commitPolicy: acceptAll },
+      options: { commitPolicy: acceptAll, resolveLedgerEntries: ledger.resolveLedgerEntries },
     })
     const epochBefore = bobGroup.epoch
 
     // Alice adds Carol; Bob's per-call rejectAll overrides his accept default.
     const carolBundle = await createKeyPackageBundle(carol)
-    const { commitMessage } = await commitInvite(aliceAfterBob, carolBundle.publicPackage)
+    const { invite: carolInvite } = await createInvite({
+      group: aliceAfterBob,
+      identity: alice,
+      recipientDID: carol.id,
+      permission: 'member',
+    })
+    ledger.publish(carolInvite)
+    const { commitMessage } = await commitInvite(
+      aliceAfterBob,
+      carolBundle.publicPackage,
+      carolInvite,
+    )
 
     await expect(
       bobGroup.processMessage(commitMessage, { commitPolicy: rejectAll }),
@@ -271,13 +315,17 @@ describe('Gap 2 — commit policy hook', () => {
     expect(aliceGroup.commitPolicy).toBe(rejectAnchorMutation)
 
     const bobBundle = await createKeyPackageBundle(bob)
-    await createInvite({
+    const { invite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const { newGroup: aliceAfterBob } = await commitInvite(aliceGroup, bobBundle.publicPackage)
+    const { newGroup: aliceAfterBob } = await commitInvite(
+      aliceGroup,
+      bobBundle.publicPackage,
+      invite,
+    )
     // Derived handle retains the policy (previously dropped — review issue #1).
     expect(aliceAfterBob.commitPolicy).toBe(rejectAnchorMutation)
 

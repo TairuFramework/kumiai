@@ -147,6 +147,7 @@ describe('group anchor', () => {
     const { welcomeMessage, commitMessage } = await commitInvite(
       aliceGroup,
       bobBundle.publicPackage,
+      invite,
     )
     expect(commitMessage).toBeInstanceOf(Uint8Array)
 

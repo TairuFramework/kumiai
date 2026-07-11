@@ -26,6 +26,8 @@ import {
   readMessageEpoch,
   removeMember,
 } from '../src/group.js'
+import { ledgerEntryDigest } from '../src/ledger.js'
+import type { GroupOptions, Invite } from '../src/types.js'
 
 describe('external rejoin codec round-trip', () => {
   test('mlsMessage(GroupInfo) encode → decode preserves version + wireformat', async () => {
@@ -73,6 +75,7 @@ describe('joinGroupExternal — stale device recovery', () => {
     const { welcomeMessage: bobWelcome, newGroup: aliceAfterBob } = await commitInvite(
       aliceGroup,
       bobKP.publicPackage,
+      bobInvite,
     )
     const { group: bobGroup, credential: bobCred } = await processWelcome({
       identity: bob,
@@ -83,11 +86,21 @@ describe('joinGroupExternal — stale device recovery', () => {
     })
     expect(bobGroup.epoch).toBe(1n)
 
-    // A advances: add C, then remove C. B stays offline.
-    // Carol never calls processWelcome here (she's only added to advance epochs),
-    // so we skip createInvite and go straight to key package + commitInvite.
+    // A advances: add C, then remove C. B stays offline. Carol never calls
+    // processWelcome here — she is only added to advance epochs — but the Add still
+    // needs the invite that authorizes it.
+    const { invite: carolInvite } = await createInvite({
+      group: aliceAfterBob,
+      identity: alice,
+      recipientDID: carol.id,
+      permission: 'member',
+    })
     const carolKP = await createKeyPackageBundle(carol)
-    const { newGroup: aliceAfterCarol } = await commitInvite(aliceAfterBob, carolKP.publicPackage)
+    const { newGroup: aliceAfterCarol } = await commitInvite(
+      aliceAfterBob,
+      carolKP.publicPackage,
+      carolInvite,
+    )
     const carolLeaf = aliceAfterCarol.findMemberLeafIndex(carol.id)
     expect(carolLeaf).toBeDefined()
     const { newGroup: aliceAdvanced } = await removeMember(aliceAfterCarol, carolLeaf as number)
@@ -181,6 +194,7 @@ describe('joinGroupExternal — stale device recovery', () => {
     const { welcomeMessage: bobWelcome, newGroup: aliceAfterBob } = await commitInvite(
       aliceGroup,
       bobKP.publicPackage,
+      bobInvite,
     )
     const { group: bobGroup, credential: bobCred } = await processWelcome({
       identity: bob,
@@ -192,10 +206,20 @@ describe('joinGroupExternal — stale device recovery', () => {
     expect(bobGroup.epoch).toBe(1n)
 
     // Alice advances the epoch while Bob is offline.
+    const { invite: carolInvite } = await createInvite({
+      group: aliceAfterBob,
+      identity: alice,
+      recipientDID: carol.id,
+      permission: 'member',
+    })
     const carolKP = await createKeyPackageBundle(carol, {
       capabilities: extensionAwareCapabilities,
     })
-    const { newGroup: aliceAfterCarol } = await commitInvite(aliceAfterBob, carolKP.publicPackage)
+    const { newGroup: aliceAfterCarol } = await commitInvite(
+      aliceAfterBob,
+      carolKP.publicPackage,
+      carolInvite,
+    )
     const carolLeaf = aliceAfterCarol.findMemberLeafIndex(carol.id)
     expect(carolLeaf).toBeDefined()
     const { newGroup: aliceAdvanced } = await removeMember(aliceAfterCarol, carolLeaf as number)
@@ -237,6 +261,7 @@ describe('joinGroupExternal — stale device recovery', () => {
     const { newGroup: aliceAfterBob, welcomeMessage } = await commitInvite(
       aliceGroup,
       bobKP.publicPackage,
+      invite,
     )
     const { credential: bobCred } = await processWelcome({
       identity: bob,
@@ -303,6 +328,7 @@ describe('joinGroupExternal — stale device recovery', () => {
     const { newGroup: aliceAfterBob, welcomeMessage } = await commitInvite(
       aliceGroup,
       bobKP.publicPackage,
+      invite,
     )
     const { credential: bobCred } = await processWelcome({
       identity: bob,
@@ -345,16 +371,32 @@ describe('joinGroupExternal — stale device recovery', () => {
     // Group of A, B, C with all online
     const { group: aliceGroup } = await createGroup(alice, 'trio-group')
 
+    // A commit's envelope names its ledger entries by content id, not by value, so a
+    // member applying someone else's Add fetches the bodies out of band. Bob is served
+    // from this map, which Alice fills as she mints each invite.
+    const tokens = new Map<string, string>()
+    const memberOptions: GroupOptions = {
+      resolveLedgerEntries: async (ids) =>
+        ids.map((id) => tokens.get(id)).filter((token): token is string => token != null),
+    }
+    const publish = (invite: Invite) => {
+      for (const token of invite.ledgerEntries) {
+        tokens.set(ledgerEntryDigest(token), token)
+      }
+    }
+
     const { invite: bobInvite } = await createInvite({
       group: aliceGroup,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
+    publish(bobInvite)
     const bobKP = await createKeyPackageBundle(bob)
     const { welcomeMessage: bobWelcome, newGroup: aliceA } = await commitInvite(
       aliceGroup,
       bobKP.publicPackage,
+      bobInvite,
     )
     const { group: bobGroup, credential: bobCred } = await processWelcome({
       identity: bob,
@@ -362,6 +404,7 @@ describe('joinGroupExternal — stale device recovery', () => {
       welcome: bobWelcome,
       keyPackageBundle: bobKP,
       ratchetTree: aliceA.state.ratchetTree,
+      options: memberOptions,
     })
 
     const { invite: carolInvite } = await createInvite({
@@ -370,12 +413,13 @@ describe('joinGroupExternal — stale device recovery', () => {
       recipientDID: carol.id,
       permission: 'member',
     })
+    publish(carolInvite)
     const carolKP = await createKeyPackageBundle(carol)
     const {
       commitMessage: addCarolCommit,
       welcomeMessage: carolWelcome,
       newGroup: aliceB,
-    } = await commitInvite(aliceA, carolKP.publicPackage)
+    } = await commitInvite(aliceA, carolKP.publicPackage, carolInvite)
     await bobGroup.processMessage(addCarolCommit)
     const { group: carolGroup } = await processWelcome({
       identity: carol,
@@ -383,6 +427,7 @@ describe('joinGroupExternal — stale device recovery', () => {
       welcome: carolWelcome,
       keyPackageBundle: carolKP,
       ratchetTree: aliceB.state.ratchetTree,
+      options: memberOptions,
     })
     expect(aliceB.epoch).toBe(2n)
     expect(bobGroup.epoch).toBe(2n)
@@ -390,10 +435,18 @@ describe('joinGroupExternal — stale device recovery', () => {
 
     // B goes stale: A and C advance by adding + removing D. B skips these commits.
     const dave = randomIdentity()
+    const { invite: daveInvite } = await createInvite({
+      group: aliceB,
+      identity: alice,
+      recipientDID: dave.id,
+      permission: 'member',
+    })
+    publish(daveInvite)
     const daveKP = await createKeyPackageBundle(dave)
     const { commitMessage: addDave, newGroup: aliceC } = await commitInvite(
       aliceB,
       daveKP.publicPackage,
+      daveInvite,
     )
     await carolGroup.processMessage(addDave)
     // B skips this commit — now stale.

@@ -3,8 +3,8 @@ import {
   isVerifiedToken,
   multihashSHA256,
   normalizeDID,
-  type OwnIdentity,
   type SignedPayload,
+  type SigningIdentity,
   stringifyToken,
   verifyToken,
 } from '@kokuin/token'
@@ -44,7 +44,10 @@ export type VerifiedLedgerEntry<TValue = unknown> = {
  * author. `ord` is signed only when present, so a claim without it never signs
  * an `ord: undefined` key. Returns the stringified token.
  */
-export async function signLedgerEntry(identity: OwnIdentity, entry: LedgerEntry): Promise<string> {
+export async function signLedgerEntry(
+  identity: SigningIdentity,
+  entry: LedgerEntry,
+): Promise<string> {
   const signed = await identity.signToken(
     {
       type: entry.type,

@@ -68,6 +68,9 @@ export type Invite = {
   permission: GroupPermission
   /** Inviter's DID */
   inviterID: string
+  /** Signed control-ledger tokens the joiner needs to fold the group's roster,
+   *  in application order. Carries at minimum the invitee's own role entry. */
+  ledgerEntries: Array<string>
 }
 
 export type KeyPackageBundle = {

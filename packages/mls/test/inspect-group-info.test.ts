@@ -33,8 +33,14 @@ describe('inspectGroupInfo', () => {
     const before = inspectGroupInfo((await exportGroupInfo({ group: aliceGroup })).groupInfo)
 
     // Add Bob → new epoch, new tree.
+    const { invite } = await createInvite({
+      group: aliceGroup,
+      identity: alice,
+      recipientDID: bob.id,
+      permission: 'member',
+    })
     const bobKP = await createKeyPackageBundle(bob)
-    const { newGroup: aliceAfterBob } = await commitInvite(aliceGroup, bobKP.publicPackage)
+    const { newGroup: aliceAfterBob } = await commitInvite(aliceGroup, bobKP.publicPackage, invite)
     const after = inspectGroupInfo((await exportGroupInfo({ group: aliceAfterBob })).groupInfo)
 
     expect(after.epoch).toBe(before.epoch + 1n)
@@ -61,6 +67,7 @@ describe('inspectGroupInfo', () => {
     const { welcomeMessage, newGroup: aliceAfterBob } = await commitInvite(
       aliceGroup,
       bobKP.publicPackage,
+      bobInvite,
     )
     const { credential: bobCred } = await processWelcome({
       identity: bob,

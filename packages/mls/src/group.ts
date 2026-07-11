@@ -66,13 +66,18 @@ import {
   parseMLSCredentialIdentity,
 } from './credential.js'
 import { nobleCryptoProvider } from './crypto.js'
-import { decodeControlEnvelope } from './envelope.js'
+import { decodeControlEnvelope, encodeControlEnvelope } from './envelope.js'
 import { foldEnvelope } from './envelope-fold.js'
 import type { FoldInput } from './fold.js'
 import { buildLedgerHeadExtension, genesisHead } from './head.js'
-import { ledgerEntryDigest, type VerifiedLedgerEntry, verifyLedgerEntry } from './ledger.js'
+import {
+  ledgerEntryDigest,
+  signLedgerEntry,
+  type VerifiedLedgerEntry,
+  verifyLedgerEntry,
+} from './ledger.js'
 import { defaultCommitPolicy, MissingLedgerEntriesError } from './policy.js'
-import { foldRoster, type RoleValue, type RosterState } from './roster.js'
+import { foldRoster, ROLE_ENTRY_TYPE, type RoleValue, type RosterState } from './roster.js'
 import type { GroupOptions, Invite, KeyPackageBundle } from './types.js'
 
 const DEFAULT_CIPHERSUITE = 'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519' as const
@@ -176,12 +181,32 @@ function readPrivateCommit(decoded: unknown): { authenticatedData: Uint8Array } 
   return { authenticatedData: data instanceof Uint8Array ? data : new Uint8Array() }
 }
 
+/**
+ * Project a held ledger into the roster. foldRoster is the role projection: it
+ * drops every non-`group.role` entry by type, so the mixed-type ledger is fed in
+ * as role inputs and the fold filters.
+ */
+function foldLedgerRoster(
+  ledger: ReadonlyMap<string, VerifiedLedgerEntry>,
+  anchor: GroupAnchor,
+  groupID: string,
+): RosterState {
+  const entries = [...ledger.entries()].map(
+    ([entryID, verified]) => ({ verified, entryID }) as FoldInput<RoleValue>,
+  )
+  return foldRoster(entries, anchor, groupID)
+}
+
 export type GroupHandleParams = {
   state: ClientState
   credential: MemberCredential
   context: MlsContext
   /** Stringified root capability (for delegation) */
   rootCapability: string
+  /** Control-ledger entries this handle starts from, keyed by content id. A handle
+   *  derived from another (commitInvite/removeMember) inherits the parent's, so the
+   *  roster it folds does not revert to the anchor alone. */
+  ledger?: ReadonlyMap<string, VerifiedLedgerEntry>
   cache: DIDCache
   resolver?: DIDResolver
   /** Default commit policy applied by processMessage/decrypt. */
@@ -228,8 +253,8 @@ export class GroupHandle {
       throw new Error('group has no anchor extension; cannot seed a control roster')
     }
     this.#anchor = anchor
-    this.#ledger = new Map()
-    this.#roster = foldRoster([], anchor, this.groupID)
+    this.#ledger = new Map(params.ledger ?? [])
+    this.#roster = foldLedgerRoster(this.#ledger, anchor, this.groupID)
   }
 
   get groupID(): string {
@@ -289,6 +314,12 @@ export class GroupHandle {
     return this.#anchor
   }
 
+  /** The verified control-ledger entries this handle holds, keyed by content id.
+   *  Carried onto handles derived from this one (commitInvite/removeMember). */
+  get ledger(): ReadonlyMap<string, VerifiedLedgerEntry> {
+    return this.#ledger
+  }
+
   /** The control roster folded from the anchor and every applied ledger entry. */
   get roster(): RosterState {
     return this.#roster
@@ -308,12 +339,7 @@ export class GroupHandle {
       if (verified == null || verified.entry.groupID !== this.groupID) continue
       this.#ledger.set(entryID, verified)
     }
-    // foldRoster is the role projection: it drops every non-`group.role` entry by
-    // type, so the mixed-type ledger is fed in as role inputs and the fold filters.
-    const entries = [...this.#ledger.entries()].map(
-      ([entryID, verified]) => ({ verified, entryID }) as FoldInput<RoleValue>,
-    )
-    this.#roster = foldRoster(entries, this.#anchor, this.groupID)
+    this.#roster = foldLedgerRoster(this.#ledger, this.#anchor, this.groupID)
   }
 
   get memberCount(): number {
@@ -727,9 +753,17 @@ export type CreateInviteResult = {
 /**
  * Create an invite for a new member.
  * Does NOT add them to the group — call commitInvite with their key package to do that.
+ *
+ * Only an admin may invite: a role entry from a non-admin issuer is dropped by every
+ * receiver's fold, so refusing here turns a silent downstream commit rejection into a
+ * local error.
  */
 export async function createInvite(params: CreateInviteParams): Promise<CreateInviteResult> {
   const { group, identity, recipientDID, permission } = params
+  if (group.roster.roles.get(normalizeDID(identity.id)) !== 'admin') {
+    throw new Error('createInvite: the inviter must be an admin in the group roster')
+  }
+
   const memberCap = await delegateGroupMembership({
     identity,
     groupID: group.groupID,
@@ -739,12 +773,23 @@ export async function createInvite(params: CreateInviteParams): Promise<CreateIn
   })
   const memberCapStr = stringifyToken(memberCap)
 
+  // The role entry naming the invitee. Its issuer is the inviter (authenticated by
+  // the token signature) and its value is the permission the capability grants, so
+  // the two agree by construction.
+  const roleToken = await signLedgerEntry(identity, {
+    type: ROLE_ENTRY_TYPE,
+    groupID: group.groupID,
+    subject: recipientDID,
+    value: permission,
+  })
+
   const invite: Invite = {
     groupID: group.groupID,
     capabilityToken: memberCapStr,
     capabilityChain: [group.rootCapability, memberCapStr],
     permission,
     inviterID: identity.id,
+    ledgerEntries: [roleToken],
   }
 
   return { invite }
@@ -766,21 +811,41 @@ export type CommitInviteResult = {
 /**
  * Commit an invite by adding the invitee's key package to the group.
  * Produces an MLS Commit + Welcome.
+ *
+ * The invite's ledger entries are enacted by this commit: their content ids ride in
+ * the commit's control envelope, so every receiver folds the invitee's role entry
+ * into its roster as it applies the Add. The envelope carries ids, not bodies — a
+ * receiver that holds neither the entry nor a `resolveLedgerEntries` resolver throws
+ * MissingLedgerEntriesError on this commit.
  */
 export async function commitInvite(
   group: GroupHandle,
   keyPackage: KeyPackage,
+  invite: Invite,
 ): Promise<CommitInviteResult> {
+  if (invite.groupID !== group.groupID) {
+    throw new Error(`commitInvite: invite is for group ${invite.groupID}, not ${group.groupID}`)
+  }
+  // Same reason createInvite guards the inviter: a non-admin's Add is rejected by
+  // every receiver, so fail here rather than emitting a commit nobody will apply.
+  if (group.roster.roles.get(normalizeDID(group.credential.id)) !== 'admin') {
+    throw new Error('commitInvite: the committer must be an admin in the group roster')
+  }
+
   const addProposal: DefaultProposal = {
     proposalType: defaultProposalTypes.add,
     add: { keyPackage },
   }
 
+  const entries = invite.ledgerEntries
   const result = await createCommit({
     context: group.context,
     state: group.state,
     extraProposals: [addProposal],
     ratchetTreeExtension: true,
+    ...(entries.length > 0 && {
+      authenticatedData: encodeControlEnvelope({ v: 1, entries: entries.map(ledgerEntryDigest) }),
+    }),
   })
 
   const newGroup = new GroupHandle({
@@ -788,6 +853,7 @@ export async function commitInvite(
     credential: group.credential,
     context: group.context,
     rootCapability: group.rootCapability,
+    ledger: group.ledger,
     cache: group.cache,
     resolver: group.resolver,
     commitPolicy: group.commitPolicy,
@@ -798,6 +864,8 @@ export async function commitInvite(
   if (result.welcome == null) {
     throw new Error('commitInvite: expected a Welcome message for the add proposal')
   }
+  // The entries this commit enacts are now part of the group's ledger.
+  await newGroup.applyLedgerEntries(entries)
   return {
     commitMessage: encode(mlsMessageEncoder, result.commit),
     welcomeMessage: encode(mlsMessageEncoder, result.welcome),
@@ -843,6 +911,26 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
     options: { cache, resolver: options?.resolver },
   })
 
+  // A Welcome is only this member's when the invite carries a role entry naming
+  // them: an invite minted for someone else is not an invitation to join.
+  const selfDID = normalizeDID(identity.id)
+  let namesSelf = false
+  for (const token of invite.ledgerEntries) {
+    const verified = await verifyLedgerEntry(token)
+    if (
+      verified != null &&
+      verified.entry.type === ROLE_ENTRY_TYPE &&
+      verified.entry.groupID === invite.groupID &&
+      normalizeDID(verified.entry.subject) === selfDID
+    ) {
+      namesSelf = true
+      break
+    }
+  }
+  if (!namesSelf) {
+    throw new Error('processWelcome: the invite carries no role entry naming this identity')
+  }
+
   let resolvedWelcome: unknown = welcome
   if (welcome instanceof Uint8Array) {
     const decoded = decode(mlsMessageDecoder, welcome)
@@ -887,6 +975,10 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
     resolveLedgerEntries: options?.resolveLedgerEntries,
     onLedgerEntries: options?.onLedgerEntries,
   })
+  // Fold the invite's entries: the roster is seeded from the anchor, and the fold
+  // grants authority only to an admin-so-far, so a member-signed entry cannot
+  // promote anyone even though applyLedgerEntries itself is the permissive primitive.
+  await group.applyLedgerEntries(invite.ledgerEntries)
 
   return { group, credential }
 }
@@ -925,6 +1017,7 @@ export async function removeMember(
     credential: group.credential,
     context: group.context,
     rootCapability: group.rootCapability,
+    ledger: group.ledger,
     cache: group.cache,
     resolver: group.resolver,
     commitPolicy: group.commitPolicy,

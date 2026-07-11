@@ -1380,3 +1380,52 @@ verdict), then head write+verify, then chain removal (Q2.5), then Phase 5 residu
 5.3 dissolved, 5.4 non-creator-admin invite tests) and Phase 6 (integration tests, delete origin
 `next/` items, write the kubun migration item). Ephemeral kubun-impact notes remain untracked in
 `docs/superpowers/notes/` for eventual reconciliation.
+
+### 2026-07-11 — Question 5.2a: the invite seeds the roster
+
+**Findings:** Confirmed, end to end. An invited member is now in every participant's control roster:
+`createInvite` signs a `group.role` entry naming the invitee, `commitInvite` puts that entry's content
+id in the commit's `authenticatedData` envelope, and each receiver's pre-pass resolves the body, folds
+it, and admits the member as the Add applies. The write-side passthrough that had been missing since
+Q1.1 is now closed — this is the first commit kumiai *emits* carrying a control envelope, and the
+Q4.1 pre-pass read it back off the wire without a single change. Suite **234 green** (227 + 7), tsc
+clean, biome clean.
+
+**A latent bug the probe surfaced, unrelated to the question as written:** the `GroupHandle`
+constructor unconditionally reset `#ledger = new Map()`, so a handle *derived* from another
+(`commitInvite`/`removeMember`) silently reverted its roster to the anchor alone — dropping every
+promotion the parent had folded. `processMessage` was unaffected (it mutates in place), which is why
+227 tests never caught it: every committer in the suite was the creator, already the anchor admin. It
+became load-bearing the moment `commitInvite` wrote an entry, since the handle it returns must hold
+the entry it just wrote. Fixed by threading `ledger` through `GroupHandleParams`; the anchorless throw
+stays exactly where it was. There is a test that fails without the fix.
+
+**The `foldRoster` question (the one that decided the security story):** the Welcome path folds the
+invite's entries through `applyLedgerEntries`, the *permissive* primitive — it verifies signatures and
+drops cross-group tokens but does **not** enforce the admin-issuer invariant that `foldEnvelope` does.
+That is sound only if the fold itself enforces authority, and it does: `foldRoster`'s `verifyAuthority`
+requires `stateSoFar.roles.get(issuer) === 'admin'` (`roster.ts:77-86`), layered with groupID scoping
+and the empty-admin guard. So a malicious inviter cannot promote anyone via the Welcome — its entries
+are rooted at the anchor and grow only through admins-so-far, exactly as on the commit path. The
+joiner trusts the *anchor*, never the inviter.
+
+**The deployment requirement, now pinned by a test:** the envelope carries entry **ids, not bodies**.
+A receiver holding neither the entry nor a `resolveLedgerEntries` resolver throws
+`MissingLedgerEntriesError` on an Add commit and stays at its pre-commit epoch. This is not a bug — it
+is the content-addressed design working — but it means *every deployment must wire a resolver*. The
+test asserts the exact error, the exact missing id, the unchanged epoch, and the unchanged roster.
+
+**Spec impact:** none.
+
+**Learned:** the probe process died mid-run without writing its report, having updated four test files
+but not `external-rejoin.test.ts` — leaving 5 failing tests and 9 type errors. Verifying by running
+the commands myself (rather than trusting a report that never arrived) caught it immediately. Two of
+that file's `commitInvite` sites also had to gain resolvers, which is itself the finding above
+reproducing in a test written before the feature existed: *any* member processing someone else's Add
+now needs to resolve the invitee's role entry. Guards were added at both `createInvite` and
+`commitInvite` (the inviter/committer must be admin in its own roster) so a non-admin fails locally
+rather than emitting a commit every receiver would reject.
+
+**Still open (unchanged by this step):** the `ledger_head` extension does not move yet, so an inviter
+can still omit entries from the envelope with no receiver detecting the omission. That is the next
+piece after Q4.1b.
