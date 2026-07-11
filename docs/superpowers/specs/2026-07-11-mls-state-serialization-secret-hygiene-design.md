@@ -51,40 +51,52 @@ internal kumiai code or tests beyond the mls package's own suite.
 
 ### 1. One FIFO mutation chain per handle
 
-Each handle gets a serialization chain. The chain must be reachable both from `GroupHandle`'s own
-methods *and* from the free producer functions in the same module — and a `#`-private method is not
-reachable from a module-level function, so the chain lives in a **module-private `WeakMap` keyed by
-handle**, with a shared `runExclusive` helper that neither the public API nor `index.ts` exports:
+Each handle gets its own serializer. It must be reachable both from `GroupHandle`'s own methods *and*
+from the free producer functions in the same module — and a `#`-private method is not reachable from a
+module-level function. So the serializer is a small **`Mutex`** object (a generic FIFO async queue,
+shaped for later extraction to `@sozai/async` — see Follow-up), held in a **module-private `WeakMap`
+keyed by handle**. Neither the `Mutex` nor the map nor the accessor is exported:
 
 ```ts
 // module-private — not exported
-const CHAINS = new WeakMap<GroupHandle, Promise<unknown>>()
-const NOOP = () => {}
+type Mutex = { run: <T>(fn: () => Promise<T>) => Promise<T> }
 
-function runExclusive<T>(handle: GroupHandle, fn: () => Promise<T>): Promise<T> {
-  const prior = CHAINS.get(handle) ?? Promise.resolve()
-  const run = prior.then(fn, fn)          // run regardless of the prior op's outcome
-  CHAINS.set(handle, run.then(NOOP, NOOP)) // a rejection must not poison the chain
-  return run
+function createMutex(): Mutex {
+  let chain: Promise<unknown> = Promise.resolve()
+  const noop = () => {}
+  return {
+    run(fn) {
+      const result = chain.then(fn, fn)   // run regardless of the prior op's outcome
+      chain = result.then(noop, noop)     // a rejection must not poison the queue
+      return result
+    },
+  }
+}
+
+const MUTEXES = new WeakMap<GroupHandle, Mutex>()
+function mutexFor(handle: GroupHandle): Mutex {
+  let m = MUTEXES.get(handle)
+  if (m === undefined) { m = createMutex(); MUTEXES.set(handle, m) }
+  return m
 }
 ```
 
-(A `WeakMap` rather than a `#mutation` field keeps the mechanism genuinely internal without growing
-`GroupHandle`'s public surface with a `runExclusive` method, and lets the free functions enlist. The
-handle holds no direct reference to its chain; the `WeakMap` entry is collected with the handle.)
+(A `WeakMap` rather than a `#mutation` field keeps the mechanism internal without adding a public
+`run`/`runExclusive` method to `GroupHandle`, and lets the free functions enlist. The handle holds no
+reference to its `Mutex`; the entry is collected with the handle.)
 
 Every async operation that reads or writes the handle's `#state` runs its whole
-`read → await → write` body inside `runExclusive(handle, …)`, so operations on one handle execute one
+`read → await → write` body inside `mutexFor(handle).run(…)`, so operations on one handle execute one
 at a time, in the order they were issued (FIFO — never reordered, because *when* a message is sent, at
 which epoch, is causally load-bearing in MLS).
 
-On the chain:
+On the queue:
 
-- `encrypt` and `processMessage` — the two methods that assign `this.#state`. A method reaches the
-  helper as `runExclusive(this, …)`.
+- `encrypt` and `processMessage` — the two methods that assign `this.#state`. A method enlists as
+  `mutexFor(this).run(…)`.
 - `commitInvite`, `removeMember`, `commitLedgerEntries` — free functions that operate on a live
   handle (they read `group.state`, `await` ts-mls, and return a derived handle). They wrap their body
-  in `runExclusive(group, …)`. They do not write the source `#state`, but serializing them closes the
+  in `mutexFor(group).run(…)`. They do not write the source `#state`, but serializing them closes the
   in-process stale-read fork (a producer reading epoch N while a concurrent `encrypt` moves the handle
   to N+1).
 
@@ -126,7 +138,7 @@ async encrypt(plaintext: Uint8Array): Promise<Uint8Array>
 ```
 
 Returns wire-framed bytes via the same `mlsMessageEncoder`/`encode` path every other producer uses,
-inside `runExclusive` (§1), with `consumed` zeroed internally (§2). No pre-encode object, no `consumed`
+inside `mutexFor(this).run(…)` (§1), with `consumed` zeroed internally (§2). No pre-encode object, no `consumed`
 in the return. A peer decrypts the bytes through `processMessage`.
 
 ### 4. Consolidate the receive path on `processMessage`; remove `decrypt`
@@ -143,7 +155,7 @@ async processMessage(message: Uint8Array | unknown, opts?): Promise<Uint8Array |
 This erases the mutate-then-throw bug outright — there is no
 `'Expected application message…'` path left — and the receive-path duplication. `processMessage`
 already applies accepted commits correctly and throws `CommitRejectedError` on reject; wrapping its
-body in `runExclusive` (§1) and zeroing `consumed` (§2) is the only change to it.
+body in `mutexFor(this).run(…)` (§1) and zeroing `consumed` (§2) is the only change to it.
 
 ## Testing
 
@@ -181,6 +193,18 @@ Fold into the existing migration item
   as plaintext.
 
 Both edits land in the same version bump as the permission change, so `mls-codec.ts` migrates once.
+
+## Follow-up (out of scope, stack architecture)
+
+The FIFO serialization primitive is generic — a `Mutex`/`Serializer` with `run(fn): Promise<T>`,
+FIFO, rejection-isolated — and belongs in `@sozai/async` for reuse across the stack (hub, rpc, and
+anything doing read-`await`-write on shared state). It is **not** done here: extracting it upstream
+means a `@sozai` change, publish, and version bump before kumiai could consume it — coordination this
+crypto-hygiene fix should not wait on. To make the later swap mechanical, the inline implementation is
+shaped as a small `Mutex` object exposing `run(fn)` (not a raw promise-chain inlined across the
+methods), with a module-private `WeakMap<GroupHandle, Mutex>` holding one per handle. When
+`@sozai/async` gains the primitive, kumiai drops the inline `Mutex` and keeps only the `WeakMap` glue.
+Record the extraction as a `@sozai` backlog item.
 
 ## Non-goals
 
