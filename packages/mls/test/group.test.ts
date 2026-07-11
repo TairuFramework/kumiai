@@ -5,10 +5,12 @@ import {
   defaultProposalTypes,
   encode,
   type GroupContextExtension,
+  joinGroupExternal as mlsJoinGroupExternal,
   mlsMessageDecoder,
   mlsMessageEncoder,
   type NodeLeaf,
   nodeTypes,
+  protocolVersions,
   wireformats,
 } from 'ts-mls'
 import { describe, expect, it, test } from 'vitest'
@@ -27,7 +29,9 @@ import {
   createGroup,
   createInvite,
   createKeyPackageBundle,
+  exportGroupInfo,
   type GroupHandle,
+  joinGroupExternal,
   processWelcome,
   readMessageEpoch,
   removeMember,
@@ -2687,5 +2691,111 @@ describe('the ledger is an ordered log, not a set of claims', () => {
     expect(rosterEntries(carolGroup)).toEqual(rosterEntries(addCarol.newGroup))
     expect(carolGroup.roster.roles.get(normalizeDID(bob.id))).toBe('member')
     expect(head(carolGroup)).toEqual(computeHead(groupID, ledgerIDs(carolGroup)))
+  })
+})
+
+/** Decode framed GroupInfo bytes to the ts-mls GroupInfo the external-join API takes. */
+function decodeGroupInfo(bytes: Uint8Array) {
+  const message = decode(mlsMessageDecoder, bytes)
+  if (message == null || message.wireformat !== wireformats.mls_group_info) {
+    throw new Error('expected a framed MLSMessage(GroupInfo)')
+  }
+  return message.groupInfo
+}
+
+describe('GroupHandle external-join commit enforcement', () => {
+  test('rejects a stranger external-joining with a leaked GroupInfo', async () => {
+    // Alice + Bob are the whole roster. Mallory is in no roster and holds no leaf.
+    const { aliceGroup } = await twoMemberGroup()
+    const mallory = randomIdentity()
+
+    // Mallory forges a plain external-join commit against a leaked GroupInfo: an
+    // external_init that adds her own leaf, with no self-remove (she has no stale
+    // leaf). This is the RFC join-via-external-commit flow a stranger would use.
+    const { groupInfo } = await exportGroupInfo({ group: aliceGroup })
+    const malloryKP = await createKeyPackageBundle(mallory)
+    const { publicMessage } = await mlsJoinGroupExternal({
+      context: aliceGroup.context,
+      groupInfo: decodeGroupInfo(groupInfo),
+      keyPackage: malloryKP.publicPackage,
+      privateKeys: malloryKP.privatePackage,
+      resync: false,
+    })
+    const commitBytes = encode(mlsMessageEncoder, {
+      version: protocolVersions.mls10,
+      wireformat: wireformats.mls_public_message,
+      publicMessage,
+    })
+
+    const epochBefore = aliceGroup.epoch
+    const rosterBefore = [...aliceGroup.roster.roles.entries()]
+    await expect(aliceGroup.processMessage(commitBytes)).rejects.toThrow(CommitRejectedError)
+    // Nothing moved: no epoch advance, no new member, roster unchanged.
+    expect(aliceGroup.epoch).toBe(epochBefore)
+    expect(aliceGroup.findMemberLeafIndex(mallory.id)).toBeUndefined()
+    expect([...aliceGroup.roster.roles.entries()]).toEqual(rosterBefore)
+  })
+
+  test('accepts a legitimate member resync and keeps them in the roster', async () => {
+    // Alice (admin) creates the group; Bob joins through Welcome, then falls behind
+    // and external-rejoins. The rejoin proves control of Bob's roster DID and removes
+    // his stale leaf, so it is accepted and Bob stays in the roster.
+    const alice = randomIdentity()
+    const bob = randomIdentity()
+    const carol = randomIdentity()
+
+    const { group: aliceGroup } = await createGroup(alice, 'resync-accept-group')
+    const { invite: bobInvite } = await createInvite({
+      group: aliceGroup,
+      identity: alice,
+      recipientDID: bob.id,
+      permission: 'member',
+    })
+    const bobKP = await createKeyPackageBundle(bob)
+    const { welcomeMessage: bobWelcome, newGroup: aliceAfterBob } = await commitInvite(
+      aliceGroup,
+      bobKP.publicPackage,
+      bobInvite,
+    )
+    const { credential: bobCred } = await processWelcome({
+      identity: bob,
+      invite: bobInvite,
+      welcome: bobWelcome,
+      keyPackageBundle: bobKP,
+      ratchetTree: aliceAfterBob.state.ratchetTree,
+    })
+
+    // Advance the epoch while Bob is offline: add Carol, then remove her.
+    const { invite: carolInvite } = await createInvite({
+      group: aliceAfterBob,
+      identity: alice,
+      recipientDID: carol.id,
+      permission: 'member',
+    })
+    const carolKP = await createKeyPackageBundle(carol)
+    const { newGroup: aliceAfterCarol } = await commitInvite(
+      aliceAfterBob,
+      carolKP.publicPackage,
+      carolInvite,
+    )
+    const carolLeaf = aliceAfterCarol.findMemberLeafIndex(carol.id)
+    if (carolLeaf == null) throw new Error('expected Carol to hold a leaf')
+    const { newGroup: aliceAdvanced } = await removeMember(aliceAfterCarol, carolLeaf)
+
+    // Bob external-rejoins and Alice processes the commit: accepted, Bob still present.
+    const { groupInfo } = await exportGroupInfo({ group: aliceAdvanced })
+    const { commitMessage, group: bobRejoined } = await joinGroupExternal({
+      identity: bob,
+      groupInfo,
+      credential: bobCred,
+      resync: true,
+    })
+
+    const epochBefore = aliceAdvanced.epoch
+    await aliceAdvanced.processMessage(commitMessage)
+    expect(aliceAdvanced.epoch).toBe(epochBefore + 1n)
+    expect(aliceAdvanced.epoch).toBe(bobRejoined.epoch)
+    expect(aliceAdvanced.findMemberLeafIndex(bob.id)).toBeDefined()
+    expect(aliceAdvanced.roster.roles.get(normalizeDID(bob.id))).toBe('member')
   })
 })

@@ -40,6 +40,7 @@ import {
   nodeTypes,
   type ProposalWithSender,
   protocolVersions,
+  senderTypes,
   wireformats,
 } from 'ts-mls'
 
@@ -189,6 +190,40 @@ function readPrivateCommit(decoded: unknown): { authenticatedData: Uint8Array } 
   if (pm == null || pm.contentType !== contentTypes.commit) return undefined
   const data = pm.authenticatedData
   return { authenticatedData: data instanceof Uint8Array ? data : new Uint8Array() }
+}
+
+/**
+ * Read the DID an external-join commit proves control of. An external join is a
+ * PublicMessage whose sender is a joining non-member (senderType
+ * new_member_commit) carrying a commit; the committer holds no pre-commit leaf,
+ * so its DID rides the commit's own UpdatePath leaf credential. Returns undefined
+ * for anything that is not such a commit — those keep the pre-envelope path.
+ * Returns `{ did: undefined }` for an external commit whose UpdatePath is absent
+ * or whose leaf credential does not resolve to a basic-credential DID: it cannot
+ * be a valid resync, so the caller rejects it. Narrows the `unknown` frame
+ * structurally, mirroring readPrivateCommit / readMessageEpoch.
+ */
+function readExternalCommit(decoded: unknown): { did: string | undefined } | undefined {
+  if (decoded == null || typeof decoded !== 'object') return undefined
+  const frame = decoded as { wireformat?: unknown; publicMessage?: unknown }
+  if (frame.wireformat !== wireformats.mls_public_message) return undefined
+  const pm = frame.publicMessage as { senderType?: unknown; content?: unknown } | undefined
+  if (pm == null || pm.senderType !== senderTypes.new_member_commit) return undefined
+  const content = pm.content as { contentType?: unknown; commit?: unknown } | undefined
+  if (content == null || content.contentType !== contentTypes.commit) return undefined
+  const commit = content.commit as { path?: unknown } | undefined
+  const path = commit?.path as { leafNode?: unknown } | undefined
+  if (path == null) return { did: undefined }
+  const leafNode = path.leafNode as { credential?: unknown } | undefined
+  const credential = leafNode?.credential as { identity?: unknown } | undefined
+  if (credential == null || !(credential.identity instanceof Uint8Array)) {
+    return { did: undefined }
+  }
+  try {
+    return { did: parseMLSCredentialIdentity(credential.identity).id }
+  } catch {
+    return { did: undefined }
+  }
 }
 
 /**
@@ -480,9 +515,19 @@ export class GroupHandle {
     const capture: { rejected?: RejectedCommit } = {}
 
     const commit = readPrivateCommit(decoded)
+    let externalCommitDID: string | undefined
     if (commit == null) {
-      // Not a PrivateMessage commit — preserve the pre-envelope behaviour exactly.
-      return { callback: wrapCommitPolicy(callerPolicy, capture), capture, applyOnAccept: () => {} }
+      const external = readExternalCommit(decoded)
+      if (external == null) {
+        // Not a PrivateMessage commit nor an external-join commit — preserve the
+        // pre-envelope behaviour exactly.
+        return {
+          callback: wrapCommitPolicy(callerPolicy, capture),
+          capture,
+          applyOnAccept: () => {},
+        }
+      }
+      externalCommitDID = external.did
     }
 
     let precomputedReject = false
@@ -491,53 +536,62 @@ export class GroupHandle {
     let acceptedEntries: Array<LedgerLogEntry> = []
     let envelopeIDs: Array<string> = []
 
-    const env = decodeControlEnvelope(commit.authenticatedData)
-    if (!env.ok) {
-      precomputedReject = true
+    if (commit == null) {
+      // An external-join commit carries no control envelope: it resolves nothing,
+      // folds nothing, enacts no ledger entries, and never moves the head. The
+      // candidate roster is the current roster unchanged. Its only precomputed
+      // reject is an unresolvable committer DID (no UpdatePath / bad credential),
+      // which cannot be a valid resync.
+      precomputedReject = externalCommitDID === undefined
     } else {
-      const ids = env.envelope.entries ?? []
-      envelopeIDs = ids
-      const resolved = new Map<string, LedgerLogEntry>()
-      const missing: Array<string> = []
-      for (const id of ids) {
-        const held = this.#entryBodies.get(id)
-        if (held != null) {
-          resolved.set(id, { ...held, entryID: id })
-        } else {
-          missing.push(id)
-        }
-      }
-      if (missing.length > 0) {
-        if (this.#resolveLedgerEntries == null) {
-          throw new MissingLedgerEntriesError(missing)
-        }
-        const tokens = await this.#resolveLedgerEntries(missing)
-        for (const token of tokens) {
-          const id = ledgerEntryDigest(token)
-          // Content-addressing binds the untrusted body to the requested id.
-          if (resolved.has(id) || !missing.includes(id)) continue
-          const verified = await verifyLedgerEntry(token)
-          if (verified == null) continue
-          resolved.set(id, { token, verified, entryID: id })
-        }
-        const stillMissing = missing.filter((id) => !resolved.has(id))
-        if (stillMissing.length > 0) {
-          throw new MissingLedgerEntriesError(stillMissing)
-        }
-      }
-      const ordered: Array<LedgerLogEntry> = ids.map((id) => {
-        const input = resolved.get(id)
-        if (input == null) throw new MissingLedgerEntriesError([id])
-        return input
-      })
-
-      const foldResult = foldEnvelope(this.#roster, ordered, this.groupID)
-      if (!foldResult.ok) {
+      const env = decodeControlEnvelope(commit.authenticatedData)
+      if (!env.ok) {
         precomputedReject = true
       } else {
-        candidateRoster = foldResult.roster
-        surfaced = foldResult.surfaced
-        acceptedEntries = ordered
+        const ids = env.envelope.entries ?? []
+        envelopeIDs = ids
+        const resolved = new Map<string, LedgerLogEntry>()
+        const missing: Array<string> = []
+        for (const id of ids) {
+          const held = this.#entryBodies.get(id)
+          if (held != null) {
+            resolved.set(id, { ...held, entryID: id })
+          } else {
+            missing.push(id)
+          }
+        }
+        if (missing.length > 0) {
+          if (this.#resolveLedgerEntries == null) {
+            throw new MissingLedgerEntriesError(missing)
+          }
+          const tokens = await this.#resolveLedgerEntries(missing)
+          for (const token of tokens) {
+            const id = ledgerEntryDigest(token)
+            // Content-addressing binds the untrusted body to the requested id.
+            if (resolved.has(id) || !missing.includes(id)) continue
+            const verified = await verifyLedgerEntry(token)
+            if (verified == null) continue
+            resolved.set(id, { token, verified, entryID: id })
+          }
+          const stillMissing = missing.filter((id) => !resolved.has(id))
+          if (stillMissing.length > 0) {
+            throw new MissingLedgerEntriesError(stillMissing)
+          }
+        }
+        const ordered: Array<LedgerLogEntry> = ids.map((id) => {
+          const input = resolved.get(id)
+          if (input == null) throw new MissingLedgerEntriesError([id])
+          return input
+        })
+
+        const foldResult = foldEnvelope(this.#roster, ordered, this.groupID)
+        if (!foldResult.ok) {
+          precomputedReject = true
+        } else {
+          candidateRoster = foldResult.roster
+          surfaced = foldResult.surfaced
+          acceptedEntries = ordered
+        }
       }
     }
 
@@ -579,7 +633,7 @@ export class GroupHandle {
         anchorExtensionData,
         expectedHeadExtensionData,
         commitEnactsEntries,
-        externalCommitDID: undefined,
+        externalCommitDID,
       })
     }
 

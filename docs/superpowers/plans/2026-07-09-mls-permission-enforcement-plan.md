@@ -1624,3 +1624,45 @@ refuses to author it. The defensive-drop behaviour of the low-level primitive st
 this design is per-entry and positional, never per-committer — the same insight that makes rotation
 sound (state-so-far) makes the committer's own admin-ness insufficient. The write path had to run the
 *receivers'* check, not its own.
+
+### 2026-07-11 — Question 4.1b: enforce the policy on external-join commits
+
+**Findings:** The commit policy now runs on external-join (PublicMessage `new_member_commit`) commits.
+The pre-pass resolves `externalCommitDID` from the commit's own UpdatePath leaf credential and feeds
+the already-written `evaluateExternalCommit` rule. Suite **263 green** (261 + 2), tsc clean, biome
+clean.
+
+**This closed a complete enforcement bypass, not a missing verdict.** Reproduced before the fix: a DID
+in **no roster** external-joins with a leaked GroupInfo and is admitted — `#prepareCommitPipeline`
+gated on `readPrivateCommit`, so a PublicMessage commit took the pre-envelope path with a `undefined`
+callback and ts-mls applied *no policy at all*. Every membership guard built to date protected only the
+PrivateMessage path. After the fix the stranger is rejected with `CommitRejectedError`, epoch unchanged,
+roster byte-identical; verified independently.
+
+**Legitimate resync survived untouched.** `external-rejoin.test.ts` — the load-bearing regression —
+stayed fully green with **zero edits**. That is the proof the new enforcement admits real rejoins while
+rejecting strangers: the resync shape (`{external_init, remove-of-self}`, rejoiner's DID on both the new
+UpdatePath leaf and the removed stale leaf) agrees with the policy rule, so no design disagreement
+surfaced.
+
+The external branch enacts nothing: no envelope decode, no resolve, no `foldEnvelope`, no head move;
+`candidateRoster` is the current roster unchanged. Its only precomputed reject is an unresolvable
+committer DID (absent UpdatePath or a credential that does not parse) — which cannot be a valid resync.
+`readExternalCommit` mirrors `readPrivateCommit`/`readMessageEpoch`, narrowing the `unknown` frame
+structurally to `publicMessage.content.commit.path.leafNode.credential`.
+
+**Spec impact:** none.
+
+**Learned:** the policy machinery for external commits (`evaluateExternalCommit`, `externalCommitDID`,
+the `external_init` routing) had been fully written since Phase 3 and was *dead code* — nothing reached
+it, because the enforcement entry point only recognised PrivateMessage commits. A rule that is written
+but never dispatched reads as "covered" in the source and is a live hole in the runtime. The gap was in
+the wiring, not the rule; finding it needed running the actual external join, not reading policy.ts.
+The design intent the rule encodes is now enforced: an external commit is a *resync of an existing
+member*, never a new join — new members arrive through Welcome.
+
+**A limit worth recording:** policy cases "remove targets a different leaf" and "external commit with
+extra proposals" cannot be re-proven at the integration layer, because mutating a signed external
+commit's proposal set invalidates the ts-mls signature — ts-mls crypto rejects it before the policy is
+consulted. Those cases stay unit-tested against the pure rule in `policy.test.ts`, which is the correct
+layer for them.
