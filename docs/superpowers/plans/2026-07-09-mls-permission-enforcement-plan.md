@@ -1752,3 +1752,56 @@ package README where a future contributor would try to add a `'read'` tier.
 by tsc and the grep, but prose has no compiler — the README described a capability chain that no longer
 exists, and only reading it against the current code surfaces that. A green build does not prove the
 docs are true.
+
+### 2026-07-11 — Question 6.1: the enforcement holds across real peers
+
+**Findings:** A new integration test, `tests/integration/test/mls-permissions.test.ts`, exercises the
+enforcement end to end over the hub's real `DirectTransports` fan-out — real commit bytes encoded to
+base64, published to a group topic, decoded by each peer, and fed to `processMessage`. The integration
+suite went from 2 files / 11 tests to 3 / 17 (6 new), tsc clean, biome clean; no production code changed.
+The `@kumiai/mls` `lib/` had to be rebuilt first — the integration package resolves the dependency
+through its built output, not `src`, and `lib/` still held the deleted `capability.*` from Q2.5.
+
+**What lands at the integration layer, and what stays a unit test.** The transport is a byte pipe;
+every enforcement decision is peer-side in `processMessage`. So the scenarios that reach the receiver
+through the public API prove themselves over the wire, and the ones that require *forging* a commit the
+public API refuses to build stay at the unit/policy layer — the same layering settled at Q4.1b.
+
+- **Admin Remove converges; a member cannot author one.** Alice removes Carol; Bob applies the wire
+  bytes and drops Carol's leaf, epoch advanced. Membership is asserted via `listMembers()`, not
+  `roster.roles`: a bare Remove carries no demotion, so Carol's role grant stays in the roster by design
+  (removal is not revocation). A member's `removeMember` throws locally on the committer-admin guard; the
+  receiver-side rejection of a *forged* member-Remove is unit-covered, not ported into the integration
+  package.
+- **A promotion rides its commit.** Alice's `commitLedgerEntries` promotion crosses the hub and Bob
+  folds `admin`; Bob, now an admin the group agrees on, invites Carol, who converges on the same roster —
+  the entry that authorizes an action travels with the commit that uses it.
+- **A missing entry blocks, resolves out of band, and retries clean.** The first `processMessage`
+  rejects with `MissingLedgerEntriesError` naming the id, epoch unchanged; the resolver map is populated
+  out of band; reprocessing the *same bytes on the same handle* succeeds. The failure is not cached.
+- **A member may resync; a stranger may not.** Bob's legitimate resync crosses the hub and Alice
+  accepts. The stranger case landed *stronger and one layer up* than the brief anticipated: a stranger
+  passing `resync: true` is stopped **by ts-mls at construction** — there is no prior leaf of hers to
+  remove — before any commit bytes exist, so nothing ships. The receiver-side Q4.1b rejection of a
+  non-roster external commit is therefore not reachable through the public API (the only external-join
+  flavour it exposes is resync, which a non-member cannot satisfy) and remains unit-covered in
+  `policy.test.ts`.
+
+**Spec impact:** none. The spec's Integration section named four scenarios "against real transports";
+scenarios 2, 3, and the accept-half of 4 exercise real enforcement over the wire, while scenario 1 and
+the reject-half of 4 land as happy-path convergence plus the honest-client guards, with the receiver-side
+rejections proven at the unit layer. Worth noting when the spec is next touched: two of its integration
+assertions are, by the design's own layering, unit properties — a member's forged Remove and a stranger's
+external commit both require the low-level ts-mls client the public API deliberately withholds.
+
+**A verification catch.** The probe's stranger assertion was a bare `.rejects.toThrow()` — it would pass
+on *any* thrown error, including an unrelated setup failure, proving nothing. Tightened to
+`.rejects.toThrow(/resync|leaf/i)` (resilient to ts-mls rewording) alongside the epoch/roster/no-leaf
+unchanged assertions that show nothing leaked. A test that asserts "it throws" without pinning *why* is a
+false-positive waiting to happen.
+
+**Learned:** "test it against real transports" quietly assumes the property is reachable through the
+transport. Two of the four were not — not because the enforcement is weak, but because the public API
+refuses to *produce* the malicious input a receiver would reject, stopping the attack a layer earlier
+than the wire. The integration layer proves the honest paths converge and the client-side guards hold;
+the receiver-side rejections are a unit concern, because you cannot ship what you cannot build.
