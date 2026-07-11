@@ -1547,6 +1547,51 @@ describe('GroupHandle commit enforcement (default-on)', () => {
     expect(surfaced).toEqual([])
   })
 
+  test('rejects a commit carrying an entry signed for a different group', async () => {
+    // Alice signs a role entry naming an entirely different groupID: the signature
+    // verifies and Alice is a genuine admin (of the receiving group, too) — only the
+    // entry's own groupID field is wrong. Built with entryCommitBytes so the commit
+    // carries a proper group-context-extensions proposal moving the head by this
+    // entry's id — a well-formed commit an admin could plausibly have authored,
+    // structurally indistinguishable from a legitimate one. That means the ONLY
+    // thing that can reject it is foldEnvelope's own cross-group check, run with
+    // `this.groupID` for the RECEIVING group threaded in from #prepareCommitPipeline
+    // — unlike a commit with no group-context-extensions proposal at all, which
+    // defaultCommitPolicy's separate "must carry a GCE proposal to enact entries"
+    // rule would reject regardless, masking a broken cross-group check. A wiring
+    // regression that dropped or mis-threaded that argument (e.g. compared the
+    // entry's own groupID against itself) would let this commit through and apply
+    // Bob's forged promotion.
+    const surfaced: Array<VerifiedLedgerEntry> = []
+    const bobTokenBox: { token?: string } = {}
+    const { alice, bob, aliceGroup, bobGroup, groupID } = await twoMemberGroup({
+      bobOptions: {
+        resolveLedgerEntries: async () => (bobTokenBox.token != null ? [bobTokenBox.token] : []),
+        onLedgerEntries: (entries) => {
+          surfaced.push(...entries)
+        },
+      },
+    })
+
+    const crossGroupToken = await signLedgerEntry(alice, {
+      type: ROLE_ENTRY_TYPE,
+      groupID: `${groupID}-elsewhere`,
+      subject: bob.id,
+      value: 'admin',
+    })
+    bobTokenBox.token = crossGroupToken
+
+    const bytes = await entryCommitBytes(aliceGroup, [crossGroupToken])
+
+    const epochBefore = bobGroup.epoch
+    const rosterBefore = [...bobGroup.roster.roles.entries()]
+    await expect(bobGroup.processMessage(bytes)).rejects.toThrow(CommitRejectedError)
+    expect(bobGroup.epoch).toBe(epochBefore)
+    expect([...bobGroup.roster.roles.entries()]).toEqual(rosterBefore)
+    expect(bobGroup.roster.roles.get(normalizeDID(bob.id))).toBe('member')
+    expect(surfaced).toEqual([])
+  })
+
   test('application messages run no envelope work', async () => {
     const { aliceGroup, bobGroup } = await twoMemberGroup({
       bobOptions: {

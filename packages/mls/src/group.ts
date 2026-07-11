@@ -46,6 +46,7 @@ import {
 import {
   buildCurrentGroupAnchorExtension,
   controlCapabilities,
+  decodeGroupAnchor,
   GROUP_ANCHOR_EXTENSION_TYPE,
   type GroupAnchor,
   LEDGER_HEAD_EXTENSION_TYPE,
@@ -492,7 +493,14 @@ export class GroupHandle {
     return [...this.#iterateMembers()]
   }
 
-  /** Encrypt an application message for the group, returning framed wire bytes. */
+  /**
+   * Encrypt an application message for the group, returning framed wire bytes.
+   * Encrypts at this handle's current epoch. A handle a commit has already
+   * superseded (see {@link commitInvite}, {@link removeMember},
+   * {@link commitLedgerEntries}) must not be reused to send — doing so silently
+   * emits an application message at the now-stale epoch; adopt the commit's
+   * `newGroup` and call `encrypt` on that instead.
+   */
   async encrypt(plaintext: Uint8Array): Promise<Uint8Array> {
     return mutexFor(this).run(async () => {
       const { newState, message, consumed } = await createApplicationMessage({
@@ -738,7 +746,26 @@ export async function createGroup(
   // Every group is anchored at creation: the creator is the epoch-0 admin, and
   // the ledger head starts at genesis. A caller-supplied anchor (e.g. one
   // carrying an `app` payload) is left untouched — the caller owns its contents.
+  // Its `creatorDID` coupling to the creating identity is validated below; a
+  // decode failure here is not this guard's concern and is left to the
+  // downstream fail-closed decode in the GroupHandle constructor.
   const extensions = [...(options?.extensions ?? [])]
+  const suppliedAnchorExtension = extensions.find(
+    (ext) => ext.extensionType === GROUP_ANCHOR_EXTENSION_TYPE,
+  )
+  if (suppliedAnchorExtension != null) {
+    const suppliedAnchorData = suppliedAnchorExtension.extensionData
+    const suppliedAnchor =
+      suppliedAnchorData instanceof Uint8Array ? decodeGroupAnchor(suppliedAnchorData) : null
+    if (
+      suppliedAnchor != null &&
+      normalizeDID(suppliedAnchor.creatorDID) !== normalizeDID(identity.id)
+    ) {
+      throw new Error(
+        `createGroup: the anchor's creatorDID (${suppliedAnchor.creatorDID}) must be the creating identity (${identity.id})`,
+      )
+    }
+  }
   if (!extensions.some((ext) => ext.extensionType === GROUP_ANCHOR_EXTENSION_TYPE)) {
     extensions.push(buildCurrentGroupAnchorExtension(identity.id))
   }
@@ -1057,6 +1084,13 @@ export type CommitLedgerEntriesResult = {
  * already carries, which is how an admin is demoted back to a role they previously held.
  * Rejects an empty `tokens` list: a commit that enacts nothing has no reason to be
  * authored here.
+ *
+ * Reads `group`'s state and returns a NEW derived handle (`newGroup`); it never
+ * advances `group` itself. The caller must adopt `newGroup` — never reuse `group` —
+ * before issuing the next commit: two commits issued from the same source handle
+ * both frame at that handle's epoch and diverge. The per-handle mutex only
+ * serializes concurrent calls against one handle; it does not make it safe to
+ * produce a second commit from a handle a prior commit has already superseded.
  */
 export async function commitLedgerEntries(
   group: GroupHandle,
@@ -1104,6 +1138,13 @@ export type CommitInviteResult = {
  * The invite itself carries the group's whole history — a joiner has nothing to fold
  * it onto — but only the entries it adds beyond that history ride the commit; see
  * {@link entriesAddedByInvite} and {@link commitWithEntries}.
+ *
+ * Reads `group`'s state and returns a NEW derived handle (`newGroup`); it never
+ * advances `group` itself. The caller must adopt `newGroup` — never reuse `group` —
+ * before issuing the next commit: two commits issued from the same source handle
+ * both frame at that handle's epoch and diverge. The per-handle mutex only
+ * serializes concurrent calls against one handle; it does not make it safe to
+ * produce a second commit from a handle a prior commit has already superseded.
  */
 export async function commitInvite(
   group: GroupHandle,
@@ -1259,6 +1300,13 @@ export type RemoveMemberResult = {
  * the roster the commit's entries fold to. So removing an admin means riding the
  * demotion entry on the same commit — pass it as `ledgerEntries`. The entry is signed
  * by the caller, who holds the identity; this only carries it.
+ *
+ * Reads `group`'s state and returns a NEW derived handle (`newGroup`); it never
+ * advances `group` itself. The caller must adopt `newGroup` — never reuse `group` —
+ * before issuing the next commit: two commits issued from the same source handle
+ * both frame at that handle's epoch and diverge. The per-handle mutex only
+ * serializes concurrent calls against one handle; it does not make it safe to
+ * produce a second commit from a handle a prior commit has already superseded.
  */
 export async function removeMember(
   group: GroupHandle,

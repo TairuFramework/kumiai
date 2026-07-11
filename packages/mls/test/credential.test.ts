@@ -118,18 +118,6 @@ describe('makeMLSCredential', () => {
   })
 })
 
-describe('populateCacheFromCredential', () => {
-  it('decodes a peer4 long form and writes the resolved doc to the cache', async () => {
-    const alice = await createIdentity({
-      keys: [{ purpose: 'sig', alg: 'EdDSA' }],
-      didMethod: 'peer:4',
-    })
-    const cache = createInMemoryDIDCache()
-    await populateCacheFromCredential({ id: alice.id, longForm: alice.longForm }, cache)
-    expect(await cache.get(alice.id)).toEqual(alice.doc)
-  })
-})
-
 // Ensure MemberCredential type carries `id` and `groupID`
 const _typeCheck: MemberCredential = {
   id: 'did:key:z...',

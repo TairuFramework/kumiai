@@ -89,6 +89,23 @@ describe('group anchor', () => {
     ).rejects.toThrow(/group anchor extension present but could not be decoded/)
   })
 
+  test('createGroup rejects a caller-supplied anchor whose creatorDID is not the creating identity', async () => {
+    const alice = randomIdentity()
+    const mallory = randomIdentity()
+    const anchor: GroupAnchor = { creatorDID: mallory.id, version: 1 }
+
+    await expect(
+      createGroup(alice, 'wrong-creator', {
+        extensions: [buildGroupAnchorExtension(anchor)],
+        capabilities: controlCapabilities(),
+      }),
+    ).rejects.toThrow(
+      new RegExp(
+        `createGroup: the anchor's creatorDID \\(${mallory.id}\\) must be the creating identity \\(${alice.id}\\)`,
+      ),
+    )
+  })
+
   test('decodeGroupAnchor returns null (never throws) on malformed bytes or wrong shape', () => {
     const enc = (s: string) => new TextEncoder().encode(s)
     // Not JSON.
