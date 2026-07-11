@@ -45,7 +45,7 @@ function context(overrides: Partial<CommitPolicyContext> = {}): CommitPolicyCont
     baseRoster,
     candidateRoster: baseRoster,
     didOfLeaf: (leafIndex) => leaves.get(leafIndex),
-    anchorExtensionData: ANCHOR_BYTES,
+    currentExtensions: controlExtensions(HEAD_BYTES.slice()),
     expectedHeadExtensionData: HEAD_BYTES,
     commitEnactsEntries: false,
     ...overrides,
@@ -82,6 +82,15 @@ function anchorExtension(bytes: Uint8Array): GroupContextExtension {
 
 function headExtension(bytes: Uint8Array): GroupContextExtension {
   return makeCustomExtension({ extensionType: LEDGER_HEAD_EXTENSION_TYPE, extensionData: bytes })
+}
+
+/** A non-head, non-anchor GroupContext extension type — stands in for something like
+ *  external_senders that an admin must not be able to inject or strip on a head move. */
+const EXTRA_EXTENSION_TYPE = 0xf200
+const EXTRA_BYTES = new Uint8Array([0x09, 0x08, 0x07])
+
+function extraExtension(bytes: Uint8Array): GroupContextExtension {
+  return makeCustomExtension({ extensionType: EXTRA_EXTENSION_TYPE, extensionData: bytes })
 }
 
 /** The list a legitimate head update installs: the unchanged anchor and the head. */
@@ -192,6 +201,79 @@ describe('defaultCommitPolicy', () => {
     expect(defaultCommitPolicy(commit(MEMBER_LEAF, [withSender(gce, undefined)]), context())).toBe(
       'reject',
     )
+  })
+
+  test('group_context_extensions accepts moving only the head while every other extension is unchanged', () => {
+    // A group carrying an extra extension: moving the head to its expected value while
+    // leaving the anchor and the extra extension byte-identical and in place is accepted.
+    const current = [
+      anchorExtension(ANCHOR_BYTES.slice()),
+      extraExtension(EXTRA_BYTES.slice()),
+      headExtension(HEAD_BYTES.slice()),
+    ]
+    const gce = gceProposal([
+      anchorExtension(ANCHOR_BYTES.slice()),
+      extraExtension(EXTRA_BYTES.slice()),
+      headExtension(OTHER_HEAD_BYTES.slice()),
+    ])
+    expect(
+      defaultCommitPolicy(
+        commit(ADMIN_LEAF, [withSender(gce, undefined)]),
+        context({ currentExtensions: current, expectedHeadExtensionData: OTHER_HEAD_BYTES }),
+      ),
+    ).toBe('accept')
+  })
+
+  test('group_context_extensions rejects a correct head move that injects a new extension', () => {
+    const current = [anchorExtension(ANCHOR_BYTES.slice()), headExtension(HEAD_BYTES.slice())]
+    const gce = gceProposal([
+      anchorExtension(ANCHOR_BYTES.slice()),
+      headExtension(HEAD_BYTES.slice()),
+      extraExtension(EXTRA_BYTES.slice()),
+    ])
+    expect(
+      defaultCommitPolicy(
+        commit(ADMIN_LEAF, [withSender(gce, undefined)]),
+        context({ currentExtensions: current, expectedHeadExtensionData: HEAD_BYTES }),
+      ),
+    ).toBe('reject')
+  })
+
+  test('group_context_extensions rejects a correct head move that strips an existing extension', () => {
+    const current = [
+      anchorExtension(ANCHOR_BYTES.slice()),
+      extraExtension(EXTRA_BYTES.slice()),
+      headExtension(HEAD_BYTES.slice()),
+    ]
+    const gce = gceProposal([
+      anchorExtension(ANCHOR_BYTES.slice()),
+      headExtension(HEAD_BYTES.slice()),
+    ])
+    expect(
+      defaultCommitPolicy(
+        commit(ADMIN_LEAF, [withSender(gce, undefined)]),
+        context({ currentExtensions: current, expectedHeadExtensionData: HEAD_BYTES }),
+      ),
+    ).toBe('reject')
+  })
+
+  test('group_context_extensions rejects a correct head move that alters another extension', () => {
+    const current = [
+      anchorExtension(ANCHOR_BYTES.slice()),
+      extraExtension(EXTRA_BYTES.slice()),
+      headExtension(HEAD_BYTES.slice()),
+    ]
+    const gce = gceProposal([
+      anchorExtension(ANCHOR_BYTES.slice()),
+      extraExtension(new Uint8Array([0xbe, 0xef])),
+      headExtension(HEAD_BYTES.slice()),
+    ])
+    expect(
+      defaultCommitPolicy(
+        commit(ADMIN_LEAF, [withSender(gce, undefined)]),
+        context({ currentExtensions: current, expectedHeadExtensionData: HEAD_BYTES }),
+      ),
+    ).toBe('reject')
   })
 
   test('a commit that enacts entries without a group_context_extensions proposal is rejected', () => {

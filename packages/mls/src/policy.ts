@@ -1,18 +1,23 @@
 import { normalizeDID } from '@kokuin/token'
-import type { IncomingMessageAction, Proposal, ProposalWithSender } from 'ts-mls'
+import type {
+  GroupContextExtension,
+  IncomingMessageAction,
+  Proposal,
+  ProposalWithSender,
+} from 'ts-mls'
 import { defaultProposalTypes, isDefaultProposal } from 'ts-mls'
 
-import { GROUP_ANCHOR_EXTENSION_TYPE, LEDGER_HEAD_EXTENSION_TYPE } from './anchor.js'
+import { LEDGER_HEAD_EXTENSION_TYPE } from './anchor.js'
 import type { RosterState } from './roster.js'
 
 /**
  * Everything the receiving-side gate needs, resolved by the caller. Pure: no
  * group handle, no I/O. `didOfLeaf` maps a pre-commit ratchet-tree leaf index to
  * its member DID (undefined for an empty or unresolvable leaf).
- * `anchorExtensionData` is the CURRENT anchor extension's verbatim bytes, for the
- * byte comparison the group-context-extensions rule makes. `externalCommitDID`
- * is the DID resolved from an external commit's UpdatePath leaf (precomputed by
- * the caller); undefined for a non-external commit.
+ * `currentExtensions` is the pre-commit GroupContext extension list, the baseline
+ * the group-context-extensions rule pins. `externalCommitDID` is the DID resolved
+ * from an external commit's UpdatePath leaf (precomputed by the caller); undefined
+ * for a non-external commit.
  */
 export type CommitPolicyContext = {
   /** Roster before this commit applies. Judges every proposal sender's authority:
@@ -22,7 +27,9 @@ export type CommitPolicyContext = {
    *  removed target: a Remove of a leaf still `admin` here carried no demotion and is rejected. */
   candidateRoster: RosterState
   didOfLeaf: (leafIndex: number) => string | undefined
-  anchorExtensionData: Uint8Array
+  /** The pre-commit GroupContext extension list. A group_context_extensions commit
+   *  may change nothing in it but the ledger_head entry. */
+  currentExtensions: Array<GroupContextExtension>
   /** The head extension bytes this commit must install: the current head extended by
    *  the commit's envelope entry ids, in envelope order. Equals the current head when
    *  the commit enacts nothing, so a commit that moves the head without enacting
@@ -68,11 +75,14 @@ function isAdmin(context: CommitPolicyContext, leafIndex: number | undefined): b
 
 /**
  * The group-context-extensions rule: an admin may replace the extension list
- * only when it carries the anchor extension byte-identical to the current one and
- * the ledger-head extension holding exactly the head this commit's envelope
- * accounts for. A GCE proposal replaces the *entire* list, so every legitimate
- * head update re-includes the unchanged anchor; a proposal that mutates or drops
- * the anchor is an anchor-tampering attempt and is rejected.
+ * only to move the ledger-head extension to the head this commit's envelope
+ * accounts for. A GCE proposal replaces the *entire* list, so the proposed list
+ * must positionally equal the current list — same length, same extension types in
+ * the same positions, byte-identical data — with the single exception of the
+ * ledger_head entry, whose data must equal the expected head. This pins the anchor
+ * and every other extension: an admin cannot inject or strip an extension (e.g.
+ * external_senders, which grants a non-member the ability to inject proposals)
+ * inside an otherwise-valid head move.
  *
  * The head must equal the current head extended by the envelope's entry ids, in
  * envelope order. A head moved to anything else — including moved at all by a
@@ -83,18 +93,28 @@ function evaluateGroupContextExtensions(
   extensions: Array<{ extensionType: number; extensionData: unknown }>,
   context: CommitPolicyContext,
 ): IncomingMessageAction {
-  const anchor = extensions.find((ext) => ext.extensionType === GROUP_ANCHOR_EXTENSION_TYPE)
-  if (anchor === undefined || !(anchor.extensionData instanceof Uint8Array)) {
-    return 'reject'
+  const expected = context.currentExtensions.map((ext) =>
+    ext.extensionType === LEDGER_HEAD_EXTENSION_TYPE
+      ? {
+          extensionType: LEDGER_HEAD_EXTENSION_TYPE,
+          extensionData: context.expectedHeadExtensionData,
+        }
+      : ext,
+  )
+  if (extensions.length !== expected.length) return 'reject'
+  for (let i = 0; i < expected.length; i++) {
+    const got = extensions[i]
+    const want = expected[i]
+    if (got.extensionType !== want.extensionType) return 'reject'
+    if (
+      !(got.extensionData instanceof Uint8Array) ||
+      !(want.extensionData instanceof Uint8Array) ||
+      !bytesEqual(got.extensionData, want.extensionData)
+    ) {
+      return 'reject'
+    }
   }
-  if (!bytesEqual(anchor.extensionData, context.anchorExtensionData)) {
-    return 'reject'
-  }
-  const head = extensions.find((ext) => ext.extensionType === LEDGER_HEAD_EXTENSION_TYPE)
-  if (head === undefined || !(head.extensionData instanceof Uint8Array)) {
-    return 'reject'
-  }
-  return bytesEqual(head.extensionData, context.expectedHeadExtensionData) ? 'accept' : 'reject'
+  return 'accept'
 }
 
 /**

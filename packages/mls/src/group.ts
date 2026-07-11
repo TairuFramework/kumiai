@@ -50,7 +50,6 @@ import {
   type GroupAnchor,
   LEDGER_HEAD_EXTENSION_TYPE,
   readGroupAnchor,
-  readGroupAnchorExtension,
 } from './anchor.js'
 import { createDIDAuthenticationService } from './authentication.js'
 import { sanitizeRatchetTree } from './codec.js'
@@ -624,46 +623,19 @@ export class GroupHandle {
       }
     }
 
-    // Precompute the pure sync inputs off the pre-commit ratchet tree.
-    const leafToDID = new Map<number, string>()
-    for (const member of this.#iterateMembers()) {
-      leafToDID.set(member.leafIndex, member.id)
-    }
-    const didOfLeaf = (leafIndex: number): string | undefined => leafToDID.get(leafIndex)
-    const anchorExt = readGroupAnchorExtension(this)
-    const anchorExtensionData =
-      anchorExt != null && anchorExt.extensionData instanceof Uint8Array
-        ? anchorExt.extensionData
-        : new Uint8Array()
-    // The head this commit must install: the pre-commit head extended by the
-    // envelope's ids, in envelope order. An unreadable head yields bytes no real
-    // extension can equal, so such a group can install no head and enact nothing.
-    const headExt = readLedgerHeadExtension(this)
-    const currentHead =
-      headExt != null && headExt.extensionData instanceof Uint8Array
-        ? decodeLedgerHead(headExt.extensionData)
-        : null
-    const expectedHeadExtensionData =
-      currentHead == null
-        ? new Uint8Array()
-        : encodeLedgerHead(extendHead(currentHead.head, envelopeIDs))
-    const commitEnactsEntries = envelopeIDs.length > 0
-    const baseRoster = this.#roster
+    const context = buildCommitPolicyContext(this, {
+      baseRoster: this.#roster,
+      candidateRoster,
+      entryIDs: envelopeIDs,
+      ...(externalCommitDID !== undefined && { externalCommitDID }),
+    })
 
     const combined: IncomingMessageCallback = (incoming) => {
       // A decode/fold failure is a hard reject even under a caller policy: the
       // ledger the commit depends on is unresolvable or malformed.
       if (precomputedReject) return 'reject'
       if (callerPolicy != null) return callerPolicy(incoming)
-      return defaultCommitPolicy(incoming, {
-        baseRoster,
-        candidateRoster,
-        didOfLeaf,
-        anchorExtensionData,
-        expectedHeadExtensionData,
-        commitEnactsEntries,
-        externalCommitDID,
-      })
+      return defaultCommitPolicy(incoming, context)
     }
 
     const applyOnAccept = () => {
@@ -909,6 +881,41 @@ function extensionsWithHead(
   )
 }
 
+/** Build the CommitPolicyContext both the receive gate and the send-side pending
+ *  filter judge against, so the two always agree. `entryIDs` are the ledger entry
+ *  ids this commit enacts (drives the expected head); `candidateRoster` is the
+ *  post-fold roster receivers install. */
+function buildCommitPolicyContext(
+  handle: GroupHandle,
+  args: {
+    baseRoster: RosterState
+    candidateRoster: RosterState
+    entryIDs: Array<string>
+    externalCommitDID?: string
+  },
+): CommitPolicyContext {
+  const leafToDID = new Map<number, string>()
+  for (const member of handle.listMembers()) leafToDID.set(member.leafIndex, member.id)
+  const headExt = readLedgerHeadExtension(handle)
+  const currentHead =
+    headExt != null && headExt.extensionData instanceof Uint8Array
+      ? decodeLedgerHead(headExt.extensionData)
+      : null
+  const expectedHeadExtensionData =
+    currentHead == null
+      ? new Uint8Array()
+      : encodeLedgerHead(extendHead(currentHead.head, args.entryIDs))
+  return {
+    baseRoster: args.baseRoster,
+    candidateRoster: args.candidateRoster,
+    didOfLeaf: (leafIndex: number) => leafToDID.get(leafIndex),
+    currentExtensions: handle.state.groupContext.extensions,
+    expectedHeadExtensionData,
+    commitEnactsEntries: args.entryIDs.length > 0,
+    ...(args.externalCommitDID !== undefined && { externalCommitDID: args.externalCommitDID }),
+  }
+}
+
 /**
  * The one place a commit carrying control-ledger entries is built: `commitInvite`,
  * `removeMember`, and `commitLedgerEntries` all route through it, so the envelope and
@@ -964,33 +971,13 @@ async function commitWithEntries(
   // Filter the pending-proposal set the committer would otherwise absorb: ts-mls folds every
   // unappliedProposal into the commit, so a non-admin's pending proposal would ride this commit
   // and every peer would reject the whole thing — a single member could stall the group. Judge
-  // each pending proposal against the SAME defaultCommitPolicy and the SAME context receivers
-  // build for this commit (base = pre-commit roster, candidate = post-fold roster), dropping any
-  // the group would reject. A modified client that skips this produces a commit the group refuses.
-  const leafToDID = new Map<number, string>()
-  for (const member of group.listMembers()) leafToDID.set(member.leafIndex, member.id)
-  const anchorExt = readGroupAnchorExtension(group)
-  const anchorExtensionData =
-    anchorExt != null && anchorExt.extensionData instanceof Uint8Array
-      ? anchorExt.extensionData
-      : new Uint8Array()
-  const headExt = readLedgerHeadExtension(group)
-  const currentHead =
-    headExt != null && headExt.extensionData instanceof Uint8Array
-      ? decodeLedgerHead(headExt.extensionData)
-      : null
-  const expectedHeadExtensionData =
-    currentHead == null
-      ? new Uint8Array()
-      : encodeLedgerHead(extendHead(currentHead.head, entryIDs))
-  const filterContext: CommitPolicyContext = {
+  // each pending proposal against the same defaultCommitPolicy and the same context receivers
+  // build for this commit, dropping any the group would reject.
+  const filterContext = buildCommitPolicyContext(group, {
     baseRoster: group.roster,
     candidateRoster: fold.roster,
-    didOfLeaf: (leafIndex: number) => leafToDID.get(leafIndex),
-    anchorExtensionData,
-    expectedHeadExtensionData,
-    commitEnactsEntries: entryIDs.length > 0,
-  }
+    entryIDs,
+  })
   const keptPending: typeof group.state.unappliedProposals = {}
   for (const [ref, pws] of Object.entries(group.state.unappliedProposals)) {
     if (defaultCommitPolicy({ kind: 'proposal', proposal: pws }, filterContext) !== 'reject') {
