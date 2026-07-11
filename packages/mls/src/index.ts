@@ -83,6 +83,7 @@ export {
   type JoinGroupExternalParams,
   type JoinGroupExternalResult,
   joinGroupExternal,
+  type LedgerLogEntry,
   makeMLSCredential,
   type ProcessWelcomeParams,
   type ProcessWelcomeResult,

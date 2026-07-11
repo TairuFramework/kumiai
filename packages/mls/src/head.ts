@@ -40,13 +40,17 @@ export class LedgerIncompleteError extends Error {
     this.#actual = actual
   }
 
-  /** The authenticated head read from the group's GroupContext. */
-  get expected(): Uint8Array {
+  /** The authenticated head read from the group's GroupContext. Named apart from
+   *  `expected`/`actual` on purpose: a test runner's diff formatter assigns those
+   *  two properties on any thrown Error, and a getter-only pair turns an
+   *  unexpected throw into a `Cannot set property` TypeError instead of the real
+   *  failure. */
+  get expectedHead(): Uint8Array {
     return this.#expected
   }
 
   /** The head recomputed from the entries the inviter supplied. */
-  get actual(): Uint8Array {
+  get actualHead(): Uint8Array {
     return this.#actual
   }
 }

@@ -151,7 +151,7 @@ describe('ledger head chain', () => {
     }
     expect(caught).toBeInstanceOf(LedgerIncompleteError)
     const error = caught as LedgerIncompleteError
-    expect(error.expected).toEqual(head)
-    expect(error.actual).toEqual(other)
+    expect(error.expectedHead).toEqual(head)
+    expect(error.actualHead).toEqual(other)
   })
 })

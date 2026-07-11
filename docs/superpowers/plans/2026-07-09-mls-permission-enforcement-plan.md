@@ -1539,3 +1539,51 @@ gates are the head coupling and the issuer check), and it was silently eating le
 **Learned:** wiring the head is what surfaced the dedup bug — the head could not reproduce a list
 containing the same id twice, which forced the duplicate to the surface. An integrity check earns its
 keep before any attacker shows up, by making the model's own inconsistencies fail loudly.
+
+### 2026-07-11 — Question 5.2d: the ledger is an ordered log, not a set of claims
+
+**Findings:** An admin can now be demoted back to a role they previously held. `#ledger` became an
+ordered `Array<LedgerLogEntry>` plus a content-keyed `#entryBodies` store for resolution; narrowing
+moved from content-based to **positional** (`commitLedgerEntries` enacts exactly what it is given;
+`commitInvite` slices `invite.ledgerEntries` past the committer's log length, and throws if the prefix
+does not match its own log). The regression failed first with `expected 'admin' to be 'member'` and
+passes after. Suite **261 green**, tsc clean, biome clean.
+
+Verified independently: the re-signed demotion token has the **same content id** as the original grant
+(Ed25519 is deterministic), yet the log holds all three enactments, the roster ends at `member`, and
+`computeHead(groupID, ledgerTokens.map(ledgerEntryDigest))` — over an id list containing the repeat —
+matches the head authenticated in the GroupContext. The log and the head chain agree, which is what
+`head.ts` assumed from the start.
+
+**Dedup was never a security control, and its removal was checked, not assumed.** Two gates do the real
+work, both pinned by tests: (1) the head coupling makes enactment admin-only — a member holding a
+genuine admin-signed promotion naming *himself* still cannot enact it; (2) `foldEnvelope` judges each
+entry's *issuer* in the state-so-far at its own position, so an admin who has since been demoted has
+their un-enacted tokens killed — a *current* admin trying to enact one of them is rejected. The only new
+capability is that a current admin may re-enact a claim at a fresh position, which grants no power a
+current admin lacks (they could sign an equivalent claim anyway) and is exactly the behaviour the fix
+exists to allow.
+
+`ord` is no longer needed to dodge a content collision: the removal test that stamped `ord: '1'` drops
+it and passes. The `createInvite` duplicate-append guard added in 5.2c was removed — a role token the
+ledger already holds is a legal re-grant, and positional narrowing handles it. `LedgerIncompleteError`'s
+getters were renamed to `expectedHead`/`actualHead` so vitest can format an unexpected throw (its diff
+formatter assigns to `expected`/`actual`, which previously threw `TypeError: Cannot set property
+expected of Error which has only a getter`).
+
+**Spec impact:** none, but the ledger's identity is now stated: an *ordered log of enactments*, not a
+set of claims. Worth stating explicitly when the spec is next touched.
+
+**Learned:** the head is what exposed this. A `Map` keyed by content id cannot represent a list holding
+the same id twice, so wiring an integrity check that *can* forced the model's own inconsistency to the
+surface — long before an attacker would have found it. The bug had been latent since the roster fold
+was written; every test passed throughout, because no test had ever demoted anyone back to a role they
+started with.
+
+**New question raised (not yet scheduled) — the write path does not fail closed.** `commitWithEntries`
+checks only that the *committer* is an admin; it never runs `foldEnvelope` over the entries it is about
+to enact. So a committer can build a commit that advances its own log and head while every receiver
+rejects it — forking itself off the group. Visible in the demoted-admin test, where the committer's own
+fold drops the entry but the commit is still emitted. Not an escalation (the damage is self-inflicted
+and receivers stay correct), but the write path should refuse to author a commit the group will reject.
+Running `foldEnvelope` at commit time would close it.

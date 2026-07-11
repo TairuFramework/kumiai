@@ -1106,7 +1106,7 @@ describe('GroupHandle control state', () => {
     expect(extensions).toContain(LEDGER_HEAD_EXTENSION_TYPE)
   })
 
-  test('applyLedgerEntries promotes a member and dedups a repeated token', async () => {
+  test('applyLedgerEntries promotes a member and appends a repeated token', async () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
     const { group } = await createGroup(alice, 'promote')
@@ -1121,10 +1121,13 @@ describe('GroupHandle control state', () => {
     await group.applyLedgerEntries([token])
     expect(group.roster.roles.get(normalizeDID(bob.id))).toBe('admin')
 
-    // A repeated token is a no-op (dedup by content id).
+    // The log records the second enactment at its own position — the roster is
+    // unchanged because re-applying the same claim is what it folds to, not because
+    // the entry was skipped.
     await group.applyLedgerEntries([token])
     expect(group.roster.roles.get(normalizeDID(bob.id))).toBe('admin')
     expect(group.roster.roles.size).toBe(2)
+    expect(group.ledgerTokens).toEqual([token, token])
   })
 
   test('applyLedgerEntries drops cross-group and member-signed tokens without throwing', async () => {
@@ -2413,16 +2416,14 @@ describe('every ledger entry rides a commit, and the head proves it', () => {
     await expect(bobGroup.processMessage(bare.commitMessage)).rejects.toThrow(CommitRejectedError)
     expect(bobGroup.epoch).toBe(epochBefore)
 
-    // With the demotion riding the same commit, the removal goes through. An entry is
-    // content-addressed over its signed claim, so demoting Bob back to the role his
-    // invite already granted him would re-sign that very entry and fold to its id — a
-    // no-op. `ord` distinguishes the new claim from the old one.
+    // With the demotion riding the same commit, the removal goes through — even though
+    // demoting Bob back to the role his invite granted him re-signs that very entry, so
+    // the log carries the same content id twice. The later position is what counts.
     const demoteBob = await signLedgerEntry(alice, {
       type: ROLE_ENTRY_TYPE,
       groupID,
       subject: bob.id,
       value: 'member',
-      ord: '1',
     })
     tokens.set(ledgerEntryDigest(demoteBob), demoteBob)
     const removal = await removeMember(promotion.newGroup, bobLeaf as number, [demoteBob])
@@ -2434,5 +2435,233 @@ describe('every ledger entry rides a commit, and the head proves it', () => {
     expect(removal.newGroup.roster.roles.get(normalizeDID(bob.id))).toBe('member')
     expect(head(carolGroup)).toEqual(head(removal.newGroup))
     expect(head(removal.newGroup)).toEqual(computeHead(groupID, ledgerIDs(removal.newGroup)))
+  })
+})
+
+/**
+ * Alice (admin) alone, having granted Bob `member`, promoted him, then demoted him back
+ * — three commits, so her log carries the same content id at two positions.
+ */
+async function demotedThroughRepeat(groupID: string) {
+  const alice = randomIdentity()
+  const bob = randomIdentity()
+  const { group, credential } = await createGroup(alice, groupID)
+  const role = async (value: 'admin' | 'member') =>
+    await signLedgerEntry(alice, { type: ROLE_ENTRY_TYPE, groupID, subject: bob.id, value })
+
+  const granted = await commitLedgerEntries(group, [await role('member')])
+  const promoted = await commitLedgerEntries(granted.newGroup, [await role('admin')])
+  const demoted = await commitLedgerEntries(promoted.newGroup, [await role('member')])
+  return { alice, bob, credential, rootCapability: group.rootCapability, group: demoted.newGroup }
+}
+
+describe('the ledger is an ordered log, not a set of claims', () => {
+  test('an admin can be demoted back to a role they previously held', async () => {
+    const alice = randomIdentity()
+    const bob = randomIdentity()
+    const { group } = await createGroup(alice, 'redemotion')
+
+    const grantMember = await signLedgerEntry(alice, {
+      type: ROLE_ENTRY_TYPE,
+      groupID: group.groupID,
+      subject: bob.id,
+      value: 'member',
+    })
+    const promoteBob = await signLedgerEntry(alice, {
+      type: ROLE_ENTRY_TYPE,
+      groupID: group.groupID,
+      subject: bob.id,
+      value: 'admin',
+    })
+    const demoteBob = await signLedgerEntry(alice, {
+      type: ROLE_ENTRY_TYPE,
+      groupID: group.groupID,
+      subject: bob.id,
+      value: 'member',
+    })
+    // Signing is deterministic, so the demotion is the byte-identical token the first
+    // grant was: the same claim at a later position, which is the only way a demotion
+    // back to a previously-held role can express itself.
+    expect(demoteBob).toBe(grantMember)
+
+    const granted = await commitLedgerEntries(group, [grantMember])
+    expect(granted.newGroup.roster.roles.get(normalizeDID(bob.id))).toBe('member')
+
+    const promoted = await commitLedgerEntries(granted.newGroup, [promoteBob])
+    expect(promoted.newGroup.roster.roles.get(normalizeDID(bob.id))).toBe('admin')
+
+    const demoted = await commitLedgerEntries(promoted.newGroup, [demoteBob])
+    expect(demoted.newGroup.roster.roles.get(normalizeDID(bob.id))).toBe('member')
+
+    // The log holds the repeated claim at both positions, and the head chains both.
+    expect(demoted.newGroup.ledgerTokens).toEqual([grantMember, promoteBob, demoteBob])
+    expect(head(demoted.newGroup)).toEqual(computeHead(group.groupID, ledgerIDs(demoted.newGroup)))
+  })
+
+  test('every receiver folds the demotion the same way, and the head covers the repeat', async () => {
+    const { alice, bob, aliceGroup, bobGroup, carolGroup, groupID, tokens } =
+      await threeMemberGroup()
+
+    const promoteBob = await signLedgerEntry(alice, {
+      type: ROLE_ENTRY_TYPE,
+      groupID,
+      subject: bob.id,
+      value: 'admin',
+    })
+    tokens.set(ledgerEntryDigest(promoteBob), promoteBob)
+    const promotion = await commitLedgerEntries(aliceGroup, [promoteBob])
+    await bobGroup.processMessage(promotion.commitMessage)
+    await carolGroup.processMessage(promotion.commitMessage)
+    expect(bobGroup.roster.roles.get(normalizeDID(bob.id))).toBe('admin')
+
+    // Demoting Bob back to `member` re-signs the very entry his invite carried, so this
+    // commit enacts a content id every receiver already holds.
+    const demoteBob = await signLedgerEntry(alice, {
+      type: ROLE_ENTRY_TYPE,
+      groupID,
+      subject: bob.id,
+      value: 'member',
+    })
+    tokens.set(ledgerEntryDigest(demoteBob), demoteBob)
+    const demotion = await commitLedgerEntries(promotion.newGroup, [demoteBob])
+    await bobGroup.processMessage(demotion.commitMessage)
+    await carolGroup.processMessage(demotion.commitMessage)
+
+    for (const receiver of [demotion.newGroup, bobGroup, carolGroup]) {
+      expect(receiver.roster.roles.get(normalizeDID(bob.id))).toBe('member')
+      expect(receiver.epoch).toBe(demotion.epoch)
+      expect(head(receiver)).toEqual(computeHead(groupID, ledgerIDs(receiver)))
+    }
+
+    // The log and the head chain agree on a list holding one id twice.
+    const ids = ledgerIDs(demotion.newGroup)
+    expect(ids.at(-1)).toBe(ids[0])
+    expect(new Set(ids).size).toBe(ids.length - 1)
+  })
+
+  test('an admin who was demoted cannot have an older token of theirs enacted', async () => {
+    const { alice, bob, aliceGroup, bobGroup, carolGroup, groupID, tokens } =
+      await threeMemberGroup()
+    const dave = randomIdentity()
+
+    // Alice signs a promotion of Dave while she is still an admin, and never commits it.
+    const alicePromotesDave = await signLedgerEntry(alice, {
+      type: ROLE_ENTRY_TYPE,
+      groupID,
+      subject: dave.id,
+      value: 'admin',
+    })
+    tokens.set(ledgerEntryDigest(alicePromotesDave), alicePromotesDave)
+
+    const promoteBob = await signLedgerEntry(alice, {
+      type: ROLE_ENTRY_TYPE,
+      groupID,
+      subject: bob.id,
+      value: 'admin',
+    })
+    tokens.set(ledgerEntryDigest(promoteBob), promoteBob)
+    const promotion = await commitLedgerEntries(aliceGroup, [promoteBob])
+    await bobGroup.processMessage(promotion.commitMessage)
+    await carolGroup.processMessage(promotion.commitMessage)
+
+    const demoteAlice = await signLedgerEntry(bob, {
+      type: ROLE_ENTRY_TYPE,
+      groupID,
+      subject: alice.id,
+      value: 'member',
+    })
+    tokens.set(ledgerEntryDigest(demoteAlice), demoteAlice)
+    const demotion = await commitLedgerEntries(bobGroup, [demoteAlice])
+    await carolGroup.processMessage(demotion.commitMessage)
+    await promotion.newGroup.processMessage(demotion.commitMessage)
+    expect(carolGroup.roster.roles.get(normalizeDID(alice.id))).toBe('member')
+
+    // Bob is a current admin, so he may enact entries — but every entry is judged by its
+    // own issuer at its own position, and Alice is no longer an admin there. Her stale
+    // token is dead, whoever carries it.
+    const stale = await commitLedgerEntries(demotion.newGroup, [alicePromotesDave])
+    const epochBefore = carolGroup.epoch
+    await expect(carolGroup.processMessage(stale.commitMessage)).rejects.toThrow(
+      CommitRejectedError,
+    )
+    expect(carolGroup.epoch).toBe(epochBefore)
+    expect(carolGroup.roster.roles.get(normalizeDID(dave.id))).toBeUndefined()
+    // The committer's own fold drops it too — nobody ends up with Dave as an admin.
+    expect(stale.newGroup.roster.roles.get(normalizeDID(dave.id))).toBeUndefined()
+  })
+
+  test('a member cannot enact an admin-signed entry naming himself', async () => {
+    const { alice, bob, bobGroup, carolGroup, groupID, tokens } = await threeMemberGroup()
+
+    const promoteBob = await signLedgerEntry(alice, {
+      type: ROLE_ENTRY_TYPE,
+      groupID,
+      subject: bob.id,
+      value: 'admin',
+    })
+    tokens.set(ledgerEntryDigest(promoteBob), promoteBob)
+
+    // Bob holds a genuine admin-signed promotion of himself. Enacting it means moving the
+    // head, which takes a group-context-extensions proposal a member may not make — so
+    // the best he can forge is a commit whose envelope names the entry and whose head
+    // stands still, and that is exactly what the receivers refuse.
+    const forged = await pathCommitBytes(
+      bobGroup,
+      encodeControlEnvelope({ v: 1, entries: [ledgerEntryDigest(promoteBob)] }),
+    )
+
+    const epochBefore = carolGroup.epoch
+    await expect(carolGroup.processMessage(forged)).rejects.toThrow(CommitRejectedError)
+    expect(carolGroup.epoch).toBe(epochBefore)
+    expect(carolGroup.roster.roles.get(normalizeDID(bob.id))).toBe('member')
+  })
+
+  test('ledgerTokens round-trips a log with repeats through restoreGroup', async () => {
+    const groupID = 'repeat-roundtrip'
+    const { bob, credential, rootCapability, group } = await demotedThroughRepeat(groupID)
+
+    const restored = await restoreGroup({
+      state: group.state,
+      credential,
+      rootCapability,
+      ledgerEntries: group.ledgerTokens,
+    })
+
+    expect(group.ledgerTokens).toHaveLength(3)
+    expect(restored.ledgerTokens).toEqual(group.ledgerTokens)
+    expect(rosterEntries(restored)).toEqual(rosterEntries(group))
+    expect(restored.roster.roles.get(normalizeDID(bob.id))).toBe('member')
+    expect(head(restored)).toEqual(computeHead(groupID, ledgerIDs(restored)))
+  })
+
+  test('an invite carries the repeats faithfully, and the joiner folds the same roster', async () => {
+    const groupID = 'repeat-invite'
+    const { alice, bob, group } = await demotedThroughRepeat(groupID)
+    const carol = randomIdentity()
+
+    const { invite } = await createInvite({
+      group,
+      identity: alice,
+      recipientDID: carol.id,
+      permission: 'member',
+    })
+    expect(invite.ledgerEntries.slice(0, 3)).toEqual(group.ledgerTokens)
+
+    const carolKP = await createKeyPackageBundle(carol)
+    const addCarol = await commitInvite(group, carolKP.publicPackage, invite)
+    // The joiner recomputes the head over the invite's list; a repeat that did not
+    // reproduce it would throw LedgerIncompleteError here.
+    const { group: carolGroup } = await processWelcome({
+      identity: carol,
+      invite,
+      welcome: addCarol.welcomeMessage,
+      keyPackageBundle: carolKP,
+      ratchetTree: addCarol.newGroup.state.ratchetTree,
+    })
+
+    expect(carolGroup.ledgerTokens).toEqual(addCarol.newGroup.ledgerTokens)
+    expect(rosterEntries(carolGroup)).toEqual(rosterEntries(addCarol.newGroup))
+    expect(carolGroup.roster.roles.get(normalizeDID(bob.id))).toBe('member')
+    expect(head(carolGroup)).toEqual(computeHead(groupID, ledgerIDs(carolGroup)))
   })
 })

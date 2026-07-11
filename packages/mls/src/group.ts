@@ -203,21 +203,22 @@ export type HeldLedgerEntry = {
   verified: VerifiedLedgerEntry
 }
 
-/** A held entry paired with the content id it is stored under. */
-type ResolvedEntry = HeldLedgerEntry & { entryID: string }
+/** A held entry paired with its content id — one position in the ledger log. */
+export type LedgerLogEntry = HeldLedgerEntry & { entryID: string }
 
 /**
  * Project a held ledger into the roster. foldRoster is the role projection: it
  * drops every non-`group.role` entry by type, so the mixed-type ledger is fed in
- * as role inputs and the fold filters.
+ * as role inputs and the fold filters. The log is replayed in order, repeats and
+ * all: a claim re-enacted at a later position must undo what came between.
  */
 function foldLedgerRoster(
-  ledger: ReadonlyMap<string, HeldLedgerEntry>,
+  ledger: ReadonlyArray<LedgerLogEntry>,
   anchor: GroupAnchor,
   groupID: string,
 ): RosterState {
-  const entries = [...ledger.entries()].map(
-    ([entryID, { verified }]) => ({ verified, entryID }) as FoldInput<RoleValue>,
+  const entries = ledger.map(
+    ({ verified, entryID }) => ({ verified, entryID }) as FoldInput<RoleValue>,
   )
   return foldRoster(entries, anchor, groupID)
 }
@@ -228,10 +229,10 @@ export type GroupHandleParams = {
   context: MlsContext
   /** Stringified root capability (for delegation) */
   rootCapability: string
-  /** Control-ledger entries this handle starts from, keyed by content id. A handle
+  /** The control-ledger log this handle starts from, in enactment order. A handle
    *  derived from another (commitInvite/removeMember) inherits the parent's, so the
    *  roster it folds does not revert to the anchor alone. */
-  ledger?: ReadonlyMap<string, HeldLedgerEntry>
+  ledger?: ReadonlyArray<LedgerLogEntry>
   cache: DIDCache
   resolver?: DIDResolver
   /** Default commit policy applied by processMessage/decrypt. */
@@ -256,7 +257,14 @@ export class GroupHandle {
   #resolveLedgerEntries?: (ids: Array<string>) => Promise<Array<string>>
   #onLedgerEntries?: (entries: Array<VerifiedLedgerEntry>) => void
   #anchor: GroupAnchor
-  #ledger: Map<string, HeldLedgerEntry>
+  /** The ordered log of enactments — the ledger as the head chains it. The same
+   *  content id may appear more than once: a claim re-enacted at a later position
+   *  undoes what came between, which is how a demotion back to a previously-held
+   *  role expresses itself at all. */
+  #ledger: Array<LedgerLogEntry>
+  /** Entry bodies by content id, for resolving the ids an envelope names. A body
+   *  is the same body wherever it appears in the log, so this store is keyed. */
+  #entryBodies: Map<string, HeldLedgerEntry>
   #roster: RosterState
 
   constructor(params: GroupHandleParams) {
@@ -278,7 +286,10 @@ export class GroupHandle {
       throw new Error('group has no anchor extension; cannot seed a control roster')
     }
     this.#anchor = anchor
-    this.#ledger = new Map(params.ledger ?? [])
+    this.#ledger = [...(params.ledger ?? [])]
+    this.#entryBodies = new Map(
+      this.#ledger.map(({ entryID, token, verified }) => [entryID, { token, verified }]),
+    )
     this.#roster = foldLedgerRoster(this.#ledger, anchor, this.groupID)
   }
 
@@ -339,19 +350,19 @@ export class GroupHandle {
     return this.#anchor
   }
 
-  /** The control-ledger entries this handle holds, keyed by content id, in the
-   *  order they were applied. Carried onto handles derived from this one
-   *  (commitInvite/removeMember). */
-  get ledger(): ReadonlyMap<string, HeldLedgerEntry> {
+  /** The control-ledger log this handle holds, in enactment order, repeats and
+   *  all. Carried onto handles derived from this one (commitInvite/removeMember). */
+  get ledger(): ReadonlyArray<LedgerLogEntry> {
     return this.#ledger
   }
 
-  /** The ordered signed tokens this handle holds — the ledger's canonical
-   *  persistent and wire form. Feeds createInvite, restoreGroup, and host
-   *  persistence. The verified entries are a derived cache with no export form:
-   *  the only way into a ledger is applyLedgerEntries, which re-verifies. */
+  /** The ordered signed tokens this handle holds, including repeats — the ledger's
+   *  canonical persistent and wire form, and the list the authenticated head folds
+   *  over. Feeds createInvite, restoreGroup, and host persistence. The verified
+   *  entries are a derived cache with no export form: the only way into a ledger is
+   *  applyLedgerEntries, which re-verifies. */
   get ledgerTokens(): Array<string> {
-    return [...this.#ledger.values()].map(({ token }) => token)
+    return this.#ledger.map(({ token }) => token)
   }
 
   /** The control roster folded from the anchor and every applied ledger entry. */
@@ -360,19 +371,26 @@ export class GroupHandle {
   }
 
   /**
-   * Verify signed ledger tokens, store the valid ones by content id, and refold
-   * the roster. Tokens that fail verification or whose groupID does not match the
-   * group are dropped (defensive — this is the low-level apply primitive; the
-   * commit pre-pass does the strict admin-issuer enforcement). Idempotent by id:
-   * a re-delivered entry keeps its original position in the ledger's order.
+   * Verify signed ledger tokens, append the valid ones to the log in the order
+   * given, and refold the roster. Tokens that fail verification or whose groupID
+   * does not match the group are dropped (defensive — this is the low-level apply
+   * primitive; the commit pre-pass does the strict admin-issuer enforcement).
+   * Every token is re-verified on the way in: no entry enters a ledger unverified,
+   * whatever the import path.
+   *
+   * A token the log already holds is appended again rather than skipped. The log
+   * is an ordered record of what each commit enacted, not a set of claims, and a
+   * repeat is the only way to express a demotion back to a previously-held role.
+   * Nothing replays a commit into it: MLS applies each commit exactly once,
+   * restoreGroup replays a token list once, and processWelcome folds an invite once.
    */
   async applyLedgerEntries(tokens: Array<string>): Promise<void> {
     for (const token of tokens) {
-      const entryID = ledgerEntryDigest(token)
-      if (this.#ledger.has(entryID)) continue
       const verified = await verifyLedgerEntry(token)
       if (verified == null || verified.entry.groupID !== this.groupID) continue
-      this.#ledger.set(entryID, { token, verified })
+      const entryID = ledgerEntryDigest(token)
+      this.#ledger.push({ entryID, token, verified })
+      this.#entryBodies.set(entryID, { token, verified })
     }
     this.#roster = foldLedgerRoster(this.#ledger, this.#anchor, this.groupID)
   }
@@ -470,7 +488,7 @@ export class GroupHandle {
     let precomputedReject = false
     let candidateRoster: RosterState = this.#roster
     let surfaced: Array<VerifiedLedgerEntry> = []
-    let acceptedEntries: Array<ResolvedEntry> = []
+    let acceptedEntries: Array<LedgerLogEntry> = []
     let envelopeIDs: Array<string> = []
 
     const env = decodeControlEnvelope(commit.authenticatedData)
@@ -479,10 +497,10 @@ export class GroupHandle {
     } else {
       const ids = env.envelope.entries ?? []
       envelopeIDs = ids
-      const resolved = new Map<string, ResolvedEntry>()
+      const resolved = new Map<string, LedgerLogEntry>()
       const missing: Array<string> = []
       for (const id of ids) {
-        const held = this.#ledger.get(id)
+        const held = this.#entryBodies.get(id)
         if (held != null) {
           resolved.set(id, { ...held, entryID: id })
         } else {
@@ -507,7 +525,7 @@ export class GroupHandle {
           throw new MissingLedgerEntriesError(stillMissing)
         }
       }
-      const ordered: Array<ResolvedEntry> = ids.map((id) => {
+      const ordered: Array<LedgerLogEntry> = ids.map((id) => {
         const input = resolved.get(id)
         if (input == null) throw new MissingLedgerEntriesError([id])
         return input
@@ -566,8 +584,11 @@ export class GroupHandle {
     }
 
     const applyOnAccept = () => {
+      // Appended, never deduped: the log records what this commit enacted, at the
+      // position the head chained it.
       for (const { token, verified, entryID } of acceptedEntries) {
-        if (!this.#ledger.has(entryID)) this.#ledger.set(entryID, { token, verified })
+        this.#ledger.push({ entryID, token, verified })
+        this.#entryBodies.set(entryID, { token, verified })
       }
       this.#roster = candidateRoster
       if (surfaced.length > 0) this.#onLedgerEntries?.(surfaced)
@@ -835,26 +856,21 @@ export async function createInvite(params: CreateInviteParams): Promise<CreateIn
     value: permission,
   })
 
-  // A signed entry is content-addressed, so re-signing a claim the group already
-  // holds — inviting a DID with exactly the role a standing entry grants it — yields
-  // that same entry, not a new one. The ledger folds each id once, and so does the
-  // head; appending the duplicate would leave the entry list unreproducible from the
-  // head the group authenticates.
-  const alreadyHeld = group.ledger.has(ledgerEntryDigest(roleToken))
-
   const invite: Invite = {
     groupID: group.groupID,
     capabilityToken: memberCapStr,
     capabilityChain: [group.rootCapability, memberCapStr],
     permission,
     inviterID: identity.id,
-    // The whole ledger, the new role entry last: a joiner handed only its own
-    // entry would never learn of a role change made before its invite, and would
-    // reject every commit by an admin promoted in the meantime — a permanent fork
-    // nothing in the protocol re-sends. The new entry must fold after the history
-    // it depends on, hence last. The joiner still folds from the anchor, so the
-    // inviter cannot promote anyone by padding this list.
-    ledgerEntries: alreadyHeld ? [...group.ledgerTokens] : [...group.ledgerTokens, roleToken],
+    // The whole log, the new role entry last: a joiner handed only its own entry
+    // would never learn of a role change made before its invite, and would reject
+    // every commit by an admin promoted in the meantime — a permanent fork nothing
+    // in the protocol re-sends. The new entry must fold after the history it depends
+    // on, hence last. Re-granting a role the log already carries appends that entry a
+    // second time, which is a legal re-enactment, not a duplicate to elide. The joiner
+    // still folds from the anchor, so the inviter cannot promote anyone by padding
+    // this list.
+    ledgerEntries: [...group.ledgerTokens, roleToken],
   }
 
   return { invite }
@@ -886,29 +902,32 @@ function extensionsWithHead(
  * `removeMember`, and `commitLedgerEntries` all route through it, so the envelope and
  * the head can never drift apart.
  *
- * `tokens` is narrowed to the delta — the entries the committer does not already hold.
- * The envelope names only what this commit *enacts*, never the whole history: replaying
- * the history would re-judge every past entry against the present roster, and a grant
- * issued by a since-demoted admin would read as coming from a non-admin, freezing every
- * group that ever rotated its admins.
+ * `enacted` is exactly what this commit enacts — the caller decides, and the caller is
+ * the only one that can: entries are enacted by *position* in the log, so an entry whose
+ * content the log already carries is a legitimate re-enactment (a demotion back to a
+ * previously-held role is precisely that) and must not be filtered out by content.
  *
- * When the delta is non-empty the commit also carries a group-context-extensions
- * proposal advancing the ledger head by exactly those ids, in envelope order. An empty
- * delta moves no head and carries no envelope.
+ * The envelope names only what this commit enacts, never the whole history: replaying the
+ * history would re-judge every past entry against the present roster, and a grant issued
+ * by a since-demoted admin would read as coming from a non-admin, freezing every group
+ * that ever rotated its admins.
+ *
+ * When `enacted` is non-empty the commit also carries a group-context-extensions proposal
+ * advancing the ledger head by exactly those ids, in envelope order. An empty list moves
+ * no head and carries no envelope.
  */
 async function commitWithEntries(
   group: GroupHandle,
   extraProposals: Array<DefaultProposal>,
-  tokens: Array<string>,
+  enacted: Array<string>,
   ratchetTreeExtension = false,
-): Promise<{ result: Awaited<ReturnType<typeof createCommit>>; enacted: Array<string> }> {
+): Promise<Awaited<ReturnType<typeof createCommit>>> {
   // Same reason createInvite guards the inviter: a non-admin's commit is rejected by
   // every receiver, so fail here rather than emitting a commit nobody will apply.
   if (group.roster.roles.get(normalizeDID(group.credential.id)) !== 'admin') {
     throw new Error('the committer must be an admin in the group roster')
   }
 
-  const enacted = tokens.filter((token) => !group.ledger.has(ledgerEntryDigest(token)))
   const entryIDs = enacted.map(ledgerEntryDigest)
   const proposals = [...extraProposals]
   if (entryIDs.length > 0) {
@@ -918,7 +937,7 @@ async function commitWithEntries(
     })
   }
 
-  const result = await createCommit({
+  return await createCommit({
     context: group.context,
     state: group.state,
     extraProposals: proposals,
@@ -927,7 +946,28 @@ async function commitWithEntries(
       authenticatedData: encodeControlEnvelope({ v: 1, entries: entryIDs }),
     }),
   })
-  return { result, enacted }
+}
+
+/**
+ * The entries an invite adds beyond the committer's own log: everything past the log's
+ * length. Positional, never by content — a re-granted role is the same token the log
+ * already carries at an earlier position, and narrowing by content would drop the very
+ * entry the invite exists to enact.
+ *
+ * Positional narrowing is only sound when the invite's list *begins with* the
+ * committer's log, so that is asserted rather than assumed: an invite built against a
+ * different history would mis-slice, and the commit would move the head by ids that do
+ * not follow the group's own — corrupting the chain for every receiver.
+ */
+function entriesAddedByInvite(group: GroupHandle, invite: Invite): Array<string> {
+  const held = group.ledgerTokens
+  if (
+    invite.ledgerEntries.length < held.length ||
+    held.some((token, index) => invite.ledgerEntries[index] !== token)
+  ) {
+    throw new Error("commitInvite: the invite's ledger does not extend this group's own")
+  }
+  return invite.ledgerEntries.slice(held.length)
 }
 
 /** Build the handle a commit hands back: the post-commit state, everything else inherited. */
@@ -961,9 +1001,10 @@ export type CommitLedgerEntriesResult = {
  * rides a commit is invisible to the head, and a joiner recomputing the head would
  * read the group's history as doctored.
  *
+ * Enacts exactly `tokens`, at the end of the log — including one whose content the log
+ * already carries, which is how an admin is demoted back to a role they previously held.
  * Rejects an empty `tokens` list: a commit that enacts nothing has no reason to be
- * authored here. Tokens the group already holds are dropped from the delta, so a list
- * of only-held tokens produces a plain key-rotation commit that moves no head.
+ * authored here.
  */
 export async function commitLedgerEntries(
   group: GroupHandle,
@@ -972,9 +1013,9 @@ export async function commitLedgerEntries(
   if (tokens.length === 0) {
     throw new Error('commitLedgerEntries: no ledger entries to commit')
   }
-  const { result, enacted } = await commitWithEntries(group, [], tokens)
+  const result = await commitWithEntries(group, [], tokens)
   const newGroup = deriveGroup(group, result.newState)
-  await newGroup.applyLedgerEntries(enacted)
+  await newGroup.applyLedgerEntries(tokens)
   return {
     commitMessage: encode(mlsMessageEncoder, result.commit),
     newGroup,
@@ -1007,7 +1048,8 @@ export type CommitInviteResult = {
  * MissingLedgerEntriesError on this commit.
  *
  * The invite itself carries the group's whole history — a joiner has nothing to fold
- * it onto — but only the delta rides the commit; see {@link commitWithEntries}.
+ * it onto — but only the entries it adds beyond that history ride the commit; see
+ * {@link entriesAddedByInvite} and {@link commitWithEntries}.
  */
 export async function commitInvite(
   group: GroupHandle,
@@ -1018,16 +1060,12 @@ export async function commitInvite(
     throw new Error(`commitInvite: invite is for group ${invite.groupID}, not ${group.groupID}`)
   }
 
+  const enacted = entriesAddedByInvite(group, invite)
   const addProposal: DefaultProposal = {
     proposalType: defaultProposalTypes.add,
     add: { keyPackage },
   }
-  const { result, enacted } = await commitWithEntries(
-    group,
-    [addProposal],
-    invite.ledgerEntries,
-    true,
-  )
+  const result = await commitWithEntries(group, [addProposal], enacted, true)
 
   const newGroup = deriveGroup(group, result.newState)
 
@@ -1196,7 +1234,8 @@ export async function removeMember(
     remove: { removed: leafIndex },
   }
 
-  const { result, enacted } = await commitWithEntries(group, [removeProposal], ledgerEntries ?? [])
+  const enacted = ledgerEntries ?? []
+  const result = await commitWithEntries(group, [removeProposal], enacted)
 
   const newGroup = deriveGroup(group, result.newState)
   await newGroup.applyLedgerEntries(enacted)
