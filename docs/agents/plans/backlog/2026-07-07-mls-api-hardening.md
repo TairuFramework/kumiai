@@ -4,8 +4,14 @@
 **Origin:** 2026-07-02 audit (commit `bb343d9`), milestone
 `milestones/2026-07-audit-remediation.md`.
 
-The behavioural mls fixes live in `next/` (permission enforcement, state
-serialization/secret hygiene); this doc collects the surface/typing debt.
+The behavioural mls fixes have since landed (see
+`../completed/2026-07-11-mls-permission-enforcement.complete.md` and
+`../completed/2026-07-11-mls-state-serialization-secret-hygiene.complete.md`); this doc collects the
+surface/typing debt that remains. Line numbers reference the tree at `bb343d9` and have drifted.
+
+**Stale items removed below (2026-07-11):** `decrypt` no longer exists (`processMessage` is the sole
+receive path) and the capability chain — with `validateGroupCapability` — was deleted outright, so
+findings naming either are void rather than outstanding.
 
 ## Findings
 
@@ -19,10 +25,10 @@ serialization/secret hygiene); this doc collects the surface/typing debt.
   `ClientState | undefined` but ts-mls `decode` also throws (e.g. `CodecError`), so the
   "undefined on failure" contract is false. Fix: try/catch to `undefined` or document the
   throw. (correctness)
-- **`packages/mls/src/group.ts:284-287,329-332,569` — `Uint8Array | unknown` params
-  collapse to `unknown`,** so `decrypt`/`processMessage`/`processWelcome` accept anything
-  at compile time and rely on runtime casts. Fix: type the legacy path as the concrete
-  ts-mls message union. (API design)
+- **`Uint8Array | unknown` params collapse to `unknown`,** so `processMessage`/`processWelcome`
+  accept anything at compile time and rely on runtime casts. Fix: type the legacy path as the
+  concrete ts-mls message union. (API design) — still outstanding; `decrypt` is gone, so this now
+  applies to `processMessage`/`processWelcome` only.
 
 ### Low
 
@@ -50,5 +56,15 @@ serialization/secret hygiene); this doc collects the surface/typing debt.
 
 ## Test hooks
 
-`validateGroupCapability`'s `res: '*'` branch, expired-token path, and `decrypt` fed
-wire-form application-message bytes untested — see `next/2026-07-07-test-gaps.md`.
+Void: `validateGroupCapability` and `decrypt` no longer exist. `processMessage` fed wire-form
+application-message bytes is now covered. See `next/2026-07-07-test-gaps.md` for what remains.
+
+## Added 2026-07-11 — GroupContext extension-data compare is fail-closed on default-typed extensions
+
+`policy.ts`'s `group_context_extensions` rule byte-compares each extension's `extensionData`, which
+requires both sides to be `Uint8Array`. ts-mls decodes *default-typed* extensions (`external_senders`,
+`required_capabilities`) into objects, and does not re-export its own `extensionsEqual`. So a group
+that ever anchors such an extension would have every honest ledger-head move rejected — fail-closed
+liveness, not a security gap, and unreachable today because nothing in this repo adds one. Fix when
+one is wanted: compare via a structural equality that handles the union (or ask ts-mls to export
+`extensionsEqual`). Documented at the guard in `policy.ts`.

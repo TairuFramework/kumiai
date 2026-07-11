@@ -16,12 +16,15 @@ API-consistency, and infra debt behind them.
 
 In order:
 
-1. [Encrypt + authenticate the directed RPC lane](../next/2026-07-07-rpc-directed-lane-security.md) —
-   the hub can currently read and forge exactly the traffic this stack exists to protect. (critical)
-2. [Enforce `GroupPermission` at the MLS boundary](../next/2026-07-07-mls-permission-enforcement.md) —
-   permission checks in mutating ops, a default commit policy, `processWelcome` token handling.
-3. [Serialize `GroupHandle` state + zero consumed secrets](../next/2026-07-07-mls-state-serialization-secret-hygiene.md) —
-   the two real crypto-hygiene holes.
+1. ~~Encrypt + authenticate the directed RPC lane~~ — **done**, see
+   [completed](../completed/2026-07-07-rpc-directed-lane-security.complete.md).
+2. ~~Enforce `GroupPermission` at the MLS boundary~~ — **done**, see
+   [completed](../completed/2026-07-11-mls-permission-enforcement.complete.md). Landed as a signed,
+   anchor-rooted control ledger folded into a roster and enforced as a receiving-side commit policy;
+   the capability chain was retired rather than fixed.
+3. ~~Serialize `GroupHandle` state + zero consumed secrets~~ — **done**, see
+   [completed](../completed/2026-07-11-mls-state-serialization-secret-hygiene.complete.md). Bundled
+   into the same release as item 2, since both reshape the `@kumiai/mls` surface kubun consumes.
 4. [Fix the hub `receive` lifecycle](../next/2026-07-07-hub-receive-lifecycle.md) —
    drain-then-attach, pre-aborted signal, swallowed write errors.
 5. [Key-package + subscribe caps](../next/2026-07-07-hub-keypackage-subscribe-caps.md) —
@@ -50,8 +53,10 @@ Phase 1 lands.
 
 ## Related pre-existing backlog
 
-- `backlog/mls-capability-revocation.md` — design together with permission enforcement
-  (both need committer-identity → capability resolution at `processMessage` time).
+- `backlog/mls-capability-revocation.md` — **premise now stale.** Permission enforcement (item 2)
+  closed the hole it targets: a removed member has no leaf, so a resync is refused outright, and
+  the capability layer it proposed to revoke no longer exists. See the status update in that doc —
+  it should only be revisited if a non-resync external join is ever wanted.
 - `backlog/hub-group-member-expiry.md`, `backlog/peer4-mls-leaf-rotation.md`,
   `backlog/ts-mls-v2-stable-upgrade.md` — untouched by this milestone.
 
