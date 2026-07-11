@@ -2,7 +2,7 @@ import { normalizeDID } from '@kokuin/token'
 import type { IncomingMessageAction, Proposal, ProposalWithSender } from 'ts-mls'
 import { defaultProposalTypes, isDefaultProposal } from 'ts-mls'
 
-import { GROUP_ANCHOR_EXTENSION_TYPE } from './anchor.js'
+import { GROUP_ANCHOR_EXTENSION_TYPE, LEDGER_HEAD_EXTENSION_TYPE } from './anchor.js'
 import type { RosterState } from './roster.js'
 
 /**
@@ -23,6 +23,13 @@ export type CommitPolicyContext = {
   candidateRoster: RosterState
   didOfLeaf: (leafIndex: number) => string | undefined
   anchorExtensionData: Uint8Array
+  /** The head extension bytes this commit must install: the current head extended by
+   *  the commit's envelope entry ids, in envelope order. Equals the current head when
+   *  the commit enacts nothing, so a commit that moves the head without enacting
+   *  anything is rejected too. */
+  expectedHeadExtensionData: Uint8Array
+  /** Whether the commit's envelope names any entries. */
+  commitEnactsEntries: boolean
   externalCommitDID?: string
 }
 
@@ -61,12 +68,16 @@ function isAdmin(context: CommitPolicyContext, leafIndex: number | undefined): b
 
 /**
  * The group-context-extensions rule: an admin may replace the extension list
- * only when it carries the anchor extension byte-identical to the current one. A
- * GCE proposal replaces the *entire* list, so every legitimate ledger-head update
- * re-includes the unchanged anchor; a proposal that mutates or drops the anchor is
- * an anchor-tampering attempt and is rejected. Deeper head couplings — that only
- * the head may differ, and that a head move carries a matching envelope entry
- * list — are not enforced here.
+ * only when it carries the anchor extension byte-identical to the current one and
+ * the ledger-head extension holding exactly the head this commit's envelope
+ * accounts for. A GCE proposal replaces the *entire* list, so every legitimate
+ * head update re-includes the unchanged anchor; a proposal that mutates or drops
+ * the anchor is an anchor-tampering attempt and is rejected.
+ *
+ * The head must equal the current head extended by the envelope's entry ids, in
+ * envelope order. A head moved to anything else — including moved at all by a
+ * commit that enacts nothing — would stop proving which entries the group has
+ * enacted, which is the omission hole the head exists to close.
  */
 function evaluateGroupContextExtensions(
   extensions: Array<{ extensionType: number; extensionData: unknown }>,
@@ -76,7 +87,14 @@ function evaluateGroupContextExtensions(
   if (anchor === undefined || !(anchor.extensionData instanceof Uint8Array)) {
     return 'reject'
   }
-  return bytesEqual(anchor.extensionData, context.anchorExtensionData) ? 'accept' : 'reject'
+  if (!bytesEqual(anchor.extensionData, context.anchorExtensionData)) {
+    return 'reject'
+  }
+  const head = extensions.find((ext) => ext.extensionType === LEDGER_HEAD_EXTENSION_TYPE)
+  if (head === undefined || !(head.extensionData instanceof Uint8Array)) {
+    return 'reject'
+  }
+  return bytesEqual(head.extensionData, context.expectedHeadExtensionData) ? 'accept' : 'reject'
 }
 
 /**
@@ -178,6 +196,10 @@ function evaluateExternalCommit(
  * with no proposals is a key rotation any member may make. When any proposal is
  * an `external_init`, the whole commit is judged by the external-init rule rather
  * than the per-proposal loop.
+ *
+ * One rule is not a proposal's own: a commit that enacts ledger entries must carry
+ * a group-context-extensions proposal, or it would enact entries without moving the
+ * head, and the head would stop covering the ledger.
  */
 export function defaultCommitPolicy(
   incoming: IncomingMessage,
@@ -189,6 +211,14 @@ export function defaultCommitPolicy(
   }
 
   const { proposals, senderLeafIndex } = incoming
+  if (
+    context.commitEnactsEntries &&
+    !proposals.some(
+      ({ proposal }) => proposal.proposalType === defaultProposalTypes.group_context_extensions,
+    )
+  ) {
+    return 'reject'
+  }
   if (proposals.length === 0) {
     return 'accept'
   }

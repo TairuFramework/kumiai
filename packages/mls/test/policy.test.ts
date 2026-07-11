@@ -3,7 +3,7 @@ import type { GroupContextExtension, Proposal, ProposalWithSender } from 'ts-mls
 import { defaultProposalTypes, makeCustomExtension } from 'ts-mls'
 import { describe, expect, test } from 'vitest'
 
-import { GROUP_ANCHOR_EXTENSION_TYPE } from '../src/anchor.js'
+import { GROUP_ANCHOR_EXTENSION_TYPE, LEDGER_HEAD_EXTENSION_TYPE } from '../src/anchor.js'
 import type { GroupPermission } from '../src/capability.js'
 import {
   type CommitPolicyContext,
@@ -22,6 +22,11 @@ const MEMBER_LEAF = 1
 const THIRD_LEAF = 2
 
 const ANCHOR_BYTES = new Uint8Array([0xf1, 0x00, 0x01, 0x02, 0x03])
+/** The head bytes a commit enacting nothing must re-install unchanged. */
+const HEAD_BYTES = new Uint8Array([0x01, 0xaa, 0xbb, 0xcc])
+/** Any other head: what a commit moving the head to a value the envelope does not
+ *  account for would install. */
+const OTHER_HEAD_BYTES = new Uint8Array([0x01, 0xde, 0xad, 0xbe])
 
 function roster(entries: Array<[string, GroupPermission]>): RosterState {
   return { roles: new Map(entries.map(([did, permission]) => [normalizeDID(did), permission])) }
@@ -42,6 +47,8 @@ function context(overrides: Partial<CommitPolicyContext> = {}): CommitPolicyCont
     candidateRoster: baseRoster,
     didOfLeaf: (leafIndex) => leaves.get(leafIndex),
     anchorExtensionData: ANCHOR_BYTES,
+    expectedHeadExtensionData: HEAD_BYTES,
+    commitEnactsEntries: false,
     ...overrides,
   }
 }
@@ -72,6 +79,15 @@ function customProposal(proposalType: number): Proposal {
 
 function anchorExtension(bytes: Uint8Array): GroupContextExtension {
   return makeCustomExtension({ extensionType: GROUP_ANCHOR_EXTENSION_TYPE, extensionData: bytes })
+}
+
+function headExtension(bytes: Uint8Array): GroupContextExtension {
+  return makeCustomExtension({ extensionType: LEDGER_HEAD_EXTENSION_TYPE, extensionData: bytes })
+}
+
+/** The list a legitimate head update installs: the unchanged anchor and the head. */
+function controlExtensions(head: Uint8Array): Array<GroupContextExtension> {
+  return [anchorExtension(ANCHOR_BYTES.slice()), headExtension(head)]
 }
 
 function withSender(proposal: Proposal, senderLeafIndex: number | undefined): ProposalWithSender {
@@ -134,34 +150,81 @@ describe('defaultCommitPolicy', () => {
     ).toBe('reject')
   })
 
-  test('group_context_extensions accepts an admin re-including the byte-identical anchor', () => {
-    const gce = gceProposal([anchorExtension(ANCHOR_BYTES.slice())])
+  test('group_context_extensions accepts an admin re-including the anchor and the expected head', () => {
+    const gce = gceProposal(controlExtensions(HEAD_BYTES.slice()))
     expect(defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(gce, undefined)]), context())).toBe(
       'accept',
     )
   })
 
   test('group_context_extensions rejects a mutated anchor', () => {
-    const gce = gceProposal([anchorExtension(new Uint8Array([0xff, 0xff]))])
-    expect(defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(gce, undefined)]), context())).toBe(
-      'reject',
-    )
-  })
-
-  test('group_context_extensions rejects a list with no anchor extension', () => {
     const gce = gceProposal([
-      makeCustomExtension({ extensionType: 0xf101, extensionData: new Uint8Array([1]) }),
+      anchorExtension(new Uint8Array([0xff, 0xff])),
+      headExtension(HEAD_BYTES.slice()),
     ])
     expect(defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(gce, undefined)]), context())).toBe(
       'reject',
     )
   })
 
-  test('group_context_extensions by a member is rejected even when the anchor is intact', () => {
+  test('group_context_extensions rejects a list with no anchor extension', () => {
+    const gce = gceProposal([headExtension(HEAD_BYTES.slice())])
+    expect(defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(gce, undefined)]), context())).toBe(
+      'reject',
+    )
+  })
+
+  test('group_context_extensions rejects a list with no head extension', () => {
     const gce = gceProposal([anchorExtension(ANCHOR_BYTES.slice())])
+    expect(defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(gce, undefined)]), context())).toBe(
+      'reject',
+    )
+  })
+
+  test('group_context_extensions rejects a head the envelope does not account for', () => {
+    const gce = gceProposal(controlExtensions(OTHER_HEAD_BYTES))
+    expect(defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(gce, undefined)]), context())).toBe(
+      'reject',
+    )
+  })
+
+  test('group_context_extensions by a member is rejected even when the anchor is intact', () => {
+    const gce = gceProposal(controlExtensions(HEAD_BYTES.slice()))
     expect(defaultCommitPolicy(commit(MEMBER_LEAF, [withSender(gce, undefined)]), context())).toBe(
       'reject',
     )
+  })
+
+  test('a commit that enacts entries without a group_context_extensions proposal is rejected', () => {
+    // Entries would be enacted while the head stood still, so the head would stop
+    // covering the ledger and an omission would become undetectable.
+    const add = taggedProposal(defaultProposalTypes.add)
+    expect(
+      defaultCommitPolicy(
+        commit(ADMIN_LEAF, [withSender(add, undefined)]),
+        context({ commitEnactsEntries: true }),
+      ),
+    ).toBe('reject')
+  })
+
+  test('an empty commit that enacts entries is rejected', () => {
+    expect(
+      defaultCommitPolicy(commit(ADMIN_LEAF, []), context({ commitEnactsEntries: true })),
+    ).toBe('reject')
+  })
+
+  test('a commit enacting entries and moving the head to the expected value is accepted', () => {
+    const add = taggedProposal(defaultProposalTypes.add)
+    const gce = gceProposal(controlExtensions(OTHER_HEAD_BYTES.slice()))
+    expect(
+      defaultCommitPolicy(
+        commit(ADMIN_LEAF, [withSender(add, undefined), withSender(gce, undefined)]),
+        context({
+          commitEnactsEntries: true,
+          expectedHeadExtensionData: OTHER_HEAD_BYTES,
+        }),
+      ),
+    ).toBe('accept')
   })
 
   test('external_init commit accepts a roster member rejoining by removing its own leaf', () => {

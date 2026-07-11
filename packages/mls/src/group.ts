@@ -69,7 +69,17 @@ import { nobleCryptoProvider } from './crypto.js'
 import { decodeControlEnvelope, encodeControlEnvelope } from './envelope.js'
 import { foldEnvelope } from './envelope-fold.js'
 import type { FoldInput } from './fold.js'
-import { buildLedgerHeadExtension, genesisHead } from './head.js'
+import {
+  assertHeadMatches,
+  buildLedgerHeadExtension,
+  computeHead,
+  decodeLedgerHead,
+  encodeLedgerHead,
+  extendHead,
+  genesisHead,
+  readLedgerHead,
+  readLedgerHeadExtension,
+} from './head.js'
 import {
   ledgerEntryDigest,
   signLedgerEntry,
@@ -461,12 +471,14 @@ export class GroupHandle {
     let candidateRoster: RosterState = this.#roster
     let surfaced: Array<VerifiedLedgerEntry> = []
     let acceptedEntries: Array<ResolvedEntry> = []
+    let envelopeIDs: Array<string> = []
 
     const env = decodeControlEnvelope(commit.authenticatedData)
     if (!env.ok) {
       precomputedReject = true
     } else {
       const ids = env.envelope.entries ?? []
+      envelopeIDs = ids
       const resolved = new Map<string, ResolvedEntry>()
       const missing: Array<string> = []
       for (const id of ids) {
@@ -522,6 +534,19 @@ export class GroupHandle {
       anchorExt != null && anchorExt.extensionData instanceof Uint8Array
         ? anchorExt.extensionData
         : new Uint8Array()
+    // The head this commit must install: the pre-commit head extended by the
+    // envelope's ids, in envelope order. An unreadable head yields bytes no real
+    // extension can equal, so such a group can install no head and enact nothing.
+    const headExt = readLedgerHeadExtension(this)
+    const currentHead =
+      headExt != null && headExt.extensionData instanceof Uint8Array
+        ? decodeLedgerHead(headExt.extensionData)
+        : null
+    const expectedHeadExtensionData =
+      currentHead == null
+        ? new Uint8Array()
+        : encodeLedgerHead(extendHead(currentHead.head, envelopeIDs))
+    const commitEnactsEntries = envelopeIDs.length > 0
     const baseRoster = this.#roster
 
     const combined: IncomingMessageCallback = (incoming) => {
@@ -534,6 +559,8 @@ export class GroupHandle {
         candidateRoster,
         didOfLeaf,
         anchorExtensionData,
+        expectedHeadExtensionData,
+        commitEnactsEntries,
         externalCommitDID: undefined,
       })
     }
@@ -808,6 +835,13 @@ export async function createInvite(params: CreateInviteParams): Promise<CreateIn
     value: permission,
   })
 
+  // A signed entry is content-addressed, so re-signing a claim the group already
+  // holds — inviting a DID with exactly the role a standing entry grants it — yields
+  // that same entry, not a new one. The ledger folds each id once, and so does the
+  // head; appending the duplicate would leave the entry list unreproducible from the
+  // head the group authenticates.
+  const alreadyHeld = group.ledger.has(ledgerEntryDigest(roleToken))
+
   const invite: Invite = {
     groupID: group.groupID,
     capabilityToken: memberCapStr,
@@ -820,10 +854,132 @@ export async function createInvite(params: CreateInviteParams): Promise<CreateIn
     // nothing in the protocol re-sends. The new entry must fold after the history
     // it depends on, hence last. The joiner still folds from the anchor, so the
     // inviter cannot promote anyone by padding this list.
-    ledgerEntries: [...group.ledgerTokens, roleToken],
+    ledgerEntries: alreadyHeld ? [...group.ledgerTokens] : [...group.ledgerTokens, roleToken],
   }
 
   return { invite }
+}
+
+/**
+ * The GroupContext extension list a commit installs when it enacts `entryIDs`: the
+ * group's current list with only the ledger-head extension replaced by the head
+ * extended by those ids, in envelope order. Every other extension — the anchor above
+ * all — is the verbatim object out of the current GroupContext, never a re-encode of
+ * a decoded value, because the receiving policy byte-compares the anchor.
+ */
+function extensionsWithHead(
+  group: GroupHandle,
+  entryIDs: Array<string>,
+): Array<GroupContextExtension> {
+  const current = readLedgerHead(group)
+  if (current == null) {
+    throw new Error('group has no ledger head extension; it cannot enact ledger entries')
+  }
+  const next = buildLedgerHeadExtension(extendHead(current.head, entryIDs))
+  return group.state.groupContext.extensions.map((ext) =>
+    ext.extensionType === LEDGER_HEAD_EXTENSION_TYPE ? next : ext,
+  )
+}
+
+/**
+ * The one place a commit carrying control-ledger entries is built: `commitInvite`,
+ * `removeMember`, and `commitLedgerEntries` all route through it, so the envelope and
+ * the head can never drift apart.
+ *
+ * `tokens` is narrowed to the delta — the entries the committer does not already hold.
+ * The envelope names only what this commit *enacts*, never the whole history: replaying
+ * the history would re-judge every past entry against the present roster, and a grant
+ * issued by a since-demoted admin would read as coming from a non-admin, freezing every
+ * group that ever rotated its admins.
+ *
+ * When the delta is non-empty the commit also carries a group-context-extensions
+ * proposal advancing the ledger head by exactly those ids, in envelope order. An empty
+ * delta moves no head and carries no envelope.
+ */
+async function commitWithEntries(
+  group: GroupHandle,
+  extraProposals: Array<DefaultProposal>,
+  tokens: Array<string>,
+  ratchetTreeExtension = false,
+): Promise<{ result: Awaited<ReturnType<typeof createCommit>>; enacted: Array<string> }> {
+  // Same reason createInvite guards the inviter: a non-admin's commit is rejected by
+  // every receiver, so fail here rather than emitting a commit nobody will apply.
+  if (group.roster.roles.get(normalizeDID(group.credential.id)) !== 'admin') {
+    throw new Error('the committer must be an admin in the group roster')
+  }
+
+  const enacted = tokens.filter((token) => !group.ledger.has(ledgerEntryDigest(token)))
+  const entryIDs = enacted.map(ledgerEntryDigest)
+  const proposals = [...extraProposals]
+  if (entryIDs.length > 0) {
+    proposals.push({
+      proposalType: defaultProposalTypes.group_context_extensions,
+      groupContextExtensions: { extensions: extensionsWithHead(group, entryIDs) },
+    })
+  }
+
+  const result = await createCommit({
+    context: group.context,
+    state: group.state,
+    extraProposals: proposals,
+    ...(ratchetTreeExtension && { ratchetTreeExtension: true }),
+    ...(entryIDs.length > 0 && {
+      authenticatedData: encodeControlEnvelope({ v: 1, entries: entryIDs }),
+    }),
+  })
+  return { result, enacted }
+}
+
+/** Build the handle a commit hands back: the post-commit state, everything else inherited. */
+function deriveGroup(group: GroupHandle, state: ClientState): GroupHandle {
+  return new GroupHandle({
+    state,
+    credential: group.credential,
+    context: group.context,
+    rootCapability: group.rootCapability,
+    ledger: group.ledger,
+    cache: group.cache,
+    resolver: group.resolver,
+    commitPolicy: group.commitPolicy,
+    resolveLedgerEntries: group.resolveLedgerEntries,
+    onLedgerEntries: group.onLedgerEntries,
+  })
+}
+
+export type CommitLedgerEntriesResult = {
+  /** Framed MLSMessage bytes. Broadcast to existing members via the DS. */
+  commitMessage: Uint8Array
+  newGroup: GroupHandle
+  /** Post-commit epoch the group is now at (== newGroup.epoch). */
+  epoch: bigint
+}
+
+/**
+ * The admin write path for the control ledger: a commit that carries no membership
+ * proposal, only the entries it enacts and the head move that covers them. This is how
+ * an admin promotes, demotes, or writes any other entry type — an entry that never
+ * rides a commit is invisible to the head, and a joiner recomputing the head would
+ * read the group's history as doctored.
+ *
+ * Rejects an empty `tokens` list: a commit that enacts nothing has no reason to be
+ * authored here. Tokens the group already holds are dropped from the delta, so a list
+ * of only-held tokens produces a plain key-rotation commit that moves no head.
+ */
+export async function commitLedgerEntries(
+  group: GroupHandle,
+  tokens: Array<string>,
+): Promise<CommitLedgerEntriesResult> {
+  if (tokens.length === 0) {
+    throw new Error('commitLedgerEntries: no ledger entries to commit')
+  }
+  const { result, enacted } = await commitWithEntries(group, [], tokens)
+  const newGroup = deriveGroup(group, result.newState)
+  await newGroup.applyLedgerEntries(enacted)
+  return {
+    commitMessage: encode(mlsMessageEncoder, result.commit),
+    newGroup,
+    epoch: newGroup.epoch,
+  }
 }
 
 export type CommitInviteResult = {
@@ -844,10 +1000,14 @@ export type CommitInviteResult = {
  * Produces an MLS Commit + Welcome.
  *
  * The invite's ledger entries are enacted by this commit: their content ids ride in
- * the commit's control envelope, so every receiver folds the invitee's role entry
- * into its roster as it applies the Add. The envelope carries ids, not bodies — a
- * receiver that holds neither the entry nor a `resolveLedgerEntries` resolver throws
+ * the commit's control envelope and the commit advances the ledger head by exactly
+ * those ids, so every receiver folds the invitee's role entry into its roster as it
+ * applies the Add. The envelope carries ids, not bodies — a receiver that holds
+ * neither the entry nor a `resolveLedgerEntries` resolver throws
  * MissingLedgerEntriesError on this commit.
+ *
+ * The invite itself carries the group's whole history — a joiner has nothing to fold
+ * it onto — but only the delta rides the commit; see {@link commitWithEntries}.
  */
 export async function commitInvite(
   group: GroupHandle,
@@ -857,48 +1017,19 @@ export async function commitInvite(
   if (invite.groupID !== group.groupID) {
     throw new Error(`commitInvite: invite is for group ${invite.groupID}, not ${group.groupID}`)
   }
-  // Same reason createInvite guards the inviter: a non-admin's Add is rejected by
-  // every receiver, so fail here rather than emitting a commit nobody will apply.
-  if (group.roster.roles.get(normalizeDID(group.credential.id)) !== 'admin') {
-    throw new Error('commitInvite: the committer must be an admin in the group roster')
-  }
 
   const addProposal: DefaultProposal = {
     proposalType: defaultProposalTypes.add,
     add: { keyPackage },
   }
-
-  // The invite carries the group's whole history — a joiner has nothing to fold it
-  // onto. The commit envelope is a different channel: it names only what this commit
-  // *enacts*, the entries existing members do not already hold. Replaying the history
-  // here instead would re-evaluate every past entry against the present roster, and a
-  // grant issued by an admin who has since been demoted would read as coming from a
-  // non-admin — rejecting the commit and freezing every group that ever rotated.
-  const enacted = invite.ledgerEntries.filter(
-    (token) => !group.ledger.has(ledgerEntryDigest(token)),
+  const { result, enacted } = await commitWithEntries(
+    group,
+    [addProposal],
+    invite.ledgerEntries,
+    true,
   )
-  const result = await createCommit({
-    context: group.context,
-    state: group.state,
-    extraProposals: [addProposal],
-    ratchetTreeExtension: true,
-    ...(enacted.length > 0 && {
-      authenticatedData: encodeControlEnvelope({ v: 1, entries: enacted.map(ledgerEntryDigest) }),
-    }),
-  })
 
-  const newGroup = new GroupHandle({
-    state: result.newState,
-    credential: group.credential,
-    context: group.context,
-    rootCapability: group.rootCapability,
-    ledger: group.ledger,
-    cache: group.cache,
-    resolver: group.resolver,
-    commitPolicy: group.commitPolicy,
-    resolveLedgerEntries: group.resolveLedgerEntries,
-    onLedgerEntries: group.onLedgerEntries,
-  })
+  const newGroup = deriveGroup(group, result.newState)
 
   if (result.welcome == null) {
     throw new Error('commitInvite: expected a Welcome message for the add proposal')
@@ -1014,6 +1145,20 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
     resolveLedgerEntries: options?.resolveLedgerEntries,
     onLedgerEntries: options?.onLedgerEntries,
   })
+  // Every ledger entry reaches the group inside a commit that extends the head by its
+  // id, so the head authenticated in the joined GroupContext is the fold from genesis
+  // over the group's entries, in order. Recompute it over the entries the inviter
+  // supplied: an omitted, reordered, or truncated list cannot reproduce it. Checked
+  // before folding, so an incomplete ledger never reaches the roster.
+  const authenticated = readLedgerHead(group)
+  if (authenticated == null) {
+    throw new Error('processWelcome: the group has no ledger head extension')
+  }
+  assertHeadMatches(
+    authenticated.head,
+    computeHead(invite.groupID, invite.ledgerEntries.map(ledgerEntryDigest)),
+  )
+
   // Fold the invite's entries: the roster is seeded from the anchor, and the fold
   // grants authority only to an admin-so-far, so a member-signed entry cannot
   // promote anyone even though applyLedgerEntries itself is the permissive primitive.
@@ -1035,34 +1180,26 @@ export type RemoveMemberResult = {
 
 /**
  * Remove a member from the group. Advances the epoch and rotates keys.
+ *
+ * Removal must demote: a receiver rejects a Remove whose target is still `admin` in
+ * the roster the commit's entries fold to. So removing an admin means riding the
+ * demotion entry on the same commit — pass it as `ledgerEntries`. The entry is signed
+ * by the caller, who holds the identity; this only carries it.
  */
 export async function removeMember(
   group: GroupHandle,
   leafIndex: number,
+  ledgerEntries?: Array<string>,
 ): Promise<RemoveMemberResult> {
   const removeProposal: DefaultProposal = {
     proposalType: defaultProposalTypes.remove,
     remove: { removed: leafIndex },
   }
 
-  const result = await createCommit({
-    context: group.context,
-    state: group.state,
-    extraProposals: [removeProposal],
-  })
+  const { result, enacted } = await commitWithEntries(group, [removeProposal], ledgerEntries ?? [])
 
-  const newGroup = new GroupHandle({
-    state: result.newState,
-    credential: group.credential,
-    context: group.context,
-    rootCapability: group.rootCapability,
-    ledger: group.ledger,
-    cache: group.cache,
-    resolver: group.resolver,
-    commitPolicy: group.commitPolicy,
-    resolveLedgerEntries: group.resolveLedgerEntries,
-    onLedgerEntries: group.onLedgerEntries,
-  })
+  const newGroup = deriveGroup(group, result.newState)
+  await newGroup.applyLedgerEntries(enacted)
 
   return {
     commitMessage: encode(mlsMessageEncoder, result.commit),

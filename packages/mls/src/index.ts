@@ -62,11 +62,13 @@ export {
 } from './fold.js'
 export {
   type CommitInviteResult,
+  type CommitLedgerEntriesResult,
   CommitRejectedError,
   type CreateGroupResult,
   type CreateInviteParams,
   type CreateInviteResult,
   commitInvite,
+  commitLedgerEntries,
   createGroup,
   createInvite,
   createKeyPackageBundle,

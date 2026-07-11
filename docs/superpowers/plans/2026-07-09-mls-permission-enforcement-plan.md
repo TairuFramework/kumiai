@@ -1486,3 +1486,56 @@ validates at mint time, so it surfaces only at the joiner's `processWelcome`. Th
 of defect as 5.2b — the chain and the roster disagree about who is an admin — and it is dissolved
 rather than fixed by the tracked chain-removal step (Q2.5), which deletes the chain outright. Do the
 removal rather than repairing the chain.
+
+### 2026-07-11 — Question 5.2c: entries ride commits, and the head proves it
+
+**Findings:** The invariant holds: **every ledger entry reaches the group inside a commit, and every
+commit that enacts entries extends the GroupContext head by exactly those ids, in envelope order.**
+`commitLedgerEntries` is the admin write path that was missing entirely — before this, promotion and
+demotion were impossible through the public API, and every test reached for `applyLedgerEntries`,
+which is the receive/restore primitive and moves no head. That back door is precisely why the head had
+never been verifiable. `applyLedgerEntries` remains, but it authors nothing.
+
+An omitting inviter is now **caught**: dropping (or reordering) an entry in `invite.ledgerEntries`
+makes `processWelcome` throw `LedgerIncompleteError` before anything is folded —
+`expected=b6f71fbc5b6ce2f4 actual=b28f397c1107519c`. The deliberate fork is closed, as the accidental
+one was in 5.2b. Suite **255 green**, tsc clean, biome clean.
+
+**ts-mls accepted both GCE shapes** — a `group_context_extensions` proposal alongside an `Add` (every
+`commitInvite` now emits `[add, gce]`) and a GCE-only commit (`commitLedgerEntries`). Its only relevant
+constraint is that a commit cannot carry two GCE proposals; we emit exactly one. No design-changing
+blocker, which was the risk the brief flagged.
+
+`removeMember` gained an optional entries parameter, closing a gap found while briefing: the policy
+requires a removed admin to have been demoted in the same commit, but nothing could sign the demotion
+— so **removing an admin was impossible**.
+
+**The head coupling is what makes entry injection admin-only.** Verified by running the attack: a
+member holding a genuine, admin-signed promotion token naming *himself* cannot enact it
+(`REJECTED: CommitRejectedError`, roster unchanged). Enacting entries requires moving the head; moving
+the head requires a GCE proposal; GCE requires admin. A member's only permitted proposal is `update`,
+which yields a valid commit — but attaching an envelope flips `commitEnactsEntries` and the commit dies
+for want of a head move. Independently, `foldEnvelope` checks each entry's *issuer* is admin in
+state-so-far, so even an admin cannot enact an entry signed by a non-admin or by a since-demoted admin.
+
+**Spec impact:** none.
+
+**A serious pre-existing bug this exposed (fixed next).** `signLedgerEntry` is deterministic (Ed25519),
+so re-signing an identical claim yields a byte-identical token and therefore the **same content id**.
+Because `#ledger` is a `Map` keyed by content id and both `applyLedgerEntries` and the envelope
+narrowing dedup on it, **an admin cannot be demoted back to a role they previously held**: granting Bob
+`member`, promoting him to `admin`, then demoting him to `member` re-signs the first entry, dedups to a
+no-op, and Bob stays `admin` — silently, with every receiver accepting the commit. Reproduced directly.
+Since removal now *requires* a demotion, this also makes "remove an admin who joined as a member"
+impossible unless the demotion carries an `ord` — which is what the new removal test does, as a
+deliberate, documented workaround pending the fix.
+
+The root cause is a category error: `#ledger` is a *set of claims* keyed by content, but the ledger is
+an **ordered log of enactments**, where the same claim recurring later is meaningful precisely because
+it undoes what came between. `head.ts` already models it correctly — `extendHead` folds over an ordered
+id list, repeats and all. The `Map` is the odd one out. Dedup was never buying security (the two real
+gates are the head coupling and the issuer check), and it was silently eating legitimate demotions.
+
+**Learned:** wiring the head is what surfaced the dedup bug — the head could not reproduce a list
+containing the same id twice, which forced the duplicate to the surface. An integrity check earns its
+keep before any attacker shows up, by making the model's own inconsistencies fail loudly.
