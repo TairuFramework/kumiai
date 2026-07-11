@@ -25,9 +25,9 @@ export type GroupOptions = {
   capabilities?: Capabilities
   /**
    * Default commit policy for the resulting GroupHandle. Invoked during
-   * processMessage/decrypt for each incoming commit; return 'reject' to refuse
-   * a commit (the handle stays at its pre-commit epoch and processMessage
-   * throws CommitRejectedError). Overridable per call.
+   * processMessage for each incoming commit or standalone proposal; return
+   * 'reject' to refuse it (the handle stays at its pre-commit epoch and
+   * processMessage throws CommitRejectedError). Overridable per call.
    *
    * Providing this REPLACES the anchored defaultCommitPolicy entirely — it does
    * not compose with it. A caller that sets this for any reason (e.g. to
