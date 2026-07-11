@@ -928,6 +928,25 @@ async function commitWithEntries(
     throw new Error('the committer must be an admin in the group roster')
   }
 
+  // Fold the entries exactly as every receiver will, and refuse to author a commit the
+  // group would reject. Without this the write path fails *open*: the committer advances
+  // its own log and head while every receiver rejects the commit, forking itself off the
+  // group. Being an admin is not enough — an entry's own issuer must still hold authority
+  // at the position it lands in, so a token signed by a since-demoted admin is dead paper
+  // no matter who commits it.
+  const inputs: Array<FoldInput> = []
+  for (const token of enacted) {
+    const verified = await verifyLedgerEntry(token)
+    if (verified == null) {
+      throw new Error('cannot enact a ledger entry whose signature does not verify')
+    }
+    inputs.push({ verified, entryID: ledgerEntryDigest(token) })
+  }
+  const fold = foldEnvelope(group.roster, inputs, group.groupID)
+  if (!fold.ok) {
+    throw new Error(`cannot enact ledger entry ${fold.entryID}: ${fold.reason}`)
+  }
+
   const entryIDs = enacted.map(ledgerEntryDigest)
   const proposals = [...extraProposals]
   if (entryIDs.length > 0) {

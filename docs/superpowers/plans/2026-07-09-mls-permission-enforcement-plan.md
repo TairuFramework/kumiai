@@ -1587,3 +1587,40 @@ rejects it — forking itself off the group. Visible in the demoted-admin test, 
 fold drops the entry but the commit is still emitted. Not an escalation (the damage is self-inflicted
 and receivers stay correct), but the write path should refuse to author a commit the group will reject.
 Running `foldEnvelope` at commit time would close it.
+
+### 2026-07-11 — The write path fails closed
+
+**Findings:** `commitWithEntries` now folds the entries it is about to enact — through the same
+`foldEnvelope` every receiver runs, against its own roster — and refuses to author a commit the group
+would reject. Suite **261 green**, tsc clean, biome clean. Done directly rather than by probe; the
+change is a dozen lines.
+
+Before this, the write path failed **open**. Being an admin was the only check, but admin-ness is not
+sufficient: an entry is judged by *its own issuer's* authority at the position it lands in, so a token
+signed by a since-demoted admin is dead paper no matter who carries it. A committer could therefore
+build a commit that advanced its own log and head while every receiver rejected it — forking itself off
+the group. Self-inflicted rather than an escalation, but the asymmetry was real: the committer trusted
+itself where its receivers would not.
+
+**Two tests changed meaning, and both got stronger.**
+
+The demoted-admin test previously *built* the stale commit and asserted receivers rejected it. Now the
+write path refuses to build it. To keep the receiver-side proof — which is the one that actually
+matters, since a malicious client can always skip the guard — the test now does both: it asserts
+`commitLedgerEntries` throws, *and* forges the same commit by hand (`entryCommitBytes`: the envelope
+plus the head move it implies) and asserts receivers still reject it. Defence in depth, both halves
+pinned.
+
+`a member-signed entry in the invite cannot promote` had a premise that no longer exists: it assumed an
+honest inviter would happily commit a tampered invite and the *joiner* would quietly drop the bad entry.
+That path is now unreachable, and should be — a silently-dropped entry would still be sitting in the
+head chain, which is exactly the incoherence the head exists to prevent. Rewritten to assert the inviter
+refuses to author it. The defensive-drop behaviour of the low-level primitive stays covered by
+`applyLedgerEntries drops cross-group and member-signed tokens without throwing`.
+
+**Spec impact:** none.
+
+**Learned:** "the committer is an admin" reads like the natural guard and is the wrong one. Authority in
+this design is per-entry and positional, never per-committer — the same insight that makes rotation
+sound (state-so-far) makes the committer's own admin-ness insufficient. The write path had to run the
+*receivers'* check, not its own.

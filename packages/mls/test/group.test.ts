@@ -27,6 +27,7 @@ import {
   createGroup,
   createInvite,
   createKeyPackageBundle,
+  type GroupHandle,
   processWelcome,
   readMessageEpoch,
   removeMember,
@@ -1278,6 +1279,35 @@ async function pathCommitBytes(
   return encode(mlsMessageEncoder, result.commit)
 }
 
+/**
+ * A commit enacting `tokens`: the envelope naming them plus the head move they imply.
+ * Stands in for a client that skipped the write path's own fold — the receivers must
+ * reject such a commit on the entries themselves, not on the committer's good behaviour.
+ */
+async function entryCommitBytes(group: GroupHandle, tokens: Array<string>): Promise<Uint8Array> {
+  const entryIDs = tokens.map(ledgerEntryDigest)
+  const current = readLedgerHead(group)
+  if (current == null) throw new Error('expected the group to carry a ledger head')
+  const head = buildLedgerHeadExtension(extendHead(current.head, entryIDs))
+  const result = await createCommit({
+    context: group.context,
+    state: group.state,
+    extraProposals: [
+      {
+        proposalType: defaultProposalTypes.group_context_extensions,
+        groupContextExtensions: {
+          extensions: group.state.groupContext.extensions.map(
+            (ext: GroupContextExtension): GroupContextExtension =>
+              ext.extensionType === LEDGER_HEAD_EXTENSION_TYPE ? head : ext,
+          ),
+        },
+      },
+    ],
+    authenticatedData: encodeControlEnvelope({ v: 1, entries: entryIDs }),
+  })
+  return encode(mlsMessageEncoder, result.commit)
+}
+
 /** A commit proposing an Add of `keyPackage`, optionally carrying an envelope. */
 async function addCommitBytes(
   group: { context: unknown; state: unknown },
@@ -1958,13 +1988,13 @@ describe('an invite carries the group ledger', () => {
     expect(rosterEntries(restored)).toEqual(rosterEntries(newGroup))
   })
 
-  test('a member-signed entry in the invite cannot promote', async () => {
+  test('a member-signed entry smuggled into an invite is refused before it is committed', async () => {
     const { bob, aliceGroup, alice, groupID } = await twoMemberGroup()
     const carol = randomIdentity()
     const dave = randomIdentity()
 
-    // Bob is only a member: his role entry verifies, but the joiner's fold is
-    // rooted at the anchor, so it drops an entry no admin-so-far issued.
+    // Bob is only a member: his role entry verifies, but authority is rooted at the
+    // anchor and grows only through admins-so-far, so no fold will ever apply it.
     const bobPromotesCarol = await signLedgerEntry(bob, {
       type: 'group.role',
       groupID,
@@ -1983,24 +2013,14 @@ describe('an invite carries the group ledger', () => {
       ledgerEntries: [...invite.ledgerEntries.slice(0, -1), bobPromotesCarol, roleToken(invite)],
     }
 
+    // Alice is an honest admin, but the entries she would enact are not hers to vouch
+    // for: she folds them as her receivers would and refuses to author a commit they
+    // would reject. An entry the fold drops must never reach the head chain.
     const daveKP = await createKeyPackageBundle(dave)
-    const { welcomeMessage, newGroup } = await commitInvite(
-      aliceGroup,
-      daveKP.publicPackage,
-      tampered,
+    await expect(commitInvite(aliceGroup, daveKP.publicPackage, tampered)).rejects.toThrow(
+      /cannot enact ledger entry/,
     )
-    const { group: daveGroup } = await processWelcome({
-      identity: dave,
-      invite: tampered,
-      welcome: welcomeMessage,
-      keyPackageBundle: daveKP,
-      ratchetTree: newGroup.state.ratchetTree,
-    })
-
-    expect(daveGroup.roster.roles.get(normalizeDID(carol.id))).toBeUndefined()
-    expect(daveGroup.roster.roles.get(normalizeDID(bob.id))).toBe('member')
-    expect(daveGroup.roster.roles.get(normalizeDID(alice.id))).toBe('admin')
-    expect(daveGroup.roster.roles.get(normalizeDID(dave.id))).toBe('member')
+    expect(aliceGroup.roster.roles.get(normalizeDID(carol.id))).toBeUndefined()
   })
 
   test('the ledger keeps its order across the wire: promote then demote folds to demoted', async () => {
@@ -2578,16 +2598,20 @@ describe('the ledger is an ordered log, not a set of claims', () => {
 
     // Bob is a current admin, so he may enact entries — but every entry is judged by its
     // own issuer at its own position, and Alice is no longer an admin there. Her stale
-    // token is dead, whoever carries it.
-    const stale = await commitLedgerEntries(demotion.newGroup, [alicePromotesDave])
-    const epochBefore = carolGroup.epoch
-    await expect(carolGroup.processMessage(stale.commitMessage)).rejects.toThrow(
-      CommitRejectedError,
+    // token is dead, whoever carries it. The write path folds before it commits, so it
+    // refuses to author a commit the group would reject rather than forking Bob off it.
+    await expect(commitLedgerEntries(demotion.newGroup, [alicePromotesDave])).rejects.toThrow(
+      /cannot enact ledger entry/,
     )
+    expect(demotion.newGroup.roster.roles.get(normalizeDID(dave.id))).toBeUndefined()
+
+    // And a client that skipped that guard gets nowhere: the receivers fold the entry
+    // themselves and reject the commit on its issuer, not on who carried it.
+    const forged = await entryCommitBytes(demotion.newGroup, [alicePromotesDave])
+    const epochBefore = carolGroup.epoch
+    await expect(carolGroup.processMessage(forged)).rejects.toThrow(CommitRejectedError)
     expect(carolGroup.epoch).toBe(epochBefore)
     expect(carolGroup.roster.roles.get(normalizeDID(dave.id))).toBeUndefined()
-    // The committer's own fold drops it too — nobody ends up with Dave as an admin.
-    expect(stale.newGroup.roster.roles.get(normalizeDID(dave.id))).toBeUndefined()
   })
 
   test('a member cannot enact an admin-signed entry naming himself', async () => {
