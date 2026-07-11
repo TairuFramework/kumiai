@@ -302,22 +302,9 @@ Note: the message decode stays *outside* the mutex (it touches no `#state`); onl
 
 Apply the same treatment to `decrypt`'s body: wrap from `#prepareCommitPipeline` through the throws/returns in `return mutexFor(this).run(async () => { … })`, and add `zeroAll(result.consumed)` right after `this.#state = result.newState`. Leave its behavior otherwise unchanged.
 
-- [ ] **Step 7: Zero `consumed` on the commit-producer path**
+- [ ] **Step 7: Do NOT zero `consumed` on the commit-producer path**
 
-In `commitWithEntries`, capture the commit result and wipe its `consumed` before returning (ts-mls has already produced `newState`, so `consumed` are retired):
-```ts
-  const commit = await createCommit({
-    context: group.context,
-    state: group.state,
-    extraProposals: proposals,
-    ...(ratchetTreeExtension && { ratchetTreeExtension: true }),
-    ...(entryIDs.length > 0 && {
-      authenticatedData: encodeControlEnvelope({ v: 1, entries: entryIDs }),
-    }),
-  })
-  zeroAll(commit.consumed)
-  return commit
-```
+Leave `commitWithEntries` unchanged — do **not** add `zeroAll(commit.consumed)` here. Unlike `encrypt`/`processMessage`/`decrypt`, the commit producers do not advance the source handle's `#state`: `commitWithEntries` reads `group.state`, and its caller builds a *derived* handle via `deriveGroup(group, result.newState)` while the source `group` stays live at its epoch and is reusable (the suite authors two alternate commits off one base handle — a to-be-rejected `bare` commit and the accepted `removal`). ts-mls's `createCommit` `consumed` buffers alias into the *still-live* source secret tree, not into retired state, so zeroing them corrupts the source handle and the next commit off it fails with `aes/gcm: invalid ghash tag`. The secrets on this path are collected with the source handle by GC when it is dropped; there is no safe eager-wipe point because the library never observes "the source is now done". Zeroing stays only on the state-advancing paths (Steps 4–6), where `this.#state = newState` provably abandons the old state first.
 
 - [ ] **Step 8: Serialize the commit producers on the handle's mutex**
 
@@ -340,7 +327,7 @@ Run: `pnpm --filter @kumiai/mls exec vitest run test/group.test.ts -t "serialize
 Expected: PASS (2 tests).
 
 Run: `pnpm --filter @kumiai/mls exec vitest run`
-Expected: PASS — **250 passed** (248 baseline + 2 new). No signature changed, so every existing test still holds.
+Expected: PASS — **253 passed** (251 baseline at Task 2 start = 248 original + 3 mutex tests from Task 1, plus 2 new here). No signature changed, so every existing test still holds.
 
 - [ ] **Step 10: Lint, type-check, commit**
 
@@ -434,10 +421,48 @@ grep -rn "\.decrypt(\|{ message[ ,}]" packages/mls/test/group.test.ts packages/m
 ```
 (The `crypto.test.ts` `.encrypt(`/`.decrypt(` hits are a different cipher object — do not touch them.)
 
+Two Task-2 tests in the `a handle serializes its state mutations` describe need shape-specific handling, not just the mechanical rewrite:
+
+- **The concurrency test** (`concurrent encrypts each get a distinct generation and all decrypt on the peer`) has `for (const { message } of [m1, m2]) { got.add(d.decode(await bobGroup.decrypt(message))) }`. Since `m1`/`m2` are now framed `Uint8Array` directly, rewrite to `for (const message of [m1, m2]) { got.add(d.decode(await bobGroup.processMessage(message))) }`. The `Promise.all([...encrypt...])` above it stays — its results are just bytes now.
+- **The consumed-zeroing test** (`encrypt wipes the retired secrets it consumed`) reads `const { consumed } = await aliceGroup.encrypt(...)` — but `encrypt` no longer returns `consumed`. Rewrite it to capture the buffers by tapping the ts-mls call, per the spec's Testing note ("spy/wrap the ts-mls call, or assert on a captured reference"). `group.ts` imports `createApplicationMessage` directly from the pure-ESM `ts-mls`, and the suite has no existing ts-mls mock, so use a file-scoped partial mock with `vi.hoisted` shared state (the standard vitest pattern — it delegates every ts-mls symbol to the real implementation via `importOriginal` and only records `consumed`). Keep the test — the zeroing behavior still runs inside `encrypt`; only its observation point moves.
+
+  Add to the top of `packages/mls/test/group.test.ts` (after the imports; `vi.mock` is auto-hoisted above them by vitest, and `vi.hoisted` makes the capture reachable from the hoisted factory). Also add `vi` to the existing `vitest` import (`import { describe, expect, it, test, vi } from 'vitest'`):
+  ```ts
+  const consumedCapture = vi.hoisted(() => ({ last: null as Array<Uint8Array> | null }))
+  vi.mock('ts-mls', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('ts-mls')>()
+    return {
+      ...actual,
+      createApplicationMessage: async (
+        ...args: Parameters<typeof actual.createApplicationMessage>
+      ) => {
+        const result = await actual.createApplicationMessage(...args)
+        consumedCapture.last = result.consumed
+        return result
+      },
+    }
+  })
+  ```
+  Replace the test body with:
+  ```ts
+  test('encrypt wipes the retired secrets it consumed', async () => {
+    const { aliceGroup } = await twoMemberGroup()
+    consumedCapture.last = null
+    await aliceGroup.encrypt(new TextEncoder().encode('x'))
+    const consumed = consumedCapture.last
+    expect(consumed).not.toBeNull()
+    expect((consumed as Array<Uint8Array>).length).toBeGreaterThan(0)
+    for (const buffer of consumed as Array<Uint8Array>) {
+      expect(buffer.every((byte) => byte === 0)).toBe(true)
+    }
+  })
+  ```
+  If the file-wide `vi.mock('ts-mls')` breaks other tests in the suite (unexpected, since it spreads the real module), STOP and report BLOCKED with the failing output rather than improvising a different seam.
+
 - [ ] **Step 6: Run the whole suite**
 
 Run: `pnpm --filter @kumiai/mls exec vitest run`
-Expected: PASS — **250 passed** (unchanged from Task 2; this task migrates call sites and adds one assertion to an existing test, it adds no new test). If any test still destructures `{ message }` from `encrypt` or calls `decrypt`, tsc/vitest will point at it — fix mechanically per Step 5.
+Expected: PASS — **253 passed** (251 baseline at Task 2 start + the 2 tests added in Task 2, both surviving here migrated/rewritten in place; the add-Carol assertion in Step 1 modifies an existing test, adding no count). If any test still destructures `{ message }` from `encrypt` or calls `decrypt`, tsc/vitest will point at it — fix mechanically per Step 5.
 
 - [ ] **Step 7: Type-check**
 

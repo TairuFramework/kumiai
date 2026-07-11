@@ -125,11 +125,20 @@ function zeroAll(buffers: Array<Uint8Array>): void {
 }
 ```
 
-Applied after `createApplicationMessage` (in `encrypt`), after `createCommit` (in the shared
-`commitWithEntries` path that `commitInvite`/`removeMember`/`commitLedgerEntries` route through), and
-after `processMessage`'s ts-mls call. `consumed` never crosses the public boundary. The zeroing
-happens *after* `this.#state = newState` (or after the derived state is built), so a buffer is never
-wiped while still referenced by the state being adopted.
+Applied only on the paths that **advance the handle's own `#state`**: after `createApplicationMessage`
+(in `encrypt`) and after `processMessage`'s ts-mls call (and the interim `decrypt`). On these paths
+`this.#state = newState` abandons the old state first, so the retired `consumed` buffers are provably
+unreferenced and safe to wipe. `consumed` never crosses the public boundary.
+
+The **commit-producer path is deliberately excluded.** `commitInvite`/`removeMember`/
+`commitLedgerEntries` route through `commitWithEntries`, which reads `group.state` but does *not*
+reassign the source handle's `#state`; the caller forks a derived handle via `deriveGroup` while the
+source stays live and reusable (the suite authors two alternate commits off one base handle).
+ts-mls's `createCommit` `consumed` alias into the *still-live* source secret tree — zeroing them
+corrupts the source and the next commit off it fails with `aes/gcm: invalid ghash tag`. Those secrets
+are not retired; they belong to the live source and are collected with it by GC when the handle is
+dropped. There is no safe eager-wipe point on a fork, because the library never observes when the
+source handle is truly done. So the fork path keeps ts-mls's `consumed` unwiped by design.
 
 ### 3. `encrypt` returns framed `Uint8Array`
 
