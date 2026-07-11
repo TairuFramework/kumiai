@@ -13,7 +13,7 @@ import {
   protocolVersions,
   wireformats,
 } from 'ts-mls'
-import { describe, expect, it, test } from 'vitest'
+import { describe, expect, it, test, vi } from 'vitest'
 
 import {
   GROUP_ANCHOR_EXTENSION_TYPE,
@@ -48,6 +48,21 @@ import { ledgerEntryDigest, signLedgerEntry, type VerifiedLedgerEntry } from '..
 import { MissingLedgerEntriesError } from '../src/policy.js'
 import { ROLE_ENTRY_TYPE } from '../src/roster.js'
 import type { GroupOptions, Invite } from '../src/types.js'
+
+const consumedCapture = vi.hoisted(() => ({ last: null as Array<Uint8Array> | null }))
+vi.mock('ts-mls', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('ts-mls')>()
+  return {
+    ...actual,
+    createApplicationMessage: async (
+      ...args: Parameters<typeof actual.createApplicationMessage>
+    ) => {
+      const result = await actual.createApplicationMessage(...args)
+      consumedCapture.last = result.consumed
+      return result
+    },
+  }
+})
 
 /** Serve an invite's signed ledger tokens to a receiver's resolver. */
 function publishInvite(tokens: Map<string, string>, invite: Invite): void {
@@ -140,14 +155,14 @@ describe('GroupHandle lifecycle', () => {
     })
 
     // Alice sends to Bob
-    const { message } = await updatedAliceGroup.encrypt(new TextEncoder().encode('hello bob'))
-    const decrypted = await bobGroup.decrypt(message)
-    expect(new TextDecoder().decode(decrypted)).toBe('hello bob')
+    const message = await updatedAliceGroup.encrypt(new TextEncoder().encode('hello bob'))
+    const decrypted = await bobGroup.processMessage(message)
+    expect(new TextDecoder().decode(decrypted as Uint8Array)).toBe('hello bob')
 
     // Bob sends to Alice
-    const { message: replyMsg } = await bobGroup.encrypt(new TextEncoder().encode('hello alice'))
-    const decryptedReply = await updatedAliceGroup.decrypt(replyMsg)
-    expect(new TextDecoder().decode(decryptedReply)).toBe('hello alice')
+    const replyMsg = await bobGroup.encrypt(new TextEncoder().encode('hello alice'))
+    const decryptedReply = await updatedAliceGroup.processMessage(replyMsg)
+    expect(new TextDecoder().decode(decryptedReply as Uint8Array)).toBe('hello alice')
   })
 
   test('removes a member with forward secrecy', async () => {
@@ -179,10 +194,8 @@ describe('GroupHandle lifecycle', () => {
     expect(groupAfterRemoval.epoch).toBe(2n)
     expect(groupAfterRemoval.memberCount).toBe(1)
 
-    const { message: secretMsg } = await groupAfterRemoval.encrypt(
-      new TextEncoder().encode('secret'),
-    )
-    await expect(bobGroup.decrypt(secretMsg)).rejects.toThrow()
+    const secretMsg = await groupAfterRemoval.encrypt(new TextEncoder().encode('secret'))
+    await expect(bobGroup.processMessage(secretMsg)).rejects.toThrow()
   })
 
   test('add device (self-invite)', async () => {
@@ -211,9 +224,9 @@ describe('GroupHandle lifecycle', () => {
       ratchetTree: updatedGroup.state.ratchetTree,
     })
 
-    const { message } = await updatedGroup.encrypt(new TextEncoder().encode('sync data'))
-    const data = await device2Group.decrypt(message)
-    expect(new TextDecoder().decode(data)).toBe('sync data')
+    const message = await updatedGroup.encrypt(new TextEncoder().encode('sync data'))
+    const data = await device2Group.processMessage(message)
+    expect(new TextDecoder().decode(data as Uint8Array)).toBe('sync data')
   })
 
   test('three-member group with fan-out', async () => {
@@ -267,9 +280,9 @@ describe('GroupHandle lifecycle', () => {
     expect(charlieGroup.memberCount).toBe(3)
     expect(groupWith3.epoch).toBe(2n)
 
-    const { message } = await groupWith3.encrypt(new TextEncoder().encode('hello everyone'))
-    const decrypted = await charlieGroup.decrypt(message)
-    expect(new TextDecoder().decode(decrypted)).toBe('hello everyone')
+    const message = await groupWith3.encrypt(new TextEncoder().encode('hello everyone'))
+    const decrypted = await charlieGroup.processMessage(message)
+    expect(new TextDecoder().decode(decrypted as Uint8Array)).toBe('hello everyone')
   })
 
   test('multi-epoch message exchange', async () => {
@@ -297,8 +310,10 @@ describe('GroupHandle lifecycle', () => {
       ratchetTree: epoch1Group.state.ratchetTree,
     })
 
-    const { message: msg1 } = await epoch1Group.encrypt(new TextEncoder().encode('epoch-1-msg'))
-    expect(new TextDecoder().decode(await bobGroup.decrypt(msg1))).toBe('epoch-1-msg')
+    const msg1 = await epoch1Group.encrypt(new TextEncoder().encode('epoch-1-msg'))
+    expect(new TextDecoder().decode((await bobGroup.processMessage(msg1)) as Uint8Array)).toBe(
+      'epoch-1-msg',
+    )
 
     const charlie = randomIdentity()
     const { invite: charlieInvite } = await createInvite({
@@ -315,8 +330,8 @@ describe('GroupHandle lifecycle', () => {
     )
     expect(epoch2Group.epoch).toBe(2n)
 
-    const { message: msg2 } = await epoch2Group.encrypt(new TextEncoder().encode('epoch-2-msg'))
-    await expect(bobGroup.decrypt(msg2)).rejects.toThrow()
+    const msg2 = await epoch2Group.encrypt(new TextEncoder().encode('epoch-2-msg'))
+    await expect(bobGroup.processMessage(msg2)).rejects.toThrow()
   })
 
   test('commitInvite returns wire bytes + epoch; receiver joins and processes via bytes', async () => {
@@ -583,9 +598,9 @@ describe('ratchet tree extension', () => {
 
     expect(bobGroup.memberCount).toBe(2)
 
-    const { message } = await updatedAlice.encrypt(new TextEncoder().encode('no tree needed'))
-    const decrypted = await bobGroup.decrypt(message)
-    expect(new TextDecoder().decode(decrypted)).toBe('no tree needed')
+    const message = await updatedAlice.encrypt(new TextEncoder().encode('no tree needed'))
+    const decrypted = await bobGroup.processMessage(message)
+    expect(new TextDecoder().decode(decrypted as Uint8Array)).toBe('no tree needed')
   })
 
   test('3-member join without ratchetTree param', async () => {
@@ -636,9 +651,9 @@ describe('ratchet tree extension', () => {
     expect(g3.memberCount).toBe(3)
     expect(charlieGroup.memberCount).toBe(3)
 
-    const { message } = await g3.encrypt(new TextEncoder().encode('extension works'))
-    const decrypted = await charlieGroup.decrypt(message)
-    expect(new TextDecoder().decode(decrypted)).toBe('extension works')
+    const message = await g3.encrypt(new TextEncoder().encode('extension works'))
+    const decrypted = await charlieGroup.processMessage(message)
+    expect(new TextDecoder().decode(decrypted as Uint8Array)).toBe('extension works')
   })
 })
 
@@ -680,9 +695,9 @@ describe('JSON serialization null safety', () => {
     expect(bobGroup.memberCount).toBe(2)
 
     // Verify full participation — not just memberCount
-    const { message } = await updatedAlice.encrypt(new TextEncoder().encode('hello bob'))
-    const decrypted = await bobGroup.decrypt(message)
-    expect(new TextDecoder().decode(decrypted)).toBe('hello bob')
+    const message = await updatedAlice.encrypt(new TextEncoder().encode('hello bob'))
+    const decrypted = await bobGroup.processMessage(message)
+    expect(new TextDecoder().decode(decrypted as Uint8Array)).toBe('hello bob')
   })
 
   test('processWelcome joins 3-member group with nullified tree', async () => {
@@ -741,9 +756,9 @@ describe('JSON serialization null safety', () => {
 
     expect(charlieGroup.memberCount).toBe(3)
 
-    const { message } = await groupWith3.encrypt(new TextEncoder().encode('to charlie'))
-    const decrypted = await charlieGroup.decrypt(message)
-    expect(new TextDecoder().decode(decrypted)).toBe('to charlie')
+    const message = await groupWith3.encrypt(new TextEncoder().encode('to charlie'))
+    const decrypted = await charlieGroup.processMessage(message)
+    expect(new TextDecoder().decode(decrypted as Uint8Array)).toBe('to charlie')
   })
 
   test('processWelcome joins after member removal with nullified tree', async () => {
@@ -816,9 +831,9 @@ describe('JSON serialization null safety', () => {
 
     expect(daveGroup.memberCount).toBe(3)
 
-    const { message } = await g5.encrypt(new TextEncoder().encode('welcome dave'))
-    const decrypted = await daveGroup.decrypt(message)
-    expect(new TextDecoder().decode(decrypted)).toBe('welcome dave')
+    const message = await g5.encrypt(new TextEncoder().encode('welcome dave'))
+    const decrypted = await daveGroup.processMessage(message)
+    expect(new TextDecoder().decode(decrypted as Uint8Array)).toBe('welcome dave')
   })
 
   test('findMemberLeafIndex works with nullified tree entries', async () => {
@@ -1029,9 +1044,9 @@ describe('peer4 MLS group end-to-end', () => {
     })
 
     const plaintext = new TextEncoder().encode('hello bob')
-    const { message } = await commit.newGroup.encrypt(plaintext)
-    const decrypted = await bobGroup.decrypt(message)
-    expect(new TextDecoder().decode(decrypted)).toBe('hello bob')
+    const message = await commit.newGroup.encrypt(plaintext)
+    const decrypted = await bobGroup.processMessage(message)
+    expect(new TextDecoder().decode(decrypted as Uint8Array)).toBe('hello bob')
   })
 
   it('mixes peer4 admin with did:key member', async () => {
@@ -1056,9 +1071,9 @@ describe('peer4 MLS group end-to-end', () => {
       keyPackageBundle: bobBundle,
     })
 
-    const { message } = await commit.newGroup.encrypt(new TextEncoder().encode('hi'))
-    const decrypted = await bobGroup.decrypt(message)
-    expect(new TextDecoder().decode(decrypted)).toBe('hi')
+    const message = await commit.newGroup.encrypt(new TextEncoder().encode('hi'))
+    const decrypted = await bobGroup.processMessage(message)
+    expect(new TextDecoder().decode(decrypted as Uint8Array)).toBe('hi')
   })
 
   it('binds an MLS leaf for a peer4 identity with multiple sig keys', async () => {
@@ -1536,9 +1551,9 @@ describe('GroupHandle commit enforcement (default-on)', () => {
       },
     })
 
-    const { message } = await aliceGroup.encrypt(new TextEncoder().encode('hi'))
-    const decrypted = await bobGroup.decrypt(message)
-    expect(new TextDecoder().decode(decrypted)).toBe('hi')
+    const message = await aliceGroup.encrypt(new TextEncoder().encode('hi'))
+    const decrypted = await bobGroup.processMessage(message)
+    expect(new TextDecoder().decode(decrypted as Uint8Array)).toBe('hi')
   })
 })
 
@@ -1741,7 +1756,8 @@ describe('an invite seeds the roster', () => {
     const addCarol = await commitInvite(aliceGroup, carolKP.publicPackage, invite)
 
     // The commit carries the entry id; Bob resolves the body out of band and folds it.
-    await bobGroup.processMessage(addCarol.commitMessage)
+    const outcome = await bobGroup.processMessage(addCarol.commitMessage)
+    expect(outcome).toBeNull()
     expect(bobGroup.roster.roles.get(normalizeDID(carol.id))).toBe('member')
     expect(addCarol.newGroup.roster.roles.get(normalizeDID(carol.id))).toBe('member')
   })
@@ -2905,17 +2921,24 @@ describe('a handle serializes its state mutations', () => {
 
     const d = new TextDecoder()
     const got = new Set<string>()
-    for (const { message } of [m1, m2]) {
-      got.add(d.decode(await bobGroup.decrypt(message)))
+    for (const message of [m1, m2]) {
+      got.add(d.decode((await bobGroup.processMessage(message)) as Uint8Array))
     }
     expect(got).toEqual(new Set(['one', 'two']))
   })
 
   test('encrypt wipes the retired secrets it consumed', async () => {
     const { aliceGroup } = await twoMemberGroup()
-    const { consumed } = await aliceGroup.encrypt(new TextEncoder().encode('x'))
-    expect(consumed.length).toBeGreaterThan(0)
-    for (const buffer of consumed) {
+    consumedCapture.last = null
+    await aliceGroup.encrypt(new TextEncoder().encode('x'))
+    const consumed = consumedCapture.last
+    expect(consumed).not.toBeNull()
+    // TS narrows `consumedCapture.last` to its pre-`encrypt` literal `null` here — it
+    // cannot see the mutation the mocked createApplicationMessage makes through the
+    // closure — so the cast needs the two-step `unknown` bridge TS's own error
+    // message suggests, not a direct one.
+    expect((consumed as unknown as Array<Uint8Array>).length).toBeGreaterThan(0)
+    for (const buffer of consumed as unknown as Array<Uint8Array>) {
       expect(buffer.every((byte) => byte === 0)).toBe(true)
     }
   })

@@ -107,8 +107,8 @@ describe('joinGroupExternal — stale device recovery', () => {
     expect(bobGroup.epoch).toBe(1n) // B still stale
 
     // A publishes a message B cannot decrypt at its stale epoch
-    const { message: staleMsg } = await aliceAdvanced.encrypt(new TextEncoder().encode('locked'))
-    await expect(bobGroup.decrypt(staleMsg)).rejects.toThrow()
+    const staleMsg = await aliceAdvanced.encrypt(new TextEncoder().encode('locked'))
+    await expect(bobGroup.processMessage(staleMsg)).rejects.toThrow()
 
     // A exports GroupInfo; B rejoins externally using its cached credential
     const { groupInfo } = await exportGroupInfo({ group: aliceAdvanced })
@@ -134,13 +134,13 @@ describe('joinGroupExternal — stale device recovery', () => {
     expect(aliceAdvanced.epoch).toBe(bobRejoined.epoch)
 
     // Round-trip messaging resumes
-    const { message: msgAB } = await aliceAdvanced.encrypt(new TextEncoder().encode('welcome back'))
-    const got = await bobRejoined.decrypt(msgAB)
-    expect(new TextDecoder().decode(got)).toBe('welcome back')
+    const msgAB = await aliceAdvanced.encrypt(new TextEncoder().encode('welcome back'))
+    const got = await bobRejoined.processMessage(msgAB)
+    expect(new TextDecoder().decode(got as Uint8Array)).toBe('welcome back')
 
-    const { message: msgBA } = await bobRejoined.encrypt(new TextEncoder().encode('thanks'))
-    const gotBA = await aliceAdvanced.decrypt(msgBA)
-    expect(new TextDecoder().decode(gotBA)).toBe('thanks')
+    const msgBA = await bobRejoined.encrypt(new TextEncoder().encode('thanks'))
+    const gotBA = await aliceAdvanced.processMessage(msgBA)
+    expect(new TextDecoder().decode(gotBA as Uint8Array)).toBe('thanks')
 
     // B's DID appears exactly once in the tree post-rejoin (resync removed old leaf)
     const bobLeafIndex = aliceAdvanced.findMemberLeafIndex(bob.id)
@@ -241,9 +241,9 @@ describe('joinGroupExternal — stale device recovery', () => {
     const decodedRejoin = decode(mlsMessageDecoder, commitMessage)
     if (decodedRejoin == null) throw new Error('failed to decode rejoin commit')
     await aliceAdvanced.processMessage(decodedRejoin)
-    const { message } = await aliceAdvanced.encrypt(new TextEncoder().encode('back with ext'))
-    const got = await bobRejoined.decrypt(message)
-    expect(new TextDecoder().decode(got)).toBe('back with ext')
+    const message = await aliceAdvanced.encrypt(new TextEncoder().encode('back with ext'))
+    const got = await bobRejoined.processMessage(message)
+    expect(new TextDecoder().decode(got as Uint8Array)).toBe('back with ext')
   })
 
   test('rejects when identity.id does not match credential.id (resync guard)', async () => {
@@ -456,11 +456,11 @@ describe('joinGroupExternal — stale device recovery', () => {
     expect(carolGroup.epoch).toBe(bobRejoined.epoch)
 
     // C encrypts; A and B decrypt
-    const { message } = await carolGroup.encrypt(new TextEncoder().encode('hi all'))
-    const aliceGot = await aliceD.decrypt(message)
-    const bobGot = await bobRejoined.decrypt(message)
-    expect(new TextDecoder().decode(aliceGot)).toBe('hi all')
-    expect(new TextDecoder().decode(bobGot)).toBe('hi all')
+    const message = await carolGroup.encrypt(new TextEncoder().encode('hi all'))
+    const aliceGot = await aliceD.processMessage(message)
+    const bobGot = await bobRejoined.processMessage(message)
+    expect(new TextDecoder().decode(aliceGot as Uint8Array)).toBe('hi all')
+    expect(new TextDecoder().decode(bobGot as Uint8Array)).toBe('hi all')
   })
 })
 

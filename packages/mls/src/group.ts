@@ -143,8 +143,8 @@ export function makeMLSCredential(identity: OwnIdentity): Credential {
 }
 
 /**
- * Thrown by GroupHandle.processMessage/decrypt when the active commit policy
- * rejects an incoming commit. The handle is left at its pre-commit epoch.
+ * Thrown by GroupHandle.processMessage when the active commit policy rejects
+ * an incoming commit. The handle is left at its pre-commit epoch.
  */
 export class CommitRejectedError extends Error {
   #proposals: Array<ProposalWithSender>
@@ -289,7 +289,7 @@ export type GroupHandleParams = {
   ledger?: ReadonlyArray<LedgerLogEntry>
   cache: DIDCache
   resolver?: DIDResolver
-  /** Default commit policy applied by processMessage/decrypt. */
+  /** Default commit policy applied by processMessage. */
   commitPolicy?: IncomingMessageCallback
   /** Fetch control-ledger entry bodies the local ledger lacks (commit pre-pass). */
   resolveLedgerEntries?: (ids: Array<string>) => Promise<Array<string>>
@@ -377,8 +377,8 @@ export class GroupHandle {
     return this.#resolver
   }
 
-  /** The commit policy enforced by processMessage/decrypt, if any. Carried
-   *  onto handles derived from this one (commitInvite/removeMember). */
+  /** The commit policy enforced by processMessage, if any. Carried onto
+   *  handles derived from this one (commitInvite/removeMember). */
   get commitPolicy(): IncomingMessageCallback | undefined {
     return this.#commitPolicy
   }
@@ -486,10 +486,8 @@ export class GroupHandle {
     return [...this.#iterateMembers()]
   }
 
-  /**
-   * Encrypt an application message for the group.
-   */
-  async encrypt(plaintext: Uint8Array): Promise<{ message: unknown; consumed: Array<Uint8Array> }> {
+  /** Encrypt an application message for the group, returning framed wire bytes. */
+  async encrypt(plaintext: Uint8Array): Promise<Uint8Array> {
     return mutexFor(this).run(async () => {
       const { newState, message, consumed } = await createApplicationMessage({
         context: this.#context,
@@ -498,15 +496,15 @@ export class GroupHandle {
       })
       this.#state = newState
       zeroAll(consumed)
-      return { message, consumed }
+      return encode(mlsMessageEncoder, message)
     })
   }
 
   /**
-   * The async pre-pass feeding the synchronous ts-mls commit callback. Both
-   * decrypt and processMessage run this before mlsProcessMessage, since either
-   * may receive a commit. For anything that is not a PrivateMessage commit
-   * (application message, proposal, PublicMessage, pre-decoded non-frame) it does
+   * The async pre-pass feeding the synchronous ts-mls commit callback.
+   * processMessage runs this before mlsProcessMessage, since it may receive a
+   * commit. For anything that is not a PrivateMessage commit (application
+   * message, proposal, PublicMessage, pre-decoded non-frame) it does
    * exactly what the code did before this step — resolve the caller policy, wrap
    * it for the rejected-proposal capture, and apply nothing on accept.
    *
@@ -665,57 +663,6 @@ export class GroupHandle {
     }
 
     return { callback: wrapCommitPolicy(combined, capture), capture, applyOnAccept }
-  }
-
-  /**
-   * Decrypt an application message from the group.
-   *
-   * Accepts either wire-form bytes (framed MLSMessage `Uint8Array`) or a
-   * pre-decoded ts-mls message object. The param type widens to `unknown`
-   * because `Uint8Array | unknown` collapses to `unknown` in TypeScript; the
-   * runtime `instanceof` check selects the decode path. Note: `encrypt`
-   * currently emits objects, so the bytes path is for symmetry with
-   * processMessage and future wire-form application messages.
-   */
-  async decrypt(
-    message: Uint8Array | unknown,
-    opts?: { commitPolicy?: IncomingMessageCallback },
-  ): Promise<Uint8Array> {
-    let decoded: unknown = message
-    if (message instanceof Uint8Array) {
-      const parsed = decode(mlsMessageDecoder, message)
-      if (parsed == null) {
-        throw new Error('decrypt: failed to decode MLSMessage')
-      }
-      decoded = parsed
-    }
-    return mutexFor(this).run(async () => {
-      const { callback, capture, applyOnAccept } = await this.#prepareCommitPipeline(decoded, opts)
-      const result = await mlsProcessMessage({
-        context: this.#context,
-        state: this.#state,
-        message: decoded as Parameters<typeof mlsProcessMessage>[0]['message'],
-        ...(callback != null && { callback }),
-      })
-      if (result.kind === 'applicationMessage') {
-        this.#state = result.newState
-        zeroAll(result.consumed)
-        return result.message
-      }
-      // On reject, ts-mls returns the pre-commit state, so the handle stays put.
-      this.#state = result.newState
-      zeroAll(result.consumed)
-      if (result.kind === 'newState' && result.actionTaken === 'reject') {
-        throw new CommitRejectedError(
-          capture.rejected?.proposals ?? [],
-          capture.rejected?.senderLeafIndex,
-        )
-      }
-      // An accepted commit reaching decrypt still advances the group (as before);
-      // apply its control-ledger effects too before reporting the type mismatch.
-      applyOnAccept()
-      throw new Error('Expected application message but received handshake message')
-    })
   }
 
   /**
