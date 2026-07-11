@@ -32,6 +32,7 @@ import {
 import { readLedgerHead } from '../src/head.js'
 import { ledgerEntryDigest, signLedgerEntry, type VerifiedLedgerEntry } from '../src/ledger.js'
 import { MissingLedgerEntriesError } from '../src/policy.js'
+import { ROLE_ENTRY_TYPE } from '../src/roster.js'
 import type { GroupOptions, Invite } from '../src/types.js'
 
 /** Serve an invite's signed ledger tokens to a receiver's resolver. */
@@ -41,9 +42,9 @@ function publishInvite(tokens: Map<string, string>, invite: Invite): void {
   }
 }
 
-/** The invite's role entry, the one naming the invitee. */
+/** The invite's role entry naming the invitee: the group's ledger with that entry appended. */
 function roleToken(invite: Invite): string {
-  const [token] = invite.ledgerEntries
+  const token = invite.ledgerEntries.at(-1)
   if (token == null) throw new Error('expected the invite to carry a role entry')
   return token
 }
@@ -1727,5 +1728,349 @@ describe('an invite seeds the roster', () => {
         ratchetTree: newGroup.state.ratchetTree,
       }),
     ).rejects.toThrow(/role entry/)
+  })
+})
+
+/** A roster as a stable, comparable value. */
+function rosterEntries(group: { roster: { roles: ReadonlyMap<string, string> } }) {
+  return [...group.roster.roles.entries()].sort(([a], [b]) => a.localeCompare(b))
+}
+
+describe('an invite carries the group ledger', () => {
+  test('a joiner agrees with the group about a role change that predates its invite', async () => {
+    const alice = randomIdentity()
+    const bob = randomIdentity()
+    const carol = randomIdentity()
+    const { group: aliceGroup } = await createGroup(alice, 'ledger-before-join')
+
+    const promoteBob = await signLedgerEntry(alice, {
+      type: 'group.role',
+      groupID: aliceGroup.groupID,
+      subject: bob.id,
+      value: 'admin',
+    })
+    await aliceGroup.applyLedgerEntries([promoteBob])
+
+    const { invite } = await createInvite({
+      group: aliceGroup,
+      identity: alice,
+      recipientDID: carol.id,
+      permission: 'member',
+    })
+    const carolKP = await createKeyPackageBundle(carol)
+    const addCarol = await commitInvite(aliceGroup, carolKP.publicPackage, invite)
+    const { group: carolGroup } = await processWelcome({
+      identity: carol,
+      invite,
+      welcome: addCarol.welcomeMessage,
+      keyPackageBundle: carolKP,
+      ratchetTree: addCarol.newGroup.state.ratchetTree,
+    })
+
+    // The invite carries the whole ledger, so a role change made before the invite
+    // still reaches the joiner: her roster cannot fork from the group's.
+    expect(carolGroup.roster.roles.get(normalizeDID(bob.id))).toBe('admin')
+    expect(carolGroup.roster.roles.get(normalizeDID(alice.id))).toBe('admin')
+    expect(carolGroup.roster.roles.get(normalizeDID(carol.id))).toBe('member')
+  })
+
+  test('a joiner accepts a commit from an admin promoted before it joined', async () => {
+    // The fork's consequence: a joiner that never learned of Bob's promotion sees
+    // his commits as unauthorized and rejects every one of them, forever.
+    const tokens = new Map<string, string>()
+    const { alice, bob, aliceGroup, bobGroup, groupID } = await twoMemberGroup({
+      bobOptions: { resolveLedgerEntries: mapResolver(tokens) },
+    })
+    const carol = randomIdentity()
+    const dave = randomIdentity()
+
+    const promoteBob = await signLedgerEntry(alice, {
+      type: 'group.role',
+      groupID,
+      subject: bob.id,
+      value: 'admin',
+    })
+    await aliceGroup.applyLedgerEntries([promoteBob])
+    await bobGroup.applyLedgerEntries([promoteBob])
+
+    // Carol joins after the promotion.
+    const { invite: carolInvite } = await createInvite({
+      group: aliceGroup,
+      identity: alice,
+      recipientDID: carol.id,
+      permission: 'member',
+    })
+    publishInvite(tokens, carolInvite)
+    const carolKP = await createKeyPackageBundle(carol)
+    const addCarol = await commitInvite(aliceGroup, carolKP.publicPackage, carolInvite)
+    const { group: carolGroup } = await processWelcome({
+      identity: carol,
+      invite: carolInvite,
+      welcome: addCarol.welcomeMessage,
+      keyPackageBundle: carolKP,
+      ratchetTree: addCarol.newGroup.state.ratchetTree,
+      options: { resolveLedgerEntries: mapResolver(tokens) },
+    })
+    await bobGroup.processMessage(addCarol.commitMessage)
+
+    // Bob — an admin the group agrees on — adds Dave, and Carol applies his commit.
+    const { invite: daveInvite } = await createInvite({
+      group: bobGroup,
+      identity: bob,
+      recipientDID: dave.id,
+      permission: 'member',
+    })
+    publishInvite(tokens, daveInvite)
+    const daveKP = await createKeyPackageBundle(dave)
+    const addDave = await commitInvite(bobGroup, daveKP.publicPackage, daveInvite)
+
+    await carolGroup.processMessage(addDave.commitMessage)
+    expect(carolGroup.epoch).toBe(addDave.newGroup.epoch)
+    expect(carolGroup.findMemberLeafIndex(dave.id)).toBeDefined()
+    expect(rosterEntries(carolGroup)).toEqual(rosterEntries(addDave.newGroup))
+  })
+
+  test('three members converge on one roster after a promotion and two joins', async () => {
+    const tokens = new Map<string, string>()
+    const { alice, bob, aliceGroup, bobGroup, groupID } = await twoMemberGroup({
+      bobOptions: { resolveLedgerEntries: mapResolver(tokens) },
+    })
+    const carol = randomIdentity()
+
+    const promoteBob = await signLedgerEntry(alice, {
+      type: 'group.role',
+      groupID,
+      subject: bob.id,
+      value: 'admin',
+    })
+    await aliceGroup.applyLedgerEntries([promoteBob])
+    await bobGroup.applyLedgerEntries([promoteBob])
+
+    const { invite } = await createInvite({
+      group: aliceGroup,
+      identity: alice,
+      recipientDID: carol.id,
+      permission: 'member',
+    })
+    publishInvite(tokens, invite)
+    const carolKP = await createKeyPackageBundle(carol)
+    const addCarol = await commitInvite(aliceGroup, carolKP.publicPackage, invite)
+    const { group: carolGroup } = await processWelcome({
+      identity: carol,
+      invite,
+      welcome: addCarol.welcomeMessage,
+      keyPackageBundle: carolKP,
+      ratchetTree: addCarol.newGroup.state.ratchetTree,
+    })
+    await bobGroup.processMessage(addCarol.commitMessage)
+
+    const expected = [
+      [normalizeDID(alice.id), 'admin'],
+      [normalizeDID(bob.id), 'admin'],
+      [normalizeDID(carol.id), 'member'],
+    ].sort(([a], [b]) => (a as string).localeCompare(b as string))
+    expect(rosterEntries(addCarol.newGroup)).toEqual(expected)
+    expect(rosterEntries(bobGroup)).toEqual(expected)
+    expect(rosterEntries(carolGroup)).toEqual(expected)
+  })
+
+  test('ledgerTokens round-trips through restoreGroup', async () => {
+    const alice = randomIdentity()
+    const bob = randomIdentity()
+    const carol = randomIdentity()
+    const { group: aliceGroup } = await createGroup(alice, 'token-roundtrip')
+
+    const promoteBob = await signLedgerEntry(alice, {
+      type: 'group.role',
+      groupID: aliceGroup.groupID,
+      subject: bob.id,
+      value: 'admin',
+    })
+    await aliceGroup.applyLedgerEntries([promoteBob])
+    const { invite } = await createInvite({
+      group: aliceGroup,
+      identity: alice,
+      recipientDID: carol.id,
+      permission: 'member',
+    })
+    const carolKP = await createKeyPackageBundle(carol)
+    const { newGroup } = await commitInvite(aliceGroup, carolKP.publicPackage, invite)
+
+    // The tokens are the ledger's whole persistent form: replaying them re-verifies
+    // every entry and reproduces the roster, with no import path for the cache.
+    const restored = await restoreGroup({
+      state: newGroup.state,
+      credential: newGroup.credential,
+      rootCapability: newGroup.rootCapability,
+      ledgerEntries: newGroup.ledgerTokens,
+    })
+
+    expect(newGroup.ledgerTokens).toHaveLength(2)
+    expect(restored.ledgerTokens).toEqual(newGroup.ledgerTokens)
+    expect(rosterEntries(restored)).toEqual(rosterEntries(newGroup))
+  })
+
+  test('a member-signed entry in the invite cannot promote', async () => {
+    const { bob, aliceGroup, alice, groupID } = await twoMemberGroup()
+    const carol = randomIdentity()
+    const dave = randomIdentity()
+
+    // Bob is only a member: his role entry verifies, but the joiner's fold is
+    // rooted at the anchor, so it drops an entry no admin-so-far issued.
+    const bobPromotesCarol = await signLedgerEntry(bob, {
+      type: 'group.role',
+      groupID,
+      subject: carol.id,
+      value: 'admin',
+    })
+
+    const { invite } = await createInvite({
+      group: aliceGroup,
+      identity: alice,
+      recipientDID: dave.id,
+      permission: 'member',
+    })
+    const tampered: Invite = {
+      ...invite,
+      ledgerEntries: [...invite.ledgerEntries.slice(0, -1), bobPromotesCarol, roleToken(invite)],
+    }
+
+    const daveKP = await createKeyPackageBundle(dave)
+    const { welcomeMessage, newGroup } = await commitInvite(
+      aliceGroup,
+      daveKP.publicPackage,
+      tampered,
+    )
+    const { group: daveGroup } = await processWelcome({
+      identity: dave,
+      invite: tampered,
+      welcome: welcomeMessage,
+      keyPackageBundle: daveKP,
+      ratchetTree: newGroup.state.ratchetTree,
+    })
+
+    expect(daveGroup.roster.roles.get(normalizeDID(carol.id))).toBeUndefined()
+    expect(daveGroup.roster.roles.get(normalizeDID(bob.id))).toBe('member')
+    expect(daveGroup.roster.roles.get(normalizeDID(alice.id))).toBe('admin')
+    expect(daveGroup.roster.roles.get(normalizeDID(dave.id))).toBe('member')
+  })
+
+  test('the ledger keeps its order across the wire: promote then demote folds to demoted', async () => {
+    const alice = randomIdentity()
+    const bob = randomIdentity()
+    const carol = randomIdentity()
+    const { group: aliceGroup } = await createGroup(alice, 'ordered-ledger')
+
+    const promoteBob = await signLedgerEntry(alice, {
+      type: 'group.role',
+      groupID: aliceGroup.groupID,
+      subject: bob.id,
+      value: 'admin',
+    })
+    const demoteBob = await signLedgerEntry(alice, {
+      type: 'group.role',
+      groupID: aliceGroup.groupID,
+      subject: bob.id,
+      value: 'member',
+    })
+    await aliceGroup.applyLedgerEntries([promoteBob, demoteBob])
+    expect(aliceGroup.roster.roles.get(normalizeDID(bob.id))).toBe('member')
+
+    const { invite } = await createInvite({
+      group: aliceGroup,
+      identity: alice,
+      recipientDID: carol.id,
+      permission: 'member',
+    })
+    // Order survives the wire, so the joiner folds the pair the same way round.
+    expect(invite.ledgerEntries.slice(0, 2)).toEqual([promoteBob, demoteBob])
+
+    const carolKP = await createKeyPackageBundle(carol)
+    const { welcomeMessage, newGroup } = await commitInvite(
+      aliceGroup,
+      carolKP.publicPackage,
+      invite,
+    )
+    const { group: carolGroup } = await processWelcome({
+      identity: carol,
+      invite,
+      welcome: welcomeMessage,
+      keyPackageBundle: carolKP,
+      ratchetTree: newGroup.state.ratchetTree,
+    })
+
+    expect(carolGroup.roster.roles.get(normalizeDID(bob.id))).toBe('member')
+  })
+
+  test('an invite after an admin rotation is accepted by an up-to-date receiver', async () => {
+    // The invite carries the whole history, but the commit envelope must name only the
+    // entries this commit enacts. Replaying the history would re-judge each past entry
+    // against the present roster, and a grant issued by a since-demoted admin would read
+    // as coming from a non-admin — freezing every group that ever rotated its admins.
+    const alice = randomIdentity()
+    const bob = randomIdentity()
+    const carol = randomIdentity()
+    const tokens = new Map<string, string>()
+    const options: GroupOptions = { resolveLedgerEntries: mapResolver(tokens) }
+    const publish = (list: Array<string>) => {
+      for (const token of list) tokens.set(ledgerEntryDigest(token), token)
+    }
+
+    const { group: aliceGroup } = await createGroup(alice, 'rotation-group', options)
+    const promoteBob = await signLedgerEntry(alice, {
+      type: ROLE_ENTRY_TYPE,
+      groupID: aliceGroup.groupID,
+      subject: bob.id,
+      value: 'admin',
+    })
+    await aliceGroup.applyLedgerEntries([promoteBob])
+    publish([promoteBob])
+
+    const { invite: bobInvite } = await createInvite({
+      group: aliceGroup,
+      identity: alice,
+      recipientDID: bob.id,
+      permission: 'admin',
+    })
+    publish(bobInvite.ledgerEntries)
+    const bobKP = await createKeyPackageBundle(bob)
+    const addBob = await commitInvite(aliceGroup, bobKP.publicPackage, bobInvite)
+    const { group: bobGroup } = await processWelcome({
+      identity: bob,
+      invite: bobInvite,
+      welcome: addBob.welcomeMessage,
+      keyPackageBundle: bobKP,
+      ratchetTree: addBob.newGroup.state.ratchetTree,
+      options,
+    })
+
+    // Bob, now an admin, demotes Alice. Both handles hold the demotion, so Alice is an
+    // up-to-date receiver rather than a stale one — the case that actually reproduces.
+    const demoteAlice = await signLedgerEntry(bob, {
+      type: ROLE_ENTRY_TYPE,
+      groupID: bobGroup.groupID,
+      subject: alice.id,
+      value: 'member',
+    })
+    await bobGroup.applyLedgerEntries([demoteAlice])
+    await addBob.newGroup.applyLedgerEntries([demoteAlice])
+    publish([demoteAlice])
+    expect(bobGroup.roster.roles.get(normalizeDID(alice.id))).toBe('member')
+
+    // Bob — the sole admin — invites Carol. Alice must still accept his commit.
+    const { invite: carolInvite } = await createInvite({
+      group: bobGroup,
+      identity: bob,
+      recipientDID: carol.id,
+      permission: 'member',
+    })
+    publish(carolInvite.ledgerEntries)
+    const carolKP = await createKeyPackageBundle(carol)
+    const addCarol = await commitInvite(bobGroup, carolKP.publicPackage, carolInvite)
+
+    await addBob.newGroup.processMessage(addCarol.commitMessage)
+    expect(addBob.newGroup.epoch).toBe(addCarol.newGroup.epoch)
+    expect(addBob.newGroup.roster.roles.get(normalizeDID(carol.id))).toBe('member')
+    expect(addBob.newGroup.roster.roles.get(normalizeDID(alice.id))).toBe('member')
   })
 })

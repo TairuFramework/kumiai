@@ -182,17 +182,32 @@ function readPrivateCommit(decoded: unknown): { authenticatedData: Uint8Array } 
 }
 
 /**
+ * A control-ledger entry as a handle holds it: the signed token — the canonical
+ * persistent and wire form, the only thing that can be handed to another party —
+ * paired with its verified form. The verified form is a one-way derivation (the
+ * token cannot be reconstructed from it), so keeping only it would leave a handle
+ * unable to forward the ledger it holds.
+ */
+export type HeldLedgerEntry = {
+  token: string
+  verified: VerifiedLedgerEntry
+}
+
+/** A held entry paired with the content id it is stored under. */
+type ResolvedEntry = HeldLedgerEntry & { entryID: string }
+
+/**
  * Project a held ledger into the roster. foldRoster is the role projection: it
  * drops every non-`group.role` entry by type, so the mixed-type ledger is fed in
  * as role inputs and the fold filters.
  */
 function foldLedgerRoster(
-  ledger: ReadonlyMap<string, VerifiedLedgerEntry>,
+  ledger: ReadonlyMap<string, HeldLedgerEntry>,
   anchor: GroupAnchor,
   groupID: string,
 ): RosterState {
   const entries = [...ledger.entries()].map(
-    ([entryID, verified]) => ({ verified, entryID }) as FoldInput<RoleValue>,
+    ([entryID, { verified }]) => ({ verified, entryID }) as FoldInput<RoleValue>,
   )
   return foldRoster(entries, anchor, groupID)
 }
@@ -206,7 +221,7 @@ export type GroupHandleParams = {
   /** Control-ledger entries this handle starts from, keyed by content id. A handle
    *  derived from another (commitInvite/removeMember) inherits the parent's, so the
    *  roster it folds does not revert to the anchor alone. */
-  ledger?: ReadonlyMap<string, VerifiedLedgerEntry>
+  ledger?: ReadonlyMap<string, HeldLedgerEntry>
   cache: DIDCache
   resolver?: DIDResolver
   /** Default commit policy applied by processMessage/decrypt. */
@@ -231,7 +246,7 @@ export class GroupHandle {
   #resolveLedgerEntries?: (ids: Array<string>) => Promise<Array<string>>
   #onLedgerEntries?: (entries: Array<VerifiedLedgerEntry>) => void
   #anchor: GroupAnchor
-  #ledger: Map<string, VerifiedLedgerEntry>
+  #ledger: Map<string, HeldLedgerEntry>
   #roster: RosterState
 
   constructor(params: GroupHandleParams) {
@@ -314,10 +329,19 @@ export class GroupHandle {
     return this.#anchor
   }
 
-  /** The verified control-ledger entries this handle holds, keyed by content id.
-   *  Carried onto handles derived from this one (commitInvite/removeMember). */
-  get ledger(): ReadonlyMap<string, VerifiedLedgerEntry> {
+  /** The control-ledger entries this handle holds, keyed by content id, in the
+   *  order they were applied. Carried onto handles derived from this one
+   *  (commitInvite/removeMember). */
+  get ledger(): ReadonlyMap<string, HeldLedgerEntry> {
     return this.#ledger
+  }
+
+  /** The ordered signed tokens this handle holds — the ledger's canonical
+   *  persistent and wire form. Feeds createInvite, restoreGroup, and host
+   *  persistence. The verified entries are a derived cache with no export form:
+   *  the only way into a ledger is applyLedgerEntries, which re-verifies. */
+  get ledgerTokens(): Array<string> {
+    return [...this.#ledger.values()].map(({ token }) => token)
   }
 
   /** The control roster folded from the anchor and every applied ledger entry. */
@@ -329,7 +353,8 @@ export class GroupHandle {
    * Verify signed ledger tokens, store the valid ones by content id, and refold
    * the roster. Tokens that fail verification or whose groupID does not match the
    * group are dropped (defensive — this is the low-level apply primitive; the
-   * commit pre-pass does the strict admin-issuer enforcement). Idempotent by id.
+   * commit pre-pass does the strict admin-issuer enforcement). Idempotent by id:
+   * a re-delivered entry keeps its original position in the ledger's order.
    */
   async applyLedgerEntries(tokens: Array<string>): Promise<void> {
     for (const token of tokens) {
@@ -337,7 +362,7 @@ export class GroupHandle {
       if (this.#ledger.has(entryID)) continue
       const verified = await verifyLedgerEntry(token)
       if (verified == null || verified.entry.groupID !== this.groupID) continue
-      this.#ledger.set(entryID, verified)
+      this.#ledger.set(entryID, { token, verified })
     }
     this.#roster = foldLedgerRoster(this.#ledger, this.#anchor, this.groupID)
   }
@@ -435,19 +460,19 @@ export class GroupHandle {
     let precomputedReject = false
     let candidateRoster: RosterState = this.#roster
     let surfaced: Array<VerifiedLedgerEntry> = []
-    let acceptedEntries: Array<FoldInput> = []
+    let acceptedEntries: Array<ResolvedEntry> = []
 
     const env = decodeControlEnvelope(commit.authenticatedData)
     if (!env.ok) {
       precomputedReject = true
     } else {
       const ids = env.envelope.entries ?? []
-      const resolved = new Map<string, FoldInput>()
+      const resolved = new Map<string, ResolvedEntry>()
       const missing: Array<string> = []
       for (const id of ids) {
         const held = this.#ledger.get(id)
         if (held != null) {
-          resolved.set(id, { verified: held, entryID: id })
+          resolved.set(id, { ...held, entryID: id })
         } else {
           missing.push(id)
         }
@@ -463,14 +488,14 @@ export class GroupHandle {
           if (resolved.has(id) || !missing.includes(id)) continue
           const verified = await verifyLedgerEntry(token)
           if (verified == null) continue
-          resolved.set(id, { verified, entryID: id })
+          resolved.set(id, { token, verified, entryID: id })
         }
         const stillMissing = missing.filter((id) => !resolved.has(id))
         if (stillMissing.length > 0) {
           throw new MissingLedgerEntriesError(stillMissing)
         }
       }
-      const ordered: Array<FoldInput> = ids.map((id) => {
+      const ordered: Array<ResolvedEntry> = ids.map((id) => {
         const input = resolved.get(id)
         if (input == null) throw new MissingLedgerEntriesError([id])
         return input
@@ -514,8 +539,8 @@ export class GroupHandle {
     }
 
     const applyOnAccept = () => {
-      for (const { verified, entryID } of acceptedEntries) {
-        if (!this.#ledger.has(entryID)) this.#ledger.set(entryID, verified)
+      for (const { token, verified, entryID } of acceptedEntries) {
+        if (!this.#ledger.has(entryID)) this.#ledger.set(entryID, { token, verified })
       }
       this.#roster = candidateRoster
       if (surfaced.length > 0) this.#onLedgerEntries?.(surfaced)
@@ -789,7 +814,13 @@ export async function createInvite(params: CreateInviteParams): Promise<CreateIn
     capabilityChain: [group.rootCapability, memberCapStr],
     permission,
     inviterID: identity.id,
-    ledgerEntries: [roleToken],
+    // The whole ledger, the new role entry last: a joiner handed only its own
+    // entry would never learn of a role change made before its invite, and would
+    // reject every commit by an admin promoted in the meantime — a permanent fork
+    // nothing in the protocol re-sends. The new entry must fold after the history
+    // it depends on, hence last. The joiner still folds from the anchor, so the
+    // inviter cannot promote anyone by padding this list.
+    ledgerEntries: [...group.ledgerTokens, roleToken],
   }
 
   return { invite }
@@ -837,14 +868,22 @@ export async function commitInvite(
     add: { keyPackage },
   }
 
-  const entries = invite.ledgerEntries
+  // The invite carries the group's whole history — a joiner has nothing to fold it
+  // onto. The commit envelope is a different channel: it names only what this commit
+  // *enacts*, the entries existing members do not already hold. Replaying the history
+  // here instead would re-evaluate every past entry against the present roster, and a
+  // grant issued by an admin who has since been demoted would read as coming from a
+  // non-admin — rejecting the commit and freezing every group that ever rotated.
+  const enacted = invite.ledgerEntries.filter(
+    (token) => !group.ledger.has(ledgerEntryDigest(token)),
+  )
   const result = await createCommit({
     context: group.context,
     state: group.state,
     extraProposals: [addProposal],
     ratchetTreeExtension: true,
-    ...(entries.length > 0 && {
-      authenticatedData: encodeControlEnvelope({ v: 1, entries: entries.map(ledgerEntryDigest) }),
+    ...(enacted.length > 0 && {
+      authenticatedData: encodeControlEnvelope({ v: 1, entries: enacted.map(ledgerEntryDigest) }),
     }),
   })
 
@@ -865,7 +904,7 @@ export async function commitInvite(
     throw new Error('commitInvite: expected a Welcome message for the add proposal')
   }
   // The entries this commit enacts are now part of the group's ledger.
-  await newGroup.applyLedgerEntries(entries)
+  await newGroup.applyLedgerEntries(enacted)
   return {
     commitMessage: encode(mlsMessageEncoder, result.commit),
     welcomeMessage: encode(mlsMessageEncoder, result.welcome),

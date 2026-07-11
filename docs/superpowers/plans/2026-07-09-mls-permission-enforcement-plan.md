@@ -1429,3 +1429,60 @@ rather than emitting a commit every receiver would reject.
 **Still open (unchanged by this step):** the `ledger_head` extension does not move yet, so an inviter
 can still omit entries from the envelope with no receiver detecting the omission. That is the next
 piece after Q4.1b.
+
+### 2026-07-11 — Question 5.2b: the invite carries the full ledger
+
+**Findings:** The split-brain is closed. `#ledger` now retains the signed token alongside the verified
+entry (`Map<id, {token, verified}>`), a `ledgerTokens` getter exports the ordered token list, and
+`createInvite` ships `[...group.ledgerTokens, roleToken]`. A member who joins after a role change now
+agrees with the group about who the admins are. The regression test was written first and failed
+first with exactly the predicted `expected undefined to be 'admin'`. Suite **241 green**, tsc clean,
+biome clean.
+
+**The layering that settled the design.** Signed tokens are the source of truth: self-verifying,
+replayable, and position-independent. Verified entries are a *derived cache* — `verifyLedgerEntry` is
+one-way, and the cache exists only because `IncomingMessageCallback` is synchronous and cannot await
+verification. The roster is the fold on top. Consequences: the persistent and wire form of the ledger
+is just the ordered `Array<string>` of tokens (already the shape `restoreGroup` takes), and **no
+`toJSON`/`fromJSON` of verified entries was added** — importing verified entries would write straight
+into the cache the sync policy reads, letting anything that can write the store forge an `issuer`
+without passing a signature check. Export is `ledgerTokens`, import is `applyLedgerEntries`, and
+**import re-verifies**. No `OrderedMap` was built either: `Map` iteration is insertion-ordered by the
+ECMAScript spec, and `applyLedgerEntries` already preserves position on a repeat.
+
+**Entries carry no `prev` pointer, and must not.** Asked whether concurrent admin writes fork:
+verified they cannot. Entries reach the ledger only inside MLS commits, and MLS totally-orders commits
+by epoch — two admins committing from the same epoch produce one winner and one stale commit
+(`ValidationError: Cannot process commit or proposal from former epoch`). There is no concurrency to
+reconcile. Binding a prev-head into an entry would make it epoch-bound and single-use: the loser of
+any commit race would have to re-sign it. An entry is a *claim*; position is assigned by the commit
+that enacts it and attested by the `ledger_head` chain computed over the result. Keep them separate.
+
+**A regression this step introduced, caught and fixed.** Growing `invite.ledgerEntries` to the whole
+history silently grew the *commit envelope* too, because `commitInvite` derived one from the other —
+harmless when the invite held one entry. So every Add re-played the entire history at every receiver,
+and `foldEnvelope` (correctly) re-judged each replayed entry's issuer against the *present* roster: a
+grant issued by a since-demoted admin reads as coming from a non-admin, and the commit is rejected.
+**Any group that ever rotated its admins would freeze.** All 240 tests stayed green, because the only
+receiver that reproduces it is one that is *up to date* with the demotion — a stale receiver still
+folds the replay successfully. Fixed by un-conflating the two channels: the **invite** carries the
+full history (a joiner has nothing to fold onto); the **commit envelope** names only what the commit
+*enacts* (`invite.ledgerEntries` minus the entries the committer already holds). A permanent
+regression test now covers it.
+
+**Spec impact:** none, but the envelope/invite distinction is now load-bearing and should be stated
+explicitly when the spec is next touched.
+
+**Learned:** the probe reported the regression rather than papering over it, but its own repro and
+mine initially disagreed — my first attempt *passed*, because I used a stale receiver and because
+Ed25519 is deterministic (Alice signing the same `{subject, value}` twice yields a byte-identical
+token and therefore the same content id, which dedups). Both details had to be right to see the bug.
+Green tests proved nothing here; only reproducing the exact state did.
+
+**New question raised (not yet scheduled) — the capability chain disagrees with the roster.**
+`createInvite` builds `[group.rootCapability, memberCapStr]`, omitting the inviter's own membership
+capability, so a *ledger-promoted* admin mints an invite whose chain never authorizes them. Nothing
+validates at mint time, so it surfaces only at the joiner's `processWelcome`. This is the same class
+of defect as 5.2b — the chain and the roster disagree about who is an admin — and it is dissolved
+rather than fixed by the tracked chain-removal step (Q2.5), which deletes the chain outright. Do the
+removal rather than repairing the chain.

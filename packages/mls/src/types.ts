@@ -68,8 +68,8 @@ export type Invite = {
   permission: GroupPermission
   /** Inviter's DID */
   inviterID: string
-  /** Signed control-ledger tokens the joiner needs to fold the group's roster,
-   *  in application order. Carries at minimum the invitee's own role entry. */
+  /** The group's whole signed control ledger, in application order, so the joiner
+   *  folds the same roster as everyone else. The invitee's own role entry is last. */
   ledgerEntries: Array<string>
 }
 

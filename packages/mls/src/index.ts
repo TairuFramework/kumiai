@@ -75,6 +75,7 @@ export {
   exportGroupInfo,
   GroupHandle,
   type GroupHandleParams,
+  type HeldLedgerEntry,
   type InspectGroupInfoResult,
   inspectGroupInfo,
   type JoinGroupExternalParams,
