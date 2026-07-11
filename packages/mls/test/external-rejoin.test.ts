@@ -282,6 +282,52 @@ describe('joinGroupExternal — stale device recovery', () => {
     ).rejects.toThrow(/identity\.id.*must match credential\.id/)
   })
 
+  test('a member an admin actually removed cannot resync back in', async () => {
+    const alice = randomIdentity()
+    const bob = randomIdentity()
+    const { group: aliceGroup } = await createGroup(alice, 'evicted-resync-group')
+    const { invite } = await createInvite({
+      group: aliceGroup,
+      identity: alice,
+      recipientDID: bob.id,
+      permission: 'member',
+    })
+    const bobKP = await createKeyPackageBundle(bob)
+    const { newGroup: aliceAfterBob, welcomeMessage } = await commitInvite(
+      aliceGroup,
+      bobKP.publicPackage,
+      invite,
+    )
+    const { credential: bobCred } = await processWelcome({
+      identity: bob,
+      invite,
+      welcome: welcomeMessage,
+      keyPackageBundle: bobKP,
+      ratchetTree: aliceAfterBob.state.ratchetTree,
+    })
+    expect(bobCred.id).toBe(bob.id)
+
+    // Alice actually evicts Bob: his leaf is gone from the tree, not merely demoted.
+    const bobLeaf = aliceAfterBob.findMemberLeafIndex(bob.id)
+    expect(bobLeaf).toBeDefined()
+    const { newGroup: aliceAfterRemove } = await removeMember(aliceAfterBob, bobLeaf as number)
+
+    // GroupInfo exported after the removal — Bob's leaf is not in this tree.
+    const { groupInfo } = await exportGroupInfo({ group: aliceAfterRemove })
+
+    // identity.id === credential.id here (Bob presents his own credential), so
+    // the identity/credential guard does NOT fire — this must exercise ts-mls's
+    // own no-prior-leaf rejection, not the precheck.
+    await expect(
+      joinGroupExternal({
+        identity: bob,
+        groupInfo,
+        credential: bobCred,
+        resync: true,
+      }),
+    ).rejects.toThrow(/External join with resync: no prior leaf matching the new KeyPackage/)
+  })
+
   test('peer4 identity can rejoin via groupInfo + resync', async () => {
     const alice = await createIdentity({
       keys: [{ purpose: 'sig', alg: 'EdDSA' }],

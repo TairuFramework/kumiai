@@ -422,13 +422,6 @@ export class GroupHandle {
   }
 
   /**
-   * Fold ledger entries into this handle's roster and ledger. This is a
-   * construction-time primitive — called on a freshly built handle before it is
-   * shared (restore, welcome, and the commit producers' derived handle). Unlike
-   * the state-mutating operations, it is not serialized on the handle's mutex, so
-   * do not call it on a live handle concurrently with encrypt/processMessage.
-   */
-  /**
    * Verify signed ledger tokens, append the valid ones to the log in the order
    * given, and refold the roster. Tokens that fail verification or whose groupID
    * does not match the group are dropped (defensive — this is the low-level apply
@@ -441,16 +434,19 @@ export class GroupHandle {
    * repeat is the only way to express a demotion back to a previously-held role.
    * Nothing replays a commit into it: MLS applies each commit exactly once,
    * restoreGroup replays a token list once, and processWelcome folds an invite once.
+   * Runs serialized on the handle's mutex, like the other state-mutating operations.
    */
   async applyLedgerEntries(tokens: Array<string>): Promise<void> {
-    for (const token of tokens) {
-      const verified = await verifyLedgerEntry(token)
-      if (verified == null || verified.entry.groupID !== this.groupID) continue
-      const entryID = ledgerEntryDigest(token)
-      this.#ledger.push({ entryID, token, verified })
-      this.#entryBodies.set(entryID, { token, verified })
-    }
-    this.#roster = foldLedgerRoster(this.#ledger, this.#anchor, this.groupID)
+    return mutexFor(this).run(async () => {
+      for (const token of tokens) {
+        const verified = await verifyLedgerEntry(token)
+        if (verified == null || verified.entry.groupID !== this.groupID) continue
+        const entryID = ledgerEntryDigest(token)
+        this.#ledger.push({ entryID, token, verified })
+        this.#entryBodies.set(entryID, { token, verified })
+      }
+      this.#roster = foldLedgerRoster(this.#ledger, this.#anchor, this.groupID)
+    })
   }
 
   get memberCount(): number {
@@ -1436,11 +1432,12 @@ export async function joinGroupExternal(
     authenticatedData,
   } = params
 
-  // Guard: resync requires the rejoining identity to match the leaf being
-  // replaced. If `identity.id` does not match `credential.id`, ts-mls's
-  // findIndex returns -1 and the downstream `removeLeafNodeMutable(tree, -1)`
-  // call enters an unbounded loop (ts-mls bug; the no-match branch is not
-  // guarded). Reject early with a clear error.
+  // Guard: resync replaces the caller's own prior leaf, so the rejoining identity
+  // must match the credential it presents. On a mismatch ts-mls rejects the
+  // external commit downstream (it finds no prior leaf matching the KeyPackage and
+  // throws); reject early here with a clearer error. This is a friendly precheck,
+  // not the security boundary — eviction completeness rests on ts-mls requiring a
+  // matching prior leaf in the resynced tree, which a removed member no longer has.
   if (normalizeDID(identity.id) !== normalizeDID(credential.id)) {
     throw new Error(
       `joinGroupExternal: identity.id (${identity.id}) must match credential.id (${credential.id}) for resync`,
