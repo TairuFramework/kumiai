@@ -1805,3 +1805,36 @@ transport. Two of the four were not — not because the enforcement is weak, but
 refuses to *produce* the malicious input a receiver would reject, stopping the attack a layer earlier
 than the wire. The integration layer proves the honest paths converge and the client-side guards hold;
 the receiver-side rejections are a unit concern, because you cannot ship what you cannot build.
+
+### 2026-07-11 — Question 6.2: close the loop
+
+**Findings:** The branch's loose ends are tied off across both repos. In kumiai: the two origin backlog
+items are deleted (`docs/agents/plans/next/2026-07-07-mls-permission-enforcement.md` and
+`2026-07-10-member-relay-invite.md` — brainstorming produced the spec, and their findings are covered,
+the relay item's headline *dissolved* rather than fixed), and a changeset records the breaking
+`@kumiai/mls` surface change (`GroupPermission` narrowed, the capability chain removed, `Invite` and
+`MemberCredential` reshaped, `rootCapability` dropped, `ControlEnvelope`/ledger-head added). Bumped
+`minor`, not `major`: at `0.1.0` that is the pre-1.0 breaking slot, and a `major` would force `1.0.0`
+prematurely — the whole group moves together pre-1.0.
+
+In kubun (written directly into its working tree, left uncommitted for the maintainer to review): a real
+migration item at `docs/agents/plans/next/2026-07-11-mls-permission-enforcement-migration.md`,
+synthesized from the three ephemeral `kubun-impact*.md` working notes and updated to the *settled*
+implementation — the notes were written mid-flight, before the chain was removed and before the head and
+external-init landed, so they still hedged on "pending Question 2.5". The migration item states the four
+files kubun deletes, the concrete `rootCapability` plumbing edits (`mls-state.ts`, `mls-group-handle.ts`,
+`group-handle-registry.test.ts`), the two-slot ledger/`app` rule and how kubun's four sub-ledgers split,
+the three kubun bugs the work closes, and the follow-ups that stay kubun's (HLC backdating, prune
+direction, pending-proposal absorption, `groupID` backfill). Its backlog line
+`ledger-derivable-group-membership.md` got a 2026-07-11 "landed, satisfied" update: `serveGroupInvite`
+is unblocked for **any admin**, not only the creator, and membership is now fold-verifiable. The three
+ephemeral notes were then deleted from kumiai, their content having moved to the durable kubun item.
+
+**Spec impact:** none. This is close-out, not design.
+
+**Learned:** the mid-implementation impact notes aged badly in a specific way — they recorded the design
+*as of a moment*, complete with open questions ("if Question 2.5 says yes, `Invite` drops
+`capabilityChain`") that the finished work has since answered. Migrating them verbatim would have handed
+kubun a decision tree whose branches are already resolved. The durable artifact had to be rewritten from
+the settled end state, not transcribed — a working note is a snapshot, and the reader of a migration item
+wants the destination, not the journey.
