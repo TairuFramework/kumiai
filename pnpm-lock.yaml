@@ -18,9 +18,6 @@ catalogs:
     '@enkaku/transport':
       specifier: ^0.18.1
       version: 0.18.1
-    '@kokuin/capability':
-      specifier: ^0.1.0
-      version: 0.1.0
     '@kokuin/expo':
       specifier: ^0.2.0
       version: 0.2.0
@@ -219,9 +216,6 @@ importers:
 
   packages/mls:
     dependencies:
-      '@kokuin/capability':
-        specifier: 'catalog:'
-        version: 0.1.0
       '@kokuin/token':
         specifier: 'catalog:'
         version: 0.1.1

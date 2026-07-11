@@ -86,7 +86,7 @@ describe('group anchor', () => {
         extensions: [corrupt],
         capabilities: controlCapabilities(),
       }),
-    ).rejects.toThrow()
+    ).rejects.toThrow(/group anchor extension present but could not be decoded/)
   })
 
   test('decodeGroupAnchor returns null (never throws) on malformed bytes or wrong shape', () => {

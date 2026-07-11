@@ -106,6 +106,13 @@ function evaluateGroupContextExtensions(
     const got = extensions[i]
     const want = expected[i]
     if (got.extensionType !== want.extensionType) return 'reject'
+    // Both sides must be raw bytes to byte-compare. ts-mls's own extensionsEqual
+    // is not re-exported, so this hand-rolled compare only handles Uint8Array
+    // extensionData; a default-typed (decoded-object) extension — e.g.
+    // external_senders or required_capabilities — fails the instanceof guard and
+    // is rejected even when it is an honest, unmodified carry-over. That is
+    // fail-closed liveness, not a security gap: no group in this repo anchors
+    // such an extension today. Revisit this compare if one is introduced.
     if (
       !(got.extensionData instanceof Uint8Array) ||
       !(want.extensionData instanceof Uint8Array) ||

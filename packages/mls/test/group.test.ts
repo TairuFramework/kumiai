@@ -477,6 +477,10 @@ describe('GroupHandle lifecycle', () => {
       ledgerEntries: [forgedRole],
     }
 
+    // The forged invite carries only the forged role entry, so the head recomputed
+    // from it can never reproduce the authenticated head the real commit installed
+    // (which extends over the admin-signed entry) — this is the same fail-closed
+    // path an incomplete or reordered ledger takes, not a distinct forgery check.
     await expect(
       processWelcome({
         identity: bob,
@@ -485,7 +489,7 @@ describe('GroupHandle lifecycle', () => {
         keyPackageBundle: bobKP,
         ratchetTree: newGroup.state.ratchetTree,
       }),
-    ).rejects.toThrow()
+    ).rejects.toThrow(LedgerIncompleteError)
   })
 
   test('readMessageEpoch reads the handshake epoch from commit bytes', async () => {
@@ -2927,6 +2931,57 @@ describe('a handle serializes its state mutations', () => {
       got.add(d.decode((await bobGroup.processMessage(message)) as Uint8Array))
     }
     expect(got).toEqual(new Set(['one', 'two']))
+  })
+
+  test('a processMessage racing an encrypt on the same handle serializes: the commit lands and the peer decrypts', async () => {
+    const { alice, bob, carol, groupID, aliceGroup, bobGroup, tokens } = await threeMemberGroup()
+    const enc = new TextEncoder()
+    const dec = new TextDecoder()
+
+    // Promote bob to admin and have both alice's and bob's own handles catch up,
+    // so bob's local roster (what commitWithEntries checks against) actually
+    // authorizes him to commit. Only then can bob hand alice real, independently
+    // authored commit bytes to race against her own encrypt — the more realistic
+    // interleaving of an incoming commit and a locally-authored application message.
+    const promoteBob = await signLedgerEntry(alice, {
+      type: ROLE_ENTRY_TYPE,
+      groupID,
+      subject: bob.id,
+      value: 'admin',
+    })
+    tokens.set(ledgerEntryDigest(promoteBob), promoteBob)
+    const promotion = await commitLedgerEntries(aliceGroup, [promoteBob])
+    await bobGroup.processMessage(promotion.commitMessage)
+
+    // Bob (now admin) removes carol — a real commit alice has not seen yet.
+    const carolLeaf = bobGroup.findMemberLeafIndex(carol.id)
+    const removal = await removeMember(bobGroup, carolLeaf as number)
+
+    const epochBefore = promotion.newGroup.epoch
+
+    // Fired together, without awaiting between them: without the mutex both read
+    // the same pre-commit #state, so the encrypt either rides the stale epoch's
+    // secret tree (undecryptable once the peer has advanced past the commit) or
+    // clobbers the commit's state advance outright (carol never actually removed).
+    const [, ciphertext] = await Promise.all([
+      promotion.newGroup.processMessage(removal.commitMessage),
+      promotion.newGroup.encrypt(enc.encode('after the race')),
+    ])
+
+    // The commit applied on alice's handle: epoch advanced and carol is gone from
+    // her roster.
+    expect(promotion.newGroup.epoch).toBe(epochBefore + 1n)
+    expect(promotion.newGroup.findMemberLeafIndex(carol.id)).toBeUndefined()
+    // The ciphertext itself is framed at the post-commit epoch: proof the encrypt
+    // actually ran after the commit applied to #state, not against a stale snapshot
+    // read concurrently with it.
+    expect(readMessageEpoch(ciphertext)).toBe(promotion.newGroup.epoch)
+
+    // Bob's own post-removal handle is already at the matching epoch (he authored
+    // the commit), so it decrypts alice's message only if her encrypt actually ran
+    // at the post-commit epoch — the serialization the mutex guarantees.
+    const plaintext = await removal.newGroup.processMessage(ciphertext)
+    expect(dec.decode(plaintext as Uint8Array)).toBe('after the race')
   })
 
   test('encrypt wipes the retired secrets it consumed', async () => {

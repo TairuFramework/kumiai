@@ -28,6 +28,14 @@ export type GroupOptions = {
    * processMessage/decrypt for each incoming commit; return 'reject' to refuse
    * a commit (the handle stays at its pre-commit epoch and processMessage
    * throws CommitRejectedError). Overridable per call.
+   *
+   * Providing this REPLACES the anchored defaultCommitPolicy entirely — it does
+   * not compose with it. A caller that sets this for any reason (e.g. to
+   * observe or add one extra rule) silently disables all default permission
+   * enforcement for the resulting handle; only the decode/fold hard-reject
+   * still applies. Callers who want to extend rather than replace the default
+   * policy must call defaultCommitPolicy themselves from within their own
+   * callback.
    */
   commitPolicy?: IncomingMessageCallback
   /**
@@ -45,7 +53,7 @@ export type GroupOptions = {
    * into the roster, everything else is handed to the consumer here.
    */
   onLedgerEntries?: (entries: Array<VerifiedLedgerEntry>) => void
-  /** Optional DID cache for resolving did:peer:4 issuers in capability chains. Default: in-memory. */
+  /** Optional DID cache for resolving did:peer:4 issuers when verifying ledger entries. Default: in-memory. */
   cache?: DIDCache
   /** Optional resolver for did:peer:4 short forms not in cache. */
   resolver?: DIDResolver
