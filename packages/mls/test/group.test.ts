@@ -2198,6 +2198,93 @@ async function threeMemberGroup() {
   }
 }
 
+describe("a non-creator admin's invite authority follows the roster", () => {
+  test('an invitee of a promoted admin joins through processWelcome and converges', async () => {
+    const tokens = new Map<string, string>()
+    const { alice, bob, aliceGroup, bobGroup, groupID } = await twoMemberGroup({
+      bobOptions: { resolveLedgerEntries: mapResolver(tokens) },
+    })
+    const carol = randomIdentity()
+
+    // Alice promotes Bob: he is now an admin the group agrees on, though not the creator.
+    const promoteBob = await signLedgerEntry(alice, {
+      type: 'group.role',
+      groupID,
+      subject: bob.id,
+      value: 'admin',
+    })
+    tokens.set(ledgerEntryDigest(promoteBob), promoteBob)
+    const promotion = await commitLedgerEntries(aliceGroup, [promoteBob])
+    await bobGroup.processMessage(promotion.commitMessage)
+
+    // Bob — not the creator — signs Carol's invite, and Carol joins through the Welcome
+    // path. Authority to invite rests on Bob's admin role, not on who opened the group.
+    const { invite } = await createInvite({
+      group: bobGroup,
+      identity: bob,
+      recipientDID: carol.id,
+      permission: 'member',
+    })
+    publishInvite(tokens, invite)
+    const carolKP = await createKeyPackageBundle(carol)
+    const addCarol = await commitInvite(bobGroup, carolKP.publicPackage, invite)
+    const { group: carolGroup } = await processWelcome({
+      identity: carol,
+      invite,
+      welcome: addCarol.welcomeMessage,
+      keyPackageBundle: carolKP,
+      ratchetTree: addCarol.newGroup.state.ratchetTree,
+      options: { resolveLedgerEntries: mapResolver(tokens) },
+    })
+
+    // Carol's roster, folded from the ledger Bob's invite carried, agrees with the group.
+    expect(carolGroup.roster.roles.get(normalizeDID(bob.id))).toBe('admin')
+    expect(carolGroup.roster.roles.get(normalizeDID(alice.id))).toBe('admin')
+    expect(carolGroup.roster.roles.get(normalizeDID(carol.id))).toBe('member')
+    expect(rosterEntries(carolGroup)).toEqual(rosterEntries(addCarol.newGroup))
+  })
+
+  test('a demoted admin can no longer serve an invite', async () => {
+    const tokens = new Map<string, string>()
+    const { alice, bob, aliceGroup, bobGroup, groupID } = await twoMemberGroup({
+      bobOptions: { resolveLedgerEntries: mapResolver(tokens) },
+    })
+    const carol = randomIdentity()
+
+    const promoteBob = await signLedgerEntry(alice, {
+      type: 'group.role',
+      groupID,
+      subject: bob.id,
+      value: 'admin',
+    })
+    const demoteBob = await signLedgerEntry(alice, {
+      type: 'group.role',
+      groupID,
+      subject: bob.id,
+      value: 'member',
+    })
+    tokens.set(ledgerEntryDigest(promoteBob), promoteBob)
+    tokens.set(ledgerEntryDigest(demoteBob), demoteBob)
+    const promotion = await commitLedgerEntries(aliceGroup, [promoteBob])
+    await bobGroup.processMessage(promotion.commitMessage)
+    const demotion = await commitLedgerEntries(promotion.newGroup, [demoteBob])
+    await bobGroup.processMessage(demotion.commitMessage)
+    expect(bobGroup.roster.roles.get(normalizeDID(bob.id))).toBe('member')
+
+    // Authority is the current roster, not Bob's past admin-ness or his stored credential:
+    // once demoted, his invite would sign a role entry every receiver's fold drops, so the
+    // honest-client guard refuses it locally.
+    await expect(
+      createInvite({
+        group: bobGroup,
+        identity: bob,
+        recipientDID: carol.id,
+        permission: 'member',
+      }),
+    ).rejects.toThrow(/admin/)
+  })
+})
+
 describe('every ledger entry rides a commit, and the head proves it', () => {
   test('an admin promotes through commitLedgerEntries; the head advances with it', async () => {
     const { alice, bob, aliceGroup, bobGroup, carolGroup, groupID, tokens } =

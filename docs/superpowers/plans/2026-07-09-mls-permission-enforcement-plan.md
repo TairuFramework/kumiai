@@ -1702,3 +1702,53 @@ wholesale because 5 of its 6 tests exercised `validateGroupCapability`. But the 
 Deleting it dropped real coverage of live code. Restored (adapted, in `credential.test.ts`), which is
 why the final count is 246 not 245. The lesson: a probe's own green run does not surface *deleted*
 coverage; only auditing what left the tree does.
+
+### 2026-07-11 — Phase 5 residuals: the grep sweep, the docs, and non-creator-admin invite tests
+
+**Findings:** Phase 5 is closed. With 5.2 built as its own chain, 5.3 dissolved when `capability.ts`
+was deleted, and the type narrowing pulled forward into 2.4, what remained was the grep sweep, the doc
+statement, and the surviving 5.4 tests. mls suite **248 green** (246 + 2), tsc clean, biome clean; no
+production code changed.
+
+**Grep sweep — kumiai clean, kubun's hits are expected.** No `rootCapability`, `capabilityChain`,
+`capabilityToken`, `validateGroupCapability`, `createGroupCapability`, `delegateGroupMembership`,
+`extractPermission`, or MLS `'read'` permission survives anywhere in `packages/`. In `../kubun` the
+`permissionType: 'read' | 'write'` hits are a **different subsystem** — store-graph/engine/graphql
+document access control, unrelated to MLS `GroupPermission`. The genuine breakage is the `rootCapability`
+plumbing in `plugin-p2p/src/groups/{mls-state,mls-group-handle}.ts` and one test — the shrunk
+`restoreGroup`/`MemberCredential` will not accept it — but that is the Phase 6.2 kubun migration item,
+not a kumiai fix. `GroupPermission` is still exported (from `roster.ts`), so kubun's `manager.ts` import
+still resolves.
+
+**Docs — the README was materially stale.** It still sold "DID-based capabilities / a signed capability
+chain", "admin delegates a capability", and a trust-model paragraph about the chain not being
+re-validated. Rewritten to the roster/ledger authority model, with a new **Authority model** section
+(ledger = ordered log of enactments; roster = the fold judging each entry's issuer in state-so-far;
+enactment is admin-only structurally through the head coupling) and the plain statement that
+`GroupPermission` is `'admin' | 'member'` — a read-only tier is unenforceable because a group member
+holds the epoch secrets and derives the same application keys as anyone else; observers gate outside MLS.
+
+**The security section was verified against code before it was touched.** "Removal is not revocation"
+still holds, but its mechanism changed: `removeMember` evicts the MLS leaf via a `remove` proposal and
+does **not** erase the removed DID's `group.role` grant, which lives in the roster independently of leaf
+membership. So the external-commit policy's `baseRoster.roles.has(did)` gate (Q4.1b) still admits a
+removed member's resync — it blocks *strangers*, who are in no roster, not removed members. The follow-up
+revocation story is now stated accurately: a ledger entry that removes a DID's role from the roster,
+after which the external-commit policy rejects that DID's resync exactly as it rejects a stranger.
+
+**5.4 shrank to two additive tests; no production change.** `createInvite` already guards on the *live*
+roster (`group.roster.roles.get(id) !== 'admin'`), so the origin defect — only the creator's chain
+validates — cannot recur, and its other cases were already covered (a member cannot invite; a
+non-creator admin's Add accepted by a third peer; a non-admin's forged commit rejected). The two
+non-redundant gaps: *an invitee of a promoted admin joins through `processWelcome` and converges* (the
+origin defect expressed against the roster — previously only the creator's invitees ran the Welcome
+path), and *a demoted admin can no longer serve an invite* (authority is the current roster, not
+identity or stored credential).
+
+**Spec impact:** none. The read-only-is-unenforceable rationale, already in the spec, is now also in the
+package README where a future contributor would try to add a `'read'` tier.
+
+**Learned:** the doc was the last place the deleted model still lived. Source and tests were swept clean
+by tsc and the grep, but prose has no compiler — the README described a capability chain that no longer
+exists, and only reading it against the current code surfaces that. A green build does not prove the
+docs are true.
