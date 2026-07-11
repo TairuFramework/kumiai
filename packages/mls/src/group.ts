@@ -82,7 +82,11 @@ import {
   verifyLedgerEntry,
 } from './ledger.js'
 import { createMutex, type Mutex } from './mutex.js'
-import { defaultCommitPolicy, MissingLedgerEntriesError } from './policy.js'
+import {
+  type CommitPolicyContext,
+  defaultCommitPolicy,
+  MissingLedgerEntriesError,
+} from './policy.js'
 import {
   foldRoster,
   type GroupPermission,
@@ -537,18 +541,20 @@ export class GroupHandle {
 
     const commit = readPrivateCommit(decoded)
     let externalCommitDID: string | undefined
+    let isCommitMessage = commit != null
     if (commit == null) {
       const external = readExternalCommit(decoded)
-      if (external == null) {
-        // Not a PrivateMessage commit nor an external-join commit — preserve the
-        // pre-envelope behaviour exactly.
-        return {
-          callback: wrapCommitPolicy(callerPolicy, capture),
-          capture,
-          applyOnAccept: () => {},
-        }
+      if (external != null) {
+        externalCommitDID = external.did
+        isCommitMessage = true
       }
-      externalCommitDID = external.did
+      // else: a standalone by-reference Proposal (or an application message / a
+      // frame ts-mls will not call back on). Fall through with the roster
+      // unchanged so `combined` judges a kind:'proposal' incoming under the same
+      // defaultCommitPolicy rows a receiver applies to a commit's proposals; a
+      // non-admin's authority-bearing proposal is rejected on receipt and never
+      // stored. Application messages never reach the callback, so this is inert
+      // for them.
     }
 
     let precomputedReject = false
@@ -557,61 +563,63 @@ export class GroupHandle {
     let acceptedEntries: Array<LedgerLogEntry> = []
     let envelopeIDs: Array<string> = []
 
-    if (commit == null) {
-      // An external-join commit carries no control envelope: it resolves nothing,
-      // folds nothing, enacts no ledger entries, and never moves the head. The
-      // candidate roster is the current roster unchanged. Its only precomputed
-      // reject is an unresolvable committer DID (no UpdatePath / bad credential),
-      // which cannot be a valid resync.
-      precomputedReject = externalCommitDID === undefined
-    } else {
-      const env = decodeControlEnvelope(commit.authenticatedData)
-      if (!env.ok) {
-        precomputedReject = true
+    if (isCommitMessage) {
+      if (commit == null) {
+        // An external-join commit carries no control envelope: it resolves nothing,
+        // folds nothing, enacts no ledger entries, and never moves the head. The
+        // candidate roster is the current roster unchanged. Its only precomputed
+        // reject is an unresolvable committer DID (no UpdatePath / bad credential),
+        // which cannot be a valid resync.
+        precomputedReject = externalCommitDID === undefined
       } else {
-        const ids = env.envelope.entries ?? []
-        envelopeIDs = ids
-        const resolved = new Map<string, LedgerLogEntry>()
-        const missing: Array<string> = []
-        for (const id of ids) {
-          const held = this.#entryBodies.get(id)
-          if (held != null) {
-            resolved.set(id, { ...held, entryID: id })
-          } else {
-            missing.push(id)
-          }
-        }
-        if (missing.length > 0) {
-          if (this.#resolveLedgerEntries == null) {
-            throw new MissingLedgerEntriesError(missing)
-          }
-          const tokens = await this.#resolveLedgerEntries(missing)
-          for (const token of tokens) {
-            const id = ledgerEntryDigest(token)
-            // Content-addressing binds the untrusted body to the requested id.
-            if (resolved.has(id) || !missing.includes(id)) continue
-            const verified = await verifyLedgerEntry(token)
-            if (verified == null) continue
-            resolved.set(id, { token, verified, entryID: id })
-          }
-          const stillMissing = missing.filter((id) => !resolved.has(id))
-          if (stillMissing.length > 0) {
-            throw new MissingLedgerEntriesError(stillMissing)
-          }
-        }
-        const ordered: Array<LedgerLogEntry> = ids.map((id) => {
-          const input = resolved.get(id)
-          if (input == null) throw new MissingLedgerEntriesError([id])
-          return input
-        })
-
-        const foldResult = foldEnvelope(this.#roster, ordered, this.groupID)
-        if (!foldResult.ok) {
+        const env = decodeControlEnvelope(commit.authenticatedData)
+        if (!env.ok) {
           precomputedReject = true
         } else {
-          candidateRoster = foldResult.roster
-          surfaced = foldResult.surfaced
-          acceptedEntries = ordered
+          const ids = env.envelope.entries ?? []
+          envelopeIDs = ids
+          const resolved = new Map<string, LedgerLogEntry>()
+          const missing: Array<string> = []
+          for (const id of ids) {
+            const held = this.#entryBodies.get(id)
+            if (held != null) {
+              resolved.set(id, { ...held, entryID: id })
+            } else {
+              missing.push(id)
+            }
+          }
+          if (missing.length > 0) {
+            if (this.#resolveLedgerEntries == null) {
+              throw new MissingLedgerEntriesError(missing)
+            }
+            const tokens = await this.#resolveLedgerEntries(missing)
+            for (const token of tokens) {
+              const id = ledgerEntryDigest(token)
+              // Content-addressing binds the untrusted body to the requested id.
+              if (resolved.has(id) || !missing.includes(id)) continue
+              const verified = await verifyLedgerEntry(token)
+              if (verified == null) continue
+              resolved.set(id, { token, verified, entryID: id })
+            }
+            const stillMissing = missing.filter((id) => !resolved.has(id))
+            if (stillMissing.length > 0) {
+              throw new MissingLedgerEntriesError(stillMissing)
+            }
+          }
+          const ordered: Array<LedgerLogEntry> = ids.map((id) => {
+            const input = resolved.get(id)
+            if (input == null) throw new MissingLedgerEntriesError([id])
+            return input
+          })
+
+          const foldResult = foldEnvelope(this.#roster, ordered, this.groupID)
+          if (!foldResult.ok) {
+            precomputedReject = true
+          } else {
+            candidateRoster = foldResult.roster
+            surfaced = foldResult.surfaced
+            acceptedEntries = ordered
+          }
         }
       }
     }
@@ -952,6 +960,45 @@ async function commitWithEntries(
   }
 
   const entryIDs = enacted.map(ledgerEntryDigest)
+
+  // Filter the pending-proposal set the committer would otherwise absorb: ts-mls folds every
+  // unappliedProposal into the commit, so a non-admin's pending proposal would ride this commit
+  // and every peer would reject the whole thing — a single member could stall the group. Judge
+  // each pending proposal against the SAME defaultCommitPolicy and the SAME context receivers
+  // build for this commit (base = pre-commit roster, candidate = post-fold roster), dropping any
+  // the group would reject. A modified client that skips this produces a commit the group refuses.
+  const leafToDID = new Map<number, string>()
+  for (const member of group.listMembers()) leafToDID.set(member.leafIndex, member.id)
+  const anchorExt = readGroupAnchorExtension(group)
+  const anchorExtensionData =
+    anchorExt != null && anchorExt.extensionData instanceof Uint8Array
+      ? anchorExt.extensionData
+      : new Uint8Array()
+  const headExt = readLedgerHeadExtension(group)
+  const currentHead =
+    headExt != null && headExt.extensionData instanceof Uint8Array
+      ? decodeLedgerHead(headExt.extensionData)
+      : null
+  const expectedHeadExtensionData =
+    currentHead == null
+      ? new Uint8Array()
+      : encodeLedgerHead(extendHead(currentHead.head, entryIDs))
+  const filterContext: CommitPolicyContext = {
+    baseRoster: group.roster,
+    candidateRoster: fold.roster,
+    didOfLeaf: (leafIndex: number) => leafToDID.get(leafIndex),
+    anchorExtensionData,
+    expectedHeadExtensionData,
+    commitEnactsEntries: entryIDs.length > 0,
+  }
+  const keptPending: typeof group.state.unappliedProposals = {}
+  for (const [ref, pws] of Object.entries(group.state.unappliedProposals)) {
+    if (defaultCommitPolicy({ kind: 'proposal', proposal: pws }, filterContext) !== 'reject') {
+      keptPending[ref] = pws
+    }
+  }
+  const commitState = { ...group.state, unappliedProposals: keptPending }
+
   const proposals = [...extraProposals]
   if (entryIDs.length > 0) {
     proposals.push({
@@ -962,7 +1009,7 @@ async function commitWithEntries(
 
   return await createCommit({
     context: group.context,
-    state: group.state,
+    state: commitState,
     extraProposals: proposals,
     ...(ratchetTreeExtension && { ratchetTreeExtension: true }),
     ...(entryIDs.length > 0 && {

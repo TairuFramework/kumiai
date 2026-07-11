@@ -1,6 +1,8 @@
 import { createIdentity, normalizeDID, randomIdentity } from '@kokuin/token'
 import {
   createCommit,
+  createProposal,
+  createUpdateProposal,
   decode,
   defaultProposalTypes,
   encode,
@@ -2941,5 +2943,140 @@ describe('a handle serializes its state mutations', () => {
     for (const buffer of consumed as unknown as Array<Uint8Array>) {
       expect(buffer.every((byte) => byte === 0)).toBe(true)
     }
+  })
+})
+
+type AddProposal = Parameters<typeof createProposal>[0]['proposal']
+
+/** A standalone by-reference `add` proposal authored against `state`. */
+function addProposal(keyPackage: unknown): AddProposal {
+  return {
+    proposalType: defaultProposalTypes.add,
+    add: { keyPackage },
+  } as AddProposal
+}
+
+/** The single pending entry a fresh `createProposal` newState holds. */
+function onlyPending(unappliedProposals: Record<string, unknown>): [string, unknown] {
+  const entry = Object.entries(unappliedProposals)[0]
+  if (entry == null) throw new Error('expected exactly one pending proposal')
+  return entry
+}
+
+describe('standalone proposals are judged by the same commit policy', () => {
+  it("rejects a non-admin member's standalone add on receipt and never stores it", async () => {
+    const { bobGroup, aliceGroup } = await threeMemberGroup()
+    const dave = randomIdentity()
+    const daveKP = await createKeyPackageBundle(dave)
+    const bobAdd = await createProposal({
+      context: bobGroup.context,
+      state: bobGroup.state,
+      proposal: addProposal(daveKP.publicPackage),
+    })
+    const bobAddBytes = encode(mlsMessageEncoder, bobAdd.message)
+
+    await expect(aliceGroup.processMessage(bobAddBytes)).rejects.toThrow(CommitRejectedError)
+    // Rejection leaves nothing in the pending set: the griefer's proposal never lands.
+    expect(Object.keys(aliceGroup.state.unappliedProposals)).toHaveLength(0)
+  })
+
+  it("rejects a non-admin member's standalone group_context_extensions on receipt", async () => {
+    const { bobGroup, aliceGroup } = await threeMemberGroup()
+    const gce = await createProposal({
+      context: bobGroup.context,
+      state: bobGroup.state,
+      proposal: {
+        proposalType: defaultProposalTypes.group_context_extensions,
+        groupContextExtensions: { extensions: bobGroup.state.groupContext.extensions },
+      } as AddProposal,
+    })
+    const gceBytes = encode(mlsMessageEncoder, gce.message)
+
+    await expect(aliceGroup.processMessage(gceBytes)).rejects.toThrow(CommitRejectedError)
+    expect(Object.keys(aliceGroup.state.unappliedProposals)).toHaveLength(0)
+  })
+
+  it("accepts a member's standalone update proposal", async () => {
+    const { bobGroup, aliceGroup } = await threeMemberGroup()
+    const update = await createUpdateProposal({
+      context: bobGroup.context,
+      state: bobGroup.state,
+    })
+    const updateBytes = encode(mlsMessageEncoder, update.message)
+
+    // Any member may rotate their own leaf: the update is admissible, so processMessage
+    // does not throw and the proposal is held pending.
+    await expect(aliceGroup.processMessage(updateBytes)).resolves.toBeNull()
+    expect(Object.keys(aliceGroup.state.unappliedProposals).length).toBeGreaterThan(0)
+  })
+})
+
+describe('the committer filters the pending set before authoring a commit', () => {
+  it("drops a non-admin's pending proposal from an admin's eviction commit", async () => {
+    const { bob, bobGroup, aliceGroup, carolGroup } = await threeMemberGroup()
+    const dave = randomIdentity()
+    const daveKP = await createKeyPackageBundle(dave)
+
+    // A non-admin proposal that — on a peer without receipt enforcement, or one that
+    // stored it before this fix — sits in the honest committer's pending set. Seed it
+    // directly: with receipt enforcement in place an honest committer would never store it.
+    const bobAdd = await createProposal({
+      context: bobGroup.context,
+      state: bobGroup.state,
+      proposal: addProposal(daveKP.publicPackage),
+    })
+    const [ref, pws] = onlyPending(bobAdd.newState.unappliedProposals)
+    aliceGroup.state.unappliedProposals[ref] =
+      pws as (typeof aliceGroup.state.unappliedProposals)[string]
+    expect(aliceGroup.state.unappliedProposals[ref]).toBeDefined()
+
+    const bobLeaf = aliceGroup.findMemberLeafIndex(bob.id)
+    if (bobLeaf == null) throw new Error('expected bob to be a member')
+    const removal = await removeMember(aliceGroup, bobLeaf)
+
+    // Carol never held Bob's proposal. Had the eviction commit absorbed it, Carol could
+    // not resolve the by-reference proposal and processMessage would throw. It does not:
+    // the filter kept the griefer's proposal out of the commit.
+    await carolGroup.processMessage(removal.commitMessage)
+
+    expect(removal.newGroup.findMemberLeafIndex(bob.id)).toBeUndefined()
+    expect(carolGroup.findMemberLeafIndex(bob.id)).toBeUndefined()
+    // Committer and receiver converge on the same epoch and membership.
+    expect(carolGroup.epoch).toBe(removal.newGroup.epoch)
+    expect(new Set(carolGroup.listMembers().map((member) => normalizeDID(member.id)))).toEqual(
+      new Set(removal.newGroup.listMembers().map((member) => normalizeDID(member.id))),
+    )
+  })
+
+  it("retains an admin's pending proposal and carries it into the commit", async () => {
+    const { bob, aliceGroup, carolGroup } = await threeMemberGroup()
+    const dave = randomIdentity()
+    const daveKP = await createKeyPackageBundle(dave)
+
+    // An admin's standalone add, held pending by the committer and by the receiver that
+    // must resolve the by-reference proposal the commit carries.
+    const aliceAdd = await createProposal({
+      context: aliceGroup.context,
+      state: aliceGroup.state,
+      proposal: addProposal(daveKP.publicPackage),
+    })
+    const [ref, pws] = onlyPending(aliceAdd.newState.unappliedProposals)
+    aliceGroup.state.unappliedProposals[ref] =
+      pws as (typeof aliceGroup.state.unappliedProposals)[string]
+    carolGroup.state.unappliedProposals[ref] =
+      pws as (typeof carolGroup.state.unappliedProposals)[string]
+
+    const bobLeaf = aliceGroup.findMemberLeafIndex(bob.id)
+    if (bobLeaf == null) throw new Error('expected bob to be a member')
+    const removal = await removeMember(aliceGroup, bobLeaf)
+
+    await carolGroup.processMessage(removal.commitMessage)
+
+    // Dave, added by the retained admin proposal, is present on both sides; Bob is gone.
+    const daveNorm = normalizeDID(dave.id)
+    expect(removal.newGroup.listMembers().some((m) => normalizeDID(m.id) === daveNorm)).toBe(true)
+    expect(carolGroup.listMembers().some((m) => normalizeDID(m.id) === daveNorm)).toBe(true)
+    expect(carolGroup.findMemberLeafIndex(bob.id)).toBeUndefined()
+    expect(carolGroup.epoch).toBe(removal.newGroup.epoch)
   })
 })
