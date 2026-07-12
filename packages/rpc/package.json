@@ -1,6 +1,6 @@
 {
   "name": "@kumiai/rpc",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "MIT",
   "description": "High-level MLS-aware group RPC for Enkaku: bus broadcast/anycast/gather plus directed RPC over the pub/sub hub",
   "keywords": [
