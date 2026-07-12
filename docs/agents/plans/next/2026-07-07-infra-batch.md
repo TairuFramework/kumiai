@@ -21,15 +21,24 @@
 
 ### Medium — turbo task graph
 
-- `turbo.json:6` — `build:js` depends on `^clean` but no package defines a `clean` script
-  (all define `build:clean`), so cleaning never happens and stale files persist in `lib/`.
-  Fix: rename package scripts or fix the task graph.
-- `turbo.json:8-9` — `test:types`/`test:unit` lack `dependsOn: ["^build:types"]` and
+Mostly **done** on `feat/mls-permission-enforcement` (commit `62c524e`), after the stale-hit
+bug below actually fired: a warm cache replayed a passing `test:types` for `e2e-expo` across
+the branch's whole MLS API reshape, so a broken consumer reached an open PR reporting green.
+
+- ~~`turbo.json:8-9` — `test:types`/`test:unit` lack `dependsOn: ["^build:types"]` and
   dependency-aware inputs: warm-cache runs give stale hits for downstream packages; fresh
-  clones fail before building. Fix: add `dependsOn` or disable test caching.
-- `turbo.json:7` — `build:js` outputs `lib/**` capture `.d.ts` emitted by the non-turbo
-  `build:types`; a cache restore can overwrite fresh declarations with stale ones. Fix:
-  narrow to `lib/**/*.js`(+maps) or move `build:types` into turbo.
+  clones fail before building.~~ **Done.** `build:types` is now a turbo task and both test
+  tasks depend on `^build:types`, so an upstream source change invalidates every downstream
+  typecheck and a cold cache bootstraps the build.
+- ~~`turbo.json:7` — `build:js` outputs `lib/**` capture `.d.ts` emitted by the non-turbo
+  `build:types`; a cache restore can overwrite fresh declarations with stale ones.~~ **Done.**
+  The two builds now claim disjoint outputs (`lib/**/*.js` and `lib/**/*.d.ts`).
+- **Still open** — `build:js` depended on `^clean`, but no package defines a `clean` script
+  (all define `build:clean`), so cleaning never happened and stale files persist in `lib/`.
+  The dead `^clean` was dropped rather than wired up, because root `build` runs `build:types`
+  before `build:js`: a clean hung off `build:js` would delete the declarations `build:types`
+  just emitted. Wiring cleaning in needs the build restructured — e.g. a single `build:clean`
+  both builds depend on, with root `build` becoming one `turbo run build:types build:js`.
 
 ### Medium — hooks and licensing
 
