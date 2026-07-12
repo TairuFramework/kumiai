@@ -6,13 +6,13 @@ import {
   normalizeDID,
   type OwnIdentity,
   type SigningIdentity,
-  stringifyToken,
 } from '@kokuin/token'
 import {
   type Capabilities,
   type CiphersuiteName,
   type ClientState,
   type Credential,
+  contentTypes,
   createApplicationMessage,
   createCommit,
   createGroupInfoWithExternalPubAndRatchetTree,
@@ -39,15 +39,20 @@ import {
   nodeTypes,
   type ProposalWithSender,
   protocolVersions,
+  senderTypes,
   wireformats,
 } from 'ts-mls'
 
-import { createDIDAuthenticationService } from './authentication.js'
 import {
-  createGroupCapability,
-  delegateGroupMembership,
-  type GroupPermission,
-} from './capability.js'
+  buildCurrentGroupAnchorExtension,
+  controlCapabilities,
+  decodeGroupAnchor,
+  GROUP_ANCHOR_EXTENSION_TYPE,
+  type GroupAnchor,
+  LEDGER_HEAD_EXTENSION_TYPE,
+  readGroupAnchor,
+} from './anchor.js'
+import { createDIDAuthenticationService } from './authentication.js'
 import { sanitizeRatchetTree } from './codec.js'
 import {
   type GroupMember,
@@ -56,9 +61,62 @@ import {
   parseMLSCredentialIdentity,
 } from './credential.js'
 import { nobleCryptoProvider } from './crypto.js'
+import { decodeControlEnvelope, encodeControlEnvelope } from './envelope.js'
+import { foldEnvelope } from './envelope-fold.js'
+import type { FoldInput } from './fold.js'
+import {
+  assertHeadMatches,
+  buildLedgerHeadExtension,
+  computeHead,
+  decodeLedgerHead,
+  encodeLedgerHead,
+  extendHead,
+  genesisHead,
+  readLedgerHead,
+  readLedgerHeadExtension,
+} from './head.js'
+import {
+  ledgerEntryDigest,
+  signLedgerEntry,
+  type VerifiedLedgerEntry,
+  verifyLedgerEntry,
+} from './ledger.js'
+import { createMutex, type Mutex } from './mutex.js'
+import {
+  type CommitPolicyContext,
+  defaultCommitPolicy,
+  MissingLedgerEntriesError,
+} from './policy.js'
+import {
+  foldRoster,
+  type GroupPermission,
+  ROLE_ENTRY_TYPE,
+  type RoleValue,
+  type RosterState,
+} from './roster.js'
 import type { GroupOptions, Invite, KeyPackageBundle } from './types.js'
 
 const DEFAULT_CIPHERSUITE = 'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519' as const
+
+/** One serializer per live handle, so its state-mutating operations run one at a
+ *  time in issue order. Keyed weakly: the entry is collected with the handle, and
+ *  the handle carries no reference back to it. */
+const MUTEXES = new WeakMap<GroupHandle, Mutex>()
+
+function mutexFor(handle: GroupHandle): Mutex {
+  let mutex = MUTEXES.get(handle)
+  if (mutex === undefined) {
+    mutex = createMutex()
+    MUTEXES.set(handle, mutex)
+  }
+  return mutex
+}
+
+/** Overwrite retired secret buffers ts-mls hands back as `consumed`, so key
+ *  material does not linger in the heap after the state that used it is replaced. */
+function zeroAll(buffers: Array<Uint8Array>): void {
+  for (const buffer of buffers) buffer.fill(0)
+}
 
 async function resolveMlsContext(options?: GroupOptions): Promise<MlsContext> {
   const name = (options?.ciphersuiteName ?? DEFAULT_CIPHERSUITE) as CiphersuiteName
@@ -89,8 +147,8 @@ export function makeMLSCredential(identity: OwnIdentity): Credential {
 }
 
 /**
- * Thrown by GroupHandle.processMessage/decrypt when the active commit policy
- * rejects an incoming commit. The handle is left at its pre-commit epoch.
+ * Thrown by GroupHandle.processMessage when the active commit policy rejects
+ * an incoming commit. The handle is left at its pre-commit epoch.
  */
 export class CommitRejectedError extends Error {
   #proposals: Array<ProposalWithSender>
@@ -139,16 +197,108 @@ function wrapCommitPolicy(
   }
 }
 
+/**
+ * Read the cleartext commit fields a PrivateMessage commit exposes before any
+ * epoch secret is available: its `authenticatedData` carrier. Returns undefined
+ * for anything that is not a PrivateMessage of contentType commit (application
+ * message, proposal, PublicMessage, or a pre-decoded non-frame) — those keep the
+ * pre-envelope code path. The decoded frame is widened to `unknown` on both
+ * public entry points, so this narrows structurally rather than by cast.
+ */
+function readPrivateCommit(decoded: unknown): { authenticatedData: Uint8Array } | undefined {
+  if (decoded == null || typeof decoded !== 'object') return undefined
+  const frame = decoded as { wireformat?: unknown; privateMessage?: unknown }
+  if (frame.wireformat !== wireformats.mls_private_message) return undefined
+  const pm = frame.privateMessage as
+    | { contentType?: unknown; authenticatedData?: unknown }
+    | undefined
+  if (pm == null || pm.contentType !== contentTypes.commit) return undefined
+  const data = pm.authenticatedData
+  return { authenticatedData: data instanceof Uint8Array ? data : new Uint8Array() }
+}
+
+/**
+ * Read the DID an external-join commit proves control of. An external join is a
+ * PublicMessage whose sender is a joining non-member (senderType
+ * new_member_commit) carrying a commit; the committer holds no pre-commit leaf,
+ * so its DID rides the commit's own UpdatePath leaf credential. Returns undefined
+ * for anything that is not such a commit — those keep the pre-envelope path.
+ * Returns `{ did: undefined }` for an external commit whose UpdatePath is absent
+ * or whose leaf credential does not resolve to a basic-credential DID: it cannot
+ * be a valid resync, so the caller rejects it. Narrows the `unknown` frame
+ * structurally, mirroring readPrivateCommit / readMessageEpoch.
+ */
+function readExternalCommit(decoded: unknown): { did: string | undefined } | undefined {
+  if (decoded == null || typeof decoded !== 'object') return undefined
+  const frame = decoded as { wireformat?: unknown; publicMessage?: unknown }
+  if (frame.wireformat !== wireformats.mls_public_message) return undefined
+  const pm = frame.publicMessage as { senderType?: unknown; content?: unknown } | undefined
+  if (pm == null || pm.senderType !== senderTypes.new_member_commit) return undefined
+  const content = pm.content as { contentType?: unknown; commit?: unknown } | undefined
+  if (content == null || content.contentType !== contentTypes.commit) return undefined
+  const commit = content.commit as { path?: unknown } | undefined
+  const path = commit?.path as { leafNode?: unknown } | undefined
+  if (path == null) return { did: undefined }
+  const leafNode = path.leafNode as { credential?: unknown } | undefined
+  const credential = leafNode?.credential as { identity?: unknown } | undefined
+  if (credential == null || !(credential.identity instanceof Uint8Array)) {
+    return { did: undefined }
+  }
+  try {
+    return { did: parseMLSCredentialIdentity(credential.identity).id }
+  } catch {
+    return { did: undefined }
+  }
+}
+
+/**
+ * A control-ledger entry as a handle holds it: the signed token — the canonical
+ * persistent and wire form, the only thing that can be handed to another party —
+ * paired with its verified form. The verified form is a one-way derivation (the
+ * token cannot be reconstructed from it), so keeping only it would leave a handle
+ * unable to forward the ledger it holds.
+ */
+export type HeldLedgerEntry = {
+  token: string
+  verified: VerifiedLedgerEntry
+}
+
+/** A held entry paired with its content id — one position in the ledger log. */
+export type LedgerLogEntry = HeldLedgerEntry & { entryID: string }
+
+/**
+ * Project a held ledger into the roster. foldRoster is the role projection: it
+ * drops every non-`group.role` entry by type, so the mixed-type ledger is fed in
+ * as role inputs and the fold filters. The log is replayed in order, repeats and
+ * all: a claim re-enacted at a later position must undo what came between.
+ */
+function foldLedgerRoster(
+  ledger: ReadonlyArray<LedgerLogEntry>,
+  anchor: GroupAnchor,
+  groupID: string,
+): RosterState {
+  const entries = ledger.map(
+    ({ verified, entryID }) => ({ verified, entryID }) as FoldInput<RoleValue>,
+  )
+  return foldRoster(entries, anchor, groupID)
+}
+
 export type GroupHandleParams = {
   state: ClientState
   credential: MemberCredential
   context: MlsContext
-  /** Stringified root capability (for delegation) */
-  rootCapability: string
+  /** The control-ledger log this handle starts from, in enactment order. A handle
+   *  derived from another (commitInvite/removeMember) inherits the parent's, so the
+   *  roster it folds does not revert to the anchor alone. */
+  ledger?: ReadonlyArray<LedgerLogEntry>
   cache: DIDCache
   resolver?: DIDResolver
-  /** Default commit policy applied by processMessage/decrypt. */
+  /** Default commit policy applied by processMessage. */
   commitPolicy?: IncomingMessageCallback
+  /** Fetch control-ledger entry bodies the local ledger lacks (commit pre-pass). */
+  resolveLedgerEntries?: (ids: Array<string>) => Promise<Array<string>>
+  /** Surface an accepted commit's notarized non-`group.role` entries to the consumer. */
+  onLedgerEntries?: (entries: Array<VerifiedLedgerEntry>) => void
 }
 
 /**
@@ -158,19 +308,45 @@ export class GroupHandle {
   #state: ClientState
   #credential: MemberCredential
   #context: MlsContext
-  #rootCapability: string
   #cache: DIDCache
   #resolver?: DIDResolver
   #commitPolicy?: IncomingMessageCallback
+  #resolveLedgerEntries?: (ids: Array<string>) => Promise<Array<string>>
+  #onLedgerEntries?: (entries: Array<VerifiedLedgerEntry>) => void
+  #anchor: GroupAnchor
+  /** The ordered log of enactments — the ledger as the head chains it. The same
+   *  content id may appear more than once: a claim re-enacted at a later position
+   *  undoes what came between, which is how a demotion back to a previously-held
+   *  role expresses itself at all. */
+  #ledger: Array<LedgerLogEntry>
+  /** Entry bodies by content id, for resolving the ids an envelope names. A body
+   *  is the same body wherever it appears in the log, so this store is keyed. */
+  #entryBodies: Map<string, HeldLedgerEntry>
+  #roster: RosterState
 
   constructor(params: GroupHandleParams) {
     this.#state = params.state
     this.#credential = params.credential
     this.#context = params.context
-    this.#rootCapability = params.rootCapability
     this.#cache = params.cache
     this.#resolver = params.resolver
     this.#commitPolicy = params.commitPolicy
+    this.#resolveLedgerEntries = params.resolveLedgerEntries
+    this.#onLedgerEntries = params.onLedgerEntries
+    // Seed the control state from the genesis anchor baked into the group's own
+    // GroupContext. The anchor survives every epoch, so reading it here makes the
+    // constructor the single choke that no anchorless handle can slip through: an
+    // absent anchor fails closed rather than installing a permissive roster.
+    const anchor = readGroupAnchor(this)
+    if (anchor == null) {
+      throw new Error('group has no anchor extension; cannot seed a control roster')
+    }
+    this.#anchor = anchor
+    this.#ledger = [...(params.ledger ?? [])]
+    this.#entryBodies = new Map(
+      this.#ledger.map(({ entryID, token, verified }) => [entryID, { token, verified }]),
+    )
+    this.#roster = foldLedgerRoster(this.#ledger, anchor, this.groupID)
   }
 
   get groupID(): string {
@@ -193,10 +369,6 @@ export class GroupHandle {
     return this.#state
   }
 
-  get rootCapability(): string {
-    return this.#rootCapability
-  }
-
   get context(): MlsContext {
     return this.#context
   }
@@ -209,10 +381,73 @@ export class GroupHandle {
     return this.#resolver
   }
 
-  /** The commit policy enforced by processMessage/decrypt, if any. Carried
-   *  onto handles derived from this one (commitInvite/removeMember). */
+  /** The commit policy enforced by processMessage, if any. Carried onto
+   *  handles derived from this one (commitInvite/removeMember). */
   get commitPolicy(): IncomingMessageCallback | undefined {
     return this.#commitPolicy
+  }
+
+  /** The ledger-entry resolver, carried onto handles derived from this one. */
+  get resolveLedgerEntries(): ((ids: Array<string>) => Promise<Array<string>>) | undefined {
+    return this.#resolveLedgerEntries
+  }
+
+  /** The accepted-commit entry sink, carried onto handles derived from this one. */
+  get onLedgerEntries(): ((entries: Array<VerifiedLedgerEntry>) => void) | undefined {
+    return this.#onLedgerEntries
+  }
+
+  /** The genesis anchor seeded into this handle at construction. */
+  get anchor(): GroupAnchor {
+    return this.#anchor
+  }
+
+  /** The control-ledger log this handle holds, in enactment order, repeats and
+   *  all. Carried onto handles derived from this one (commitInvite/removeMember). */
+  get ledger(): ReadonlyArray<LedgerLogEntry> {
+    return this.#ledger
+  }
+
+  /** The ordered signed tokens this handle holds, including repeats — the ledger's
+   *  canonical persistent and wire form, and the list the authenticated head folds
+   *  over. Feeds createInvite, restoreGroup, and host persistence. The verified
+   *  entries are a derived cache with no export form: the only way into a ledger is
+   *  applyLedgerEntries, which re-verifies. */
+  get ledgerTokens(): Array<string> {
+    return this.#ledger.map(({ token }) => token)
+  }
+
+  /** The control roster folded from the anchor and every applied ledger entry. */
+  get roster(): RosterState {
+    return this.#roster
+  }
+
+  /**
+   * Verify signed ledger tokens, append the valid ones to the log in the order
+   * given, and refold the roster. Tokens that fail verification or whose groupID
+   * does not match the group are dropped (defensive — this is the low-level apply
+   * primitive; the commit pre-pass does the strict admin-issuer enforcement).
+   * Every token is re-verified on the way in: no entry enters a ledger unverified,
+   * whatever the import path.
+   *
+   * A token the log already holds is appended again rather than skipped. The log
+   * is an ordered record of what each commit enacted, not a set of claims, and a
+   * repeat is the only way to express a demotion back to a previously-held role.
+   * Nothing replays a commit into it: MLS applies each commit exactly once,
+   * restoreGroup replays a token list once, and processWelcome folds an invite once.
+   * Runs serialized on the handle's mutex, like the other state-mutating operations.
+   */
+  async applyLedgerEntries(tokens: Array<string>): Promise<void> {
+    return mutexFor(this).run(async () => {
+      for (const token of tokens) {
+        const verified = await verifyLedgerEntry(token)
+        if (verified == null || verified.entry.groupID !== this.groupID) continue
+        const entryID = ledgerEntryDigest(token)
+        this.#ledger.push({ entryID, token, verified })
+        this.#entryBodies.set(entryID, { token, verified })
+      }
+      this.#roster = foldLedgerRoster(this.#ledger, this.#anchor, this.groupID)
+    })
   }
 
   get memberCount(): number {
@@ -259,62 +494,166 @@ export class GroupHandle {
   }
 
   /**
-   * Encrypt an application message for the group.
+   * Encrypt an application message for the group, returning framed wire bytes.
+   * Encrypts at this handle's current epoch. A handle a commit has already
+   * superseded (see {@link commitInvite}, {@link removeMember},
+   * {@link commitLedgerEntries}) must not be reused to send — doing so silently
+   * emits an application message at the now-stale epoch; adopt the commit's
+   * `newGroup` and call `encrypt` on that instead.
    */
-  async encrypt(plaintext: Uint8Array): Promise<{ message: unknown; consumed: Array<Uint8Array> }> {
-    const { newState, message, consumed } = await createApplicationMessage({
-      context: this.#context,
-      state: this.#state,
-      message: plaintext,
+  async encrypt(plaintext: Uint8Array): Promise<Uint8Array> {
+    return mutexFor(this).run(async () => {
+      const { newState, message, consumed } = await createApplicationMessage({
+        context: this.#context,
+        state: this.#state,
+        message: plaintext,
+      })
+      this.#state = newState
+      zeroAll(consumed)
+      return encode(mlsMessageEncoder, message)
     })
-    this.#state = newState
-    return { message, consumed }
   }
 
   /**
-   * Decrypt an application message from the group.
+   * The async pre-pass feeding the synchronous ts-mls commit callback.
+   * processMessage runs this before mlsProcessMessage, since it may receive a
+   * commit. For anything that is not a PrivateMessage commit (application
+   * message, proposal, PublicMessage, pre-decoded non-frame) it does
+   * exactly what the code did before this step — resolve the caller policy, wrap
+   * it for the rejected-proposal capture, and apply nothing on accept.
    *
-   * Accepts either wire-form bytes (framed MLSMessage `Uint8Array`) or a
-   * pre-decoded ts-mls message object. The param type widens to `unknown`
-   * because `Uint8Array | unknown` collapses to `unknown` in TypeScript; the
-   * runtime `instanceof` check selects the decode path. Note: `encrypt`
-   * currently emits objects, so the bytes path is for symmetry with
-   * processMessage and future wire-form application messages.
+   * For a PrivateMessage commit it decodes the control envelope, resolves and
+   * verifies the entry bodies the envelope names, folds a candidate roster off
+   * the pre-commit state, and precomputes the pure inputs the sync callback
+   * reads. The returned callback is a pure lookup over that precomputed state:
+   * a decode/fold failure is a hard reject; otherwise a caller policy wins the
+   * permission decision, and with no caller policy the anchored default policy
+   * runs. Missing entry bodies with no resolver throw MissingLedgerEntriesError
+   * here — before mlsProcessMessage — so the handle stays at its pre-commit epoch.
    */
-  async decrypt(
-    message: Uint8Array | unknown,
+  async #prepareCommitPipeline(
+    decoded: unknown,
     opts?: { commitPolicy?: IncomingMessageCallback },
-  ): Promise<Uint8Array> {
-    let decoded: unknown = message
-    if (message instanceof Uint8Array) {
-      const parsed = decode(mlsMessageDecoder, message)
-      if (parsed == null) {
-        throw new Error('decrypt: failed to decode MLSMessage')
-      }
-      decoded = parsed
-    }
-    const callback = opts?.commitPolicy ?? this.#commitPolicy
+  ): Promise<{
+    callback: IncomingMessageCallback | undefined
+    capture: { rejected?: RejectedCommit }
+    applyOnAccept: () => void
+  }> {
+    const callerPolicy = opts?.commitPolicy ?? this.#commitPolicy
     const capture: { rejected?: RejectedCommit } = {}
-    const wrapped = wrapCommitPolicy(callback, capture)
-    const result = await mlsProcessMessage({
-      context: this.#context,
-      state: this.#state,
-      message: decoded as Parameters<typeof mlsProcessMessage>[0]['message'],
-      ...(wrapped != null && { callback: wrapped }),
+
+    const commit = readPrivateCommit(decoded)
+    let externalCommitDID: string | undefined
+    let isCommitMessage = commit != null
+    if (commit == null) {
+      const external = readExternalCommit(decoded)
+      if (external != null) {
+        externalCommitDID = external.did
+        isCommitMessage = true
+      }
+      // else: a standalone by-reference Proposal (or an application message / a
+      // frame ts-mls will not call back on). Fall through with the roster
+      // unchanged so `combined` judges a kind:'proposal' incoming under the same
+      // defaultCommitPolicy rows a receiver applies to a commit's proposals; a
+      // non-admin's authority-bearing proposal is rejected on receipt and never
+      // stored. Application messages never reach the callback, so this is inert
+      // for them.
+    }
+
+    let precomputedReject = false
+    let candidateRoster: RosterState = this.#roster
+    let surfaced: Array<VerifiedLedgerEntry> = []
+    let acceptedEntries: Array<LedgerLogEntry> = []
+    let envelopeIDs: Array<string> = []
+
+    if (isCommitMessage) {
+      if (commit == null) {
+        // An external-join commit carries no control envelope: it resolves nothing,
+        // folds nothing, enacts no ledger entries, and never moves the head. The
+        // candidate roster is the current roster unchanged. Its only precomputed
+        // reject is an unresolvable committer DID (no UpdatePath / bad credential),
+        // which cannot be a valid resync.
+        precomputedReject = externalCommitDID === undefined
+      } else {
+        const env = decodeControlEnvelope(commit.authenticatedData)
+        if (!env.ok) {
+          precomputedReject = true
+        } else {
+          const ids = env.envelope.entries ?? []
+          envelopeIDs = ids
+          const resolved = new Map<string, LedgerLogEntry>()
+          const missing: Array<string> = []
+          for (const id of ids) {
+            const held = this.#entryBodies.get(id)
+            if (held != null) {
+              resolved.set(id, { ...held, entryID: id })
+            } else {
+              missing.push(id)
+            }
+          }
+          if (missing.length > 0) {
+            if (this.#resolveLedgerEntries == null) {
+              throw new MissingLedgerEntriesError(missing)
+            }
+            const tokens = await this.#resolveLedgerEntries(missing)
+            for (const token of tokens) {
+              const id = ledgerEntryDigest(token)
+              // Content-addressing binds the untrusted body to the requested id.
+              if (resolved.has(id) || !missing.includes(id)) continue
+              const verified = await verifyLedgerEntry(token)
+              if (verified == null) continue
+              resolved.set(id, { token, verified, entryID: id })
+            }
+            const stillMissing = missing.filter((id) => !resolved.has(id))
+            if (stillMissing.length > 0) {
+              throw new MissingLedgerEntriesError(stillMissing)
+            }
+          }
+          const ordered: Array<LedgerLogEntry> = ids.map((id) => {
+            const input = resolved.get(id)
+            if (input == null) throw new MissingLedgerEntriesError([id])
+            return input
+          })
+
+          const foldResult = foldEnvelope(this.#roster, ordered, this.groupID)
+          if (!foldResult.ok) {
+            precomputedReject = true
+          } else {
+            candidateRoster = foldResult.roster
+            surfaced = foldResult.surfaced
+            acceptedEntries = ordered
+          }
+        }
+      }
+    }
+
+    const context = buildCommitPolicyContext(this, {
+      baseRoster: this.#roster,
+      candidateRoster,
+      entryIDs: envelopeIDs,
+      ...(externalCommitDID !== undefined && { externalCommitDID }),
     })
-    if (result.kind === 'applicationMessage') {
-      this.#state = result.newState
-      return result.message
+
+    const combined: IncomingMessageCallback = (incoming) => {
+      // A decode/fold failure is a hard reject even under a caller policy: the
+      // ledger the commit depends on is unresolvable or malformed.
+      if (precomputedReject) return 'reject'
+      if (callerPolicy != null) return callerPolicy(incoming)
+      return defaultCommitPolicy(incoming, context)
     }
-    // On reject, ts-mls returns the pre-commit state, so the handle stays put.
-    this.#state = result.newState
-    if (result.kind === 'newState' && result.actionTaken === 'reject') {
-      throw new CommitRejectedError(
-        capture.rejected?.proposals ?? [],
-        capture.rejected?.senderLeafIndex,
-      )
+
+    const applyOnAccept = () => {
+      // Appended, never deduped: the log records what this commit enacted, at the
+      // position the head chained it.
+      for (const { token, verified, entryID } of acceptedEntries) {
+        this.#ledger.push({ entryID, token, verified })
+        this.#entryBodies.set(entryID, { token, verified })
+      }
+      this.#roster = candidateRoster
+      if (surfaced.length > 0) this.#onLedgerEntries?.(surfaced)
     }
-    throw new Error('Expected application message but received handshake message')
+
+    return { callback: wrapCommitPolicy(combined, capture), capture, applyOnAccept }
   }
 
   /**
@@ -338,27 +677,28 @@ export class GroupHandle {
       }
       decoded = parsed
     }
-    const callback = opts?.commitPolicy ?? this.#commitPolicy
-    const capture: { rejected?: RejectedCommit } = {}
-    const wrapped = wrapCommitPolicy(callback, capture)
-    const result = await mlsProcessMessage({
-      context: this.#context,
-      state: this.#state,
-      message: decoded as Parameters<typeof mlsProcessMessage>[0]['message'],
-      ...(wrapped != null && { callback: wrapped }),
+    return mutexFor(this).run(async () => {
+      const { callback, capture, applyOnAccept } = await this.#prepareCommitPipeline(decoded, opts)
+      const result = await mlsProcessMessage({
+        context: this.#context,
+        state: this.#state,
+        message: decoded as Parameters<typeof mlsProcessMessage>[0]['message'],
+        ...(callback != null && { callback }),
+      })
+      this.#state = result.newState
+      zeroAll(result.consumed)
+      if (result.kind === 'newState' && result.actionTaken === 'reject') {
+        throw new CommitRejectedError(
+          capture.rejected?.proposals ?? [],
+          capture.rejected?.senderLeafIndex,
+        )
+      }
+      if (result.kind === 'applicationMessage') {
+        return result.message
+      }
+      applyOnAccept()
+      return null
     })
-    // On reject, ts-mls returns the pre-commit state, so the handle stays put.
-    this.#state = result.newState
-    if (result.kind === 'newState' && result.actionTaken === 'reject') {
-      throw new CommitRejectedError(
-        capture.rejected?.proposals ?? [],
-        capture.rejected?.senderLeafIndex,
-      )
-    }
-    if (result.kind === 'applicationMessage') {
-      return result.message
-    }
-    return null
   }
 }
 
@@ -403,7 +743,35 @@ export async function createGroup(
   const cache = options?.cache ?? createInMemoryDIDCache()
   const context = await resolveMlsContext(options)
 
-  const extensions = options?.extensions ?? []
+  // Every group is anchored at creation: the creator is the epoch-0 admin, and
+  // the ledger head starts at genesis. A caller-supplied anchor (e.g. one
+  // carrying an `app` payload) is left untouched — the caller owns its contents.
+  // Its `creatorDID` coupling to the creating identity is validated below; a
+  // decode failure here is not this guard's concern and is left to the
+  // downstream fail-closed decode in the GroupHandle constructor.
+  const extensions = [...(options?.extensions ?? [])]
+  const suppliedAnchorExtension = extensions.find(
+    (ext) => ext.extensionType === GROUP_ANCHOR_EXTENSION_TYPE,
+  )
+  if (suppliedAnchorExtension != null) {
+    const suppliedAnchorData = suppliedAnchorExtension.extensionData
+    const suppliedAnchor =
+      suppliedAnchorData instanceof Uint8Array ? decodeGroupAnchor(suppliedAnchorData) : null
+    if (
+      suppliedAnchor != null &&
+      normalizeDID(suppliedAnchor.creatorDID) !== normalizeDID(identity.id)
+    ) {
+      throw new Error(
+        `createGroup: the anchor's creatorDID (${suppliedAnchor.creatorDID}) must be the creating identity (${identity.id})`,
+      )
+    }
+  }
+  if (!extensions.some((ext) => ext.extensionType === GROUP_ANCHOR_EXTENSION_TYPE)) {
+    extensions.push(buildCurrentGroupAnchorExtension(identity.id))
+  }
+  if (!extensions.some((ext) => ext.extensionType === LEDGER_HEAD_EXTENSION_TYPE)) {
+    extensions.push(buildLedgerHeadExtension(genesisHead(groupID)))
+  }
   const statePromise = generateKeyPackageWithKey({
     credential: makeMLSCredential(identity),
     signatureKeyPair: { signKey: identity.privateKey, publicKey: identity.publicKey },
@@ -418,27 +786,21 @@ export async function createGroup(
       extensions,
     })
   })
-  const [state, rootCap] = await Promise.all([
-    statePromise,
-    createGroupCapability(identity, groupID),
-  ])
+  const state = await statePromise
 
-  const rootCapability = stringifyToken(rootCap)
   const credential: MemberCredential = {
     id: identity.id,
-    capabilityChain: [rootCapability],
-    capability: rootCap,
-    permission: 'admin',
     groupID,
   }
   const group = new GroupHandle({
     state,
     credential,
     context,
-    rootCapability,
     cache,
     resolver: options?.resolver,
     commitPolicy: options?.commitPolicy,
+    resolveLedgerEntries: options?.resolveLedgerEntries,
+    onLedgerEntries: options?.onLedgerEntries,
   })
 
   return { group, credential }
@@ -447,21 +809,27 @@ export async function createGroup(
 export type RestoreGroupParams = {
   state: ClientState
   credential: MemberCredential
-  rootCapability: string
+  /** Signed ledger tokens the host persisted, replayed to rebuild the roster. */
+  ledgerEntries?: Array<string>
   options?: GroupOptions
 }
 
 export async function restoreGroup(params: RestoreGroupParams): Promise<GroupHandle> {
   const cache = params.options?.cache ?? createInMemoryDIDCache()
-  return new GroupHandle({
+  // Construction reseeds `{creator: 'admin'}` from the anchor in the restored
+  // state — an anchorless state throws here, the same fail-closed guard.
+  const group = new GroupHandle({
     state: params.state,
     credential: params.credential,
     context: await resolveMlsContext(params.options),
-    rootCapability: params.rootCapability,
     cache,
     resolver: params.options?.resolver,
     commitPolicy: params.options?.commitPolicy,
+    resolveLedgerEntries: params.options?.resolveLedgerEntries,
+    onLedgerEntries: params.options?.onLedgerEntries,
   })
+  await group.applyLedgerEntries(params.ledgerEntries ?? [])
+  return group
 }
 
 export type CreateInviteParams = {
@@ -478,27 +846,269 @@ export type CreateInviteResult = {
 /**
  * Create an invite for a new member.
  * Does NOT add them to the group — call commitInvite with their key package to do that.
+ *
+ * Only an admin may invite: a role entry from a non-admin issuer is dropped by every
+ * receiver's fold, so refusing here turns a silent downstream commit rejection into a
+ * local error.
  */
 export async function createInvite(params: CreateInviteParams): Promise<CreateInviteResult> {
   const { group, identity, recipientDID, permission } = params
-  const memberCap = await delegateGroupMembership({
-    identity,
+  if (group.roster.roles.get(normalizeDID(identity.id)) !== 'admin') {
+    throw new Error('createInvite: the inviter must be an admin in the group roster')
+  }
+
+  // The role entry naming the invitee. Its issuer is the inviter (authenticated by
+  // the token signature) and its value is the permission granted.
+  const roleToken = await signLedgerEntry(identity, {
+    type: ROLE_ENTRY_TYPE,
     groupID: group.groupID,
-    recipientDID,
-    permission,
-    parentCapability: group.rootCapability,
+    subject: recipientDID,
+    value: permission,
   })
-  const memberCapStr = stringifyToken(memberCap)
 
   const invite: Invite = {
     groupID: group.groupID,
-    capabilityToken: memberCapStr,
-    capabilityChain: [group.rootCapability, memberCapStr],
-    permission,
     inviterID: identity.id,
+    // The whole log, the new role entry last: a joiner handed only its own entry
+    // would never learn of a role change made before its invite, and would reject
+    // every commit by an admin promoted in the meantime — a permanent fork nothing
+    // in the protocol re-sends. The new entry must fold after the history it depends
+    // on, hence last. Re-granting a role the log already carries appends that entry a
+    // second time, which is a legal re-enactment, not a duplicate to elide. The joiner
+    // still folds from the anchor, so the inviter cannot promote anyone by padding
+    // this list.
+    ledgerEntries: [...group.ledgerTokens, roleToken],
   }
 
   return { invite }
+}
+
+/**
+ * The GroupContext extension list a commit installs when it enacts `entryIDs`: the
+ * group's current list with only the ledger-head extension replaced by the head
+ * extended by those ids, in envelope order. Every other extension — the anchor above
+ * all — is the verbatim object out of the current GroupContext, never a re-encode of
+ * a decoded value, because the receiving policy byte-compares the anchor.
+ */
+function extensionsWithHead(
+  group: GroupHandle,
+  entryIDs: Array<string>,
+): Array<GroupContextExtension> {
+  const current = readLedgerHead(group)
+  if (current == null) {
+    throw new Error('group has no ledger head extension; it cannot enact ledger entries')
+  }
+  const next = buildLedgerHeadExtension(extendHead(current.head, entryIDs))
+  return group.state.groupContext.extensions.map((ext) =>
+    ext.extensionType === LEDGER_HEAD_EXTENSION_TYPE ? next : ext,
+  )
+}
+
+/** Build the CommitPolicyContext both the receive gate and the send-side pending
+ *  filter judge against, so the two always agree. `entryIDs` are the ledger entry
+ *  ids this commit enacts (drives the expected head); `candidateRoster` is the
+ *  post-fold roster receivers install. */
+function buildCommitPolicyContext(
+  handle: GroupHandle,
+  args: {
+    baseRoster: RosterState
+    candidateRoster: RosterState
+    entryIDs: Array<string>
+    externalCommitDID?: string
+  },
+): CommitPolicyContext {
+  const leafToDID = new Map<number, string>()
+  for (const member of handle.listMembers()) leafToDID.set(member.leafIndex, member.id)
+  const headExt = readLedgerHeadExtension(handle)
+  const currentHead =
+    headExt != null && headExt.extensionData instanceof Uint8Array
+      ? decodeLedgerHead(headExt.extensionData)
+      : null
+  const expectedHeadExtensionData =
+    currentHead == null
+      ? new Uint8Array()
+      : encodeLedgerHead(extendHead(currentHead.head, args.entryIDs))
+  return {
+    baseRoster: args.baseRoster,
+    candidateRoster: args.candidateRoster,
+    didOfLeaf: (leafIndex: number) => leafToDID.get(leafIndex),
+    currentExtensions: handle.state.groupContext.extensions,
+    expectedHeadExtensionData,
+    commitEnactsEntries: args.entryIDs.length > 0,
+    ...(args.externalCommitDID !== undefined && { externalCommitDID: args.externalCommitDID }),
+  }
+}
+
+/**
+ * The one place a commit carrying control-ledger entries is built: `commitInvite`,
+ * `removeMember`, and `commitLedgerEntries` all route through it, so the envelope and
+ * the head can never drift apart.
+ *
+ * `enacted` is exactly what this commit enacts — the caller decides, and the caller is
+ * the only one that can: entries are enacted by *position* in the log, so an entry whose
+ * content the log already carries is a legitimate re-enactment (a demotion back to a
+ * previously-held role is precisely that) and must not be filtered out by content.
+ *
+ * The envelope names only what this commit enacts, never the whole history: replaying the
+ * history would re-judge every past entry against the present roster, and a grant issued
+ * by a since-demoted admin would read as coming from a non-admin, freezing every group
+ * that ever rotated its admins.
+ *
+ * When `enacted` is non-empty the commit also carries a group-context-extensions proposal
+ * advancing the ledger head by exactly those ids, in envelope order. An empty list moves
+ * no head and carries no envelope.
+ */
+async function commitWithEntries(
+  group: GroupHandle,
+  extraProposals: Array<DefaultProposal>,
+  enacted: Array<string>,
+  ratchetTreeExtension = false,
+): Promise<Awaited<ReturnType<typeof createCommit>>> {
+  // Same reason createInvite guards the inviter: a non-admin's commit is rejected by
+  // every receiver, so fail here rather than emitting a commit nobody will apply.
+  if (group.roster.roles.get(normalizeDID(group.credential.id)) !== 'admin') {
+    throw new Error('the committer must be an admin in the group roster')
+  }
+
+  // Fold the entries exactly as every receiver will, and refuse to author a commit the
+  // group would reject. Without this the write path fails *open*: the committer advances
+  // its own log and head while every receiver rejects the commit, forking itself off the
+  // group. Being an admin is not enough — an entry's own issuer must still hold authority
+  // at the position it lands in, so a token signed by a since-demoted admin is dead paper
+  // no matter who commits it.
+  const inputs: Array<FoldInput> = []
+  for (const token of enacted) {
+    const verified = await verifyLedgerEntry(token)
+    if (verified == null) {
+      throw new Error('cannot enact a ledger entry whose signature does not verify')
+    }
+    inputs.push({ verified, entryID: ledgerEntryDigest(token) })
+  }
+  const fold = foldEnvelope(group.roster, inputs, group.groupID)
+  if (!fold.ok) {
+    throw new Error(`cannot enact ledger entry ${fold.entryID}: ${fold.reason}`)
+  }
+
+  const entryIDs = enacted.map(ledgerEntryDigest)
+
+  // Filter the pending-proposal set the committer would otherwise absorb: ts-mls folds every
+  // unappliedProposal into the commit, so a non-admin's pending proposal would ride this commit
+  // and every peer would reject the whole thing — a single member could stall the group. Judge
+  // each pending proposal against the same defaultCommitPolicy and the same context receivers
+  // build for this commit, dropping any the group would reject.
+  const filterContext = buildCommitPolicyContext(group, {
+    baseRoster: group.roster,
+    candidateRoster: fold.roster,
+    entryIDs,
+  })
+  const keptPending: typeof group.state.unappliedProposals = {}
+  for (const [ref, pws] of Object.entries(group.state.unappliedProposals)) {
+    if (defaultCommitPolicy({ kind: 'proposal', proposal: pws }, filterContext) !== 'reject') {
+      keptPending[ref] = pws
+    }
+  }
+  const commitState = { ...group.state, unappliedProposals: keptPending }
+
+  const proposals = [...extraProposals]
+  if (entryIDs.length > 0) {
+    proposals.push({
+      proposalType: defaultProposalTypes.group_context_extensions,
+      groupContextExtensions: { extensions: extensionsWithHead(group, entryIDs) },
+    })
+  }
+
+  return await createCommit({
+    context: group.context,
+    state: commitState,
+    extraProposals: proposals,
+    ...(ratchetTreeExtension && { ratchetTreeExtension: true }),
+    ...(entryIDs.length > 0 && {
+      authenticatedData: encodeControlEnvelope({ v: 1, entries: entryIDs }),
+    }),
+  })
+}
+
+/**
+ * The entries an invite adds beyond the committer's own log: everything past the log's
+ * length. Positional, never by content — a re-granted role is the same token the log
+ * already carries at an earlier position, and narrowing by content would drop the very
+ * entry the invite exists to enact.
+ *
+ * Positional narrowing is only sound when the invite's list *begins with* the
+ * committer's log, so that is asserted rather than assumed: an invite built against a
+ * different history would mis-slice, and the commit would move the head by ids that do
+ * not follow the group's own — corrupting the chain for every receiver.
+ */
+function entriesAddedByInvite(group: GroupHandle, invite: Invite): Array<string> {
+  const held = group.ledgerTokens
+  if (
+    invite.ledgerEntries.length < held.length ||
+    held.some((token, index) => invite.ledgerEntries[index] !== token)
+  ) {
+    throw new Error("commitInvite: the invite's ledger does not extend this group's own")
+  }
+  return invite.ledgerEntries.slice(held.length)
+}
+
+/** Build the handle a commit hands back: the post-commit state, everything else inherited. */
+function deriveGroup(group: GroupHandle, state: ClientState): GroupHandle {
+  return new GroupHandle({
+    state,
+    credential: group.credential,
+    context: group.context,
+    ledger: group.ledger,
+    cache: group.cache,
+    resolver: group.resolver,
+    commitPolicy: group.commitPolicy,
+    resolveLedgerEntries: group.resolveLedgerEntries,
+    onLedgerEntries: group.onLedgerEntries,
+  })
+}
+
+export type CommitLedgerEntriesResult = {
+  /** Framed MLSMessage bytes. Broadcast to existing members via the DS. */
+  commitMessage: Uint8Array
+  newGroup: GroupHandle
+  /** Post-commit epoch the group is now at (== newGroup.epoch). */
+  epoch: bigint
+}
+
+/**
+ * The admin write path for the control ledger: a commit that carries no membership
+ * proposal, only the entries it enacts and the head move that covers them. This is how
+ * an admin promotes, demotes, or writes any other entry type — an entry that never
+ * rides a commit is invisible to the head, and a joiner recomputing the head would
+ * read the group's history as doctored.
+ *
+ * Enacts exactly `tokens`, at the end of the log — including one whose content the log
+ * already carries, which is how an admin is demoted back to a role they previously held.
+ * Rejects an empty `tokens` list: a commit that enacts nothing has no reason to be
+ * authored here.
+ *
+ * Reads `group`'s state and returns a NEW derived handle (`newGroup`); it never
+ * advances `group` itself. The caller must adopt `newGroup` — never reuse `group` —
+ * before issuing the next commit: two commits issued from the same source handle
+ * both frame at that handle's epoch and diverge. The per-handle mutex only
+ * serializes concurrent calls against one handle; it does not make it safe to
+ * produce a second commit from a handle a prior commit has already superseded.
+ */
+export async function commitLedgerEntries(
+  group: GroupHandle,
+  tokens: Array<string>,
+): Promise<CommitLedgerEntriesResult> {
+  return mutexFor(group).run(async () => {
+    if (tokens.length === 0) {
+      throw new Error('commitLedgerEntries: no ledger entries to commit')
+    }
+    const result = await commitWithEntries(group, [], tokens)
+    const newGroup = deriveGroup(group, result.newState)
+    await newGroup.applyLedgerEntries(tokens)
+    return {
+      commitMessage: encode(mlsMessageEncoder, result.commit),
+      newGroup,
+      epoch: newGroup.epoch,
+    }
+  })
 }
 
 export type CommitInviteResult = {
@@ -517,42 +1127,56 @@ export type CommitInviteResult = {
 /**
  * Commit an invite by adding the invitee's key package to the group.
  * Produces an MLS Commit + Welcome.
+ *
+ * The invite's ledger entries are enacted by this commit: their content ids ride in
+ * the commit's control envelope and the commit advances the ledger head by exactly
+ * those ids, so every receiver folds the invitee's role entry into its roster as it
+ * applies the Add. The envelope carries ids, not bodies — a receiver that holds
+ * neither the entry nor a `resolveLedgerEntries` resolver throws
+ * MissingLedgerEntriesError on this commit.
+ *
+ * The invite itself carries the group's whole history — a joiner has nothing to fold
+ * it onto — but only the entries it adds beyond that history ride the commit; see
+ * {@link entriesAddedByInvite} and {@link commitWithEntries}.
+ *
+ * Reads `group`'s state and returns a NEW derived handle (`newGroup`); it never
+ * advances `group` itself. The caller must adopt `newGroup` — never reuse `group` —
+ * before issuing the next commit: two commits issued from the same source handle
+ * both frame at that handle's epoch and diverge. The per-handle mutex only
+ * serializes concurrent calls against one handle; it does not make it safe to
+ * produce a second commit from a handle a prior commit has already superseded.
  */
 export async function commitInvite(
   group: GroupHandle,
   keyPackage: KeyPackage,
+  invite: Invite,
 ): Promise<CommitInviteResult> {
-  const addProposal: DefaultProposal = {
-    proposalType: defaultProposalTypes.add,
-    add: { keyPackage },
-  }
+  return mutexFor(group).run(async () => {
+    if (invite.groupID !== group.groupID) {
+      throw new Error(`commitInvite: invite is for group ${invite.groupID}, not ${group.groupID}`)
+    }
 
-  const result = await createCommit({
-    context: group.context,
-    state: group.state,
-    extraProposals: [addProposal],
-    ratchetTreeExtension: true,
+    const enacted = entriesAddedByInvite(group, invite)
+    const addProposal: DefaultProposal = {
+      proposalType: defaultProposalTypes.add,
+      add: { keyPackage },
+    }
+    const result = await commitWithEntries(group, [addProposal], enacted, true)
+
+    const newGroup = deriveGroup(group, result.newState)
+
+    if (result.welcome == null) {
+      throw new Error('commitInvite: expected a Welcome message for the add proposal')
+    }
+    // The entries this commit enacts are now part of the group's ledger.
+    await newGroup.applyLedgerEntries(enacted)
+    return {
+      commitMessage: encode(mlsMessageEncoder, result.commit),
+      welcomeMessage: encode(mlsMessageEncoder, result.welcome),
+      newGroup,
+      epoch: newGroup.epoch,
+    }
   })
-
-  const newGroup = new GroupHandle({
-    state: result.newState,
-    credential: group.credential,
-    context: group.context,
-    rootCapability: group.rootCapability,
-    cache: group.cache,
-    resolver: group.resolver,
-    commitPolicy: group.commitPolicy,
-  })
-
-  if (result.welcome == null) {
-    throw new Error('commitInvite: expected a Welcome message for the add proposal')
-  }
-  return {
-    commitMessage: encode(mlsMessageEncoder, result.commit),
-    welcomeMessage: encode(mlsMessageEncoder, result.welcome),
-    newGroup,
-    epoch: newGroup.epoch,
-  }
 }
 
 export type ProcessWelcomeResult = {
@@ -580,17 +1204,25 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
   const cache = options?.cache ?? createInMemoryDIDCache()
   const context = await resolveMlsContext(options)
 
-  // Validate the invite's capability chain before trusting it.
-  // validateGroupCapability internally calls verifyToken with cache/resolver and returns the
-  // verified token — reuse it instead of calling verifyToken a second time without cache/resolver.
-  const { validateGroupCapability } = await import('./capability.js')
-  const capToken = await validateGroupCapability({
-    tokenData: invite.capabilityToken,
-    groupID: invite.groupID,
-    delegationChain:
-      invite.capabilityChain.length > 1 ? invite.capabilityChain.slice(0, -1) : undefined,
-    options: { cache, resolver: options?.resolver },
-  })
+  // A Welcome is only this member's when the invite carries a role entry naming
+  // them: an invite minted for someone else is not an invitation to join.
+  const selfDID = normalizeDID(identity.id)
+  let namesSelf = false
+  for (const token of invite.ledgerEntries) {
+    const verified = await verifyLedgerEntry(token)
+    if (
+      verified != null &&
+      verified.entry.type === ROLE_ENTRY_TYPE &&
+      verified.entry.groupID === invite.groupID &&
+      normalizeDID(verified.entry.subject) === selfDID
+    ) {
+      namesSelf = true
+      break
+    }
+  }
+  if (!namesSelf) {
+    throw new Error('processWelcome: the invite carries no role entry naming this identity')
+  }
 
   let resolvedWelcome: unknown = welcome
   if (welcome instanceof Uint8Array) {
@@ -615,9 +1247,6 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
 
   const credential: MemberCredential = {
     id: identity.id,
-    capabilityChain: invite.capabilityChain,
-    capability: capToken as MemberCredential['capability'],
-    permission: invite.permission,
     groupID: invite.groupID,
   }
 
@@ -625,15 +1254,30 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
     state,
     credential,
     context,
-    rootCapability:
-      invite.capabilityChain[0] ??
-      (() => {
-        throw new Error('Invalid invite: capability chain must not be empty')
-      })(),
     cache,
     resolver: options?.resolver,
     commitPolicy: options?.commitPolicy,
+    resolveLedgerEntries: options?.resolveLedgerEntries,
+    onLedgerEntries: options?.onLedgerEntries,
   })
+  // Every ledger entry reaches the group inside a commit that extends the head by its
+  // id, so the head authenticated in the joined GroupContext is the fold from genesis
+  // over the group's entries, in order. Recompute it over the entries the inviter
+  // supplied: an omitted, reordered, or truncated list cannot reproduce it. Checked
+  // before folding, so an incomplete ledger never reaches the roster.
+  const authenticated = readLedgerHead(group)
+  if (authenticated == null) {
+    throw new Error('processWelcome: the group has no ledger head extension')
+  }
+  assertHeadMatches(
+    authenticated.head,
+    computeHead(invite.groupID, invite.ledgerEntries.map(ledgerEntryDigest)),
+  )
+
+  // Fold the invite's entries: the roster is seeded from the anchor, and the fold
+  // grants authority only to an admin-so-far, so a member-signed entry cannot
+  // promote anyone even though applyLedgerEntries itself is the permissive primitive.
+  await group.applyLedgerEntries(invite.ledgerEntries)
 
   return { group, credential }
 }
@@ -651,37 +1295,42 @@ export type RemoveMemberResult = {
 
 /**
  * Remove a member from the group. Advances the epoch and rotates keys.
+ *
+ * Removal must demote: a receiver rejects a Remove whose target is still `admin` in
+ * the roster the commit's entries fold to. So removing an admin means riding the
+ * demotion entry on the same commit — pass it as `ledgerEntries`. The entry is signed
+ * by the caller, who holds the identity; this only carries it.
+ *
+ * Reads `group`'s state and returns a NEW derived handle (`newGroup`); it never
+ * advances `group` itself. The caller must adopt `newGroup` — never reuse `group` —
+ * before issuing the next commit: two commits issued from the same source handle
+ * both frame at that handle's epoch and diverge. The per-handle mutex only
+ * serializes concurrent calls against one handle; it does not make it safe to
+ * produce a second commit from a handle a prior commit has already superseded.
  */
 export async function removeMember(
   group: GroupHandle,
   leafIndex: number,
+  ledgerEntries?: Array<string>,
 ): Promise<RemoveMemberResult> {
-  const removeProposal: DefaultProposal = {
-    proposalType: defaultProposalTypes.remove,
-    remove: { removed: leafIndex },
-  }
+  return mutexFor(group).run(async () => {
+    const removeProposal: DefaultProposal = {
+      proposalType: defaultProposalTypes.remove,
+      remove: { removed: leafIndex },
+    }
 
-  const result = await createCommit({
-    context: group.context,
-    state: group.state,
-    extraProposals: [removeProposal],
+    const enacted = ledgerEntries ?? []
+    const result = await commitWithEntries(group, [removeProposal], enacted)
+
+    const newGroup = deriveGroup(group, result.newState)
+    await newGroup.applyLedgerEntries(enacted)
+
+    return {
+      commitMessage: encode(mlsMessageEncoder, result.commit),
+      newGroup,
+      epoch: newGroup.epoch,
+    }
   })
-
-  const newGroup = new GroupHandle({
-    state: result.newState,
-    credential: group.credential,
-    context: group.context,
-    rootCapability: group.rootCapability,
-    cache: group.cache,
-    resolver: group.resolver,
-    commitPolicy: group.commitPolicy,
-  })
-
-  return {
-    commitMessage: encode(mlsMessageEncoder, result.commit),
-    newGroup,
-    epoch: newGroup.epoch,
-  }
 }
 
 /**
@@ -762,7 +1411,9 @@ export async function createKeyPackageBundle(
     credential: makeMLSCredential(identity),
     signatureKeyPair: { signKey: identity.privateKey, publicKey: identity.publicKey },
     cipherSuite,
-    capabilities: options?.capabilities ?? defaultCapabilities(),
+    // An invitee leaf must advertise the control extension types or ts-mls
+    // refuses to add it to an anchored group. An explicit override still wins.
+    capabilities: options?.capabilities ?? controlCapabilities(),
   })
   return { ...result, ownerDID: identity.id }
 }
@@ -829,16 +1480,12 @@ export async function joinGroupExternal(
     authenticatedData,
   } = params
 
-  const rootCapability = credential.capabilityChain[0]
-  if (rootCapability == null) {
-    throw new Error('Invalid credential: capability chain must not be empty')
-  }
-
-  // Guard: resync requires the rejoining identity to match the leaf being
-  // replaced. If `identity.id` does not match `credential.id`, ts-mls's
-  // findIndex returns -1 and the downstream `removeLeafNodeMutable(tree, -1)`
-  // call enters an unbounded loop (ts-mls bug; the no-match branch is not
-  // guarded). Reject early with a clear error.
+  // Guard: resync replaces the caller's own prior leaf, so the rejoining identity
+  // must match the credential it presents. On a mismatch ts-mls rejects the
+  // external commit downstream (it finds no prior leaf matching the KeyPackage and
+  // throws); reject early here with a clearer error. This is a friendly precheck,
+  // not the security boundary — eviction completeness rests on ts-mls requiring a
+  // matching prior leaf in the resynced tree, which a removed member no longer has.
   if (normalizeDID(identity.id) !== normalizeDID(credential.id)) {
     throw new Error(
       `joinGroupExternal: identity.id (${identity.id}) must match credential.id (${credential.id}) for resync`,
@@ -892,10 +1539,11 @@ export async function joinGroupExternal(
     state: newState,
     credential,
     context,
-    rootCapability,
     cache,
     resolver: options?.resolver,
     commitPolicy: options?.commitPolicy,
+    resolveLedgerEntries: options?.resolveLedgerEntries,
+    onLedgerEntries: options?.onLedgerEntries,
   })
 
   return { commitMessage, group }

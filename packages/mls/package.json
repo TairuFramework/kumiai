@@ -1,6 +1,6 @@
 {
   "name": "@kumiai/mls",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "MIT",
   "description": "E2EE group identity and membership for Enkaku using MLS",
   "keywords": [
@@ -35,7 +35,6 @@
     "prepublishOnly": "pnpm run build"
   },
   "dependencies": {
-    "@kokuin/capability": "catalog:",
     "@sozai/runtime": "catalog:",
     "@kokuin/token": "catalog:",
     "@noble/ciphers": "catalog:",

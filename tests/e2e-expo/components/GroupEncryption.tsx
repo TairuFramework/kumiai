@@ -33,7 +33,7 @@ async function createGroupMessage(): Promise<string> {
   const bobKP = await createKeyPackageBundle(bob, options)
 
   // Alice commits the invite
-  const { welcomeMessage, newGroup } = await commitInvite(aliceGroup, bobKP.publicPackage)
+  const { welcomeMessage, newGroup } = await commitInvite(aliceGroup, bobKP.publicPackage, invite)
 
   // Bob joins via Welcome
   const { group: bobGroup } = await processWelcome({
@@ -47,8 +47,11 @@ async function createGroupMessage(): Promise<string> {
 
   // Alice encrypts, Bob decrypts
   const msg = new TextEncoder().encode('hello from expo')
-  const { message } = await newGroup.encrypt(msg)
-  const decrypted = await bobGroup.decrypt(message)
+  const message = await newGroup.encrypt(msg)
+  const decrypted = await bobGroup.processMessage(message)
+  if (decrypted == null) {
+    throw new Error('expected an application message, got a handshake')
+  }
   return new TextDecoder().decode(decrypted)
 }
 

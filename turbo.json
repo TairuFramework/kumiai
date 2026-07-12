@@ -1,12 +1,19 @@
 {
   "$schema": "./node_modules/turbo/schema.json",
   "tasks": {
-    "clean": {},
     "build:js": {
-      "dependsOn": ["^clean"],
-      "outputs": ["lib/**"]
+      "dependsOn": ["^build:js"],
+      "outputs": ["lib/**/*.js"]
     },
-    "test:types": {},
-    "test:unit": {}
+    "build:types": {
+      "dependsOn": ["^build:types"],
+      "outputs": ["lib/**/*.d.ts"]
+    },
+    "test:types": {
+      "dependsOn": ["^build:types"]
+    },
+    "test:unit": {
+      "dependsOn": ["^build:js", "^build:types"]
+    }
   }
 }

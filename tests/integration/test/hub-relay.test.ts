@@ -1,15 +1,10 @@
 import { Client } from '@enkaku/client'
 import type { AnyClientMessageOf, AnyServerMessageOf } from '@enkaku/protocol'
 import { DirectTransports } from '@enkaku/transport'
-import { type OwnIdentity, randomIdentity, stringifyToken } from '@kokuin/token'
+import { type OwnIdentity, randomIdentity } from '@kokuin/token'
 import { HubClient } from '@kumiai/hub-client'
 import type { HubProtocol, HubStore } from '@kumiai/hub-protocol'
 import { type AuthorizeHook, createHub, createMemoryStore } from '@kumiai/hub-server'
-import {
-  createGroupCapability,
-  delegateGroupMembership,
-  validateGroupCapability,
-} from '@kumiai/mls'
 import { describe, expect, test } from 'vitest'
 
 type HubTransports = DirectTransports<
@@ -64,26 +59,6 @@ function createTestHub(options: TestHubOptions = {}) {
   }
 
   return { hub, hubID: hubIdentity.id, store, connect, dispose }
-}
-
-// Issue a membership credential rooted at the group creator. Self-membership
-// uses the root admin capability; everyone else gets a delegated one.
-async function membershipCredential(
-  owner: OwnIdentity,
-  memberDID: string,
-  groupID: string,
-): Promise<string> {
-  if (owner.id === memberDID) {
-    return stringifyToken(await createGroupCapability(owner, groupID))
-  }
-  return stringifyToken(
-    await delegateGroupMembership({
-      identity: owner,
-      groupID,
-      recipientDID: memberDID,
-      permission: 'member',
-    }),
-  )
 }
 
 describe('Hub relay: multi-device delivery', () => {
@@ -222,23 +197,15 @@ describe('Hub store: pagination and acks', () => {
   })
 })
 
-describe('Hub groups: MLS-capability-gated pub/sub', () => {
-  // A membership service validates each member's MLS group capability and feeds
-  // the resulting authorized-DID set to the hub's authorize hook. This wires the
-  // capability layer (@kumiai/mls) to the relay's pub/sub authorization.
+describe('Hub groups: authorized-DID pub/sub', () => {
+  // The hub gates a group topic on an authorized-DID set fed to its authorize hook.
+  // The set is the group's known members; this test drives the hook and fan-out.
   function groupTopic(groupID: string): string {
     return `group/${groupID}`
   }
 
-  async function setupGroupHub(
-    groupID: string,
-    credentials: Array<{ did: string; token: string }>,
-  ) {
-    const members = new Set<string>()
-    for (const { did, token } of credentials) {
-      await validateGroupCapability({ tokenData: token, groupID })
-      members.add(did)
-    }
+  function setupGroupHub(groupID: string, memberDIDs: Array<string>) {
+    const members = new Set(memberDIDs)
     const authorize: AuthorizeHook = (did, _action, topicID) => {
       if (topicID === groupTopic(groupID)) return members.has(did)
       return true
@@ -250,13 +217,8 @@ describe('Hub groups: MLS-capability-gated pub/sub', () => {
     const groupID = 'chat'
     const alice = randomIdentity()
     const bob = randomIdentity()
-    const aliceCred = await membershipCredential(alice, alice.id, groupID)
-    const bobCred = await membershipCredential(alice, bob.id, groupID)
 
-    const testHub = await setupGroupHub(groupID, [
-      { did: alice.id, token: aliceCred },
-      { did: bob.id, token: bobCred },
-    ])
+    const testHub = setupGroupHub(groupID, [alice.id, bob.id])
     const { client: aliceClient } = testHub.connect(alice)
     const { client: bobClient } = testHub.connect(bob)
 
@@ -282,9 +244,8 @@ describe('Hub groups: MLS-capability-gated pub/sub', () => {
   test('non-member is rejected on subscribe and publish', async () => {
     const groupID = 'chat'
     const alice = randomIdentity()
-    const aliceCred = await membershipCredential(alice, alice.id, groupID)
 
-    const testHub = await setupGroupHub(groupID, [{ did: alice.id, token: aliceCred }])
+    const testHub = setupGroupHub(groupID, [alice.id])
     const { client: carol } = testHub.connect()
 
     await expect(carol.subscribe(groupTopic(groupID))).rejects.toThrow('Not authorized')
