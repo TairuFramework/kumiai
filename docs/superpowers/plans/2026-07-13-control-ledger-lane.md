@@ -63,12 +63,19 @@ row, or mints sequenceIDs in-process.
 - **Assumption:** retention can be moved off delivery without breaking the mailbox behaviour the
   rest of the system still depends on (rendezvous and app lanes keep mailbox semantics — G9).
 - **Done when:** publish stores a log entry with zero subscribers; `ack` deletes a *delivery* and
-  never a log entry; trim (depth + age) is the only deleter and moves `oldest` without touching
-  `head`. Suite's log tests pass. The existing `hub.test.ts` / `memoryStore.test.ts` still pass —
-  the mailbox is not regressed.
+  never a log entry; `trim({ topicID, before })` is the only deleter and moves `oldest` without
+  touching `head`. Suite's log tests pass. The existing `hub.test.ts` still passes — the mailbox
+  is not regressed.
+- **Three existing tests encode the old contract and must be rewritten, not preserved** (found
+  in question 1.1): `memoryStore.test.ts:11` (zero-subscriber publish drops), `:83` (refcount GC
+  on last ack), `:62` (last unsubscribe drops the whole topic log). Each *asserts* a behaviour
+  the spec now forbids. Rewriting a passing test is the correct move here and it will feel wrong;
+  do it deliberately, and say in the commit which contract each one used to encode.
 - **⚠️ Wrong-but-passing:** keeping `deleteMessage`'s refcount GC "as an optimization for
   messages nobody wants". That is precisely today's bug: the last ack destroys the log entry, and
-  every online-peer test still passes.
+  every online-peer test still passes. Same shape for `unsubscribe`: dropping the topic index
+  when the last subscriber leaves is a deletion `trim` never authorized, and no online-peer test
+  notices.
 - **Spec excerpt:** "Messages are retained per topic, independently of delivery… Delivery rows
   govern push only… Trim governs the log, by depth and age, and is the only thing that removes a
   log entry."
@@ -337,3 +344,55 @@ findings.
 ---
 
 ## Decision Log
+
+### 2026-07-13 — Question 1.1: Does a conformance suite written from the spec actually fail today's store?
+
+**Findings:** Confirmed, and by a wider margin than the plan predicted — **9 of 10 clauses fail**
+against the unmodified `memoryStore`, not 4. The plan's done-when list undercounted: today's store
+also ignores `expectedHead` entirely, so both CAS clauses and the concurrent-CAS clause fail on
+top of the four named. The one pass is legitimate: `formatSequenceID` already zero-pads to 12, so
+the lexicographic-ordering clause holds. The load-bearing dedup-outlives-trim clause fails on its
+own assertion (`expected '000000000002' to be '000000000001'` — there is no dedup record at all).
+Every other test in the repo stays green; the type additions cascade nowhere (27/27 `test:types`).
+
+Three of the four originally-named clauses fail on `Error: fetchTopic is not implemented` rather
+than on their own assertion — **masked, not absent.** This is structural: every clause about the
+log must *read* the log, and the only contract read path is `fetchTopic`, which today's store does
+not have. Independent evidence over the store's existing API confirms each fails for the reason
+the spec predicts: a zero-subscriber publish mints sequenceID `000000000001` for a frame that is
+then unrecoverable by any read path (exactly the incoherent head the spec describes), the last ack
+destroys the frame, and `expectedHead`/`publishID` are silently ignored.
+
+**Spec impact: revision 16.** Three changes, all from things the probe found that the design had
+not settled:
+
+1. **`NotSubscribedError` is named.** The spec named only `HeadMismatchError`, so the
+   non-subscriber clause could only be written as `rejects.toThrow()` — which any throw satisfies,
+   *including a host's not-implemented stub*. A store with no read path at all would have passed
+   that clause. Rule now in the spec: every error the contract requires a store to raise is a named
+   type.
+2. **`trim({ topicID, before })` replaces "trim by depth and age".** There was no trim surface on
+   `HubStore` at all — only `purge({ olderThan })` — so "trim moves `oldest` and never touches
+   `head`" was unassertable by any host. One primitive; depth-versus-age becomes host policy on
+   top of it; the invariant is what the contract fixes.
+3. **The default window drops from 90 days to 30, and becomes a first-class config knob.** The
+   spec now separates *head* from *history* explicitly: the head and the dedup record are permanent
+   and tiny, and they are the entire anti-fork mechanism — a hub whose log is trimmed to nothing
+   still cannot fork a group. Only catch-up degrades. Frames have exactly one reader (the peer that
+   fell behind), and MLS gives it two ways forward and no third: pull the log (needs only the hub)
+   or heal (needs another member *awake*). So the window buys one thing — how long a member may be
+   offline and still converge against the hub alone — and that, not disk, is the dial.
+
+**Learned:** The masking is a property of the suite worth keeping in mind for the rest of Phase 1 —
+against a *partially migrated* host store the suite fails loudly and precisely, but against a store
+with no read path the first missing method swallows the assertion behind it. A host cannot conclude
+"only `fetchTopic` is missing" from a run like today's.
+
+Also: `unsubscribe` is a third illegal deleter nobody had noticed. `memoryStore` drops a topic's
+whole message index when its last subscriber leaves (`memoryStore.ts:242-250`) — a deletion `trim`
+never authorized, and no online-peer test notices. Folded into question 1.2, along with the three
+existing tests that assert the old contract and must be rewritten rather than preserved.
+
+The suite ships as a `@kumiai/hub-protocol/conformance` subpath so `vitest` stays out of the main
+entry (optional peer dep). It is therefore vitest-shaped: a host on another runner cannot use it.
+Accepted — no host in the stack uses anything else.

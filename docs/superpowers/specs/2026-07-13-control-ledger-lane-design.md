@@ -1,7 +1,9 @@
 # Design: the control-ledger lane
 
-**Status:** design, revision 4 (2026-07-13). Reviewed three times by kubun in
-`2026-07-13-control-ledger-lane-review.md`; G1–G12 are folded in below.
+**Status:** design, revision 16 (2026-07-13). Reviewed fourteen times by kubun in
+`2026-07-13-control-ledger-lane-review.md`; G1–G27 are folded in below. Revision 16 folds in
+the first implementation probe (question 1.1): `NotSubscribedError`, a `trim` primitive, and a
+30-day default window.
 **Supersedes:** the requirements in `../../agents/plans/next/2026-07-13-host-ledger-lane.md`
 (R1/R2/R3), which stays as the origin record.
 **Scope:** `@kumiai/mls`, `@kumiai/rpc`, `@kumiai/hub-protocol`, `@kumiai/hub-server`,
@@ -89,8 +91,8 @@ no peer could ever pull them. So:
   the topic's log whether or not anyone is subscribed. This is the system of record.
 - **Delivery rows govern push only.** They remain an optimization — a wakeup signal — and
   `ack` deletes a *delivery*, never a log entry.
-- **Trim governs the log**, by depth and age, and is the only thing that removes a log entry.
-  Trim moves `oldest` and never touches `head`.
+- **Trim governs the log** and is the only thing that removes a log entry. Trim moves `oldest`
+  and never touches `head`. Nothing else deletes: not `ack`, not `unsubscribe`.
 - **The `publishID` → `sequenceID` dedup record is not a log entry, and trim must not remove
   it (G24).** It has its own retention, strictly longer than the commit-log trim window;
   **retaining it indefinitely is the recommended implementation** — it is a hash and a
@@ -100,24 +102,63 @@ no peer could ever pull them. So:
   become an ordinary new publish. See "Restart replay" for why that is fatal rather than
   merely untidy.
 
-**The trim window on `commitTopic` is a group-liveness parameter, not a storage parameter
-(G12).** It decides one thing: *how long a member may be offline and still resume by
-pulling, rather than by healing.* A peer offline longer than the window comes back trimmed
-out, and every such peer runs `recover()` — a rendezvous, an external commit, and a CAS
-contention (G10). Tuned like a message-queue backlog (hours, or a few thousand frames), the
-rare fallback becomes the common path for the most common client: kubun's peers are phones,
-and offline-for-a-week is ordinary. So:
+#### The head is not history; the log is (G12)
 
-- **Default the `commitTopic` window to 90 days**, and treat any depth bound as a runaway
-  guard set far above expected volume, never as the primary policy. Hosts tune it from
-  member offline behaviour, not from disk pressure.
-- **Retention is now unconditional** (that is the point of G7), so the log grows with commit
-  volume — and D1 raises commit volume by an order of magnitude by design. It is still
-  small: a commit frame is a few KB, so a group committing 100 times a day for 90 days
-  retains on the order of tens of MB. Storage is cheap; recovery storms are not.
-- A host that shortens this window is choosing to convert the late-joiner fix back into a
-  recovery path. The design says so out loud because the failure is silent and shows up as
-  load, not as an error.
+The two things the store now retains have completely different lifetimes, and conflating them
+is what makes "the hub keeps a log" sound more expensive than it is.
+
+- **The head and the dedup record are permanent, and tiny.** One sequenceID per topic; one
+  `publishID → sequenceID` pair per commit, a few dozen bytes. Together they are the *entire*
+  anti-fork mechanism, and they do not depend on the frames still being there. **A hub whose
+  commit log has been trimmed to nothing still cannot fork a group.** Ordering survives an
+  empty log; only catch-up degrades.
+- **Frames are history**, and exactly one reader wants them: the peer that fell behind and
+  comes back at epoch N while the group is at epoch M.
+
+That peer has two ways forward, and MLS offers no third:
+
+- **Pull** frames N..M from the log and apply them in order. Needs only the hub.
+- **Heal** — rendezvous with a live member, obtain a sealed GroupInfo, external-commit in
+  (D2, G10). Needs **another member awake at that moment**.
+
+There is no cheaper catch-up. MLS epochs cannot be skipped: a peer either replays every
+commit or rejoins the group. And the hub cannot hold a snapshot to shortcut the replay — a
+GroupInfo carries the ratchet tree and `external_pub`, so parking one at the hub is precisely
+the leak D2 exists to close.
+
+So the trim window buys exactly one thing: **how long a member may be offline and still
+converge against the hub alone, without needing another member online.** That is the clause to
+weigh, not disk. A group of phones where everyone is asleep and one wakes up converges from
+the log; with no log it cannot converge at all until someone else opens the app.
+
+- **Default the `commitTopic` window to 30 days, and make it a first-class configuration
+  knob** — per host, and settable per topic class. It is a liveness/storage dial, and the
+  design's job is to say what each end costs, not to pick for the host: a shorter window is
+  cheaper and makes heal the ordinary reconnect path (so reconnects start depending on another
+  member being awake); a longer window lets a long-absent peer converge against the hub alone.
+- **Retention is unconditional** (that is the point of G7), so the log grows with commit
+  volume — and D1 raises commit volume by an order of magnitude by design. A commit frame is a
+  few KB, so a group committing 100 times a day for 30 days retains on the order of 10 MB.
+  That is the high-water group; most commit orders of magnitude less. It is a tail cost, not a
+  mean one.
+- **Only `commitTopic` is a log.** `rendezvousTopic` and every app/broadcast topic keep
+  mailbox semantics — deliver, ack, delete (G9). The hub stays a relay for the bulk of its
+  traffic; the log is one topic per group.
+
+**Trim is one primitive, and policy sits on top.** Depth-versus-age is a host decision, and
+putting both in the contract makes neither testable. The contract exposes a single bound:
+
+```ts
+export type TrimParams = {
+  topicID: string
+  /** Remove log entries with sequenceID strictly below this bound. */
+  before: string
+}
+```
+
+A host implements a 30-day window, a depth cap, or both, by choosing `before`. What the
+contract fixes is the invariant, and the conformance suite asserts it for every host: **trim
+moves `oldest`, never touches `head`, and never removes a dedup record.**
 
 ```ts
 export type PublishParams = {
@@ -141,7 +182,7 @@ export type PublishParams = {
 }
 
 export type FetchTopicParams = {
-  /** Authorization: the caller must be a current subscriber of topicID. */
+  /** Authorization: the caller must be a current subscriber of topicID, or NotSubscribedError. */
   subscriberDID: string
   topicID: string
   /** Exclusive cursor: messages after this sequenceID. Absent: from the oldest retained. */
@@ -161,8 +202,16 @@ export type HubStore = {
   // ...existing members unchanged
   publish(params: PublishParams): Promise<string>
   fetchTopic(params: FetchTopicParams): Promise<FetchTopicResult>
+  trim(params: TrimParams): Promise<void>
 }
 ```
+
+**Two named errors, because an unnamed one is a false pass.** `HeadMismatchError` for a lost
+CAS, and `NotSubscribedError` for a `fetchTopic` from a non-subscriber. Both live in
+`hub-protocol` and both are part of the contract: a conformance clause of the form
+`rejects.toThrow()` is satisfied by *any* throw — including a host's not-yet-implemented stub —
+so the suite must be able to name what it expects. Every error the contract requires a store to
+raise is a named type.
 
 **`sequenceID` gains an ordering contract.** The design compares sequenceIDs in five places
 — `expectedHead` equality, `head` against the cursor, `oldest` against the cursor, `after`
@@ -422,7 +471,7 @@ Run it through the sole-member group the journal exists for, and nothing does:
 > The creator `commitInvite`s. It journals, publishes, the hub **accepts**, and the process
 > dies before `onAccepted` — so the invitee never got a Welcome and never became a member.
 > There is exactly one member in the world. The user does not reopen the app for longer than
-> the trim window — 90 days, which this design set deliberately generous. Trim removes the
+> the trim window — 30 days by default. Trim removes the
 > frame and, with it, the `publishID` record. The peer restarts and replays: the key is
 > unknown, so the republish is treated as new — an ordinary CAS at the journalled
 > `expectedHead` (`null`, the empty-topic sentinel, since it was the group's first commit).
@@ -917,9 +966,9 @@ Named so the work is sized honestly. These are the host's to absorb.
   largest item in the design, and it is not a column or two. Today retention is a function
   of delivery: a publish with no subscribers stores nothing, and the last ack deletes the
   row. The store must instead **retain messages per topic independently of delivery**, with
-  trim (by depth and age) as the only thing that removes an entry; delivery rows become a
-  push-wakeup optimization, and `ack` stops deleting messages. On top of that: a per-topic
-  head, a unique `publishID`, a topic-log read path, sequenceIDs that are lexicographically
+  `trim` as the only thing that removes an entry; delivery rows become a push-wakeup
+  optimization, and `ack` stops deleting messages — as does `unsubscribe`. On top of that: a
+  per-topic head, a unique `publishID`, a topic-log read path, sequenceIDs that are lexicographically
   ordered and **minted by the database inside the CAS transaction** rather than by an
   in-process counter (kubun's current counter collides across two hub processes on one
   database — survivable for a mailbox, fatal for a head). A host that reads this as "add a
@@ -1016,7 +1065,11 @@ heal cannot reach for want of a responder.)*
     the frame.** The single test that proves retention is not a function of delivery. Every
     store passes today's tests and fails this one.
   - **Ack does not delete:** subscriber acks a frame, then pulls it again via `fetchTopic`.
-  - **Trim is the only deleter:** `head` survives a trim while `oldest` moves.
+  - **Trim is the only deleter:** `head` survives a `trim` while `oldest` moves. Asserted
+    through the `trim` primitive, so it holds for every host whatever depth-or-age policy
+    it layers on top. Nothing else deletes a log entry — not `ack`, and not `unsubscribe`
+    (today's memory store drops a topic's whole index when its last subscriber leaves; under
+    this contract that is a deletion trim did not authorize).
   - **Ordering:** sequenceIDs sort lexicographically across a 9→10 boundary. A store minting
     unpadded decimals passes the type and fails here.
   - **CAS:** two publishes at the same head — one accepted, one `HeadMismatchError`, nothing
@@ -1031,7 +1084,11 @@ heal cannot reach for want of a responder.)*
     exactly one accepted append. This must run against a real database over **separate
     connections** — not N `await`s on one connection, which the obvious in-memory version
     does and which a non-transactional, process-counter store passes while being broken.
-  - `fetchTopic` refuses a non-subscriber.
+  - **`fetchTopic` refuses a non-subscriber with `NotSubscribedError`** — the named type, not
+    merely "it throws". A clause that accepts any throw is satisfied by a host's
+    not-implemented stub, which is how a store passes the contract while having no read path
+    at all. The clause also asserts the positive case in the same test: a subscriber *can*
+    read, so a store that throws for everyone still fails.
 - **Concurrent commits.** Two admins commit at epoch N against one hub: one wins, the loser
   rebases and its entries land in a later commit. No fork, no lost entries.
 - **Same-device concurrency.** Two concurrent `peer.commit` calls serialize; both commits

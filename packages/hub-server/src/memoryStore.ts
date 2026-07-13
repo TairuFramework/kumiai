@@ -2,11 +2,14 @@ import type {
   AckParams,
   FetchParams,
   FetchResult,
+  FetchTopicParams,
+  FetchTopicResult,
   HubStore,
   HubStoreEvents,
   PublishParams,
   PurgeParams,
   StoredMessage,
+  TrimParams,
 } from '@kumiai/hub-protocol'
 import { EventEmitter } from '@sozai/event'
 
@@ -183,6 +186,14 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
         result.hasMore = true
       }
       return result
+    },
+
+    async fetchTopic(_params: FetchTopicParams): Promise<FetchTopicResult> {
+      throw new Error('fetchTopic is not implemented')
+    },
+
+    async trim(_params: TrimParams): Promise<void> {
+      throw new Error('trim is not implemented')
     },
 
     async ack(params: AckParams): Promise<void> {
