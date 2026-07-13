@@ -1,14 +1,16 @@
 # Design: the control-ledger lane
 
-**Status:** design, revision 20 (2026-07-13). Reviewed fourteen times by kubun in
-`2026-07-13-control-ledger-lane-review.md`; G1–G27 are folded in below. Revisions 16–20 fold in
-the first four implementation probes: `NotSubscribedError`, a `trim` primitive, a 30-day default
+**Status:** design, revision 21 (2026-07-13). Reviewed fourteen times by kubun in
+`2026-07-13-control-ledger-lane-review.md`; G1–G27 are folded in below. Revisions 16–21 fold in
+the implementation probes: `NotSubscribedError`, a `trim` primitive, a 30-day default
 window, two retention classes with subscriber-requested durations, **G28 — the commit lane must
 not outrun the mailbox**, which silently destroys downloaded messages, **G29 — `head` advances
 only on a log publish**, without which any member can wedge the lane for the group, **G30 —
 "one transaction" is necessary but not sufficient for the CAS**: on `READ COMMITTED` a faithful
-implementation still forks, and **G31 — two tables reference `messages` and exactly one of them
-may cascade**.
+implementation still forks, **G31 — two tables reference `messages` and exactly one of them
+may cascade**, and **G32 — "every commit carries an UpdatePath" is false about MLS**: an
+Add-only commit rotates nothing, and D2's premise holds here only through a coupling nobody
+had written down.
 **Supersedes:** the requirements in `../../agents/plans/next/2026-07-13-host-ledger-lane.md`
 (R1/R2/R3), which stays as the origin record.
 **Scope:** `@kumiai/mls`, `@kumiai/rpc`, `@kumiai/hub-protocol`, `@kumiai/hub-server`,
@@ -854,10 +856,10 @@ there is no later.
 Revision 3 argued: "commits rotate only the committer's path, and a peer that lost a CAS
 race never rotated at all", so the requester still holds the leaf private key the responder
 can see. The first clause is true. The conclusion inverts for exactly the peers heal exists
-to serve, because **the committer's path is whose path a commit rotates** — every Commit
-carries an UpdatePath installing a fresh leaf HPKE key for its author (kumiai depends on
-this: `envelope-fold` resolves the committer from "the commit's own UpdatePath leaf
-credential"), and the new private key lives only in the derived post-commit state:
+to serve, because **the committer's path is whose path a commit rotates** — every Commit that
+carries an UpdatePath installs a fresh leaf HPKE key for its author (kumiai depends on this:
+`envelope-fold` resolves the committer from "the commit's own UpdatePath leaf credential"),
+and the new private key lives only in the derived post-commit state:
 
 | Heal path | Committed? | Leaf key in the responder's tree | Can open a leaf-sealed reply |
 |---|---|---|---|
@@ -870,6 +872,21 @@ two peers whose state is genuinely broken, and for whom `recover()` is the sole 
 not. D1 step 5 already half-knew this ("the pre-commit leaf key material is retained, which
 the heal path needs"), but that reasoning covers the *discarded* commit; on the
 *accepted-then-crashed* commit the tree moved and the key moved with it.
+
+**G32 — "every commit carries an UpdatePath" is false about MLS, and true about kumiai only by
+an undocumented coupling.** RFC 9420 §12.4 lets a Commit whose proposals are *all* Add / PSK /
+ReInit omit the path entirely — ts-mls implements exactly that (`needsUpdatePath` in
+`clientState.js`), and such a commit rotates **nothing**, not even its author's leaf. Every
+commit this codebase can currently build does carry a path, but only because each one routes
+through `commitWithEntries`, which appends a `group_context_extensions` proposal advancing the
+ledger head: `commitLedgerEntries` refuses an empty token list, `createInvite` always appends a
+role token, `removeMember` carries a remove, and an external commit sets `needsUpdatePath`
+unconditionally. **That coupling is load-bearing.** A future caller who hand-builds an `Invite`
+whose ledger entries are empty gets an Add-only, path-less commit whose author's leaf key does
+not rotate — silently reversing the table above for that commit. When D2 lands, `commitInvite`'s
+"always appends a role token" property is a **precondition of the recovery design**, not an
+implementation convenience, and it is the place to assert it. Confirmed empirically:
+`packages/mls/test/leaf-key-rotation.test.ts`.
 
 **So the reply is sealed to an ephemeral key the requester mints, and authorization stays on
 the roster.** The requester generates an HPKE keypair per `recover()` call and puts the

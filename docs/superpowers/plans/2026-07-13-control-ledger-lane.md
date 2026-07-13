@@ -2,11 +2,12 @@
 
 **Stage:** planning
 **Mode:** learning-loop
-**Spec:** `docs/superpowers/specs/2026-07-13-control-ledger-lane-design.md` (revision 20)
+**Spec:** `docs/superpowers/specs/2026-07-13-control-ledger-lane-design.md` (revision 21)
 **Review record:** `docs/superpowers/specs/2026-07-13-control-ledger-lane-review.md` (G1–G27)
 **Found while implementing:** G28 (the lane outruns the mailbox), G29 (`head` advances on a
 mailbox publish), G30 ("one transaction" is not a CAS), G31 (the dedup record must not cascade
-from `messages`, while the delivery rows must) — see the decision log.
+from `messages`, while the delivery rows must), G32 (an Add-only commit carries no UpdatePath and
+rotates nothing) — see the decision log.
 
 ## How this plan is adversarial
 
@@ -181,6 +182,16 @@ ledger; the completeness invariant is computable locally.
   test: a peer whose own commit was accepted and then lost recovers** — the case leaf-sealing fails.
 - **⚠️ Wrong-but-passing:** sealing to the leaf. It passes a three-member happy-path recovery test
   and fails only for the two peers that actually need heal.
+- **Two traps found while verifying the premise (question 2.1), both landing here:**
+  - **The first rejection you hit is the wrong one.** Feeding a commit back to a handle that has no
+    `resolveLedgerEntries` resolver fails at the **ledger policy** ("ledger entries could not be
+    resolved") long before MLS is reached. A recovery test written against a resolver-less handle
+    passes for a shallow reason and proves nothing about sealing. Provision the resolver so the
+    throw you assert is the genuine MLS one.
+  - **A stale committer cannot even apply its own commit** — ts-mls *throws* (`No overlap between
+    provided private keys and update path`), because the author's own subtree is excluded from every
+    path secret's recipient set. So the recovery path must not fall back to "re-feed it the commit
+    it sent". Its only route back into the group is a fresh leaf.
 - **Spec excerpt:** "The requester generates an HPKE keypair per `recover()` call and puts the
   public half in the rendezvous request, signed by its DID identity key. The responder: verifies
   the request signature… checks that DID has a leaf in the **current ratchet tree**… seals to the
@@ -667,3 +678,57 @@ of them forking or bricking a group:
 A conformance suite that states its own ceiling is worth more than one that implies it has none.
 Three of those four are now written into the spec as host review items, because a host reads a green
 suite as proof.
+
+---
+
+### 2026-07-13 — Question 2.1: Does a commit really rotate the committer's leaf HPKE key?
+
+**Findings: yes — confirmed, and the strandedness is total.** `packages/mls/test/leaf-key-rotation.test.ts`
+(new; **zero `src/` changes** — a read-only verification probe, as intended). Two tests, both green;
+full verify green (27/27 tasks, `mls` 267/267).
+
+The committer's post-commit leaf key differs from its pre-commit one, and the pre-commit private key
+**fails to open** a seal made to the key the responder can see. Soundness of the seal was checked
+too: the *dropped* post-commit private key **does** open that same ciphertext, so the failure is the
+stale key and not a malformed seal. The negative control fires as predicted — a non-committing
+member's leaf is **byte-identical** after someone else's commit, and its held private key opens its
+seal fine. That asymmetry is exactly what let the flaw survive three spec revisions, and it is now
+pinned by a test rather than by an argument.
+
+In ts-mls: the new leaf key is drawn from **fresh randomness** (`updatePath.js:26`), not from the
+group key schedule — so nothing the committer still holds predicts it. Its private half is
+transmitted to **no one, ever** (`updatePath.js:60`: *"we have to remove the leaf secret since we
+don't send it to anyone"*). And it lands **only** in the returned `newState` (`createCommit.js:85-90`)
+— `createCommit` never mutates the state it was given, so a committer that dies before adopting the
+handle has destroyed the key while the group has already moved to the matching public one. Three
+doors, all closed.
+
+**Spec impact: revision 21 — G32.**
+
+> **"Every commit carries an UpdatePath" is false about MLS, and true about kumiai only through a
+> coupling nobody had written down.**
+
+RFC 9420 §12.4 lets an **Add/PSK/ReInit-only** commit omit the path entirely, and ts-mls implements
+exactly that (`needsUpdatePath`, `clientState.js:443-447`). Such a commit rotates **nothing** — not
+even its author's leaf. Every commit this codebase can currently build *does* carry a path, but only
+because each routes through `commitWithEntries`, which appends a `group_context_extensions` proposal
+advancing the ledger head: `commitLedgerEntries` refuses an empty token list, `createInvite` always
+appends a role token, `removeMember` carries a remove. So `commitInvite`'s "always appends a role
+token" is a **precondition of the recovery design**, not an implementation convenience. A future
+caller who hand-builds an `Invite` with empty ledger entries gets an Add-only, path-less commit whose
+author's leaf does not rotate — silently reversing D2's table for that commit, with nothing in the
+old phrasing to warn them. Folded into D2; the assertion belongs on `commitInvite` when D2 lands.
+
+**Learned:** the premise was true, but *the sentence stating it was not* — the design was right for a
+reason narrower than the one it gave, and the narrower reason is a property of **our** call graph
+rather than of MLS. That is the same shape as every other defect this plan has found: a claim the
+obvious implementation satisfies while being wrong. Had we built D2 on the stated reason and someone
+later added a path-less commit, the recovery design would have broken with every test still green.
+
+Two traps carried into Q2.2, both written into the question: (1) **the first rejection you hit is the
+wrong one** — a commit fed back to a handle with no `resolveLedgerEntries` resolver fails at the
+*ledger policy*, long before MLS is reached, and a recovery test written that way passes for a
+shallow reason (the probe's own first draft did exactly this and caught itself); (2) **a stale
+committer cannot even apply its own commit** — ts-mls *throws* `No overlap between provided private
+keys and update path`, because the author's subtree is excluded from every path secret's recipient
+set. There is no "just re-feed it the commit it sent" fallback. A fresh leaf is the only way back.
