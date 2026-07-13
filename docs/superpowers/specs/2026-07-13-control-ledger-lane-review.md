@@ -3,11 +3,49 @@
 **Reviewer:** kubun (the host driving the requirements in `2026-07-13-host-ledger-lane.md`).
 **Subject:** `2026-07-13-control-ledger-lane-design.md`.
 
-Four review passes. **The newest pass is at the top; earlier passes are kept below as the record.**
+Five review passes. **The newest pass is at the top; earlier passes are kept below as the record.**
 
 ---
 
-# Revision 4 review
+# Revision 5 review
+
+**Verdict:** G13 and G14 are folded in, and both correctly. "All three operations are top-level operations on one serialized lane; none of them ever calls another; the mutex is never re-entered" is the right rule, and it makes "heal is two commits" *fall out of* the concurrency invariant instead of being bolted on. The ephemeral-key seal keeps every property leaf-sealing was defending — intrinsic roster authorization, a removed member gets nothing, replay-bound AAD — and drops the assumption that inverted.
+
+One new finding. **G15 is the last structural hole I can find**, and it is both a liveness bug and a security hole on the same path.
+
+## G15 — A rejoined peer cannot bootstrap its ledger, and nothing authenticates one if it could
+
+**Blocking.** `recover()`'s accepted branch says:
+
+> `gather the ledger bodies the GroupInfo did not carry (D3)`
+
+and D3's gather is `getLedgerEntries(ids: Array<string>)`, served from the responder's `handle.ledger`.
+
+**The rejoined peer does not know the ids.** It joined by external commit from a GroupInfo. Its GroupContext carries `ledger_head` — a *chain digest*, not a list — and its handle's ledger is empty. `resolveLedgerEntries(ids)` is the commit pre-pass's hook: it is called with ids read from an incoming commit's *envelope*, i.e. only for entries some **new** commit enacts. Nothing enumerates the group's *existing* ledger. So the peer has nothing to ask for, and the gather cannot start.
+
+That is the liveness half. The security half is worse, and it is what makes this blocking rather than merely a missing method:
+
+**An empty ledger is not a neutral state — it is a roster reset.** The roster folds from the anchor plus the applied entries. With no entries, the rejoined peer's roster is *the genesis anchor alone*: the creator is admin, and nobody else is. Every admin promoted since is invisible to it. It will refuse the next commit any of them authors — `foldEnvelope` rejects an entry whose issuer is not an admin in state-so-far — so a rejoined peer doesn't just lack history, it **actively rejects the live group's commits** and re-strands itself. And the host's projections (kubun's circles, members, settings) fold from the same ledger, so they come back empty too.
+
+Now suppose the gather is added naively — "ask a member for the whole ledger". A lying member hands back a list with one demotion entry **omitted**. Every token still verifies (they are all genuinely signed), the groupID still matches, and the fold still runs. The rejoiner's roster now contains an admin the group demoted. Signature verification does not catch an omission, and neither does authority folding — **only the order and the completeness of the list are unprotected, and those are exactly what `ledger_head` protects.**
+
+**The fix is already in `mls`, unused.** `computeHead(groupID, entryIDs)` recomputes the chain from genesis across an ordered id list, and `assertHeadMatches` throws `LedgerIncompleteError` — whose doc comment says, verbatim, *"an inviter omitted, reordered, or truncated a ledger entry"*. That is precisely this attack, anticipated for the invite path and never wired for the rejoin path. So:
+
+- **Gather the whole ordered ledger, not "the missing ids".** `GroupMLS` needs a full-log accessor alongside the id-keyed one — the responder already has it (`handle.ledgerTokens` is documented as "the canonical persistent and wire form, the only thing that can be handed to another party").
+- **Verify it against the authenticated head before applying a single entry.** Recompute with `computeHead` over the gathered ids in the order given, compare against the `ledger_head` extension the peer's own GroupContext already carries (`readLedgerHead`), and reject on mismatch. The head came in with the GroupInfo and is MLS-authenticated, so it is a trustworthy check against an untrusted responder.
+- **A responder that fails the head check is not asked again** — fall through to the next gather reply. This makes a lying member able to withhold, never to rewrite, which is the same bound D3 already claims for the id-keyed gather ("a lying responder can only fail to answer, never inject").
+
+Worth stating in the design as a named step — "ledger bootstrap" — rather than a clause inside `recover()`, because it is a distinct primitive with its own integrity check, and the host's projections depend on it having run before they refold.
+
+## What matches, revision 5
+
+The single serialized lane is the right resolution of G13, and deriving "heal is two commits" from it is cleaner than the revision-4 text that asserted both separately. The G14 table is exactly the analysis, and the replay note (a signed request means a forged one now fails verification outright, where before it was merely useless) is a genuine improvement over what I proposed. `applyRecovery` returning a `PendingCommit` rather than applying — so the heal path's external commit goes through the same CAS discipline as any other — closes the loop between D1 and D2 properly.
+
+I have no further structural objections beyond G15. The remaining risk in this design is implementation fidelity, not shape — chiefly the `HubStore` conformance suite actually being run against a real database over separate connections.
+
+---
+
+# Revision 4 review (folded in — kept as the record)
 
 **Verdict:** G10–G12 are folded in, and the `recover()` CAS loop is the right shape — "heal is two commits, not one" (the external commit carries no envelope, so the entries ride a *subsequent* `commit()` that contends normally) is a distinction I had not drawn, and it is correct.
 

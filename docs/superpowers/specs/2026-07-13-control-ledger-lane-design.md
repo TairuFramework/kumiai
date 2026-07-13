@@ -343,7 +343,10 @@ recover(deadline):                          # a top-level lane operation; holds 
     publish pending.commit to commitTopic with expectedHead = reconciledHead
       accepted     -> pending.onAccepted()            # adopt the rejoined handle
                       reconciledHead = returned sequenceID
-                      gather the ledger bodies the GroupInfo did not carry (D3)
+                      bootstrapLedger()               # gather the WHOLE ordered ledger and
+                                                      # head-verify it (D3) — the rejoined
+                                                      # handle's ledger is empty, which is a
+                                                      # roster reset until this runs
                       return { advanced: true, reenact: <entries discarded on the way in> }
       HeadMismatch -> discard the GroupInfo AND the external commit built from it
                       (the GroupInfo describes a tree the winner already changed)
@@ -493,6 +496,57 @@ getLedgerEntries(ids: Array<string>): Promise<Array<string>>  // signed tokens, 
 
 The requester re-verifies every returned token and checks each digest against the id it
 asked for, so a lying responder can only fail to answer, never inject.
+
+#### Ledger bootstrap: a rejoined peer refolds its ledger, head-verified (G15)
+
+A peer that rejoined by external commit has a GroupInfo, an MLS state — and an **empty
+ledger**. That is not a neutral starting point, it is a **roster reset**: the roster folds
+from the genesis anchor plus the applied entries, so with no entries the creator is admin
+and nobody else is. Every admin promoted since is invisible to it, and `foldEnvelope` will
+reject the next commit any of them authors — the rejoined peer does not merely lack history,
+it **actively rejects the live group's commits and re-strands itself**. The host's
+projections fold from the same ledger, so they come back empty too.
+
+It also cannot use D3's gather to fix this, because **it does not know the ids to ask for**.
+`resolveLedgerEntries(ids)` is the commit pre-pass's hook, called with ids read from an
+incoming commit's envelope — it resolves entries some *new* commit enacts. Nothing
+enumerates the group's *existing* ledger, and `ledger_head` is a chain digest, not a list.
+
+So bootstrap is its own primitive, not a clause inside `recover()`:
+
+1. **Gather the whole ordered ledger** — not "the missing ids". `GroupMLS` gains a full-log
+   accessor beside the id-keyed one; the responder serves it from `handle.ledgerTokens`, "the
+   canonical persistent and wire form, the only thing that can be handed to another party".
+2. **Verify it against the authenticated head before applying a single entry.** Recompute
+   with `computeHead(groupID, entryIDs)` over the gathered ids *in the order given* and
+   compare against the `ledger_head` the peer's own GroupContext already carries
+   (`readLedgerHead`). The head arrived inside the GroupInfo and is MLS-authenticated, so it
+   is a trustworthy check against an untrusted responder.
+3. **A responder that fails the head check is not asked again** — fall through to the next
+   gather reply.
+
+Signature verification alone does **not** cover this. A lying member can hand back a list of
+genuinely-signed, correctly-scoped tokens with one demotion **omitted**: every token
+verifies, every groupID matches, the fold runs, and the rejoiner's roster now contains an
+admin the group demoted. Order and completeness are exactly what signatures do not protect
+and what `ledger_head` does. This bound — **a lying responder can withhold, never rewrite** —
+is the one D3 already claims for the id-keyed gather; bootstrap earns it the same way.
+
+The primitives for this are already in `mls` and, today, wired only for the invite path:
+`computeHead` and `assertHeadMatches` (whose `LedgerIncompleteError` doc comment names this
+attack verbatim — "an inviter omitted, reordered, or truncated a ledger entry") are called
+from `processWelcome` and nowhere else. Rejoin needs the same check.
+
+```ts
+type GroupMLS = {
+  // ...
+  /** The whole ordered ledger, as signed tokens — the bootstrap gather's reply. */
+  getLedger(): Promise<Array<string>>
+  /** Fold a gathered ledger after verifying its recomputed head against the authenticated
+   *  one. Throws LedgerIncompleteError on mismatch; the peer then tries the next responder. */
+  bootstrapLedger(tokens: Array<string>): Promise<void>
+}
+```
 
 **Cursor-advance rule.** Replaces revision 1's ack table, now that the commit lane is pulled
 rather than delivered. For each frame processed from `commitTopic`:
@@ -645,6 +699,15 @@ if metadata exposure to ex-members becomes a stated requirement.
 - **Heal never nests.** A heal triggered while `commit()` is pulling does not deadlock: the
   trigger records, `commit()` unwinds and releases the lane, `recover()` runs as its own
   operation, and the re-enactment is a later `commit()` (the G13 regression test).
+- **Ledger bootstrap.** A rejoined peer refolds the full ledger and its roster matches the
+  live group's — in particular it **accepts the next commit from an admin promoted after
+  genesis**, which a peer with an empty ledger would reject (the G15 liveness regression
+  test).
+- **Bootstrap rejects a doctored ledger.** A responder returns a genuinely-signed,
+  correctly-scoped ledger with one demotion omitted: the recomputed head does not match the
+  GroupInfo's authenticated `ledger_head`, `LedgerIncompleteError` is thrown, that responder
+  is skipped, and the peer folds an honest reply instead. The demoted admin does **not**
+  reappear in the rejoiner's roster (the G15 security regression test).
 - **Cursor-advance.** A commit with unresolvable bodies is retried without advancing; a
   malformed commit advances the cursor once and is never retried.
 - **Fork heal.** A simulated lying hub double-accepts; the lower-sequenceID branch wins, the
