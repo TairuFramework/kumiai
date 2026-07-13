@@ -166,10 +166,15 @@ describe('signLedgerEntry / verifyLedgerEntry', () => {
       value: 'admin',
     })
 
-    // Flip a character inside the signature segment (the third JWT part).
-    const lastIndex = token.length - 1
-    const original = token[lastIndex]
-    const flipped = `${token.slice(0, lastIndex)}${original === 'A' ? 'B' : 'A'}`
+    // Flip a character inside the signature segment (the third JWT part), but
+    // NOT its last one: an Ed25519 signature is 64 bytes = 512 bits, which
+    // base64url encodes in 86 characters = 516 bits, so the final character
+    // carries 4 padding bits. A flip landing only in the padding decodes to the
+    // identical signature bytes and verification legitimately succeeds. Every
+    // other character carries 6 significant bits.
+    const signatureStart = token.lastIndexOf('.') + 1
+    const original = token[signatureStart]
+    const flipped = `${token.slice(0, signatureStart)}${original === 'A' ? 'B' : 'A'}${token.slice(signatureStart + 1)}`
     expect(flipped).not.toBe(token)
 
     await expect(verifyLedgerEntry(flipped)).resolves.toBeNull()
