@@ -1,16 +1,19 @@
 # Design: the control-ledger lane
 
-**Status:** design, revision 21 (2026-07-13). Reviewed fourteen times by kubun in
-`2026-07-13-control-ledger-lane-review.md`; G1–G27 are folded in below. Revisions 16–21 fold in
+**Status:** design, revision 22 (2026-07-13). Reviewed fourteen times by kubun in
+`2026-07-13-control-ledger-lane-review.md`; G1–G27 are folded in below. Revisions 16–22 fold in
 the implementation probes: `NotSubscribedError`, a `trim` primitive, a 30-day default
 window, two retention classes with subscriber-requested durations, **G28 — the commit lane must
 not outrun the mailbox**, which silently destroys downloaded messages, **G29 — `head` advances
 only on a log publish**, without which any member can wedge the lane for the group, **G30 —
 "one transaction" is necessary but not sufficient for the CAS**: on `READ COMMITTED` a faithful
 implementation still forks, **G31 — two tables reference `messages` and exactly one of them
-may cascade**, and **G32 — "every commit carries an UpdatePath" is false about MLS**: an
+may cascade**, **G32 — "every commit carries an UpdatePath" is false about MLS**: an
 Add-only commit rotates nothing, and D2's premise holds here only through a coupling nobody
-had written down.
+had written down, and revision 22 — D2's primitives as built, plus the two properties they
+made visible: **the roster check goes stale** (a responder lagging a removal still answers the
+removed member — liveness, not confidentiality), and **the ephemeral private key's lifetime is
+an unenforced host obligation** across the very crash it exists to survive.
 **Supersedes:** the requirements in `../../agents/plans/next/2026-07-13-host-ledger-lane.md`
 (R1/R2/R3), which stays as the origin record.
 **Scope:** `@kumiai/mls`, `@kumiai/rpc`, `@kumiai/hub-protocol`, `@kumiai/hub-server`,
@@ -910,16 +913,61 @@ amplification and nothing else — bounded, as before, by responder jitter, stor
 suppression, and the roster filter. A *forged* request now fails signature verification
 outright, where previously it was merely useless.
 
-**mls grows two primitives**, over the X25519 HPKE already in `mls/crypto.ts`:
+**mls grows three primitives** (`packages/mls/src/recovery.ts`), over the X25519 HPKE already in
+`mls/crypto.ts` and the `@kokuin/token` signature scheme the ledger already uses. No second HPKE,
+no second signature scheme:
 
 ```ts
-sealGroupInfo({ group, requesterDID, requestID, recipientKey }): Promise<Uint8Array>
-openSealedGroupInfo({ sealed, requesterDID, requestID, privateKey }): Promise<Uint8Array>
+createRecoveryRequest({ group, identity, requestID })
+  → { request: string; ephemeralPublicKey: Uint8Array; ephemeralPrivateKey: Uint8Array }
+sealGroupInfo({ group, request }): Promise<Uint8Array>
+openSealedGroupInfo({ group, sealed, requestID, ephemeralPrivateKey }): Promise<Uint8Array>
 ```
 
-`sealGroupInfo` throws if `requesterDID` has no leaf in the current tree. `openSealedGroupInfo`
-returns the framed `MLSMessage(GroupInfo)`, which feeds the existing `joinGroupExternal`
-unchanged, and rejects anything whose AAD does not bind the caller's own DID and request.
+Three shape decisions, each removing a way a caller could hold this wrong:
+
+- **The recipient key is not a parameter.** It lives *inside* the signed request, so `sealGroupInfo`
+  takes `{ group, request }` and nothing else. "Seal to the key passed alongside the request" is not
+  merely avoided — it is unrepresentable.
+- **There is no `requesterDID` field.** It is the token's verified `iss`, so the DID a request names
+  and the DID whose key signed it cannot come apart, and no code has to remember to compare them.
+- **`openSealedGroupInfo` rebuilds the AAD from the caller's own handle** — group id and DID come
+  from its own state, so there is no DID to pass and therefore no wrong DID to pass. The binding is
+  an **AEAD failure**, not a field compared after decryption: a reply replayed at another member
+  fails to *open*, rather than decrypting the ratchet tree and then being rejected. This is what
+  makes the replay refusal airtight rather than merely tested.
+
+`sealGroupInfo` throws if the request's signature does not verify, if its DID has no leaf in the
+current tree, or if it names **another group** (a responder in two groups would otherwise seal *this*
+group's state in answer to a request authorized against *another*, with signature and ephemeral key
+both checking out). `openSealedGroupInfo` returns the framed `MLSMessage(GroupInfo)`, which feeds the
+existing `joinGroupExternal` unchanged.
+
+**The roster check is the MLS ratchet tree, not the ledger roster.** `roster.ts` folds the *ledger*
+into role permissions and can hold a role for a DID with no MLS membership at all; authorization
+here is `findMemberLeafIndex` over `state.ratchetTree`. Using the ledger roster would answer a DID
+that was granted a role and never added.
+
+**The roster check goes stale, by design.** A responder's tree is as fresh as the last commit it
+applied, so **a responder lagging a removal still answers the removed member**. Three things bound
+it, and none of them is a policy check: the window is one commit's propagation delay; the reply is
+sealed to *her* ephemeral key, so no eavesdropper benefits; and `joinGroupExternal`'s resync requires
+a prior leaf in the resynced tree, which the removing commit took away — so she gets a GroupInfo she
+cannot rejoin with, describing an epoch she was entitled to as a member anyway. **This is a
+liveness/PCS property, not a confidentiality hole.** The removal is the security event; the seal is
+not. Stated here because, undocumented, it reads as a hole.
+
+**The ephemeral private key's lifetime is a host obligation, and nothing in the type system enforces
+it:**
+
+- It is retained by the host, keyed by `requestID`, until `applyRecovery` consumes it — **across the
+  crash it exists to recover from**, so in the general case it must be **persisted**. That is a new
+  secret at rest, and the host must treat it as one.
+- **Drop it** when `applyRecovery` consumes it or the request is abandoned. Retaining it forever
+  turns a per-request secret into a long-lived one.
+- **Mint `requestID` randomly.** It is a correlation id, so a host may reasonably think a counter
+  will do — but reusing one across two `recover()` calls gives both replies the same AAD, making
+  them mutually openable and collapsing the per-request binding.
 
 **The `GroupMLS` port follows the ephemeral key**, and — because the heal path's external
 commit is CAS'd (G10) — `applyRecovery` returns a `PendingCommit` rather than applying:

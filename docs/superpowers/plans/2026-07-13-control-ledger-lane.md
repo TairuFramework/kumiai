@@ -732,3 +732,72 @@ shallow reason (the probe's own first draft did exactly this and caught itself);
 committer cannot even apply its own commit** — ts-mls *throws* `No overlap between provided private
 keys and update path`, because the author's subtree is excluded from every path secret's recipient
 set. There is no "just re-feed it the commit it sent" fallback. A fresh leaf is the only way back.
+
+---
+
+### 2026-07-13 — Question 2.2: Can GroupInfo be sealed to a requester-supplied ephemeral key, authorized by the roster?
+
+**Findings: yes — all six clauses hold.** `packages/mls/src/recovery.ts` (three primitives) and
+`packages/mls/test/recovery.test.ts` (nine tests, green). Full verify green; `mls` 276/276, 27/27
+tasks. The stranded committer — the peer leaf-sealing cannot serve, per question 2.1 — **recovers,
+rejoins via `joinGroupExternal`, and resumes two-way traffic.** Over the X25519 HPKE already in
+`crypto.ts` and the `@kokuin/token` scheme the ledger already uses: no second HPKE, no second
+signature scheme, no `GroupMLS` port built.
+
+**The primitives came out tighter than the spec wrote them, in the direction that matters.** Three
+deviations, each one deleting a way a caller could hold it wrong rather than adding a check:
+
+- **The recipient key is not a parameter.** It lives inside the signed request, so `sealGroupInfo`
+  takes `{ group, request }` and nothing else. "Seal to the key passed alongside the request" is
+  **unrepresentable**, not merely avoided.
+- **There is no `requesterDID` field** — it is the verified `iss`. The DID a request names and the
+  DID whose key signed it cannot come apart, so no code has to remember to compare them.
+- **`openSealedGroupInfo` rebuilds the AAD from the caller's own handle.** There is no DID to pass,
+  hence no wrong DID to pass. The binding is an **AEAD failure**, not a comparison after decryption:
+  in the replay test Carol is handed *the ephemeral private key itself* and still gets nothing. Had
+  it been compare-after-decrypt she would have **decrypted the ratchet tree** and then been told not
+  to look.
+
+A fourth refusal was added that the spec did not list: **a request naming another group**. Without
+it, a responder in two groups seals *this* group's state in answer to a request authorized against
+*another* — signature and ephemeral key both checking out.
+
+**The probe mutation-checked the two clauses that could pass shallowly.** Deleting the roster check
+makes the non-member test fail; stripping DID + requestID from the AAD makes both replay tests fail
+(the replayed reply *opens*). Both reverted. The refusals bite — which is the standard this plan
+holds a test to, and the reason it is worth stating rather than assuming.
+
+**Spec impact: revision 22.** D2's primitive block replaced with what shipped, plus the two
+properties building it made visible:
+
+1. **The roster check goes stale, by design.** A responder's tree is as fresh as its last applied
+   commit, so **a responder lagging a removal still answers the removed member**. Bounded by one
+   commit's propagation; the reply is sealed to *her* ephemeral key so no eavesdropper benefits; and
+   `joinGroupExternal`'s resync needs a prior leaf the removing commit took away, so she gets a
+   GroupInfo she cannot rejoin with, describing an epoch she was entitled to as a member anyway.
+   **Liveness/PCS, not confidentiality** — but undocumented it reads as a hole, so it is now written
+   down and asserted as a test.
+2. **The ephemeral private key's lifetime is an unenforced host obligation.** The host retains a raw
+   `Uint8Array` keyed by `requestID` **across the crash it exists to recover from** — so in the
+   general case it must be *persisted*, which is a new secret at rest. Nothing zeroes it, expires
+   it, or stops `requestID` reuse, which would give two replies the same AAD and collapse the
+   per-request binding. Three rules now on the spec: persist it as a secret, drop it on consume or
+   abandon, mint `requestID` randomly.
+
+Also noted for the roster: authorization is `findMemberLeafIndex` over the **MLS ratchet tree**, not
+`roster.ts` — which folds the *ledger* into role permissions and can hold a role for a DID with no
+MLS membership at all. The naming invites the wrong one.
+
+**Learned:** the strongest refusals in this design are the ones with no parameter to get wrong. Every
+deviation the probe made was of that shape — not "add a check" but "remove the input that made the
+check necessary." The AEAD-vs-compare-after-decrypt choice is the sharpest instance: both forms pass
+the same test, and only one of them declines to decrypt the ratchet tree first.
+
+**Unrelated defect fixed in passing (a real bug, not the flake we assumed).** `ledger.test.ts:169`
+flipped the **last** base64url character of an Ed25519 signature. A signature is 64 bytes = 512 bits,
+which base64url encodes in 86 characters = 516 bits — so the final character carries **4 padding
+bits**. A flip landing only in the padding decodes to the identical signature bytes and verification
+legitimately succeeds. The test's premise was false for roughly one token in four. It reproduces on a
+clean tree, in isolation, at about 1 run in 5 — it was never load-related, and two earlier probes had
+recorded it as a parallel-load flake on my say-so. Now flips the *first* signature character, which
+carries six significant bits; ten consecutive runs green.

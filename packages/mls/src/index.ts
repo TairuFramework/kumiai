@@ -112,6 +112,23 @@ export {
   MissingLedgerEntriesError,
 } from './policy.js'
 export {
+  type CreateRecoveryRequestParams,
+  type CreateRecoveryRequestResult,
+  createRecoveryRequest,
+  type OpenSealedGroupInfoParams,
+  openSealedGroupInfo,
+  RECOVERY_REQUEST_TYPE,
+  type RecoveryRequest,
+  RecoveryRequestError,
+  type RecoveryRequestRejection,
+  SEALED_GROUP_INFO_VERSION,
+  SealedGroupInfoError,
+  type SealedGroupInfoRejection,
+  type SealGroupInfoParams,
+  sealGroupInfo,
+  type VerifiedRecoveryRequest,
+} from './recovery.js'
+export {
   adminCount,
   foldRoster,
   type GroupPermission,
