@@ -1,7 +1,7 @@
 # Design: the control-ledger lane
 
-**Status:** design, revision 2 (2026-07-13). Revision 1 was reviewed by kubun in
-`2026-07-13-control-ledger-lane-review.md`; G1–G4 are folded in below.
+**Status:** design, revision 3 (2026-07-13). Reviewed twice by kubun in
+`2026-07-13-control-ledger-lane-review.md`; G1–G9 are folded in below.
 **Supersedes:** the requirements in `../../agents/plans/next/2026-07-13-host-ledger-lane.md`
 (R1/R2/R3), which stays as the origin record.
 **Scope:** `@kumiai/mls`, `@kumiai/rpc`, `@kumiai/hub-protocol`, `@kumiai/hub-server`,
@@ -30,11 +30,17 @@ sound. Three things around it are not:
 
 A fourth, surfaced while reviewing D1 and fixed here as a consequence of it:
 
-4. **The commit lane is a mailbox, not a log.** `HubStore.fetch` is a per-recipient
-   delivery queue, and `publish` snapshots its recipients from the topic's subscribers *at
-   publish time*. A member invited at epoch N who subscribes after two further commits
-   have landed is never sent those commits — there is no backlog to ask for. It is
-   stranded on arrival, today, independent of everything above.
+4. **`HubStore` is a mailbox, not a log.** `fetch` is a per-recipient delivery queue, and
+   `publish` snapshots its recipients from the topic's subscribers *at publish time*. A
+   member invited at epoch N who subscribes after two further commits have landed is never
+   sent those commits — there is no backlog to ask for. It is stranded on arrival, today,
+   independent of everything above. Two further consequences, both load-bearing for D1:
+   **a publish with no recipients stores nothing at all** (`memoryStore.publish`:
+   `if (recipients.size === 0) return sequenceID` — the sequence is burned and no row is
+   written), and **`ack` deletes** — `removeDelivery` refcounts a message down and GCs it
+   out of `topicMessages` when its last recipient acks. What looks like a topic log is
+   derivative of delivery. Retention is a function of who has read a message, not of the
+   topic.
 
 ## Design decisions
 
@@ -66,12 +72,25 @@ availability/consistency class:
 Accepted. The hub can already drop, delay, reorder and partition; none of this raises its
 ceiling.
 
-#### The `HubStore` contract change
+#### The `HubStore` contract change: a log alongside the mailbox
 
 `HubStore` is a **`hub-protocol` contract that hosts implement** — kubun backs it with SQL
 over SQLite and Postgres. So the head lives in the host's database, and this is a contract
 change every host with a hub must migrate for. `hub-protocol` *defines* the semantics; the
 `HubStore` implementation *provides* them.
+
+**This is not a field addition. `HubStore` gains a log.** Today, as problem 4 sets out,
+messages are retained as a function of delivery: a publish with no subscribers is not
+stored, and the last ack deletes the row. A CAS head over that is incoherent — the head
+would advance past frames that were never stored, or that a reader's own ack destroyed, and
+no peer could ever pull them. So:
+
+- **Messages are retained per topic, independently of delivery.** A publish is appended to
+  the topic's log whether or not anyone is subscribed. This is the system of record.
+- **Delivery rows govern push only.** They remain an optimization — a wakeup signal — and
+  `ack` deletes a *delivery*, never a log entry.
+- **Trim governs the log**, by depth and age, and is the only thing that removes an entry.
+  Trim moves `oldest` and never touches `head`.
 
 ```ts
 export type PublishParams = {
@@ -118,20 +137,34 @@ export type HubStore = {
 }
 ```
 
-**Atomicity is a contract requirement, not an implementation detail.** The head
-comparison, the append, and the head advance MUST happen in a single transaction. A
-read-then-write CAS is a race — and it is precisely the race D1 exists to eliminate. A
-host reading "the head is a scalar" could reasonably implement it as three statements; the
-contract must forbid that in words, and the conformance suite must catch it.
+**`sequenceID` gains an ordering contract.** The design compares sequenceIDs in five places
+— `expectedHead` equality, `head` against the cursor, `oldest` against the cursor, `after`
+as an exclusive cursor, and the byzantine tiebreak. The type is `string` and its order has
+never been specified; `memoryStore` works only because `formatSequenceID` happens to
+`padStart(12, '0')`. A host that mints `String(counter)` unpadded, or a UUID, satisfies the
+type and silently breaks every one of those comparisons (`"10" < "9"`). The contract now
+requires:
 
-The head is **hub-assigned** — it is a `sequenceID`, which only the store mints. A member
-cannot choose it, so a malicious member cannot wedge the lane by publishing a bogus head
-token. This is why the CAS condition is not a member-supplied value. The payload stays
-opaque: the hub sequences bytes it cannot read.
+- sequenceIDs are **lexicographically ordered, strictly increasing within a topic** —
+  byte-comparable, so a fixed-width zero-padded encoding, not a bare decimal and not a UUID;
+- the sequenceID is **minted by the store inside the CAS transaction**, not by the process.
+  kubun mints from an in-process counter lazily seeded from `max(sequence_id)`, so two hub
+  processes on one database already collide. Survivable for a mailbox; fatal for a head,
+  because the head *is* a sequenceID.
+
+**Atomicity is a contract requirement, not an implementation detail.** The head comparison,
+**the sequence mint**, the append, and the head advance MUST happen in **one transaction**.
+A read-then-write CAS is a race — precisely the race D1 exists to eliminate. A host reading
+"the head is a scalar" could reasonably implement it as three statements; the contract
+forbids that in words, and the conformance suite must catch it.
+
+The head is **hub-assigned** — a `sequenceID`, which only the store mints. A member cannot
+choose it, so a malicious member cannot wedge the lane by publishing a bogus head token.
+This is why the CAS condition is not a member-supplied value. The payload stays opaque: the
+hub sequences bytes it cannot read.
 
 `fetchTopic` is gated on subscription, so it exposes a topic's log only to members who
-already derive that topic from the group secret. Trimming (by depth or age) moves `oldest`
-and never touches `head`.
+already derive that topic from the group secret.
 
 #### Topic split
 
@@ -165,6 +198,14 @@ applied that frame or dropped it as stale or malformed.
   mattering for commits.
 - **Ack becomes cursor-advance.** "Do not ack, so the hub redelivers" is no longer how the
   commit lane retries; the cursor simply does not advance. See D3.
+
+**Only the commit lane becomes a log (G9).** Publish-time recipient snapshotting strands
+late subscribers on *every* lane, not just this one. The rendezvous lane and the app lane
+keep the mailbox semantics, deliberately: a recovery requester subscribes before it asks, so
+it cannot miss its own reply, and app data has the host's own sync behind it. This is a
+decision, not an omission — a new lane that needs history must opt into `fetchTopic`, and a
+new lane that assumes a late subscriber sees anything published before it subscribed is
+wrong.
 
 #### The peer's commit state machine
 
@@ -204,10 +245,24 @@ Inside the mutex:
 5. **`HeadMismatchError`** → drop the `PendingCommit` untouched. Discarding costs nothing,
    and the pre-commit leaf key material is retained, which the heal path needs. Go back to
    step 1: pull the winning commit, let the host's handle rebase as it applies, and call
-   `build()` again against the now-current handle. Bounded retries (default 5), then throw.
+   `build()` again against the now-current handle.
+
+**The retry bound is a deadline, not an attempt count.** At the commit rate D1 is designed
+for, with several active admins, five consecutive CAS losses on a busy group is not rare —
+an attempt count turns ordinary contention into a thrown error. `commit` retries until a
+configurable deadline (default 30s), with a large attempt ceiling retained only as a
+runaway guard. Losing a CAS is the expected path, not an error path.
 
 `build()` must read the host's *current* handle on every call — it is a closure, so this is
 natural — and must have no side effects until `onAccepted` runs.
+
+**A throw from `onAccepted` is the crash window, reached by a likelier route (G8).** The hub
+has accepted; the group has advanced; the host failed to adopt — a DB write failed, a
+Welcome send failed. `commit()` is therefore **not atomic**, and a host must not assume it
+is. The peer treats a throw exactly as it treats the crash: it does not retry the commit
+(the commit is already in the log and other members are applying it), it surfaces the
+failure, and the peer heals by external-commit rejoin and re-enacts its entries. See
+"Host-side impact".
 
 Because a loser's commit is never published, the commit topic under an honest hub contains
 only accepted commits.
@@ -220,12 +275,20 @@ timing heuristic in revision 1 is gone (G4).
 - **Trim strand.** After a pull, `head > reconciledHead` but the intervening frames are no
   longer retained (`oldest` is past the cursor). The peer knows in one observation that they
   were trimmed, with no waiting. Action: `recover()`.
-- **Byzantine double-accept.** A valid commit framed at an epoch the peer has already
-  passed. Tiebreak: the branch whose conflicting commit carries the **lower** hub sequenceID
-  wins — both peers can evaluate this once they see both frames, and the peer retains, per
-  applied epoch, the sequenceID of the commit it applied there. The loser rejoins by
-  external commit onto the winner's branch and re-enacts its entries; entry tokens are
-  epoch-independent, so re-enactment needs no re-signing.
+- **Byzantine double-accept.** The peer records, per epoch it has applied, the sequenceID of
+  the commit it applied there. A fork is: **a valid commit at an epoch for which this peer
+  holds a recorded applied-commit sequenceID, whose sequenceID differs from the recorded
+  one.** "A valid commit at an epoch the peer has already passed" — revision 2's trigger —
+  is *not* the test, and using it would be a bug: a late joiner pulling from `oldest` walks
+  frames from before it was invited, a rejoined peer walks a log that predates its new leaf,
+  and a re-seeded peer walks frames it never held. None of them ever "passed" those epochs.
+  Every one of them would diagnose a fork on its first pull and escalate to `recover()`,
+  turning the late-joiner fix into a recovery storm. **No record for that epoch → not a
+  fork, just history.** Tiebreak, when it really is a fork: the branch whose conflicting
+  commit carries the **lower** hub sequenceID wins — both peers can evaluate this once they
+  see both frames. The loser rejoins by external commit onto the winner's branch and
+  re-enacts its entries; entry tokens are epoch-independent, so re-enactment needs no
+  re-signing.
 - **Unrecoverable partition.** A hub that never shows a peer the other branch prevents
   convergence entirely. That is DoS, and out of scope.
 
@@ -257,6 +320,15 @@ exportGroupInfo({ group, requesterDID, requestID }): Promise<{ sealed: Uint8Arra
   X25519 HPKE already present in `mls/crypto.ts`, MLS-style labeled encryption.
 - AAD binds `groupID`, `requesterDID`, and `requestID`, so a reply cannot be replayed at
   another member, another group, or another request.
+
+`requestID` is minted by the **requester**, randomly, per `recover()` call — it is already
+the rendezvous correlation id in `peer.ts`. It exists to bind a reply to the request that
+asked for it; it is not an authorization token. A **replayed request** is therefore
+harmless: it can only cause responders to seal another copy of GroupInfo to the leaf of the
+DID the request names, which nobody but that member can open. What a replayed or forged
+request buys an attacker is amplification, and that is bounded by what already exists — the
+responder's jitter, the storm-collapse suppression, and the "no leaf in the current tree →
+ignore" filter.
 
 **mls grows the opening side:**
 
@@ -311,8 +383,9 @@ rather than delivered. For each frame processed from `commitTopic`:
 
 | Outcome | Cursor |
 |---|---|
-| Applied | advance |
-| Stale / already-superseded epoch | advance (drop the frame, run the D1 fork check) |
+| Applied | advance; record this epoch → sequenceID for the D1 fork check |
+| Frame at an epoch this peer has no recorded applied-commit for (pre-join, pre-rejoin, re-seeded history) | advance, **no fork check** — this is history, not a fork |
+| Frame at an epoch this peer *has* a record for, with a different sequenceID | advance; this is the fork trigger (D1) |
 | Malformed, or policy-rejected (`CommitRejectedError`) | advance (poison — never retry) |
 | `MissingLedgerEntriesError` | **do not advance**; gather the missing ids, retry the frame (bounded); on exhaustion, advance and escalate to `recover()` |
 
@@ -334,8 +407,17 @@ permanently-failing commit is redelivered forever.
 
 Named so the work is sized honestly. These are the host's to absorb.
 
-- **Every host with a hub pays a `HubStore` migration:** a per-topic head, a unique
-  `publishID`, and a topic-log read path, with the CAS in one transaction.
+- **Every host with a hub rebuilds the storage model of its `HubStore`.** This is the
+  largest item in the design, and it is not a column or two. Today retention is a function
+  of delivery: a publish with no subscribers stores nothing, and the last ack deletes the
+  row. The store must instead **retain messages per topic independently of delivery**, with
+  trim (by depth and age) as the only thing that removes an entry; delivery rows become a
+  push-wakeup optimization, and `ack` stops deleting messages. On top of that: a per-topic
+  head, a unique `publishID`, a topic-log read path, sequenceIDs that are lexicographically
+  ordered and **minted by the database inside the CAS transaction** rather than by an
+  in-process counter (kubun's current counter collides across two hub processes on one
+  database — survivable for a mailbox, fatal for a head). A host that reads this as "add a
+  head column" will under-scope it by a wide margin.
 - **Removing `localCommitted` inverts the host's commit path.** A host that applies the
   commit and adopts `newGroup` up front (kubun's `withHandleReplacing`) must instead build
   without adopting and adopt only inside `onAccepted`. Because `build()` re-runs on every
@@ -367,19 +449,33 @@ Named so the work is sized honestly. These are the host's to absorb.
 
 ## Testing
 
-- **`HubStore` conformance suite**, run against the memory store and exported for hosts to
-  run against theirs: two publishes at the same head — one accepted, one `HeadMismatchError`,
-  nothing stored for the loser; the empty-topic sentinel (`null`); a replayed `publishID`
-  returns the original sequenceID and appends nothing; `head` survives a trim while `oldest`
-  moves; `fetchTopic` refuses a non-subscriber; **concurrent CAS under real parallelism — N
-  racing publishes at the same head yield exactly one accepted append** (the test that
-  catches a non-transactional implementation).
+- **`HubStore` conformance suite**, run against the memory store and **exported from
+  `hub-protocol` for hosts to run against their own store** — it is the contract, and every
+  clause below exists because a plausible implementation gets it wrong:
+  - **The log is real: publish to a topic with zero subscribers, then subscribe and pull
+    the frame.** The single test that proves retention is not a function of delivery. Every
+    store passes today's tests and fails this one.
+  - **Ack does not delete:** subscriber acks a frame, then pulls it again via `fetchTopic`.
+  - **Trim is the only deleter:** `head` survives a trim while `oldest` moves.
+  - **Ordering:** sequenceIDs sort lexicographically across a 9→10 boundary. A store minting
+    unpadded decimals passes the type and fails here.
+  - **CAS:** two publishes at the same head — one accepted, one `HeadMismatchError`, nothing
+    stored for the loser; the empty-topic sentinel (`null`); a replayed `publishID` returns
+    the original sequenceID and appends nothing.
+  - **Concurrent CAS under real parallelism:** N racing publishes at the same head yield
+    exactly one accepted append. This must run against a real database over **separate
+    connections** — not N `await`s on one connection, which the obvious in-memory version
+    does and which a non-transactional, process-counter store passes while being broken.
+  - `fetchTopic` refuses a non-subscriber.
 - **Concurrent commits.** Two admins commit at epoch N against one hub: one wins, the loser
   rebases and its entries land in a later commit. No fork, no lost entries.
 - **Same-device concurrency.** Two concurrent `peer.commit` calls serialize; both commits
   land; neither builds against a superseded handle.
 - **Late joiner.** A member is invited, two further commits land before it subscribes, and it
-  converges by pulling the log — with no `recover()`.
+  converges by pulling the log — with no `recover()` and **no fork diagnosis**, walking
+  frames from epochs it never held (the G5 regression test).
+- **`onAccepted` throws.** The commit is in the log, the host failed to adopt: `commit()`
+  surfaces the failure, does not retry the commit, and the peer heals by rejoin.
 - **First-delivery resolution.** Three-member group, an admin enacts an entry, the third
   member has never seen the body: it applies the commit on first delivery, no gather.
 - **Offline catch-up.** A member offline across several enacting commits reconnects and
