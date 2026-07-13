@@ -276,23 +276,34 @@ type CommitJournal = {
   clear(publishID: string): Promise<void>
 }
 
-commit: (build: () => Promise<PendingCommit>) => Promise<void>
-
 /**
- * How replay hands recoverable work back to the host (G26). Fired from lane step 0 when a
- * journalled commit turns out to have lost its CAS — the peer cannot rebuild it, because
- * `build()` was a closure and the process that held it is gone.
+ * What replay found (G26). Delivered as a RETURN VALUE, never a callback (G27): replay runs
+ * at lane step 0, inside the mutex, and the host's response to it is to call `commit()` —
+ * which takes that same mutex. A callback fired under the lock whose documented purpose is to
+ * make the host re-enter the lock is precisely the nesting G13 forbids, and the obvious host
+ * handler deadlocks. Returning it means the host acts after the lane has released, so its
+ * follow-up `commit()` is naturally a separate lane operation.
  *
  * `kind: 'ledger'` carries the surviving signed tokens: the host re-issues them with an
- * ordinary `commit()`. `kind: 'invite' | 'remove'` carries no tokens: that commit did not
- * happen and cannot be reconstructed, so the host must re-issue the operation or tell the
- * user. The peer NEVER commits on the host's behalf.
+ * ordinary `commit()`. `kind: 'invite' | 'remove'` carries none: that commit did not happen
+ * and cannot be reconstructed, so the host must re-issue the operation or tell the user.
  */
-onCommitLost?: (event:
+type LostCommit =
   | { kind: 'ledger'; tokens: Array<string> }
   | { kind: 'invite' | 'remove' }
-) => void
+
+/** Every lane operation replays first (step 0), so every one of them can surface a loss. */
+type LaneResult = { lost?: LostCommit }
+
+commit: (build: () => Promise<PendingCommit>) => Promise<LaneResult>
+recover: () => Promise<LaneResult & { advanced: boolean; reenact: Array<string> }>
+/** Replay on its own, for startup: run the lane's step 0 and hand back what it found. */
+replay: () => Promise<LaneResult>
 ```
+
+This keeps the symmetry the design has been arguing for: **`recover()` returns `reenact` and
+replay returns `lost`** — two paths where the work survived and the closure did not, now
+structurally identical rather than merely conceptually so. Neither calls back into the peer.
 
 **`commit` holds a per-group mutex for its whole run (G3).** CAS resolves races between
 devices; it says nothing about two callers on the same device. Two concurrent `build()`
@@ -343,7 +354,8 @@ a live closure over the host's current handle. **After a restart there is no clo
 process that held it is gone. So the branch routes on `kind`:
 
 **Replay never re-enacts anything. It surfaces what survived and what did not (G26)**, and the
-host commits again — for every `kind`:
+host commits again — for every `kind`. It surfaces it **as the lane operation's return value,
+after the mutex is released (G27)**, never as a callback fired under the lock:
 
 | `kind` | What replay hands back |
 |---|---|
@@ -918,12 +930,14 @@ Named so the work is sized honestly. These are the host's to absorb.
   retry, an invite re-mints both the Commit *and* the Welcome each time. This is a rewrite
   of the host's commit paths, not a call-site swap.
 - **A commit lost to a restart is handed back, not swallowed — and the host re-commits it.**
-  When replay's republish loses the CAS, the peer fires `onCommitLost`: for a `ledger` commit
-  it hands back the surviving signed tokens, which the host re-issues via an ordinary
-  `commit()`; for an `invite` or `remove` it hands back a failure notice, because `build()` was
-  a closure and the process that held it is gone. **The peer never commits on the host's
-  behalf** — the same rule that governs heal's `reenact`. A dropped removal is the case to
-  design for: the admin believes the member is evicted and they are not.
+  When replay's republish loses the CAS, the lane operation **returns** `lost`: for a `ledger`
+  commit it carries the surviving signed tokens, which the host re-issues via an ordinary
+  `commit()`; for an `invite` or `remove` it carries a failure notice, because `build()` was a
+  closure and the process that held it is gone. It is a return value and not a callback for a
+  concrete reason (G27): the host's response is to call `commit()`, and a callback fired at
+  step 0 runs **inside the lane mutex**, so the obvious handler would deadlock. **The peer
+  never commits on the host's behalf** — the same rule that governs heal's `reenact`. A dropped
+  removal is the case to design for: the admin believes the member is evicted and they are not.
 - **`onAccepted` must be idempotent.** Replay is at-least-once: a crash between `onAccepted()`
   and `clear()`, or partway through `onAccepted()` itself, re-runs it. Adopting the journalled
   handle twice is harmless; **delivering the Welcome twice is not**, so the host must make
@@ -1053,6 +1067,10 @@ heal cannot reach for want of a responder.)*
 - **Heal never nests.** A heal triggered while `commit()` is pulling does not deadlock: the
   trigger records, `commit()` unwinds and releases the lane, `recover()` runs as its own
   operation, and the re-enactment is a later `commit()` (the G13 regression test).
+- **Nothing the peer hands back is delivered under the lock (G27).** A host that responds to
+  *any* lane result — `lost`, `reenact` — by immediately calling `commit()` completes, and does
+  not deadlock. Written as a test the obvious host handler would fail if the peer ever moved
+  either one back into a callback.
 - **Ledger bootstrap.** A rejoined peer refolds the full ledger and its roster matches the
   live group's — in particular it **accepts the next commit from an admin promoted after
   genesis**, which a peer with an empty ledger would reject (the G15 liveness regression

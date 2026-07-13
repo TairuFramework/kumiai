@@ -3,11 +3,52 @@
 **Reviewer:** kubun (the host driving the requirements in `2026-07-13-host-ledger-lane.md`).
 **Subject:** `2026-07-13-control-ledger-lane-design.md`.
 
-Thirteen review passes. **The newest pass is at the top; earlier passes are kept below as the record.**
+Fourteen review passes. **The newest pass is at the top; earlier passes are kept below as the record.**
 
 ---
 
-# Revision 13 review
+# Revision 14 review
+
+**Verdict:** G26 is folded in, and folded in the right way — replay surfaces, the host commits, for every `kind`; the "peer never constructs a commit" invariant is stated and carried into the component-boundaries table.
+
+One finding, and it is precise: the *shape* of the new API violates the rule G13 established, and the obvious host implementation of it deadlocks.
+
+## G27 — `onCommitLost` fires inside the lane mutex, and the natural host implementation deadlocks
+
+**Blocking, but a signature change.** `onCommitLost` is declared as a synchronous callback returning `void`, and the design says it is **"fired from lane step 0"**. Step 0 is *inside the mutex* — the numbered list begins "Inside the mutex: 0. Replay the journal."
+
+Now write the host handler the API invites:
+
+```ts
+onCommitLost: (event) => {
+  if (event.kind === 'ledger') {
+    peer.commit(() => buildLedgerCommit(event.tokens))   // deadlock
+  }
+}
+```
+
+That is the only thing the `ledger` case can mean — "the host issues an ordinary `commit()` over them" is the design's own instruction — and `commit()` takes the per-group mutex, which the replay that fired the callback is still holding. G13's rule is explicit: *"All three operations are top-level operations on one serialized per-group lane. None of them ever calls another. The mutex is never re-entered."* A callback fired under the lock, whose documented purpose is to make the host call back into the lock, is exactly that nesting, reintroduced through a new door.
+
+Note the contrast with `recover()`, which gets this right *by construction*: it hands `reenact` back as a **return value**, delivered after the lane operation completes and the mutex is released, so the caller's follow-up `commit()` is naturally a separate lane operation. Replay is the identical situation — the design says so — but it delivers its outcome through a callback fired mid-operation instead of a value delivered after it, and that difference is the whole bug.
+
+Two ways to fix, and the first keeps the symmetry the design is already arguing for:
+
+1. **Deliver replay's outcome the way `recover()` delivers `reenact`** — as a value the lane hands back after it releases. Replay runs at step 0 of whatever lane operation the host invoked, so that operation's result carries it (or the peer exposes an explicit `replay()` lane operation whose result does). The host's follow-up `commit()` is then a fresh lane operation, queued behind the one that produced the value, with no possibility of re-entry.
+2. **Keep the callback and forbid re-entry in the contract** — `onCommitLost` MUST NOT call back into the peer; it must queue. This works, but it is a rule a host learns by deadlocking, and it makes the API's most obvious use its most dangerous one. If this route is taken, say so on the type, not in prose elsewhere.
+
+Option 1 is better: it makes the two "work survived, closure did not" paths structurally identical rather than merely conceptually identical, which is the argument the design already makes for them.
+
+## What matches, revision 14
+
+Collapsing the two rows into "replay never re-enacts anything; it surfaces what survived and what did not" is right, and the `kind` tag now has a clean job. The choice to hand back *nothing* for `remove` — rather than the demotion token that technically survived in `bodies` — is correct and worth noting: re-enacting a demotion without the eviction that was riding it would leave the member demoted but still in the group, which is a worse state than the one the admin started from. Putting "constructing commits — only the host does that" in the *Does not* column of the `rpc` row is the right place for an invariant that now governs two paths.
+
+## Closing assessment, unchanged
+
+G27 is a signature, not a structure. The design's shape has been fixed since revision 4 and the findings have narrowed monotonically: structural (G14, G21), then a method (G26), now a callback's delivery mechanism. I have nothing else, and I do not expect a fifteenth pass to produce anything but this class. Remaining risk is implementation fidelity — the `HubStore` conformance suite run against a real database over separate connections, the cursor table's rows implemented in the order written, and `onAccepted` genuinely idempotent.
+
+---
+
+# Revision 13 review (folded in — kept as the record)
 
 **Verdict:** G25 is folded in — the `kind` tag, the per-kind routing table, and the point that a silently-dropped *remove* is a security-relevant no-op rather than data loss. The reasoning for why "rebuild like any other loser" holds inside `commit()` and dies across a restart is now explicit.
 
