@@ -6,6 +6,11 @@
 
 export { defineGroupProtocol, type GroupProtocolDefinition } from '@kumiai/broadcast'
 
+export {
+  type CommitFrame,
+  decodeCommitFrame,
+  encodeCommitFrame,
+} from './commit-frame.js'
 export type { CommitContext, GroupCrypto, GroupMLS } from './crypto.js'
 export {
   asDeliveryPosition,
@@ -22,14 +27,23 @@ export {
   type HandshakeKind,
 } from './handshake.js'
 export {
+  createLedgerEntryResolver,
+  decodeLedgerEntries,
+  encodeLedgerEntries,
+} from './ledger-entries.js'
+export {
   createMemoryGroupMLS,
+  encodeMemoryCommit,
   type MemoryGroupMLS,
   type MemoryGroupMLSOptions,
+  MissingLedgerEntriesError,
+  memoryEntryID,
 } from './memory-group-mls.js'
 export {
   createGroupPeer,
   type GroupPeer,
   type GroupPeerParams,
+  type LocalCommitOptions,
   type ProtocolSurface,
 } from './peer.js'
 export {

@@ -27,6 +27,22 @@ export type CommitContext = {
    * authorization boundary.
    */
   senderDID?: string
+  /**
+   * The bodies riding this Commit's own frame: the signed control-ledger tokens it
+   * enacts, sealed under the epoch the Commit is framed at. The port wires this into
+   * the MLS handle's entry resolver for the duration of this commit, so the entries the
+   * Commit names resolve from the frame that carries them — no prior delivery, no store.
+   *
+   * It is a resolver, not a value, and that is load-bearing: it opens the blob only when
+   * the port asks, and the port asks only for a Commit it is applying — one framed at
+   * the epoch this peer is at, which is the epoch the blob is sealed under. A frame this
+   * peer cannot apply never has its blob touched.
+   *
+   * Answers with the tokens sealed into the frame; the port binds each to the id it
+   * asked for by digesting it (a responder can fail to answer, never inject), and gets
+   * nothing at all for a blob that cannot be opened.
+   */
+  resolveLedgerEntries?: (ids: Array<string>) => Promise<Array<string>>
 }
 
 /**
@@ -59,6 +75,16 @@ export type GroupMLS = {
    * tolerated — the caller treats it as no advance — but returning is preferred.
    */
   applyRecovery(groupInfo: Uint8Array): Promise<{ advanced: boolean }>
+  /**
+   * The signed control-ledger tokens this member holds for the given content ids,
+   * omitting any it does not hold. It serves another member's request for the bodies
+   * of entries it lacks — the one case a commit frame cannot cover, because a peer that
+   * rejoined by external commit was handed no ledger with its GroupInfo.
+   *
+   * The requester re-verifies every token and checks its digest against the id it asked
+   * for, so an implementation that answers with the wrong body can only fail to answer.
+   */
+  getLedgerEntries(ids: Array<string>): Promise<Array<string>>
   /**
    * The epoch-independent secret for the non-rotating handshake/recovery topic.
    * Stable for the group's whole life so a stranded peer on any epoch can always

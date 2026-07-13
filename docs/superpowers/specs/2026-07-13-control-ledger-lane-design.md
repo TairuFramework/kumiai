@@ -1,7 +1,7 @@
 # Design: the control-ledger lane
 
-**Status:** design, revision 24 (2026-07-13). Reviewed fourteen times by kubun in
-`2026-07-13-control-ledger-lane-review.md`; G1–G27 are folded in below. Revisions 16–24 fold in
+**Status:** design, revision 25 (2026-07-13). Reviewed fourteen times by kubun in
+`2026-07-13-control-ledger-lane-review.md`; G1–G27 are folded in below. Revisions 16–25 fold in
 the implementation probes: `NotSubscribedError`, a `trim` primitive, a 30-day default
 window, two retention classes with subscriber-requested durations, **G28 — the commit lane must
 not outrun the mailbox**, which silently destroys downloaded messages, **G29 — `head` advances
@@ -18,7 +18,9 @@ bootstrap's two host obligations: **the handle mutex is not reentrant** (reading
 inside `resolveLedgerEntries` deadlocks), and **a responder must gate its gather reply on
 `isLedgerComplete()`** or it answers with an empty ledger. Revision 24 splits the hub port —
 **`MailboxHub` / `LogHub`** — because `HubLike` named both the hub a peer is handed and the
-mailbox-only adapter views that are not hubs at all.
+mailbox-only adapter views that are not hubs at all. Revision 25 records that **D3 forces D1's
+commit-path inversion**: a committer that has already adopted its own commit has rotated past the
+epoch secret its bodies must be sealed under, so apply-then-announce cannot carry them at all.
 **Supersedes:** the requirements in `../../agents/plans/next/2026-07-13-host-ledger-lane.md`
 (R1/R2/R3), which stays as the origin record.
 **Scope:** `@kumiai/mls`, `@kumiai/rpc`, `@kumiai/hub-protocol`, `@kumiai/hub-server`,
@@ -1035,6 +1037,17 @@ the commit either. It processes the log in sequence order, and each commit's blo
 unwrappable by the time that commit is the next one it can apply.
 
 The MLS control envelope stays ids-only. This is the transport frame, not the AAD.
+
+**D3 forces D1's commit-path inversion; the two are one decision.** The bodies are sealed under
+the epoch the commit is *framed* at, and the receiver resolves them **before** it applies the
+commit — mls's pre-pass runs ahead of `mlsProcessMessage`. So a committer that has **already
+adopted** its own commit has rotated past that secret and can seal the bodies **for nobody**.
+Apply-then-announce is therefore not a contract bodies can ride on: `localCommitted(commit)` —
+"a Commit the consumer just produced *and already applied locally*" — cannot carry them. The peer
+must **seal, publish, and only then adopt**, and a consumer that adopts first must be **told**,
+not silently allowed to publish a blob nobody can open. That is exactly D1's `commit(build)` with
+`onAccepted` as the adoption point and `PendingCommit.bodies` as the entries — the two decisions
+are the same one seen from either end.
 
 **Resolution and catch-up.** The peer supplies the resolver the host wires into
 `GroupHandleParams.resolveLedgerEntries`. It serves from the bodies unwrapped from the

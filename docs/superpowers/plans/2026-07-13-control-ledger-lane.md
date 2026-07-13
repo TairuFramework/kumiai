@@ -275,6 +275,18 @@ frames are still undecrypted.
   reusing the source handle across a retry. Both pass a single-committer test; the second is the
   hazard `commitLedgerEntries` documents ("two commits issued from the same source handle both
   frame at that handle's epoch and diverge").
+- **Carried from question 3.2 — most of the inversion is already built.** D3 could not be built on
+  apply-then-announce (the bodies are sealed under the epoch the commit is *framed* at, so a
+  committer that already adopted can seal them for nobody), so `localCommitted` is already
+  `(commit, { ledgerEntries, adopt })`: seal → publish → `adopt()` → rebuild, erroring if the host
+  adopted first. **`adopt` is `onAccepted`; `ledgerEntries` is `PendingCommit.bodies`.** Absorb it
+  into `commit(build)` — do not re-derive it.
+- **Carried from question 3.2 — a decision to make deliberately, not by accident.** *Does the journal
+  hold the bodies or the sealed frame?* Replay can only **re-seal** the bodies if the peer is still
+  at the pre-commit epoch — which it is, because adoption happens in `onAccepted` and a crash before
+  acceptance means no adoption. **But that holds by an argument, not by construction.** Journalling
+  the **sealed frame** makes it hold by construction, at the cost of a journal holding ciphertext it
+  cannot re-key. Pick one on purpose and say why.
 - **Carried from question 3.1 — this question owns it.** *The pull hands a peer back its own commit
   frames; push never did.* The hub excludes a sender from its own delivery, but a **log is not
   delivery-filtered**, so the committer reads its own frame back and would apply a commit it has
@@ -302,6 +314,17 @@ frames are still undecrypted.
   passes the G18 test perfectly. It also routes policy-rejected commits and missing-bodies frames to
   `recover()` — so any member, including a removed one, forces the **entire group** into a recovery
   storm with one publish, repeatable at will.
+- **Carried from question 3.2 — the failure next door, and worse.** *The port must not **throw** on
+  an inapplicable frame.* The lane's rule is "a throw leaves the cursor put and the frame is read
+  again". So a `GroupMLS` adapter that lets ts-mls throw on a commit from an epoch it is not at
+  **wedges the late joiner on its own add-commit forever.** The adapter must return
+  `{ advanced: false }` for a frame it cannot apply, and throw **only** for one it *should* have been
+  able to apply and could not (the resolver miss). This table is where that line gets drawn
+  explicitly.
+- **Carried from question 3.2 — the one place tempted to grow a `console.warn`.** A peer never learns
+  that a blob failed to open: the resolver swallows the failure into "no entries", and there is no
+  channel by which it can be surfaced as corruption. When this question adds diagnostics, **that
+  catch must stay silent** — a blob this peer cannot open is ordinary history.
 - **Carried from question 3.1 — a real hole, currently invisible.** *A recovered peer will re-apply
   the stale commits still in the log.* After `applyRecovery` jumps it to epoch M, its
   `reconciledHead` is unchanged, so the next pull walks frames from epochs it has already passed.
@@ -1033,3 +1056,91 @@ implements them, they are two types.
    passed. Dropping them needs stale-epoch classification, which is question 3.4's table. **No test
    catches it today because the recovery tests have no commit frames on the topic** — a real hole,
    currently invisible. 3.4 now owns it, and owns writing that test.
+
+---
+
+### 2026-07-13 — Question 3.2: Do bodies ride the commit frame, and is classification before unwrap?
+
+**Findings: yes, both.** `rpc` 93/93 (77 → 93: +7 codec, +5 lane, +4 port; none removed). `mls` 283,
+integration 23, build and lint clean.
+
+**The three-member test lands with no gather.** An admin enacts an entry, the third member has never
+seen the body, and it applies the commit on **first delivery**. The no-gather assertion is over the
+wire: `asksOnTheWire` is *every message any peer published on any topic that is not the commit
+topic* — an app-lane gather, a rendezvous request, a directed ask, all of them land in it — and it
+must be empty. With "the commit topic carries exactly one frame", the entire cost of enacting an
+entry a member had never seen is **one commit**. A `leakedBody` scan over every published payload
+confirms the hub carried the body and never saw it.
+
+**The mutation check is the sharpest of the plan so far: 92 of 93 pass.** Unwrap-in-parse — decode
+the frame, and you have a commit and some bodies — passes the three-member deliverable, every
+catch-up test, every reconnect test, every lifecycle test. The cursor advances on both rows, so
+nothing stalls and nothing diverges. One test fails:
+
+```
+1. a late joiner walks the commit that added it — a frame it can never open — and calls none of it malformed
+   AssertionError: expected 1 to be 2
+```
+
+That is `seen()`: Dave was handed **one** commit instead of two. **The frame that created him never
+reached MLS** — it was caught and logged as malformed, because its blob is sealed under the epoch
+before he was a member. Every number a user or a test would look at is **identical**: his epoch, his
+ledger, his commit count, the absence of a heal. The only trace of the lie is in the log — which is
+exactly the day it costs someone.
+
+`seen()` is what gives the test teeth: the double now counts *every commit the lane handed to
+`processCommit`* separately from *the ones it applied*, and a frame dropped as malformed reaches
+neither. Nothing else in the peer's observable state distinguishes the two implementations.
+
+**Two test doubles were made faithful about the thing the question turns on.** `FakeCrypto` is now
+epoch-keyed — `unwrap` **throws** for bytes sealed under any other epoch — and `MemoryGroupMLS`'s
+commits are epoch-framed. "Cannot open" became a real property rather than a claim, and every
+pre-existing commit-lane test got strictly stronger. (Nothing in `peer.ts` looks at an epoch: that is
+modelling, not classification.)
+
+**Parse and unwrap are kept apart structurally — and the probe is honest about where that stops.**
+The codec module has **no crypto in scope**: `decodeCommitFrame` reads a `u32` and takes two
+subarrays, and *cannot* decrypt anything. The blob leaves the lane as a **resolver, not a value**, so
+it is opened only if the port asks, and the port asks only while applying a commit — at the epoch the
+blob is sealed under. A blob that will not open yields **no entries, not an error**, so there is no
+code path on which a failed decryption *can* be reported as corruption. What is not structural:
+nothing stops a future edit from `await`ing that resolver eagerly in `pullCommits`. The test holds
+that line; the type system does not.
+
+**Spec impact: revision 25 — D3 forces D1's commit-path inversion, and it could not be deferred.**
+
+The bodies are sealed under the epoch the commit is **framed at**, and the receiver resolves them
+*before* it applies the commit (mls's pre-pass runs ahead of `mlsProcessMessage`). **A committer that
+has already adopted its own commit has rotated past that secret and can seal the bodies for nobody.**
+So `localCommitted(commit)` — "a Commit the consumer just produced *and already applied locally*" —
+is not a contract bodies can ride on. It is now `localCommitted(commit, { ledgerEntries, adopt })`:
+seal, publish, `adopt()`, rebuild — with a **hard error** if the host adopted first, rather than
+silently publishing a blob nobody can open. That is D1's `commit(build)` seen from the other end:
+`adopt` **is** `onAccepted`, and `ledgerEntries` **is** `PendingCommit.bodies`. Question 3.3 absorbs
+it rather than re-deriving it.
+
+**Learned:** two decisions the spec presents as separable — "bodies ride the frame" (D3) and "the
+commit path inverts" (D1) — are one decision. The proof is mechanical: the seal needs the pre-commit
+epoch secret, and adoption destroys it. Writing them as separate sections is what allowed
+`localCommitted`'s apply-then-announce contract to survive fourteen review passes while being
+incompatible with the body design two sections down.
+
+**Three things handed forward, all written into the questions that own them:**
+
+1. **3.4 — the port must not *throw* on an inapplicable frame.** The lane's rule is "a throw leaves
+   the cursor put and the frame is read again", so an adapter that lets ts-mls throw on a commit from
+   an epoch it is not at **wedges the late joiner on its own add-commit forever** — the failure next
+   door to this one, and worse. Return `{ advanced: false }`; throw only for a frame it *should* have
+   been able to apply (the resolver miss).
+2. **3.4 — the resolver's `catch` must stay silent.** A peer never learns that a blob failed to open,
+   and there is no channel by which it could be surfaced as corruption. That catch is the one place
+   tempted to grow a `console.warn` when diagnostics land.
+3. **3.3 — journal the bodies, or the sealed frame?** Replay can only re-seal if the peer is still at
+   the pre-commit epoch, which it is (adoption is in `onAccepted`; a crash before acceptance means no
+   adoption). **That holds by an argument, not by construction.** Journalling the sealed frame makes
+   it hold by construction. A deliberate choice, not an accident.
+
+**One release-time item, noted and not fixed:** `HANDSHAKE_VERSION` is still `1` while the commit
+payload's shape changed under it, so a pre-3.2 frame now decodes as a **truncated commit frame**
+rather than a version mismatch. It is the one remaining route by which ordinary history reads as
+corruption. Moot pre-1.0 with no deployed peers; needs a bump at the first release shipping both.

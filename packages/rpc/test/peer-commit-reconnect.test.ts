@@ -1,10 +1,9 @@
 import type { ProtocolDefinition } from '@enkaku/protocol'
 import { describe, expect, test } from 'vitest'
 
-import { encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import { createMemoryGroupMLS } from '../src/memory-group-mls.js'
 import { createGroupPeer } from '../src/peer.js'
-import { commitTopic } from '../src/topic.js'
+import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 
@@ -34,20 +33,6 @@ function makeDurablePeer(hub: DurableFakeHub, localDID: string, recoverySecret: 
   return { peer, crypto, mls }
 }
 
-function publishCommit(
-  hub: DurableFakeHub,
-  senderDID: string,
-  recoverySecret: Uint8Array,
-  commit: Uint8Array,
-): Promise<{ sequenceID: string }> {
-  return hub.publish({
-    senderDID,
-    topicID: commitTopic(recoverySecret),
-    payload: encodeHandshakeFrame(HANDSHAKE_KIND.commit, commit),
-    retain: 'log',
-  })
-}
-
 describe('the commit lane across a disconnect', () => {
   test('a redelivered commit is not applied twice; a missed one is caught up by the pull', async () => {
     const hub = new DurableFakeHub()
@@ -56,7 +41,7 @@ describe('the commit lane across a disconnect', () => {
     await flush()
 
     // Online: a Commit is delivered, and applied once.
-    await publishCommit(hub, 'alice', recoverySecret, new Uint8Array([1]))
+    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
     await flush()
     expect(bob.mls.epoch()).toBe(2)
     expect(bob.mls.commits()).toBe(1)
@@ -71,7 +56,7 @@ describe('the commit lane across a disconnect', () => {
 
     // Offline: a Commit lands while bob is detached, so no push reaches him.
     hub.detach('bob')
-    await publishCommit(hub, 'alice', recoverySecret, new Uint8Array([2]))
+    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 2 })
     await flush()
     expect(bob.mls.epoch()).toBe(2)
 

@@ -1,10 +1,10 @@
 import type { ProtocolDefinition } from '@enkaku/protocol'
 import { describe, expect, test } from 'vitest'
 
-import { encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import { createMemoryGroupMLS } from '../src/memory-group-mls.js'
 import { createGroupPeer } from '../src/peer.js'
 import { commitTopic, protocolTopic, rendezvousTopic } from '../src/topic.js'
+import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 
@@ -33,21 +33,6 @@ function makeMLSPeer(hub: FakeHub, localDID: string, recoverySecret: Uint8Array)
     handlers: { chat: {} } as never,
   })
   return { peer, crypto, mls }
-}
-
-/** Append a Commit to the group's commit log, the way a committing member does. */
-function publishCommit(
-  hub: FakeHub,
-  senderDID: string,
-  recoverySecret: Uint8Array,
-  commit: Uint8Array,
-): Promise<{ sequenceID: string }> {
-  return hub.publish({
-    senderDID,
-    topicID: commitTopic(recoverySecret),
-    payload: encodeHandshakeFrame(HANDSHAKE_KIND.commit, commit),
-    retain: 'log',
-  })
 }
 
 describe('control lane lifecycle', () => {
@@ -141,7 +126,7 @@ describe('control lane lifecycle', () => {
     const secret = await bob.crypto.exportSecret()
     expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(2)
 
-    await publishCommit(hub, 'alice', recoverySecret, new Uint8Array([1]))
+    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
     await flush()
 
     expect(bob.mls.epoch()).toBe(2)
@@ -160,7 +145,14 @@ describe('control lane lifecycle', () => {
     await flush()
 
     const secret = await bob.crypto.exportSecret()
-    await publishCommit(hub, 'alice', recoverySecret, new Uint8Array())
+    // A Commit with no bytes: read as a frame, but nothing a member can apply.
+    await publishCommit({
+      hub,
+      senderDID: 'alice',
+      recoverySecret,
+      epoch: 1,
+      commit: new Uint8Array(),
+    })
     await flush()
 
     expect(bob.mls.epoch()).toBe(1)
@@ -180,9 +172,11 @@ describe('control lane lifecycle', () => {
     const secret = await alice.crypto.exportSecret()
     expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(2)
 
-    // Alice produced a Commit and already applied it locally: advance her epoch.
-    alice.crypto.setEpoch(2)
-    await alice.peer.localCommitted(new Uint8Array([7]))
+    // Alice produced a Commit and has NOT adopted it: the group is still at the epoch it
+    // was framed at, which is the epoch its bodies must be sealed under. She adopts it
+    // once the hub has the frame.
+    const commit = alice.mls.buildCommit()
+    await alice.peer.localCommitted(commit, { adopt: () => alice.mls.adopt(commit) })
     await flush()
 
     // Bob pulled the Commit, advanced, and resynced; Alice rebuilt to epoch 2.

@@ -6,6 +6,7 @@ import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../s
 import { createMemoryGroupMLS } from '../src/memory-group-mls.js'
 import { createGroupPeer } from '../src/peer.js'
 import { commitTopic, protocolTopic, rendezvousTopic } from '../src/topic.js'
+import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 
@@ -36,20 +37,6 @@ function makeMLSPeer(hub: LogHub, localDID: string, recoverySecret: Uint8Array, 
   return { peer, crypto, mls }
 }
 
-function publishCommit(
-  hub: FakeHub,
-  senderDID: string,
-  recoverySecret: Uint8Array,
-  commit: Uint8Array,
-): Promise<{ sequenceID: string }> {
-  return hub.publish({
-    senderDID,
-    topicID: commitTopic(recoverySecret),
-    payload: encodeHandshakeFrame(HANDSHAKE_KIND.commit, commit),
-    retain: 'log',
-  })
-}
-
 /** Every recovery request this peer group put on the wire. */
 function recoveryRequests(hub: FakeHub, recoverySecret: Uint8Array): Array<unknown> {
   const topic = rendezvousTopic(recoverySecret)
@@ -71,8 +58,8 @@ describe('the commit lane is pull-driven', () => {
     // Dave is invited at epoch 1 — his Welcome names that epoch — but the group commits
     // twice more before he gets as far as subscribing. Nothing will ever push those two
     // frames at him: he was not a subscriber when they were published.
-    await publishCommit(hub, 'alice', recoverySecret, new Uint8Array([1]))
-    await publishCommit(hub, 'alice', recoverySecret, new Uint8Array([2]))
+    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
+    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 2 })
 
     const dave = makeMLSPeer(hub, 'dave', recoverySecret, 1)
     await flush()
@@ -96,8 +83,13 @@ describe('the commit lane is pull-driven', () => {
   test('a peer that has processed nothing seeds from the log, not from the head', async () => {
     const hub = new FakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x12)
-    await publishCommit(hub, 'alice', recoverySecret, new Uint8Array([1]))
-    const { sequenceID } = await publishCommit(hub, 'alice', recoverySecret, new Uint8Array([2]))
+    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
+    const { sequenceID } = await publishCommit({
+      hub,
+      senderDID: 'alice',
+      recoverySecret,
+      epoch: 2,
+    })
 
     // The head is right there in the topic, and it names a commit the joiner has never
     // applied. A cursor seeded from it would skip both frames and strand him.
@@ -120,7 +112,7 @@ describe('the commit lane is pull-driven', () => {
     // An accepted log frame is pushed AND retained. Both online peers see it twice —
     // once as a delivery, once in the log — and must apply it exactly once: the push is
     // a wakeup, and the frames come from the pull.
-    await publishCommit(hub, 'alice', recoverySecret, new Uint8Array([1]))
+    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
     await flush()
 
     expect(bob.mls.commits()).toBe(1)
@@ -139,16 +131,16 @@ describe('the commit lane is pull-driven', () => {
     const bob = makeMLSPeer(hub, 'bob', recoverySecret)
     await flush()
 
-    // Alice produced this Commit and applied it before announcing it. The log hands her
-    // back her own frame — push never did, because the hub excludes the sender.
-    alice.crypto.setEpoch(2)
-    await alice.peer.localCommitted(new Uint8Array([7]))
+    // Alice produced this Commit and adopts it as the hub takes it. The log hands her back
+    // her own frame — push never did, because the hub excludes the sender.
+    const own = alice.mls.buildCommit()
+    await alice.peer.localCommitted(own, { adopt: () => alice.mls.adopt(own) })
     await flush()
     expect(alice.mls.commits()).toBe(0)
 
     // Another member commits next, waking alice. Her cursor walks over her own frame on
     // the way, so she applies theirs and only theirs, and never re-applies hers.
-    await publishCommit(hub, 'zoe', recoverySecret, new Uint8Array([8]))
+    await publishCommit({ hub, senderDID: 'zoe', recoverySecret, epoch: 2 })
     await flush()
 
     expect(alice.mls.commits()).toBe(1)
@@ -178,7 +170,7 @@ describe('the commit lane is pull-driven', () => {
       payload: encodeHandshakeFrame(HANDSHAKE_KIND.recoveryRequest, new Uint8Array([1])),
       retain: 'log',
     })
-    await publishCommit(hub, 'alice', recoverySecret, new Uint8Array([1]))
+    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
     await flush()
 
     expect(bob.mls.epoch()).toBe(2)

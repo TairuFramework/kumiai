@@ -15,12 +15,14 @@ import type { StoredMessage } from '@kumiai/hub-protocol'
 import type { LogHub } from '@kumiai/hub-tunnel'
 
 import { createGroupBusServer } from './bus-server.js'
+import { type CommitFrame, decodeCommitFrame, encodeCommitFrame } from './commit-frame.js'
 import type { GroupCrypto, GroupMLS } from './crypto.js'
 import { asLogPosition, type LogPosition } from './cursor.js'
 import { createDirectedClient, createInboxAcceptor } from './directed.js'
 import { adaptBusHandlers } from './handlers.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from './handshake.js'
 import { createHubMux, type HubMux } from './hub-mux.js'
+import { createLedgerEntryResolver, encodeLedgerEntries } from './ledger-entries.js'
 import {
   decodeRecoveryReply,
   decodeRecoveryRequest,
@@ -69,14 +71,36 @@ export type ProtocolSurface<Protocol extends ProtocolDefinition> = {
   to: (memberDID: string) => Client<Protocol>
 }
 
+export type LocalCommitOptions = {
+  /**
+   * The signed control-ledger tokens this Commit enacts. They ride the commit's own
+   * frame, sealed under the epoch secret the Commit is framed at, so every member that
+   * can apply the Commit already has its bodies. Nothing is published ahead of the
+   * commit, and no member has to ask for a body it has never seen.
+   */
+  ledgerEntries?: Array<string>
+  /**
+   * Adopt the post-commit MLS state. Run once the hub has the frame, before the peer
+   * rebuilds its app lane at the new epoch. It is the consumer's own handle swap — the
+   * peer owns no MLS state and only needs to know WHEN it happened.
+   */
+  adopt?: () => void | Promise<void>
+}
+
 export type GroupPeer<Protocols extends Record<string, ProtocolDefinition>> = {
   protocol: <K extends keyof Protocols>(name: K) => ProtocolSurface<Protocols[K]>
   /**
-   * Announce a Commit the consumer just produced (and already applied locally):
-   * append it to the commit log and rebuild this peer's app topics to the
-   * now-current epoch. No-op when the peer has no MLS port.
+   * Announce a Commit the consumer has produced but NOT yet adopted: seal the ledger
+   * entries it enacts under the current — pre-commit — epoch secret, append the frame to
+   * the commit log, adopt, and rebuild this peer's app topics at the epoch it moved to.
+   * No-op when the peer has no MLS port.
+   *
+   * The order is the contract: the bodies must be sealed under the epoch every receiver
+   * of this Commit is at, which is the epoch the group is at until this Commit is
+   * adopted. A consumer that adopts first can no longer seal them for anybody, and is
+   * told so rather than publishing a blob no member can open.
    */
-  localCommitted: (commit: Uint8Array) => Promise<void>
+  localCommitted: (commit: Uint8Array, options?: LocalCommitOptions) => Promise<void>
   /**
    * Deep recovery for a peer stranded past the commit log's trim window: request
    * current state on the rendezvous topic, apply the first reply, and resync.
@@ -344,8 +368,25 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           reconciledHead = position // the commit lane carries commits, and nothing else
           continue
         }
-        const { advanced } = await port.processCommit(frame.payload, {
+        // Split the frame into the commit and the sealed blob of the bodies it enacts.
+        // This reads bytes and decrypts NOTHING: a peer walking the log reaches frames
+        // sealed under epochs it does not hold — a late joiner reaches the very commit
+        // that added it — and a blob it cannot open is history, not poison. Opening it is
+        // a consequence of "I can apply this commit", never a precondition of reading it.
+        let commitFrame: CommitFrame
+        try {
+          commitFrame = decodeCommitFrame(frame.payload)
+        } catch {
+          reconciledHead = position // malformed: dropped, and the cursor still steps over it
+          continue
+        }
+        const { advanced } = await port.processCommit(commitFrame.commit, {
           senderDID: message.senderDID,
+          // The resolver, not the bodies: the blob is opened only if the port asks for
+          // the entries this commit names, and it asks only for a commit it is applying —
+          // one framed at the epoch this peer is at, which is the epoch the blob is sealed
+          // under. That is what makes body delivery atomic with the commit.
+          resolveLedgerEntries: createLedgerEntryResolver(commitFrame.sealedEntries, crypto.unwrap),
         })
         if (advanced) advancedEpoch = true
         reconciledHead = position
@@ -418,19 +459,38 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
 
   // Append a locally-produced Commit to the log and rebuild this peer's app topics.
   // Rides the same serial tail as the pull so it never interleaves with one.
-  const localCommitted = async (commit: Uint8Array): Promise<void> => {
+  const localCommitted = async (
+    commit: Uint8Array,
+    options?: LocalCommitOptions,
+  ): Promise<void> => {
     await ready
     if (mls == null || commitTopicID == null) return
     const topicID = commitTopicID
-    const frame = encodeHandshakeFrame(HANDSHAKE_KIND.commit, commit)
     await runSerial(async () => {
+      // The bodies are sealed under the epoch secret the Commit is FRAMED at — the epoch
+      // every member that can apply it is at, and the one the local group is still at
+      // until this Commit is adopted. A consumer that adopted first has already rotated
+      // past it and can seal them for nobody, so say so instead of publishing a blob no
+      // member can open.
+      if (crypto.epoch() !== epoch) {
+        throw new Error(
+          'localCommitted: the local group has already advanced past the epoch this commit was framed at. Announce a commit before adopting it.',
+        )
+      }
+      const sealedEntries = await crypto.wrap(encodeLedgerEntries(options?.ledgerEntries ?? []))
+      const payload = encodeHandshakeFrame(
+        HANDSHAKE_KIND.commit,
+        encodeCommitFrame(commit, sealedEntries),
+      )
       // Log class: this frame must still be there for a member invited tomorrow, long
       // after every current subscriber has acked it.
-      const { sequenceID } = await mux.publish({ topicID, payload: frame, retain: 'log' })
-      // The consumer applied this Commit before announcing it, and a pull reads back the
-      // peer's own frames. Remember it so the pull steps over it instead of applying it
-      // twice.
+      const { sequenceID } = await mux.publish({ topicID, payload, retain: 'log' })
+      // A pull reads back the peer's own frames. Remember this one so the cursor steps
+      // over it instead of handing this peer back a commit it produced.
       selfCommitted.add(asLogPosition(sequenceID))
+      // The hub has the frame: the Commit is the group's now. The consumer adopts it,
+      // and only then does the app lane move to the epoch it reached.
+      await options?.adopt?.()
       await rebuildEpoch()
       // Pull immediately: no push comes back for a frame this peer published, so this is
       // what carries the cursor over it — and it picks up anything that landed alongside.
