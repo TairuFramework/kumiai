@@ -3,11 +3,68 @@
 **Reviewer:** kubun (the host driving the requirements in `2026-07-13-host-ledger-lane.md`).
 **Subject:** `2026-07-13-control-ledger-lane-design.md`.
 
-Seven review passes. **The newest pass is at the top; earlier passes are kept below as the record.**
+Eight review passes. **The newest pass is at the top; earlier passes are kept below as the record.**
 
 ---
 
-# Revision 7 review
+# Revision 8 review
+
+**Verdict:** G18 is folded in, with the trigger, the cursor row, the ordering note, the `inFlight`-is-empty consequence, and the Deferred-journal demotion all correct.
+
+But the new row introduced a defect of its own. **G19 is blocking, and it is member-triggerable**: as worded, the un-merged own-commit trigger is *strictly dominant* over the two rows beneath it, so any member — including a removed one — can force every peer in the group into a recovery storm with a single publish.
+
+## G19 — The un-merged own-commit trigger swallows every unapplicable frame at the current epoch
+
+**Blocking.** The trigger reads:
+
+> **Un-merged own commit.** A valid frame framed at the peer's **current** epoch that it cannot apply.
+
+and the cursor table puts that row **above** the poison row, deliberately (G18's own note: "otherwise a healthy own-commit is filed as poison").
+
+Now read the predicate literally. "A valid frame at my current epoch that I cannot apply" describes the un-merged own commit — and it *also* describes:
+
+- a **policy-rejected** commit (`CommitRejectedError`) at the current epoch — a well-formed frame the peer deliberately refuses;
+- a frame that throws **`MissingLedgerEntriesError`** at the current epoch — well-formed, and *by definition* at the current epoch, since that is the only epoch whose frames a peer tries to resolve.
+
+Both already have rows, and both are below the G18 row, so the G18 row wins. The frame a peer is *about to apply* is always at its current epoch — that is what "next frame" means — so the new row captures essentially every non-applied frame in the normal path. `MissingLedgerEntriesError`, which D3 is at pains to keep as "the one retryable outcome", now routes to `recover()` instead of a gather. And a poison commit routes to `recover()` instead of being dropped.
+
+**That last one is a group-wide DoS, and any member can pull it.** The hub is blind: it does not know the roster and cannot judge a commit. So a member — or a **removed** member, who keeps `commitTopic` and its subscription forever, as the design's own "Accepted exposure" section establishes — publishes one well-formed, policy-rejected commit, CAS'd at the current head. The hub accepts it (it accepts bytes). Every honest peer pulls it, finds a valid frame at its current epoch that it cannot apply, and heals: a rendezvous request, a sealed GroupInfo from every responder, an external commit, and CAS contention — from every member of the group, at once. Repeat at will.
+
+**Fix: the discriminator is authorship, not applicability.** The condition the design actually means is *"my own commit, which I never merged"*. So test that:
+
+> A valid frame framed at the peer's current epoch **whose committer is this peer** and which it cannot merge.
+
+The committer is readable without applying the frame — `defaultCommitPolicy` already resolves a proposal's sender leaf to a DID via `didOfLeaf`, and `envelope-fold` resolves an external commit's author from its UpdatePath leaf credential. So the row becomes:
+
+| Frame | Cursor |
+|---|---|
+| At the peer's current epoch, **committed by this peer**, unmergeable (pending state lost) | do not advance; heal trigger → `recover()` |
+
+With authorship in the predicate the row stops overlapping the others: a policy-rejected commit from someone else is poison (advance, drop), a `MissingLedgerEntriesError` is a gather (do not advance, retry), and only the peer's own orphaned commit heals. The ordering note in G18 stays correct and becomes narrow enough to be safe.
+
+## G20 — The "accepted exposure" analysis covers reads, not writes
+
+**Not blocking on its own; it is what makes G19 dangerous, and it should be reasoned about explicitly.**
+
+The design carefully analyses what a removed member can *read* from `commitTopic` (retained history; no confidentiality delta; a metadata delta, accepted). It never analyses what a removed member — or any member — can *write* to it.
+
+Under the old mailbox semantics, a garbage commit from an ex-member was a message honest peers ignored. Under D1 the commit topic is **the group's serialization point**, and the hub authorizes publishes without knowing the roster. So an ex-member's publish:
+
+- **advances the head**, which every honest committer must now CAS against;
+- forces every peer to fetch, parse, classify, and drop the frame;
+- and, with G19 unfixed, triggers a full group-wide recovery.
+
+Even with G19 fixed, this is worth a line in the exposure section rather than an omission: an ex-member can inject noise into the group's serialization lane indefinitely, costing every honest commit an extra CAS round and every peer a wasted pull. That is DoS-class and consistent with the design's stated posture ("the hub can already drop, delay, reorder and partition"), but it is a *new* capability handed to *members*, not to the hub — and the exposure section is the place to say so. If it ever needs bounding, the lever is the same one the design already rejected for reads (rotating the topic on removal), which suggests recording now that the write side was considered and accepted, so it is not rediscovered as a surprise.
+
+## What matches, revision 8
+
+The G18 trigger is right in substance — `readMessageEpoch` as the discriminator between "history" and "the frame I should be able to apply" is exactly the observation, and the reasoning for why nothing else fires (invariant passes, trim doesn't, fork doesn't) is correct and worth having written down. The `inFlight`-is-empty-after-crash note composing with G17's membership filter is a genuinely nice piece of consistency. Demoting the durable-commit journal from silently-load-bearing to a stated optimization is right.
+
+Minor editorial: the heal-triggers section still opens "Retained for the **two** cases CAS cannot cover" and then lists three.
+
+---
+
+# Revision 7 review (folded in — kept as the record)
 
 **Verdict:** G16 and G17 are folded in, and both correctly. The completeness invariant (`computeHead(ids(handle.ledger))` vs the handle's own `ledger_head`) as a *self-describing* bootstrap trigger is the right shape — it needs no memory of how the peer got broken. And "re-enact by ledger membership, never by failure mode" collapses the three heal paths into a single set-difference, which is strictly better than telling them apart.
 

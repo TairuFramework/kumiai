@@ -394,14 +394,31 @@ timing heuristic in revision 1 is gone (G4).
   see both frames. The loser rejoins by external commit onto the winner's branch and
   re-enacts its entries; entry tokens are epoch-independent, so re-enactment needs no
   re-signing.
-- **Un-merged own commit (G18).** A valid frame framed at the peer's **current** epoch that
-  it cannot apply. This is the crash-window victim: the hub accepted its commit, the group
-  advanced, and the pending state died with the process — MLS *merges* a pending commit, it
-  does not *process* one, so the peer can never apply the frame that is its own commit. The
-  condition cannot arise for a healthy peer: a frame at your current epoch is by definition
-  the next commit you should be able to apply. `readMessageEpoch` reads a frame's epoch
-  without applying it, which is what separates this from ordinary history. Action:
-  `recover()`.
+- **Un-merged own commit (G18, narrowed by G19).** A valid frame framed at the peer's
+  **current** epoch **whose committer is this peer**, which it cannot merge. This is the
+  crash-window victim: the hub accepted its commit, the group advanced, and the pending state
+  died with the process — MLS *merges* a pending commit, it does not *process* one, so the
+  peer can never apply the frame that is its own commit. Action: `recover()`.
+
+  **The discriminator is authorship, not applicability.** "A valid frame at my current epoch
+  that I cannot apply" — revision 8's wording — is not a description of this condition, it is
+  a description of *every* frame a peer fails to apply, since the frame you are about to
+  apply is always at your current epoch. It swallows the two rows beneath it: a
+  policy-rejected commit (well-formed, deliberately refused) and a `MissingLedgerEntriesError`
+  frame (well-formed, and *by definition* at the current epoch, since that is the only epoch
+  whose frames a peer resolves). Left that way it is a **member-triggerable group-wide DoS**:
+  the hub is blind and cannot judge a commit, so any member — including a removed one, who
+  keeps `commitTopic` and its subscription forever — publishes one well-formed,
+  policy-rejected commit at the current head, and *every* honest peer heals at once. A
+  rendezvous, a sealed GroupInfo from every responder, an external commit, and CAS contention,
+  from the whole group, repeatable at will.
+
+  Both `readMessageEpoch` (the frame's epoch) and the committer's DID (`policy.ts`'s
+  `didOfLeaf` over the commit's `senderLeafIndex`) are readable **without applying the
+  frame**, and the committer is MLS-authenticated, so authorship cannot be forged. With
+  authorship in the predicate the row stops overlapping its neighbours: someone else's
+  policy-rejected commit is poison, a missing-bodies frame is a gather, and only the peer's
+  own orphaned commit heals.
 
   This is the third heal path, and until now it was the one with no trigger. It trips
   *nothing* else: the completeness invariant passes (the peer never rejoined, so its ledger
@@ -660,7 +677,7 @@ poison, and that lie costs someone a day the first time they debug a real log.
 | Applied | advance; record this epoch → sequenceID for the D1 fork check |
 | At an epoch this peer has no recorded applied-commit for (pre-join, pre-rejoin, re-seeded history) | advance, **no fork check, no unwrap attempt** — history, not a fork and not poison |
 | At an epoch this peer *has* a record for, with a different sequenceID | advance; the fork trigger (D1) |
-| **At the peer's current epoch, valid, but unapplicable — its own un-merged commit** | **do not advance; heal trigger → `recover()`** (G18) |
+| **At the peer's current epoch, committed by *this peer*, unmergeable (pending state lost)** | **do not advance; heal trigger → `recover()`** (G18, narrowed by G19 — the predicate is authorship, *not* "cannot apply") |
 | Malformed, or policy-rejected (`CommitRejectedError`) | advance (poison — never retry) |
 | `MissingLedgerEntriesError` | **do not advance**; gather the missing ids, retry the frame (bounded); on exhaustion, advance and escalate to `recover()` |
 
@@ -736,6 +753,26 @@ cheaply: the hub is blind to the roster by design, so it cannot know a removal h
 rotating `commitTopic` on removal would break the one property the topic exists for — that a
 peer stranded on any epoch can still find the rendezvous. Accepted and named; revisit only
 if metadata exposure to ex-members becomes a stated requirement.
+
+**The write side, which matters more (G20).** The analysis above is about what an ex-member
+can *read*. D1 makes `commitTopic` the group's **serialization point**, and the hub authorizes
+publishes without knowing the roster — so what a member can *write* to it is a new capability,
+handed to members rather than to the hub. Under the old mailbox semantics a garbage commit was
+a message honest peers ignored. Now an ex-member's publish:
+
+- **advances the head**, which every honest committer must then CAS against;
+- forces every peer to fetch, parse, classify and drop the frame.
+
+So an ex-member can inject noise into the serialization lane indefinitely, costing every
+honest commit an extra CAS round and every peer a wasted pull. DoS-class, consistent with the
+posture the design already takes ("the hub can already drop, delay, reorder and partition"),
+and **accepted** — recorded here so the write side is not rediscovered later as a surprise.
+
+This is also what made G19 dangerous rather than merely wrong: a predicate that heals on any
+unapplicable frame turns this write capability into a group-wide recovery storm. The general
+lesson holds for anything added to this lane — **a frame from an untrusted member must never
+be able to make an honest peer do expensive work**, and the only lever that would bound the
+write side is the same one rejected for the read side (rotating the topic on removal).
 
 ## Deferred
 
@@ -820,6 +857,11 @@ if metadata exposure to ex-members becomes a stated requirement.
   GroupInfo's authenticated `ledger_head`, `LedgerIncompleteError` is thrown, that responder
   is skipped, and the peer folds an honest reply instead. The demoted admin does **not**
   reappear in the rejoiner's roster (the G15 security regression test).
+- **A hostile commit does not trigger heal (G19).** A removed member publishes a well-formed,
+  policy-rejected commit at the current head. Every honest peer drops it as poison and
+  **nobody heals** — the security regression test for the narrowed predicate, which an
+  applicability-based trigger fails by sending the entire group into recovery at once.
+  Likewise: a frame that throws `MissingLedgerEntriesError` gathers, and does not heal.
 - **A crash in the acceptance window self-heals.** The committer is killed after the hub
   accepts and before it adopts, then restarted. It pulls, reaches its own commit at its
   current epoch, cannot merge it, and **heals** — rather than filing it as poison and walking
