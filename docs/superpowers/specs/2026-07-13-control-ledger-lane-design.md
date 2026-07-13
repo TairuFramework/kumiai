@@ -299,6 +299,11 @@ hazard the mutex exists for, on the path where the handle is least stable.
 **All three operations — pull, `commit()`, `recover()` — are top-level operations on one
 serialized per-group lane. None of them ever calls another. The mutex is never re-entered.**
 
+**Every lane operation first checks the ledger-completeness invariant (G16)** — cheap, local,
+no network — and bootstraps before proceeding if it fails. That is what makes a peer stranded
+by a crash mid-bootstrap self-healing at its next lane operation or at startup, rather than
+depending on `recover()` having remembered to finish.
+
 - A heal trigger fired while processing a frame **records the condition and returns**. It
   does not heal in place. The pull finishes, the enclosing `commit()` unwinds and releases
   the lane, and its caller sees a retryable outcome.
@@ -343,11 +348,18 @@ recover(deadline):                          # a top-level lane operation; holds 
     publish pending.commit to commitTopic with expectedHead = reconciledHead
       accepted     -> pending.onAccepted()            # adopt the rejoined handle
                       reconciledHead = returned sequenceID
-                      bootstrapLedger()               # gather the WHOLE ordered ledger and
-                                                      # head-verify it (D3) — the rejoined
-                                                      # handle's ledger is empty, which is a
-                                                      # roster reset until this runs
-                      return { advanced: true, reenact: <entries discarded on the way in> }
+                      bootstrap()                     # REQUIRED: the rejoined handle's ledger
+                                                      # is empty, which is a roster reset until
+                                                      # this runs. Gathers the WHOLE ordered
+                                                      # ledger, head-verified (D3). Failure is a
+                                                      # persistent degraded state, NOT a heal:
+                                                      # keep retrying; never return advanced:true
+                                                      # with an incomplete ledger.
+                      # Re-enact by MEMBERSHIP, not by failure mode (G17): keep only the
+                      # in-flight entries whose ids the bootstrapped ledger does not contain.
+                      # On the crash path this empties the list — those entries are already
+                      # enacted, and re-appending them would revert a later admin's change.
+                      return { advanced: true, reenact: inFlight.filter(id not in ledger) }
       HeadMismatch -> discard the GroupInfo AND the external commit built from it
                       (the GroupInfo describes a tree the winner already changed)
                       continue the loop
@@ -497,6 +509,33 @@ getLedgerEntries(ids: Array<string>): Promise<Array<string>>  // signed tokens, 
 The requester re-verifies every returned token and checks each digest against the id it
 asked for, so a lying responder can only fail to answer, never inject.
 
+#### Ledger completeness is an invariant the peer can check alone (G16)
+
+A handle's ledger is complete **exactly when** `computeHead(groupID, ids(handle.ledger))`
+equals the `ledger_head` in its own GroupContext (`readLedgerHead`). That comparison needs no
+peer, no network, and no memory of how the peer got into its current state. It is the
+trigger for bootstrap — *not* `recover()`'s control flow:
+
+- **Check it on restore, and before every lane operation.** Mismatch → the ledger is
+  incomplete → bootstrap before doing anything else.
+- **An incomplete ledger is a persistent, retryable, degraded state**, not a return value
+  that can be dropped. A peer that cannot bootstrap must keep trying and must **not** report
+  `advanced: true` and carry on as though healed.
+
+This matters because bootstrap has an unavoidable window and no rollback. `recover()` adopts
+the rejoined handle and only then can bootstrap: the gather rides the app lane, which
+requires group membership, so a peer **cannot** bootstrap before rejoining. Between adoption
+and a successful bootstrap it holds an internally inconsistent handle — an empty
+`handle.ledger` against a real, non-genesis `ledger_head` — which is the roster reset G15
+describes. The external commit is already in the log, so there is nothing to roll back, and
+having rejoined, the peer no longer trips the trim-strand trigger that would have sent it
+back. A crash in that window is the same state reached faster, and it **survives restart**:
+the host persists the handle with an empty ledger, `restoreGroup` replays it, and the roster
+resets again with nothing anywhere noticing.
+
+The invariant makes that state self-detecting and self-healing, at startup or at any lane
+operation, with no extra machinery.
+
 #### Ledger bootstrap: a rejoined peer refolds its ledger, head-verified (G15)
 
 A peer that rejoined by external commit has a GroupInfo, an MLS state — and an **empty
@@ -540,6 +579,9 @@ from `processWelcome` and nowhere else. Rejoin needs the same check.
 ```ts
 type GroupMLS = {
   // ...
+  /** True when computeHead(groupID, ids(handle.ledger)) matches the handle's own
+   *  ledger_head. False means the ledger is incomplete and bootstrap must run. */
+  isLedgerComplete(): Promise<boolean>
   /** The whole ordered ledger, as signed tokens — the bootstrap gather's reply. */
   getLedger(): Promise<Array<string>>
   /** Fold a gathered ledger after verifying its recomputed head against the authenticated
@@ -547,6 +589,39 @@ type GroupMLS = {
   bootstrapLedger(tokens: Array<string>): Promise<void>
 }
 ```
+
+#### Re-enact by ledger membership, never by failure mode (G17)
+
+After a heal, the peer re-enacts the entries it had in flight. Doing that unconditionally is
+**silent data loss on the crash path**, because the three heal paths differ in whether the
+peer's entries already reached the group's ledger:
+
+| Heal path | Hub accepted its commit? | Entries in the group's ledger? | Re-enact? |
+|---|---|---|---|
+| Trim strand | never committed | nothing in flight | no-op |
+| **Crash / `onAccepted` threw** | **yes — acceptance is what defines this path** | **yes — every other member pulled and applied it** | **must NOT** |
+| Byzantine losing branch | only on a branch the group discarded | no | **must** |
+
+The crash path is *defined* by the hub having accepted the commit — that is why the group
+advanced without the committer — so its entries are already enacted everywhere. Re-enacting
+appends them **again, at the end of the log**, and `mls` does not dedup: `applyLedgerEntries`
+pushes every token, and `commitLedgerEntries` documents enacting "one whose content the log
+already carries" as intentional, because re-appending is how a demotion back to a
+previously-held role is expressed. So a re-enacted entry **wins the fold**:
+
+> Admin A commits `circle.def X → name "Foo"`. The hub accepts; A crashes before adopting.
+> Admin B commits `circle.def X → name "Bar"`. Everyone applies it. The circle is "Bar".
+> A heals, rejoins, bootstraps, re-enacts "Foo". The ledger is `[Foo, Bar, Foo]`, the fold is
+> last-write-wins by position, and **the circle is "Foo" again** — B's change reverted by a
+> peer that crashed, with no error, no conflict, and no signal anywhere.
+
+That generalizes to every last-write-wins reducer, which is all of kubun's.
+
+**The rule is membership, not provenance:** *an entry is re-enacted if and only if the
+group's authenticated ledger does not already contain it* — never because of which failure
+brought the peer here. Bootstrap has already fetched the whole ordered, head-verified ledger
+with its content ids, so this is one set-difference over ids, and the three heal paths stop
+needing to be told apart at all.
 
 **Cursor-advance rule.** Replaces revision 1's ack table, now that the commit lane is pulled
 rather than delivered. For each frame processed from `commitTopic`:
@@ -708,6 +783,15 @@ if metadata exposure to ex-members becomes a stated requirement.
   GroupInfo's authenticated `ledger_head`, `LedgerIncompleteError` is thrown, that responder
   is skipped, and the peer folds an honest reply instead. The demoted admin does **not**
   reappear in the rejoiner's roster (the G15 security regression test).
+- **A crash mid-bootstrap self-heals.** The peer is killed between adopting the rejoined
+  handle and completing bootstrap, and restarted: the completeness invariant fails on
+  restore, bootstrap runs, and the roster is whole — with no memory of how it got there (the
+  G16 regression test). A peer that cannot bootstrap stays degraded and retrying, and never
+  reports itself healed.
+- **Heal does not revert a later admin's change.** Admin A's commit is accepted, A crashes
+  before adopting; admin B overwrites the same subject; A heals. A's entry is **not**
+  re-enacted (bootstrap's ledger already contains its id), and B's value stands. The G17
+  regression test — an unfiltered re-enactment silently reverts B with no error anywhere.
 - **Cursor-advance.** A commit with unresolvable bodies is retried without advancing; a
   malformed commit advances the cursor once and is never retried.
 - **Fork heal.** A simulated lying hub double-accepts; the lower-sequenceID branch wins, the

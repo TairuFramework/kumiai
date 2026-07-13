@@ -3,11 +3,62 @@
 **Reviewer:** kubun (the host driving the requirements in `2026-07-13-host-ledger-lane.md`).
 **Subject:** `2026-07-13-control-ledger-lane-design.md`.
 
-Five review passes. **The newest pass is at the top; earlier passes are kept below as the record.**
+Six review passes. **The newest pass is at the top; earlier passes are kept below as the record.**
 
 ---
 
-# Revision 5 review
+# Revision 6 review
+
+**Verdict:** G15 is folded in, and correctly — bootstrap as a named primitive with its own head-verification step, rather than a clause inside `recover()`, is the right call, and wiring `computeHead`/`assertHeadMatches` on the rejoin path (where today they run only from `processWelcome`) closes the omission attack.
+
+Two new findings, both in the heal path the last two revisions drew. **G17 is a silent data-loss bug** — it reverts another admin's change with no error anywhere.
+
+## G17 — Re-enacting after heal is correct on one path and corrupting on another
+
+**Blocking.** `recover()` returns `reenact: <entries discarded on the way in>`, and the caller re-enacts them through an ordinary `commit()`. That is right for one heal path and wrong for another, because the three paths differ in *whether the peer's entries already reached the group's ledger*:
+
+| Heal path | Was its commit accepted by the hub? | Are its entries in the group's ledger? | Re-enact? |
+|---|---|---|---|
+| Trim strand | never committed | n/a — nothing to re-enact | no-op |
+| **Crash / `onAccepted` threw** | **yes — acceptance is what defines this path** | **yes — every other member pulled and applied it** | **must NOT** |
+| Byzantine losing branch | accepted only on a branch the group discarded | no | **must** |
+
+The crash path is defined by the hub having *accepted* the commit — that is precisely why the group advanced without the committer. So its entries are already enacted, already folded, already in everyone's ledger. Re-enacting them appends them a second time, at the end of the log.
+
+And in `mls` that is not a harmless duplicate. `applyLedgerEntries` documents it: *"A token the log already holds is appended again rather than skipped. The log is an ordered record of what each commit enacted, not a set of claims"* — deliberate, because re-appending is how a demotion back to a previously-held role is expressed. Which means a re-enacted entry **wins the fold**:
+
+> Admin A commits `circle.def X → name "Foo"`. The hub accepts; A crashes before adopting.
+> Admin B commits `circle.def X → name "Bar"`. Everyone applies it. The circle is "Bar".
+> A heals, rejoins, bootstraps, and re-enacts its "Foo" entry.
+> The ledger is now `[Foo, Bar, Foo]`. The fold is last-write-wins by position. **The circle is "Foo" again.**
+
+B's change is silently reverted by a peer that crashed. No error, no conflict, no signal — a stale write resurrected by the recovery mechanism itself. This generalizes to every last-write-wins host reducer, which is all three of kubun's.
+
+**Fix, and it is cheap because bootstrap already fetched what it needs.** Bootstrap hands the peer the **whole ordered ledger, with content ids, head-verified**. So after bootstrap, re-enact only the entries whose ids are **absent** from it. On the crash path that filter empties the list; on the byzantine path it keeps it whole; on the trim path there was nothing anyway. One set-difference, and the three paths stop needing to be told apart.
+
+Worth stating the invariant the filter enforces, because it is the real rule: **an entry is re-enacted if and only if the group's authenticated ledger does not already contain it** — never because of which failure brought us here.
+
+## G16 — Bootstrap has no failure path, and a crash before it leaves a silently reset peer
+
+`recover()`'s accepted branch adopts the rejoined handle, then calls `bootstrapLedger()`. Between those two, and until bootstrap succeeds, the peer holds an **internally inconsistent handle**: `handle.ledger` is empty while its GroupContext's `ledger_head` is the group's real, non-genesis digest. As G15 established, that is a roster reset — the peer will reject the next commit any non-creator admin authors.
+
+The design never says what happens when bootstrap **fails**: every responder lies, or nobody answers, or the peer goes offline mid-gather. And it cannot be undone — the external commit is already accepted and in the log, so there is no rollback. The peer is rejoined, broken, and (having rejoined) no longer trips the trim-strand trigger that would have sent it back to `recover()`. Worse, the ordering is forced: the gather rides the app lane, which needs group membership, so the peer *cannot* bootstrap before rejoining. The window is unavoidable and must therefore be survivable.
+
+A crash in that window is the same state, reached faster, and it **persists across restart**: the host persists the handle with `ledgerEntries: []`, `restoreGroup` replays an empty list, the roster resets again, and nothing anywhere notices.
+
+**The detector is a self-describing invariant, and it is free.** A handle's ledger is complete exactly when `computeHead(groupID, ids(handle.ledger))` equals the `ledger_head` in its own GroupContext. That comparison needs no peer, no network, and no memory of how the peer got here — it is evaluable at startup, after restore, and before any commit. Make *that* the bootstrap trigger, rather than `recover()`'s control flow:
+
+- **On restore and before each lane operation**, check the invariant. Mismatch → the ledger is incomplete → bootstrap before doing anything else.
+- **Bootstrap failure is a retryable, persistent state**, not a return value that gets dropped. A peer that cannot bootstrap is degraded and must keep trying; it must not report `advanced: true` and proceed as though healed.
+- This also subsumes the crash case with no extra machinery, and gives the peer a real answer to "am I whole?" that does not depend on remembering what went wrong.
+
+## What matches, revision 6
+
+Bootstrap as its own primitive with `getLedger()` + `bootstrapLedger()` is right, and putting the head check *before* the fold ("verify it against the authenticated head before applying a single entry") is the correct ordering — a fold-then-check would already have moved the roster. The observation that `computeHead`/`assertHeadMatches` exist and are wired only into `processWelcome` is exactly the gap. The "withhold, never rewrite" bound now holds on both gather paths.
+
+---
+
+# Revision 5 review (folded in — kept as the record)
 
 **Verdict:** G13 and G14 are folded in, and both correctly. "All three operations are top-level operations on one serialized lane; none of them ever calls another; the mutex is never re-entered" is the right rule, and it makes "heal is two commits" *fall out of* the concurrency invariant instead of being bolted on. The ephemeral-key seal keeps every property leaf-sealing was defending — intrinsic roster authorization, a removed member gets nothing, replay-bound AAD — and drops the assumption that inverted.
 
