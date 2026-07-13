@@ -62,20 +62,28 @@ row, or mints sequenceIDs in-process.
 
 - **Assumption:** retention can be moved off delivery without breaking the mailbox behaviour the
   rest of the system still depends on (rendezvous and app lanes keep mailbox semantics — G9).
-- **Done when:** publish stores a log entry with zero subscribers; `ack` deletes a *delivery* and
-  never a log entry; `trim({ topicID, before })` is the only deleter and moves `oldest` without
-  touching `head`. Suite's log tests pass. The existing `hub.test.ts` still passes — the mailbox
-  is not regressed.
+- **Done when:** a `log`-class publish stores an entry with zero subscribers; `ack` deletes a
+  *delivery* and never a `log` entry; `trim({ topicID, before })` is the only deleter of one, and
+  moves `oldest` without touching `head`; a trimmed entry leaves no pending delivery behind; a
+  `mailbox`-class publish keeps **today's** semantics exactly, ack GC included. Suite's log and
+  class tests pass. The existing `hub.test.ts` still passes — the mailbox is not regressed.
+- **The two classes are the point (spec revision 17).** Ack GC asks "has everyone read this?" and
+  on the commit topic the reader **may not exist yet** — an invitee is not a subscriber at publish
+  time, so no refcount over current subscribers can account for it. That is why the log's retention
+  cannot be delivery-derived *even with a correct refcount*, and it is also why the mailbox may
+  keep its refcount: there, the reader set really is known.
 - **Three existing tests encode the old contract and must be rewritten, not preserved** (found
   in question 1.1): `memoryStore.test.ts:11` (zero-subscriber publish drops), `:83` (refcount GC
   on last ack), `:62` (last unsubscribe drops the whole topic log). Each *asserts* a behaviour
   the spec now forbids. Rewriting a passing test is the correct move here and it will feel wrong;
   do it deliberately, and say in the commit which contract each one used to encode.
-- **⚠️ Wrong-but-passing:** keeping `deleteMessage`'s refcount GC "as an optimization for
-  messages nobody wants". That is precisely today's bug: the last ack destroys the log entry, and
-  every online-peer test still passes. Same shape for `unsubscribe`: dropping the topic index
-  when the last subscriber leaves is a deletion `trim` never authorized, and no online-peer test
-  notices.
+- **⚠️ Wrong-but-passing:** keeping `deleteMessage`'s refcount GC *for the log class* "as an
+  optimization for messages nobody wants". That is precisely today's bug: the last ack destroys
+  the log entry, and every online-peer test still passes. Same shape for `unsubscribe`: dropping
+  the topic index when the last subscriber leaves is a deletion `trim` never authorized, and no
+  online-peer test notices. And the newest shape: **treating `retain` as a no-op** — a store that
+  ignores the class passes every clause except the one pair that publishes identically to the same
+  topic with the same acks and expects one frame gone and one still there.
 - **Spec excerpt:** "Messages are retained per topic, independently of delivery… Delivery rows
   govern push only… Trim governs the log, by depth and age, and is the only thing that removes a
   log entry."
@@ -192,7 +200,8 @@ ledger; the completeness invariant is computable locally.
 ## Phase 3: The peer lane
 
 **Exit criteria:** one serialized lane; the cursor table's rows fire in the order written; no lane
-result is delivered under the lock.
+result is delivered under the lock; the lane never advances the group past an epoch whose app
+frames are still undecrypted.
 
 ### Question 3.1: Does the pull-driven commit lane seed and catch up correctly?
 
@@ -301,6 +310,33 @@ result is delivered under the lock.
   forbids."
 - **Verify:** `rtk proxy pnpm run build && rtk proxy pnpm run lint && rtk proxy pnpm test`
 
+### Question 3.7: Does the lane outrun the mailbox and destroy downloaded messages? (G28)
+
+- **Assumption:** an app frame is decryptable only from its own epoch's secret tree, `ts-mls` keeps
+  **4 epochs by default** (`defaultKeyRetentionConfig.retainKeysForEpochs`), and a pull-driven
+  commit lane that replays to head at step 0 therefore blows past the keys for every app frame
+  already sitting in the mailbox.
+- **Write the failing test first, against the lane as Q3.1–3.6 leave it.** A peer goes offline; the
+  group makes ten commits *and* sends an app message at an early epoch; the peer reconnects. Assert
+  it **reads the plaintext**. This is expected to fail before the fix — capture that, the way
+  question 1.1 captured the store's failure. If it *passes* without the interleave, the premise is
+  wrong and the spec needs revisiting, not the test.
+- **Done when:** replay drains the mailbox up to epoch E before applying the commit that leaves E,
+  and the test above passes. `retainKeysForEpochs` is raised above 4 as a safety net for live
+  out-of-order delivery — **not** as the fix; assert the interleave holds with the default still in
+  place, or the config is doing the work and the bug is merely postponed.
+- **⚠️ Wrong-but-passing:** everything. This is the design's purest silent failure — the peer
+  converges, the epoch is right, the roster matches, `head` matches, no error is raised anywhere,
+  and a week of messages is simply gone. **Every single existing test still passes.** The only
+  assertion that catches it is the plaintext of a message sent at an old epoch. Do not assert "no
+  error"; assert the bytes.
+- **Also worth knowing:** at D1's target commit volume (100/day, the whole control plane on the
+  ledger), four epochs is **under an hour**. This is not a long-absence bug. A member offline over
+  lunch loses its messages.
+- **Spec excerpt:** "Never apply the commit that leaves epoch E while app frames at epoch E are
+  still undecrypted… The lane advances the group only as fast as the consumer drains it."
+- **Verify:** `rtk proxy pnpm run build && rtk proxy pnpm run lint && rtk proxy pnpm test`
+
 ---
 
 ## Phase 4: The scenarios that only fail at the seams
@@ -383,7 +419,7 @@ not settled:
    or heal (needs another member *awake*). So the window buys one thing — how long a member may be
    offline and still converge against the hub alone — and that, not disk, is the dial.
 
-**Learned:** The masking is a property of the suite worth keeping in mind for the rest of Phase 1 —
+**Learned (1.1):** The masking is a property of the suite worth keeping in mind for the rest of Phase 1 —
 against a *partially migrated* host store the suite fails loudly and precisely, but against a store
 with no read path the first missing method swallows the assertion behind it. A host cannot conclude
 "only `fetchTopic` is missing" from a run like today's.
@@ -396,3 +432,56 @@ existing tests that assert the old contract and must be rewritten rather than pr
 The suite ships as a `@kumiai/hub-protocol/conformance` subpath so `vitest` stays out of the main
 entry (optional peer dep). It is therefore vitest-shaped: a host on another runner cannot use it.
 Accepted — no host in the stack uses anything else.
+
+---
+
+### 2026-07-13 — Question 1.2: Can `memoryStore` retain a per-topic log independently of delivery?
+
+**Findings:** Yes, and the split is clean — no cascade beyond `memoryStore.ts` and its tests. The
+first pass hit its prediction exactly (5 passed / 5 failed of 10); the retention model that came out
+of it took the suite to 9 passed / 5 failed of 14, with the five CAS/dedup clauses still failing by
+design. `hub.test.ts` passed **untouched, on the first run** — the sharpest signal available that
+the mailbox is not regressed.
+
+The trick that makes the invariant structural rather than disciplinary: **`heads` is a separate map
+from the log.** Nothing that removes entries can reach it, so `head` survives trimming a topic to
+empty — which the restart-replay path depends on. One removal path (`removeLogEntry`) touches the
+log; `dropDelivery` cannot reach it by construction.
+
+**Spec impact: revisions 17 and 18.** Three changes, and the first came from a question the user
+asked rather than from a test:
+
+1. **Two retention classes, not one.** The design had every topic taking the log's retention, which
+   would have left app ciphertext on the hub for 30 days after every recipient acked it, and thrown
+   away the mailbox's refcount GC — which is *correct* for a mailbox. `PublishParams.retain: 'log' |
+   'mailbox'` (default `mailbox` = exactly today's behaviour). The reason the commit log cannot use
+   ack GC is sharper than "some peers are offline": **ack GC asks "has everyone read this?" and on
+   the commit topic the reader may not exist yet.** An invitee is not a subscriber at publish time,
+   so no refcount over current subscribers can ever account for it — the last member acks, the frame
+   dies, and the member that needed it had not been born. G7 one layer up. Equally, this is *why*
+   the mailbox may keep its refcount: there, the reader set really is known.
+2. **Retention duration is requested at subscribe and bounded by the hub** — `{ default, max }`, with
+   `RetentionExceededError` rather than a silent clamp (a clamp strands a peer that believed it had
+   asked for more). A topic's frames live for the longest retention any current subscriber asked for.
+3. **G29 — `head` advances only on a log publish.** The probe found this and declined to fix it,
+   correctly. `publish` was advancing `head` for every accepted publish, including a mailbox frame
+   that its own last ack then frees. Every member is a subscriber of `commitTopic`, so **any member
+   could move the head to a frame that then vanishes** — peers pull, never see that sequenceID, their
+   cursor can never reach the head, and the next CAS anchors on something unfetchable. The lane
+   wedges for the entire group, permanently, and nothing raises. G19's shape reached through the
+   store instead of the heal trigger, and it would have been load-bearing under question 1.3.
+
+**Learned:** the wrong-but-passing frame keeps paying out, but the *finder* is shifting. G7 was
+caught by writing a suite the store had to fail; G29 was caught by an implementer noticing that a
+field meant two things. Both are invisible to any test written from the happy path.
+
+The most quotable line in the report is §6.3: **every pre-existing test that could have caught the
+old retention bug asserts through `store.fetch` — the mailbox.** The entire suite was blind to
+whether the log survives. Only the three tests we had to rewrite reached past `fetch`, and they
+reached past it to assert *the bug*.
+
+Two open items, accepted rather than solved: the suite asks a host to **declare** its `maxRetention`,
+so a host declaring `Infinity` passes the refusal clause vacuously (the suite can check the boundary
+a host declares, not that it declared a sane one); and retention follows *current* subscribers rather
+than a high-water mark, which is safe only because the commit lane never unsubscribes — now stated in
+the spec, because it is a load-bearing assumption that reads like an implementation detail.

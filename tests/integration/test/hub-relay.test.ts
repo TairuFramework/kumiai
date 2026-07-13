@@ -120,7 +120,7 @@ describe('Hub store: pagination and acks', () => {
     const store = createMemoryStore()
     const recipient = randomIdentity()
     const topicID = 'topic:paginate'
-    await store.subscribe(recipient.id, topicID)
+    await store.subscribe({ subscriberDID: recipient.id, topicID })
 
     for (let i = 0; i < 5; i++) {
       await store.publish({
@@ -154,7 +154,7 @@ describe('Hub store: pagination and acks', () => {
     const store = createMemoryStore()
     const recipient = randomIdentity()
     const topicID = 'topic:ack'
-    await store.subscribe(recipient.id, topicID)
+    await store.subscribe({ subscriberDID: recipient.id, topicID })
 
     await store.publish({
       senderDID: 'did:key:sender',
@@ -178,7 +178,7 @@ describe('Hub store: pagination and acks', () => {
     const store = createMemoryStore()
     const recipient = randomIdentity()
     const topicID = 'topic:combined'
-    await store.subscribe(recipient.id, topicID)
+    await store.subscribe({ subscriberDID: recipient.id, topicID })
 
     const id1 = await store.publish({
       senderDID: 'did:key:sender',
@@ -260,7 +260,7 @@ describe('Hub groups: authorized-DID pub/sub', () => {
 describe('Hub store: eviction', () => {
   async function storeWithSubscriber() {
     const store = createMemoryStore()
-    await store.subscribe('did:key:bob', 'topic:evict')
+    await store.subscribe({ subscriberDID: 'did:key:bob', topicID: 'topic:evict' })
     return store
   }
 
@@ -295,8 +295,8 @@ describe('Hub store: eviction', () => {
 
   test('reference counting: message survives partial ack', async () => {
     const store = createMemoryStore()
-    await store.subscribe('did:key:bob', 'topic:fanout')
-    await store.subscribe('did:key:carol', 'topic:fanout')
+    await store.subscribe({ subscriberDID: 'did:key:bob', topicID: 'topic:fanout' })
+    await store.subscribe({ subscriberDID: 'did:key:carol', topicID: 'topic:fanout' })
 
     const id = await store.publish({
       senderDID: 'did:key:alice',

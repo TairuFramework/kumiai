@@ -4,7 +4,7 @@
  * @module hub-protocol
  */
 
-export { HeadMismatchError, NotSubscribedError } from './errors.js'
+export { HeadMismatchError, NotSubscribedError, RetentionExceededError } from './errors.js'
 export type { HubProtocol } from './protocol.js'
 export { hubProtocol } from './protocol.js'
 export type {
@@ -18,5 +18,6 @@ export type {
   PublishParams,
   PurgeParams,
   StoredMessage,
+  SubscribeParams,
   TrimParams,
 } from './types.js'

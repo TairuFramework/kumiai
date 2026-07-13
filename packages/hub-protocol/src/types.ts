@@ -25,6 +25,25 @@ export type PublishParams = {
    * log entry and MUST NOT be removed by trim.
    */
   publishID?: string
+  /**
+   * Retention class. 'mailbox' (default): the frame is removed once every delivery is acked,
+   * or when it ages out. 'log': the frame is retained unconditionally and removed only by
+   * trim, because a subscriber that must read it may not exist when it is published.
+   */
+  retain?: 'log' | 'mailbox'
+}
+
+export type SubscribeParams = {
+  subscriberDID: string
+  topicID: string
+  /**
+   * Requested retention in seconds for this subscriber's view of the topic. Absent: the hub's
+   * default. Above the hub's maximum: RetentionExceededError, at subscribe time — never a
+   * silent downgrade to the maximum, which would strand a peer that believed it had asked for
+   * more. A topic's frames live for the longest retention any of its subscribers asked for,
+   * floored at the hub's default.
+   */
+  retention?: number
 }
 
 export type FetchTopicParams = {
@@ -38,7 +57,12 @@ export type FetchTopicParams = {
 
 export type FetchTopicResult = {
   messages: Array<StoredMessage>
-  /** The topic's current head: the sequenceID of the last accepted publish, or null. */
+  /**
+   * The topic's current head: the sequenceID of the last accepted `retain: 'log'` publish, or
+   * null. A mailbox publish mints a sequenceID and appends, but does NOT move the head — a head
+   * naming a mailbox frame is a head that the frame's own last ack deletes, anchoring the
+   * compare-and-set to a frame no reader of the log can ever pull.
+   */
   head: string | null
   /** The oldest sequenceID still retained for this topic, or null if the log is empty. */
   oldest: string | null
@@ -63,6 +87,10 @@ export type AckParams = {
 }
 
 export type PurgeParams = {
+  /**
+   * The hub's default retention in seconds: the age bound applied to a topic no subscriber
+   * asked to keep for longer.
+   */
   olderThan: number
 }
 
@@ -84,12 +112,21 @@ export type HubStoreEvents = {
 /**
  * The hub's storage contract: a per-topic log alongside a per-recipient mailbox.
  *
- * - Messages are retained per topic, independently of delivery: a publish is appended to the
- *   topic's log whether or not anyone is subscribed. The log is the system of record.
- * - Delivery rows govern push only. `ack` deletes a delivery, never a log entry.
- * - `trim` is the only thing that removes a log entry. It moves `oldest`, never touches `head`,
- *   and never removes a `publishID` dedup record. `purge` is the separate mailbox/expiry
- *   surface — it governs delivery rows, not the log.
+ * Retention is a **class**, declared per publish, and a **duration**, requested per subscribe.
+ * They are independent.
+ *
+ * - The `'mailbox'` class is delivery-derived: its readers are known at publish time, so the
+ *   last ack frees the frame. It is the default.
+ * - The `'log'` class is not: a subscriber that must read a frame may not exist when it is
+ *   published, so no refcount over current subscribers can ever free it. It is appended whether
+ *   or not anyone is subscribed, and `trim` is the only thing that removes it — never `ack`,
+ *   never `unsubscribe`. `trim` moves `oldest`, never touches `head`, and never removes a
+ *   `publishID` dedup record.
+ * - Removing a log entry removes the deliveries that pointed at it: a delivery references a log
+ *   entry and does not own it, and it cannot be pushed once its referent is gone.
+ * - `purge` is the age enforcement for both classes, honouring the same invariants as `trim`. A
+ *   topic's frames live for the longest retention any of its subscribers asked for, floored at
+ *   the hub's default.
  * - `sequenceID`s are lexicographically ordered and strictly increasing within a topic — a
  *   fixed-width zero-padded encoding, not a bare decimal and not a UUID.
  * - `publish` mints the sequenceID, compares `expectedHead`, appends, and advances the head in
@@ -106,7 +143,7 @@ export type HubStore = {
   ack(params: AckParams): Promise<void>
   purge(params: PurgeParams): Promise<Array<string>>
   trim(params: TrimParams): Promise<void>
-  subscribe(subscriberDID: string, topicID: string): Promise<void>
+  subscribe(params: SubscribeParams): Promise<void>
   unsubscribe(subscriberDID: string, topicID: string): Promise<void>
   getSubscribers(topicID: string): Promise<Array<string>>
   storeKeyPackage(ownerDID: string, keyPackage: string): Promise<void>

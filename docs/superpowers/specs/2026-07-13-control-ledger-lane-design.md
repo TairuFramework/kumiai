@@ -1,9 +1,11 @@
 # Design: the control-ledger lane
 
-**Status:** design, revision 16 (2026-07-13). Reviewed fourteen times by kubun in
-`2026-07-13-control-ledger-lane-review.md`; G1–G27 are folded in below. Revision 16 folds in
-the first implementation probe (question 1.1): `NotSubscribedError`, a `trim` primitive, and a
-30-day default window.
+**Status:** design, revision 18 (2026-07-13). Reviewed fourteen times by kubun in
+`2026-07-13-control-ledger-lane-review.md`; G1–G27 are folded in below. Revisions 16–18 fold in
+the first two implementation probes: `NotSubscribedError`, a `trim` primitive, a 30-day default
+window, two retention classes with subscriber-requested durations, **G28 — the commit lane must
+not outrun the mailbox**, which silently destroys downloaded messages, and **G29 — `head`
+advances only on a log publish**, without which any member can wedge the lane for the group.
 **Supersedes:** the requirements in `../../agents/plans/next/2026-07-13-host-ledger-lane.md`
 (R1/R2/R3), which stays as the origin record.
 **Scope:** `@kumiai/mls`, `@kumiai/rpc`, `@kumiai/hub-protocol`, `@kumiai/hub-server`,
@@ -145,6 +147,107 @@ the log; with no log it cannot converge at all until someone else opens the app.
   mailbox semantics — deliver, ack, delete (G9). The hub stays a relay for the bulk of its
   traffic; the log is one topic per group.
 
+#### Two retention classes, because the commit log's reader may not exist yet
+
+A first cut of this design gave *every* topic the log's retention, and that is wrong in both
+directions: app ciphertext would sit on the hub for 30 days after every recipient had acked
+it, and the mailbox's ack-driven GC — which is *correct* for a mailbox — would have been
+thrown away for no gain. The two lifetimes answer different questions:
+
+| | `commitTopic` (log) | app / `rendezvousTopic` (mailbox) |
+|---|---|---|
+| Is the reader set known at publish time? | **No** — a member invited tomorrow must read frames published today | Yes — the current subscribers |
+| Ack-driven GC | **Unsound** | Correct |
+| Removed by | `trim` only | last ack, or age |
+| Read with | `fetchTopic` | `fetch` (push/mailbox) |
+
+The middle row is the whole point, and it is G7 one layer up. **Ack GC asks "has everyone
+read this?" — and on the commit topic, the reader may not exist yet.** An invitee is not a
+subscriber, not a member, not anything at publish time, so no refcount over current
+subscribers can account for it. The last existing member acks, the frame dies, and the member
+that needed it had not been born. That is why the commit log's retention cannot be delivery-
+derived *even with* a complete and correct refcount.
+
+(The invitee does not need the log for its *ledger* — `commitInvite` puts the whole ordered
+ledger in the invite and `processWelcome` head-verifies it, so ledger history never comes
+from the hub. What it needs from the log is the MLS commits that landed between its Welcome
+and its first subscribe. It cannot skip them: MLS epochs do not skip.)
+
+So the class is declared at publish:
+
+```ts
+export type PublishParams = {
+  // ...
+  /**
+   * Retention class. 'mailbox' (default): today's semantics — the frame is removed once
+   * every delivery is acked, or when it ages out. 'log': the frame is retained
+   * unconditionally and removed only by trim, because a future subscriber may need it.
+   */
+  retain?: 'log' | 'mailbox'
+}
+```
+
+**`rpc`'s commit lane sets this, not the host** — the host never gets the chance to pick
+wrong. And it leaks nothing to the hub that the hub does not already have: the commit topic
+is already the *only* topic that uses `expectedHead`, so a hub that wants to identify it
+merely watches for conditional publishes.
+
+**`head` advances only for `retain: 'log'` (G29).** A head that names a mailbox frame is a
+head that can be deleted, and the CAS is then anchored to a frame no reader can pull. This is
+not theoretical: every member is a subscriber of `commitTopic`, so **a member that publishes a
+mailbox-class frame there moves the head to a frame that its own last ack then frees.** Peers
+pull the log, never see that sequenceID, and their cursor can never reach the head; the next
+conditional publish compares against something unfetchable. The lane wedges for the whole
+group, permanently, and nothing raises. It is G19's shape — a member-triggerable, group-wide
+denial of service — reached through the store instead of through the heal trigger.
+
+So `head` means **the last accepted *log* publish**, which is exactly what CAS needs. A stray
+mailbox frame on `commitTopic` becomes a frame the peer reads, fails to parse as a commit, and
+steps over as poison. Mailbox topics never read `head` at all — they use `fetch`, not
+`fetchTopic` — so nothing is lost by narrowing it.
+
+#### Retention duration: the hub sets the bounds, the subscriber asks within them
+
+Duration is orthogonal to class, and it is a subscription-time request:
+
+```ts
+export type SubscribeParams = {
+  subscriberDID: string
+  topicID: string
+  /**
+   * Requested retention in seconds for this subscriber's view of the topic. Absent: the
+   * hub's default. Above the hub's maximum: RetentionExceededError, at subscribe time —
+   * never a silent downgrade to the max, which would strand a peer that believed it had
+   * asked for more.
+   */
+  retention?: number
+}
+```
+
+- **A topic's frames live for the longest retention any of its *current* subscribers asked
+  for**, floored at the hub's default. For a mailbox topic that bound sits *alongside* ack GC —
+  whichever frees the frame first wins, and for a mailbox the ack usually does. For a log topic
+  it is the only bound, since ack GC is off.
+- Retention therefore follows the subscriber list rather than being a high-water mark only trim
+  can lower. That is deliberate: a high-water mark can be pinned by a member who has since left.
+  It is safe here because **the commit lane subscribes to `commitTopic` for the peer's whole life
+  and never unsubscribes** — both group topics are non-rotating and survive resync — so the
+  group's log window is stable for as long as the group has members.
+- **The hub configures `{ default, max }`** and enforces the max. `hub-server`'s existing
+  scheduled purge becomes the age enforcement for both classes.
+- **`rpc`'s commit lane subscribes to `commitTopic` with the group's log retention** — 30 days
+  by default, configurable. Everything else subscribes with the hub default, which is today's
+  7 days, unchanged.
+
+This is what makes both windows configurable by the hub while letting a consumer that knows
+it needs more — a group of phones, a long-absent member — ask for it and be told no rather
+than discover the shortfall as a stranded peer.
+
+**A member offline longer than the mailbox window keeps its membership and loses its chat.**
+That asymmetry is deliberate: the commit log is correctness, the mailbox is content. What the
+design does *not* permit is a member losing content it successfully downloaded — see "The
+commit lane must not outrun the mailbox" (G28).
+
 **Trim is one primitive, and policy sits on top.** Depth-versus-age is a host decision, and
 putting both in the contract makes neither testable. The contract exposes a single bound:
 
@@ -159,6 +262,11 @@ export type TrimParams = {
 A host implements a 30-day window, a depth cap, or both, by choosing `before`. What the
 contract fixes is the invariant, and the conformance suite asserts it for every host: **trim
 moves `oldest`, never touches `head`, and never removes a dedup record.**
+
+**Removing a log entry removes the deliveries that pointed at it.** A delivery whose referent
+is gone can never be pushed, so leaving it is a silent leak. A SQL host gets this free with
+`ON DELETE CASCADE`; one without a foreign key leaks rows and nothing notices — so the suite
+asserts it: *a trimmed entry leaves no pending delivery behind.*
 
 ```ts
 export type PublishParams = {
@@ -206,12 +314,12 @@ export type HubStore = {
 }
 ```
 
-**Two named errors, because an unnamed one is a false pass.** `HeadMismatchError` for a lost
-CAS, and `NotSubscribedError` for a `fetchTopic` from a non-subscriber. Both live in
-`hub-protocol` and both are part of the contract: a conformance clause of the form
-`rejects.toThrow()` is satisfied by *any* throw — including a host's not-yet-implemented stub —
-so the suite must be able to name what it expects. Every error the contract requires a store to
-raise is a named type.
+**Named errors, because an unnamed one is a false pass.** `HeadMismatchError` for a lost CAS,
+`NotSubscribedError` for a `fetchTopic` from a non-subscriber, `RetentionExceededError` for a
+subscribe above the hub's maximum. All live in `hub-protocol` and all are part of the contract:
+a conformance clause of the form `rejects.toThrow()` is satisfied by *any* throw — including a
+host's not-yet-implemented stub — so the suite must be able to name what it expects. Every error
+the contract requires a store to raise is a named type.
 
 **`sequenceID` gains an ordering contract.** The design compares sequenceIDs in five places
 — `expectedHead` equality, `head` against the cursor, `oldest` against the cursor, `after`
@@ -507,6 +615,44 @@ failure, and the peer heals by external-commit rejoin and re-enacts its entries.
 
 Because a loser's commit is never published, the commit topic under an honest hub contains
 only accepted commits.
+
+#### The commit lane must not outrun the mailbox (G28)
+
+Pulling the commit lane out of the mailbox breaks an interleaving that was previously free,
+and the cost is silent message loss.
+
+An MLS application message is decrypted from **its own epoch's** secret tree. `ts-mls` keeps
+those for `retainKeysForEpochs` epochs — **4 by default** — and drops the rest
+(`clientState.ts`, `removeOldHistoricalReceiverData`). The frame's epoch is in its cleartext
+header, so the peer can always *see* which epoch a pending app frame belongs to; it just
+cannot open it once the keys are gone.
+
+Today commits and app messages share one mailbox and drain in sequenceID order, so a commit
+is applied only after the app messages that preceded it. The interleave costs nothing and
+nobody had to think about it. **D1 makes the commit lane a separate, pull-driven lane that
+runs at lane step 0** — so replay races to the head while the mailbox is still full. Five
+commits later, every app frame the peer had already downloaded is undecryptable. The peer is
+perfectly in sync, the roster matches, no error is raised, and a week of messages is gone.
+
+D1 makes this worse *by design*: moving a host's control plane onto `commitLedgerEntries`
+raises commit volume by an order of magnitude. At 100 commits a day, four epochs is under an
+hour — so this is not a 30-day-absence problem. **A member offline over lunch loses its
+messages.**
+
+The rule, which is local — the peer has every frame in hand and every epoch is readable
+without a key:
+
+> **Never apply the commit that leaves epoch E while app frames at epoch E are still
+> undecrypted.** Replay drains the mailbox up to E, applies the commit, drains E+1, applies,
+> and so on. The lane advances the group only as fast as the consumer drains it.
+
+Raise `retainKeysForEpochs` above 4 as well, but as a safety net for ordinary out-of-order
+delivery — *not* as the fix. The fix is the ordering rule; a bigger retention window only
+widens the race it loses.
+
+This is why the retention asymmetry in D1 is acceptable: a member offline past the mailbox
+window loses chat it never received, which is a product decision. Losing chat it *did*
+receive, because its own commit lane sprinted past the keys, is a bug.
 
 #### One serialized lane; heal never runs nested (G13)
 
@@ -1089,6 +1235,20 @@ heal cannot reach for want of a responder.)*
     not-implemented stub, which is how a store passes the contract while having no read path
     at all. The clause also asserts the positive case in the same test: a subscriber *can*
     read, so a store that throws for everyone still fails.
+  - **A trimmed entry leaves no pending delivery behind.** A host without a foreign key leaks
+    delivery rows pointing at frames that no longer exist, and nothing else in the system
+    notices.
+  - **The two retention classes:** a `mailbox` frame is gone once every delivery is acked; a
+    `log` frame published in the same way, to the same topic, with the same acks, **is still
+    there**. This is the pair that proves the class is honoured rather than ignored — a store
+    that treats `retain` as a no-op passes every other clause.
+  - **Retention duration:** a subscribe above the hub's maximum raises `RetentionExceededError`
+    rather than silently clamping; a topic's frames survive as long as the *longest* retention
+    any of its subscribers asked for.
+  - **`head` ignores a mailbox publish (G29):** publish a log frame, then a mailbox frame to the
+    same topic, and `head` still names the log frame. A store that advances the head on every
+    publish passes every other clause and hands the commit lane a head that its own ack can
+    delete.
 - **Concurrent commits.** Two admins commit at epoch N against one hub: one wins, the loser
   rebases and its entries land in a later commit. No fork, no lost entries.
 - **Same-device concurrency.** Two concurrent `peer.commit` calls serialize; both commits
@@ -1096,6 +1256,11 @@ heal cannot reach for want of a responder.)*
 - **Late joiner.** A member is invited, two further commits land before it subscribes, and it
   converges by pulling the log — with no `recover()` and **no fork diagnosis**, walking
   frames from epochs it never held (the G5 regression test).
+- **The lane does not outrun the mailbox (G28).** A peer is offline while the group makes ten
+  commits *and* sends an app message at an early epoch. On reconnect it reads the message.
+  With `retainKeysForEpochs` at its default of 4 this fails unless replay interleaves, and it
+  fails **silently** — the peer converges, the roster matches, nothing throws, and the message
+  is simply undecryptable. Assert the plaintext, never the absence of an error.
 - **`onAccepted` throws.** The commit is in the log, the host failed to adopt: `commit()`
   surfaces the failure, does not retry the commit, and the peer heals by rejoin.
 - **First-delivery resolution.** Three-member group, an admin enacts an entry, the third

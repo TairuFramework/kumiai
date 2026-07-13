@@ -130,7 +130,7 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       if (!(await authorize(clientDID, 'subscribe', topicID))) {
         throw new HandlerError({ code: 'EK02', message: 'Not authorized to subscribe to topic' })
       }
-      await store.subscribe(clientDID, topicID)
+      await store.subscribe({ subscriberDID: clientDID, topicID })
       return { subscribed: true }
     }) as RequestHandler<HubProtocol, 'hub/subscribe'>,
 

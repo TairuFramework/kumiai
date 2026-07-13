@@ -7,3 +7,11 @@ export class HeadMismatchError extends Error {
 export class NotSubscribedError extends Error {
   override name = 'NotSubscribedError'
 }
+
+/**
+ * A subscribe requested a retention above the hub's maximum. The request is refused, never
+ * clamped: a peer that believed it had asked for more would otherwise be stranded.
+ */
+export class RetentionExceededError extends Error {
+  override name = 'RetentionExceededError'
+}

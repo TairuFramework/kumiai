@@ -1,3 +1,4 @@
+import { NotSubscribedError, RetentionExceededError } from '@kumiai/hub-protocol'
 import { describe, expect, test, vi } from 'vitest'
 
 import { createMemoryStore } from '../src/memoryStore.js'
@@ -8,7 +9,7 @@ const CAROL = 'did:key:carol'
 const TOPIC = 'topic:1'
 
 describe('createMemoryStore pub/sub', () => {
-  test('publish stores nothing when the topic has no subscribers (drop)', async () => {
+  test('a mailbox publish with no subscribers is dropped: nobody was ever going to read it', async () => {
     const store = createMemoryStore()
     const id = await store.publish({
       senderDID: ALICE,
@@ -16,14 +17,40 @@ describe('createMemoryStore pub/sub', () => {
       payload: new Uint8Array([1]),
     })
     expect(typeof id).toBe('string')
-    const result = await store.fetch({ recipientDID: BOB })
-    expect(result.messages).toHaveLength(0)
+    expect((await store.fetch({ recipientDID: BOB })).messages).toHaveLength(0)
+
+    // The mailbox class is delivery-derived, so a subscriber who arrives later gets nothing.
+    await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+    const log = await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
+    expect(log.messages).toHaveLength(0)
+    expect(log.oldest).toBeNull()
+  })
+
+  test('a log publish with no subscribers is retained: its reader may not exist yet', async () => {
+    const store = createMemoryStore()
+    const id = await store.publish({
+      senderDID: ALICE,
+      topicID: TOPIC,
+      payload: new Uint8Array([1]),
+      retain: 'log',
+    })
+
+    // Nobody was subscribed, so there is no delivery...
+    expect((await store.fetch({ recipientDID: BOB })).messages).toHaveLength(0)
+
+    // ...but a log frame's retention is not a function of delivery, and a subscriber who
+    // arrives later can pull it.
+    await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+    const log = await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
+    expect(log.messages.map((m) => m.sequenceID)).toEqual([id])
+    expect(log.head).toBe(id)
+    expect(log.oldest).toBe(id)
   })
 
   test('publish fans out to current subscribers (minus sender)', async () => {
     const store = createMemoryStore()
-    await store.subscribe(BOB, TOPIC)
-    await store.subscribe(ALICE, TOPIC)
+    await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+    await store.subscribe({ subscriberDID: ALICE, topicID: TOPIC })
     await store.publish({ senderDID: ALICE, topicID: TOPIC, payload: new Uint8Array([1, 2]) })
 
     const bob = await store.fetch({ recipientDID: BOB })
@@ -40,8 +67,8 @@ describe('createMemoryStore pub/sub', () => {
   test('getSubscribers reflects subscribe / unsubscribe', async () => {
     const store = createMemoryStore()
     expect(await store.getSubscribers(TOPIC)).toEqual([])
-    await store.subscribe(BOB, TOPIC)
-    await store.subscribe(BOB, TOPIC) // idempotent
+    await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+    await store.subscribe({ subscriberDID: BOB, topicID: TOPIC }) // idempotent
     expect(await store.getSubscribers(TOPIC)).toEqual([BOB])
     await store.unsubscribe(BOB, TOPIC)
     expect(await store.getSubscribers(TOPIC)).toEqual([])
@@ -49,8 +76,8 @@ describe('createMemoryStore pub/sub', () => {
 
   test('unsubscribe clears the subscriber pending deliveries for that topic', async () => {
     const store = createMemoryStore()
-    await store.subscribe(BOB, TOPIC)
-    await store.subscribe(CAROL, TOPIC)
+    await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+    await store.subscribe({ subscriberDID: CAROL, topicID: TOPIC })
     await store.publish({ senderDID: ALICE, topicID: TOPIC, payload: new Uint8Array([1]) })
 
     await store.unsubscribe(BOB, TOPIC)
@@ -59,19 +86,32 @@ describe('createMemoryStore pub/sub', () => {
     expect((await store.fetch({ recipientDID: CAROL })).messages).toHaveLength(1)
   })
 
-  test('last unsubscribe drops the whole topic log immediately', async () => {
+  test('last unsubscribe frees a mailbox frame and leaves a log frame standing', async () => {
     const store = createMemoryStore()
-    await store.subscribe(BOB, TOPIC)
+    await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
     await store.publish({ senderDID: ALICE, topicID: TOPIC, payload: new Uint8Array([1]) })
+    const logged = await store.publish({
+      senderDID: ALICE,
+      topicID: TOPIC,
+      payload: new Uint8Array([2]),
+      retain: 'log',
+    })
     await store.unsubscribe(BOB, TOPIC)
-    // Re-subscribe and confirm no backlog survived.
-    await store.subscribe(BOB, TOPIC)
+
+    // Re-subscribe: neither frame is pending any more.
+    await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
     expect((await store.fetch({ recipientDID: BOB })).messages).toHaveLength(0)
+
+    // The mailbox frame's only reader is gone, so it is gone. Trim is the only deleter of a log
+    // frame, and unsubscribe is not trim.
+    const log = await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
+    expect(log.messages.map((m) => m.sequenceID)).toEqual([logged])
+    expect(log.head).toBe(logged)
   })
 
   test('maxDepth trims the oldest message per topic on publish', async () => {
     const store = createMemoryStore({ maxDepth: 2 })
-    await store.subscribe(BOB, TOPIC)
+    await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
     await store.publish({ senderDID: ALICE, topicID: TOPIC, payload: new Uint8Array([1]) })
     await store.publish({ senderDID: ALICE, topicID: TOPIC, payload: new Uint8Array([2]) })
     await store.publish({ senderDID: ALICE, topicID: TOPIC, payload: new Uint8Array([3]) })
@@ -80,24 +120,114 @@ describe('createMemoryStore pub/sub', () => {
     expect(result.messages.map((m) => m.payload[0])).toEqual([2, 3])
   })
 
-  test('refcount GC: message removed when its last subscriber acks', async () => {
+  test('the last ack frees a mailbox frame; a log frame outlives every ack', async () => {
     const store = createMemoryStore()
-    await store.subscribe(BOB, TOPIC)
-    await store.subscribe(CAROL, TOPIC)
-    const id = await store.publish({
+    await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+    await store.subscribe({ subscriberDID: CAROL, topicID: TOPIC })
+    const mailbox = await store.publish({
       senderDID: ALICE,
       topicID: TOPIC,
       payload: new Uint8Array([1]),
     })
-    await store.ack({ recipientDID: BOB, sequenceIDs: [id] })
-    expect((await store.fetch({ recipientDID: CAROL })).messages).toHaveLength(1)
-    await store.ack({ recipientDID: CAROL, sequenceIDs: [id] })
+    const logged = await store.publish({
+      senderDID: ALICE,
+      topicID: TOPIC,
+      payload: new Uint8Array([2]),
+      retain: 'log',
+    })
+
+    await store.ack({ recipientDID: BOB, sequenceIDs: [mailbox, logged] })
+    // One recipient's ack does not touch another's deliveries.
+    expect((await store.fetch({ recipientDID: CAROL })).messages).toHaveLength(2)
+
+    await store.ack({ recipientDID: CAROL, sequenceIDs: [mailbox, logged] })
     expect((await store.fetch({ recipientDID: CAROL })).messages).toHaveLength(0)
+
+    // Everyone has read both. The mailbox frame's readers were all known at publish time, so it
+    // is done. The log frame's may not be, so no ack can free it.
+    const log = await store.fetchTopic({ subscriberDID: CAROL, topicID: TOPIC })
+    expect(log.messages.map((m) => m.sequenceID)).toEqual([logged])
+    expect(log.head).toBe(logged)
+  })
+
+  test('trim removes log entries below the bound and never moves head', async () => {
+    const store = createMemoryStore()
+    await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+    const first = await store.publish({
+      senderDID: ALICE,
+      topicID: TOPIC,
+      payload: new Uint8Array([1]),
+      retain: 'log',
+    })
+    const last = await store.publish({
+      senderDID: ALICE,
+      topicID: TOPIC,
+      payload: new Uint8Array([2]),
+      retain: 'log',
+    })
+
+    // Exclusive bound: everything strictly below `last` goes, `last` stays. The trimmed entry's
+    // pending delivery goes with it.
+    await store.trim({ topicID: TOPIC, before: last })
+    const log = await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
+    expect(log.messages.map((m) => m.sequenceID)).toEqual([last])
+    expect(log.oldest).toBe(last)
+    expect(log.head).toBe(last)
+    expect((await store.fetch({ recipientDID: BOB })).messages.map((m) => m.sequenceID)).toEqual([
+      last,
+    ])
+
+    // Trimming the whole log empties it without resetting head.
+    await store.trim({ topicID: TOPIC, before: 'zzz' })
+    const emptied = await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
+    expect(emptied.messages).toHaveLength(0)
+    expect(emptied.oldest).toBeNull()
+    expect(emptied.head).toBe(last)
+    expect(first < last).toBe(true)
+  })
+
+  test('fetchTopic refuses a non-subscriber and honours after/limit', async () => {
+    const store = createMemoryStore()
+    await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+    const first = await store.publish({
+      senderDID: ALICE,
+      topicID: TOPIC,
+      payload: new Uint8Array([1]),
+      retain: 'log',
+    })
+    await store.publish({
+      senderDID: ALICE,
+      topicID: TOPIC,
+      payload: new Uint8Array([2]),
+      retain: 'log',
+    })
+    await store.publish({
+      senderDID: ALICE,
+      topicID: TOPIC,
+      payload: new Uint8Array([3]),
+      retain: 'log',
+    })
+
+    await expect(store.fetchTopic({ subscriberDID: CAROL, topicID: TOPIC })).rejects.toThrow(
+      NotSubscribedError,
+    )
+
+    // `after` is exclusive, `limit` applies after the cursor.
+    const page = await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC, after: first })
+    expect(page.messages.map((m) => m.payload[0])).toEqual([2, 3])
+    const limited = await store.fetchTopic({
+      subscriberDID: BOB,
+      topicID: TOPIC,
+      after: first,
+      limit: 1,
+    })
+    expect(limited.messages.map((m) => m.payload[0])).toEqual([2])
+    expect(limited.oldest).toBe(first)
   })
 
   test('fetch respects after cursor, limit, and hasMore', async () => {
     const store = createMemoryStore()
-    await store.subscribe(BOB, TOPIC)
+    await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
     const id1 = await store.publish({
       senderDID: ALICE,
       topicID: TOPIC,
@@ -116,7 +246,7 @@ describe('createMemoryStore pub/sub', () => {
 
   test('purge removes aged messages and emits the purge event', async () => {
     const store = createMemoryStore()
-    await store.subscribe(BOB, TOPIC)
+    await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
     await store.publish({ senderDID: ALICE, topicID: TOPIC, payload: new Uint8Array([1]) })
     const handler = vi.fn()
     store.events.on('purge', handler)
@@ -126,6 +256,66 @@ describe('createMemoryStore pub/sub', () => {
       expect.objectContaining({ sequenceIDs: expect.any(Array) }),
     )
     expect((await store.fetch({ recipientDID: BOB })).messages).toHaveLength(0)
+  })
+
+  test('purge ages out a log frame nobody asked to keep for longer', async () => {
+    const store = createMemoryStore()
+    await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+    await store.publish({
+      senderDID: ALICE,
+      topicID: TOPIC,
+      payload: new Uint8Array([1]),
+      retain: 'log',
+    })
+
+    const purged = await store.purge({ olderThan: 0 })
+    expect(purged).toHaveLength(1)
+    const log = await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
+    expect(log.messages).toHaveLength(0)
+  })
+
+  test('a subscribe above the maximum retention is refused, not clamped', async () => {
+    const store = createMemoryStore({ retention: { max: 60 } })
+    await expect(
+      store.subscribe({ subscriberDID: BOB, topicID: TOPIC, retention: 61 }),
+    ).rejects.toThrow(RetentionExceededError)
+    expect(await store.getSubscribers(TOPIC)).toEqual([])
+    await expect(store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })).rejects.toThrow(
+      NotSubscribedError,
+    )
+  })
+
+  test('a topic keeps its frames for the longest retention any subscriber asked for', async () => {
+    const store = createMemoryStore({ retention: { max: 3600 } })
+    await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+    await store.subscribe({ subscriberDID: CAROL, topicID: TOPIC, retention: 3600 })
+    const id = await store.publish({
+      senderDID: ALICE,
+      topicID: TOPIC,
+      payload: new Uint8Array([1]),
+      retain: 'log',
+    })
+
+    // The most aggressive sweep the hub can run frees nothing: Carol asked for an hour.
+    expect(await store.purge({ olderThan: 0 })).toEqual([])
+    const log = await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
+    expect(log.messages.map((m) => m.sequenceID)).toEqual([id])
+
+    // With Carol gone, so is the request that was keeping the frame.
+    await store.unsubscribe(CAROL, TOPIC)
+    expect(await store.purge({ olderThan: 0 })).toEqual([id])
+  })
+
+  test('the store default retention floors what an expiry sweep may remove', async () => {
+    const store = createMemoryStore({ retention: { default: 3600, max: 3600 } })
+    await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+    await store.publish({
+      senderDID: ALICE,
+      topicID: TOPIC,
+      payload: new Uint8Array([1]),
+      retain: 'log',
+    })
+    expect(await store.purge({ olderThan: 0 })).toEqual([])
   })
 
   test('key package store and fetch', async () => {

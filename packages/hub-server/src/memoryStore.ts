@@ -9,22 +9,36 @@ import type {
   PublishParams,
   PurgeParams,
   StoredMessage,
+  SubscribeParams,
   TrimParams,
 } from '@kumiai/hub-protocol'
+import { NotSubscribedError, RetentionExceededError } from '@kumiai/hub-protocol'
 import { EventEmitter } from '@sozai/event'
 
-type MessageRecord = {
+type RetentionClass = 'log' | 'mailbox'
+
+type LogEntry = {
   sequenceID: string
   senderDID: string
   topicID: string
   payload: Uint8Array
-  recipients: Set<string>
   storedAt: number
+  retain: RetentionClass
+  /** Recipients with a pending delivery of this entry: the reverse index of `deliveries`. */
+  pendingFor: Set<string>
+}
+
+export type MemoryStoreRetention = {
+  /** Floor, in seconds, on how long a topic's frames are kept. Default 0. */
+  default?: number
+  /** Ceiling, in seconds, on what a subscriber may request. Above it: RetentionExceededError. */
+  max?: number
 }
 
 export type MemoryStoreOptions = {
-  /** Per-topic max retained messages; oldest are trimmed beyond this. Default 1000. */
+  /** Per-topic max retained entries; oldest are trimmed beyond this. Default 1000. */
   maxDepth?: number
+  retention?: MemoryStoreRetention
 }
 
 const DEFAULT_MAX_DEPTH = 1000
@@ -36,54 +50,83 @@ function formatSequenceID(counter: number): string {
 /**
  * In-memory implementation of HubStore for testing and development.
  *
- * Single message copy + per-subscriber delivery index + refcount GC. Recipients
- * are resolved from the subscription table at publish time, never passed in.
+ * Retention is a class, declared per publish, and a duration, requested per subscribe.
+ *
+ * - `'mailbox'` (the default) is delivery-derived: its readers are known at publish time, so the
+ *   last ack frees the frame, and a publish nobody is subscribed to is dropped outright.
+ * - `'log'` is not: a subscriber that must read a frame may not exist when it is published, so no
+ *   refcount over current subscribers can ever free it. It is appended whether or not anyone is
+ *   subscribed, and only `trim` — or the age bound — removes it.
+ *
+ * The store is told the class; it never infers it, and it never reads a payload.
+ *
+ * Both classes are bounded by age: a topic's frames live for the longest retention any of its
+ * subscribers asked for, floored at the hub's default. For a mailbox topic that bound sits
+ * alongside the ack GC, and the ack usually gets there first.
  */
 export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
   const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH
+  const defaultRetention = options.retention?.default ?? 0
+  const maxRetention = options.retention?.max ?? Number.POSITIVE_INFINITY
   let counter = 0
-  const messages = new Map<string, MessageRecord>()
+  const entries = new Map<string, LogEntry>()
+  const topicLogs = new Map<string, Array<string>>()
+  const heads = new Map<string, string>()
   const deliveries = new Map<string, Array<string>>()
-  const subscriptions = new Map<string, Set<string>>()
-  const topicMessages = new Map<string, Array<string>>()
+  /** Per topic: the subscribers, each with the retention it asked for. */
+  const subscriptions = new Map<string, Map<string, number>>()
   const keyPackages = new Map<string, Array<string>>()
   const events = new EventEmitter<HubStoreEvents>()
 
-  // Remove a message entirely: every recipient delivery list, the topic log,
-  // and the message record.
-  function deleteMessage(sequenceID: string): void {
-    const record = messages.get(sequenceID)
-    if (record == null) return
-    for (const recipient of record.recipients) {
-      const list = deliveries.get(recipient)
+  // The age bound for a topic: the longest retention any of its subscribers asked for, floored
+  // by the hub's default and by the caller's own bound.
+  function retentionOf(topicID: string, floor: number): number {
+    let retention = Math.max(floor, defaultRetention)
+    const subscribers = subscriptions.get(topicID)
+    if (subscribers != null) {
+      for (const requested of subscribers.values()) {
+        if (requested > retention) retention = requested
+      }
+    }
+    return retention
+  }
+
+  // The only removal path for an entry. Pending deliveries of it go with it: they reference an
+  // entry that no longer exists, so they can no longer be pushed. `heads` is never touched — an
+  // empty log still has a head.
+  function removeEntry(sequenceID: string): void {
+    const entry = entries.get(sequenceID)
+    if (entry == null) return
+    for (const recipientDID of entry.pendingFor) {
+      const list = deliveries.get(recipientDID)
       if (list != null) {
         const index = list.indexOf(sequenceID)
         if (index !== -1) list.splice(index, 1)
       }
     }
-    const topicLog = topicMessages.get(record.topicID)
-    if (topicLog != null) {
-      const index = topicLog.indexOf(sequenceID)
-      if (index !== -1) topicLog.splice(index, 1)
-      if (topicLog.length === 0) topicMessages.delete(record.topicID)
+    const log = topicLogs.get(entry.topicID)
+    if (log != null) {
+      const index = log.indexOf(sequenceID)
+      if (index !== -1) log.splice(index, 1)
+      if (log.length === 0) topicLogs.delete(entry.topicID)
     }
-    messages.delete(sequenceID)
+    entries.delete(sequenceID)
   }
 
-  // Drop one subscriber's delivery of a message; GC the message when its last
-  // recipient is gone (refcount → 0).
-  function removeDelivery(recipientDID: string, sequenceID: string): void {
+  // Drop one recipient's pending delivery. A mailbox frame whose last delivery is gone has been
+  // read by everyone who was ever going to read it, so it goes with it. A log frame does not: the
+  // subscriber that needs it may not exist yet.
+  function dropDelivery(recipientDID: string, sequenceID: string): void {
     const list = deliveries.get(recipientDID)
     if (list != null) {
       const index = list.indexOf(sequenceID)
       if (index !== -1) list.splice(index, 1)
     }
-    const record = messages.get(sequenceID)
-    if (record != null) {
-      record.recipients.delete(recipientDID)
-      if (record.recipients.size === 0) {
-        deleteMessage(sequenceID)
-      }
+    const entry = entries.get(sequenceID)
+    if (entry == null) return
+    entry.pendingFor.delete(recipientDID)
+    if (entry.retain === 'mailbox' && entry.pendingFor.size === 0) {
+      removeEntry(sequenceID)
     }
   }
 
@@ -91,50 +134,61 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
     events,
 
     async publish(params: PublishParams): Promise<string> {
+      const retain: RetentionClass = params.retain ?? 'mailbox'
       counter++
       const sequenceID = formatSequenceID(counter)
 
-      // Recipients = current subscribers minus the sender. Zero recipients
-      // (no subscribers, or only the sender) → drop immediately, store nothing.
-      const subscribers = subscriptions.get(params.topicID)
+      // Only a log publish moves the head. A head naming a mailbox frame is a head that the
+      // frame's own last ack deletes, leaving readers of the log a head they can never reach.
+      if (retain === 'log') {
+        heads.set(params.topicID, sequenceID)
+      }
+
+      // Recipients = current subscribers minus the sender.
       const recipients = new Set<string>()
+      const subscribers = subscriptions.get(params.topicID)
       if (subscribers != null) {
-        for (const did of subscribers) {
-          if (did !== params.senderDID) recipients.add(did)
+        for (const subscriberDID of subscribers.keys()) {
+          if (subscriberDID !== params.senderDID) recipients.add(subscriberDID)
         }
       }
-      if (recipients.size === 0) {
+
+      // A mailbox frame with no recipients has already been read by everyone who was going to
+      // read it. A log frame is kept regardless: its reader may not exist yet.
+      if (retain === 'mailbox' && recipients.size === 0) {
         return sequenceID
       }
 
-      const record: MessageRecord = {
+      const entry: LogEntry = {
         sequenceID,
         senderDID: params.senderDID,
         topicID: params.topicID,
         payload: params.payload,
-        recipients,
         storedAt: Date.now(),
+        retain,
+        pendingFor: recipients,
       }
-      messages.set(sequenceID, record)
+      entries.set(sequenceID, entry)
 
-      for (const recipient of recipients) {
-        let list = deliveries.get(recipient)
+      let log = topicLogs.get(params.topicID)
+      if (log == null) {
+        log = []
+        topicLogs.set(params.topicID, log)
+      }
+      log.push(sequenceID)
+
+      for (const recipientDID of recipients) {
+        let list = deliveries.get(recipientDID)
         if (list == null) {
           list = []
-          deliveries.set(recipient, list)
+          deliveries.set(recipientDID, list)
         }
         list.push(sequenceID)
       }
 
-      let topicLog = topicMessages.get(params.topicID)
-      if (topicLog == null) {
-        topicLog = []
-        topicMessages.set(params.topicID, topicLog)
-      }
-      topicLog.push(sequenceID)
-      // Per-topic max-depth trim: drop oldest beyond the bound.
-      while (topicLog.length > maxDepth) {
-        deleteMessage(topicLog[0])
+      // Depth bound: a trim like any other, so it moves oldest and leaves head alone.
+      while (log.length > maxDepth) {
+        removeEntry(log[0])
       }
 
       return sequenceID
@@ -143,37 +197,37 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
     async fetch(params: FetchParams): Promise<FetchResult> {
       if (params.ack != null && params.ack.length > 0) {
         for (const sequenceID of params.ack) {
-          removeDelivery(params.recipientDID, sequenceID)
+          dropDelivery(params.recipientDID, sequenceID)
         }
       }
 
-      const recipientDeliveries = deliveries.get(params.recipientDID)
-      if (recipientDeliveries == null || recipientDeliveries.length === 0) {
+      const pending = deliveries.get(params.recipientDID)
+      if (pending == null || pending.length === 0) {
         return { messages: [], cursor: null }
       }
 
       let startIndex = 0
       if (params.after != null) {
-        const afterIndex = recipientDeliveries.indexOf(params.after)
+        const afterIndex = pending.indexOf(params.after)
         if (afterIndex !== -1) {
           startIndex = afterIndex + 1
         }
       }
 
-      const available = recipientDeliveries.slice(startIndex)
+      const available = pending.slice(startIndex)
       const limit = params.limit ?? available.length
       const selected = available.slice(0, limit)
       const hasMore = available.length > limit
 
       const resultMessages: Array<StoredMessage> = []
       for (const sequenceID of selected) {
-        const record = messages.get(sequenceID)
-        if (record != null) {
+        const entry = entries.get(sequenceID)
+        if (entry != null) {
           resultMessages.push({
-            sequenceID: record.sequenceID,
-            senderDID: record.senderDID,
-            topicID: record.topicID,
-            payload: record.payload,
+            sequenceID: entry.sequenceID,
+            senderDID: entry.senderDID,
+            topicID: entry.topicID,
+            payload: entry.payload,
           })
         }
       }
@@ -188,28 +242,67 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
       return result
     },
 
-    async fetchTopic(_params: FetchTopicParams): Promise<FetchTopicResult> {
-      throw new Error('fetchTopic is not implemented')
+    async fetchTopic(params: FetchTopicParams): Promise<FetchTopicResult> {
+      if (!subscriptions.get(params.topicID)?.has(params.subscriberDID)) {
+        throw new NotSubscribedError(
+          `${params.subscriberDID} is not a subscriber of ${params.topicID}`,
+        )
+      }
+
+      const log = topicLogs.get(params.topicID) ?? []
+      const after = params.after
+      const selected = after == null ? log : log.filter((sequenceID) => sequenceID > after)
+      const limited = params.limit == null ? selected : selected.slice(0, params.limit)
+
+      const messages: Array<StoredMessage> = []
+      for (const sequenceID of limited) {
+        const entry = entries.get(sequenceID)
+        if (entry != null) {
+          messages.push({
+            sequenceID: entry.sequenceID,
+            senderDID: entry.senderDID,
+            topicID: entry.topicID,
+            payload: entry.payload,
+          })
+        }
+      }
+
+      return {
+        messages,
+        head: heads.get(params.topicID) ?? null,
+        oldest: log.length > 0 ? log[0] : null,
+      }
     },
 
-    async trim(_params: TrimParams): Promise<void> {
-      throw new Error('trim is not implemented')
+    async trim(params: TrimParams): Promise<void> {
+      const log = topicLogs.get(params.topicID)
+      if (log == null) return
+      for (const sequenceID of [...log]) {
+        if (sequenceID < params.before) {
+          removeEntry(sequenceID)
+        }
+      }
     },
 
     async ack(params: AckParams): Promise<void> {
       for (const sequenceID of params.sequenceIDs) {
-        removeDelivery(params.recipientDID, sequenceID)
+        dropDelivery(params.recipientDID, sequenceID)
       }
     },
 
     async purge(params: PurgeParams): Promise<Array<string>> {
-      const threshold = Date.now() - params.olderThan * 1000
+      // The age bound, for both classes: the same removal path, the same invariants — head is
+      // untouched.
+      const now = Date.now()
       const purgedIDs: Array<string> = []
-      for (const [sequenceID, record] of messages) {
-        if (record.storedAt <= threshold) {
+      for (const [sequenceID, entry] of entries) {
+        const retention = retentionOf(entry.topicID, params.olderThan)
+        if (entry.storedAt <= now - retention * 1000) {
           purgedIDs.push(sequenceID)
-          deleteMessage(sequenceID)
         }
+      }
+      for (const sequenceID of purgedIDs) {
+        removeEntry(sequenceID)
       }
       if (purgedIDs.length > 0) {
         await events.emit('purge', { sequenceIDs: purgedIDs })
@@ -217,47 +310,44 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
       return purgedIDs
     },
 
-    async subscribe(subscriberDID: string, topicID: string): Promise<void> {
-      let subs = subscriptions.get(topicID)
-      if (subs == null) {
-        subs = new Set()
-        subscriptions.set(topicID, subs)
+    async subscribe(params: SubscribeParams): Promise<void> {
+      const requested = params.retention ?? defaultRetention
+      if (requested > maxRetention) {
+        throw new RetentionExceededError(
+          `Requested retention of ${requested}s exceeds the maximum of ${maxRetention}s`,
+        )
       }
-      subs.add(subscriberDID)
+      let subscribers = subscriptions.get(params.topicID)
+      if (subscribers == null) {
+        subscribers = new Map()
+        subscriptions.set(params.topicID, subscribers)
+      }
+      subscribers.set(params.subscriberDID, requested)
     },
 
     async unsubscribe(subscriberDID: string, topicID: string): Promise<void> {
-      const subs = subscriptions.get(topicID)
-      if (subs != null) {
-        subs.delete(subscriberDID)
-        if (subs.size === 0) {
+      const subscribers = subscriptions.get(topicID)
+      if (subscribers != null) {
+        subscribers.delete(subscriberDID)
+        if (subscribers.size === 0) {
           subscriptions.delete(topicID)
         }
       }
-      // Drop this subscriber's pending deliveries for the topic.
-      const list = deliveries.get(subscriberDID)
-      if (list != null) {
-        for (const sequenceID of [...list]) {
-          const record = messages.get(sequenceID)
-          if (record != null && record.topicID === topicID) {
-            removeDelivery(subscriberDID, sequenceID)
-          }
-        }
-      }
-      // Last subscriber gone → drop the whole topic log immediately.
-      if (!subscriptions.has(topicID)) {
-        const topicLog = topicMessages.get(topicID)
-        if (topicLog != null) {
-          for (const sequenceID of [...topicLog]) {
-            deleteMessage(sequenceID)
+      // Drops this subscriber's pending deliveries for the topic — freeing a mailbox frame whose
+      // last delivery this was, and leaving a log frame standing.
+      const pending = deliveries.get(subscriberDID)
+      if (pending != null) {
+        for (const sequenceID of [...pending]) {
+          if (entries.get(sequenceID)?.topicID === topicID) {
+            dropDelivery(subscriberDID, sequenceID)
           }
         }
       }
     },
 
     async getSubscribers(topicID: string): Promise<Array<string>> {
-      const subs = subscriptions.get(topicID)
-      return subs == null ? [] : [...subs]
+      const subscribers = subscriptions.get(topicID)
+      return subscribers == null ? [] : [...subscribers.keys()]
     },
 
     async storeKeyPackage(ownerDID: string, keyPackage: string): Promise<void> {
