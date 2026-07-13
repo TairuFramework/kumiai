@@ -3,11 +3,56 @@
 **Reviewer:** kubun (the host driving the requirements in `2026-07-13-host-ledger-lane.md`).
 **Subject:** `2026-07-13-control-ledger-lane-design.md`.
 
-Six review passes. **The newest pass is at the top; earlier passes are kept below as the record.**
+Seven review passes. **The newest pass is at the top; earlier passes are kept below as the record.**
 
 ---
 
-# Revision 6 review
+# Revision 7 review
+
+**Verdict:** G16 and G17 are folded in, and both correctly. The completeness invariant (`computeHead(ids(handle.ledger))` vs the handle's own `ledger_head`) as a *self-describing* bootstrap trigger is the right shape — it needs no memory of how the peer got broken. And "re-enact by ledger membership, never by failure mode" collapses the three heal paths into a single set-difference, which is strictly better than telling them apart.
+
+One new finding. It is the **last instance of the pattern this review has been chasing since G5**: the design enumerates three heal *paths* but only ever specifies two heal *triggers*.
+
+## G18 — The crash-window peer has no trigger. Nothing detects it, including the new invariant.
+
+**Blocking.** Heal has three named paths. It has exactly two triggers — trim strand, and byzantine double-accept. The third path, crash-in-the-acceptance-window, is never given one.
+
+The design conflates two different failures under one heading: *"A throw from `onAccepted` is the crash window, reached by a likelier route."* For the **throw**, that's fine — the peer is alive, it is inside `commit()`, it knows. For an actual **process death** between the hub's acceptance and the host's adoption, the knowledge dies with the process. On restart the peer is left in a state that trips nothing:
+
+- **The completeness invariant passes.** It never rejoined, so its ledger still matches its own `ledger_head` at epoch N. G16's check says it is healthy.
+- **Trim strand does not fire.** The frames are all still retained; it can pull the log to the end.
+- **The fork trigger does not fire.** It never applied a commit at epoch N, so it holds no conflicting per-epoch sequenceID record.
+
+So it pulls, reaches the frame that is **its own accepted commit at epoch N**, and cannot apply it — MLS *merges* a pending commit, it does not *process* one, and the pending state died with the process. The design already knows this ("Host-side impact" says exactly that sentence), but the cursor table has no row for it. The frame falls through to *malformed / policy-rejected → poison → advance*. The cursor then walks every later frame, all at epochs the peer cannot reach, each classified as *no record for that epoch → history → advance*.
+
+The peer ends at `reconciledHead == head`, believing it is fully reconciled, **stuck at epoch N forever, with a complete ledger and a clean bill of health.** It silently stops applying group changes and silently stops being able to commit. There is no error, and — this is what makes it blocking — the invariant introduced in G16 to make strandedness self-detecting *reports this peer as fine*.
+
+**The detector already exists in `mls`: `readMessageEpoch`.** It reads a frame's epoch without applying it, so the peer can distinguish "a frame from before my time" (history — skip) from "a frame at my *current* epoch that I cannot apply" (I am stranded — heal). That second condition is precisely the un-merged own-commit, and it cannot arise for any healthy peer: a frame framed at your current epoch is, by definition, the next commit you should be able to apply.
+
+Recommend a third heal trigger, stated beside the other two:
+
+> **Un-merged own commit.** A valid frame framed at the peer's *current* epoch that it cannot apply. The peer is the crash-window victim: the hub accepted its commit, the group advanced, and the pending state did not survive. Action: `recover()`.
+
+and a matching row in the cursor table, above the poison row, so an un-mergeable own-commit is never miscategorized as malformed:
+
+| Frame | Cursor |
+|---|---|
+| At the peer's current epoch, valid, but unapplicable (own un-merged commit) | do not advance; **heal trigger** — `recover()` |
+
+Two smaller consequences fall out for free once this is stated:
+
+- **`inFlight` is empty after a real crash** — the `PendingCommit` was in memory. That is *correct* and needs no extra machinery, precisely because of G17: on the crash path the membership filter empties the re-enact list anyway, since the entries are already in the group's ledger. The two fixes compose. Worth one sentence saying so, because a reader will otherwise wonder how a restarted peer re-enacts entries it can no longer name.
+- The Deferred "durable pending-commit journal" is now clearly an *optimization* (it would let the peer merge instead of rejoin), not a correctness dependency — which is worth saying, since without a trigger it was silently load-bearing.
+
+## What matches, revision 7
+
+The completeness invariant is the right abstraction and is correctly scoped ("check it on restore, and before every lane operation"), and making an incomplete ledger a *persistent degraded state* rather than a droppable return value is the part that actually closes G16. G17's table and the `[Foo, Bar, Foo]` walkthrough state the bug precisely, and "membership, not provenance" is a better rule than the path-by-path fix I proposed — it means a future fourth heal path inherits the correct behaviour for free.
+
+With G18 closed I have no further structural objections. Every remaining risk I can see is implementation fidelity: the `HubStore` conformance suite run against a real database over separate connections, and the cursor table's rows being implemented in the order written.
+
+---
+
+# Revision 6 review (folded in — kept as the record)
 
 **Verdict:** G15 is folded in, and correctly — bootstrap as a named primitive with its own head-verification step, rather than a clause inside `recover()`, is the right call, and wiring `computeHead`/`assertHeadMatches` on the rejoin path (where today they run only from `processWelcome`) closes the omission attack.
 

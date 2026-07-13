@@ -394,6 +394,26 @@ timing heuristic in revision 1 is gone (G4).
   see both frames. The loser rejoins by external commit onto the winner's branch and
   re-enacts its entries; entry tokens are epoch-independent, so re-enactment needs no
   re-signing.
+- **Un-merged own commit (G18).** A valid frame framed at the peer's **current** epoch that
+  it cannot apply. This is the crash-window victim: the hub accepted its commit, the group
+  advanced, and the pending state died with the process — MLS *merges* a pending commit, it
+  does not *process* one, so the peer can never apply the frame that is its own commit. The
+  condition cannot arise for a healthy peer: a frame at your current epoch is by definition
+  the next commit you should be able to apply. `readMessageEpoch` reads a frame's epoch
+  without applying it, which is what separates this from ordinary history. Action:
+  `recover()`.
+
+  This is the third heal path, and until now it was the one with no trigger. It trips
+  *nothing* else: the completeness invariant passes (the peer never rejoined, so its ledger
+  still matches its own `ledger_head` at epoch N), trim does not fire (the frames are all
+  retained), and the fork trigger does not fire (it never applied a commit at epoch N, so it
+  holds no conflicting per-epoch record). Without this row the frame falls through to
+  *poison → advance*, every later frame classifies as *history → advance*, and the peer ends
+  at `reconciledHead == head` believing it is fully reconciled — **stuck at epoch N forever,
+  with a complete ledger and a clean bill of health.** A throw from `onAccepted` is the same
+  failure with the peer alive to notice; a process death is the same failure with nobody left
+  to remember.
+
 - **Unrecoverable partition.** A hub that never shows a peer the other branch prevents
   convergence entirely. That is DoS, and out of scope.
 
@@ -640,8 +660,22 @@ poison, and that lie costs someone a day the first time they debug a real log.
 | Applied | advance; record this epoch → sequenceID for the D1 fork check |
 | At an epoch this peer has no recorded applied-commit for (pre-join, pre-rejoin, re-seeded history) | advance, **no fork check, no unwrap attempt** — history, not a fork and not poison |
 | At an epoch this peer *has* a record for, with a different sequenceID | advance; the fork trigger (D1) |
+| **At the peer's current epoch, valid, but unapplicable — its own un-merged commit** | **do not advance; heal trigger → `recover()`** (G18) |
 | Malformed, or policy-rejected (`CommitRejectedError`) | advance (poison — never retry) |
 | `MissingLedgerEntriesError` | **do not advance**; gather the missing ids, retry the frame (bounded); on exhaustion, advance and escalate to `recover()` |
+
+**The rows are evaluated in the order written.** Epoch classification comes first (G11: no
+unwrap before it), the un-merged own-commit row comes before the poison row (G18: otherwise a
+crash victim's own commit is filed as malformed and the peer walks cheerfully to
+`reconciledHead == head`), and poison is the last resort, never the fallback for "I could not
+apply this".
+
+**After a real crash, `inFlight` is empty** — the `PendingCommit` lived in memory. That is
+correct and needs no machinery, because G17's membership filter would empty the re-enact list
+anyway: on the crash path the entries are already in the group's authenticated ledger. The
+restarted peer heals, bootstraps, re-enacts nothing, and is whole. The two fixes compose, and
+a reader wondering how a restarted peer re-enacts entries it can no longer name has the
+answer: it must not, and it does not need to.
 
 `MissingLedgerEntriesError` remains the one retryable outcome, and D3 makes it the rare one.
 This also repairs today's bug in `peer.ts`, whose bare `catch` never acks, so *any*
@@ -707,8 +741,11 @@ if metadata exposure to ex-members becomes a stated requirement.
 
 - **Closing the crash window.** A durable pending-commit journal (commit bytes, `newGroup`
   state, any Welcome) written before publish, plus republish-by-`publishID` on restart to
-  learn the outcome, would make commit acceptance and local adoption atomic. `publishID` is
-  in the contract *now* so this costs no second host migration when we do it.
+  learn the outcome, would let a restarted committer **merge** its pending commit instead of
+  rejoining. This is an **optimization, not a correctness dependency**: with the un-merged
+  own-commit trigger (G18) the crash victim detects itself and heals. Without that trigger it
+  was silently load-bearing. `publishID` is in the contract *now* so this costs no second host
+  migration when we do it.
 - **Full-device-loss recovery** (no MLS state at all). Such a member is re-invited.
 - **Hub-partition DoS.** Out of scope.
 
@@ -783,6 +820,13 @@ if metadata exposure to ex-members becomes a stated requirement.
   GroupInfo's authenticated `ledger_head`, `LedgerIncompleteError` is thrown, that responder
   is skipped, and the peer folds an honest reply instead. The demoted admin does **not**
   reappear in the rejoiner's roster (the G15 security regression test).
+- **A crash in the acceptance window self-heals.** The committer is killed after the hub
+  accepts and before it adopts, then restarted. It pulls, reaches its own commit at its
+  current epoch, cannot merge it, and **heals** — rather than filing it as poison and walking
+  to `reconciledHead == head` with a clean bill of health, which is what an implementation
+  without the G18 row does. It re-enacts nothing (its entries are already in the ledger) and
+  ends whole. The G18 regression test, and the one that fails silently: assert the peer's
+  epoch **advanced**, not merely that no error was raised.
 - **A crash mid-bootstrap self-heals.** The peer is killed between adopting the rejoined
   handle and completing bootstrap, and restarted: the completeness invariant fails on
   restore, bootstrap runs, and the roster is whole — with no memory of how it got there (the
