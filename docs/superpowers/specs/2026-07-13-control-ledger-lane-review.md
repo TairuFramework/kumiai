@@ -3,11 +3,51 @@
 **Reviewer:** kubun (the host driving the requirements in `2026-07-13-host-ledger-lane.md`).
 **Subject:** `2026-07-13-control-ledger-lane-design.md`.
 
-Twelve review passes. **The newest pass is at the top; earlier passes are kept below as the record.**
+Thirteen review passes. **The newest pass is at the top; earlier passes are kept below as the record.**
 
 ---
 
-# Revision 12 review
+# Revision 13 review
+
+**Verdict:** G25 is folded in — the `kind` tag, the per-kind routing table, and the point that a silently-dropped *remove* is a security-relevant no-op rather than data loss. The reasoning for why "rebuild like any other loser" holds inside `commit()` and dies across a restart is now explicit.
+
+One finding. It is an ownership question the G25 fix opened, and it is the last thing I have.
+
+## G26 — On replay, the peer is told to re-enact a commit it has no way to build
+
+**Blocking, but small — a missing port method or a two-line contract change, depending on which way you resolve it.**
+
+The `kind: 'ledger'` row says:
+
+> **Re-enact.** …Re-enact them through a fresh `commit()`, membership-filtered exactly as G17 defines.
+
+`commit()` takes a `build` closure. On the replay path there is no closure — that is the entire premise of G25 — and the peer cannot synthesize one, because building a ledger commit means calling `commitLedgerEntries(group, tokens)`, which lives behind the `GroupMLS` port. Look at what that port exposes: `processCommit`, `exportGroupInfo`, `applyRecovery`, `createRecoveryRequest`, `getLedgerEntries`, `getLedger`, `bootstrapLedger`, `isLedgerComplete`. **There is no "build a ledger commit from these tokens".** Commits are built by the host, inside `build()`, and the host's `build()` is gone.
+
+So as written, the `ledger` row is not implementable by the peer, and the `invite`/`remove` rows are — which is backwards from how the table reads.
+
+Two ways out, and the second is better:
+
+1. **`GroupMLS` grows `buildLedgerCommit(tokens): Promise<PendingCommit>`.** The peer can then rebuild and re-enact autonomously. It works, but it puts commit *construction* behind a port whose stated job is MLS state, and it gives the peer a second, private way to make a commit that does not go through the host at all.
+
+2. **Replay surfaces, and the host drives — for every `kind`.** Replay returns the recoverable work rather than performing it: the journalled tokens for `ledger`, a failure notice for `invite`/`remove`. The host then issues an ordinary `commit()` with its own `build()` over those tokens. **This is exactly the contract `recover()` already has** — it returns `{ advanced, reenact }` and the design is explicit that *"the caller re-enacts `reenact` via an ordinary `commit()` — a SEPARATE lane operation"*. Replay is the same situation (work survived, closure did not), so it should have the same shape, and the symmetry is an argument in itself: one rule, "the peer never builds commits; it hands recoverable work back to the host", holding on both paths.
+
+Under option 2 the two rows collapse into one honest statement — **replay never re-enacts anything; it surfaces what survived and what did not** — and the `kind` tag keeps its job, which is telling the host *which* of those it is looking at. `ledger` means "here are your tokens, re-issue them"; `invite`/`remove` means "this did not happen, and I cannot give it back to you."
+
+Worth stating the invariant that makes both paths safe, since it is now load-bearing in two places: **the peer never constructs a commit. Only the host does, via `build()`.** Every mechanism that "re-enacts" — heal, replay — is really the host committing again over tokens the peer preserved.
+
+## What matches, revision 13
+
+The `kind` tag is the right mechanism and is correctly motivated (replay must route without parsing the framed commit). The per-kind table states the recoverability asymmetry precisely: entry tokens are epoch-independent and survive; MLS proposals and KeyPackages do not. And the escalation on `remove` — *"the admin clicked evict, the process crashed, and from their side the member is gone while in fact they are still in the group, with no signal to anyone"* — is the right severity call; that belongs in the design, not buried in a review.
+
+## Closing assessment
+
+With G26 resolved I have no further findings, and I do not expect to produce more by looking harder. The shape has been fixed since revision 4 — CAS'd log, pull-driven lane, bodies in the frame, ephemeral-key seal, journal plus heal — and revisions 5 through 13 have closed strictly narrowing interactions at its edges: G14 and G21 were structural, G22 through G26 are each a sentence or a method. That curve is what convergence looks like.
+
+The remaining risk is implementation fidelity, and it concentrates in three places, all of which the design already names: the `HubStore` conformance suite actually run against a real database over separate connections; the cursor table's rows implemented in the order written; and `onAccepted` written to be genuinely idempotent rather than assumed to be.
+
+---
+
+# Revision 12 review (folded in — kept as the record)
 
 **Verdict:** G24 is folded in — the dedup record has its own retention, the contract says it is not a log entry, and the conformance test (publish, trim, republish the same `publishID`, get the original `sequenceID` back) pins it.
 

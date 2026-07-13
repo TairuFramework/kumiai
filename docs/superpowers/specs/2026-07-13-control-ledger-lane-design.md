@@ -277,6 +277,21 @@ type CommitJournal = {
 }
 
 commit: (build: () => Promise<PendingCommit>) => Promise<void>
+
+/**
+ * How replay hands recoverable work back to the host (G26). Fired from lane step 0 when a
+ * journalled commit turns out to have lost its CAS — the peer cannot rebuild it, because
+ * `build()` was a closure and the process that held it is gone.
+ *
+ * `kind: 'ledger'` carries the surviving signed tokens: the host re-issues them with an
+ * ordinary `commit()`. `kind: 'invite' | 'remove'` carries no tokens: that commit did not
+ * happen and cannot be reconstructed, so the host must re-issue the operation or tell the
+ * user. The peer NEVER commits on the host's behalf.
+ */
+onCommitLost?: (event:
+  | { kind: 'ledger'; tokens: Array<string> }
+  | { kind: 'invite' | 'remove' }
+) => void
 ```
 
 **`commit` holds a per-group mutex for its whole run (G3).** CAS resolves races between
@@ -327,18 +342,29 @@ phrase is fine: losing means going back to step 1 and calling `build()` again, a
 a live closure over the host's current handle. **After a restart there is no closure** — the
 process that held it is gone. So the branch routes on `kind`:
 
-| `kind` | On replay-`HeadMismatchError` |
+**Replay never re-enacts anything. It surfaces what survived and what did not (G26)**, and the
+host commits again — for every `kind`:
+
+| `kind` | What replay hands back |
 |---|---|
-| `ledger` | **Re-enact.** The journalled `bodies` are the signed entry tokens, and entry tokens are epoch-independent — the same property heal leans on. Re-enact them through a fresh `commit()`, membership-filtered exactly as G17 defines (they are *not* in the group's ledger, since this commit never landed, so the filter keeps them). Nothing is lost. This is the common case, and after kubun's control-plane move it is *most* commits. |
-| `invite` / `remove` | **Surface it.** The intent lives in the MLS Add/Remove proposal and the KeyPackage, not in `bodies`, and neither survives in a form the peer can rebuild without `build()`. The peer reports the failure to the host, which must re-issue or tell the user. |
+| `ledger` | **The journalled tokens, re-issuable.** Entry tokens are signed and epoch-independent — the property heal already leans on — so the work survives the restart intact. The host issues an ordinary `commit()` over them, membership-filtered exactly as G17 defines (they are *not* in the group's ledger, since this commit never landed, so the filter keeps them). Nothing is lost. After kubun's control-plane move this is *most* commits. |
+| `invite` / `remove` | **A failure notice: this did not happen, and it cannot be given back.** The intent lives in the MLS Add/Remove proposal and the KeyPackage, not in `bodies`, and neither survives without `build()`. The host must re-issue it or tell the user. |
+
+**The invariant, now load-bearing in two places: the peer never constructs a commit — only the
+host does, via `build()`.** Every mechanism that "re-enacts" (heal, replay) is really the host
+committing again over tokens the peer preserved. This is already `recover()`'s contract — it
+returns `{ advanced, reenact }` and the caller commits those as a separate lane operation — and
+replay has the identical shape, because it is the identical situation: the work survived, the
+closure did not. A peer that could rebuild a `ledger` commit itself would need commit
+*construction* behind `GroupMLS` (whose job is MLS state) and would gain a second, private way
+to commit that never passes through the host.
 
 **Silently clearing the slot is the one thing that must not happen.** For an invite it loses an
 invitation; for a **remove** it is worse than data loss — the admin clicked evict, the process
 crashed, and from their side the member is gone while in fact they are still in the group, with
 no signal to anyone. An admin who believes a member was evicted when they were not is a
-security-relevant no-op, not a UX wrinkle. The `kind` tag exists so replay can tell these apart
-without parsing the framed commit, and so the host gets a meaningful event rather than a
-generic failure.
+security-relevant no-op, not a UX wrinkle. The `kind` tag exists so replay can route without
+parsing the framed commit, and so the host is told *which* of the two situations it is in.
 
 **`onAccepted` MUST be idempotent — replay can and will run it more than once (G22).** The
 sequence *publish → accepted → `onAccepted()` → `clear(publishID)`* is three steps and a crash
@@ -868,7 +894,7 @@ permanently-failing commit is redelivered forever.
 | `hub-protocol` | *Defines* conditional publish, `fetchTopic`, `HeadMismatchError`, the atomicity requirement, the conformance suite | Implement storage |
 | `HubStore` implementations (`hub-server` memory store; each host's DB store) | *Provide* the per-topic head, the atomic CAS, the readable log | Read payloads; know what a commit is |
 | `mls` | Group state, authority, `ledger_head`, ledger tokens, GroupInfo sealing/opening, the recovery request's ephemeral key and signature | Transport; ordering across peers |
-| `rpc` (`GroupPeer`) | The serialized per-group lane (pull, `commit`, `recover` — never nested), the CAS loops, retry/rebase, the pull cursor, body framing, the resolver, gather, fork detection, heal triggers | MLS state; entry semantics |
+| `rpc` (`GroupPeer`) | The serialized per-group lane (replay, pull, `commit`, `recover` — never nested), the CAS loops, retry/rebase, the pull cursor, body framing, the resolver, gather, fork detection, heal triggers | MLS state; entry semantics; **constructing commits — only the host does that, via `build()`. Heal and replay hand recoverable work back; they never commit on the host's behalf (G26)** |
 | Host | Persist handle state; author entries; app reducers; migrate its `HubStore` | Ordering, authority, integrity, body distribution, body storage |
 
 ## Host-side impact
@@ -891,11 +917,13 @@ Named so the work is sized honestly. These are the host's to absorb.
   without adopting and adopt only inside `onAccepted`. Because `build()` re-runs on every
   retry, an invite re-mints both the Commit *and* the Welcome each time. This is a rewrite
   of the host's commit paths, not a call-site swap.
-- **A commit lost to a restart is reported, not swallowed.** When replay's republish loses the
-  CAS, a `ledger` commit's entries are re-enacted automatically, but an `invite` or a `remove`
-  cannot be rebuilt from the journal — `build()` was a closure and the process that held it is
-  gone. The peer surfaces that, and the host must re-issue it or tell the user. A dropped
-  removal is the case to design for: the admin believes the member is evicted and they are not.
+- **A commit lost to a restart is handed back, not swallowed — and the host re-commits it.**
+  When replay's republish loses the CAS, the peer fires `onCommitLost`: for a `ledger` commit
+  it hands back the surviving signed tokens, which the host re-issues via an ordinary
+  `commit()`; for an `invite` or `remove` it hands back a failure notice, because `build()` was
+  a closure and the process that held it is gone. **The peer never commits on the host's
+  behalf** — the same rule that governs heal's `reenact`. A dropped removal is the case to
+  design for: the admin believes the member is evicted and they are not.
 - **`onAccepted` must be idempotent.** Replay is at-least-once: a crash between `onAccepted()`
   and `clear()`, or partway through `onAccepted()` itself, re-runs it. Adopting the journalled
   handle twice is harmless; **delivering the Welcome twice is not**, so the host must make
@@ -1054,13 +1082,14 @@ heal cannot reach for want of a responder.)*
   adopts and still sends the Welcome. A store that trims its dedup records with its log bricks
   this group, and does so silently — in a multi-member group the same bug is masked by
   `recover()` finding a responder.
-- **Replay loses the CAS: entries survive, proposals are reported (G25).** The peer journals a
-  commit, dies before publishing succeeds, and another admin commits meanwhile. On restart the
-  republish takes `HeadMismatchError`, and: a `ledger` commit's entries land via a fresh
-  `commit()` (assert they are in the group's ledger afterwards), while a journalled `remove` is
-  **surfaced to the host** — assert the host is told, and assert the member is still in the
-  roster, because the silent-success version of this bug leaves an admin believing an eviction
-  happened.
+- **Replay loses the CAS: entries survive, proposals are reported (G25, G26).** The peer
+  journals a commit, dies before publishing succeeds, and another admin commits meanwhile. On
+  restart the republish takes `HeadMismatchError` and the peer fires `onCommitLost`: for a
+  `ledger` commit the host receives the tokens and re-issues them (assert they are in the
+  group's ledger after the host's `commit()` — **and that the peer did not commit them by
+  itself**), and for a journalled `remove` the host receives a failure notice (assert the host
+  is told, and assert the member is still in the roster, because the silent-success version of
+  this bug leaves an admin believing an eviction happened).
 - **Replay runs `onAccepted` twice.** The peer is killed between `onAccepted()` and
   `clear(publishID)`. On restart the entry replays: the handle is adopted again (harmless) and
   the Welcome is delivered again — and the invitee, already joined, no-ops it rather than
