@@ -3,11 +3,54 @@
 **Reviewer:** kubun (the host driving the requirements in `2026-07-13-host-ledger-lane.md`).
 **Subject:** `2026-07-13-control-ledger-lane-design.md`.
 
-Ten review passes. **The newest pass is at the top; earlier passes are kept below as the record.**
+Eleven review passes. **The newest pass is at the top; earlier passes are kept below as the record.**
 
 ---
 
-# Revision 10 review
+# Revision 11 review
+
+**Verdict:** G22 and G23 are folded in. Replay as an explicit *step zero* ahead of the completeness check and the pull is the right structural fix, and stating the at-least-once semantics out loud — rather than letting a host infer exactly-once from a journal whose whole purpose is to make a commit look atomic — is exactly the note to leave.
+
+One finding. It is narrow, but it lands on the single guarantee the journal was introduced to provide, so it is blocking.
+
+## G24 — The journal's idempotency dies with the trim, in exactly the case the journal exists for
+
+**Blocking.** Replay rests entirely on one contract clause:
+
+> *"Republishing an already-accepted `publishID` returns its original `sequenceID` instead of appending again."*
+
+The design never says **where the `publishID` record lives, or how long it survives.** Everything else in the store is governed by one rule it states emphatically: *"Trim governs the log… and is the only thing that removes an entry."* If the `publishID` uniqueness record is a column on the message row — which is what "hosts persist it and enforce uniqueness" most naturally means, and what any implementer will build — then **trim deletes the idempotency record along with the frame.**
+
+After that, a replay of that `publishID` is no longer idempotent. It is an ordinary new publish.
+
+For a multi-member group this is harmless: the republish CASes at a stale `expectedHead`, takes `HeadMismatchError`, clears the slot, and the peer falls through to `recover()` — where responders exist, so it heals. The degradation is invisible because something else catches it.
+
+**But run it through the one scenario the journal was added for (G21) — the sole-member group with no possible responder:**
+
+1. The creator makes a group and `commitInvite`s. It journals, publishes, the hub **accepts**, and the process dies before `onAccepted`. The invitee never got a Welcome, so it never became a member. There is exactly one member in the world.
+2. The user does not reopen the app for longer than the trim window. This is ordinary human behaviour, and the design just set that window to **90 days** on the argument that it must be generous.
+3. Trim removes the frame — and with it the `publishID` record.
+4. The peer restarts and replays. The `publishID` is unknown to the store now, so the republish is treated as *new*: an ordinary CAS at the journalled `expectedHead` (`null`, the empty-topic sentinel, since it was the group's first commit). The topic's `head` is still the sequenceID of its own now-trimmed frame — trim moves `oldest` and, by the design's own rule, **never touches `head`**. So `null ≠ head` → `HeadMismatchError` → clear the slot, discard.
+5. The peer pulls: `messages: []`, `head` set, `oldest` null. `head > reconciledHead` with nothing retrievable → **trim strand → `recover()` → no responder, and there never will be one.**
+
+The group is bricked at creation — the identical outcome G21 diagnosed, reached by a different road, and reached *through* the mechanism introduced to prevent it. The journal survives the crash but not the calendar.
+
+**Fix: `publishID` records are not log entries and must not be trimmed with them.** They are a hash and a sequenceID — tiny, and there is one per commit, not one per delivery. The contract should say:
+
+- The `publishID` → `sequenceID` mapping is a **dedup record with its own retention**, independent of the message log. Retain it strictly longer than the commit-log trim window; retaining it indefinitely costs a few dozen bytes per commit and is the simplest thing that is correct.
+- Add the conformance test that pins it: **publish with a `publishID`, trim the log, republish the same `publishID` — the original `sequenceID` comes back and nothing is appended.** Every store that hangs the key off the message row passes today's tests and fails this one, which is the same shape as the zero-subscriber test that proved the log was real.
+
+If, instead, bounded retention is preferred, then replay needs a defined answer for "my journalled entry is older than the dedup window" — and in the sole-member case that answer would have to be something other than `recover()`, because there is nobody to recover from. Retaining the record is much cheaper than inventing that path.
+
+## What matches, revision 11
+
+Step zero is right, and calling the ordering "load-bearing, not stylistic" earns its place — it is the kind of line that survives a refactor. The `onAccepted` idempotency paragraph correctly separates the harmless half (re-adopting a fixed serialized `newGroup`) from the dangerous half (re-delivering a Welcome), and names two concrete ways for a host to satisfy it. G23's resolution — stating that `recover()`'s acceptance window is self-healing by re-recovery, and *why* the three facts hold together — is the right call over journalling a second path.
+
+Absent G24 I see no remaining structural defect. The design has been stable in shape for three revisions now; what keeps surfacing are narrower and narrower interactions at its edges, which is what convergence looks like.
+
+---
+
+# Revision 10 review (folded in — kept as the record)
 
 **Verdict:** G21 is folded in, and the journal is the right mechanism — replay by `publishID` lets the store's idempotency contract decide the outcome with no responder and no network peer, which is exactly what the size-one group needs. The split between the two mechanisms is stated crisply and correctly: *"the journal recovers a peer whose own pending state was lost; `recover()` recovers a peer whose group state is unusable."*
 

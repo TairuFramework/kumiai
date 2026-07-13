@@ -89,8 +89,16 @@ no peer could ever pull them. So:
   the topic's log whether or not anyone is subscribed. This is the system of record.
 - **Delivery rows govern push only.** They remain an optimization — a wakeup signal — and
   `ack` deletes a *delivery*, never a log entry.
-- **Trim governs the log**, by depth and age, and is the only thing that removes an entry.
+- **Trim governs the log**, by depth and age, and is the only thing that removes a log entry.
   Trim moves `oldest` and never touches `head`.
+- **The `publishID` → `sequenceID` dedup record is not a log entry, and trim must not remove
+  it (G24).** It has its own retention, strictly longer than the commit-log trim window;
+  **retaining it indefinitely is the recommended implementation** — it is a hash and a
+  sequenceID, one per commit rather than one per delivery, a few dozen bytes. Hanging the key
+  off the message row is the natural implementation and it is **wrong**: trim would delete the
+  idempotency record along with the frame, and a replay of that `publishID` would silently
+  become an ordinary new publish. See "Restart replay" for why that is fatal rather than
+  merely untidy.
 
 **The trim window on `commitTopic` is a group-liveness parameter, not a storage parameter
 (G12).** It decides one thing: *how long a member may be offline and still resume by
@@ -125,9 +133,9 @@ export type PublishParams = {
   expectedHead?: string | null
   /**
    * Idempotency key. Republishing an already-accepted publishID returns its original
-   * sequenceID instead of appending again. Reserved for the durable-commit journal in
-   * "Deferred" below; hosts persist it and enforce uniqueness now, so closing that gap
-   * later costs no second migration.
+   * sequenceID instead of appending again. This is what makes the commit journal's restart
+   * replay work (see "Restart replay"), so its record has its OWN retention — it is not a
+   * log entry and MUST NOT be trimmed with one (G24).
    */
   publishID?: string
 }
@@ -337,6 +345,31 @@ The narrow alternative — "notice I am alone and just re-commit" — does not w
 frame is already in the log at epoch 0, so any later reader sees two frames at that epoch and
 trips the fork trigger on them. The journal is the clean answer, and `publishID` has been in
 `PublishParams` since revision 2 precisely so this costs no second host migration.
+
+**Replay rests entirely on the `publishID` record outliving the log (G24).** If a store hangs
+that key off the message row — the natural reading of "the log is the system of record, and
+trim is the only deleter" — then trim destroys the idempotency record along with the frame,
+and the replay of a trimmed `publishID` is no longer idempotent: it is an ordinary new publish.
+In a multi-member group that degradation is *invisible*, because the republish CASes at a now
+stale `expectedHead`, takes `HeadMismatchError`, and the peer falls through to `recover()`,
+where responders exist. Something else catches it.
+
+Run it through the sole-member group the journal exists for, and nothing does:
+
+> The creator `commitInvite`s. It journals, publishes, the hub **accepts**, and the process
+> dies before `onAccepted` — so the invitee never got a Welcome and never became a member.
+> There is exactly one member in the world. The user does not reopen the app for longer than
+> the trim window — 90 days, which this design set deliberately generous. Trim removes the
+> frame and, with it, the `publishID` record. The peer restarts and replays: the key is
+> unknown, so the republish is treated as new — an ordinary CAS at the journalled
+> `expectedHead` (`null`, the empty-topic sentinel, since it was the group's first commit).
+> But `head` is still the sequenceID of its own trimmed frame, because **trim never touches
+> `head`**. So `null ≠ head` → `HeadMismatchError` → discard. The peer pulls: no messages, a
+> head it cannot reach, nothing retained → trim strand → `recover()` → **no responder, and
+> there never will be one.**
+
+The group is bricked at creation — G21's exact outcome, reached through the mechanism
+introduced to prevent it. The journal survives the crash; it must also survive the calendar.
 
 The G18 trigger stays, and the two mechanisms cover different failures: the journal recovers a
 peer whose *own* pending state was lost; `recover()` recovers a peer whose *group* state is
@@ -917,6 +950,11 @@ heal cannot reach for want of a responder.)*
   - **CAS:** two publishes at the same head — one accepted, one `HeadMismatchError`, nothing
     stored for the loser; the empty-topic sentinel (`null`); a replayed `publishID` returns
     the original sequenceID and appends nothing.
+  - **The dedup record outlives the log (G24): publish with a `publishID`, trim the log, then
+    republish the same `publishID` — the original sequenceID comes back and nothing is
+    appended.** A store that hangs the key off the message row passes every other test here
+    and fails this one, exactly as a delivery-derived store passes everything and fails the
+    zero-subscriber test. These two are the suite's load-bearing tests.
   - **Concurrent CAS under real parallelism:** N racing publishes at the same head yield
     exactly one accepted append. This must run against a real database over **separate
     connections** — not N `await`s on one connection, which the obvious in-memory version
@@ -981,6 +1019,11 @@ heal cannot reach for want of a responder.)*
   member in existence to answer a rendezvous. It recovers from the journal alone, the invitee
   receives the Welcome, and the group is alive. Without the journal this group is bricked
   forever — the test that no amount of heal machinery can pass.
+- **…and survives it across the trim window (G24).** Same scenario, but the log is trimmed
+  before the peer restarts. Replay still returns the original sequenceID, the peer still
+  adopts and still sends the Welcome. A store that trims its dedup records with its log bricks
+  this group, and does so silently — in a multi-member group the same bug is masked by
+  `recover()` finding a responder.
 - **Replay runs `onAccepted` twice.** The peer is killed between `onAccepted()` and
   `clear(publishID)`. On restart the entry replays: the handle is adopted again (harmless) and
   the Welcome is delivered again — and the invitee, already joined, no-ops it rather than
