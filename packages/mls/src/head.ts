@@ -184,11 +184,20 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
 }
 
 /**
+ * Whether a recomputed head equals the authenticated one. The predicate form of
+ * {@link assertHeadMatches} — one comparison, two entry points: a gate that must
+ * fail closed throws, a local invariant check reads the boolean.
+ */
+export function headsMatch(expected: Uint8Array, actual: Uint8Array): boolean {
+  return bytesEqual(expected, actual)
+}
+
+/**
  * Assert a recomputed head matches the authenticated one, or throw
  * {@link LedgerIncompleteError} carrying both. Returns for equal heads.
  */
 export function assertHeadMatches(expected: Uint8Array, actual: Uint8Array): void {
-  if (!bytesEqual(expected, actual)) {
+  if (!headsMatch(expected, actual)) {
     throw new LedgerIncompleteError(expected, actual)
   }
 }

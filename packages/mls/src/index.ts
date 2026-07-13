@@ -93,6 +93,7 @@ export {
   encodeLedgerHead,
   extendHead,
   genesisHead,
+  headsMatch,
   LEDGER_HEAD_VERSION,
   type LedgerHead,
   LedgerIncompleteError,

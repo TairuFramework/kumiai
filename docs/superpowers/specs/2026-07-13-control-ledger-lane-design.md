@@ -1,7 +1,7 @@
 # Design: the control-ledger lane
 
-**Status:** design, revision 22 (2026-07-13). Reviewed fourteen times by kubun in
-`2026-07-13-control-ledger-lane-review.md`; G1–G27 are folded in below. Revisions 16–22 fold in
+**Status:** design, revision 23 (2026-07-13). Reviewed fourteen times by kubun in
+`2026-07-13-control-ledger-lane-review.md`; G1–G27 are folded in below. Revisions 16–23 fold in
 the implementation probes: `NotSubscribedError`, a `trim` primitive, a 30-day default
 window, two retention classes with subscriber-requested durations, **G28 — the commit lane must
 not outrun the mailbox**, which silently destroys downloaded messages, **G29 — `head` advances
@@ -13,7 +13,10 @@ Add-only commit rotates nothing, and D2's premise holds here only through a coup
 had written down, and revision 22 — D2's primitives as built, plus the two properties they
 made visible: **the roster check goes stale** (a responder lagging a removal still answers the
 removed member — liveness, not confidentiality), and **the ephemeral private key's lifetime is
-an unenforced host obligation** across the very crash it exists to survive.
+an unenforced host obligation** across the very crash it exists to survive. Revision 23 adds
+bootstrap's two host obligations: **the handle mutex is not reentrant** (reading the ledger from
+inside `resolveLedgerEntries` deadlocks), and **a responder must gate its gather reply on
+`isLedgerComplete()`** or it answers with an empty ledger.
 **Supersedes:** the requirements in `../../agents/plans/next/2026-07-13-host-ledger-lane.md`
 (R1/R2/R3), which stays as the origin record.
 **Scope:** `@kumiai/mls`, `@kumiai/rpc`, `@kumiai/hub-protocol`, `@kumiai/hub-server`,
@@ -1105,6 +1108,26 @@ type GroupMLS = {
   bootstrapLedger(tokens: Array<string>): Promise<void>
 }
 ```
+
+**`bootstrapLedger` replaces the ledger; it is not an append.** That is sound *because* the check
+is a fold from genesis: a list that reproduces the authenticated head **is** the group's entire
+ledger, in order. It therefore cannot reuse `applyLedgerEntries`, which appends and which *silently
+drops* a token that fails verification — permissive is right for the low-level primitive and wrong
+for a gate. Bootstrap fails closed.
+
+**Two host obligations the types do not carry:**
+
+- **The handle mutex is not reentrant, and all three methods take it.** `resolveLedgerEntries` and
+  `onLedgerEntries` fire *inside* `processMessage`'s critical section, so a host that calls
+  `getLedger()` or `isLedgerComplete()` from one of those callbacks **deadlocks**. They take the
+  mutex on purpose: `applyLedgerEntries` awaits per-token verification inside its own critical
+  section, so a lock-free read can observe a **half-applied ledger** — a torn `getLedger()` would be
+  served to another peer and fail *its* head check, and a torn `isLedgerComplete()` would
+  false-negative into a spurious bootstrap. Read the ledger outside the callbacks.
+- **A responder should gate its gather reply on `isLedgerComplete()`.** A rejoined peer that has not
+  yet bootstrapped will otherwise answer another peer's gather with its **empty** ledger. The
+  requester's head check rejects it, so this is a wasted responder rather than a soundness hole —
+  but it is a wasted responder in exactly the situation where responders are scarce.
 
 #### Re-enact by ledger membership, never by failure mode (G17)
 

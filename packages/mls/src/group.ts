@@ -72,6 +72,7 @@ import {
   encodeLedgerHead,
   extendHead,
   genesisHead,
+  headsMatch,
   readLedgerHead,
   readLedgerHeadExtension,
 } from './head.js'
@@ -447,6 +448,116 @@ export class GroupHandle {
         this.#entryBodies.set(entryID, { token, verified })
       }
       this.#roster = foldLedgerRoster(this.#ledger, this.#anchor, this.groupID)
+    })
+  }
+
+  /**
+   * Whether the ledger this handle holds is the whole ledger the group's own
+   * GroupContext attests to: the head folded from the ids it holds, in the order
+   * it holds them, against the authenticated `ledger_head`.
+   *
+   * Purely local. It reads this handle's ledger and this handle's GroupContext,
+   * consults no peer and no network, and needs no memory of how the handle got
+   * into its current state. False means the ledger is incomplete — an
+   * external-commit rejoin arrives with an *empty* ledger against a live,
+   * non-genesis head — and {@link bootstrapLedger} must run before the handle can
+   * be trusted to fold a roster or judge an incoming commit.
+   *
+   * A group with no entries reads true, and not vacuously: the empty fold is the
+   * genesis head — SHA-256 over a domain separator and the group id — so both
+   * sides of the comparison are real 32-byte digests bound to this group. An
+   * empty ledger reads complete only against a head that has never moved, which
+   * is exactly the group whose ledger is genuinely empty.
+   */
+  async isLedgerComplete(): Promise<boolean> {
+    return mutexFor(this).run(async () => {
+      const authenticated = readLedgerHead(this)
+      if (authenticated == null) {
+        // A group with no head extension cannot attest to any ledger, so nothing
+        // it holds can be shown complete. Report incomplete and let bootstrap
+        // fail loudly, rather than passing a handle whose ledger nothing covers.
+        return false
+      }
+      return headsMatch(
+        authenticated.head,
+        computeHead(
+          this.groupID,
+          this.#ledger.map(({ entryID }) => entryID),
+        ),
+      )
+    })
+  }
+
+  /**
+   * The whole ordered ledger this handle holds, as signed tokens — what a
+   * responder serves to a bootstrapping peer. Order is load-bearing: the head is
+   * a chain digest, so a permuted list of the same tokens folds to a different
+   * head and the requester rejects it.
+   */
+  async getLedger(): Promise<Array<string>> {
+    return mutexFor(this).run(async () => this.ledgerTokens)
+  }
+
+  /**
+   * Install a gathered ledger, verified against the authenticated head before a
+   * single entry is folded.
+   *
+   * The gathered list is the group's WHOLE ledger from genesis, not a delta:
+   * `computeHead` folds it from the genesis head, so a list that reproduces the
+   * head this group's own GroupContext carries *is* the group's entire ledger, in
+   * order. It therefore replaces whatever this handle held.
+   *
+   * **Check before fold, structurally.** The head is recomputed over the incoming
+   * `tokens` and compared against this handle's own GroupContext while the
+   * handle's ledger, entry bodies and roster are still untouched; every value the
+   * fold produces is built as a local and installed in one assignment at the end.
+   * There is no window in which a doctored ledger is half-applied, and no rollback
+   * to get wrong, because a rejected ledger writes nothing.
+   *
+   * **Signature verification alone does not cover this.** A lying responder hands
+   * back tokens that are genuinely signed and correctly scoped, with one demotion
+   * omitted or two entries transposed — every signature verifies, and the roster
+   * that folds out contains an admin the group demoted. Omission and reordering
+   * are exactly what a signature does not protect and what the head chain does.
+   * The bound this earns is: **a lying responder can withhold, never rewrite.**
+   *
+   * Throws {@link LedgerIncompleteError} on a head mismatch; the caller drops that
+   * responder and tries the next one.
+   */
+  async bootstrapLedger(tokens: Array<string>): Promise<void> {
+    return mutexFor(this).run(async () => {
+      const authenticated = readLedgerHead(this)
+      if (authenticated == null) {
+        throw new Error('bootstrapLedger: the group has no ledger head extension')
+      }
+
+      // The gate. Nothing below this line touches the handle until the last three
+      // statements, and nothing above it reads the gathered tokens for anything
+      // but their content ids.
+      const entryIDs = tokens.map(ledgerEntryDigest)
+      assertHeadMatches(authenticated.head, computeHead(this.groupID, entryIDs))
+
+      const log: Array<LedgerLogEntry> = []
+      for (let index = 0; index < tokens.length; index++) {
+        const token = tokens[index] as string
+        const verified = await verifyLedgerEntry(token)
+        if (verified == null || verified.entry.groupID !== this.groupID) {
+          // Unreachable for any list that passed the gate — the chain digests the
+          // token bytes, so an unverifiable or replayed token cannot sit at a
+          // position whose id the authenticated head covers. Fails closed anyway:
+          // the handle is never left folding a ledger the head does not attest to.
+          throw new Error(
+            'bootstrapLedger: the gathered ledger holds an unverifiable or cross-group entry',
+          )
+        }
+        log.push({ entryID: entryIDs[index] as string, token, verified })
+      }
+
+      this.#ledger = log
+      this.#entryBodies = new Map(
+        log.map(({ entryID, token, verified }) => [entryID, { token, verified }]),
+      )
+      this.#roster = foldLedgerRoster(log, this.#anchor, this.groupID)
     })
   }
 

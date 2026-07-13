@@ -801,3 +801,131 @@ legitimately succeeds. The test's premise was false for roughly one token in fou
 clean tree, in isolation, at about 1 run in 5 — it was never load-related, and two earlier probes had
 recorded it as a parallel-load flake on my say-so. Now flips the *first* signature character, which
 carries six significant bits; ten consecutive runs green.
+
+---
+
+### 2026-07-13 — Question 2.3: Does head-verified ledger bootstrap reject a doctored ledger?
+
+**Findings: yes — rejected, and nothing folded.** `packages/mls/src/group.ts` (`isLedgerComplete`,
+`getLedger`, `bootstrapLedger`), `packages/mls/src/head.ts` (`headsMatch`, the predicate form of the
+comparison `assertHeadMatches` already made), `packages/mls/test/ledger-bootstrap.test.ts` (seven
+tests, green). Full verify green: `mls` 283/283, 27/27 tasks, `test:types` included. No second head
+computation was written — `computeHead` / `assertHeadMatches` wired onto the rejoin path unchanged,
+and `processWelcome`'s existing call is byte-identical.
+
+**The attack was demonstrated before it was defended against**, which is the only way to know the
+test means anything. The doctored ledger is built *honestly*: a real group, real invites, Bob
+genuinely promoted to admin and genuinely demoted back — then the lying responder returns that real
+ledger with the demotion **dropped**. No token is forged; the test asserts every token verifies, is
+scoped to the group, and is signed by the real admin. It then folds that ledger the way a
+signature-verifying implementation would, and shows the result:
+
+```ts
+expect(folded.roster.roles.get(normalizeDID(bob.id))).toBe('admin')   // the demoted admin, back
+```
+
+Against `bootstrapLedger` it throws `LedgerIncompleteError`, and the roster is asserted
+**exhaustively** — `toEqual` over the whole entry list, not "Bob is not admin" — because a
+fold-then-check implementation throws in exactly the same place and differs only in what it left
+behind. Reorder variant: same four tokens, two transposed, every signature still valid, rejected.
+
+**The mutation check is the finding, not a formality.** Replacing the head check with signature-only
+verification — which is *literally deleting the assertion*, since the per-token verify loop below it
+already is the wrong implementation:
+
+```
+ × rejects a genuinely-signed ledger with one demotion omitted, and folds nothing
+   → promise resolved "undefined" instead of rejecting
+ × rejects a reordered ledger — every entry present, every signature valid
+   → promise resolved "undefined" instead of rejecting
+ ✓ accepts the honest ledger and rebuilds the roster the group actually has
+ ✓ an empty-ledger peer rejects the promoted admin's commit; a bootstrapped one applies it
+```
+
+**Read which tests still pass under the mutation.** The honest path and the liveness test cannot
+distinguish the two implementations. Only the head check does — which is exactly why neither could
+stand alone, and why the plan demanded both. Under the mutation the bootstrap does not merely fail to
+throw: a throwaway probe confirmed it **installs the doctored roster**, demoted admin back as
+`admin`.
+
+**Check-before-fold is structural, by data dependency rather than statement order.** The fold builds
+locals only; the handle is mutated in one block of three assignments at the tail, every one consuming
+a local built *after* the gate. They cannot be hoisted above the check without failing to compile.
+
+**`isLedgerComplete()` is local and not vacuous.** The genesis-only group reads `true` against a real
+32-byte digest bound to the group id (`SHA-256(DOMAIN ‖ groupID)`) — asserted unequal to another
+group's genesis head and to the zero buffer, so "complete" is never "both sides are empty in
+different ways". A suppressed head extension reads `false` (fail-safe, into bootstrap, which throws
+loudly). The test wires a call-counting resolver and asserts the count does not move: no peer, no
+network.
+
+**Spec impact: revision 23.** Two host obligations the types do not carry, both folded into D2's
+bootstrap block:
+
+1. **The handle mutex is not reentrant, and all three methods take it.** `resolveLedgerEntries` and
+   `onLedgerEntries` fire *inside* `processMessage`'s critical section, so a host calling
+   `getLedger()` or `isLedgerComplete()` from one of those callbacks **deadlocks**. They take the
+   mutex deliberately: `applyLedgerEntries` awaits per-token verification inside its own critical
+   section, so a lock-free read can observe a **half-applied ledger** — a torn `getLedger()` would be
+   served to another peer and fail *its* head check.
+2. **A responder must gate its gather reply on `isLedgerComplete()`**, or a rejoined peer that has
+   not yet bootstrapped answers with its **empty** ledger. The requester's head check rejects it, so
+   it is a wasted responder rather than a soundness hole — but a wasted responder precisely when
+   responders are scarce.
+
+Also recorded: `bootstrapLedger` **replaces** the ledger rather than appending, and so cannot reuse
+`applyLedgerEntries` — which appends, and which *silently drops* an unverifiable token. Permissive is
+right for the low-level primitive and wrong for a gate. Bootstrap fails closed.
+
+**Learned:** the liveness test earns its place by *failing to distinguish* — it passes under the
+wrong implementation, and that is the point. Its job is to stop the opposite mistake: a
+`bootstrapLedger` that throws on everything passes the security test perfectly. The two tests are a
+pair, and either one alone is a design that looks defended and is not.
+
+---
+
+## Phase 2 exit
+
+**Met.** The exit criteria were: sealing works for a peer whose leaf key rotated; bootstrap rejects a
+doctored ledger; the completeness invariant is computable locally. All three, and each proven against
+the implementation that would have passed a naive test:
+
+- **Sealing.** The stranded committer — the peer whose commit the hub accepted and who then died
+  before adopting it — recovers, rejoins, and resumes two-way traffic. Leaf-sealing cannot serve that
+  peer, and question 2.1 proved *why* before question 2.2 built the alternative: the leaf key is
+  fresh randomness, sent to nobody, living only in a returned handle the crash destroyed.
+- **Bootstrap.** A genuinely-signed, correctly-scoped ledger with one demotion omitted is rejected
+  with nothing folded, and the same test **fails** against signature-only verification.
+- **The invariant.** Local, non-vacuous, consults no peer.
+
+**What the phase produced beyond the code.** Phase 1's lesson was that a green conformance run hides
+defects; Phase 2's is narrower and sharper: **the design was right for reasons narrower than the ones
+it gave.**
+
+- **G32** — "every commit carries an UpdatePath" is *false about MLS*. An Add-only commit rotates
+  nothing. D2's premise holds in kumiai only because every commit routes through `commitWithEntries`
+  and appends a ledger-head proposal — a coupling nobody had written down, and one a future
+  hand-built `Invite` with no entries would break silently, reversing D2's whole table for that
+  commit.
+- **The refusals with no parameter to get wrong.** Every deviation question 2.2 made from the spec's
+  pseudo-signatures was of one shape: not "add a check" but **"remove the input that made the check
+  necessary."** The recipient key lives inside the signed request, so sealing to an unsigned key is
+  unrepresentable. There is no `requesterDID` field, so the named DID cannot disagree with the
+  signing key. `openSealedGroupInfo` rebuilds the AAD from the caller's own handle, so there is no
+  DID to pass and no wrong DID to pass — and the replay refusal becomes an **AEAD failure** rather
+  than a comparison after decryption. Both forms pass the same test; only one declines to decrypt the
+  ratchet tree first.
+- **Two properties that read as holes until written down**: the roster check goes stale (a responder
+  lagging a removal still answers the removed member — bounded, liveness not confidentiality), and
+  the ephemeral private key's lifetime is an unenforced host obligation *across the very crash it
+  exists to survive*, which likely means persisting a new secret at rest.
+- **A real test bug, mistaken twice for a flake.** `ledger.test.ts` flipped the last base64url
+  character of an Ed25519 signature — 4 of whose 6 bits are padding — so one token in four decoded
+  unchanged and verification correctly succeeded. It failed about one run in five, on a clean tree,
+  in isolation. Two probe briefs had told the next probe to ignore it as parallel-load noise. The
+  third one looked.
+
+**Mutation-checking became the phase's standing practice**, and it paid twice: deleting the roster
+check, stripping the AAD binding, and replacing the head check with signature verification each made
+the corresponding test go red — and in two of the three, the wrong implementation did not merely fail
+to refuse, it **installed the attacker's state**.
