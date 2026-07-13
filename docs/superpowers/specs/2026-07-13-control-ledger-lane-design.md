@@ -286,6 +286,29 @@ failure, and the peer heals by external-commit rejoin and re-enacts its entries.
 Because a loser's commit is never published, the commit topic under an honest hub contains
 only accepted commits.
 
+#### One serialized lane; heal never runs nested (G13)
+
+`commit()` holds the per-group mutex for its whole run, and its first step *pulls and
+processes* frames — which is what fires the heal triggers. So heal is reachable from inside
+the mutex, and `recover()` both mutates the handle and ends by re-enacting entries through
+`commit()`. Nesting it either way is broken: take the mutex and a heal triggered inside
+`commit()`'s pull deadlocks (twice over, on the tail call); skip the mutex and a concurrent
+`commit()` builds against the pre-rejoin handle while `recover()` swaps it out — the exact
+hazard the mutex exists for, on the path where the handle is least stable.
+
+**All three operations — pull, `commit()`, `recover()` — are top-level operations on one
+serialized per-group lane. None of them ever calls another. The mutex is never re-entered.**
+
+- A heal trigger fired while processing a frame **records the condition and returns**. It
+  does not heal in place. The pull finishes, the enclosing `commit()` unwinds and releases
+  the lane, and its caller sees a retryable outcome.
+- `recover()` then runs as its **own** lane operation, taking the mutex itself.
+- Re-enactment after a successful heal is a **subsequent** `commit()`, queued on the lane
+  after `recover()` releases it — which is just "heal is two commits, not one" (G10) falling
+  out of the concurrency rule rather than being bolted onto it.
+- A `commit()` that was in flight when heal was triggered re-enters the lane behind
+  `recover()` and rebuilds, if it is still within its deadline.
+
 #### Heal: `recover()` is a CAS loop of its own (G10)
 
 Three paths reach heal — the trim strand, the losing branch of a byzantine double-accept,
@@ -309,18 +332,26 @@ here, on the path where the group is *already* fragile.
   re-enact" is two acts, and the second one can lose.
 
 ```
-recover(deadline):
+recover(deadline):                          # a top-level lane operation; holds the mutex
   loop until deadline:
-    pull commitTopic to the end            # may itself resolve the strand: nothing to heal
-    request GroupInfo over rendezvousTopic # sealed to this peer's leaf (D2)
-    build external commit (joinGroupExternal, resync: true)
-    publish to commitTopic with expectedHead = reconciledHead
-      accepted        -> adopt the rejoined handle, reconciledHead = returned sequenceID
-                         gather the ledger bodies the GroupInfo did not carry (D3)
-                         re-enact any discarded entries via the ordinary commit() loop
-                         return { advanced: true }
-      HeadMismatch    -> discard the GroupInfo AND the external commit, continue the loop
+    pull commitTopic to the end             # may resolve the strand outright: nothing to heal
+    requestID = fresh
+    request = mls.createRecoveryRequest(requestID)   # ephemeral HPKE key, signed (D2)
+    publish request on rendezvousTopic, await a sealed reply
+    pending = mls.applyRecovery(sealed, requestID)   # opens with the ephemeral key,
+                                                     # builds the external commit; null if unopenable
+    publish pending.commit to commitTopic with expectedHead = reconciledHead
+      accepted     -> pending.onAccepted()            # adopt the rejoined handle
+                      reconciledHead = returned sequenceID
+                      gather the ledger bodies the GroupInfo did not carry (D3)
+                      return { advanced: true, reenact: <entries discarded on the way in> }
+      HeadMismatch -> discard the GroupInfo AND the external commit built from it
+                      (the GroupInfo describes a tree the winner already changed)
+                      continue the loop
   deadline exceeded -> return { advanced: false }
+
+# The caller re-enacts `reenact` via an ordinary commit() — a SEPARATE lane operation,
+# queued after recover() releases the mutex. recover() never calls commit().
 ```
 
 The peer's own entry tokens survive all of this untouched: they are epoch-independent, so a
@@ -351,58 +382,84 @@ timing heuristic in revision 1 is gone (G4).
 - **Unrecoverable partition.** A hub that never shows a peer the other branch prevents
   convergence entirely. That is DoS, and out of scope.
 
-### D2 — Recovery: seal GroupInfo to the requester's MLS leaf
+### D2 — Recovery: seal GroupInfo to a requester-supplied ephemeral key, authorized by the roster
 
-The reachable requester population is exactly "still holds MLS state, but stale or forked":
-the rendezvous topic is derived from `exportRecoverySecret()`, which comes from MLS state,
-so a peer that lost its state entirely cannot even derive the topic to ask on. That
-population is precisely the one that still holds its **leaf HPKE private key** — commits
-rotate only the committer's path, and a peer that lost a CAS race never rotated at all. So
-sealing to the leaf serves everyone who can ask, and nobody who cannot.
+**Sealing to the requester's MLS leaf does not work, and the reason is instructive (G14).**
+Revision 3 argued: "commits rotate only the committer's path, and a peer that lost a CAS
+race never rotated at all", so the requester still holds the leaf private key the responder
+can see. The first clause is true. The conclusion inverts for exactly the peers heal exists
+to serve, because **the committer's path is whose path a commit rotates** — every Commit
+carries an UpdatePath installing a fresh leaf HPKE key for its author (kumiai depends on
+this: `envelope-fold` resolves the committer from "the commit's own UpdatePath leaf
+credential"), and the new private key lives only in the derived post-commit state:
 
-Sealing to the requester's DID keyAgreement key was considered and rejected: it would make a
-stolen DID key alone sufficient to pull group state with no MLS material, and it would
-require re-deriving the rendezvous from an identity-based secret. Full-device-loss recovery
-is a separate problem — such a member should be re-invited by an admin, not self-serve a
-rejoin.
+| Heal path | Committed? | Leaf key in the responder's tree | Can open a leaf-sealed reply |
+|---|---|---|---|
+| Trim strand (offline too long) | No | its old key, still held | **Yes** |
+| Crash / `onAccepted` threw | Yes — the hub accepted it | its **new** key, installed by the commit every other member applied | **No** — that private key died with the unpersisted `newGroup` |
+| Byzantine double-accept, losing branch | Yes — it merged its own | on the winner's branch, its **old** key, which its own merge rotated away | **No** — it holds only the new key, from a branch nobody else has |
 
-**mls grows the sealing side:**
+Only the trim-strand peer — the one that was merely behind — could open its own rescue. The
+two peers whose state is genuinely broken, and for whom `recover()` is the sole exit, could
+not. D1 step 5 already half-knew this ("the pre-commit leaf key material is retained, which
+the heal path needs"), but that reasoning covers the *discarded* commit; on the
+*accepted-then-crashed* commit the tree moved and the key moved with it.
+
+**So the reply is sealed to an ephemeral key the requester mints, and authorization stays on
+the roster.** The requester generates an HPKE keypair per `recover()` call and puts the
+public half in the rendezvous request, signed by its DID identity key. The responder:
+
+1. verifies the request signature against the DID it names;
+2. checks that DID has a leaf in the **current ratchet tree** — authorization remains
+   intrinsic and roster-based, the property D2 refuses to give up: a removed member gets
+   nothing, with no policy check a host could forget;
+3. seals the framed `MLSMessage(GroupInfo)` to the **ephemeral** public key, AAD binding
+   `groupID`, `requesterDID`, and `requestID` exactly as before.
+
+This keeps every property the leaf-sealing argument was defending, and drops the one
+assumption that fails. It also still answers the objection that killed DID-key sealing — a
+stolen DID key would let an attacker *ask*, but the reply is sealed to an ephemeral public
+key the attacker does not hold, so a stolen identity key alone buys nothing readable.
+
+The request is now **signed**, which changes the replay analysis: a replayed request re-seals
+GroupInfo to the same ephemeral key only its original minter can open, so replay buys
+amplification and nothing else — bounded, as before, by responder jitter, storm-collapse
+suppression, and the roster filter. A *forged* request now fails signature verification
+outright, where previously it was merely useless.
+
+**mls grows two primitives**, over the X25519 HPKE already in `mls/crypto.ts`:
 
 ```ts
-exportGroupInfo({ group, requesterDID, requestID }): Promise<{ sealed: Uint8Array }>
+sealGroupInfo({ group, requesterDID, requestID, recipientKey }): Promise<Uint8Array>
+openSealedGroupInfo({ sealed, requesterDID, requestID, privateKey }): Promise<Uint8Array>
 ```
 
-- Resolve `requesterDID`'s leaf in the current ratchet tree by credential identity. No leaf
-  → throw. A removed member gets nothing: authorization is intrinsic, not a policy check a
-  host could forget.
-- HPKE-seal the framed `MLSMessage(GroupInfo)` to that leaf's `encryption_key`, using the
-  X25519 HPKE already present in `mls/crypto.ts`, MLS-style labeled encryption.
-- AAD binds `groupID`, `requesterDID`, and `requestID`, so a reply cannot be replayed at
-  another member, another group, or another request.
+`sealGroupInfo` throws if `requesterDID` has no leaf in the current tree. `openSealedGroupInfo`
+returns the framed `MLSMessage(GroupInfo)`, which feeds the existing `joinGroupExternal`
+unchanged, and rejects anything whose AAD does not bind the caller's own DID and request.
 
-`requestID` is minted by the **requester**, randomly, per `recover()` call — it is already
-the rendezvous correlation id in `peer.ts`. It exists to bind a reply to the request that
-asked for it; it is not an authorization token. A **replayed request** is therefore
-harmless: it can only cause responders to seal another copy of GroupInfo to the leaf of the
-DID the request names, which nobody but that member can open. What a replayed or forged
-request buys an attacker is amplification, and that is bounded by what already exists — the
-responder's jitter, the storm-collapse suppression, and the "no leaf in the current tree →
-ignore" filter.
-
-**mls grows the opening side:**
+**The `GroupMLS` port follows the ephemeral key**, and — because the heal path's external
+commit is CAS'd (G10) — `applyRecovery` returns a `PendingCommit` rather than applying:
 
 ```ts
-openGroupInfo({ group, sealed, requestID }): Promise<Uint8Array>  // framed MLSMessage(GroupInfo)
+type GroupMLS = {
+  // ...processCommit, exportRecoverySecret, getLedgerEntries unchanged
+  /** Mint the ephemeral keypair + sign the rendezvous request. The private half is retained
+   *  by the host, keyed by requestID, until applyRecovery consumes it. */
+  createRecoveryRequest(requestID: string): Promise<Uint8Array>
+  /** Verify signature, check the roster, seal to the request's ephemeral key. Returns null
+   *  for a request whose DID has no leaf — the responder simply stays silent. */
+  exportGroupInfo(request: Uint8Array): Promise<Uint8Array | null>
+  /** Open with the retained ephemeral private key and build the external commit. Returns
+   *  null for bytes it cannot open (hub-injected, or sealed to another request). The peer
+   *  CASes the returned commit; the handle is adopted only in onAccepted. */
+  applyRecovery(sealed: Uint8Array, requestID: string): Promise<PendingCommit | null>
+}
 ```
 
-Decrypts with the caller's own leaf HPKE private key and verifies the AAD binds its own DID
-and the request it issued. Output feeds the existing `joinGroupExternal` unchanged.
-
-**rpc's `GroupMLS` contract then holds as written.** `exportGroupInfo(requesterDID)` returns
-sealed bytes; `applyRecovery(sealed)` returns `{ advanced: false }` for anything it cannot
-open — hub-injected bytes, or a reply sealed to another member — which is what `peer.ts`
-already expects. Responders additionally ignore rendezvous requests naming a DID with no
-leaf in the current tree: a free filter against a hub spamming requests.
+`requestID` is still minted by the requester, per `recover()` call, and is still a
+correlation id rather than an authorization token — the signature and the roster check carry
+authorization now.
 
 ### D3 — Bodies: bundled with the commit, no host store
 
@@ -467,8 +524,8 @@ permanently-failing commit is redelivered forever.
 |---|---|---|
 | `hub-protocol` | *Defines* conditional publish, `fetchTopic`, `HeadMismatchError`, the atomicity requirement, the conformance suite | Implement storage |
 | `HubStore` implementations (`hub-server` memory store; each host's DB store) | *Provide* the per-topic head, the atomic CAS, the readable log | Read payloads; know what a commit is |
-| `mls` | Group state, authority, `ledger_head`, ledger tokens, GroupInfo sealing/opening | Transport; ordering across peers |
-| `rpc` (`GroupPeer`) | The commit mutex, the CAS loop, retry/rebase, the pull cursor, body framing, the resolver, gather, fork detection, heal triggers | MLS state; entry semantics |
+| `mls` | Group state, authority, `ledger_head`, ledger tokens, GroupInfo sealing/opening, the recovery request's ephemeral key and signature | Transport; ordering across peers |
+| `rpc` (`GroupPeer`) | The serialized per-group lane (pull, `commit`, `recover` — never nested), the CAS loops, retry/rebase, the pull cursor, body framing, the resolver, gather, fork detection, heal triggers | MLS state; entry semantics |
 | Host | Persist handle state; author entries; app reducers; migrate its `HubStore` | Ordering, authority, integrity, body distribution, body storage |
 
 ## Host-side impact
@@ -581,7 +638,13 @@ if metadata exposure to ex-members becomes a stated requirement.
   (the G11 regression test).
 - **Sealing.** A reply opens for the requester and fails to open for every other member and
   for the hub. A reply replayed at another member or another request is rejected by the AAD
-  check. A removed member's request is refused.
+  check. A removed member's request is refused (no leaf in the current tree). A request with
+  a bad signature is refused. **A peer whose own commit was accepted and then lost (the crash
+  path) recovers** — the G14 regression test, which a leaf-sealed design fails: it holds no
+  private key matching the leaf the responder can see.
+- **Heal never nests.** A heal triggered while `commit()` is pulling does not deadlock: the
+  trigger records, `commit()` unwinds and releases the lane, `recover()` runs as its own
+  operation, and the re-enactment is a later `commit()` (the G13 regression test).
 - **Cursor-advance.** A commit with unresolvable bodies is retried without advancing; a
   malformed commit advances the cursor once and is never retried.
 - **Fork heal.** A simulated lying hub double-accepts; the lower-sequenceID branch wins, the

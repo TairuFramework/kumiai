@@ -3,11 +3,66 @@
 **Reviewer:** kubun (the host driving the requirements in `2026-07-13-host-ledger-lane.md`).
 **Subject:** `2026-07-13-control-ledger-lane-design.md`.
 
-Three review passes. **The newest pass is at the top; earlier passes are kept below as the record.**
+Four review passes. **The newest pass is at the top; earlier passes are kept below as the record.**
 
 ---
 
-# Revision 3 review
+# Revision 4 review
+
+**Verdict:** G10–G12 are folded in, and the `recover()` CAS loop is the right shape — "heal is two commits, not one" (the external commit carries no envelope, so the entries ride a *subsequent* `commit()` that contends normally) is a distinction I had not drawn, and it is correct.
+
+Two findings. **G14 is the most serious defect found in any pass**: D2's sealing target is unavailable to two of the three peers the heal path exists to serve. It is not a gap in the writing — the design is internally consistent and still wrong, because it rests on an MLS property that does not hold for a peer that has committed.
+
+## G14 — The heal path's victims cannot open the recovery reply sealed to them
+
+**Blocking.** D2 justifies sealing GroupInfo to the requester's MLS leaf with:
+
+> "That population is precisely the one that still holds its **leaf HPKE private key** — commits rotate only the committer's path, and a peer that lost a CAS race never rotated at all."
+
+The first clause is right; the conclusion does not follow, because **the committer's path is exactly whose path a commit rotates — and two of the three heal paths are walked by peers that committed.**
+
+An MLS Commit carrying an UpdatePath installs a *fresh leaf HPKE key* for the committer. The new private key lives in the derived post-commit state — kumiai's `newGroup` — and the old one is gone from the merged state. Now walk the design's own three heal paths:
+
+| Heal path | Did this peer commit? | Whose leaf key is in the responder's tree? | Can it open the seal? |
+|---|---|---|---|
+| **Trim strand** (offline too long) | No | its old leaf key, which it still holds | **Yes** |
+| **Crash / `onAccepted` throws** | Yes — the hub *accepted* it | its **new** leaf key, installed by the commit every other member applied | **No** — the new private key was in the `newGroup` it failed to persist |
+| **Byzantine double-accept, losing branch** | Yes — it applied its own commit | on the winner's branch, its **old** leaf key — which its own merge rotated away | **No** — it holds only the new key, from a branch nobody else has |
+
+So the trim-strand peer — the one case that could arguably have limped along without recovery, since it merely fell behind — is the *only* one that can open a sealed GroupInfo. The two peers whose state is genuinely broken, and for whom `recover()` is the sole exit, are precisely the two that cannot decrypt the reply. Heal is unreachable for the peers that need it.
+
+Note this is not hypothetical for the crash path: D1 step 5 is careful that on `HeadMismatchError` "the pre-commit leaf key material is retained, which the heal path needs" — the design already knows leaf key material is at stake. But that reasoning covers only the *rejected* commit. On the *accepted-then-crashed* commit, the tree moved and the key that moved with it was never persisted. The property the design relies on holds for the discard case and inverts for the crash case.
+
+**Recommended fix: seal to a requester-supplied ephemeral key, authorized by roster membership.** The requester mints an ephemeral HPKE keypair per `recover()` call and sends the public half in the rendezvous request, signed by its DID identity key. The responder:
+
+1. verifies the request signature against the named DID;
+2. checks that DID has a leaf in the current ratchet tree — **authorization is still intrinsic and still roster-based**, which is the property D2 correctly refuses to give up;
+3. seals the GroupInfo to the *ephemeral* public key, with the AAD binding `groupID`, `requesterDID`, and `requestID` exactly as now.
+
+This keeps every property D2 argues for — a removed member gets nothing, no policy check a host can forget, replay-bound AAD — while removing the one assumption that fails: that the requester still holds the private key matching the leaf the responder can see. It also sidesteps D2's stated objection to DID-key sealing (that a stolen DID key alone would suffice to pull group state): the DID key here *authenticates* the request, and confidentiality rests on the ephemeral key the requester just generated, so a stolen DID key buys an attacker a seal to a public key it does not hold.
+
+If sealing to the leaf is kept for the trim-strand case, the design must say explicitly that the other two paths are unrecoverable — which would mean a crash in `commit()`'s acceptance window permanently strands a member, and the "Deferred: closing the crash window" item becomes load-bearing rather than an optimization.
+
+## G13 — `recover()` and `commit()` contend for the same per-group mutex, and `recover()` calls `commit()`
+
+`commit()` holds the per-group mutex for its whole run (G3), and inside it, step 1 pulls the log and *processes* frames. Processing a frame is what fires the heal triggers: a trim strand, or a byzantine fork. So `recover()` is reachable from inside the mutex.
+
+`recover()` in turn mutates the handle (it adopts the rejoined state) and, on success, "re-enacts any discarded entries via the ordinary `commit()` loop" — which takes the mutex again.
+
+Both ways round are broken:
+
+- If `recover()` **takes** the mutex, a heal triggered from inside `commit()`'s pull deadlocks on a non-reentrant mutex, and its own tail call into `commit()` deadlocks a second time.
+- If `recover()` **does not** take the mutex, a concurrent `commit()` on another caller can build against the pre-rejoin handle while `recover()` is swapping it out — the exact hazard the mutex exists to prevent, on the path where the handle is least stable.
+
+The design needs an explicit concurrency story here. The shape that likely works: the heal *trigger* fired during a pull records the condition and returns, letting the pull and the enclosing `commit()` unwind and release the mutex; `recover()` then runs as a separate mutex-holding operation, and its re-enactment is a *subsequent* `commit()` after it releases — consistent with "heal is two commits, not one", which the design already establishes. Whatever the choice, say which lock `recover()` holds and where it releases it, because the current text has it running both inside and around `commit()`.
+
+## What matches, revision 4
+
+`recover()` as its own CAS loop, with the discard-the-GroupInfo-too rule and its regression test, is exactly what G10 asked for. "Heal is two commits, not one" is a better decomposition than the one I suggested. The trim window as a group-liveness parameter with a 90-day default, and the explicit note that shortening it silently converts the late-joiner fix back into a recovery path, closes G12. G11's "classify by epoch first; unwrap only what you can apply" is right, including the observation that the lie costs a debugging day rather than correctness. The removed-member exposure section correctly reasons that no confidentiality delta exists and names the metadata delta anyway.
+
+---
+
+# Revision 3 review (folded in — kept as the record)
 
 **Verdict:** G1–G9 are all folded in, and folded in *correctly* — the G5 fix is the one I'd have written (the per-epoch sequenceID record was already in the design; the trigger just had to use it), and the G7 rewrite of the host-impact section now states the storage-model change at its real size. The conformance suite's "publish to a topic with zero subscribers, then subscribe and pull the frame" is the right single test.
 
