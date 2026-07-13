@@ -3,11 +3,65 @@
 **Reviewer:** kubun (the host driving the requirements in `2026-07-13-host-ledger-lane.md`).
 **Subject:** `2026-07-13-control-ledger-lane-design.md`.
 
-Two review passes. **Revision 2 is reviewed at the top of this document; the revision-1 pass (G1–G4, all folded in) is kept below as the record.**
+Three review passes. **The newest pass is at the top; earlier passes are kept below as the record.**
 
 ---
 
-# Revision 2 review
+# Revision 3 review
+
+**Verdict:** G1–G9 are all folded in, and folded in *correctly* — the G5 fix is the one I'd have written (the per-epoch sequenceID record was already in the design; the trigger just had to use it), and the G7 rewrite of the host-impact section now states the storage-model change at its real size. The conformance suite's "publish to a topic with zero subscribers, then subscribe and pull the frame" is the right single test.
+
+Three findings. **G10 is structural**: it is the one path in the design that has no publish story, and three separate failure paths all terminate in it.
+
+## G10 — The heal path's external commit has no defined publish path
+
+**Blocking.** Every recovery route in the design ends in the same sentence: *"the loser rejoins by external commit onto the winner's branch and re-enacts its entries."* Three distinct paths reach it —
+
+- trim strand (`oldest` past the cursor),
+- byzantine double-accept (the losing branch),
+- `onAccepted` throwing, or the crash window (the committer cannot apply even its own commit),
+
+— and **none of them says how that external commit reaches the hub.** `joinGroupExternal` produces a Commit that changes the ratchet tree; every other member must apply it, so it must land on `commitTopic`. That leaves the questions D1 was built to answer, unanswered for the one lane that most needs them:
+
+1. **Is the external commit CAS'd?** It must be. Publishing it unconditionally re-opens exactly the fork D1 closes — and does so on the path where the group is *already* fragile.
+2. **What is its `expectedHead`?** The rejoining peer seeds `reconciledHead` from `fetchTopic` (G1's mechanism), so it has one. Say so explicitly.
+3. **What happens when the external commit loses the CAS?** This is not an edge case — it is the *likely* case, because heal runs precisely when the group is under commit pressure. And unlike a normal `HeadMismatchError`, the peer cannot just call `build()` again: its GroupInfo is now **stale**, describing a ratchet tree the winning commit has already changed. It must re-request recovery, get a fresh GroupInfo, and rebuild the external commit. The retry loop is a different shape from `commit()`'s, and the design never draws it.
+4. **What if two peers heal concurrently?** Both hold GroupInfo at the same epoch, both build an external commit, one wins. The loser needs the same re-request loop. With a trim window shorter than a mobile peer's offline period (see G12) this is routine, not exotic.
+
+Recommend `recover()` own an explicit loop of the same shape as `commit()`: pull to the end, request GroupInfo, build the external commit, CAS it at `reconciledHead`, and on `HeadMismatchError` discard the GroupInfo and start over from the pull — with the same deadline discipline `commit()` now has.
+
+## G12 — Trim policy silently decides how often heal runs
+
+The design says trim exists ("by depth and age"), that it is the only deleter, and that it moves `oldest`. It never says what the window is, and it never connects the window to the trim-strand heal path — but that connection is the whole operational story:
+
+> **A peer offline longer than the trim window comes back trimmed-out, and every such peer runs the heal path.**
+
+Kubun's peers are phones. Offline for a week is ordinary, not exceptional. If the trim window is tuned like a message-queue backlog (hours, or a few thousand messages), then a returning phone does not resume by pulling the log — it triggers `recover()`, which triggers a rendezvous, which triggers an external commit, which (G10) contends on the CAS. The mechanism designed as the rare fallback becomes the common path for the most common client.
+
+Two things to state:
+
+- **The trim window is a group-liveness parameter, not a storage parameter.** It should be set from "how long may a member be offline and still resume by pull", and the default should be generous (weeks, not hours). Storage is cheap; recovery storms are not.
+- **Retention is now unconditional** — a frame is kept whether or not anyone has read it (that is the point of G7). So the log grows with commit volume, and D1 *raises* commit volume by an order of magnitude. The design should say what bounds it, because "trim by depth" with a small depth silently converts the late-joiner fix back into a recovery path.
+
+## G11 — The cursor table has no row for "cannot unwrap the body blob"
+
+D3 wraps the body blob under the **pre-commit** epoch secret. A peer walking the log through history — the late joiner, the rejoiner, the re-seeded peer, all now explicitly expected to do this — reaches frames whose blob it cannot unwrap, because it never held that epoch's secret. Its own add-commit is one of them.
+
+The cursor table classifies frames by *epoch record*, which correctly routes those frames to "advance, no fork check". But a naive implementation unwraps the blob *before* classifying, and a failed unwrap looks like a malformed frame. Both rows say "advance", so the cursor still moves — but a frame that is ordinary history gets logged as poison, and the distinction matters the moment anyone debugs a real log.
+
+Make it explicit: **the body blob is unwrapped only for a frame the peer can actually apply.** Classification by epoch comes first; unwrap is a consequence of "I can apply this", never a precondition of reading the frame.
+
+## Noted, not blocking
+
+- **A removed member keeps `commitTopic` forever.** The topic is non-rotating and derived from `exportRecoverySecret()`, which a removed member knows permanently, and `fetchTopic` authorizes on subscription. Under mailbox semantics it could only receive what was published while it was subscribed; under a retained log it can re-pull the topic's whole retained history at any time. No confidentiality delta — post-removal frames are wrapped under epoch secrets it cannot derive, and pre-removal frames it already had — but it does gain durable metadata (commit cadence, frame sizes) and a free hub-resource drain. Worth one line acknowledging it, and worth asking whether removal should revoke the subscription.
+
+## What matches, revision 3
+
+The G5 fix is exactly right, including the explicit "no record for that epoch → not a fork, just history" and the late-joiner regression test. The deadline-not-attempt-count retry bound is the right call. The G7 host-impact rewrite now says the true size of the storage change, and the conformance suite's zero-subscriber test is the one that proves it. `requestID`'s threat analysis (a replayed request only causes another seal to a leaf nobody else can open) is sound. `onAccepted`-throws is now specified — and G10 is, in a sense, the missing second half of that specification.
+
+---
+
+# Revision 2 review (folded in — kept as the record)
 
 **Verdict:** G1–G4 are correctly folded in, and the design found something the revision-1 review missed — problem 4, the commit lane being a mailbox rather than a log. That find is right. But it is *bigger than the design accounts for*: closing it is not a `HubStore` field addition, it is a change to what a `HubStore` fundamentally is. G7 blocks; G6 is a correctness bug in the CAS itself.
 

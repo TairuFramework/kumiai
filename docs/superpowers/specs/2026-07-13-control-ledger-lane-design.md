@@ -1,7 +1,7 @@
 # Design: the control-ledger lane
 
-**Status:** design, revision 3 (2026-07-13). Reviewed twice by kubun in
-`2026-07-13-control-ledger-lane-review.md`; G1–G9 are folded in below.
+**Status:** design, revision 4 (2026-07-13). Reviewed three times by kubun in
+`2026-07-13-control-ledger-lane-review.md`; G1–G12 are folded in below.
 **Supersedes:** the requirements in `../../agents/plans/next/2026-07-13-host-ledger-lane.md`
 (R1/R2/R3), which stays as the origin record.
 **Scope:** `@kumiai/mls`, `@kumiai/rpc`, `@kumiai/hub-protocol`, `@kumiai/hub-server`,
@@ -91,6 +91,25 @@ no peer could ever pull them. So:
   `ack` deletes a *delivery*, never a log entry.
 - **Trim governs the log**, by depth and age, and is the only thing that removes an entry.
   Trim moves `oldest` and never touches `head`.
+
+**The trim window on `commitTopic` is a group-liveness parameter, not a storage parameter
+(G12).** It decides one thing: *how long a member may be offline and still resume by
+pulling, rather than by healing.* A peer offline longer than the window comes back trimmed
+out, and every such peer runs `recover()` — a rendezvous, an external commit, and a CAS
+contention (G10). Tuned like a message-queue backlog (hours, or a few thousand frames), the
+rare fallback becomes the common path for the most common client: kubun's peers are phones,
+and offline-for-a-week is ordinary. So:
+
+- **Default the `commitTopic` window to 90 days**, and treat any depth bound as a runaway
+  guard set far above expected volume, never as the primary policy. Hosts tune it from
+  member offline behaviour, not from disk pressure.
+- **Retention is now unconditional** (that is the point of G7), so the log grows with commit
+  volume — and D1 raises commit volume by an order of magnitude by design. It is still
+  small: a commit frame is a few KB, so a group committing 100 times a day for 90 days
+  retains on the order of tens of MB. Storage is cheap; recovery storms are not.
+- A host that shortens this window is choosing to convert the late-joiner fix back into a
+  recovery path. The design says so out loud because the failure is silent and shows up as
+  load, not as an error.
 
 ```ts
 export type PublishParams = {
@@ -267,7 +286,47 @@ failure, and the peer heals by external-commit rejoin and re-enacts its entries.
 Because a loser's commit is never published, the commit topic under an honest hub contains
 only accepted commits.
 
-#### Heal
+#### Heal: `recover()` is a CAS loop of its own (G10)
+
+Three paths reach heal — the trim strand, the losing branch of a byzantine double-accept,
+and a crash or an `onAccepted` throw after acceptance. All three end in an **external
+commit**, which changes the ratchet tree and must therefore land on `commitTopic` like any
+other commit. That means every question D1 answers for `commit()` must also be answered
+here, on the path where the group is *already* fragile.
+
+- **The external commit is CAS'd**, at `reconciledHead`, seeded from `fetchTopic` exactly as
+  a fresh member seeds it (G1's mechanism). Publishing it unconditionally would re-open the
+  fork D1 exists to close, on the worst possible path.
+- **Losing the CAS is the likely case, not the edge case** — heal runs precisely when the
+  group is under commit pressure, and two peers healing concurrently (routine, given G12)
+  race each other. But a heal retry is **not** shaped like `commit()`'s: the peer cannot
+  simply rebuild, because its GroupInfo is now **stale** — it describes a ratchet tree the
+  winning commit has already changed. It must discard the GroupInfo, re-request it, and
+  rebuild the external commit from the fresh one.
+- **Heal is two commits, not one.** `joinGroupExternal` returns `{ commitMessage, group }`
+  and carries no entry envelope, so it cannot re-enact anything. The entries ride a
+  *subsequent* ordinary `commit()`, which contends on the CAS like any other. "Rejoin and
+  re-enact" is two acts, and the second one can lose.
+
+```
+recover(deadline):
+  loop until deadline:
+    pull commitTopic to the end            # may itself resolve the strand: nothing to heal
+    request GroupInfo over rendezvousTopic # sealed to this peer's leaf (D2)
+    build external commit (joinGroupExternal, resync: true)
+    publish to commitTopic with expectedHead = reconciledHead
+      accepted        -> adopt the rejoined handle, reconciledHead = returned sequenceID
+                         gather the ledger bodies the GroupInfo did not carry (D3)
+                         re-enact any discarded entries via the ordinary commit() loop
+                         return { advanced: true }
+      HeadMismatch    -> discard the GroupInfo AND the external commit, continue the loop
+  deadline exceeded -> return { advanced: false }
+```
+
+The peer's own entry tokens survive all of this untouched: they are epoch-independent, so a
+discarded external commit costs nothing but the round trip.
+
+#### Heal triggers
 
 Retained for the two cases CAS cannot cover. Both triggers are single-observation; the
 timing heuristic in revision 1 is gone (G4).
@@ -381,11 +440,20 @@ asked for, so a lying responder can only fail to answer, never inject.
 **Cursor-advance rule.** Replaces revision 1's ack table, now that the commit lane is pulled
 rather than delivered. For each frame processed from `commitTopic`:
 
-| Outcome | Cursor |
+**Classify by epoch first; unwrap only what you can apply (G11).** The blob is sealed under
+the *pre-commit* epoch secret, so a peer walking history — the late joiner, the rejoiner,
+the re-seeded peer, all of which the design now expects to do exactly this — reaches frames
+whose blob it can never open, including the commit that added it. Unwrapping is therefore a
+*consequence* of "I can apply this frame", never a precondition of reading it. A naive
+implementation that unwraps before classifying sees ordinary history as a decryption
+failure: the cursor still advances (both rows say advance), but the frame is logged as
+poison, and that lie costs someone a day the first time they debug a real log.
+
+| Frame | Cursor |
 |---|---|
 | Applied | advance; record this epoch → sequenceID for the D1 fork check |
-| Frame at an epoch this peer has no recorded applied-commit for (pre-join, pre-rejoin, re-seeded history) | advance, **no fork check** — this is history, not a fork |
-| Frame at an epoch this peer *has* a record for, with a different sequenceID | advance; this is the fork trigger (D1) |
+| At an epoch this peer has no recorded applied-commit for (pre-join, pre-rejoin, re-seeded history) | advance, **no fork check, no unwrap attempt** — history, not a fork and not poison |
+| At an epoch this peer *has* a record for, with a different sequenceID | advance; the fork trigger (D1) |
 | Malformed, or policy-rejected (`CommitRejectedError`) | advance (poison — never retry) |
 | `MissingLedgerEntriesError` | **do not advance**; gather the missing ids, retry the frame (bounded); on exhaustion, advance and escalate to `recover()` |
 
@@ -430,6 +498,24 @@ Named so the work is sized honestly. These are the host's to absorb.
   leaves an **orphan leaf**: a member added to the tree who never received keys. The repair
   is an admin remove + re-invite. Accepted as a crash-window rarity, not a steady-state
   hazard.
+
+## Accepted exposure: a removed member keeps `commitTopic`
+
+`commitTopic` is non-rotating and derived from `exportRecoverySecret()`, which a removed
+member knows permanently, and `fetchTopic` authorizes on subscription. Under mailbox
+semantics such a member could only ever receive what was published while it was subscribed;
+under a retained log it can re-pull the topic's whole retained history at any time.
+
+**No confidentiality delta.** Post-removal frames carry bodies wrapped under epoch secrets
+it cannot derive, and the commits themselves are MLS-authenticated; pre-removal frames it
+already had. What it gains is **durable metadata** — commit cadence, frame sizes, group
+liveness — and a free hub-resource drain.
+
+Revoking the subscription on removal is the obvious mitigation and is *not* available
+cheaply: the hub is blind to the roster by design, so it cannot know a removal happened, and
+rotating `commitTopic` on removal would break the one property the topic exists for — that a
+peer stranded on any epoch can still find the rendezvous. Accepted and named; revisit only
+if metadata exposure to ex-members becomes a stated requirement.
 
 ## Deferred
 
@@ -482,6 +568,17 @@ Named so the work is sized honestly. These are the host's to absorb.
   converges, with no host-side backfill code.
 - **Trim strand.** The intervening commits are trimmed; the peer detects it in one
   observation (`head > reconciledHead`, `oldest` past the cursor) and heals.
+- **Heal loses the CAS.** A commit lands between the rejoining peer's GroupInfo request and
+  its external-commit publish: the peer takes `HeadMismatchError`, **discards the GroupInfo**
+  (not just the commit), re-requests, rebuilds, and converges. The regression test for G10 —
+  a peer that merely retried the same external commit against a changed tree would wedge.
+- **Two peers heal concurrently.** Both hold GroupInfo at the same epoch; one wins, the other
+  re-requests and converges. Both end up in the roster, and neither loses its entries.
+- **Heal re-enacts.** After a rejoin, the peer's discarded entries land via an ordinary
+  `commit()` — a second commit, which itself contends normally.
+- **History is not poison.** A late joiner pulling from `oldest` walks frames whose body blob
+  it cannot unwrap (including its own add-commit) and classifies none of them as malformed
+  (the G11 regression test).
 - **Sealing.** A reply opens for the requester and fails to open for every other member and
   for the hub. A reply replayed at another member or another request is rejected by the AAD
   check. A removed member's request is refused.
@@ -504,3 +601,6 @@ Named so the work is sized honestly. These are the host's to absorb.
 - `GroupMLS.exportGroupInfo` is implementable by a host without leaking group state to the
   relay.
 - A permanently-failing commit is dropped once and never retried forever.
+- A peer that must heal converges even under commit pressure: its external commit is CAS'd,
+  and losing the race costs it a re-request, not a wedge.
+- A member offline for the trim window's duration resumes by pulling, not by healing.
