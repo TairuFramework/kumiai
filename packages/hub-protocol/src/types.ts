@@ -33,9 +33,22 @@ export type PublishParams = {
    */
   expectedHead?: string | null
   /**
-   * Idempotency key. Republishing an already-accepted publishID returns its original
-   * sequenceID instead of appending again. Its record has its OWN retention — it is not a
-   * log entry and MUST NOT be removed by trim.
+   * Idempotency key. Republishing an already-accepted publishID returns its original sequenceID
+   * and appends nothing: no entry, no delivery row, no sequenceID consumed, no event. This is
+   * what makes a peer's restart replay work, so:
+   *
+   * - The `publishID` -> `sequenceID` record is **not a log entry**. `trim` and `purge` MUST NOT
+   *   remove it. Its retention is its own, and strictly longer than the log's — retaining it
+   *   indefinitely is the recommended implementation, since it is a key and a sequenceID, one per
+   *   conditional publish. Hanging the key off the message row is the natural implementation and
+   *   it is wrong: trim deletes the record with the frame, and the replay silently becomes an
+   *   ordinary new publish.
+   * - The returned sequenceID may name a frame that has since been trimmed. That is correct: a
+   *   replay asks "did my publish land?", not "give me my frame".
+   * - The dedup check happens **before** the `expectedHead` comparison. A replay carries a stale
+   *   `expectedHead` by construction — the accepted publish it is replaying is what moved the
+   *   head — so a store that compares first raises HeadMismatchError and tells the caller its
+   *   commit was lost when it landed.
    */
   publishID?: string
   /**
@@ -143,10 +156,13 @@ export type HubStoreEvents = {
  * - `sequenceID`s are lexicographically ordered and strictly increasing within a topic — a
  *   fixed-width zero-padded encoding, not a bare decimal and not a UUID — and they are minted by
  *   the STORE, inside the transaction, not by the calling process.
- * - `publish` compares `expectedHead`, mints the sequenceID, appends, and advances the head in
- *   ONE transaction. A read-then-write compare-and-set is a race — precisely the race the head
- *   exists to eliminate — and a host that reads "the head is a scalar" and implements it as three
- *   statements does not satisfy this contract, however green its single-connection tests are.
+ * - `publish` checks `publishID` for a replay, then compares `expectedHead`, mints the sequenceID,
+ *   appends, and advances the head — in ONE transaction, and in that order. A read-then-write
+ *   compare-and-set is a race — precisely the race the head exists to eliminate — and a host that
+ *   reads "the head is a scalar" and implements it as three statements does not satisfy this
+ *   contract, however green its single-connection tests are.
+ * - The `publishID` dedup record is **not a log entry**: no deleter may reach it, its retention is
+ *   its own (indefinite is recommended), and it outlives the frame it names.
  *
  * Implementations are verified by the conformance suite exported from
  * `@kumiai/hub-protocol/conformance`.

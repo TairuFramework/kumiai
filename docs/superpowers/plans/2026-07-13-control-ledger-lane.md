@@ -2,8 +2,10 @@
 
 **Stage:** planning
 **Mode:** learning-loop
-**Spec:** `docs/superpowers/specs/2026-07-13-control-ledger-lane-design.md` (revision 15)
+**Spec:** `docs/superpowers/specs/2026-07-13-control-ledger-lane-design.md` (revision 19)
 **Review record:** `docs/superpowers/specs/2026-07-13-control-ledger-lane-review.md` (G1–G27)
+**Found while implementing:** G28 (the lane outruns the mailbox), G29 (`head` advances on a
+mailbox publish), G30 ("one transaction" is not a CAS) — see the decision log.
 
 ## How this plan is adversarial
 
@@ -37,8 +39,15 @@ suite — that is the phase's central check, and it is the one thing that would 
 on day one.
 
 **Exit criteria:** `hub-protocol` exports a conformance suite; `memoryStore` passes all of it;
-the suite fails against a store that hangs retention off delivery, or dedup off the message
-row, or mints sequenceIDs in-process.
+and the suite **demonstrably fails** a store that hangs retention off delivery, or dedup off the
+message row — both verified by building the wrong store and watching it fail, not by assertion.
+
+An in-process sequence counter was originally listed here too. **It is not testable and the
+criterion is withdrawn** (question 1.3): the suite drives one store object in one process, where a
+lazily-seeded counter is monotonic and unique, so it passes every clause and breaks only across two
+hub processes on one database. It is a review item against the host's DDL, recorded in the spec's
+host-side impact. Restating it honestly is worth more than a clause that would have passed
+vacuously.
 
 ### Question 1.1: Does a conformance suite written from the spec actually fail today's store?
 
@@ -529,3 +538,50 @@ concurrent-CAS clause now opens its doc comment with "READ THIS BEFORE TRUSTING 
 CASE" and states that a non-transactional three-statement store passes it every time. A vacuous
 clause that announces its vacuity is useful; one that stays quiet is worse than no clause at all,
 because a host reads green as proof.
+
+---
+
+### 2026-07-13 — Question 1.4: Does the dedup record outlive the log?
+
+**Findings:** Confirmed — **15/15**, and the claim was *verified rather than asserted*. The probe
+built the wrong store (dedup key hung off the message row) and watched it score **14/15**, failing
+exactly and only the load-bearing clause, with:
+
+```
+HeadMismatchError: expected head null, but the head is 000000000002
+```
+
+That is the bricked-group walkthrough reproduced mechanically. The clause does not merely detect a
+missing row — it prints the fatal path. Full repo green for the first time since question 1.1.
+
+Structural again, and by the same trick that made `heads` right in 1.2: the dedup record is keyed by
+`publishID`, and **every deleter in the store is keyed by sequenceID, with no index running back the
+other way.** `removeEntry`, `trim` and `purge` *cannot* reach it. The dedup check is the first thing
+`publish` does — above the CAS and above the mint — because a replay carries both a known
+`publishID` and a now-stale `expectedHead`, and in the other order the store raises
+`HeadMismatchError` and **the caller concludes its commit was lost when it actually landed.**
+
+**Spec impact: revision 20.**
+
+1. **G31 — two tables reference `messages`, and exactly one of them may cascade.** Delivery rows
+   **must** `ON DELETE CASCADE` (question 1.2's finding). The dedup record **must not** — that
+   cascade *is* the row-hung store, and a host that writes the symmetric, tidy-looking schema has
+   rebuilt it **while believing it had separated them**, passing fourteen of fifteen clauses on the
+   way. The natural thing is the fatal one, so the spec names it rather than leaving it to review.
+2. **The dedup record and the log entry are written in one transaction.** A crash between them
+   either bricks the group (frame committed, record lost) or — worse and silently — leaves a record
+   for a frame that never existed, so a replay returns a sequenceID for a publish that never landed
+   and the caller **marks a lost commit as accepted.**
+
+**Phase 1 exit: 2 of 3, and the third criterion is withdrawn rather than passed.** The suite
+demonstrably fails a delivery-derived store and a row-hung dedup record — both watched failing, not
+assumed. It **cannot** catch an in-process sequence counter, because it drives one store object in
+one process where a lazily-seeded counter is monotonic and unique; kubun's current shape passes all
+fifteen clauses and breaks only across two hub processes on one database. The plan's exit criterion
+has been restated to say so.
+
+**Learned:** the highest-value output of this phase was not the store — it was **three defects the
+suite structurally cannot catch** (in-process counter, read-then-write CAS on `READ COMMITTED`, and
+the cascading dedup FK), each of which passes a fully green run. Every one of them is silent, every
+one forks or bricks a group, and every one is a schema review rather than a test. A conformance suite
+that knows and states its own ceiling is worth considerably more than one that implies it has none.

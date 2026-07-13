@@ -354,12 +354,20 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(1),
+        retain: 'log',
         publishID: 'publish-1',
       })
+
+      // The replay is the caller re-sending what it journalled, byte for byte — including an
+      // expectedHead that the accepted publish above has itself made stale. The dedup check must
+      // precede the compare-and-set: a store that compares first raises HeadMismatchError here,
+      // and the caller concludes its publish was lost when it landed.
       const replayed = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(1),
+        retain: 'log',
+        expectedHead: null,
         publishID: 'publish-1',
       })
       expect(replayed).toBe(sequenceID)
@@ -373,10 +381,13 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
       const store = await createStore()
       await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
 
+      // The first publish on the topic: the caller journals `expectedHead: null` and this key.
       const sequenceID = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(1),
+        retain: 'log',
+        expectedHead: null,
         publishID: 'publish-1',
       })
       // A later entry gives trim an exclusive bound past `sequenceID`.
@@ -384,19 +395,25 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(2),
+        retain: 'log',
       })
 
-      // The dedup record has its own retention and is never removed by trim. A store that
-      // hangs the key off the message row loses it here, and the replay below silently
-      // becomes an ordinary new publish.
+      // The dedup record has its own retention and is never removed by trim. A store that hangs
+      // the key off the message row loses it here, and the replay below silently becomes an
+      // ordinary new publish — which then fails its compare-and-set against a head that names the
+      // frame trim just removed, with no way for the caller to learn that its publish had landed.
       await store.trim({ topicID: TOPIC, before: sentinel })
 
       const replayed = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(1),
+        retain: 'log',
+        expectedHead: null,
         publishID: 'publish-1',
       })
+      // The sequenceID it returns names a frame that no longer exists, and that is correct: the
+      // replay asks "did my publish land?", not "give me my frame".
       expect(replayed).toBe(sequenceID)
 
       const result = await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })

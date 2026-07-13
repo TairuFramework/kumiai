@@ -380,6 +380,48 @@ describe('createMemoryStore pub/sub', () => {
     expect(log.head).toBe(next)
   })
 
+  test('a replayed publishID consumes no sequenceID and survives a purge of the whole log', async () => {
+    const store = createMemoryStore()
+    await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+    const first = await store.publish({
+      senderDID: ALICE,
+      topicID: TOPIC,
+      payload: new Uint8Array([1]),
+      retain: 'log',
+      expectedHead: null,
+      publishID: 'commit-1',
+    })
+    expect(first).toBe('000000000001')
+
+    // The age bound removes the frame. It cannot reach the dedup record.
+    expect(await store.purge({ olderThan: 0 })).toEqual([first])
+    expect((await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })).messages).toHaveLength(
+      0,
+    )
+
+    // The replay carries the head the caller journalled, which the frame's own acceptance made
+    // stale. It still gets its original sequenceID back — naming a frame that no longer exists,
+    // which is the answer to "did my publish land?".
+    const replayed = await store.publish({
+      senderDID: ALICE,
+      topicID: TOPIC,
+      payload: new Uint8Array([1]),
+      retain: 'log',
+      expectedHead: null,
+      publishID: 'commit-1',
+    })
+    expect(replayed).toBe(first)
+
+    // Nothing was appended and no sequenceID was burned: the next publish takes the next ID.
+    const next = await store.publish({
+      senderDID: ALICE,
+      topicID: TOPIC,
+      payload: new Uint8Array([2]),
+      retain: 'log',
+    })
+    expect(next).toBe('000000000002')
+  })
+
   test('key package store and fetch', async () => {
     const store = createMemoryStore()
     await store.storeKeyPackage(ALICE, 'kp-1')

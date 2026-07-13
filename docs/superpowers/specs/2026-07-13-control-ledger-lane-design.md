@@ -1,13 +1,14 @@
 # Design: the control-ledger lane
 
-**Status:** design, revision 19 (2026-07-13). Reviewed fourteen times by kubun in
-`2026-07-13-control-ledger-lane-review.md`; G1–G27 are folded in below. Revisions 16–19 fold in
-the first three implementation probes: `NotSubscribedError`, a `trim` primitive, a 30-day default
+**Status:** design, revision 20 (2026-07-13). Reviewed fourteen times by kubun in
+`2026-07-13-control-ledger-lane-review.md`; G1–G27 are folded in below. Revisions 16–20 fold in
+the first four implementation probes: `NotSubscribedError`, a `trim` primitive, a 30-day default
 window, two retention classes with subscriber-requested durations, **G28 — the commit lane must
 not outrun the mailbox**, which silently destroys downloaded messages, **G29 — `head` advances
-only on a log publish**, without which any member can wedge the lane for the group, and **G30 —
+only on a log publish**, without which any member can wedge the lane for the group, **G30 —
 "one transaction" is necessary but not sufficient for the CAS**: on `READ COMMITTED` a faithful
-implementation still forks.
+implementation still forks, and **G31 — two tables reference `messages` and exactly one of them
+may cascade**.
 **Supersedes:** the requirements in `../../agents/plans/next/2026-07-13-host-ledger-lane.md`
 (R1/R2/R3), which stays as the origin record.
 **Scope:** `@kumiai/mls`, `@kumiai/rpc`, `@kumiai/hub-protocol`, `@kumiai/hub-server`,
@@ -1149,6 +1150,17 @@ Named so the work is sized honestly. These are the host's to absorb.
   Neither can be exercised in-process: catching them requires two connections racing a real
   database. The suite says so where it can, but **a host that reads a fully green conformance
   run as proof its store is sound is wrong**, and this is the sentence that tells it so.
+- **The schema trap: two tables reference `messages`, and exactly one of them may cascade
+  (G31).** Delivery rows **must** `ON DELETE CASCADE` — a delivery whose referent is trimmed can
+  never be pushed, and a host without the foreign key leaks them silently. The `publishID` dedup
+  record **must not** — the cascade is precisely the row-hung store the design forbids, and a
+  host that writes the symmetric, tidy-looking schema has rebuilt it *while believing it had
+  separated them*. It will pass fourteen of the suite's fifteen clauses on the way. The natural
+  thing here is the fatal one, so it is called out rather than left to review.
+- **The dedup record and the log entry are written in one transaction.** A crash between them
+  either bricks the group (frame committed, record lost — see "Restart replay") or, worse and
+  silently, leaves a record for a frame that never existed, so a replay returns a sequenceID for
+  a publish that never landed and **the caller marks a lost commit as accepted.**
 - **Removing `localCommitted` inverts the host's commit path.** A host that applies the
   commit and adopts `newGroup` up front (kubun's `withHandleReplacing`) must instead build
   without adopting and adopt only inside `onAccepted`. Because `build()` re-runs on every

@@ -73,6 +73,14 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
   const topicLogs = new Map<string, Array<string>>()
   const heads = new Map<string, string>()
   const deliveries = new Map<string, Array<string>>()
+  /**
+   * publishID -> the sequenceID it was accepted as. Not a log entry, and not reachable from one:
+   * no deleter here takes a publishID, so `removeEntry`, `trim` and `purge` have no way to touch
+   * this map even by mistake. Retained indefinitely — it is a key and a sequenceID, one per
+   * conditional publish, and it is the only thing that lets a peer replaying its journal learn
+   * that a commit it never saw acknowledged had in fact landed.
+   */
+  const publishRecords = new Map<string, string>()
   /** Per topic: the subscribers, each with the retention it asked for. */
   const subscriptions = new Map<string, Map<string, number>>()
   const keyPackages = new Map<string, Array<string>>()
@@ -136,6 +144,20 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
     async publish(params: PublishParams): Promise<string> {
       const retain: RetentionClass = params.retain ?? 'mailbox'
 
+      // The dedup check comes BEFORE the compare-and-set, and the order is load-bearing. A replay
+      // carries the publishID the store has already accepted and the expectedHead the caller
+      // journalled — which the accepted publish itself made stale. Comparing first would raise
+      // HeadMismatchError, and the caller would conclude its commit was lost when it landed:
+      // exactly the confusion the key exists to prevent. The sequenceID returned may name a frame
+      // that trim has since removed, and that is correct — the question a replay asks is "did my
+      // publish land?", not "give me my frame".
+      if (params.publishID != null) {
+        const accepted = publishRecords.get(params.publishID)
+        if (accepted !== undefined) {
+          return accepted
+        }
+      }
+
       // The compare-and-set, before anything is minted or written. The head comparison, the
       // sequence mint, the append and the head advance are one indivisible step, and a loser
       // leaves the log, the head and the sequence exactly as it found them: no entry, no
@@ -152,6 +174,9 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
 
       counter++
       const sequenceID = formatSequenceID(counter)
+      if (params.publishID != null) {
+        publishRecords.set(params.publishID, sequenceID)
+      }
 
       // Only a log publish moves the head. A head naming a mailbox frame is a head that the
       // frame's own last ack deletes, leaving readers of the log a head they can never reach.
