@@ -1,9 +1,18 @@
 import type { BroadcastBus } from '@kumiai/broadcast'
 import type { StoredMessage } from '@kumiai/hub-protocol'
-import type { HubLike, HubReceiveSubscription } from '@kumiai/hub-tunnel'
+import type {
+  HubFetchTopicResult,
+  HubReceiveSubscription,
+  HubSubscribeOptions,
+  LogHub,
+  MailboxHub,
+} from '@kumiai/hub-tunnel'
+
+import { asDeliveryPosition } from './cursor.js'
 
 export type HubMuxParams = {
-  hub: HubLike
+  /** The real hub. It must serve a log: the commit lane reads one. */
+  hub: LogHub
   /** Authenticated DID used to drain `hub.receive` and stamp bus publishes. */
   localDID: string
 }
@@ -15,10 +24,32 @@ export type HubMuxParams = {
  */
 export type InboundListener = (message: StoredMessage, ack: () => void) => void
 
+export type MuxPublishParams = {
+  topicID: string
+  payload: Uint8Array
+  /** Retention class. Absent: 'mailbox'. Only a 'log' publish moves the topic's head. */
+  retain?: 'log' | 'mailbox'
+}
+
+export type MuxFetchTopicParams = {
+  topicID: string
+  /** Exclusive cursor: entries after this log position. Absent: from the oldest retained. */
+  after?: string
+  limit?: number
+}
+
 export type HubMux = {
   readonly bus: BroadcastBus
-  readonly hubLike: HubLike
-  onInbound: (topicID: string, listener: InboundListener) => () => void
+  /** A mailbox-shaped view of the drain, for the directed tunnels. It carries no log. */
+  readonly mailbox: MailboxHub
+  publish: (params: MuxPublishParams) => Promise<{ sequenceID: string }>
+  /** Pull a topic's log as the local DID. */
+  fetchTopic: (params: MuxFetchTopicParams) => Promise<HubFetchTopicResult>
+  onInbound: (
+    topicID: string,
+    listener: InboundListener,
+    options?: HubSubscribeOptions,
+  ) => () => void
   dispose: () => Promise<void>
 }
 
@@ -28,12 +59,12 @@ type Sink = {
 }
 
 /**
- * Multiplex a single hub `receive` drain into a BroadcastBus view, a HubLike
+ * Multiplex a single hub `receive` drain into a BroadcastBus view, a mailbox-hub
  * view (for directed tunnels), and an onInbound hook (for lazy directed-server
  * accept).
  *
  * Per inbound message, in order: (1) fire `onInbound` listeners for the topic,
- * then (2) push to every `hubLike.receive` sink — so a listener may create a
+ * then (2) push to every `mailbox.receive` sink — so a listener may create a
  * directed tunnel synchronously and still receive the triggering frame. Topics
  * are refcounted across all three views: the first registration subscribes on
  * the hub, the last removal unsubscribes.
@@ -46,10 +77,10 @@ export function createHubMux(params: HubMuxParams): HubMux {
   const sinks = new Set<Sink>()
   let disposed = false
 
-  const retain = (topicID: string): void => {
+  const retain = (topicID: string, options?: HubSubscribeOptions): void => {
     const next = (refcount.get(topicID) ?? 0) + 1
     refcount.set(topicID, next)
-    if (next === 1) void Promise.resolve(hub.subscribe(localDID, topicID)).catch(() => {})
+    if (next === 1) void Promise.resolve(hub.subscribe(localDID, topicID, options)).catch(() => {})
   }
 
   const release = (topicID: string): void => {
@@ -64,14 +95,18 @@ export function createHubMux(params: HubMuxParams): HubMux {
     }
   }
 
-  const onInbound = (topicID: string, listener: InboundListener): (() => void) => {
+  const onInbound = (
+    topicID: string,
+    listener: InboundListener,
+    options?: HubSubscribeOptions,
+  ): (() => void) => {
     let set = listeners.get(topicID)
     if (set == null) {
       set = new Set()
       listeners.set(topicID, set)
     }
     set.add(listener)
-    retain(topicID)
+    retain(topicID, options)
     let removed = false
     return () => {
       if (removed) return
@@ -96,7 +131,11 @@ export function createHubMux(params: HubMuxParams): HubMux {
       if (disposed || result.done) return
       const message = result.value
       const ack = () => {
-        void Promise.resolve(subscription.ack?.(message.sequenceID)).catch(() => {})
+        // An ack names a place in THIS recipient's delivery queue, not in the topic's
+        // log. The two are different sequences and must never be crossed, so the
+        // position is named for what it is and never leaves this closure.
+        const position = asDeliveryPosition(message.sequenceID)
+        void Promise.resolve(subscription.ack?.(position)).catch(() => {})
       }
       for (const listener of listeners.get(message.topicID) ?? []) {
         try {
@@ -115,7 +154,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
     subscribe: (topicID, onMessage) => onInbound(topicID, (message) => onMessage(message.payload)),
   }
 
-  const hubLike: HubLike = {
+  const mailbox: MailboxHub = {
     publish: (publishParams) => hub.publish(publishParams),
     subscribe: (_subscriberDID, topicID) => {
       retain(topicID)
@@ -173,9 +212,33 @@ export function createHubMux(params: HubMuxParams): HubMux {
     },
   }
 
+  const publish = (params: MuxPublishParams): Promise<{ sequenceID: string }> =>
+    Promise.resolve(
+      hub.publish({
+        senderDID: localDID,
+        topicID: params.topicID,
+        payload: params.payload,
+        ...(params.retain != null ? { retain: params.retain } : {}),
+      }),
+    )
+
+  const fetchTopic = (params: MuxFetchTopicParams): Promise<HubFetchTopicResult> =>
+    // Called on `hub`, not through a detached reference: a LogHub is often a class, and
+    // an unbound method loses its receiver.
+    Promise.resolve(
+      hub.fetchTopic({
+        subscriberDID: localDID,
+        topicID: params.topicID,
+        ...(params.after != null ? { after: params.after } : {}),
+        ...(params.limit != null ? { limit: params.limit } : {}),
+      }),
+    )
+
   return {
     bus,
-    hubLike,
+    mailbox,
+    publish,
+    fetchTopic,
     onInbound,
     dispose: async () => {
       if (disposed) return

@@ -1,7 +1,7 @@
 # Design: the control-ledger lane
 
-**Status:** design, revision 23 (2026-07-13). Reviewed fourteen times by kubun in
-`2026-07-13-control-ledger-lane-review.md`; G1–G27 are folded in below. Revisions 16–23 fold in
+**Status:** design, revision 24 (2026-07-13). Reviewed fourteen times by kubun in
+`2026-07-13-control-ledger-lane-review.md`; G1–G27 are folded in below. Revisions 16–24 fold in
 the implementation probes: `NotSubscribedError`, a `trim` primitive, a 30-day default
 window, two retention classes with subscriber-requested durations, **G28 — the commit lane must
 not outrun the mailbox**, which silently destroys downloaded messages, **G29 — `head` advances
@@ -16,7 +16,9 @@ removed member — liveness, not confidentiality), and **the ephemeral private k
 an unenforced host obligation** across the very crash it exists to survive. Revision 23 adds
 bootstrap's two host obligations: **the handle mutex is not reentrant** (reading the ledger from
 inside `resolveLedgerEntries` deadlocks), and **a responder must gate its gather reply on
-`isLedgerComplete()`** or it answers with an empty ledger.
+`isLedgerComplete()`** or it answers with an empty ledger. Revision 24 splits the hub port —
+**`MailboxHub` / `LogHub`** — because `HubLike` named both the hub a peer is handed and the
+mailbox-only adapter views that are not hubs at all.
 **Supersedes:** the requirements in `../../agents/plans/next/2026-07-13-host-ledger-lane.md`
 (R1/R2/R3), which stays as the origin record.
 **Scope:** `@kumiai/mls`, `@kumiai/rpc`, `@kumiai/hub-protocol`, `@kumiai/hub-server`,
@@ -416,6 +418,25 @@ it cannot miss its own reply, and app data has the host's own sync behind it. Th
 decision, not an omission — a new lane that needs history must opt into `fetchTopic`, and a
 new lane that assumes a late subscriber sees anything published before it subscribed is
 wrong.
+
+**The port splits with it: `MailboxHub` and `LogHub`.** The old `HubLike` named two different
+things — the hub a host wires into a `GroupPeer`, and the mailbox-shaped *adapter views* built
+inside `rpc` (the mux's fan-out view, the sealed directed lane, the session tunnel, the encrypted
+app transport). The adapters are not hubs: they wrap one, they never carry a commit, and they have
+no log to serve. So `fetchTopic` is **required** on `LogHub`, which is what `GroupPeer` takes, and
+absent from `MailboxHub`, which is what the adapters satisfy:
+
+```ts
+export type MailboxHub = { publish; subscribe; unsubscribe?; receive; events? }
+export type LogHub = MailboxHub & { fetchTopic(params): Promise<HubFetchTopicResult> }
+```
+
+Making `fetchTopic` *optional* instead — with the peer refusing at init — would have the type say
+"a hub may or may not serve a log", which is false of every hub a peer is handed, and would leave a
+runtime check standing in for a distinction the types can draw. Handing a mailbox-only hub to a peer
+is now a **compile error at the host's wiring**, which is the only place the mistake can be made.
+None of the four adapters needed a method to satisfy the split: the optional `fetchTopic` existed
+only because they could not satisfy a required one.
 
 #### The peer's commit state machine
 

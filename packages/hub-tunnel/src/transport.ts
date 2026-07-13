@@ -22,35 +22,90 @@ export type HubReceiveSubscription = AsyncIterable<StoredMessage> & {
   ack?: (sequenceID: string) => void | Promise<void>
 }
 
-export type HubLikeEvent =
+export type MailboxHubEvent =
   | { type: 'reconnecting' }
   | { type: 'connected' }
   | { type: 'disconnected' }
 
-export type HubLikeEventListener = (event: HubLikeEvent) => void
+export type MailboxHubEventListener = (event: MailboxHubEvent) => void
 
-export type HubLikeEvents = {
-  subscribe: (listener: HubLikeEventListener) => () => void
+export type MailboxHubEvents = {
+  subscribe: (listener: MailboxHubEventListener) => () => void
 }
 
 export type HubPublishParams = {
   senderDID: string
   topicID: string
   payload: Uint8Array
+  /**
+   * Retention class. 'mailbox' (default): the frame is removed once every delivery
+   * is acked, or when it ages out. 'log': the frame is retained unconditionally and
+   * removed only by trim, because a subscriber that must read it may not exist when
+   * it is published. Only a 'log' publish moves the topic's head.
+   */
+  retain?: 'log' | 'mailbox'
 }
 
-export type HubLike = {
+export type HubSubscribeOptions = {
+  /**
+   * Requested retention in seconds for this subscriber's view of the topic. Absent:
+   * the hub's default. Above the hub's maximum the subscribe is refused, never
+   * clamped — a silent downgrade strands a peer that believed it had asked for more.
+   */
+  retention?: number
+}
+
+export type HubFetchTopicParams = {
+  subscriberDID: string
+  topicID: string
+  /** Exclusive cursor: entries after this sequenceID. Absent: from the oldest retained. */
+  after?: string
+  limit?: number
+}
+
+export type HubFetchTopicResult = {
+  messages: Array<StoredMessage>
+  /** The sequenceID of the last accepted log publish, or null. Survives a trim. */
+  head: string | null
+  /** The oldest sequenceID still retained, or null if the log is empty. */
+  oldest: string | null
+}
+
+/**
+ * Publish and push-delivery over topics. A subscriber sees only what is published
+ * after it subscribes: there is nothing here to read history from.
+ *
+ * This is the shape of the adapter views built on top of a hub — a directed tunnel,
+ * a session hub, an encrypting wrapper — as well as of a hub used for mailbox
+ * traffic alone. A lane that must be readable by a peer which was not subscribed at
+ * publish time needs a {@link LogHub} instead.
+ */
+export type MailboxHub = {
   publish: (params: HubPublishParams) => Promise<{ sequenceID: string }>
-  subscribe: (subscriberDID: string, topicID: string) => Promise<void> | void
+  subscribe: (
+    subscriberDID: string,
+    topicID: string,
+    options?: HubSubscribeOptions,
+  ) => Promise<void> | void
   unsubscribe?: (subscriberDID: string, topicID: string) => Promise<void> | void
   receive: (subscriberDID: string) => HubReceiveSubscription
-  events?: HubLikeEvents
+  events?: MailboxHubEvents
+}
+
+/**
+ * A hub that also retains a readable per-topic log. A pull-driven lane needs one:
+ * commits must be readable by a peer that was not subscribed when they were
+ * published — a member invited tomorrow has to apply the commits that land today,
+ * and no push will ever bring them to it.
+ */
+export type LogHub = MailboxHub & {
+  fetchTopic: (params: HubFetchTopicParams) => Promise<HubFetchTopicResult>
 }
 
 export type HubTunnelSessionID = string | { auto: true }
 
 export type HubTunnelTransportParams = {
-  hub: HubLike
+  hub: MailboxHub
   sessionID: HubTunnelSessionID
   /**
    * The authenticated DID used to drain the receive stream (`hub.receive`) and

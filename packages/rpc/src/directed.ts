@@ -4,7 +4,7 @@ import { type ProcedureHandlers, Server } from '@enkaku/server'
 import type { ByteTransform, Unwrap, UnwrapResult } from '@kumiai/broadcast'
 import { defaultRandomID } from '@kumiai/broadcast'
 import type { StoredMessage } from '@kumiai/hub-protocol'
-import { createHubTunnelTransport, decodeFrame, type HubLike } from '@kumiai/hub-tunnel'
+import { createHubTunnelTransport, decodeFrame, type MailboxHub } from '@kumiai/hub-tunnel'
 
 import { sealDirectedHub } from './directed-crypto.js'
 import type { HubMux } from './hub-mux.js'
@@ -33,7 +33,7 @@ export function createDirectedClient<Protocol extends ProtocolDefinition>(
   // Replies are authored by `memberDID`; drop anything a lying hub injects under
   // a different MLS sender.
   const sealedHub = sealDirectedHub({
-    hub: mux.hubLike,
+    hub: mux.mailbox,
     wrap,
     unwrap,
     expectedSenderDID: memberDID,
@@ -96,10 +96,10 @@ export function createInboxAcceptor<Protocol extends ProtocolDefinition>(
     const queue: Array<StoredMessage> = []
     let resolveNext: ((result: IteratorResult<StoredMessage>) => void) | undefined
     let closed = false
-    const sessionHub: HubLike = {
+    const sessionHub: MailboxHub = {
       async publish(publishParams) {
         const sealed = await wrap(publishParams.payload)
-        return mux.hubLike.publish({
+        return mux.mailbox.publish({
           senderDID: publishParams.senderDID,
           topicID: publishParams.topicID,
           payload: sealed,

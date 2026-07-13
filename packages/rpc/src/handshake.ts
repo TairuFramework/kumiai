@@ -1,7 +1,8 @@
 /**
- * Framing for the raw MLS-handshake lane. Unlike application protocols, this
- * lane carries un-`wrap`ped bytes on a single non-rotating topic and multiplexes
- * three message kinds. Each frame is self-identifying:
+ * Framing for the raw MLS control lanes. Unlike application protocols, these carry
+ * un-`wrap`ped bytes on non-rotating topics: Commits on the commit topic, recovery
+ * request/reply on the rendezvous topic. Each frame is self-identifying, so a frame
+ * that lands on the wrong lane is recognised and dropped rather than mis-read:
  *
  *   [ MAGIC(2) | VERSION(1) | KIND(1) | payload... ]
  *

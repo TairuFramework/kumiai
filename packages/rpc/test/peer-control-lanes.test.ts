@@ -4,7 +4,7 @@ import { describe, expect, test } from 'vitest'
 import { encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import { createMemoryGroupMLS } from '../src/memory-group-mls.js'
 import { createGroupPeer } from '../src/peer.js'
-import { handshakeTopic, protocolTopic } from '../src/topic.js'
+import { commitTopic, protocolTopic, rendezvousTopic } from '../src/topic.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 
@@ -35,7 +35,7 @@ function makeMLSPeer(hub: FakeHub, localDID: string, recoverySecret: Uint8Array)
   return { peer, crypto, mls }
 }
 
-/** Publish a raw Commit frame to the group's handshake topic. */
+/** Append a Commit to the group's commit log, the way a committing member does. */
 function publishCommit(
   hub: FakeHub,
   senderDID: string,
@@ -44,13 +44,14 @@ function publishCommit(
 ): Promise<{ sequenceID: string }> {
   return hub.publish({
     senderDID,
-    topicID: handshakeTopic(recoverySecret),
+    topicID: commitTopic(recoverySecret),
     payload: encodeHandshakeFrame(HANDSHAKE_KIND.commit, commit),
+    retain: 'log',
   })
 }
 
-describe('handshake topic lifecycle', () => {
-  test('subscribed once at init, survives resync, dropped on dispose', async () => {
+describe('control lane lifecycle', () => {
+  test('commit and rendezvous are subscribed once at init, survive resync, drop on dispose', async () => {
     const hub = new FakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x33)
     const crypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
@@ -65,26 +66,54 @@ describe('handshake topic lifecycle', () => {
     })
     await flush()
 
-    const hsTopic = handshakeTopic(recoverySecret)
+    const commits = commitTopic(recoverySecret)
+    const rendezvous = rendezvousTopic(recoverySecret)
+    expect(commits).not.toBe(rendezvous)
     const secret = await crypto.exportSecret()
-    expect(hub.subscriberCount(hsTopic)).toBe(1)
+    expect(hub.subscriberCount(commits)).toBe(1)
+    expect(hub.subscriberCount(rendezvous)).toBe(1)
     expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(1)
 
-    // Advance the epoch and resync: app topics rotate, handshake topic persists.
+    // Advance the epoch and resync: app topics rotate, both control topics persist.
     crypto.setEpoch(2)
     await peer.resync()
     await flush()
 
-    expect(hub.subscriberCount(hsTopic)).toBe(1)
+    expect(hub.subscriberCount(commits)).toBe(1)
+    expect(hub.subscriberCount(rendezvous)).toBe(1)
     expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(0)
     expect(hub.subscriberCount(protocolTopic(secret, 2, 'chat'))).toBe(1)
 
     await peer.dispose()
     await flush()
-    expect(hub.subscriberCount(hsTopic)).toBe(0)
+    expect(hub.subscriberCount(commits)).toBe(0)
+    expect(hub.subscriberCount(rendezvous)).toBe(0)
   })
 
-  test('no handshake subscription when mls is omitted', async () => {
+  test('the commit topic is subscribed with the log retention window', async () => {
+    const hub = new FakeHub()
+    const recoverySecret = new Uint8Array(32).fill(0x34)
+    const crypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
+    const mls = createMemoryGroupMLS({ recoverySecret })
+    const peer = createGroupPeer<Protocols>({
+      hub,
+      crypto,
+      mls,
+      localDID: 'alice',
+      protocols: { chat },
+      handlers: { chat: {} } as never,
+      commitLogRetentionSeconds: 1234,
+    })
+    await flush()
+
+    expect(hub.requestedRetention(commitTopic(recoverySecret))).toBe(1234)
+    // The rendezvous lane is a mailbox: it takes the hub's default window.
+    expect(hub.requestedRetention(rendezvousTopic(recoverySecret))).toBeUndefined()
+
+    await peer.dispose()
+  })
+
+  test('no control subscriptions when mls is omitted', async () => {
     const hub = new FakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x33)
     const crypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
@@ -97,7 +126,8 @@ describe('handshake topic lifecycle', () => {
     })
     await flush()
 
-    expect(hub.subscriberCount(handshakeTopic(recoverySecret))).toBe(0)
+    expect(hub.subscriberCount(commitTopic(recoverySecret))).toBe(0)
+    expect(hub.subscriberCount(rendezvousTopic(recoverySecret))).toBe(0)
     await peer.dispose()
   })
 
@@ -140,7 +170,7 @@ describe('handshake topic lifecycle', () => {
     await bob.peer.dispose()
   })
 
-  test('localCommitted publishes to receivers and resyncs the sender', async () => {
+  test('localCommitted appends to the log and resyncs the sender', async () => {
     const hub = new FakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x55)
     const alice = makeMLSPeer(hub, 'alice', recoverySecret)
@@ -155,10 +185,15 @@ describe('handshake topic lifecycle', () => {
     await alice.peer.localCommitted(new Uint8Array([7]))
     await flush()
 
-    // Bob received the Commit, advanced, and resynced; Alice rebuilt to epoch 2.
+    // Bob pulled the Commit, advanced, and resynced; Alice rebuilt to epoch 2.
     expect(bob.mls.epoch()).toBe(2)
     expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(0)
     expect(hub.subscriberCount(protocolTopic(secret, 2, 'chat'))).toBe(2)
+    // It went to the log, not the mailbox: it moved the topic's head, so it is still
+    // there for a member invited tomorrow.
+    const committed = hub.published.filter((m) => m.topicID === commitTopic(recoverySecret))
+    expect(committed).toHaveLength(1)
+    expect(hub.head(commitTopic(recoverySecret))).toBe(committed[0].sequenceID)
 
     await alice.peer.dispose()
     await bob.peer.dispose()

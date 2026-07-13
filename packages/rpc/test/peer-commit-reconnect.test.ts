@@ -4,7 +4,7 @@ import { describe, expect, test } from 'vitest'
 import { encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import { createMemoryGroupMLS } from '../src/memory-group-mls.js'
 import { createGroupPeer } from '../src/peer.js'
-import { handshakeTopic } from '../src/topic.js'
+import { commitTopic } from '../src/topic.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 
@@ -42,44 +42,46 @@ function publishCommit(
 ): Promise<{ sequenceID: string }> {
   return hub.publish({
     senderDID,
-    topicID: handshakeTopic(recoverySecret),
+    topicID: commitTopic(recoverySecret),
     payload: encodeHandshakeFrame(HANDSHAKE_KIND.commit, commit),
+    retain: 'log',
   })
 }
 
-describe('handshake tier-1 replay', () => {
-  test('acked Commits are not redelivered; missed Commits replay on reconnect', async () => {
+describe('the commit lane across a disconnect', () => {
+  test('a redelivered commit is not applied twice; a missed one is caught up by the pull', async () => {
     const hub = new DurableFakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x66)
     const bob = makeDurablePeer(hub, 'bob', recoverySecret)
     await flush()
 
-    // Online: a Commit is processed and acked.
+    // Online: a Commit is delivered, and applied once.
     await publishCommit(hub, 'alice', recoverySecret, new Uint8Array([1]))
     await flush()
     expect(bob.mls.epoch()).toBe(2)
     expect(bob.mls.commits()).toBe(1)
-    expect(hub.ackedCount('bob')).toBe(1)
 
-    // Reconnect: the acked Commit is NOT redelivered, so it is not reprocessed.
+    // Redelivery is just another wakeup. The cursor is already past that frame, so the
+    // pull returns nothing and the Commit is not applied a second time — even when the
+    // hub pushes it again. Redelivery has stopped mattering for commits.
     hub.redeliver('bob')
     await flush()
     expect(bob.mls.epoch()).toBe(2)
     expect(bob.mls.commits()).toBe(1)
 
-    // Offline: a Commit is published while detached and missed.
+    // Offline: a Commit lands while bob is detached, so no push reaches him.
     hub.detach('bob')
     await publishCommit(hub, 'alice', recoverySecret, new Uint8Array([2]))
     await flush()
     expect(bob.mls.epoch()).toBe(2)
 
-    // Reconnect: the unacked Commit replays and is processed.
+    // Back online: the next wakeup makes him pull, and he takes the missed frame from
+    // the log rather than from the delivery it happens to arrive on.
     hub.reattach('bob')
     hub.redeliver('bob')
     await flush()
     expect(bob.mls.epoch()).toBe(3)
     expect(bob.mls.commits()).toBe(2)
-    expect(hub.ackedCount('bob')).toBe(2)
 
     await bob.peer.dispose()
   })

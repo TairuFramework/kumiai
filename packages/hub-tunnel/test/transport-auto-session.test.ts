@@ -3,7 +3,7 @@ import { describe, expect, test } from 'vitest'
 import { SessionNotEstablishedError } from '../src/errors.js'
 import type { ObservabilityEvent } from '../src/events.js'
 import { decodeFrame, encodeFrame, type HubFrame, type HubFrameMessageBody } from '../src/frame.js'
-import { createHubTunnelTransport, type HubLike } from '../src/transport.js'
+import { createHubTunnelTransport, type MailboxHub } from '../src/transport.js'
 
 import { FakeHub } from './fixtures/fake-hub.js'
 
@@ -165,7 +165,7 @@ describe('createHubTunnelTransport auto-sessionID', () => {
     const topicB = 'topic:auto-4-b'
 
     const sentPayloads: Array<Uint8Array> = []
-    const recordingHub: HubLike = {
+    const recordingHub: MailboxHub = {
       publish: async (params) => {
         sentPayloads.push(params.payload)
         return await hub.publish(params)

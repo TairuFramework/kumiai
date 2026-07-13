@@ -4,7 +4,7 @@ import { describe, expect, test } from 'vitest'
 import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import { createMemoryGroupMLS } from '../src/memory-group-mls.js'
 import { createGroupPeer } from '../src/peer.js'
-import { handshakeTopic, protocolTopic } from '../src/topic.js'
+import { protocolTopic, rendezvousTopic } from '../src/topic.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 
@@ -43,14 +43,14 @@ function makePeer(
 }
 
 function recoveryReplyCount(hub: FakeHub, recoverySecret: Uint8Array): number {
-  const topic = handshakeTopic(recoverySecret)
+  const topic = rendezvousTopic(recoverySecret)
   return hub.published.filter(
     (m) =>
       m.topicID === topic && decodeHandshakeFrame(m.payload).kind === HANDSHAKE_KIND.recoveryReply,
   ).length
 }
 
-describe('handshake recovery rendezvous', () => {
+describe('recovery rendezvous', () => {
   test('a stranded peer recovers and one responder wins (storm-collapse)', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x77)

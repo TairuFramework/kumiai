@@ -4,14 +4,14 @@ import { type ProcedureHandlers, type RequestHandler, serve } from '@enkaku/serv
 import type { StoredMessage } from '@kumiai/hub-protocol'
 import {
   createHubTunnelTransport,
-  type HubLike,
   type HubPublishParams,
   type HubReceiveSubscription,
+  type MailboxHub,
 } from '@kumiai/hub-tunnel'
 import { describe, expect, test } from 'vitest'
 
 // ---------------------------------------------------------------------------
-// In-memory HubLike double — topic pub/sub with per-subscriber delivery.
+// In-memory MailboxHub double — topic pub/sub with per-subscriber delivery.
 // ---------------------------------------------------------------------------
 
 type Inbox = {
@@ -19,7 +19,7 @@ type Inbox = {
   wakers: Array<(msg: StoredMessage) => void>
 }
 
-function createInMemoryHub(): HubLike {
+function createInMemoryHub(): MailboxHub {
   const inboxes: Record<string, Inbox> = {}
   // topicID -> set of subscriber DIDs
   const subscriptions: Record<string, Set<string>> = {}

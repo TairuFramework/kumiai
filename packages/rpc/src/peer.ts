@@ -12,10 +12,11 @@ import {
   type SuppressConfig,
 } from '@kumiai/broadcast'
 import type { StoredMessage } from '@kumiai/hub-protocol'
-import type { HubLike } from '@kumiai/hub-tunnel'
+import type { LogHub } from '@kumiai/hub-tunnel'
 
 import { createGroupBusServer } from './bus-server.js'
 import type { GroupCrypto, GroupMLS } from './crypto.js'
+import { asLogPosition, type LogPosition } from './cursor.js'
 import { createDirectedClient, createInboxAcceptor } from './directed.js'
 import { adaptBusHandlers } from './handlers.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from './handshake.js'
@@ -26,13 +27,23 @@ import {
   encodeRecoveryReply,
   encodeRecoveryRequest,
 } from './recovery.js'
-import { handshakeTopic, inboxTopic, protocolTopic } from './topic.js'
+import { commitTopic, inboxTopic, protocolTopic, rendezvousTopic } from './topic.js'
 
 const DEFAULT_RECOVERY_TIMEOUT_MS = 5000
 const DEFAULT_RECOVERY_JITTER_MS = 250
 
+/**
+ * How long the hub is asked to keep the commit log. It bounds one thing: how long a
+ * member may be offline and still converge against the hub alone, by pulling, without
+ * needing another member awake to heal it.
+ */
+const DEFAULT_COMMIT_LOG_RETENTION_SECONDS = 30 * 24 * 60 * 60
+
+/** How many commit frames a single pull asks for. Pull loops until the log is drained. */
+const COMMIT_FETCH_LIMIT = 100
+
 export type GroupPeerParams<Protocols extends Record<string, ProtocolDefinition>> = {
-  hub: HubLike
+  hub: LogHub
   crypto: GroupCrypto
   /** MLS lifecycle port. When provided, the peer runs the handshake lane. */
   mls?: GroupMLS
@@ -43,6 +54,12 @@ export type GroupPeerParams<Protocols extends Record<string, ProtocolDefinition>
   getRandomID?: () => string
   /** Recovery rendezvous tuning. `getDelayMs` is the responder reply jitter. */
   recovery?: { timeoutMs?: number; getDelayMs?: () => number }
+  /**
+   * Retention the hub is asked to hold the commit log for, in seconds. Defaults to 30
+   * days. It is a liveness dial: below it, a returning member converges by pulling the
+   * log; beyond it, it must be healed by another live member.
+   */
+  commitLogRetentionSeconds?: number
 }
 
 export type ProtocolSurface<Protocol extends ProtocolDefinition> = {
@@ -56,15 +73,16 @@ export type GroupPeer<Protocols extends Record<string, ProtocolDefinition>> = {
   protocol: <K extends keyof Protocols>(name: K) => ProtocolSurface<Protocols[K]>
   /**
    * Announce a Commit the consumer just produced (and already applied locally):
-   * fan it out on the handshake topic and rebuild this peer's app topics to the
+   * append it to the commit log and rebuild this peer's app topics to the
    * now-current epoch. No-op when the peer has no MLS port.
    */
   localCommitted: (commit: Uint8Array) => Promise<void>
   /**
-   * Deep recovery for a peer stranded past the handshake backlog: request current
-   * state on the handshake topic, apply the first reply, and resync. Returns
-   * whether the epoch advanced. No-op (`advanced:false`) without an MLS port or
-   * if no reply arrives before the timeout.
+   * Deep recovery for a peer stranded past the commit log's trim window: request
+   * current state on the rendezvous topic, apply the first reply, and resync.
+   * Returns whether the epoch advanced. No-op (`advanced:false`) without an MLS
+   * port or if no reply arrives before the timeout. A peer that is merely *behind*
+   * does not need this — it pulls the commit log and catches up.
    */
   recover: () => Promise<{ advanced: boolean }>
   resync: () => Promise<void>
@@ -86,6 +104,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   const recoveryTimeoutMs = params.recovery?.timeoutMs ?? DEFAULT_RECOVERY_TIMEOUT_MS
   const getReplyDelayMs =
     params.recovery?.getDelayMs ?? (() => defaultJitter(DEFAULT_RECOVERY_JITTER_MS))
+  const commitLogRetentionSeconds =
+    params.commitLogRetentionSeconds ?? DEFAULT_COMMIT_LOG_RETENTION_SECONDS
   const mux: HubMux = createHubMux({ hub, localDID })
 
   let runtimes = new Map<string, ProtocolRuntime>()
@@ -189,9 +209,38 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     await buildEpoch()
   }
 
-  let handshakeUnsubscribe: (() => void) | undefined
-  let handshakeTopicID: string | undefined
-  let handshakeTail: Promise<void> = Promise.resolve()
+  let commitUnsubscribe: (() => void) | undefined
+  let rendezvousUnsubscribe: (() => void) | undefined
+  let commitTopicID: string | undefined
+  let rendezvousTopicID: string | undefined
+
+  /**
+   * The last position in the commit log this peer has PROCESSED — applied, or dropped
+   * as stale, foreign or malformed. Not a delivery position: it is only ever read out
+   * of a `fetchTopic` result or a log publish (see `cursor.ts`). `null` means the peer
+   * has processed nothing, and must read the log from its oldest retained frame.
+   */
+  let reconciledHead: LogPosition | null = null
+
+  /**
+   * Commit frames this peer published itself and had already applied before announcing.
+   * The log hands a peer its own frames back — push never did, because the hub excludes
+   * a sender from its own delivery — so without this the committer would apply its own
+   * commit a second time when it pulls. Entries are dropped as the cursor passes them.
+   */
+  const selfCommitted = new Set<string>()
+
+  // Commit processing is serialized: MLS applies Commits in order, and both
+  // processCommit and the epoch rebuild are async.
+  let commitTail: Promise<void> = Promise.resolve()
+  const runSerial = <T>(fn: () => Promise<T>): Promise<T> => {
+    const op = commitTail.then(fn)
+    commitTail = op.then(
+      () => {},
+      () => {},
+    )
+    return op
+  }
 
   // Recovery rendezvous state, keyed by requestID.
   const recoveryWaiters = new Map<string, (groupInfo: Uint8Array | null) => void>()
@@ -204,22 +253,24 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   // (storm-collapse), in which case the scheduled reply is cancelled.
   const handleRecoveryRequest = (request: { requestID: string; requesterDID: string }): void => {
     const { requestID, requesterDID } = request
-    if (mls == null || handshakeTopicID == null) return
+    if (mls == null || rendezvousTopicID == null) return
     if (suppressedRequests.has(requestID) || pendingReplies.has(requestID)) return
     const port = mls
-    const topicID = handshakeTopicID
+    const topicID = rendezvousTopicID
     const timer = setTimeout(() => {
       pendingReplies.delete(requestID)
       void (async () => {
         try {
           const groupInfo = await port.exportGroupInfo(requesterDID)
-          await mux.bus.publish(
+          // Mailbox class, deliberately: a rendezvous frame must never move the commit
+          // topic's head, and its reader — the requester — subscribed before it asked.
+          await mux.publish({
             topicID,
-            encodeHandshakeFrame(
+            payload: encodeHandshakeFrame(
               HANDSHAKE_KIND.recoveryReply,
               encodeRecoveryReply(requestID, groupInfo),
             ),
-          )
+          })
         } catch {
           // a failed reply just means another responder (or a retry) covers it
         }
@@ -249,82 +300,149 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     }
   }
 
-  // Serialize inbound handshake processing: Commits must apply in MLS order, and
-  // both processCommit and the epoch rebuild are async. Each op waits for init to
-  // finish, then runs to completion before the next begins.
-  const onHandshakeMessage = (message: StoredMessage, ack: () => void): void => {
-    handshakeTail = handshakeTail
-      .then(async () => {
-        await ready
-        if (mls == null) {
-          ack()
-          return
+  /**
+   * Read the commit log forward from the cursor and process every frame it can,
+   * advancing the cursor over each one. Returns whether any of them advanced the epoch.
+   *
+   * This is the only place commit frames are ever read. The cursor advances over a
+   * frame the peer PROCESSED — applied, dropped as foreign, or dropped as malformed —
+   * and does NOT advance over a frame whose processing threw: the throw leaves the
+   * cursor where it was, and the next pull reads that frame again. The cursor, not the
+   * ack, is what makes the lane retry.
+   */
+  const pullCommits = async (): Promise<boolean> => {
+    if (mls == null || commitTopicID == null) return false
+    const port = mls
+    const topicID = commitTopicID
+    let advancedEpoch = false
+    while (true) {
+      const result = await mux.fetchTopic({
+        topicID,
+        // From the cursor. With no cursor — a fresh member from a Welcome, a peer whose
+        // backlog was trimmed, a peer that just rejoined — read from the OLDEST retained
+        // frame and process what is there. Seeding from the topic's `head` instead would
+        // be a guess: it names commits this peer has never applied, and it is wrong in
+        // exactly the case this lane exists for.
+        ...(reconciledHead != null ? { after: reconciledHead } : {}),
+        limit: COMMIT_FETCH_LIMIT,
+      })
+      if (result.messages.length === 0) return advancedEpoch
+      for (const message of result.messages) {
+        const position = asLogPosition(message.sequenceID)
+        if (selfCommitted.delete(position)) {
+          reconciledHead = position // this peer's own commit, applied before it announced it
+          continue
         }
         let frame: ReturnType<typeof decodeHandshakeFrame>
         try {
           frame = decodeHandshakeFrame(message.payload)
         } catch {
-          ack() // drop malformed frames; acking stops poison redelivery
-          return
+          reconciledHead = position // malformed: dropped, and the cursor still steps over it
+          continue
         }
-        if (frame.kind === HANDSHAKE_KIND.commit) {
-          const { advanced } = await mls.processCommit(frame.payload, {
-            senderDID: message.senderDID,
-          })
-          if (advanced) await rebuildEpoch()
-          ack() // durably handled
-          return
+        if (frame.kind !== HANDSHAKE_KIND.commit) {
+          reconciledHead = position // the commit lane carries commits, and nothing else
+          continue
         }
-        if (frame.kind === HANDSHAKE_KIND.recoveryRequest) {
-          handleRecoveryRequest(decodeRecoveryRequest(frame.payload))
-          ack()
-          return
-        }
-        if (frame.kind === HANDSHAKE_KIND.recoveryReply) {
-          handleRecoveryReply(decodeRecoveryReply(frame.payload))
-          ack()
-          return
-        }
-        ack()
-      })
-      .catch(() => {
-        // processing failed (e.g. processCommit threw) — do NOT ack, so the hub
-        // redelivers and we retry.
-      })
+        const { advanced } = await port.processCommit(frame.payload, {
+          senderDID: message.senderDID,
+        })
+        if (advanced) advancedEpoch = true
+        reconciledHead = position
+      }
+      if (result.messages.length < COMMIT_FETCH_LIMIT) return advancedEpoch
+    }
   }
 
-  const initHandshake = async (): Promise<void> => {
+  /** Pull the commit log, and rebuild the app lane if the pull moved the epoch. */
+  const reconcileCommits = async (): Promise<void> => {
+    const advanced = await pullCommits()
+    if (advanced) await rebuildEpoch()
+  }
+
+  /**
+   * A delivery on the commit topic is a WAKEUP and nothing more. The frames come from
+   * the pull, never from the push: an accepted log publish is pushed AND retained, so a
+   * peer that also processed the pushed copy would apply every commit twice — once from
+   * the push, once from the pull. Its payload is not read here, and its sequenceID is a
+   * delivery position, which can never become the cursor.
+   */
+  const onCommitDelivery = (_message: StoredMessage, ack: () => void): void => {
+    ack()
+    void runSerial(async () => {
+      await ready
+      await reconcileCommits()
+    }).catch(() => {
+      // the pull failed (e.g. processCommit threw); the cursor did not advance, so the
+      // next wakeup reads those frames again
+    })
+  }
+
+  const onRendezvousMessage = (message: StoredMessage, ack: () => void): void => {
+    ack()
+    if (mls == null) return
+    let frame: ReturnType<typeof decodeHandshakeFrame>
+    try {
+      frame = decodeHandshakeFrame(message.payload)
+    } catch {
+      return // malformed frames are dropped
+    }
+    if (frame.kind === HANDSHAKE_KIND.recoveryRequest) {
+      handleRecoveryRequest(decodeRecoveryRequest(frame.payload))
+    } else if (frame.kind === HANDSHAKE_KIND.recoveryReply) {
+      handleRecoveryReply(decodeRecoveryReply(frame.payload))
+    }
+  }
+
+  const initControlLanes = async (): Promise<void> => {
     if (mls == null) return
     const recoverySecret = await mls.exportRecoverySecret()
-    const topicID = handshakeTopic(recoverySecret)
-    handshakeTopicID = topicID
-    // Subscribed once for the peer's whole life — deliberately NOT rebuilt on
-    // resync, so a peer stranded on a stale epoch always shares this rendezvous
-    // with the live group. Released only on dispose.
-    handshakeUnsubscribe = mux.onInbound(topicID, onHandshakeMessage)
+    commitTopicID = commitTopic(recoverySecret)
+    rendezvousTopicID = rendezvousTopic(recoverySecret)
+    // Both topics are subscribed once for the peer's whole life — deliberately NOT
+    // rebuilt on resync, so a peer stranded on a stale epoch still shares both
+    // rendezvous with the live group. Released only on dispose.
+    //
+    // Subscribe BEFORE the first pull: the hub gates a topic fetch on the caller's own
+    // subscription, and the subscription is also what asks it to hold the log.
+    commitUnsubscribe = mux.onInbound(commitTopicID, onCommitDelivery, {
+      retention: commitLogRetentionSeconds,
+    })
+    rendezvousUnsubscribe = mux.onInbound(rendezvousTopicID, onRendezvousMessage)
+    // Then seed the cursor by READING the log — the commits published before this peer
+    // subscribed are exactly the ones no push will ever bring it.
+    await runSerial(pullCommits).catch(() => {
+      // a failed seed leaves the cursor where it was; the next wakeup pulls again
+    })
   }
 
-  // Fan out a locally-produced Commit and rebuild this peer's app topics. The
-  // publish + rebuild ride the same serial tail as inbound processing so they
-  // never interleave with a concurrently-received Commit.
+  // Append a locally-produced Commit to the log and rebuild this peer's app topics.
+  // Rides the same serial tail as the pull so it never interleaves with one.
   const localCommitted = async (commit: Uint8Array): Promise<void> => {
     await ready
-    if (mls == null || handshakeTopicID == null) return
-    const topicID = handshakeTopicID
+    if (mls == null || commitTopicID == null) return
+    const topicID = commitTopicID
     const frame = encodeHandshakeFrame(HANDSHAKE_KIND.commit, commit)
-    const op = handshakeTail.then(async () => {
-      await mux.bus.publish(topicID, frame)
+    await runSerial(async () => {
+      // Log class: this frame must still be there for a member invited tomorrow, long
+      // after every current subscriber has acked it.
+      const { sequenceID } = await mux.publish({ topicID, payload: frame, retain: 'log' })
+      // The consumer applied this Commit before announcing it, and a pull reads back the
+      // peer's own frames. Remember it so the pull steps over it instead of applying it
+      // twice.
+      selfCommitted.add(asLogPosition(sequenceID))
       await rebuildEpoch()
+      // Pull immediately: no push comes back for a frame this peer published, so this is
+      // what carries the cursor over it — and it picks up anything that landed alongside.
+      await reconcileCommits()
     })
-    handshakeTail = op.catch(() => {})
-    await op
   }
 
   const recover = async (): Promise<{ advanced: boolean }> => {
     await ready
-    if (mls == null || handshakeTopicID == null) return { advanced: false }
+    if (mls == null || rendezvousTopicID == null) return { advanced: false }
     const port = mls
-    const topicID = handshakeTopicID
+    const topicID = rendezvousTopicID
     const requestID = (getRandomID ?? defaultRandomID)()
     const groupInfo = await new Promise<Uint8Array | null>((resolve) => {
       recoveryWaiters.set(requestID, resolve)
@@ -336,18 +454,18 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         }, recoveryTimeoutMs),
       )
       void Promise.resolve(
-        mux.bus.publish(
+        mux.publish({
           topicID,
-          encodeHandshakeFrame(
+          payload: encodeHandshakeFrame(
             HANDSHAKE_KIND.recoveryRequest,
             encodeRecoveryRequest(requestID, localDID),
           ),
-        ),
+        }),
       ).catch(() => {})
     })
     if (groupInfo == null) return { advanced: false }
     let result = { advanced: false }
-    const op = handshakeTail.then(async () => {
+    const op = runSerial(async () => {
       let r: { advanced: boolean }
       try {
         r = await port.applyRecovery(groupInfo)
@@ -359,15 +477,17 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       if (r.advanced) await rebuildEpoch()
       result = r
     })
-    handshakeTail = op.catch(() => {})
     await op
     return result
   }
 
   const ready = (async () => {
-    await initHandshake()
+    await initControlLanes()
     await buildEpoch()
   })()
+  // A failed init rejects every public call, but must not raise an unhandled rejection
+  // before the first of them is made.
+  const settled = ready.catch(() => {})
   const withReady = async <T>(fn: () => T | Promise<T>): Promise<T> => {
     await ready
     return fn()
@@ -390,8 +510,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       await rebuildEpoch()
     },
     dispose: async () => {
-      await ready
-      handshakeUnsubscribe?.()
+      // Tear down even a peer whose init failed — it still holds a hub drain.
+      await settled
+      commitUnsubscribe?.()
+      rendezvousUnsubscribe?.()
       for (const timer of recoveryTimers.values()) clearTimeout(timer)
       for (const timer of pendingReplies.values()) clearTimeout(timer)
       recoveryTimers.clear()

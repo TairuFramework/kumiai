@@ -46,7 +46,7 @@ describe('createHubMux', () => {
       order.push('onInbound')
       senders.push(msg.senderDID)
     })
-    const sub = mux.hubLike.receive('bob')
+    const sub = mux.mailbox.receive('bob')
     void (async () => {
       for await (const _msg of sub) order.push('sink')
     })()
@@ -68,7 +68,7 @@ describe('createHubMux', () => {
     other.onInbound('topic:p', (msg) => {
       seen = msg
     })
-    await mux.hubLike.publish({ senderDID: 'bob', topicID: 'topic:p', payload: fromUTF('hey') })
+    await mux.mailbox.publish({ senderDID: 'bob', topicID: 'topic:p', payload: fromUTF('hey') })
     await flush()
     expect(seen?.senderDID).toBe('bob')
     expect(toUTF(seen?.payload ?? new Uint8Array())).toBe('hey')
@@ -95,7 +95,7 @@ describe('createHubMux', () => {
     mux.onInbound('topic:lazy', () => {
       if (started) return
       started = true
-      const sub = mux.hubLike.receive('bob')
+      const sub = mux.mailbox.receive('bob')
       void (async () => {
         for await (const msg of sub) got.push(toUTF(msg.payload))
       })()

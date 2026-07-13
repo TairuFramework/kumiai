@@ -275,6 +275,14 @@ frames are still undecrypted.
   reusing the source handle across a retry. Both pass a single-committer test; the second is the
   hazard `commitLedgerEntries` documents ("two commits issued from the same source handle both
   frame at that handle's epoch and diverge").
+- **Carried from question 3.1 — this question owns it.** *The pull hands a peer back its own commit
+  frames; push never did.* The hub excludes a sender from its own delivery, but a **log is not
+  delivery-filtered**, so the committer reads its own frame back and would apply a commit it has
+  already applied. 3.1 holds it off with an in-memory `selfCommitted` set keyed on the sequenceID
+  the publish returned — **which does not survive a restart.** A peer that crashes between
+  publishing and recording re-applies its own commit on restart. **The journal must replace that
+  set**, and the test is: publish, kill the peer before it records, restart, pull — the commit is
+  applied exactly once.
 - **Spec excerpt:** "`commit` holds a per-group mutex for its whole run… Journal the pending commit
   before publishing… It is what makes the acceptance window survivable *without a peer*."
 - **Verify:** `rtk proxy pnpm run build && rtk proxy pnpm run lint && rtk proxy pnpm test`
@@ -294,6 +302,14 @@ frames are still undecrypted.
   passes the G18 test perfectly. It also routes policy-rejected commits and missing-bodies frames to
   `recover()` — so any member, including a removed one, forces the **entire group** into a recovery
   storm with one publish, repeatable at will.
+- **Carried from question 3.1 — a real hole, currently invisible.** *A recovered peer will re-apply
+  the stale commits still in the log.* After `applyRecovery` jumps it to epoch M, its
+  `reconciledHead` is unchanged, so the next pull walks frames from epochs it has already passed.
+  The spec's answer is the second row of this table — *dropped, and the cursor still advances* — but
+  nothing classifies a stale-epoch frame yet, so today it would **double-advance**. **No existing
+  test catches this, because the recovery tests have no commit frames on the topic.** That test is
+  part of this question: recover, then pull a log that still holds the commits you skipped, and
+  apply none of them.
 - **Spec excerpt:** "**The discriminator is authorship, not applicability.**… the committer is
   MLS-authenticated, so authorship cannot be forged."
 - **Verify:** `rtk proxy pnpm run build && rtk proxy pnpm run lint && rtk proxy pnpm test`
@@ -929,3 +945,91 @@ it gave.**
 check, stripping the AAD binding, and replacing the head check with signature verification each made
 the corresponding test go red — and in two of the three, the wrong implementation did not merely fail
 to refuse, it **installed the attacker's state**.
+
+---
+
+### 2026-07-13 — Question 3.1: Does the pull-driven commit lane seed and catch up correctly?
+
+**Findings: yes.** `rpc` 77/77 (was 68); full verify green, integration 23/23. The topic split lands
+(`commitTopic` / `rendezvousTopic`, both non-rotating, both subscribed for the peer's whole life),
+the peer subscribes-then-pulls, and **push is a wakeup only** — the delivered message is bound to
+`_message` and never read.
+
+**The late joiner converges by pulling.** A member joins at epoch 1, two commits land before it
+subscribes, and it reaches epoch 3 having applied both — **once each** — with **zero recovery
+requests** on the wire. (There is no fork/heal diagnosis surface to assert on yet; that is 3.4. So
+the assertion is against the wire — no `recover()` — plus an exact commit count, which catches both a
+spurious heal and a double-apply.)
+
+**Both wrong implementations were built and watched failing.**
+
+- *Head-seeded cursor* (the obvious one — the head is right there in `fetchTopic`'s reply):
+  **75 of 77 still pass.** Every online-peer test is green; only the two late-joiner tests fall, with
+  `expected 1 to be 3` — the joiner stranded at the epoch it was invited at, CAS-ready against a head
+  whose commits it never applied.
+- *A lane that also processes the pushed copy*: `expected 2 to be 1` — every commit applied twice, by
+  every online receiver. This is the trap question 1.5 predicted: an accepted `retain: 'log'` frame is
+  pushed **and** retained, and the store excludes the sender from its own delivery, so a lane that
+  processes the pushed copy **works perfectly in every single-peer test**.
+
+**The two cursors are branded apart, and the type system enforces it.** `LogPosition` and
+`DeliveryPosition` are distinct branded strings. `reconciledHead = message.sequenceID` on a pushed
+frame **does not compile**; minting a `LogPosition` requires `asLogPosition`, which appears in exactly
+two places, both fed from a log source. The probe volunteered that it would not have got this right
+without the warning — the two `after` fields are both `string` and mean different things.
+
+**One existing test encoded the contract this question replaces.** `peer-handshake-replay.test.ts`
+asserted `hub.ackedCount('bob')` **as the mechanism**: the peer got its missed commits *because the
+hub redelivered unacked frames*, and avoided reprocessing *because it had acked*. That is precisely
+the "do not ack, so the hub redelivers" retry the spec removes. Rewritten so the **cursor**, not the
+ack, is what makes a redelivery a no-op — and the `ackedCount` assertions are gone, because asserting
+on them would re-encode the old contract. Same shape as phase 1's three tests that *asserted* the
+forbidden behaviour. Three more tests were retargeted at the split topics.
+
+**A live bug in our own fixtures, exposed by the log.** Both fake hubs minted sequenceIDs as bare
+decimals — `"10" < "9"`. Harmless for a mailbox; **fatal for a log**, whose `after` is an exclusive
+cursor compared lexicographically, so the pull would skip or re-read frames past the tenth commit.
+This is G30's sibling — the defect the store contract's ordering clause exists to prevent — sitting
+in the test doubles that were supposed to be checking for it. Both now zero-pad to 12 like the real
+store.
+
+**Spec impact: revision 24 — the hub port splits.** `HubLike` was named for a resemblance and was
+doing two jobs: it named *the hub a host wires into a `GroupPeer`*, which must serve a log or the
+group cannot work at all, and *the mailbox-shaped adapter views built inside `rpc`* — the mux's
+fan-out view, the sealed directed lane, the session tunnel, the encrypted app transport — which are
+**not hubs**, never carry a commit, and have no log to serve.
+
+The probe first made `fetchTopic` **optional**, with the peer refusing at init. That works and is
+testable, but it makes the type say *a hub may or may not serve a log*, which is false of every hub a
+peer is handed, and leaves a runtime check standing in for a distinction the types can draw. So:
+
+```ts
+export type MailboxHub = { publish; subscribe; unsubscribe?; receive; events? }
+export type LogHub = MailboxHub & { fetchTopic(params): Promise<HubFetchTopicResult> }
+```
+
+`GroupPeer` takes a `LogHub`. Handing it a mailbox-only hub is now a **compile error at the host's
+wiring** — the only place the mistake can be made. The runtime refusal is deleted, and its test
+became a type-level one, mutation-checked the same way: making `MailboxHub` assignable to `LogHub`
+fails the build with `TS2578: Unused '@ts-expect-error' directive`.
+
+**And the finding that confirms the cut: none of the four adapters needed a log.** Not one gained a
+method; all are unchanged in substance. The optional `fetchTopic` existed *only* because they could
+not satisfy a required one, and none of them ever wanted it.
+
+**Learned:** an optional field on a port is often a type-level distinction nobody drew. The tell here
+was that the option was never a real choice — every hub a peer is handed serves a log, and everything
+that doesn't is not a hub. When the "optional" case and the "required" case have no overlap in who
+implements them, they are two types.
+
+**Two gaps carried forward, both written into the questions that own them:**
+
+1. **The pull hands a peer back its own commit frames; push never did** — a log is not
+   delivery-filtered. Held off with an in-memory `selfCommitted` set that **does not survive a
+   restart**. Question 3.3's journal must replace it, with the test: publish, kill the peer before it
+   records, restart, pull, and apply the commit exactly once.
+2. **A recovered peer will re-apply the stale commits still in the log** — after `applyRecovery`
+   jumps to epoch M the cursor is unchanged, so the next pull walks frames from epochs already
+   passed. Dropping them needs stale-epoch classification, which is question 3.4's table. **No test
+   catches it today because the recovery tests have no commit frames on the topic** — a real hole,
+   currently invisible. 3.4 now owns it, and owns writing that test.

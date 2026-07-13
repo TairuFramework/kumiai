@@ -8,6 +8,12 @@ export { defineGroupProtocol, type GroupProtocolDefinition } from '@kumiai/broad
 
 export type { CommitContext, GroupCrypto, GroupMLS } from './crypto.js'
 export {
+  asDeliveryPosition,
+  asLogPosition,
+  type DeliveryPosition,
+  type LogPosition,
+} from './cursor.js'
+export {
   decodeHandshakeFrame,
   encodeHandshakeFrame,
   HANDSHAKE_KIND,
@@ -33,10 +39,12 @@ export {
   encodeRecoveryRequest,
 } from './recovery.js'
 export {
+  COMMIT_LABEL,
+  commitTopic,
   discoveryTopic,
-  HANDSHAKE_LABEL,
-  handshakeTopic,
   INBOX_LABEL,
   inboxTopic,
   protocolTopic,
+  RENDEZVOUS_LABEL,
+  rendezvousTopic,
 } from './topic.js'
