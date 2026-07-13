@@ -246,6 +246,12 @@ type PendingCommit = {
   /** Signed ledger-entry tokens this commit enacts. Empty for a commit that enacts none. */
   bodies: Array<string>
   /**
+   * What this commit was. Replay routes on it, so it never has to parse the framed commit
+   * (G25). 'ledger' is fully rebuildable from `bodies` after a restart; the proposal-carrying
+   * kinds are not, and must be surfaced to the host instead of silently dropped.
+   */
+  kind: 'ledger' | 'invite' | 'remove'
+  /**
    * Opaque host blob holding everything needed to adopt this commit after a restart:
    * the serialized post-commit handle (`newGroup`) and any Welcome to deliver. Written to
    * the journal BEFORE the peer publishes. The peer never inspects it (G21).
@@ -263,6 +269,7 @@ type CommitJournal = {
     expectedHead: string | null
     commit: Uint8Array
     bodies: Array<string>
+    kind: 'ledger' | 'invite' | 'remove'
     journal: Uint8Array
   }): Promise<void>
   get(): Promise<JournalEntry | null>
@@ -312,8 +319,26 @@ idempotency contract decides the outcome, with no responder and no network peer 
   appends nothing. The peer adopts the journalled `newGroup`, delivers the journalled Welcome,
   sets `reconciledHead`, and clears the slot. It is whole.
 - **It was never accepted** → the republish is an ordinary CAS at `expectedHead`. It wins (the
-  commit lands, adopt as above) or it takes `HeadMismatchError` (someone else committed
-  meanwhile: clear the slot, discard, and rebuild later like any other loser).
+  commit lands, adopt as above), or it takes `HeadMismatchError` — someone else committed
+  meanwhile — and **what happens to the work depends on what the commit was (G25)**.
+
+**Replay's `HeadMismatchError` cannot "rebuild like any other loser".** Inside `commit()` that
+phrase is fine: losing means going back to step 1 and calling `build()` again, and `build()` is
+a live closure over the host's current handle. **After a restart there is no closure** — the
+process that held it is gone. So the branch routes on `kind`:
+
+| `kind` | On replay-`HeadMismatchError` |
+|---|---|
+| `ledger` | **Re-enact.** The journalled `bodies` are the signed entry tokens, and entry tokens are epoch-independent — the same property heal leans on. Re-enact them through a fresh `commit()`, membership-filtered exactly as G17 defines (they are *not* in the group's ledger, since this commit never landed, so the filter keeps them). Nothing is lost. This is the common case, and after kubun's control-plane move it is *most* commits. |
+| `invite` / `remove` | **Surface it.** The intent lives in the MLS Add/Remove proposal and the KeyPackage, not in `bodies`, and neither survives in a form the peer can rebuild without `build()`. The peer reports the failure to the host, which must re-issue or tell the user. |
+
+**Silently clearing the slot is the one thing that must not happen.** For an invite it loses an
+invitation; for a **remove** it is worse than data loss — the admin clicked evict, the process
+crashed, and from their side the member is gone while in fact they are still in the group, with
+no signal to anyone. An admin who believes a member was evicted when they were not is a
+security-relevant no-op, not a UX wrinkle. The `kind` tag exists so replay can tell these apart
+without parsing the framed commit, and so the host gets a meaningful event rather than a
+generic failure.
 
 **`onAccepted` MUST be idempotent — replay can and will run it more than once (G22).** The
 sequence *publish → accepted → `onAccepted()` → `clear(publishID)`* is three steps and a crash
@@ -866,6 +891,11 @@ Named so the work is sized honestly. These are the host's to absorb.
   without adopting and adopt only inside `onAccepted`. Because `build()` re-runs on every
   retry, an invite re-mints both the Commit *and* the Welcome each time. This is a rewrite
   of the host's commit paths, not a call-site swap.
+- **A commit lost to a restart is reported, not swallowed.** When replay's republish loses the
+  CAS, a `ledger` commit's entries are re-enacted automatically, but an `invite` or a `remove`
+  cannot be rebuilt from the journal — `build()` was a closure and the process that held it is
+  gone. The peer surfaces that, and the host must re-issue it or tell the user. A dropped
+  removal is the case to design for: the admin believes the member is evicted and they are not.
 - **`onAccepted` must be idempotent.** Replay is at-least-once: a crash between `onAccepted()`
   and `clear()`, or partway through `onAccepted()` itself, re-runs it. Adopting the journalled
   handle twice is harmless; **delivering the Welcome twice is not**, so the host must make
@@ -1024,6 +1054,13 @@ heal cannot reach for want of a responder.)*
   adopts and still sends the Welcome. A store that trims its dedup records with its log bricks
   this group, and does so silently — in a multi-member group the same bug is masked by
   `recover()` finding a responder.
+- **Replay loses the CAS: entries survive, proposals are reported (G25).** The peer journals a
+  commit, dies before publishing succeeds, and another admin commits meanwhile. On restart the
+  republish takes `HeadMismatchError`, and: a `ledger` commit's entries land via a fresh
+  `commit()` (assert they are in the group's ledger afterwards), while a journalled `remove` is
+  **surfaced to the host** — assert the host is told, and assert the member is still in the
+  roster, because the silent-success version of this bug leaves an admin believing an eviction
+  happened.
 - **Replay runs `onAccepted` twice.** The peer is killed between `onAccepted()` and
   `clear(publishID)`. On restart the entry replays: the handle is adopted again (harmless) and
   the Welcome is delivered again — and the invitee, already joined, no-ops it rather than

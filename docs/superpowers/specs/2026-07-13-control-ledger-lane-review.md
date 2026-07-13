@@ -3,11 +3,46 @@
 **Reviewer:** kubun (the host driving the requirements in `2026-07-13-host-ledger-lane.md`).
 **Subject:** `2026-07-13-control-ledger-lane-design.md`.
 
-Eleven review passes. **The newest pass is at the top; earlier passes are kept below as the record.**
+Twelve review passes. **The newest pass is at the top; earlier passes are kept below as the record.**
 
 ---
 
-# Revision 11 review
+# Revision 12 review
+
+**Verdict:** G24 is folded in — the dedup record has its own retention, the contract says it is not a log entry, and the conformance test (publish, trim, republish the same `publishID`, get the original `sequenceID` back) pins it.
+
+One finding, and it is the last one I have. It is a sentence the journal quietly made untrue.
+
+## G25 — Replay's `HeadMismatchError` branch promises a rebuild that cannot happen after a restart
+
+**Blocking, but small — it is a semantics gap, not a mechanism gap.** The replay path says:
+
+> **It was never accepted** → the republish is an ordinary CAS at `expectedHead`. It wins… or it takes `HeadMismatchError` (someone else committed meanwhile: clear the slot, discard, **and rebuild later like any other loser**).
+
+"Like any other loser" is right inside `commit()`, where losing means going back to step 1 and calling `build()` again — `build()` is a live closure over the host's current handle, and that is what makes a rebuild possible.
+
+**After a restart there is no closure.** The process that held `build()` is gone. So "rebuild later" describes something the peer cannot do, and the design does not say what actually happens to the work. Three cases, and they are not alike:
+
+- **A ledger-only commit** (`commitLedgerEntries` — which, after kubun's move, is *most* commits). The journal holds `bodies`: the **signed entry tokens**, which are epoch-independent — the design leans on this repeatedly ("entry tokens are epoch-independent, so re-enactment needs no re-signing"). These are fully recoverable. The peer can re-enact them through a fresh `commit()`, subject to G17's membership filter (they are not in the ledger, since the commit never landed, so the filter keeps them). Nothing is lost, but only if the design says to do it — otherwise a host clears the slot and the entries silently evaporate.
+- **An invite.** The intent lives in the MLS Add proposal and the KeyPackage, not in `bodies`. Neither survives in a form the peer can rebuild without the original `build()`. The invite simply did not happen.
+- **A remove.** Same: the intent is the Remove proposal. The journal's `bodies` hold only the demotion entry that was riding along. **The removal silently did not happen** — and the admin who issued it has no signal, because from their side the app crashed *after* they clicked it. An admin believing a member was evicted when they were not is a security-relevant no-op, not a UX wrinkle.
+
+So the branch needs to say what it does, per case:
+
+- **Re-enact what is recoverable.** On replay-`HeadMismatchError`, the journalled `bodies` are re-enacted through an ordinary `commit()` — the same membership-filtered path G17 already defines for heal. This is the common case and it costs nothing new.
+- **Surface what is not.** A journalled entry whose commit carried MLS proposals (invite, remove) cannot be rebuilt from the journal. The peer must report it — the host has to know that the invite or the removal did not take effect, so it can re-issue or tell the user. Silently clearing the slot is the one thing that must not happen.
+
+The cheap way to make this expressible: have the journal carry a small tag of what the commit *was* (ledger-only / invite / remove), so replay can route it without the peer having to parse the framed commit. That also gives the host a meaningful event to surface rather than a generic failure.
+
+## What matches, revision 12
+
+The G24 fix is complete and correctly placed: the retention rule sits in `PublishParams` next to the field, is restated in the store-contract section, and has a conformance test whose shape mirrors the zero-subscriber test — both are "every plausible store passes today's suite and fails this one", which is the right instinct for a contract test. The sole-member walkthrough now appears in the design itself rather than only in this review, which is where it belongs.
+
+Absent G25 I have no further findings. Across twelve passes the design's *shape* has not moved since revision 4 — CAS'd log, pull-driven lane, bodies in the frame, seal to an ephemeral key, journal plus heal — and everything since has been closing interactions at its edges, each narrower than the last. That is convergence, and the next risk is implementation fidelity, not design.
+
+---
+
+# Revision 11 review (folded in — kept as the record)
 
 **Verdict:** G22 and G23 are folded in. Replay as an explicit *step zero* ahead of the completeness check and the pull is the right structural fix, and stating the at-least-once semantics out loud — rather than letting a host infer exactly-once from a journal whose whole purpose is to make a commit look atomic — is exactly the note to leave.
 
