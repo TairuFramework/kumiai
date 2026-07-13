@@ -1144,3 +1144,112 @@ incompatible with the body design two sections down.
 payload's shape changed under it, so a pre-3.2 frame now decodes as a **truncated commit frame**
 rather than a version mismatch. It is the one remaining route by which ordinary history reads as
 corruption. Moot pre-1.0 with no deployed peers; needs a bump at the first release shipping both.
+
+---
+
+### 2026-07-13 — Question 3.3: Does the commit CAS loop converge, serialize, and journal?
+
+**⚠️ IN PROGRESS — uncommitted work in the working tree, and the tree is RED.** Read the "Resuming"
+section at the end of this entry before touching anything.
+
+**The main body of the question is answered, and it was green (110/110) before the follow-up began.**
+Full report: `docs/superpowers/probes/question-3.3-report.md`.
+
+**Findings.** Two admins at one epoch converge with **no fork and no lost entries** — the loser
+rebases and its entries land in the *winner's* ledger. The race is constructed, not hoped for:
+Alice's publish is held until Bob has demonstrably framed at epoch 1. `bobFramedAt === [1, 2]`.
+
+Two same-device `commit()` calls serialize: `framedAt === [1, 2]`, the second `build()` seeing the
+first commit **adopted**. And `putWhileOccupied() === 0` — the same fact from the other side: **the
+single-slot journal *is* the commit mutex written down**, and two commits in flight at once would
+have one destroying the other's only record of itself.
+
+Five consecutive CAS losses land **without throwing**. An attempt count of 5 throws there; that is
+the whole argument for a deadline, demonstrated rather than asserted.
+
+`lost` is a return value — and **the callback version deadlocks**, which the probe proved by building
+it: `DEADLOCK: commit() is waiting on a mutex replay() still holds`. G27 earned its place.
+
+`selfCommitted` (question 3.1's in-memory set) is **dead, and nothing replaced it**: an accepted
+commit sets the cursor to its own frame, and the journal carries that across a restart.
+
+**Three mutation checks, all reverted:**
+
+- **Reuse the source handle across a retry → the fork, reproduced.** `commitFrames(...).toHaveLength(2)`
+  **still passes** — two frames are in the log. But the retry republished a commit framed at the
+  **superseded epoch**, every member at the new epoch dropped it, **`commit()` resolved, and the
+  committer believes it committed.** Nothing anywhere raised a word. Exactly what
+  `commitLedgerEntries`' doc comment warns about. **One assertion catches it** — the one the brief
+  insisted on: *the loser's entries are in the winner's ledger*.
+- **Adopt on hub-accept, before `onAccepted` → 106/110 pass.** Every ledger test green. The one
+  casualty: **the invitee never gets a Welcome**, which lives in `onAccepted` and nowhere else.
+- **Pull before replay** (the ordering the spec calls load-bearing) **→ 109/110 pass.** The restarted
+  peer meets its **own un-merged commit** and runs it through `processCommit` as if it were somebody
+  else's. Against real MLS that is the heal trigger firing into the rendezvous path the journal exists
+  to avoid.
+
+**A new defect, found while implementing — the cursor-wedge. G29's mirror image.**
+
+G29 made the store's `head` advance **only on a log publish**. But `fetchTopic` still returned **every**
+retained frame, mailbox ones included. So a peer pulls a mailbox-class frame, steps over it (3.1's
+rule), and sets `reconciledHead` to a sequenceID **that is not and can never be the head**. Every
+subsequent `commit()` CASes against a value that will never match, takes `HeadMismatchError` until its
+deadline, and dies. **Permanently.** The frame need not even persist — the cursor keeps its value after
+the frame is acked away. And per the spec's own *"a removed member keeps `commitTopic`"*, **a removed
+member can publish one.** We fixed the head-wedge and left the cursor-wedge.
+
+**Both approved fixes are being applied (this is the in-progress work):**
+
+1. **Store:** `fetchTopic` serves **log-class frames only**. A topic's log is its log-class frames; a
+   mailbox publish to a log topic is still *delivered* and **never enters the log**. Removes the
+   vector entirely. New conformance clause — a contract change, so hosts must be told, and the suite
+   is how they are told.
+2. **Peer:** CAS against **the head the drained pull reported**, not the cursor. `reconciledHead` is
+   what this peer **processed**; the log's `head` is what the log's **tip is**. Two things, two names —
+   the same discipline that branded `LogPosition` apart from `DeliveryPosition`.
+
+Belt and braces on purpose: the store change makes the log honest, the peer change makes the anchor
+correct *by name* rather than by an invariant it does not state.
+
+**And a second approved change — the journal epoch guard.** Replay **re-seals** the bodies (the journal
+holds plaintext tokens, which is forced: `LostCommit.tokens` must hand back re-issuable tokens
+regardless). Re-sealing is safe *only because `onAccepted` is the sole adopt point* — an argument, not
+a construction. A host that adopts elsewhere and crashes pre-acceptance re-seals under the **post**-commit
+epoch and publishes a blob **no member can open**: the commit applies, every receiver fails to resolve,
+`processCommit` throws, the cursor never advances, and **the lane wedges for the whole group** on a
+frame nobody can ever get past. So `JournalEntry` gains an `epoch` field and replay refuses to re-seal
+at a different one — one field, turning a silent group-wide wedge into a loud local error at the peer
+that caused it. **This deviates from the spec's verbatim `JournalEntry`; the spec is being corrected.**
+
+**Learned (so far):** the fork this question exists to prevent is *silent from the committer's side*.
+Its `commit()` resolves. Its own ledger holds its entry. Only the rest of the group knows. That is why
+the assertion had to be "the loser's entries are in the **winner's** ledger" — every weaker form of the
+test passes against the forking implementation.
+
+---
+
+#### Resuming — the tree is RED and the work is uncommitted
+
+The probe was stopped mid-fix. State on disk:
+
+- **Everything from the main body of 3.3 is present and was green at 110/110.** New:
+  `packages/rpc/src/commit.ts`, `test/fixtures/journal.ts`, `test/fixtures/peer.ts`,
+  `test/peer-commit-cas.test.ts`, `test/peer-commit-replay.test.ts`. Modified: `peer.ts` (the loop),
+  `hub-mux.ts` + `hub-tunnel/src/transport.ts` (`expectedHead`/`publishID` plumbed to the peer),
+  `memory-group-mls.ts`, both fake hubs (**dedup-before-CAS**, per the store contract — a fixture that
+  ignored the CAS would have let every one of these tests pass against a broken peer), and the four
+  suites that used `localCommitted`.
+- **The follow-up is half-applied.** The store-side filter and its conformance clause are written;
+  **one conformance test is failing** (`fetchTopic refuses a non-subscriber`), and the **peer-side head
+  CAS is not written at all** — the probe's last words were *"now `pullCommits` must record the head
+  from the drain."* The journal epoch guard is **not** started.
+
+**To resume:** re-dispatch against `docs/superpowers/probes/question-3.3-brief.md` plus the follow-up
+instructions recorded above (store filter + conformance clause; peer CASes on the drained head; the
+`epoch` field on `JournalEntry` with a named error). The report at `question-3.3-report.md` is complete
+for the main body and wants a "The cursor-wedge and the epoch guard (follow-up)" section. **Do not
+commit until green**, and the follow-up must report *how much each half of the wedge fix is carrying* —
+revert one at a time and name which test goes red for each.
+
+**Not yet folded into the spec** (do it when 3.3 lands): the cursor-wedge as a numbered defect, the
+`fetchTopic` log-class contract, and `JournalEntry.epoch`.
