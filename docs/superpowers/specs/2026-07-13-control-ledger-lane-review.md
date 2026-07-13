@@ -3,11 +3,48 @@
 **Reviewer:** kubun (the host driving the requirements in `2026-07-13-host-ledger-lane.md`).
 **Subject:** `2026-07-13-control-ledger-lane-design.md`.
 
-Nine review passes. **The newest pass is at the top; earlier passes are kept below as the record.**
+Ten review passes. **The newest pass is at the top; earlier passes are kept below as the record.**
 
 ---
 
-# Revision 9 review
+# Revision 10 review
+
+**Verdict:** G21 is folded in, and the journal is the right mechanism — replay by `publishID` lets the store's idempotency contract decide the outcome with no responder and no network peer, which is exactly what the size-one group needs. The split between the two mechanisms is stated crisply and correctly: *"the journal recovers a peer whose own pending state was lost; `recover()` recovers a peer whose group state is unusable."*
+
+This pass is materially smaller than the last nine. One finding, and one gap the journal itself opens.
+
+## G22 — `onAccepted` must be idempotent, and the design does not say so
+
+**Blocking, but small.** The commit sequence is: publish → **accepted** → `onAccepted()` → `clear(publishID)`. Those are three separate durable-ish steps, and a crash can land between any two of them. Replay then re-runs `onAccepted` on an entry that already ran it:
+
+- Crash **between `onAccepted()` and `clear()`** — the slot still holds the entry. On restart, replay republishes, the store returns the original sequenceID, and the peer *"adopts the journalled `newGroup`, delivers the journalled Welcome"* — **a second time.**
+- Crash **partway through `onAccepted()`** — say the handle was persisted but the Welcome had not been sent, or vice versa. Same replay, same double-execution of whichever half already ran.
+
+Re-adopting the same `newGroup` is harmless (it is a fixed serialized value; adopting it twice is idempotent by construction). **Re-delivering the Welcome is not.** The invitee has already joined; a second `processWelcome` over the same bytes is not a no-op — it either errors or builds a duplicate group state, and either way the invitee's host is now handling an event its author believed happened once.
+
+So the contract needs a line the design is currently missing: **`onAccepted` MUST be idempotent — replay can and will run it more than once.** In practice that means the host writes its handle adoption and its Welcome delivery so that a repeat is a no-op (deliver-by-`publishID`, or simply tolerate a duplicate Welcome for a member already at that leaf). This is a host obligation and belongs in "Host-side impact" beside the others, because a host will otherwise reasonably assume `onAccepted` runs exactly once — the whole point of the journal is to make the commit look atomic, and that framing is precisely what hides the at-least-once semantics underneath.
+
+While there: the numbered `commit()` steps still begin at *"1. Pull `commitTopic` to the end"*, and replay is described separately as happening "before any lane operation". The ordering is load-bearing and worth making structural rather than prose — **replay must strictly precede the pull**, because a peer that pulls first meets its own un-merged commit, fires the G18 trigger, and takes the expensive rendezvous path the journal exists to avoid. Making replay step 0 of the lane, ahead of both the completeness check and the pull, removes the ambiguity.
+
+## G23 — `recover()`'s own acceptance window is unjournalled, and the design does not say what happens
+
+Not blocking — I believe it is already safe — but it is an unexamined window in the path that everything else falls back to, and it should be reasoned about rather than left to the reader.
+
+`recover()` has the same shape as `commit()`: it publishes an external commit, the hub accepts, and only then does `pending.onAccepted()` adopt. A crash in *that* window is not journalled. Tracing it:
+
+- On restart the peer's handle is the old, broken one. It pulls. Its orphaned external commit is in the log, framed at the group's epoch E — **not** at the peer's own (stale) epoch N. So the G18 trigger does not fire (authorship matches, epoch does not), and the frame classifies as *history → advance*.
+- The peer's original condition — trim strand, or fork — still holds, so it trips again and re-enters `recover()`, builds a *fresh* external commit, and this one lands.
+- `joinGroupExternal({ resync: true })` is documented to atomically remove the prior leaf for the same identity, so the leaf the orphaned first rejoin added is cleaned up by the second.
+
+So it converges, by re-recovering rather than by replaying — which is fine, and cheaper than journalling a second path. But it depends on three separate facts holding together (the epoch mismatch keeping G18 quiet, the original trigger re-firing, and `resync: true` collecting the orphan leaf), and none of them is stated. One paragraph saying "recover()'s acceptance window is self-healing by re-recovery, and here is why" would close it — otherwise the first person to implement this will either journal it unnecessarily or assume it is broken.
+
+## What matches, revision 10
+
+The journal is correctly scoped: single-slot, host-provided (the host has a database, the peer does not), written *before* the publish, cleared on both terminal outcomes. Making the peer never inspect the blob — it is opaque host state — keeps the layering clean. Replay-by-`publishID` covering both "accepted" and "never accepted" with the same call, and letting the CAS resolve the second case, is elegant. And the design now says plainly that revision 8 was wrong to demote the journal, with the reason (detection is not recovery), which is the sort of thing worth leaving in the document.
+
+---
+
+# Revision 9 review (folded in — kept as the record)
 
 **Verdict:** G19 and G20 are folded in correctly. Authorship-not-applicability is the right predicate, the note that both `readMessageEpoch` and the committer DID are readable *without applying the frame* (and that the committer is MLS-authenticated, so authorship cannot be forged) is the part that makes it implementable, and the write-side exposure is now recorded rather than omitted.
 

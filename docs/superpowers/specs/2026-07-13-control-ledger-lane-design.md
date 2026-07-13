@@ -272,6 +272,10 @@ serialization.
 
 Inside the mutex:
 
+0. **Replay the journal (G22).** This is step **zero** of every lane operation, strictly ahead
+   of the completeness check and the pull — the ordering is load-bearing, not stylistic. A
+   peer that pulls first meets its own un-merged commit, fires the G18 trigger, and takes the
+   expensive rendezvous path the journal exists to avoid. See "Restart replay".
 1. Pull `commitTopic` to the end and process everything. `reconciledHead` is now current.
 2. Call `build()`. The host has produced `newGroup` via `commitLedgerEntries` /
    `commitInvite` / `removeMember` but has **not** adopted it — mls commits are
@@ -302,6 +306,20 @@ idempotency contract decides the outcome, with no responder and no network peer 
 - **It was never accepted** → the republish is an ordinary CAS at `expectedHead`. It wins (the
   commit lands, adopt as above) or it takes `HeadMismatchError` (someone else committed
   meanwhile: clear the slot, discard, and rebuild later like any other loser).
+
+**`onAccepted` MUST be idempotent — replay can and will run it more than once (G22).** The
+sequence *publish → accepted → `onAccepted()` → `clear(publishID)`* is three steps and a crash
+can land between any two of them, so an entry whose `onAccepted` already ran (wholly or
+partly) is still in the slot on restart and gets replayed. Re-adopting the journalled
+`newGroup` is harmless — it is a fixed serialized value, so adopting it twice is idempotent by
+construction. **Re-delivering the Welcome is not:** the invitee has already joined, and a
+second `processWelcome` over the same bytes is not a no-op — it errors or builds a duplicate
+group state, and either way the invitee's host handles an event its author believed happened
+once. The host must therefore write both halves of `onAccepted` to tolerate a repeat
+(deliver-by-`publishID`, or simply no-op a Welcome for a member already at that leaf). The
+journal's whole purpose is to make a commit *look* atomic, and that framing is exactly what
+hides the at-least-once semantics underneath — so the design states them rather than letting a
+host infer exactly-once.
 
 This is why **the journal is not an optimization** (revision 8 said it was; it was wrong).
 Every heal path terminates in `recover()`, and `recover()` is a rendezvous — it needs *another
@@ -430,6 +448,26 @@ recover(deadline):                          # a top-level lane operation; holds 
 
 The peer's own entry tokens survive all of this untouched: they are epoch-independent, so a
 discarded external commit costs nothing but the round trip.
+
+**`recover()`'s own acceptance window is deliberately unjournalled: it is self-healing by
+re-recovery (G23).** `recover()` has `commit()`'s shape — publish, accept, *then* adopt — so a
+crash in that window leaves an orphaned external commit in the log. It converges anyway, and
+the reason is worth stating so nobody journals it unnecessarily or assumes it is broken:
+
+- On restart the peer holds its old, broken handle. It pulls, and its orphaned external commit
+  is in the log framed at the **group's** epoch E — not at the peer's own stale epoch N. The
+  G18 trigger tests authorship **and** current epoch: authorship matches, the epoch does not,
+  so it stays quiet and the frame classifies as *history → advance*. (This is the G19
+  narrowing paying for itself: an applicability-based trigger would have fired here.)
+- The peer's original condition — trimmed out, or on a discarded branch — still holds, so it
+  trips again, re-enters `recover()`, and builds a **fresh** external commit against a fresh
+  GroupInfo. That one lands.
+- `joinGroupExternal({ resync: true })` "atomically removes prior leaf for same identity", so
+  the second rejoin collects the leaf the orphaned first one added. Leaves do not accumulate.
+
+Re-recovering is cheaper than journalling a second path, and unlike the `commit()` window it
+needs no responder that a size-one group cannot supply — a group with no other member has no
+`recover()` to crash inside.
 
 #### Heal triggers
 
@@ -795,6 +833,11 @@ Named so the work is sized honestly. These are the host's to absorb.
   without adopting and adopt only inside `onAccepted`. Because `build()` re-runs on every
   retry, an invite re-mints both the Commit *and* the Welcome each time. This is a rewrite
   of the host's commit paths, not a call-site swap.
+- **`onAccepted` must be idempotent.** Replay is at-least-once: a crash between `onAccepted()`
+  and `clear()`, or partway through `onAccepted()` itself, re-runs it. Adopting the journalled
+  handle twice is harmless; **delivering the Welcome twice is not**, so the host must make
+  Welcome delivery a no-op on repeat. The journal makes a commit *look* atomic, which is
+  exactly why this has to be said out loud.
 - **The host provides a durable single-slot commit journal (`CommitJournal`) and serializes
   its pending handle into it.** Written before every publish, replayed before every lane
   operation, cleared on acceptance or rejection. The blob is host-opaque — the serialized
@@ -938,6 +981,15 @@ heal cannot reach for want of a responder.)*
   member in existence to answer a rendezvous. It recovers from the journal alone, the invitee
   receives the Welcome, and the group is alive. Without the journal this group is bricked
   forever — the test that no amount of heal machinery can pass.
+- **Replay runs `onAccepted` twice.** The peer is killed between `onAccepted()` and
+  `clear(publishID)`. On restart the entry replays: the handle is adopted again (harmless) and
+  the Welcome is delivered again — and the invitee, already joined, no-ops it rather than
+  erroring or building a duplicate group (the G22 regression test).
+- **A crash inside `recover()`'s acceptance window converges.** The peer is killed after its
+  external commit is accepted and before it adopts. On restart its orphan commit classifies as
+  history (authorship matches, epoch does not — the G18 trigger stays quiet), the original heal
+  condition re-fires, a fresh rejoin lands, and `resync: true` collects the orphaned leaf. The
+  peer ends whole with exactly one leaf (the G23 regression test).
 - **The journal is lost or absent → the G18 trigger still fires.** The peer detects its own
   un-merged commit and heals via a responder (the multi-member fallback), rather than walking
   to `reconciledHead == head` with a clean bill of health.
