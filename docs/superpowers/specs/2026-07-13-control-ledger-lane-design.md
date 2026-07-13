@@ -237,8 +237,28 @@ type PendingCommit = {
   commit: Uint8Array
   /** Signed ledger-entry tokens this commit enacts. Empty for a commit that enacts none. */
   bodies: Array<string>
+  /**
+   * Opaque host blob holding everything needed to adopt this commit after a restart:
+   * the serialized post-commit handle (`newGroup`) and any Welcome to deliver. Written to
+   * the journal BEFORE the peer publishes. The peer never inspects it (G21).
+   */
+  journal: Uint8Array
   /** Runs only if the hub accepts. The host adopts newGroup here and sends any Welcome. */
   onAccepted: () => Promise<void>
+}
+
+/** Durable single-slot journal, host-provided. The host already persists handle state and
+ *  has a database; the peer has neither. */
+type CommitJournal = {
+  put(entry: {
+    publishID: string
+    expectedHead: string | null
+    commit: Uint8Array
+    bodies: Array<string>
+    journal: Uint8Array
+  }): Promise<void>
+  get(): Promise<JournalEntry | null>
+  clear(publishID: string): Promise<void>
 }
 
 commit: (build: () => Promise<PendingCommit>) => Promise<void>
@@ -257,14 +277,53 @@ Inside the mutex:
    `commitInvite` / `removeMember` but has **not** adopted it — mls commits are
    non-mutating, returning a derived handle and never advancing the source, so the host's
    live handle is still the pre-commit one.
-3. Frame `[commit][wrap(bodies)]` (see D3) and publish to `commitTopic` with
-   `expectedHead: reconciledHead`.
-4. **Accepted** → set `reconciledHead` to the returned sequenceID, run `onAccepted()`,
-   rebuild the epoch.
-5. **`HeadMismatchError`** → drop the `PendingCommit` untouched. Discarding costs nothing,
-   and the pre-commit leaf key material is retained, which the heal path needs. Go back to
-   step 1: pull the winning commit, let the host's handle rebase as it applies, and call
-   `build()` again against the now-current handle.
+3. **Journal the pending commit before publishing (G21):** `journal.put({ publishID,
+   expectedHead: reconciledHead, commit, bodies, journal })` with a fresh `publishID`. This
+   write must be durable before step 4 begins. It is what makes the acceptance window
+   survivable *without a peer* — see "Restart replay".
+4. Frame `[commit][wrap(bodies)]` (see D3) and publish to `commitTopic` with
+   `expectedHead: reconciledHead` and that `publishID`.
+5. **Accepted** → set `reconciledHead` to the returned sequenceID, run `onAccepted()`, clear
+   the journal slot, rebuild the epoch.
+6. **`HeadMismatchError`** → clear the journal slot and drop the `PendingCommit` untouched.
+   Discarding costs nothing, and the pre-commit leaf key material is retained, which the heal
+   path needs. Go back to step 1: pull the winning commit, let the host's handle rebase as it
+   applies, and call `build()` again against the now-current handle.
+
+#### Restart replay: the crash window is closed, not merely detected (G21)
+
+**Before any lane operation, the peer replays its journal.** If the slot holds an entry, the
+peer republishes it with the **same `publishID` and the same `expectedHead`**. The store's
+idempotency contract decides the outcome, with no responder and no network peer involved:
+
+- **The original publish was accepted** → the store returns its original sequenceID and
+  appends nothing. The peer adopts the journalled `newGroup`, delivers the journalled Welcome,
+  sets `reconciledHead`, and clears the slot. It is whole.
+- **It was never accepted** → the republish is an ordinary CAS at `expectedHead`. It wins (the
+  commit lands, adopt as above) or it takes `HeadMismatchError` (someone else committed
+  meanwhile: clear the slot, discard, and rebuild later like any other loser).
+
+This is why **the journal is not an optimization** (revision 8 said it was; it was wrong).
+Every heal path terminates in `recover()`, and `recover()` is a rendezvous — it needs *another
+member, online, able to seal a GroupInfo*. Consider the first commit of a group's life: the
+creator is the sole member, it `commitInvite`s, the hub accepts (the frame is retained even
+with zero other subscribers — G7 working as intended), and the process dies before
+`onAccepted`. On restart the G18 trigger fires exactly as designed and `recover()` publishes a
+rendezvous request — and **nobody answers, and nobody ever will**, because the only prospective
+member is the invitee, whose Welcome `onAccepted` never sent. Without the journal that group is
+**bricked at creation**: it can never merge its own commit, never advance past epoch 0, never
+commit again (its `expectedHead` is behind the head its own orphan frame installed), and never
+heal. Detection is not recovery.
+
+The narrow alternative — "notice I am alone and just re-commit" — does not work: the orphan
+frame is already in the log at epoch 0, so any later reader sees two frames at that epoch and
+trips the fork trigger on them. The journal is the clean answer, and `publishID` has been in
+`PublishParams` since revision 2 precisely so this costs no second host migration.
+
+The G18 trigger stays, and the two mechanisms cover different failures: the journal recovers a
+peer whose *own* pending state was lost; `recover()` recovers a peer whose *group* state is
+unusable (trimmed out, or on a discarded branch). The journal makes the common crash need no
+responder at all; heal remains the exit when the peer genuinely needs the group's help.
 
 **The retry bound is a deadline, not an attempt count.** At the commit rate D1 is designed
 for, with several active admins, five consecutive CAS losses on a busy group is not rare —
@@ -374,8 +433,16 @@ discarded external commit costs nothing but the round trip.
 
 #### Heal triggers
 
-Retained for the two cases CAS cannot cover. Both triggers are single-observation; the
-timing heuristic in revision 1 is gone (G4).
+Three of them, for the cases CAS cannot cover. All three are single-observation; the timing
+heuristic in revision 1 is gone (G4).
+
+**`recover()` has a precondition, and it must be stated (G21): heal requires at least one
+other member that is online, holds the group, and can seal a GroupInfo.** It is a rendezvous;
+without a responder it cannot work. When none answers, `recover()` burns its deadline and
+returns `{ advanced: false }`, and the peer stays degraded and retries — which reads as "try
+later" and *is* "try later", but only for a group that has other members. This is precisely
+why the crash window is closed by the journal (above) rather than by heal: at group size one
+there is no later.
 
 - **Trim strand.** After a pull, `head > reconciledHead` but the intervening frames are no
   longer retained (`oldest` is past the cursor). The peer knows in one observation that they
@@ -728,13 +795,16 @@ Named so the work is sized honestly. These are the host's to absorb.
   without adopting and adopt only inside `onAccepted`. Because `build()` re-runs on every
   retry, an invite re-mints both the Commit *and* the Welcome each time. This is a rewrite
   of the host's commit paths, not a call-site swap.
-- **Welcome delivery is not durable across CAS acceptance.** Once the hub accepts, the group
-  has advanced whether or not `onAccepted` ran. A crash in that window leaves the committer
-  unable to apply even its own commit — MLS merges a pending commit, it does not process one
-  — so it heals by external-commit rejoin and re-enacts its entries. An invite lost this way
-  leaves an **orphan leaf**: a member added to the tree who never received keys. The repair
-  is an admin remove + re-invite. Accepted as a crash-window rarity, not a steady-state
-  hazard.
+- **The host provides a durable single-slot commit journal (`CommitJournal`) and serializes
+  its pending handle into it.** Written before every publish, replayed before every lane
+  operation, cleared on acceptance or rejection. The blob is host-opaque — the serialized
+  post-commit handle plus any Welcome — and the host already has both a database and handle
+  serialization, which the peer does not. This is required, not optional (G21): without it a
+  crash in the acceptance window bricks a single-member group permanently, because heal needs
+  a responder and there is none. It also makes Welcome delivery durable across acceptance, so
+  the orphan-leaf outcome (a member added to the tree who never received keys, repaired by an
+  admin remove + re-invite) is no longer the expected result of a crash — it is what happens
+  only if the journal itself is lost.
 
 ## Accepted exposure: a removed member keeps `commitTopic`
 
@@ -776,13 +846,9 @@ write side is the same one rejected for the read side (rotating the topic on rem
 
 ## Deferred
 
-- **Closing the crash window.** A durable pending-commit journal (commit bytes, `newGroup`
-  state, any Welcome) written before publish, plus republish-by-`publishID` on restart to
-  learn the outcome, would let a restarted committer **merge** its pending commit instead of
-  rejoining. This is an **optimization, not a correctness dependency**: with the un-merged
-  own-commit trigger (G18) the crash victim detects itself and heals. Without that trigger it
-  was silently load-bearing. `publishID` is in the contract *now* so this costs no second host
-  migration when we do it.
+*(The pending-commit journal was deferred in revisions 2–8 and is now **required** — see
+"Restart replay". G21 showed it is the only exit for a crash in a single-member group, which
+heal cannot reach for want of a responder.)*
 - **Full-device-loss recovery** (no MLS state at all). Such a member is re-invited.
 - **Hub-partition DoS.** Out of scope.
 
@@ -862,13 +928,19 @@ write side is the same one rejected for the read side (rotating the topic on rem
   **nobody heals** — the security regression test for the narrowed predicate, which an
   applicability-based trigger fails by sending the entire group into recovery at once.
   Likewise: a frame that throws `MissingLedgerEntriesError` gathers, and does not heal.
-- **A crash in the acceptance window self-heals.** The committer is killed after the hub
-  accepts and before it adopts, then restarted. It pulls, reaches its own commit at its
-  current epoch, cannot merge it, and **heals** — rather than filing it as poison and walking
-  to `reconciledHead == head` with a clean bill of health, which is what an implementation
-  without the G18 row does. It re-enacts nothing (its entries are already in the ledger) and
-  ends whole. The G18 regression test, and the one that fails silently: assert the peer's
-  epoch **advanced**, not merely that no error was raised.
+- **A crash in the acceptance window is repaired from the journal, with no peer.** The
+  committer is killed after the hub accepts and before it adopts, then restarted. Replay
+  republishes by `publishID`, the store returns the original sequenceID without appending,
+  and the peer adopts the journalled handle and sends the journalled Welcome. Assert the
+  peer's epoch **advanced** — an implementation that merely raises no error leaves it stuck.
+- **A single-member group survives a crash on its first commit (G21).** The creator's
+  `commitInvite` is accepted, the process dies before `onAccepted`, and there is no other
+  member in existence to answer a rendezvous. It recovers from the journal alone, the invitee
+  receives the Welcome, and the group is alive. Without the journal this group is bricked
+  forever — the test that no amount of heal machinery can pass.
+- **The journal is lost or absent → the G18 trigger still fires.** The peer detects its own
+  un-merged commit and heals via a responder (the multi-member fallback), rather than walking
+  to `reconciledHead == head` with a clean bill of health.
 - **A crash mid-bootstrap self-heals.** The peer is killed between adopting the rejoined
   handle and completing bootstrap, and restarted: the completeness invariant fails on
   restore, bootstrap runs, and the roster is whole — with no memory of how it got there (the

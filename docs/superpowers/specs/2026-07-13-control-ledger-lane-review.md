@@ -3,11 +3,54 @@
 **Reviewer:** kubun (the host driving the requirements in `2026-07-13-host-ledger-lane.md`).
 **Subject:** `2026-07-13-control-ledger-lane-design.md`.
 
-Eight review passes. **The newest pass is at the top; earlier passes are kept below as the record.**
+Nine review passes. **The newest pass is at the top; earlier passes are kept below as the record.**
 
 ---
 
-# Revision 8 review
+# Revision 9 review
+
+**Verdict:** G19 and G20 are folded in correctly. Authorship-not-applicability is the right predicate, the note that both `readMessageEpoch` and the committer DID are readable *without applying the frame* (and that the committer is MLS-authenticated, so authorship cannot be forged) is the part that makes it implementable, and the write-side exposure is now recorded rather than omitted.
+
+One new finding. **G21 is blocking, it is permanent, and it is reachable on the first commit of every group.** It also invalidates revision 8's demotion of the Deferred pending-commit journal.
+
+## G21 — Heal needs a responder. The crash-window victim can be the only member there is.
+
+**Blocking.** Every heal path terminates in `recover()`, and `recover()` is a rendezvous: *"publish request on rendezvousTopic, await a sealed reply."* It needs **another member, online, willing and able to seal a GroupInfo.** The design never states that precondition, and there is a case where it cannot be met — permanently.
+
+Walk the very first commit of a group's life:
+
+1. The creator makes a group. It is the sole member, and the sole admin.
+2. It invites someone: `commitInvite` → `commit(build)` → the frame is CAS'd onto `commitTopic` (retained even with zero other subscribers — that is G7's fix working as intended).
+3. **The hub accepts. The process dies before `onAccepted`.**
+
+On restart: the creator is at epoch 0 with a persisted pre-commit handle. It pulls, finds its own commit at its current epoch, cannot merge it (the pending state died) — and the G19-narrowed trigger fires exactly as designed. `recover()` runs. It publishes a rendezvous request.
+
+**Nobody answers.** The only other person who could have become a member is the invitee, and the invitee never received the Welcome — `onAccepted` is what sends it. So there is no responder, there never will be, and `recover()` burns its deadline and returns `{ advanced: false }`.
+
+The creator is now permanently wedged: it can never merge its own commit, never advance past epoch 0, never commit again (its `expectedHead` is behind the head its own orphaned frame installed), and never heal. **The group is bricked at creation, by a crash in a window that exists on every single commit.** The same argument covers any group whose other members are all offline — there it is a stall rather than a brick, which is survivable, but the single-member case has no exit at all.
+
+**This makes the Deferred journal load-bearing, not an optimization.** Revision 8 demoted it:
+
+> "This is an **optimization, not a correctness dependency**: with the un-merged own-commit trigger (G18) the crash victim detects itself and heals."
+
+Detection is not the same as recovery. The trigger tells the peer it is broken; the *rendezvous* is what fixes it, and the rendezvous requires a peer. With a durable pending-commit journal the crash victim does not need a responder at all — it reloads its own `newGroup`, merges, and is whole. That is the **only** exit that works at group size one, so the journal is the sole mechanism covering a case that is otherwise unrecoverable.
+
+Two ways to close it, and they compose:
+
+- **Promote the journal out of Deferred** for at least the commit path: persist the pending commit (bytes, `newGroup` state, any Welcome) *before* publishing, and on restart, republish by `publishID` to learn the outcome — accepted means adopt the journalled `newGroup` and send the journalled Welcome; rejected means discard. The `publishID` idempotency key is already in the `PublishParams` contract *precisely so this costs no second migration*, which the design says out loud. It should just be built now.
+- **State the precondition** on `recover()` regardless: heal requires at least one other member that is online, holds the group, and can seal. Say what happens when none answers — today the pseudocode returns `{ advanced: false }` and the caller is given no guidance, which reads as "try later" but is "never" in the single-member case.
+
+The narrower alternative — have the peer detect "I am the only member and my own commit is orphaned" and simply re-CAS a fresh commit — does not work: the orphan frame is already in the log at epoch 0, so any later reader sees two frames at that epoch and the fork trigger fires on them. The journal is the clean answer.
+
+## What matches, revision 9
+
+The G19 narrowing is exactly right, and the design now explains *why* the broad predicate was dangerous rather than just replacing it — which is the difference between a fix and a patch. The G20 write-side section correctly identifies that D1 turns the commit topic into the group's serialization point and that this hands members (not just the hub) a new capability, and it records the mitigation lever as considered-and-rejected rather than unexamined.
+
+Still stale, editorially: the heal-triggers section opens "Retained for the **two** cases CAS cannot cover" and then lists three.
+
+---
+
+# Revision 8 review (folded in — kept as the record)
 
 **Verdict:** G18 is folded in, with the trigger, the cursor row, the ordering note, the `inFlight`-is-empty consequence, and the Deferred-journal demotion all correct.
 
