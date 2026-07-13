@@ -485,3 +485,47 @@ so a host declaring `Infinity` passes the refusal clause vacuously (the suite ca
 a host declares, not that it declared a sane one); and retention follows *current* subscribers rather
 than a high-water mark, which is safe only because the commit lane never unsubscribes — now stated in
 the spec, because it is a load-bearing assumption that reads like an implementation detail.
+
+---
+
+### 2026-07-13 — Question 1.3: Is the CAS atomic, and is `sequenceID` ordered?
+
+**Findings:** Confirmed. 13 passed / 2 failed of 15 — the three CAS clauses flip green, the two
+`publishID` dedup clauses stay red for question 1.4. The CAS is the **first** thing `publish` does,
+above `counter++`, so a loser is not a rollback: there is nothing to roll back. No entry, no
+delivery row, no sequenceID burned. "Stores nothing" ends up structural rather than a cleanup path
+that could be forgotten.
+
+**The suite caught itself.** G29 (from question 1.2) had silently broken three CAS clauses: they
+published *mailbox*-class frames, which no longer move the head — so the `null`-sentinel clause
+**would have passed for the wrong reason**. Head stays `null` forever, so a second
+`expectedHead: null` publish is legitimately accepted, and the clause proves nothing. It only became
+a real test once told to publish `retain: 'log'`. A clause passing for the wrong reason is precisely
+what this suite exists to prevent, and it happened *inside the suite*.
+
+**Spec impact: revision 19.** Two additions, both about defects the suite **structurally cannot
+catch**:
+
+1. **G30 — "one transaction" is necessary and not sufficient.** On `READ COMMITTED` — the default in
+   both Postgres and MySQL — a `SELECT head …` inside `BEGIN` takes **no lock**. Two transactions
+   read the same head, both pass the comparison, both commit, and both frames land. The host obeyed
+   the contract to the letter and forked the group anyway. The contract now requires a **conditional
+   write** (`UPDATE … WHERE head = :expected` plus an affected-row-count check) or a locking read, and
+   says plainly that **a read followed by a write is not a compare-and-set, however many `BEGIN`s wrap
+   it.**
+2. **An in-process sequence counter passes all 15 clauses — and it is what kubun mints today.** The
+   suite drives one store object in one process, where a lazily-seeded counter is monotonic and
+   unique. Two hub processes on one database mint the *same* sequenceID for different frames, both
+   CAS successfully against the same head, and the lane forks.
+
+Both are now in "Host-side impact" as a **DDL review item, not a test**, under a sentence that says
+what the whole phase has been circling: *a host that reads a fully green conformance run as proof its
+store is sound is wrong.*
+
+**Learned:** the conformance suite has a hard ceiling, and naming it is worth more than extending it.
+Everything that needs **two processes against one database** — the counter collision, the
+read-then-write CAS — is invisible to an in-process suite and will pass every clause forever. The
+concurrent-CAS clause now opens its doc comment with "READ THIS BEFORE TRUSTING A GREEN RUN OF THIS
+CASE" and states that a non-transactional three-statement store passes it every time. A vacuous
+clause that announces its vacuity is useful; one that stays quiet is worse than no clause at all,
+because a host reads green as proof.

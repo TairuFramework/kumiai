@@ -1,4 +1,4 @@
-import { NotSubscribedError, RetentionExceededError } from '@kumiai/hub-protocol'
+import { HeadMismatchError, NotSubscribedError, RetentionExceededError } from '@kumiai/hub-protocol'
 import { describe, expect, test, vi } from 'vitest'
 
 import { createMemoryStore } from '../src/memoryStore.js'
@@ -316,6 +316,68 @@ describe('createMemoryStore pub/sub', () => {
       retain: 'log',
     })
     expect(await store.purge({ olderThan: 0 })).toEqual([])
+  })
+
+  test('a losing conditional publish consumes no sequenceID and leaves no gap', async () => {
+    const store = createMemoryStore()
+    await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+    const first = await store.publish({
+      senderDID: ALICE,
+      topicID: TOPIC,
+      payload: new Uint8Array([1]),
+      retain: 'log',
+    })
+    expect(first).toBe('000000000001')
+
+    await expect(
+      store.publish({
+        senderDID: ALICE,
+        topicID: TOPIC,
+        payload: new Uint8Array([2]),
+        retain: 'log',
+        expectedHead: null,
+      }),
+    ).rejects.toThrow(HeadMismatchError)
+
+    // The loser leaves the sequence exactly as it found it: the next accepted publish takes the
+    // sequenceID the loser would have had. A store that mints before it compares burns one here.
+    const next = await store.publish({
+      senderDID: ALICE,
+      topicID: TOPIC,
+      payload: new Uint8Array([3]),
+      retain: 'log',
+      expectedHead: first,
+    })
+    expect(next).toBe('000000000002')
+
+    const log = await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
+    expect(log.messages.map((m) => m.sequenceID)).toEqual([first, next])
+    expect(log.head).toBe(next)
+  })
+
+  test('a mailbox publish neither reads nor moves the head, so the CAS ignores it', async () => {
+    const store = createMemoryStore()
+    await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+    const logged = await store.publish({
+      senderDID: ALICE,
+      topicID: TOPIC,
+      payload: new Uint8Array([1]),
+      retain: 'log',
+      expectedHead: null,
+    })
+    await store.publish({ senderDID: ALICE, topicID: TOPIC, payload: new Uint8Array([2]) })
+
+    // The interleaved mailbox frame did not move the head, so a conditional publish against the
+    // last log frame still wins.
+    const next = await store.publish({
+      senderDID: ALICE,
+      topicID: TOPIC,
+      payload: new Uint8Array([3]),
+      retain: 'log',
+      expectedHead: logged,
+    })
+    const log = await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
+    expect(log.head).toBe(next)
   })
 
   test('key package store and fetch', async () => {

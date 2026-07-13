@@ -1,11 +1,13 @@
 # Design: the control-ledger lane
 
-**Status:** design, revision 18 (2026-07-13). Reviewed fourteen times by kubun in
-`2026-07-13-control-ledger-lane-review.md`; G1–G27 are folded in below. Revisions 16–18 fold in
-the first two implementation probes: `NotSubscribedError`, a `trim` primitive, a 30-day default
+**Status:** design, revision 19 (2026-07-13). Reviewed fourteen times by kubun in
+`2026-07-13-control-ledger-lane-review.md`; G1–G27 are folded in below. Revisions 16–19 fold in
+the first three implementation probes: `NotSubscribedError`, a `trim` primitive, a 30-day default
 window, two retention classes with subscriber-requested durations, **G28 — the commit lane must
-not outrun the mailbox**, which silently destroys downloaded messages, and **G29 — `head`
-advances only on a log publish**, without which any member can wedge the lane for the group.
+not outrun the mailbox**, which silently destroys downloaded messages, **G29 — `head` advances
+only on a log publish**, without which any member can wedge the lane for the group, and **G30 —
+"one transaction" is necessary but not sufficient for the CAS**: on `READ COMMITTED` a faithful
+implementation still forks.
 **Supersedes:** the requirements in `../../agents/plans/next/2026-07-13-host-ledger-lane.md`
 (R1/R2/R3), which stays as the origin record.
 **Scope:** `@kumiai/mls`, `@kumiai/rpc`, `@kumiai/hub-protocol`, `@kumiai/hub-server`,
@@ -341,6 +343,21 @@ requires:
 A read-then-write CAS is a race — precisely the race D1 exists to eliminate. A host reading
 "the head is a scalar" could reasonably implement it as three statements; the contract
 forbids that in words, and the conformance suite must catch it.
+
+**And "one transaction" is necessary, not sufficient — say so, because a host will read it as
+sufficient (G30).** On `READ COMMITTED`, which is the default isolation level in both Postgres
+and MySQL, a `SELECT head …` inside `BEGIN` takes **no lock**. Two transactions read the same
+head, both pass the comparison, both commit, and both frames are in the log. The host did
+exactly what the contract said and the group forked anyway. So the contract says the stronger
+thing:
+
+- The head check must be a **conditional write** — `UPDATE topics SET head = :new WHERE id =
+  :topic AND head = :expected`, followed by an **affected-row-count check** — or a locking read
+  (`SELECT … FOR UPDATE`), or `SERIALIZABLE`.
+- **A read followed by a write is not a compare-and-set**, however many `BEGIN`s wrap it.
+
+No conformance clause can catch this: it needs two connections racing a real database, and the
+in-process suite serializes them. It is reviewed in the host's DDL, not tested in ours.
 
 The head is **hub-assigned** — a `sequenceID`, which only the store mints. A member cannot
 choose it, so a malicious member cannot wedge the lane by publishing a bogus head token.
@@ -1119,6 +1136,19 @@ Named so the work is sized honestly. These are the host's to absorb.
   in-process counter (kubun's current counter collides across two hub processes on one
   database — survivable for a mailbox, fatal for a head). A host that reads this as "add a
   head column" will under-scope it by a wide margin.
+- **Two host defects the conformance suite structurally cannot catch, and which therefore need
+  a DDL review rather than a green test run.** Both are silent, both fork the group, and both
+  pass every clause in the suite:
+  1. **An in-process sequence counter.** The suite drives one store object in one process,
+     where a lazily-seeded counter is monotonic and unique — so it passes all of it. Two hub
+     processes on one database mint the *same* sequenceID for different frames, both CAS
+     successfully against the same head, and the lane forks. This is what kubun mints today.
+  2. **A read-then-write CAS inside a transaction** (G30 above). `READ COMMITTED` is the
+     default in Postgres and MySQL, and a `SELECT` inside `BEGIN` takes no lock.
+
+  Neither can be exercised in-process: catching them requires two connections racing a real
+  database. The suite says so where it can, but **a host that reads a fully green conformance
+  run as proof its store is sound is wrong**, and this is the sentence that tells it so.
 - **Removing `localCommitted` inverts the host's commit path.** A host that applies the
   commit and adopts `newGroup` up front (kubun's `withHandleReplacing`) must instead build
   without adopting and adopt only inside `onAccepted`. Because `build()` re-runs on every

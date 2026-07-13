@@ -260,17 +260,26 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
       const sequenceIDs: Array<string> = []
       for (let index = 0; index < 11; index++) {
         sequenceIDs.push(
-          await store.publish({ senderDID: ALICE, topicID: TOPIC, payload: payload(index) }),
+          await store.publish({
+            senderDID: ALICE,
+            topicID: TOPIC,
+            payload: payload(index),
+            retain: 'log',
+          }),
         )
       }
 
+      // Byte order is the only order the design has: `expectedHead` equality, `head` and `oldest`
+      // against a cursor, and `after` as an exclusive cursor all compare these as strings. A host
+      // minting a bare decimal fails here on the 9-to-10 boundary ("10" < "9"); a host minting a
+      // UUID fails on the very first pair.
       expect([...sequenceIDs].sort()).toEqual(sequenceIDs)
       for (let index = 1; index < sequenceIDs.length; index++) {
         expect(sequenceIDs[index] > sequenceIDs[index - 1]).toBe(true)
       }
     })
 
-    test('expectedHead null is accepted only while the topic has never had a publish', async () => {
+    test('expectedHead null is accepted only while the topic has never had a log publish', async () => {
       const store = await createStore()
       await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
 
@@ -278,6 +287,7 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(1),
+        retain: 'log',
         expectedHead: null,
       })
 
@@ -286,6 +296,7 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
           senderDID: ALICE,
           topicID: TOPIC,
           payload: payload(2),
+          retain: 'log',
           expectedHead: null,
         }),
       ).rejects.toThrow(HeadMismatchError)
@@ -298,12 +309,18 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
     test('two publishes at the same head: one accepted, one rejected, nothing stored for the loser', async () => {
       const store = await createStore()
       await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
-      const first = await store.publish({ senderDID: ALICE, topicID: TOPIC, payload: payload(1) })
+      const first = await store.publish({
+        senderDID: ALICE,
+        topicID: TOPIC,
+        payload: payload(1),
+        retain: 'log',
+      })
 
       const winner = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(2),
+        retain: 'log',
         expectedHead: first,
       })
 
@@ -312,13 +329,21 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
           senderDID: ALICE,
           topicID: TOPIC,
           payload: payload(3),
+          retain: 'log',
           expectedHead: first,
         }),
       ).rejects.toThrow(HeadMismatchError)
 
+      // "Stores nothing" is the load-bearing half, and it is the half a store that appends and
+      // THEN throws passes on the throw alone. The loser left no log entry, no delivery row, and
+      // did not move the head: payload(3) is nowhere, in either index.
       const result = await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
       expect(result.messages.map((message) => message.sequenceID)).toEqual([first, winner])
+      expect(result.messages.map((message) => message.payload)).toEqual([payload(1), payload(2)])
       expect(result.head).toBe(winner)
+
+      const delivered = await store.fetch({ recipientDID: BOB })
+      expect(delivered.messages.map((message) => message.sequenceID)).toEqual([first, winner])
     })
 
     test('a replayed publishID returns the original sequenceID and appends nothing', async () => {
@@ -379,16 +404,41 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
       expect(result.head).toBe(sentinel)
     })
 
+    /**
+     * READ THIS BEFORE TRUSTING A GREEN RUN OF THIS CASE.
+     *
+     * As written here it proves almost nothing. It fires N publishes without awaiting between
+     * them, but they run on ONE event loop against ONE connection: whatever the store does
+     * between reading the head and writing it, nothing interleaves, so a store that reads the
+     * head, mints a sequence and writes — three statements, no transaction — passes this case
+     * every time while being exactly the race the head exists to eliminate. An in-memory store
+     * passing it is a tautology, not evidence.
+     *
+     * What it does catch: a store that ignores `expectedHead` outright, and one whose losers do
+     * not raise HeadMismatchError.
+     *
+     * To have any force, a host MUST also run this against its real database over SEPARATE
+     * CONNECTIONS, with the N publishes genuinely concurrent. That is the only version that
+     * proves the head comparison, the sequence mint, the append and the head advance happen in
+     * one transaction. Treating this in-process case as proof of atomicity is the specific
+     * mistake a green suite invites.
+     */
     test('racing publishes at the same head yield exactly one accepted append', async () => {
       const store = await createStore()
       await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
-      const first = await store.publish({ senderDID: ALICE, topicID: TOPIC, payload: payload(1) })
+      const first = await store.publish({
+        senderDID: ALICE,
+        topicID: TOPIC,
+        payload: payload(1),
+        retain: 'log',
+      })
 
       const racers = [2, 3, 4, 5, 6].map((byte) =>
         store.publish({
           senderDID: ALICE,
           topicID: TOPIC,
           payload: payload(byte),
+          retain: 'log',
           expectedHead: first,
         }),
       )

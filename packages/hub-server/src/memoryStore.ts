@@ -12,7 +12,7 @@ import type {
   SubscribeParams,
   TrimParams,
 } from '@kumiai/hub-protocol'
-import { NotSubscribedError, RetentionExceededError } from '@kumiai/hub-protocol'
+import { HeadMismatchError, NotSubscribedError, RetentionExceededError } from '@kumiai/hub-protocol'
 import { EventEmitter } from '@sozai/event'
 
 type RetentionClass = 'log' | 'mailbox'
@@ -135,6 +135,21 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
 
     async publish(params: PublishParams): Promise<string> {
       const retain: RetentionClass = params.retain ?? 'mailbox'
+
+      // The compare-and-set, before anything is minted or written. The head comparison, the
+      // sequence mint, the append and the head advance are one indivisible step, and a loser
+      // leaves the log, the head and the sequence exactly as it found them: no entry, no
+      // delivery, no sequenceID consumed. Absent expectedHead, this is skipped entirely — an
+      // unconditional publish is the fast path every mailbox frame takes.
+      if (params.expectedHead !== undefined) {
+        const head = heads.get(params.topicID) ?? null
+        if (head !== params.expectedHead) {
+          throw new HeadMismatchError(
+            `Publish to ${params.topicID} expected head ${params.expectedHead ?? 'null'}, but the head is ${head ?? 'null'}`,
+          )
+        }
+      }
+
       counter++
       const sequenceID = formatSequenceID(counter)
 

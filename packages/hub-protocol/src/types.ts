@@ -2,6 +2,15 @@ import type { EventEmitter } from '@sozai/event'
 
 /** Opaque message stored by the hub — minimal metadata for routing only. */
 export type StoredMessage = {
+  /**
+   * Minted by the store, inside the transaction that accepts the publish — never by the calling
+   * process. Lexicographically ordered and strictly increasing within a topic: byte-comparable,
+   * so a fixed-width zero-padded encoding. A bare decimal (`"10" < "9"`) or a UUID satisfies the
+   * type and silently breaks every comparison the design makes on it — `expectedHead` equality,
+   * `head` and `oldest` against a cursor, `after` as an exclusive cursor. A counter held in the
+   * process rather than the store collides across two hub processes on one database: survivable
+   * for a mailbox, fatal for a head, because the head IS a sequenceID.
+   */
   sequenceID: string
   senderDID: string
   topicID: string
@@ -15,8 +24,12 @@ export type PublishParams = {
   /**
    * Compare-and-set on the topic's head. Absent: append unconditionally. Present: append
    * only if the topic's current head is exactly this value, where `null` means "the topic
-   * has never had an accepted publish". On mismatch, throw HeadMismatchError and store
-   * nothing.
+   * has never had an accepted log publish". On mismatch, throw HeadMismatchError and store
+   * nothing: no log entry, no delivery row, no sequenceID consumed, no event emitted. A store
+   * that appends and then throws satisfies a test that only checks for the throw, and is broken.
+   *
+   * The head is hub-assigned — it is a sequenceID, which only the store mints — so a member
+   * cannot choose it, and cannot wedge the lane by publishing a bogus head token.
    */
   expectedHead?: string | null
   /**
@@ -128,9 +141,12 @@ export type HubStoreEvents = {
  *   topic's frames live for the longest retention any of its subscribers asked for, floored at
  *   the hub's default.
  * - `sequenceID`s are lexicographically ordered and strictly increasing within a topic — a
- *   fixed-width zero-padded encoding, not a bare decimal and not a UUID.
- * - `publish` mints the sequenceID, compares `expectedHead`, appends, and advances the head in
- *   ONE transaction. A read-then-write compare-and-set is a race and does not satisfy this.
+ *   fixed-width zero-padded encoding, not a bare decimal and not a UUID — and they are minted by
+ *   the STORE, inside the transaction, not by the calling process.
+ * - `publish` compares `expectedHead`, mints the sequenceID, appends, and advances the head in
+ *   ONE transaction. A read-then-write compare-and-set is a race — precisely the race the head
+ *   exists to eliminate — and a host that reads "the head is a scalar" and implements it as three
+ *   statements does not satisfy this contract, however green its single-connection tests are.
  *
  * Implementations are verified by the conformance suite exported from
  * `@kumiai/hub-protocol/conformance`.
