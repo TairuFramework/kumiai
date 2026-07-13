@@ -5,6 +5,7 @@ import {
   type RequestHandler,
 } from '@enkaku/server'
 import type { HubProtocol, HubStore, StoredMessage } from '@kumiai/hub-protocol'
+import { hubErrorCodeOf } from '@kumiai/hub-protocol'
 import { fromB64, toB64 } from '@sozai/codec'
 
 import { createRateLimiter, type RateLimitConfig } from './rateLimit.js'
@@ -59,6 +60,22 @@ function getClientDID(ctx: { message: { payload: Record<string, unknown> } }): s
   return iss
 }
 
+/**
+ * Re-raise a named store error with its wire code, so the caller can tell a lost compare-and-set
+ * from an unreachable hub. Anything else is not ours and passes through untouched.
+ */
+function rethrowAsHandlerError(error: unknown): never {
+  const code = hubErrorCodeOf(error)
+  if (code != null) {
+    throw new HandlerError({
+      code,
+      message: error instanceof Error ? error.message : code,
+      cause: error,
+    })
+  }
+  throw error
+}
+
 export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<HubProtocol> {
   const { store, registry } = params
   const authorize: AuthorizeHook = params.authorize ?? (() => true)
@@ -109,7 +126,21 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         throw new HandlerError({ code: 'EK01', message: 'Publish rate limit exceeded for topic' })
       }
       const payloadBytes = fromB64(payload)
-      const sequenceID = await store.publish({ senderDID, topicID, payload: payloadBytes })
+      let sequenceID: string
+      try {
+        sequenceID = await store.publish({
+          senderDID,
+          topicID,
+          payload: payloadBytes,
+          retain: ctx.param.retain,
+          // Absent and null are different requests: null is the empty-topic sentinel, absent is
+          // an unconditional publish. Spreading only when present keeps them apart.
+          ...('expectedHead' in ctx.param ? { expectedHead: ctx.param.expectedHead } : {}),
+          publishID: ctx.param.publishID,
+        })
+      } catch (error) {
+        rethrowAsHandlerError(error)
+      }
 
       // Live-deliver to currently-connected subscribers (minus the sender).
       const subscribers = await store.getSubscribers(topicID)
@@ -130,9 +161,35 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       if (!(await authorize(clientDID, 'subscribe', topicID))) {
         throw new HandlerError({ code: 'EK02', message: 'Not authorized to subscribe to topic' })
       }
-      await store.subscribe({ subscriberDID: clientDID, topicID })
+      try {
+        await store.subscribe({ subscriberDID: clientDID, topicID, retention: ctx.param.retention })
+      } catch (error) {
+        rethrowAsHandlerError(error)
+      }
       return { subscribed: true }
     }) as RequestHandler<HubProtocol, 'hub/subscribe'>,
+
+    'hub/topic/fetch': (async (ctx) => {
+      const { topicID, after, limit } = ctx.param
+      // The subscriber is the authenticated caller, taken from the verified issuer of the signed
+      // message — never a wire field, or any member could read a topic's log by naming another.
+      const subscriberDID = getClientDID(ctx)
+      try {
+        const result = await store.fetchTopic({ subscriberDID, topicID, after, limit })
+        return {
+          messages: result.messages.map((message) => ({
+            sequenceID: message.sequenceID,
+            senderDID: message.senderDID,
+            topicID: message.topicID,
+            payload: toB64(message.payload),
+          })),
+          head: result.head,
+          oldest: result.oldest,
+        }
+      } catch (error) {
+        rethrowAsHandlerError(error)
+      }
+    }) as RequestHandler<HubProtocol, 'hub/topic/fetch'>,
 
     'hub/unsubscribe': (async (ctx) => {
       const { topicID } = ctx.param

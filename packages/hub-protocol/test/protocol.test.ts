@@ -11,9 +11,34 @@ describe('hubProtocol', () => {
         'hub/publish',
         'hub/receive',
         'hub/subscribe',
+        'hub/topic/fetch',
         'hub/unsubscribe',
       ].sort(),
     )
+  })
+
+  test('hub/topic/fetch takes no subscriberDID: the caller is the authenticated DID', () => {
+    const fetchTopic = hubProtocol['hub/topic/fetch']
+    expect(fetchTopic.type).toBe('request')
+    expect(fetchTopic.param.required).toEqual(['topicID'])
+    // A subscriberDID on the wire would let any member read any topic's log by naming someone
+    // else. The server takes it from the verified issuer of the signed message instead.
+    expect(fetchTopic.param.properties).not.toHaveProperty('subscriberDID')
+    expect(fetchTopic.param.additionalProperties).toBe(false)
+    expect(fetchTopic.result.required).toEqual(['messages', 'head', 'oldest'])
+  })
+
+  test('hub/publish carries the retention class, the CAS head and the idempotency key', () => {
+    const publish = hubProtocol['hub/publish']
+    expect(publish.param.properties.retain.enum).toEqual(['log', 'mailbox'])
+    // The empty-topic sentinel has to survive the wire as null, distinct from an absent field.
+    expect(publish.param.properties.expectedHead.type).toEqual(['string', 'null'])
+    expect(publish.param.properties).toHaveProperty('publishID')
+    expect(publish.param.required).toEqual(['topicID', 'payload'])
+  })
+
+  test('hub/subscribe carries the requested retention', () => {
+    expect(hubProtocol['hub/subscribe'].param.properties).toHaveProperty('retention')
   })
 
   test('removes the legacy group/recipients procedures', () => {

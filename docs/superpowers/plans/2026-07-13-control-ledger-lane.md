@@ -2,10 +2,11 @@
 
 **Stage:** planning
 **Mode:** learning-loop
-**Spec:** `docs/superpowers/specs/2026-07-13-control-ledger-lane-design.md` (revision 19)
+**Spec:** `docs/superpowers/specs/2026-07-13-control-ledger-lane-design.md` (revision 20)
 **Review record:** `docs/superpowers/specs/2026-07-13-control-ledger-lane-review.md` (G1–G27)
 **Found while implementing:** G28 (the lane outruns the mailbox), G29 (`head` advances on a
-mailbox publish), G30 ("one transaction" is not a CAS) — see the decision log.
+mailbox publish), G30 ("one transaction" is not a CAS), G31 (the dedup record must not cascade
+from `messages`, while the delivery rows must) — see the decision log.
 
 ## How this plan is adversarial
 
@@ -222,6 +223,15 @@ frames are still undecrypted.
   diagnosis** while walking frames from epochs it never held.
 - **⚠️ Wrong-but-passing:** seeding the cursor from the topic's `head` at subscribe time. Every
   online-peer test passes; the joiner then CASes against a head whose commits it never applied.
+- **Two traps found while wiring the transport (question 1.5), both landing here:**
+  - **A log publish is pushed *and* retained.** An accepted `retain: 'log'` frame goes down
+    `hub/receive` *and* into the log, so an online peer sees every commit twice. The lane drives by
+    **pull**; push is a wakeup and nothing more. A lane that also processes the pushed copy works
+    perfectly in every single-peer test and breaks the moment two peers are online.
+  - **`hub/receive`'s `after` and `hub/topic/fetch`'s `after` are both `string` and mean different
+    things** — a delivery-queue position versus a log position. A peer holding one "cursor" and
+    feeding it to both silently mis-pages. Name them apart in the peer's state
+    (`deliveryCursor` / `reconciledHead`); do not let them share a type alias either.
 - **Spec excerpt:** "seeds its cursor by *reading the log*, not by guessing… A frame framed at an
   epoch it has already passed is dropped and still advances the cursor."
 - **Verify:** `rtk proxy pnpm run build && rtk proxy pnpm run lint && rtk proxy pnpm test`
@@ -585,3 +595,75 @@ suite structurally cannot catch** (in-process counter, read-then-write CAS on `R
 the cascading dedup FK), each of which passes a fully green run. Every one of them is silent, every
 one forks or bricks a group, and every one is a schema review rather than a test. A conformance suite
 that knows and states its own ceiling is worth considerably more than one that implies it has none.
+
+---
+
+### 2026-07-13 — Question 1.5: Does `fetchTopic` read the log, gated on subscription?
+
+**Findings:** Confirmed, end to end. `hub/topic/fetch` is the new procedure; `retain`,
+`expectedHead` and `publishID` thread through publish, `retention` through subscribe; the three
+errors cross the wire as `HUB_HEAD_MISMATCH` / `HUB_NOT_SUBSCRIBED` / `HUB_RETENTION_EXCEEDED`, and
+`hubErrorFromCode` rebuilds the named class client-side — returning `null` for anything without a
+hub code, which is exactly what a transport failure is. So the peer lane can distinguish "I lost the
+CAS, rebase and retry" from "the hub is down", which its whole retry loop turns on. Integration
+23/23, full repo green.
+
+**The five wire fields are proven, not assumed.** Each was deleted and the resulting failure
+recorded. Dropping `retain` fails 3 of 6 integration tests and the zero-subscriber pull returns `[]`
+— the entire phase silently reverting to a mailbox, exactly as predicted. Dropping `publishID`
+reproduces the restart-replay brick end to end: `expected head null, but the head is 000000000001`.
+
+`subscriberDID` was a non-finding, and the good kind: every existing handler already derives the
+caller from the verified `iss` of the signed message, so the new one does too. The protocol test now
+asserts `subscriberDID`'s **absence** from the wire schema — it cannot be named by a caller.
+
+**Spec impact:** none. Two notes folded into question 3.1 instead, both found by wiring rather than
+by testing:
+
+1. **A log publish is pushed *and* retained** — an online peer sees each commit twice, once down
+   `hub/receive` and once by pulling. Consistent with the design (the lane drives by pull; push is a
+   wakeup), but a lane that also processes the pushed copy passes every single-peer test and breaks
+   the moment two peers are online.
+2. **`hub/receive`'s `after` and `hub/topic/fetch`'s `after` are both `string` and mean different
+   things** — a delivery-queue position versus a log position. A peer holding one "cursor" and
+   feeding it to both silently mis-pages.
+
+**Learned:** `expectedHead: null` and *absent* are different requests — conditional-at-empty versus
+unconditional — and spreading `params.expectedHead` straight through would have made **every mailbox
+publish a conditional publish against `undefined`**. The optional-field-that-means-something-when-
+null is a shape worth watching for wherever this design uses one.
+
+`fetchTopic` was deliberately **not** added to `hub-tunnel`'s `HubLike`: that is the tunnel's mailbox
+abstraction, with four implementations and no consumer for a log — the peer lane pulls through
+`hub-client`. A two-line addition if Phase 3 turns out to want it.
+
+---
+
+## Phase 1 exit
+
+**Met, with one criterion withdrawn rather than passed.**
+
+- `hub-protocol` exports a conformance suite (`@kumiai/hub-protocol/conformance`), 15 clauses.
+- `memoryStore` passes all 15, and the whole surface is reachable over the wire.
+- The suite **demonstrably fails** the two wrong stores — both were built and watched failing, not
+  argued about: a delivery-derived store (9 of 10 red at the time) and a row-hung dedup record (14
+  of 15, failing exactly the load-bearing clause with the bricked-group error printed).
+- **Withdrawn:** "the suite fails a store that mints sequenceIDs in-process." It cannot, and no
+  in-process suite can. Now a DDL review item in the spec's host-side impact.
+
+**What the phase actually produced.** The store was the smaller half. The larger half is four
+defects that a fully green conformance run does not catch, every one of them silent, and every one
+of them forking or bricking a group:
+
+- **G29** — `head` advancing on a mailbox publish lets *any member* wedge the lane for the whole
+  group, permanently. Found by an implementer noticing a field meant two things.
+- **G30** — "one transaction" is necessary and not sufficient: on `READ COMMITTED`, a host that
+  obeys the contract to the letter still forks. Needs a conditional write, not a read-then-write.
+- **G31** — two tables reference `messages`; the delivery rows **must** cascade and the dedup record
+  **must not**. The symmetric, tidy-looking schema is the fatal one.
+- **The in-process counter** — passes all 15 clauses; breaks across two hub processes on one
+  database. Kubun mints this today.
+
+A conformance suite that states its own ceiling is worth more than one that implies it has none.
+Three of those four are now written into the spec as host review items, because a host reads a green
+suite as proof.
