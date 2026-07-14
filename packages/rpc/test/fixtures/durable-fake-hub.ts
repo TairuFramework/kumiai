@@ -1,4 +1,4 @@
-import { NotSubscribedError, type StoredMessage } from '@kumiai/hub-protocol'
+import { HeadMismatchError, NotSubscribedError, type StoredMessage } from '@kumiai/hub-protocol'
 import type {
   HubFetchTopicParams,
   HubFetchTopicResult,
@@ -35,6 +35,10 @@ export class DurableFakeHub implements LogHub {
   #sinks = new Map<string, Sink>()
   #live = new Map<string, boolean>()
   #acked = new Map<string, Set<string>>()
+  /** publishID -> the sequenceID it was accepted as. Not a log entry; no deleter reaches it. */
+  #publishRecords = new Map<string, string>()
+  /** The sequenceIDs published `retain: 'log'`. A topic's log is these, and nothing else. */
+  #logClass = new Set<string>()
 
   subscribe(subscriberDID: string, topicID: string): void {
     let set = this.#topics.get(topicID)
@@ -53,7 +57,21 @@ export class DurableFakeHub implements LogHub {
   }
 
   async publish(params: HubPublishParams): Promise<{ sequenceID: string }> {
+    // Dedup before compare-and-set: the store's order, and a replay depends on it.
+    if (params.publishID != null) {
+      const accepted = this.#publishRecords.get(params.publishID)
+      if (accepted !== undefined) return { sequenceID: accepted }
+    }
+    if (params.expectedHead !== undefined) {
+      const head = this.#heads.get(params.topicID) ?? null
+      if (head !== params.expectedHead) {
+        throw new HeadMismatchError(
+          `Publish to ${params.topicID} expected head ${params.expectedHead ?? 'null'}, but the head is ${head ?? 'null'}`,
+        )
+      }
+    }
     const sequenceID = formatSequenceID(++this.#seq)
+    if (params.publishID != null) this.#publishRecords.set(params.publishID, sequenceID)
     const message: StoredMessage = {
       sequenceID,
       senderDID: params.senderDID,
@@ -61,7 +79,11 @@ export class DurableFakeHub implements LogHub {
       payload: params.payload,
     }
     this.#log.push(message)
-    if (params.retain === 'log') this.#heads.set(params.topicID, sequenceID)
+    // Only a log publish moves the head — and only a log publish is IN the log.
+    if (params.retain === 'log') {
+      this.#logClass.add(sequenceID)
+      this.#heads.set(params.topicID, sequenceID)
+    }
     for (const did of this.#topics.get(params.topicID) ?? []) {
       if (did === params.senderDID) continue
       if (this.#live.get(did)) this.#sinks.get(did)?.push(message)
@@ -75,7 +97,12 @@ export class DurableFakeHub implements LogHub {
         `${params.subscriberDID} is not a subscriber of ${params.topicID}`,
       )
     }
-    const log = this.#log.filter((m) => m.topicID === params.topicID)
+    // A topic's log is its log-class frames and nothing else: a mailbox frame is delivered
+    // and never enters the log, so no reader's cursor can name a position the head cannot
+    // reach.
+    const log = this.#log.filter(
+      (m) => m.topicID === params.topicID && this.#logClass.has(m.sequenceID),
+    )
     const after = params.after
     const selected = after == null ? log : log.filter((m) => m.sequenceID > after)
     const messages = params.limit == null ? selected : selected.slice(0, params.limit)

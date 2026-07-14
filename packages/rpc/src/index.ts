@@ -7,6 +7,17 @@
 export { defineGroupProtocol, type GroupProtocolDefinition } from '@kumiai/broadcast'
 
 export {
+  CommitDeadlineError,
+  type CommitJournal,
+  type CommitKind,
+  isHeadMismatch,
+  type JournalEntry,
+  JournalEpochError,
+  type LaneResult,
+  type LostCommit,
+  type PendingCommit,
+} from './commit.js'
+export {
   type CommitFrame,
   decodeCommitFrame,
   encodeCommitFrame,
@@ -42,8 +53,8 @@ export {
 export {
   createGroupPeer,
   type GroupPeer,
+  type GroupPeerMLSParams,
   type GroupPeerParams,
-  type LocalCommitOptions,
   type ProtocolSurface,
 } from './peer.js'
 export {

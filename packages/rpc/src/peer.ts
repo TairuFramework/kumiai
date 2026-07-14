@@ -15,6 +15,15 @@ import type { StoredMessage } from '@kumiai/hub-protocol'
 import type { LogHub } from '@kumiai/hub-tunnel'
 
 import { createGroupBusServer } from './bus-server.js'
+import {
+  CommitDeadlineError,
+  type CommitJournal,
+  isHeadMismatch,
+  JournalEpochError,
+  type LaneResult,
+  type LostCommit,
+  type PendingCommit,
+} from './commit.js'
 import { type CommitFrame, decodeCommitFrame, encodeCommitFrame } from './commit-frame.js'
 import type { GroupCrypto, GroupMLS } from './crypto.js'
 import { asLogPosition, type LogPosition } from './cursor.js'
@@ -44,11 +53,46 @@ const DEFAULT_COMMIT_LOG_RETENTION_SECONDS = 30 * 24 * 60 * 60
 /** How many commit frames a single pull asks for. Pull loops until the log is drained. */
 const COMMIT_FETCH_LIMIT = 100
 
+/**
+ * How long `commit` keeps rebasing before it gives up. A deadline, not an attempt count:
+ * with several active admins, five consecutive lost compare-and-sets on a busy group is
+ * ordinary contention, and an attempt count turns it into a thrown error.
+ */
+const DEFAULT_COMMIT_DEADLINE_MS = 30_000
+
+/**
+ * Runaway guard only. The deadline is the bound that matters; this exists so a hub that
+ * accepts nothing and never advances its head cannot spin the loop forever inside a clock
+ * tick.
+ */
+const COMMIT_ATTEMPT_CEILING = 1000
+
+/**
+ * The MLS half of a peer: the lifecycle port, the durable journal that carries a pending
+ * commit across a crash, and the host hook that adopts one after a restart. They arrive
+ * together or not at all — a peer with an MLS port and no journal would lose every commit
+ * whose process died in the acceptance window, silently, and the type is what stops a host
+ * wiring that.
+ */
+export type GroupPeerMLSParams = {
+  /** MLS lifecycle port. When provided, the peer runs the commit lane. */
+  mls: GroupMLS
+  /** Durable single-slot journal. Written before every publish, cleared on both outcomes. */
+  journal: CommitJournal
+  /**
+   * Adopt a commit that was journalled and has now been confirmed accepted — the restart
+   * half of {@link PendingCommit.onAccepted}, over the same opaque blob. The host
+   * deserializes its post-commit handle, adopts it, and delivers any Welcome it carried.
+   *
+   * MUST be idempotent, for the same reason `onAccepted` must: the peer cannot tell an
+   * entry whose `onAccepted` already ran from one whose process died before it.
+   */
+  adoptJournalled: (journal: Uint8Array) => Promise<void>
+}
+
 export type GroupPeerParams<Protocols extends Record<string, ProtocolDefinition>> = {
   hub: LogHub
   crypto: GroupCrypto
-  /** MLS lifecycle port. When provided, the peer runs the handshake lane. */
-  mls?: GroupMLS
   localDID: string
   protocols: Protocols
   handlers: { [K in keyof Protocols]: ProcedureHandlers<Protocols[K]> }
@@ -62,7 +106,12 @@ export type GroupPeerParams<Protocols extends Record<string, ProtocolDefinition>
    * log; beyond it, it must be healed by another live member.
    */
   commitLogRetentionSeconds?: number
-}
+  /**
+   * How long `commit` rebases against the group before giving up, in milliseconds.
+   * Defaults to 30s. Losing a compare-and-set is the expected path, not an error path.
+   */
+  commitDeadlineMs?: number
+} & (GroupPeerMLSParams | { mls?: undefined; journal?: undefined; adoptJournalled?: undefined })
 
 export type ProtocolSurface<Protocol extends ProtocolDefinition> = {
   dispatch: (prc: string, data?: Record<string, unknown>) => Promise<void>
@@ -71,36 +120,36 @@ export type ProtocolSurface<Protocol extends ProtocolDefinition> = {
   to: (memberDID: string) => Client<Protocol>
 }
 
-export type LocalCommitOptions = {
-  /**
-   * The signed control-ledger tokens this Commit enacts. They ride the commit's own
-   * frame, sealed under the epoch secret the Commit is framed at, so every member that
-   * can apply the Commit already has its bodies. Nothing is published ahead of the
-   * commit, and no member has to ask for a body it has never seen.
-   */
-  ledgerEntries?: Array<string>
-  /**
-   * Adopt the post-commit MLS state. Run once the hub has the frame, before the peer
-   * rebuilds its app lane at the new epoch. It is the consumer's own handle swap — the
-   * peer owns no MLS state and only needs to know WHEN it happened.
-   */
-  adopt?: () => void | Promise<void>
-}
-
 export type GroupPeer<Protocols extends Record<string, ProtocolDefinition>> = {
   protocol: <K extends keyof Protocols>(name: K) => ProtocolSurface<Protocols[K]>
   /**
-   * Announce a Commit the consumer has produced but NOT yet adopted: seal the ledger
-   * entries it enacts under the current — pre-commit — epoch secret, append the frame to
-   * the commit log, adopt, and rebuild this peer's app topics at the epoch it moved to.
-   * No-op when the peer has no MLS port.
+   * Commit to the group, and keep rebasing until it lands.
    *
-   * The order is the contract: the bodies must be sealed under the epoch every receiver
-   * of this Commit is at, which is the epoch the group is at until this Commit is
-   * adopted. A consumer that adopts first can no longer seal them for anybody, and is
-   * told so rather than publishing a blob no member can open.
+   * `build()` produces a commit against the host's CURRENT handle and does not adopt it.
+   * The peer replays its journal, pulls the commit log to the end, calls `build()`,
+   * journals the result, and publishes it conditionally on the head it pulled to. If it
+   * wins, the host's `onAccepted` runs and the slot clears. If it loses — someone else
+   * committed first — the pending commit is dropped untouched and `build()` is called
+   * again against the now-current handle. That is the expected path, not an error path.
+   *
+   * `build()` is called once per attempt and MUST read the host's live handle each time.
+   * It must have no side effects until `onAccepted` runs: an attempt that loses is
+   * discarded whole.
+   *
+   * Holds the group's commit mutex for its whole run. The compare-and-set resolves races
+   * between devices; it says nothing about two callers on the same one, and two `build()`
+   * calls against a single handle would both frame at that handle's epoch and diverge.
    */
-  localCommitted: (commit: Uint8Array, options?: LocalCommitOptions) => Promise<void>
+  commit: (build: () => Promise<PendingCommit>) => Promise<LaneResult>
+  /**
+   * Replay the journal on its own, for startup: republish any pending commit under its
+   * original idempotency key and hand back what did not survive.
+   *
+   * Every lane operation replays first, so this is not the only way a loss surfaces — but
+   * it is the one a host can call before it does anything else, and a peer that comes up
+   * holding a commit it never learned the fate of should be asked.
+   */
+  replay: () => Promise<LaneResult>
   /**
    * Deep recovery for a peer stranded past the commit log's trim window: request
    * current state on the rendezvous topic, apply the first reply, and resync.
@@ -123,13 +172,16 @@ type ProtocolRuntime = {
 export function createGroupPeer<Protocols extends Record<string, ProtocolDefinition>>(
   params: GroupPeerParams<Protocols>,
 ): GroupPeer<Protocols> {
-  const { hub, crypto, mls, localDID, protocols, handlers, suppress } = params
+  const { hub, crypto, mls, journal, adoptJournalled, localDID, protocols, handlers, suppress } =
+    params
   const getRandomID = params.getRandomID
+  const newPublishID = getRandomID ?? defaultRandomID
   const recoveryTimeoutMs = params.recovery?.timeoutMs ?? DEFAULT_RECOVERY_TIMEOUT_MS
   const getReplyDelayMs =
     params.recovery?.getDelayMs ?? (() => defaultJitter(DEFAULT_RECOVERY_JITTER_MS))
   const commitLogRetentionSeconds =
     params.commitLogRetentionSeconds ?? DEFAULT_COMMIT_LOG_RETENTION_SECONDS
+  const commitDeadlineMs = params.commitDeadlineMs ?? DEFAULT_COMMIT_DEADLINE_MS
   const mux: HubMux = createHubMux({ hub, localDID })
 
   let runtimes = new Map<string, ProtocolRuntime>()
@@ -247,15 +299,40 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   let reconciledHead: LogPosition | null = null
 
   /**
-   * Commit frames this peer published itself and had already applied before announcing.
-   * The log hands a peer its own frames back — push never did, because the hub excludes
-   * a sender from its own delivery — so without this the committer would apply its own
-   * commit a second time when it pulls. Entries are dropped as the cursor passes them.
+   * The commit log's TIP, as the last complete drain reported it — and the anchor every
+   * commit compare-and-sets against.
+   *
+   * It is NOT the cursor, and conflating them is a defect waiting to happen. The cursor is
+   * what this peer has PROCESSED; the head is what the log's last accepted frame IS. They
+   * coincide only while every frame on the topic is log-class, which is a property of the
+   * store, not of this peer — so the peer names the head for what it is and reads it from
+   * the store's own reply, rather than inferring it from a cursor that happens to agree.
+   * `null` means the topic has never had an accepted log publish, which is exactly what the
+   * first commit of a group's life must compare against.
    */
-  const selfCommitted = new Set<string>()
+  let commitLogHead: LogPosition | null = null
 
-  // Commit processing is serialized: MLS applies Commits in order, and both
-  // processCommit and the epoch rebuild are async.
+  /**
+   * A commit this peer journalled, that never landed, and that it cannot re-issue itself:
+   * held until a lane operation with a return value can hand it to the host.
+   *
+   * A delivery wakeup is a lane operation too, and it replays like any other — but it has
+   * nowhere to put a loss. Dropping it there would be the one thing that must not happen:
+   * for an invite it loses an invitation, and for a remove it leaves an admin believing a
+   * member was evicted when they were not.
+   */
+  let lostCommit: LostCommit | undefined
+
+  /**
+   * The group's commit mutex, and the serialization of every commit-lane operation
+   * through one tail. The compare-and-set resolves races between devices; it says nothing
+   * about two callers on this one, and two `build()` calls against a single handle would
+   * both frame at that handle's epoch and diverge.
+   *
+   * It is NOT reentrant: a task that calls `runSerial` again waits on a tail that includes
+   * itself. That is why a loss is returned to the host and never handed to it under the
+   * lock — the host's answer to a loss is to commit, and a commit takes this mutex.
+   */
   let commitTail: Promise<void> = Promise.resolve()
   const runSerial = <T>(fn: () => Promise<T>): Promise<T> => {
     const op = commitTail.then(fn)
@@ -333,12 +410,23 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * and does NOT advance over a frame whose processing threw: the throw leaves the
    * cursor where it was, and the next pull reads that frame again. The cursor, not the
    * ack, is what makes the lane retry.
+   *
+   * It is also the only place the log's tip is learned, and the tip is taken from the
+   * store's OWN reply — never inferred from the cursor. It is recorded ONLY on a complete
+   * drain, at the points this returns: a tip recorded ahead of the frames it covers would
+   * name a commit this peer has not reconciled to, and the next `commit()` would win a
+   * compare-and-set at an epoch it had not caught up to.
    */
   const pullCommits = async (): Promise<boolean> => {
     if (mls == null || commitTopicID == null) return false
     const port = mls
     const topicID = commitTopicID
     let advancedEpoch = false
+    // The tip as the reply that drained the log named it. Read from the SAME reply whose
+    // frames were processed, so it can never run ahead of them.
+    const takeHead = (head: string | null): void => {
+      commitLogHead = head == null ? null : asLogPosition(head)
+    }
     while (true) {
       const result = await mux.fetchTopic({
         topicID,
@@ -350,13 +438,21 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         ...(reconciledHead != null ? { after: reconciledHead } : {}),
         limit: COMMIT_FETCH_LIMIT,
       })
-      if (result.messages.length === 0) return advancedEpoch
+      if (result.messages.length === 0) {
+        // Drained. The tip an EMPTY page reports is not redundant: a topic keeps its head
+        // when its frames age out, so a log that has been swept away entirely still has a
+        // tip — and a peer that anchored on its own cursor there would compare-and-set
+        // against `null` on a topic whose head is a real sequenceID, and lose forever.
+        takeHead(result.head)
+        return advancedEpoch
+      }
       for (const message of result.messages) {
+        // The peer's OWN commit frames are never read here, and no set of them is kept: a
+        // commit this peer landed moved its cursor to that frame's own position as it was
+        // accepted, so the pull starts after it. The journal is what carries that across a
+        // restart — replay sets the cursor to the frame it confirms — and it is durable,
+        // where an in-memory set was not.
         const position = asLogPosition(message.sequenceID)
-        if (selfCommitted.delete(position)) {
-          reconciledHead = position // this peer's own commit, applied before it announced it
-          continue
-        }
         let frame: ReturnType<typeof decodeHandshakeFrame>
         try {
           frame = decodeHandshakeFrame(message.payload)
@@ -391,7 +487,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         if (advanced) advancedEpoch = true
         reconciledHead = position
       }
-      if (result.messages.length < COMMIT_FETCH_LIMIT) return advancedEpoch
+      // A short page is the end of the log: every frame this reply named has been
+      // processed, so the tip it named is a tip this peer has reconciled to. A full page
+      // is not — the tip may be beyond it — so the loop goes round and takes the head from
+      // the reply that finally drains.
+      if (result.messages.length < COMMIT_FETCH_LIMIT) {
+        takeHead(result.head)
+        return advancedEpoch
+      }
     }
   }
 
@@ -412,7 +515,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     ack()
     void runSerial(async () => {
       await ready
-      await reconcileCommits()
+      // A wakeup is a lane operation like any other: step 0, then the pull. It has no
+      // return value, so a loss found here is stashed for the next call that has one.
+      const replayed = await replayJournal()
+      const pulled = await pullCommits()
+      if (replayed || pulled) await rebuildEpoch()
     }).catch(() => {
       // the pull failed (e.g. processCommit threw); the cursor did not advance, so the
       // next wakeup reads those frames again
@@ -452,49 +559,239 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     rendezvousUnsubscribe = mux.onInbound(rendezvousTopicID, onRendezvousMessage)
     // Then seed the cursor by READING the log — the commits published before this peer
     // subscribed are exactly the ones no push will ever bring it.
-    await runSerial(pullCommits).catch(() => {
-      // a failed seed leaves the cursor where it was; the next wakeup pulls again
+    //
+    // The seed is a lane operation, so the journal is replayed AHEAD of it: a peer coming
+    // up after a crash has to settle its own pending commit before it reads a log that
+    // may contain it. Neither step rebuilds the epoch — buildEpoch runs next and reads
+    // whatever epoch they left the group at.
+    await runSerial(async () => {
+      await replayJournal()
+      await pullCommits()
+    }).catch(() => {
+      // a failed seed leaves the cursor where it was; the next wakeup replays and pulls again
     })
   }
 
-  // Append a locally-produced Commit to the log and rebuild this peer's app topics.
-  // Rides the same serial tail as the pull so it never interleaves with one.
-  const localCommitted = async (
-    commit: Uint8Array,
-    options?: LocalCommitOptions,
-  ): Promise<void> => {
-    await ready
-    if (mls == null || commitTopicID == null) return
-    const topicID = commitTopicID
-    await runSerial(async () => {
-      // The bodies are sealed under the epoch secret the Commit is FRAMED at — the epoch
-      // every member that can apply it is at, and the one the local group is still at
-      // until this Commit is adopted. A consumer that adopted first has already rotated
-      // past it and can seal them for nobody, so say so instead of publishing a blob no
-      // member can open.
-      if (crypto.epoch() !== epoch) {
-        throw new Error(
-          'localCommitted: the local group has already advanced past the epoch this commit was framed at. Announce a commit before adopting it.',
-        )
-      }
-      const sealedEntries = await crypto.wrap(encodeLedgerEntries(options?.ledgerEntries ?? []))
-      const payload = encodeHandshakeFrame(
-        HANDSHAKE_KIND.commit,
-        encodeCommitFrame(commit, sealedEntries),
+  /**
+   * Frame a commit for the log: `[commit][wrap(bodies)]`, the bodies sealed under the
+   * epoch secret the commit is FRAMED at — the epoch every member that can apply it is at,
+   * and the one this group is still at until the commit is adopted. A host that adopted
+   * first has rotated past it and can seal them for nobody, so it is told, rather than
+   * publishing a blob no member can open.
+   */
+  const frameCommit = async (commit: Uint8Array, bodies: Array<string>): Promise<Uint8Array> => {
+    if (crypto.epoch() !== epoch) {
+      throw new Error(
+        'commit: the local group has already advanced past the epoch this commit was framed at. A commit is adopted in onAccepted, never before.',
       )
-      // Log class: this frame must still be there for a member invited tomorrow, long
-      // after every current subscriber has acked it.
-      const { sequenceID } = await mux.publish({ topicID, payload, retain: 'log' })
-      // A pull reads back the peer's own frames. Remember this one so the cursor steps
-      // over it instead of handing this peer back a commit it produced.
-      selfCommitted.add(asLogPosition(sequenceID))
-      // The hub has the frame: the Commit is the group's now. The consumer adopts it,
-      // and only then does the app lane move to the epoch it reached.
-      await options?.adopt?.()
-      await rebuildEpoch()
-      // Pull immediately: no push comes back for a frame this peer published, so this is
-      // what carries the cursor over it — and it picks up anything that landed alongside.
-      await reconcileCommits()
+    }
+    const sealedEntries = await crypto.wrap(encodeLedgerEntries(bodies))
+    return encodeHandshakeFrame(HANDSHAKE_KIND.commit, encodeCommitFrame(commit, sealedEntries))
+  }
+
+  /**
+   * Step 0 of every lane operation, strictly ahead of the pull. Settle any journalled
+   * commit: adopt it if the slot records that it landed, and otherwise republish it under
+   * its ORIGINAL publishID and expectedHead and let the store's idempotency decide what
+   * happened to it — no responder, no network peer, no rendezvous.
+   *
+   * Ahead of the pull because the ordering is load-bearing: a peer that pulls first meets
+   * its own un-merged commit in the log and has to reason about a frame it produced and
+   * never adopted, which is the expensive path the journal exists to avoid.
+   *
+   * Returns whether it moved the epoch. Any loss is stashed, not thrown and not called
+   * back: it is the host's to act on, and its action is to commit.
+   */
+  const replayJournal = async (): Promise<boolean> => {
+    if (mls == null || journal == null || commitTopicID == null) return false
+    const entry = await journal.get()
+    if (entry == null) return false
+
+    if (entry.acceptedAs != null) {
+      // It landed, and this peer wrote that down before it adopted. There is nothing to ask
+      // anyone: no republish, no re-seal, no network. The recorded sequenceID is both the
+      // last position this peer processed and the log's tip as of that frame — a stale tip
+      // is safe, because a commit that races it simply loses the compare-and-set and
+      // rebases, where a WRONG one would win a race it had no right to.
+      const accepted = asLogPosition(entry.acceptedAs)
+      reconciledHead = accepted
+      commitLogHead = accepted
+      await adoptJournalled(entry.journal)
+      await journal.clear(entry.publishID)
+      return true
+    }
+
+    // Republishing means RE-SEALING the bodies, and they can only be sealed under the epoch
+    // the host's handle is at now. That is the epoch the commit was framed at only while
+    // onAccepted is the sole place the host adopts — and an entry whose acceptance was never
+    // recorded, at any other epoch, is proof that it is not. Sealing anyway would publish a
+    // blob no member can open and wedge the lane for the whole group, so the peer refuses
+    // and keeps the slot.
+    if (crypto.epoch() !== entry.epoch) {
+      throw new JournalEpochError(
+        `commit replay: the journalled commit was framed at epoch ${entry.epoch}, and this group is now at ${crypto.epoch()}. A commit is adopted in onAccepted, and nowhere else.`,
+      )
+    }
+
+    const payload = await frameCommit(entry.commit, entry.bodies)
+    let sequenceID: string
+    try {
+      sequenceID = (
+        await mux.publish({
+          topicID: commitTopicID,
+          payload,
+          retain: 'log',
+          expectedHead: entry.expectedHead,
+          publishID: entry.publishID,
+        })
+      ).sequenceID
+    } catch (error) {
+      if (!isHeadMismatch(error)) {
+        // The outcome is UNKNOWN — the hub may have accepted this and failed to say so.
+        // Leave the slot exactly as it is: the next lane operation asks again.
+        throw error
+      }
+      // It never landed, and someone else's commit is at the head now. There is no
+      // `build()` to call again: the process that held it is gone. So hand back what
+      // survived, and clear the slot — the notice is what must not be lost, never the
+      // slot that must be kept.
+      await journal.clear(entry.publishID)
+      lostCommit =
+        entry.kind === 'ledger' ? { kind: 'ledger', tokens: entry.bodies } : { kind: entry.kind }
+      return false
+    }
+    // Accepted — either just now, or by the process that published it and then died. The
+    // store's dedup record makes those two indistinguishable, and that is the point.
+    //
+    // Record the acceptance BEFORE adopting, for the same reason `commit()` does: adopting
+    // moves the handle past the epoch this commit was framed at, and a crash between the
+    // two would leave a journalled commit that looks exactly like a host that adopted out
+    // of band. Written first, this replay is idempotent — the next one adopts from the slot
+    // and never republishes.
+    await journal.markAccepted(entry.publishID, sequenceID)
+    // This peer's own accepted frame is BOTH: the last thing it processed, and the log's
+    // tip. Two names for one position here, because for this one frame they genuinely
+    // coincide — and a `commit()` straight after a `replay()` would otherwise anchor on a
+    // tip from before its own commit landed.
+    const accepted = asLogPosition(sequenceID)
+    reconciledHead = accepted
+    commitLogHead = accepted
+    await adoptJournalled(entry.journal)
+    await journal.clear(entry.publishID)
+    return true
+  }
+
+  /** Hand the host any loss found by a step 0 — this operation's, or an earlier wakeup's. */
+  const takeLost = (): LaneResult => {
+    const lost = lostCommit
+    lostCommit = undefined
+    return lost != null ? { lost } : {}
+  }
+
+  /**
+   * Commit to the group, rebasing until it lands or the deadline passes. Runs under the
+   * commit mutex for its whole life, so `build()` never races another `build()` on this
+   * device against the same handle.
+   */
+  const commit = async (build: () => Promise<PendingCommit>): Promise<LaneResult> => {
+    await ready
+    if (mls == null || journal == null || commitTopicID == null) {
+      throw new Error('commit: this peer has no MLS port, so it has no group to commit to')
+    }
+    const slot = journal
+    const topicID = commitTopicID
+    return runSerial(async () => {
+      // 0. Replay the journal, ahead of the pull.
+      if (await replayJournal()) await rebuildEpoch()
+
+      const deadline = Date.now() + commitDeadlineMs
+      for (let attempt = 0; attempt < COMMIT_ATTEMPT_CEILING; attempt++) {
+        // 1. Pull the log to the end. The peer has now processed every frame in it, and
+        //    learned the tip it must race at from the store's own reply.
+        await reconcileCommits()
+
+        // 2. Build against the host's CURRENT handle, adopting nothing. `build` is a
+        //    closure over that handle, so a rebased retry frames at the rebased epoch.
+        const pending = await build()
+
+        // 3. Journal BEFORE publishing, and durably: from here to the hub's answer is the
+        //    window a crash can land in, and the slot is the only thing that survives it.
+        //
+        //    The anchor is the log's TIP, not this peer's cursor. The cursor names the last
+        //    frame the peer PROCESSED, and a frame it processed need not be one the head can
+        //    ever name — so anchoring there stakes every commit on the two never diverging,
+        //    which is a property of the store and not of this peer.
+        const publishID = newPublishID()
+        const expectedHead = commitLogHead
+        const payload = await frameCommit(pending.commit, pending.bodies)
+        await slot.put({
+          publishID,
+          expectedHead,
+          // The epoch this commit is framed at, and the only one its bodies can be sealed
+          // under. A replay that finds itself at any other epoch, with no recorded
+          // acceptance, knows the host adopted somewhere it must not have.
+          epoch: crypto.epoch(),
+          commit: pending.commit,
+          bodies: pending.bodies,
+          kind: pending.kind,
+          journal: pending.journal,
+        })
+
+        // 4. Publish, conditional on the head the pull reached.
+        let sequenceID: string
+        try {
+          sequenceID = (
+            await mux.publish({ topicID, payload, retain: 'log', expectedHead, publishID })
+          ).sequenceID
+        } catch (error) {
+          if (!isHeadMismatch(error)) {
+            // Unknown outcome: the frame may be in the log. The slot STAYS — the next lane
+            // operation replays it and asks the store which it was.
+            throw error
+          }
+          // 6. Lost the compare-and-set: someone else committed first. This is the
+          //    expected path, not an error path. Drop the pending commit untouched —
+          //    discarding costs nothing, and the pre-commit key material is retained —
+          //    clear the slot, and go back to step 1 against the winner.
+          await slot.clear(publishID)
+          if (Date.now() >= deadline) {
+            throw new CommitDeadlineError(
+              `commit: still rebasing after ${commitDeadlineMs}ms and ${attempt + 1} attempts`,
+            )
+          }
+          continue
+        }
+
+        // 5. Accepted. Record it in the slot BEFORE the host adopts, while the group is
+        //    still at the epoch this commit was framed at. That ordering is what makes a
+        //    crash legible: an entry carrying its acceptance is a commit that landed and
+        //    can simply be adopted on restart, and an entry carrying none, at an epoch past
+        //    the one it was framed at, is a host that adopted somewhere other than
+        //    `onAccepted`. Recorded after the adopt, the two would be indistinguishable and
+        //    the peer would have to re-seal a commit it cannot seal for anyone.
+        await slot.markAccepted(publishID, sequenceID)
+
+        // The commit is the group's now — and this frame is both the last position this
+        // peer processed and the log's new tip.
+        const accepted = asLogPosition(sequenceID)
+        reconciledHead = accepted
+        commitLogHead = accepted
+        await pending.onAccepted()
+        await slot.clear(publishID)
+        await rebuildEpoch()
+        return takeLost()
+      }
+      throw new CommitDeadlineError(
+        `commit: gave up after ${COMMIT_ATTEMPT_CEILING} attempts inside its deadline`,
+      )
+    })
+  }
+
+  const replay = async (): Promise<LaneResult> => {
+    await ready
+    return runSerial(async () => {
+      if (await replayJournal()) await rebuildEpoch()
+      return takeLost()
     })
   }
 
@@ -563,7 +860,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         to: (memberDID) => surfaceFor(key).to(memberDID),
       } as ProtocolSurface<Protocols[K]>
     },
-    localCommitted,
+    commit,
+    replay,
     recover,
     resync: async () => {
       await ready

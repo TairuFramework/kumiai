@@ -66,7 +66,7 @@ export function encodeMemoryCommit(epoch: number, entryIDs: Array<string> = []):
   return fromUTF(JSON.stringify({ epoch, entryIDs } satisfies MemoryCommit))
 }
 
-function decodeMemoryCommit(commit: Uint8Array): MemoryCommit | null {
+export function decodeMemoryCommit(commit: Uint8Array): MemoryCommit | null {
   if (commit.length === 0) return null
   try {
     const value = JSON.parse(toUTF(commit)) as MemoryCommit

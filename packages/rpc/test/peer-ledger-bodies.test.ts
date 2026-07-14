@@ -1,48 +1,14 @@
-import type { ProtocolDefinition } from '@enkaku/protocol'
 import { fromUTF } from '@sozai/codec'
 import { describe, expect, test } from 'vitest'
 
 import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
-import { createMemoryGroupMLS, encodeMemoryCommit, memoryEntryID } from '../src/memory-group-mls.js'
-import { createGroupPeer } from '../src/peer.js'
+import { encodeMemoryCommit, memoryEntryID } from '../src/memory-group-mls.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
-import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
+import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
 
 const flush = () => new Promise((r) => setTimeout(r, 30))
-
-const chat = {
-  'chat/changed': { type: 'event', data: { type: 'object' } },
-} as const satisfies ProtocolDefinition
-
-type Protocols = { chat: typeof chat }
-
-/** A member of the group at `epoch`, holding `ledger` (the history its Welcome carried). */
-function makeMLSPeer(
-  hub: FakeHub,
-  localDID: string,
-  recoverySecret: Uint8Array,
-  options: { epoch?: number; ledger?: Array<string> } = {},
-) {
-  const epoch = options.epoch ?? 1
-  const crypto = createFakeCrypto({ epoch, localDID })
-  const mls = createMemoryGroupMLS({
-    recoverySecret,
-    epoch,
-    ...(options.ledger != null ? { ledger: options.ledger } : {}),
-    onAdvance: (e) => crypto.setEpoch(e),
-  })
-  const peer = createGroupPeer<Protocols>({
-    hub,
-    crypto,
-    mls,
-    localDID,
-    protocols: { chat },
-    handlers: { chat: {} } as never,
-  })
-  return { peer, crypto, mls }
-}
 
 /** Everything this group put on the wire that was NOT a commit frame: an ask of any kind
  *  — a gather on the app lane, a recovery request on the rendezvous — shows up here. */
@@ -84,11 +50,7 @@ describe('the bodies ride the commit', () => {
     // ahead of the commit: it rides the commit's own frame, sealed under the epoch every
     // member that can apply that commit is at.
     const token = 'signed-token: carol is an admin'
-    const commit = alice.mls.buildCommit([token])
-    await alice.peer.localCommitted(commit, {
-      ledgerEntries: [token],
-      adopt: () => alice.mls.adopt(commit),
-    })
+    await alice.peer.commit(buildLedgerCommit(alice, [token]))
     await flush()
 
     const entryID = memoryEntryID(token)
@@ -198,11 +160,7 @@ describe('the bodies ride the commit', () => {
     await flush()
 
     const token = 'signed-token: a body'
-    const commit = alice.mls.buildCommit([token])
-    await alice.peer.localCommitted(commit, {
-      ledgerEntries: [token],
-      adopt: () => alice.mls.adopt(commit),
-    })
+    await alice.peer.commit(buildLedgerCommit(alice, [token]))
     await flush()
 
     const published = hub.published.filter((m) => m.topicID === commitTopic(recoverySecret))
@@ -218,22 +176,30 @@ describe('the bodies ride the commit', () => {
     await alice.peer.dispose()
   })
 
-  test('a consumer that adopts before it announces cannot seal the bodies, and is told so', async () => {
+  test('a build() that adopts cannot seal the bodies, and is told so', async () => {
     const hub = new FakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x25)
     const alice = makeMLSPeer(hub, 'alice', recoverySecret)
     await flush()
 
     const token = 'signed-token: a body'
-    const commit = alice.mls.buildCommit([token])
-    // The group is rotated past the epoch this commit was framed at, so its bodies can no
-    // longer be sealed for the members that are about to receive it. Publishing a blob no
-    // member can open would look exactly like a healthy commit until the first receiver
-    // failed to resolve it.
-    alice.mls.adopt(commit)
-    await expect(alice.peer.localCommitted(commit, { ledgerEntries: [token] })).rejects.toThrow(
-      /already advanced past the epoch/,
-    )
+    // A commit is adopted in onAccepted and nowhere else. A build() that adopts has rotated
+    // the group past the epoch its own commit is framed at, so its bodies can no longer be
+    // sealed for the members about to receive it — and a blob no member can open looks
+    // exactly like a healthy commit until the first receiver fails to resolve it.
+    await expect(
+      alice.peer.commit(async () => {
+        const commit = alice.mls.buildCommit([token])
+        alice.mls.adopt(commit)
+        return {
+          commit,
+          bodies: [token],
+          kind: 'ledger' as const,
+          journal: commit,
+          onAccepted: async () => {},
+        }
+      }),
+    ).rejects.toThrow(/already advanced past the epoch/)
 
     await alice.peer.dispose()
   })

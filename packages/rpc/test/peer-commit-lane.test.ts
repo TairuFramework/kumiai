@@ -1,41 +1,15 @@
-import type { ProtocolDefinition } from '@enkaku/protocol'
-import type { LogHub, MailboxHub } from '@kumiai/hub-tunnel'
+import type { MailboxHub } from '@kumiai/hub-tunnel'
 import { describe, expect, test } from 'vitest'
 
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
-import { createMemoryGroupMLS } from '../src/memory-group-mls.js'
 import { createGroupPeer } from '../src/peer.js'
 import { commitTopic, protocolTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
+import { buildLedgerCommit, chat, makeMLSPeer, type Protocols } from './fixtures/peer.js'
 
 const flush = () => new Promise((r) => setTimeout(r, 30))
-
-const chat = {
-  'chat/changed': { type: 'event', data: { type: 'object' } },
-} as const satisfies ProtocolDefinition
-
-type Protocols = { chat: typeof chat }
-
-/** A peer that joined the group at `epoch` — from a Welcome, say. */
-function makeMLSPeer(hub: LogHub, localDID: string, recoverySecret: Uint8Array, epoch = 1) {
-  const crypto = createFakeCrypto({ epoch, localDID })
-  const mls = createMemoryGroupMLS({
-    recoverySecret,
-    epoch,
-    onAdvance: (e) => crypto.setEpoch(e),
-  })
-  const peer = createGroupPeer<Protocols>({
-    hub,
-    crypto,
-    mls,
-    localDID,
-    protocols: { chat },
-    handlers: { chat: {} } as never,
-  })
-  return { peer, crypto, mls }
-}
 
 /** Every recovery request this peer group put on the wire. */
 function recoveryRequests(hub: FakeHub, recoverySecret: Uint8Array): Array<unknown> {
@@ -61,7 +35,7 @@ describe('the commit lane is pull-driven', () => {
     await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
     await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 2 })
 
-    const dave = makeMLSPeer(hub, 'dave', recoverySecret, 1)
+    const dave = makeMLSPeer(hub, 'dave', recoverySecret, { epoch: 1 })
     await flush()
 
     // He reaches the group's epoch, by reading the log.
@@ -95,7 +69,7 @@ describe('the commit lane is pull-driven', () => {
     // applied. A cursor seeded from it would skip both frames and strand him.
     expect(hub.head(commitTopic(recoverySecret))).toBe(sequenceID)
 
-    const dave = makeMLSPeer(hub, 'dave', recoverySecret, 1)
+    const dave = makeMLSPeer(hub, 'dave', recoverySecret, { epoch: 1 })
     await flush()
     expect(dave.mls.commits()).toBe(2)
 
@@ -131,12 +105,11 @@ describe('the commit lane is pull-driven', () => {
     const bob = makeMLSPeer(hub, 'bob', recoverySecret)
     await flush()
 
-    // Alice produced this Commit and adopts it as the hub takes it. The log hands her back
-    // her own frame — push never did, because the hub excludes the sender.
-    const own = alice.mls.buildCommit()
-    await alice.peer.localCommitted(own, { adopt: () => alice.mls.adopt(own) })
+    // Alice commits, and adopts it in onAccepted as the hub takes the frame. The log hands
+    // her back her own frame — push never did, because the hub excludes the sender.
+    await alice.peer.commit(buildLedgerCommit(alice, []))
     await flush()
-    expect(alice.mls.commits()).toBe(0)
+    expect(alice.mls.commits()).toBe(0) // adopted, never applied as somebody else's commit
 
     // Another member commits next, waking alice. Her cursor walks over her own frame on
     // the way, so she applies theirs and only theirs, and never re-applies hers.

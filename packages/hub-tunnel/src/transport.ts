@@ -44,6 +44,23 @@ export type HubPublishParams = {
    * it is published. Only a 'log' publish moves the topic's head.
    */
   retain?: 'log' | 'mailbox'
+  /**
+   * Compare-and-set on the topic's head. Absent: append unconditionally. Present:
+   * append only if the topic's head is exactly this value, where `null` means "the
+   * topic has never had an accepted log publish". A loser gets HeadMismatchError and
+   * nothing is stored — no entry, no delivery, no sequenceID consumed.
+   *
+   * `null` and absent are different requests, so a forwarding implementation must
+   * distinguish them: check for the key, not for a non-null value.
+   */
+  expectedHead?: string | null
+  /**
+   * Idempotency key. Republishing an already-accepted `publishID` returns its original
+   * sequenceID and appends nothing. It is what lets a peer that crashed between
+   * publishing a commit and recording the outcome ask "did my publish land?" and get an
+   * answer, with no responder and no network peer involved.
+   */
+  publishID?: string
 }
 
 export type HubSubscribeOptions = {

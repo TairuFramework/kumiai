@@ -6,6 +6,8 @@ import { createGroupPeer } from '../src/peer.js'
 import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
+import { createMemoryCommitJournal } from './fixtures/journal.js'
+import { adoptJournalledBlob } from './fixtures/peer.js'
 
 const flush = () => new Promise((r) => setTimeout(r, 30))
 
@@ -26,6 +28,10 @@ function makeDurablePeer(hub: DurableFakeHub, localDID: string, recoverySecret: 
     hub,
     crypto,
     mls,
+    journal: createMemoryCommitJournal(),
+    adoptJournalled: async (blob) => {
+      adoptJournalledBlob(mls, blob)
+    },
     localDID,
     protocols: { chat },
     handlers: { chat: {} } as never,

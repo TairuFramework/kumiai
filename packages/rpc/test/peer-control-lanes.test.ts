@@ -1,4 +1,3 @@
-import type { ProtocolDefinition } from '@enkaku/protocol'
 import { describe, expect, test } from 'vitest'
 
 import { createMemoryGroupMLS } from '../src/memory-group-mls.js'
@@ -7,33 +6,16 @@ import { commitTopic, protocolTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
+import { createMemoryCommitJournal } from './fixtures/journal.js'
+import {
+  adoptJournalledBlob,
+  buildLedgerCommit,
+  chat,
+  makeMLSPeer,
+  type Protocols,
+} from './fixtures/peer.js'
 
 const flush = () => new Promise((r) => setTimeout(r, 30))
-
-const chat = {
-  'chat/changed': { type: 'event', data: { type: 'object' } },
-} as const satisfies ProtocolDefinition
-
-type Protocols = { chat: typeof chat }
-
-/** Build an MLS-enabled peer whose fake MLS keeps the fake crypto's epoch in step. */
-function makeMLSPeer(hub: FakeHub, localDID: string, recoverySecret: Uint8Array) {
-  const crypto = createFakeCrypto({ epoch: 1, localDID })
-  const mls = createMemoryGroupMLS({
-    recoverySecret,
-    epoch: 1,
-    onAdvance: (e) => crypto.setEpoch(e),
-  })
-  const peer = createGroupPeer<Protocols>({
-    hub,
-    crypto,
-    mls,
-    localDID,
-    protocols: { chat },
-    handlers: { chat: {} } as never,
-  })
-  return { peer, crypto, mls }
-}
 
 describe('control lane lifecycle', () => {
   test('commit and rendezvous are subscribed once at init, survive resync, drop on dispose', async () => {
@@ -45,6 +27,10 @@ describe('control lane lifecycle', () => {
       hub,
       crypto,
       mls,
+      journal: createMemoryCommitJournal(),
+      adoptJournalled: async (blob) => {
+        adoptJournalledBlob(mls, blob)
+      },
       localDID: 'alice',
       protocols: { chat },
       handlers: { chat: {} } as never,
@@ -84,6 +70,10 @@ describe('control lane lifecycle', () => {
       hub,
       crypto,
       mls,
+      journal: createMemoryCommitJournal(),
+      adoptJournalled: async (blob) => {
+        adoptJournalledBlob(mls, blob)
+      },
       localDID: 'alice',
       protocols: { chat },
       handlers: { chat: {} } as never,
@@ -162,7 +152,7 @@ describe('control lane lifecycle', () => {
     await bob.peer.dispose()
   })
 
-  test('localCommitted appends to the log and resyncs the sender', async () => {
+  test('an accepted commit appends to the log and resyncs the sender', async () => {
     const hub = new FakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x55)
     const alice = makeMLSPeer(hub, 'alice', recoverySecret)
@@ -172,11 +162,10 @@ describe('control lane lifecycle', () => {
     const secret = await alice.crypto.exportSecret()
     expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(2)
 
-    // Alice produced a Commit and has NOT adopted it: the group is still at the epoch it
-    // was framed at, which is the epoch its bodies must be sealed under. She adopts it
-    // once the hub has the frame.
-    const commit = alice.mls.buildCommit()
-    await alice.peer.localCommitted(commit, { adopt: () => alice.mls.adopt(commit) })
+    // Alice builds a Commit and does NOT adopt it: the group is still at the epoch it was
+    // framed at, which is the epoch its bodies must be sealed under. She adopts it in
+    // onAccepted, once the hub has taken the frame.
+    await alice.peer.commit(buildLedgerCommit(alice, []))
     await flush()
 
     // Bob pulled the Commit, advanced, and resynced; Alice rebuilt to epoch 2.
@@ -193,7 +182,7 @@ describe('control lane lifecycle', () => {
     await bob.peer.dispose()
   })
 
-  test('localCommitted is a no-op without an MLS port', async () => {
+  test('a peer without an MLS port has no commit lane to replay', async () => {
     const hub = new FakeHub()
     const crypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
     const peer = createGroupPeer<Protocols>({
@@ -204,7 +193,7 @@ describe('control lane lifecycle', () => {
       handlers: { chat: {} } as never,
     })
     await flush()
-    await expect(peer.localCommitted(new Uint8Array([1]))).resolves.toBeUndefined()
+    await expect(peer.replay()).resolves.toEqual({})
     await peer.dispose()
   })
 })

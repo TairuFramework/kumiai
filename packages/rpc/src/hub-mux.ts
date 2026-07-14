@@ -29,6 +29,14 @@ export type MuxPublishParams = {
   payload: Uint8Array
   /** Retention class. Absent: 'mailbox'. Only a 'log' publish moves the topic's head. */
   retain?: 'log' | 'mailbox'
+  /**
+   * Compare-and-set on the topic's head. Absent: append unconditionally. `null`: append
+   * only while the topic has never had a log publish. A loser gets HeadMismatchError and
+   * the store is left exactly as it was found.
+   */
+  expectedHead?: string | null
+  /** Idempotency key: a republish of an accepted one returns its sequenceID and appends nothing. */
+  publishID?: string
 }
 
 export type MuxFetchTopicParams = {
@@ -219,6 +227,11 @@ export function createHubMux(params: HubMuxParams): HubMux {
         topicID: params.topicID,
         payload: params.payload,
         ...(params.retain != null ? { retain: params.retain } : {}),
+        // `expectedHead: null` is a compare-and-set against an empty topic and must reach
+        // the hub; only an ABSENT key means "append unconditionally". Keyed on presence,
+        // never on nullness — the first commit of a group's life is exactly the null case.
+        ...('expectedHead' in params ? { expectedHead: params.expectedHead } : {}),
+        ...(params.publishID != null ? { publishID: params.publishID } : {}),
       }),
     )
 

@@ -1,4 +1,4 @@
-import { NotSubscribedError, type StoredMessage } from '@kumiai/hub-protocol'
+import { HeadMismatchError, NotSubscribedError, type StoredMessage } from '@kumiai/hub-protocol'
 import type {
   HubFetchTopicParams,
   HubFetchTopicResult,
@@ -37,6 +37,14 @@ export class FakeHub implements LogHub {
   #sinks = new Map<string, Set<Sink>>()
   #logs = new Map<string, Array<StoredMessage>>()
   #heads = new Map<string, string>()
+  /** The sequenceIDs published `retain: 'log'`. A topic's log is these, and nothing else. */
+  #logClass = new Set<string>()
+  /**
+   * publishID -> the sequenceID it was accepted as. NOT a log entry: no deleter reaches
+   * it, and it outlives the frame it names. It is the only thing that lets a peer replaying
+   * its journal learn that a commit it never saw acknowledged had in fact landed.
+   */
+  #publishRecords = new Map<string, string>()
   /** Retention seconds requested per topic, by the most recent subscribe. */
   #retention = new Map<string, number | undefined>()
   /** Append-only record of every published message, for test assertions. */
@@ -60,7 +68,28 @@ export class FakeHub implements LogHub {
   }
 
   async publish(params: HubPublishParams): Promise<{ sequenceID: string }> {
+    // The dedup check comes BEFORE the compare-and-set, and the order is the store's
+    // contract. A replay carries the publishID the store already accepted and the
+    // expectedHead the caller journalled — which its own accepted publish made stale — so
+    // comparing first would tell a peer its commit was lost when it landed.
+    if (params.publishID != null) {
+      const accepted = this.#publishRecords.get(params.publishID)
+      if (accepted !== undefined) return { sequenceID: accepted }
+    }
+    // The compare-and-set, before anything is minted: a loser leaves the log, the head and
+    // the sequence exactly as it found them. `null` means "the topic has never had an
+    // accepted log publish", and is a different request from an absent expectedHead.
+    if (params.expectedHead !== undefined) {
+      const head = this.#heads.get(params.topicID) ?? null
+      if (head !== params.expectedHead) {
+        throw new HeadMismatchError(
+          `Publish to ${params.topicID} expected head ${params.expectedHead ?? 'null'}, but the head is ${head ?? 'null'}`,
+        )
+      }
+    }
+
     const sequenceID = formatSequenceID(++this.#sequence)
+    if (params.publishID != null) this.#publishRecords.set(params.publishID, sequenceID)
     const message: StoredMessage = {
       sequenceID,
       senderDID: params.senderDID,
@@ -75,8 +104,11 @@ export class FakeHub implements LogHub {
       this.#logs.set(params.topicID, log)
     }
     log.push(message)
-    // Only a log publish moves the head.
-    if (params.retain === 'log') this.#heads.set(params.topicID, sequenceID)
+    // Only a log publish moves the head — and only a log publish is IN the log.
+    if (params.retain === 'log') {
+      this.#logClass.add(sequenceID)
+      this.#heads.set(params.topicID, sequenceID)
+    }
 
     // An accepted log frame is retained AND pushed — the push is not an alternative to
     // the log, it is on top of it.
@@ -95,7 +127,13 @@ export class FakeHub implements LogHub {
         `${params.subscriberDID} is not a subscriber of ${params.topicID}`,
       )
     }
-    const log = this.#logs.get(params.topicID) ?? []
+    // A topic's log is its log-class frames and nothing else. A mailbox frame published to
+    // the commit topic is delivered, and never enters the log: it does not move the head,
+    // so a reader that met one would carry a cursor the head can never equal, and every
+    // compare-and-set anchored there would lose forever.
+    const log = (this.#logs.get(params.topicID) ?? []).filter((m) =>
+      this.#logClass.has(m.sequenceID),
+    )
     const after = params.after
     const selected = after == null ? log : log.filter((m) => m.sequenceID > after)
     const messages = params.limit == null ? selected : selected.slice(0, params.limit)
@@ -162,6 +200,21 @@ export class FakeHub implements LogHub {
 
   subscriberCount(topicID: string): number {
     return this.#topics.get(topicID)?.size ?? 0
+  }
+
+  /**
+   * Remove a topic's frames older than `before`, exclusive — the hub sweeping a log past its
+   * retention. The head is NOT touched, exactly as the store's is not: it names the last
+   * accepted log publish, and it outlives the frame it names. So a topic whose log has been
+   * swept away entirely still has a head, and that is the state a returning member reads.
+   */
+  trim(topicID: string, before: string): void {
+    const log = this.#logs.get(topicID)
+    if (log == null) return
+    this.#logs.set(
+      topicID,
+      log.filter((message) => message.sequenceID >= before),
+    )
   }
 
   /** The topic's head: the last accepted log publish, or null. */
