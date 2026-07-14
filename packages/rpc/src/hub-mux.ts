@@ -58,6 +58,11 @@ export type HubMux = {
     listener: InboundListener,
     options?: HubSubscribeOptions,
   ) => () => void
+  /**
+   * Stop the drain and drop every local listener. It does NOT unsubscribe: see the note on
+   * {@link createHubMux}. The member stays a subscriber of everything it was subscribed to,
+   * and the hub keeps holding its mail.
+   */
   dispose: () => Promise<void>
 }
 
@@ -75,7 +80,20 @@ type Sink = {
  * then (2) push to every `mailbox.receive` sink — so a listener may create a
  * directed tunnel synchronously and still receive the triggering frame. Topics
  * are refcounted across all three views: the first registration subscribes on
- * the hub, the last removal unsubscribes.
+ * the hub.
+ *
+ * **The refcount is about LOCAL LISTENERS, and it never unsubscribes.** A subscription is
+ * a durable relationship between a member and a topic, not a session: the hub holds a
+ * subscriber's undelivered frames FOR it, and `unsubscribe` is the store's instruction to
+ * stop — it drops the member's pending deliveries and frees any mailbox frame it was the
+ * last reader of. So nothing here may unsubscribe on the strength of a local lifecycle
+ * event. Dropping a listener, rotating an epoch and disposing the mux all mean "I am not
+ * listening", and none of them mean "I have read my mail, throw the rest away".
+ *
+ * That leaves unsubscribing as something only an explicit leave-the-group would ever do,
+ * and nothing in this package does it. That is correct: a member's subscription outliving
+ * its process is exactly the property that lets it come back and find its mail — and on a
+ * mobile client, disposing the peer is what backgrounding the app calls.
  */
 export function createHubMux(params: HubMuxParams): HubMux {
   const { hub, localDID } = params
@@ -91,16 +109,15 @@ export function createHubMux(params: HubMuxParams): HubMux {
     if (next === 1) void Promise.resolve(hub.subscribe(localDID, topicID, options)).catch(() => {})
   }
 
+  // Drops a local listener's reference, and NOTHING at the hub. The subscription stands: the
+  // frames this member has been sent and not read are its own, and a caller that has merely
+  // stopped listening has not read them.
   const release = (topicID: string): void => {
     const current = refcount.get(topicID) ?? 0
     if (current <= 0) return
     const next = current - 1
-    if (next === 0) {
-      refcount.delete(topicID)
-      void Promise.resolve(hub.unsubscribe?.(localDID, topicID)).catch(() => {})
-    } else {
-      refcount.set(topicID, next)
-    }
+    if (next === 0) refcount.delete(topicID)
+    else refcount.set(topicID, next)
   }
 
   const onInbound = (
@@ -258,9 +275,11 @@ export function createHubMux(params: HubMuxParams): HubMux {
       disposed = true
       for (const sink of [...sinks]) sink.close()
       sinks.clear()
-      for (const topicID of [...refcount.keys()]) {
-        void Promise.resolve(hub.unsubscribe?.(localDID, topicID)).catch(() => {})
-      }
+      // The listeners go, the drain stops, and the SUBSCRIPTIONS STAND. Disposing is this
+      // process saying it has stopped reading — not this member saying it has read
+      // everything and wants the rest thrown away. On a mobile client this is what
+      // backgrounding the app calls, and unsubscribing here would delete the user's unread
+      // messages out of the hub every time they switched apps.
       refcount.clear()
       listeners.clear()
       iterator.return?.()

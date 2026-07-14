@@ -247,6 +247,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     const next = new Map<string, ProtocolRuntime>()
     for (const [name, protocol] of Object.entries(protocols)) {
       const topicID = protocolTopic(secret, epoch, name)
+      // Both of these are subscribed for the member's whole life, on the same terms as the
+      // commit and rendezvous topics: a rotation tears down the LISTENERS on an epoch it has
+      // left, and never the subscriptions. The mux is what guarantees it — nothing there
+      // unsubscribes — because unsubscribing tells the hub to drop this member's pending
+      // deliveries for the topic and to free any frame it was the last reader of. A peer that
+      // gave up the subscription as it rotated would delete its own unread messages, and
+      // everyone else's copy of them, on the way past.
+      const selfInbox = inboxTopic(secret, epoch, localDID)
       const client = new BroadcastClient({
         transport: createBroadcastTransport({
           topicID,
@@ -275,7 +283,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       const acceptor = createInboxAcceptor<ProtocolDefinition>({
         mux,
         localDID,
-        selfInboxTopic: inboxTopic(secret, epoch, localDID),
+        selfInboxTopic: selfInbox,
         resolveSendTopic: (senderDID) => inboxTopic(secret, epoch, senderDID),
         protocol: protocol as ProtocolDefinition,
         handlers: handlers[name] as unknown as ProcedureHandlers<ProtocolDefinition>,

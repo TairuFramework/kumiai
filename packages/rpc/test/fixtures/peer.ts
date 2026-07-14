@@ -60,6 +60,8 @@ export type MakeMLSPeerOptions = {
    */
   adoptJournalled?: (blob: Uint8Array) => void
   welcomes?: Array<string>
+  /** The host's own app-protocol handlers. Without them the app lane delivers to nobody. */
+  handlers?: Record<string, unknown>
   commitDeadlineMs?: number
   /** The group's commit policy: a committer this refuses is well-formed and not applied. */
   acceptsCommitter?: (committerDID: string) => boolean
@@ -106,7 +108,7 @@ export function makeMLSPeer(
     },
     localDID,
     protocols: { chat },
-    handlers: { chat: {} } as never,
+    handlers: { chat: options.handlers ?? {} } as never,
     ...(options.commitDeadlineMs != null ? { commitDeadlineMs: options.commitDeadlineMs } : {}),
     ...(options.recovery != null ? { recovery: options.recovery } : {}),
   })

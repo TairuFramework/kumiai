@@ -18,7 +18,7 @@ import {
 const flush = () => new Promise((r) => setTimeout(r, 30))
 
 describe('control lane lifecycle', () => {
-  test('commit and rendezvous are subscribed once at init, survive resync, drop on dispose', async () => {
+  test('commit and rendezvous are subscribed once at init, and survive resync and dispose', async () => {
     const hub = new FakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x33)
     const crypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
@@ -52,13 +52,21 @@ describe('control lane lifecycle', () => {
 
     expect(hub.subscriberCount(commits)).toBe(1)
     expect(hub.subscriberCount(rendezvous)).toBe(1)
-    expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(0)
     expect(hub.subscriberCount(protocolTopic(secret, 2, 'chat'))).toBe(1)
+    // The epoch it left is a topic it no longer LISTENS on — and still subscribes to. At the
+    // hub, unsubscribing frees this member's undelivered frames; a peer that dropped the
+    // subscription as it rotated would delete its own unread mail on the way past.
+    expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(1)
 
+    // Disposing stops this process reading. It does not resign the member's subscriptions —
+    // not the control topics, and not the app topics it rotated through. The hub goes on
+    // holding what it has been sent, which is what lets it come back and find its mail.
     await peer.dispose()
     await flush()
-    expect(hub.subscriberCount(commits)).toBe(0)
-    expect(hub.subscriberCount(rendezvous)).toBe(0)
+    expect(hub.subscriberCount(commits)).toBe(1)
+    expect(hub.subscriberCount(rendezvous)).toBe(1)
+    expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(1)
+    expect(hub.subscriberCount(protocolTopic(secret, 2, 'chat'))).toBe(1)
   })
 
   test('the commit topic is subscribed with the log retention window', async () => {
@@ -121,8 +129,10 @@ describe('control lane lifecycle', () => {
 
     expect(bob.mls.epoch()).toBe(2)
     expect(carol.mls.epoch()).toBe(2)
-    expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(0)
     expect(hub.subscriberCount(protocolTopic(secret, 2, 'chat'))).toBe(2)
+    // Both keep the subscription they rotated off: it is what stops the hub freeing the
+    // frames they were sent at that epoch and have not read.
+    expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(2)
 
     await bob.peer.dispose()
     await carol.peer.dispose()
@@ -170,8 +180,8 @@ describe('control lane lifecycle', () => {
 
     // Bob pulled the Commit, advanced, and resynced; Alice rebuilt to epoch 2.
     expect(bob.mls.epoch()).toBe(2)
-    expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(0)
     expect(hub.subscriberCount(protocolTopic(secret, 2, 'chat'))).toBe(2)
+    expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(2)
     // It went to the log, not the mailbox: it moved the topic's head, so it is still
     // there for a member invited tomorrow.
     const committed = hub.published.filter((m) => m.topicID === commitTopic(recoverySecret))

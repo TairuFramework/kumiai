@@ -19,21 +19,25 @@ describe('createHubMux', () => {
     await flush()
     expect(got).toEqual(['m1'])
 
+    // Dropping the listener stops this process READING the topic. It does not stop the member
+    // being a subscriber of it: unsubscribing tells the hub to drop this member's pending
+    // deliveries and free any frame it was the last reader of, and a caller that has merely
+    // stopped listening has not read them.
     unsub()
-    expect(hub.subscriberCount('topic:x')).toBe(0)
+    expect(hub.subscriberCount('topic:x')).toBe(1)
     await mux.dispose()
   })
 
-  test('refcounts overlapping subscriptions to the same topic', async () => {
+  test('the last listener leaving does not unsubscribe', async () => {
     const hub = new FakeHub()
     const mux = createHubMux({ hub, localDID: 'bob' })
     const a = mux.bus.subscribe('topic:y', () => {})
     const b = mux.onInbound('topic:y', () => {})
+    // One real subscribe across both registrations: the refcount is about local listeners.
     expect(hub.subscriberCount('topic:y')).toBe(1)
     a()
-    expect(hub.subscriberCount('topic:y')).toBe(1)
     b()
-    expect(hub.subscriberCount('topic:y')).toBe(0)
+    expect(hub.subscriberCount('topic:y')).toBe(1)
     await mux.dispose()
   })
 
@@ -76,13 +80,25 @@ describe('createHubMux', () => {
     await other.dispose()
   })
 
-  test('dispose stops the drain and unsubscribes remaining topics', async () => {
+  test('dispose stops the drain and leaves the subscriptions standing', async () => {
     const hub = new FakeHub()
     const mux = createHubMux({ hub, localDID: 'bob' })
-    mux.bus.subscribe('topic:q', () => {})
+    const got: Array<string> = []
+    mux.bus.subscribe('topic:q', (bytes) => got.push(toUTF(bytes)))
     expect(hub.subscriberCount('topic:q')).toBe(1)
+
     await mux.dispose()
-    expect(hub.subscriberCount('topic:q')).toBe(0)
+
+    // Disposed, so nothing is read here any more...
+    await hub.publish({ senderDID: 'alice', topicID: 'topic:q', payload: fromUTF('m1') })
+    await flush()
+    expect(got).toEqual([])
+
+    // ...and the member is still a subscriber, so the hub is still holding that frame for it.
+    // A subscription is a durable relationship, not a session: disposing is this process
+    // saying it has stopped reading, and on a mobile client it is what backgrounding calls.
+    // Unsubscribing here would delete the user's unread messages every time they switched app.
+    expect(hub.subscriberCount('topic:q')).toBe(1)
   })
 
   test('a sink created inside an onInbound listener receives the triggering message (lazy-accept race)', async () => {
