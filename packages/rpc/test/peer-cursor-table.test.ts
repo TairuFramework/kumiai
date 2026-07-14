@@ -246,6 +246,60 @@ describe('a hostile commit cannot make an honest peer do expensive work', () => 
     await bob.peer.dispose()
     await carol.peer.dispose()
   })
+
+  test('a commit that can never be applied is read ONCE, and the cursor never walks back over it', async () => {
+    const hub = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x46)
+    const bob = makeMLSPeer(hub, 'bob', rs, { acceptsCommitter: removed, recovery: fastRecovery })
+    await flush()
+
+    // Two frames that no member at this epoch can ever apply, and that no retry could ever
+    // discover anything new about: one the policy refuses, one whose bodies are nowhere. They
+    // arrive separately, so each is the last frame of the pull that reads it — a cursor that
+    // failed to step over EITHER is caught, rather than covered for by the other's advance.
+    await publishCommit({ hub, senderDID: 'mallory', recoverySecret: rs, epoch: 1 })
+    await flush(80)
+    expect(bob.mls.seen()).toBe(1)
+
+    const orphan = memoryEntryID('a body nobody can supply')
+    await publishCommit({
+      hub,
+      senderDID: 'alice',
+      recoverySecret: rs,
+      epoch: 1,
+      commit: encodeMemoryCommit(1, 'alice', [orphan]),
+    })
+    await flush(80)
+    expect(bob.mls.seen()).toBe(2)
+    expect(bob.mls.commits()).toBe(0)
+    expect(bob.mls.epoch()).toBe(1)
+
+    // The group's next commit wakes bob and makes him pull AGAIN. That second pull is the only
+    // observation that can tell "dropped once" from "retried forever": a peer whose cursor
+    // stopped dead on the poison reads it again here, converges anyway — the honest frame is
+    // right behind it — and reports itself perfectly healthy while re-reading a dead frame on
+    // every wakeup it will ever have. Every other assertion in this suite passes for it.
+    const token = 'signed-token: carol is an admin'
+    await publishCommit({
+      hub,
+      senderDID: 'alice',
+      recoverySecret: rs,
+      epoch: 1,
+      entries: [token],
+    })
+    await flush(80)
+
+    // Three frames on the topic; three reads, ever.
+    expect(bob.mls.seen()).toBe(3)
+    // And the state MOVED: the honest commit applied over the top of the dead frames, and its
+    // entry is in the ledger.
+    expect(bob.mls.commits()).toBe(1)
+    expect(bob.mls.epoch()).toBe(2)
+    expect(bob.mls.ledgerIDs()).toEqual([memoryEntryID(token)])
+    expect(heals(hub, rs)).toHaveLength(0)
+
+    await bob.peer.dispose()
+  })
 })
 
 describe('a peer that must recover before it can commit', () => {

@@ -1,6 +1,6 @@
 # Design: the control-ledger lane
 
-**Status:** design, revision 31 (2026-07-14). **G28 is RETRACTED** — see below. Reviewed fourteen times by kubun in
+**Status:** design, revision 32 (2026-07-14). **G28 is RETRACTED** — see below. Reviewed fourteen times by kubun in
 `2026-07-13-control-ledger-lane-review.md`; G1–G27 are folded in below. Revisions 16–25 fold in
 the implementation probes: `NotSubscribedError`, a `trim` primitive, a 30-day default
 window, two retention classes with subscriber-requested durations, **G28 — the commit lane must
@@ -1937,8 +1937,13 @@ heal cannot reach for want of a responder.)*
   before adopting; admin B overwrites the same subject; A heals. A's entry is **not**
   re-enacted (bootstrap's ledger already contains its id), and B's value stands. The G17
   regression test — an unfiltered re-enactment silently reverts B with no error anywhere.
-- **Cursor-advance.** A commit with unresolvable bodies is retried without advancing; a
-  malformed commit advances the cursor once and is never retried.
+- **Cursor-advance.** A commit with unresolvable bodies **advances the cursor and is never
+  retried** — G36 reversed the original rule, because a retry loop lets any current member force
+  the whole group into a recovery storm with one body-less commit: the escalation *was* the denial
+  of service. A malformed commit does the same. Both are poison: read once, stepped over, never
+  healed for. **And "once" is the load-bearing half of that sentence** — a stuck cursor is invisible
+  inside the pull that hits the frame, and only observable on the *next* one, so a test that asserts
+  the drop must pull again.
 - **Fork heal.** A simulated lying hub double-accepts; the lower-sequenceID branch wins, the
   loser rejoins by external commit, and its entries are re-enacted.
 
@@ -1953,8 +1958,8 @@ heal cannot reach for want of a responder.)*
   recovery.
 - A third member who has never seen an entry body applies the enacting commit on first
   delivery.
-- `GroupMLS.exportGroupInfo` is implementable by a host without leaking group state to the
-  relay.
+- `GroupMLS.sealGroupInfo` (named `exportGroupInfo` above, before D2 gave it a request to seal
+  to) is implementable by a host without leaking group state to the relay.
 - A permanently-failing commit is dropped once and never retried forever.
 - A peer that must heal converges even under commit pressure: its external commit is CAS'd,
   and losing the race costs it a re-request, not a wedge.

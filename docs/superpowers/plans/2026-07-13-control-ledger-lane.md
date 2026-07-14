@@ -448,6 +448,27 @@ findings.
   matching, members converged.
 - **Verify:** `rtk proxy pnpm run build && rtk proxy pnpm run lint && rtk proxy pnpm test`
 
+### Question 4.3: Does the ledger gather leak the ledger to the relay?
+
+- **Assumption:** the heal is confidential end to end. It is not — question 4.2 found that
+  `encodeLedgerReply` does not seal, so a bootstrap answer puts the group's whole ordered ledger on
+  the rendezvous topic **in plaintext**. The hub learns every role, every promotion and demotion, in
+  order, from **one** heal. These are the same bodies the commit frame seals under the epoch secret
+  and that `peer-ledger-bodies.test.ts` asserts the hub never sees.
+- **Done when:** a heal that gathers the ledger leaves **no entry body in the clear** on the wire —
+  the same assertion `leakedBody()` already makes of the commit frame — and the requester still
+  bootstraps, head-verified, **from the seed path**, which is the one that gathers.
+- **⚠️ Wrong-but-passing:** sealing under the **responder's current epoch secret**. It is the obvious
+  fix, it is what the commit frame does, and it is green in every test where nobody is behind. But at
+  the seed `ensureLedger` runs **before** the pull, so the requester may be at an **older epoch than
+  the responder** — and the reply is then unopenable **by the very peer that asked for it**. The
+  group heals, the hub sees nothing, and the peer is stranded with an empty ledger. Either the
+  request names the epoch to seal at, or `ensureLedger` moves after the pull; **the choice is a design
+  call and belongs in the spec, not in a probe.**
+- **Spec excerpt:** "A host writes no ordering, no authority, no integrity, and no body-distribution
+  code" — and the relay sees no bodies. The spec is **silent** on the gather; that silence is the bug.
+- **Verify:** `rtk proxy pnpm run build && rtk proxy pnpm run lint && rtk proxy pnpm test`
+
 ---
 
 ## Decision Log
@@ -1690,3 +1711,62 @@ Also carried: the probe used `FakeHub` rather than `DurableFakeHub` as the brief
 it — `DurableFakeHub`'s only distinctive feature is ack/redelivery, and a group of one receives no
 pushes (the hub skips the sender), so a trim there would have been dead fixture code. **`DurableFakeHub`
 still has no `trim`**; if a later question needs one under redelivery, it remains to be written.
+
+---
+
+### 2026-07-14 — Question 4.2: Do the acceptance criteria hold end to end?
+
+**Findings:** Eight of nine bullets hold, and the ninth is not a test. The census was done by reading
+assertions rather than test names — bullets 2, 3, 4, 5, 6 and 8 are **COVERED** by tests that assert the
+bullet's own claim, not an adjacent one. Bullets 7 and 9 were **PARTIAL** and now have tests. No `src/`
+change. rpc 153 → 155.
+
+**Bullet 1 is a claim about ABSENCE, and no test can observe code a host did not write.** "A host writes
+no ordering, no authority, no integrity, no body-distribution code, and no body store" is a property of
+the contract *surface*. Recorded as a design property with three real proxies rather than a ceremony
+that passes and means nothing: the 17-clause conformance suite **is** the whole store obligation and its
+surface has no body, ledger, or entry-ordering API; the bodies ride the frame sealed (`leakedBody ===
+false`, no rendezvous traffic); and the committer is read from the commit's own bytes even when the hub
+forges `senderDID` per reader.
+
+**Bullet 7 was passing for the wrong reason, and the mutation is the proof.** Deleting *either*
+cursor-advance for a permanently-failing frame left **all 153 tests green.** Every existing assertion
+checks `seen()` inside the *first* pull's window — and a cursor that never advances is only observable
+on the **next** one. The three "poison, and nobody heals" tests converge regardless, because the honest
+frame sits directly behind the dead one. The new test pins it (`seen() === 3` after a second pull); both
+mutations now kill it, and nothing else. **"Dropped once" and "dropped" are different claims, and only
+one of them was tested.**
+
+Bullet 9's old test carried no bodies, missed one commit, and **never trimmed the log** — it passed
+against a hub that retains everything forever, and never asserted the *absence* of a heal, which is the
+bullet's second half. The new one trims. A third mutation (read the peer's epoch once per page instead
+of once per frame) takes it red along with four pre-existing late-joiner tests — the loop, not the
+table, exactly as question 3.4 established.
+
+**Bullet 6 is the strongest test in the suite and worth naming as a model:** it does not round-trip. It
+models the hub as the attacker, grants it every input it could actually have (the request rides the wire
+in the clear, so it reconstructs the exact AAD), and includes a **positive control** proving the failure
+is the missing key rather than a wrong AAD that would fail against any input.
+
+**Spec impact: revision 32.** Two stale lines, both found by the census: `## Testing` still said an
+unresolvable commit is "retried without advancing" — **G36 reversed that**, because the retry loop was
+itself the denial of service; the code has been right since, the line was not. And the acceptance list
+still named `exportGroupInfo` for the method D2 renamed `sealGroupInfo`.
+
+**And one hole, outside the acceptance list, which became question 4.3.** `encodeLedgerReply` **does not
+seal.** A bootstrap answer puts the group's whole ordered ledger on the rendezvous topic in **plaintext**
+— verified in `hub.published`, `role:carol=admin` in the clear. These are the same bodies the commit
+frame seals under the epoch secret and that `peer-ledger-bodies.test.ts` asserts the hub never sees.
+**One heal hands the relay the group's entire authority state.** It fails no bullet — `sealGroupInfo`
+itself is clean — because no bullet was ever written about the step that follows it.
+
+**Learned (4.2):** *An acceptance list is a census target, not a test plan.* Six bullets were already
+green; the value of the question was entirely in the two that **looked** green and were not, and neither
+would have been caught by asking "is there a test for this?" — only by opening the test and reading what
+it asserts. A bullet's claim and its test's assertion drift apart silently, and the drift is invisible
+from the test name, which is the one thing a census is tempted to read.
+
+**Also carried:** the trim-strand gap is confirmed unbuilt and was **not** built — nothing in the peer
+reads `oldest`, so a member offline *beyond* the window walks to `reconciledHead == head` and **reports
+itself healthy while stuck at a dead epoch.** It is deliberately not in the acceptance list, and it is
+not what bullet 9 covers.

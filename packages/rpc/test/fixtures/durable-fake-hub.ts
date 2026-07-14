@@ -39,6 +39,8 @@ export class DurableFakeHub implements LogHub {
   #publishRecords = new Map<string, string>()
   /** The sequenceIDs published `retain: 'log'`. A topic's log is these, and nothing else. */
   #logClass = new Set<string>()
+  /** Append-only record of every published message, for test assertions. */
+  published: Array<StoredMessage> = []
 
   subscribe(subscriberDID: string, topicID: string): void {
     let set = this.#topics.get(topicID)
@@ -78,6 +80,7 @@ export class DurableFakeHub implements LogHub {
       topicID: params.topicID,
       payload: params.payload,
     }
+    this.published.push(message)
     this.#log.push(message)
     // Only a log publish moves the head — and only a log publish is IN the log.
     if (params.retain === 'log') {
@@ -150,6 +153,27 @@ export class DurableFakeHub implements LogHub {
 
   ackedCount(subscriberDID: string): number {
     return this.#acked.get(subscriberDID)?.size ?? 0
+  }
+
+  /**
+   * Sweep a topic's frames older than `before`, exclusive — the hub enforcing its retention
+   * window. The head is NOT touched, exactly as the store's is not: it names the last accepted
+   * log publish and outlives the frame it names. A member offline for the window's duration is
+   * one whose own backlog is the OLDEST thing left here.
+   */
+  trim(topicID: string, before: string): void {
+    this.#log = this.#log.filter((m) => m.topicID !== topicID || m.sequenceID >= before)
+  }
+
+  /** The oldest log-class frame the topic still retains, or null. */
+  oldest(topicID: string): string | null {
+    const log = this.#log.filter((m) => m.topicID === topicID && this.#logClass.has(m.sequenceID))
+    return log.length > 0 ? (log[0] as StoredMessage).sequenceID : null
+  }
+
+  /** The topic's head: the last accepted log publish, or null. It survives a trim. */
+  head(topicID: string): string | null {
+    return this.#heads.get(topicID) ?? null
   }
 
   receive(subscriberDID: string): HubReceiveSubscription {
