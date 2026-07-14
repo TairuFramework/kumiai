@@ -100,7 +100,10 @@ export type GroupPeerMLSParams = {
    * deserializes its post-commit handle, adopts it, and delivers any Welcome it carried.
    *
    * MUST be idempotent, for the same reason `onAccepted` must: the peer cannot tell an
-   * entry whose `onAccepted` already ran from one whose process died before it.
+   * entry whose `onAccepted` already ran from one whose process died before it. So the
+   * Welcome goes out again, at-least-once and by design — see
+   * {@link PendingCommit.onAccepted} for why the sender must not suppress the repeat, and
+   * what absorbs it on the invitee's side.
    */
   adoptJournalled: (journal: Uint8Array) => Promise<void>
 }

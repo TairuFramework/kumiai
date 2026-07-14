@@ -8,8 +8,10 @@ import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryCommitJournal, type MemoryCommitJournal } from './fixtures/journal.js'
 import {
+  adoptJournalledBlob,
   buildInviteCommit,
   buildLedgerCommit,
+  buildRemoveCommit,
   makeMLSPeer,
   type TestPeer,
 } from './fixtures/peer.js'
@@ -296,11 +298,28 @@ describe('restart replay closes the crash window', () => {
     await alice.peer.dispose()
   })
 
-  test('a remove that never landed is surfaced too — the notice is the whole point', async () => {
+  test('a remove that lands evicts the member', async () => {
+    const hub = new FakeHub()
+    const recoverySecret = new Uint8Array(32).fill(0x3a)
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { members: ['alice', 'mallory'] })
+    await flush()
+
+    await alice.peer.commit(buildRemoveCommit(alice, 'mallory'))
+
+    // The control the failed remove below is measured against: when the commit lands, the host
+    // adopts in onAccepted and the leaf is gone. Eviction is that adoption and nothing else.
+    expect(alice.mls.leaves()).not.toContain('mallory')
+    expect(alice.journal.slot()).toBeNull()
+
+    await alice.peer.dispose()
+  })
+
+  test('a remove that never landed is surfaced, and the member is STILL IN THE GROUP', async () => {
     const hub = new FakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x36)
 
-    const seed = makeMLSPeer(hub, 'alice', recoverySecret)
+    // Mallory is in the tree, and the commit that was going to evict her never reached the hub.
+    const seed = makeMLSPeer(hub, 'alice', recoverySecret, { members: ['alice', 'mallory'] })
     const journal = await journalledButNeverPublished(seed, {
       expectedHead: null,
       kind: 'remove',
@@ -313,8 +332,26 @@ describe('restart replay closes the crash window', () => {
       mls: seed.mls,
       crypto: seed.crypto,
       journal,
+      // The blob a remove journals is its POST-commit handle — the one whose tree no longer
+      // holds Mallory. Adopting it is the eviction, and nothing else is. So a peer that
+      // adopts a commit it has not been told landed evicts her here, on a group that still
+      // holds her, and this test is the thing that catches it.
+      adoptJournalled: (blob) => {
+        adoptJournalledBlob(seed.mls, blob)
+        seed.mls.evict('mallory')
+      },
     })
-    expect((await alice.peer.replay()).lost).toEqual({ kind: 'remove' })
+    const { lost } = await alice.peer.replay()
+
+    // Two failures are possible and they are NOT the same. Silence, and an admin believes an
+    // eviction happened that did not. Or a notice over a handle Mallory is already gone from,
+    // and the admin is told the removal failed while this device quietly acts as if it did —
+    // it stops sealing to her, and diverges from a group that still holds her leaf. Only the
+    // pair of assertions below can tell those apart, and both must hold.
+    expect(lost).toEqual({ kind: 'remove' })
+    expect(alice.mls.leaves()).toContain('mallory')
+    expect(commitFrames(hub, recoverySecret)).toHaveLength(1) // only zoe's: the remove never landed
+    expect(journal.slot()).toBeNull() // surfaced, then cleared. Never cleared silently.
 
     await alice.peer.dispose()
   })

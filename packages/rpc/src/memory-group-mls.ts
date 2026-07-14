@@ -34,6 +34,14 @@ export type MemoryGroupMLS = GroupMLS & {
   /** Adopt a Commit this member produced: enact its entries and advance. */
   adopt: (commit: Uint8Array) => void
   /**
+   * Drop a member's leaf. The double has no Remove proposal, so this stands in for the one
+   * effect a remove has on the tree — and it is what ADOPTING the post-commit handle of a
+   * remove does, which is the only way a leaf ever goes away. A remove whose commit never
+   * landed must leave the leaf exactly where it is: an admin told the eviction failed, over
+   * a handle the member is already gone from, has been lied to twice.
+   */
+  evict: (did: string) => void
+  /**
    * Make the next rejoin's `onAccepted` throw: the process dies in `recover()`'s own
    * acceptance window, after the hub took the external commit and before this handle
    * adopted it. Deliberately unjournalled, so the orphan is repaired by re-recovery.
@@ -295,6 +303,11 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         throw new Error("adopt: not a commit framed at this member's current epoch")
       }
       enact(parsed)
+    },
+    evict(did: string) {
+      for (let i = leaves.length - 1; i >= 0; i--) {
+        if (leaves[i] === did) leaves.splice(i, 1)
+      }
     },
     readCommitHeader(commit: Uint8Array): CommitHeader | null {
       // Reads the commit's own bytes and nothing else: no epoch secret, no blob, no state.

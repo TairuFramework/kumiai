@@ -1393,6 +1393,51 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
   return { group, credential }
 }
 
+export type ProcessWelcomeOnceParams = ProcessWelcomeParams & {
+  /** The group ids this member already holds a handle for. */
+  joined: Iterable<string>
+}
+
+/**
+ * Join from a Welcome, unless this member has already joined that group — in which case it
+ * returns `null` and the member keeps the handle it has.
+ *
+ * **A Welcome is delivered AT LEAST ONCE, by design.** A sender that journals its commit and
+ * delivers the Welcome only once the hub has accepted it re-delivers on any crash between
+ * those two steps, and it must: a sender that suppressed the repeat instead would strand the
+ * invitee in a group it was added to and never told about. So the repeat is the receiver's to
+ * absorb, and this is where it is absorbed.
+ *
+ * It matters because {@link processWelcome} does NOT absorb it. It is a pure function of the
+ * Welcome bytes, the key package and the private keys — nothing in it, and nothing in the MLS
+ * library beneath it, holds a registry of joined groups, so there is no already-joined state
+ * for it to consult. A repeat therefore succeeds, silently, and hands back a whole second
+ * group state frozen at the epoch the Welcome was minted for. **Adopting that handle rolls the
+ * member back to its joining epoch: every member added since is gone from its roster, it can
+ * no longer read the group's traffic, and nothing anywhere raises an error.** That is the
+ * hazard this function exists to remove, and it is why the safe path is the one to call.
+ *
+ * **The join is done and then thrown away, and it has to be.** The duplicate is only visible
+ * AFTER the join: a Welcome's group id is encrypted to the joiner's key, so the check cannot
+ * be hoisted above the `processWelcome` call — there is nothing to check it against until the
+ * handle exists. So this joins, compares the group id it got against `joined`, and DISCARDS
+ * the stale handle rather than returning it. The wasted work is the price of the guarantee.
+ *
+ * A Welcome for a group this member does not hold is an ordinary first join, whatever else it
+ * holds: the check is per group id, not per member.
+ */
+export async function processWelcomeOnce(
+  params: ProcessWelcomeOnceParams,
+): Promise<ProcessWelcomeResult | null> {
+  const { joined, ...welcomeParams } = params
+  const held = new Set(joined)
+  const result = await processWelcome(welcomeParams)
+  if (held.has(result.group.groupID)) {
+    return null
+  }
+  return result
+}
+
 export type RemoveMemberResult = {
   /** Framed MLSMessage bytes. Broadcast to existing members via the DS. */
   commitMessage: Uint8Array

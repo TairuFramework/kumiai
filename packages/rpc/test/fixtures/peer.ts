@@ -52,6 +52,13 @@ export type MakeMLSPeerOptions = {
   crypto?: FakeCrypto
   /** Reuse an existing journal — durability across a restart is exactly this. */
   journal?: MemoryCommitJournal
+  /**
+   * The host's adoption of a journalled post-commit handle, overridden. The default adopts
+   * the blob and nothing else, which is the whole of what a `ledger` commit's handle carries.
+   * A `remove`'s handle carries one thing more — the member's leaf is already gone from it —
+   * and only a host that models that can tell an eviction that happened from one that did not.
+   */
+  adoptJournalled?: (blob: Uint8Array) => void
   welcomes?: Array<string>
   commitDeadlineMs?: number
   /** The group's commit policy: a committer this refuses is well-formed and not applied. */
@@ -91,6 +98,10 @@ export function makeMLSPeer(
     journal,
     // The restart half of onAccepted, over the same blob — and idempotent, as it must be.
     adoptJournalled: async (blob) => {
+      if (options.adoptJournalled != null) {
+        options.adoptJournalled(blob)
+        return
+      }
       adoptJournalledBlob(mls, blob)
     },
     localDID,
@@ -130,6 +141,34 @@ export function buildLedgerCommit(
       journal: commit,
       onAccepted: async () => {
         adoptJournalledBlob(member.mls, commit)
+      },
+    }
+  }
+}
+
+/**
+ * A host's `build()` for a remove. The eviction happens when — and only when — the host
+ * adopts the post-commit handle, which it does in `onAccepted` and nowhere else. A remove
+ * that never lands therefore leaves the member exactly where they were, and the notice the
+ * peer hands back is the ONLY thing that tells the admin so.
+ */
+export function buildRemoveCommit(
+  member: TestPeer,
+  victimDID: string,
+  options: LedgerCommitOptions = {},
+): () => Promise<PendingCommit> {
+  return async () => {
+    await options.onBuild?.()
+    options.framedAt?.push(member.mls.epoch())
+    const commit = member.mls.buildCommit([])
+    return {
+      commit,
+      bodies: [],
+      kind: 'remove',
+      journal: commit,
+      onAccepted: async () => {
+        adoptJournalledBlob(member.mls, commit)
+        member.mls.evict(victimDID)
       },
     }
   }

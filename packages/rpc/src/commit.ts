@@ -45,9 +45,20 @@ export type PendingCommit = {
    * acceptance → `onAccepted()` → clear the journal slot* is four steps and a crash can
    * land between any two of them, so an entry whose `onAccepted` already ran, wholly or
    * partly, is still in the slot on restart and is replayed. Re-adopting the journalled
-   * handle is harmless — it is a fixed serialized value. **Re-delivering a Welcome is
-   * not:** the invitee has already joined, and a second `processWelcome` over the same
-   * bytes errors or builds a duplicate group state. Both halves must tolerate a repeat.
+   * handle is harmless — it is a fixed serialized value.
+   *
+   * **So a Welcome is delivered AT LEAST ONCE, and that is deliberate.** Replay WILL send it
+   * again, and it must: suppressing the repeat would mean a crash in this window strands the
+   * invitee in a group it was added to and never told about, which is the whole reason the
+   * Welcome is journalled. The sender does not deduplicate, and must not try.
+   *
+   * The repeat is safe on the invitee's side, and only because it is absorbed there: a
+   * receiver joins with `processWelcomeOnce` from `@kumiai/mls`, which returns `null` for a
+   * Welcome whose group it already holds. Plain `processWelcome` does NOT — it is a pure
+   * function with no registry of joined groups, so a repeat quietly builds a second group
+   * state at the joining epoch, and adopting it rolls the member back: every member added
+   * since is gone from its roster and it can no longer read the group, with no error
+   * anywhere.
    */
   onAccepted: () => Promise<void>
 }
