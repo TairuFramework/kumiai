@@ -43,7 +43,10 @@ export type TestPeer = {
 
 export type MakeMLSPeerOptions = {
   epoch?: number
-  ledger?: Array<string>
+  /** Entry bodies this member already holds — a Welcome carries them. Not an enacted ledger. */
+  bodies?: Array<string>
+  /** The members this handle's tree holds a leaf for. A responder seals only to those. */
+  members?: Array<string>
   /** Reuse an existing group state — a "restart" is a new peer over the same handle. */
   mls?: MemoryGroupMLS
   crypto?: FakeCrypto
@@ -53,7 +56,7 @@ export type MakeMLSPeerOptions = {
   commitDeadlineMs?: number
   /** The group's commit policy: a committer this refuses is well-formed and not applied. */
   acceptsCommitter?: (committerDID: string) => boolean
-  recovery?: { timeoutMs?: number; getDelayMs?: () => number }
+  recovery?: { timeoutMs?: number; getDelayMs?: () => number; deadlineMs?: number }
 }
 
 /** A member of the group at `epoch`, wired with a durable journal, as a host must be. */
@@ -74,7 +77,8 @@ export function makeMLSPeer(
       // it compares a commit's author against. A double with no identity cannot model the
       // one question this lane asks of a frame — "did I write this?".
       localDID,
-      ...(options.ledger != null ? { ledger: options.ledger } : {}),
+      ...(options.bodies != null ? { bodies: options.bodies } : {}),
+      ...(options.members != null ? { members: options.members } : {}),
       ...(options.acceptsCommitter != null ? { acceptsCommitter: options.acceptsCommitter } : {}),
       onAdvance: (e) => crypto.setEpoch(e),
     })

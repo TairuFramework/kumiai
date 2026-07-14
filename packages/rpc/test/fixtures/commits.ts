@@ -3,7 +3,7 @@ import type { HubPublishParams } from '@kumiai/hub-tunnel'
 import { encodeCommitFrame } from '../../src/commit-frame.js'
 import { encodeHandshakeFrame, HANDSHAKE_KIND } from '../../src/handshake.js'
 import { encodeLedgerEntries } from '../../src/ledger-entries.js'
-import { encodeMemoryCommit, memoryEntryID } from '../../src/memory-group-mls.js'
+import { encodeMemoryCommit, memoryEntryID, memoryLedgerHead } from '../../src/memory-group-mls.js'
 import { commitTopic } from '../../src/topic.js'
 import { createFakeCrypto } from './fake-crypto.js'
 
@@ -24,8 +24,22 @@ export type PublishCommitParams = {
   epoch: number
   /** The signed tokens it enacts. They ride the frame, sealed under `epoch`. */
   entries?: Array<string>
+  /**
+   * The tokens the group's ledger ALREADY holds, in order. A commit that enacts entries
+   * carries the head folded over the committer's whole ledger, so an off-stage admin
+   * committing onto a non-empty ledger has to say what was under it — a head folded over the
+   * new entries alone is a head no receiver's ledger reproduces.
+   */
+  ledgerBefore?: Array<string>
   /** Override the commit bytes (an empty commit is a no-op the receiver cannot apply). */
   commit?: Uint8Array
+  /**
+   * The head this publish is conditional on. Omitted, the frame is appended unconditionally —
+   * fine for an admin off-stage in a test that is not about the race. Given, it is a real
+   * compare-and-set, and TWO publishes naming the same head are what a hub has to break its
+   * own contract to accept.
+   */
+  expectedHead?: string | null
 }
 
 /**
@@ -34,16 +48,23 @@ export type PublishCommitParams = {
  * bodies sealed under the pre-commit epoch secret.
  */
 export async function publishCommit(params: PublishCommitParams): Promise<{ sequenceID: string }> {
-  const { hub, senderDID, recoverySecret, epoch, entries = [] } = params
+  const { hub, senderDID, recoverySecret, epoch, entries = [], ledgerBefore = [] } = params
   const committerDID = params.committerDID ?? senderDID
   const crypto = createFakeCrypto({ epoch, localDID: senderDID })
+  const entryIDs = entries.map(memoryEntryID)
   const commit =
-    params.commit ?? encodeMemoryCommit(epoch, committerDID, entries.map(memoryEntryID))
+    params.commit ??
+    encodeMemoryCommit(epoch, committerDID, entryIDs, {
+      ...(entryIDs.length > 0
+        ? { head: memoryLedgerHead([...ledgerBefore.map(memoryEntryID), ...entryIDs]) }
+        : {}),
+    })
   const sealed = await crypto.wrap(encodeLedgerEntries(entries))
   return hub.publish({
     senderDID,
     topicID: commitTopic(recoverySecret),
     payload: encodeHandshakeFrame(HANDSHAKE_KIND.commit, encodeCommitFrame(commit, sealed)),
     retain: 'log',
+    ...(params.expectedHead !== undefined ? { expectedHead: params.expectedHead } : {}),
   })
 }

@@ -51,6 +51,15 @@ export class FakeHub implements LogHub {
    * A hub that lies about who sent a frame. See {@link FakeHub.lieAboutSender}.
    */
   #senderLie: ((message: StoredMessage, readerDID: string) => string) | undefined
+  /**
+   * A hub that does not honour the compare-and-set. Off by default: everything below is
+   * OPT-IN, so an honest hub is what every test gets unless it asks for otherwise.
+   */
+  #acceptsAnyHead = false
+  /** Frames a given reader is not shown at all: `readerDID -> sequenceIDs`. */
+  #hidden = new Map<string, Set<string>>()
+  /** Frames a given reader is shown even though its cursor is already past them. */
+  #belowCursor = new Map<string, Set<string>>()
   /** Append-only record of every published message, for test assertions. */
   published: Array<StoredMessage> = []
 
@@ -65,6 +74,57 @@ export class FakeHub implements LogHub {
    */
   lieAboutSender(fn: (message: StoredMessage, readerDID: string) => string): void {
     this.#senderLie = fn
+  }
+
+  /**
+   * Stop honouring the compare-and-set: accept every publish at whatever head it names, so
+   * two commits at one head both land and the log forks.
+   *
+   * A conforming store cannot do this — the head comparison, the sequence mint and the append
+   * are one transaction — and the store's contract is not what this models. It models the hub
+   * the design refuses to trust. **The double-accept is the ONLY way a fork exists at all**, so
+   * a fixture that cannot produce one cannot exercise a single line of the code that heals it.
+   */
+  acceptAtAnyHead(): void {
+    this.#acceptsAnyHead = true
+  }
+
+  /**
+   * Serve divergent logs: withhold a frame from one reader while showing it to another. This
+   * is what "the hub accepted both and told different members different things" actually looks
+   * like from inside a peer.
+   */
+  hideFrom(readerDID: string, sequenceID: string): void {
+    let set = this.#hidden.get(readerDID)
+    if (set == null) {
+      set = new Set()
+      this.#hidden.set(readerDID, set)
+    }
+    set.add(sequenceID)
+  }
+
+  /**
+   * Hand a reader a frame its cursor has ALREADY PASSED — the branch it was never shown,
+   * arriving after it committed to the other one.
+   *
+   * `fetchTopic`'s `after` is an exclusive cursor, and that is a CONTRACT: the party it binds
+   * is the party this design does not trust. A hub that has already broken the compare-and-set
+   * to fork the log has no reason to keep this one, and a peer that assumed it would can never
+   * be shown the branch it lost — which is exactly the observation that heals it.
+   *
+   * ONE-SHOT: the frame is served on the next read and then the log converges to one story. A
+   * hub that kept re-serving a frame below every peer's cursor forever would simply re-trigger
+   * every heal forever, which is a hub denying service rather than a hub forking a log, and no
+   * peer-side rule can survive it.
+   */
+  revealTo(readerDID: string, sequenceID: string): void {
+    this.#hidden.get(readerDID)?.delete(sequenceID)
+    let set = this.#belowCursor.get(readerDID)
+    if (set == null) {
+      set = new Set()
+      this.#belowCursor.set(readerDID, set)
+    }
+    set.add(sequenceID)
   }
 
   #asReadBy(message: StoredMessage, readerDID: string): StoredMessage {
@@ -101,7 +161,7 @@ export class FakeHub implements LogHub {
     // The compare-and-set, before anything is minted: a loser leaves the log, the head and
     // the sequence exactly as it found them. `null` means "the topic has never had an
     // accepted log publish", and is a different request from an absent expectedHead.
-    if (params.expectedHead !== undefined) {
+    if (params.expectedHead !== undefined && !this.#acceptsAnyHead) {
       const head = this.#heads.get(params.topicID) ?? null
       if (head !== params.expectedHead) {
         throw new HeadMismatchError(
@@ -136,6 +196,8 @@ export class FakeHub implements LogHub {
     // the log, it is on top of it.
     for (const did of [...(this.#topics.get(params.topicID) ?? [])]) {
       if (did === params.senderDID) continue
+      // A frame this reader is being kept from does not reach it by push either.
+      if (this.#hidden.get(did)?.has(sequenceID) === true) continue
       const asRead = this.#asReadBy(message, did)
       for (const sink of this.#sinks.get(did) ?? []) sink.push(asRead)
     }
@@ -158,10 +220,22 @@ export class FakeHub implements LogHub {
       this.#logClass.has(m.sequenceID),
     )
     const after = params.after
-    const selected = after == null ? log : log.filter((m) => m.sequenceID > after)
+    // An honest hub shows every reader the same log and honours the exclusive cursor. A hub
+    // told to fork does neither: a frame it is withholding from this reader is not in the
+    // reader's log at all, and one it has been told to reveal is served even though the
+    // reader's cursor is already past it.
+    const hidden = this.#hidden.get(params.subscriberDID)
+    const belowCursor = this.#belowCursor.get(params.subscriberDID)
+    const visible = hidden == null ? log : log.filter((m) => !hidden.has(m.sequenceID))
+    const selected = visible.filter(
+      (m) => after == null || m.sequenceID > after || belowCursor?.has(m.sequenceID) === true,
+    )
     const messages = (params.limit == null ? selected : selected.slice(0, params.limit)).map((m) =>
       this.#asReadBy(m, params.subscriberDID),
     )
+    // A frame served below the cursor is served once: the fork is shown, and then the hub tells
+    // one story again.
+    for (const message of messages) belowCursor?.delete(message.sequenceID)
     return {
       messages: [...messages],
       head: this.#heads.get(params.topicID) ?? null,

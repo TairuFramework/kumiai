@@ -63,6 +63,31 @@ export type CommitContext = {
 }
 
 /**
+ * The external commit that rejoins a stranded peer to the group, BUILT and not adopted —
+ * the recovery twin of {@link "commit".PendingCommit}, and non-mutating for the same
+ * reason: the handle it derives is adopted only if the hub accepts the commit, and a peer
+ * that adopted first would be sitting on a branch of its own the moment it lost the
+ * compare-and-set.
+ *
+ * It carries no entries. `joinGroupExternal` returns a commit and a handle and has nowhere
+ * to put an entry envelope, which is why a heal is TWO commits: this one rejoins, and the
+ * entries the peer still owes the group ride an ordinary `commit()` behind it.
+ */
+export type PendingRecovery = {
+  /** The external-commit bytes, framed at the epoch the sealed GroupInfo described. */
+  commit: Uint8Array
+  /**
+   * Adopt the rejoined handle. Runs only if the hub accepts the external commit, and is
+   * the ONLY place it may be adopted.
+   *
+   * **The rejoined handle's ledger is EMPTY** — a GroupInfo carries an authenticated ledger
+   * head and no entries — so from here until the ledger is bootstrapped the handle is
+   * internally inconsistent, and that state is a roster reset, not a neutral one.
+   */
+  onAccepted: () => Promise<void>
+}
+
+/**
  * Consumer-supplied MLS lifecycle port. Sibling to {@link GroupCrypto}: where
  * `GroupCrypto` adapts application encrypt/decrypt, this drives the handshake
  * lane — applying Commits to advance the epoch and re-syncing a stranded peer.
@@ -101,28 +126,68 @@ export type GroupMLS = {
    */
   processCommit(commit: Uint8Array, context: CommitContext): Promise<{ advanced: boolean }>
   /**
-   * Export current group state for a recovery responder, sealed to the
-   * requesting member's MLS leaf so only that requester (not the hub, not other
-   * members) can open it.
-   */
-  exportGroupInfo(requesterDID: string): Promise<Uint8Array>
-  /**
-   * Re-sync from a sealed recovery reply, returning whether the epoch advanced.
-   * The bytes may be hub-injected or sealed to a different member; implementations
-   * SHOULD return `{ advanced: false }` for input they cannot open. A throw is also
-   * tolerated — the caller treats it as no advance — but returning is preferred.
-   */
-  applyRecovery(groupInfo: Uint8Array): Promise<{ advanced: boolean }>
-  /**
-   * The signed control-ledger tokens this member holds for the given content ids,
-   * omitting any it does not hold. It serves another member's request for the bodies
-   * of entries it lacks — the one case a commit frame cannot cover, because a peer that
-   * rejoined by external commit was handed no ledger with its GroupInfo.
+   * Mint the rendezvous request this peer publishes to ask the group for its state: an
+   * HPKE keypair minted for this one request, its public half carried in a token signed by
+   * this member's identity key.
    *
-   * The requester re-verifies every token and checks its digest against the id it asked
-   * for, so an implementation that answers with the wrong body can only fail to answer.
+   * The private half is retained by the port, keyed by `requestID`, and is what makes the
+   * reply openable by this peer and nobody else. It is minted per request rather than taken
+   * from the peer's leaf because the peers that most need a heal — the one whose commit was
+   * accepted and lost, the one on a discarded branch — no longer hold the leaf key the
+   * group can see: their own commit rotated it, and the new private key died with the state
+   * that was never persisted.
    */
-  getLedgerEntries(ids: Array<string>): Promise<Array<string>>
+  createRecoveryRequest(requestID: string): Promise<Uint8Array>
+  /**
+   * Answer another member's request: verify the token, check the requester still holds a
+   * leaf in THIS member's current ratchet tree, and seal current GroupInfo to the ephemeral
+   * key inside the signed request.
+   *
+   * Authorization is roster-intrinsic, not a permission the caller can forget to check: a
+   * removed member gets nothing from any responder that has applied its removal. Throws for
+   * a request it refuses, and the peer stays silent rather than answering.
+   */
+  sealGroupInfo(request: Uint8Array): Promise<Uint8Array>
+  /**
+   * Open a sealed reply with the key minted for `requestID`, and BUILD the external commit
+   * that rejoins this peer to the group it describes. Non-mutating, like every other commit
+   * this port builds: the rejoined handle is adopted in {@link PendingRecovery.onAccepted}
+   * and nowhere else, because the commit still has to win a compare-and-set at the head.
+   *
+   * `null` for bytes this peer cannot open — a hub-injected reply, or one sealed for another
+   * member or another request. A throw is tolerated and read the same way.
+   */
+  applyRecovery(sealed: Uint8Array, requestID: string): Promise<PendingRecovery | null>
+  /**
+   * Whether the ledger this handle holds is the whole ledger its OWN GroupContext attests
+   * to: the head folded from the entries it holds, in the order it holds them, against the
+   * authenticated head it carries.
+   *
+   * Purely local — no peer, no network, and no memory of how the handle got here. False
+   * means the ledger is incomplete and {@link bootstrapLedger} must run before this handle
+   * can be trusted to fold a roster or judge an incoming commit. A handle that rejoined by
+   * external commit reads false: its ledger is empty against a live, non-genesis head.
+   */
+  isLedgerComplete(): Promise<boolean>
+  /**
+   * The WHOLE ordered ledger this handle holds, as signed tokens — what a responder serves
+   * to a bootstrapping peer, and what a peer about to be rejoined snapshots as the entries
+   * it may still owe the group.
+   *
+   * Order is load-bearing: the head is a chain digest, so a permuted list of the same tokens
+   * folds to a different head and the requester rejects it.
+   */
+  getLedger(): Promise<Array<string>>
+  /**
+   * Install a gathered ledger, verified against the authenticated head BEFORE a single
+   * entry is folded. It REPLACES the ledger this handle holds, which is sound because the
+   * check is a fold from genesis: a list that reproduces the head this handle's own
+   * GroupContext carries IS the group's entire ledger, in order.
+   *
+   * Throws for a list whose recomputed head does not match — a lying responder can withhold,
+   * never rewrite — and the peer drops that responder and folds the next reply instead.
+   */
+  bootstrapLedger(tokens: Array<string>): Promise<void>
   /**
    * The epoch-independent secret for the non-rotating handshake/recovery topic.
    * Stable for the group's whole life so a stranded peer on any epoch can always

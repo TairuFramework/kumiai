@@ -120,11 +120,22 @@ export type CommitJournal = {
 export type LostCommit = { kind: 'ledger'; tokens: Array<string> } | { kind: 'invite' | 'remove' }
 
 /**
- * Every lane operation replays the journal first, so every one of them can surface a loss.
- * It is a RETURN VALUE and never a callback: replay runs inside the peer's commit mutex,
- * and the host's response to a loss is to call `commit()`, which takes that same mutex.
+ * What a lane operation found that the host has to act on. Every one of them is a RETURN
+ * VALUE and never a callback: they are found inside the peer's commit mutex, and the host's
+ * response to both of them is to call `commit()`, which takes that same mutex.
+ *
+ * `lost` is a commit that was journalled and never landed, whose closure died with the
+ * process that built it. `reenact` is the other side of the same coin: a heal rejoined this
+ * peer, and these are the signed entry tokens it held that the group's authenticated ledger
+ * does NOT contain — the work survived, the commit that carried it did not. Both are the
+ * host's to re-issue, and the peer never re-issues either by itself.
+ *
+ * An entry the group's ledger already holds is absent from `reenact`, whatever failure
+ * brought the peer here. Re-enacting one would append it a second time, and the fold is
+ * last-write-wins by position: it would win, and silently revert whatever a later admin
+ * wrote over it.
  */
-export type LaneResult = { lost?: LostCommit }
+export type LaneResult = { lost?: LostCommit; reenact?: Array<string> }
 
 /**
  * `commit()` ran out of time rebasing: it kept losing the compare-and-set until its

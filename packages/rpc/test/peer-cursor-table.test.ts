@@ -26,7 +26,11 @@ function heals(hub: FakeHub, recoverySecret: Uint8Array): Array<unknown> {
 }
 
 /** Fast rendezvous, so a heal that is going to happen happens inside a test. */
-const fastRecovery = { timeoutMs: 100, getDelayMs: () => 5 }
+const fastRecovery = { timeoutMs: 100, getDelayMs: () => 5, deadlineMs: 300 }
+
+/** A responder answers only a DID its own tree still holds a leaf for, so a peer that expects
+ *  to be healed has to be in the group it is asking. */
+const members = ['alice', 'bob', 'carol']
 
 describe('a peer that meets its own un-merged commit', () => {
   test('heals, and its epoch advances — with no journal to repair it', async () => {
@@ -38,18 +42,21 @@ describe('a peer that meets its own un-merged commit', () => {
     // journal is gone too: this is the peer the journal cannot repair.
     await publishCommit({ hub, senderDID: 'alice', recoverySecret: rs, epoch: 1 })
 
-    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, recovery: fastRecovery })
+    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery: fastRecovery })
     await flush()
     expect(bob.mls.epoch()).toBe(2)
 
     // Alice comes back at the epoch she died at, holding an empty journal, and reads the log.
-    const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, recovery: fastRecovery })
+    const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, recovery: fastRecovery })
     await flush(200)
 
-    // She healed. The assertion is her EPOCH, not the absence of an error: a peer missing
-    // this row files its own commit as poison, walks cheerfully to the end of the log, and
-    // reports itself fully reconciled — stuck at epoch 1 forever with a clean bill of health.
-    expect(alice.mls.epoch()).toBe(2)
+    // She healed, by rejoining: the external commit is a commit like any other, so it lands on
+    // the log and takes the whole group to the next epoch with her. The assertion is her
+    // EPOCH, not the absence of an error — a peer missing this row files its own commit as
+    // poison, walks cheerfully to the end of the log, and reports itself fully reconciled,
+    // stuck at epoch 1 forever with a clean bill of health.
+    expect(alice.mls.epoch()).toBe(3)
+    expect(bob.mls.epoch()).toBe(3)
     expect(heals(hub, rs)).toHaveLength(1)
 
     // And the port was never even asked about that frame. The un-merged own-commit row is
@@ -68,7 +75,7 @@ describe('a peer that meets its own un-merged commit', () => {
 
     // Alice's orphaned commit at epoch 1...
     await publishCommit({ hub, senderDID: 'alice', recoverySecret: rs, epoch: 1 })
-    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, recovery: fastRecovery })
+    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery: fastRecovery })
     await flush()
     // ...and the group commits again on top of it, at epoch 2.
     const token = 'signed-token: bob enacted this while alice was dead'
@@ -76,28 +83,34 @@ describe('a peer that meets its own un-merged commit', () => {
     await flush()
     expect(bob.mls.epoch()).toBe(3)
 
-    // Alice restarts at epoch 1 and heals to the group's epoch. The jump moves her epoch; it
-    // does not move her cursor, so both commits she skipped are still in the log ahead of it.
-    const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, recovery: fastRecovery })
-    await flush(200)
+    // Alice restarts at epoch 1 and heals to the group's epoch. The rejoin moves her epoch; it
+    // does not move her cursor over the frames she skipped, and at the epoch she lands on they
+    // are history.
+    const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, recovery: fastRecovery })
+    await flush(300)
 
-    expect(alice.mls.epoch()).toBe(3)
-    // She applied NEITHER. At the epoch she landed on they are frames from epochs she holds
-    // no record for — history — so the cursor walks them and the port is never asked. A peer
-    // that re-applied them would advance twice on commits the group counted once.
+    expect(alice.mls.epoch()).toBe(4)
+    expect(bob.mls.epoch()).toBe(4)
+    // She applied NEITHER of the frames she jumped over. At the epoch she landed on they are
+    // frames from epochs she holds no record for — history — so the cursor walks them and the
+    // port is never asked. A peer that re-applied them would advance twice on commits the
+    // group counted once.
     expect(alice.mls.seen()).toBe(0)
     expect(alice.mls.commits()).toBe(0)
-    expect(alice.mls.ledgerIDs()).toEqual([])
+    // She did not APPLY bob's commit — and she holds what it enacted anyway. The rejoined
+    // handle came back with an empty ledger, and bootstrap refolded the group's whole ledger
+    // into it, head-verified.
+    expect(alice.mls.ledgerIDs()).toEqual([memoryEntryID(token)])
     // And she does not heal again on the way past her own commit: authorship matches, but
     // the epoch no longer does.
     expect(heals(hub, rs)).toHaveLength(1)
 
     // Her lane is live at the epoch she landed on: the next commit reaches her and applies.
-    await publishCommit({ hub, senderDID: 'zoe', recoverySecret: rs, epoch: 3 })
+    await publishCommit({ hub, senderDID: 'zoe', recoverySecret: rs, epoch: 4 })
     await flush(80)
     expect(alice.mls.seen()).toBe(1)
     expect(alice.mls.commits()).toBe(1)
-    expect(alice.mls.epoch()).toBe(4)
+    expect(alice.mls.epoch()).toBe(5)
 
     await alice.peer.dispose()
     await bob.peer.dispose()
@@ -282,20 +295,22 @@ describe('a peer the group left behind', () => {
     await publishCommit({ hub, senderDID: 'alice', recoverySecret: rs, epoch: 2 })
 
     // A live member, to answer a rendezvous.
-    const carol = makeMLSPeer(hub, 'carol', rs, { epoch: 3, recovery: fastRecovery })
+    const carol = makeMLSPeer(hub, 'carol', rs, { epoch: 3, members, recovery: fastRecovery })
     await flush()
 
     // Bob comes to the log at epoch 1, without that body. He drops the frame he cannot
     // resolve — in silence, because as far as he can tell nobody else could resolve it
     // either — and then meets the NEXT frame, framed at epoch 2, ahead of him. That is the
     // observation that says the fault was his alone.
-    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, recovery: fastRecovery })
-    await flush(250)
+    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery: fastRecovery })
+    await flush(300)
 
     // He healed, and the assertion is his epoch: a peer missing this row calls the ahead
     // frame "history", advances over it, reaches the end of the log, and reports itself fully
-    // reconciled — stuck at a dead epoch forever with a clean bill of health.
-    expect(bob.mls.epoch()).toBe(3)
+    // reconciled — stuck at a dead epoch forever with a clean bill of health. He rejoined onto
+    // the group's epoch, so the group moved with him.
+    expect(bob.mls.epoch()).toBe(4)
+    expect(carol.mls.epoch()).toBe(4)
     expect(heals(hub, rs)).toHaveLength(1)
     // The port was asked about exactly one frame: the one at his own epoch. The frame ahead of
     // him was classified and stepped over without ever being handed to it.
@@ -330,7 +345,7 @@ describe('a peer the group left behind', () => {
     // next one is never ahead of him.
     const dave = makeMLSPeer(hub, 'dave', rs, {
       epoch: 1,
-      ledger: [daveRole],
+      bodies: [daveRole],
       recovery: fastRecovery,
     })
     await flush(250)

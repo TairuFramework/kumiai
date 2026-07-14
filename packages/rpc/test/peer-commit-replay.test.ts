@@ -109,6 +109,57 @@ describe('restart replay closes the crash window', () => {
     await restarted.peer.dispose()
   })
 
+  test('a peer whose group is past its first epoch settles its journalled commit at startup, with the host calling nothing', async () => {
+    const hub = new FakeHub()
+    const recoverySecret = new Uint8Array(32).fill(0x3a)
+    // The process dies between the hub's answer and the durable write, so the slot records NO
+    // acceptance: replay cannot adopt from it, it has to republish — which means re-sealing the
+    // bodies, which means the lane has to know what epoch the handle is at.
+    let dying = true
+    const journal = createMemoryCommitJournal({
+      onMarkAccepted: () => {
+        if (!dying) return
+        dying = false
+        throw new Error('the process died here')
+      },
+    })
+    // A group PAST its first epoch — which is every group that has ever committed, and the only
+    // kind a crash can happen in. The epoch the lane compares against is the HANDLE's, and it
+    // must be asked for it before the first lane operation runs: replay is step 0 of the SEED,
+    // which happens before the app lane is built. A lane that assumed it was still at epoch 0
+    // refuses its own replay — for having "already advanced past" the commit it is holding, on
+    // a handle that has advanced past nothing — and the throw takes the seed pull down with it.
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 3, journal })
+    await flush()
+
+    const token = 'signed-token: carol is an admin'
+    await expect(alice.peer.commit(buildLedgerCommit(alice, [token]))).rejects.toThrow(
+      'the process died here',
+    )
+    await alice.peer.dispose()
+    expect(journal.slot()?.acceptedAs).toBeUndefined()
+    expect(alice.mls.epoch()).toBe(3)
+
+    // Restart, and then call NOTHING. The host does not know it crashed — that is the whole
+    // premise of a crash — so the peer's own first lane operation has to settle this. A peer
+    // that only recovered when the host happened to ask for a lane operation would come up
+    // holding an unsettled commit and an unseeded cursor, silently.
+    const restarted = makeMLSPeer(hub, 'alice', recoverySecret, {
+      mls: alice.mls,
+      crypto: alice.crypto,
+      journal,
+    })
+    await flush()
+
+    expect(restarted.mls.epoch()).toBe(4)
+    expect(restarted.mls.ledgerIDs()).toEqual([memoryEntryID(token)])
+    expect(journal.slot()).toBeNull()
+    // The store recognised the publishID and appended nothing: one frame, not two.
+    expect(commitFrames(hub, recoverySecret)).toHaveLength(1)
+
+    await restarted.peer.dispose()
+  })
+
   test('the commit is applied exactly once across the restart — never once by replay and again by the pull', async () => {
     const hub = new FakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x32)

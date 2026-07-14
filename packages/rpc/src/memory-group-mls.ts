@@ -1,7 +1,7 @@
 import { sha256 } from '@noble/hashes/sha2.js'
 import { fromUTF, toB64U, toUTF } from '@sozai/codec'
 
-import type { CommitContext, CommitHeader, GroupMLS } from './crypto.js'
+import type { CommitContext, CommitHeader, GroupMLS, PendingRecovery } from './crypto.js'
 
 export type MemoryGroupMLS = GroupMLS & {
   epoch: () => number
@@ -15,6 +15,14 @@ export type MemoryGroupMLS = GroupMLS & {
   /** The content ids this member's ledger has enacted, in order. */
   ledgerIDs: () => Array<string>
   /**
+   * The ledger folded, last-write-wins by position: `subject=value` tokens reduced in the
+   * order the ledger holds them. It is the whole reason re-enactment is filtered — the fold
+   * has no dedup, so an entry appended a second time WINS, whatever it said the first time.
+   */
+  fold: () => Map<string, string>
+  /** The members this handle's ratchet tree holds a leaf for, one entry per leaf. */
+  leaves: () => Array<string>
+  /**
    * Produce a Commit at this member's CURRENT epoch, enacting these signed tokens. Like
    * the real thing it is non-mutating: the group advances when the commit is adopted,
    * so the bodies can still be sealed under the epoch every receiver is at.
@@ -25,6 +33,12 @@ export type MemoryGroupMLS = GroupMLS & {
   buildCommit: (tokens?: Array<string>) => Uint8Array
   /** Adopt a Commit this member produced: enact its entries and advance. */
   adopt: (commit: Uint8Array) => void
+  /**
+   * Make the next rejoin's `onAccepted` throw: the process dies in `recover()`'s own
+   * acceptance window, after the hub took the external commit and before this handle
+   * adopted it. Deliberately unjournalled, so the orphan is repaired by re-recovery.
+   */
+  failNextRecoveryAdopt: () => void
 }
 
 export type MemoryGroupMLSOptions = {
@@ -33,9 +47,12 @@ export type MemoryGroupMLSOptions = {
   /** This member's DID — the committer stamped into the Commits it builds, and the modelled
    *  recipient of GroupInfo sealed to its leaf. */
   localDID?: string
-  /** Signed tokens this member already holds — a joiner's Welcome carries the group's
-   *  history, so the entries enacted before it joined are in the handle it starts from. */
-  ledger?: Array<string>
+  /** Signed tokens whose BODIES this member holds — a joiner's Welcome carries them, and a
+   *  member that resolved them from a commit frame keeps them. Holding a body is not the
+   *  same as having enacted it: the ledger is what a commit enacted, and it starts empty. */
+  bodies?: Array<string>
+  /** The members this handle's tree holds a leaf for. Defaults to this member alone. */
+  members?: Array<string>
   /**
    * The group's commit policy, modelled: a Commit whose committer this refuses is
    * well-formed and deliberately NOT applied — a removed member's commit is exactly that.
@@ -59,13 +76,56 @@ export class MissingLedgerEntriesError extends Error {
   }
 }
 
+/**
+ * A gathered ledger whose recomputed head does not match the one this handle's own group
+ * state attests to. The responder withheld, reordered or truncated an entry — every token
+ * in it can be perfectly well signed, which is exactly what the head chain catches and a
+ * signature does not.
+ */
+export class LedgerIncompleteError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'LedgerIncompleteError'
+  }
+}
+
 /** The content id of a signed token: its digest. Content-addressing is what binds an
  *  untrusted body to the id a Commit names. */
 export function memoryEntryID(token: string): string {
   return toB64U(sha256(fromUTF(token)))
 }
 
-type MemoryCommit = { epoch: number; committerDID: string; entryIDs: Array<string> }
+/**
+ * The ledger head: a chain digest over the entry ids, in order. Folded from a genesis
+ * value, so a list that reproduces a group's head IS that group's whole ledger, in order —
+ * which is what lets a bootstrapping peer check an untrusted responder's answer against the
+ * head its own group state carries, and what makes an omitted or transposed entry detectable
+ * when every signature in the list verifies.
+ */
+export function memoryLedgerHead(entryIDs: Array<string>): string {
+  let head = fromUTF('kumiai/memory-ledger-head/v1')
+  for (const id of entryIDs) head = sha256(new Uint8Array([...head, ...fromUTF(id)]))
+  return toB64U(head)
+}
+
+type MemoryCommit = {
+  epoch: number
+  committerDID: string
+  entryIDs: Array<string>
+  /**
+   * The ledger head AFTER this commit — the committer's own fold, carried in the commit and
+   * authenticated with it, exactly as a real one carries it in the GroupContext extension it
+   * proposes. A receiver TAKES it rather than recomputing it, which is why a receiver whose
+   * ledger is incomplete stays visibly incomplete instead of quietly re-anchoring on its own
+   * truncated fold.
+   *
+   * Absent on a commit that enacts nothing: it proposes no head extension, so the head it
+   * found is the head it leaves.
+   */
+  head?: string
+  /** An external commit: the committer is rejoining, and its leaf replaces any it still had. */
+  external?: boolean
+}
 
 /**
  * A Commit for the memory port: the epoch it was framed at, the member that authored it,
@@ -82,8 +142,21 @@ export function encodeMemoryCommit(
   epoch: number,
   committerDID: string,
   entryIDs: Array<string> = [],
+  options: { head?: string; external?: boolean } = {},
 ): Uint8Array {
-  return fromUTF(JSON.stringify({ epoch, committerDID, entryIDs } satisfies MemoryCommit))
+  // A commit that enacts nothing proposes no head extension: the head it found is the head it
+  // leaves. Only a committer that enacts entries folds a new one, and it folds it over its
+  // WHOLE ledger — so a caller enacting entries onto a non-empty ledger must say what that
+  // ledger was.
+  const head = options.head ?? (entryIDs.length > 0 ? memoryLedgerHead(entryIDs) : undefined)
+  const commit: MemoryCommit = {
+    epoch,
+    committerDID,
+    entryIDs,
+    ...(head != null ? { head } : {}),
+    ...(options.external === true ? { external: true } : {}),
+  }
+  return fromUTF(JSON.stringify(commit))
 }
 
 export function decodeMemoryCommit(commit: Uint8Array): MemoryCommit | null {
@@ -93,6 +166,7 @@ export function decodeMemoryCommit(commit: Uint8Array): MemoryCommit | null {
     if (
       typeof value?.epoch !== 'number' ||
       typeof value?.committerDID !== 'string' ||
+      (value.head != null && typeof value.head !== 'string') ||
       !Array.isArray(value.entryIDs)
     ) {
       return null
@@ -103,15 +177,22 @@ export function decodeMemoryCommit(commit: Uint8Array): MemoryCommit | null {
   }
 }
 
+/** The sealed GroupInfo, modelled. It carries the group's epoch and its AUTHENTICATED
+ *  ledger head — and no ledger, which is the whole reason bootstrap exists. */
+type MemoryGroupInfo = { to: string; requestID: string; epoch: number; head: string }
+
+type MemoryRecoveryRequest = { requestID: string; requesterDID: string }
+
 /**
  * In-memory {@link GroupMLS} for exercising peer orchestration WITHOUT real MLS —
  * the group-rpc analogue of `createMemoryBus`. It models an epoch counter and a
  * control ledger: a Commit is framed at an epoch and names the entries it enacts,
  * a member applies only Commits framed at the epoch it is at, and the bodies of the
  * entries it does not hold are resolved from the commit's own frame. GroupInfo carries
- * the epoch so a stranded peer can jump forward. The recovery secret is fixed for the
- * instance's life (epoch-independent). NOT real cryptography — a test double for
- * wiring, not a production implementation (a real port adapts a live MLS group).
+ * the epoch and the authenticated ledger head — and no entries, so a rejoined handle's
+ * ledger is EMPTY and its roster is reset until bootstrap runs. The recovery secret is
+ * fixed for the instance's life (epoch-independent). NOT real cryptography — a test double
+ * for wiring, not a production implementation (a real port adapts a live MLS group).
  */
 export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): MemoryGroupMLS {
   const recoverySecret = options.recoverySecret ?? new Uint8Array(32).fill(0x33)
@@ -121,45 +202,64 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   let commits = 0
   let seen = 0
   let lastSender: string | undefined
-  const ledger: Array<string> = []
+  /** The entries this handle has ENACTED, in order. A rejoined handle holds none. */
+  let ledger: Array<string> = []
+  /** The head this handle's group state attests to. Genesis until a commit moves it. */
+  let ledgerHead = memoryLedgerHead([])
   /** Entry bodies by content id — what this member can serve, and what it can enact. */
   const bodies = new Map<string, string>()
-  for (const token of options.ledger ?? []) bodies.set(memoryEntryID(token), token)
+  for (const token of options.bodies ?? []) bodies.set(memoryEntryID(token), token)
+  const leaves: Array<string> = [...(options.members ?? (localDID != null ? [localDID] : []))]
+  /** Ephemeral private keys, keyed by requestID — modelled as the DID a reply must be sealed
+   *  to. Retained by the port between the request and the reply, exactly as the real one is. */
+  const ephemeralKeys = new Map<string, string>()
+  let failRecoveryAdopt = false
 
   const advance = (to: number): void => {
     epoch = to
     options.onAdvance?.(epoch)
   }
 
-  // Seal = [didLen(2)][requesterDID][epoch(1)]. NOT real crypto — a test double
-  // that models "only the sealed-to member can open it".
-  const seal = (requesterDID: string, epochByte: number): Uint8Array => {
-    const did = fromUTF(requesterDID)
-    const out = new Uint8Array(2 + did.length + 1)
-    new DataView(out.buffer).setUint16(0, did.length, true)
-    out.set(did, 2)
-    out[2 + did.length] = epochByte
-    return out
-  }
+  const seal = (info: MemoryGroupInfo): Uint8Array => fromUTF(JSON.stringify(info))
 
-  const open = (sealed: Uint8Array): number | undefined => {
-    if (sealed.length < 3) return undefined
-    const didLen = new DataView(sealed.buffer, sealed.byteOffset, sealed.byteLength).getUint16(
-      0,
-      true,
-    )
-    if (sealed.length < 2 + didLen + 1) return undefined
-    const sealedTo = toUTF(sealed.subarray(2, 2 + didLen))
-    // A member with a set localDID can open only bytes sealed to it. When unset,
-    // the double is permissive (used by wiring tests that don't assert sealing).
-    if (localDID != null && sealedTo !== localDID) return undefined
-    return sealed[2 + didLen]
+  const open = (sealed: Uint8Array, requestID: string): MemoryGroupInfo | null => {
+    let info: MemoryGroupInfo
+    try {
+      info = JSON.parse(toUTF(sealed)) as MemoryGroupInfo
+    } catch {
+      return null // hub-injected bytes: not a reply at all
+    }
+    if (typeof info?.to !== 'string' || typeof info?.epoch !== 'number') return null
+    // The ephemeral key minted for THIS request is the only thing that opens a reply: one
+    // sealed to another member, or to another request by this member, does not open at all.
+    if (ephemeralKeys.get(requestID) !== info.to) return null
+    if (info.requestID !== requestID) return null
+    return info
   }
 
   const enact = (parsed: MemoryCommit): void => {
     ledger.push(...parsed.entryIDs)
+    // The head is the committer's, not this receiver's: a handle whose ledger is incomplete
+    // must stay visibly incomplete rather than re-anchor on its own truncated fold. A commit
+    // that enacted nothing carries none, and leaves the head where it found it.
+    if (parsed.head != null) ledgerHead = parsed.head
+    if (parsed.external) {
+      // `resync: true`: the rejoining member's prior leaf is atomically removed, so a peer
+      // that rejoined twice — an orphaned external commit, then a fresh one — leaves one leaf
+      // behind and not two.
+      for (let i = leaves.length - 1; i >= 0; i--) {
+        if (leaves[i] === parsed.committerDID) leaves.splice(i, 1)
+      }
+      leaves.push(parsed.committerDID)
+    }
     advance(epoch + 1)
   }
+
+  const ledgerTokens = (): Array<string> =>
+    ledger.flatMap((id) => {
+      const token = bodies.get(id)
+      return token == null ? [] : [token]
+    })
 
   return {
     epoch: () => epoch,
@@ -167,13 +267,27 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     seen: () => seen,
     lastSender: () => lastSender,
     ledgerIDs: () => [...ledger],
+    leaves: () => [...leaves],
+    fold: () => {
+      const folded = new Map<string, string>()
+      for (const token of ledgerTokens()) {
+        const split = token.indexOf('=')
+        if (split > 0) folded.set(token.slice(0, split), token.slice(split + 1))
+      }
+      return folded
+    },
+    failNextRecoveryAdopt() {
+      failRecoveryAdopt = true
+    },
     buildCommit(tokens: Array<string> = []) {
       const entryIDs = tokens.map((token) => {
         const id = memoryEntryID(token)
         bodies.set(id, token)
         return id
       })
-      return encodeMemoryCommit(epoch, localDID ?? '', entryIDs)
+      return encodeMemoryCommit(epoch, localDID ?? '', entryIDs, {
+        head: memoryLedgerHead([...ledger, ...entryIDs]),
+      })
     },
     adopt(commit: Uint8Array) {
       const parsed = decodeMemoryCommit(commit)
@@ -204,7 +318,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       // A member can never apply the frame that is its OWN commit: MLS merges a pending
       // commit, it does not process one, and the pending state is the only thing that could
       // have carried it. A member that meets its own commit in the log has lost that state,
-      // and no amount of processing will get it back.
+      // and no amount of processing will get it back. An external commit is the exception
+      // that proves it — the rejoining member adopts the handle its own rejoin derived.
       if (localDID != null && parsed.committerDID === localDID) {
         return { advanced: false }
       }
@@ -231,22 +346,90 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       enact(parsed)
       return { advanced: true }
     },
-    async getLedgerEntries(ids: Array<string>) {
-      return ids.flatMap((id) => {
-        const token = bodies.get(id)
-        return token == null ? [] : [token]
+    async isLedgerComplete() {
+      return memoryLedgerHead(ledger) === ledgerHead
+    },
+    async getLedger() {
+      return ledgerTokens()
+    },
+    async bootstrapLedger(tokens: Array<string>) {
+      // The gate, and nothing below it touches the handle until the check has passed: the
+      // head is recomputed over the gathered ids IN THE ORDER GIVEN and compared against the
+      // one this handle's own group state carries. A rejected ledger writes nothing.
+      const entryIDs = tokens.map(memoryEntryID)
+      if (memoryLedgerHead(entryIDs) !== ledgerHead) {
+        throw new LedgerIncompleteError(
+          'bootstrapLedger: the gathered ledger does not fold to the head this group attests to',
+        )
+      }
+      for (const token of tokens) bodies.set(memoryEntryID(token), token)
+      // A REPLACEMENT, not an append: a list that reproduces the authenticated head is the
+      // group's entire ledger, in order.
+      ledger = entryIDs
+    },
+    async createRecoveryRequest(requestID: string) {
+      // The ephemeral key, minted per request and retained by the port: the reply is sealed
+      // to it, and to nothing this peer's leaf can be read out of.
+      const requesterDID = localDID ?? ''
+      ephemeralKeys.set(requestID, requesterDID)
+      return fromUTF(JSON.stringify({ requestID, requesterDID } satisfies MemoryRecoveryRequest))
+    },
+    async sealGroupInfo(request: Uint8Array) {
+      let parsed: MemoryRecoveryRequest
+      try {
+        parsed = JSON.parse(toUTF(request)) as MemoryRecoveryRequest
+      } catch {
+        throw new Error('sealGroupInfo: the request does not parse')
+      }
+      if (typeof parsed?.requesterDID !== 'string' || typeof parsed?.requestID !== 'string') {
+        throw new Error('sealGroupInfo: the request is malformed')
+      }
+      // Roster-intrinsic authorization: the only DIDs that can be answered are the ones this
+      // responder's own tree still carries a leaf for.
+      if (!leaves.includes(parsed.requesterDID)) {
+        throw new Error(`sealGroupInfo: ${parsed.requesterDID} has no leaf in the current tree`)
+      }
+      return seal({
+        to: parsed.requesterDID,
+        requestID: parsed.requestID,
+        epoch,
+        // The AUTHENTICATED head, and no ledger with it. This is what the rejoined handle
+        // will hold, and why its empty ledger reads incomplete rather than complete-and-empty.
+        head: ledgerHead,
       })
     },
-    async exportGroupInfo(requesterDID: string) {
-      return seal(requesterDID, epoch)
-    },
-    async applyRecovery(groupInfo: Uint8Array) {
-      const target = open(groupInfo)
-      if (target == null || target <= epoch) {
-        return { advanced: false }
+    async applyRecovery(sealed: Uint8Array, requestID: string): Promise<PendingRecovery | null> {
+      const info = open(sealed, requestID)
+      if (info == null) return null
+      ephemeralKeys.delete(requestID)
+      // The external commit is framed at the epoch the GroupInfo described — the epoch the
+      // group is at, which is NOT the epoch this peer is at. Every member that can apply it
+      // is at that epoch, so a GroupInfo the group has already moved past builds a commit
+      // nobody will apply, which is why losing the compare-and-set discards the GroupInfo
+      // and not merely the commit.
+      const commit = encodeMemoryCommit(info.epoch, localDID ?? '', [], {
+        head: info.head,
+        external: true,
+      })
+      return {
+        commit,
+        onAccepted: async () => {
+          if (failRecoveryAdopt) {
+            failRecoveryAdopt = false
+            throw new Error('the process died in the acceptance window')
+          }
+          // The rejoined handle: at the group's next epoch, holding the group's
+          // authenticated ledger head — and an EMPTY ledger. That is a roster reset, and it
+          // stands until the ledger is bootstrapped.
+          ledger = []
+          ledgerHead = info.head
+          for (let i = leaves.length - 1; i >= 0; i--) {
+            if (leaves[i] === localDID) leaves.splice(i, 1)
+          }
+          if (localDID != null) leaves.push(localDID)
+          advance(info.epoch + 1)
+        },
       }
-      advance(target)
-      return { advanced: true }
     },
     exportRecoverySecret() {
       return recoverySecret

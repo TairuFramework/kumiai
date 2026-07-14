@@ -100,7 +100,7 @@ describe('the bodies ride the commit', () => {
     // his own role entry. What he does NOT hold is the epoch-0 secret: the blob on the
     // commit that added him is sealed under the epoch before he was a member, and he can
     // never open it. He reads the whole log anyway.
-    const dave = makeMLSPeer(hub, 'dave', recoverySecret, { epoch: 1, ledger: [daveRole] })
+    const dave = makeMLSPeer(hub, 'dave', recoverySecret, { epoch: 1, bodies: [daveRole] })
     await flush()
 
     // The frame from before he joined was walked as history: classified by its own epoch,

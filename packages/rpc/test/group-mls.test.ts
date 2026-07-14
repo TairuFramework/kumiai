@@ -113,59 +113,116 @@ describe('GroupMLS port', () => {
     expect(mls.ledgerIDs()).toEqual([])
   })
 
-  test('getLedgerEntries serves the tokens it holds, and only those', async () => {
-    const held = 'signed-role-token'
-    const mls = createMemoryGroupMLS({
-      recoverySecret: new Uint8Array(32).fill(1),
-      ledger: [held],
-    })
-    const heldID = memoryEntryID(held)
-    const unheldID = memoryEntryID('some other token')
-
-    expect(await mls.getLedgerEntries([heldID])).toEqual([held])
-    // An entry it does not hold is simply absent from the answer.
-    expect(await mls.getLedgerEntries([heldID, unheldID])).toEqual([held])
-    expect(await mls.getLedgerEntries([unheldID])).toEqual([])
-  })
-
-  test('exportGroupInfo + applyRecovery jumps a stranded peer forward', async () => {
+  test('a rejoin builds an external commit, and adopts only when it is accepted', async () => {
     const live = createMemoryGroupMLS({
       recoverySecret: new Uint8Array(32).fill(1),
       localDID: 'live',
+      members: ['live', 'stranded'],
     })
     // Advance live to epoch 2. A member ADOPTS the commits it made — it can never process
     // one, because MLS merges a pending commit rather than applying it.
-    live.adopt(live.buildCommit())
+    live.adopt(live.buildCommit(['role:live=admin']))
     live.adopt(live.buildCommit())
     const stranded = createMemoryGroupMLS({
       recoverySecret: new Uint8Array(32).fill(1),
       localDID: 'stranded',
     })
-    const groupInfo = await live.exportGroupInfo('stranded')
-    expect(await stranded.applyRecovery(groupInfo)).toEqual({ advanced: true })
-    expect(stranded.epoch()).toBe(2)
+
+    const request = await stranded.createRecoveryRequest('req-1')
+    const sealed = await live.sealGroupInfo(request)
+    const pending = await stranded.applyRecovery(sealed, 'req-1')
+
+    // BUILT, not adopted: the commit still has to win a compare-and-set at the head, and a
+    // peer that adopted first would be alone on a branch the moment it lost.
+    expect(pending).not.toBeNull()
+    expect(stranded.epoch()).toBe(0)
+    expect(stranded.readCommitHeader(pending?.commit as Uint8Array)).toEqual({
+      epoch: 2,
+      committerDID: 'stranded',
+    })
+
+    await pending?.onAccepted()
+    expect(stranded.epoch()).toBe(3)
+    // The rejoined handle holds the group's authenticated head and an EMPTY ledger. That is a
+    // roster reset, and it reads as incomplete until the ledger is bootstrapped.
+    expect(stranded.ledgerIDs()).toEqual([])
+    expect(await stranded.isLedgerComplete()).toBe(false)
+
+    await stranded.bootstrapLedger(await live.getLedger())
+    expect(await stranded.isLedgerComplete()).toBe(true)
+    expect(stranded.fold().get('role:live')).toBe('admin')
   })
 
-  test('a member other than the requester cannot open the sealed GroupInfo', async () => {
+  test('a bootstrapped ledger with an entry withheld is refused, and folds nothing', async () => {
     const live = createMemoryGroupMLS({
       recoverySecret: new Uint8Array(32).fill(1),
       localDID: 'live',
+      members: ['live', 'stranded'],
+    })
+    live.adopt(live.buildCommit(['role:mallory=admin']))
+    live.adopt(live.buildCommit(['role:mallory=member']))
+    const stranded = createMemoryGroupMLS({
+      recoverySecret: new Uint8Array(32).fill(1),
+      localDID: 'stranded',
+    })
+    const request = await stranded.createRecoveryRequest('req-1')
+    const pending = await stranded.applyRecovery(await live.sealGroupInfo(request), 'req-1')
+    await pending?.onAccepted()
+
+    // Every token in this list is perfectly well-formed. The DEMOTION is simply missing —
+    // which is exactly what a signature does not protect and what the head chain does.
+    const honest = await live.getLedger()
+    await expect(stranded.bootstrapLedger([honest[0] as string])).rejects.toThrow(
+      /does not fold to the head/,
+    )
+    expect(stranded.ledgerIDs()).toEqual([])
+    // The demoted admin did not reappear: a rejected ledger folds nothing at all.
+    expect(stranded.fold().get('role:mallory')).toBeUndefined()
+
+    await stranded.bootstrapLedger(honest)
+    expect(stranded.fold().get('role:mallory')).toBe('member')
+  })
+
+  test('a reply sealed for another member, or another request, does not open', async () => {
+    const live = createMemoryGroupMLS({
+      recoverySecret: new Uint8Array(32).fill(1),
+      localDID: 'live',
+      members: ['live', 'stranded', 'eve'],
     })
     live.adopt(live.buildCommit())
     const eve = createMemoryGroupMLS({
       recoverySecret: new Uint8Array(32).fill(1),
       localDID: 'eve',
     })
-    const sealed = await live.exportGroupInfo('stranded') // sealed to 'stranded', not 'eve'
-    expect(await eve.applyRecovery(sealed)).toEqual({ advanced: false })
+    const stranded = createMemoryGroupMLS({
+      recoverySecret: new Uint8Array(32).fill(1),
+      localDID: 'stranded',
+    })
+    const sealed = await live.sealGroupInfo(await stranded.createRecoveryRequest('req-1'))
+
+    // Eve has a leaf and could have asked for herself; this reply is not hers to open.
+    await eve.createRecoveryRequest('req-1')
+    expect(await eve.applyRecovery(sealed, 'req-1')).toBeNull()
+    // And the requester cannot open it under another request id: the key is minted per request.
+    await stranded.createRecoveryRequest('req-2')
+    expect(await stranded.applyRecovery(sealed, 'req-2')).toBeNull()
   })
 
-  test('applyRecovery is a no-op when already current', async () => {
-    const mls = createMemoryGroupMLS({
+  test('a member with no leaf in the responder tree is refused', async () => {
+    const live = createMemoryGroupMLS({
       recoverySecret: new Uint8Array(32).fill(1),
-      localDID: 'self',
+      localDID: 'live',
+      members: ['live'],
     })
-    expect(await mls.applyRecovery(await mls.exportGroupInfo('self'))).toEqual({ advanced: false })
+    const removed = createMemoryGroupMLS({
+      recoverySecret: new Uint8Array(32).fill(1),
+      localDID: 'mallory',
+    })
+    // Authorization is roster-intrinsic: the responder can only answer DIDs its own tree still
+    // carries a leaf for, so a removed member gets nothing from anyone who applied its removal.
+    await expect(live.sealGroupInfo(await removed.createRecoveryRequest('req-1'))).rejects.toThrow(
+      /no leaf/,
+    )
   })
 
   test('exportRecoverySecret is stable and epoch-independent', async () => {

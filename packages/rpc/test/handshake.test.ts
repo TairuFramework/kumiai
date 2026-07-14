@@ -27,9 +27,9 @@ describe('handshake frame codec', () => {
     expect(frame.length).toBe(5)
   })
 
-  test('the three kinds are distinct', () => {
+  test('the kinds are distinct', () => {
     const kinds = Object.values(HANDSHAKE_KIND)
-    expect(new Set(kinds).size).toBe(3)
+    expect(new Set(kinds).size).toBe(kinds.length)
   })
 
   test('an empty payload round-trips', () => {

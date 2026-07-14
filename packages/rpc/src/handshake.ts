@@ -27,6 +27,15 @@ export const HANDSHAKE_KIND = {
   recoveryRequest: 1,
   /** A member's reply carrying the state needed to re-sync. */
   recoveryReply: 2,
+  /**
+   * A rejoined peer asking for the group's WHOLE ordered ledger. A GroupInfo carries an
+   * authenticated ledger head and no entries, so a peer that rejoined by external commit
+   * cannot ask for "the ids it is missing" — nothing enumerates them, and the head is a
+   * chain digest, not a list.
+   */
+  ledgerRequest: 3,
+  /** A member's reply carrying its whole ordered ledger, for the requester to head-verify. */
+  ledgerReply: 4,
 } as const
 
 export type HandshakeKind = (typeof HANDSHAKE_KIND)[keyof typeof HANDSHAKE_KIND]

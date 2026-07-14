@@ -34,6 +34,7 @@ export {
   type GroupCrypto,
   type GroupMLS,
   isMissingLedgerEntries,
+  type PendingRecovery,
 } from './crypto.js'
 export {
   asDeliveryPosition,
@@ -57,10 +58,12 @@ export {
 export {
   createMemoryGroupMLS,
   encodeMemoryCommit,
+  LedgerIncompleteError,
   type MemoryGroupMLS,
   type MemoryGroupMLSOptions,
   MissingLedgerEntriesError,
   memoryEntryID,
+  memoryLedgerHead,
 } from './memory-group-mls.js'
 export {
   createGroupPeer,
@@ -70,8 +73,12 @@ export {
   type ProtocolSurface,
 } from './peer.js'
 export {
+  decodeLedgerReply,
+  decodeLedgerRequest,
   decodeRecoveryReply,
   decodeRecoveryRequest,
+  encodeLedgerReply,
+  encodeLedgerRequest,
   encodeRecoveryReply,
   encodeRecoveryRequest,
 } from './recovery.js'
