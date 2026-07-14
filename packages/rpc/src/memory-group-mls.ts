@@ -1,7 +1,7 @@
 import { sha256 } from '@noble/hashes/sha2.js'
 import { fromUTF, toB64U, toUTF } from '@sozai/codec'
 
-import type { CommitContext, GroupMLS } from './crypto.js'
+import type { CommitContext, CommitHeader, GroupMLS } from './crypto.js'
 
 export type MemoryGroupMLS = GroupMLS & {
   epoch: () => number
@@ -18,6 +18,9 @@ export type MemoryGroupMLS = GroupMLS & {
    * Produce a Commit at this member's CURRENT epoch, enacting these signed tokens. Like
    * the real thing it is non-mutating: the group advances when the commit is adopted,
    * so the bodies can still be sealed under the epoch every receiver is at.
+   *
+   * The Commit carries its committer, as a real one does — the author is authenticated by
+   * the Commit's own signature, not by whoever handed it to the hub.
    */
   buildCommit: (tokens?: Array<string>) => Uint8Array
   /** Adopt a Commit this member produced: enact its entries and advance. */
@@ -27,11 +30,19 @@ export type MemoryGroupMLS = GroupMLS & {
 export type MemoryGroupMLSOptions = {
   recoverySecret?: Uint8Array
   epoch?: number
-  /** This member's DID — modelled recipient of GroupInfo sealed to its leaf. */
+  /** This member's DID — the committer stamped into the Commits it builds, and the modelled
+   *  recipient of GroupInfo sealed to its leaf. */
   localDID?: string
   /** Signed tokens this member already holds — a joiner's Welcome carries the group's
    *  history, so the entries enacted before it joined are in the handle it starts from. */
   ledger?: Array<string>
+  /**
+   * The group's commit policy, modelled: a Commit whose committer this refuses is
+   * well-formed and deliberately NOT applied — a removed member's commit is exactly that.
+   * A refusal is a `{ advanced: false }`, never a throw. Defaults to accepting every
+   * committer.
+   */
+  acceptsCommitter?: (committerDID: string) => boolean
   /** Called whenever the modelled epoch advances (e.g. to keep a GroupCrypto in step). */
   onAdvance?: (epoch: number) => void
 }
@@ -54,23 +65,38 @@ export function memoryEntryID(token: string): string {
   return toB64U(sha256(fromUTF(token)))
 }
 
-type MemoryCommit = { epoch: number; entryIDs: Array<string> }
+type MemoryCommit = { epoch: number; committerDID: string; entryIDs: Array<string> }
 
 /**
- * A Commit for the memory port: the epoch it was framed at, and the content ids of the
- * ledger entries it enacts. The epoch is what makes the double faithful about the thing
- * this lane turns on — a real MLS Commit can only be applied by a member AT the epoch it
- * was framed at, and cannot even be decrypted by one that is not.
+ * A Commit for the memory port: the epoch it was framed at, the member that authored it,
+ * and the content ids of the ledger entries it enacts.
+ *
+ * Both the epoch and the committer live INSIDE the commit, and both are what make the double
+ * faithful about the things this lane turns on. A real MLS Commit can only be applied by a
+ * member AT the epoch it was framed at, and cannot even be decrypted by one that is not. And
+ * a real MLS Commit authenticates its own author, with the Commit's own signature — so a
+ * peer asking "did I write this?" reads the commit, and never the frame's transport sender,
+ * which is only the hub's word about who handed it over.
  */
-export function encodeMemoryCommit(epoch: number, entryIDs: Array<string> = []): Uint8Array {
-  return fromUTF(JSON.stringify({ epoch, entryIDs } satisfies MemoryCommit))
+export function encodeMemoryCommit(
+  epoch: number,
+  committerDID: string,
+  entryIDs: Array<string> = [],
+): Uint8Array {
+  return fromUTF(JSON.stringify({ epoch, committerDID, entryIDs } satisfies MemoryCommit))
 }
 
 export function decodeMemoryCommit(commit: Uint8Array): MemoryCommit | null {
   if (commit.length === 0) return null
   try {
     const value = JSON.parse(toUTF(commit)) as MemoryCommit
-    if (typeof value?.epoch !== 'number' || !Array.isArray(value.entryIDs)) return null
+    if (
+      typeof value?.epoch !== 'number' ||
+      typeof value?.committerDID !== 'string' ||
+      !Array.isArray(value.entryIDs)
+    ) {
+      return null
+    }
     return value
   } catch {
     return null
@@ -90,6 +116,7 @@ export function decodeMemoryCommit(commit: Uint8Array): MemoryCommit | null {
 export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): MemoryGroupMLS {
   const recoverySecret = options.recoverySecret ?? new Uint8Array(32).fill(0x33)
   const localDID = options.localDID
+  const acceptsCommitter = options.acceptsCommitter ?? (() => true)
   let epoch = options.epoch ?? 0
   let commits = 0
   let seen = 0
@@ -146,7 +173,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         bodies.set(id, token)
         return id
       })
-      return encodeMemoryCommit(epoch, entryIDs)
+      return encodeMemoryCommit(epoch, localDID ?? '', entryIDs)
     },
     adopt(commit: Uint8Array) {
       const parsed = decodeMemoryCommit(commit)
@@ -154,6 +181,11 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         throw new Error("adopt: not a commit framed at this member's current epoch")
       }
       enact(parsed)
+    },
+    readCommitHeader(commit: Uint8Array): CommitHeader | null {
+      // Reads the commit's own bytes and nothing else: no epoch secret, no blob, no state.
+      const parsed = decodeMemoryCommit(commit)
+      return parsed == null ? null : { epoch: parsed.epoch, committerDID: parsed.committerDID }
     },
     async processCommit(commit: Uint8Array, context: CommitContext) {
       lastSender = context.senderDID
@@ -167,6 +199,19 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       // joiner's own add-commit is exactly this — and NOT corruption. The blob riding it
       // is never opened, because the entries are never resolved.
       if (parsed.epoch !== epoch) {
+        return { advanced: false }
+      }
+      // A member can never apply the frame that is its OWN commit: MLS merges a pending
+      // commit, it does not process one, and the pending state is the only thing that could
+      // have carried it. A member that meets its own commit in the log has lost that state,
+      // and no amount of processing will get it back.
+      if (localDID != null && parsed.committerDID === localDID) {
+        return { advanced: false }
+      }
+      // Well-formed, and refused: the group's policy does not accept commits from this
+      // committer. A refusal is NOT a throw — the peer read the commit, judged it, and
+      // declined it, and there is nothing to retry.
+      if (!acceptsCommitter(parsed.committerDID)) {
         return { advanced: false }
       }
       const missing = parsed.entryIDs.filter((id) => !bodies.has(id))

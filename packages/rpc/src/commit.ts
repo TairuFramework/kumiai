@@ -153,6 +153,23 @@ export class JournalEpochError extends Error {
 }
 
 /**
+ * `commit()` pulled the log and found a frame that proves this peer is not reconciled with
+ * the group: its own un-merged commit, or a commit framed at an epoch ahead of the one it is
+ * at. It cannot race a head it has not caught up to, so it unwinds rather than committing on
+ * a branch of its own.
+ *
+ * **The commit did not happen, and nothing was published.** The heal is already scheduled —
+ * it runs as its own lane operation the moment `commit()` releases the lane, which is why
+ * this is thrown rather than waited on: a heal needs the mutex `commit()` is holding, and a
+ * `commit()` that waited for one would wait on a queue that included itself. The host
+ * re-issues the commit once the peer is whole; it must NOT retry in a tight loop, which would
+ * simply take the mutex back before the heal can run.
+ */
+export class RecoveryRequiredError extends Error {
+  override name = 'RecoveryRequiredError'
+}
+
+/**
  * The compare-and-set was lost: someone else's commit is at the head. The error crosses a
  * transport and is rebuilt from a wire code on the far side, so a peer talking to a real
  * hub holds a reconstructed instance — match on the name too, or a remote loss reads as an

@@ -47,8 +47,30 @@ export class FakeHub implements LogHub {
   #publishRecords = new Map<string, string>()
   /** Retention seconds requested per topic, by the most recent subscribe. */
   #retention = new Map<string, number | undefined>()
+  /**
+   * A hub that lies about who sent a frame. See {@link FakeHub.lieAboutSender}.
+   */
+  #senderLie: ((message: StoredMessage, readerDID: string) => string) | undefined
   /** Append-only record of every published message, for test assertions. */
   published: Array<StoredMessage> = []
+
+  /**
+   * Make the hub lie about a frame's `senderDID`, per reader — the field it authenticates
+   * and therefore the field it can freely invent.
+   *
+   * `senderDID` is the hub's word about who handed a frame over, and this hub is not trusted:
+   * a design that reads authority out of it has moved that authority to the hub without
+   * saying so. A FakeHub that cannot forge the one field the design says is forgeable cannot
+   * model the threat, so it can.
+   */
+  lieAboutSender(fn: (message: StoredMessage, readerDID: string) => string): void {
+    this.#senderLie = fn
+  }
+
+  #asReadBy(message: StoredMessage, readerDID: string): StoredMessage {
+    if (this.#senderLie == null) return message
+    return { ...message, senderDID: this.#senderLie(message, readerDID) }
+  }
 
   subscribe(subscriberDID: string, topicID: string, options?: HubSubscribeOptions): void {
     let set = this.#topics.get(topicID)
@@ -114,7 +136,8 @@ export class FakeHub implements LogHub {
     // the log, it is on top of it.
     for (const did of [...(this.#topics.get(params.topicID) ?? [])]) {
       if (did === params.senderDID) continue
-      for (const sink of this.#sinks.get(did) ?? []) sink.push(message)
+      const asRead = this.#asReadBy(message, did)
+      for (const sink of this.#sinks.get(did) ?? []) sink.push(asRead)
     }
     return { sequenceID }
   }
@@ -136,7 +159,9 @@ export class FakeHub implements LogHub {
     )
     const after = params.after
     const selected = after == null ? log : log.filter((m) => m.sequenceID > after)
-    const messages = params.limit == null ? selected : selected.slice(0, params.limit)
+    const messages = (params.limit == null ? selected : selected.slice(0, params.limit)).map((m) =>
+      this.#asReadBy(m, params.subscriberDID),
+    )
     return {
       messages: [...messages],
       head: this.#heads.get(params.topicID) ?? null,

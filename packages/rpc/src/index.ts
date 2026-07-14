@@ -7,6 +7,11 @@
 export { defineGroupProtocol, type GroupProtocolDefinition } from '@kumiai/broadcast'
 
 export {
+  type CommitClassifierState,
+  type CommitDisposition,
+  classifyCommit,
+} from './classify.js'
+export {
   CommitDeadlineError,
   type CommitJournal,
   type CommitKind,
@@ -16,13 +21,20 @@ export {
   type LaneResult,
   type LostCommit,
   type PendingCommit,
+  RecoveryRequiredError,
 } from './commit.js'
 export {
   type CommitFrame,
   decodeCommitFrame,
   encodeCommitFrame,
 } from './commit-frame.js'
-export type { CommitContext, GroupCrypto, GroupMLS } from './crypto.js'
+export {
+  type CommitContext,
+  type CommitHeader,
+  type GroupCrypto,
+  type GroupMLS,
+  isMissingLedgerEntries,
+} from './crypto.js'
 export {
   asDeliveryPosition,
   asLogPosition,

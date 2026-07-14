@@ -11,7 +11,14 @@ type PublishingHub = { publish: (params: HubPublishParams) => Promise<{ sequence
 
 export type PublishCommitParams = {
   hub: PublishingHub
+  /** Who hands the frame to the hub. The hub authenticates this, and nothing else about it. */
   senderDID: string
+  /**
+   * Who AUTHORED the commit, inside the commit's own bytes, where MLS signs it. Defaults to
+   * the transport sender, because in an honest group they are the same member — and they are
+   * separable here because the whole point is that a peer must never confuse them.
+   */
+  committerDID?: string
   recoverySecret: Uint8Array
   /** The epoch this Commit is framed at — the epoch every member that can apply it is at. */
   epoch: number
@@ -23,13 +30,15 @@ export type PublishCommitParams = {
 
 /**
  * A member that is not a peer in the test — an admin off-stage — publishing a commit
- * frame, exactly as a peer's `localCommitted` builds one: `[commit][wrap(bodies)]`,
- * with the bodies sealed under the pre-commit epoch secret.
+ * frame, exactly as a peer's `commit()` builds one: `[commit][wrap(bodies)]`, with the
+ * bodies sealed under the pre-commit epoch secret.
  */
 export async function publishCommit(params: PublishCommitParams): Promise<{ sequenceID: string }> {
   const { hub, senderDID, recoverySecret, epoch, entries = [] } = params
+  const committerDID = params.committerDID ?? senderDID
   const crypto = createFakeCrypto({ epoch, localDID: senderDID })
-  const commit = params.commit ?? encodeMemoryCommit(epoch, entries.map(memoryEntryID))
+  const commit =
+    params.commit ?? encodeMemoryCommit(epoch, committerDID, entries.map(memoryEntryID))
   const sealed = await crypto.wrap(encodeLedgerEntries(entries))
   return hub.publish({
     senderDID,

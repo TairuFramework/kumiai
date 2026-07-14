@@ -15,6 +15,7 @@ import type { StoredMessage } from '@kumiai/hub-protocol'
 import type { LogHub } from '@kumiai/hub-tunnel'
 
 import { createGroupBusServer } from './bus-server.js'
+import { classifyCommit } from './classify.js'
 import {
   CommitDeadlineError,
   type CommitJournal,
@@ -23,9 +24,10 @@ import {
   type LaneResult,
   type LostCommit,
   type PendingCommit,
+  RecoveryRequiredError,
 } from './commit.js'
 import { type CommitFrame, decodeCommitFrame, encodeCommitFrame } from './commit-frame.js'
-import type { GroupCrypto, GroupMLS } from './crypto.js'
+import { type GroupCrypto, type GroupMLS, isMissingLedgerEntries } from './crypto.js'
 import { asLogPosition, type LogPosition } from './cursor.js'
 import { createDirectedClient, createInboxAcceptor } from './directed.js'
 import { adaptBusHandlers } from './handlers.js'
@@ -313,6 +315,34 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   let commitLogHead: LogPosition | null = null
 
   /**
+   * The sequenceID of the commit this peer ENACTED at each epoch it has passed — applied
+   * from the log, or committed itself and adopted. It is the whole of the fork check: a
+   * second, different commit at an epoch this peer holds a record for is two commits at one
+   * epoch, which the hub can only have produced by showing different logs to different
+   * members.
+   *
+   * An epoch with NO record is not a fork, it is history — a late joiner, a rejoiner and a
+   * re-seeded peer all walk commits from epochs they never held, and a trigger that fired on
+   * "an epoch I have passed" would send every one of them into recovery on its first pull.
+   *
+   * In memory, deliberately. A restart drops the record, and a peer with no record reads
+   * history as history: it can MISS a fork, never invent one, and missing one costs a peer
+   * that would have healed nothing that the trim and heal triggers do not already cover.
+   */
+  const appliedByEpoch = new Map<number, string>()
+
+  /**
+   * The heal trigger, RECORDED and never awaited where it is found.
+   *
+   * `recover()` is a lane operation and takes the commit mutex itself, so a pull that awaited
+   * it would wait on a tail that includes the pull. The trigger therefore only writes this
+   * flag; the pull unwinds, the lane is released, and the heal runs afterwards as its own
+   * operation. `healing` is what stops a second wakeup starting a concurrent one.
+   */
+  let healRequested = false
+  let healing = false
+
+  /**
    * A commit this peer journalled, that never landed, and that it cannot re-issue itself:
    * held until a lane operation with a return value can hand it to the host.
    *
@@ -402,20 +432,26 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   }
 
   /**
-   * Read the commit log forward from the cursor and process every frame it can,
-   * advancing the cursor over each one. Returns whether any of them advanced the epoch.
+   * Read the commit log forward from the cursor and classify every frame it holds, advancing
+   * the cursor over each one it is done with. Returns whether any of them advanced the epoch.
    *
-   * This is the only place commit frames are ever read. The cursor advances over a
-   * frame the peer PROCESSED — applied, dropped as foreign, or dropped as malformed —
-   * and does NOT advance over a frame whose processing threw: the throw leaves the
-   * cursor where it was, and the next pull reads that frame again. The cursor, not the
-   * ack, is what makes the lane retry.
+   * This is the only place commit frames are ever read, and the only place the cursor table
+   * is applied. Each frame is classified against this peer's state BEFORE anything is
+   * applied and before anything is decrypted (see {@link "classify".classifyCommit}); the
+   * classification says whether the cursor advances, whether the port is asked, and whether
+   * the peer must heal.
+   *
+   * The cursor advances over a frame the peer is DONE with — applied, walked as history,
+   * stepped over as poison — and does NOT advance over one it must read again: an unresolved
+   * commit inside its retry budget, or its own un-merged commit. A throw leaves the cursor
+   * where it was, and the next pull reads that frame again.
    *
    * It is also the only place the log's tip is learned, and the tip is taken from the
    * store's OWN reply — never inferred from the cursor. It is recorded ONLY on a complete
-   * drain, at the points this returns: a tip recorded ahead of the frames it covers would
-   * name a commit this peer has not reconciled to, and the next `commit()` would win a
-   * compare-and-set at an epoch it had not caught up to.
+   * drain, at the points this returns having read the whole log: a tip recorded ahead of the
+   * frames it covers would name a commit this peer has not reconciled to, and the next
+   * `commit()` would win a compare-and-set at an epoch it had not caught up to. A pull that
+   * stops early — on the frame it must heal for — takes no tip at all.
    */
   const pullCommits = async (): Promise<boolean> => {
     if (mls == null || commitTopicID == null) return false
@@ -447,11 +483,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         return advancedEpoch
       }
       for (const message of result.messages) {
-        // The peer's OWN commit frames are never read here, and no set of them is kept: a
-        // commit this peer landed moved its cursor to that frame's own position as it was
-        // accepted, so the pull starts after it. The journal is what carries that across a
-        // restart — replay sets the cursor to the frame it confirms — and it is durable,
-        // where an in-memory set was not.
+        // A commit this peer landed moved its cursor to that frame's own position as it was
+        // accepted, so an ordinary pull starts after it. The journal is what carries that
+        // across a restart. A peer that meets its own commit here is the one whose journal
+        // was lost or never written — the last row of the table below.
         const position = asLogPosition(message.sequenceID)
         let frame: ReturnType<typeof decodeHandshakeFrame>
         try {
@@ -476,15 +511,108 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           reconciledHead = position // malformed: dropped, and the cursor still steps over it
           continue
         }
-        const { advanced } = await port.processCommit(commitFrame.commit, {
-          senderDID: message.senderDID,
-          // The resolver, not the bodies: the blob is opened only if the port asks for
-          // the entries this commit names, and it asks only for a commit it is applying —
-          // one framed at the epoch this peer is at, which is the epoch the blob is sealed
-          // under. That is what makes body delivery atomic with the commit.
-          resolveLedgerEntries: createLedgerEntryResolver(commitFrame.sealedEntries, crypto.unwrap),
+
+        // The commit's OWN epoch and its OWN committer, out of the commit's own bytes. Never
+        // `message.senderDID`: that is the hub-authenticated publisher of the frame, which is
+        // to say the hub's word about who handed it over, and the hub is not trusted here. A
+        // hub that could name the committer could stamp every recipient's own DID onto one
+        // poison frame and make the entire group heal at once.
+        const disposition = classifyCommit(port.readCommitHeader(commitFrame.commit), position, {
+          localDID,
+          epoch: crypto.epoch(),
+          appliedByEpoch,
         })
-        if (advanced) advancedEpoch = true
+
+        if (disposition.row === 'own-unmerged') {
+          // This peer's own commit, at the epoch it is still at: the hub took it, the group
+          // moved on it, and the pending state died with the process that built it. It can
+          // never be applied — MLS merges a pending commit, it does not process one — so the
+          // cursor stays put, the drain stops here, no tip is taken, and the peer heals.
+          //
+          // The trigger only RECORDS. `recover()` takes the commit mutex, and this pull is
+          // already holding it.
+          healRequested = true
+          return advancedEpoch
+        }
+        if (disposition.row === 'ahead') {
+          // The group advanced at an epoch where this peer did not. Step over the frame — the
+          // heal is what repairs this, not a re-read — and ask for one.
+          reconciledHead = position
+          healRequested = true
+          continue
+        }
+        if (disposition.row === 'history') {
+          // A frame from an epoch below this peer's that it holds no record for. Not a fork,
+          // not poison, and not the port's business: it is never handed over, and its blob is
+          // never touched.
+          reconciledHead = position
+          continue
+        }
+        if (disposition.row === 'fork') {
+          // Two commits at one epoch. The branch whose commit carries the lower sequenceID
+          // wins, and the loser rejoins onto it — which is a heal. The winner has nothing to
+          // do but step over the frame.
+          reconciledHead = position
+          if (disposition.branch === 'losing') healRequested = true
+          continue
+        }
+        if (disposition.row === 'poison') {
+          reconciledHead = position // not a commit at all: stepped over, and never retried
+          continue
+        }
+
+        // Framed at this peer's epoch, and somebody else's: a frame it is in a position to
+        // apply. Everything below is the port's answer to it.
+        const framedEpoch = crypto.epoch()
+        let applied: { advanced: boolean }
+        try {
+          applied = await port.processCommit(commitFrame.commit, {
+            senderDID: message.senderDID,
+            // The resolver, not the bodies: the blob is opened only if the port asks for
+            // the entries this commit names, and it asks only for a commit it is applying —
+            // one framed at the epoch this peer is at, which is the epoch the blob is sealed
+            // under. That is what makes body delivery atomic with the commit.
+            resolveLedgerEntries: createLedgerEntryResolver(
+              commitFrame.sealedEntries,
+              crypto.unwrap,
+            ),
+          })
+        } catch (error) {
+          if (!isMissingLedgerEntries(error)) {
+            // The port broke its contract. The cursor stays where it is and the frame is
+            // read again — the pull is a retry, and this is not an outcome it can name.
+            throw error
+          }
+          // The commit names ledger entries whose bodies will not resolve. POISON: drop it,
+          // advance, and do NOT heal.
+          //
+          // The bodies ride the commit, sealed under the epoch it is framed at — so a blob
+          // this peer cannot open is a blob no member at this epoch can open. If nobody can
+          // resolve it, nobody applies it, and the group never moves past that epoch: the
+          // frame is dead in the log, the next honest commit is framed at the same epoch and
+          // compare-and-sets at the head behind it, and everyone applies that one. The whole
+          // cost is a wasted slot in the serialization lane, which any member with write
+          // access can burn anyway.
+          //
+          // Healing here instead would hand any member a group-wide recovery storm for the
+          // price of one publish — a commit naming entries whose bodies it simply leaves out
+          // of the frame, and every honest peer heals at once. Retrying here, bounded or not,
+          // only delays that by the size of the budget. The one case where this peer really
+          // is the broken one — everybody else resolved the frame and moved on — announces
+          // itself later, and from a different frame: the next commit is then framed at an
+          // epoch AHEAD of this peer's, and that is what heals it.
+          reconciledHead = position
+          continue
+        }
+        if (applied.advanced) {
+          advancedEpoch = true
+          // The fork check's record, and the only place it is written from the log.
+          appliedByEpoch.set(framedEpoch, position)
+        }
+        // `{ advanced: false }` here is the port reading a commit at this peer's own epoch,
+        // from another member, and REFUSING it: well-formed and deliberately not applied.
+        // Poison, on the same terms and for the same reason as an unresolvable one — it
+        // advances, it is never retried, and it does not heal.
         reconciledHead = position
       }
       // A short page is the end of the log: every frame this reply named has been
@@ -520,10 +648,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       const replayed = await replayJournal()
       const pulled = await pullCommits()
       if (replayed || pulled) await rebuildEpoch()
-    }).catch(() => {
-      // the pull failed (e.g. processCommit threw); the cursor did not advance, so the
-      // next wakeup reads those frames again
     })
+      .catch(() => {
+        // the pull failed (e.g. processCommit threw); the cursor did not advance, so the
+        // next wakeup reads those frames again
+      })
+      // Outside the mutex, and only once the pull has released it: a heal is its own lane
+      // operation and takes that mutex itself.
+      .then(() => healIfRequested())
   }
 
   const onRendezvousMessage = (message: StoredMessage, ack: () => void): void => {
@@ -616,6 +748,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       const accepted = asLogPosition(entry.acceptedAs)
       reconciledHead = accepted
       commitLogHead = accepted
+      appliedByEpoch.set(entry.epoch, accepted)
       await adoptJournalled(entry.journal)
       await journal.clear(entry.publishID)
       return true
@@ -676,6 +809,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     const accepted = asLogPosition(sequenceID)
     reconciledHead = accepted
     commitLogHead = accepted
+    appliedByEpoch.set(entry.epoch, accepted)
     await adoptJournalled(entry.journal)
     await journal.clear(entry.publishID)
     return true
@@ -700,7 +834,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     }
     const slot = journal
     const topicID = commitTopicID
-    return runSerial(async () => {
+    const op = runSerial(async () => {
       // 0. Replay the journal, ahead of the pull.
       if (await replayJournal()) await rebuildEpoch()
 
@@ -709,6 +843,17 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         // 1. Pull the log to the end. The peer has now processed every frame in it, and
         //    learned the tip it must race at from the store's own reply.
         await reconcileCommits()
+
+        // A pull that ended in a heal trigger did NOT reach the end of the log, and the tip
+        // it holds is stale. Unwind, rather than race a head this peer has not reconciled
+        // to: the lane is released here, the heal runs as its own operation, and the host's
+        // commit is a later one. Retrying inside this loop would hold the mutex that the
+        // heal needs and spin until the deadline.
+        if (healRequested) {
+          throw new RecoveryRequiredError(
+            'commit: the log holds a frame this peer cannot reconcile with — its own un-merged commit, or a commit from an epoch ahead of it. It must recover before it can commit again.',
+          )
+        }
 
         // 2. Build against the host's CURRENT handle, adopting nothing. `build` is a
         //    closure over that handle, so a rebased retry frames at the rebased epoch.
@@ -723,6 +868,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         //    which is a property of the store and not of this peer.
         const publishID = newPublishID()
         const expectedHead = commitLogHead
+        const framedEpoch = crypto.epoch()
         const payload = await frameCommit(pending.commit, pending.bodies)
         await slot.put({
           publishID,
@@ -730,7 +876,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           // The epoch this commit is framed at, and the only one its bodies can be sealed
           // under. A replay that finds itself at any other epoch, with no recorded
           // acceptance, knows the host adopted somewhere it must not have.
-          epoch: crypto.epoch(),
+          epoch: framedEpoch,
           commit: pending.commit,
           bodies: pending.bodies,
           kind: pending.kind,
@@ -776,6 +922,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         const accepted = asLogPosition(sequenceID)
         reconciledHead = accepted
         commitLogHead = accepted
+        // A commit this peer made and adopted is a commit it enacted at that epoch, exactly
+        // as an applied one is, so it joins the fork record on the same terms. Without it a
+        // second commit at an epoch this peer OWNS would read as history.
+        appliedByEpoch.set(framedEpoch, accepted)
         await pending.onAccepted()
         await slot.clear(publishID)
         await rebuildEpoch()
@@ -785,6 +935,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         `commit: gave up after ${COMMIT_ATTEMPT_CEILING} attempts inside its deadline`,
       )
     })
+    // A heal the pull asked for runs once this operation has released the lane, and never
+    // inside it: the host is told its commit did not land, and the peer repairs itself.
+    void op.catch(() => {}).then(() => healIfRequested())
+    return op
   }
 
   const replay = async (): Promise<LaneResult> => {
@@ -831,11 +985,40 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         // rather than rejecting the public recover() call.
         return
       }
-      if (r.advanced) await rebuildEpoch()
       result = r
+      if (!r.advanced) return
+      // The jump moved the epoch; it did not move the cursor. The commits this peer skipped
+      // are still in the log ahead of that cursor, and at the epoch it has landed on they
+      // are history — the table walks them without handing one of them to the port, which is
+      // the difference between a recovered peer and one that re-applies its own past.
+      await pullCommits().catch(() => {
+        // a failed walk leaves the cursor where it was; the next wakeup reads those frames again
+      })
+      await rebuildEpoch()
     })
     await op
     return result
+  }
+
+  /**
+   * Run a heal the lane asked for — and never from inside the lane. `recover()` is a lane
+   * operation and takes the commit mutex, so the trigger records and the caller runs this
+   * once it has released it. A heal already in flight absorbs any trigger raised while it
+   * runs: the frame that raised it is still in the log, and the next pull raises it again if
+   * the heal did not settle it.
+   */
+  const healIfRequested = async (): Promise<void> => {
+    if (!healRequested || healing) return
+    healing = true
+    healRequested = false
+    try {
+      await recover()
+    } catch {
+      // No responder, or a reply that would not open. The peer stays degraded, and the frame
+      // that asked for the heal is still in the log: the next pull asks again.
+    } finally {
+      healing = false
+    }
   }
 
   const ready = (async () => {
@@ -845,6 +1028,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   // A failed init rejects every public call, but must not raise an unhandled rejection
   // before the first of them is made.
   const settled = ready.catch(() => {})
+  // The seed pull runs inside init, and it is where the crash victim whose journal was lost
+  // meets its own un-merged commit. Its heal waits for init to finish, because every lane
+  // operation — `recover()` included — waits on `ready`.
+  void settled.then(() => healIfRequested())
   const withReady = async <T>(fn: () => T | Promise<T>): Promise<T> => {
     await ready
     return fn()

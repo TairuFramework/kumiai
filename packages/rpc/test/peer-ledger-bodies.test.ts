@@ -8,7 +8,7 @@ import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
 
-const flush = () => new Promise((r) => setTimeout(r, 30))
+const flush = (ms = 30) => new Promise((r) => setTimeout(r, ms))
 
 /** Everything this group put on the wire that was NOT a commit frame: an ask of any kind
  *  — a gather on the app lane, a recovery request on the rendezvous — shows up here. */
@@ -103,11 +103,11 @@ describe('the bodies ride the commit', () => {
     const dave = makeMLSPeer(hub, 'dave', recoverySecret, { epoch: 1, ledger: [daveRole] })
     await flush()
 
-    // Both frames were READ as commits and handed to MLS — including the one whose blob he
-    // cannot open. A frame a peer cannot open is history, not poison.
-    expect(dave.mls.seen()).toBe(2)
-    // He applied only the one he was at the epoch for; the other is a commit he was never
-    // in a position to apply, and it is not an error that he wasn't.
+    // The frame from before he joined was walked as history: classified by its own epoch,
+    // stepped over, and never handed to the port at all — so its blob was never touched.
+    // The only frame the port was asked about is the one he was at the epoch to apply.
+    // A frame a peer cannot open is history, not poison, and it is not even a question.
+    expect(dave.mls.seen()).toBe(1)
     expect(dave.mls.commits()).toBe(1)
     expect(dave.mls.epoch()).toBe(2)
     // And the entry that commit enacted came out of its own frame.
@@ -119,36 +119,39 @@ describe('the bodies ride the commit', () => {
     await dave.peer.dispose()
   })
 
-  test('a commit whose bodies are not in its frame does not advance the cursor, and is read again', async () => {
+  test('a commit whose bodies are not in its frame is dropped, and never retried', async () => {
     const hub = new FakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x23)
-    const bob = makeMLSPeer(hub, 'bob', recoverySecret)
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { recovery: { timeoutMs: 50 } })
     await flush()
 
-    // A commit that names an entry whose body is nowhere: not in bob's ledger, and not in
-    // the frame (the shape a rejoin by external commit leaves behind — its GroupInfo
-    // carries no ledger). The port raises, and the lane leaves the cursor put.
+    // A commit that names an entry whose body is nowhere: not in bob's ledger, and not in the
+    // frame. The bodies are sealed under the epoch the commit is framed at, so a blob bob
+    // cannot open is a blob no member at his epoch can open — nobody applies this commit, and
+    // the group never moves past it. It is dead in the log, and bob steps over it.
     const orphan = memoryEntryID('a body nobody delivered')
     await publishCommit({
       hub,
       senderDID: 'alice',
       recoverySecret,
       epoch: 1,
-      commit: encodeMemoryCommit(1, [orphan]),
+      commit: encodeMemoryCommit(1, 'alice', [orphan]),
     })
-    await flush()
+    await flush(80)
 
-    expect(bob.mls.epoch()).toBe(1)
-    expect(bob.mls.commits()).toBe(0)
+    // Read once. Not retried: a retry can only succeed if some member at this epoch can open a
+    // blob none of them can, and a peer whose cursor stopped dead here could never commit
+    // again — a permanent, group-wide wedge for the price of one publish.
     expect(bob.mls.seen()).toBe(1)
-
-    // The cursor did not move, so the next wakeup reads that same frame again — the lane
-    // retries it rather than stepping over it. (What answers it is a gather from the
-    // members that hold the body; the peer has no such ask yet.)
-    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
-    await flush()
-    expect(bob.mls.seen()).toBeGreaterThan(1)
+    expect(bob.mls.commits()).toBe(0)
     expect(bob.mls.epoch()).toBe(1)
+
+    // And the lane is not wedged behind it: the next honest commit is framed at the same
+    // epoch, lands behind the dead frame, and applies.
+    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
+    await flush(80)
+    expect(bob.mls.commits()).toBe(1)
+    expect(bob.mls.epoch()).toBe(2)
 
     await bob.peer.dispose()
   })

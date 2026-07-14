@@ -51,6 +51,9 @@ export type MakeMLSPeerOptions = {
   journal?: MemoryCommitJournal
   welcomes?: Array<string>
   commitDeadlineMs?: number
+  /** The group's commit policy: a committer this refuses is well-formed and not applied. */
+  acceptsCommitter?: (committerDID: string) => boolean
+  recovery?: { timeoutMs?: number; getDelayMs?: () => number }
 }
 
 /** A member of the group at `epoch`, wired with a durable journal, as a host must be. */
@@ -67,7 +70,12 @@ export function makeMLSPeer(
     createMemoryGroupMLS({
       recoverySecret,
       epoch,
+      // The member's own identity: it is what the commits it BUILDS are signed by, and what
+      // it compares a commit's author against. A double with no identity cannot model the
+      // one question this lane asks of a frame — "did I write this?".
+      localDID,
       ...(options.ledger != null ? { ledger: options.ledger } : {}),
+      ...(options.acceptsCommitter != null ? { acceptsCommitter: options.acceptsCommitter } : {}),
       onAdvance: (e) => crypto.setEpoch(e),
     })
   const journal = options.journal ?? createMemoryCommitJournal()
@@ -85,6 +93,7 @@ export function makeMLSPeer(
     protocols: { chat },
     handlers: { chat: {} } as never,
     ...(options.commitDeadlineMs != null ? { commitDeadlineMs: options.commitDeadlineMs } : {}),
+    ...(options.recovery != null ? { recovery: options.recovery } : {}),
   })
   return { peer, crypto, mls, journal, welcomes }
 }

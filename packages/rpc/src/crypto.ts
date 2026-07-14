@@ -18,6 +18,23 @@ export type GroupCrypto = {
   unwrap: Unwrap
 }
 
+/**
+ * What a Commit says about itself, readable WITHOUT applying it and without decrypting
+ * anything: the epoch it is framed at, and the member that authored it.
+ *
+ * Both are needed to classify a frame before the peer touches it, and both come out of the
+ * commit's own bytes — in real MLS, the message's epoch and the DID of the leaf its
+ * `senderLeafIndex` names, authenticated by the Commit's own signature. The committer is
+ * therefore unforgeable, which is exactly why the lane reads it here and never from the
+ * frame's transport sender: that is the hub's word, and the hub is not trusted.
+ */
+export type CommitHeader = {
+  /** The epoch the Commit is framed at — the epoch every member that can apply it is at. */
+  epoch: number
+  /** The MLS-authenticated author of the Commit. Not the publisher of the frame. */
+  committerDID: string
+}
+
 /** Context delivered alongside a received Commit on the raw handshake lane. */
 export type CommitContext = {
   /**
@@ -56,10 +73,31 @@ export type CommitContext = {
  */
 export type GroupMLS = {
   /**
+   * Read what a Commit says about itself — its epoch and its committer — WITHOUT applying it
+   * and without opening anything. `null` for bytes that are not a Commit at all.
+   *
+   * This is what lets the lane classify a frame before it touches it: the epoch says whether
+   * the frame is this peer's to apply, and the committer says whether it is this peer's own.
+   * Neither question may be answered by trying and failing.
+   */
+  readCommitHeader(commit: Uint8Array): CommitHeader | null
+  /**
    * Apply a received Commit to the MLS state and durably persist the result,
    * returning whether the epoch advanced (the signal to resync the app lane).
    * Implementations make this atomic; the orchestration only requires that the
    * write is durable before it resolves.
+   *
+   * **A frame it cannot apply is `{ advanced: false }`, and never a throw.** The lane's rule
+   * is that a throw leaves the cursor where it was and the frame is read again — so a port
+   * that throws on a Commit it was never in a position to apply wedges the lane on that
+   * frame forever, and a late joiner that throws on its own add-commit wedges on the first
+   * frame it ever reads. A Commit framed at another epoch, and a Commit the group's policy
+   * refuses, are both `{ advanced: false }`.
+   *
+   * It throws for exactly ONE outcome: a Commit it SHOULD have been able to apply and could
+   * not, because the ledger entries the Commit names would not resolve. That failure is
+   * retryable — the bodies can still arrive — and it is the only one that is. See
+   * {@link isMissingLedgerEntries}.
    */
   processCommit(commit: Uint8Array, context: CommitContext): Promise<{ advanced: boolean }>
   /**
@@ -91,4 +129,20 @@ export type GroupMLS = {
    * derive the rendezvous.
    */
   exportRecoverySecret(): Uint8Array | Promise<Uint8Array>
+}
+
+/**
+ * The one throw {@link GroupMLS.processCommit} is allowed: the Commit named ledger entries
+ * whose bodies would not resolve, from its own frame or from anywhere else the peer looked.
+ *
+ * It is the only RETRYABLE outcome, and the lane treats it as one — the frame is read again,
+ * a bounded number of times, before the cursor is allowed past it. Everything else the port
+ * says about a frame it will not apply is a `{ advanced: false }`.
+ *
+ * Matched by name, not by class: the port is consumer-supplied and its error type is not
+ * this package's to import. A port whose missing-entries error is named anything else is a
+ * port whose frames the lane will treat as an unknown failure — so the name is contract.
+ */
+export function isMissingLedgerEntries(error: unknown): boolean {
+  return error instanceof Error && error.name === 'MissingLedgerEntriesError'
 }

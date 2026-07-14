@@ -28,6 +28,59 @@ describe('GroupMLS port', () => {
     expect(mls.seen()).toBe(1)
   })
 
+  test('a commit says who wrote it, and at what epoch, without being applied', () => {
+    const admin = createMemoryGroupMLS({
+      recoverySecret: new Uint8Array(32).fill(1),
+      epoch: 4,
+      localDID: 'admin',
+    })
+    const commit = admin.buildCommit()
+    const reader = createMemoryGroupMLS({ recoverySecret: new Uint8Array(32).fill(1), epoch: 4 })
+
+    // Read out of the commit's own bytes. No state is touched, and the reader is not at the
+    // committer's group, let alone at a position to apply anything.
+    expect(reader.readCommitHeader(commit)).toEqual({ epoch: 4, committerDID: 'admin' })
+    expect(reader.readCommitHeader(new Uint8Array([0xff, 0xff]))).toBeNull()
+    expect(reader.readCommitHeader(new Uint8Array())).toBeNull()
+  })
+
+  test('a member cannot apply the frame that is its own commit', async () => {
+    const mls = createMemoryGroupMLS({
+      recoverySecret: new Uint8Array(32).fill(1),
+      epoch: 1,
+      localDID: 'self',
+    })
+    // MLS merges a pending commit; it does not process one. The state that could have
+    // carried it is the pending state, and a member meeting its own commit in the log has
+    // lost it. It is refused, and not with a throw: there is nothing here to retry.
+    expect(await mls.processCommit(mls.buildCommit(), { senderDID: 'self' })).toEqual({
+      advanced: false,
+    })
+    expect(mls.epoch()).toBe(1)
+  })
+
+  test('a commit from a committer the policy refuses is well-formed, and not applied', async () => {
+    const removed = createMemoryGroupMLS({
+      recoverySecret: new Uint8Array(32).fill(1),
+      epoch: 1,
+      localDID: 'mallory',
+    })
+    const bob = createMemoryGroupMLS({
+      recoverySecret: new Uint8Array(32).fill(1),
+      epoch: 1,
+      localDID: 'bob',
+      acceptsCommitter: (did) => did !== 'mallory',
+    })
+    // A refusal is a `{ advanced: false }`, never a throw: the lane's rule is that a throw
+    // leaves the cursor put and the frame is read again, and a commit deliberately refused
+    // is a commit that will be refused every time.
+    expect(await bob.processCommit(removed.buildCommit(), { senderDID: 'mallory' })).toEqual({
+      advanced: false,
+    })
+    expect(bob.epoch()).toBe(1)
+    expect(bob.seen()).toBe(1)
+  })
+
   test('a commit resolves the bodies it enacts from the frame it rides in', async () => {
     const mls = createMemoryGroupMLS({ recoverySecret: new Uint8Array(32).fill(1), epoch: 1 })
     const admin = createMemoryGroupMLS({ recoverySecret: new Uint8Array(32).fill(1), epoch: 1 })
@@ -80,9 +133,10 @@ describe('GroupMLS port', () => {
       recoverySecret: new Uint8Array(32).fill(1),
       localDID: 'live',
     })
-    // advance live to epoch 2
-    await live.processCommit(live.buildCommit(), { senderDID: 'live' })
-    await live.processCommit(live.buildCommit(), { senderDID: 'live' })
+    // Advance live to epoch 2. A member ADOPTS the commits it made — it can never process
+    // one, because MLS merges a pending commit rather than applying it.
+    live.adopt(live.buildCommit())
+    live.adopt(live.buildCommit())
     const stranded = createMemoryGroupMLS({
       recoverySecret: new Uint8Array(32).fill(1),
       localDID: 'stranded',
@@ -97,7 +151,7 @@ describe('GroupMLS port', () => {
       recoverySecret: new Uint8Array(32).fill(1),
       localDID: 'live',
     })
-    await live.processCommit(live.buildCommit(), { senderDID: 'live' })
+    live.adopt(live.buildCommit())
     const eve = createMemoryGroupMLS({
       recoverySecret: new Uint8Array(32).fill(1),
       localDID: 'eve',
