@@ -1971,3 +1971,52 @@ exactly its red and nothing else.
 legitimate clear silently disarmed the gate. The bug was invisible because the only heal-trigger row the
 suite tested under a failed heal was the one that re-arms itself — the review's standing lesson again: a
 test that exercises the self-healing case cannot see a fault in the cases that do not self-heal.
+
+### 2026-07-14 — Question 5.3: The conformance suite has holes a plausible SQL host walks through.
+
+**Findings:** The suite is the deliverable — the contract a SQL-backed hub in another repo implements —
+and it had three ways for a host to pass all 16 clauses and then silently fork or empty a group's commit
+log, plus two real bugs in the reference `memoryStore`. All the same signature: the obligation stated
+correctly in `types.ts`, implemented correctly (mostly) in the store, and **checked by no clause**, so a
+host correct-by-its-own-unit-tests is not held to it.
+
+- **Critical — a host can derive `head` from the log.** Every existing `trim`/`purge` clause left a
+  surviving frame, so `SELECT max(sequenceID) WHERE retain='log'` passes all 16. Then a commit log ages
+  out, the derived head becomes `null`, a peer CASes `expectedHead: null` and **wins** — G34, the fork
+  the head exists to prevent. Two new clauses empty the log to nothing and assert `head` still stands.
+- **Critical — `unsubscribe` is a deleter the suite never called.** A host that GCs zero-delivery
+  messages on unsubscribe — the exact shape the reference store once had, and which this plan's own log
+  records as "a third illegal deleter nobody had noticed" — passes every clause and destroys the commit
+  log the first time a group's last member unsubscribes. New clause: unsubscribe the only subscriber,
+  assert the mailbox frame is gone and the log frame and head survive.
+- **Critical — the `retain: 'mailbox'` default was never exercised.** Every publish in the suite passed
+  `retain` explicitly, so a host defaulting to `'log'` passes — and then every app, rendezvous and tunnel
+  frame becomes log-class, ungc'd, moving every topic's head. New clause publishes with `retain` omitted.
+
+**Two REAL store bugs, each captured red before the fix:**
+
+- **`memoryStore.trim` deleted undelivered mailbox mail** (`expected [] to deeply equal ['000000000001']`)
+  — it iterated the mixed `topicLogs` and removed anything below `before`. Scoped to log-class; the
+  contract's own language (`trim` is log-class) settled the ambiguity.
+- **`maxDepth` counted mailbox frames** (`expected [] to deeply equal ['000000000018']`) — so any member
+  could evict a group's entire commit log with a flood of mailbox frames to the log topic. The class was
+  made unable to *wedge* the lane (G33); it was not made unable to *empty* it. Fixed to count log-class
+  frames only. One existing unit test asserted the old mailbox-depth behaviour — the destructor written
+  down as an invariant, again — and was rewritten.
+
+**Spec/contract impact.** `types.ts`: **`head` is stored state, not a projection of the log**; `trim` and
+the depth bound are **log-class-scoped**. Every new clause asserts its paired deletion in the same test
+(so a delete-nothing store cannot pass), and every one was mutation-checked against the reference store —
+the wrong change it forbids applied, the clause confirmed red, then reverted. Suite 16 → 23 clauses;
+hub-server units 57 → 66.
+
+**Accepted design calls, stated:** the depth clause needs an optional `maxDepth` conformance param
+(depth-evicts is host policy, not a universal contract guarantee) and is skipped for a host that declares
+no bound; the purge-empties-log clauses require the conformance store's default retention to be 0, a
+documented `createStore` requirement.
+
+**Learned (5.3):** *An interface's conformance suite is graded against a store written by the same hand
+that wrote the interface — so the suite tests what that author remembered to check, not what the contract
+requires.* Every hole here was a clause-shaped gap over a correct implementation, invisible precisely
+because the reference store did the right thing and the suite never asked a wrong one to fail. The fix
+was not new behaviour; it was making the suite able to reject the natural wrong host.

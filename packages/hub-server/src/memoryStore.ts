@@ -226,9 +226,22 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
         list.push(sequenceID)
       }
 
-      // Depth bound: a trim like any other, so it moves oldest and leaves head alone.
-      while (log.length > maxDepth) {
-        removeEntry(log[0])
+      // Depth bound: a trim like any other, so it moves oldest and leaves head alone — and it
+      // counts LOG frames only. A mailbox frame is bounded by its ack and by age, not by depth,
+      // and counting it here would let any member evict the commit log with a flood of mailbox
+      // frames. Only a log publish can push the log-class count over the bound, so this is skipped
+      // for the mailbox fast path.
+      if (retain === 'log') {
+        let logDepth = 0
+        for (const id of log) {
+          if (entries.get(id)?.retain === 'log') logDepth++
+        }
+        while (logDepth > maxDepth) {
+          const oldestLog = log.find((id) => entries.get(id)?.retain === 'log')
+          if (oldestLog == null) break
+          removeEntry(oldestLog)
+          logDepth--
+        }
       }
 
       return sequenceID
@@ -329,7 +342,10 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
       const log = topicLogs.get(params.topicID)
       if (log == null) return
       for (const sequenceID of [...log]) {
-        if (sequenceID < params.before) {
+        // Log-class frames only. A mailbox frame shares the topic's array but not its log: it is
+        // delivery-derived, freed by its last ack or by age, and trim never removes it — trimming
+        // the mixed array silently drops pending mail below the bound.
+        if (sequenceID < params.before && entries.get(sequenceID)?.retain === 'log') {
           removeEntry(sequenceID)
         }
       }

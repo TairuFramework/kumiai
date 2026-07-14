@@ -103,6 +103,13 @@ export type FetchTopicResult = {
    * null. A mailbox publish mints a sequenceID and appends, but does NOT move the head — a head
    * naming a mailbox frame is a head that the frame's own last ack deletes, anchoring the
    * compare-and-set to a frame no reader of the log can ever pull.
+   *
+   * The head is **stored state, not a projection of the log**. It outlives every frame: a `trim`
+   * or `purge` that empties the log leaves the head still naming the last accepted publish. A host
+   * that derives it — `SELECT max(sequenceID) WHERE topic=? AND retain='log'` — passes every
+   * single-connection test, then returns null the first time a group's log ages out; a peer reads
+   * that null, CASes `expectedHead: null`, wins, and forks the group at the hub. A host that
+   * recomputes the head does not satisfy this contract however green its tests are.
    */
   head: string | null
   /** The oldest sequenceID still retained for this topic, or null if the log is empty. */
@@ -138,10 +145,16 @@ export type PurgeParams = {
 export type TrimParams = {
   topicID: string
   /**
-   * Remove log entries with sequenceID strictly below this bound. Depth-versus-age retention
-   * policy is the host's, layered on top by choosing this value — the contract fixes only the
-   * invariant: trim moves `oldest`, never touches `head`, and never removes a `publishID`
-   * dedup record.
+   * Remove `retain: 'log'` frames with sequenceID strictly below this bound — and **only** those.
+   * A mailbox frame on the same topic is delivery-derived, freed by its last ack or by age, and
+   * `trim` never touches it: a host that scopes its DELETE to the whole topic rather than to the
+   * log class silently drops pending mail below the bound.
+   *
+   * Depth-versus-age retention policy is the host's, layered on top by choosing this value — the
+   * contract fixes only the invariant: trim moves `oldest`, never touches `head`, and never
+   * removes a `publishID` dedup record. Any depth- or count-based bound a host layers on `trim`
+   * must likewise count log-class frames only: a member may publish a mailbox frame to a log
+   * topic, so a bound that counts mailbox frames lets that member evict the log with a flood.
    */
   before: string
 }
@@ -162,7 +175,13 @@ export type HubStoreEvents = {
  *   published, so no refcount over current subscribers can ever free it. It is appended whether
  *   or not anyone is subscribed, and `trim` is the only thing that removes it — never `ack`,
  *   never `unsubscribe`. `trim` moves `oldest`, never touches `head`, and never removes a
- *   `publishID` dedup record.
+ *   `publishID` dedup record. Any depth- or count-based bound a host layers on top must count
+ *   log-class frames only — a mailbox frame shares the topic but not the log, and counting it
+ *   lets any member evict the log with a flood of mailbox frames.
+ * - The `head` is **stored state, not a projection of the log**: it names the last accepted log
+ *   publish and outlives every frame, so it still stands when `trim` or `purge` empties the log.
+ *   A host that recomputes it from the surviving frames returns null the moment the log empties,
+ *   and a peer that reads that null CASes `expectedHead: null`, wins, and forks the group.
  * - Removing a log entry removes the deliveries that pointed at it: a delivery references a log
  *   entry and does not own it, and it cannot be pushed once its referent is gone.
  * - `purge` is the age enforcement for both classes, honouring the same invariants as `trim`. A

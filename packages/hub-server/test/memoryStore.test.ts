@@ -109,15 +109,52 @@ describe('createMemoryStore pub/sub', () => {
     expect(log.head).toBe(logged)
   })
 
-  test('maxDepth trims the oldest message per topic on publish', async () => {
+  test('maxDepth evicts the oldest log frame per topic on publish', async () => {
     const store = createMemoryStore({ maxDepth: 2 })
     await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
-    await store.publish({ senderDID: ALICE, topicID: TOPIC, payload: new Uint8Array([1]) })
-    await store.publish({ senderDID: ALICE, topicID: TOPIC, payload: new Uint8Array([2]) })
-    await store.publish({ senderDID: ALICE, topicID: TOPIC, payload: new Uint8Array([3]) })
+    const first = await store.publish({
+      senderDID: ALICE,
+      topicID: TOPIC,
+      payload: new Uint8Array([1]),
+      retain: 'log',
+    })
+    await store.publish({
+      senderDID: ALICE,
+      topicID: TOPIC,
+      payload: new Uint8Array([2]),
+      retain: 'log',
+    })
+    const last = await store.publish({
+      senderDID: ALICE,
+      topicID: TOPIC,
+      payload: new Uint8Array([3]),
+      retain: 'log',
+    })
 
-    const result = await store.fetch({ recipientDID: BOB })
+    const result = await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
     expect(result.messages.map((m) => m.payload[0])).toEqual([2, 3])
+    expect(result.oldest != null && result.oldest > first).toBe(true)
+    expect(result.head).toBe(last)
+  })
+
+  test('maxDepth counts log frames only: a mailbox flood cannot evict the commit log', async () => {
+    const store = createMemoryStore({ maxDepth: 2 })
+    await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+    const commit = await store.publish({
+      senderDID: ALICE,
+      topicID: TOPIC,
+      payload: new Uint8Array([1]),
+      retain: 'log',
+    })
+    // A member floods the log topic with mailbox frames, well past the depth bound. They are the
+    // publisher's to choose, but they must not be theirs to evict the log with.
+    for (let i = 0; i < 5; i++) {
+      await store.publish({ senderDID: ALICE, topicID: TOPIC, payload: new Uint8Array([i]) })
+    }
+
+    const log = await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
+    expect(log.messages.map((m) => m.sequenceID)).toEqual([commit])
+    expect(log.head).toBe(commit)
   })
 
   test('the last ack frees a mailbox frame; a log frame outlives every ack', async () => {
@@ -184,6 +221,33 @@ describe('createMemoryStore pub/sub', () => {
     expect(emptied.oldest).toBeNull()
     expect(emptied.head).toBe(last)
     expect(first < last).toBe(true)
+  })
+
+  test('trim removes only log frames: a mailbox frame on the same topic keeps its delivery', async () => {
+    const store = createMemoryStore()
+    await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+    const mailbox = await store.publish({
+      senderDID: ALICE,
+      topicID: TOPIC,
+      payload: new Uint8Array([1]),
+    })
+    const logged = await store.publish({
+      senderDID: ALICE,
+      topicID: TOPIC,
+      payload: new Uint8Array([2]),
+      retain: 'log',
+    })
+
+    // Trim past both. The log frame goes; the mailbox frame is delivery-derived, not a log entry,
+    // and trim never touches it — so its pending delivery is still there.
+    await store.trim({ topicID: TOPIC, before: 'zzz' })
+    expect((await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })).messages).toHaveLength(
+      0,
+    )
+    expect((await store.fetch({ recipientDID: BOB })).messages.map((m) => m.sequenceID)).toEqual([
+      mailbox,
+    ])
+    expect(logged > mailbox).toBe(true)
   })
 
   test('fetchTopic refuses a non-subscriber and honours after/limit', async () => {

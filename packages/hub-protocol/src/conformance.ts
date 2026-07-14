@@ -9,7 +9,10 @@
  * testHubStoreConformance({ createStore: () => new SQLHubStore(freshDatabase()) })
  * ```
  *
- * `createStore` MUST return an empty store — every case gets a fresh one.
+ * `createStore` MUST return an empty store — every case gets a fresh one — configured with a
+ * default retention of zero, so that `purge({ olderThan: 0 })` can empty a topic whose only
+ * subscriber holds the default. (A non-zero default floors the age bound and the purge-empties
+ * clauses would never fire; hosts run the suite against a zero-default store.)
  *
  * Every clause here exists because a plausible implementation gets it wrong. Three are
  * load-bearing: a store that treats `retain` as a no-op passes everything except "the retention
@@ -43,6 +46,15 @@ export type HubStoreConformanceParams = {
    * allow. Must be greater than zero — a hub that retains nothing has nothing to serve.
    */
   maxRetention: number
+  /**
+   * The per-topic log depth the store returned by `createStore` is configured to keep before it
+   * evicts the oldest log frame — the count that governs its depth-based retention. A host with
+   * no depth bound omits it, and the depth clause is skipped. When present it counts LOG frames
+   * only: the clause floods a topic with this many mailbox frames and asserts the commit log
+   * survives, so the store MUST be configured with a modest value (at least 11, to leave the
+   * ordering clause's frames intact) to keep the run quick.
+   */
+  maxDepth?: number
 }
 
 const ALICE = 'did:key:alice'
@@ -55,7 +67,7 @@ function payload(byte: number): Uint8Array {
 }
 
 export function testHubStoreConformance(params: HubStoreConformanceParams): void {
-  const { createStore, maxRetention } = params
+  const { createStore, maxRetention, maxDepth } = params
 
   describe('HubStore conformance', () => {
     test('the retention class governs deletion: an acked mailbox frame is gone, an acked log frame is not', async () => {
@@ -545,5 +557,245 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
         NotSubscribedError,
       )
     })
+
+    test('head is stored state: it survives a trim that empties the log', async () => {
+      const store = await createStore()
+      await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+      const first = await store.publish({
+        senderDID: ALICE,
+        topicID: TOPIC,
+        payload: payload(1),
+        retain: 'log',
+      })
+      const last = await store.publish({
+        senderDID: ALICE,
+        topicID: TOPIC,
+        payload: payload(2),
+        retain: 'log',
+      })
+
+      // Trim ABOVE the tip: every log frame goes, the one the head names included. Every other
+      // trim clause leaves a surviving frame, so a host that derives `head = max(sequenceID)`
+      // over the retained log passes them all — an empty log is the only thing that tells a
+      // stored head from a derived one.
+      await store.trim({ topicID: TOPIC, before: `${last}\uffff` })
+
+      const result = await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
+      // The log really is empty: the frames are gone, not hidden. (Assert the deletion first, or a
+      // store that trims nothing passes the head assertion below for free.)
+      expect(result.messages).toHaveLength(0)
+      expect(result.oldest).toBeNull()
+      // And the head still names the last accepted log publish. A derived head is null here, and a
+      // peer that reads null CASes `expectedHead: null`, wins, and forks the group at the hub.
+      expect(result.head).toBe(last)
+      expect(first < last).toBe(true)
+    })
+
+    test('head is stored state: it survives a purge that empties the log', async () => {
+      const store = await createStore()
+      await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+      const last = await store.publish({
+        senderDID: ALICE,
+        topicID: TOPIC,
+        payload: payload(1),
+        retain: 'log',
+      })
+
+      // The most aggressive age sweep the hub can run, on a topic whose only subscriber holds the
+      // default retention: it empties the log.
+      await store.purge({ olderThan: 0 })
+
+      const result = await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
+      expect(result.messages).toHaveLength(0)
+      expect(result.oldest).toBeNull()
+      // purge is a deleter like trim and honours the same invariant: it never touches the head.
+      // The head outlives the age bound exactly as it outlives the trim.
+      expect(result.head).toBe(last)
+    })
+
+    test('the dedup record outlives the log: a replay after a purge still returns the original sequenceID', async () => {
+      const store = await createStore()
+      await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+      const sequenceID = await store.publish({
+        senderDID: ALICE,
+        topicID: TOPIC,
+        payload: payload(1),
+        retain: 'log',
+        expectedHead: null,
+        publishID: 'publish-1',
+      })
+
+      // purge empties the log — the frame the record names is gone...
+      await store.purge({ olderThan: 0 })
+      expect(
+        (await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })).messages,
+      ).toHaveLength(0)
+
+      // ...but the dedup record has its own retention, and purge honours trim's invariants: no
+      // deleter reaches it. A host that hangs the key off the frame loses it to the sweep, and the
+      // replay silently becomes a new publish that then fails its compare-and-set against a head
+      // naming the purged frame — the caller told its commit was lost when it landed.
+      const replayed = await store.publish({
+        senderDID: ALICE,
+        topicID: TOPIC,
+        payload: payload(1),
+        retain: 'log',
+        expectedHead: null,
+        publishID: 'publish-1',
+      })
+      expect(replayed).toBe(sequenceID)
+    })
+
+    test('unsubscribe frees the mailbox frame but never the log frame or the head', async () => {
+      const store = await createStore()
+      await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+      const mailbox = await store.publish({
+        senderDID: ALICE,
+        topicID: TOPIC,
+        payload: payload(1),
+        retain: 'mailbox',
+      })
+      const logged = await store.publish({
+        senderDID: ALICE,
+        topicID: TOPIC,
+        payload: payload(2),
+        retain: 'log',
+      })
+
+      // Both frames are pending for Bob before he leaves.
+      const pending = await store.fetch({ recipientDID: BOB })
+      expect(pending.messages.map((message) => message.sequenceID)).toEqual([mailbox, logged])
+
+      // Bob is the only subscriber. unsubscribe is a delivery operation, not a trim: it frees the
+      // mailbox frame whose last reader Bob was, and leaves the log frame — which trim alone may
+      // remove — standing. A host that implements unsubscribe as "drop this subscriber's deliveries
+      // then GC any frame with no deliveries left" destroys the commit log the first time a group's
+      // last member unsubscribes.
+      await store.unsubscribe(BOB, TOPIC)
+      await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+
+      // The mailbox frame is gone: its only reader left...
+      expect((await store.fetch({ recipientDID: BOB })).messages).toHaveLength(0)
+      // ...and the log frame and the head are exactly where they were.
+      const result = await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
+      expect(result.messages.map((message) => message.sequenceID)).toEqual([logged])
+      expect(result.head).toBe(logged)
+    })
+
+    test('an absent retain defaults to mailbox: the frame is delivery-derived and never enters the log', async () => {
+      const store = await createStore()
+      await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+      await store.subscribe({ subscriberDID: CAROL, topicID: TOPIC })
+
+      // No `retain`. The default is the whole backward-compatibility hinge: every app, rendezvous
+      // and tunnel frame in the system publishes without one, and a host that defaults an absent
+      // `retain` to 'log' turns all of them into log-class frames — never GC'd, each moving the
+      // head of every topic it touches.
+      const sequenceID = await store.publish({
+        senderDID: ALICE,
+        topicID: TOPIC,
+        payload: payload(1),
+      })
+
+      // It never was a log frame: it is absent from the log and it did not move the head...
+      const before = await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
+      expect(before.messages).toHaveLength(0)
+      expect(before.head).toBeNull()
+      // ...and it IS delivered, to every subscriber, exactly as a mailbox frame always was.
+      expect((await store.fetch({ recipientDID: BOB })).messages.map((m) => m.sequenceID)).toEqual([
+        sequenceID,
+      ])
+
+      // Delivery-derived: once every subscriber acks, the frame is gone.
+      await store.ack({ recipientDID: BOB, sequenceIDs: [sequenceID] })
+      await store.ack({ recipientDID: CAROL, sequenceIDs: [sequenceID] })
+      expect((await store.fetch({ recipientDID: BOB })).messages).toHaveLength(0)
+      expect((await store.fetch({ recipientDID: CAROL })).messages).toHaveLength(0)
+
+      // The frame is deleted, and the head — which it never moved — is still null.
+      const after = await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
+      expect(after.head).toBeNull()
+      expect(after.oldest).toBeNull()
+    })
+
+    test('trim removes only log-class frames: a mailbox frame on the same topic is untouched', async () => {
+      const store = await createStore()
+      await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+      const mailbox = await store.publish({
+        senderDID: ALICE,
+        topicID: TOPIC,
+        payload: payload(1),
+        retain: 'mailbox',
+      })
+      const logged = await store.publish({
+        senderDID: ALICE,
+        topicID: TOPIC,
+        payload: payload(2),
+        retain: 'log',
+      })
+
+      // Trim past both frames. trim removes log entries, and a mailbox frame is not one — it is
+      // delivery-derived, freed by ack or age, never by trim. A host that scopes its DELETE to the
+      // whole topic rather than to the log class silently drops the pending mail below the bound.
+      await store.trim({ topicID: TOPIC, before: `${logged}\uffff` })
+
+      // The log frame is gone...
+      const result = await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
+      expect(result.messages).toHaveLength(0)
+      // ...and the mailbox frame's pending delivery is untouched and still deliverable.
+      expect((await store.fetch({ recipientDID: BOB })).messages.map((m) => m.sequenceID)).toEqual([
+        mailbox,
+      ])
+    })
+
+    if (maxDepth != null) {
+      test('the depth bound counts only log frames: a mailbox flood cannot evict the commit log', async () => {
+        const store = await createStore()
+        await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+
+        // The depth bound is real, and it is the paired deletion this clause needs: publish one
+        // past it in LOG frames, and the oldest log frame is evicted, oldest first.
+        const logIDs: Array<string> = []
+        for (let index = 0; index <= maxDepth; index++) {
+          logIDs.push(
+            await store.publish({
+              senderDID: ALICE,
+              topicID: TOPIC,
+              payload: payload(index & 0xff),
+              retain: 'log',
+            }),
+          )
+        }
+        const bounded = await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
+        expect(bounded.messages).toHaveLength(maxDepth)
+        expect(bounded.oldest).toBe(logIDs[1])
+        expect(bounded.head).toBe(logIDs[logIDs.length - 1])
+
+        // Now the flood. A separate topic: one log frame — the commit — then `maxDepth` mailbox
+        // frames on the same topic. The suite has already established that any member may publish a
+        // mailbox frame to a log topic, so a host that counts them against the same depth lets that
+        // member evict the commit log, and offline peers can no longer converge from the hub.
+        const other = 'topic:conformance-depth'
+        await store.subscribe({ subscriberDID: BOB, topicID: other })
+        const commit = await store.publish({
+          senderDID: ALICE,
+          topicID: other,
+          payload: payload(0),
+          retain: 'log',
+        })
+        for (let index = 0; index < maxDepth; index++) {
+          await store.publish({
+            senderDID: ALICE,
+            topicID: other,
+            payload: payload(index & 0xff),
+            retain: 'mailbox',
+          })
+        }
+
+        const survived = await store.fetchTopic({ subscriberDID: BOB, topicID: other })
+        expect(survived.messages.map((message) => message.sequenceID)).toEqual([commit])
+        expect(survived.head).toBe(commit)
+      })
+    }
   })
 }
