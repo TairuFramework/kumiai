@@ -1,6 +1,6 @@
 # Design: the control-ledger lane
 
-**Status:** design, revision 26 (2026-07-13). Reviewed fourteen times by kubun in
+**Status:** design, revision 27 (2026-07-13). Reviewed fourteen times by kubun in
 `2026-07-13-control-ledger-lane-review.md`; G1–G27 are folded in below. Revisions 16–25 fold in
 the implementation probes: `NotSubscribedError`, a `trim` primitive, a 30-day default
 window, two retention classes with subscriber-requested durations, **G28 — the commit lane must
@@ -29,6 +29,15 @@ The obvious guard was built, and measured to have *zero* discriminating power: t
 legal crash window and a host that adopted out of band leave byte-for-byte identical state. The
 journal now records the **acceptance**, written before the adopt, and that ordering is the whole
 of the fix.
+Revision 27 folds in the cursor table as built. **G36 — the escalation was the DoS**: an
+unresolvable frame is **poison**, not a gather-and-heal. The gather had nowhere to go (the app lane
+is epoch-bound, and a stuck peer is behind everyone who applied the frame), and escalating on it let
+any member force the whole group into a recovery storm with one body-less commit. The table gains a
+first row — **a frame framed AHEAD of this peer** is the only honest proof it is behind — whose
+absence was a live bug: a peer that skipped an epoch read every later commit as "history" and
+reported itself healthy while permanently stuck. **G37 — the committer is read from the commit, never
+from the frame's `senderDID`**, which is the untrusted hub's word; an implementation that uses it
+passes G18, passes the plain G19 test, and hands the hub a group-wide DoS.
 **Supersedes:** the requirements in `../../agents/plans/next/2026-07-13-host-ledger-lane.md`
 (R1/R2/R3), which stays as the origin record.
 **Scope:** `@kumiai/mls`, `@kumiai/rpc`, `@kumiai/hub-protocol`, `@kumiai/hub-server`,
@@ -1352,18 +1361,83 @@ poison, and that lie costs someone a day the first time they debug a real log.
 
 | Frame | Cursor |
 |---|---|
+| **Framed at an epoch AHEAD of this peer's** | **advance; heal trigger → `recover()`** (G36 — the group moved on without this peer, which is proof it is behind) |
 | Applied | advance; record this epoch → sequenceID for the D1 fork check |
 | At an epoch this peer has no recorded applied-commit for (pre-join, pre-rejoin, re-seeded history) | advance, **no fork check, no unwrap attempt** — history, not a fork and not poison |
 | At an epoch this peer *has* a record for, with a different sequenceID | advance; the fork trigger (D1) |
 | **At the peer's current epoch, committed by *this peer*, unmergeable (pending state lost)** | **do not advance; heal trigger → `recover()`** (G18, narrowed by G19 — the predicate is authorship, *not* "cannot apply") |
-| Malformed, or policy-rejected (`CommitRejectedError`) | advance (poison — never retry) |
-| `MissingLedgerEntriesError` | **do not advance**; gather the missing ids, retry the frame (bounded); on exhaustion, advance and escalate to `recover()` |
+| Malformed, policy-rejected (`CommitRejectedError`), **or naming ledger entries that will not resolve** | advance (poison — never retry, **never heal**) |
 
 **The rows are evaluated in the order written.** Epoch classification comes first (G11: no
 unwrap before it), the un-merged own-commit row comes before the poison row (G18: otherwise a
 crash victim's own commit is filed as malformed and the peer walks cheerfully to
 `reconciledHead == head`), and poison is the last resort, never the fallback for "I could not
 apply this".
+
+**G36 — the escalation was the DoS, and the table was missing a row.** Revisions up to 26 gave
+`MissingLedgerEntriesError` its own row: *gather the missing ids, retry the frame (bounded); on
+exhaustion, advance and escalate to `recover()`*. Both halves are wrong.
+
+The **gather has nowhere to go.** D3 puts it on the app lane, which is epoch-bound — and a peer
+stuck at epoch E is *behind* every member that applied the frame, all of whom rotated to E+1. An
+app-lane gather at epoch E reaches nobody. The retry therefore re-runs an identical computation and
+always exhausts.
+
+The **escalation is a member-triggerable group-wide DoS.** Any current member publishes one commit
+naming ledger entries whose bodies it omits from the frame; every honest peer fails to resolve it;
+every honest peer heals. That is G19's exact shape, arriving through the row that was supposed to be
+safe, and the bounded retry only delays it by N attempts. It violates the rule G19 established:
+*a frame from an untrusted member must never be able to make an honest peer do expensive work.*
+
+**The discriminator that resolves both.** The bodies are sealed under the epoch the commit is framed
+at, and **every member at that epoch holds that secret** — so a frame resolves for *all* of them or
+for *none*. Therefore:
+
+- **Nobody can resolve it** → nobody applies it → the group never advances past that epoch. It is a
+  dead frame: the next honest commit is framed at the same epoch, CASes at the head behind the
+  poison, and everyone applies it. Cost: one wasted CAS slot — a write capability this design
+  **already accepts** ("an ex-member can inject noise into the serialization lane indefinitely").
+- **The group *does* advance past it** → the fault is this peer's alone. And it learns that **not
+  from the frame, but from a later frame framed at an epoch ahead of its own** — the new first row.
+
+So an unresolvable frame is **poison**: drop it, advance, and do not heal. The retry loop and the
+escalation are deleted.
+
+**Why the table needed the `ahead` row, and why its absence was a live bug.** A frame framed ahead of
+this peer previously matched *"an epoch this peer has no recorded applied-commit for"* → **history →
+advance**. So a peer that skipped an epoch walked the rest of the log calling every subsequent commit
+"history", reached `reconciledHead == head`, and **reported itself healthy while permanently stuck at
+a dead epoch** — the same failure G18 names, reached by a different road.
+
+**The row cannot trip a joiner, and the reason is worth stating** because the obvious fear is that it
+would. The log runs in **non-decreasing epoch order**, so a peer reading it applies each frame at its
+own epoch and *rises with it*: a Welcome joiner starting at epoch N reads history below N, then meets
+N, then rises — and never encounters a frame ahead of itself. What *does* break a joiner is reading
+the peer's epoch **once per page** instead of once per frame: the epoch goes stale mid-page, the very
+next frame classifies as *ahead*, and the joiner **heals on arrival**. The classifier therefore takes
+the epoch as an argument, and the lane re-reads it per frame, so it cannot go stale. The danger was in
+the loop, not in the table.
+
+**An accepted, bounded hazard.** A peer that dropped an unresolvable frame stays at an epoch it did
+not advance past, and it may still commit from there — landing on a private branch if the rest of the
+group applied that frame. This is accepted, on two grounds. It is **not attacker-reachable**: a peer
+that alone cannot resolve a frame is one whose epoch secret already differs from the group's, so it
+was on another branch before the frame arrived. And it **expires**: the group's next commit is framed
+ahead of it, which is the `ahead` row, which heals it. The obvious guard — *refuse to commit at an
+epoch I skipped* — is **worse than the bug**: in the case that actually happens, every honest member
+skipped that epoch, so every honest member refuses, while the peer that published the frame adopted
+its own commit and sits an epoch ahead alone. Nobody can publish the commit that unsticks the group.
+One unresolvable frame would kill the group permanently.
+
+**The committer is read from the commit, never from the frame's `senderDID` (G37).** `senderDID` is
+the *hub's* word — `CommitContext` already says it is "not an authorization boundary" — and the hub is
+untrusted. An implementation that keys the G18 authorship predicate on it **passes G18 and passes the
+plain G19 test**, because the crash victim did publish its own frame and the removed member's frame
+does carry their DID. It fails only against a hub that stamps each recipient's *own* DID onto one
+poison frame, which makes every peer in the group heal at once: the G19 storm, through the one party
+the design never trusted. The frame's epoch and its committer must both be read out of the
+MLS-authenticated commit, which is what `senderLeafIndex` → `didOfLeaf` is for. Any test double must
+be able to lie about `senderDID`, or it is not modelling the threat.
 
 **After a real crash, `inFlight` is empty** — the `PendingCommit` lived in memory. That is
 correct and needs no machinery, because G17's membership filter would empty the re-enact list
@@ -1643,7 +1717,23 @@ heal cannot reach for want of a responder.)*
   policy-rejected commit at the current head. Every honest peer drops it as poison and
   **nobody heals** — the security regression test for the narrowed predicate, which an
   applicability-based trigger fails by sending the entire group into recovery at once.
-  Likewise: a frame that throws `MissingLedgerEntriesError` gathers, and does not heal.
+- **…and not even when the hub swears the peer sent it to itself (G37).** The hub stamps each
+  recipient's *own* DID onto that poison frame. Still nobody heals. **This is the only test that
+  separates a committer read from the MLS-authenticated commit from one read from `senderDID`** —
+  an implementation using `senderDID` passes every other test in the suite. A test double that
+  cannot forge `senderDID` is not modelling the threat.
+- **An unresolvable frame is poison, and nobody heals (G36).** A member publishes a commit naming
+  ledger entries whose bodies are not in its frame and cannot be resolved. Every honest peer drops
+  it, advances, and **does not heal**. The group is neither wedged nor stormed. Escalating here —
+  as revisions up to 26 specified — turns one publish into a group-wide recovery storm.
+- **A peer the group left behind heals (G36).** It fails to apply a frame the others applied; the
+  group reaches the next epoch; the peer meets a frame framed **ahead** of it and heals. Assert its
+  epoch **advanced** — an implementation without this row walks to `reconciledHead == head` and
+  reports itself healthy while stuck at a dead epoch forever.
+- **A Welcome joiner does not heal on arrival (G36).** The log is non-decreasing in epoch, so a
+  joiner rises with it and never meets a frame ahead of itself. The implementation that breaks this
+  reads the peer's epoch **once per page** instead of once per frame: it goes stale mid-page, the
+  next frame classifies as *ahead*, and every new member heals on its first pull.
 - **A crash in the acceptance window is repaired from the journal, with no peer.** The
   committer is killed after the hub accepts and before it adopts, then restarted. Replay
   republishes by `publishID`, the store returns the original sequenceID without appending,

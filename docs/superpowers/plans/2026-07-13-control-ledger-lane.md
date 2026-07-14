@@ -1287,3 +1287,89 @@ may re-seal — journal the acceptance, before the adopt). `FetchTopicParams`/`F
 log-class contract; `CommitJournal` gains `markAccepted` and its two-write ordering; the commit loop's
 step 5 and the restart-replay routing are rewritten; four testing clauses added; the host-side impact
 bullet now says **two** durable writes, and why the second one's position is load-bearing.
+
+---
+
+### 2026-07-14 — Question 3.4: Does the cursor table classify in the order written — and can a member weaponise it?
+
+**ANSWERED. Green: rpc 137 (was 114), 27/27 tasks.** Two new defects (G36, G37), both folded into the
+spec at revision 27. Full report: `docs/superpowers/probes/question-3.4-report.md`.
+
+**Findings.** The table is built as a pure function (`classify.ts`) the tests drive row by row without a
+hub, plus the ordering tests that show row 4 precedes row 5 — the property G18 turns on, and one an
+end-to-end test cannot demonstrate.
+
+**G37 — the committer must be read from the commit, never from the frame's `senderDID`. This is the
+sharpest wrong-but-passing of the whole plan.** `senderDID` is the obvious source, and it **passes G18,
+passes the plain G19 test, and passes every classifier unit test — 131 of 132 green.** The crash victim
+really did publish its own frame; the removed member's poison frame really does carry their DID. It is
+wrong because `senderDID` is the **untrusted hub's word** (`CommitContext` says so already: *"not an
+authorization boundary"*), and a hub that stamps each recipient's own DID onto one poison frame makes
+**every peer heal at once** — the G19 storm, through the one party the design never trusted. Exactly one
+test catches it. **Without `FakeHub.lieAboutSender`, that implementation ships.** The security of the
+lane rests on a fixture being able to lie about the one field the spec calls forgeable.
+
+**G36 — the escalation was the DoS, and the table was missing a row.** The probe reported the gather
+"has nowhere to go" (D3 puts it on the epoch-bound app lane, and a stuck peer is behind everyone who
+applied the frame). It goes further: **escalating to `recover()` on an unresolvable frame lets any
+current member force the whole group into a recovery storm with one body-less commit** — G19's shape,
+through the row meant to be safe. Bounded retry only delays it by N attempts.
+
+The discriminator that resolves it: **the bodies are sealed under the epoch the commit is framed at, and
+every member at that epoch holds that secret — so a frame resolves for all of them or for none.** Nobody
+can resolve it ⇒ nobody applies it ⇒ the group never advances ⇒ it is a dead frame, one wasted CAS slot,
+a cost this design already accepts. The group *does* advance past it ⇒ the fault is mine — and I learn
+that **not from the frame, but from a later frame framed ahead of my epoch.** So: unresolvable is
+**poison** (drop, advance, never heal; the retry loop is deleted), and the table gains a **first row** —
+*framed ahead of me* — whose absence was a **live bug**: a peer that skipped an epoch read every later
+commit as "history", reached `reconciledHead == head`, and **reported itself healthy while permanently
+stuck at a dead epoch.**
+
+**The joiner trap was not where I put it.** I briefed the probe to watch the new row's *placement*,
+fearing a Welcome joiner (which sees frames both below and above its epoch) would heal on arrival. **The
+placement cannot break a joiner, and the probe showed why:** the log is non-decreasing in epoch, so a
+joiner applies each frame at its own epoch and **rises with it**, never meeting one ahead. What breaks it
+is reading the peer's epoch **once per page** instead of once per frame — the obvious hoist-out-of-the-loop
+optimisation. The epoch goes stale mid-page, the next frame classifies as *ahead*, and every new member
+heals on its first pull. **The danger was in the loop, not the table.** The classifier now takes the epoch
+as an argument so it cannot go stale.
+
+**Three mutation checks, all red on exactly the predicted test, all reverted:**
+
+- **The applicability predicate** heals the crash victim *perfectly* and turns one publish from a removed
+  member into **2 heals in a 2-member honest group**.
+- **`senderDID` as committer** — 131/132 green (above).
+- **Restore the escalation** — the storm, measured. And a detail worth keeping: under it the
+  left-behind-peer test **still passes**. It heals for the wrong reason. **Only counting heals on the
+  frame nobody can resolve separates the two implementations.**
+
+**Decisions taken.** A typed `RecoveryRequiredError` for the heal trigger unwinding `commit()` (the spec
+said to unwind, never how the host is told). `appliedByEpoch` stays **in memory**: a restarted peer can
+*miss* a fork and can never *invent* one — the safe direction, and D1's fork **resolution** is not built,
+so the trigger has nowhere to go. No durable store for a trigger with no action.
+
+**An accepted, bounded hazard.** A peer that dropped an unresolvable frame may still commit, landing on a
+private branch if the others applied that frame. Accepted, because it is **not attacker-reachable** (a
+peer that alone cannot resolve a frame already holds a different epoch secret — it was forked before the
+frame arrived) and it **expires** (the group's next commit is *ahead* of it, and the new row heals it).
+The obvious guard — *refuse to commit at an epoch I skipped* — is **worse than the bug**: in the case that
+actually happens every honest member skipped that epoch, so every honest member refuses, while the peer
+that published the frame adopted its own commit and sits an epoch ahead alone. **One unresolvable frame
+would kill the group permanently.**
+
+**Spec impact:** revision 27. The table gains the `ahead` row and loses the gather/retry/escalate row;
+G36 and G37 written up; five testing clauses added.
+
+**Learned.** Twice now the fix that suggested itself was worse than the defect — the epoch guard in 3.3
+that could not tell a legal crash from an attack, and the skipped-epoch commit guard here that would trade
+a bounded self-fork for a permanent group death. Both were only visible after building the thing and
+asking *what does this refuse that it should not?* And G37 says something narrower and sharper: **a test
+double that cannot lie is not a test.** The hub is untrusted by design, and until the fixture could forge
+`senderDID`, every test in the suite agreed with an implementation that hands it the group.
+
+**Still open, and carried:** `MissingLedgerEntriesError` no longer has a gather at all — D3's bootstrap
+gather (question 2.3, head-verified) is the only one that works, and it runs after a heal. **D1's fork
+resolution is not built**: the fork row escalates to `recover()` and stops. A `FakeHub` that is a single
+honest log cannot produce a losing branch, so there is no end-to-end fork test. **Trim-to-empty** (head
+present, no frames) leaves a peer quietly behind with nothing to trip the `ahead` row — not new, not
+worsened, and easy to mistake for covered.
