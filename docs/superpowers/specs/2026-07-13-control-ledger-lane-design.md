@@ -1,6 +1,6 @@
 # Design: the control-ledger lane
 
-**Status:** design, revision 25 (2026-07-13). Reviewed fourteen times by kubun in
+**Status:** design, revision 26 (2026-07-13). Reviewed fourteen times by kubun in
 `2026-07-13-control-ledger-lane-review.md`; G1–G27 are folded in below. Revisions 16–25 fold in
 the implementation probes: `NotSubscribedError`, a `trim` primitive, a 30-day default
 window, two retention classes with subscriber-requested durations, **G28 — the commit lane must
@@ -21,6 +21,14 @@ inside `resolveLedgerEntries` deadlocks), and **a responder must gate its gather
 mailbox-only adapter views that are not hubs at all. Revision 25 records that **D3 forces D1's
 commit-path inversion**: a committer that has already adopted its own commit has rotated past the
 epoch secret its bodies must be sealed under, so apply-then-announce cannot carry them at all.
+Revision 26 folds in the commit lane as built: **G33 — the cursor-wedge**, G29's mirror image
+(`fetchTopic` must serve log-class frames only, and the peer must CAS on the head, not its
+cursor); **G34 — an empty log still has a head**, so a peer with no cursor CASes `null` against a
+real one and loses forever; and **G35 — the epoch alone cannot say whether a replay may re-seal**.
+The obvious guard was built, and measured to have *zero* discriminating power: the design's own
+legal crash window and a host that adopted out of band leave byte-for-byte identical state. The
+journal now records the **acceptance**, written before the adopt, and that ordering is the whole
+of the fix.
 **Supersedes:** the requirements in `../../agents/plans/next/2026-07-13-host-ledger-lane.md`
 (R1/R2/R3), which stays as the origin record.
 **Scope:** `@kumiai/mls`, `@kumiai/rpc`, `@kumiai/hub-protocol`, `@kumiai/hub-server`,
@@ -216,10 +224,51 @@ conditional publish compares against something unfetchable. The lane wedges for 
 group, permanently, and nothing raises. It is G19's shape — a member-triggerable, group-wide
 denial of service — reached through the store instead of through the heal trigger.
 
-So `head` means **the last accepted *log* publish**, which is exactly what CAS needs. A stray
-mailbox frame on `commitTopic` becomes a frame the peer reads, fails to parse as a commit, and
-steps over as poison. Mailbox topics never read `head` at all — they use `fetch`, not
-`fetchTopic` — so nothing is lost by narrowing it.
+So `head` means **the last accepted *log* publish**, which is exactly what CAS needs. Mailbox
+topics never read `head` at all — they use `fetch`, not `fetchTopic` — so nothing is lost by
+narrowing it.
+
+**G33 — `fetchTopic` serves log-class frames only, and the peer CASes on the head, not its
+cursor.** G29 narrowed the *head* and left the *cursor* free to name a frame the head can never
+equal. Revision 25 said a stray mailbox frame on `commitTopic` "becomes a frame the peer reads,
+fails to parse as a commit, and steps over as poison." Stepping over it **is** the poison. The
+cursor advances over every frame the peer *processed* — including the ones it dropped — so the
+peer sets `reconciledHead` to a mailbox frame's sequenceID, a value `head` will never take.
+Every subsequent `commit()` compares against it, loses, rebases, loses again, and dies on its
+deadline. **Permanently**, and the frame need not even persist: the cursor keeps its value long
+after the frame is acked away. The retention class is the *publisher's* to choose, and per
+"a removed member keeps `commitTopic`" below, **a removed member can publish one.** One frame,
+one member, and every writer on the topic is finished. G29's mirror image, reached from the
+other side.
+
+Two changes, defending different victims, and each is load-bearing on its own:
+
+1. **`fetchTopic` serves log-class frames only** — a contract on `HubStore`, so hosts are told
+   through the conformance suite. A topic's log **is** its log-class frames; a mailbox publish
+   to a log topic is still *delivered*, and never enters the log. The class must be filtered
+   **before** `limit`, not after: a page of mailbox frames that ate the caller's limit would
+   hand a draining reader an empty page while log frames still waited, and the reader would
+   stop. This defends *every* reader of *any* log topic, including readers that are not this
+   peer.
+2. **The peer compare-and-sets against the head the drained pull reported**, read from
+   `fetchTopic`'s own reply — never against its cursor. `reconciledHead` is what this peer
+   **processed**; `head` is what the log's tip **is**. Two things, two names, the same
+   discipline that branded `LogPosition` apart from `DeliveryPosition`. This defends this peer
+   against *any* store, including a correct one — and it is the only thing that closes **G34**.
+
+**G34 — an empty log still has a head, and a peer with no cursor CASes against `null`.** A topic
+keeps its `head` when its frames age out (trimming removes frames, never the head — the store
+already asserts this). So a group whose commit log has been swept past its retention window
+presents a reader with **no frames and a head that is a real sequenceID**. A peer with a null
+cursor — a member joining from a Welcome, or **any peer after a restart, since the cursor is not
+persisted** — pulls, processes nothing, and compare-and-sets `expectedHead: null`, which means
+*"this topic has never had a log publish"*, against a topic whose head is somebody's frame. It
+loses. Forever. The log-class filter cannot reach this one: the log is honest and still empty.
+Only anchoring on the reported head closes it. The head is therefore recorded **on a complete
+drain** — never mid-page, since a full page means the tip may lie beyond it, and a head recorded
+ahead of the frames it covers would let the next commit win a CAS at an epoch the peer had not
+caught up to. Recording a *stale* head is safe in the other direction: the CAS simply loses and
+the loop rebases.
 
 #### Retention duration: the hub sets the bounds, the subscriber asks within them
 
@@ -304,18 +353,27 @@ export type PublishParams = {
   publishID?: string
 }
 
+/**
+ * Read a topic's log. The log is its `retain: 'log'` frames and NOTHING ELSE (G33): a mailbox
+ * publish to the same topic is delivered like any other, and never appears here.
+ */
 export type FetchTopicParams = {
   /** Authorization: the caller must be a current subscriber of topicID, or NotSubscribedError. */
   subscriberDID: string
   topicID: string
-  /** Exclusive cursor: messages after this sequenceID. Absent: from the oldest retained. */
+  /**
+   * Exclusive cursor: LOG messages after this sequenceID. Absent: from the oldest retained.
+   * `limit` counts log frames — filtering the class after applying it would hand a draining
+   * reader an empty page while log frames still waited, and the reader would stop.
+   */
   after?: string
   limit?: number
 }
 
 export type FetchTopicResult = {
   messages: Array<StoredMessage>
-  /** The topic's current head: the sequenceID of the last accepted publish, or null. */
+  /** The topic's current head: the sequenceID of the last accepted LOG publish, or null.
+   *  Survives trimming — an empty log still has a head (G34). */
   head: string | null
   /** The oldest sequenceID still retained for this topic, or null if the log is empty. */
   oldest: string | null
@@ -468,19 +526,88 @@ type PendingCommit = {
 }
 
 /** Durable single-slot journal, host-provided. The host already persists handle state and
- *  has a database; the peer has neither. */
+ *  has a database; the peer has neither.
+ *
+ *  The slot is written TWICE for a commit that lands: `put` before the publish, then
+ *  `markAccepted` when the hub answers — BEFORE `onAccepted` runs. See G35. */
 type CommitJournal = {
   put(entry: {
     publishID: string
     expectedHead: string | null
+    /** The epoch the commit was framed at, from `crypto.epoch()`. Replay re-seals the
+     *  bodies, and re-sealing is only safe at this epoch (G35). */
+    epoch: number
     commit: Uint8Array
     bodies: Array<string>
     kind: 'ledger' | 'invite' | 'remove'
     journal: Uint8Array
   }): Promise<void>
   get(): Promise<JournalEntry | null>
+  /** The hub accepted this commit, at this sequenceID. Runs BEFORE `onAccepted` — the
+   *  ordering is the whole of G35, and a host must not "optimise" it to after. */
+  markAccepted(publishID: string, sequenceID: string): Promise<void>
   clear(publishID: string): Promise<void>
 }
+```
+
+`JournalEntry` is what `get()` returns: everything `put` was given, plus `acceptedAs?: string` —
+the sequenceID the hub returned, absent when the outcome is unknown.
+
+**G35 — replay re-seals the bodies, and the epoch alone cannot say whether that is safe.**
+`replayJournal` reconstructs the commit frame, which means it calls `crypto.wrap` again. Seal at
+the wrong epoch and the frame carries a blob **no member can open**: the commit applies (it is
+framed at the epoch its receivers are at), every receiver fails to resolve its bodies,
+`processCommit` throws, no cursor advances, and **the lane wedges for the whole group** on a frame
+nobody can ever get past. Revision 25 rested this on an argument — *`onAccepted` is the sole adopt
+point* — and the obvious upgrade is to journal the epoch and refuse to re-seal at a different one.
+
+**That guard has zero discriminating power, and this was measured, not reasoned.** The two states
+it must separate are byte-for-byte identical:
+
+```
+legal   (accepted → onAccepted adopted → crash before clear):  journalled epoch 1, handle epoch 2
+illegal (adopted early → publish never accepted → crash):      journalled epoch 1, handle epoch 2
+```
+
+The first is the design's **own** crash window — `publish → accept → onAccepted → clear` is three
+steps and a crash lands between any two of them, which is why `onAccepted` must be idempotent. A
+guard on the epoch fires on both or neither. `entry.epoch + 1 === crypto.epoch()` is what a
+*correctly behaved* host looks like after the commonest crash in the design.
+
+The bit that actually separates them is **"was the publish accepted?"** — and the journal did not
+record it, because the slot was written once, before the publish. So it records it now:
+
+- `markAccepted` fires **between the hub's answer and `onAccepted`** — *before* it, while the
+  handle is still at the pre-commit epoch. **That ordering is the whole trick.** Recorded after the
+  adopt, a legal crash and a misbehaving host leave the same state again, and the guard is back to
+  useless.
+- Replay routes on `acceptedAs` **first**: present means the commit landed and this is known
+  locally — adopt, clear, take cursor and head from the recorded sequenceID, **publish nothing,
+  re-seal nothing, touch the network not at all.** Absent means replay is about to re-seal, and
+  *only there* does the epoch check apply: refuse unless `crypto.epoch() === entry.epoch`.
+- **Replay's own accepted path must `markAccepted` before it adopts, too.** Replay's tail is the
+  same four steps as `commit`'s, so a crash between its adopt and its clear would otherwise leave
+  exactly the state the check refuses — a peer that crashed *inside its own replay* would come back
+  and be accused of misbehaving.
+
+```
+crash after onAccepted, before clear   → acceptedAs SET,    epoch N+1 → adopt, clear. LEGAL   ✓
+host adopts early, publish never lands → acceptedAs ABSENT, epoch N+1 → REFUSE.       ILLEGAL ✗
+```
+
+The one window this leaves — a crash between the hub's answer and the `markAccepted` write — is
+**already correct and needs no new code**: the host has not adopted (`onAccepted` has not run), so
+the epoch still matches, so replay republishes under the original `publishID`, and the store's
+dedup returns the original sequenceID and appends nothing. That is the idempotency the CAS log
+already provides.
+
+The peer raises `JournalEpochError` when it refuses, and **keeps the slot** — a refusal is never a
+silent clear. Two costs, both accepted: one extra durable write on the commit fast path, and the
+check is **local**. It refuses a misbehaving *host* on its own device; it does not stop a modified
+*peer* from publishing an unopenable frame anyway. Making the group **survive** such a frame is the
+classification table's job, not this guard's. It closes the accident, not the attack.
+
+```ts
 
 /**
  * What replay found (G26). Delivered as a RETURN VALUE, never a callback (G27): replay runs
@@ -523,19 +650,24 @@ Inside the mutex:
    of the completeness check and the pull — the ordering is load-bearing, not stylistic. A
    peer that pulls first meets its own un-merged commit, fires the G18 trigger, and takes the
    expensive rendezvous path the journal exists to avoid. See "Restart replay".
-1. Pull `commitTopic` to the end and process everything. `reconciledHead` is now current.
+1. Pull `commitTopic` to the end and process everything. `reconciledHead` (what this peer has
+   processed) and `commitLogHead` (the log's tip, as the drained pull reported it) are now
+   current. **The CAS anchors on the head, never on the cursor — G33/G34.**
 2. Call `build()`. The host has produced `newGroup` via `commitLedgerEntries` /
    `commitInvite` / `removeMember` but has **not** adopted it — mls commits are
    non-mutating, returning a derived handle and never advancing the source, so the host's
    live handle is still the pre-commit one.
 3. **Journal the pending commit before publishing (G21):** `journal.put({ publishID,
-   expectedHead: reconciledHead, commit, bodies, journal })` with a fresh `publishID`. This
-   write must be durable before step 4 begins. It is what makes the acceptance window
-   survivable *without a peer* — see "Restart replay".
+   expectedHead: commitLogHead, epoch: crypto.epoch(), commit, bodies, kind, journal })` with a
+   fresh `publishID`. This write must be durable before step 4 begins. It is what makes the
+   acceptance window survivable *without a peer* — see "Restart replay".
 4. Frame `[commit][wrap(bodies)]` (see D3) and publish to `commitTopic` with
-   `expectedHead: reconciledHead` and that `publishID`.
-5. **Accepted** → set `reconciledHead` to the returned sequenceID, run `onAccepted()`, clear
-   the journal slot, rebuild the epoch.
+   `expectedHead: commitLogHead` and that `publishID`.
+5. **Accepted** → `journal.markAccepted(publishID, sequenceID)` **first, while the handle is
+   still at the pre-commit epoch (G35)**; then run `onAccepted()`; then set `reconciledHead` and
+   `commitLogHead` to the returned sequenceID, clear the journal slot, and rebuild the epoch.
+   The order of the first two is not stylistic: swap them and replay can no longer tell a legal
+   crash from a host that adopted out of band.
 6. **`HeadMismatchError`** → clear the journal slot and drop the `PendingCommit` untouched.
    Discarding costs nothing, and the pre-commit leaf key material is retained, which the heal
    path needs. Go back to step 1: pull the winning commit, let the host's handle rebase as it
@@ -543,16 +675,26 @@ Inside the mutex:
 
 #### Restart replay: the crash window is closed, not merely detected (G21)
 
-**Before any lane operation, the peer replays its journal.** If the slot holds an entry, the
-peer republishes it with the **same `publishID` and the same `expectedHead`**. The store's
-idempotency contract decides the outcome, with no responder and no network peer involved:
+**Before any lane operation, the peer replays its journal.** If the slot holds an entry, replay
+routes on `acceptedAs` (G35) — it does **not** republish blind:
 
-- **The original publish was accepted** → the store returns its original sequenceID and
-  appends nothing. The peer adopts the journalled `newGroup`, delivers the journalled Welcome,
-  sets `reconciledHead`, and clears the slot. It is whole.
-- **It was never accepted** → the republish is an ordinary CAS at `expectedHead`. It wins (the
-  commit lands, adopt as above), or it takes `HeadMismatchError` — someone else committed
-  meanwhile — and **what happens to the work depends on what the commit was (G25)**.
+- **The slot records an acceptance** (`acceptedAs` set) → the commit landed, and this peer knows
+  it **locally**. Adopt the journalled `newGroup`, deliver the journalled Welcome, set
+  `reconciledHead` and `commitLogHead` from the recorded sequenceID, clear the slot. **No
+  publish, no re-seal, no network** — it is whole even with the hub unreachable. This is the
+  commonest crash of all (between `onAccepted` and `clear`), and under revision 25 it cost a
+  full re-sealed frame shipped to a store that discarded it unread.
+- **The slot records no acceptance** → the outcome is unknown and replay is about to **re-seal**,
+  so the epoch check applies first: refuse with `JournalEpochError` unless
+  `crypto.epoch() === entry.epoch`, and **keep the slot** (a refusal is never a silent clear).
+  Otherwise republish with the **same `publishID` and the same `expectedHead`**, and let the
+  store's idempotency contract decide, with no responder and no network peer involved:
+  - **The original publish was accepted after all** (the crash landed between the hub's answer
+    and the `markAccepted` write) → the store returns its original sequenceID and appends
+    nothing. Adopt as above. The host had not yet adopted, which is *why* the epoch check passed.
+  - **It was never accepted** → the republish is an ordinary CAS at `expectedHead`. It wins (the
+    commit lands, adopt as above), or it takes `HeadMismatchError` — someone else committed
+    meanwhile — and **what happens to the work depends on what the commit was (G25)**.
 
 **Replay's `HeadMismatchError` cannot "rebuild like any other loser".** Inside `commit()` that
 phrase is fine: losing means going back to step 1 and calling `build()` again, and `build()` is
@@ -1303,8 +1445,12 @@ Named so the work is sized honestly. These are the host's to absorb.
   Welcome delivery a no-op on repeat. The journal makes a commit *look* atomic, which is
   exactly why this has to be said out loud.
 - **The host provides a durable single-slot commit journal (`CommitJournal`) and serializes
-  its pending handle into it.** Written before every publish, replayed before every lane
-  operation, cleared on acceptance or rejection. The blob is host-opaque — the serialized
+  its pending handle into it.** Written before every publish, **marked accepted when the hub
+  answers — before `onAccepted` runs (G35)**, replayed before every lane operation, cleared on
+  acceptance or rejection. That is **two durable writes** on the commit path, not one, and the
+  ordering of the second is load-bearing: a host that "optimises" `markAccepted` to after the
+  adopt destroys replay's only means of telling a legal crash from a handle adopted out of band,
+  and gets a group-wide wedge for it. The blob is host-opaque — the serialized
   post-commit handle plus any Welcome — and the host already has both a database and handle
   serialization, which the peer does not. This is required, not optional (G21): without it a
   crash in the acceptance window bricks a single-member group permanently, because heal needs
@@ -1413,6 +1559,12 @@ heal cannot reach for want of a responder.)*
     same topic, and `head` still names the log frame. A store that advances the head on every
     publish passes every other clause and hands the commit lane a head that its own ack can
     delete.
+  - **`fetchTopic` serves log-class frames only (G33):** a mailbox publish to a log topic is
+    **delivered** (it reaches `fetch` like any other) and **absent from the log**. Assert its
+    absence *before* the ack as well as after — asserting only after would pass against a store
+    that puts mailbox frames in the log, because the ack is what removes them. Assert `limit`
+    counts log frames, so a page of mailbox frames cannot hand a draining reader a short page
+    while log frames still wait.
 - **Concurrent commits.** Two admins commit at epoch N against one hub: one wins, the loser
   rebases and its entries land in a later commit. No fork, no lost entries.
 - **Same-device concurrency.** Two concurrent `peer.commit` calls serialize; both commits
@@ -1425,6 +1577,27 @@ heal cannot reach for want of a responder.)*
   With `retainKeysForEpochs` at its default of 4 this fails unless replay interleaves, and it
   fails **silently** — the peer converges, the roster matches, nothing throws, and the message
   is simply undecryptable. Assert the plaintext, never the absence of an error.
+- **A mailbox frame on `commitTopic` does not wedge the lane (G33).** Any member — a removed one
+  included — publishes one `retain: 'mailbox'` frame there, and the next `commit()` still
+  **lands**. Assert it landed *for the group* (a second member's ledger and epoch), never that
+  the call merely resolved: the fork this lane exists to prevent is silent from the committer's
+  own side. Set the commit deadline to zero — there is nothing to rebase against, so a wrong
+  anchor must fail *at once* rather than rebase for thirty seconds against a head it can never
+  reach.
+- **A swept log still commits (G34).** Trim the commit log past its retention (the head
+  survives, the frames do not) and let a peer with a **null cursor** — a Welcome joiner, or any
+  peer after a restart — commit. It must land. A peer that CASes on its cursor sends
+  `expectedHead: null` against a real head and loses forever.
+- **Replay of an accepted commit touches no network (G35).** Crash between `onAccepted` and
+  `clear`, restart with **every publish throwing**, and replay must still adopt, deliver the
+  Welcome once, and clear the slot. The acceptance is in the journal; a peer that had to ask the
+  store what became of its commit could not get past a dead hub, and does not have to.
+- **A host that adopted outside `onAccepted` is refused (G35).** It adopts out of band while the
+  publish is in flight and dies without learning the outcome. Replay raises `JournalEpochError`,
+  **keeps the slot**, and the unopenable frame never reaches the log. Assert the *group* survives
+  — two other members' commit lane still works — because a group-wide wedge, not a throw, is the
+  subject. Mutation-check both halves: recording the acceptance *after* `onAccepted` must break
+  the legal-crash test, and dropping the epoch check must let the poison frame land.
 - **`onAccepted` throws.** The commit is in the log, the host failed to adopt: `commit()`
   surfaces the failure, does not retry the commit, and the peer heals by rejoin.
 - **First-delivery resolution.** Three-member group, an admin enacts an entry, the third

@@ -1149,8 +1149,8 @@ corruption. Moot pre-1.0 with no deployed peers; needs a bump at the first relea
 
 ### 2026-07-13 — Question 3.3: Does the commit CAS loop converge, serialize, and journal?
 
-**⚠️ IN PROGRESS — uncommitted work in the working tree, and the tree is RED.** Read the "Resuming"
-section at the end of this entry before touching anything.
+**ANSWERED. Green: rpc 114, hub-server 57, mls 283, integration 23.** Three defects found while
+implementing (G33, G34, G35), all folded into the spec at revision 26.
 
 **The main body of the question is answered, and it was green (110/110) before the follow-up began.**
 Full report: `docs/superpowers/probes/question-3.3-report.md`.
@@ -1198,58 +1198,92 @@ deadline, and dies. **Permanently.** The frame need not even persist — the cur
 the frame is acked away. And per the spec's own *"a removed member keeps `commitTopic`"*, **a removed
 member can publish one.** We fixed the head-wedge and left the cursor-wedge.
 
-**Both approved fixes are being applied (this is the in-progress work):**
+**Two fixes, and each carries a different test — established by reverting them one at a time, not by
+assertion.** The store's `fetchTopic` now serves **log-class frames only** (a mailbox publish to a log
+topic is still *delivered*, and never enters the log; the class is filtered **before** `limit`, or a
+page of mailbox frames hands a draining reader a short page and it stops). And the peer now CASes
+against **the head the drained pull reported**, never against its cursor.
 
-1. **Store:** `fetchTopic` serves **log-class frames only**. A topic's log is its log-class frames; a
-   mailbox publish to a log topic is still *delivered* and **never enters the log**. Removes the
-   vector entirely. New conformance clause — a contract change, so hosts must be told, and the suite
-   is how they are told.
-2. **Peer:** CAS against **the head the drained pull reported**, not the cursor. `reconciledHead` is
-   what this peer **processed**; the log's `head` is what the log's **tip is**. Two things, two names —
-   the same discipline that branded `LogPosition` apart from `DeliveryPosition`.
+| half | what it carries alone |
+|---|---|
+| store log-class filter | The `HubStore` contract — 2 conformance clauses. **No rpc test.** |
+| peer head CAS | **G34**, below — 1 rpc test. **No conformance clause.** |
+| both | The mailbox-wedge test needs *either*. Red only when both are gone. |
 
-Belt and braces on purpose: the store change makes the log honest, the peer change makes the anchor
-correct *by name* rather than by an invariant it does not state.
+The probe could have manufactured a failure for the peer half by making the fake hub serve mailbox
+frames from `fetchTopic`, and refused to — that would have lied about where the safety lives. It went
+looking for the case the peer half carries alone instead, and found one.
 
-**And a second approved change — the journal epoch guard.** Replay **re-seals** the bodies (the journal
-holds plaintext tokens, which is forced: `LostCommit.tokens` must hand back re-issuable tokens
-regardless). Re-sealing is safe *only because `onAccepted` is the sole adopt point* — an argument, not
-a construction. A host that adopts elsewhere and crashes pre-acceptance re-seals under the **post**-commit
-epoch and publishes a blob **no member can open**: the commit applies, every receiver fails to resolve,
-`processCommit` throws, the cursor never advances, and **the lane wedges for the whole group** on a
-frame nobody can ever get past. So `JournalEntry` gains an `epoch` field and replay refuses to re-seal
-at a different one — one field, turning a silent group-wide wedge into a loud local error at the peer
-that caused it. **This deviates from the spec's verbatim `JournalEntry`; the spec is being corrected.**
+**G34 — an empty log still has a head.** Trimming removes frames and leaves the head standing (the
+store already asserts this). So a swept commit log presents a reader with **no frames and a real head**,
+and a peer with a null cursor — a Welcome joiner, **or any peer after a restart, since the cursor is
+not persisted** — CASes `expectedHead: null`, meaning *"this topic never had a log publish"*, against
+it. Loses. Forever. The log-class filter cannot reach this: the log is honest and still empty.
 
-**Learned (so far):** the fork this question exists to prevent is *silent from the committer's side*.
-Its `commit()` resolves. Its own ledger holds its entry. Only the rest of the group knows. That is why
-the assertion had to be "the loser's entries are in the **winner's** ledger" — every weaker form of the
-test passes against the forking implementation.
+**G35 — the epoch guard was built, and measured to have zero discriminating power.** The approved fix
+was to journal the epoch and refuse to re-seal at a different one. The probe built exactly that. It
+fired — and broke a green test, `replay is idempotent`, which is the design's **own** crash window: a
+crash between `onAccepted` and `clear` leaves a handle at N+1 with an entry framed at N. So it built
+the misbehaving host and printed both states side by side:
 
----
+```
+legal   (accepted → onAccepted adopted → crash before clear):  journalled epoch 1, handle epoch 2
+illegal (adopted early → publish never accepted → crash):      journalled epoch 1, handle epoch 2
+```
 
-#### Resuming — the tree is RED and the work is uncommitted
+**Identical.** Not too strict — *measuring the wrong thing*. `entry.epoch + 1 === crypto.epoch()` is
+what a correctly-behaved host looks like after the commonest crash in the design. The bit that
+separates them is **"was the publish accepted?"**, and the journal never recorded it: the slot was
+written once, before the publish. It reverted the guard whole and reported `BLOCKED` rather than ship a
+check that refuses the design's own crash window.
 
-The probe was stopped mid-fix. State on disk:
+**The fix, approved after discussion: record the acceptance, and record it at the right moment.**
+`CommitJournal` gains `markAccepted(publishID, sequenceID)`, fired **between the hub's answer and
+`onAccepted`** — *before* it, while the handle is still at the pre-commit epoch. That is the whole
+trick. Replay routes on `acceptedAs` first (adopt, clear, **no network at all**) and checks the epoch
+only where it is about to re-seal. `JournalEntry` gains `epoch` and `acceptedAs`; `JournalEpochError`
+is raised on refusal, and the slot is **kept**.
 
-- **Everything from the main body of 3.3 is present and was green at 110/110.** New:
-  `packages/rpc/src/commit.ts`, `test/fixtures/journal.ts`, `test/fixtures/peer.ts`,
-  `test/peer-commit-cas.test.ts`, `test/peer-commit-replay.test.ts`. Modified: `peer.ts` (the loop),
-  `hub-mux.ts` + `hub-tunnel/src/transport.ts` (`expectedHead`/`publishID` plumbed to the peer),
-  `memory-group-mls.ts`, both fake hubs (**dedup-before-CAS**, per the store contract — a fixture that
-  ignored the CAS would have let every one of these tests pass against a broken peer), and the four
-  suites that used `localCommitted`.
-- **The follow-up is half-applied.** The store-side filter and its conformance clause are written;
-  **one conformance test is failing** (`fetchTopic refuses a non-subscriber`), and the **peer-side head
-  CAS is not written at all** — the probe's last words were *"now `pullCommits` must record the head
-  from the drain."* The journal epoch guard is **not** started.
+Considered and rejected: a `lookupPublish` query on `HubStore`. The store is the real authority on
+acceptance, but it is a second breaking contract change on every host in one revision, and it is
+avoidable — and it would make a restarted peer ask the network for something it could have written
+down. The local record is strictly better on the fast path: it works with the hub down.
 
-**To resume:** re-dispatch against `docs/superpowers/probes/question-3.3-brief.md` plus the follow-up
-instructions recorded above (store filter + conformance clause; peer CASes on the drained head; the
-`epoch` field on `JournalEntry` with a named error). The report at `question-3.3-report.md` is complete
-for the main body and wants a "The cursor-wedge and the epoch guard (follow-up)" section. **Do not
-commit until green**, and the follow-up must report *how much each half of the wedge fix is carrying* —
-revert one at a time and name which test goes red for each.
+**Two mutation checks, both red, each on a different test:**
 
-**Not yet folded into the spec** (do it when 3.3 lands): the cursor-wedge as a numbered defect, the
-`fetchTopic` log-class contract, and `JournalEntry.epoch`.
+- **`markAccepted` moved to after `onAccepted` → `replay is idempotent` fails**, and with its first
+  assertion relaxed it fails *with `JournalEpochError` itself*. **The guard fires on the legal crash
+  window.** That is G35 reproduced by moving one `await` past another. The ordering is not stylistic,
+  and it is now pinned by a test rather than by a comment.
+- **Epoch check dropped, `acceptedAs` kept → the misbehaving-host test fails**, the poison frame lands,
+  and Bob — an ordinary member at epoch 1 who did nothing wrong — applies it, cannot open its blob, and
+  dies inside `pullCommits` before `build()` is ever reached. He can never commit again, nor can anyone
+  else at that epoch. The group-wide wedge, end to end.
+
+**One thing the brief missed, and the design forced:** replay's **own** accepted path must
+`markAccepted` before it adopts. Replay's tail is the same four steps as `commit`'s, so a crash between
+its adopt and its clear leaves exactly the state the check refuses — a peer that crashed *inside its own
+replay* would come back and be accused of misbehaving.
+
+**Learned.** The fork this question exists to prevent is *silent from the committer's side*. Its
+`commit()` resolves. Its own ledger holds its entry. Only the rest of the group knows. That is why the
+assertion had to be "the loser's entries are in the **winner's** ledger" — every weaker form of the test
+passes against the forking implementation.
+
+And the deeper one, from G35: **a guard can be correct in its reasoning and still be measuring the
+wrong variable.** The epoch check was right about the danger, right about the mechanism, right about the
+cost — and it could not tell the attack from the design's own commonest crash. Only building it and
+printing both states side by side showed that. An argument cannot always be cheaply upgraded to a check;
+sometimes the check needs a fact nobody was recording.
+
+**Not closed:** the check is **local**. It refuses a misbehaving *host* on its own device; nothing stops
+a modified *peer* from publishing an unopenable frame anyway. Making the group **survive** one is
+question 3.4's job — the classification table must not let `processCommit` stall the lane permanently.
+This closes the accident, not the attack.
+
+**Spec impact:** revision 26. G33 (the cursor-wedge: `fetchTopic` serves log-class frames only, and the
+peer CASes on the head), G34 (an empty log still has a head), G35 (the epoch cannot say whether a replay
+may re-seal — journal the acceptance, before the adopt). `FetchTopicParams`/`FetchTopicResult` carry the
+log-class contract; `CommitJournal` gains `markAccepted` and its two-write ordering; the commit loop's
+step 5 and the restart-replay routing are rewritten; four testing clauses added; the host-side impact
+bullet now says **two** durable writes, and why the second one's position is load-bearing.
