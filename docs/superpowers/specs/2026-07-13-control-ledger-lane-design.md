@@ -1,6 +1,6 @@
 # Design: the control-ledger lane
 
-**Status:** design, revision 33 (2026-07-14). **G28 is RETRACTED** — see below. Reviewed fourteen times by kubun in
+**Status:** design, revision 34 (2026-07-14). **G28 is RETRACTED** — see below. Reviewed fourteen times by kubun in
 `2026-07-13-control-ledger-lane-review.md`; G1–G27 are folded in below. Revisions 16–25 fold in
 the implementation probes: `NotSubscribedError`, a `trim` primitive, a 30-day default
 window, two retention classes with subscriber-requested durations, **G28 — the commit lane must
@@ -1174,6 +1174,50 @@ assumption that fails. It also still answers the objection that killed DID-key s
 stolen DID key would let an attacker *ask*, but the reply is sealed to an ephemeral public
 key the attacker does not hold, so a stolen identity key alone buys nothing readable.
 
+**The seal authenticates the recipient, not the sender — and the first implementation forgot
+the other half (revision 34).** HPKE base mode seals with the recipient's *public* key, and
+every input to the AAD travels in the clear inside the request on a public, secretless topic.
+So the seal proves only that whoever opened it minted the ephemeral key — it proves **nothing
+about who sealed it.** The roster filter in step 2 authorizes the *asker*; nothing authorized
+the *answerer*, and the code and an earlier draft of this section both wrongly claimed the AEAD
+did. **Any party that observed one request could forge a reply that opens**, and on the
+GroupInfo path — where the plaintext was checked only for *being* a GroupInfo, never for being
+*this group's* — that redirected the healing peer into an attacker-built group carrying the
+real group id, with the attacker as admin and the epoch secret in the attacker's hands. The
+peer's own `isLedgerComplete()` certified the hijack as healthy, because an empty ledger folds
+clean against the attacker's genesis head.
+
+The answer direction must be roster-intrinsic too, and by the exact mirror of the ask:
+
+3a. **The reply is bound to the group.** `openSealedGroupInfo` byte-compares the offered
+    GroupInfo's `groupContext.groupId` against the requester's own, **and** its genesis-anchor
+    extension against the anchor the requester already holds — immutable for the group's whole
+    life, so this is a comparison, not a trust decision, at **zero availability cost.** It closes
+    every attacker who was never a member. `joinGroupExternal` makes the same group-id check, so
+    a caller cannot join a group its credential does not name.
+3b. **The responder attests its membership.** It signs a token — binding the group, the request,
+    and a digest of the exact GroupInfo bytes — with its DID identity key, framed inside the
+    AEAD. The requester verifies the signature and requires the signer to hold a leaf in its
+    **own last-known ratchet tree**: the precise mirror of step 2's check on the ask direction.
+
+**Two residual classes stay open, and the design states them rather than hiding them.** The
+requester's tree is stale *by construction* — it is healing — so a member **removed after** the
+requester's last-known epoch is still in that tree and passes 3b, and a **current member** is an
+authorized responder. Both hold the real anchor and pass 3a. Neither can *promote* the attacker
+(the roster seeds from the real anchor's creator, whose key the attacker does not hold) and a
+current member already holds the epoch secret, so what remains is a **fork / roster-downgrade by
+an authorized member**, not the novel *observer-to-full-compromise* escalation, which is closed.
+Fully closing the residual needs a **freshness proof on the reply** — an epoch binding a
+crashed-at-an-older-epoch requester can still verify without first fetching the current epoch —
+and that interacts with the epoch-independence this rendezvous depends on and with the
+availability floor below. **It is left open, not answered.**
+
+**The membership check has an availability cost, named.** Because it is against the requester's
+*stale* tree, an honest responder who joined *after* the requester left is refused. In a group
+whose only online member is such a newcomer, heal waits for a still-known member — a real
+regression against a design that already bricks when nobody can answer, and the unavoidable price
+of a stale-tree check; dropping it reopens the removed-before-departure hole that 3b closes.
+
 The request is now **signed**, which changes the replay analysis: a replayed request re-seals
 GroupInfo to the same ephemeral key only its original minter can open, so replay buys
 amplification and nothing else — bounded, as before, by responder jitter, storm-collapse
@@ -1248,9 +1292,12 @@ type GroupMLS = {
   /** Verify signature, check the roster, seal to the request's ephemeral key. Returns null
    *  for a request whose DID has no leaf — the responder simply stays silent. */
   exportGroupInfo(request: Uint8Array): Promise<Uint8Array | null>
-  /** Open with the retained ephemeral private key and build the external commit. Returns
-   *  null for bytes it cannot open (hub-injected, or sealed to another request). The peer
-   *  CASes the returned commit; the handle is adopted only in onAccepted. */
+  /** Open with the retained ephemeral private key, verify the responder's membership
+   *  attestation and the group binding (revision 34), and build the external commit. A
+   *  hub-injected reply MAY decrypt — the base-mode seal authenticates no sender — so null
+   *  comes from the attestation and group-binding checks, not from the seal. Also null for
+   *  bytes sealed to another request. The peer CASes the returned commit; the handle is
+   *  adopted only in onAccepted. */
   applyRecovery(sealed: Uint8Array, requestID: string): Promise<PendingCommit | null>
 }
 ```

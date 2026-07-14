@@ -8,8 +8,15 @@ import {
   stringifyToken,
   verifyToken,
 } from '@kokuin/token'
+import { sha256 } from '@noble/hashes/sha2.js'
 
-import { exportGroupInfo, type GroupHandle, inspectGroupInfo } from './group.js'
+import { readGroupAnchorExtension } from './anchor.js'
+import {
+  exportGroupInfo,
+  type GroupHandle,
+  inspectGroupInfo,
+  readGroupInfoBinding,
+} from './group.js'
 
 const utf8 = new TextEncoder()
 
@@ -17,6 +24,11 @@ const utf8 = new TextEncoder()
  *  token from every other signed payload in the stack, so a token minted for
  *  another purpose can never be presented as a request for group state. */
 export const RECOVERY_REQUEST_TYPE = 'group.recovery-request'
+
+/** The `type` tag a responder's GroupInfo attestation carries. Domain-separates
+ *  the responder's membership proof from every other signed payload, so a token
+ *  minted elsewhere can never stand in for it. */
+export const RECOVERY_GROUPINFO_TYPE = 'group.recovery-groupinfo'
 
 /** The only sealed-reply format this build produces or opens. */
 export const SEALED_GROUP_INFO_VERSION = 1
@@ -153,8 +165,21 @@ export class RecoveryRequestError extends Error {
  */
 export type SealedReplyRejection = 'not-for-me' | 'malformed'
 
-/** @deprecated name retained for the GroupInfo reply; see {@link SealedReplyRejection}. */
-export type SealedGroupInfoRejection = SealedReplyRejection
+/**
+ * Why a requester could not open a sealed GroupInfo — the two shared reasons plus
+ * two the GroupInfo reply carries that the AEAD alone cannot enforce, because HPKE
+ * base mode authenticates no responder:
+ *
+ * - `unauthenticated` — the reply carried no valid proof that a member of the
+ *   requester's own last-known group sealed it: a missing, unsigned, or unverifiable
+ *   responder attestation, one that does not bind this group / request / GroupInfo,
+ *   or one signed by a DID that holds no leaf in the requester's ratchet tree.
+ * - `group-mismatch` — the offered GroupInfo names a different group id, or carries
+ *   a different genesis anchor, than the group being healed. The anchor is immutable
+ *   for the group's whole life and the requester already holds it, so this is a
+ *   byte comparison, not a trust decision.
+ */
+export type SealedGroupInfoRejection = SealedReplyRejection | 'unauthenticated' | 'group-mismatch'
 
 /** Why a requester could not open a sealed ledger. The same two answers, for the
  *  same two reasons — and a GroupInfo presented as a ledger is `not-for-me`, not
@@ -165,15 +190,15 @@ export type SealedLedgerRejection = SealedReplyRejection
  *  from "corrupt", so a peer sifting replies off a shared lane can drop the
  *  former quietly and shout about the latter. */
 export class SealedGroupInfoError extends Error {
-  #reason: SealedReplyRejection
+  #reason: SealedGroupInfoRejection
 
-  constructor(reason: SealedReplyRejection, message: string) {
+  constructor(reason: SealedGroupInfoRejection, message: string) {
     super(message)
     this.name = 'SealedGroupInfoError'
     this.#reason = reason
   }
 
-  get reason(): SealedReplyRejection {
+  get reason(): SealedGroupInfoRejection {
     return this.#reason
   }
 }
@@ -216,6 +241,58 @@ function concat(parts: Array<Uint8Array>): Uint8Array {
     offset += part.length
   }
   return out
+}
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false
+  }
+  return true
+}
+
+/**
+ * The responder's membership proof, carried INSIDE the sealed GroupInfo reply. HPKE
+ * base mode seals to a public key and authenticates nobody, so the AEAD alone cannot
+ * tell a member's reply from an observer's forgery. This token can: it is signed by
+ * the responder's DID identity key and binds the group, the request it answers, and
+ * a digest of the exact GroupInfo bytes it accompanies. The open side verifies the
+ * signature and then requires the signer to hold a leaf in the requester's own
+ * last-known ratchet tree — the mirror of the roster check {@link sealToRequest}
+ * makes on the ask direction.
+ */
+type ResponderAttestation = {
+  type: typeof RECOVERY_GROUPINFO_TYPE
+  groupID: string
+  requestID: string
+  /** Multibase-encoded SHA-256 of the framed `MLSMessage(GroupInfo)` this attests. */
+  groupInfoDigest: string
+}
+
+/** The sealed GroupInfo plaintext: `[len(4)][attestation token][GroupInfo bytes]`,
+ *  big-endian length, so the responder's proof and the GroupInfo it vouches for are
+ *  sealed together under one AEAD and neither can be lifted from the other. */
+function frameAttestedGroupInfo(attestation: string, groupInfo: Uint8Array): Uint8Array {
+  const token = utf8.encode(attestation)
+  const out = new Uint8Array(4 + token.length + groupInfo.length)
+  new DataView(out.buffer).setUint32(0, token.length, false)
+  out.set(token, 4)
+  out.set(groupInfo, 4 + token.length)
+  return out
+}
+
+function unframeAttestedGroupInfo(bytes: Uint8Array): {
+  attestation: string
+  groupInfo: Uint8Array
+} {
+  if (bytes.length < 4) throw new Error('attested GroupInfo frame is truncated')
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  const length = view.getUint32(0, false)
+  if (4 + length > bytes.length) throw new Error('attested GroupInfo frame is truncated')
+  return {
+    attestation: new TextDecoder().decode(bytes.subarray(4, 4 + length)),
+    groupInfo: bytes.slice(4 + length),
+  }
 }
 
 /**
@@ -440,23 +517,55 @@ export type SealGroupInfoParams = {
   /** The responder's current handle. Its ratchet tree — not a roster snapshot,
    *  not a policy list — is what authorizes the requester. */
   group: GroupHandle
+  /** The responder's own signing identity. It signs the membership attestation the
+   *  requester checks, and must be the identity behind `group`'s own leaf. */
+  identity: SigningIdentity
   /** The signed request token, verbatim. */
   request: string
 }
 
 /**
  * Answer a recovery request with this group's framed `MLSMessage(GroupInfo)`,
- * sealed to the ephemeral key inside the signed request.
+ * sealed to the ephemeral key inside the signed request and accompanied by a
+ * membership attestation the responder signs with its DID identity key.
  *
- * Throws {@link RecoveryRequestError} for every refusal. The reply is
- * `[version][enc][ct]`; nothing in it is readable without the ephemeral private
- * key, and nothing in it opens for another member, another request, or another
- * kind of answer.
+ * The attestation is not decoration. The seal is HPKE base mode — it needs only
+ * the requester's public ephemeral key, every input to which rides the public
+ * request in the clear — so the AEAD cannot distinguish a member's reply from an
+ * observer's forgery. The signed attestation, bound to this group, this request,
+ * and a digest of these exact GroupInfo bytes, is what lets the requester refuse a
+ * reply from anyone who does not hold a leaf in its own last-known tree.
+ *
+ * Throws {@link RecoveryRequestError} for every refusal of the request itself. The
+ * reply is `[version][enc][ct]`; nothing in it is readable without the ephemeral
+ * private key, and nothing in it opens for another member, another request, or
+ * another kind of answer.
  */
 export async function sealGroupInfo(params: SealGroupInfoParams): Promise<Uint8Array> {
-  const { group, request } = params
+  const { group, identity, request } = params
+  if (normalizeDID(identity.id) !== normalizeDID(group.credential.id)) {
+    throw new Error(
+      `sealGroupInfo: identity.id (${identity.id}) must match the responding handle credential (${group.credential.id})`,
+    )
+  }
+
+  const verified = await verifyRecoveryRequest(request)
   const { groupInfo } = await exportGroupInfo({ group })
-  return await sealToRequest(GROUP_INFO_REPLY, group, request, groupInfo)
+
+  const signed = await identity.signToken<ResponderAttestation>(
+    {
+      type: RECOVERY_GROUPINFO_TYPE,
+      groupID: verified.groupID,
+      requestID: verified.requestID,
+      groupInfoDigest: encodeMultibase(sha256(groupInfo)),
+    },
+    // Self-verifying offline, like the request and every ledger entry: the healing
+    // peer must be able to check the signature without resolving the responder.
+    { embedLongForm: true },
+  )
+
+  const plaintext = frameAttestedGroupInfo(stringifyToken(signed), groupInfo)
+  return await sealToRequest(GROUP_INFO_REPLY, group, request, plaintext)
 }
 
 export type OpenSealedGroupInfoParams = {
@@ -472,12 +581,102 @@ export type OpenSealedGroupInfoParams = {
 }
 
 /**
+ * Verify the responder's membership attestation and require the signer to hold a
+ * leaf in the requester's own last-known ratchet tree. This is the authentication
+ * the AEAD cannot provide: HPKE base mode seals to a public key, so opening proves
+ * only that the holder of the ephemeral private key opened it — never who sealed it.
+ *
+ * The attestation must bind this group, this request, and a digest of these exact
+ * GroupInfo bytes, so a member cannot have its honest attestation for one GroupInfo
+ * lifted onto a substituted one. The tree it is checked against is the requester's
+ * OWN — stale by construction, which is the point and the limit: a member absent
+ * from that tree (never joined, or removed before the requester's last-known epoch)
+ * is refused, and a member still in it (including one removed AFTER that epoch) is
+ * accepted.
+ */
+async function assertResponderIsMember(
+  attestation: string,
+  group: GroupHandle,
+  requestID: string,
+  groupInfo: Uint8Array,
+): Promise<void> {
+  let verified: Awaited<ReturnType<typeof verifyToken<ResponderAttestation>>>
+  try {
+    verified = await verifyToken<ResponderAttestation>(attestation)
+  } catch {
+    throw new SealedGroupInfoError(
+      'unauthenticated',
+      'responder attestation signature did not verify',
+    )
+  }
+  if (!isVerifiedToken<SignedPayload & ResponderAttestation>(verified)) {
+    throw new SealedGroupInfoError('unauthenticated', 'responder attestation is not signed')
+  }
+
+  const { iss, type, groupID, requestID: attestedRequestID, groupInfoDigest } = verified.payload
+  if (
+    type !== RECOVERY_GROUPINFO_TYPE ||
+    groupID !== group.groupID ||
+    attestedRequestID !== requestID ||
+    typeof groupInfoDigest !== 'string' ||
+    groupInfoDigest !== encodeMultibase(sha256(groupInfo))
+  ) {
+    throw new SealedGroupInfoError(
+      'unauthenticated',
+      'responder attestation does not bind this group, request, and GroupInfo',
+    )
+  }
+  if (group.findMemberLeafIndex(normalizeDID(iss)) === undefined) {
+    throw new SealedGroupInfoError(
+      'unauthenticated',
+      "responder holds no leaf in the requester's last-known ratchet tree",
+    )
+  }
+}
+
+/**
+ * Bind the offered GroupInfo to the group being healed: same group id, and the same
+ * immutable genesis anchor the requester already holds. The anchor is written once
+ * at creation and never changes, so a byte comparison against the requester's own
+ * costs nothing and refuses any group whose authority root differs — the roster a
+ * hijacked peer would fold is seeded from that anchor.
+ */
+function assertGroupInfoBoundToGroup(groupInfo: Uint8Array, group: GroupHandle): void {
+  const binding = readGroupInfoBinding(groupInfo)
+  if (binding.groupID !== group.groupID) {
+    throw new SealedGroupInfoError(
+      'group-mismatch',
+      `sealed GroupInfo names group ${binding.groupID}, not ${group.groupID}`,
+    )
+  }
+  const ownAnchor = readGroupAnchorExtension(group)
+  const ownData = ownAnchor?.extensionData instanceof Uint8Array ? ownAnchor.extensionData : null
+  if (
+    ownData == null ||
+    binding.anchorExtensionData == null ||
+    !bytesEqual(ownData, binding.anchorExtensionData)
+  ) {
+    throw new SealedGroupInfoError(
+      'group-mismatch',
+      'sealed GroupInfo carries a different genesis anchor than the group being healed',
+    )
+  }
+}
+
+/**
  * Open a sealed reply and return the framed `MLSMessage(GroupInfo)` — the exact
  * bytes `joinGroupExternal` takes, unchanged. Throws {@link SealedGroupInfoError}.
+ *
+ * Opening the AEAD is not the end of the check. The seal is HPKE base mode, so a
+ * reply that opens proves only that this peer held the ephemeral key it minted —
+ * not that a member sealed it. Two further gates make the reply roster-intrinsic:
+ * the responder's signed attestation must place the sealer in this requester's own
+ * last-known tree, and the offered GroupInfo's group id and genesis anchor must
+ * match the group being healed. Only then are the bytes handed on.
  */
 export async function openSealedGroupInfo(params: OpenSealedGroupInfoParams): Promise<Uint8Array> {
   const { group, sealed, requestID, ephemeralPrivateKey } = params
-  const groupInfo = await openSealedReply(
+  const plaintext = await openSealedReply(
     GROUP_INFO_REPLY,
     group,
     sealed,
@@ -485,8 +684,18 @@ export async function openSealedGroupInfo(params: OpenSealedGroupInfoParams): Pr
     ephemeralPrivateKey,
   )
 
-  // The AEAD proves a group member sealed these bytes for this request; it does
-  // not prove they framed a GroupInfo. Fail here rather than deep inside a join.
+  let attestation: string
+  let groupInfo: Uint8Array
+  try {
+    ;({ attestation, groupInfo } = unframeAttestedGroupInfo(plaintext))
+  } catch {
+    throw new SealedGroupInfoError(
+      'malformed',
+      'sealed plaintext is not a framed, attested GroupInfo',
+    )
+  }
+
+  // Parse as a GroupInfo before anything trusts its fields.
   try {
     inspectGroupInfo(groupInfo)
   } catch {
@@ -495,6 +704,11 @@ export async function openSealedGroupInfo(params: OpenSealedGroupInfoParams): Pr
       'sealed plaintext is not a framed MLSMessage(GroupInfo)',
     )
   }
+
+  // Authenticate the responder, then bind the GroupInfo to this group.
+  await assertResponderIsMember(attestation, group, requestID, groupInfo)
+  assertGroupInfoBoundToGroup(groupInfo, group)
+
   return groupInfo
 }
 
@@ -589,10 +803,16 @@ export type OpenSealedLedgerParams = {
  * Open a sealed ledger reply and return the responder's whole ordered ledger, as
  * signed tokens.
  *
- * Opening proves the tokens came from a member that holds this group's tree, and
- * proves nothing else — a member can still withhold, reorder or truncate. That is
- * what the head check the caller runs next is for, and this must not be mistaken
- * for it. Throws {@link SealedLedgerError}.
+ * Opening proves NOTHING about who sealed these tokens. The seal is HPKE base mode
+ * over an AAD whose every field rides the public request in the clear, so an observer
+ * of the request — the hub, a stranger who learned the topic — can forge a reply that
+ * opens just as a member can. The bound this path rests on is not the seal but the
+ * head check the caller runs next: {@link GroupHandle.bootstrapLedger} re-derives every
+ * id from the token bytes and gates on the MLS-authenticated `ledger_head`, which a
+ * forger cannot reproduce. So a forged or lying reply can withhold, reorder or
+ * truncate — never rewrite — and a genuinely forged one simply fails that check and is
+ * dropped. (The residual is a denial of service: a forged reply that opens can burn a
+ * requester's gather attempt. It is not a compromise.) Throws {@link SealedLedgerError}.
  */
 export async function openSealedLedger(params: OpenSealedLedgerParams): Promise<Array<string>> {
   const { group, sealed, requestID, ephemeralPrivateKey } = params

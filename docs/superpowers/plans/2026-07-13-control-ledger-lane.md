@@ -1837,3 +1837,83 @@ because nobody had written a bullet about the step that runs immediately after i
 **Carried:** the rpc-level domain-separation assertion does **not** bite under a domain-collapse
 mutation — the double's shape check masks it — so that claim rests on the mls test with real HPKE.
 Reported rather than hidden.
+
+---
+
+## Phase 5: The branch review findings
+
+A three-reviewer read of the finished branch (`main..7459db4`, read-only, one reviewer each over the
+hub store, the mls crypto, and the rpc lane) turned up **four Criticals across three packages, plus
+Importants.** Every one had the plan's own signature: the reference implementation is correct and the
+thing that guards it — a conformance clause, a doc comment, an authentication step — is not. Phase 5
+closes them, security first.
+
+### 2026-07-14 — Question 5.1: The sealed recovery reply authenticates nobody.
+
+**Findings:** The most serious defect in the project, and the suite was green over it. The recovery
+rendezvous seals its reply in **HPKE base mode**, which needs only the recipient's *public* key, and
+every AAD input rides the wire in the clear on a public, secretless topic. **So any party that observed
+one request could forge a reply that opens.** The roster check authorized the *asker*; nothing
+authorized the *answerer* — and the code claimed, in three doc comments and the spec's `applyRecovery`
+line ("null for hub-injected bytes"), that the AEAD proved a member sealed it. It did not.
+
+The ledger path survived — `bootstrapLedger`'s head check re-derives every id from the token bytes and
+gates on the MLS-authenticated `ledger_head`, exactly the bound the spec claims. **The GroupInfo path
+was a full compromise of the healing peer**, reproduced verbatim before any fix:
+
+```
+VICTIM BELIEFS AFTER HIJACK:
+  handleReportsGroupID: "forgery-target"   groupIDMatchesExpectation: true
+  roster: { "attacker(mallory)": "admin" } attackerIsAdmin: true
+  victimHasAnyRole: false                  realAdminAliceInRoster: false
+  isLedgerComplete: true                   anchorCreatorDID: "attacker(mallory)"
+```
+
+A never-member observer built its own MLS group under the real group id (own genesis anchor, the
+victim's genuine KeyPackage spliced in as a second leaf so the head stays at genesis), sealed a
+GroupInfo to the ephemeral key off the wire, and the victim `joinGroupExternal`ed it. **Its own
+completeness invariant certified the hijack as healthy** (empty ledger folds clean against the
+attacker's genesis head), the attacker was sole admin, and the attacker decrypted the victim's next
+application message in the clear — that assertion passed too. `openSealedGroupInfo` had validated only
+that the plaintext *was* a GroupInfo, never that it was *this group's*, and `joinGroupExternal` built
+the handle from the caller's own credential, so it reported the expected group id whatever it joined.
+
+**Spec impact: revision 34.** Two mirrored mechanisms, and they are not alternatives:
+
+- **(a) Bind the reply to the group** — `openSealedGroupInfo` byte-compares the offered GroupInfo's
+  `groupId` and its genesis anchor against the requester's own (immutable for the group's life;
+  **zero availability cost**), and `joinGroupExternal` refuses a group its credential does not name.
+  Closes every never-member.
+- **(b) Authenticate the responder** — the reply carries a DID-signed membership attestation binding
+  the group, the request, and a digest of the exact GroupInfo bytes; the requester requires the signer
+  to hold a leaf in its **own last-known tree** — the exact mirror of the ask-direction roster check.
+
+**Both are load-bearing, shown by mutation.** Revert (a): a *current member* offering a same-id
+wrong-anchor forgery is no longer refused (1 red; the never-member and removed-member tests stay green
+— (b) still catches them). Revert (b): the *removed member* — who holds the real anchor, so (a) passes
+— is no longer refused (3 red). The never-member is caught by **both**; neither alone lets it through.
+
+**Two residual classes stay open, stated not hidden.** The requester's tree is stale by construction,
+so a member **removed after** the requester's last-known epoch (still in that tree) and a **current
+member** (an authorized responder) both pass (a)+(b). Neither can promote the attacker (the roster
+seeds from the real anchor's creator) and a current member already holds the epoch secret, so the
+residual is a **fork / roster-downgrade by an authorized member** — not the observer-to-full-compromise
+escalation, which is closed. Fully closing it needs a **freshness proof on the reply** (an epoch
+binding a crashed-at-an-older-epoch requester can still verify), which interacts with the rendezvous's
+epoch-independence and with question 4.1's availability floor. **`BLOCKED` sub-finding: stated, not
+answered.**
+
+**Availability cost, named:** the membership check is against the requester's *stale* tree, so an
+honest responder who joined *after* the requester left is refused. In a group whose only online member
+is such a newcomer, heal waits for a still-known member. Unavoidable price of a stale-tree check;
+dropping it reopens the removed-before-departure hole (b) closes.
+
+**Learned (5.1):** *A seal proves the recipient, never the sender — and "the AEAD proves a member sealed
+this" is the exact sentence to distrust.* The one-directional roster check read as symmetric because the
+ask direction was so carefully authorized; nobody wrote the mirror, and no test sealed a reply from a
+party with **no group state at all** — every responder in every test was a real member, so the forgery
+had no witness. The same lesson as G37/G38 (a double that cannot lie) and 4.3 (a double that cannot keep
+a secret), in its third disguise: **a test whose every actor is honest cannot see an authentication
+hole.** And bullet 6 of the acceptance list — "exportGroupInfo leaks nothing to the relay" — was true,
+green, and beside the point, because it was written about the seal's *confidentiality* and the hole was
+in its *authenticity*.

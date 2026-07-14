@@ -218,7 +218,7 @@ describe('sealed ledger gather', () => {
   })
 
   test('a sealed GroupInfo does not open as a ledger, and a sealed ledger does not open as a GroupInfo', async () => {
-    const { bob, aliceGroup, bobGroup } = await threeMemberGroup('ledger-domain')
+    const { alice, bob, aliceGroup, bobGroup } = await threeMemberGroup('ledger-domain')
 
     // ONE request: the same group, the same member, the same request id, and the same ephemeral
     // key. So the AADs differ in nothing but the domain — the separation cannot be coming from
@@ -228,7 +228,7 @@ describe('sealed ledger gather', () => {
       identity: bob,
       requestID: 'req-1',
     })
-    const sealedGroupInfo = await sealGroupInfo({ group: aliceGroup, request })
+    const sealedGroupInfo = await sealGroupInfo({ group: aliceGroup, identity: alice, request })
     const sealedLedger = await sealLedger({ group: aliceGroup, request, entries: LEDGER })
 
     const asLedger = openSealedLedger({

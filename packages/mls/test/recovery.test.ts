@@ -163,7 +163,7 @@ function recoveryAAD(groupID: string, requesterDID: string, requestID: string): 
 
 describe('sealed GroupInfo recovery', () => {
   test('a sealed reply opens for its requester and feeds joinGroupExternal unchanged', async () => {
-    const { fixture, bob, aliceGroup, bobGroup } = await threeMemberGroup('recovery-happy')
+    const { fixture, alice, bob, aliceGroup, bobGroup } = await threeMemberGroup('recovery-happy')
 
     const { request, ephemeralPrivateKey } = await createRecoveryRequest({
       group: bobGroup,
@@ -171,7 +171,7 @@ describe('sealed GroupInfo recovery', () => {
       requestID: 'req-1',
     })
 
-    const sealed = await sealGroupInfo({ group: aliceGroup, request })
+    const sealed = await sealGroupInfo({ group: aliceGroup, identity: alice, request })
     const groupInfo = await openSealedGroupInfo({
       group: bobGroup,
       sealed,
@@ -208,7 +208,7 @@ describe('sealed GroupInfo recovery', () => {
   // -------------------------------------------------------------------------
 
   test('a sealed reply does not open for another member, or for a non-member holding the bytes', async () => {
-    const { bob, carol, aliceGroup, bobGroup, carolGroup } =
+    const { alice, bob, carol, aliceGroup, bobGroup, carolGroup } =
       await threeMemberGroup('recovery-others')
 
     const { request, ephemeralPrivateKey } = await createRecoveryRequest({
@@ -216,7 +216,7 @@ describe('sealed GroupInfo recovery', () => {
       identity: bob,
       requestID: 'req-1',
     })
-    const sealed = await sealGroupInfo({ group: aliceGroup, request })
+    const sealed = await sealGroupInfo({ group: aliceGroup, identity: alice, request })
 
     // Another member, holding her own keys: nothing she has opens it. Her own MLS
     // leaf private key is the closest thing to a "group key" she holds.
@@ -284,7 +284,7 @@ describe('sealed GroupInfo recovery', () => {
       requestID: 'req-2',
     })
     await expect(
-      sealGroupInfo({ group: aliceGroup, request: carolRequest.request }),
+      sealGroupInfo({ group: aliceGroup, identity: alice, request: carolRequest.request }),
     ).resolves.toBeInstanceOf(Uint8Array)
   })
 
@@ -293,7 +293,7 @@ describe('sealed GroupInfo recovery', () => {
   // -------------------------------------------------------------------------
 
   test('a reply replayed at another member does not open, even with the ephemeral key', async () => {
-    const { bob, aliceGroup, bobGroup, carolGroup } =
+    const { alice, bob, aliceGroup, bobGroup, carolGroup } =
       await threeMemberGroup('recovery-replay-member')
 
     const { request, ephemeralPrivateKey } = await createRecoveryRequest({
@@ -301,7 +301,7 @@ describe('sealed GroupInfo recovery', () => {
       identity: bob,
       requestID: 'req-1',
     })
-    const sealed = await sealGroupInfo({ group: aliceGroup, request })
+    const sealed = await sealGroupInfo({ group: aliceGroup, identity: alice, request })
 
     // Hand Carol the ephemeral private key itself — the strongest form of the
     // replay. The AAD binds Bob's DID, which Carol's handle cannot reproduce, so
@@ -318,7 +318,7 @@ describe('sealed GroupInfo recovery', () => {
   })
 
   test('a reply sealed for one request does not open for another', async () => {
-    const { bob, aliceGroup, bobGroup } = await threeMemberGroup('recovery-replay-request')
+    const { alice, bob, aliceGroup, bobGroup } = await threeMemberGroup('recovery-replay-request')
 
     const first = await createRecoveryRequest({
       group: bobGroup,
@@ -330,7 +330,11 @@ describe('sealed GroupInfo recovery', () => {
       identity: bob,
       requestID: 'req-2',
     })
-    const sealedForFirst = await sealGroupInfo({ group: aliceGroup, request: first.request })
+    const sealedForFirst = await sealGroupInfo({
+      group: aliceGroup,
+      identity: alice,
+      request: first.request,
+    })
 
     // Same member, same group, same ephemeral key — only the request id differs.
     const wrongRequest = openSealedGroupInfo({
@@ -352,7 +356,11 @@ describe('sealed GroupInfo recovery', () => {
     ).rejects.toMatchObject({ reason: 'not-for-me' })
 
     // Both requests, answered on their own terms, still work.
-    const sealedForSecond = await sealGroupInfo({ group: aliceGroup, request: second.request })
+    const sealedForSecond = await sealGroupInfo({
+      group: aliceGroup,
+      identity: alice,
+      request: second.request,
+    })
     await expect(
       openSealedGroupInfo({
         group: bobGroup,
@@ -364,7 +372,7 @@ describe('sealed GroupInfo recovery', () => {
   })
 
   test('a request signed for another group is refused', async () => {
-    const { aliceGroup } = await threeMemberGroup('recovery-group-a')
+    const { alice, aliceGroup } = await threeMemberGroup('recovery-group-a')
 
     // Bob holds a handle in a group of his own. The request it mints is validly
     // signed — it just names another group.
@@ -376,7 +384,7 @@ describe('sealed GroupInfo recovery', () => {
       requestID: 'req-1',
     })
 
-    const refusal = sealGroupInfo({ group: aliceGroup, request })
+    const refusal = sealGroupInfo({ group: aliceGroup, identity: alice, request })
     await expect(refusal).rejects.toThrow(RecoveryRequestError)
     await expect(refusal).rejects.toMatchObject({ reason: 'group-mismatch' })
   })
@@ -386,7 +394,8 @@ describe('sealed GroupInfo recovery', () => {
   // -------------------------------------------------------------------------
 
   test('a requester with no leaf in the current tree is refused', async () => {
-    const { carol, aliceGroup, bobGroup, carolGroup } = await threeMemberGroup('recovery-roster')
+    const { alice, bob, carol, aliceGroup, bobGroup, carolGroup } =
+      await threeMemberGroup('recovery-roster')
 
     // A DID that was never in the group. It signs a well-formed request for this
     // group id — the signature verifies; the tree is what refuses it.
@@ -397,7 +406,11 @@ describe('sealed GroupInfo recovery', () => {
       identity: outsider,
       requestID: 'req-1',
     })
-    const outsiderRefusal = sealGroupInfo({ group: aliceGroup, request: outsiderRequest.request })
+    const outsiderRefusal = sealGroupInfo({
+      group: aliceGroup,
+      identity: alice,
+      request: outsiderRequest.request,
+    })
     await expect(outsiderRefusal).rejects.toThrow(RecoveryRequestError)
     await expect(outsiderRefusal).rejects.toMatchObject({ reason: 'not-a-member' })
 
@@ -413,7 +426,11 @@ describe('sealed GroupInfo recovery', () => {
       identity: carol,
       requestID: 'req-2',
     })
-    const removedRefusal = sealGroupInfo({ group: removal.newGroup, request: carolRequest.request })
+    const removedRefusal = sealGroupInfo({
+      group: removal.newGroup,
+      identity: alice,
+      request: carolRequest.request,
+    })
     await expect(removedRefusal).rejects.toThrow(RecoveryRequestError)
     await expect(removedRefusal).rejects.toMatchObject({ reason: 'not-a-member' })
 
@@ -421,11 +438,11 @@ describe('sealed GroupInfo recovery', () => {
     // applied the removal, so he still answers her — the window closes for each
     // responder as it applies the commit, not the instant the removal is issued.
     await expect(
-      sealGroupInfo({ group: bobGroup, request: carolRequest.request }),
+      sealGroupInfo({ group: bobGroup, identity: bob, request: carolRequest.request }),
     ).resolves.toBeInstanceOf(Uint8Array)
     await bobGroup.processMessage(removal.commitMessage)
     await expect(
-      sealGroupInfo({ group: bobGroup, request: carolRequest.request }),
+      sealGroupInfo({ group: bobGroup, identity: bob, request: carolRequest.request }),
     ).rejects.toMatchObject({ reason: 'not-a-member' })
   })
 
@@ -434,7 +451,7 @@ describe('sealed GroupInfo recovery', () => {
   // -------------------------------------------------------------------------
 
   test('a request with a bad signature is refused', async () => {
-    const { bob, aliceGroup, bobGroup } = await threeMemberGroup('recovery-signature')
+    const { alice, bob, aliceGroup, bobGroup } = await threeMemberGroup('recovery-signature')
 
     const { request } = await createRecoveryRequest({
       group: bobGroup,
@@ -446,7 +463,9 @@ describe('sealed GroupInfo recovery', () => {
     const rewritten = tamperPayload(request, (payload) => {
       payload.requestID = 'req-2'
     })
-    await expect(sealGroupInfo({ group: aliceGroup, request: rewritten })).rejects.toMatchObject({
+    await expect(
+      sealGroupInfo({ group: aliceGroup, identity: alice, request: rewritten }),
+    ).rejects.toMatchObject({
       reason: 'unverified',
     })
 
@@ -460,7 +479,9 @@ describe('sealed GroupInfo recovery', () => {
     const substituted = tamperPayload(request, (payload) => {
       payload.ephemeralKey = encodeMultibase(attackerKey)
     })
-    await expect(sealGroupInfo({ group: aliceGroup, request: substituted })).rejects.toMatchObject({
+    await expect(
+      sealGroupInfo({ group: aliceGroup, identity: alice, request: substituted }),
+    ).rejects.toMatchObject({
       reason: 'unverified',
     })
 
@@ -479,27 +500,27 @@ describe('sealed GroupInfo recovery', () => {
     const impersonated = tamperPayload(malloryRequest.request, (payload) => {
       payload.iss = bob.id
     })
-    await expect(sealGroupInfo({ group: aliceGroup, request: impersonated })).rejects.toMatchObject(
-      {
-        reason: 'unverified',
-      },
-    )
+    await expect(
+      sealGroupInfo({ group: aliceGroup, identity: alice, request: impersonated }),
+    ).rejects.toMatchObject({
+      reason: 'unverified',
+    })
 
     // Garbage is refused as unverified, not as a crash.
     await expect(
-      sealGroupInfo({ group: aliceGroup, request: 'not-a-token' }),
+      sealGroupInfo({ group: aliceGroup, identity: alice, request: 'not-a-token' }),
     ).rejects.toMatchObject({ reason: 'unverified' })
   })
 
   test('a truncated or unversioned reply is malformed, not silently ignored', async () => {
-    const { bob, aliceGroup, bobGroup } = await threeMemberGroup('recovery-frame')
+    const { alice, bob, aliceGroup, bobGroup } = await threeMemberGroup('recovery-frame')
 
     const { request, ephemeralPrivateKey } = await createRecoveryRequest({
       group: bobGroup,
       identity: bob,
       requestID: 'req-1',
     })
-    const sealed = await sealGroupInfo({ group: aliceGroup, request })
+    const sealed = await sealGroupInfo({ group: aliceGroup, identity: alice, request })
 
     await expect(
       openSealedGroupInfo({
@@ -585,7 +606,7 @@ describe('sealed GroupInfo recovery', () => {
       identity: alice,
       requestID: 'heal-1',
     })
-    const sealed = await sealGroupInfo({ group: bobGroup, request })
+    const sealed = await sealGroupInfo({ group: bobGroup, identity: bob, request })
 
     // The stale leaf key she still holds opens nothing — the contrast that justifies
     // the ephemeral key.

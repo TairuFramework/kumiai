@@ -1555,6 +1555,43 @@ export function inspectGroupInfo(groupInfoBytes: Uint8Array): InspectGroupInfoRe
   return { epoch: groupContext.epoch, treeHash: groupContext.treeHash }
 }
 
+export type GroupInfoBinding = {
+  /** The group id the GroupInfo's GroupContext names, decoded from its bytes. */
+  groupID: string
+  /** The genesis-anchor GroupContext extension's raw data, or null when absent.
+   *  Byte-compared against the requester's own immutable anchor, never re-encoded. */
+  anchorExtensionData: Uint8Array | null
+}
+
+/**
+ * Read the group-identifying bindings out of a framed MLSMessage(GroupInfo)
+ * without joining: the group id its GroupContext names and the raw bytes of its
+ * genesis-anchor extension. A recovering peer compares both against the group it
+ * believes it is healing, so a GroupInfo for another group — or one carrying a
+ * different anchor — is refused before it can steer an external join. Structural
+ * read only; it does not verify the GroupInfo signature. Throws on malformed
+ * input, like {@link inspectGroupInfo}.
+ */
+export function readGroupInfoBinding(groupInfoBytes: Uint8Array): GroupInfoBinding {
+  const message = decode(mlsMessageDecoder, groupInfoBytes)
+  if (message == null) {
+    throw new Error('Invalid groupInfo: failed to decode MLSMessage')
+  }
+  if (message.wireformat !== wireformats.mls_group_info) {
+    throw new Error(
+      `Invalid groupInfo: expected wireformat mls_group_info, got ${String(message.wireformat)}`,
+    )
+  }
+  const { groupContext } = message.groupInfo
+  const anchor = groupContext.extensions.find(
+    (ext) => ext.extensionType === GROUP_ANCHOR_EXTENSION_TYPE,
+  )
+  return {
+    groupID: new TextDecoder().decode(groupContext.groupId),
+    anchorExtensionData: anchor?.extensionData instanceof Uint8Array ? anchor.extensionData : null,
+  }
+}
+
 /**
  * Generate a key package for joining groups.
  */
@@ -1662,6 +1699,17 @@ export async function joinGroupExternal(
   }
   // Discriminated-union narrow via the literal wireformat tag — no cast needed.
   const { groupInfo } = message
+
+  // A resync must target the group this credential names. The returned handle is
+  // built from the CALLER's credential, so it reports `credential.groupID`
+  // whatever group it actually joins — without this a caller steered onto a
+  // GroupInfo for another group would hold a handle that lies about its identity.
+  const offeredGroupID = new TextDecoder().decode(groupInfo.groupContext.groupId)
+  if (offeredGroupID !== credential.groupID) {
+    throw new Error(
+      `joinGroupExternal: groupInfo names group ${offeredGroupID}, not credential.groupID (${credential.groupID})`,
+    )
+  }
 
   // The rejoining leaf must advertise every GroupContext extension the group
   // uses (e.g. a genesis-anchor extension), or ts-mls rejects the external

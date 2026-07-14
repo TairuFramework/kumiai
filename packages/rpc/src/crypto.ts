@@ -140,12 +140,15 @@ export type GroupMLS = {
   createRecoveryRequest(requestID: string): Promise<Uint8Array>
   /**
    * Answer another member's request: verify the token, check the requester still holds a
-   * leaf in THIS member's current ratchet tree, and seal current GroupInfo to the ephemeral
-   * key inside the signed request.
+   * leaf in THIS member's current ratchet tree, seal current GroupInfo to the ephemeral key
+   * inside the signed request, AND vouch for it — the reply carries a membership attestation
+   * this member signs with its DID key, binding the group, the request and the exact GroupInfo
+   * bytes. The seal is HPKE base mode and authenticates no one, so the attestation is what lets
+   * the requester tell this member's reply from an observer's forgery.
    *
-   * Authorization is roster-intrinsic, not a permission the caller can forget to check: a
-   * removed member gets nothing from any responder that has applied its removal. Throws for
-   * a request it refuses, and the peer stays silent rather than answering.
+   * The ask-direction authorization is roster-intrinsic, not a permission the caller can forget
+   * to check: a removed member gets nothing from any responder that has applied its removal.
+   * Throws for a request it refuses, and the peer stays silent rather than answering.
    */
   sealGroupInfo(request: Uint8Array): Promise<Uint8Array>
   /**
@@ -154,8 +157,14 @@ export type GroupMLS = {
    * this port builds: the rejoined handle is adopted in {@link PendingRecovery.onAccepted}
    * and nowhere else, because the commit still has to win a compare-and-set at the head.
    *
-   * `null` for bytes this peer cannot open — a hub-injected reply, or one sealed for another
-   * member or another request. A throw is tolerated and read the same way.
+   * `null` for bytes this peer cannot open OR cannot trust. The seal is HPKE base mode — it
+   * needs only the requester's public ephemeral key, every input to which rides the public
+   * request in the clear — so a hub-injected or observer-forged reply may well DECRYPT. What
+   * refuses it is not the seal: the responder must prove membership by signing the reply with
+   * its DID key (the open side requires the signer to hold a leaf in this peer's own last-known
+   * tree), and the offered GroupInfo's group id and immutable genesis anchor must match the
+   * group being healed. A reply the AEAD refuses (sealed for another member or request), or one
+   * that fails either of those checks, is `null`. A throw is tolerated and read the same way.
    */
   applyRecovery(sealed: Uint8Array, requestID: string): Promise<PendingRecovery | null>
   /**
@@ -202,14 +211,18 @@ export type GroupMLS = {
    * Open a sealed gather reply with the key minted for `requestID`, and return the responder's
    * whole ordered ledger as signed tokens.
    *
-   * `null` for bytes this peer cannot open — a hub-injected reply, one sealed for another
-   * member or another request, or a reply answering another question entirely. A throw is
-   * tolerated and read the same way. The key is NOT consumed: every responder answers a
-   * gather, and the requester must be able to open the next reply after it drops one.
+   * `null` when the AEAD refuses these bytes — sealed to another ephemeral key, or bound to
+   * another member, request, or reply kind. It does NOT mean the sealer was a member: unlike
+   * the GroupInfo reply, the ledger reply carries no responder attestation, and HPKE base mode
+   * authenticates no one, so an observer of the request can forge a ledger reply that decrypts.
+   * The key is NOT consumed: every responder answers a gather, and the requester must be able
+   * to open the next reply after it drops one.
    *
-   * Opening proves a member of this group sealed these tokens, and proves nothing more — a
-   * member can still withhold, reorder or truncate, which is what {@link bootstrapLedger}'s
-   * head check is for and what this must never be mistaken for.
+   * Opening therefore proves NOTHING about who sealed these tokens. The bound is
+   * {@link bootstrapLedger}'s head check: a reply that reproduces this group's authenticated
+   * head is its whole ledger, in order, and a forged, lying, reordered or truncated one fails
+   * that check and is dropped — withhold, never rewrite. A forged reply that merely decrypts
+   * costs the requester one gather attempt: a denial of service, not a compromise.
    */
   openSealedLedger(sealed: Uint8Array, requestID: string): Promise<Array<string> | null>
   /**
