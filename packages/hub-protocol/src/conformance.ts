@@ -75,13 +75,13 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
       await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
 
       // Two publishes to the same topic, with the same subscribers, differing only in class.
-      const mailbox = await store.publish({
+      const { sequenceID: mailbox } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(1),
         retain: 'mailbox',
       })
-      const logged = await store.publish({
+      const { sequenceID: logged } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(2),
@@ -103,13 +103,13 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
       const store = await createStore()
       await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
 
-      const logged = await store.publish({
+      const { sequenceID: logged } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(1),
         retain: 'log',
       })
-      const mailbox = await store.publish({
+      const { sequenceID: mailbox } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(2),
@@ -138,7 +138,7 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
       const store = await createStore()
       await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
 
-      const first = await store.publish({
+      const { sequenceID: first } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(1),
@@ -146,13 +146,13 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
       })
       // A mailbox frame on a topic that carries a log. Nothing stops a member publishing one:
       // the class is the publisher's to choose, and the store never infers it from the topic.
-      const mailbox = await store.publish({
+      const { sequenceID: mailbox } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(2),
         retain: 'mailbox',
       })
-      const second = await store.publish({
+      const { sequenceID: second } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(3),
@@ -190,7 +190,7 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
     test('a publish to a topic with no subscribers is retained and can be pulled later', async () => {
       const store = await createStore()
 
-      const sequenceID = await store.publish({
+      const { sequenceID } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(1),
@@ -211,7 +211,7 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
     test('ack deletes the delivery, not the log entry', async () => {
       const store = await createStore()
       await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
-      const sequenceID = await store.publish({
+      const { sequenceID } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(1),
@@ -230,13 +230,13 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
     test('trimming an entry removes the deliveries that pointed at it', async () => {
       const store = await createStore()
       await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
-      const first = await store.publish({
+      const { sequenceID: first } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(1),
         retain: 'log',
       })
-      const last = await store.publish({
+      const { sequenceID: last } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(2),
@@ -276,7 +276,7 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
       await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
       await store.subscribe({ subscriberDID: CAROL, topicID: TOPIC, retention: maxRetention })
 
-      const sequenceID = await store.publish({
+      const { sequenceID } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(1),
@@ -295,13 +295,13 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
     test('trim is the only deleter: head survives a trim while oldest moves', async () => {
       const store = await createStore()
       await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
-      const first = await store.publish({
+      const { sequenceID: first } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(1),
         retain: 'log',
       })
-      const last = await store.publish({
+      const { sequenceID: last } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(2),
@@ -329,12 +329,14 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
       const sequenceIDs: Array<string> = []
       for (let index = 0; index < 11; index++) {
         sequenceIDs.push(
-          await store.publish({
-            senderDID: ALICE,
-            topicID: TOPIC,
-            payload: payload(index),
-            retain: 'log',
-          }),
+          (
+            await store.publish({
+              senderDID: ALICE,
+              topicID: TOPIC,
+              payload: payload(index),
+              retain: 'log',
+            })
+          ).sequenceID,
         )
       }
 
@@ -352,7 +354,7 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
       const store = await createStore()
       await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
 
-      const sequenceID = await store.publish({
+      const { sequenceID } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(1),
@@ -378,14 +380,14 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
     test('two publishes at the same head: one accepted, one rejected, nothing stored for the loser', async () => {
       const store = await createStore()
       await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
-      const first = await store.publish({
+      const { sequenceID: first } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(1),
         retain: 'log',
       })
 
-      const winner = await store.publish({
+      const { sequenceID: winner } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(2),
@@ -419,7 +421,7 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
       const store = await createStore()
       await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
 
-      const sequenceID = await store.publish({
+      const { sequenceID } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(1),
@@ -431,7 +433,7 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
       // expectedHead that the accepted publish above has itself made stale. The dedup check must
       // precede the compare-and-set: a store that compares first raises HeadMismatchError here,
       // and the caller concludes its publish was lost when it landed.
-      const replayed = await store.publish({
+      const { sequenceID: replayed } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(1),
@@ -446,12 +448,57 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
       expect(result.head).toBe(sequenceID)
     })
 
+    test('a deduped publish reports deduped, appends nothing, and creates no new delivery', async () => {
+      const store = await createStore()
+      await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+
+      // The accepted publish: BOB, a subscriber, gets a delivery of it, and the store reports the
+      // append with deduped false. A store that returns deduped true here — or omits the flag —
+      // would tell the hub to skip the live fan-out of a genuine new frame.
+      const accepted = await store.publish({
+        senderDID: ALICE,
+        topicID: TOPIC,
+        payload: payload(1),
+        retain: 'log',
+        publishID: 'publish-dedup',
+      })
+      expect(accepted.deduped).toBe(false)
+
+      // Drain and ack the one delivery, so BOB's queue is empty and the log holds exactly [seq].
+      await store.ack({ recipientDID: BOB, sequenceIDs: [accepted.sequenceID] })
+      expect((await store.fetch({ recipientDID: BOB })).messages).toHaveLength(0)
+
+      // The replay: same publishID, byte for byte. It returns the SAME sequenceID and reports
+      // deduped — the signal the hub reads to NOT re-fan-out. This is the half a store gets wrong
+      // by always returning deduped false: mutate it so and this assertion goes red.
+      const replay = await store.publish({
+        senderDID: ALICE,
+        topicID: TOPIC,
+        payload: payload(1),
+        retain: 'log',
+        publishID: 'publish-dedup',
+      })
+      expect(replay.sequenceID).toBe(accepted.sequenceID)
+      expect(replay.deduped).toBe(true)
+
+      // It appended nothing: the log is still exactly [seq], head unmoved.
+      const log = await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
+      expect(log.messages.map((message) => message.sequenceID)).toEqual([accepted.sequenceID])
+      expect(log.head).toBe(accepted.sequenceID)
+
+      // And — the load-bearing half — it created NO new delivery. BOB acked the original and has
+      // an empty queue; a store that re-ran its fan-out on the replay would put the frame back
+      // there, and the hub above it would push a frame BOB has already applied, named by a
+      // sequenceID whose delivery is already gone. The queue must stay empty.
+      expect((await store.fetch({ recipientDID: BOB })).messages).toHaveLength(0)
+    })
+
     test('the dedup record outlives the log: a replay after a trim still returns the original sequenceID', async () => {
       const store = await createStore()
       await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
 
       // The first publish on the topic: the caller journals `expectedHead: null` and this key.
-      const sequenceID = await store.publish({
+      const { sequenceID } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(1),
@@ -460,7 +507,7 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
         publishID: 'publish-1',
       })
       // A later entry gives trim an exclusive bound past `sequenceID`.
-      const sentinel = await store.publish({
+      const { sequenceID: sentinel } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(2),
@@ -473,7 +520,7 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
       // frame trim just removed, with no way for the caller to learn that its publish had landed.
       await store.trim({ topicID: TOPIC, before: sentinel })
 
-      const replayed = await store.publish({
+      const { sequenceID: replayed } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(1),
@@ -512,7 +559,7 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
     test('racing publishes at the same head yield exactly one accepted append', async () => {
       const store = await createStore()
       await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
-      const first = await store.publish({
+      const { sequenceID: first } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(1),
@@ -561,13 +608,13 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
     test('head is stored state: it survives a trim that empties the log', async () => {
       const store = await createStore()
       await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
-      const first = await store.publish({
+      const { sequenceID: first } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(1),
         retain: 'log',
       })
-      const last = await store.publish({
+      const { sequenceID: last } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(2),
@@ -594,7 +641,7 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
     test('head is stored state: it survives a purge that empties the log', async () => {
       const store = await createStore()
       await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
-      const last = await store.publish({
+      const { sequenceID: last } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(1),
@@ -616,7 +663,7 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
     test('the dedup record outlives the log: a replay after a purge still returns the original sequenceID', async () => {
       const store = await createStore()
       await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
-      const sequenceID = await store.publish({
+      const { sequenceID } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(1),
@@ -635,7 +682,7 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
       // deleter reaches it. A host that hangs the key off the frame loses it to the sweep, and the
       // replay silently becomes a new publish that then fails its compare-and-set against a head
       // naming the purged frame — the caller told its commit was lost when it landed.
-      const replayed = await store.publish({
+      const { sequenceID: replayed } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(1),
@@ -649,13 +696,13 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
     test('unsubscribe frees the mailbox frame but never the log frame or the head', async () => {
       const store = await createStore()
       await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
-      const mailbox = await store.publish({
+      const { sequenceID: mailbox } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(1),
         retain: 'mailbox',
       })
-      const logged = await store.publish({
+      const { sequenceID: logged } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(2),
@@ -691,7 +738,7 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
       // and tunnel frame in the system publishes without one, and a host that defaults an absent
       // `retain` to 'log' turns all of them into log-class frames — never GC'd, each moving the
       // head of every topic it touches.
-      const sequenceID = await store.publish({
+      const { sequenceID } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(1),
@@ -721,13 +768,13 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
     test('trim removes only log-class frames: a mailbox frame on the same topic is untouched', async () => {
       const store = await createStore()
       await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
-      const mailbox = await store.publish({
+      const { sequenceID: mailbox } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(1),
         retain: 'mailbox',
       })
-      const logged = await store.publish({
+      const { sequenceID: logged } = await store.publish({
         senderDID: ALICE,
         topicID: TOPIC,
         payload: payload(2),
@@ -758,12 +805,14 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
         const logIDs: Array<string> = []
         for (let index = 0; index <= maxDepth; index++) {
           logIDs.push(
-            await store.publish({
-              senderDID: ALICE,
-              topicID: TOPIC,
-              payload: payload(index & 0xff),
-              retain: 'log',
-            }),
+            (
+              await store.publish({
+                senderDID: ALICE,
+                topicID: TOPIC,
+                payload: payload(index & 0xff),
+                retain: 'log',
+              })
+            ).sequenceID,
           )
         }
         const bounded = await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
@@ -777,7 +826,7 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
         // member evict the commit log, and offline peers can no longer converge from the hub.
         const other = 'topic:conformance-depth'
         await store.subscribe({ subscriberDID: BOB, topicID: other })
-        const commit = await store.publish({
+        const { sequenceID: commit } = await store.publish({
           senderDID: ALICE,
           topicID: other,
           payload: payload(0),

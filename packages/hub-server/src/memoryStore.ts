@@ -7,6 +7,7 @@ import type {
   HubStore,
   HubStoreEvents,
   PublishParams,
+  PublishResult,
   PurgeParams,
   StoredMessage,
   SubscribeParams,
@@ -31,7 +32,14 @@ type LogEntry = {
 export type MemoryStoreRetention = {
   /** Floor, in seconds, on how long a topic's frames are kept. Default 0. */
   default?: number
-  /** Ceiling, in seconds, on what a subscriber may request. Above it: RetentionExceededError. */
+  /**
+   * Ceiling, in seconds, on what a subscriber may request. Above it: RetentionExceededError.
+   * Default {@link DEFAULT_MAX_RETENTION} (30 days) — finite, not infinite: an unbounded ceiling
+   * lets any subscriber pin a topic's frames forever with `subscribe({ retention: 2**31 })`, and
+   * the `RetentionExceededError` path is then dead on the default hub. A host that wants a
+   * different ceiling sets it here; a host that genuinely wants no ceiling sets it to
+   * `Number.POSITIVE_INFINITY` explicitly.
+   */
   max?: number
 }
 
@@ -42,6 +50,8 @@ export type MemoryStoreOptions = {
 }
 
 const DEFAULT_MAX_DEPTH = 1000
+/** 30 days, in seconds. A finite default ceiling on requested retention. */
+const DEFAULT_MAX_RETENTION = 2_592_000
 
 function formatSequenceID(counter: number): string {
   return String(counter).padStart(12, '0')
@@ -67,7 +77,7 @@ function formatSequenceID(counter: number): string {
 export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
   const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH
   const defaultRetention = options.retention?.default ?? 0
-  const maxRetention = options.retention?.max ?? Number.POSITIVE_INFINITY
+  const maxRetention = options.retention?.max ?? DEFAULT_MAX_RETENTION
   let counter = 0
   const entries = new Map<string, LogEntry>()
   const topicLogs = new Map<string, Array<string>>()
@@ -141,7 +151,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
   return {
     events,
 
-    async publish(params: PublishParams): Promise<string> {
+    async publish(params: PublishParams): Promise<PublishResult> {
       const retain: RetentionClass = params.retain ?? 'mailbox'
 
       // The dedup check comes BEFORE the compare-and-set, and the order is load-bearing. A replay
@@ -154,7 +164,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
       if (params.publishID != null) {
         const accepted = publishRecords.get(params.publishID)
         if (accepted !== undefined) {
-          return accepted
+          return { sequenceID: accepted, deduped: true }
         }
       }
 
@@ -196,7 +206,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
       // A mailbox frame with no recipients has already been read by everyone who was going to
       // read it. A log frame is kept regardless: its reader may not exist yet.
       if (retain === 'mailbox' && recipients.size === 0) {
-        return sequenceID
+        return { sequenceID, deduped: false }
       }
 
       const entry: LogEntry = {
@@ -244,7 +254,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
         }
       }
 
-      return sequenceID
+      return { sequenceID, deduped: false }
     },
 
     async fetch(params: FetchParams): Promise<FetchResult> {
@@ -259,11 +269,22 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
         return { messages: [], cursor: null }
       }
 
-      let startIndex = 0
-      if (params.after != null) {
-        const afterIndex = pending.indexOf(params.after)
-        if (afterIndex !== -1) {
-          startIndex = afterIndex + 1
+      // `after` is an exclusive cursor: the first pending delivery whose sequenceID is strictly
+      // greater than it. Pending is in append order — strictly increasing sequenceIDs — so this
+      // is the position just past `after` whether or not `after` is still pending. Matching on the
+      // value (indexOf) instead would fall back to index 0 the moment the cursored delivery is
+      // acked or aged out between two pages of a drain, silently restarting the page from the top
+      // and re-serving frames the reader has already been handed. Scanning for `> after` resumes
+      // where the cursor pointed even after its own entry is gone.
+      let startIndex = pending.length
+      if (params.after == null) {
+        startIndex = 0
+      } else {
+        for (let index = 0; index < pending.length; index++) {
+          if (pending[index] > params.after) {
+            startIndex = index
+            break
+          }
         }
       }
 

@@ -34,8 +34,8 @@ export type PublishParams = {
   expectedHead?: string | null
   /**
    * Idempotency key. Republishing an already-accepted publishID returns its original sequenceID
-   * and appends nothing: no entry, no delivery row, no sequenceID consumed, no event. This is
-   * what makes a peer's restart replay work, so:
+   * with `deduped: true` and appends nothing: no entry, no delivery row, no sequenceID consumed,
+   * no event, and no live fan-out. This is what makes a peer's restart replay work, so:
    *
    * - The `publishID` -> `sequenceID` record is **not a log entry**. `trim` and `purge` MUST NOT
    *   remove it. Its retention is its own, and strictly longer than the log's — retaining it
@@ -57,6 +57,22 @@ export type PublishParams = {
    * trim, because a subscriber that must read it may not exist when it is published.
    */
   retain?: 'log' | 'mailbox'
+}
+
+export type PublishResult = {
+  /**
+   * The sequenceID the publish was accepted as. On a `publishID` replay it is the sequenceID
+   * the ORIGINAL publish was accepted as, which may name a frame that has since been trimmed.
+   */
+  sequenceID: string
+  /**
+   * True iff this call matched an already-accepted `publishID` and therefore appended nothing:
+   * no entry, no delivery row, no sequenceID consumed, no event. The hub reads this to decide
+   * whether to fan the frame out to live subscribers — a deduped publish MUST NOT be re-delivered,
+   * because every current subscriber has already seen the original, and the sequenceID it names
+   * may already be acked and gone. False on an ordinary accepted publish.
+   */
+  deduped: boolean
 }
 
 export type SubscribeParams = {
@@ -114,6 +130,13 @@ export type FetchTopicResult = {
   head: string | null
   /** The oldest sequenceID still retained for this topic, or null if the log is empty. */
   oldest: string | null
+  // There is deliberately no `hasMore` / paging cursor here. A reader draining the log by `after`
+  // terminates on the (`head`, `oldest`) pair this result already carries, both of which are
+  // stored state that survives a trim: it is caught up once the last sequenceID it has seen equals
+  // `head`, and against a fully-trimmed topic (`head` set, `oldest` null) it starts from `oldest`
+  // being null and reads forward. Adding `hasMore` would widen the store contract, the wire
+  // response, and every host and test implementation for a signal `head`/`oldest` already give —
+  // so it is left out on purpose.
 }
 
 export type FetchParams = {
@@ -159,6 +182,16 @@ export type TrimParams = {
   before: string
 }
 
+/**
+ * The `purge` event is the age sweep's notification, and the only removal event the store emits.
+ * It exists so a host can observe the scheduled, asynchronous expiry it did not initiate frame by
+ * frame — the sweep decides for itself which frames have aged out. `trim` and any depth-based
+ * eviction are deliberately silent: both are the synchronous consequence of a caller's own action
+ * (the `before` bound it chose, the log-class publish it made), so that caller already knows what
+ * left and needs no event to be told. A host layering more deleters keeps this rule — only the
+ * age sweep is observable — so a listener can treat every `purge` event as "the clock removed
+ * these", never "someone trimmed".
+ */
 export type HubStoreEvents = {
   purge: { sequenceIDs: Array<string> }
 }
@@ -186,7 +219,13 @@ export type HubStoreEvents = {
  *   entry and does not own it, and it cannot be pushed once its referent is gone.
  * - `purge` is the age enforcement for both classes, honouring the same invariants as `trim`. A
  *   topic's frames live for the longest retention any of its subscribers asked for, floored at
- *   the hub's default.
+ *   the hub's default. That window is a function of the CURRENT subscribers, so it does not only
+ *   grow, and the consequence bites: a topic that momentarily has no subscriber holding a long
+ *   retention — every long-holder has unsubscribed, or none has re-subscribed yet after a
+ *   restart — collapses to the hub default for the duration of that window, and a `purge` landing
+ *   inside it removes frames a subscriber returning a moment later would have been entitled to
+ *   keep. A host that needs a floor a transient gap cannot lower must set the hub default high
+ *   enough, or not schedule `purge` against topics whose readers reconnect.
  * - `sequenceID`s are lexicographically ordered and strictly increasing within a topic — a
  *   fixed-width zero-padded encoding, not a bare decimal and not a UUID — and they are minted by
  *   the STORE, inside the transaction, not by the calling process.
@@ -203,7 +242,7 @@ export type HubStoreEvents = {
  */
 export type HubStore = {
   events: EventEmitter<HubStoreEvents>
-  publish(params: PublishParams): Promise<string>
+  publish(params: PublishParams): Promise<PublishResult>
   fetch(params: FetchParams): Promise<FetchResult>
   fetchTopic(params: FetchTopicParams): Promise<FetchTopicResult>
   ack(params: AckParams): Promise<void>

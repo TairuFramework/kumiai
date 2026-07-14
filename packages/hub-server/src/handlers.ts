@@ -127,8 +127,9 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       }
       const payloadBytes = fromB64(payload)
       let sequenceID: string
+      let deduped: boolean
       try {
-        sequenceID = await store.publish({
+        const result = await store.publish({
           senderDID,
           topicID,
           payload: payloadBytes,
@@ -138,17 +139,26 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
           ...('expectedHead' in ctx.param ? { expectedHead: ctx.param.expectedHead } : {}),
           publishID: ctx.param.publishID,
         })
+        sequenceID = result.sequenceID
+        deduped = result.deduped
       } catch (error) {
         rethrowAsHandlerError(error)
       }
 
-      // Live-deliver to currently-connected subscribers (minus the sender).
-      const subscribers = await store.getSubscribers(topicID)
-      for (const recipientDID of subscribers) {
-        if (recipientDID === senderDID) continue
-        const client = registry.getClient(recipientDID)
-        if (client?.sendMessage != null) {
-          client.sendMessage({ sequenceID, senderDID, topicID, payload: payloadBytes })
+      // A deduped publish appended nothing: the frame it names was already accepted and already
+      // fanned out to whoever was subscribed then, and its sequenceID may since have been acked
+      // and its delivery row removed. Re-running the loop would push a frame every current
+      // subscriber has already applied — with a sequenceID that no longer names a live delivery.
+      // So the live fan-out is for a genuine append only.
+      if (!deduped) {
+        // Live-deliver to currently-connected subscribers (minus the sender).
+        const subscribers = await store.getSubscribers(topicID)
+        for (const recipientDID of subscribers) {
+          if (recipientDID === senderDID) continue
+          const client = registry.getClient(recipientDID)
+          if (client?.sendMessage != null) {
+            client.sendMessage({ sequenceID, senderDID, topicID, payload: payloadBytes })
+          }
         }
       }
 

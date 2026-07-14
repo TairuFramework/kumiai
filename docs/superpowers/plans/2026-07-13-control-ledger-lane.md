@@ -2020,3 +2020,74 @@ that wrote the interface — so the suite tests what that author remembered to c
 requires.* Every hole here was a clause-shaped gap over a correct implementation, invisible precisely
 because the reference store did the right thing and the suite never asked a wrong one to fail. The fix
 was not new behaviour; it was making the suite able to reject the natural wrong host.
+
+### 2026-07-14 — Question 5.4: The hub Importants and Minors.
+
+**Findings:** Both Importants were real, and both fixes came out structural rather than disciplinary.
+
+- **`wrapHub` silently dropped `retain`/`expectedHead`/`publishID`** — a conditional publish through the
+  encrypting tunnel became an unconditional mailbox one, CAS gone, nothing failing. Fixed **type-level**:
+  the tunnel is mailbox-only by design, so `MailboxHub.publish` now takes a narrow `MailboxPublishParams`
+  with no CAS fields, and `LogHub` carries the CAS-capable `publish` (`HubPublishParams =
+  MailboxPublishParams & {expectedHead, publishID, retain}`). A conditional publish through a mailbox
+  lane is now a **compile error** (`TS2353`), not a runtime silent loss — the drop cannot happen because
+  the fields do not exist to drop.
+- **A deduped publish was re-fanned-out to every subscriber** — the handler ran the live delivery loop
+  unconditionally, so a replayed `publishID` pushed a frame every recipient had already applied. Fixed:
+  `HubStore.publish` now returns `{ sequenceID, deduped }`, the handler skips the fan-out when `deduped`,
+  and a new conformance clause asserts a repeat `publishID` returns the same sequenceID, `deduped: true`,
+  **and creates no new delivery.** The shape change is **contained to the hub packages** exactly as the
+  stop condition required — the wire `MailboxHub.publish` stays `{ sequenceID }`, so rpc/mls compile and
+  test green with zero edits.
+
+**Minors:** `maxRetention` given a finite default and a setter (the dead `RetentionExceededError` path
+was letting any client pin frames forever); the transient-zero-subscriber retention collapse and the
+`purge`-event emission decided and documented; the `fetch` `after`-fallback bounded. `hasMore` on
+`FetchTopicResult` **left by design** — termination is derivable from the `head`/`oldest` pair already
+returned, and adding it would widen the store contract, the wire, and every fake including rpc's `LogHub`
+doubles.
+
+**Contract impact.** `types.ts`: the `MailboxPublishParams`/`HubPublishParams`/`LogHub` split; the
+`deduped` return and its "MUST NOT re-deliver" obligation. Conformance 23 → 24 clauses; hub-server units
+66 → 69.
+
+**Learned (5.4):** *When a wrapper drops a field, the fix is usually to delete the field from the
+wrapper's type, not to forward it.* The silent-CAS-loss and the "which lane may CAS" question were the
+same question, and the type answered both — a mailbox lane that cannot represent a conditional publish
+cannot lose one.
+
+---
+
+## Phase 5 — remaining (handoff for the next session)
+
+Branch review Criticals are **all closed** (Q5.1 mls seal forgery, Q5.2 the two rpc heal bugs, Q5.3 hub
+conformance + store bugs, Q5.4 hub Importants/Minors). Two probes remain, both review-scoped, **no
+Criticals**, one per package so they cannot run in parallel against the shared tree:
+
+**Q5.5 — mls Importants/Minors:**
+- **Important** — `sealLedger` takes its payload as a parameter (`recovery.ts`), so a caller can seal
+  *another group's* tokens to a member of this one; read it from the handle (`group.getLedger()`), matching
+  `sealGroupInfo`'s unrepresentable-payload shape. The requester's head check protects the *requester*,
+  not the group whose ledger leaks.
+- **Important** — a corrupt/wrong-length ephemeral private key is caught inside the `try` and reported
+  `not-for-me` (`openSealedReply`), so a key-persistence bug silently strands the peer as "somebody
+  else's reply"; validate length and import **outside** the `try`, throw a distinct loud error.
+- **Minors** — recovery requests carry no `exp`/`nbf` (a request is a standing capability; `verifyToken`
+  already enforces both when present); `processWelcomeOnce`'s dedup-key coupling wants a comment where it
+  keys on `invite.groupID`; `decodeLedgerTokens` ignores trailing bytes; `SealedGroupInfoRejection` ships
+  `@deprecated` in the range that introduced it; the `processWelcomeOnce` "discards the handle" doc
+  overclaims (no zeroization).
+
+**Q5.6 — rpc Importants/Minors:**
+- **Important** — `ensureLedger`'s `false` return is discarded by `commit()` (and `replay()`): a peer
+  whose bootstrap failed commits against a roster-reset handle. Give `commit()` the same refusal
+  `recover()` gives it (nothing published, host retries), and surface the degraded state from `replay()`.
+- **Important** — the exported `GroupMLS` port docs (`crypto.ts` ~115, ~233; `peer.ts` ~617) still
+  promise the missing-entries retry that **G36 deleted** — the only spec a host has. Correct all three to
+  match the poison-advance behaviour the lane actually implements.
+- **Minors** — the port's per-request ephemeral keys are never released and there is no method to release
+  them (add `releaseRecoveryRequest`/TTL, call from `ensureLedger` finish and `recover()` failed
+  attempts); `suppressedRequests` grows monotonically on a wire-supplied id; `recover()` has no backoff on
+  an unopenable reply (a hostile relay drives fresh rendezvous per round trip); `classify.ts`'s stated row
+  order does not match its evaluation order; `takeLost()` is reached only on the success path, and no doc
+  tells a host to call `replay()` to collect a `lost` remove notice after a failed `commit()`.

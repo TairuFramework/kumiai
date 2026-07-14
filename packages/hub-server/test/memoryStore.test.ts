@@ -11,7 +11,7 @@ const TOPIC = 'topic:1'
 describe('createMemoryStore pub/sub', () => {
   test('a mailbox publish with no subscribers is dropped: nobody was ever going to read it', async () => {
     const store = createMemoryStore()
-    const id = await store.publish({
+    const { sequenceID: id } = await store.publish({
       senderDID: ALICE,
       topicID: TOPIC,
       payload: new Uint8Array([1]),
@@ -28,7 +28,7 @@ describe('createMemoryStore pub/sub', () => {
 
   test('a log publish with no subscribers is retained: its reader may not exist yet', async () => {
     const store = createMemoryStore()
-    const id = await store.publish({
+    const { sequenceID: id } = await store.publish({
       senderDID: ALICE,
       topicID: TOPIC,
       payload: new Uint8Array([1]),
@@ -90,7 +90,7 @@ describe('createMemoryStore pub/sub', () => {
     const store = createMemoryStore()
     await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
     await store.publish({ senderDID: ALICE, topicID: TOPIC, payload: new Uint8Array([1]) })
-    const logged = await store.publish({
+    const { sequenceID: logged } = await store.publish({
       senderDID: ALICE,
       topicID: TOPIC,
       payload: new Uint8Array([2]),
@@ -112,7 +112,7 @@ describe('createMemoryStore pub/sub', () => {
   test('maxDepth evicts the oldest log frame per topic on publish', async () => {
     const store = createMemoryStore({ maxDepth: 2 })
     await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
-    const first = await store.publish({
+    const { sequenceID: first } = await store.publish({
       senderDID: ALICE,
       topicID: TOPIC,
       payload: new Uint8Array([1]),
@@ -124,7 +124,7 @@ describe('createMemoryStore pub/sub', () => {
       payload: new Uint8Array([2]),
       retain: 'log',
     })
-    const last = await store.publish({
+    const { sequenceID: last } = await store.publish({
       senderDID: ALICE,
       topicID: TOPIC,
       payload: new Uint8Array([3]),
@@ -140,7 +140,7 @@ describe('createMemoryStore pub/sub', () => {
   test('maxDepth counts log frames only: a mailbox flood cannot evict the commit log', async () => {
     const store = createMemoryStore({ maxDepth: 2 })
     await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
-    const commit = await store.publish({
+    const { sequenceID: commit } = await store.publish({
       senderDID: ALICE,
       topicID: TOPIC,
       payload: new Uint8Array([1]),
@@ -161,12 +161,12 @@ describe('createMemoryStore pub/sub', () => {
     const store = createMemoryStore()
     await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
     await store.subscribe({ subscriberDID: CAROL, topicID: TOPIC })
-    const mailbox = await store.publish({
+    const { sequenceID: mailbox } = await store.publish({
       senderDID: ALICE,
       topicID: TOPIC,
       payload: new Uint8Array([1]),
     })
-    const logged = await store.publish({
+    const { sequenceID: logged } = await store.publish({
       senderDID: ALICE,
       topicID: TOPIC,
       payload: new Uint8Array([2]),
@@ -190,13 +190,13 @@ describe('createMemoryStore pub/sub', () => {
   test('trim removes log entries below the bound and never moves head', async () => {
     const store = createMemoryStore()
     await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
-    const first = await store.publish({
+    const { sequenceID: first } = await store.publish({
       senderDID: ALICE,
       topicID: TOPIC,
       payload: new Uint8Array([1]),
       retain: 'log',
     })
-    const last = await store.publish({
+    const { sequenceID: last } = await store.publish({
       senderDID: ALICE,
       topicID: TOPIC,
       payload: new Uint8Array([2]),
@@ -226,12 +226,12 @@ describe('createMemoryStore pub/sub', () => {
   test('trim removes only log frames: a mailbox frame on the same topic keeps its delivery', async () => {
     const store = createMemoryStore()
     await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
-    const mailbox = await store.publish({
+    const { sequenceID: mailbox } = await store.publish({
       senderDID: ALICE,
       topicID: TOPIC,
       payload: new Uint8Array([1]),
     })
-    const logged = await store.publish({
+    const { sequenceID: logged } = await store.publish({
       senderDID: ALICE,
       topicID: TOPIC,
       payload: new Uint8Array([2]),
@@ -253,7 +253,7 @@ describe('createMemoryStore pub/sub', () => {
   test('fetchTopic refuses a non-subscriber and honours after/limit', async () => {
     const store = createMemoryStore()
     await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
-    const first = await store.publish({
+    const { sequenceID: first } = await store.publish({
       senderDID: ALICE,
       topicID: TOPIC,
       payload: new Uint8Array([1]),
@@ -292,7 +292,7 @@ describe('createMemoryStore pub/sub', () => {
   test('fetch respects after cursor, limit, and hasMore', async () => {
     const store = createMemoryStore()
     await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
-    const id1 = await store.publish({
+    const { sequenceID: id1 } = await store.publish({
       senderDID: ALICE,
       topicID: TOPIC,
       payload: new Uint8Array([1]),
@@ -306,6 +306,37 @@ describe('createMemoryStore pub/sub', () => {
     const limited = await store.fetch({ recipientDID: BOB, limit: 1 })
     expect(limited.messages).toHaveLength(1)
     expect(limited.hasMore).toBe(true)
+  })
+
+  test('fetch resumes past a cursor whose delivery is already gone, not from the top', async () => {
+    const store = createMemoryStore()
+    await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+    const { sequenceID: id1 } = await store.publish({
+      senderDID: ALICE,
+      topicID: TOPIC,
+      payload: new Uint8Array([1]),
+    })
+    const { sequenceID: id2 } = await store.publish({
+      senderDID: ALICE,
+      topicID: TOPIC,
+      payload: new Uint8Array([2]),
+    })
+    const { sequenceID: id3 } = await store.publish({
+      senderDID: ALICE,
+      topicID: TOPIC,
+      payload: new Uint8Array([3]),
+    })
+    expect(id1 < id2 && id2 < id3).toBe(true)
+
+    // The cursor names id2, but id2's delivery is acked away between two pages of a drain — the
+    // exact race trim or a concurrent ack creates when it removes the cursored frame.
+    await store.ack({ recipientDID: BOB, sequenceIDs: [id2] })
+
+    // `after` is exclusive and forward-only, so the next page is what comes after id2: id3 alone.
+    // A store that falls back to index 0 when the cursor entry is gone re-serves id1 — a frame
+    // the reader is already past — and can loop a drain that never makes progress.
+    const page = await store.fetch({ recipientDID: BOB, after: id2 })
+    expect(page.messages.map((m) => m.payload[0])).toEqual([3])
   })
 
   test('purge removes aged messages and emits the purge event', async () => {
@@ -349,11 +380,22 @@ describe('createMemoryStore pub/sub', () => {
     )
   })
 
+  test('the default maximum retention is finite: a subscribe far above it is refused', async () => {
+    // No retention options at all. The default ceiling must still be finite: an infinite one
+    // leaves the RetentionExceededError path dead on the default hub, and any member could pin a
+    // topic's frames indefinitely with a single enormous request.
+    const store = createMemoryStore()
+    await expect(
+      store.subscribe({ subscriberDID: BOB, topicID: TOPIC, retention: 2 ** 31 }),
+    ).rejects.toThrow(RetentionExceededError)
+    expect(await store.getSubscribers(TOPIC)).toEqual([])
+  })
+
   test('a topic keeps its frames for the longest retention any subscriber asked for', async () => {
     const store = createMemoryStore({ retention: { max: 3600 } })
     await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
     await store.subscribe({ subscriberDID: CAROL, topicID: TOPIC, retention: 3600 })
-    const id = await store.publish({
+    const { sequenceID: id } = await store.publish({
       senderDID: ALICE,
       topicID: TOPIC,
       payload: new Uint8Array([1]),
@@ -385,7 +427,7 @@ describe('createMemoryStore pub/sub', () => {
   test('a losing conditional publish consumes no sequenceID and leaves no gap', async () => {
     const store = createMemoryStore()
     await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
-    const first = await store.publish({
+    const { sequenceID: first } = await store.publish({
       senderDID: ALICE,
       topicID: TOPIC,
       payload: new Uint8Array([1]),
@@ -405,7 +447,7 @@ describe('createMemoryStore pub/sub', () => {
 
     // The loser leaves the sequence exactly as it found it: the next accepted publish takes the
     // sequenceID the loser would have had. A store that mints before it compares burns one here.
-    const next = await store.publish({
+    const { sequenceID: next } = await store.publish({
       senderDID: ALICE,
       topicID: TOPIC,
       payload: new Uint8Array([3]),
@@ -422,7 +464,7 @@ describe('createMemoryStore pub/sub', () => {
   test('a mailbox publish neither reads nor moves the head, so the CAS ignores it', async () => {
     const store = createMemoryStore()
     await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
-    const logged = await store.publish({
+    const { sequenceID: logged } = await store.publish({
       senderDID: ALICE,
       topicID: TOPIC,
       payload: new Uint8Array([1]),
@@ -433,7 +475,7 @@ describe('createMemoryStore pub/sub', () => {
 
     // The interleaved mailbox frame did not move the head, so a conditional publish against the
     // last log frame still wins.
-    const next = await store.publish({
+    const { sequenceID: next } = await store.publish({
       senderDID: ALICE,
       topicID: TOPIC,
       payload: new Uint8Array([3]),
@@ -447,7 +489,7 @@ describe('createMemoryStore pub/sub', () => {
   test('a replayed publishID consumes no sequenceID and survives a purge of the whole log', async () => {
     const store = createMemoryStore()
     await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
-    const first = await store.publish({
+    const { sequenceID: first } = await store.publish({
       senderDID: ALICE,
       topicID: TOPIC,
       payload: new Uint8Array([1]),
@@ -466,7 +508,7 @@ describe('createMemoryStore pub/sub', () => {
     // The replay carries the head the caller journalled, which the frame's own acceptance made
     // stale. It still gets its original sequenceID back — naming a frame that no longer exists,
     // which is the answer to "did my publish land?".
-    const replayed = await store.publish({
+    const { sequenceID: replayed } = await store.publish({
       senderDID: ALICE,
       topicID: TOPIC,
       payload: new Uint8Array([1]),
@@ -477,7 +519,7 @@ describe('createMemoryStore pub/sub', () => {
     expect(replayed).toBe(first)
 
     // Nothing was appended and no sequenceID was burned: the next publish takes the next ID.
-    const next = await store.publish({
+    const { sequenceID: next } = await store.publish({
       senderDID: ALICE,
       topicID: TOPIC,
       payload: new Uint8Array([2]),

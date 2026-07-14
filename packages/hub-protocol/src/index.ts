@@ -24,6 +24,7 @@ export type {
   HubStore,
   HubStoreEvents,
   PublishParams,
+  PublishResult,
   PurgeParams,
   StoredMessage,
   SubscribeParams,
