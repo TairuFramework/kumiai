@@ -459,13 +459,30 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    */
   let commitTail: Promise<void> = Promise.resolve()
   const runSerial = <T>(fn: () => Promise<T>): Promise<T> => {
-    const op = commitTail.then(fn)
+    const op = commitTail.then(() => {
+      journalReplayed = false
+      return fn()
+    })
     commitTail = op.then(
       () => {},
       () => {},
     )
     return op
   }
+
+  /**
+   * Whether the journal has been replayed in the lane operation now running. Cleared when
+   * an operation takes the mutex, set by `replayJournal`, and required by `pullCommits`.
+   *
+   * The ordering it enforces is the whole of what saves a group of one. A peer that pulls
+   * before it replays meets its OWN un-merged commit in the log, and the cursor table's
+   * answer to that frame is to heal — from a group that, at creation, has nobody in it to
+   * answer. Nothing else catches it: the heal resolves without advancing and without
+   * throwing, the replay that follows adopts the commit anyway, and the peer converges. It
+   * merely spends a rendezvous and a recovery deadline asking the void for help, silently,
+   * on every restart.
+   */
+  let journalReplayed = false
 
   // Recovery rendezvous state, keyed by requestID.
   const recoveryWaiters = new Map<string, (groupInfo: Uint8Array | null) => void>()
@@ -599,6 +616,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * stops early — on the frame it must heal for — takes no tip at all.
    */
   const pullCommits = async (): Promise<boolean> => {
+    if (!journalReplayed) {
+      throw new Error(
+        'pullCommits: the journal must be replayed first in every lane operation, or a peer that crashed on its own commit heals from it instead of adopting it',
+      )
+    }
     if (mls == null || commitTopicID == null) return false
     const port = mls
     const topicID = commitTopicID
@@ -895,6 +917,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * back: it is the host's to act on, and its action is to commit.
    */
   const replayJournal = async (): Promise<boolean> => {
+    journalReplayed = true
     if (mls == null || journal == null || commitTopicID == null) return false
     const entry = await journal.get()
     if (entry == null) return false

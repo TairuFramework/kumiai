@@ -1623,3 +1623,70 @@ describes.** G28 reasoned from an architecture — commits racing ahead of a dra
 codebase does not have. Writing the test first is what caught it; had the probe started from the fix, it
 would have built an interleave for a race that cannot happen, shipped it green, and left the real bug
 untouched **with a test standing guard over it.**
+
+---
+
+### 2026-07-14 — Question 4.1: Does a sole-member group survive a crash on its first commit — and the calendar?
+
+**Findings:** Yes, at both crash points, with the log intact and with it swept away — and **with no
+`src/` change**. Four tests: {the hub accepted but the process died before `markAccepted`} × {log
+intact, log trimmed}, and the same pair for a crash after the acceptance was recorded. The peer
+publishes to the rendezvous topic **zero times** in all four. G21 and G24 both hold.
+
+**But the prediction going in was wrong, and being wrong about it is the finding.** The brief expected
+the seed pull to meet the peer's own un-merged commit and trip the G18 trigger in a group with nobody
+to answer. It does not — because **`replayJournal` runs at step 0 of the seed**, ahead of
+`ensureLedger()` and the pull, and leaves the cursor past the peer's own frame. A recording hub proved
+it rather than inferring it: the pull was handed `[]` over a log the test asserts still holds exactly
+one frame.
+
+**So the group of one was saved by an ordering constraint with nothing behind it.** `replayJournal`
+never clears `healRequested`, and the flag has **three** producers — `own-unmerged`, `ahead`, and
+`fork`-losing. (A blanket clear on adopt is therefore a *regression*: it would swallow a genuine heal
+raised for the other two, and the trim-strand peer would silently stop asking for help. The obvious fix
+is worse than the defect, for the third time in this plan.) The design was safe only because replay
+precedes the pull in all five lane operations — an invariant stated in prose and enforced by nothing.
+
+**The mutation is the whole lesson.** Inverting the seed ordering — pull before replay — produces this:
+
+```
+welcomes [ 'dave' ]      ← the Welcome fired
+epoch 2                  ← converged
+slot cleared
+rendezvous publishes 1   ← it asked the void for help
+commit frames 1
+```
+
+`recover()` with no responder **resolves `{ advanced: false }`. It does not throw.** The group converges,
+the Welcome fires, nothing errors, and the peer has spent a rendezvous and a 30s recovery deadline on a
+group that contains only itself — on every restart, forever. **Every assertion the plan warned against
+would pass.** The single observation that separates recovery from luck is `rendezvous publishes == 0`.
+
+**And the trimmed case is the weaker test, permanently.** Under the wrong ordering the two *trimmed*
+tests stayed **green** — a trimmed log returns no frames, so the own-commit row cannot fire and the
+ordering cannot be observed at all. Had G24 been written over the wrong crash point, or over a fixture
+that always trims, the probe would have reported success on a broken lane. **Any test of this area that
+trims must be paired with one that does not.**
+
+**Spec impact: revision 31.** The ordering is now **checked, not described**: `pullCommits` refuses to
+run in a lane operation whose journal has not been replayed (`journalReplayed`, cleared by `runSerial`,
+set by `replayJournal`). Before the guard the mutation went red on 6 tests — 4 of them in
+`peer-commit-replay`, failing through an *unrelated* mechanism (`JournalEpochError`), **every one of
+them involving a second member**. Not one existing test was a group of one. With the guard it goes red
+on **16 across 6 files, including both trimmed tests** — the blind spot the trim opened is closed.
+
+**G24 is the only test in the repo that measures the dedup record.** Mutating `FakeHub.trim` to forget
+the `publishID` of whatever the log forgets leaves the suite at `PASS (152) FAIL (1)`, and that one
+failure is exactly the spec's scenario: the republish CASes at `expectedHead: null` against a head that
+is still its own trimmed frame, takes `HeadMismatchError`, the slot clears, and the invite surfaces as
+lost. **Dave is in the ratchet tree and is never told.** Silently, with no error anywhere.
+
+**Learned (4.1):** *An invariant that is load-bearing and silent when violated must be checked, not
+written down.* The ordering was correct, uniformly applied, and documented in five places — and a
+refactor touching only the seed would have passed 147 of 153 tests while every sole-member group asked
+the void for help on every restart. The guard costs nine lines.
+
+Also carried: the probe used `FakeHub` rather than `DurableFakeHub` as the brief specified, and argued
+it — `DurableFakeHub`'s only distinctive feature is ack/redelivery, and a group of one receives no
+pushes (the hub skips the sender), so a trim there would have been dead fixture code. **`DurableFakeHub`
+still has no `trim`**; if a later question needs one under redelivery, it remains to be written.

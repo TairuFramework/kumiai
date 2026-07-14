@@ -1,6 +1,6 @@
 # Design: the control-ledger lane
 
-**Status:** design, revision 30 (2026-07-14). **G28 is RETRACTED** — see below. Reviewed fourteen times by kubun in
+**Status:** design, revision 31 (2026-07-14). **G28 is RETRACTED** — see below. Reviewed fourteen times by kubun in
 `2026-07-13-control-ledger-lane-review.md`; G1–G27 are folded in below. Revisions 16–25 fold in
 the implementation probes: `NotSubscribedError`, a `trim` primitive, a 30-day default
 window, two retention classes with subscriber-requested durations, **G28 — the commit lane must
@@ -826,6 +826,25 @@ The G18 trigger stays, and the two mechanisms cover different failures: the jour
 peer whose *own* pending state was lost; `recover()` recovers a peer whose *group* state is
 unusable (trimmed out, or on a discarded branch). The journal makes the common crash need no
 responder at all; heal remains the exit when the peer genuinely needs the group's help.
+
+**And what keeps the two apart is an ordering, which must therefore be enforced rather than
+described (revision 31).** Replay is step 0 of every lane operation, ahead of the pull — and
+that is not a preference. A peer that pulls first meets **its own un-merged commit** in the log,
+and the classification table's answer to that frame is the G18 trigger: heal. In the sole-member
+group there is nobody to heal *from*, and the failure is invisible from every angle a test
+normally looks at — `recover()` with no responder resolves `{ advanced: false }` without
+throwing, the replay that follows adopts the commit anyway, the epoch advances, the Welcome
+fires, and the group converges. It merely spends a rendezvous and a full recovery deadline
+asking the void for help, on every restart, forever.
+
+The observation that separates recovery from luck is therefore **not** convergence and **not**
+the absence of an error. It is that the peer publishes to the rendezvous topic **zero times**.
+
+Because the invariant is load-bearing and its violation is silent, the peer **checks** it:
+`pullCommits` refuses to run in a lane operation whose journal has not been replayed. A trimmed
+log makes this worse, not better — it returns no frames at all, so the own-commit row cannot
+fire and the wrong ordering cannot be observed. **Any test of this area that trims must be
+paired with one that does not.**
 
 **The retry bound is a deadline, not an attempt count.** At the commit rate D1 is designed
 for, with several active admins, five consecutive CAS losses on a busy group is not rare —
