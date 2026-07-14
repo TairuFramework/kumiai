@@ -365,8 +365,10 @@ frames are still undecrypted.
 - **Done when:** `replay()` exists as a lane operation and every lane result carries
   `{ lost?: LostCommit }`. **The G27 test:** a host that responds to *any* lane result (`lost`,
   `reenact`) by immediately calling `commit()` **completes and does not deadlock.** **The G22 test:**
-  replay runs `onAccepted` twice (crash between `onAccepted()` and `clear()`) and the invitee
-  **no-ops the duplicate Welcome** rather than erroring or building a duplicate group. **The G25/G26
+  replay runs `onAccepted` twice (crash between `onAccepted()` and `clear()`) and the duplicate
+  Welcome is **absorbed by the invitee** — `processWelcomeOnce` returns `null` for a group it already
+  holds, and the member's live handle stands. Plain `processWelcome` does NOT absorb it: it silently
+  builds a second group state at the joining epoch, which is the defect the safe path removes. **The G25/G26
   test:** replay loses the CAS — a `ledger` commit's tokens are handed back and the *host* re-issues
   them (assert **the peer did not commit them itself**), and a journalled `remove` is surfaced with
   the member **still in the roster** (an admin must never believe an eviction happened when it did
@@ -1457,3 +1459,69 @@ moved to the rendezvous lane; `getLedgerEntries` removed from the port.
 **Still open, and carried:** the **trim-strand trigger is unbuilt** — nothing reads `oldest`. `recover()`
 handles the trim strand correctly once something triggers it, and nothing does. Of the three heal paths,
 only the byzantine losing branch and the un-merged own commit fire today.
+
+---
+
+### 2026-07-14 — Question 3.6: Does replay return its outcome without deadlocking the host?
+
+**ANSWERED, and it did not go as planned.** Three of the four clauses were already green as side effects
+of 3.3 and 3.5 — verified, not assumed. The fourth was **false**, and the probe reported `BLOCKED`
+rather than route around it. Green: mls 287 (was 283), rpc 148, 27/27. Report:
+`docs/superpowers/probes/question-3.6-report.md`.
+
+**G40 — "the invitee no-ops a re-delivered Welcome" was never true, about ts-mls or anything else.** A
+second `processWelcome` over the same Welcome bytes **neither errors nor no-ops: it silently builds a
+second, stale group state.** The invitee ends up holding a handle at its *joining* epoch (1n, 2 members)
+with the **same group id** as its live handle (2n, 3 members), and the stale one cannot decrypt the
+group's current traffic.
+
+The reason is structural, not a bug: **`processWelcome`, and ts-mls's `joinGroup` beneath it, are pure
+functions** of (Welcome bytes, key package, private keys). Neither holds a registry of joined groups, so
+there is no "already joined" state to consult and **nothing that could no-op**. The Welcome is not
+consumed by the first join, so the second decryption succeeds identically.
+
+**This was a live silent defect on the crash path.** Replay re-runs `onAccepted`, the Welcome is
+re-delivered, and an invitee that adopts what comes back **rolls back to its joining epoch, loses every
+member added since, and goes deaf to the group** — with no error anywhere. Worse, we were *telling hosts
+it was handled*: `PendingCommit.onAccepted` stated "both halves must tolerate a repeat" as an obligation
+**nothing in kumiai discharged**. The spec repeated the claim in two more places, and one of them
+recommended a no-op that **is not available to a host at all**.
+
+**The fix: `processWelcomeOnce` in `mls`, not a line in the host-obligation list.** It takes the group
+ids the member already holds and returns `null` for a Welcome it has already joined. `processWelcome`
+stays exported and stays pure underneath — it is correct as it is; the new function is the safe path
+over it. The dedup **cannot** be hoisted above the join: the group id is encrypted to the joiner, so
+there is nothing to compare against until the handle exists. The implementation joins, compares, and
+**discards the stale handle rather than returning it**, and the doc comment says why, because that is
+exactly the optimisation the next reader will reach for.
+
+Suppressing the re-delivery on the *sender* side was considered and rejected: the send is host-side and
+its outcome is unknowable, so at-most-once strands invitees — which is the failure the journalled Welcome
+exists to prevent. **The Welcome is at-least-once by design, and the receiver is where idempotency has to
+live.**
+
+**The audit found the hole exactly where the brief sent it looking.** The `remove` notice was **not
+pinned**: the old test asserted only that a notice came back, and said nothing about the roster. **The
+precise bug the spec names — *"an admin told the removal failed while the member is quietly gone"* — would
+have passed it.** Now fixed with a **positive control** (a remove that lands *does* evict, so the negative
+is not vacuous) and `expect(alice.mls.leaves()).toContain('mallory')`. Mutation-checked: injecting
+`adoptJournalled` on the lost-CAS branch fails on exactly that line, and **the invite test does not catch
+it** — the remove test is the only thing guarding it. The other three clauses were genuinely pinned, each
+by an assertion that would catch the wrong implementation.
+
+**Accepted residual.** `processWelcomeOnce` is only as safe as the `joined` set the caller passes. The
+shape is still materially better than a documented obligation, because **the signature forces the
+question**: a host cannot call the safe path without supplying the set, so passing an empty one is
+asserting something false about its own state — a louder error than forgetting a check exists. Making it
+airtight would mean `mls` owning a group store, which cuts against the package being deliberately pure.
+
+**Spec impact:** revision 29 — G40; the false "no-ops it" claim removed from all three places it appeared;
+the testing clause now asserts **both** halves (that plain `processWelcome` silently builds a second group
+state, which is *why* the safe path exists, and that `processWelcomeOnce` returns `null`).
+
+**Learned.** Every other defect in this plan was code that failed to match the design. **This one was the
+design asserting a fact about a dependency that was never true** — and then building on it: a doc comment
+telling hosts to rely on it, and the journal's Welcome re-delivery resting on it. Fourteen review passes
+read it as obviously true. It was reachable only by testing the **recipient** instead of the sender, and
+every test we had asserted the sender delivers once — the easy half, and the wrong half. **When a design
+claims a dependency behaves a certain way, that claim is a test, not a premise.**

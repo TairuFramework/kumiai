@@ -1,6 +1,6 @@
 # Design: the control-ledger lane
 
-**Status:** design, revision 28 (2026-07-14). Reviewed fourteen times by kubun in
+**Status:** design, revision 29 (2026-07-14). Reviewed fourteen times by kubun in
 `2026-07-13-control-ledger-lane-review.md`; G1–G27 are folded in below. Revisions 16–25 fold in
 the implementation probes: `NotSubscribedError`, a `trim` primitive, a 30-day default
 window, two retention classes with subscriber-requested durations, **G28 — the commit lane must
@@ -47,6 +47,13 @@ peer's pre-rejoin ledger, not the journal** (with the journal in place, replay s
 commit before any heal can run, so filtering the journal would filter nothing); the **bootstrap gather
 rides the rendezvous lane**, not the app lane; and **`GroupMLS.getLedgerEntries` is removed**, dead
 since the bodies moved into the commit frame.
+Revision 29 corrects a claim this design made about **ts-mls** and then built on. **G40 — "the invitee
+no-ops a re-delivered Welcome" was never true.** `processWelcome`, and `joinGroup` beneath it, are pure
+functions with no registry of joined groups: a second call over the same bytes **silently builds a
+second, stale group state** at the joining epoch. Replay re-delivers the Welcome by design, so an
+invitee that adopted it rolled back, lost every member added since, and went deaf to the group — with
+nothing thrown. `mls` now provides **`processWelcomeOnce`**, which returns `null` for a group the member
+already holds; the obligation is discharged, not documented.
 **Supersedes:** the requirements in `../../agents/plans/next/2026-07-13-host-ledger-lane.md`
 (R1/R2/R3), which stays as the origin record.
 **Scope:** `@kumiai/mls`, `@kumiai/rpc`, `@kumiai/hub-protocol`, `@kumiai/hub-server`,
@@ -752,11 +759,26 @@ partly) is still in the slot on restart and gets replayed. Re-adopting the journ
 construction. **Re-delivering the Welcome is not:** the invitee has already joined, and a
 second `processWelcome` over the same bytes is not a no-op — it errors or builds a duplicate
 group state, and either way the invitee's host handles an event its author believed happened
-once. The host must therefore write both halves of `onAccepted` to tolerate a repeat
-(deliver-by-`publishID`, or simply no-op a Welcome for a member already at that leaf). The
-journal's whole purpose is to make a commit *look* atomic, and that framing is exactly what
-hides the at-least-once semantics underneath — so the design states them rather than letting a
-host infer exactly-once.
+once. The journal's whole purpose is to make a commit *look* atomic, and that framing is
+exactly what hides the at-least-once semantics underneath — so the design states them rather
+than letting a host infer exactly-once.
+
+**The sender does not deduplicate the Welcome, and must not.** Suppressing the repeat would
+mean a crash in this window strands the invitee in a group it was added to and never told
+about, which is the whole reason the Welcome is journalled in the first place. At-least-once
+is the contract, and the repeat is absorbed on the **invitee's** side — by `processWelcomeOnce`
+(`@kumiai/mls`), which joins, sees the group id is one the member already holds, and returns
+`null` instead of the stale handle.
+
+That absorption cannot be assumed; it had to be built. `processWelcome` is a pure function of
+(Welcome bytes, key package, private keys), and neither it nor the MLS library beneath it holds
+a registry of joined groups — so there is no already-joined state for it to consult, and a
+repeat quietly succeeds, returning a second group state frozen at the joining epoch. Adopting
+that handle rolls the member back: every member added since is gone from its roster, it can no
+longer read the group's traffic, and nothing raises an error. Nor can the check be hoisted
+above the join — a Welcome's group id is encrypted to the joiner, so there is nothing to
+compare against until the handle exists. `processWelcomeOnce` therefore does the join and
+*discards* the stale handle, which is the price of the guarantee.
 
 This is why **the journal is not an optimization** (revision 8 said it was; it was wrong).
 Every heal path terminates in `recover()`, and `recover()` is a rendezvous — it needs *another
@@ -1821,8 +1843,13 @@ heal cannot reach for want of a responder.)*
   this bug leaves an admin believing an eviction happened).
 - **Replay runs `onAccepted` twice.** The peer is killed between `onAccepted()` and
   `clear(publishID)`. On restart the entry replays: the handle is adopted again (harmless) and
-  the Welcome is delivered again — and the invitee, already joined, no-ops it rather than
-  erroring or building a duplicate group (the G22 regression test).
+  the Welcome is delivered again — at-least-once, deliberately, because a sender that
+  suppressed the repeat would strand the invitee. The repeat is absorbed by the invitee:
+  `processWelcomeOnce` returns `null` for a group it already holds, and the live handle stands.
+  Assert both halves — that plain `processWelcome` over the same bytes silently builds a second
+  group state at the joining epoch (it does; it neither errors nor no-ops, which is why the
+  safe path exists), and that `processWelcomeOnce` hands back `null` and leaves the member's
+  epoch, roster and ability to read the group untouched (the G22 regression test).
 - **A crash inside `recover()`'s acceptance window converges.** The peer is killed after its
   external commit is accepted and before it adopts. On restart its orphan commit classifies as
   history (authorship matches, epoch does not — the G18 trigger stays quiet), the original heal
