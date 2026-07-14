@@ -47,6 +47,7 @@
     "@noble/hashes": "catalog:"
   },
   "devDependencies": {
+    "@noble/curves": "catalog:",
     "vitest": "catalog:"
   }
 }

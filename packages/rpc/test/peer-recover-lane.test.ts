@@ -8,18 +8,18 @@ import { describe, expect, test } from 'vitest'
 
 import { RecoveryRequiredError } from '../src/commit.js'
 import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
+import { commitTopic, rendezvousTopic } from '../src/topic.js'
+import { publishCommit } from './fixtures/commits.js'
+import { createFakeCrypto } from './fixtures/fake-crypto.js'
+import { FakeHub } from './fixtures/fake-hub.js'
+import { createMemoryCommitJournal } from './fixtures/journal.js'
 import {
   createMemoryGroupMLS,
   encodeMemoryCommit,
   type MemoryGroupMLS,
   memoryEntryID,
   memoryLedgerHead,
-} from '../src/memory-group-mls.js'
-import { commitTopic, rendezvousTopic } from '../src/topic.js'
-import { publishCommit } from './fixtures/commits.js'
-import { createFakeCrypto } from './fixtures/fake-crypto.js'
-import { FakeHub } from './fixtures/fake-hub.js'
-import { createMemoryCommitJournal } from './fixtures/journal.js'
+} from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer, type TestPeer } from './fixtures/peer.js'
 
 const flush = (ms = 40) => new Promise((r) => setTimeout(r, ms))
@@ -533,25 +533,19 @@ describe('a bootstrap that cannot complete is a degraded state, not a heal', () 
     const rs = new Uint8Array(32).fill(0x57)
 
     const bobCrypto = createFakeCrypto({ epoch: 1, localDID: 'bob' })
+    // The only responder withholds an entry. Every token it serves is perfectly well-formed —
+    // omission is exactly what a signature does not protect and what the head chain does.
+    let lying = true
     const bobMLS = createMemoryGroupMLS({
       recoverySecret: rs,
       epoch: 1,
       localDID: 'bob',
       members,
+      serveLedger: (ledger) => (lying ? ledger.slice(0, ledger.length - 1) : ledger),
       onAdvance: (e) => bobCrypto.setEpoch(e),
     })
-    // The only responder withholds an entry. Every token it serves is perfectly well-formed —
-    // omission is exactly what a signature does not protect and what the head chain does.
-    let lying = true
-    const responder: MemoryGroupMLS = {
-      ...bobMLS,
-      getLedger: async () => {
-        const ledger = await bobMLS.getLedger()
-        return lying ? ledger.slice(0, ledger.length - 1) : ledger
-      },
-    }
     const bob = makeMLSPeer(hub, 'bob', rs, {
-      mls: responder,
+      mls: bobMLS,
       crypto: bobCrypto,
       members,
       recovery,

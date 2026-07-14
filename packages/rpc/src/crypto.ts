@@ -170,14 +170,48 @@ export type GroupMLS = {
    */
   isLedgerComplete(): Promise<boolean>
   /**
-   * The WHOLE ordered ledger this handle holds, as signed tokens — what a responder serves
-   * to a bootstrapping peer, and what a peer about to be rejoined snapshots as the entries
-   * it may still owe the group.
+   * The WHOLE ordered ledger this handle holds, as signed tokens — what a peer about to be
+   * rejoined snapshots as the entries it may still owe the group, and what it filters its
+   * re-enactment against once the group's own ledger is back.
+   *
+   * Purely local, and never what goes on the wire: a responder answers a gather with
+   * {@link sealLedger}, which is this ledger sealed to one requester and to nobody else.
    *
    * Order is load-bearing: the head is a chain digest, so a permuted list of the same tokens
    * folds to a different head and the requester rejects it.
    */
   getLedger(): Promise<Array<string>>
+  /**
+   * Answer another member's ledger gather: verify the token, check the requester still holds
+   * a leaf in THIS member's current ratchet tree, and seal this handle's whole ordered ledger
+   * to the ephemeral key inside the signed request.
+   *
+   * The authorization is the same roster-intrinsic check {@link sealGroupInfo} makes, and it
+   * is not a nicety here: the ledger is the group's whole authority state, the rendezvous
+   * topic is public and secretless, and a responder that sealed without checking would hand
+   * every role and every promotion to any stranger who minted a request — neatly encrypted to
+   * the stranger's own key. Throws for a request it refuses, and the peer stays silent.
+   *
+   * The seal is EPOCH-INDEPENDENT, and must remain so. The requester is a peer that crashed
+   * between its rejoin and its bootstrap, and the lane gathers before it pulls — so it can be
+   * at an older epoch than every responder, and a reply sealed under the responder's current
+   * epoch would be unopenable by the very peer that asked for it.
+   */
+  sealLedger(request: Uint8Array): Promise<Uint8Array>
+  /**
+   * Open a sealed gather reply with the key minted for `requestID`, and return the responder's
+   * whole ordered ledger as signed tokens.
+   *
+   * `null` for bytes this peer cannot open — a hub-injected reply, one sealed for another
+   * member or another request, or a reply answering another question entirely. A throw is
+   * tolerated and read the same way. The key is NOT consumed: every responder answers a
+   * gather, and the requester must be able to open the next reply after it drops one.
+   *
+   * Opening proves a member of this group sealed these tokens, and proves nothing more — a
+   * member can still withhold, reorder or truncate, which is what {@link bootstrapLedger}'s
+   * head check is for and what this must never be mistaken for.
+   */
+  openSealedLedger(sealed: Uint8Array, requestID: string): Promise<Array<string> | null>
   /**
    * Install a gathered ledger, verified against the authenticated head BEFORE a single
    * entry is folded. It REPLACES the ledger this handle holds, which is sound because the

@@ -56,16 +56,6 @@ export {
   encodeLedgerEntries,
 } from './ledger-entries.js'
 export {
-  createMemoryGroupMLS,
-  encodeMemoryCommit,
-  LedgerIncompleteError,
-  type MemoryGroupMLS,
-  type MemoryGroupMLSOptions,
-  MissingLedgerEntriesError,
-  memoryEntryID,
-  memoryLedgerHead,
-} from './memory-group-mls.js'
-export {
   createGroupPeer,
   type GroupPeer,
   type GroupPeerMLSParams,

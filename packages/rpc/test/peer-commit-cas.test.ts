@@ -8,13 +8,13 @@ import { fromUTF } from '@sozai/codec'
 import { describe, expect, test } from 'vitest'
 
 import { CommitDeadlineError } from '../src/commit.js'
-import { createMemoryGroupMLS, memoryEntryID } from '../src/memory-group-mls.js'
 import { createGroupPeer } from '../src/peer.js'
 import { commitTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryCommitJournal } from './fixtures/journal.js'
+import { createMemoryGroupMLS, memoryEntryID } from './fixtures/memory-group-mls.js'
 import {
   buildInviteCommit,
   buildLedgerCommit,

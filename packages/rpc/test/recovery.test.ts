@@ -29,13 +29,19 @@ describe('rendezvous codecs', () => {
     expect(() => decodeRecoveryRequest(valid.subarray(0, 3))).toThrow()
   })
 
-  test('a ledger reply round-trips the whole ordered ledger', () => {
-    const tokens = ['role:bob=admin', 'circle:x=Foo', 'circle:x=Bar']
-    const decoded = decodeLedgerReply(encodeLedgerReply('req-2', tokens))
-    expect(decoded.requestID).toBe('req-2')
-    // ORDER is carried, and it is load-bearing: the head is a chain digest, so the same
-    // tokens in another order fold to another head and the requester rejects them.
-    expect(decoded.tokens).toEqual(tokens)
-    expect(decodeLedgerRequest(encodeLedgerRequest('req-2'))).toEqual({ requestID: 'req-2' })
+  test('a ledger gather carries a signed request, and a sealed reply', () => {
+    // The ledger is the group's whole authority state and the rendezvous topic is public, so
+    // the lane carries bytes it cannot read in BOTH directions: the requester's signed blob —
+    // which is what a responder authorizes against, and the only key it will seal to — and the
+    // responder's sealed answer. Neither is a field this codec can look inside.
+    const request = new Uint8Array([7, 7, 7])
+    const decodedRequest = decodeLedgerRequest(encodeLedgerRequest('req-2', request))
+    expect(decodedRequest.requestID).toBe('req-2')
+    expect(Array.from(decodedRequest.request)).toEqual([7, 7, 7])
+
+    const sealed = new Uint8Array([1, 2, 3, 4, 5])
+    const decodedReply = decodeLedgerReply(encodeLedgerReply('req-2', sealed))
+    expect(decodedReply.requestID).toBe('req-2')
+    expect(Array.from(decodedReply.sealed)).toEqual([1, 2, 3, 4, 5])
   })
 })

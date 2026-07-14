@@ -2,10 +2,10 @@ import { fromUTF } from '@sozai/codec'
 import { describe, expect, test } from 'vitest'
 
 import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
-import { encodeMemoryCommit, memoryEntryID } from '../src/memory-group-mls.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
+import { encodeMemoryCommit, memoryEntryID } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
 
 const flush = (ms = 30) => new Promise((r) => setTimeout(r, ms))

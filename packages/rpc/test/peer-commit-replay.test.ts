@@ -2,11 +2,11 @@ import type { HubFetchTopicParams, HubPublishParams, LogHub } from '@kumiai/hub-
 import { describe, expect, test } from 'vitest'
 
 import { type JournalEntry, JournalEpochError, type LostCommit } from '../src/commit.js'
-import { memoryEntryID } from '../src/memory-group-mls.js'
 import { commitTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryCommitJournal, type MemoryCommitJournal } from './fixtures/journal.js'
+import { memoryEntryID } from './fixtures/memory-group-mls.js'
 import {
   adoptJournalledBlob,
   buildInviteCommit,

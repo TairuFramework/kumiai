@@ -1,7 +1,8 @@
+import { x25519 } from '@noble/curves/ed25519.js'
 import { sha256 } from '@noble/hashes/sha2.js'
-import { fromUTF, toB64U, toUTF } from '@sozai/codec'
+import { fromB64U, fromUTF, toB64U, toUTF } from '@sozai/codec'
 
-import type { CommitContext, CommitHeader, GroupMLS, PendingRecovery } from './crypto.js'
+import type { CommitContext, CommitHeader, GroupMLS, PendingRecovery } from '../../src/crypto.js'
 
 export type MemoryGroupMLS = GroupMLS & {
   epoch: () => number
@@ -68,6 +69,16 @@ export type MemoryGroupMLSOptions = {
    * committer.
    */
   acceptsCommitter?: (committerDID: string) => boolean
+  /**
+   * What this responder actually SERVES to a ledger gather, given the ledger it holds.
+   * Defaults to the whole of it, in order.
+   *
+   * A responder that withholds, reorders or truncates an entry is serving a list in which
+   * every token is perfectly well signed — which is exactly what a signature does not protect
+   * and what the requester's head check does. A double that could only serve the truth could
+   * not exercise the one check standing between a bootstrap and a lying member.
+   */
+  serveLedger?: (ledger: Array<string>) => Array<string>
   /** Called whenever the modelled epoch advances (e.g. to keep a GroupCrypto in step). */
   onAdvance?: (epoch: number) => void
 }
@@ -189,7 +200,107 @@ export function decodeMemoryCommit(commit: Uint8Array): MemoryCommit | null {
  *  ledger head — and no ledger, which is the whole reason bootstrap exists. */
 type MemoryGroupInfo = { to: string; requestID: string; epoch: number; head: string }
 
-type MemoryRecoveryRequest = { requestID: string; requesterDID: string }
+/**
+ * The request a peer publishes to ask the group for its state. The requester's DID and the
+ * ephemeral PUBLIC key its reply must be sealed to ride inside it — modelling the signed
+ * token the real port mints, whose signature covers both.
+ */
+type MemoryRecoveryRequest = { requestID: string; requesterDID: string; ephemeralKey: string }
+
+/**
+ * What a sealed reply answers. The two answers are NOT interchangeable, and the separation is
+ * in the seal rather than in a field a reader could forget to compare: the label goes into the
+ * key derivation and into the tag, so a GroupInfo does not open as a ledger even when the
+ * group, the member, the request id and the ephemeral key are all the same.
+ */
+const SEAL_DOMAIN = {
+  groupInfo: 'kumiai/memory-recovery/group-info/v1',
+  ledger: 'kumiai/memory-recovery/ledger/v1',
+} as const
+
+/** enc(32) + tag(16): the shortest well-formed sealed reply. */
+const MIN_SEALED_LENGTH = 32 + 16
+
+function concatBytes(parts: Array<Uint8Array>): Uint8Array {
+  let length = 0
+  for (const part of parts) length += part.length
+  const out = new Uint8Array(length)
+  let offset = 0
+  for (const part of parts) {
+    out.set(part, offset)
+    offset += part.length
+  }
+  return out
+}
+
+/** SHA-256 in counter mode: enough keystream for a payload of any length. */
+function keystream(seed: Uint8Array, length: number): Uint8Array {
+  const out = new Uint8Array(length)
+  for (let offset = 0, counter = 0; offset < length; offset += 32, counter++) {
+    const block = sha256(concatBytes([seed, fromUTF(`/${counter}`)]))
+    out.set(block.subarray(0, Math.min(32, length - offset)), offset)
+  }
+  return out
+}
+
+function xorWith(bytes: Uint8Array, pad: Uint8Array): Uint8Array {
+  const out = new Uint8Array(bytes.length)
+  for (let i = 0; i < bytes.length; i++) out[i] = (bytes[i] as number) ^ (pad[i] as number)
+  return out
+}
+
+/**
+ * The bytes a reply is bound to: the KIND of answer, the group member it is for, and the
+ * request it answers. Bound into the key and into the tag, so a reply for another member, for
+ * another request, or to another question does not open at all — it is never a field compared
+ * after decryption.
+ */
+function sealContext(domain: string, requesterDID: string, requestID: string): Uint8Array {
+  return fromUTF(`${domain}|${requesterDID}|${requestID}`)
+}
+
+/**
+ * Seal a payload to an ephemeral public key: an X25519 ECDH to a fresh keypair, a SHA-256
+ * keystream over the shared secret, and a SHA-256 tag over the ciphertext. `[enc][tag][ct]`.
+ *
+ * NOT production cryptography — no HPKE, no AEAD (the real port uses both). But the TRAPDOOR
+ * is real, and it is the one property the double has to have: everything the hub sees of a
+ * request — the requester's DID, the request id, the ephemeral public key — is in this
+ * function's inputs, and it still cannot derive the shared secret. A double that "sealed"
+ * under something the hub could reconstruct would let a confidentiality test pass for the
+ * wrong reason.
+ */
+function sealToKey(publicKey: Uint8Array, context: Uint8Array, payload: Uint8Array): Uint8Array {
+  const secretKey = x25519.utils.randomSecretKey()
+  const enc = x25519.getPublicKey(secretKey)
+  const shared = x25519.getSharedSecret(secretKey, publicKey)
+  const ct = xorWith(payload, keystream(concatBytes([shared, enc, context]), payload.length))
+  const tag = sha256(concatBytes([shared, context, ct])).subarray(0, 16)
+  return concatBytes([enc, tag, ct])
+}
+
+/** Open a sealed reply, or `null` for bytes this key and context do not open. */
+function openWithKey(
+  privateKey: Uint8Array,
+  context: Uint8Array,
+  sealed: Uint8Array,
+): Uint8Array | null {
+  if (sealed.length < MIN_SEALED_LENGTH) return null
+  const enc = sealed.slice(0, 32)
+  const tag = sealed.slice(32, 48)
+  const ct = sealed.slice(48)
+  let shared: Uint8Array
+  try {
+    shared = x25519.getSharedSecret(privateKey, enc)
+  } catch {
+    return null // hub-injected bytes: not a reply at all
+  }
+  const expected = sha256(concatBytes([shared, context, ct])).subarray(0, 16)
+  for (let i = 0; i < 16; i++) {
+    if (tag[i] !== expected[i]) return null
+  }
+  return xorWith(ct, keystream(concatBytes([shared, enc, context]), ct.length))
+}
 
 /**
  * In-memory {@link GroupMLS} for exercising peer orchestration WITHOUT real MLS —
@@ -206,6 +317,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   const recoverySecret = options.recoverySecret ?? new Uint8Array(32).fill(0x33)
   const localDID = options.localDID
   const acceptsCommitter = options.acceptsCommitter ?? (() => true)
+  const serveLedger = options.serveLedger ?? ((ledger: Array<string>) => ledger)
   let epoch = options.epoch ?? 0
   let commits = 0
   let seen = 0
@@ -218,9 +330,12 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   const bodies = new Map<string, string>()
   for (const token of options.bodies ?? []) bodies.set(memoryEntryID(token), token)
   const leaves: Array<string> = [...(options.members ?? (localDID != null ? [localDID] : []))]
-  /** Ephemeral private keys, keyed by requestID — modelled as the DID a reply must be sealed
-   *  to. Retained by the port between the request and the reply, exactly as the real one is. */
-  const ephemeralKeys = new Map<string, string>()
+  /**
+   * Ephemeral PRIVATE keys, keyed by requestID: minted with the request, retained by the port
+   * until the reply is opened, and never on the wire. It is the whole of what makes a reply
+   * openable by this peer and by nobody else — the hub holds every other input.
+   */
+  const ephemeralKeys = new Map<string, Uint8Array>()
   let failRecoveryAdopt = false
 
   const advance = (to: number): void => {
@@ -228,19 +343,58 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     options.onAdvance?.(epoch)
   }
 
-  const seal = (info: MemoryGroupInfo): Uint8Array => fromUTF(JSON.stringify(info))
+  /**
+   * Verify a request and authorize it against the ROSTER: the only DIDs this responder can
+   * answer are the ones its own tree still carries a leaf for. Roster-intrinsic, so a removed
+   * member — and a stranger, and the hub — gets nothing from any responder that has applied
+   * the removal, and there is no permission a caller can forget to check.
+   *
+   * It THROWS, and that is deliberate: a double that could not refuse could not model the one
+   * question this rendezvous asks of a request, and every authorization test would pass.
+   */
+  const authorize = (request: Uint8Array, label: string): MemoryRecoveryRequest => {
+    let parsed: MemoryRecoveryRequest
+    try {
+      parsed = JSON.parse(toUTF(request)) as MemoryRecoveryRequest
+    } catch {
+      throw new Error(`${label}: the request does not parse`)
+    }
+    if (
+      typeof parsed?.requesterDID !== 'string' ||
+      typeof parsed?.requestID !== 'string' ||
+      typeof parsed?.ephemeralKey !== 'string'
+    ) {
+      throw new Error(`${label}: the request is malformed`)
+    }
+    if (!leaves.includes(parsed.requesterDID)) {
+      throw new Error(`${label}: ${parsed.requesterDID} has no leaf in the current tree`)
+    }
+    return parsed
+  }
+
+  const sealReply = (domain: string, to: MemoryRecoveryRequest, payload: Uint8Array): Uint8Array =>
+    sealToKey(
+      fromB64U(to.ephemeralKey),
+      sealContext(domain, to.requesterDID, to.requestID),
+      payload,
+    )
+
+  const openReply = (domain: string, sealed: Uint8Array, requestID: string): Uint8Array | null => {
+    const privateKey = ephemeralKeys.get(requestID)
+    if (privateKey == null) return null
+    return openWithKey(privateKey, sealContext(domain, localDID ?? '', requestID), sealed)
+  }
 
   const open = (sealed: Uint8Array, requestID: string): MemoryGroupInfo | null => {
+    const opened = openReply(SEAL_DOMAIN.groupInfo, sealed, requestID)
+    if (opened == null) return null
     let info: MemoryGroupInfo
     try {
-      info = JSON.parse(toUTF(sealed)) as MemoryGroupInfo
+      info = JSON.parse(toUTF(opened)) as MemoryGroupInfo
     } catch {
-      return null // hub-injected bytes: not a reply at all
+      return null
     }
     if (typeof info?.to !== 'string' || typeof info?.epoch !== 'number') return null
-    // The ephemeral key minted for THIS request is the only thing that opens a reply: one
-    // sealed to another member, or to another request by this member, does not open at all.
-    if (ephemeralKeys.get(requestID) !== info.to) return null
     if (info.requestID !== requestID) return null
     return info
   }
@@ -381,35 +535,64 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       ledger = entryIDs
     },
     async createRecoveryRequest(requestID: string) {
-      // The ephemeral key, minted per request and retained by the port: the reply is sealed
-      // to it, and to nothing this peer's leaf can be read out of.
+      // The ephemeral keypair, minted per request: the private half is retained here and the
+      // public half goes on the wire. It is the only key a reply is ever sealed to, and it is
+      // nothing this peer's leaf can be read out of — the peers that most need a heal no
+      // longer hold the leaf key the group can see.
+      //
+      // ONE mint serves both gathers. A rejoin and a bootstrap are the same rendezvous asking
+      // two questions, and a second request format would be a second thing to get wrong.
       const requesterDID = localDID ?? ''
-      ephemeralKeys.set(requestID, requesterDID)
-      return fromUTF(JSON.stringify({ requestID, requesterDID } satisfies MemoryRecoveryRequest))
+      const privateKey = x25519.utils.randomSecretKey()
+      ephemeralKeys.set(requestID, privateKey)
+      return fromUTF(
+        JSON.stringify({
+          requestID,
+          requesterDID,
+          ephemeralKey: toB64U(x25519.getPublicKey(privateKey)),
+        } satisfies MemoryRecoveryRequest),
+      )
     },
     async sealGroupInfo(request: Uint8Array) {
-      let parsed: MemoryRecoveryRequest
+      const to = authorize(request, 'sealGroupInfo')
+      return sealReply(
+        SEAL_DOMAIN.groupInfo,
+        to,
+        fromUTF(
+          JSON.stringify({
+            to: to.requesterDID,
+            requestID: to.requestID,
+            epoch,
+            // The AUTHENTICATED head, and no ledger with it. This is what the rejoined handle
+            // will hold, and why its empty ledger reads incomplete rather than
+            // complete-and-empty.
+            head: ledgerHead,
+          } satisfies MemoryGroupInfo),
+        ),
+      )
+    },
+    async sealLedger(request: Uint8Array) {
+      // The same roster check, and it is the whole authorization: the ledger is the group's
+      // authority state, and the topic it goes out on is public. A responder that sealed
+      // without checking would hand every role to any stranger who minted a request.
+      const to = authorize(request, 'sealLedger')
+      // Sealed to the requester's ephemeral key, and NOT under this responder's epoch secret:
+      // the requester may be at an older epoch than this responder, and a reply it cannot open
+      // is a peer left stranded with an empty ledger, reporting itself healthy.
+      return sealReply(SEAL_DOMAIN.ledger, to, fromUTF(JSON.stringify(serveLedger(ledgerTokens()))))
+    },
+    async openSealedLedger(sealed: Uint8Array, requestID: string) {
+      // The key is NOT consumed: every responder answers a gather, and a requester that drops
+      // a lying responder's reply must still be able to open the next honest one.
+      const opened = openReply(SEAL_DOMAIN.ledger, sealed, requestID)
+      if (opened == null) return null
       try {
-        parsed = JSON.parse(toUTF(request)) as MemoryRecoveryRequest
+        const tokens = JSON.parse(toUTF(opened)) as Array<string>
+        if (!Array.isArray(tokens) || tokens.some((token) => typeof token !== 'string')) return null
+        return tokens
       } catch {
-        throw new Error('sealGroupInfo: the request does not parse')
+        return null
       }
-      if (typeof parsed?.requesterDID !== 'string' || typeof parsed?.requestID !== 'string') {
-        throw new Error('sealGroupInfo: the request is malformed')
-      }
-      // Roster-intrinsic authorization: the only DIDs that can be answered are the ones this
-      // responder's own tree still carries a leaf for.
-      if (!leaves.includes(parsed.requesterDID)) {
-        throw new Error(`sealGroupInfo: ${parsed.requesterDID} has no leaf in the current tree`)
-      }
-      return seal({
-        to: parsed.requesterDID,
-        requestID: parsed.requestID,
-        epoch,
-        // The AUTHENTICATED head, and no ledger with it. This is what the rejoined handle
-        // will hold, and why its empty ledger reads incomplete rather than complete-and-empty.
-        head: ledgerHead,
-      })
     },
     async applyRecovery(sealed: Uint8Array, requestID: string): Promise<PendingRecovery | null> {
       const info = open(sealed, requestID)

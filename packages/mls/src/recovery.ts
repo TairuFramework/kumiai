@@ -21,18 +21,9 @@ export const RECOVERY_REQUEST_TYPE = 'group.recovery-request'
 /** The only sealed-reply format this build produces or opens. */
 export const SEALED_GROUP_INFO_VERSION = 1
 
-/**
- * Bound into the AAD of every sealed reply, then framed field by field. The
- * domain separator keeps the AAD from colliding with any other length-framed
- * byte string in the group (e.g. the ledger head's chain), and both sides build
- * it with the same function — a byte-identical AAD is a correctness requirement
- * here, not a nicety.
- */
-const AAD_DOMAIN = utf8.encode('kumiai/mls/recovery-aad/v1')
-
-/** HPKE `info` for the sealed reply — separates this use of the group's HPKE
- *  from every use MLS itself makes of the same ciphersuite. */
-const HPKE_INFO = utf8.encode('kumiai/mls/recovery/v1')
+/** The sealed ledger reply shares the frame — `[version][enc][ct]` — and shares
+ *  nothing else: see {@link LEDGER_REPLY}. */
+export const SEALED_LEDGER_VERSION = 1
 
 /** X25519 KEM output / public key length. The only KEM the crypto provider
  *  supports (see `createNobleCryptoProvider`), so `enc` is fixed-width and the
@@ -41,6 +32,47 @@ const KEM_OUTPUT_LENGTH = 32
 
 /** Version byte + `enc` + a bare AEAD tag: the shortest well-formed reply. */
 const MIN_SEALED_LENGTH = 1 + KEM_OUTPUT_LENGTH + 16
+
+/**
+ * What a sealed reply CARRIES, as the AEAD sees it. One rendezvous answers two
+ * different questions — "give me the group's state" and "give me the group's
+ * ledger" — and the two answers must not be interchangeable: a responder's reply
+ * to one must be undecryptable as the other, so no peer can be fed a ledger where
+ * it asked for a GroupInfo or the reverse.
+ *
+ * The separation is cryptographic and unconditional. In practice a peer's two
+ * gathers already carry different `requestID`s, so their AADs already differ —
+ * but that is a property of the caller, not of the seal, and a caller that reused
+ * an id would silently lose the distinction. The labels below are what actually
+ * carry it: distinct HPKE `info` AND a distinct AAD domain, so the two replies
+ * fail to open for each other even when the group, the member, the request id and
+ * the ephemeral key are all identical.
+ */
+type SealedReplyKind = {
+  /** HPKE `info` — separates this use of the group's HPKE from every use MLS
+   *  itself makes of the same ciphersuite, and from the other reply kind. */
+  hpkeInfo: Uint8Array
+  /** Prefix of the AAD, before the group/member/request fields are framed in. */
+  aadDomain: Uint8Array
+  /** The frame's version byte. */
+  version: number
+  /** Raised when a reply of this kind will not open. */
+  fail: (reason: SealedReplyRejection, message: string) => Error
+}
+
+const GROUP_INFO_REPLY: SealedReplyKind = {
+  hpkeInfo: utf8.encode('kumiai/mls/recovery/v1'),
+  aadDomain: utf8.encode('kumiai/mls/recovery-aad/v1'),
+  version: SEALED_GROUP_INFO_VERSION,
+  fail: (reason, message) => new SealedGroupInfoError(reason, message),
+}
+
+const LEDGER_REPLY: SealedReplyKind = {
+  hpkeInfo: utf8.encode('kumiai/mls/recovery-ledger/v1'),
+  aadDomain: utf8.encode('kumiai/mls/recovery-ledger-aad/v1'),
+  version: SEALED_LEDGER_VERSION,
+  fail: (reason, message) => new SealedLedgerError(reason, message),
+}
 
 /**
  * The signed payload a recovering peer publishes. `iss` — filled by the signer,
@@ -119,21 +151,47 @@ export class RecoveryRequestError extends Error {
  * - `malformed` — the frame is truncated or carries an unknown version, or the
  *   plaintext a responder sealed is not a framed `MLSMessage(GroupInfo)`.
  */
-export type SealedGroupInfoRejection = 'not-for-me' | 'malformed'
+export type SealedReplyRejection = 'not-for-me' | 'malformed'
+
+/** @deprecated name retained for the GroupInfo reply; see {@link SealedReplyRejection}. */
+export type SealedGroupInfoRejection = SealedReplyRejection
+
+/** Why a requester could not open a sealed ledger. The same two answers, for the
+ *  same two reasons — and a GroupInfo presented as a ledger is `not-for-me`, not
+ *  `malformed`: the domains differ, so the AEAD refuses before anything is parsed. */
+export type SealedLedgerRejection = SealedReplyRejection
 
 /** Thrown by {@link openSealedGroupInfo}. Distinguishes "not addressed to me"
  *  from "corrupt", so a peer sifting replies off a shared lane can drop the
  *  former quietly and shout about the latter. */
 export class SealedGroupInfoError extends Error {
-  #reason: SealedGroupInfoRejection
+  #reason: SealedReplyRejection
 
-  constructor(reason: SealedGroupInfoRejection, message: string) {
+  constructor(reason: SealedReplyRejection, message: string) {
     super(message)
     this.name = 'SealedGroupInfoError'
     this.#reason = reason
   }
 
-  get reason(): SealedGroupInfoRejection {
+  get reason(): SealedReplyRejection {
+    return this.#reason
+  }
+}
+
+/** Thrown by {@link openSealedLedger}, and read exactly as its GroupInfo sibling
+ *  is: a requester sifting replies off a shared lane drops `not-for-me` quietly —
+ *  every other member's reply to every other request looks like this — and shouts
+ *  about `malformed`. */
+export class SealedLedgerError extends Error {
+  #reason: SealedReplyRejection
+
+  constructor(reason: SealedReplyRejection, message: string) {
+    super(message)
+    this.name = 'SealedLedgerError'
+    this.#reason = reason
+  }
+
+  get reason(): SealedReplyRejection {
     return this.#reason
   }
 }
@@ -161,15 +219,21 @@ function concat(parts: Array<Uint8Array>): Uint8Array {
 }
 
 /**
- * The AAD binding a sealed reply to one group, one member, and one request. The
- * responder builds it from the *verified* request; the requester rebuilds it
- * from its own handle and its own request id. Any disagreement — a reply meant
- * for another member, or for another request by the same member — is an AEAD
- * failure, not something a caller has to remember to compare.
+ * The AAD binding a sealed reply to one KIND of answer, one group, one member,
+ * and one request. The responder builds it from the *verified* request; the
+ * requester rebuilds it from its own handle and its own request id. Any
+ * disagreement — a reply meant for another member, for another request by the
+ * same member, or answering another question entirely — is an AEAD failure, not
+ * something a caller has to remember to compare.
  */
-function recoveryAAD(groupID: string, requesterDID: string, requestID: string): Uint8Array {
+function recoveryAAD(
+  kind: SealedReplyKind,
+  groupID: string,
+  requesterDID: string,
+  requestID: string,
+): Uint8Array {
   return concat([
-    AAD_DOMAIN,
+    kind.aadDomain,
     frameField(groupID),
     frameField(normalizeDID(requesterDID)),
     frameField(requestID),
@@ -281,31 +345,27 @@ export async function createRecoveryRequest(
   return { request: stringifyToken(signed), ephemeralPublicKey, ephemeralPrivateKey }
 }
 
-export type SealGroupInfoParams = {
-  /** The responder's current handle. Its ratchet tree — not a roster snapshot,
-   *  not a policy list — is what authorizes the requester. */
-  group: GroupHandle
-  /** The signed request token, verbatim. */
-  request: string
-}
-
 /**
- * Answer a recovery request: verify it, check the requester still has a leaf in
- * the responder's current ratchet tree, and seal this group's framed
- * `MLSMessage(GroupInfo)` to the ephemeral key *inside the signed request*.
+ * Answer a request of one kind: verify the request, check the requester still has
+ * a leaf in the responder's current ratchet tree, and seal `plaintext` to the
+ * ephemeral key *inside the signed request*.
  *
- * Authorization is roster-intrinsic. It is not a permission a host can forget to
- * check: the only DIDs that can be answered are the ones the responder's own MLS
- * tree still carries a leaf for, so a removed member gets nothing from the first
- * responder that has applied its removal.
+ * Authorization is roster-intrinsic, and it lives HERE rather than in each caller
+ * — every answer this rendezvous can give is bound by the same tree lookup, and a
+ * new kind of answer cannot be added without it. It is not a permission a host can
+ * forget to check: the only DIDs that can be answered are the ones the responder's
+ * own MLS tree still carries a leaf for, so a removed member gets nothing from the
+ * first responder that has applied its removal.
  *
  * Throws {@link RecoveryRequestError} for every refusal — see
- * {@link RecoveryRequestRejection}. The reply is `[version][enc][ct]`; nothing
- * in it is readable without the ephemeral private key, and nothing in it opens
- * for another member or another request.
+ * {@link RecoveryRequestRejection}.
  */
-export async function sealGroupInfo(params: SealGroupInfoParams): Promise<Uint8Array> {
-  const { group, request } = params
+async function sealToRequest(
+  kind: SealedReplyKind,
+  group: GroupHandle,
+  request: string,
+  plaintext: Uint8Array,
+): Promise<Uint8Array> {
   const verified = await verifyRecoveryRequest(request)
 
   if (verified.groupID !== group.groupID) {
@@ -321,21 +381,82 @@ export async function sealGroupInfo(params: SealGroupInfoParams): Promise<Uint8A
     )
   }
 
-  const { groupInfo } = await exportGroupInfo({ group })
   const { hpke } = group.context.cipherSuite
-  const aad = recoveryAAD(group.groupID, verified.requesterDID, verified.requestID)
+  const aad = recoveryAAD(kind, group.groupID, verified.requesterDID, verified.requestID)
   const { ct, enc } = await hpke.seal(
     await hpke.importPublicKey(verified.ephemeralPublicKey),
-    groupInfo,
-    HPKE_INFO,
+    plaintext,
+    kind.hpkeInfo,
     aad,
   )
 
   const sealed = new Uint8Array(1 + enc.length + ct.length)
-  sealed[0] = SEALED_GROUP_INFO_VERSION
+  sealed[0] = kind.version
   sealed.set(enc, 1)
   sealed.set(ct, 1 + enc.length)
   return sealed
+}
+
+/**
+ * Open a reply of one kind with the key minted for `requestID`, and return the
+ * plaintext the responder sealed.
+ *
+ * The AAD is rebuilt from the caller's *own* group id and DID and the request id
+ * it names, so a reply minted for another member, or for another request by this
+ * same member, fails as an AEAD failure rather than a field comparison a caller
+ * could skip. So does a reply answering another question: the kind is bound into
+ * the AAD and the HPKE `info`, and neither is negotiable.
+ */
+async function openSealedReply(
+  kind: SealedReplyKind,
+  group: GroupHandle,
+  sealed: Uint8Array,
+  requestID: string,
+  ephemeralPrivateKey: Uint8Array,
+): Promise<Uint8Array> {
+  if (sealed.length < MIN_SEALED_LENGTH || sealed[0] !== kind.version) {
+    throw kind.fail('malformed', 'sealed reply frame is truncated or carries an unknown version')
+  }
+  const enc = sealed.slice(1, 1 + KEM_OUTPUT_LENGTH)
+  const ct = sealed.slice(1 + KEM_OUTPUT_LENGTH)
+
+  const { hpke } = group.context.cipherSuite
+  const aad = recoveryAAD(kind, group.groupID, group.credential.id, requestID)
+
+  try {
+    return await hpke.open(
+      await hpke.importPrivateKey(ephemeralPrivateKey),
+      enc,
+      ct,
+      kind.hpkeInfo,
+      aad,
+    )
+  } catch {
+    throw kind.fail('not-for-me', 'sealed reply does not open for this member and request')
+  }
+}
+
+export type SealGroupInfoParams = {
+  /** The responder's current handle. Its ratchet tree — not a roster snapshot,
+   *  not a policy list — is what authorizes the requester. */
+  group: GroupHandle
+  /** The signed request token, verbatim. */
+  request: string
+}
+
+/**
+ * Answer a recovery request with this group's framed `MLSMessage(GroupInfo)`,
+ * sealed to the ephemeral key inside the signed request.
+ *
+ * Throws {@link RecoveryRequestError} for every refusal. The reply is
+ * `[version][enc][ct]`; nothing in it is readable without the ephemeral private
+ * key, and nothing in it opens for another member, another request, or another
+ * kind of answer.
+ */
+export async function sealGroupInfo(params: SealGroupInfoParams): Promise<Uint8Array> {
+  const { group, request } = params
+  const { groupInfo } = await exportGroupInfo({ group })
+  return await sealToRequest(GROUP_INFO_REPLY, group, request, groupInfo)
 }
 
 export type OpenSealedGroupInfoParams = {
@@ -352,40 +473,17 @@ export type OpenSealedGroupInfoParams = {
 
 /**
  * Open a sealed reply and return the framed `MLSMessage(GroupInfo)` — the exact
- * bytes `joinGroupExternal` takes, unchanged.
- *
- * The AAD is rebuilt from the caller's *own* group id and DID and the request id
- * it names, so a reply minted for another member, or for another request by this
- * same member, fails as an AEAD failure rather than a field comparison a caller
- * could skip. Throws {@link SealedGroupInfoError}.
+ * bytes `joinGroupExternal` takes, unchanged. Throws {@link SealedGroupInfoError}.
  */
 export async function openSealedGroupInfo(params: OpenSealedGroupInfoParams): Promise<Uint8Array> {
   const { group, sealed, requestID, ephemeralPrivateKey } = params
-
-  if (sealed.length < MIN_SEALED_LENGTH || sealed[0] !== SEALED_GROUP_INFO_VERSION) {
-    throw new SealedGroupInfoError('malformed', 'sealed GroupInfo frame is truncated or unknown')
-  }
-  const enc = sealed.slice(1, 1 + KEM_OUTPUT_LENGTH)
-  const ct = sealed.slice(1 + KEM_OUTPUT_LENGTH)
-
-  const { hpke } = group.context.cipherSuite
-  const aad = recoveryAAD(group.groupID, group.credential.id, requestID)
-
-  let groupInfo: Uint8Array
-  try {
-    groupInfo = await hpke.open(
-      await hpke.importPrivateKey(ephemeralPrivateKey),
-      enc,
-      ct,
-      HPKE_INFO,
-      aad,
-    )
-  } catch {
-    throw new SealedGroupInfoError(
-      'not-for-me',
-      'sealed GroupInfo does not open for this member and request',
-    )
-  }
+  const groupInfo = await openSealedReply(
+    GROUP_INFO_REPLY,
+    group,
+    sealed,
+    requestID,
+    ephemeralPrivateKey,
+  )
 
   // The AEAD proves a group member sealed these bytes for this request; it does
   // not prove they framed a GroupInfo. Fail here rather than deep inside a join.
@@ -398,4 +496,116 @@ export async function openSealedGroupInfo(params: OpenSealedGroupInfoParams): Pr
     )
   }
   return groupInfo
+}
+
+/**
+ * The whole ordered ledger, framed for sealing: `[count(4)][ (length(4) | token)... ]`,
+ * big-endian throughout, to match the AAD's framing rather than the wire codecs'.
+ *
+ * The ORDER is what is being carried, and it is load-bearing: the head is a chain
+ * digest, so the same tokens in another order fold to another head and the
+ * requester rejects them. A list is the only faithful shape — not a set, not a map.
+ */
+function encodeLedgerTokens(tokens: Array<string>): Uint8Array {
+  const encoded = tokens.map((token) => utf8.encode(token))
+  const size = encoded.reduce((total, bytes) => total + 4 + bytes.length, 4)
+  const out = new Uint8Array(size)
+  const view = new DataView(out.buffer)
+  view.setUint32(0, encoded.length, false)
+  let offset = 4
+  for (const bytes of encoded) {
+    view.setUint32(offset, bytes.length, false)
+    out.set(bytes, offset + 4)
+    offset += 4 + bytes.length
+  }
+  return out
+}
+
+function decodeLedgerTokens(bytes: Uint8Array): Array<string> {
+  if (bytes.length < 4) throw new Error('sealed ledger is too short')
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  const count = view.getUint32(0, false)
+  const tokens: Array<string> = []
+  let offset = 4
+  for (let i = 0; i < count; i++) {
+    if (offset + 4 > bytes.length) throw new Error('sealed ledger is truncated')
+    const length = view.getUint32(offset, false)
+    const start = offset + 4
+    if (start + length > bytes.length) throw new Error('sealed ledger is truncated')
+    tokens.push(new TextDecoder().decode(bytes.subarray(start, start + length)))
+    offset = start + length
+  }
+  return tokens
+}
+
+export type SealLedgerParams = {
+  /** The responder's current handle. Its ratchet tree is what authorizes the
+   *  requester, on exactly the terms {@link sealGroupInfo} is authorized. */
+  group: GroupHandle
+  /** The signed request token, verbatim — the same token a GroupInfo request
+   *  carries, and minted by the same {@link createRecoveryRequest}. */
+  request: string
+  /** The whole ordered ledger this responder holds, as signed tokens. */
+  entries: Array<string>
+}
+
+/**
+ * Answer a ledger gather: the group's whole ordered authority state, sealed to the
+ * ephemeral key inside the signed request.
+ *
+ * These are the SAME bodies a commit frame seals under the epoch secret, and the
+ * gather must give the relay no more than the commit lane does. It gives it less:
+ * the rendezvous topic is public and secretless, so a reply the hub could open
+ * would hand every role, promotion and demotion, in order, to anyone who knows the
+ * topic — and an UNAUTHORIZED reply would hand them to anyone who can mint a
+ * request. The roster check inside {@link sealToRequest} is what closes the second
+ * hole, and it is not optional: a seal without it merely encrypts the group's
+ * authority state neatly to the attacker's own key.
+ *
+ * The seal is epoch-INDEPENDENT, and that is why it is HPKE to an ephemeral key
+ * and not the epoch secret: the peer that most needs a bootstrap is one that
+ * crashed between its rejoin and its gather, and it may be at an older epoch than
+ * every responder. A reply sealed under the responder's current epoch would be
+ * unopenable by the very peer that asked for it.
+ *
+ * Throws {@link RecoveryRequestError} for every refusal; the responder stays silent.
+ */
+export async function sealLedger(params: SealLedgerParams): Promise<Uint8Array> {
+  const { group, request, entries } = params
+  return await sealToRequest(LEDGER_REPLY, group, request, encodeLedgerTokens(entries))
+}
+
+export type OpenSealedLedgerParams = {
+  /** The requester's own handle: the DID and group the AAD is rebuilt from. */
+  group: GroupHandle
+  sealed: Uint8Array
+  /** The id of the request this reply is expected to answer. */
+  requestID: string
+  /** The private half retained since {@link createRecoveryRequest}. */
+  ephemeralPrivateKey: Uint8Array
+}
+
+/**
+ * Open a sealed ledger reply and return the responder's whole ordered ledger, as
+ * signed tokens.
+ *
+ * Opening proves the tokens came from a member that holds this group's tree, and
+ * proves nothing else — a member can still withhold, reorder or truncate. That is
+ * what the head check the caller runs next is for, and this must not be mistaken
+ * for it. Throws {@link SealedLedgerError}.
+ */
+export async function openSealedLedger(params: OpenSealedLedgerParams): Promise<Array<string>> {
+  const { group, sealed, requestID, ephemeralPrivateKey } = params
+  const plaintext = await openSealedReply(
+    LEDGER_REPLY,
+    group,
+    sealed,
+    requestID,
+    ephemeralPrivateKey,
+  )
+  try {
+    return decodeLedgerTokens(plaintext)
+  } catch {
+    throw new SealedLedgerError('malformed', 'sealed plaintext is not a framed ledger')
+  }
 }

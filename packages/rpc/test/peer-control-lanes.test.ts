@@ -1,12 +1,11 @@
 import { describe, expect, test } from 'vitest'
-
-import { createMemoryGroupMLS } from '../src/memory-group-mls.js'
 import { createGroupPeer } from '../src/peer.js'
 import { commitTopic, protocolTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryCommitJournal } from './fixtures/journal.js'
+import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
 import {
   adoptJournalledBlob,
   buildLedgerCommit,

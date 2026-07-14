@@ -495,7 +495,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * head check is a responder that withheld an entry, and the requester falls through to the
    * next reply rather than giving up on the gather.
    */
-  const ledgerWaiters = new Map<string, (tokens: Array<string>) => void>()
+  const ledgerWaiters = new Map<string, (sealed: Uint8Array) => void>()
   const pendingLedgerReplies = new Set<ReturnType<typeof setTimeout>>()
 
   // Responder: after a jitter delay, answer a recovery request with GroupInfo sealed to the
@@ -554,7 +554,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
 
   /**
    * Responder: serve this member's WHOLE ordered ledger to a peer that has rejoined and
-   * holds none.
+   * holds none — SEALED to the ephemeral key inside the request's own signed blob, and only
+   * to a requester the responder's own ratchet tree still holds a leaf for.
+   *
+   * Both halves are the port's, and neither is this lane's to skip. The ledger is the group's
+   * whole ordered authority state, and this topic is public and secretless: a plaintext reply
+   * would hand every role, promotion and demotion to the hub, and an unauthorized one would
+   * hand them to any stranger who put a request on the topic. The port refuses a request from
+   * a DID with no leaf, and this peer then simply stays silent — a refusal is not an answer.
    *
    * **Gated on the completeness invariant.** A peer that has itself rejoined and not yet
    * bootstrapped holds an EMPTY ledger, and answering with it would burn a responder in
@@ -565,7 +572,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * lying responder's answer fails the requester's head check, and the requester needs a
    * second answer to fall through to.
    */
-  const handleLedgerRequest = (request: { requestID: string }): void => {
+  const handleLedgerRequest = (request: { requestID: string; request: Uint8Array }): void => {
     if (mls == null || rendezvousTopicID == null) return
     const port = mls
     const topicID = rendezvousTopicID
@@ -574,23 +581,26 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       void (async () => {
         try {
           if (!(await port.isLedgerComplete())) return
+          // The port verifies the request and checks the requester's leaf against its own
+          // current tree. A request it refuses raises, and this peer simply stays silent.
+          const sealed = await port.sealLedger(request.request)
           await mux.publish({
             topicID,
             payload: encodeHandshakeFrame(
               HANDSHAKE_KIND.ledgerReply,
-              encodeLedgerReply(request.requestID, await port.getLedger()),
+              encodeLedgerReply(request.requestID, sealed),
             ),
           })
         } catch {
-          // a failed reply just means another responder (or a retry) covers it
+          // a refused or failed reply just means another responder (or a retry) covers it
         }
       })()
     }, getReplyDelayMs())
     pendingLedgerReplies.add(timer)
   }
 
-  const handleLedgerReply = (reply: { requestID: string; tokens: Array<string> }): void => {
-    ledgerWaiters.get(reply.requestID)?.(reply.tokens)
+  const handleLedgerReply = (reply: { requestID: string; sealed: Uint8Array }): void => {
+    ledgerWaiters.get(reply.requestID)?.(reply.sealed)
   }
 
   /**
@@ -1043,7 +1053,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     // to diff against. Every responder that holds a complete ledger answers, and each answer
     // is checked against the head this handle already carries: a lying responder can withhold,
     // never rewrite, and one that fails the check is dropped for the next reply.
+    //
+    // The request is the port's own signed blob — the same one a rejoin carries, minted by the
+    // same call. It names this peer inside a signature, which is what a responder authorizes
+    // against, and it carries an ephemeral public key, which is the only key a responder will
+    // seal to. Both halves matter: without the first, any stranger gets the group's whole
+    // authority state for the price of one publish; without the second, so does the hub.
     const requestID = newPublishID()
+    const request = await port.createRecoveryRequest(requestID)
     return await new Promise<boolean>((resolve) => {
       let settled = false
       const finish = (complete: boolean): void => {
@@ -1054,10 +1071,16 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         resolve(complete)
       }
       const timer = setTimeout(() => finish(false), Math.max(0, deadline - Date.now()))
-      ledgerWaiters.set(requestID, (tokens) => {
+      ledgerWaiters.set(requestID, (sealed) => {
         void (async () => {
           if (settled) return
           try {
+            // Bytes this peer cannot open are another member's reply to another request, or a
+            // hub-injected forgery. Dropped, and the gather waits: the key is minted per
+            // request and NOT consumed here, because the next responder's reply is still to
+            // come and it is sealed to the same key.
+            const tokens = await port.openSealedLedger(sealed, requestID)
+            if (tokens == null) return
             await port.bootstrapLedger(tokens)
             finish(true)
           } catch {
@@ -1072,7 +1095,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           topicID,
           payload: encodeHandshakeFrame(
             HANDSHAKE_KIND.ledgerRequest,
-            encodeLedgerRequest(requestID),
+            encodeLedgerRequest(requestID, request),
           ),
         })
         .catch(() => {})

@@ -2,14 +2,14 @@ import type { ProtocolDefinition } from '@enkaku/protocol'
 import type { LogHub } from '@kumiai/hub-tunnel'
 
 import type { PendingCommit } from '../../src/commit.js'
+import { createGroupPeer, type GroupPeer } from '../../src/peer.js'
+import { createFakeCrypto, type FakeCrypto } from './fake-crypto.js'
+import { createMemoryCommitJournal, type MemoryCommitJournal } from './journal.js'
 import {
   createMemoryGroupMLS,
   decodeMemoryCommit,
   type MemoryGroupMLS,
-} from '../../src/memory-group-mls.js'
-import { createGroupPeer, type GroupPeer } from '../../src/peer.js'
-import { createFakeCrypto, type FakeCrypto } from './fake-crypto.js'
-import { createMemoryCommitJournal, type MemoryCommitJournal } from './journal.js'
+} from './memory-group-mls.js'
 
 export const chat = {
   'chat/changed': { type: 'event', data: { type: 'object' } },

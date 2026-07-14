@@ -1770,3 +1770,70 @@ from the test name, which is the one thing a census is tempted to read.
 reads `oldest`, so a member offline *beyond* the window walks to `reconciledHead == head` and **reports
 itself healthy while stuck at a dead epoch.** It is deliberately not in the acceptance list, and it is
 not what bullet 9 covers.
+
+---
+
+### 2026-07-14 — Question 4.3: Does the ledger gather leak the ledger to the relay?
+
+**Findings:** It did, and it was worse than a leak. `encodeLedgerReply` did not seal, and
+`encodeLedgerRequest` carried an **empty payload** — no requester identity, no key. The rendezvous
+topic is public and secretless by design. So the gather was not merely observable by a passive relay:
+**any party that knew the topic could ask, and every complete member would answer.** Captured red
+before the fix — `mallory`, a DID with no leaf in anyone's tree, holding no key and signing nothing,
+published one request and got back:
+
+```
+[RED] responder bob answered requestID=anon-1
+[RED]   tokens: ["role:carol=admin","role:dave=member","role:carol=member"]
+[RED]   frame as text: "EK anon-1    role:carol=admin
+                           role:dave=member   role:carol=member"
+```
+
+The group's whole ordered authority state, in the clear, on a public topic, to a stranger, for the
+price of one publish. **The commit lane seals these exact bodies under the epoch secret and
+`peer-ledger-bodies.test.ts` asserts the hub never sees them. The heal lane gave them away on
+request.**
+
+**Spec impact: revision 33.** The gather now mirrors D2: the request carries the port's **signed**
+blob (requester DID and ephemeral public key inside the signature), the responder authorizes
+**roster-intrinsically**, and the reply is sealed to that ephemeral key under a **distinct HPKE
+domain** from the GroupInfo reply. `sealToRequest` / `openSealedReply` were factored out of
+`sealGroupInfo` — **whose wire format is unchanged, and whose test file is untouched.** The head check
+is untouched and still load-bearing (deleting it takes down the two *pre-existing* head-check tests
+alongside the new ones).
+
+**The two mutations are the whole lesson, and each is a fix somebody would ship.**
+
+**M2 — keep the seal, delete the roster check: the leak test stays GREEN.** A sealed-but-unauthorized
+reply is unreadable by the hub and hands the group's entire authority state to any stranger who asks
+— *encrypted neatly to the stranger's own key*. The confidentiality assertion passes. Only the
+authorization tests fail. **The seal alone is not the fix**, and the check therefore lives inside
+`sealToRequest`, not in its callers: a new kind of answer cannot be added to this rendezvous without
+inheriting it.
+
+**M5 — seal under the responder's current epoch (the obvious fix, and what the commit frame does):
+160 of 162 tests stay green.** Every heal where nobody is behind passes; the hub still sees nothing.
+It fails only for the one peer the mechanism exists for. `ensureLedger` runs **before** the pull, so
+the requester may be behind the responder — measured at **epoch 3 against a responder sealing at 5**
+— and the reply is then unopenable **by the very peer that asked for it**, leaving it stranded with an
+empty ledger and reporting itself healthy. The ephemeral seal is epoch-independent, which is exactly
+why D2 chose it.
+
+**Also: the test double moved out of the public API.** The double's "seal" was plaintext JSON derived
+from the requester DID and requestID — both of which the hub already sees — so *the hub could
+reconstruct it*, and the confidentiality test would have passed **for no reason at all**. It now does a
+real X25519 ECDH. That pulled `@noble/curves` into `@kumiai/rpc`, and `createMemoryGroupMLS` lived in
+`src/` behind the public export while **nothing outside `packages/rpc` imported it**. `memory-group-mls.ts`
+moved to `test/fixtures/`, its exports came out of `src/index.ts`, and the dependency is now a
+devDependency. The `GroupMLS` port contract stays in `src/` — that is the thing hosts implement.
+
+**Learned (4.3):** *"A test double that cannot lie is not a test" has a second half: a test double that
+cannot keep a secret cannot test confidentiality.* The same lesson that bit at G37 and G38 bit here in
+a new form — the double had no trapdoor, so "the hub cannot read this" was unfalsifiable at the rpc
+layer no matter what the code did. And the acceptance list was no defence: bullet 6 asserts
+`sealGroupInfo` leaks nothing to the relay, and it was **true, and green, and beside the point**,
+because nobody had written a bullet about the step that runs immediately after it.
+
+**Carried:** the rpc-level domain-separation assertion does **not** bite under a domain-collapse
+mutation — the double's shape check masks it — so that claim rests on the mls test with real HPKE.
+Reported rather than hidden.

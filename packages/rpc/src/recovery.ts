@@ -1,7 +1,5 @@
 import { fromUTF, toUTF } from '@sozai/codec'
 
-import { decodeLedgerEntries, encodeLedgerEntries } from './ledger-entries.js'
-
 /**
  * Payload codecs for the rendezvous carried on the handshake lane.
  *
@@ -12,9 +10,13 @@ import { decodeLedgerEntries, encodeLedgerEntries } from './ledger-entries.js'
  * field of its own beside the token would be offering the responder an unsigned one to seal
  * against.
  *
- * The ledger gather is the same rendezvous in the other direction: a peer that rejoined by
- * external commit holds an authenticated ledger head and no entries, so it asks for the whole
- * ordered ledger and checks the answer against that head.
+ * The ledger gather is the same rendezvous in the other direction, and it carries the SAME
+ * signed blob for the same two reasons. The topic is public and secretless: a request that
+ * named no requester would be a request anyone could mint, and a reply that was not sealed
+ * would put the group's whole ordered authority state — every role, every promotion, every
+ * demotion — on a public topic in the clear. A peer that rejoined by external commit holds an
+ * authenticated ledger head and no entries, so it asks for the whole ordered ledger, opens the
+ * reply with the key minted for its own request, and checks what it finds against that head.
  */
 
 /** Cap on decoded ID lengths — these become attacker-controlled map keys. */
@@ -79,28 +81,40 @@ export function decodeRecoveryReply(payload: Uint8Array): {
   return { requestID, groupInfo: rest }
 }
 
-export function encodeLedgerRequest(requestID: string): Uint8Array {
-  return encodeWithRequestID(requestID, new Uint8Array(), 'ledger request')
+/**
+ * A ledger gather carries the port's signed request blob, exactly as a recovery request does
+ * and for the same reason: it is what a responder authorizes against, and it is the only key
+ * a responder will seal to. A request with no blob is a request from nobody, and every
+ * responder refuses it.
+ */
+export function encodeLedgerRequest(requestID: string, request: Uint8Array): Uint8Array {
+  return encodeWithRequestID(requestID, request, 'ledger request')
 }
 
-export function decodeLedgerRequest(payload: Uint8Array): { requestID: string } {
-  const { requestID } = decodeWithRequestID(payload, 'ledger request')
-  return { requestID }
+export function decodeLedgerRequest(payload: Uint8Array): {
+  requestID: string
+  request: Uint8Array
+} {
+  const { requestID, rest } = decodeWithRequestID(payload, 'ledger request')
+  return { requestID, request: rest }
 }
 
 /**
- * A responder's whole ordered ledger. The order is carried, and it is load-bearing: the head
- * is a chain digest, so a permuted list of the same tokens folds to a different head and the
- * requester rejects it.
+ * A responder's whole ordered ledger, SEALED to the ephemeral key inside the request it
+ * answers. The lane carries the bytes and reads none of them: what is in there is the port's
+ * business, and the hub's business is nothing.
+ *
+ * The order is carried inside the seal, and it is load-bearing: the head is a chain digest,
+ * so a permuted list of the same tokens folds to a different head and the requester rejects it.
  */
-export function encodeLedgerReply(requestID: string, tokens: Array<string>): Uint8Array {
-  return encodeWithRequestID(requestID, encodeLedgerEntries(tokens), 'ledger reply')
+export function encodeLedgerReply(requestID: string, sealed: Uint8Array): Uint8Array {
+  return encodeWithRequestID(requestID, sealed, 'ledger reply')
 }
 
 export function decodeLedgerReply(payload: Uint8Array): {
   requestID: string
-  tokens: Array<string>
+  sealed: Uint8Array
 } {
   const { requestID, rest } = decodeWithRequestID(payload, 'ledger reply')
-  return { requestID, tokens: decodeLedgerEntries(rest) }
+  return { requestID, sealed: rest }
 }

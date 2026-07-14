@@ -1,6 +1,6 @@
 # Design: the control-ledger lane
 
-**Status:** design, revision 32 (2026-07-14). **G28 is RETRACTED** — see below. Reviewed fourteen times by kubun in
+**Status:** design, revision 33 (2026-07-14). **G28 is RETRACTED** — see below. Reviewed fourteen times by kubun in
 `2026-07-13-control-ledger-lane-review.md`; G1–G27 are folded in below. Revisions 16–25 fold in
 the implementation probes: `NotSubscribedError`, a `trim` primitive, a 30-day default
 window, two retention classes with subscriber-requested durations, **G28 — the commit lane must
@@ -1369,6 +1369,43 @@ The primitives for this are already in `mls` and, today, wired only for the invi
 `computeHead` and `assertHeadMatches` (whose `LedgerIncompleteError` doc comment names this
 attack verbatim — "an inviter omitted, reordered, or truncated a ledger entry") are called
 from `processWelcome` and nowhere else. Rejoin needs the same check.
+
+**The gather is sealed and authorized exactly as D2's is (revision 33).** The head check bounds a
+lying *responder*; it says nothing about who may *ask*, or who may *read the answer* — and the
+first draft of this design answered both questions wrongly. The rendezvous topic is public and
+secretless by construction, the ledger request carried no identity, and the reply was published in
+the clear. So **any party that knew the topic — the hub, a removed member, a stranger — could ask,
+and every complete member would answer with the group's entire ordered authority state in
+plaintext**: every role, every promotion, every demotion, in order, for the price of one publish.
+These are the same bodies the commit frame seals under the epoch secret and that the design
+elsewhere insists the relay never sees. The commit lane protected them; the heal lane gave them
+away on request.
+
+The gather is the same rendezvous as D2 in the other direction, and it takes the same three
+properties, which are **one mechanism, not three**:
+
+1. **The request carries the port's signed blob** — requester DID and ephemeral public key *inside*
+   the signature. A DID in a field beside the token is an unsigned DID, and sealing to it is sealing
+   to whoever asked.
+2. **Authorization is roster-intrinsic**, in the seal itself and not in its callers: the only DIDs
+   any responder can answer are the ones its own ratchet tree still holds a leaf for. A new kind of
+   answer cannot be added to this rendezvous without inheriting the check.
+3. **The reply is sealed to that ephemeral key**, under a **distinct HPKE domain** from the
+   GroupInfo reply, so the two cannot be substituted for one another.
+
+**The seal alone is not the fix, and this is the trap worth writing down.** A sealed-but-unauthorized
+reply is unreadable by the hub and hands the group's whole authority state to any stranger who asks
+— *encrypted neatly to the stranger's own key*. The confidentiality test passes. Only the
+authorization test fails.
+
+**And it must be sealed to the ephemeral key, not the epoch secret.** The epoch secret is the
+obvious choice — it is what the commit frame uses — and it is wrong here for a reason that is
+invisible in the common case: `ensureLedger` runs **before** the pull, so the requester (a peer that
+crashed between its rejoin and its bootstrap) may be at an **older epoch than the responder**. A
+reply sealed at the responder's current epoch is unopenable **by the very peer that asked for it**,
+and the group heals, the hub sees nothing, and that peer is left stranded with an empty ledger
+**reporting itself healthy.** The ephemeral seal is epoch-independent, which is precisely why D2
+chose it.
 
 ```ts
 type GroupMLS = {

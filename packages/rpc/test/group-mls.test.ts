@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest'
 
-import { createMemoryGroupMLS, memoryEntryID } from '../src/memory-group-mls.js'
+import { createMemoryGroupMLS, memoryEntryID } from './fixtures/memory-group-mls.js'
 
 describe('GroupMLS port', () => {
   test('processCommit advances the epoch and reports it', async () => {
@@ -206,6 +206,51 @@ describe('GroupMLS port', () => {
     // And the requester cannot open it under another request id: the key is minted per request.
     await stranded.createRecoveryRequest('req-2')
     expect(await stranded.applyRecovery(sealed, 'req-2')).toBeNull()
+  })
+
+  test('a sealed ledger answers one question, and the key survives a reply that is dropped', async () => {
+    const live = createMemoryGroupMLS({
+      recoverySecret: new Uint8Array(32).fill(1),
+      localDID: 'live',
+      members: ['live', 'stranded'],
+    })
+    live.adopt(live.buildCommit(['role:live=admin']))
+    const stranded = createMemoryGroupMLS({
+      recoverySecret: new Uint8Array(32).fill(1),
+      localDID: 'stranded',
+    })
+
+    // ONE request, so the two replies differ in nothing but the question they answer: same
+    // member, same request id, same ephemeral key. A GroupInfo is not a ledger and a ledger is
+    // not a GroupInfo, and neither opens as the other.
+    const request = await stranded.createRecoveryRequest('req-1')
+    const sealedGroupInfo = await live.sealGroupInfo(request)
+    const sealedLedger = await live.sealLedger(request)
+    expect(await stranded.openSealedLedger(sealedGroupInfo, 'req-1')).toBeNull()
+    expect(await stranded.applyRecovery(sealedLedger, 'req-1')).toBeNull()
+
+    // And a reply the requester drops does not cost it the key: every responder answers a
+    // gather, and the next one's reply is sealed to the same ephemeral key.
+    expect(await stranded.openSealedLedger(sealedLedger, 'req-1')).toEqual(['role:live=admin'])
+  })
+
+  test('a member with no leaf in the responder tree is refused the ledger, as well as the group', async () => {
+    const live = createMemoryGroupMLS({
+      recoverySecret: new Uint8Array(32).fill(1),
+      localDID: 'live',
+      members: ['live'],
+    })
+    live.adopt(live.buildCommit(['role:live=admin']))
+    const mallory = createMemoryGroupMLS({
+      recoverySecret: new Uint8Array(32).fill(1),
+      localDID: 'mallory',
+    })
+    // The ledger is the group's whole authority state, and the topic it is asked for on is
+    // public. Sealing without authorizing would answer this — and encrypt every role neatly to
+    // the stranger's own key.
+    await expect(live.sealLedger(await mallory.createRecoveryRequest('req-1'))).rejects.toThrow(
+      /no leaf/,
+    )
   })
 
   test('a member with no leaf in the responder tree is refused', async () => {

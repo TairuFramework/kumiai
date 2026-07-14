@@ -3,9 +3,9 @@ import type { HubPublishParams } from '@kumiai/hub-tunnel'
 import { encodeCommitFrame } from '../../src/commit-frame.js'
 import { encodeHandshakeFrame, HANDSHAKE_KIND } from '../../src/handshake.js'
 import { encodeLedgerEntries } from '../../src/ledger-entries.js'
-import { encodeMemoryCommit, memoryEntryID, memoryLedgerHead } from '../../src/memory-group-mls.js'
 import { commitTopic } from '../../src/topic.js'
 import { createFakeCrypto } from './fake-crypto.js'
+import { encodeMemoryCommit, memoryEntryID, memoryLedgerHead } from './memory-group-mls.js'
 
 type PublishingHub = { publish: (params: HubPublishParams) => Promise<{ sequenceID: string }> }
 
