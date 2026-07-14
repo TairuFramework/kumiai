@@ -1,6 +1,6 @@
 # Design: the control-ledger lane
 
-**Status:** design, revision 29 (2026-07-14). Reviewed fourteen times by kubun in
+**Status:** design, revision 30 (2026-07-14). **G28 is RETRACTED** — see below. Reviewed fourteen times by kubun in
 `2026-07-13-control-ledger-lane-review.md`; G1–G27 are folded in below. Revisions 16–25 fold in
 the implementation probes: `NotSubscribedError`, a `trim` primitive, a 30-day default
 window, two retention classes with subscriber-requested durations, **G28 — the commit lane must
@@ -847,7 +847,47 @@ failure, and the peer heals by external-commit rejoin and re-enacts its entries.
 Because a loser's commit is never published, the commit topic under an honest hub contains
 only accepted commits.
 
-#### The commit lane must not outrun the mailbox (G28)
+#### ~~The commit lane must not outrun the mailbox (G28)~~ — RETRACTED, revision 30
+
+**G28 is wrong, and it was tested before it was implemented. Everything in this section down to the
+next heading is kept as the record of a mistake; do not build from it.** What replaces it is G41 (the
+real mechanism, scoped out to `docs/agents/plans/next/2026-07-14-app-lane-delivery.md`) and G42 (the
+destructor, fixed).
+
+**The scenario it describes passes with no fix.** A peer goes offline, the group makes ten commits, an
+app message is sent at an early epoch, the peer reconnects — and it reads the plaintext, through a test
+double that opens *only* the current epoch, with `retainKeysForEpochs` untouched.
+
+**The commit lane cannot outrun the mailbox, because they are the same queue.** `createHubMux` drains
+`hub.receive` in one ordered loop and unwraps app frames **synchronously** in the listener, while
+`onCommitDelivery` defers all its work behind `void runSerial(...)`. For any frame ahead of the commit
+in delivery order the interleave **already holds structurally**, guaranteed by the drain and not by any
+rule. *"Replay races to the head while the mailbox is still full"* describes a lane this codebase does
+not have.
+
+**And the rule cannot be implemented.** *"Drain the mailbox up to E"* needs a per-epoch mailbox that
+does not exist: app frames are mailbox-class, `fetchTopic` serves **log-class frames only** — an app
+frame **can never be pulled** — `subscribe` back-fills nothing, and a mailbox publish with no
+subscribers is dropped at publish. There is no signal that says *"I have everything for epoch E."* Any
+implementation is a race against the delivery loop, not an invariant.
+
+**G41 — what actually loses messages: the subscription, not the secret.** App topics are epoch-derived
+and app delivery is push-only, so **a member is structurally incapable of receiving traffic from any
+epoch it slept through** — it was never a subscriber of that topic, the hub created no delivery for it,
+it cannot pull, and `subscribe` back-fills nothing. This is true **today, before D1**, and no key
+retention window touches it. It is the app lane's problem, not the control lane's, and it is scoped out.
+
+**G42 — three paths were DELETING mail; all three are closed.** On the real store,
+`unsubscribe → dropDelivery → removeEntry` is a **destructor**. It was reached by `rebuildEpoch()`
+(advancing the epoch deleted the peer's unread mail), by the self-inbox topic (directed mail deleted on
+every rotation), and by `peer.dispose()` (**which is what backgrounding calls on mobile**). The peer now
+releases *listeners* and never unsubscribes: **a subscription is a durable relationship, not a session**,
+and the app topics now hold the property the control topics always had. Non-delivery is recoverable by a
+future design; deletion is not — which is why these were fixed and the rest was not.
+
+---
+
+**The retracted argument follows.**
 
 Pulling the commit lane out of the mailbox breaks an interleaving that was previously free,
 and the cost is silent message loss.
@@ -1715,11 +1755,22 @@ heal cannot reach for want of a responder.)*
 - **Late joiner.** A member is invited, two further commits land before it subscribes, and it
   converges by pulling the log — with no `recover()` and **no fork diagnosis**, walking
   frames from epochs it never held (the G5 regression test).
-- **The lane does not outrun the mailbox (G28).** A peer is offline while the group makes ten
-  commits *and* sends an app message at an early epoch. On reconnect it reads the message.
-  With `retainKeysForEpochs` at its default of 4 this fails unless replay interleaves, and it
-  fails **silently** — the peer converges, the roster matches, nothing throws, and the message
-  is simply undecryptable. Assert the plaintext, never the absence of an error.
+- **~~The lane does not outrun the mailbox (G28).~~ RETRACTED.** The scenario **passes with no fix** —
+  the commit lane and the mailbox are the same ordered queue, so the interleave already holds
+  structurally. What replaces it:
+  - **Advancing an epoch does not delete the peer's mail (G42).** The peer rotates its app lane, and
+    the frames it had not yet read are **still in the hub**. Same for its directed inbox, and same
+    across `dispose()` — which on mobile is what backgrounding calls. A test asserting
+    `subscriberCount === 0` after a rotation or a dispose is **encoding the destructor as an
+    invariant**; four of them did.
+  - **A returning peer reads the plaintext of messages sent at an epoch it slept through (G41).**
+    **This test is in the tree and it is SKIPPED, because it cannot pass** — app topics are
+    epoch-derived and app delivery is push-only, so the peer was never a subscriber of that topic and
+    the hub created no delivery for it. Waiting on
+    `docs/agents/plans/next/2026-07-14-app-lane-delivery.md`. Do not delete it, do not weaken it: it is
+    the only assertion in the repo that catches a peer losing every message in its inbox, and **148 rpc
+    tests and 287 mls tests pass while it does.**
+  - In both cases: **assert the plaintext, never the absence of an error.**
 - **A mailbox frame on `commitTopic` does not wedge the lane (G33).** Any member — a removed one
   included — publishes one `retain: 'mailbox'` frame there, and the next `commit()` still
   **lands**. Assert it landed *for the group* (a second member's ledger and epoch), never that

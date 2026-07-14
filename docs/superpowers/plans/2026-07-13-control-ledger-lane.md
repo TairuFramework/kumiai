@@ -1525,3 +1525,101 @@ telling hosts to rely on it, and the journal's Welcome re-delivery resting on it
 read it as obviously true. It was reachable only by testing the **recipient** instead of the sender, and
 every test we had asserted the sender delivers once — the easy half, and the wrong half. **When a design
 claims a dependency behaves a certain way, that claim is a test, not a premise.**
+
+---
+
+### 2026-07-14 — Question 3.7: Does the lane outrun the mailbox and destroy downloaded messages? (G28)
+
+**ANSWERED: NO — and something far worse is true.** The probe reported `BLOCKED` on the spec, not on the
+code, and it was right. **G28 is wrong on the mechanism, and its rule cannot be implemented.** Green: rpc
+149 + **1 deliberately skipped**, mls 287, 27/27. Report: `docs/superpowers/probes/question-3.7-report.md`.
+
+**The spec's own scenario passes with no fix.** Written test-first, as the plan demanded: a peer goes
+offline, the group makes ten commits, an app message is sent at an early epoch, the peer reconnects — and
+it **reads the plaintext**. Through a double that opens *only* the current epoch, with
+`retainKeysForEpochs` untouched. The message survived ten commits and a one-epoch key window.
+
+**The commit lane cannot outrun the mailbox, because they are the same queue.** `createHubMux` drains
+`hub.receive` in one ordered loop and unwraps app frames **synchronously** in the listener, while
+`onCommitDelivery` defers all its work behind `void runSerial(...)`. For any frame ahead of the commit in
+delivery order, the interleave **already holds structurally** — guaranteed by the drain, not by any rule.
+*"D1 makes the commit lane run at step 0 so replay races to the head while the mailbox is still full"*
+**describes a lane that does not exist in this tree.**
+
+**And the rule is not implementable.** *"Drain the mailbox up to E"* needs a per-epoch mailbox that does
+not exist: app frames are mailbox-class, `fetchTopic` serves **log-class only** — so an app frame **can
+never be pulled** — `subscribe` back-fills nothing, and a mailbox publish with no subscribers is dropped
+at publish. There is no signal that says *"I now have everything for epoch E"*. Any implementation is a
+**race against the delivery loop, not an invariant**. Reordering `ready` turns the failing test green, and
+the probe **refused to ship it** — the same scenario still loses the message when the backlog arrives one
+tick later. That is winning a race on a fast machine, and calling it an invariant.
+
+**G41 — what actually loses messages, and it is not the keys.** Six experiments; the causal pair is a
+restart with ten commits (message lost) against the identical restart with **zero** commits (message
+read, at epoch 1, through a double that opens only the current epoch). **The commits destroy the message,
+and what they destroy is the *subscription*, not the secret.**
+
+At startup the seed pull runs **to head before `buildEpoch()`**, so a peer that comes up at epoch 1
+holding epoch-1 frames builds its app lane at **epoch 11** and never installs a listener on the epoch-1
+topic at all. The hub — which still has it subscribed, because a crash does not unsubscribe — **pushes the
+frame straight at it**, and it lands in the mux drain, finds no listener, and is dropped on the floor.
+**The hub delivered it. The peer held the key. It threw it away.**
+
+**The real defect is structural, predates D1, and the control lane has nothing to do with it.** App topics
+are **epoch-derived** and app delivery is **push-only**, so a member is *structurally incapable* of
+receiving traffic from any epoch it slept through: it was never a subscriber of that topic, so the hub
+created no delivery for it, it cannot pull, and `subscribe` back-fills nothing. **That** is what "a member
+offline over lunch loses its messages" actually is. No key window touches it. **Scoped out** to
+`docs/agents/plans/next/2026-07-14-app-lane-delivery.md` — "should app frames be log-class and pullable"
+reaches retention, GC and unlinkability, and deserves a brainstorm, not a probe.
+
+**G42 — three paths were DELETING mail, and all three are now closed.** On the real store
+`unsubscribe → dropDelivery → removeEntry` is a **destructor**: it frees the subscriber's pending
+deliveries, and frees the frame outright for everyone if that was the last pending reader.
+
+1. **`rebuildEpoch()`** unsubscribed the old epoch's protocol topic — **advancing the epoch deleted the
+   peer's own unread mail out of the hub.**
+2. **The self-inbox topic** went through the same release path, so **directed mail was deleted on every
+   rotation too.** Nobody had named this one; it fell out of fixing the first.
+3. **`peer.dispose()`** unsubscribed everything — and **on a mobile client, `dispose` is what backgrounding
+   calls.** The same destructor under another name, firing in the most common way a peer goes away.
+
+The governing principle, and the reason these were fixed here while the rest was scoped out:
+**non-delivery is recoverable by a future design; deletion is not.** A frame still retained in the hub can
+be handed to a pull-based app lane whenever we build one. A frame `removeEntry` has freed is gone forever.
+
+The fix is peer-side, with **no `HubStore` change** — the peer simply stops *asking* for the deletion.
+`release()` and `dispose()` now drop **local listeners** and leave the subscription standing. The app
+topics now hold the property the control topics always had, in the spec's own words: *subscribed once for
+the peer's whole life, deliberately NOT unsubscribed.* **A subscription is a durable relationship, not a
+session.** Dropping a listener, rotating an epoch and disposing all mean *"I am not listening"*; none of
+them means *"I have read my mail, throw the rest away"*, which is what `unsubscribe` means to the store.
+
+**The destructor was written down as an invariant — in four tests.** Three rotation assertions
+(`subscriberCount(T(old)) === 0`) and, exactly as predicted, `hub-mux.test.ts`'s *"dispose stops the drain
+and unsubscribes remaining topics"*. **They were the bug, not the fix.** All four now assert the opposite
+and say why. Mutation checks: restoring `dispose()`'s unsubscribe → 1 red; restoring `release()`'s → 3 red.
+
+**Accepted cost, stated not buried.** Subscriptions are never released, so they accumulate — **~1,400 per
+member per week** of process uptime at 100 commits/day. Taken deliberately, because the alternative is
+deleting users' mail. It **dissolves entirely if the redesign drops epoch-derived topics** (one stable
+topic per protocol, subscribed for life, exactly as `commitTopic` already is), which is why a sweep now
+would likely be wasted work — and a sweep needs a retention figure **the app lane does not declare**.
+
+**The most useful number in this plan.** When the failing test was written, **148 rpc tests and 287 mls
+tests passed while the peer silently lost every message in its inbox.** The convergence assertion on the
+line directly above the failure passed too. And **no test in the suite could ever have caught it**: the
+peer fixture had no way to register an app handler, so nothing in the repo had *ever* asserted a plaintext
+across a commit. The one new assertion is the only thing that notices. It is kept, **skipped**, unweakened
+— a reader can unskip it and watch it fail for the right reason.
+
+**Spec impact:** revision 30 — **G28 is retracted**: wrong mechanism, unimplementable rule, and it
+described a race that does not exist. Replaced by G41 (the real mechanism, scoped out) and G42 (the
+destructor, fixed).
+
+**Learned.** The plan's organizing principle is *"a design claim the obvious implementation satisfies
+while being wrong."* This question found its mirror: **a design claim that is wrong about the system it
+describes.** G28 reasoned from an architecture — commits racing ahead of a drainable mailbox — that this
+codebase does not have. Writing the test first is what caught it; had the probe started from the fix, it
+would have built an interleave for a race that cannot happen, shipped it green, and left the real bug
+untouched **with a test standing guard over it.**
