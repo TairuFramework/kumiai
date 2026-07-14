@@ -1917,3 +1917,57 @@ a secret), in its third disguise: **a test whose every actor is honest cannot se
 hole.** And bullet 6 of the acceptance list — "exportGroupInfo leaks nothing to the relay" — was true,
 green, and beside the point, because it was written about the seal's *confidentiality* and the hole was
 in its *authenticity*.
+
+### 2026-07-14 — Question 5.2: A failed heal deletes its own trigger; dispose during a heal hangs the lane.
+
+**Findings:** Two Criticals, both reproduced against HEAD before any fix, both in `peer.ts`, both silent.
+
+**Critical 1 — a stranded peer wins a compare-and-set at a stale epoch, with no attacker.** `recover()`
+cleared `healRequested` at the top of each attempt and restored it on none of its failure exits. The
+`ahead` cursor row **advances the cursor and takes the tip**, so after one pull the flag is the peer's
+*only* remaining evidence it is off the group's line — and `commit()`'s sole guard against racing at a
+stale epoch is that flag. Reproduced: group at epoch 3, log trimmed to a single frame framed at epoch 3,
+Bob back at epoch 1, no responder — `commit()` **resolved instead of rejecting**, Bob framed at epoch 1
+against a head carrying epoch 3, **won the CAS**, and advanced onto a branch of one. If the commit were
+an invite, its Welcome delivers the invitee into that branch. This is a live regression against a
+**recorded** hazard: the Q3.4 log said the self-fork "expires (the next commit is ahead of it)", true
+only when a responder exists; the no-responder path was documented as "stays degraded and retries" and
+the code **forgot** instead. The `own-unmerged` row was already safe — it does not advance the cursor,
+so its trigger re-fires on every pull — which is exactly why the one existing test (covering only that
+row) stayed green.
+
+**Fix — a distinct `stranded` flag, not capture/restore of `healRequested`.** The minimal fix does not
+work: `healIfRequested` clears `healRequested` **before** calling `recover()`, so a capture at entry
+captures `false`. `healRequested` conflates *schedule the next heal* (legitimately cleared as control
+flow) with *refuse commits, I have positive evidence I am behind* (must survive a failed heal). `stranded`
+is set only by the three positive-evidence rows (`own-unmerged`, `ahead`, `fork`-losing), guards
+`commit()` alone, and is cleared in exactly one place: a rejoin that actually lands. That is provably
+exact — **no pull can un-strand a peer**, because log frames run in non-decreasing epoch order, so once a
+peer sees a frame ahead of its epoch there is never a frame *at* its epoch behind it to apply; only a
+rejoin rebuilds its place in the tree.
+
+**Group-death hazard (Q3.4) shown NOT reintroduced.** The guard fires on `ahead`-class evidence, **never
+on poison**. New test: a peer that has only stepped over a body-less frame **still commits**. The
+distinction the log demands holds — in the case it fears, nobody resolves the body-less frame, so the
+group never advances past that epoch and no honest member ever sees an `ahead` frame to be gated by.
+
+**Critical 2 — `dispose()` during an in-flight heal hangs the whole lane.** `requestGroupInfo` resolves
+from exactly two places, a reply or its timeout, and `dispose()` cleared the timeout (`recoveryTimers`)
+while never resolving `recoveryWaiters`. So `recover()` never settled, `commitTail` never resolved, and
+every lane op queued behind it hung too — reproduced as `recover() after dispose: HUNG`. `dispose()` is
+what backgrounding a mobile client calls; a heal is what a returning peer runs at startup. Fix:
+`dispose()` drains the waiters (each called with `null`) **before** clearing the timers, mirroring the
+timeout path. The **ledger gather does not have this bug** and was left unchanged — its requester-side
+timeout is a bare local `const`, held in none of the collections `dispose()` clears, so it fires and
+settles `ensureLedger` on its own; confirmed by a test that passes on unmodified source.
+
+**Spec impact: none.** Both are implementation defects against behaviour the spec already specifies
+(`RecoveryRequiredError`'s contract, and `dispose()` tearing down cleanly). rpc 162 → 171; nine new
+tests across `peer-failed-heal-strand.test.ts` and `peer-dispose-heal.test.ts`; each mutation reproduces
+exactly its red and nothing else.
+
+**Learned (5.2):** *A flag that means two things is cleared for one reason and read for the other.*
+`healRequested` was a scheduling signal and a safety gate wearing one name, and the scheduling half's
+legitimate clear silently disarmed the gate. The bug was invisible because the only heal-trigger row the
+suite tested under a failed heal was the one that re-arms itself — the review's standing lesson again: a
+test that exercises the self-healing case cannot see a fault in the cases that do not self-heal.

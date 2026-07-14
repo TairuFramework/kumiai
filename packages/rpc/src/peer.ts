@@ -402,6 +402,30 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   let healing = false
 
   /**
+   * Positive evidence this peer is off the group's line, and the sole guard on `commit()`. It
+   * is set when a pull sees proof the peer cannot reconcile itself: a frame framed AHEAD of its
+   * epoch, its OWN un-merged commit at its current epoch, or the LOSING side of a fork.
+   *
+   * It is deliberately NOT `healRequested`. That flag only SCHEDULES the next heal and is
+   * cleared as ordinary control flow — `recover()` clears it at the top of every attempt — so a
+   * heal that finds no responder, or runs out its deadline, leaves it false. Gating `commit()`
+   * on it would let a peer that just failed to heal race the compare-and-set at a stale epoch
+   * and WIN, landing a commit — a Welcome among them — on a branch of one. This flag instead
+   * survives a failed heal: it is cleared ONLY when a rejoin actually lands (`recover`), which
+   * is the one thing that rebuilds this peer's place in the tree. No pull can carry a stranded
+   * peer back — the frames that would are gone, and the head sits at an epoch it can no longer
+   * reach by applying the log.
+   *
+   * Set on that positive evidence and NEVER on poison: a frame this peer stepped over — one
+   * malformed, refused by policy, or naming bodies nobody can resolve — is not evidence the
+   * group moved on without it, because nobody applied it either. Gating on poison would rebuild
+   * the group-death hazard the classifier's `poison` row exists to refuse: every honest member
+   * would refuse to commit at an epoch a body-less frame poisoned, and no one could publish the
+   * commit that unsticks the group.
+   */
+  let stranded = false
+
+  /**
    * A commit this peer journalled, that never landed, and that it cannot re-issue itself:
    * held until a lane operation with a return value can hand it to the host.
    *
@@ -622,8 +646,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * store's OWN reply — never inferred from the cursor. It is recorded ONLY on a complete
    * drain, at the points this returns having read the whole log: a tip recorded ahead of the
    * frames it covers would name a commit this peer has not reconciled to, and the next
-   * `commit()` would win a compare-and-set at an epoch it had not caught up to. A pull that
-   * stops early — on the frame it must heal for — takes no tip at all.
+   * `commit()` would win a compare-and-set at an epoch it had not caught up to. Only the
+   * `own-unmerged` frame stops the pull early and takes no tip; the `ahead` path steps OVER its
+   * frame and drains to the end, so it DOES record the tip — the head is genuinely beyond this
+   * peer — and it is the `stranded` flag, not a withheld tip, that then stops the next
+   * `commit()` racing at it.
    */
   const pullCommits = async (): Promise<boolean> => {
     if (!journalReplayed) {
@@ -709,6 +736,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           // The trigger only RECORDS. `recover()` takes the commit mutex, and this pull is
           // already holding it.
           healRequested = true
+          stranded = true
           return advancedEpoch
         }
         if (disposition.row === 'ahead') {
@@ -716,6 +744,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           // heal is what repairs this, not a re-read — and ask for one.
           reconciledHead = position
           healRequested = true
+          stranded = true
           continue
         }
         if (disposition.row === 'history') {
@@ -730,7 +759,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           // wins, and the loser rejoins onto it — which is a heal. The winner has nothing to
           // do but step over the frame.
           reconciledHead = position
-          if (disposition.branch === 'losing') healRequested = true
+          if (disposition.branch === 'losing') {
+            healRequested = true
+            stranded = true
+          }
           continue
         }
         if (disposition.row === 'poison') {
@@ -1128,12 +1160,15 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         //    learned the tip it must race at from the store's own reply.
         await reconcileCommits()
 
-        // A pull that ended in a heal trigger did NOT reach the end of the log, and the tip
-        // it holds is stale. Unwind, rather than race a head this peer has not reconciled
-        // to: the lane is released here, the heal runs as its own operation, and the host's
-        // commit is a later one. Retrying inside this loop would hold the mutex that the
-        // heal needs and spin until the deadline.
-        if (healRequested) {
+        // The pull found positive evidence this peer is off the group's line — its own
+        // un-merged commit, a frame framed ahead of it, or the losing side of a fork — and that
+        // evidence stands whether or not the heal that follows can land. Unwind rather than
+        // race: on the `ahead` path the pull DID drain to the end and take the live tip, so a
+        // commit here would win the compare-and-set at an epoch it never caught up to. The lane
+        // is released, the heal runs as its own operation, and the host's commit is a later one.
+        // Gating on `stranded` and not `healRequested` is what makes this survive a heal that
+        // found no responder — a `commit()` right after such a heal must still refuse.
+        if (stranded) {
           throw new RecoveryRequiredError(
             'commit: the log holds a frame this peer cannot reconcile with — its own un-merged commit, or a commit from an epoch ahead of it. It must recover before it can commit again.',
           )
@@ -1393,6 +1428,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         // fork it is.
         if (rejoinedAtEpoch != null) appliedByEpoch.set(rejoinedAtEpoch, sequenceID)
         healRequested = false
+        // The one place the commit gate is released: the rejoin landed, so this peer's leaf is
+        // back in the tree at the group's epoch and the stale-epoch fork it guards is closed. A
+        // bootstrap that still fails below is a roster-repair problem `commit()`'s own
+        // ledger-completeness check handles — not a reason to keep refusing every commit.
+        stranded = false
         await rebuildEpoch()
 
         // 8. Bootstrap: REQUIRED, and not a formality. Until it runs, this handle's ledger is
@@ -1488,6 +1528,15 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       await settled
       commitUnsubscribe?.()
       rendezvousUnsubscribe?.()
+      // Resolve any in-flight recovery rendezvous FIRST, before its timers are cleared. A
+      // `recover()` blocked in `requestGroupInfo` is settled by exactly two things — a reply, or
+      // its timeout — and dispose is about to clear that timeout; drain the waiters here or the
+      // heal never settles, `commitTail` never resolves, and every lane operation queued behind
+      // it hangs with it. Resolve, then clear, so a fired timer cannot race a half-drained map.
+      // (The ledger gather needs no such drain: its timeout is a local, held in none of the maps
+      // cleared below, so it fires and settles `ensureLedger` on its own.)
+      for (const waiter of recoveryWaiters.values()) waiter(null)
+      recoveryWaiters.clear()
       for (const timer of recoveryTimers.values()) clearTimeout(timer)
       for (const timer of pendingReplies.values()) clearTimeout(timer)
       for (const timer of pendingLedgerReplies) clearTimeout(timer)
