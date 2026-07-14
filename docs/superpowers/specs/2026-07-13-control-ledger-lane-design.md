@@ -1,6 +1,6 @@
 # Design: the control-ledger lane
 
-**Status:** design, revision 27 (2026-07-13). Reviewed fourteen times by kubun in
+**Status:** design, revision 28 (2026-07-14). Reviewed fourteen times by kubun in
 `2026-07-13-control-ledger-lane-review.md`; G1–G27 are folded in below. Revisions 16–25 fold in
 the implementation probes: `NotSubscribedError`, a `trim` primitive, a 30-day default
 window, two retention classes with subscriber-requested durations, **G28 — the commit lane must
@@ -38,6 +38,15 @@ absence was a live bug: a peer that skipped an epoch read every later commit as 
 reported itself healthy while permanently stuck. **G37 — the committer is read from the commit, never
 from the frame's `senderDID`**, which is the untrusted hub's word; an implementation that uses it
 passes G18, passes the plain G19 test, and hands the hub a group-wide DoS.
+Revision 28 folds in `recover()` as built. **G38 — the losing-branch row is not dead code; the
+fixture could not lie.** It looks unreachable through a forward-only cursor, and that reasoning holds
+for an honest hub *and only* for an honest hub: a fork exists **only because** the hub broke the
+compare-and-set, and a hub that will do that has no reason to honour `fetchTopic`'s exclusive cursor
+either. Both are contracts binding the one party this design does not trust. Also: **`inFlight` is the
+peer's pre-rejoin ledger, not the journal** (with the journal in place, replay settles a crashed peer's
+commit before any heal can run, so filtering the journal would filter nothing); the **bootstrap gather
+rides the rendezvous lane**, not the app lane; and **`GroupMLS.getLedgerEntries` is removed**, dead
+since the bodies moved into the commit frame.
 **Supersedes:** the requirements in `../../agents/plans/next/2026-07-13-host-ledger-lane.md`
 (R1/R2/R3), which stays as the origin record.
 **Scope:** `@kumiai/mls`, `@kumiai/rpc`, `@kumiai/hub-protocol`, `@kumiai/hub-server`,
@@ -1418,6 +1427,32 @@ next frame classifies as *ahead*, and the joiner **heals on arrival**. The class
 the epoch as an argument, and the lane re-reads it per frame, so it cannot go stale. The danger was in
 the loop, not in the table.
 
+**G38 — the fork row looks like dead code, and it is not. The fixture could not lie.** The argument
+that it is unreachable is easy to make and it is wrong: `appliedByEpoch` only ever holds a sequenceID
+the cursor has reached, and the pull only serves frames above the cursor, so an incoming fork frame is
+**always** the winning one and the losing branch can never be observed. **That holds for an honest hub,
+and only for an honest hub.**
+
+Look at what the row is *for*. A fork exists **only because the hub broke the compare-and-set** — it
+accepted two commits at one head and served divergent logs to different members. **A hub that will do
+that has no reason to honour `fetchTopic`'s exclusive cursor either.** Both are contracts, and the
+party bound by both is the one party this design does not trust. So the losing branch is reachable
+exactly as written, by the only actor who can produce it:
+
+```
+The hub double-accepts at head H: commit X (seq 3) and commit Y (seq 5), both framed at epoch E.
+It serves Y to Bob first.  Bob applies Y.  appliedByEpoch[E] = 5,  cursor = 5.
+It then serves X to Bob.   3 < 5  ->  'losing'  ->  Bob heals onto the winning branch.
+```
+
+**A test double that cannot lie is not a test**, and this is the second place that rule bit (see G37,
+where an implementation reading the committer from `senderDID` passed every test but one). A `FakeHub`
+that only ever behaves needs explicit, opt-in byzantine controls — double-accept at any head, hide a
+frame from one peer, reveal it later below their cursor — **honest by default**, and kept out of
+`HubStore`'s conformance suite entirely: the store's contract is unchanged, and the fixture is modelling
+a **non-conforming** store, which is precisely the threat. Without them, deleting this row's heal
+trigger passes the whole suite, and a peer on a discarded branch stays there forever, silently.
+
 **An accepted, bounded hazard.** A peer that dropped an unresolvable frame stays at an epoch it did
 not advance past, and it may still commit from there — landing on a private branch if the rest of the
 group applied that frame. This is accepted, on two grounds. It is **not attacker-reachable**: a peer
@@ -1439,12 +1474,24 @@ the design never trusted. The frame's epoch and its committer must both be read 
 MLS-authenticated commit, which is what `senderLeafIndex` → `didOfLeaf` is for. Any test double must
 be able to lie about `senderDID`, or it is not modelling the threat.
 
-**After a real crash, `inFlight` is empty** — the `PendingCommit` lived in memory. That is
-correct and needs no machinery, because G17's membership filter would empty the re-enact list
-anyway: on the crash path the entries are already in the group's authenticated ledger. The
-restarted peer heals, bootstraps, re-enacts nothing, and is whole. The two fixes compose, and
-a reader wondering how a restarted peer re-enacts entries it can no longer name has the
-answer: it must not, and it does not need to.
+**`inFlight` is the peer's PRE-REJOIN LEDGER, not the journal (G39).** Revisions up to 27 said
+"the entries it had in flight", implying the journal. With the journal in place that set is
+**always empty at a heal**, and not by accident: replay is step 0 of every lane operation, so a
+crashed peer's journalled commit is *settled* — republished under its original `publishID`, the
+store's dedup answers, the peer adopts — **before any heal can run.** A journal-sourced
+`inFlight` can never coexist with a heal, so a filter over it would filter nothing.
+
+The set that matters is the entries **this peer believes in that the group's ledger does not
+contain**, which is exactly its pre-rejoin ledger minus the bootstrapped one. That makes the
+membership rule literally what it says — *re-enact an entry if and only if the group's
+authenticated ledger does not already contain it* — as a **set-difference**, computed after
+bootstrap, with no memory of how the peer got here. It covers the byzantine losing branch (entries
+on a discarded branch, which the group never saw) and correctly excludes the crash path (entries
+the group already holds, whether the peer adopted them via replay or never adopted them at all).
+
+**Bootstrap must therefore run BEFORE the filter, and that ordering is load-bearing.** With no
+group ledger there is nothing to filter against, so a peer that re-enacts first re-enacts its
+*whole* pre-rejoin ledger and reverts the later admin — G17's failure, reached through G15's door.
 
 `MissingLedgerEntriesError` remains the one retryable outcome, and D3 makes it the rare one.
 This also repairs today's bug in `peer.ts`, whose bare `catch` never acks, so *any*
@@ -1734,6 +1781,21 @@ heal cannot reach for want of a responder.)*
   joiner rises with it and never meets a frame ahead of itself. The implementation that breaks this
   reads the peer's epoch **once per page** instead of once per frame: it goes stale mid-page, the
   next frame classifies as *ahead*, and every new member heals on its first pull.
+- **The losing branch of a byzantine double-accept heals — through a hub that lies (G38).** The
+  fixture double-accepts at one head and serves the two frames to two peers in opposite orders. The
+  peer that applied the *higher* sequenceID is later served the lower one **below its own cursor**,
+  classifies it as the losing branch, rejoins, bootstraps, and **re-enacts the entry the winning
+  branch never had**. Its counterpart, on the winning branch, sees the same tiebreak on the same two
+  frames and **must not heal** — one test each, and they must reach opposite conclusions. An honest
+  fixture reaches neither: delete this row's heal trigger and the whole suite still passes while a
+  peer sits on a discarded branch forever.
+- **A crash-restarted peer settles its journal with the host calling nothing (G39's neighbour).** The
+  seed lane operation alone must replay it. An implementation that reads the epoch before the handle
+  is loaded refuses every replay at startup for any peer past epoch 0 — the crash-restart path, which
+  is the journal's whole reason for existing — and *every test that calls `replay()` explicitly stays
+  green*. **The crash must land before the acceptance is recorded**, too: a crash inside `onAccepted`
+  replays from the recorded acceptance and never re-seals, so it never reaches the guard, and the test
+  passes against the broken code.
 - **A crash in the acceptance window is repaired from the journal, with no peer.** The
   committer is killed after the hub accepts and before it adopts, then restarted. Replay
   republishes by `publishID`, the store returns the original sequenceID without appending,

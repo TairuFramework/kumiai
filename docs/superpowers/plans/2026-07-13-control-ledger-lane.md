@@ -1373,3 +1373,87 @@ resolution is not built**: the fork row escalates to `recover()` and stops. A `F
 honest log cannot produce a losing branch, so there is no end-to-end fork test. **Trim-to-empty** (head
 present, no frames) leaves a peer quietly behind with nothing to trip the `ahead` row — not new, not
 worsened, and easy to mistake for covered.
+
+---
+
+### 2026-07-14 — Question 3.5: Does `recover()` heal without nesting, and re-enact by membership?
+
+**ANSWERED. Green: rpc 147 (was 137), 27/27 tasks.** Full report:
+`docs/superpowers/probes/question-3.5-report.md`.
+
+**Findings.** `recover()` is a top-level lane operation with a CAS loop of its own; the mutex is never
+re-entered; re-enactment is a *subsequent* `commit()` filtered by ledger membership. Four mutation
+checks, all red:
+
+- **Drop the membership filter** → the spec's worked example, produced exactly: ledger `[Foo, Bar, Foo]`,
+  the circle is `"Foo"` again, **and nothing is thrown anywhere.** `AssertionError: expected 'Foo' to be
+  'Bar'`.
+- **Retry the external commit instead of discarding the GroupInfo** → worse than a failure. The peer
+  **publishes, adopts its own derived handle, and sits alone on a branch believing it rejoined**, never
+  bootstrapping, because the stale head it adopted makes its empty ledger look complete. This mutation
+  also exposed a weak assertion in the probe's own first draft: *"the peer is in the roster"* passes
+  trivially, because a stranded member's **old leaf is still in the tree**.
+- **Nest the heal inside the pull** → deadlock, 4s timeout. `commit()` holds the mutex, its pull calls
+  `recover()`, `recover()` takes `runSerial`, and the tail it waits on contains the operation waiting
+  for it.
+- **Return `advanced: true` without completing bootstrap** → two failures, and the first is the
+  instructive one: **bootstrap-before-filter is load-bearing.** With no group ledger there is nothing to
+  filter against, so the peer re-enacts its whole pre-rejoin ledger and reverts the later admin — G17's
+  failure reached through G15's door. The second is a **silent roster reset** reported as a heal.
+
+**A live defect in question 3.3's journal, found by 3.5.** `peer.ts` initialised `epoch = 0` and ran
+`buildEpoch()` *after* the seed lane operation, so `frameCommit`'s guard **refused every journal replay
+at startup** for any peer past epoch 0 — and the throw aborted the seed pull, leaving the cursor
+unseeded too. **That is the crash-restart path, which is the journal's entire reason for existing.** All
+137 tests were green because every replay test calls `replay()` explicitly, after `ready`, when the
+epoch is correct. Fixed by seeding from the live handle, and now pinned by a test the host drives
+nothing in: the seed lane operation alone must settle it.
+
+**And the test for that bug is itself a trap.** The probe's first draft **passed against the broken
+code**: crashing inside `onAccepted` records the acceptance *first* (3.3's `markAccepted` ordering), so
+replay adopts from the slot and never re-seals — never reaching the broken guard. Only a crash **before
+the acceptance is recorded** exercises it. Q3.3's own fix had made its own bug untestable from the
+obvious angle.
+
+**G38 — the fork row is not dead code; the fixture could not lie.** The probe reported the losing-branch
+row unreachable: the cursor is forward-only, `applied <= reconciledHead`, and the pull only serves
+frames above the cursor, so an incoming fork frame is **always** `'winning'`. **That reasoning is
+airtight about an honest hub, and only about an honest hub.** A fork exists *only because* the hub broke
+the compare-and-set — and a hub that will do that has no reason to honour `fetchTopic`'s exclusive
+cursor either. **Both are contracts binding the one party this design does not trust.** `FakeHub` gained
+three opt-in byzantine controls (honest by default, and kept well away from `hub-protocol`'s conformance
+suite — the store's contract is unchanged; the fixture models a **non-conforming** store, which is the
+threat). Bob applies the higher-sequenceID commit, is later served the lower one **below his cursor**,
+classifies `losing`, rejoins, bootstraps, and re-enacts the entry the winning branch never had.
+Deleting the row's `healRequested` goes red: **zero heals, Bob on the discarded branch forever,
+silently.** The winning side needed its own test and got one — the same tiebreak, on the same two
+frames, must lead the two peers to **opposite** conclusions.
+
+**Decisions taken.**
+
+- **`inFlight` is the peer's pre-rejoin ledger, not the journal** — a **correction to the spec**. With
+  the journal in place, replay settles a crashed peer's commit at step 0 *before* any heal can run, so a
+  journal-sourced in-flight set can never coexist with a heal and the filter over it would be vacuous.
+  The pre-rejoin ledger makes the membership rule literally what it says: a **set-difference** against
+  the group's authenticated ledger.
+- **The bootstrap gather rides the rendezvous lane.** The spec's "gather rides the app lane" refers to
+  D3's id-keyed gather, which question 3.2 deleted. A just-rejoined peer needs a lane it certainly
+  shares with a responder, and the rendezvous topic is the only non-rotating one both hold for life.
+- **`LaneResult` gains `reenact?`** — a heal fired by the *pull* has no return value to put the entries
+  in, so they are stashed for the next lane operation that has one, exactly as `lost` is.
+- **`GroupMLS.getLedgerEntries` is removed.** Dead since 3.2 put the bodies in the commit frame; nothing
+  called it. One less method every host implements.
+
+**Learned.** *A test double that cannot lie is not a test* — and this is now the **second** question
+where it was the finding, not a footnote. In 3.4 an implementation reading the committer from
+`senderDID` passed 131 of 132 tests, and only a hub that could **lie** exposed it. Here an entire row of
+the cursor table looked like dead code, and only a hub that could **reorder** showed it was not. Both
+times the honest fixture agreed with the wrong implementation. When the threat model names an untrusted
+party, the double has to be able to *be* it.
+
+**Spec impact:** revision 28 — G38; `inFlight` corrected to the pre-rejoin ledger; the bootstrap gather
+moved to the rendezvous lane; `getLedgerEntries` removed from the port.
+
+**Still open, and carried:** the **trim-strand trigger is unbuilt** — nothing reads `oldest`. `recover()`
+handles the trim strand correctly once something triggers it, and nothing does. Of the three heal paths,
+only the byzantine losing branch and the un-merged own commit fire today.
