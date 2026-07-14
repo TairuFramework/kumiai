@@ -111,11 +111,68 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
       // something no reader can fetch.
       const result = await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
       expect(result.head).toBe(logged)
+      // And the mailbox frame is not in the log even BEFORE it is acked. Asserting this only
+      // after the ack would pass on a store that puts mailbox frames in the log, because the
+      // ack is what removes them — the assertion has to come first to mean anything.
+      expect(result.messages.map((message) => message.sequenceID)).toEqual([logged])
 
       await store.ack({ recipientDID: BOB, sequenceIDs: [mailbox] })
       const afterAck = await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
       expect(afterAck.head).toBe(logged)
       expect(afterAck.messages.map((message) => message.sequenceID)).toEqual([logged])
+    })
+
+    test('a mailbox publish to a log topic is delivered, and does not appear in the log', async () => {
+      const store = await createStore()
+      await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+
+      const first = await store.publish({
+        senderDID: ALICE,
+        topicID: TOPIC,
+        payload: payload(1),
+        retain: 'log',
+      })
+      // A mailbox frame on a topic that carries a log. Nothing stops a member publishing one:
+      // the class is the publisher's to choose, and the store never infers it from the topic.
+      const mailbox = await store.publish({
+        senderDID: ALICE,
+        topicID: TOPIC,
+        payload: payload(2),
+        retain: 'mailbox',
+      })
+      const second = await store.publish({
+        senderDID: ALICE,
+        topicID: TOPIC,
+        payload: payload(3),
+        retain: 'log',
+      })
+
+      // It IS delivered. Push is untouched by the class: a mailbox frame reaches every
+      // subscriber exactly as it always did.
+      const delivered = await store.fetch({ recipientDID: BOB })
+      expect(delivered.messages.map((message) => message.sequenceID)).toEqual([
+        first,
+        mailbox,
+        second,
+      ])
+
+      // And it is NOT in the log. A topic's log is its log-class frames and nothing else.
+      //
+      // This is what makes the log's tip reachable. A mailbox frame does not move the head,
+      // so a reader that met one in the log would advance its cursor to a position the head
+      // can never equal — and every compare-and-set it anchored there would lose, forever,
+      // on a frame that is not even retained. One such publish, by any member of the topic,
+      // would permanently wedge every writer on it. The class is the publisher's to choose;
+      // it must not be theirs to poison the log with.
+      const log = await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
+      expect(log.messages.map((message) => message.sequenceID)).toEqual([first, second])
+      expect(log.head).toBe(second)
+      expect(log.oldest).toBe(first)
+
+      // Paging honours the class too: the limit counts log frames, so a page of mailbox
+      // frames cannot hand a draining reader an empty page while log frames still wait.
+      const page = await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC, after: first })
+      expect(page.messages.map((message) => message.sequenceID)).toEqual([second])
     })
 
     test('a publish to a topic with no subscribers is retained and can be pulled later', async () => {
@@ -476,7 +533,10 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
     test('fetchTopic refuses a non-subscriber', async () => {
       const store = await createStore()
       await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
-      await store.publish({ senderDID: ALICE, topicID: TOPIC, payload: payload(1) })
+      // A log frame, so that the allowed call below has something to hand back: the subject
+      // here is authorization, and a mailbox frame would be absent from the log for a reason
+      // that has nothing to do with who is asking.
+      await store.publish({ senderDID: ALICE, topicID: TOPIC, payload: payload(1), retain: 'log' })
 
       const allowed = await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
       expect(allowed.messages).toHaveLength(1)

@@ -289,8 +289,19 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
         )
       }
 
-      const log = topicLogs.get(params.topicID) ?? []
+      // A topic's LOG is its log-class frames, and nothing else. A mailbox frame published
+      // to a log topic is still delivered — push is untouched — but it never enters the
+      // log: it does not move the head, so a reader that saw one would hold a cursor
+      // naming a position the head can never reach, and every compare-and-set anchored on
+      // that cursor would lose forever. The class decides what the log is, and only the
+      // publisher's own `retain` sets the class.
+      const log = (topicLogs.get(params.topicID) ?? []).filter(
+        (sequenceID) => entries.get(sequenceID)?.retain === 'log',
+      )
       const after = params.after
+      // Filter to the class BEFORE the limit: a page of mailbox frames must not eat the
+      // caller's limit and hand back an empty page while log frames are still waiting —
+      // a caller that drains until a short page would stop early and strand itself.
       const selected = after == null ? log : log.filter((sequenceID) => sequenceID > after)
       const limited = params.limit == null ? selected : selected.slice(0, params.limit)
 

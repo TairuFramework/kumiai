@@ -72,11 +72,26 @@ export type SubscribeParams = {
   retention?: number
 }
 
+/**
+ * Read a topic's log. The log is its `retain: 'log'` frames and **nothing else**: a mailbox
+ * publish to the same topic is delivered like any other, and never appears here.
+ *
+ * That exclusion is load-bearing, not tidiness. A mailbox frame does not move the head, so a
+ * reader that met one in the log would advance its cursor to a position the head can never
+ * equal, and every compare-and-set anchored on that cursor would lose forever — on a frame
+ * that is not even retained. The retention class is the publisher's to choose, so a store
+ * that serves mailbox frames from the log lets any member of a topic permanently wedge every
+ * writer on it with a single publish.
+ */
 export type FetchTopicParams = {
   /** Authorization: the caller must be a current subscriber of topicID, or NotSubscribedError. */
   subscriberDID: string
   topicID: string
-  /** Exclusive cursor: messages after this sequenceID. Absent: from the oldest retained. */
+  /**
+   * Exclusive cursor: log messages after this sequenceID. Absent: from the oldest retained.
+   * The `limit` counts log frames — filtering the class after applying it would hand a
+   * draining reader an empty page while log frames were still waiting, and it would stop.
+   */
   after?: string
   limit?: number
 }
