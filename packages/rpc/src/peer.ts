@@ -83,6 +83,22 @@ const DEFAULT_COMMIT_DEADLINE_MS = 30_000
 const COMMIT_ATTEMPT_CEILING = 1000
 
 /**
+ * The most reply requestIDs the storm-collapse suppression set retains before it evicts its
+ * oldest. The requestID comes off the wire, so without a bound a hostile relay could replay
+ * replies under an endless stream of distinct ids and grow the set forever.
+ *
+ * Eviction is safe at any size, because a dropped entry can only ever COST a redundant reply,
+ * never leak anything: the sole thing a suppression does is stop THIS peer scheduling its own
+ * reply to a re-delivered request for that id, and a reply it schedules after an eviction just
+ * re-seals current GroupInfo to a requester the port still authorizes against the live roster —
+ * a wasted publish a removed requester gets nothing from. The cap is set well above the number
+ * of recovery/ledger requests that can be in flight at once, so eviction only ever reaches ids
+ * whose requester deadline has long passed and which no honest peer will ask about again (every
+ * attempt mints a fresh id).
+ */
+const SUPPRESSED_REQUESTS_MAX = 1024
+
+/**
  * The MLS half of a peer: the lifecycle port, the durable journal that carries a pending
  * commit across a crash, and the host hook that adopts one after a restart. They arrive
  * together or not at all — a peer with an MLS port and no journal would lose every commit
@@ -161,6 +177,13 @@ export type GroupPeer<Protocols extends Record<string, ProtocolDefinition>> = {
    * Holds the group's commit mutex for its whole run. The compare-and-set resolves races
    * between devices; it says nothing about two callers on the same one, and two `build()`
    * calls against a single handle would both frame at that handle's epoch and diverge.
+   *
+   * A RESULT means the commit landed and `onAccepted` ran; a THROW means it did not — the peer
+   * was stranded or its ledger incomplete ({@link "commit".RecoveryRequiredError}), or it kept
+   * losing the compare-and-set past its deadline ({@link "commit".CommitDeadlineError}). A throw
+   * publishes nothing and advances nothing, but it may leave earlier `lost` / `reenact` work — a
+   * loss a delivery wakeup found, entries a heal handed back — undrained, because only the
+   * success path returns them. After a `commit()` that threw, call {@link replay} to collect it.
    */
   commit: (build: () => Promise<PendingCommit>) => Promise<LaneResult>
   /**
@@ -169,7 +192,16 @@ export type GroupPeer<Protocols extends Record<string, ProtocolDefinition>> = {
    *
    * Every lane operation replays first, so this is not the only way a loss surfaces — but
    * it is the one a host can call before it does anything else, and a peer that comes up
-   * holding a commit it never learned the fate of should be asked.
+   * holding a commit it never learned the fate of should be asked. It is also the collector
+   * to call after a `commit()` that threw: the loss or re-enactment such a commit could not
+   * return is drained here.
+   *
+   * It builds and publishes nothing, so unlike `commit()` an incomplete ledger is no hazard
+   * here: `replay()` re-attempts the bootstrap the same way every lane operation does and
+   * returns what it holds WITHOUT throwing, leaving the peer degraded until a responder
+   * answers. A `{}` result is "no orphaned work to re-issue", never a claim the peer is whole
+   * — the completeness gate that a reset roster must not commit lives on `commit()`, which
+   * refuses, and `replay()` is the retry that eventually clears it.
    */
   replay: () => Promise<LaneResult>
   /**
@@ -559,6 +591,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   // suppresses this peer's own pending reply for the same request.
   const handleRecoveryReply = (reply: { requestID: string; groupInfo: Uint8Array }): void => {
     suppressedRequests.add(reply.requestID)
+    // Bound the wire-fed set: evict oldest-first once it is over the cap. A Set iterates in
+    // insertion order, so the front is always the least-recently-added id, which is the one
+    // whose request is furthest past its deadline.
+    while (suppressedRequests.size > SUPPRESSED_REQUESTS_MAX) {
+      const oldest = suppressedRequests.values().next().value
+      if (oldest === undefined) break
+      suppressedRequests.delete(oldest)
+    }
     const replyTimer = pendingReplies.get(reply.requestID)
     if (replyTimer != null) {
       clearTimeout(replyTimer)
@@ -637,10 +677,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * classification says whether the cursor advances, whether the port is asked, and whether
    * the peer must heal.
    *
-   * The cursor advances over a frame the peer is DONE with — applied, walked as history,
-   * stepped over as poison — and does NOT advance over one it must read again: an unresolved
-   * commit inside its retry budget, or its own un-merged commit. A throw leaves the cursor
-   * where it was, and the next pull reads that frame again.
+   * The cursor advances over a frame the peer is DONE with — applied, walked as history, or
+   * stepped over as poison, and a commit whose ledger entries will not resolve is poison: it
+   * advances and is never retried. It does NOT advance over its own un-merged commit, which
+   * stops the drain. A throw — a port that broke its contract on a frame it should have applied
+   * — leaves the cursor where it was, and the next pull reads that frame again.
    *
    * It is also the only place the log's tip is learned, and the tip is taken from the
    * store's OWN reply — never inferred from the cursor. It is recorded ONLY on a complete
@@ -1149,10 +1190,29 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     const op = runSerial(async () => {
       // 0. Replay the journal, ahead of the pull.
       if (await replayJournal()) await rebuildEpoch()
-      // 0.5. And repair the ledger if it is incomplete — a rejoin whose bootstrap never
-      //      finished leaves a handle whose roster has reset, and a commit built on one would
-      //      be built against a group this peer cannot see the admins of.
-      await ensureLedger(Date.now() + recoveryTimeoutMs)
+      // 0.5. Refuse on an incomplete ledger. A rejoin whose bootstrap never finished leaves a
+      //      handle whose roster has reset, and a commit built on one would be judged against a
+      //      group this peer cannot see the admins of: its fold sees only the genesis creator as
+      //      admin, every promotion since is invisible, and it would act on authority it cannot
+      //      verify. `ensureLedger` repairs it in place when a responder answers; when none does
+      //      it stays incomplete, and the peer must publish NOTHING and advance nothing.
+      //
+      //      It is the same refusal the `stranded` gate below makes, for the same reason. It
+      //      THROWS rather than returning, because `commit()`'s contract is that it returns only
+      //      when the commit LANDED — a return is `onAccepted` ran and the epoch moved — so a
+      //      peer that cannot commit says so by throwing, exactly as it does for a strand or a
+      //      spent deadline. `recover()` answers its own `advanced: false` instead because its
+      //      contract carries that flag; `commit()`'s does not, and inventing a landed-or-not
+      //      field on the result nobody reads would be worse than the throw the host already
+      //      handles. NO heal is scheduled: this peer has already rejoined and holds its leaf, so
+      //      an external-commit rejoin is not what it needs and would rotate the tree for nothing
+      //      — the gather that just failed for want of a responder IS the repair, and it re-runs
+      //      at the head of the next lane operation.
+      if (!(await ensureLedger(Date.now() + recoveryTimeoutMs))) {
+        throw new RecoveryRequiredError(
+          'commit: the ledger is incomplete, so this handle rejoined the group and its bootstrap has not completed — its roster has reset, and a commit built now would be judged against a group whose admins it cannot see. It must finish bootstrapping its ledger before it can commit again.',
+        )
+      }
 
       const deadline = Date.now() + commitDeadlineMs
       for (let attempt = 0; attempt < COMMIT_ATTEMPT_CEILING; attempt++) {

@@ -1,21 +1,26 @@
 import type { CommitHeader } from './crypto.js'
 
 /**
- * What the lane does with one frame from the commit log. Six rows, and they are evaluated
- * in the order written below — the order is not decoration, it is the whole design:
+ * What the lane does with one frame from the commit log. Six rows, listed in the order they
+ * are EVALUATED — the order is not decoration, it is the whole design, and this table is the
+ * `if` chain of {@link classifyCommit} (plus the port's answer to its last row) read top to
+ * bottom:
  *
  * | Frame | Cursor |
  * |---|---|
- * | Applied | advance; record this epoch -> sequenceID for the fork check |
+ * | Not a commit at all (unreadable header) | advance (poison — never retry, never heal); settled first, before any epoch question |
  * | Framed at an epoch AHEAD of this peer's | advance; heal — the group moved on without it |
  * | Below this peer's epoch, with no recorded applied-commit | advance, no fork check, no unwrap attempt |
  * | Below this peer's epoch, with a record naming a different sequenceID | advance; the fork trigger |
  * | At this peer's current epoch, committed by THIS peer | do not advance; heal |
- * | Malformed, refused by policy, or naming ledger entries that will not resolve | advance (poison — never retry, never heal) |
+ * | At this peer's current epoch, committed by another — handed to the port | applied: advance and record this epoch -> sequenceID for the fork check; refused by policy or entries unresolvable: advance (poison — never retry, never heal) |
  *
- * Four of those rows are decided BEFORE the frame is handed to the MLS port, and two are the
- * port's answer to a frame that was. This function is the first half: it classifies the frame
- * against this peer's state, reading bytes and decrypting nothing.
+ * FIVE of those rows are decided BEFORE the frame is handed to the MLS port; only the last —
+ * a frame framed at this peer's epoch and authored by someone else — is handed over, and the
+ * port's answer to it is the sixth row (applied, or poison). This function is that first half:
+ * it classifies the frame against this peer's state, reading bytes and decrypting nothing. The
+ * malformed-poison row is settled at the very top, because bytes with no header cannot be asked
+ * any of the epoch questions the other rows turn on.
  *
  * **Classify by epoch first, and unwrap only what you can apply.** The blob a commit frame
  * carries is sealed under the epoch the commit is framed at, so a peer walking history — the

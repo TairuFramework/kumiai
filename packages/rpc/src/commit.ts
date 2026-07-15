@@ -175,17 +175,29 @@ export class JournalEpochError extends Error {
 }
 
 /**
- * `commit()` pulled the log and found a frame that proves this peer is not reconciled with
- * the group: its own un-merged commit, or a commit framed at an epoch ahead of the one it is
- * at. It cannot race a head it has not caught up to, so it unwinds rather than committing on
- * a branch of its own.
+ * `commit()` cannot commit right now and refuses rather than build on a state it cannot trust.
+ * Two causes raise it, and both mean the same thing to the host: **nothing was published, the
+ * epoch did not advance, and the commit must be re-issued once the peer is whole.**
  *
- * **The commit did not happen, and nothing was published.** The heal is already scheduled —
- * it runs as its own lane operation the moment `commit()` releases the lane, which is why
- * this is thrown rather than waited on: a heal needs the mutex `commit()` is holding, and a
- * `commit()` that waited for one would wait on a queue that included itself. The host
- * re-issues the commit once the peer is whole; it must NOT retry in a tight loop, which would
- * simply take the mutex back before the heal can run.
+ * The first is a strand the pull found: a frame that proves this peer is not reconciled with
+ * the group — its own un-merged commit, or a commit framed at an epoch ahead of the one it is
+ * at. It cannot race a head it has not caught up to. The repair is a heal, already scheduled:
+ * it runs as its own lane operation the moment `commit()` releases the lane, which is why this
+ * is thrown rather than waited on — a heal needs the mutex `commit()` is holding, and a
+ * `commit()` that waited for one would wait on a queue that included itself.
+ *
+ * The second is an incomplete ledger: this peer rejoined by external commit and its bootstrap
+ * has not completed, so its handle holds an empty ledger against a live head — a roster reset,
+ * where every admin promoted since genesis is invisible and a commit built now would be judged
+ * against a group whose admins it cannot see. NO heal is scheduled for this one: the peer
+ * already holds its leaf, and the ledger gather that just failed for want of a responder IS the
+ * repair — it re-runs at the head of the next lane operation, with no external commit.
+ *
+ * Either way the host re-issues the commit once the peer is whole; it must NOT retry in a tight
+ * loop, which for the strand would take the mutex back before the heal can run, and for the
+ * incomplete ledger would re-gather before a responder has returned. A `commit()` that throws
+ * leaves any earlier `lost` / `reenact` work undrained — call {@link "peer".GroupPeer.replay}
+ * to collect it.
  */
 export class RecoveryRequiredError extends Error {
   override name = 'RecoveryRequiredError'

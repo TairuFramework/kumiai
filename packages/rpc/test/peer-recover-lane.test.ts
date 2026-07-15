@@ -7,7 +7,13 @@ import type {
 import { describe, expect, test } from 'vitest'
 
 import { RecoveryRequiredError } from '../src/commit.js'
-import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
+import {
+  decodeHandshakeFrame,
+  encodeHandshakeFrame,
+  HANDSHAKE_KIND,
+  type HandshakeKind,
+} from '../src/handshake.js'
+import { decodeRecoveryReply, encodeRecoveryReply, encodeRecoveryRequest } from '../src/recovery.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
@@ -579,6 +585,206 @@ describe('a bootstrap that cannot complete is a degraded state, not a heal', () 
     expect(alice.mls.fold().get('role:dave')).toBe('admin')
 
     await alice.peer.dispose()
+    await bob.peer.dispose()
+  })
+})
+
+/**
+ * A peer whose bootstrap starved holds an EMPTY ledger against a live head — its roster has
+ * reset to the genesis creator alone. A commit built on that handle is judged against a group
+ * whose admins it cannot see, so `commit()` must refuse: publish nothing, advance nothing, and
+ * say so by throwing, exactly as the `stranded` gate does. A `commit()` that merely RETURNED
+ * would be a silent success — the invite or remove never happened, and the host would never
+ * know.
+ */
+async function starveBootstrap(
+  hub: FakeHub,
+  rs: Uint8Array,
+): Promise<{
+  aliceMLS: MemoryGroupMLS
+  aliceCrypto: ReturnType<typeof createFakeCrypto>
+  bob: TestPeer
+}> {
+  const bobCrypto = createFakeCrypto({ epoch: 1, localDID: 'bob' })
+  // The one responder withholds an entry, and keeps withholding it — every token it serves is
+  // perfectly signed, which is exactly what the head chain catches and a signature does not.
+  const bobMLS = createMemoryGroupMLS({
+    recoverySecret: rs,
+    epoch: 1,
+    localDID: 'bob',
+    members,
+    serveLedger: (ledger) => ledger.slice(0, ledger.length - 1),
+    onAdvance: (e) => bobCrypto.setEpoch(e),
+  })
+  const bob = makeMLSPeer(hub, 'bob', rs, { mls: bobMLS, crypto: bobCrypto, members, recovery })
+  await flush()
+  await bob.peer.commit(buildLedgerCommit(bob, ['role:carol=admin', 'role:dave=admin']))
+  await flush()
+
+  const aliceCrypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
+  const aliceMLS = createMemoryGroupMLS({
+    recoverySecret: rs,
+    epoch: 1,
+    localDID: 'alice',
+    members,
+    onAdvance: (e) => aliceCrypto.setEpoch(e),
+  })
+  const dead = makeMLSPeer(hub, 'alice', rs, {
+    mls: aliceMLS,
+    crypto: aliceCrypto,
+    members,
+    recovery,
+  })
+  await flush()
+  // She rejoins — her leaf is in the tree — but the gather never completes, so her ledger stays
+  // empty against a live head. `recover()` refuses to report her healed.
+  const recovered = await dead.peer.recover()
+  await flush(100)
+  expect(recovered).toEqual({ advanced: false, reenact: [] })
+  expect(await aliceMLS.isLedgerComplete()).toBe(false)
+  await dead.peer.dispose()
+
+  return { aliceMLS, aliceCrypto, bob }
+}
+
+describe('commit() refuses on an incomplete ledger', () => {
+  test('nothing is published and the epoch does not advance', async () => {
+    const hub = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x5a)
+    const { aliceMLS, aliceCrypto, bob } = await starveBootstrap(hub, rs)
+
+    // She restarts over the same handle. The completeness invariant finds the reset roster again
+    // at startup — and with NO pending heal, because a restart drops the in-memory heal flag: the
+    // refusal below must stand on its own, not lean on a heal scheduled earlier.
+    const alice = makeMLSPeer(hub, 'alice', rs, {
+      mls: aliceMLS,
+      crypto: aliceCrypto,
+      members,
+      recovery,
+    })
+    await flush(200)
+    expect(await alice.mls.isLedgerComplete()).toBe(false)
+
+    const rejoinedEpoch = alice.mls.epoch()
+    const before = hub.published.filter((m) => m.topicID === commitTopic(rs)).length
+
+    // The refusal. It THROWS — a return would be a false success — and it does so before `build`
+    // is ever called.
+    const framedAt: Array<number> = []
+    await expect(
+      alice.peer.commit(buildLedgerCommit(alice, ['role:eve=admin'], { framedAt })),
+    ).rejects.toThrow(RecoveryRequiredError)
+    await flush(200)
+
+    // Not a silent commit-against-a-reset-handle: no new frame on the commit log, the epoch is
+    // exactly where the rejoin left it, and `build()` was never called. Returning without
+    // throwing is not evidence — this asserts the peer published and advanced nothing.
+    expect(hub.published.filter((m) => m.topicID === commitTopic(rs)).length).toBe(before)
+    expect(alice.mls.epoch()).toBe(rejoinedEpoch)
+    expect(framedAt).toEqual([])
+    expect(await alice.mls.isLedgerComplete()).toBe(false)
+
+    await alice.peer.dispose()
+    await bob.peer.dispose()
+  })
+})
+
+describe('replay() on an incomplete ledger', () => {
+  test('returns without throwing, publishes nothing, and leaves the peer degraded', async () => {
+    const hub = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x5b)
+    const { aliceMLS, aliceCrypto, bob } = await starveBootstrap(hub, rs)
+
+    const alice = makeMLSPeer(hub, 'alice', rs, {
+      mls: aliceMLS,
+      crypto: aliceCrypto,
+      members,
+      recovery,
+    })
+    await flush(200)
+    expect(await alice.mls.isLedgerComplete()).toBe(false)
+    const before = hub.published.filter((m) => m.topicID === commitTopic(rs)).length
+
+    // replay() builds and publishes nothing, so an incomplete ledger is no hazard here: it
+    // re-attempts the bootstrap the way every lane operation does and returns what it holds
+    // rather than throwing. It stays the retry that eventually clears the degraded state; the
+    // safety gate lives on commit(), which refuses.
+    const result = await alice.peer.replay()
+    await flush(200)
+
+    // `{}` is "no orphaned work to re-issue", NOT a claim the peer is whole.
+    expect(result).toEqual({})
+    expect(await alice.mls.isLedgerComplete()).toBe(false)
+    expect(hub.published.filter((m) => m.topicID === commitTopic(rs)).length).toBe(before)
+
+    await alice.peer.dispose()
+    await bob.peer.dispose()
+  })
+})
+
+describe('the storm-collapse suppression set is bounded', () => {
+  test('a flood of distinct-id replies evicts stale suppressions, and a re-delivered request is answered again', async () => {
+    const hub = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x60)
+    // A member peer that acts as a responder to the rendezvous.
+    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
+    // A requester Bob authorizes: alice holds a leaf in his tree, so he seals GroupInfo to her.
+    const requester = createMemoryGroupMLS({
+      recoverySecret: rs,
+      epoch: 1,
+      localDID: 'alice',
+      members,
+    })
+    await flush()
+
+    const rendezvous = rendezvousTopic(rs)
+    const inject = (kind: HandshakeKind, payload: Uint8Array): Promise<{ sequenceID: string }> =>
+      hub.publish({
+        senderDID: 'zoe',
+        topicID: rendezvous,
+        payload: encodeHandshakeFrame(kind, payload),
+      })
+    const bobRepliesTo = (requestID: string): number =>
+      hub.published.filter((m) => {
+        if (m.topicID !== rendezvous || m.senderDID !== 'bob') return false
+        try {
+          const frame = decodeHandshakeFrame(m.payload)
+          return (
+            frame.kind === HANDSHAKE_KIND.recoveryReply &&
+            decodeRecoveryReply(frame.payload).requestID === requestID
+          )
+        } catch {
+          return false
+        }
+      }).length
+
+    // Bob sees a reply for "R": storm-collapse records it, and he will not answer a request for it.
+    await inject(HANDSHAKE_KIND.recoveryReply, encodeRecoveryReply('R', new Uint8Array([1])))
+    await flush()
+    const req1 = await requester.createRecoveryRequest('R')
+    await inject(HANDSHAKE_KIND.recoveryRequest, encodeRecoveryRequest('R', req1))
+    await flush(60)
+    expect(bobRepliesTo('R')).toBe(0)
+
+    // A flood of distinct-id replies off the wire pushes "R" — the oldest — out of the bounded
+    // set. Without the bound the set would simply grow forever on an attacker's stream.
+    for (let i = 0; i <= 1024; i++) {
+      await inject(
+        HANDSHAKE_KIND.recoveryReply,
+        encodeRecoveryReply(`flood-${i}`, new Uint8Array([1])),
+      )
+    }
+    await flush(300)
+
+    // "R" is no longer suppressed, so a re-delivered request for it is answered again. This is
+    // exactly why the bound is safe: eviction can only ever cost a redundant, roster-authorized
+    // reply — never a leak, and never the loss of a LIVE suppression (a live one is far too
+    // recent to be the oldest).
+    const req2 = await requester.createRecoveryRequest('R')
+    await inject(HANDSHAKE_KIND.recoveryRequest, encodeRecoveryRequest('R', req2))
+    await flush(60)
+    expect(bobRepliesTo('R')).toBe(1)
+
     await bob.peer.dispose()
   })
 })

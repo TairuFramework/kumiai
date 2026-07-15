@@ -2098,22 +2098,62 @@ the wrong call becomes unrepresentable rather than merely unwise.
 
 ---
 
-## Phase 5 — remaining (handoff for the next session)
+### 2026-07-15 — Question 5.6: the rpc Importants and Minors
 
-Branch review Criticals are **all closed** (Q5.1 mls seal forgery, Q5.2 the two rpc heal bugs, Q5.3 hub
-conformance + store bugs, Q5.4 hub Importants/Minors). Q5.5 (mls Importants/Minors) is **closed**. One probe
-remains, review-scoped, **no Criticals**:
+**Findings:**
+- **`commit()` and `replay()` discarded the ledger-completeness refusal `recover()` honors.** `ensureLedger`
+  returns `false` when the ledger is still incomplete after the gather deadline; `recover()` refuses on it
+  (publish nothing, do not advance), but `commit()` (step 0.5) and `replay()` threw the boolean away — so a
+  peer rejoined by external commit whose bootstrap found no responder would **build and publish a commit
+  against a roster-reset handle**, judging authority against a group whose admins its empty ledger cannot
+  see. Fixed: `commit()` now **throws `RecoveryRequiredError`** on an incomplete ledger — the deliberate
+  choice over the brief's `return takeLost()`, because `commit()`'s contract is *return = landed, throw =
+  did not*, so a silent return would be a false success that drops the host's commit intent (the exact
+  class this branch fights). It is structurally the `stranded` gate a few lines below, which already throws
+  the same error; no heal is scheduled (the peer already rejoined — the failed gather *is* the repair, re-run
+  next lane op), and **`LaneResult` is not widened**. `replay()` was assessed and left returning
+  `takeLost()`: it builds/publishes nothing, so an incomplete ledger is no hazard there and `{}` means "no
+  orphaned work", not "peer is whole". Reuse of `RecoveryRequiredError` (not a distinct error) was confirmed
+  with the user: the host's recovery action is **identical** for both causes — back off, retry `commit()`,
+  call `replay()` to drain lost work — so a second error would buy only diagnostics at the cost of surface.
+  Paired no-publish test (peer restarted to drop the setup heal, then `commit()` throws, **no frame on the
+  log**, epoch unchanged, `build()` never called); mutation (discard the boolean) → red with a silent `{}`.
+- **Three (→four) exported `GroupMLS` port docs still promised the missing-entries retry that G36 deleted.**
+  The port doc is the only spec a host has, and `processCommit` / `isMissingLedgerEntries` (`crypto.ts`), the
+  `pullCommits` doc (`peer.ts`) and a fixture comment described a retry/re-gather the lane no longer performs
+  — it treats an unresolvable commit as **poison that advances the cursor and is never retried**. All four
+  corrected to match `pullCommits`; the missing-entries throw is kept (it is how the lane tells that one
+  poison case from a genuine contract violation it does re-read).
 
-**Q5.6 — rpc Importants/Minors:**
-- **Important** — `ensureLedger`'s `false` return is discarded by `commit()` (and `replay()`): a peer
-  whose bootstrap failed commits against a roster-reset handle. Give `commit()` the same refusal
-  `recover()` gives it (nothing published, host retries), and surface the degraded state from `replay()`.
-- **Important** — the exported `GroupMLS` port docs (`crypto.ts` ~115, ~233; `peer.ts` ~617) still
-  promise the missing-entries retry that **G36 deleted** — the only spec a host has. Correct all three to
-  match the poison-advance behaviour the lane actually implements.
-- **Minors** — the port's per-request ephemeral keys are never released and there is no method to release
-  them (add `releaseRecoveryRequest`/TTL, call from `ensureLedger` finish and `recover()` failed
-  attempts); `suppressedRequests` grows monotonically on a wire-supplied id; `recover()` has no backoff on
-  an unopenable reply (a hostile relay drives fresh rendezvous per round trip); `classify.ts`'s stated row
-  order does not match its evaluation order; `takeLost()` is reached only on the success path, and no doc
-  tells a host to call `replay()` to collect a `lost` remove notice after a failed `commit()`.
+**Minors:** `suppressedRequests` given a `1024`-cap with oldest-first eviction (safe: an eviction costs only
+a redundant reply re-sealed to a still-authorized requester, and the cap sits far above in-flight count so
+the oldest is always past its deadline) — tested + mutation-checked. `classify.ts` row-order doc reordered to
+the real `if`-chain (malformed → ahead → history → fork → own-unmerged → the port's `apply`), and the
+"decided before the port" count corrected four → five. `takeLost()`-after-a-failed-`commit()` verified to
+**defer, not drop** (the loss stays stashed for the next `replay()`/`commit()`), and the host obligation now
+documented on `commit`/`replay`/`RecoveryRequiredError`. Ephemeral-key leak **documented as a port-side
+contract finding** (the rpc side clears everything it holds; the port retains one HPKE key per `requestID`
+evicted only on a successful GroupInfo open, so a timed-out bootstrap gather leaks) — a lane release hook
+would obligate the real mls adapter, out of scope, so the host's TTL obligation is stated on
+`createRecoveryRequest` rather than adding a method nothing calls. `recover()` backoff **left**: the fixed
+deadline bounds total work and a per-iteration delay would slow the legitimate fast-retry on a lost CAS.
+
+**Spec impact:** none — these were implementation/doc seams; the lane behaviour they now describe was
+already the spec's (poison-advance is G36; the roster-reset hazard is D2's rejoin-then-bootstrap).
+
+**Learned:** *A function that returns a refusal signal is only as safe as its least careful caller.*
+`ensureLedger` was correct and one of its three callers honored it; the other two silently proceeded. The
+fix was not to change `ensureLedger` but to make every caller that can act on a reset handle refuse on the
+throw channel that already means "did not land" — and the right refusal for a build-and-publish operation is
+a throw, never a quiet return, because a quiet return of unbuilt work is indistinguishable from success.
+
+---
+
+## Phase 5 — complete
+
+All branch-review findings are closed: Q5.1 (mls seal forgery, Critical), Q5.2 (the two rpc heal Criticals),
+Q5.3 (hub conformance holes + two store bugs, Criticals), Q5.4 (hub Importants/Minors), Q5.5 (mls
+Importants/Minors), Q5.6 (rpc Importants/Minors). No open Criticals, Importants, or Minors remain. Full suite
+green: rpc 174 + 1 skipped, mls 301, hub-server 69, hub-tunnel 63, hub-protocol 8 (24 conformance clauses),
+hub-client 5, broadcast 35 — 27/27 tasks; build 7/7; lint clean. Spec at revision 34. Branch is ready for
+`finishing-a-development-branch`.

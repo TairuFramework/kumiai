@@ -120,9 +120,13 @@ export type GroupMLS = {
    * refuses, are both `{ advanced: false }`.
    *
    * It throws for exactly ONE outcome: a Commit it SHOULD have been able to apply and could
-   * not, because the ledger entries the Commit names would not resolve. That failure is
-   * retryable — the bodies can still arrive — and it is the only one that is. See
-   * {@link isMissingLedgerEntries}.
+   * not, because the ledger entries the Commit names would not resolve — from the Commit's own
+   * frame, the only place they ride. The lane does NOT retry it and the bodies do not arrive
+   * later: they are sealed under the epoch the Commit is framed at, so a peer that cannot open
+   * them is one no member at that epoch can, and the lane steps over the frame as POISON — the
+   * cursor advances past it and it is never read again. The throw is what distinguishes that
+   * one poison case from a port that broke its contract on a frame it should have applied, which
+   * the lane DOES re-read. See {@link isMissingLedgerEntries}.
    */
   processCommit(commit: Uint8Array, context: CommitContext): Promise<{ advanced: boolean }>
   /**
@@ -136,6 +140,18 @@ export type GroupMLS = {
    * accepted and lost, the one on a discarded branch — no longer hold the leaf key the
    * group can see: their own commit rotated it, and the new private key died with the state
    * that was never persisted.
+   *
+   * **The port owns eviction of that private half, because the lane has no release hook to
+   * offer.** A gather or rejoin that TIMES OUT (no responder) and a `recover()` attempt that
+   * fails before it opens a reply both drop their `requestID` on the rpc side — the
+   * `ledgerWaiters` / `recoveryWaiters` maps clear on finish, timeout and dispose — but neither
+   * tells the port anything, so a port that only evicts when a reply opens (a bootstrap gather
+   * opens none; every honest responder still answers) accumulates one key per timed-out round.
+   * Over a long-lived peer healing repeatedly against a flaky group these add up. The port MUST
+   * bound the retention itself — a TTL keyed off the request's mint time is the natural bound,
+   * since a request older than one requester deadline can no longer be answered. Adding a lane
+   * release call would obligate every {@link GroupMLS} implementation to a new method, so the
+   * bound lives here, in the port that holds the key, rather than as a hook nothing else can honour.
    */
   createRecoveryRequest(requestID: string): Promise<Uint8Array>
   /**
@@ -245,11 +261,15 @@ export type GroupMLS = {
 
 /**
  * The one throw {@link GroupMLS.processCommit} is allowed: the Commit named ledger entries
- * whose bodies would not resolve, from its own frame or from anywhere else the peer looked.
+ * whose bodies would not resolve from the frame the Commit rides in.
  *
- * It is the only RETRYABLE outcome, and the lane treats it as one — the frame is read again,
- * a bounded number of times, before the cursor is allowed past it. Everything else the port
- * says about a frame it will not apply is a `{ advanced: false }`.
+ * The lane treats it as POISON: it steps over the frame, advances the cursor past it, and never
+ * reads it again. The bodies are sealed under the epoch the Commit is framed at, so a peer that
+ * cannot resolve them is one no member at that epoch can — nobody applies the commit, the group
+ * never moves past that epoch, and the next honest commit is framed at the same epoch and
+ * compare-and-sets behind it. Everything else the port says about a frame it will not apply is a
+ * `{ advanced: false }`, which is poison on the same terms: it advances, it is never retried,
+ * and it does not heal.
  *
  * Matched by name, not by class: the port is consumer-supplied and its error type is not
  * this package's to import. A port whose missing-entries error is named anything else is a

@@ -83,9 +83,9 @@ export type MemoryGroupMLSOptions = {
   onAdvance?: (epoch: number) => void
 }
 
-/** The port raises this when a Commit names entry bodies it cannot resolve — from the
- *  frame the commit rides in, or from any resolver the lane supplies. The lane does not
- *  classify it: a throw leaves the cursor where it was, and the frame is read again. */
+/** The port raises this when a Commit names entry bodies it cannot resolve from the frame the
+ *  commit rides in. The lane treats it as poison: it steps over the frame, advances the cursor
+ *  past it, and never reads it again. */
 export class MissingLedgerEntriesError extends Error {
   ids: Array<string>
   constructor(ids: Array<string>) {
