@@ -98,15 +98,12 @@ export type HubFetchTopicResult = {
 }
 
 /**
- * Publish and push-delivery over topics. A subscriber sees only what is published after it
- * subscribes — no history to read.
- *
- * The shape of the adapter views over a hub (directed tunnel, session hub, encrypting wrapper) and
- * of a hub used for mailbox traffic alone. A lane that must be readable by a peer not subscribed at
- * publish time needs a {@link LogHub} instead.
+ * The APIs both hub kinds share — everything except how you publish. `events` are
+ * connection-lifecycle (reconnect/connect/disconnect), emitted by a mailbox and a log hub alike, so
+ * they belong here rather than on either shape. {@link MailboxHub} and {@link LogHub} each add their
+ * own `publish` on top; neither is derived from the other.
  */
-export type MailboxHub = {
-  publish: (params: MailboxPublishParams) => Promise<{ sequenceID: string }>
+export type HubBase = {
   subscribe: (
     subscriberDID: string,
     topicID: string,
@@ -118,6 +115,18 @@ export type MailboxHub = {
 }
 
 /**
+ * Publish and push-delivery over topics. A subscriber sees only what is published after it
+ * subscribes — no history to read.
+ *
+ * The shape of the adapter views over a hub (directed tunnel, session hub, encrypting wrapper) and
+ * of a hub used for mailbox traffic alone. A lane that must be readable by a peer not subscribed at
+ * publish time needs a {@link LogHub} instead.
+ */
+export type MailboxHub = HubBase & {
+  publish: (params: MailboxPublishParams) => Promise<{ sequenceID: string }>
+}
+
+/**
  * A hub that also retains a readable per-topic log. A pull-driven lane needs one: commits must be
  * readable by a peer not subscribed when they were published — a member invited tomorrow has to
  * apply commits that land today, which no push will bring it.
@@ -126,7 +135,7 @@ export type MailboxHub = {
  * caller drive the CAS (`expectedHead`), pin a frame to the log (`retain: 'log'`), or carry an
  * idempotency key (`publishID`). A MailboxHub deliberately cannot.
  */
-export type LogHub = Omit<MailboxHub, 'publish'> & {
+export type LogHub = HubBase & {
   publish: (params: HubPublishParams) => Promise<{ sequenceID: string }>
   fetchTopic: (params: HubFetchTopicParams) => Promise<HubFetchTopicResult>
 }

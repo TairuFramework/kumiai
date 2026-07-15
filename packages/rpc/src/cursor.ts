@@ -13,6 +13,9 @@
  * requires saying which you mean.
  */
 
+// Nominal brand keys: `declare const … : unique symbol` mints a fresh type-only tag with no runtime
+// value — the declaration IS the definition, nothing to import. Each tags one string type below so
+// the two cannot be assigned to each other.
 declare const logPositionBrand: unique symbol
 declare const deliveryPositionBrand: unique symbol
 

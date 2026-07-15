@@ -35,6 +35,7 @@ export {
 } from './frame.js'
 export {
   createHubTunnelTransport,
+  type HubBase,
   type HubFetchTopicParams,
   type HubFetchTopicResult,
   type HubPublishParams,
