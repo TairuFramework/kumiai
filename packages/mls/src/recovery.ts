@@ -20,56 +20,46 @@ import {
 
 const utf8 = new TextEncoder()
 
-/** The `type` tag every recovery-request token carries. Domain-separates the
- *  token from every other signed payload in the stack, so a token minted for
- *  another purpose can never be presented as a request for group state. */
+/** `type` tag on every recovery-request token. Domain-separates it, so a token
+ *  minted for another purpose can never pose as a request for group state. */
 export const RECOVERY_REQUEST_TYPE = 'group.recovery-request'
 
-/** The `type` tag a responder's GroupInfo attestation carries. Domain-separates
- *  the responder's membership proof from every other signed payload, so a token
- *  minted elsewhere can never stand in for it. */
+/** `type` tag on a responder's GroupInfo attestation. Domain-separates the
+ *  membership proof, so no token minted elsewhere can stand in for it. */
 export const RECOVERY_GROUPINFO_TYPE = 'group.recovery-groupinfo'
 
 /** The only sealed-reply format this build produces or opens. */
 export const SEALED_GROUP_INFO_VERSION = 1
 
-/** The sealed ledger reply shares the frame — `[version][enc][ct]` — and shares
- *  nothing else: see {@link LEDGER_REPLY}. */
+/** The sealed ledger reply shares the frame — `[version][enc][ct]` — and nothing
+ *  else: see {@link LEDGER_REPLY}. */
 export const SEALED_LEDGER_VERSION = 1
 
-/** X25519 KEM output / public key length. The only KEM the crypto provider
- *  supports (see `createNobleCryptoProvider`), so `enc` is fixed-width and the
- *  sealed frame needs no length prefix. */
+/** X25519 KEM output / public-key length. The only KEM this provider supports, so
+ *  `enc` is fixed-width and the sealed frame needs no length prefix. */
 const KEM_OUTPUT_LENGTH = 32
 
-/** X25519 secret-key length. The same 32 bytes as the KEM output for this suite,
- *  but a DISTINCT invariant: `enc` is a wire field a peer sends, whereas this is the
- *  requester's OWN retained key. A retained key of any other length is a host storage
- *  fault — a corrupt or truncated own key — not a reply addressed to someone else, and
- *  must not be swallowed as {@link openSealedReply}'s benign `not-for-me` verdict. */
+/** X25519 secret-key length. Same 32 bytes as the KEM output, but a DISTINCT
+ *  invariant: this is the requester's OWN retained key, not a wire field. A wrong
+ *  length is a host storage fault (corrupt/truncated own key), not a reply for
+ *  someone else, and must NOT be swallowed as {@link openSealedReply}'s benign
+ *  `not-for-me` verdict. */
 const KEM_PRIVATE_KEY_LENGTH = 32
 
 /** Version byte + `enc` + a bare AEAD tag: the shortest well-formed reply. */
 const MIN_SEALED_LENGTH = 1 + KEM_OUTPUT_LENGTH + 16
 
 /**
- * What a sealed reply CARRIES, as the AEAD sees it. One rendezvous answers two
- * different questions — "give me the group's state" and "give me the group's
- * ledger" — and the two answers must not be interchangeable: a responder's reply
- * to one must be undecryptable as the other, so no peer can be fed a ledger where
- * it asked for a GroupInfo or the reverse.
- *
- * The separation is cryptographic and unconditional. In practice a peer's two
- * gathers already carry different `requestID`s, so their AADs already differ —
- * but that is a property of the caller, not of the seal, and a caller that reused
- * an id would silently lose the distinction. The labels below are what actually
- * carry it: distinct HPKE `info` AND a distinct AAD domain, so the two replies
- * fail to open for each other even when the group, the member, the request id and
- * the ephemeral key are all identical.
+ * The per-kind labels that keep the two reply kinds — GroupInfo vs ledger —
+ * cryptographically non-interchangeable: distinct HPKE `info` AND distinct AAD
+ * domain, so a reply of one kind fails to open as the other even when group,
+ * member, request id and ephemeral key are all identical. Do not rely on distinct
+ * `requestID`s for this separation — that is a caller property a reused id loses;
+ * these labels carry it unconditionally.
  */
 type SealedReplyKind = {
-  /** HPKE `info` — separates this use of the group's HPKE from every use MLS
-   *  itself makes of the same ciphersuite, and from the other reply kind. */
+  /** HPKE `info` — separates this use from MLS's own use of the same ciphersuite,
+   *  and from the other reply kind. */
   hpkeInfo: Uint8Array
   /** Prefix of the AAD, before the group/member/request fields are framed in. */
   aadDomain: Uint8Array
@@ -94,14 +84,10 @@ const LEDGER_REPLY: SealedReplyKind = {
 }
 
 /**
- * The signed payload a recovering peer publishes. `iss` — filled by the signer,
- * covered by the signature — is the requester's DID: the request has no
- * self-asserted DID field, so there is nothing to disagree with the key that
- * signed it.
- *
- * `ephemeralKey` is the multibase-encoded public half of an HPKE keypair minted
- * for this one request. It is the *only* key a reply is ever sealed to: a
- * responder never seals to a key handed to it alongside the request, so the
+ * The signed payload a recovering peer publishes. The requester DID is the signed
+ * `iss`, never a self-asserted payload field — nothing to disagree with the
+ * signing key. `ephemeralKey` is the only key a reply is ever sealed to (a
+ * responder never seals to a key handed in alongside the request), so the
  * signature covers the key that matters.
  */
 export type RecoveryRequest = {
@@ -124,17 +110,15 @@ export type VerifiedRecoveryRequest = {
 /**
  * Why a responder refused a request.
  *
- * - `unverified` — the token is unparseable, unsigned, or its signature does not
- *   verify against the DID it names. Cryptographic.
- * - `malformed` — the signature verified but the payload is not a recovery
- *   request (wrong `type`, missing field, or an `ephemeralKey` that is not a
- *   32-byte X25519 key). A comparison in code.
- * - `group-mismatch` — a validly signed request for another group. A comparison
- *   in code: without it, a responder that is a member of both groups would seal
- *   *this* group's state to a request authorized against another.
- * - `not-a-member` — the requester's DID has no leaf in the responder's current
- *   ratchet tree. A comparison in code over MLS state — the authorization check,
- *   and the one a removed member fails.
+ * - `unverified` — token unparseable, unsigned, or signature fails against the DID
+ *   it names.
+ * - `malformed` — signature verified but payload is not a recovery request (wrong
+ *   `type`, missing field, or `ephemeralKey` not a 32-byte X25519 key).
+ * - `group-mismatch` — validly signed request for another group. Without this
+ *   check a responder in both groups would seal *this* group's state to a request
+ *   authorized against another.
+ * - `not-a-member` — requester's DID has no leaf in the responder's current
+ *   ratchet tree. The authorization check; a removed member fails it.
  */
 export type RecoveryRequestRejection =
   | 'unverified'
@@ -142,9 +126,8 @@ export type RecoveryRequestRejection =
   | 'group-mismatch'
   | 'not-a-member'
 
-/** Thrown by {@link sealGroupInfo}. A responder that wants to stay silent rather
- *  than answer catches this and returns nothing; the primitive itself refuses
- *  loudly, so a caller cannot mistake a refusal for an empty reply. */
+/** Thrown by {@link sealGroupInfo}. The primitive refuses loudly rather than
+ *  returning an empty reply; a responder that wants to stay silent catches this. */
 export class RecoveryRequestError extends Error {
   #reason: RecoveryRequestRejection
 
@@ -162,40 +145,36 @@ export class RecoveryRequestError extends Error {
 /**
  * Why a requester could not open a reply.
  *
- * - `not-for-me` — the AEAD refused. Either the reply was sealed to another
- *   ephemeral key, or its AAD binds another member or another request. The two
- *   are cryptographically indistinguishable and both mean the same thing: these
- *   bytes are not this peer's rescue. Never a field comparison after decryption
- *   — the binding is the AAD, so a reply for someone else never decrypts at all.
- * - `malformed` — the frame is truncated or carries an unknown version, or the
- *   plaintext a responder sealed is not a framed `MLSMessage(GroupInfo)`.
+ * - `not-for-me` — the AEAD refused: sealed to another ephemeral key, or AAD binds
+ *   another member or request. Indistinguishable and all mean "not this peer's".
+ *   Never a post-decryption field comparison — the binding is the AAD, so a reply
+ *   for someone else never decrypts.
+ * - `malformed` — frame truncated or unknown version, or the sealed plaintext is
+ *   not a framed `MLSMessage(GroupInfo)`.
  */
 export type SealedReplyRejection = 'not-for-me' | 'malformed'
 
 /**
  * Why a requester could not open a sealed GroupInfo — the two shared reasons plus
- * two the GroupInfo reply carries that the AEAD alone cannot enforce, because HPKE
- * base mode authenticates no responder:
+ * two the AEAD cannot enforce (HPKE base mode authenticates no responder):
  *
- * - `unauthenticated` — the reply carried no valid proof that a member of the
- *   requester's own last-known group sealed it: a missing, unsigned, or unverifiable
- *   responder attestation, one that does not bind this group / request / GroupInfo,
- *   or one signed by a DID that holds no leaf in the requester's ratchet tree.
- * - `group-mismatch` — the offered GroupInfo names a different group id, or carries
- *   a different genesis anchor, than the group being healed. The anchor is immutable
- *   for the group's whole life and the requester already holds it, so this is a
- *   byte comparison, not a trust decision.
+ * - `unauthenticated` — no valid proof that a member of the requester's own
+ *   last-known group sealed it: missing/unsigned/unverifiable attestation, one that
+ *   does not bind this group / request / GroupInfo, or one signed by a DID with no
+ *   leaf in the requester's tree.
+ * - `group-mismatch` — the offered GroupInfo names a different group id or carries a
+ *   different genesis anchor than the group being healed. The anchor is immutable
+ *   and the requester holds it, so this is a byte comparison, not a trust decision.
  */
 export type SealedGroupInfoRejection = SealedReplyRejection | 'unauthenticated' | 'group-mismatch'
 
-/** Why a requester could not open a sealed ledger. The same two answers, for the
- *  same two reasons — and a GroupInfo presented as a ledger is `not-for-me`, not
- *  `malformed`: the domains differ, so the AEAD refuses before anything is parsed. */
+/** Why a requester could not open a sealed ledger — the same two answers. A
+ *  GroupInfo presented as a ledger is `not-for-me`, not `malformed`: the domains
+ *  differ, so the AEAD refuses before anything is parsed. */
 export type SealedLedgerRejection = SealedReplyRejection
 
-/** Thrown by {@link openSealedGroupInfo}. Distinguishes "not addressed to me"
- *  from "corrupt", so a peer sifting replies off a shared lane can drop the
- *  former quietly and shout about the latter. */
+/** Thrown by {@link openSealedGroupInfo}. Distinguishes "not addressed to me" from
+ *  "corrupt", so a peer sifting a shared lane drops the former quietly. */
 export class SealedGroupInfoError extends Error {
   #reason: SealedGroupInfoRejection
 
@@ -210,10 +189,9 @@ export class SealedGroupInfoError extends Error {
   }
 }
 
-/** Thrown by {@link openSealedLedger}, and read exactly as its GroupInfo sibling
- *  is: a requester sifting replies off a shared lane drops `not-for-me` quietly —
- *  every other member's reply to every other request looks like this — and shouts
- *  about `malformed`. */
+/** Thrown by {@link openSealedLedger}, read like its GroupInfo sibling: a requester
+ *  sifting a shared lane drops `not-for-me` quietly (every other member's reply to
+ *  every other request looks like this) and shouts about `malformed`. */
 export class SealedLedgerError extends Error {
   #reason: SealedReplyRejection
 
@@ -259,14 +237,13 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
 }
 
 /**
- * The responder's membership proof, carried INSIDE the sealed GroupInfo reply. HPKE
- * base mode seals to a public key and authenticates nobody, so the AEAD alone cannot
- * tell a member's reply from an observer's forgery. This token can: it is signed by
- * the responder's DID identity key and binds the group, the request it answers, and
- * a digest of the exact GroupInfo bytes it accompanies. The open side verifies the
- * signature and then requires the signer to hold a leaf in the requester's own
- * last-known ratchet tree — the mirror of the roster check {@link sealToRequest}
- * makes on the ask direction.
+ * The responder's membership proof, sealed INSIDE the GroupInfo reply. HPKE base
+ * mode authenticates nobody, so the AEAD cannot tell a member's reply from an
+ * observer's forgery; this token can. Signed by the responder's DID identity key,
+ * it binds the group, the request, and a digest of the exact GroupInfo bytes it
+ * accompanies. The open side verifies it and requires the signer to hold a leaf in
+ * the requester's own last-known tree — the mirror of {@link sealToRequest}'s
+ * roster check on the ask direction.
  */
 type ResponderAttestation = {
   type: typeof RECOVERY_GROUPINFO_TYPE
@@ -277,8 +254,8 @@ type ResponderAttestation = {
 }
 
 /** The sealed GroupInfo plaintext: `[len(4)][attestation token][GroupInfo bytes]`,
- *  big-endian length, so the responder's proof and the GroupInfo it vouches for are
- *  sealed together under one AEAD and neither can be lifted from the other. */
+ *  big-endian length. Proof and vouched-for GroupInfo are sealed under one AEAD;
+ *  neither can be lifted from the other. */
 function frameAttestedGroupInfo(attestation: string, groupInfo: Uint8Array): Uint8Array {
   const token = utf8.encode(attestation)
   const out = new Uint8Array(4 + token.length + groupInfo.length)
@@ -303,12 +280,10 @@ function unframeAttestedGroupInfo(bytes: Uint8Array): {
 }
 
 /**
- * The AAD binding a sealed reply to one KIND of answer, one group, one member,
- * and one request. The responder builds it from the *verified* request; the
- * requester rebuilds it from its own handle and its own request id. Any
- * disagreement — a reply meant for another member, for another request by the
- * same member, or answering another question entirely — is an AEAD failure, not
- * something a caller has to remember to compare.
+ * The AAD binding a sealed reply to one kind, group, member, and request. The
+ * responder builds it from the *verified* request; the requester rebuilds it from
+ * its own handle and request id. Any disagreement is an AEAD failure, not a
+ * comparison a caller must remember to make.
  */
 function recoveryAAD(
   kind: SealedReplyKind,
@@ -327,11 +302,9 @@ function recoveryAAD(
 /**
  * Verify a request token's signature and parse its payload. The requester DID is
  * the verified issuer, never a payload field. Unsigned (`alg: 'none'`) tokens are
- * rejected: `verifyToken` returns them without checking a signature, so their
- * `iss` is attacker-chosen — same discipline as `verifyLedgerEntry`.
- *
- * Like a ledger entry, a request is signed with `embedLongForm`, so it verifies
- * offline against nothing but itself: a responder needs no DID resolver to answer.
+ * rejected: `verifyToken` returns them unchecked, so their `iss` is
+ * attacker-chosen. `embedLongForm` lets it verify offline — a responder needs no
+ * DID resolver to answer.
  */
 async function verifyRecoveryRequest(token: string): Promise<VerifiedRecoveryRequest> {
   let verified: Awaited<ReturnType<typeof verifyToken<RecoveryRequest>>>
@@ -375,8 +348,8 @@ export type CreateRecoveryRequestParams = {
    *  ciphersuite is the HPKE the ephemeral keypair must be minted under. */
   group: GroupHandle
   identity: SigningIdentity
-  /** Correlation id, minted per recover() call. Not an authorization token — the
-   *  signature and the responder's roster check carry authorization. */
+  /** Correlation id, minted per recover() call. Not authorization — the signature
+   *  and the responder's roster check carry that. */
   requestID: string
 }
 
@@ -391,13 +364,10 @@ export type CreateRecoveryRequestResult = {
 
 /**
  * Mint an ephemeral HPKE keypair and sign the request that publishes its public
- * half. One keypair per request: the private half is what makes the reply
- * openable by this peer and nobody else — including an attacker holding a stolen
- * copy of the peer's DID identity key, who can forge the *request* but cannot
- * read the answer.
- *
- * The keypair is drawn from the group's own ciphersuite HPKE, so no second HPKE
- * enters the system.
+ * half. One keypair per request: the private half is what makes the reply openable
+ * by this peer and nobody else — an attacker who stole the peer's DID identity key
+ * can forge the *request* but cannot read the answer. The keypair is drawn from the
+ * group's own ciphersuite HPKE, so no second HPKE enters the system.
  */
 export async function createRecoveryRequest(
   params: CreateRecoveryRequestParams,
@@ -421,8 +391,8 @@ export async function createRecoveryRequest(
       requestID,
       ephemeralKey: encodeMultibase(ephemeralPublicKey),
     },
-    // Self-verifying offline, like a ledger entry: a responder answering a peer
-    // it has never resolved must not need a DID resolver to check the signature.
+    // Self-verifying offline: a responder must not need a DID resolver to check
+    // the signature of a peer it has never resolved.
     { embedLongForm: true },
   )
 
@@ -430,16 +400,14 @@ export async function createRecoveryRequest(
 }
 
 /**
- * Answer a request of one kind: verify the request, check the requester still has
- * a leaf in the responder's current ratchet tree, and seal `plaintext` to the
- * ephemeral key *inside the signed request*.
+ * Answer a request of one kind: verify it, check the requester still holds a leaf
+ * in the responder's current ratchet tree, and seal `plaintext` to the ephemeral
+ * key *inside the signed request*.
  *
- * Authorization is roster-intrinsic, and it lives HERE rather than in each caller
- * — every answer this rendezvous can give is bound by the same tree lookup, and a
- * new kind of answer cannot be added without it. It is not a permission a host can
- * forget to check: the only DIDs that can be answered are the ones the responder's
- * own MLS tree still carries a leaf for, so a removed member gets nothing from the
- * first responder that has applied its removal.
+ * Authorization is roster-intrinsic and lives HERE, not in each caller, so a new
+ * kind of answer cannot be added without it. Not a permission a host can forget:
+ * only DIDs the responder's own tree still carries a leaf for can be answered, so a
+ * removed member gets nothing from any responder that has applied its removal.
  *
  * Throws {@link RecoveryRequestError} for every refusal — see
  * {@link RecoveryRequestRejection}.
@@ -482,14 +450,12 @@ async function sealToRequest(
 }
 
 /**
- * Open a reply of one kind with the key minted for `requestID`, and return the
- * plaintext the responder sealed.
+ * Open a reply of one kind with the key minted for `requestID`; return the sealed
+ * plaintext.
  *
- * The AAD is rebuilt from the caller's *own* group id and DID and the request id
- * it names, so a reply minted for another member, or for another request by this
- * same member, fails as an AEAD failure rather than a field comparison a caller
- * could skip. So does a reply answering another question: the kind is bound into
- * the AAD and the HPKE `info`, and neither is negotiable.
+ * The AAD is rebuilt from the caller's *own* group id, DID, and request id, so a
+ * reply for another member, another request, or another kind (kind is bound into
+ * both AAD and HPKE `info`) fails as an AEAD failure, not a skippable comparison.
  */
 async function openSealedReply(
   kind: SealedReplyKind,
@@ -507,14 +473,12 @@ async function openSealedReply(
   const { hpke } = group.context.cipherSuite
   const aad = recoveryAAD(kind, group.groupID, group.credential.id, requestID)
 
-  // The retained private key is this member's OWN, minted by createRecoveryRequest and
-  // kept by the host. A wrong length is a corrupt or truncated own key — a host storage
-  // fault — not a reply sealed for another member, so it must NOT read as `not-for-me`
-  // (the benign verdict a lane-sifter drops quietly). Validate and import it OUTSIDE the
-  // open, where a throw cannot be mistaken for the AEAD's refusal. The surface is a plain
-  // Error, not a SealedReplyRejection: a caller/host bug is not a wire condition, and the
-  // union a sifter treats as droppable must never absorb it. (importPrivateKey only wraps
-  // the bytes; the length is the check, and it is a stable invariant for this suite's KEM.)
+  // This member's OWN retained key. A wrong length is a corrupt/truncated own key
+  // (host storage fault), not a reply for another member, so it must NOT read as
+  // `not-for-me` (the benign verdict a lane-sifter drops). Validate OUTSIDE the open,
+  // where a throw cannot be mistaken for the AEAD's refusal, and surface a plain
+  // Error, not a SealedReplyRejection: a caller/host bug is not a droppable wire
+  // condition. (importPrivateKey only wraps the bytes; length is the whole check.)
   if (ephemeralPrivateKey.length !== KEM_PRIVATE_KEY_LENGTH) {
     throw new Error(
       `openSealedReply: retained ephemeral private key must be ${KEM_PRIVATE_KEY_LENGTH} bytes, not ${ephemeralPrivateKey.length} — a corrupt or truncated own key, not a reply for another member`,
@@ -530,11 +494,11 @@ async function openSealedReply(
 }
 
 export type SealGroupInfoParams = {
-  /** The responder's current handle. Its ratchet tree — not a roster snapshot,
-   *  not a policy list — is what authorizes the requester. */
+  /** The responder's current handle. Its ratchet tree — not a roster snapshot or
+   *  policy list — is what authorizes the requester. */
   group: GroupHandle
-  /** The responder's own signing identity. It signs the membership attestation the
-   *  requester checks, and must be the identity behind `group`'s own leaf. */
+  /** The responder's signing identity: signs the membership attestation and must be
+   *  the identity behind `group`'s own leaf. */
   identity: SigningIdentity
   /** The signed request token, verbatim. */
   request: string
@@ -542,20 +506,18 @@ export type SealGroupInfoParams = {
 
 /**
  * Answer a recovery request with this group's framed `MLSMessage(GroupInfo)`,
- * sealed to the ephemeral key inside the signed request and accompanied by a
- * membership attestation the responder signs with its DID identity key.
+ * sealed to the ephemeral key inside the signed request, plus a membership
+ * attestation signed with the responder's DID identity key.
  *
- * The attestation is not decoration. The seal is HPKE base mode — it needs only
- * the requester's public ephemeral key, every input to which rides the public
- * request in the clear — so the AEAD cannot distinguish a member's reply from an
- * observer's forgery. The signed attestation, bound to this group, this request,
- * and a digest of these exact GroupInfo bytes, is what lets the requester refuse a
- * reply from anyone who does not hold a leaf in its own last-known tree.
+ * The attestation is load-bearing: HPKE base mode seals to the requester's public
+ * ephemeral key (which rides the public request in the clear), so the AEAD cannot
+ * distinguish a member's reply from a forgery. The attestation — bound to this
+ * group, request, and a digest of these exact GroupInfo bytes — lets the requester
+ * refuse a reply from anyone holding no leaf in its own last-known tree.
  *
- * Throws {@link RecoveryRequestError} for every refusal of the request itself. The
- * reply is `[version][enc][ct]`; nothing in it is readable without the ephemeral
- * private key, and nothing in it opens for another member, another request, or
- * another kind of answer.
+ * Throws {@link RecoveryRequestError} for every refusal. The reply is
+ * `[version][enc][ct]`, unreadable without the ephemeral private key and opening
+ * for no other member, request, or kind.
  */
 export async function sealGroupInfo(params: SealGroupInfoParams): Promise<Uint8Array> {
   const { group, identity, request } = params
@@ -575,8 +537,8 @@ export async function sealGroupInfo(params: SealGroupInfoParams): Promise<Uint8A
       requestID: verified.requestID,
       groupInfoDigest: encodeMultibase(sha256(groupInfo)),
     },
-    // Self-verifying offline, like the request and every ledger entry: the healing
-    // peer must be able to check the signature without resolving the responder.
+    // Self-verifying offline: the healing peer must check the signature without
+    // resolving the responder.
     { embedLongForm: true },
   )
 
@@ -585,9 +547,8 @@ export async function sealGroupInfo(params: SealGroupInfoParams): Promise<Uint8A
 }
 
 export type OpenSealedGroupInfoParams = {
-  /** The requester's own handle. Supplies the DID and group the AAD is rebuilt
-   *  from, so a caller cannot open a reply addressed to somebody else by passing
-   *  the wrong DID — it has no DID to pass. */
+  /** The requester's own handle. Supplies the DID and group the AAD is rebuilt from
+   *  — a caller has no DID to pass, so cannot open a reply for someone else. */
   group: GroupHandle
   sealed: Uint8Array
   /** The id of the request this reply is expected to answer. */
@@ -598,17 +559,16 @@ export type OpenSealedGroupInfoParams = {
 
 /**
  * Verify the responder's membership attestation and require the signer to hold a
- * leaf in the requester's own last-known ratchet tree. This is the authentication
- * the AEAD cannot provide: HPKE base mode seals to a public key, so opening proves
- * only that the holder of the ephemeral private key opened it — never who sealed it.
+ * leaf in the requester's own last-known ratchet tree — the authentication the AEAD
+ * cannot provide (HPKE base mode proves only that the ephemeral-key holder opened
+ * it, never who sealed it).
  *
- * The attestation must bind this group, this request, and a digest of these exact
- * GroupInfo bytes, so a member cannot have its honest attestation for one GroupInfo
- * lifted onto a substituted one. The tree it is checked against is the requester's
- * OWN — stale by construction, which is the point and the limit: a member absent
- * from that tree (never joined, or removed before the requester's last-known epoch)
- * is refused, and a member still in it (including one removed AFTER that epoch) is
- * accepted.
+ * The attestation must bind this group, request, and a digest of these exact
+ * GroupInfo bytes, so an honest attestation for one GroupInfo cannot be lifted onto
+ * a substituted one. The tree checked against is the requester's OWN — stale by
+ * construction, which is the point and the limit: a member absent from it (never
+ * joined, or removed before the requester's last-known epoch) is refused; one still
+ * in it (including one removed AFTER that epoch) is accepted.
  */
 async function assertResponderIsMember(
   attestation: string,
@@ -651,11 +611,10 @@ async function assertResponderIsMember(
 }
 
 /**
- * Bind the offered GroupInfo to the group being healed: same group id, and the same
- * immutable genesis anchor the requester already holds. The anchor is written once
- * at creation and never changes, so a byte comparison against the requester's own
- * costs nothing and refuses any group whose authority root differs — the roster a
- * hijacked peer would fold is seeded from that anchor.
+ * Bind the offered GroupInfo to the group being healed: same group id, same
+ * immutable genesis anchor. The anchor is written once at creation and seeds the
+ * roster a peer folds, so a byte comparison against the requester's own refuses any
+ * group whose authority root differs.
  */
 function assertGroupInfoBoundToGroup(groupInfo: Uint8Array, group: GroupHandle): void {
   const binding = readGroupInfoBinding(groupInfo)
@@ -681,14 +640,13 @@ function assertGroupInfoBoundToGroup(groupInfo: Uint8Array, group: GroupHandle):
 
 /**
  * Open a sealed reply and return the framed `MLSMessage(GroupInfo)` — the exact
- * bytes `joinGroupExternal` takes, unchanged. Throws {@link SealedGroupInfoError}.
+ * bytes `joinGroupExternal` takes. Throws {@link SealedGroupInfoError}.
  *
- * Opening the AEAD is not the end of the check. The seal is HPKE base mode, so a
- * reply that opens proves only that this peer held the ephemeral key it minted —
- * not that a member sealed it. Two further gates make the reply roster-intrinsic:
- * the responder's signed attestation must place the sealer in this requester's own
- * last-known tree, and the offered GroupInfo's group id and genesis anchor must
- * match the group being healed. Only then are the bytes handed on.
+ * Opening is not the end of the check: HPKE base mode proves only that this peer
+ * held the ephemeral key, not that a member sealed it. Two further gates make the
+ * reply roster-intrinsic before the bytes are handed on — the signed attestation
+ * must place the sealer in this requester's own last-known tree, and the offered
+ * GroupInfo's group id and genesis anchor must match the group being healed.
  */
 export async function openSealedGroupInfo(params: OpenSealedGroupInfoParams): Promise<Uint8Array> {
   const { group, sealed, requestID, ephemeralPrivateKey } = params
@@ -730,11 +688,9 @@ export async function openSealedGroupInfo(params: OpenSealedGroupInfoParams): Pr
 
 /**
  * The whole ordered ledger, framed for sealing: `[count(4)][ (length(4) | token)... ]`,
- * big-endian throughout, to match the AAD's framing rather than the wire codecs'.
- *
- * The ORDER is what is being carried, and it is load-bearing: the head is a chain
- * digest, so the same tokens in another order fold to another head and the
- * requester rejects them. A list is the only faithful shape — not a set, not a map.
+ * big-endian throughout. Order is load-bearing: the head is a chain digest, so the
+ * same tokens reordered fold to a different head and the requester rejects them — a
+ * list, never a set or map.
  */
 function encodeLedgerTokens(tokens: Array<string>): Uint8Array {
   const encoded = tokens.map((token) => utf8.encode(token))
@@ -765,9 +721,9 @@ function decodeLedgerTokens(bytes: Uint8Array): Array<string> {
     tokens.push(new TextDecoder().decode(bytes.subarray(start, start + length)))
     offset = start + length
   }
-  // The count and its framed tokens must consume the whole payload. Trailing bytes are
-  // a lie the head check downstream might not catch — a lax decoder is a parser
-  // differential — so reject them here, in the same "truncated"/"malformed" class.
+  // The count and its framed tokens must consume the whole payload. Reject trailing
+  // bytes here (same truncated/malformed class): a lax decoder is a parser
+  // differential the downstream head check might not catch.
   if (offset !== bytes.length) {
     throw new Error('sealed ledger has trailing bytes after the last token')
   }
@@ -775,15 +731,13 @@ function decodeLedgerTokens(bytes: Uint8Array): Array<string> {
 }
 
 export type SealLedgerParams = {
-  /** The responder's current handle. Its ratchet tree is what authorizes the
-   *  requester, on exactly the terms {@link sealGroupInfo} is authorized — and its
-   *  own ledger is the only ledger it can seal. The payload is read from the handle
-   *  ({@link GroupHandle.getLedger}), never handed in: there is no parameter through
-   *  which a caller could seal one group's authority state to a requester authorized
-   *  against another. */
+  /** The responder's current handle. Its ratchet tree authorizes the requester on
+   *  the same terms as {@link sealGroupInfo}, and its own ledger is the only one it
+   *  can seal: the payload is read from {@link GroupHandle.getLedger}, never handed
+   *  in, so no caller can seal another group's authority state through this. */
   group: GroupHandle
-  /** The signed request token, verbatim — the same token a GroupInfo request
-   *  carries, and minted by the same {@link createRecoveryRequest}. */
+  /** The signed request token, verbatim — the same {@link createRecoveryRequest}
+   *  token a GroupInfo request carries. */
   request: string
 }
 
@@ -791,26 +745,20 @@ export type SealLedgerParams = {
  * Answer a ledger gather: the group's whole ordered authority state, sealed to the
  * ephemeral key inside the signed request.
  *
- * These are the SAME bodies a commit frame seals under the epoch secret, and the
- * gather must give the relay no more than the commit lane does. It gives it less:
- * the rendezvous topic is public and secretless, so a reply the hub could open
- * would hand every role, promotion and demotion, in order, to anyone who knows the
- * topic — and an UNAUTHORIZED reply would hand them to anyone who can mint a
- * request. The roster check inside {@link sealToRequest} is what closes the second
- * hole, and it is not optional: a seal without it merely encrypts the group's
- * authority state neatly to the attacker's own key.
+ * These are the SAME bodies a commit frame seals under the epoch secret, but the
+ * rendezvous topic is public and secretless. A reply the hub could open would hand
+ * every role change, in order, to anyone who knows the topic; an unauthorized reply
+ * would hand them to anyone who can mint a request. {@link sealToRequest}'s roster
+ * check closes the second hole and is NOT optional — a seal without it merely
+ * encrypts the authority state neatly to the attacker's own key.
  *
- * The seal is epoch-INDEPENDENT, and that is why it is HPKE to an ephemeral key
- * and not the epoch secret: the peer that most needs a bootstrap is one that
- * crashed between its rejoin and its gather, and it may be at an older epoch than
- * every responder. A reply sealed under the responder's current epoch would be
- * unopenable by the very peer that asked for it.
+ * Epoch-INDEPENDENT, hence HPKE to an ephemeral key and not the epoch secret: the
+ * peer most needing a bootstrap may be at an older epoch than every responder, and
+ * a reply sealed under the responder's current epoch would be unopenable by it.
  *
- * The ledger sealed is always this handle's own — read from {@link GroupHandle.getLedger}
- * under the handle's mutex, exactly as {@link sealGroupInfo} reads its GroupInfo from
- * {@link exportGroupInfo}. There is no seam through which a caller could hand in another
- * group's tokens: a responder can only ever seal the authority state of the group whose
- * ratchet tree just authorized the requester.
+ * The ledger sealed is always this handle's own — read from
+ * {@link GroupHandle.getLedger} under the mutex — so a responder can only ever seal
+ * the authority state of the group whose tree just authorized the requester.
  *
  * Throws {@link RecoveryRequestError} for every refusal; the responder stays silent.
  */
@@ -834,16 +782,15 @@ export type OpenSealedLedgerParams = {
  * Open a sealed ledger reply and return the responder's whole ordered ledger, as
  * signed tokens.
  *
- * Opening proves NOTHING about who sealed these tokens. The seal is HPKE base mode
- * over an AAD whose every field rides the public request in the clear, so an observer
- * of the request — the hub, a stranger who learned the topic — can forge a reply that
- * opens just as a member can. The bound this path rests on is not the seal but the
- * head check the caller runs next: {@link GroupHandle.bootstrapLedger} re-derives every
- * id from the token bytes and gates on the MLS-authenticated `ledger_head`, which a
- * forger cannot reproduce. So a forged or lying reply can withhold, reorder or
- * truncate — never rewrite — and a genuinely forged one simply fails that check and is
- * dropped. (The residual is a denial of service: a forged reply that opens can burn a
- * requester's gather attempt. It is not a compromise.) Throws {@link SealedLedgerError}.
+ * Opening proves NOTHING about who sealed these tokens: HPKE base mode over an AAD
+ * whose fields all ride the public request in the clear, so any observer (the hub, a
+ * stranger who learned the topic) can forge a reply that opens as a member's would.
+ * The bound is not the seal but the head check the caller runs next —
+ * {@link GroupHandle.bootstrapLedger} re-derives every id from the token bytes and
+ * gates on the MLS-authenticated `ledger_head`, which a forger cannot reproduce. So a
+ * forged or lying reply can withhold, reorder, or truncate — never rewrite — and a
+ * forged one simply fails that check. Residual is DoS only (a forged reply can burn a
+ * gather attempt), not compromise. Throws {@link SealedLedgerError}.
  */
 export async function openSealedLedger(params: OpenSealedLedgerParams): Promise<Array<string>> {
   const { group, sealed, requestID, ephemeralPrivateKey } = params

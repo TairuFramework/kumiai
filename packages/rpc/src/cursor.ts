@@ -1,19 +1,16 @@
 /**
- * The hub hands a peer two kinds of position, and both are a bare `string`.
+ * The hub hands a peer two kinds of position, both a bare `string`:
  *
- * - A **log position** is a place in a *topic's log*: the domain of `fetchTopic`'s
- *   `after`, `head` and `oldest`. Every reader of the topic sees the same log in the
- *   same order.
- * - A **delivery position** is a place in *this recipient's delivery queue*: the
- *   domain of `hub/receive`'s `after` and of `ack`. It runs across every topic the
- *   recipient subscribes to, it skips the frames the recipient published itself, and
- *   it is emptied by acking.
+ * - A **log position** is a place in a *topic's log*: `fetchTopic`'s `after`, `head`,
+ *   `oldest`. Every reader of the topic sees the same log in the same order.
+ * - A **delivery position** is a place in *this recipient's delivery queue*:
+ *   `hub/receive`'s `after` and `ack`. It runs across every subscribed topic, skips the
+ *   recipient's own frames, and is emptied by acking.
  *
- * They are different sequences, over different frames, in different orders. A peer
- * that holds one "cursor" and feeds it to both silently mis-pages — skipping commits
- * or re-reading them — and no type error stops it, because both are strings. So they
- * are branded here: a delivery position cannot be assigned where a log position is
- * expected, and the only way to mint either is to say which one you mean.
+ * Different sequences, different frames, different orders. Crossing them silently mis-pages
+ * (skipped or re-read commits) with no type error, since both are strings. Branded so a
+ * delivery position cannot be assigned where a log position is expected, and minting either
+ * requires saying which you mean.
  */
 
 declare const logPositionBrand: unique symbol

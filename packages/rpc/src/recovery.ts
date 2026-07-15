@@ -3,20 +3,14 @@ import { fromUTF, toUTF } from '@sozai/codec'
 /**
  * Payload codecs for the rendezvous carried on the handshake lane.
  *
- * A recovery request names a `requestID` — so replies correlate and redundant responders can
- * observe-and-suppress — and carries the port's own signed request blob, which the peer never
- * reads. The requester's identity, and the ephemeral key its reply must be sealed to, live
- * INSIDE that blob where the requester's signature covers them: a peer that put the DID in a
- * field of its own beside the token would be offering the responder an unsigned one to seal
- * against.
+ * A request names a `requestID` (reply correlation + responder observe-and-suppress) and carries
+ * the port's signed request blob, which the peer never reads. Requester DID and the ephemeral
+ * key its reply must be sealed to live INSIDE that signed blob, never in a peer-added field — a
+ * field beside the token would offer the responder an unsigned DID to seal against.
  *
- * The ledger gather is the same rendezvous in the other direction, and it carries the SAME
- * signed blob for the same two reasons. The topic is public and secretless: a request that
- * named no requester would be a request anyone could mint, and a reply that was not sealed
- * would put the group's whole ordered authority state — every role, every promotion, every
- * demotion — on a public topic in the clear. A peer that rejoined by external commit holds an
- * authenticated ledger head and no entries, so it asks for the whole ordered ledger, opens the
- * reply with the key minted for its own request, and checks what it finds against that head.
+ * The ledger gather is the same rendezvous reversed and carries the SAME signed blob: the topic
+ * is public and secretless, so an unnamed request is one anyone can mint, and an unsealed reply
+ * puts the group's whole authority state in the clear.
  */
 
 /** Cap on decoded ID lengths — these become attacker-controlled map keys. */
@@ -82,10 +76,9 @@ export function decodeRecoveryReply(payload: Uint8Array): {
 }
 
 /**
- * A ledger gather carries the port's signed request blob, exactly as a recovery request does
- * and for the same reason: it is what a responder authorizes against, and it is the only key
- * a responder will seal to. A request with no blob is a request from nobody, and every
- * responder refuses it.
+ * A ledger gather carries the port's signed request blob, as a recovery request does: it is
+ * what a responder authorizes against and the only key it will seal to. A request with no blob
+ * is from nobody, and every responder refuses it.
  */
 export function encodeLedgerRequest(requestID: string, request: Uint8Array): Uint8Array {
   return encodeWithRequestID(requestID, request, 'ledger request')
@@ -101,11 +94,10 @@ export function decodeLedgerRequest(payload: Uint8Array): {
 
 /**
  * A responder's whole ordered ledger, SEALED to the ephemeral key inside the request it
- * answers. The lane carries the bytes and reads none of them: what is in there is the port's
- * business, and the hub's business is nothing.
+ * answers. The lane carries the bytes and reads none of them.
  *
- * The order is carried inside the seal, and it is load-bearing: the head is a chain digest,
- * so a permuted list of the same tokens folds to a different head and the requester rejects it.
+ * Order is inside the seal and load-bearing: the head is a chain digest, so a permuted list of
+ * the same tokens folds to a different head and the requester rejects it.
  */
 export function encodeLedgerReply(requestID: string, sealed: Uint8Array): Uint8Array {
   return encodeWithRequestID(requestID, sealed, 'ledger reply')

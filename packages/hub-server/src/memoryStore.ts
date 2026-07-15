@@ -34,11 +34,9 @@ export type MemoryStoreRetention = {
   default?: number
   /**
    * Ceiling, in seconds, on what a subscriber may request. Above it: RetentionExceededError.
-   * Default {@link DEFAULT_MAX_RETENTION} (30 days) — finite, not infinite: an unbounded ceiling
-   * lets any subscriber pin a topic's frames forever with `subscribe({ retention: 2**31 })`, and
-   * the `RetentionExceededError` path is then dead on the default hub. A host that wants a
-   * different ceiling sets it here; a host that genuinely wants no ceiling sets it to
-   * `Number.POSITIVE_INFINITY` explicitly.
+   * Default {@link DEFAULT_MAX_RETENTION} (30 days), finite by design — an unbounded ceiling lets
+   * any subscriber pin a topic's frames forever with `subscribe({ retention: 2**31 })`. A host
+   * wanting no ceiling sets `Number.POSITIVE_INFINITY` explicitly.
    */
   max?: number
 }
@@ -58,21 +56,20 @@ function formatSequenceID(counter: number): string {
 }
 
 /**
- * In-memory implementation of HubStore for testing and development.
+ * In-memory HubStore for testing and development.
  *
- * Retention is a class, declared per publish, and a duration, requested per subscribe.
- *
- * - `'mailbox'` (the default) is delivery-derived: its readers are known at publish time, so the
- *   last ack frees the frame, and a publish nobody is subscribed to is dropped outright.
+ * Retention is a class (per publish) and a duration (per subscribe):
+ * - `'mailbox'` (default) is delivery-derived: readers are known at publish time, so the last ack
+ *   frees the frame, and a publish nobody is subscribed to is dropped outright.
  * - `'log'` is not: a subscriber that must read a frame may not exist when it is published, so no
- *   refcount over current subscribers can ever free it. It is appended whether or not anyone is
- *   subscribed, and only `trim` — or the age bound — removes it.
+ *   refcount over current subscribers can free it. It is appended whether or not anyone is
+ *   subscribed, and only `trim` or the age bound removes it.
  *
- * The store is told the class; it never infers it, and it never reads a payload.
+ * The store is told the class; it never infers it, and never reads a payload.
  *
- * Both classes are bounded by age: a topic's frames live for the longest retention any of its
- * subscribers asked for, floored at the hub's default. For a mailbox topic that bound sits
- * alongside the ack GC, and the ack usually gets there first.
+ * Both classes are age-bounded: frames live for the longest retention any subscriber asked for,
+ * floored at the hub's default. For mailbox that bound sits alongside the ack GC, ack usually
+ * winning.
  */
 export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
   const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH
@@ -84,11 +81,10 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
   const heads = new Map<string, string>()
   const deliveries = new Map<string, Array<string>>()
   /**
-   * publishID -> the sequenceID it was accepted as. Not a log entry, and not reachable from one:
-   * no deleter here takes a publishID, so `removeEntry`, `trim` and `purge` have no way to touch
-   * this map even by mistake. Retained indefinitely — it is a key and a sequenceID, one per
-   * conditional publish, and it is the only thing that lets a peer replaying its journal learn
-   * that a commit it never saw acknowledged had in fact landed.
+   * publishID -> the sequenceID it was accepted as. Not a log entry and not reachable from one: no
+   * deleter takes a publishID, so `removeEntry`, `trim` and `purge` cannot touch this map even by
+   * mistake. Retained indefinitely — it is the only thing that lets a peer replaying its journal
+   * learn that a commit it never saw acknowledged had in fact landed.
    */
   const publishRecords = new Map<string, string>()
   /** Per topic: the subscribers, each with the retention it asked for. */
@@ -154,13 +150,11 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
     async publish(params: PublishParams): Promise<PublishResult> {
       const retain: RetentionClass = params.retain ?? 'mailbox'
 
-      // The dedup check comes BEFORE the compare-and-set, and the order is load-bearing. A replay
-      // carries the publishID the store has already accepted and the expectedHead the caller
-      // journalled — which the accepted publish itself made stale. Comparing first would raise
-      // HeadMismatchError, and the caller would conclude its commit was lost when it landed:
-      // exactly the confusion the key exists to prevent. The sequenceID returned may name a frame
-      // that trim has since removed, and that is correct — the question a replay asks is "did my
-      // publish land?", not "give me my frame".
+      // The dedup check comes BEFORE the CAS; the order is load-bearing. A replay carries the
+      // already-accepted publishID and the journalled expectedHead, which the accepted publish
+      // itself made stale — comparing first would raise HeadMismatchError and tell the caller its
+      // commit was lost when it landed. The returned sequenceID may name an already-trimmed frame,
+      // which is correct: a replay asks "did my publish land?", not "give me my frame".
       if (params.publishID != null) {
         const accepted = publishRecords.get(params.publishID)
         if (accepted !== undefined) {
@@ -168,11 +162,10 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
         }
       }
 
-      // The compare-and-set, before anything is minted or written. The head comparison, the
-      // sequence mint, the append and the head advance are one indivisible step, and a loser
-      // leaves the log, the head and the sequence exactly as it found them: no entry, no
-      // delivery, no sequenceID consumed. Absent expectedHead, this is skipped entirely — an
-      // unconditional publish is the fast path every mailbox frame takes.
+      // The CAS, before anything is minted or written. Head comparison, sequence mint, append and
+      // head advance are one indivisible step; a loser leaves log, head and sequence untouched (no
+      // entry, no delivery, no sequenceID consumed). Absent expectedHead this is skipped — the
+      // unconditional fast path every mailbox frame takes.
       if (params.expectedHead !== undefined) {
         const head = heads.get(params.topicID) ?? null
         if (head !== params.expectedHead) {
@@ -236,11 +229,10 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
         list.push(sequenceID)
       }
 
-      // Depth bound: a trim like any other, so it moves oldest and leaves head alone — and it
-      // counts LOG frames only. A mailbox frame is bounded by its ack and by age, not by depth,
-      // and counting it here would let any member evict the commit log with a flood of mailbox
-      // frames. Only a log publish can push the log-class count over the bound, so this is skipped
-      // for the mailbox fast path.
+      // Depth bound: a trim like any other (moves oldest, leaves head alone), counting LOG frames
+      // only. A mailbox frame is bounded by ack and age, not depth; counting it here would let any
+      // member evict the commit log with a mailbox flood. Only a log publish can push the log-class
+      // count over the bound, so this is skipped for the mailbox fast path.
       if (retain === 'log') {
         let logDepth = 0
         for (const id of log) {
@@ -269,13 +261,12 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
         return { messages: [], cursor: null }
       }
 
-      // `after` is an exclusive cursor: the first pending delivery whose sequenceID is strictly
-      // greater than it. Pending is in append order — strictly increasing sequenceIDs — so this
-      // is the position just past `after` whether or not `after` is still pending. Matching on the
-      // value (indexOf) instead would fall back to index 0 the moment the cursored delivery is
-      // acked or aged out between two pages of a drain, silently restarting the page from the top
-      // and re-serving frames the reader has already been handed. Scanning for `> after` resumes
-      // where the cursor pointed even after its own entry is gone.
+      // `after` is an exclusive cursor: the first pending delivery with sequenceID strictly greater
+      // than it. Pending is in append order (strictly increasing), so this is the position just
+      // past `after` whether or not `after` is still pending. Matching on the value (indexOf) would
+      // fall back to index 0 once the cursored delivery is acked or aged out between pages of a
+      // drain, silently restarting from the top and re-serving frames already handed out. Scanning
+      // for `> after` resumes where the cursor pointed even after its own entry is gone.
       let startIndex = pending.length
       if (params.after == null) {
         startIndex = 0
@@ -323,19 +314,18 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
         )
       }
 
-      // A topic's LOG is its log-class frames, and nothing else. A mailbox frame published
-      // to a log topic is still delivered — push is untouched — but it never enters the
-      // log: it does not move the head, so a reader that saw one would hold a cursor
-      // naming a position the head can never reach, and every compare-and-set anchored on
-      // that cursor would lose forever. The class decides what the log is, and only the
-      // publisher's own `retain` sets the class.
+      // A topic's LOG is its log-class frames and nothing else. A mailbox frame published to a log
+      // topic is still delivered (push is untouched) but never enters the log: it does not move the
+      // head, so a reader that saw one would hold a cursor naming a position the head can never
+      // reach, and every CAS anchored there would lose forever. Only the publisher's own `retain`
+      // sets the class.
       const log = (topicLogs.get(params.topicID) ?? []).filter(
         (sequenceID) => entries.get(sequenceID)?.retain === 'log',
       )
       const after = params.after
-      // Filter to the class BEFORE the limit: a page of mailbox frames must not eat the
-      // caller's limit and hand back an empty page while log frames are still waiting —
-      // a caller that drains until a short page would stop early and strand itself.
+      // Filter to the class BEFORE the limit: a page of mailbox frames must not eat the limit and
+      // hand back an empty page while log frames wait — a caller draining until a short page would
+      // stop early and strand itself.
       const selected = after == null ? log : log.filter((sequenceID) => sequenceID > after)
       const limited = params.limit == null ? selected : selected.slice(0, params.limit)
 

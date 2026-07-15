@@ -147,10 +147,8 @@ export function makeMLSCredential(identity: OwnIdentity): Credential {
   }
 }
 
-/**
- * Thrown by GroupHandle.processMessage when the active commit policy rejects
- * an incoming commit. The handle is left at its pre-commit epoch.
- */
+/** Thrown by GroupHandle.processMessage when the commit policy rejects an incoming
+ *  commit. The handle is left at its pre-commit epoch. */
 export class CommitRejectedError extends Error {
   #proposals: Array<ProposalWithSender>
   #senderLeafIndex?: number
@@ -174,11 +172,9 @@ export class CommitRejectedError extends Error {
 type RejectedCommit = { proposals: Array<ProposalWithSender>; senderLeafIndex?: number }
 
 /**
- * Wrap a consumer commit policy so the rejected commit's proposals are captured
- * for CommitRejectedError. ts-mls's ProcessMessageResult does not surface the
- * rejected proposals on the result, so we record them from the callback's own
- * argument on the 'reject' path onto `capture.rejected`. Returns undefined when
- * no policy is set.
+ * Wrap a consumer commit policy to capture a rejected commit's proposals for
+ * CommitRejectedError. ts-mls does not surface them on its result, so record them
+ * from the callback's own argument on the 'reject' path. Undefined when no policy.
  */
 function wrapCommitPolicy(
   callback: IncomingMessageCallback | undefined,
@@ -199,12 +195,10 @@ function wrapCommitPolicy(
 }
 
 /**
- * Read the cleartext commit fields a PrivateMessage commit exposes before any
- * epoch secret is available: its `authenticatedData` carrier. Returns undefined
- * for anything that is not a PrivateMessage of contentType commit (application
- * message, proposal, PublicMessage, or a pre-decoded non-frame) — those keep the
- * pre-envelope code path. The decoded frame is widened to `unknown` on both
- * public entry points, so this narrows structurally rather than by cast.
+ * Read a PrivateMessage commit's cleartext `authenticatedData`, available before
+ * any epoch secret. Returns undefined for anything that is not a PrivateMessage of
+ * contentType commit (those keep the pre-envelope path). Narrows the `unknown`
+ * frame structurally, not by cast.
  */
 function readPrivateCommit(decoded: unknown): { authenticatedData: Uint8Array } | undefined {
   if (decoded == null || typeof decoded !== 'object') return undefined
@@ -220,14 +214,12 @@ function readPrivateCommit(decoded: unknown): { authenticatedData: Uint8Array } 
 
 /**
  * Read the DID an external-join commit proves control of. An external join is a
- * PublicMessage whose sender is a joining non-member (senderType
- * new_member_commit) carrying a commit; the committer holds no pre-commit leaf,
- * so its DID rides the commit's own UpdatePath leaf credential. Returns undefined
- * for anything that is not such a commit — those keep the pre-envelope path.
- * Returns `{ did: undefined }` for an external commit whose UpdatePath is absent
- * or whose leaf credential does not resolve to a basic-credential DID: it cannot
- * be a valid resync, so the caller rejects it. Narrows the `unknown` frame
- * structurally, mirroring readPrivateCommit / readMessageEpoch.
+ * PublicMessage from a joining non-member (senderType new_member_commit) carrying a
+ * commit; the committer holds no pre-commit leaf, so its DID rides the commit's own
+ * UpdatePath leaf credential. Returns undefined for anything else (keeps the
+ * pre-envelope path). Returns `{ did: undefined }` when the UpdatePath is absent or
+ * the leaf credential does not resolve to a basic-credential DID — cannot be a valid
+ * resync, so the caller rejects it. Narrows structurally.
  */
 function readExternalCommit(decoded: unknown): { did: string | undefined } | undefined {
   if (decoded == null || typeof decoded !== 'object') return undefined
@@ -253,11 +245,10 @@ function readExternalCommit(decoded: unknown): { did: string | undefined } | und
 }
 
 /**
- * A control-ledger entry as a handle holds it: the signed token — the canonical
- * persistent and wire form, the only thing that can be handed to another party —
- * paired with its verified form. The verified form is a one-way derivation (the
- * token cannot be reconstructed from it), so keeping only it would leave a handle
- * unable to forward the ledger it holds.
+ * A control-ledger entry as a handle holds it: the signed token (canonical
+ * persistent/wire form, the only thing forwardable to another party) paired with
+ * its verified form. The verified form is a one-way derivation, so keeping only it
+ * would leave a handle unable to forward its ledger.
  */
 export type HeldLedgerEntry = {
   token: string
@@ -268,10 +259,9 @@ export type HeldLedgerEntry = {
 export type LedgerLogEntry = HeldLedgerEntry & { entryID: string }
 
 /**
- * Project a held ledger into the roster. foldRoster is the role projection: it
- * drops every non-`group.role` entry by type, so the mixed-type ledger is fed in
- * as role inputs and the fold filters. The log is replayed in order, repeats and
- * all: a claim re-enacted at a later position must undo what came between.
+ * Project a held ledger into the roster. foldRoster drops every non-`group.role`
+ * entry by type, so the mixed-type log is fed in whole. Replayed in order, repeats
+ * and all: a claim re-enacted at a later position must undo what came between.
  */
 function foldLedgerRoster(
   ledger: ReadonlyArray<LedgerLogEntry>,
@@ -302,9 +292,7 @@ export type GroupHandleParams = {
   onLedgerEntries?: (entries: Array<VerifiedLedgerEntry>) => void
 }
 
-/**
- * Mutable wrapper around MLS group state + Enkaku credential.
- */
+/** Mutable wrapper around MLS group state + Enkaku credential. */
 export class GroupHandle {
   #state: ClientState
   #credential: MemberCredential
@@ -315,13 +303,12 @@ export class GroupHandle {
   #resolveLedgerEntries?: (ids: Array<string>) => Promise<Array<string>>
   #onLedgerEntries?: (entries: Array<VerifiedLedgerEntry>) => void
   #anchor: GroupAnchor
-  /** The ordered log of enactments — the ledger as the head chains it. The same
-   *  content id may appear more than once: a claim re-enacted at a later position
-   *  undoes what came between, which is how a demotion back to a previously-held
-   *  role expresses itself at all. */
+  /** The ordered log of enactments — the ledger as the head chains it. A content id
+   *  may appear more than once: re-enacting a claim at a later position undoes what
+   *  came between, which is how a demotion back to a previously-held role works. */
   #ledger: Array<LedgerLogEntry>
-  /** Entry bodies by content id, for resolving the ids an envelope names. A body
-   *  is the same body wherever it appears in the log, so this store is keyed. */
+  /** Entry bodies by content id, for resolving the ids an envelope names. A body is
+   *  the same wherever it appears in the log, so this store is keyed. */
   #entryBodies: Map<string, HeldLedgerEntry>
   #roster: RosterState
 
@@ -334,10 +321,9 @@ export class GroupHandle {
     this.#commitPolicy = params.commitPolicy
     this.#resolveLedgerEntries = params.resolveLedgerEntries
     this.#onLedgerEntries = params.onLedgerEntries
-    // Seed the control state from the genesis anchor baked into the group's own
-    // GroupContext. The anchor survives every epoch, so reading it here makes the
-    // constructor the single choke that no anchorless handle can slip through: an
-    // absent anchor fails closed rather than installing a permissive roster.
+    // Seed control state from the genesis anchor in the group's GroupContext. Reading
+    // it here makes the constructor the single choke no anchorless handle slips
+    // through: an absent anchor fails closed rather than installing a permissive roster.
     const anchor = readGroupAnchor(this)
     if (anchor == null) {
       throw new Error('group has no anchor extension; cannot seed a control roster')
@@ -409,11 +395,11 @@ export class GroupHandle {
     return this.#ledger
   }
 
-  /** The ordered signed tokens this handle holds, including repeats — the ledger's
-   *  canonical persistent and wire form, and the list the authenticated head folds
-   *  over. Feeds createInvite, restoreGroup, and host persistence. The verified
-   *  entries are a derived cache with no export form: the only way into a ledger is
-   *  applyLedgerEntries, which re-verifies. */
+  /** The ordered signed tokens this handle holds, repeats included — the ledger's
+   *  canonical persistent/wire form, and the list the authenticated head folds over.
+   *  Feeds createInvite, restoreGroup, and host persistence. The verified entries are
+   *  a derived cache with no export form: the only way in is applyLedgerEntries,
+   *  which re-verifies. */
   get ledgerTokens(): Array<string> {
     return this.#ledger.map(({ token }) => token)
   }
@@ -424,19 +410,17 @@ export class GroupHandle {
   }
 
   /**
-   * Verify signed ledger tokens, append the valid ones to the log in the order
-   * given, and refold the roster. Tokens that fail verification or whose groupID
-   * does not match the group are dropped (defensive — this is the low-level apply
-   * primitive; the commit pre-pass does the strict admin-issuer enforcement).
+   * Verify signed ledger tokens, append the valid ones in the order given, and
+   * refold the roster. Tokens that fail verification or whose groupID mismatches are
+   * dropped (defensive — the strict admin-issuer enforcement is the commit pre-pass).
    * Every token is re-verified on the way in: no entry enters a ledger unverified,
    * whatever the import path.
    *
-   * A token the log already holds is appended again rather than skipped. The log
-   * is an ordered record of what each commit enacted, not a set of claims, and a
-   * repeat is the only way to express a demotion back to a previously-held role.
-   * Nothing replays a commit into it: MLS applies each commit exactly once,
-   * restoreGroup replays a token list once, and processWelcome folds an invite once.
-   * Runs serialized on the handle's mutex, like the other state-mutating operations.
+   * A token the log already holds is appended again, not skipped: the log records
+   * what each commit enacted, not a set of claims, and a repeat is the only way to
+   * express a demotion back to a previously-held role. Nothing replays a commit into
+   * it (MLS applies each once, restoreGroup replays a token list once, processWelcome
+   * folds an invite once). Serialized on the handle's mutex.
    */
   async applyLedgerEntries(tokens: Array<string>): Promise<void> {
     return mutexFor(this).run(async () => {
@@ -452,30 +436,25 @@ export class GroupHandle {
   }
 
   /**
-   * Whether the ledger this handle holds is the whole ledger the group's own
-   * GroupContext attests to: the head folded from the ids it holds, in the order
-   * it holds them, against the authenticated `ledger_head`.
+   * Whether the ledger this handle holds is the whole ledger its GroupContext
+   * attests to: the head folded from the ids it holds, in order, against the
+   * authenticated `ledger_head`.
    *
-   * Purely local. It reads this handle's ledger and this handle's GroupContext,
-   * consults no peer and no network, and needs no memory of how the handle got
-   * into its current state. False means the ledger is incomplete — an
-   * external-commit rejoin arrives with an *empty* ledger against a live,
-   * non-genesis head — and {@link bootstrapLedger} must run before the handle can
-   * be trusted to fold a roster or judge an incoming commit.
+   * Purely local — reads this handle's ledger and GroupContext, consults no peer.
+   * False means incomplete (e.g. an external-commit rejoin arrives with an *empty*
+   * ledger against a live, non-genesis head), and {@link bootstrapLedger} must run
+   * before the handle can be trusted to fold a roster or judge a commit.
    *
-   * A group with no entries reads true, and not vacuously: the empty fold is the
-   * genesis head — SHA-256 over a domain separator and the group id — so both
-   * sides of the comparison are real 32-byte digests bound to this group. An
-   * empty ledger reads complete only against a head that has never moved, which
-   * is exactly the group whose ledger is genuinely empty.
+   * A group with no entries reads true, non-vacuously: the empty fold is the genesis
+   * head (a real 32-byte digest bound to this group), which matches only a head that
+   * has never moved — exactly a genuinely empty ledger.
    */
   async isLedgerComplete(): Promise<boolean> {
     return mutexFor(this).run(async () => {
       const authenticated = readLedgerHead(this)
       if (authenticated == null) {
-        // A group with no head extension cannot attest to any ledger, so nothing
-        // it holds can be shown complete. Report incomplete and let bootstrap
-        // fail loudly, rather than passing a handle whose ledger nothing covers.
+        // No head extension attests to no ledger, so nothing can be shown complete.
+        // Report incomplete and let bootstrap fail loudly.
         return false
       }
       return headsMatch(
@@ -489,10 +468,9 @@ export class GroupHandle {
   }
 
   /**
-   * The whole ordered ledger this handle holds, as signed tokens — what a
-   * responder serves to a bootstrapping peer. Order is load-bearing: the head is
-   * a chain digest, so a permuted list of the same tokens folds to a different
-   * head and the requester rejects it.
+   * The whole ordered ledger this handle holds, as signed tokens — what a responder
+   * serves to a bootstrapping peer. Order is load-bearing: the head is a chain
+   * digest, so a permuted list folds to a different head and is rejected.
    */
   async getLedger(): Promise<Array<string>> {
     return mutexFor(this).run(async () => this.ledgerTokens)
@@ -502,27 +480,23 @@ export class GroupHandle {
    * Install a gathered ledger, verified against the authenticated head before a
    * single entry is folded.
    *
-   * The gathered list is the group's WHOLE ledger from genesis, not a delta:
-   * `computeHead` folds it from the genesis head, so a list that reproduces the
-   * head this group's own GroupContext carries *is* the group's entire ledger, in
-   * order. It therefore replaces whatever this handle held.
+   * The gathered list is the group's WHOLE ledger from genesis, not a delta: a list
+   * that reproduces the head this GroupContext carries *is* the entire ledger, in
+   * order, and replaces whatever this handle held.
    *
-   * **Check before fold, structurally.** The head is recomputed over the incoming
-   * `tokens` and compared against this handle's own GroupContext while the
-   * handle's ledger, entry bodies and roster are still untouched; every value the
-   * fold produces is built as a local and installed in one assignment at the end.
-   * There is no window in which a doctored ledger is half-applied, and no rollback
-   * to get wrong, because a rejected ledger writes nothing.
+   * Check before fold, structurally: the head is recomputed over the incoming
+   * `tokens` while the handle's ledger, entry bodies, and roster are untouched, and
+   * the fold's results are installed in one assignment at the end. A rejected ledger
+   * writes nothing — no half-applied window, no rollback.
    *
-   * **Signature verification alone does not cover this.** A lying responder hands
-   * back tokens that are genuinely signed and correctly scoped, with one demotion
-   * omitted or two entries transposed — every signature verifies, and the roster
-   * that folds out contains an admin the group demoted. Omission and reordering
-   * are exactly what a signature does not protect and what the head chain does.
-   * The bound this earns is: **a lying responder can withhold, never rewrite.**
+   * Signatures alone do not cover this: a lying responder can hand back genuinely
+   * signed, correctly scoped tokens with one demotion omitted or two transposed —
+   * every signature verifies, yet the folded roster contains an admin the group
+   * demoted. Omission and reordering are exactly what the head chain protects and
+   * signatures do not. The bound: **a lying responder can withhold, never rewrite.**
    *
    * Throws {@link LedgerIncompleteError} on a head mismatch; the caller drops that
-   * responder and tries the next one.
+   * responder and tries the next.
    */
   async bootstrapLedger(tokens: Array<string>): Promise<void> {
     return mutexFor(this).run(async () => {
@@ -531,9 +505,8 @@ export class GroupHandle {
         throw new Error('bootstrapLedger: the group has no ledger head extension')
       }
 
-      // The gate. Nothing below this line touches the handle until the last three
-      // statements, and nothing above it reads the gathered tokens for anything
-      // but their content ids.
+      // The gate. Nothing below touches the handle until the last three statements,
+      // and nothing above reads the tokens except for their content ids.
       const entryIDs = tokens.map(ledgerEntryDigest)
       assertHeadMatches(authenticated.head, computeHead(this.groupID, entryIDs))
 
@@ -542,10 +515,9 @@ export class GroupHandle {
         const token = tokens[index] as string
         const verified = await verifyLedgerEntry(token)
         if (verified == null || verified.entry.groupID !== this.groupID) {
-          // Unreachable for any list that passed the gate — the chain digests the
-          // token bytes, so an unverifiable or replayed token cannot sit at a
-          // position whose id the authenticated head covers. Fails closed anyway:
-          // the handle is never left folding a ledger the head does not attest to.
+          // Unreachable past the gate — the chain digests the token bytes, so an
+          // unverifiable or cross-group token cannot sit at a position the head
+          // covers. Fails closed anyway.
           throw new Error(
             'bootstrapLedger: the gathered ledger holds an unverifiable or cross-group entry',
           )
@@ -595,22 +567,21 @@ export class GroupHandle {
   }
 
   /**
-   * Enumerate the group's current members from the ratchet tree, in ascending
-   * leaf-index order. Leaves whose credential identity fails to parse are skipped
-   * (same tolerance as findMemberLeafIndex). Reflects the handle's current #state
-   * — call before and after processMessage to diff a commit's membership change.
+   * The group's current members from the ratchet tree, in ascending leaf-index
+   * order. Leaves whose credential identity fails to parse are skipped (like
+   * findMemberLeafIndex). Reflects current #state — call before and after
+   * processMessage to diff a commit's membership change.
    */
   listMembers(): Array<GroupMember> {
     return [...this.#iterateMembers()]
   }
 
   /**
-   * Encrypt an application message for the group, returning framed wire bytes.
-   * Encrypts at this handle's current epoch. A handle a commit has already
-   * superseded (see {@link commitInvite}, {@link removeMember},
-   * {@link commitLedgerEntries}) must not be reused to send — doing so silently
-   * emits an application message at the now-stale epoch; adopt the commit's
-   * `newGroup` and call `encrypt` on that instead.
+   * Encrypt an application message for the group at this handle's current epoch,
+   * returning framed wire bytes. A handle a commit has already superseded (see
+   * {@link commitInvite}, {@link removeMember}, {@link commitLedgerEntries}) must not
+   * be reused to send — it silently emits at the now-stale epoch. Adopt the commit's
+   * `newGroup` and encrypt on that.
    */
   async encrypt(plaintext: Uint8Array): Promise<Uint8Array> {
     return mutexFor(this).run(async () => {
@@ -626,21 +597,18 @@ export class GroupHandle {
   }
 
   /**
-   * The async pre-pass feeding the synchronous ts-mls commit callback.
-   * processMessage runs this before mlsProcessMessage, since it may receive a
-   * commit. For anything that is not a PrivateMessage commit (application
-   * message, proposal, PublicMessage, pre-decoded non-frame) it does
-   * exactly what the code did before this step — resolve the caller policy, wrap
-   * it for the rejected-proposal capture, and apply nothing on accept.
+   * The async pre-pass feeding the synchronous ts-mls commit callback, run before
+   * mlsProcessMessage. For anything that is not a PrivateMessage commit it just
+   * resolves the caller policy, wraps it for rejected-proposal capture, and applies
+   * nothing on accept.
    *
    * For a PrivateMessage commit it decodes the control envelope, resolves and
-   * verifies the entry bodies the envelope names, folds a candidate roster off
-   * the pre-commit state, and precomputes the pure inputs the sync callback
-   * reads. The returned callback is a pure lookup over that precomputed state:
-   * a decode/fold failure is a hard reject; otherwise a caller policy wins the
-   * permission decision, and with no caller policy the anchored default policy
-   * runs. Missing entry bodies with no resolver throw MissingLedgerEntriesError
-   * here — before mlsProcessMessage — so the handle stays at its pre-commit epoch.
+   * verifies the entry bodies it names, folds a candidate roster off the pre-commit
+   * state, and precomputes the pure inputs the sync callback reads. That callback is
+   * a pure lookup: decode/fold failure is a hard reject; else a caller policy wins,
+   * and with none the anchored default policy runs. Missing entry bodies with no
+   * resolver throw MissingLedgerEntriesError HERE — before mlsProcessMessage — so the
+   * handle stays at its pre-commit epoch.
    */
   async #prepareCommitPipeline(
     decoded: unknown,
@@ -663,12 +631,11 @@ export class GroupHandle {
         isCommitMessage = true
       }
       // else: a standalone by-reference Proposal (or an application message / a
-      // frame ts-mls will not call back on). Fall through with the roster
-      // unchanged so `combined` judges a kind:'proposal' incoming under the same
-      // defaultCommitPolicy rows a receiver applies to a commit's proposals; a
-      // non-admin's authority-bearing proposal is rejected on receipt and never
-      // stored. Application messages never reach the callback, so this is inert
-      // for them.
+      // frame ts-mls will not call back on). Fall through with the roster unchanged
+      // so `combined` judges a kind:'proposal' incoming under the same
+      // defaultCommitPolicy rows applied to a commit's proposals; a non-admin's
+      // authority-bearing proposal is rejected on receipt and never stored.
+      // Application messages never reach the callback, so this is inert for them.
     }
 
     let precomputedReject = false
@@ -679,11 +646,10 @@ export class GroupHandle {
 
     if (isCommitMessage) {
       if (commit == null) {
-        // An external-join commit carries no control envelope: it resolves nothing,
-        // folds nothing, enacts no ledger entries, and never moves the head. The
-        // candidate roster is the current roster unchanged. Its only precomputed
-        // reject is an unresolvable committer DID (no UpdatePath / bad credential),
-        // which cannot be a valid resync.
+        // An external-join commit carries no control envelope: resolves nothing,
+        // folds nothing, never moves the head; candidate roster is unchanged. Its
+        // only precomputed reject is an unresolvable committer DID (no UpdatePath /
+        // bad credential), which cannot be a valid resync.
         precomputedReject = externalCommitDID === undefined
       } else {
         const env = decodeControlEnvelope(commit.authenticatedData)
@@ -768,13 +734,10 @@ export class GroupHandle {
   }
 
   /**
-   * Process a received MLS message (Commit, Proposal, or application).
-   *
-   * Accepts either wire-form bytes (the preferred input — framed MLSMessage
-   * `Uint8Array`, e.g. from commitInvite/removeMember) or a pre-decoded ts-mls
-   * message object (legacy path). The param type widens to `unknown` because
-   * `Uint8Array | unknown` collapses to `unknown` in TypeScript; the runtime
-   * `instanceof` check selects the decode path.
+   * Process a received MLS message (Commit, Proposal, or application). Accepts
+   * wire-form bytes (preferred, e.g. from commitInvite/removeMember) or a pre-decoded
+   * ts-mls object (legacy). Param widens to `unknown` because `Uint8Array | unknown`
+   * collapses to `unknown`; the runtime `instanceof` selects the decode path.
    */
   async processMessage(
     message: Uint8Array | unknown,
@@ -818,15 +781,11 @@ export class GroupHandle {
 // ---------------------------------------------------------------------------
 
 /**
- * Build the leaf-node capabilities for a member joining or creating a group.
- * RFC 9420 requires a member's leaf to advertise every non-default GroupContext
- * extension type the group uses; we derive that set from the group's extensions
- * so it cannot desync. This applies equally to a creator (extensions from the
- * group being created) and to an external rejoiner (extensions from the
- * GroupInfo it resyncs against) — a rejoining leaf that advertises only the
- * defaults is rejected by ts-mls with "client does not support every extension
- * in the GroupContext". An explicit `override` (GroupOptions.capabilities) wins
- * verbatim.
+ * Build the leaf-node capabilities for a member joining or creating a group. RFC
+ * 9420 requires a leaf to advertise every non-default GroupContext extension type
+ * the group uses; derive that set from the group's extensions so it cannot desync.
+ * A leaf advertising only defaults is rejected by ts-mls ("client does not support
+ * every extension in the GroupContext"). An explicit `override` wins verbatim.
  */
 function buildLeafCapabilities(
   extensions: ReadonlyArray<GroupContextExtension>,
@@ -843,9 +802,7 @@ export type CreateGroupResult = {
   credential: MemberCredential
 }
 
-/**
- * Create a new MLS group. The identity becomes the sole member and admin.
- */
+/** Create a new MLS group. The identity becomes the sole member and admin. */
 export async function createGroup(
   identity: OwnIdentity,
   groupID: string,
@@ -854,12 +811,10 @@ export async function createGroup(
   const cache = options?.cache ?? createInMemoryDIDCache()
   const context = await resolveMlsContext(options)
 
-  // Every group is anchored at creation: the creator is the epoch-0 admin, and
-  // the ledger head starts at genesis. A caller-supplied anchor (e.g. one
-  // carrying an `app` payload) is left untouched — the caller owns its contents.
-  // Its `creatorDID` coupling to the creating identity is validated below; a
-  // decode failure here is not this guard's concern and is left to the
-  // downstream fail-closed decode in the GroupHandle constructor.
+  // Every group is anchored at creation: creator is the epoch-0 admin, ledger head
+  // starts at genesis. A caller-supplied anchor is left untouched (the caller owns
+  // its contents); its `creatorDID` coupling to the creating identity is validated
+  // below. A decode failure here is left to the fail-closed decode in the constructor.
   const extensions = [...(options?.extensions ?? [])]
   const suppliedAnchorExtension = extensions.find(
     (ext) => ext.extensionType === GROUP_ANCHOR_EXTENSION_TYPE,
@@ -927,8 +882,8 @@ export type RestoreGroupParams = {
 
 export async function restoreGroup(params: RestoreGroupParams): Promise<GroupHandle> {
   const cache = params.options?.cache ?? createInMemoryDIDCache()
-  // Construction reseeds `{creator: 'admin'}` from the anchor in the restored
-  // state — an anchorless state throws here, the same fail-closed guard.
+  // Construction reseeds `{creator: 'admin'}` from the anchor in the restored state;
+  // an anchorless state throws (the same fail-closed guard).
   const group = new GroupHandle({
     state: params.state,
     credential: params.credential,
@@ -955,12 +910,12 @@ export type CreateInviteResult = {
 }
 
 /**
- * Create an invite for a new member.
- * Does NOT add them to the group — call commitInvite with their key package to do that.
+ * Create an invite for a new member. Does NOT add them — call commitInvite with
+ * their key package for that.
  *
  * Only an admin may invite: a role entry from a non-admin issuer is dropped by every
- * receiver's fold, so refusing here turns a silent downstream commit rejection into a
- * local error.
+ * receiver's fold, so refusing here turns a silent downstream rejection into a local
+ * error.
  */
 export async function createInvite(params: CreateInviteParams): Promise<CreateInviteResult> {
   const { group, identity, recipientDID, permission } = params
@@ -980,14 +935,12 @@ export async function createInvite(params: CreateInviteParams): Promise<CreateIn
   const invite: Invite = {
     groupID: group.groupID,
     inviterID: identity.id,
-    // The whole log, the new role entry last: a joiner handed only its own entry
-    // would never learn of a role change made before its invite, and would reject
-    // every commit by an admin promoted in the meantime — a permanent fork nothing
-    // in the protocol re-sends. The new entry must fold after the history it depends
-    // on, hence last. Re-granting a role the log already carries appends that entry a
-    // second time, which is a legal re-enactment, not a duplicate to elide. The joiner
-    // still folds from the anchor, so the inviter cannot promote anyone by padding
-    // this list.
+    // The whole log, new role entry last: a joiner handed only its own entry would
+    // never learn of earlier role changes and would reject every commit by an admin
+    // promoted since — a permanent fork nothing re-sends. The new entry must fold
+    // after the history it depends on, hence last. Re-granting a role the log already
+    // carries appends it again (a legal re-enactment). The joiner still folds from the
+    // anchor, so padding this list cannot promote anyone.
     ledgerEntries: [...group.ledgerTokens, roleToken],
   }
 
@@ -996,10 +949,10 @@ export async function createInvite(params: CreateInviteParams): Promise<CreateIn
 
 /**
  * The GroupContext extension list a commit installs when it enacts `entryIDs`: the
- * group's current list with only the ledger-head extension replaced by the head
- * extended by those ids, in envelope order. Every other extension — the anchor above
- * all — is the verbatim object out of the current GroupContext, never a re-encode of
- * a decoded value, because the receiving policy byte-compares the anchor.
+ * current list with only the ledger-head extension replaced by the head extended by
+ * those ids, in envelope order. Every other extension — the anchor above all — is the
+ * verbatim object from the current GroupContext, never a re-encode: the receiving
+ * policy byte-compares the anchor.
  */
 function extensionsWithHead(
   group: GroupHandle,
@@ -1052,22 +1005,22 @@ function buildCommitPolicyContext(
 
 /**
  * The one place a commit carrying control-ledger entries is built: `commitInvite`,
- * `removeMember`, and `commitLedgerEntries` all route through it, so the envelope and
- * the head can never drift apart.
+ * `removeMember`, and `commitLedgerEntries` all route through it, so envelope and
+ * head never drift apart.
  *
- * `enacted` is exactly what this commit enacts — the caller decides, and the caller is
- * the only one that can: entries are enacted by *position* in the log, so an entry whose
- * content the log already carries is a legitimate re-enactment (a demotion back to a
- * previously-held role is precisely that) and must not be filtered out by content.
+ * `enacted` is exactly what this commit enacts, and only the caller can decide it:
+ * entries are enacted by *position*, so one whose content the log already carries is
+ * a legitimate re-enactment (e.g. a demotion back to a previously-held role) and must
+ * not be filtered by content.
  *
- * The envelope names only what this commit enacts, never the whole history: replaying the
- * history would re-judge every past entry against the present roster, and a grant issued
- * by a since-demoted admin would read as coming from a non-admin, freezing every group
- * that ever rotated its admins.
+ * The envelope names only what this commit enacts, never the whole history: replaying
+ * history would re-judge every past entry against the present roster, and a grant by
+ * a since-demoted admin would read as a non-admin's — freezing every group that ever
+ * rotated admins.
  *
- * When `enacted` is non-empty the commit also carries a group-context-extensions proposal
- * advancing the ledger head by exactly those ids, in envelope order. An empty list moves
- * no head and carries no envelope.
+ * When `enacted` is non-empty the commit also carries a group-context-extensions
+ * proposal advancing the head by exactly those ids, in envelope order. An empty list
+ * moves no head and carries no envelope.
  */
 async function commitWithEntries(
   group: GroupHandle,
@@ -1081,12 +1034,12 @@ async function commitWithEntries(
     throw new Error('the committer must be an admin in the group roster')
   }
 
-  // Fold the entries exactly as every receiver will, and refuse to author a commit the
-  // group would reject. Without this the write path fails *open*: the committer advances
-  // its own log and head while every receiver rejects the commit, forking itself off the
-  // group. Being an admin is not enough — an entry's own issuer must still hold authority
-  // at the position it lands in, so a token signed by a since-demoted admin is dead paper
-  // no matter who commits it.
+  // Fold the entries exactly as every receiver will; refuse to author a commit the
+  // group would reject. Without this the write path fails *open*: the committer
+  // advances its own log and head while every receiver rejects the commit, forking
+  // itself off. Being an admin is not enough — an entry's own issuer must hold
+  // authority at the position it lands, so a token signed by a since-demoted admin is
+  // dead paper no matter who commits it.
   const inputs: Array<FoldInput> = []
   for (const token of enacted) {
     const verified = await verifyLedgerEntry(token)
@@ -1102,11 +1055,11 @@ async function commitWithEntries(
 
   const entryIDs = enacted.map(ledgerEntryDigest)
 
-  // Filter the pending-proposal set the committer would otherwise absorb: ts-mls folds every
-  // unappliedProposal into the commit, so a non-admin's pending proposal would ride this commit
-  // and every peer would reject the whole thing — a single member could stall the group. Judge
-  // each pending proposal against the same defaultCommitPolicy and the same context receivers
-  // build for this commit, dropping any the group would reject.
+  // Filter the pending-proposal set the committer would otherwise absorb: ts-mls folds
+  // every unappliedProposal into the commit, so a non-admin's pending proposal would
+  // ride it and every peer would reject the whole thing — one member could stall the
+  // group. Judge each against the same defaultCommitPolicy and context receivers build,
+  // dropping any the group would reject.
   const filterContext = buildCommitPolicyContext(group, {
     baseRoster: group.roster,
     candidateRoster: fold.roster,
@@ -1140,15 +1093,15 @@ async function commitWithEntries(
 }
 
 /**
- * The entries an invite adds beyond the committer's own log: everything past the log's
- * length. Positional, never by content — a re-granted role is the same token the log
- * already carries at an earlier position, and narrowing by content would drop the very
- * entry the invite exists to enact.
+ * The entries an invite adds beyond the committer's own log: everything past the
+ * log's length. Positional, never by content — a re-granted role is a token the log
+ * already carries earlier, and content-narrowing would drop the very entry the invite
+ * exists to enact.
  *
- * Positional narrowing is only sound when the invite's list *begins with* the
- * committer's log, so that is asserted rather than assumed: an invite built against a
- * different history would mis-slice, and the commit would move the head by ids that do
- * not follow the group's own — corrupting the chain for every receiver.
+ * Positional narrowing is sound only when the invite's list *begins with* the
+ * committer's log, so that is asserted, not assumed: an invite against a different
+ * history would mis-slice and move the head by ids that do not follow the group's own,
+ * corrupting the chain for every receiver.
  */
 function entriesAddedByInvite(group: GroupHandle, invite: Invite): Array<string> {
   const held = group.ledgerTokens
@@ -1185,23 +1138,20 @@ export type CommitLedgerEntriesResult = {
 }
 
 /**
- * The admin write path for the control ledger: a commit that carries no membership
- * proposal, only the entries it enacts and the head move that covers them. This is how
- * an admin promotes, demotes, or writes any other entry type — an entry that never
- * rides a commit is invisible to the head, and a joiner recomputing the head would
- * read the group's history as doctored.
+ * The admin write path for the control ledger: a commit carrying no membership
+ * proposal, only the entries it enacts and the head move covering them. An entry that
+ * never rides a commit is invisible to the head, and a joiner recomputing the head
+ * would read the history as doctored.
  *
- * Enacts exactly `tokens`, at the end of the log — including one whose content the log
- * already carries, which is how an admin is demoted back to a role they previously held.
- * Rejects an empty `tokens` list: a commit that enacts nothing has no reason to be
- * authored here.
+ * Enacts exactly `tokens` at the end of the log — including one whose content the log
+ * already carries (how an admin is demoted back to a previously-held role). Rejects an
+ * empty `tokens` list.
  *
- * Reads `group`'s state and returns a NEW derived handle (`newGroup`); it never
- * advances `group` itself. The caller must adopt `newGroup` — never reuse `group` —
- * before issuing the next commit: two commits issued from the same source handle
- * both frame at that handle's epoch and diverge. The per-handle mutex only
- * serializes concurrent calls against one handle; it does not make it safe to
- * produce a second commit from a handle a prior commit has already superseded.
+ * Reads `group` and returns a NEW derived handle (`newGroup`); it never advances
+ * `group`. The caller MUST adopt `newGroup` — never reuse `group` — before the next
+ * commit: two commits from the same source handle both frame at its epoch and diverge.
+ * The mutex only serializes concurrent calls against one handle; it does not make a
+ * second commit from a superseded handle safe.
  */
 export async function commitLedgerEntries(
   group: GroupHandle,
@@ -1228,34 +1178,32 @@ export type CommitInviteResult = {
   /** Framed MLSMessage(Welcome) bytes. Delivered to the new member. */
   welcomeMessage: Uint8Array
   newGroup: GroupHandle
-  /** Post-commit epoch the group is now at (== newGroup.epoch). NOTE: this is
-   *  NOT the epoch carried in the commit's wire header — a commit is framed at
-   *  the sender's pre-commit epoch (== epoch - 1n), which is what receivers
-   *  compare against their own handle.epoch for ordering (see readMessageEpoch). */
+  /** Post-commit epoch (== newGroup.epoch). NOT the commit's wire-header epoch: a
+   *  commit is framed at the sender's pre-commit epoch (== epoch - 1n), which is what
+   *  receivers compare against their own handle.epoch for ordering (see
+   *  readMessageEpoch). */
   epoch: bigint
 }
 
 /**
- * Commit an invite by adding the invitee's key package to the group.
- * Produces an MLS Commit + Welcome.
+ * Commit an invite by adding the invitee's key package. Produces an MLS Commit +
+ * Welcome.
  *
- * The invite's ledger entries are enacted by this commit: their content ids ride in
- * the commit's control envelope and the commit advances the ledger head by exactly
- * those ids, so every receiver folds the invitee's role entry into its roster as it
- * applies the Add. The envelope carries ids, not bodies — a receiver that holds
- * neither the entry nor a `resolveLedgerEntries` resolver throws
- * MissingLedgerEntriesError on this commit.
+ * The invite's ledger entries are enacted here: their content ids ride the commit's
+ * control envelope and advance the head by exactly those ids, so every receiver folds
+ * the invitee's role entry as it applies the Add. The envelope carries ids, not
+ * bodies — a receiver holding neither the entry nor a `resolveLedgerEntries` resolver
+ * throws MissingLedgerEntriesError.
  *
- * The invite itself carries the group's whole history — a joiner has nothing to fold
- * it onto — but only the entries it adds beyond that history ride the commit; see
+ * The invite carries the group's whole history (a joiner has nothing to fold it onto),
+ * but only the entries beyond that history ride the commit — see
  * {@link entriesAddedByInvite} and {@link commitWithEntries}.
  *
- * Reads `group`'s state and returns a NEW derived handle (`newGroup`); it never
- * advances `group` itself. The caller must adopt `newGroup` — never reuse `group` —
- * before issuing the next commit: two commits issued from the same source handle
- * both frame at that handle's epoch and diverge. The per-handle mutex only
- * serializes concurrent calls against one handle; it does not make it safe to
- * produce a second commit from a handle a prior commit has already superseded.
+ * Reads `group` and returns a NEW derived handle (`newGroup`); it never advances
+ * `group`. The caller MUST adopt `newGroup` — never reuse `group` — before the next
+ * commit: two commits from the same source handle both frame at its epoch and diverge.
+ * The mutex only serializes concurrent calls against one handle; it does not make a
+ * second commit from a superseded handle safe.
  */
 export async function commitInvite(
   group: GroupHandle,
@@ -1371,11 +1319,10 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
     resolveLedgerEntries: options?.resolveLedgerEntries,
     onLedgerEntries: options?.onLedgerEntries,
   })
-  // Every ledger entry reaches the group inside a commit that extends the head by its
-  // id, so the head authenticated in the joined GroupContext is the fold from genesis
-  // over the group's entries, in order. Recompute it over the entries the inviter
-  // supplied: an omitted, reordered, or truncated list cannot reproduce it. Checked
-  // before folding, so an incomplete ledger never reaches the roster.
+  // The head authenticated in the joined GroupContext is the fold from genesis over the
+  // group's entries, in order. Recompute it over the inviter's supplied entries: an
+  // omitted, reordered, or truncated list cannot reproduce it. Checked before folding,
+  // so an incomplete ledger never reaches the roster.
   const authenticated = readLedgerHead(group)
   if (authenticated == null) {
     throw new Error('processWelcome: the group has no ledger head extension')
@@ -1385,9 +1332,9 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
     computeHead(invite.groupID, invite.ledgerEntries.map(ledgerEntryDigest)),
   )
 
-  // Fold the invite's entries: the roster is seeded from the anchor, and the fold
-  // grants authority only to an admin-so-far, so a member-signed entry cannot
-  // promote anyone even though applyLedgerEntries itself is the permissive primitive.
+  // Fold the invite's entries: the roster is seeded from the anchor and the fold grants
+  // authority only to an admin-so-far, so a member-signed entry cannot promote anyone
+  // even though applyLedgerEntries itself is the permissive primitive.
   await group.applyLedgerEntries(invite.ledgerEntries)
 
   return { group, credential }
@@ -1399,34 +1346,24 @@ export type ProcessWelcomeOnceParams = ProcessWelcomeParams & {
 }
 
 /**
- * Join from a Welcome, unless this member has already joined that group — in which case it
- * returns `null` and the member keeps the handle it has.
+ * Join from a Welcome, unless this member already joined that group — then return
+ * `null` and keep the existing handle.
  *
- * **A Welcome is delivered AT LEAST ONCE, by design.** A sender that journals its commit and
- * delivers the Welcome only once the hub has accepted it re-delivers on any crash between
- * those two steps, and it must: a sender that suppressed the repeat instead would strand the
- * invitee in a group it was added to and never told about. So the repeat is the receiver's to
- * absorb, and this is where it is absorbed.
+ * A Welcome is delivered AT LEAST ONCE by design (a sender re-delivers on a crash
+ * between journaling its commit and delivering, or it would strand an invitee never
+ * told it was added), so the receiver must absorb the repeat. {@link processWelcome}
+ * does NOT — it is a pure function with no registry of joined groups, so a repeat
+ * succeeds silently and hands back a second handle frozen at the join epoch.
+ * **Adopting that handle rolls the member back: every member added since is gone from
+ * its roster, it can no longer read traffic, and nothing raises an error.** This
+ * function exists to remove that hazard.
  *
- * It matters because {@link processWelcome} does NOT absorb it. It is a pure function of the
- * Welcome bytes, the key package and the private keys — nothing in it, and nothing in the MLS
- * library beneath it, holds a registry of joined groups, so there is no already-joined state
- * for it to consult. A repeat therefore succeeds, silently, and hands back a whole second
- * group state frozen at the epoch the Welcome was minted for. **Adopting that handle rolls the
- * member back to its joining epoch: every member added since is gone from its roster, it can
- * no longer read the group's traffic, and nothing anywhere raises an error.** That is the
- * hazard this function exists to remove, and it is why the safe path is the one to call.
- *
- * **The join is done and then dropped, and it has to be.** The duplicate is only visible
- * AFTER the join: a Welcome's group id is encrypted to the joiner's key, so the check cannot
- * be hoisted above the `processWelcome` call — there is nothing to check it against until the
- * handle exists. So this joins, compares the group id it got against `joined`, and drops the
- * stale handle — a local reference falling out of scope, not a wipe: nothing here zeroizes the
- * key material it held — rather than returning it. The wasted work is the price of the guarantee.
- *
- * The dedup keys on the joined group's id alone: the id `processWelcome` handed back, checked
- * against the ids this member already holds (`joined`). A Welcome for a group absent from that
- * set is an ordinary first join, whatever else the Welcome carries.
+ * The check cannot be hoisted above `processWelcome`: a Welcome's group id is
+ * encrypted to the joiner's key, so there is nothing to check until the handle exists.
+ * So this joins, compares the resulting group id against `joined`, and drops the stale
+ * handle (a local falling out of scope — nothing zeroizes its key material) rather than
+ * returning it. Dedup keys on the group id alone; a Welcome for an id absent from
+ * `joined` is an ordinary first join.
  */
 export async function processWelcomeOnce(
   params: ProcessWelcomeOnceParams,
@@ -1444,27 +1381,25 @@ export type RemoveMemberResult = {
   /** Framed MLSMessage bytes. Broadcast to existing members via the DS. */
   commitMessage: Uint8Array
   newGroup: GroupHandle
-  /** Post-commit epoch the group is now at (== newGroup.epoch). NOTE: this is
-   *  NOT the epoch carried in the commit's wire header — a commit is framed at
-   *  the sender's pre-commit epoch (== epoch - 1n), which is what receivers
-   *  compare against their own handle.epoch for ordering (see readMessageEpoch). */
+  /** Post-commit epoch (== newGroup.epoch). NOT the commit's wire-header epoch: a
+   *  commit is framed at the sender's pre-commit epoch (== epoch - 1n), which is what
+   *  receivers compare against their own handle.epoch for ordering (see
+   *  readMessageEpoch). */
   epoch: bigint
 }
 
 /**
- * Remove a member from the group. Advances the epoch and rotates keys.
+ * Remove a member. Advances the epoch and rotates keys.
  *
  * Removal must demote: a receiver rejects a Remove whose target is still `admin` in
- * the roster the commit's entries fold to. So removing an admin means riding the
- * demotion entry on the same commit — pass it as `ledgerEntries`. The entry is signed
- * by the caller, who holds the identity; this only carries it.
+ * the folded roster. So removing an admin means riding the demotion entry on the same
+ * commit — pass it as `ledgerEntries`. The caller signs the entry; this only carries it.
  *
- * Reads `group`'s state and returns a NEW derived handle (`newGroup`); it never
- * advances `group` itself. The caller must adopt `newGroup` — never reuse `group` —
- * before issuing the next commit: two commits issued from the same source handle
- * both frame at that handle's epoch and diverge. The per-handle mutex only
- * serializes concurrent calls against one handle; it does not make it safe to
- * produce a second commit from a handle a prior commit has already superseded.
+ * Reads `group` and returns a NEW derived handle (`newGroup`); it never advances
+ * `group`. The caller MUST adopt `newGroup` — never reuse `group` — before the next
+ * commit: two commits from the same source handle both frame at its epoch and diverge.
+ * The mutex only serializes concurrent calls against one handle; it does not make a
+ * second commit from a superseded handle safe.
  */
 export async function removeMember(
   group: GroupHandle,
@@ -1492,15 +1427,14 @@ export async function removeMember(
 }
 
 /**
- * Read the MLS epoch from a framed handshake/application message's cleartext
- * header, without decrypting. Advisory only — the header epoch is unauthenticated;
- * use it to drop stale / buffer future messages before the authenticated
- * processMessage. Returns undefined for non-message or undecodable bytes.
+ * Read the MLS epoch from a framed message's cleartext header without decrypting.
+ * Advisory only — the header epoch is unauthenticated; use it to drop stale / buffer
+ * future messages before the authenticated processMessage. Returns undefined for
+ * non-message or undecodable bytes.
  *
- * Total by contract: this is a safe pre-filter over bytes arriving from an
- * untrusted Delivery Service, so it never throws. ts-mls `decode` throws (e.g.
- * CodecError on input larger than its max size) rather than returning undefined
- * for some malformed inputs; that is caught and treated as "not a message".
+ * Total by contract (a safe pre-filter over untrusted Delivery Service bytes): never
+ * throws. ts-mls `decode` throws on some malformed inputs (e.g. oversized); that is
+ * caught and treated as "not a message".
  */
 export function readMessageEpoch(bytes: Uint8Array): bigint | undefined {
   const message = (() => {
@@ -1530,18 +1464,15 @@ export type InspectGroupInfoResult = {
 }
 
 /**
- * Non-destructively inspect a framed MLSMessage(GroupInfo) — read its epoch and
- * ratchet-tree hash without joining or mutating any state. Used to confirm an
- * external-resync Commit was canonically accepted: compare the returned
- * (epoch, treeHash) for equality against the rejoiner's own post-commit state
- * (GroupHandle.epoch / GroupHandle.treeHash). Equal ⟹ this device's Commit won
- * the epoch; unequal ⟹ another Commit won and the rejoin must retry.
+ * Read a framed MLSMessage(GroupInfo)'s epoch and ratchet-tree hash without joining
+ * or mutating state. Used to confirm an external-resync Commit was canonically
+ * accepted: compare the returned (epoch, treeHash) against the rejoiner's own
+ * post-commit state. Equal ⟹ this device's Commit won the epoch; unequal ⟹ another
+ * won and the rejoin must retry.
  *
- * Structural read only: it does NOT verify the GroupInfo signature. The caller
- * is expected to have obtained the bytes over the group's authorized channel.
- * Unlike readMessageEpoch (a total pre-filter over untrusted DS bytes), this
- * THROWS on malformed input — a malformed already-trusted GroupInfo is a
- * programming error, not expected traffic.
+ * Structural read only — does NOT verify the GroupInfo signature; the caller obtains
+ * the bytes over the group's authorized channel. Unlike readMessageEpoch, this THROWS
+ * on malformed input: an already-trusted malformed GroupInfo is a programming error.
  */
 export function inspectGroupInfo(groupInfoBytes: Uint8Array): InspectGroupInfoResult {
   const message = decode(mlsMessageDecoder, groupInfoBytes)
@@ -1566,13 +1497,12 @@ export type GroupInfoBinding = {
 }
 
 /**
- * Read the group-identifying bindings out of a framed MLSMessage(GroupInfo)
- * without joining: the group id its GroupContext names and the raw bytes of its
- * genesis-anchor extension. A recovering peer compares both against the group it
- * believes it is healing, so a GroupInfo for another group — or one carrying a
- * different anchor — is refused before it can steer an external join. Structural
- * read only; it does not verify the GroupInfo signature. Throws on malformed
- * input, like {@link inspectGroupInfo}.
+ * Read a framed MLSMessage(GroupInfo)'s group-identifying bindings without joining:
+ * the group id its GroupContext names and the raw genesis-anchor extension bytes. A
+ * recovering peer compares both against the group it believes it is healing, so a
+ * GroupInfo for another group or with a different anchor is refused before it can
+ * steer an external join. Structural read only; does not verify the signature. Throws
+ * on malformed input, like {@link inspectGroupInfo}.
  */
 export function readGroupInfoBinding(groupInfoBytes: Uint8Array): GroupInfoBinding {
   const message = decode(mlsMessageDecoder, groupInfoBytes)
@@ -1594,9 +1524,7 @@ export function readGroupInfoBinding(groupInfoBytes: Uint8Array): GroupInfoBindi
   }
 }
 
-/**
- * Generate a key package for joining groups.
- */
+/** Generate a key package for joining groups. */
 export async function createKeyPackageBundle(
   identity: OwnIdentity,
   options?: GroupOptions,
@@ -1675,12 +1603,11 @@ export async function joinGroupExternal(
     authenticatedData,
   } = params
 
-  // Guard: resync replaces the caller's own prior leaf, so the rejoining identity
-  // must match the credential it presents. On a mismatch ts-mls rejects the
-  // external commit downstream (it finds no prior leaf matching the KeyPackage and
-  // throws); reject early here with a clearer error. This is a friendly precheck,
-  // not the security boundary — eviction completeness rests on ts-mls requiring a
-  // matching prior leaf in the resynced tree, which a removed member no longer has.
+  // Resync replaces the caller's own prior leaf, so the rejoining identity must match
+  // the presented credential. A friendly precheck, not the security boundary: on a
+  // mismatch ts-mls rejects the external commit downstream anyway. Eviction
+  // completeness rests on ts-mls requiring a matching prior leaf in the resynced tree,
+  // which a removed member no longer has.
   if (normalizeDID(identity.id) !== normalizeDID(credential.id)) {
     throw new Error(
       `joinGroupExternal: identity.id (${identity.id}) must match credential.id (${credential.id}) for resync`,
@@ -1702,10 +1629,9 @@ export async function joinGroupExternal(
   // Discriminated-union narrow via the literal wireformat tag — no cast needed.
   const { groupInfo } = message
 
-  // A resync must target the group this credential names. The returned handle is
-  // built from the CALLER's credential, so it reports `credential.groupID`
-  // whatever group it actually joins — without this a caller steered onto a
-  // GroupInfo for another group would hold a handle that lies about its identity.
+  // A resync must target the group this credential names. The returned handle reports
+  // `credential.groupID` whatever group it joins, so without this a caller steered onto
+  // a GroupInfo for another group would hold a handle that lies about its identity.
   const offeredGroupID = new TextDecoder().decode(groupInfo.groupContext.groupId)
   if (offeredGroupID !== credential.groupID) {
     throw new Error(
@@ -1713,11 +1639,9 @@ export async function joinGroupExternal(
     )
   }
 
-  // The rejoining leaf must advertise every GroupContext extension the group
-  // uses (e.g. a genesis-anchor extension), or ts-mls rejects the external
-  // join with "client does not support every extension in the GroupContext".
-  // Derive them from the GroupInfo being resynced against, honoring an explicit
-  // capabilities override.
+  // The rejoining leaf must advertise every GroupContext extension the group uses, or
+  // ts-mls rejects the external join. Derive them from the GroupInfo being resynced
+  // against, honoring an explicit capabilities override.
   const keyPackage = await generateKeyPackageWithKey({
     credential: makeMLSCredential(identity),
     signatureKeyPair: { signKey: identity.privateKey, publicKey: identity.publicKey },

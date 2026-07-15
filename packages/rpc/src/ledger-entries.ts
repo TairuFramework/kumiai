@@ -2,17 +2,15 @@ import type { Unwrap } from '@kumiai/broadcast'
 import { fromUTF, toUTF } from '@sozai/codec'
 
 /**
- * The blob a commit frame carries: the signed control-ledger tokens the Commit enacts,
- * sealed with `GroupCrypto.wrap` under the epoch secret the Commit is framed at — the
- * epoch every peer that can apply the Commit is at. The hub sees only the sealed bytes,
- * and never a body.
+ * The blob a commit frame carries: the signed control-ledger tokens the Commit enacts, sealed
+ * with `GroupCrypto.wrap` under the epoch secret the Commit is framed at (the epoch every peer
+ * that can apply it holds). The hub sees only the sealed bytes, never a body.
  *
  *   [ count(2, LE) | (tokenLength(4, LE) | token utf8)... ]
  *
- * This module holds the ONLY place a commit frame's blob is opened, and it is a
- * resolver: it runs when the MLS port asks for the bodies of a commit it is applying,
- * and at no other time. Unwrapping is a consequence of "I can apply this frame", never a
- * precondition of reading it.
+ * This module is the ONLY place a commit frame's blob is opened, via a resolver that runs only
+ * when the MLS port asks for the bodies of a commit it is applying. Unwrapping is a consequence
+ * of "I can apply this frame", never a precondition of reading it.
  */
 
 const COUNT_BYTES = 2
@@ -59,22 +57,20 @@ export function decodeLedgerEntries(bytes: Uint8Array): Array<string> {
 }
 
 /**
- * A ledger-entry resolver over the blob of the commit frame being applied. The MLS port
- * calls it with the ids the Commit's control envelope names, and it answers with the
- * bodies sealed into that same frame — which is what makes body delivery atomic with the
- * commit, and first-delivery stranding impossible rather than merely retryable.
+ * A ledger-entry resolver over the blob of the commit frame being applied. The MLS port calls
+ * it with the ids the Commit's control envelope names; it answers with the bodies sealed into
+ * that same frame — making body delivery atomic with the commit, so first delivery cannot
+ * strand.
  *
- * It answers with every token in the blob rather than the subset the ids name: a token is
- * content-addressed, so the caller binds each body to the id it asked for by digesting it,
- * and a body that matches no requested id is ignored. A responder can fail to answer,
- * never inject.
+ * Answers with every token in the blob, not just the named subset: tokens are
+ * content-addressed, so the caller binds each body to its id by digesting, and an unrequested
+ * body is ignored. A responder can fail to answer, never inject.
  *
- * A blob this peer cannot open yields NO entries, not an error: the commit then fails to
- * resolve what it names, the port raises its missing-entries error, and the lane leaves
- * the cursor where it is so the frame is read again. It is never reported as corruption.
- * In practice this does not arise on the apply path at all — the port asks only for a
- * commit it is applying, and a commit it is applying is framed at the epoch this peer is
- * at, which is the epoch the blob is sealed under.
+ * A blob this peer cannot open yields NO entries, not an error: the commit fails to resolve,
+ * the port raises missing-entries, and the lane leaves the cursor put so the frame is re-read
+ * — never reported as corruption. In practice this cannot arise on the apply path: the port
+ * asks only for a commit it is applying, framed at this peer's epoch, the epoch the blob is
+ * sealed under.
  */
 export function createLedgerEntryResolver(
   sealedEntries: Uint8Array,
@@ -84,9 +80,9 @@ export function createLedgerEntryResolver(
     try {
       const opened = await unwrap(sealedEntries)
       const payload = opened instanceof Uint8Array ? opened : opened.payload
-      // The blob's authenticity is not what makes a body trustworthy: every token is
-      // signed and content-addressed, and the caller re-verifies both. The seal buys
-      // confidentiality from the hub, so the recovered sender is deliberately unused.
+      // Body trust comes from the token's own signature + content-address, which the caller
+      // re-verifies — not from the seal, which only buys confidentiality from the hub. The
+      // recovered sender is deliberately unused.
       return decodeLedgerEntries(payload)
     } catch {
       return []

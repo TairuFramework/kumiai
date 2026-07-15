@@ -1,20 +1,18 @@
 /**
- * The commit lane's frame: an MLS Commit, and riding with it the ledger-entry bodies
- * that Commit enacts, sealed under the epoch secret the Commit is framed at.
+ * The commit lane's frame: an MLS Commit plus the ledger-entry bodies that Commit enacts,
+ * sealed under the epoch secret the Commit is framed at.
  *
  *   [ commitLength(4, LE) | commit bytes | sealed entry blob... ]
  *
- * The halves are length-delimited, so the commit half is read WITHOUT the blob being
- * touched. That is the whole shape of the design: body delivery is atomic with the
- * commit, so a peer never has to be told about a body before the commit that enacts it.
+ * Length-delimited halves, so the commit half is read WITHOUT touching the blob. Body
+ * delivery is atomic with the commit: a peer is never told of a body before the commit that
+ * enacts it.
  *
- * NOTHING IN THIS MODULE IMPORTS CRYPTO. Reading a frame cannot decrypt anything, so
- * "I read this frame" and "I opened this frame's blob" cannot be conflated. Every peer
- * walking the log reaches frames sealed under an epoch secret it does not hold — the
- * late joiner reaches the very commit that added it, sealed under the epoch before it
- * was a member — and a blob a peer cannot open is history, not poison: it still reads
- * the commit half, and steps over the frame like any other it cannot apply. The blob is
- * opened by {@link "ledger-entries".createLedgerEntryResolver}, and only for a commit
+ * NOTHING IN THIS MODULE IMPORTS CRYPTO — reading a frame cannot decrypt, so "read this
+ * frame" and "opened its blob" cannot be conflated. Every peer walking the log reaches frames
+ * sealed under an epoch secret it does not hold (the late joiner reaches the commit that added
+ * it); an unopenable blob is history, not poison — read the commit half, step over the frame.
+ * The blob is opened by {@link "ledger-entries".createLedgerEntryResolver}, only for a commit
  * the peer is applying.
  */
 

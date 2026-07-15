@@ -72,28 +72,22 @@ type Sink = {
 }
 
 /**
- * Multiplex a single hub `receive` drain into a BroadcastBus view, a mailbox-hub
- * view (for directed tunnels), and an onInbound hook (for lazy directed-server
- * accept).
+ * Multiplex a single hub `receive` drain into a BroadcastBus view, a mailbox-hub view (for
+ * directed tunnels), and an onInbound hook (for lazy directed-server accept).
  *
- * Per inbound message, in order: (1) fire `onInbound` listeners for the topic,
- * then (2) push to every `mailbox.receive` sink — so a listener may create a
- * directed tunnel synchronously and still receive the triggering frame. Topics
- * are refcounted across all three views: the first registration subscribes on
- * the hub.
+ * Per inbound message, in order: (1) fire `onInbound` listeners for the topic, then (2) push
+ * to every `mailbox.receive` sink — so a listener may create a directed tunnel synchronously
+ * and still receive the triggering frame. Topics are refcounted across all three views; the
+ * first registration subscribes on the hub.
  *
- * **The refcount is about LOCAL LISTENERS, and it never unsubscribes.** A subscription is
- * a durable relationship between a member and a topic, not a session: the hub holds a
- * subscriber's undelivered frames FOR it, and `unsubscribe` is the store's instruction to
- * stop — it drops the member's pending deliveries and frees any mailbox frame it was the
- * last reader of. So nothing here may unsubscribe on the strength of a local lifecycle
- * event. Dropping a listener, rotating an epoch and disposing the mux all mean "I am not
- * listening", and none of them mean "I have read my mail, throw the rest away".
- *
- * That leaves unsubscribing as something only an explicit leave-the-group would ever do,
- * and nothing in this package does it. That is correct: a member's subscription outliving
- * its process is exactly the property that lets it come back and find its mail — and on a
- * mobile client, disposing the peer is what backgrounding the app calls.
+ * **The refcount tracks LOCAL LISTENERS and never unsubscribes.** A subscription is a durable
+ * member-topic relationship, not a session: the hub holds a subscriber's undelivered frames,
+ * and `unsubscribe` tells the store to drop them and free any mailbox frame it was the last
+ * reader of. So no local lifecycle event may unsubscribe — dropping a listener, rotating an
+ * epoch, disposing the mux all mean "not listening", never "I have read my mail, discard the
+ * rest". Only an explicit leave-the-group would unsubscribe, and nothing here does. That
+ * outliving subscription is what lets a member return and find its mail; disposing the peer is
+ * what backgrounding a mobile app calls.
  */
 export function createHubMux(params: HubMuxParams): HubMux {
   const { hub, localDID } = params
@@ -275,11 +269,9 @@ export function createHubMux(params: HubMuxParams): HubMux {
       disposed = true
       for (const sink of [...sinks]) sink.close()
       sinks.clear()
-      // The listeners go, the drain stops, and the SUBSCRIPTIONS STAND. Disposing is this
-      // process saying it has stopped reading — not this member saying it has read
-      // everything and wants the rest thrown away. On a mobile client this is what
-      // backgrounding the app calls, and unsubscribing here would delete the user's unread
-      // messages out of the hub every time they switched apps.
+      // Listeners go, the drain stops, SUBSCRIPTIONS STAND. Disposing means "stopped reading",
+      // not "read everything, discard the rest". On mobile this is what backgrounding calls;
+      // unsubscribing here would delete the user's unread mail on every app switch.
       refcount.clear()
       listeners.clear()
       iterator.return?.()

@@ -34,13 +34,12 @@ export type MailboxHubEvents = {
 }
 
 /**
- * The parameters of a mailbox-class publish — the only kind a {@link MailboxHub} accepts. A
- * mailbox frame is delivery-derived: it carries no retention class, no compare-and-set and no
- * idempotency key, because the lanes a MailboxHub fronts (a directed tunnel, an encrypting
- * wrapper, a session hub) carry app traffic that is never CAS'd against a log head. Keeping those
- * fields OFF this type is what makes the restriction structural: a caller cannot hand a
- * conditional publish to a mailbox lane, so a wrapper fronting one has nothing to silently drop.
- * A lane that genuinely needs the compare-and-set publishes through a {@link LogHub} instead.
+ * A mailbox-class publish — the only kind a {@link MailboxHub} accepts. No retention class, no
+ * compare-and-set, no idempotency key: the lanes a MailboxHub fronts (directed tunnel, encrypting
+ * wrapper, session hub) carry app traffic never CAS'd against a log head. Keeping those fields OFF
+ * this type makes the restriction structural — a caller cannot hand a conditional publish to a
+ * mailbox lane, so a wrapper fronting one has nothing to silently drop. A lane that needs the CAS
+ * uses a {@link LogHub} instead.
  */
 export type MailboxPublishParams = {
   senderDID: string
@@ -50,36 +49,34 @@ export type MailboxPublishParams = {
 
 export type HubPublishParams = MailboxPublishParams & {
   /**
-   * Retention class. 'mailbox' (default): the frame is removed once every delivery
-   * is acked, or when it ages out. 'log': the frame is retained unconditionally and
-   * removed only by trim, because a subscriber that must read it may not exist when
-   * it is published. Only a 'log' publish moves the topic's head.
+   * Retention class. 'mailbox' (default): removed once every delivery is acked, or when it ages
+   * out. 'log': retained unconditionally, removed only by trim (a subscriber that must read it may
+   * not exist when it is published). Only a 'log' publish moves the topic's head.
    */
   retain?: 'log' | 'mailbox'
   /**
-   * Compare-and-set on the topic's head. Absent: append unconditionally. Present:
-   * append only if the topic's head is exactly this value, where `null` means "the
-   * topic has never had an accepted log publish". A loser gets HeadMismatchError and
-   * nothing is stored — no entry, no delivery, no sequenceID consumed.
+   * Compare-and-set on the topic's head. Absent: append unconditionally. Present: append only if
+   * the head is exactly this value, where `null` means "the topic has never had an accepted log
+   * publish". A loser gets HeadMismatchError and nothing is stored (no entry, no delivery, no
+   * sequenceID consumed).
    *
-   * `null` and absent are different requests, so a forwarding implementation must
-   * distinguish them: check for the key, not for a non-null value.
+   * `null` and absent are different requests: a forwarding implementation must check for the key,
+   * not for a non-null value.
    */
   expectedHead?: string | null
   /**
-   * Idempotency key. Republishing an already-accepted `publishID` returns its original
-   * sequenceID and appends nothing. It is what lets a peer that crashed between
-   * publishing a commit and recording the outcome ask "did my publish land?" and get an
-   * answer, with no responder and no network peer involved.
+   * Idempotency key. Republishing an already-accepted `publishID` returns its original sequenceID
+   * and appends nothing — letting a peer that crashed between publishing a commit and recording
+   * the outcome ask "did my publish land?" with no responder or network peer involved.
    */
   publishID?: string
 }
 
 export type HubSubscribeOptions = {
   /**
-   * Requested retention in seconds for this subscriber's view of the topic. Absent:
-   * the hub's default. Above the hub's maximum the subscribe is refused, never
-   * clamped — a silent downgrade strands a peer that believed it had asked for more.
+   * Requested retention in seconds for this subscriber's view. Absent: the hub's default. Above
+   * the hub's maximum the subscribe is refused, never clamped — a silent downgrade strands a peer
+   * that believed it had asked for more.
    */
   retention?: number
 }
@@ -101,12 +98,11 @@ export type HubFetchTopicResult = {
 }
 
 /**
- * Publish and push-delivery over topics. A subscriber sees only what is published
- * after it subscribes: there is nothing here to read history from.
+ * Publish and push-delivery over topics. A subscriber sees only what is published after it
+ * subscribes — no history to read.
  *
- * This is the shape of the adapter views built on top of a hub — a directed tunnel,
- * a session hub, an encrypting wrapper — as well as of a hub used for mailbox
- * traffic alone. A lane that must be readable by a peer which was not subscribed at
+ * The shape of the adapter views over a hub (directed tunnel, session hub, encrypting wrapper) and
+ * of a hub used for mailbox traffic alone. A lane that must be readable by a peer not subscribed at
  * publish time needs a {@link LogHub} instead.
  */
 export type MailboxHub = {
@@ -122,14 +118,13 @@ export type MailboxHub = {
 }
 
 /**
- * A hub that also retains a readable per-topic log. A pull-driven lane needs one:
- * commits must be readable by a peer that was not subscribed when they were
- * published — a member invited tomorrow has to apply the commits that land today,
- * and no push will ever bring them to it.
+ * A hub that also retains a readable per-topic log. A pull-driven lane needs one: commits must be
+ * readable by a peer not subscribed when they were published — a member invited tomorrow has to
+ * apply commits that land today, which no push will bring it.
  *
  * Its `publish` widens the mailbox one to {@link HubPublishParams}: only through a LogHub can a
- * caller drive the compare-and-set (`expectedHead`), pin a frame to the log (`retain: 'log'`), or
- * carry an idempotency key (`publishID`). A MailboxHub deliberately cannot.
+ * caller drive the CAS (`expectedHead`), pin a frame to the log (`retain: 'log'`), or carry an
+ * idempotency key (`publishID`). A MailboxHub deliberately cannot.
  */
 export type LogHub = Omit<MailboxHub, 'publish'> & {
   publish: (params: HubPublishParams) => Promise<{ sequenceID: string }>
@@ -167,18 +162,16 @@ export type HubTunnelTransportParams = {
 const DEFAULT_INBOX_CAPACITY = 1024
 
 /**
- * Build a hub-tunnel transport over the pub/sub hub API. The returned
- * `TransportType` subscribes to `receiveTopicID`, reads from a single inbox
- * subscription (filtering to that topic), and writes to the hub via
+ * Build a hub-tunnel transport over the pub/sub hub API. The returned `TransportType` subscribes
+ * to `receiveTopicID`, reads a single inbox subscription filtered to that topic, and writes via
  * `hub.publish` on `sendTopicID`.
  *
- * **Contract notes (relied on by callers):**
- * - `hub.subscribe(localDID, receiveTopicID)` and `hub.receive(localDID)` are
- *   each called **exactly once** during construction.
- * - On any teardown path (signal abort, idle timeout, encrypt failure,
- *   peer-side `session-end`, manual `transport.dispose()`), this transport
- *   publishes a best-effort `session-end` frame to `sendTopicID` and
- *   best-effort `hub.unsubscribe?.(localDID, receiveTopicID)`.
+ * **Contract (relied on by callers):**
+ * - `hub.subscribe(localDID, receiveTopicID)` and `hub.receive(localDID)` are each called
+ *   **exactly once** during construction.
+ * - On any teardown path (signal abort, idle timeout, encrypt failure, peer-side `session-end`,
+ *   manual `transport.dispose()`), it publishes a best-effort `session-end` frame to `sendTopicID`
+ *   and best-effort `hub.unsubscribe?.(localDID, receiveTopicID)`.
  */
 export function createHubTunnelTransport<R, W>(
   params: HubTunnelTransportParams,

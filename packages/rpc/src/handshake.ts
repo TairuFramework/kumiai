@@ -1,14 +1,12 @@
 /**
- * Framing for the raw MLS control lanes. Unlike application protocols, these carry
- * un-`wrap`ped bytes on non-rotating topics: Commits on the commit topic, recovery
- * request/reply on the rendezvous topic. Each frame is self-identifying, so a frame
- * that lands on the wrong lane is recognised and dropped rather than mis-read:
+ * Framing for the raw MLS control lanes: un-`wrap`ped bytes on non-rotating topics (Commits on
+ * the commit topic, recovery request/reply on the rendezvous topic). Self-identifying, so a
+ * frame on the wrong lane is dropped rather than mis-read:
  *
  *   [ MAGIC(2) | VERSION(1) | KIND(1) | payload... ]
  *
- * The magic marks the bytes as a handshake frame (fail-fast on garbage or a
- * mis-routed payload); the version allows the wire format to evolve without an
- * ambiguous unversioned migration; the kind discriminates the three messages.
+ * Magic: fail-fast on garbage or a mis-routed payload. Version: evolve the wire format without
+ * an ambiguous unversioned migration. Kind: discriminate the messages.
  */
 
 /** Leading marker identifying a handshake frame ("EK"). */
@@ -29,9 +27,8 @@ export const HANDSHAKE_KIND = {
   recoveryReply: 2,
   /**
    * A rejoined peer asking for the group's WHOLE ordered ledger. A GroupInfo carries an
-   * authenticated ledger head and no entries, so a peer that rejoined by external commit
-   * cannot ask for "the ids it is missing" — nothing enumerates them, and the head is a
-   * chain digest, not a list.
+   * authenticated ledger head (a chain digest) and no entries, so a peer that rejoined by
+   * external commit cannot ask for "the ids it is missing" — nothing enumerates them.
    */
   ledgerRequest: 3,
   /** A member's reply carrying its whole ordered ledger, for the requester to head-verify. */

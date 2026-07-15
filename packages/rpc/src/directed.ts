@@ -77,12 +77,11 @@ type ServerSession = {
 }
 
 /**
- * Accept directed RPC. A single sealed drain of `selfInboxTopic` opens each
- * inbound frame with `unwrap`, binds every session to the MLS-authenticated
- * sender recovered from the ciphertext, and feeds decrypted frame bytes into a
- * per-session in-memory transport whose replies are sealed with `wrap`. Frames
- * whose recovered sender does not match the session binding are dropped, so a
- * malicious hub can neither read the lane nor forge/splice a sender.
+ * Accept directed RPC. A single sealed drain of `selfInboxTopic` opens each inbound frame with
+ * `unwrap`, binds every session to the MLS-authenticated sender recovered from the ciphertext,
+ * and feeds decrypted bytes into a per-session in-memory transport whose replies are sealed
+ * with `wrap`. Frames whose recovered sender does not match the session binding are dropped, so
+ * a malicious hub can neither read the lane nor forge/splice a sender.
  */
 export function createInboxAcceptor<Protocol extends ProtocolDefinition>(
   params: InboxAcceptorParams<Protocol>,
@@ -180,11 +179,9 @@ export function createInboxAcceptor<Protocol extends ProtocolDefinition>(
     }
   }
 
-  // Serialize inbound processing: `unwrap` is async (real MLS decrypt has
-  // variable latency), so independent concurrent tasks could resolve out of
-  // dispatch order — racing to double-create a session, or feeding frames to a
-  // tunnel out of wire order (which drops them as stale seq). Chaining each
-  // message onto a running tail keeps processing in arrival order.
+  // Serialize inbound processing: `unwrap` is async with variable latency, so concurrent
+  // tasks could resolve out of dispatch order — double-creating a session, or feeding a tunnel
+  // out of wire order (dropped as stale seq). Chaining onto a running tail keeps arrival order.
   let inboundTail: Promise<void> = Promise.resolve()
   const unsubscribe = mux.onInbound(selfInboxTopic, (message) => {
     inboundTail = inboundTail

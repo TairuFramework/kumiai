@@ -145,11 +145,10 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         rethrowAsHandlerError(error)
       }
 
-      // A deduped publish appended nothing: the frame it names was already accepted and already
-      // fanned out to whoever was subscribed then, and its sequenceID may since have been acked
-      // and its delivery row removed. Re-running the loop would push a frame every current
-      // subscriber has already applied — with a sequenceID that no longer names a live delivery.
-      // So the live fan-out is for a genuine append only.
+      // A deduped publish appended nothing: the frame was already accepted, already fanned out to
+      // whoever was subscribed then, and its sequenceID may since have been acked and its delivery
+      // row removed. Re-running the loop would push a frame every current subscriber has already
+      // applied, named by a dead sequenceID. Live fan-out is for a genuine append only.
       if (!deduped) {
         // Live-deliver to currently-connected subscribers (minus the sender).
         const subscribers = await store.getSubscribers(topicID)

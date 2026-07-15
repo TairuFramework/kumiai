@@ -38,14 +38,12 @@ export function inboxTopic(secret: Uint8Array, epoch: number, memberDID: string)
 }
 
 /**
- * The non-rotating commit topic: MLS Commits only, retained as a log and read by
- * pull. Derived from the epoch-independent recovery secret (epoch fixed at `0`), so
- * it is stable for the group's whole life and a member stranded on any epoch can
- * still derive it. Opaque to the hub.
+ * The non-rotating commit topic: MLS Commits only, retained as a log, read by pull. Derived
+ * from the epoch-independent recovery secret (epoch fixed at `0`), so it is stable for the
+ * group's life and a member stranded on any epoch can still derive it. Opaque to the hub.
  *
- * Separate from {@link rendezvousTopic} because the two lanes want opposite things
- * from the hub: the commit lane is a log whose head every commit moves, and the
- * rendezvous lane is a mailbox whose frames must never move that head.
+ * Separate from {@link rendezvousTopic}: the commit lane is a log whose head every commit
+ * moves, the rendezvous lane is a mailbox whose frames must never move a head.
  */
 export function commitTopic(recoverySecret: Uint8Array): string {
   return deriveTopicID(recoverySecret, 0, COMMIT_LABEL)
@@ -53,10 +51,9 @@ export function commitTopic(recoverySecret: Uint8Array): string {
 
 /**
  * The non-rotating recovery-rendezvous topic: recovery request/reply, published
- * unconditionally and delivered by push. Derived from the same epoch-independent
- * recovery secret, so a stranded peer always shares this rendezvous with the live
- * group. Keeps mailbox semantics: a requester subscribes before it asks, so it
- * cannot miss its own reply. Opaque to the hub.
+ * unconditionally and pushed. Derived from the same epoch-independent recovery secret, so a
+ * stranded peer always shares it with the live group. Mailbox semantics: a requester
+ * subscribes before it asks, so it cannot miss its own reply. Opaque to the hub.
  */
 export function rendezvousTopic(recoverySecret: Uint8Array): string {
   return deriveTopicID(recoverySecret, 0, RENDEZVOUS_LABEL)
