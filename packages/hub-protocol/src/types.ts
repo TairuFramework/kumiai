@@ -223,7 +223,7 @@ export type HubStoreEvents = {
  * - The `publishID` dedup record is **not a log entry**: no deleter may reach it, its retention is
  *   its own (indefinite recommended), and it outlives the frame it names.
  *
- * Verified by the conformance suite in `@kumiai/hub-protocol/conformance`.
+ * Verified by the conformance suite in `@kumiai/hub-conformance`.
  */
 export type HubStore = {
   events: EventEmitter<HubStoreEvents>

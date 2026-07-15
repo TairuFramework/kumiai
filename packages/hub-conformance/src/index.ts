@@ -4,7 +4,7 @@
  * Hosts implementing `HubStore` run this against their own store:
  *
  * ```ts
- * import { testHubStoreConformance } from '@kumiai/hub-protocol/conformance'
+ * import { testHubStoreConformance } from '@kumiai/hub-conformance'
  *
  * testHubStoreConformance({ createStore: () => new SQLHubStore(freshDatabase()) })
  * ```
@@ -29,12 +29,11 @@
  * CONNECTIONS — the only version that proves the head comparison, sequence mint, append and head
  * advance happen in one transaction.
  *
- * @module conformance
+ * @module hub-conformance
  */
+import type { HubStore } from '@kumiai/hub-protocol'
+import { HeadMismatchError, NotSubscribedError, RetentionExceededError } from '@kumiai/hub-protocol'
 import { describe, expect, test } from 'vitest'
-
-import { HeadMismatchError, NotSubscribedError, RetentionExceededError } from './errors.js'
-import type { HubStore } from './types.js'
 
 export type HubStoreConformanceParams = {
   /** Returns a fresh, empty store. Called once per test case. */

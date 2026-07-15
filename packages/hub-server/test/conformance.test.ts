@@ -1,4 +1,4 @@
-import { testHubStoreConformance } from '@kumiai/hub-protocol/conformance'
+import { testHubStoreConformance } from '@kumiai/hub-conformance'
 
 import { createMemoryStore } from '../src/memoryStore.js'
 

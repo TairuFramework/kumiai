@@ -18,8 +18,7 @@
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "exports": {
-    ".": "./lib/index.js",
-    "./conformance": "./lib/conformance.js"
+    ".": "./lib/index.js"
   },
   "files": [
     "lib/*"
@@ -38,14 +37,6 @@
   "dependencies": {
     "@sozai/event": "catalog:",
     "@enkaku/protocol": "catalog:"
-  },
-  "peerDependencies": {
-    "vitest": "catalog:"
-  },
-  "peerDependenciesMeta": {
-    "vitest": {
-      "optional": true
-    }
   },
   "devDependencies": {
     "vitest": "catalog:"
