@@ -42,6 +42,13 @@ export const SEALED_LEDGER_VERSION = 1
  *  sealed frame needs no length prefix. */
 const KEM_OUTPUT_LENGTH = 32
 
+/** X25519 secret-key length. The same 32 bytes as the KEM output for this suite,
+ *  but a DISTINCT invariant: `enc` is a wire field a peer sends, whereas this is the
+ *  requester's OWN retained key. A retained key of any other length is a host storage
+ *  fault — a corrupt or truncated own key — not a reply addressed to someone else, and
+ *  must not be swallowed as {@link openSealedReply}'s benign `not-for-me` verdict. */
+const KEM_PRIVATE_KEY_LENGTH = 32
+
 /** Version byte + `enc` + a bare AEAD tag: the shortest well-formed reply. */
 const MIN_SEALED_LENGTH = 1 + KEM_OUTPUT_LENGTH + 16
 
@@ -500,14 +507,23 @@ async function openSealedReply(
   const { hpke } = group.context.cipherSuite
   const aad = recoveryAAD(kind, group.groupID, group.credential.id, requestID)
 
-  try {
-    return await hpke.open(
-      await hpke.importPrivateKey(ephemeralPrivateKey),
-      enc,
-      ct,
-      kind.hpkeInfo,
-      aad,
+  // The retained private key is this member's OWN, minted by createRecoveryRequest and
+  // kept by the host. A wrong length is a corrupt or truncated own key — a host storage
+  // fault — not a reply sealed for another member, so it must NOT read as `not-for-me`
+  // (the benign verdict a lane-sifter drops quietly). Validate and import it OUTSIDE the
+  // open, where a throw cannot be mistaken for the AEAD's refusal. The surface is a plain
+  // Error, not a SealedReplyRejection: a caller/host bug is not a wire condition, and the
+  // union a sifter treats as droppable must never absorb it. (importPrivateKey only wraps
+  // the bytes; the length is the check, and it is a stable invariant for this suite's KEM.)
+  if (ephemeralPrivateKey.length !== KEM_PRIVATE_KEY_LENGTH) {
+    throw new Error(
+      `openSealedReply: retained ephemeral private key must be ${KEM_PRIVATE_KEY_LENGTH} bytes, not ${ephemeralPrivateKey.length} — a corrupt or truncated own key, not a reply for another member`,
     )
+  }
+  const privateKey = await hpke.importPrivateKey(ephemeralPrivateKey)
+
+  try {
+    return await hpke.open(privateKey, enc, ct, kind.hpkeInfo, aad)
   } catch {
     throw kind.fail('not-for-me', 'sealed reply does not open for this member and request')
   }
@@ -749,18 +765,26 @@ function decodeLedgerTokens(bytes: Uint8Array): Array<string> {
     tokens.push(new TextDecoder().decode(bytes.subarray(start, start + length)))
     offset = start + length
   }
+  // The count and its framed tokens must consume the whole payload. Trailing bytes are
+  // a lie the head check downstream might not catch — a lax decoder is a parser
+  // differential — so reject them here, in the same "truncated"/"malformed" class.
+  if (offset !== bytes.length) {
+    throw new Error('sealed ledger has trailing bytes after the last token')
+  }
   return tokens
 }
 
 export type SealLedgerParams = {
   /** The responder's current handle. Its ratchet tree is what authorizes the
-   *  requester, on exactly the terms {@link sealGroupInfo} is authorized. */
+   *  requester, on exactly the terms {@link sealGroupInfo} is authorized — and its
+   *  own ledger is the only ledger it can seal. The payload is read from the handle
+   *  ({@link GroupHandle.getLedger}), never handed in: there is no parameter through
+   *  which a caller could seal one group's authority state to a requester authorized
+   *  against another. */
   group: GroupHandle
   /** The signed request token, verbatim — the same token a GroupInfo request
    *  carries, and minted by the same {@link createRecoveryRequest}. */
   request: string
-  /** The whole ordered ledger this responder holds, as signed tokens. */
-  entries: Array<string>
 }
 
 /**
@@ -782,10 +806,17 @@ export type SealLedgerParams = {
  * every responder. A reply sealed under the responder's current epoch would be
  * unopenable by the very peer that asked for it.
  *
+ * The ledger sealed is always this handle's own — read from {@link GroupHandle.getLedger}
+ * under the handle's mutex, exactly as {@link sealGroupInfo} reads its GroupInfo from
+ * {@link exportGroupInfo}. There is no seam through which a caller could hand in another
+ * group's tokens: a responder can only ever seal the authority state of the group whose
+ * ratchet tree just authorized the requester.
+ *
  * Throws {@link RecoveryRequestError} for every refusal; the responder stays silent.
  */
 export async function sealLedger(params: SealLedgerParams): Promise<Uint8Array> {
-  const { group, request, entries } = params
+  const { group, request } = params
+  const entries = await group.getLedger()
   return await sealToRequest(LEDGER_REPLY, group, request, encodeLedgerTokens(entries))
 }
 

@@ -130,8 +130,48 @@ function ledgerAAD(groupID: string, requesterDID: string, requestID: string): Ui
   return out
 }
 
-/** The group's whole ordered authority state — every role, every promotion, every demotion. */
-const LEDGER = ['role:carol=admin', 'role:dave=member', 'role:carol=member']
+/** Frame a ledger token list exactly as recovery.ts does — `[count(4)][ (len(4)|token)... ]`,
+ *  big-endian — so a test can build a plaintext with, or without, trailing garbage. */
+function encodeLedger(tokens: Array<string>): Uint8Array {
+  const utf8 = new TextEncoder()
+  const encoded = tokens.map((token) => utf8.encode(token))
+  const out = new Uint8Array(encoded.reduce((total, bytes) => total + 4 + bytes.length, 4))
+  const view = new DataView(out.buffer)
+  view.setUint32(0, encoded.length, false)
+  let offset = 4
+  for (const bytes of encoded) {
+    view.setUint32(offset, bytes.length, false)
+    out.set(bytes, offset + 4)
+    offset += 4 + bytes.length
+  }
+  return out
+}
+
+/** Seal an ARBITRARY plaintext to a request's ephemeral key over the ledger domain — the
+ *  way a responder (or a forger) would, letting a test frame a plaintext the primitive
+ *  never would, e.g. one with trailing bytes past the last token. */
+async function sealLedgerPlaintext(opts: {
+  group: GroupHandle
+  ephemeralPublicKey: Uint8Array
+  requesterDID: string
+  requestID: string
+  plaintext: Uint8Array
+}): Promise<Uint8Array> {
+  const { hpke } = opts.group.context.cipherSuite
+  const info = new TextEncoder().encode('kumiai/mls/recovery-ledger/v1')
+  const aad = ledgerAAD(opts.group.groupID, opts.requesterDID, opts.requestID)
+  const { ct, enc } = await hpke.seal(
+    await hpke.importPublicKey(opts.ephemeralPublicKey),
+    opts.plaintext,
+    info,
+    aad,
+  )
+  const sealed = new Uint8Array(1 + enc.length + ct.length)
+  sealed[0] = 1 // SEALED_LEDGER_VERSION
+  sealed.set(enc, 1)
+  sealed.set(ct, 1 + enc.length)
+  return sealed
+}
 
 describe('sealed ledger gather', () => {
   test('a sealed ledger opens for its requester, in order, and for nobody else', async () => {
@@ -142,13 +182,16 @@ describe('sealed ledger gather', () => {
       identity: bob,
       requestID: 'req-1',
     })
-    const sealed = await sealLedger({ group: aliceGroup, request, entries: LEDGER })
+    // The responder seals its OWN ledger, read from the handle — never a list handed in.
+    const expected = await aliceGroup.getLedger()
+    expect(expected.length).toBeGreaterThan(0)
+    const sealed = await sealLedger({ group: aliceGroup, request })
 
     // The order comes back as it went in: the head is a chain digest, so a permuted list of
     // the same tokens folds to a different head and the caller's head check rejects it.
     await expect(
       openSealedLedger({ group: bobGroup, sealed, requestID: 'req-1', ephemeralPrivateKey }),
-    ).resolves.toEqual(LEDGER)
+    ).resolves.toEqual(expected)
 
     // Another member, holding her own keys — her MLS leaf private key is the closest thing to
     // a "group key" she has — opens nothing.
@@ -189,7 +232,8 @@ describe('sealed ledger gather', () => {
       identity: bob,
       requestID: 'req-1',
     })
-    const sealed = await sealLedger({ group: aliceGroup, request, entries: LEDGER })
+    const ledger = await aliceGroup.getLedger()
+    const sealed = await sealLedger({ group: aliceGroup, request })
 
     // The hub holds no group state, so it cannot even form the call: it attacks the bytes.
     // Every input it could actually have is granted to it — the request rides the wire in the
@@ -214,7 +258,7 @@ describe('sealed ledger gather', () => {
     // And the plaintext is nowhere in the frame: the tokens are the bodies the commit lane
     // seals under the epoch secret, and the heal lane gives the relay no more than it does.
     const wire = new TextDecoder().decode(sealed)
-    for (const token of LEDGER) expect(wire).not.toContain(token)
+    for (const token of ledger) expect(wire).not.toContain(token)
   })
 
   test('a sealed GroupInfo does not open as a ledger, and a sealed ledger does not open as a GroupInfo', async () => {
@@ -229,7 +273,8 @@ describe('sealed ledger gather', () => {
       requestID: 'req-1',
     })
     const sealedGroupInfo = await sealGroupInfo({ group: aliceGroup, identity: alice, request })
-    const sealedLedger = await sealLedger({ group: aliceGroup, request, entries: LEDGER })
+    const ledger = await aliceGroup.getLedger()
+    const sealedLedger = await sealLedger({ group: aliceGroup, request })
 
     const asLedger = openSealedLedger({
       group: bobGroup,
@@ -260,7 +305,7 @@ describe('sealed ledger gather', () => {
         requestID: 'req-1',
         ephemeralPrivateKey,
       }),
-    ).resolves.toEqual(LEDGER)
+    ).resolves.toEqual(ledger)
     await expect(
       openSealedGroupInfo({
         group: bobGroup,
@@ -287,7 +332,6 @@ describe('sealed ledger gather', () => {
     const refusal = sealLedger({
       group: aliceGroup,
       request: outsiderRequest.request,
-      entries: LEDGER,
     })
     await expect(refusal).rejects.toThrow(RecoveryRequestError)
     await expect(refusal).rejects.toMatchObject({ reason: 'not-a-member' })
@@ -303,25 +347,25 @@ describe('sealed ledger gather', () => {
       requestID: 'req-2',
     })
     await expect(
-      sealLedger({ group: removal.newGroup, request: carolRequest.request, entries: LEDGER }),
+      sealLedger({ group: removal.newGroup, request: carolRequest.request }),
     ).rejects.toMatchObject({ reason: 'not-a-member' })
 
     // Authorization is only as fresh as the responder's own tree: bob has not applied the
     // removal, so he still answers her. The window closes for each responder as it applies the
     // commit, and not the instant the removal is issued.
     await expect(
-      sealLedger({ group: bobGroup, request: carolRequest.request, entries: LEDGER }),
+      sealLedger({ group: bobGroup, request: carolRequest.request }),
     ).resolves.toBeInstanceOf(Uint8Array)
     await bobGroup.processMessage(removal.commitMessage)
     await expect(
-      sealLedger({ group: bobGroup, request: carolRequest.request, entries: LEDGER }),
+      sealLedger({ group: bobGroup, request: carolRequest.request }),
     ).rejects.toMatchObject({ reason: 'not-a-member' })
 
     // Garbage, and a request signed for another group, are refused too — the ledger gather is
     // authorized on exactly the terms the GroupInfo rendezvous is.
-    await expect(
-      sealLedger({ group: aliceGroup, request: 'not-a-token', entries: LEDGER }),
-    ).rejects.toMatchObject({ reason: 'unverified' })
+    await expect(sealLedger({ group: aliceGroup, request: 'not-a-token' })).rejects.toMatchObject({
+      reason: 'unverified',
+    })
     const { group: elsewhere } = await createGroup(outsider, 'ledger-roster-other')
     const elsewhereRequest = await createRecoveryRequest({
       group: elsewhere,
@@ -329,7 +373,7 @@ describe('sealed ledger gather', () => {
       requestID: 'req-3',
     })
     await expect(
-      sealLedger({ group: aliceGroup, request: elsewhereRequest.request, entries: LEDGER }),
+      sealLedger({ group: aliceGroup, request: elsewhereRequest.request }),
     ).rejects.toMatchObject({ reason: 'group-mismatch' })
   })
 
@@ -346,7 +390,7 @@ describe('sealed ledger gather', () => {
       identity: bob,
       requestID: 'req-2',
     })
-    const sealed = await sealLedger({ group: aliceGroup, request: first.request, entries: LEDGER })
+    const sealed = await sealLedger({ group: aliceGroup, request: first.request })
 
     // Same member, same group, same ephemeral key — only the request id differs.
     await expect(
@@ -370,18 +414,22 @@ describe('sealed ledger gather', () => {
   })
 
   test('an empty ledger seals and opens as an empty ledger', async () => {
-    const { bob, aliceGroup, bobGroup } = await threeMemberGroup('ledger-empty')
-
     // A group whose ledger is genuinely empty is not the same thing as a peer that could not
     // gather one, and the codec must not blur them: the head check is what tells them apart.
+    // A freshly created group holds no role entries — its ledger is empty — and its creator is
+    // the member who both requests and answers here.
+    const alice = randomIdentity()
+    const { group: aliceGroup } = await createGroup(alice, 'ledger-empty')
+    expect(await aliceGroup.getLedger()).toEqual([])
+
     const { request, ephemeralPrivateKey } = await createRecoveryRequest({
-      group: bobGroup,
-      identity: bob,
+      group: aliceGroup,
+      identity: alice,
       requestID: 'req-1',
     })
-    const sealed = await sealLedger({ group: aliceGroup, request, entries: [] })
+    const sealed = await sealLedger({ group: aliceGroup, request })
     await expect(
-      openSealedLedger({ group: bobGroup, sealed, requestID: 'req-1', ephemeralPrivateKey }),
+      openSealedLedger({ group: aliceGroup, sealed, requestID: 'req-1', ephemeralPrivateKey }),
     ).resolves.toEqual([])
   })
 
@@ -393,7 +441,7 @@ describe('sealed ledger gather', () => {
       identity: bob,
       requestID: 'req-1',
     })
-    const sealed = await sealLedger({ group: aliceGroup, request, entries: LEDGER })
+    const sealed = await sealLedger({ group: aliceGroup, request })
 
     await expect(
       openSealedLedger({
@@ -428,5 +476,132 @@ describe('sealed ledger gather', () => {
         ephemeralPrivateKey,
       }),
     ).rejects.toMatchObject({ reason: 'not-for-me' })
+  })
+
+  test('a responder seals only its own ledger, never one handed in for another group', async () => {
+    const { bob, aliceGroup, bobGroup } = await threeMemberGroup('ledger-cross-a')
+
+    // Group B is a wholly separate group with a DIFFERENT ledger. Its tokens sit right here in
+    // scope, exactly as a buggy caller would hold them — but there is no parameter to hand them
+    // through. `sealLedger` reads group A's own ledger from the handle and nothing else, so a
+    // responder authorized against A can only ever seal A's authority state, never B's.
+    const groupB = await threeMemberGroup('ledger-cross-b')
+    const bLedger = await groupB.aliceGroup.getLedger()
+    const aLedger = await aliceGroup.getLedger()
+    expect(aLedger.length).toBeGreaterThan(0)
+    expect(bLedger).not.toEqual(aLedger) // the two ledgers genuinely differ
+
+    const { request, ephemeralPrivateKey } = await createRecoveryRequest({
+      group: bobGroup,
+      identity: bob,
+      requestID: 'req-1',
+    })
+    const sealed = await sealLedger({ group: aliceGroup, request })
+    const opened = await openSealedLedger({
+      group: bobGroup,
+      sealed,
+      requestID: 'req-1',
+      ephemeralPrivateKey,
+    })
+
+    // A's ledger comes back, never B's: the payload is bound to the sealing handle, not to
+    // anything a caller passed alongside the request.
+    expect(opened).toEqual(aLedger)
+    expect(opened).not.toEqual(bLedger)
+  })
+
+  test('a corrupt retained ephemeral key is a loud host fault, not not-for-me', async () => {
+    const { bob, aliceGroup, bobGroup } = await threeMemberGroup('ledger-corrupt-key')
+
+    const { request, ephemeralPrivateKey } = await createRecoveryRequest({
+      group: bobGroup,
+      identity: bob,
+      requestID: 'req-1',
+    })
+    const sealed = await sealLedger({ group: aliceGroup, request })
+
+    // A truncated own key is a host storage fault, not a reply addressed elsewhere: it throws a
+    // distinct, loud error — NOT the benign `not-for-me` a lane-sifter drops quietly, and not a
+    // SealedLedgerError at all.
+    const loud = openSealedLedger({
+      group: bobGroup,
+      sealed,
+      requestID: 'req-1',
+      ephemeralPrivateKey: ephemeralPrivateKey.slice(0, 20),
+    })
+    await expect(loud).rejects.toThrow(/retained ephemeral private key must be/)
+    const err = await loud.catch((error: unknown) => error)
+    expect(err).not.toBeInstanceOf(SealedLedgerError)
+    expect((err as { reason?: unknown }).reason).toBeUndefined()
+
+    // A valid-but-wrong ephemeral key — a different request's key, of the right length, genuinely
+    // not this reply's — still yields `not-for-me`. The fix SEPARATES a corrupt own key from a
+    // reply for someone else; it does not reclassify both.
+    const other = await createRecoveryRequest({
+      group: bobGroup,
+      identity: bob,
+      requestID: 'req-2',
+    })
+    expect(other.ephemeralPrivateKey.length).toBe(ephemeralPrivateKey.length)
+    await expect(
+      openSealedLedger({
+        group: bobGroup,
+        sealed,
+        requestID: 'req-1',
+        ephemeralPrivateKey: other.ephemeralPrivateKey,
+      }),
+    ).rejects.toMatchObject({ reason: 'not-for-me' })
+  })
+
+  test('trailing bytes after the last ledger token are malformed, not silently accepted', async () => {
+    const { bob, aliceGroup, bobGroup } = await threeMemberGroup('ledger-trailing')
+
+    const { ephemeralPublicKey, ephemeralPrivateKey } = await createRecoveryRequest({
+      group: bobGroup,
+      identity: bob,
+      requestID: 'req-1',
+    })
+    const tokens = await aliceGroup.getLedger()
+
+    // A valid ledger framing with one garbage byte appended past the last token: the count and
+    // its framed tokens no longer consume the whole payload. A lax decoder would return the
+    // tokens and drop the tail — a parser differential the head check downstream might not catch.
+    const body = encodeLedger(tokens)
+    const withTrailing = new Uint8Array(body.length + 1)
+    withTrailing.set(body)
+    withTrailing[body.length] = 0x00
+    const sealedTrailing = await sealLedgerPlaintext({
+      group: aliceGroup,
+      ephemeralPublicKey,
+      requesterDID: bob.id,
+      requestID: 'req-1',
+      plaintext: withTrailing,
+    })
+    await expect(
+      openSealedLedger({
+        group: bobGroup,
+        sealed: sealedTrailing,
+        requestID: 'req-1',
+        ephemeralPrivateKey,
+      }),
+    ).rejects.toMatchObject({ reason: 'malformed' })
+
+    // Control: the very same framing WITHOUT the trailing byte opens cleanly to the tokens — so
+    // the refusal above is the trailing byte, not the forge path itself.
+    const sealedClean = await sealLedgerPlaintext({
+      group: aliceGroup,
+      ephemeralPublicKey,
+      requesterDID: bob.id,
+      requestID: 'req-1',
+      plaintext: body,
+    })
+    await expect(
+      openSealedLedger({
+        group: bobGroup,
+        sealed: sealedClean,
+        requestID: 'req-1',
+        ephemeralPrivateKey,
+      }),
+    ).resolves.toEqual(tokens)
   })
 })

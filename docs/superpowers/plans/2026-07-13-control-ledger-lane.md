@@ -2058,25 +2058,51 @@ cannot lose one.
 
 ---
 
+### 2026-07-15 — Question 5.5: the mls Importants and Minors
+
+**Findings:**
+- **`sealLedger` sealed whatever payload it was handed (a cross-group leak).** `SealLedgerParams` carried
+  `entries`, and `sealToRequest` authorizes only the *requester* against the handle's tree — nothing bound
+  the payload to the sealing group, so a caller could seal group X's ledger to a member of group Y. The
+  reference `sealGroupInfo` never had this: it reads its payload from `exportGroupInfo({ group })`. Fixed by
+  removing the seam entirely — `entries` is gone from `SealLedgerParams`, `sealLedger` reads
+  `group.getLedger()`, and "seal a ledger that isn't this group's" is now inexpressible. The cross-group
+  test (group A + a separate group B whose ledgers differ) round-trips A's ledger with B's tokens in scope;
+  the mutation (re-add `entries?` winning over the handle) turns it red with B's authority state sealed to a
+  member of A. Blast radius confirmed **contained in mls**: the rpc `sealLedger(request)` port is a distinct
+  method reading its own state, never the mls primitive with `entries`.
+- **A corrupt retained ephemeral key masked as `not-for-me`.** `openSealedReply` imported the requester's own
+  private key *inside* the AEAD `try` whose catch says `not-for-me` — the benign "somebody else's reply, drop
+  it" verdict — so a host storage fault read as routine. Fixed: length-validate (`KEM_PRIVATE_KEY_LENGTH = 32`,
+  empirically confirmed; `importPrivateKey` is a no-op wrapper so the deep `decap` failure was the only prior
+  signal) and import **outside** the try, throwing a plain `Error` — deliberately *not* folded into the
+  `SealedReplyRejection` union a lane-sifter reads, so a real bug cannot be swallowed as `not-for-me`. Both
+  halves tested: truncated key → loud distinct error; valid-but-wrong key → still `not-for-me`.
+
+**Minors:** `decodeLedgerTokens` now rejects trailing bytes (`offset === bytes.length`, → `malformed`) with a
+test; `processWelcomeOnce` doc corrected (a dropped reference is not a zeroization; dedup keys on the joined
+group's id — code matches, no divergence). `exp`/`nbf` on requests **left with reasoning**: the reply is
+sealed to the request's signed per-request ephemeral *public* key, so a replay serves only whoever holds the
+matching private key (the legitimate requester) — it closes no confidentiality hole, only bounds a
+members-only responder-side DoS the roster check already limits; not worth a clock dependency in the
+otherwise-offline `createRecoveryRequest`. `@deprecated` concern was a **no-op** — zero such tags in
+`packages/mls/src` at this HEAD.
+
+**Spec impact:** none — the seal-authenticates-who-not-what class was already stated in D2 (revision 34);
+these were the implementation seams under it.
+
+**Learned:** *An authorization check on the recipient does not bind the payload to the sender's own state —
+a primitive that takes its secret-bearing payload as a parameter can always be pointed at the wrong secret.*
+The fix is the same one Q5.4 reached from the other direction: delete the parameter, read from the handle, and
+the wrong call becomes unrepresentable rather than merely unwise.
+
+---
+
 ## Phase 5 — remaining (handoff for the next session)
 
 Branch review Criticals are **all closed** (Q5.1 mls seal forgery, Q5.2 the two rpc heal bugs, Q5.3 hub
-conformance + store bugs, Q5.4 hub Importants/Minors). Two probes remain, both review-scoped, **no
-Criticals**, one per package so they cannot run in parallel against the shared tree:
-
-**Q5.5 — mls Importants/Minors:**
-- **Important** — `sealLedger` takes its payload as a parameter (`recovery.ts`), so a caller can seal
-  *another group's* tokens to a member of this one; read it from the handle (`group.getLedger()`), matching
-  `sealGroupInfo`'s unrepresentable-payload shape. The requester's head check protects the *requester*,
-  not the group whose ledger leaks.
-- **Important** — a corrupt/wrong-length ephemeral private key is caught inside the `try` and reported
-  `not-for-me` (`openSealedReply`), so a key-persistence bug silently strands the peer as "somebody
-  else's reply"; validate length and import **outside** the `try`, throw a distinct loud error.
-- **Minors** — recovery requests carry no `exp`/`nbf` (a request is a standing capability; `verifyToken`
-  already enforces both when present); `processWelcomeOnce`'s dedup-key coupling wants a comment where it
-  keys on `invite.groupID`; `decodeLedgerTokens` ignores trailing bytes; `SealedGroupInfoRejection` ships
-  `@deprecated` in the range that introduced it; the `processWelcomeOnce` "discards the handle" doc
-  overclaims (no zeroization).
+conformance + store bugs, Q5.4 hub Importants/Minors). Q5.5 (mls Importants/Minors) is **closed**. One probe
+remains, review-scoped, **no Criticals**:
 
 **Q5.6 — rpc Importants/Minors:**
 - **Important** — `ensureLedger`'s `false` return is discarded by `commit()` (and `replay()`): a peer

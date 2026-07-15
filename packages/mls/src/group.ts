@@ -1417,14 +1417,16 @@ export type ProcessWelcomeOnceParams = ProcessWelcomeParams & {
  * no longer read the group's traffic, and nothing anywhere raises an error.** That is the
  * hazard this function exists to remove, and it is why the safe path is the one to call.
  *
- * **The join is done and then thrown away, and it has to be.** The duplicate is only visible
+ * **The join is done and then dropped, and it has to be.** The duplicate is only visible
  * AFTER the join: a Welcome's group id is encrypted to the joiner's key, so the check cannot
  * be hoisted above the `processWelcome` call — there is nothing to check it against until the
- * handle exists. So this joins, compares the group id it got against `joined`, and DISCARDS
- * the stale handle rather than returning it. The wasted work is the price of the guarantee.
+ * handle exists. So this joins, compares the group id it got against `joined`, and drops the
+ * stale handle — a local reference falling out of scope, not a wipe: nothing here zeroizes the
+ * key material it held — rather than returning it. The wasted work is the price of the guarantee.
  *
- * A Welcome for a group this member does not hold is an ordinary first join, whatever else it
- * holds: the check is per group id, not per member.
+ * The dedup keys on the joined group's id alone: the id `processWelcome` handed back, checked
+ * against the ids this member already holds (`joined`). A Welcome for a group absent from that
+ * set is an ordinary first join, whatever else the Welcome carries.
  */
 export async function processWelcomeOnce(
   params: ProcessWelcomeOnceParams,
