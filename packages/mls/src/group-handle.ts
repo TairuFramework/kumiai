@@ -703,7 +703,8 @@ export class GroupHandle {
    * sender-data secret: decrypt it to the sender leaf index and resolve that against this
    * handle's ratchet tree — the same leaf->DID the commit policy sees as
    * `didOfLeaf(senderLeafIndex)`. An external commit's committer rides its UpdatePath leaf
-   * (see {@link readExternalCommit}) — added in the external-commit path.
+   * instead (see {@link readExternalCommit}) — no tree lookup, no sender-data decrypt.
+   * `null` for anything that is neither.
    *
    * Runs on the handle mutex so the epoch secret, tree, and epoch are one snapshot against a
    * concurrent processMessage. Non-mutating: sender-data decrypt is epoch-level and consumes
@@ -718,8 +719,15 @@ export class GroupHandle {
       const epoch = readMessageEpoch(commit)
       if (epoch == null) return null
 
+      // External-join commit: the committer holds no pre-commit leaf, so its DID rides the
+      // commit's own UpdatePath leaf. No tree lookup, no sender-data decrypt.
+      const external = readExternalCommit(decoded)
+      if (external != null) {
+        return external.did == null ? null : { epoch, committerDID: external.did }
+      }
+
       const pm = readPrivateCommitFrame(decoded)
-      if (pm == null) return null // external + non-commit handled next task
+      if (pm == null) return null // non-commit frame
       const leafIndex = await readSenderLeafIndex(
         this.#context,
         this.#state.keySchedule.senderDataSecret,
