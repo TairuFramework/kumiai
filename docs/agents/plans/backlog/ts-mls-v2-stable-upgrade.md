@@ -12,7 +12,7 @@ As of 2026-05-27, npm `dist-tags` show `latest: 1.6.2` and `rc: 2.0.0-rc.13` —
 `packages/mls/src/sender-data.ts` reimplements RFC 9420 §6.3.2 sender-data decrypt because
 ts-mls `2.0.0-rc.13` ships `decryptSenderData` but does not re-export it from the package
 index (the `exports` map exposes only `.`, so deep imports are blocked). See
-`docs/superpowers/specs/2026-07-15-committer-reader-design.md`.
+`docs/agents/plans/completed/2026-07-15-committer-reader.complete.md`.
 
 When adopting stable: check whether ts-mls now re-exports `decryptSenderData` (and the
 sender-data TLS codecs). If so, delete `sender-data.ts` and delegate `GroupHandle`'s
