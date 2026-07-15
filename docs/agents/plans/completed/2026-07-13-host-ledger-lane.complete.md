@@ -1,5 +1,9 @@
 # Host requirements: the control-ledger lane
 
+> **COMPLETE (2026-07-15).** These are Kubun's original requirements (R1/R2/R3); all three were implemented
+> on `feat/control-ledger-lane`. See [2026-07-15-control-ledger-lane.complete.md](./2026-07-15-control-ledger-lane.complete.md)
+> for what was built and the (breaking) release position. Kept for provenance.
+
 **Priority:** 2 — blocks kubun from becoming a pure consumer of the 0.2 control ledger; R3 is a soundness question, not a convenience.
 **Origin:** kubun's adoption of `@kumiai/mls` 0.2 permission enforcement (kubun `feat/peer-connect-abstraction`, 2026-07-12). Kubun is the first host to drive the control ledger end to end; these are the gaps it hit.
 
