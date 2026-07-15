@@ -25,6 +25,7 @@ import {
 import { decodeControlEnvelope } from './envelope.js'
 import { foldEnvelope } from './envelope-fold.js'
 import type { FoldInput } from './fold.js'
+import { readMessageEpoch } from './group-info.js'
 import {
   assertHeadMatches,
   computeHead,
@@ -43,6 +44,7 @@ import {
   MissingLedgerEntriesError,
 } from './policy.js'
 import { foldRoster, type RoleValue, type RosterState } from './roster.js'
+import { type PrivateCommitFrame, readSenderLeafIndex } from './sender-data.js'
 
 /** One serializer per live handle, so its state-mutating operations run one at a
  *  time in issue order. Keyed weakly: the entry is collected with the handle, and
@@ -127,6 +129,41 @@ function readPrivateCommit(decoded: unknown): { authenticatedData: Uint8Array } 
   if (pm == null || pm.contentType !== contentTypes.commit) return undefined
   const data = pm.authenticatedData
   return { authenticatedData: data instanceof Uint8Array ? data : new Uint8Array() }
+}
+
+/**
+ * Narrow a decoded frame to the PrivateMessage-commit fields sender-data decrypt reads.
+ * Returns undefined for anything that is not a PrivateMessage of contentType commit.
+ */
+function readPrivateCommitFrame(decoded: unknown): PrivateCommitFrame | undefined {
+  if (decoded == null || typeof decoded !== 'object') return undefined
+  const frame = decoded as { wireformat?: unknown; privateMessage?: unknown }
+  if (frame.wireformat !== wireformats.mls_private_message) return undefined
+  const pm = frame.privateMessage as
+    | {
+        groupId?: unknown
+        epoch?: unknown
+        contentType?: unknown
+        encryptedSenderData?: unknown
+        ciphertext?: unknown
+      }
+    | undefined
+  if (pm == null || pm.contentType !== contentTypes.commit) return undefined
+  if (
+    !(pm.groupId instanceof Uint8Array) ||
+    typeof pm.epoch !== 'bigint' ||
+    !(pm.encryptedSenderData instanceof Uint8Array) ||
+    !(pm.ciphertext instanceof Uint8Array)
+  ) {
+    return undefined
+  }
+  return {
+    groupId: pm.groupId,
+    epoch: pm.epoch,
+    contentType: pm.contentType,
+    encryptedSenderData: pm.encryptedSenderData,
+    ciphertext: pm.ciphertext,
+  }
 }
 
 /**
@@ -648,6 +685,50 @@ export class GroupHandle {
     }
 
     return { callback: wrapCommitPolicy(combined, capture), capture, applyOnAccept }
+  }
+
+  /** The DID at a ratchet-tree leaf index, or undefined if that leaf is empty/unparsable. */
+  #didOfLeaf(leafIndex: number): string | undefined {
+    for (const member of this.#iterateMembers()) {
+      if (member.leafIndex === leafIndex) return member.id
+    }
+    return undefined
+  }
+
+  /**
+   * Read a Commit's MLS-authenticated committer against this handle, WITHOUT advancing
+   * state. `null` for bytes that are not a Commit.
+   *
+   * A member commit (PrivateMessage) has its committer encrypted under the epoch's
+   * sender-data secret: decrypt it to the sender leaf index and resolve that against this
+   * handle's ratchet tree — the same leaf->DID the commit policy sees as
+   * `didOfLeaf(senderLeafIndex)`. An external commit's committer rides its UpdatePath leaf
+   * (see {@link readExternalCommit}) — added in the external-commit path.
+   *
+   * Runs on the handle mutex so the epoch secret, tree, and epoch are one snapshot against a
+   * concurrent processMessage. Non-mutating: sender-data decrypt is epoch-level and consumes
+   * no per-message key. Async only because the KDF and AEAD are.
+   */
+  async readCommitHeader(
+    commit: Uint8Array,
+  ): Promise<{ epoch: bigint; committerDID: string } | null> {
+    return mutexFor(this).run(async () => {
+      const decoded = decode(mlsMessageDecoder, commit)
+      if (decoded == null) return null
+      const epoch = readMessageEpoch(commit)
+      if (epoch == null) return null
+
+      const pm = readPrivateCommitFrame(decoded)
+      if (pm == null) return null // external + non-commit handled next task
+      const leafIndex = await readSenderLeafIndex(
+        this.#context,
+        this.#state.keySchedule.senderDataSecret,
+        pm,
+      )
+      if (leafIndex == null) return null
+      const committerDID = this.#didOfLeaf(leafIndex)
+      return committerDID == null ? null : { epoch, committerDID }
+    })
   }
 
   /**
