@@ -1,6 +1,6 @@
 {
   "name": "@kumiai/mls",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "license": "MIT",
   "description": "E2EE group identity and membership for Enkaku using MLS",
   "keywords": [

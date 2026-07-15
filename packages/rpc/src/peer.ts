@@ -701,11 +701,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         // `message.senderDID` — the hub-authenticated publisher, the hub's word about who handed
         // it over, and the hub is not trusted: a hub that could name the committer could stamp
         // every recipient's own DID onto one poison frame and make the whole group heal at once.
-        const disposition = classifyCommit(port.readCommitHeader(commitFrame.commit), position, {
-          localDID,
-          epoch: crypto.epoch(),
-          appliedByEpoch,
-        })
+        const disposition = classifyCommit(
+          await port.readCommitHeader(commitFrame.commit),
+          position,
+          { localDID, epoch: crypto.epoch(), appliedByEpoch },
+        )
 
         if (disposition.row === 'own-unmerged') {
           // This peer's own commit, at the epoch it is still at: the hub took it, the group moved
@@ -1367,7 +1367,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         //    the group's epoch, not this peer's, so the own-commit trigger (tests authorship AND
         //    current epoch) stays quiet; the original heal condition still holds, the peer rejoins
         //    again, and `resync` collects the leaf the orphan added. Leaves do not accumulate.
-        const rejoinedAtEpoch = port.readCommitHeader(pending.commit)?.epoch
+        const rejoinedAtEpoch = (await port.readCommitHeader(pending.commit))?.epoch
         await pending.onAccepted()
         const accepted = asLogPosition(sequenceID)
         reconciledHead = accepted

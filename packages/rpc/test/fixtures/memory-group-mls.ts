@@ -463,7 +463,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         if (leaves[i] === did) leaves.splice(i, 1)
       }
     },
-    readCommitHeader(commit: Uint8Array): CommitHeader | null {
+    async readCommitHeader(commit: Uint8Array): Promise<CommitHeader | null> {
       // Reads the commit's own bytes and nothing else: no epoch secret, no blob, no state.
       const parsed = decodeMemoryCommit(commit)
       return parsed == null ? null : { epoch: parsed.epoch, committerDID: parsed.committerDID }
