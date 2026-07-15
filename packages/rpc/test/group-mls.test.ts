@@ -28,7 +28,7 @@ describe('GroupMLS port', () => {
     expect(mls.seen()).toBe(1)
   })
 
-  test('a commit says who wrote it, and at what epoch, without being applied', () => {
+  test('a commit says who wrote it, and at what epoch, without being applied', async () => {
     const admin = createMemoryGroupMLS({
       recoverySecret: new Uint8Array(32).fill(1),
       epoch: 4,
@@ -39,9 +39,9 @@ describe('GroupMLS port', () => {
 
     // Read out of the commit's own bytes. No state is touched, and the reader is not at the
     // committer's group, let alone at a position to apply anything.
-    expect(reader.readCommitHeader(commit)).toEqual({ epoch: 4, committerDID: 'admin' })
-    expect(reader.readCommitHeader(new Uint8Array([0xff, 0xff]))).toBeNull()
-    expect(reader.readCommitHeader(new Uint8Array())).toBeNull()
+    expect(await reader.readCommitHeader(commit)).toEqual({ epoch: 4, committerDID: 'admin' })
+    expect(await reader.readCommitHeader(new Uint8Array([0xff, 0xff]))).toBeNull()
+    expect(await reader.readCommitHeader(new Uint8Array())).toBeNull()
   })
 
   test('a member cannot apply the frame that is its own commit', async () => {
@@ -136,7 +136,7 @@ describe('GroupMLS port', () => {
     // peer that adopted first would be alone on a branch the moment it lost.
     expect(pending).not.toBeNull()
     expect(stranded.epoch()).toBe(0)
-    expect(stranded.readCommitHeader(pending?.commit as Uint8Array)).toEqual({
+    expect(await stranded.readCommitHeader(pending?.commit as Uint8Array)).toEqual({
       epoch: 2,
       committerDID: 'stranded',
     })

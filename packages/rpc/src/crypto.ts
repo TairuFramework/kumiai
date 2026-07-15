@@ -83,12 +83,17 @@ export type PendingRecovery = {
  */
 export type GroupMLS = {
   /**
-   * Read what a Commit says about itself — epoch and committer — WITHOUT applying it or opening
-   * anything. `null` for bytes that are not a Commit. Lets the lane classify a frame (epoch =
-   * this peer's to apply? committer = this peer's own?) before touching it; neither question may
+   * Read what a Commit says about itself — epoch and committer — WITHOUT advancing state.
+   * `null` for bytes that are not a Commit. Lets the lane classify a frame (epoch = this
+   * peer's to apply? committer = this peer's own?) before touching it; neither question may
    * be answered by trying and failing.
+   *
+   * Async and handle-bound: a real host recovers a member commit's committer by decrypting
+   * its sender-data with the epoch secret (an open, not an apply) and mapping the sender leaf
+   * to a DID against the ratchet tree — both reachable only on the handle the host already
+   * holds. The port reaches its own handle internally; the lane awaits.
    */
-  readCommitHeader(commit: Uint8Array): CommitHeader | null
+  readCommitHeader(commit: Uint8Array): Promise<CommitHeader | null>
   /**
    * Apply a received Commit and durably persist the result, returning whether the epoch
    * advanced (the signal to resync the app lane). Must be durable before it resolves.
