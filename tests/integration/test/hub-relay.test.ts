@@ -180,7 +180,7 @@ describe('Hub store: pagination and acks', () => {
     const topicID = 'topic:combined'
     await store.subscribe({ subscriberDID: recipient.id, topicID })
 
-    const id1 = await store.publish({
+    const { sequenceID: id1 } = await store.publish({
       senderDID: 'did:key:sender',
       topicID,
       payload: new Uint8Array([1]),
@@ -298,7 +298,7 @@ describe('Hub store: eviction', () => {
     await store.subscribe({ subscriberDID: 'did:key:bob', topicID: 'topic:fanout' })
     await store.subscribe({ subscriberDID: 'did:key:carol', topicID: 'topic:fanout' })
 
-    const id = await store.publish({
+    const { sequenceID: id } = await store.publish({
       senderDID: 'did:key:alice',
       topicID: 'topic:fanout',
       payload: new Uint8Array([1]),
