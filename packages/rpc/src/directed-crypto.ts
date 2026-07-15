@@ -1,9 +1,9 @@
 import type { ByteTransform, Unwrap, UnwrapResult } from '@kumiai/broadcast'
 import type { StoredMessage } from '@kumiai/hub-protocol'
-import type { HubLike, HubPublishParams, HubReceiveSubscription } from '@kumiai/hub-tunnel'
+import type { HubPublishParams, HubReceiveSubscription, MailboxHub } from '@kumiai/hub-tunnel'
 
 export type SealDirectedHubParams = {
-  hub: HubLike
+  hub: MailboxHub
   wrap: ByteTransform
   unwrap: Unwrap
   /** When set, inbound frames whose recovered senderDID != this are dropped. */
@@ -15,13 +15,13 @@ function normalizeUnwrap(result: Uint8Array | UnwrapResult): UnwrapResult {
 }
 
 /**
- * Wrap a HubLike so directed frames are sealed with `wrap` on publish and opened
+ * Wrap a MailboxHub so directed frames are sealed with `wrap` on publish and opened
  * with `unwrap` on receive. The recovered MLS `senderDID` replaces the
  * hub-asserted one (a lying hub cannot forge it); frames that fail to open,
  * that unwrap without a recovered sender, or whose recovered sender !=
  * `expectedSenderDID`, are dropped.
  */
-export function sealDirectedHub(params: SealDirectedHubParams): HubLike {
+export function sealDirectedHub(params: SealDirectedHubParams): MailboxHub {
   const { hub, wrap, unwrap, expectedSenderDID } = params
   return {
     async publish(publishParams: HubPublishParams): Promise<{ sequenceID: string }> {

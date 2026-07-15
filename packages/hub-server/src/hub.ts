@@ -24,7 +24,11 @@ export const DEFAULT_HUB_ACCESS_RULES: AccessRules = {
 export type HubPurgeOptions = {
   /** Interval between purge runs in milliseconds. Default: 3600000 (1 hour) */
   interval?: number
-  /** Age in seconds after which unacked stored messages are purged. Default: 604800 (7 days) */
+  /**
+   * The hub's default retention in seconds: the age bound applied to a topic no subscriber asked
+   * to keep for longer. Default: 604800 (7 days). The maximum a subscriber may ask for is the
+   * store's, since the store is the thing that refuses the subscribe.
+   */
   olderThan?: number
 }
 

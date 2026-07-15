@@ -4,8 +4,8 @@ import { HubReconnectingError } from '../src/errors.js'
 import { encodeFrame, type HubFrame, type HubFrameMessageBody } from '../src/frame.js'
 import {
   createHubTunnelTransport,
-  type HubLike,
   type HubReceiveSubscription,
+  type MailboxHub,
 } from '../src/transport.js'
 
 import { FakeHub } from './fixtures/fake-hub.js'
@@ -123,7 +123,7 @@ describe('createHubTunnelTransport reconnect', () => {
     const topicA = 'topic:a'
     const topicB = 'topic:b'
 
-    const hubWithoutEvents: HubLike = {
+    const hubWithoutEvents: MailboxHub = {
       publish: (params) => fakeHub.publish(params),
       subscribe: (subscriberDID: string, topicID: string) =>
         fakeHub.subscribe(subscriberDID, topicID),

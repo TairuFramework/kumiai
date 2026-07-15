@@ -1,6 +1,10 @@
 import type { StoredMessage } from '@kumiai/hub-protocol'
 
-import type { HubLikeEvent, HubLikeEventListener, HubPublishParams } from '../../src/transport.js'
+import type {
+  HubPublishParams,
+  MailboxHubEvent,
+  MailboxHubEventListener,
+} from '../../src/transport.js'
 
 export type FakeHubPublishParams = HubPublishParams
 export type FakeHubMessage = StoredMessage
@@ -29,10 +33,10 @@ export class FakeHub {
   #pendingDelays: Array<number> = []
   #pendingSwap = 0
   #heldForSwap: Array<{ recipient: string; message: FakeHubMessage }> = []
-  #eventListeners = new Set<HubLikeEventListener>()
+  #eventListeners = new Set<MailboxHubEventListener>()
 
   events = {
-    subscribe: (listener: HubLikeEventListener): (() => void) => {
+    subscribe: (listener: MailboxHubEventListener): (() => void) => {
       this.#eventListeners.add(listener)
       return () => {
         this.#eventListeners.delete(listener)
@@ -40,7 +44,7 @@ export class FakeHub {
     },
   }
 
-  #emitEvent(event: HubLikeEvent): void {
+  #emitEvent(event: MailboxHubEvent): void {
     for (const listener of this.#eventListeners) {
       listener(event)
     }

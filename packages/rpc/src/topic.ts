@@ -5,8 +5,11 @@ import { fromUTF, toB64U } from '@sozai/codec'
 /** Reserved label for per-member unicast inbox topics. */
 export const INBOX_LABEL = 'enkaku/inbox/v1'
 
-/** Reserved label for the non-rotating MLS-handshake/recovery topic. */
-export const HANDSHAKE_LABEL = 'enkaku/handshake/v1'
+/** Reserved label for the non-rotating MLS commit topic. */
+export const COMMIT_LABEL = 'enkaku/commit/v1'
+
+/** Reserved label for the non-rotating recovery-rendezvous topic. */
+export const RENDEZVOUS_LABEL = 'enkaku/rendezvous/v1'
 
 const DISCOVERY_PREFIX = 'enkaku/discovery/v1'
 const SEP = '\0'
@@ -35,13 +38,25 @@ export function inboxTopic(secret: Uint8Array, epoch: number, memberDID: string)
 }
 
 /**
- * The non-rotating MLS-handshake/recovery topic, derived from the
- * epoch-independent recovery secret (epoch fixed at `0`). Stable for the group's
- * whole life so every member — including one stranded on a stale epoch — can
- * always derive the rendezvous. Opaque to the hub.
+ * The non-rotating commit topic: MLS Commits only, retained as a log, read by pull. Derived
+ * from the epoch-independent recovery secret (epoch fixed at `0`), so it is stable for the
+ * group's life and a member stranded on any epoch can still derive it. Opaque to the hub.
+ *
+ * Separate from {@link rendezvousTopic}: the commit lane is a log whose head every commit
+ * moves, the rendezvous lane is a mailbox whose frames must never move a head.
  */
-export function handshakeTopic(recoverySecret: Uint8Array): string {
-  return deriveTopicID(recoverySecret, 0, HANDSHAKE_LABEL)
+export function commitTopic(recoverySecret: Uint8Array): string {
+  return deriveTopicID(recoverySecret, 0, COMMIT_LABEL)
+}
+
+/**
+ * The non-rotating recovery-rendezvous topic: recovery request/reply, published
+ * unconditionally and pushed. Derived from the same epoch-independent recovery secret, so a
+ * stranded peer always shares it with the live group. Mailbox semantics: a requester
+ * subscribes before it asks, so it cannot miss its own reply. Opaque to the hub.
+ */
+export function rendezvousTopic(recoverySecret: Uint8Array): string {
+  return deriveTopicID(recoverySecret, 0, RENDEZVOUS_LABEL)
 }
 
 /**

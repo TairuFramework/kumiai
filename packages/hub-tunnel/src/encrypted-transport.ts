@@ -8,10 +8,11 @@ import { DecryptError, EncryptError, EnvelopeDecodeError } from './errors.js'
 import type { ObservabilityEventListener } from './events.js'
 import {
   createHubTunnelTransport,
-  type HubLike,
-  type HubPublishParams,
   type HubReceiveSubscription,
+  type HubSubscribeOptions,
   type HubTunnelTransportParams,
+  type MailboxHub,
+  type MailboxPublishParams,
 } from './transport.js'
 
 export type EncryptedHubTunnelTransportParams = HubTunnelTransportParams & {
@@ -20,16 +21,16 @@ export type EncryptedHubTunnelTransportParams = HubTunnelTransportParams & {
 }
 
 type WrapHubParams = {
-  hub: HubLike
+  hub: MailboxHub
   encryptor: Encryptor
   groupID: string
   onEvent?: ObservabilityEventListener
   onEncryptError: (error: EncryptError) => void
 }
 
-function wrapHub({ hub, encryptor, groupID, onEvent, onEncryptError }: WrapHubParams): HubLike {
-  const wrapped: HubLike = {
-    async publish(params: HubPublishParams): Promise<{ sequenceID: string }> {
+function wrapHub({ hub, encryptor, groupID, onEvent, onEncryptError }: WrapHubParams): MailboxHub {
+  const wrapped: MailboxHub = {
+    async publish(params: MailboxPublishParams): Promise<{ sequenceID: string }> {
       let ciphertextBytes: Uint8Array
       try {
         ciphertextBytes = await encryptor.encrypt(params.payload)
@@ -49,8 +50,12 @@ function wrapHub({ hub, encryptor, groupID, onEvent, onEncryptError }: WrapHubPa
         payload: encodeEnvelope(envelope),
       })
     },
-    subscribe(subscriberDID: string, topicID: string): Promise<void> | void {
-      return hub.subscribe(subscriberDID, topicID)
+    subscribe(
+      subscriberDID: string,
+      topicID: string,
+      options?: HubSubscribeOptions,
+    ): Promise<void> | void {
+      return hub.subscribe(subscriberDID, topicID, options)
     },
     unsubscribe(subscriberDID: string, topicID: string): Promise<void> | void {
       return hub.unsubscribe?.(subscriberDID, topicID)

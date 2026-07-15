@@ -9,6 +9,15 @@ export const hubProtocol = {
       properties: {
         topicID: { type: 'string', minLength: 1, maxLength: 256 },
         payload: { type: 'string', contentEncoding: 'base64', maxLength: 1048576 },
+        /** Retention class. Absent: 'mailbox'. */
+        retain: { type: 'string', enum: ['log', 'mailbox'] },
+        /**
+         * Compare-and-set on the topic's head. Absent: unconditional. `null`: the topic has never
+         * had an accepted log publish. Absent and `null` are NOT the same request.
+         */
+        expectedHead: { type: ['string', 'null'], maxLength: 64 },
+        /** Idempotency key: a replay returns the original sequenceID and appends nothing. */
+        publishID: { type: 'string', minLength: 1, maxLength: 128 },
       },
       required: ['topicID', 'payload'],
       additionalProperties: false,
@@ -29,6 +38,11 @@ export const hubProtocol = {
       type: 'object',
       properties: {
         topicID: { type: 'string', minLength: 1, maxLength: 256 },
+        /**
+         * Requested retention in seconds. Above the hub's maximum the subscribe is refused, never
+         * clamped. Absent: the hub's default.
+         */
+        retention: { type: 'integer', minimum: 0 },
       },
       required: ['topicID'],
       additionalProperties: false,
@@ -59,6 +73,47 @@ export const hubProtocol = {
         unsubscribed: { type: 'boolean' },
       },
       required: ['unsubscribed'],
+      additionalProperties: false,
+    },
+  },
+  'hub/topic/fetch': {
+    type: 'request',
+    description:
+      "Pull a topic's log. Gated on subscription: the caller is the authenticated DID, never a wire field, so a member cannot read a topic's log by naming someone else",
+    param: {
+      type: 'object',
+      properties: {
+        topicID: { type: 'string', minLength: 1, maxLength: 256 },
+        /** Exclusive cursor: entries after this sequenceID. Absent: from the oldest retained. */
+        after: { type: 'string', maxLength: 64 },
+        limit: { type: 'integer', minimum: 1, maximum: 500 },
+      },
+      required: ['topicID'],
+      additionalProperties: false,
+    },
+    result: {
+      type: 'object',
+      properties: {
+        messages: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              sequenceID: { type: 'string' },
+              senderDID: { type: 'string' },
+              topicID: { type: 'string' },
+              payload: { type: 'string', contentEncoding: 'base64' },
+            },
+            required: ['sequenceID', 'senderDID', 'topicID', 'payload'],
+            additionalProperties: false,
+          },
+        },
+        /** The sequenceID of the last accepted log publish, or null. Survives a trim. */
+        head: { type: ['string', 'null'] },
+        /** The oldest sequenceID still retained, or null if the log is empty. */
+        oldest: { type: ['string', 'null'] },
+      },
+      required: ['messages', 'head', 'oldest'],
       additionalProperties: false,
     },
   },

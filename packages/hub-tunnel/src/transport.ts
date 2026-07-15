@@ -22,35 +22,128 @@ export type HubReceiveSubscription = AsyncIterable<StoredMessage> & {
   ack?: (sequenceID: string) => void | Promise<void>
 }
 
-export type HubLikeEvent =
+export type MailboxHubEvent =
   | { type: 'reconnecting' }
   | { type: 'connected' }
   | { type: 'disconnected' }
 
-export type HubLikeEventListener = (event: HubLikeEvent) => void
+export type MailboxHubEventListener = (event: MailboxHubEvent) => void
 
-export type HubLikeEvents = {
-  subscribe: (listener: HubLikeEventListener) => () => void
+export type MailboxHubEvents = {
+  subscribe: (listener: MailboxHubEventListener) => () => void
 }
 
-export type HubPublishParams = {
+/**
+ * A mailbox-class publish — the only kind a {@link MailboxHub} accepts. No retention class, no
+ * compare-and-set, no idempotency key: the lanes a MailboxHub fronts (directed tunnel, encrypting
+ * wrapper, session hub) carry app traffic never CAS'd against a log head. Keeping those fields OFF
+ * this type makes the restriction structural — a caller cannot hand a conditional publish to a
+ * mailbox lane, so a wrapper fronting one has nothing to silently drop. A lane that needs the CAS
+ * uses a {@link LogHub} instead.
+ */
+export type MailboxPublishParams = {
   senderDID: string
   topicID: string
   payload: Uint8Array
 }
 
-export type HubLike = {
-  publish: (params: HubPublishParams) => Promise<{ sequenceID: string }>
-  subscribe: (subscriberDID: string, topicID: string) => Promise<void> | void
+export type HubPublishParams = MailboxPublishParams & {
+  /**
+   * Retention class. 'mailbox' (default): removed once every delivery is acked, or when it ages
+   * out. 'log': retained unconditionally, removed only by trim (a subscriber that must read it may
+   * not exist when it is published). Only a 'log' publish moves the topic's head.
+   */
+  retain?: 'log' | 'mailbox'
+  /**
+   * Compare-and-set on the topic's head. Absent: append unconditionally. Present: append only if
+   * the head is exactly this value, where `null` means "the topic has never had an accepted log
+   * publish". A loser gets HeadMismatchError and nothing is stored (no entry, no delivery, no
+   * sequenceID consumed).
+   *
+   * `null` and absent are different requests: a forwarding implementation must check for the key,
+   * not for a non-null value.
+   */
+  expectedHead?: string | null
+  /**
+   * Idempotency key. Republishing an already-accepted `publishID` returns its original sequenceID
+   * and appends nothing — letting a peer that crashed between publishing a commit and recording
+   * the outcome ask "did my publish land?" with no responder or network peer involved.
+   */
+  publishID?: string
+}
+
+export type HubSubscribeOptions = {
+  /**
+   * Requested retention in seconds for this subscriber's view. Absent: the hub's default. Above
+   * the hub's maximum the subscribe is refused, never clamped — a silent downgrade strands a peer
+   * that believed it had asked for more.
+   */
+  retention?: number
+}
+
+export type HubFetchTopicParams = {
+  subscriberDID: string
+  topicID: string
+  /** Exclusive cursor: entries after this sequenceID. Absent: from the oldest retained. */
+  after?: string
+  limit?: number
+}
+
+export type HubFetchTopicResult = {
+  messages: Array<StoredMessage>
+  /** The sequenceID of the last accepted log publish, or null. Survives a trim. */
+  head: string | null
+  /** The oldest sequenceID still retained, or null if the log is empty. */
+  oldest: string | null
+}
+
+/**
+ * The APIs both hub kinds share — everything except how you publish. `events` are
+ * connection-lifecycle (reconnect/connect/disconnect), emitted by a mailbox and a log hub alike, so
+ * they belong here rather than on either shape. {@link MailboxHub} and {@link LogHub} each add their
+ * own `publish` on top; neither is derived from the other.
+ */
+export type HubBase = {
+  subscribe: (
+    subscriberDID: string,
+    topicID: string,
+    options?: HubSubscribeOptions,
+  ) => Promise<void> | void
   unsubscribe?: (subscriberDID: string, topicID: string) => Promise<void> | void
   receive: (subscriberDID: string) => HubReceiveSubscription
-  events?: HubLikeEvents
+  events?: MailboxHubEvents
+}
+
+/**
+ * Publish and push-delivery over topics. A subscriber sees only what is published after it
+ * subscribes — no history to read.
+ *
+ * The shape of the adapter views over a hub (directed tunnel, session hub, encrypting wrapper) and
+ * of a hub used for mailbox traffic alone. A lane that must be readable by a peer not subscribed at
+ * publish time needs a {@link LogHub} instead.
+ */
+export type MailboxHub = HubBase & {
+  publish: (params: MailboxPublishParams) => Promise<{ sequenceID: string }>
+}
+
+/**
+ * A hub that also retains a readable per-topic log. A pull-driven lane needs one: commits must be
+ * readable by a peer not subscribed when they were published — a member invited tomorrow has to
+ * apply commits that land today, which no push will bring it.
+ *
+ * Its `publish` widens the mailbox one to {@link HubPublishParams}: only through a LogHub can a
+ * caller drive the CAS (`expectedHead`), pin a frame to the log (`retain: 'log'`), or carry an
+ * idempotency key (`publishID`). A MailboxHub deliberately cannot.
+ */
+export type LogHub = HubBase & {
+  publish: (params: HubPublishParams) => Promise<{ sequenceID: string }>
+  fetchTopic: (params: HubFetchTopicParams) => Promise<HubFetchTopicResult>
 }
 
 export type HubTunnelSessionID = string | { auto: true }
 
 export type HubTunnelTransportParams = {
-  hub: HubLike
+  hub: MailboxHub
   sessionID: HubTunnelSessionID
   /**
    * The authenticated DID used to drain the receive stream (`hub.receive`) and
@@ -78,18 +171,16 @@ export type HubTunnelTransportParams = {
 const DEFAULT_INBOX_CAPACITY = 1024
 
 /**
- * Build a hub-tunnel transport over the pub/sub hub API. The returned
- * `TransportType` subscribes to `receiveTopicID`, reads from a single inbox
- * subscription (filtering to that topic), and writes to the hub via
+ * Build a hub-tunnel transport over the pub/sub hub API. The returned `TransportType` subscribes
+ * to `receiveTopicID`, reads a single inbox subscription filtered to that topic, and writes via
  * `hub.publish` on `sendTopicID`.
  *
- * **Contract notes (relied on by callers):**
- * - `hub.subscribe(localDID, receiveTopicID)` and `hub.receive(localDID)` are
- *   each called **exactly once** during construction.
- * - On any teardown path (signal abort, idle timeout, encrypt failure,
- *   peer-side `session-end`, manual `transport.dispose()`), this transport
- *   publishes a best-effort `session-end` frame to `sendTopicID` and
- *   best-effort `hub.unsubscribe?.(localDID, receiveTopicID)`.
+ * **Contract (relied on by callers):**
+ * - `hub.subscribe(localDID, receiveTopicID)` and `hub.receive(localDID)` are each called
+ *   **exactly once** during construction.
+ * - On any teardown path (signal abort, idle timeout, encrypt failure, peer-side `session-end`,
+ *   manual `transport.dispose()`), it publishes a best-effort `session-end` frame to `sendTopicID`
+ *   and best-effort `hub.unsubscribe?.(localDID, receiveTopicID)`.
  */
 export function createHubTunnelTransport<R, W>(
   params: HubTunnelTransportParams,

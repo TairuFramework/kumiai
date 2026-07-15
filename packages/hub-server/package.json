@@ -45,6 +45,7 @@
     "@kokuin/token": "catalog:"
   },
   "devDependencies": {
+    "@kumiai/hub-conformance": "workspace:^",
     "@enkaku/client": "catalog:",
     "@enkaku/transport": "catalog:"
   }

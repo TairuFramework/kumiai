@@ -6,7 +6,42 @@
 
 export { defineGroupProtocol, type GroupProtocolDefinition } from '@kumiai/broadcast'
 
-export type { CommitContext, GroupCrypto, GroupMLS } from './crypto.js'
+export {
+  type CommitClassifierState,
+  type CommitDisposition,
+  classifyCommit,
+} from './classify.js'
+export {
+  CommitDeadlineError,
+  type CommitJournal,
+  type CommitKind,
+  isHeadMismatch,
+  type JournalEntry,
+  JournalEpochError,
+  type LaneResult,
+  type LostCommit,
+  type PendingCommit,
+  RecoveryRequiredError,
+} from './commit.js'
+export {
+  type CommitFrame,
+  decodeCommitFrame,
+  encodeCommitFrame,
+} from './commit-frame.js'
+export {
+  type CommitContext,
+  type CommitHeader,
+  type GroupCrypto,
+  type GroupMLS,
+  isMissingLedgerEntries,
+  type PendingRecovery,
+} from './crypto.js'
+export {
+  asDeliveryPosition,
+  asLogPosition,
+  type DeliveryPosition,
+  type LogPosition,
+} from './cursor.js'
 export {
   decodeHandshakeFrame,
   encodeHandshakeFrame,
@@ -16,27 +51,34 @@ export {
   type HandshakeKind,
 } from './handshake.js'
 export {
-  createMemoryGroupMLS,
-  type MemoryGroupMLS,
-  type MemoryGroupMLSOptions,
-} from './memory-group-mls.js'
+  createLedgerEntryResolver,
+  decodeLedgerEntries,
+  encodeLedgerEntries,
+} from './ledger-entries.js'
 export {
   createGroupPeer,
   type GroupPeer,
+  type GroupPeerMLSParams,
   type GroupPeerParams,
   type ProtocolSurface,
 } from './peer.js'
 export {
+  decodeLedgerReply,
+  decodeLedgerRequest,
   decodeRecoveryReply,
   decodeRecoveryRequest,
+  encodeLedgerReply,
+  encodeLedgerRequest,
   encodeRecoveryReply,
   encodeRecoveryRequest,
 } from './recovery.js'
 export {
+  COMMIT_LABEL,
+  commitTopic,
   discoveryTopic,
-  HANDSHAKE_LABEL,
-  handshakeTopic,
   INBOX_LABEL,
   inboxTopic,
   protocolTopic,
+  RENDEZVOUS_LABEL,
+  rendezvousTopic,
 } from './topic.js'

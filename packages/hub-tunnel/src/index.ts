@@ -35,12 +35,18 @@ export {
 } from './frame.js'
 export {
   createHubTunnelTransport,
-  type HubLike,
-  type HubLikeEvent,
-  type HubLikeEventListener,
-  type HubLikeEvents,
+  type HubBase,
+  type HubFetchTopicParams,
+  type HubFetchTopicResult,
   type HubPublishParams,
   type HubReceiveSubscription,
+  type HubSubscribeOptions,
   type HubTunnelSessionID,
   type HubTunnelTransportParams,
+  type LogHub,
+  type MailboxHub,
+  type MailboxHubEvent,
+  type MailboxHubEventListener,
+  type MailboxHubEvents,
+  type MailboxPublishParams,
 } from './transport.js'

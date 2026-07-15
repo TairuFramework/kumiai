@@ -37,5 +37,8 @@
   "dependencies": {
     "@sozai/event": "catalog:",
     "@enkaku/protocol": "catalog:"
+  },
+  "devDependencies": {
+    "vitest": "catalog:"
   }
 }
