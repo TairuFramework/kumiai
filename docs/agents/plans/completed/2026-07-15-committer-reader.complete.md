@@ -70,15 +70,27 @@ mutex. So the method could not stay synchronous or handle-less.
 
 ## Verification
 
-- `@kumiai/mls`: 305/305 unit; new `test/commit-header.test.ts` covers member-commit committer
+- `@kumiai/mls`: 306/306 unit; new `test/commit-header.test.ts` covers member-commit committer
   (interop-decrypting a genuine ts-mls commit), external-commit committer, non-commit/garbage →
-  null, and non-mutation.
+  null, a truncated (decode-throwing) frame → null, and non-mutation.
 - `@kumiai/rpc`: 174 passed / 1 skipped (the skip is a pre-existing, unrelated app-lane test).
 - All-package `build:types` clean; biome lint clean.
 - Executed subagent-driven: each of the three implementation tasks was independently
-  spec+quality reviewed and came back clean (one cosmetic Minor noted below). A final
-  whole-branch review was not run separately — completion was requested directly after the
-  per-task reviews.
+  spec+quality reviewed and came back clean. A final whole-branch review (opus) then found
+  one **Critical** and it was fixed before merge (see below).
+
+## Critical found and fixed in final review
+
+`GroupHandle.readCommitHeader`'s top-level `decode(mlsMessageDecoder, commit)` was unwrapped.
+ts-mls `decode` *throws* `CodecError` on malformed/truncated frames (not just returns null), and
+the rpc lane calls the port method outside any try/catch on raw, un-decoded bytes handed over by
+`decodeCommitFrame`. A hub-injected frame with a valid outer wrapper but garbage inner-commit
+bytes would throw, `pullCommits` would reject, the cursor would never advance past that frame,
+and every later wakeup would re-read and re-throw — a permanent, hub-triggerable commit-lane
+wedge (the exact failure the design guards against for `processCommit`). Fixed (commit `1c3d0bf`)
+by wrapping the decode to return `null` on any throw — mirroring `readMessageEpoch`, which guards
+the same call — plus a regression test that rejected pre-fix (`CodecError: Data length exceeds
+buffer`) and returns `null` post-fix.
 
 ## Follow-on
 
