@@ -714,7 +714,16 @@ export class GroupHandle {
     commit: Uint8Array,
   ): Promise<{ epoch: bigint; committerDID: string } | null> {
     return mutexFor(this).run(async () => {
-      const decoded = decode(mlsMessageDecoder, commit)
+      let decoded: unknown
+      try {
+        decoded = decode(mlsMessageDecoder, commit)
+      } catch {
+        // ts-mls `decode` throws CodecError on malformed/truncated frames; the contract is
+        // "null for bytes that are not a Commit", and the lane treats null as poison (advance
+        // the cursor, never retry). An unguarded throw would instead wedge the commit lane on
+        // this frame forever. Mirrors readMessageEpoch, which guards this same decode.
+        return null
+      }
       if (decoded == null) return null
       const epoch = readMessageEpoch(commit)
       if (epoch == null) return null

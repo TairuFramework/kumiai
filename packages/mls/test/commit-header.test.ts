@@ -121,4 +121,33 @@ describe('GroupHandle.readCommitHeader — external commit and non-commit', () =
     expect(await bobGroup.readCommitHeader(new Uint8Array([0xff, 0xff]))).toBeNull()
     expect(await bobGroup.readCommitHeader(new Uint8Array())).toBeNull()
   })
+
+  test('returns null (does not reject) for a truncated commit frame that makes ts-mls decode throw', async () => {
+    const { alice, aliceAfterBob, bobGroup } = await twoMemberGroup()
+    const carol = randomIdentity()
+    const carolBundle = await createKeyPackageBundle(carol, {
+      capabilities: controlCapabilities(),
+    })
+    const { invite: carolInvite } = await createInvite({
+      group: aliceAfterBob,
+      identity: alice,
+      recipientDID: carol.id,
+      permission: 'member',
+    })
+    const { commitMessage } = await commitInvite(
+      aliceAfterBob,
+      carolBundle.publicPackage,
+      carolInvite,
+    )
+
+    // Slicing 3 bytes off the end leaves an inner variable-length prefix claiming more
+    // data than remains in the buffer. ts-mls `decode` throws a CodecError ("Data length
+    // exceeds buffer") for this input rather than returning null — verified directly
+    // against `decode(mlsMessageDecoder, truncated)` in a scratch check. readCommitHeader's
+    // contract is "null for bytes that are not a Commit"; it must not let that throw
+    // propagate as a rejection.
+    const truncated = commitMessage.slice(0, commitMessage.length - 3)
+
+    await expect(bobGroup.readCommitHeader(truncated)).resolves.toBeNull()
+  })
 })
