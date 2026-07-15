@@ -34,8 +34,8 @@ catalogs:
       specifier: ^2.0.0
       version: 2.2.0
     '@sozai/async':
-      specifier: ^0.2.0
-      version: 0.2.0
+      specifier: ^0.2.1
+      version: 0.2.1
     '@sozai/codec':
       specifier: ^0.2.0
       version: 0.2.0
@@ -103,7 +103,7 @@ importers:
         version: 2.2.0
       '@sozai/async':
         specifier: 'catalog:'
-        version: 0.2.0
+        version: 0.2.1
       '@sozai/codec':
         specifier: 'catalog:'
         version: 0.2.0
@@ -210,7 +210,7 @@ importers:
         version: link:../hub-protocol
       '@sozai/async':
         specifier: 'catalog:'
-        version: 0.2.0
+        version: 0.2.1
       '@sozai/codec':
         specifier: 'catalog:'
         version: 0.2.0
@@ -1574,6 +1574,9 @@ packages:
 
   '@sozai/async@0.2.0':
     resolution: {integrity: sha512-bwXozVnxD3DNND76+Hg4zmz5/sBsip1DOeuggR+zLY6LXoI99bOwsty7SU1lD57FwVJLx6Hyp1O5Ka7DfMKUcg==}
+
+  '@sozai/async@0.2.1':
+    resolution: {integrity: sha512-pWJtDAlWSAUpRmqFQluyYKHuoQFOLmdy9/WT0EBWvqWTTe6s/Vy8+e2BxS2YMOK6vwsPuwSSEOlf6PvdF597+A==}
 
   '@sozai/codec@0.2.0':
     resolution: {integrity: sha512-HBbJY76Vso59kGJMxgGAtcnPYugY5TCWR4lhzJsjjtaX1oTs1F8SUWliUmgcRJZfHmnJO4tY03J7C/iy6SqXvw==}
@@ -4851,7 +4854,7 @@ snapshots:
 
   '@enkaku/transport@0.19.1':
     dependencies:
-      '@sozai/async': 0.2.0
+      '@sozai/async': 0.2.1
       '@sozai/event': 0.1.1
       '@sozai/stream': 0.2.0
 
@@ -5664,6 +5667,8 @@ snapshots:
   '@sindresorhus/merge-streams@4.0.0': {}
 
   '@sozai/async@0.2.0': {}
+
+  '@sozai/async@0.2.1': {}
 
   '@sozai/codec@0.2.0':
     dependencies:

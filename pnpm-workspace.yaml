@@ -20,7 +20,7 @@ catalog:
   '@enkaku/transport': ^0.19.1
   '@kokuin/capability': ^0.1.0
   '@kokuin/token': ^0.2.0
-  '@sozai/async': ^0.2.0
+  '@sozai/async': ^0.2.1
   '@sozai/codec': ^0.2.0
   '@sozai/event': ^0.1.1
   '@sozai/runtime': ^0.1.0

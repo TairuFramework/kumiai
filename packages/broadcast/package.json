@@ -1,6 +1,6 @@
 {
   "name": "@kumiai/broadcast",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "license": "MIT",
   "description": "Generic fan-out broadcast transport and anycast client for Enkaku RPC",
   "keywords": [
