@@ -94,8 +94,7 @@ describe('restart replay closes the crash window', () => {
 
     // Restart: a new peer over the same durable state — the same handle, the same journal.
     const restarted = makeMLSPeer(hub, 'alice', recoverySecret, {
-      mls: alice.mls,
-      crypto: alice.crypto,
+      restartOf: alice,
       journal,
     })
     const result = await restarted.peer.replay()
@@ -147,8 +146,7 @@ describe('restart replay closes the crash window', () => {
     // that only recovered when the host happened to ask for a lane operation would come up
     // holding an unsettled commit and an unseeded cursor, silently.
     const restarted = makeMLSPeer(hub, 'alice', recoverySecret, {
-      mls: alice.mls,
-      crypto: alice.crypto,
+      restartOf: alice,
       journal,
     })
     await flush()
@@ -185,8 +183,7 @@ describe('restart replay closes the crash window', () => {
     // nothing in memory remembers that it published it. Replay runs ahead of the pull, and
     // the cursor it sets is what carries the pull over the frame.
     const restarted = makeMLSPeer(hub, 'alice', recoverySecret, {
-      mls: alice.mls,
-      crypto: alice.crypto,
+      restartOf: alice,
       journal,
     })
     await restarted.peer.replay()
@@ -214,8 +211,7 @@ describe('restart replay closes the crash window', () => {
     await seed.peer.dispose()
 
     const alice = makeMLSPeer(hub, 'alice', recoverySecret, {
-      mls: seed.mls,
-      crypto: seed.crypto,
+      restartOf: seed,
       journal,
     })
     const result = await alice.peer.replay()
@@ -250,8 +246,7 @@ describe('restart replay closes the crash window', () => {
     await publishCommit({ hub, senderDID: 'zoe', recoverySecret, epoch: 1 })
 
     const alice = makeMLSPeer(hub, 'alice', recoverySecret, {
-      mls: seed.mls,
-      crypto: seed.crypto,
+      restartOf: seed,
       journal,
     })
     const result = await alice.peer.replay()
@@ -281,8 +276,7 @@ describe('restart replay closes the crash window', () => {
     await publishCommit({ hub, senderDID: 'zoe', recoverySecret, epoch: 1 })
 
     const alice = makeMLSPeer(hub, 'alice', recoverySecret, {
-      mls: seed.mls,
-      crypto: seed.crypto,
+      restartOf: seed,
       journal,
     })
     const result = await alice.peer.replay()
@@ -329,8 +323,7 @@ describe('restart replay closes the crash window', () => {
     await publishCommit({ hub, senderDID: 'zoe', recoverySecret, epoch: 1 })
 
     const alice = makeMLSPeer(hub, 'alice', recoverySecret, {
-      mls: seed.mls,
-      crypto: seed.crypto,
+      restartOf: seed,
       journal,
       // The blob a remove journals is its POST-commit handle — the one whose tree no longer
       // holds Mallory. Adopting it is the eviction, and nothing else is. So a peer that
@@ -371,8 +364,7 @@ describe('restart replay closes the crash window', () => {
     await publishCommit({ hub, senderDID: 'zoe', recoverySecret, epoch: 1 })
 
     const alice = makeMLSPeer(hub, 'alice', recoverySecret, {
-      mls: seed.mls,
-      crypto: seed.crypto,
+      restartOf: seed,
       journal,
     })
 
@@ -477,7 +469,7 @@ describe('restart replay closes the crash window', () => {
       faultyHub(hub, () => true),
       'alice',
       recoverySecret,
-      { mls: alice.mls, crypto: alice.crypto, journal, welcomes: alice.welcomes },
+      { restartOf: alice, journal },
     )
     await restarted.peer.replay()
     await restarted.peer.replay()
@@ -525,8 +517,7 @@ describe('restart replay closes the crash window', () => {
     // the commit still applies exactly once.
     dead = false
     const restarted = makeMLSPeer(hub, 'alice', recoverySecret, {
-      mls: alice.mls,
-      crypto: alice.crypto,
+      restartOf: alice,
       journal,
     })
     expect(await restarted.peer.replay()).toEqual({})
@@ -566,8 +557,7 @@ describe('restart replay closes the crash window', () => {
     await flush()
 
     const alice = makeMLSPeer(hub, 'alice', recoverySecret, {
-      mls: seed.mls,
-      crypto: seed.crypto,
+      restartOf: seed,
       journal,
     })
 

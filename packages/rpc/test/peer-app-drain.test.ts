@@ -92,9 +92,7 @@ describe('app frames outlive the commits that leave their epoch', () => {
     // He comes back up over the same handle. He is still at epoch 1, and he still holds epoch
     // 1's secret — the key that opens the message is in his hand.
     const restarted = makeMLSPeer(hub, 'bob', recoverySecret, {
-      mls: bob.mls,
-      crypto: bob.crypto,
-      journal: bob.journal,
+      restartOf: bob,
       handlers,
     })
     hub.reattach('bob')

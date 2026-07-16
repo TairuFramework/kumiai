@@ -4,6 +4,7 @@
  * @module rpc
  */
 
+export type { Anchor, AnchorStore } from './anchor.js'
 export {
   type CommitClassifierState,
   type CommitDisposition,

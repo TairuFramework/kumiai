@@ -131,7 +131,7 @@ standalone: rename + widen the predicate, invert the add-only and external-rejoi
   before/after diff idiom as the way to detect membership change — unsound for rejoin. Correct it.
 - **Verify:** `pnpm run build && rtk proxy pnpm run lint && pnpm test`
 
-### Question 2.4: Does a durably persisted anchor survive a restart without partitioning?
+### Question 2.4: Does a durably persisted anchor survive a restart without partitioning? ✅
 
 - **Assumption:** a member rebooting over a handle already past the anchor epoch cannot re-export that
   epoch's secret, so `{anchorSecret, anchorEpoch}` must be persisted and restored at construction
@@ -263,6 +263,43 @@ condition; a member away beyond the window triggers it.
 ---
 
 ## Decision Log
+
+### 2026-07-16 — Question 2.4: the anchor is persisted state, in a store of its own
+
+**Findings:** Confirmed. A new `AnchorStore` (`packages/rpc/src/anchor.ts`) — `load()`/`save()`, one
+slot, never cleared — **required alongside `mls`/`journal`** in `GroupPeerMLSParams`, on that type's own
+existing argument: both failures are silent, and the type is what stops a host wiring either. The three
+anchor captures collapsed into one `captureAnchor()` that exports and saves; construction restores
+before `initControlLanes`, and an empty store means first boot and only first boot. Mutation (drop the
+restore): `anchorEpoch()` returned the live epoch 3 instead of the persisted 1. Verify green: rpc 198
+passed / 1 skip, 30/30.
+
+**Rejected — the commit journal.** It is a single-slot store for one *pending* commit, cleared on
+outcome (`commit.ts:99`). The anchor is state a peer holds for its whole life in the group. Same shape,
+opposite lifecycle.
+
+**Accepted residual — the crash window.** `processCommit` is durable, then rpc computes the anchor, then
+`save()`. A crash between leaves a persisted anchor one rotation stale, and the peer stays off the
+group's topic **until the next roster change** — which in a settled group could be weeks, not "briefly".
+Closing it needs the anchor inside the same durable write as the handle, which this layer cannot reach:
+the anchor exists only once the port has committed and returned. Recorded as a `KNOWN BOUND` comment on
+`captureAnchor`, not a TODO. Revisit only as an `@kumiai/mls`-side change.
+
+**`load()` is trusted, by construction.** A well-formed but wrong anchor (stale backup, a store shared
+across groups) puts the peer on a dead topic with exactly the silence this work exists to remove. rpc
+has nothing to validate it against — that the handle cannot re-derive it is the premise — so the port
+contract carries it. Not a gap; a boundary.
+
+**The fixtures modelled the bug (found by the probe, fixed after).** Thirteen restart sites across four
+test files carried `mls`/`crypto`/`journal` into the restarted peer and took a **fresh** anchor store.
+They passed only because their anchor never rotated — at an unrotated anchor, restoring and re-seeding
+land on the same epoch and are indistinguishable, so threading the store through them was
+*unfalsifiable*. Fixed structurally rather than by hand: `makeMLSPeer` gained `restartOf: TestPeer`,
+carrying a dead peer's handle, crypto, journal, anchor store and Welcome record **as one** (explicit
+options still override — a restart onto a different journal is a real scenario), so dropping a piece
+stops being writable. Covered by one test that rotates the anchor *before* the restart and goes through
+the shared fixture; mutation (drop `restartOf?.anchorStore`) reddens that test **and only** that test —
+which is itself the proof that the other twelve never covered this.
 
 ### 2026-07-16 — Question 2.3: an external-commit rejoin rotates the anchor
 

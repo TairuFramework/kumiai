@@ -3,6 +3,7 @@ import type { LogHub } from '@kumiai/hub-tunnel'
 
 import type { PendingCommit } from '../../src/commit.js'
 import { createGroupPeer, type GroupPeer } from '../../src/peer.js'
+import { createMemoryAnchorStore, type MemoryAnchorStore } from './anchor.js'
 import { createFakeCrypto, type FakeCrypto } from './fake-crypto.js'
 import { createMemoryCommitJournal, type MemoryCommitJournal } from './journal.js'
 import {
@@ -37,6 +38,7 @@ export type TestPeer = {
   crypto: FakeCrypto
   mls: MemoryGroupMLS
   journal: MemoryCommitJournal
+  anchorStore: MemoryAnchorStore
   /** Every Welcome this host delivered, in order. Records the at-least-once repeats too. */
   welcomes: Array<string>
 }
@@ -47,11 +49,32 @@ export type MakeMLSPeerOptions = {
   bodies?: Array<string>
   /** The members this handle's tree holds a leaf for. A responder seals only to those. */
   members?: Array<string>
-  /** Reuse an existing group state — a "restart" is a new peer over the same handle. */
+  /**
+   * A RESTART: a new peer over everything a dead one left behind — its handle, its crypto, its
+   * journal, its anchor store, its Welcome record — carried as one.
+   *
+   * It is one option and not four because a restart needs ALL of them and a host cannot be told
+   * which: hand-copying the list is how a piece goes missing, and each piece goes missing
+   * quietly. A journal left behind loses the commit whose process died in the acceptance window.
+   * An anchor store left behind re-seeds the anchor at the live epoch and partitions the peer
+   * from its own group — it derives its own topics, sees nobody, and nothing reports it. Naming
+   * the dead peer instead of its parts is what makes those unwritable.
+   *
+   * Any option below still overrides what this carries — a restart onto a DIFFERENT journal is a
+   * real scenario, and saying so explicitly is the point.
+   */
+  restartOf?: TestPeer
+  /** Reuse an existing group state without a restart — a peer built over a handle made here. */
   mls?: MemoryGroupMLS
   crypto?: FakeCrypto
   /** Reuse an existing journal — durability across a restart is exactly this. */
   journal?: MemoryCommitJournal
+  /**
+   * Reuse an existing anchor store. The store must OUTLIVE the peer: the anchor is persisted
+   * state a rebooted handle can never re-export, so a restart that does not carry the store
+   * forward is a peer that partitions from its own group.
+   */
+  anchorStore?: MemoryAnchorStore
   /**
    * The host's adoption of a journalled post-commit handle, overridden. The default adopts
    * the blob and nothing else, which is the whole of what a `ledger` commit's handle carries.
@@ -76,9 +99,11 @@ export function makeMLSPeer(
   options: MakeMLSPeerOptions = {},
 ): TestPeer {
   const epoch = options.epoch ?? 1
-  const crypto = options.crypto ?? createFakeCrypto({ epoch, localDID })
+  const restartOf = options.restartOf
+  const crypto = options.crypto ?? restartOf?.crypto ?? createFakeCrypto({ epoch, localDID })
   const mls =
     options.mls ??
+    restartOf?.mls ??
     createMemoryGroupMLS({
       recoverySecret,
       epoch,
@@ -91,13 +116,15 @@ export function makeMLSPeer(
       ...(options.acceptsCommitter != null ? { acceptsCommitter: options.acceptsCommitter } : {}),
       onAdvance: (e) => crypto.setEpoch(e),
     })
-  const journal = options.journal ?? createMemoryCommitJournal()
-  const welcomes = options.welcomes ?? []
+  const journal = options.journal ?? restartOf?.journal ?? createMemoryCommitJournal()
+  const anchorStore = options.anchorStore ?? restartOf?.anchorStore ?? createMemoryAnchorStore()
+  const welcomes = options.welcomes ?? restartOf?.welcomes ?? []
   const peer = createGroupPeer<Protocols>({
     hub,
     crypto,
     mls,
     journal,
+    anchorStore,
     // The restart half of onAccepted, over the same blob — and idempotent, as it must be.
     adoptJournalled: async (blob) => {
       if (options.adoptJournalled != null) {
@@ -112,7 +139,7 @@ export function makeMLSPeer(
     ...(options.commitDeadlineMs != null ? { commitDeadlineMs: options.commitDeadlineMs } : {}),
     ...(options.recovery != null ? { recovery: options.recovery } : {}),
   })
-  return { peer, crypto, mls, journal, welcomes }
+  return { peer, crypto, mls, journal, anchorStore, welcomes }
 }
 
 export type LedgerCommitOptions = {

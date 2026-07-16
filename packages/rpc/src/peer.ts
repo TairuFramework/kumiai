@@ -15,6 +15,7 @@ import {
 import type { StoredMessage } from '@kumiai/hub-protocol'
 import type { LogHub } from '@kumiai/hub-tunnel'
 
+import type { Anchor, AnchorStore } from './anchor.js'
 import { createGroupBusServer } from './bus-server.js'
 import { classifyCommit } from './classify.js'
 import {
@@ -96,15 +97,25 @@ const SUPPRESSED_REQUESTS_MAX = 1024
 
 /**
  * The MLS half of a peer: the lifecycle port, the durable journal that carries a pending commit
- * across a crash, and the host hook that adopts one after a restart. They arrive together or not
- * at all — a peer with a port and no journal would silently lose every commit whose process died
- * in the acceptance window, and the type is what stops a host wiring that.
+ * across a crash, the host hook that adopts one after a restart, and the durable store that
+ * carries the app-lane anchor across the same restart. They arrive together or not at all — a
+ * peer with a port and no journal would silently lose every commit whose process died in the
+ * acceptance window, and a peer with a port and no anchor store would silently partition from its
+ * own group on the next restart, re-seeding the anchor at its live epoch while every member that
+ * stayed up holds the real one. Both failures are silent, and the type is what stops a host
+ * wiring either.
  */
 export type GroupPeerMLSParams = {
   /** MLS lifecycle port. When provided, the peer runs the commit lane. */
   mls: GroupMLS
   /** Durable single-slot journal. Written before every publish, cleared on both outcomes. */
   journal: CommitJournal
+  /**
+   * Durable store for the app-lane anchor. Written on every rotation, read once at construction.
+   * The anchor is persisted state, not derived state: it sits at the last roster change, the live
+   * handle runs ahead of it, and a rebooted handle can never re-export an earlier epoch's secret.
+   */
+  anchorStore: AnchorStore
   /**
    * Adopt a journalled commit now confirmed accepted — the restart half of
    * {@link PendingCommit.onAccepted}, over the same opaque blob: deserialize the post-commit
@@ -143,7 +154,10 @@ export type GroupPeerParams<Protocols extends Record<string, ProtocolDefinition>
    * the expected path, not an error path.
    */
   commitDeadlineMs?: number
-} & (GroupPeerMLSParams | { mls?: undefined; journal?: undefined; adoptJournalled?: undefined })
+} & (
+  | GroupPeerMLSParams
+  | { mls?: undefined; journal?: undefined; adoptJournalled?: undefined; anchorStore?: undefined }
+)
 
 export type ProtocolSurface<Protocol extends ProtocolDefinition> = {
   dispatch: (prc: string, data?: Record<string, unknown>) => Promise<void>
@@ -242,8 +256,18 @@ type ProtocolRuntime = {
 export function createGroupPeer<Protocols extends Record<string, ProtocolDefinition>>(
   params: GroupPeerParams<Protocols>,
 ): GroupPeer<Protocols> {
-  const { hub, crypto, mls, journal, adoptJournalled, localDID, protocols, handlers, suppress } =
-    params
+  const {
+    hub,
+    crypto,
+    mls,
+    journal,
+    adoptJournalled,
+    anchorStore,
+    localDID,
+    protocols,
+    handlers,
+    suppress,
+  } = params
   const getRandomID = params.getRandomID
   const newPublishID = getRandomID ?? defaultRandomID
   const recoveryTimeoutMs = params.recovery?.timeoutMs ?? DEFAULT_RECOVERY_TIMEOUT_MS
@@ -288,13 +312,34 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * own external flag instead, and the rejoiner sets this from its rejoined handle in
    * `recover()`, the one place it can — a member never applies its own commit.
    *
+   * PERSISTED, never re-derived: it is captured at an epoch the live handle then runs past, and
+   * MLS ratchets forward, so a rebooted handle can never re-export the secret of the epoch the
+   * anchor sits at. Every capture below writes it to {@link GroupPeerMLSParams.anchorStore} and
+   * construction restores it from there — a peer that re-seeded from its live handle instead
+   * would derive topics no member that stayed up is on.
+   *
    * The topic derivation and subscription rotation that consume the secret are built on top of
    * this; here it is only recorded, and only the epoch is observable (see
    * {@link GroupPeer.anchorEpoch}).
    */
-  let anchor: { secret: Uint8Array<ArrayBufferLike>; epoch: number } = {
+  let anchor: Anchor = {
     secret: new Uint8Array(),
     epoch: crypto.epoch(),
+  }
+
+  /**
+   * Capture the anchor from the port's post-commit handle and persist it. The one place the
+   * anchor is written from the live epoch, and the one place it is saved.
+   *
+   * KNOWN BOUND: `processCommit` is durable before this runs, so a crash between the two leaves a
+   * persisted anchor one rotation stale, and the restarted peer stays off the group's topic until
+   * the next roster change rotates it again. Closing it needs the anchor inside the same durable
+   * write as the handle, which this layer cannot reach: the anchor exists only once the port has
+   * already committed and returned.
+   */
+  const captureAnchor = async (): Promise<void> => {
+    anchor = { secret: await crypto.exportSecret(), epoch: crypto.epoch() }
+    await anchorStore?.save(anchor)
   }
 
   const buildEpoch = async (): Promise<void> => {
@@ -885,7 +930,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             detectRosterChange(rosterBefore, await port.rosterDIDs()) ||
             header?.external === true
           ) {
-            anchor = { secret: await crypto.exportSecret(), epoch: crypto.epoch() }
+            await captureAnchor()
           }
         }
         // `{ advanced: false }` here is the port REFUSING a well-formed commit at this peer's own
@@ -1479,7 +1524,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         // anchor captured — which is exactly where an applying member lands, since applying this
         // commit is what carries them off the epoch it is framed at. Reading it before the adopt
         // would anchor this peer one epoch below the group, on a topic no member is on.
-        anchor = { secret: await crypto.exportSecret(), epoch: crypto.epoch() }
+        await captureAnchor()
         const accepted = asLogPosition(sequenceID)
         reconciledHead = accepted
         commitLogHead = accepted
@@ -1546,13 +1591,28 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   }
 
   const ready = (async () => {
-    // Seed the app-lane anchor at genesis BEFORE the seed pull: a group with no roster change yet
-    // anchors at its initial epoch, and a roster change the seed pull applies must be able to
-    // rotate it off that seed rather than have a later re-seed overwrite the rotation. A member
-    // booting over a handle it was just added to seeds HERE, at its own add epoch — the same
-    // epoch every existing member rotates to on applying that add, which is what makes the two
-    // agree with no exchange between them.
-    anchor = { secret: await crypto.exportSecret(), epoch: crypto.epoch() }
+    // Settle the app-lane anchor BEFORE the seed pull: a roster change the seed pull applies must
+    // be able to rotate it off whatever lands here rather than have a later seed overwrite the
+    // rotation. Both branches run before `initControlLanes` below, so every lane is built on the
+    // settled anchor.
+    //
+    // A stored anchor is RESTORED, never recomputed. This construction is not necessarily
+    // genesis: it is just as likely a restart over a handle the group has carried past the last
+    // roster change. The anchor sits at that roster change and the handle ratchets forward, so
+    // there is nothing to recompute from — the live handle exports the live epoch's secret and
+    // no earlier one. Seeding from it here would put this peer on a topic of its own, invisible
+    // to every member that did not restart and blind to them.
+    //
+    // An empty store is first boot, and only first boot: seed at the initial epoch, as a group
+    // with no roster change yet must, and persist it. A member booting over a handle it was just
+    // added to seeds at its own add epoch — the same epoch every existing member rotates to on
+    // applying that add, which is what makes the two agree with no exchange between them.
+    const stored = await anchorStore?.load()
+    if (stored != null) {
+      anchor = stored
+    } else {
+      await captureAnchor()
+    }
     await initControlLanes()
     await buildEpoch()
   })()

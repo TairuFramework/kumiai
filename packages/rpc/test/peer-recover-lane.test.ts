@@ -130,8 +130,7 @@ describe('a heal re-enacts by ledger membership', () => {
     // landed, so she adopts it and now HOLDS the entry — and then the log tells her the group
     // went on without her: she meets a frame framed ahead of her, and heals.
     const alice = makeMLSPeer(hub, 'alice', rs, {
-      mls: dead.mls,
-      crypto: dead.crypto,
+      restartOf: dead,
       journal,
       members,
       recovery,

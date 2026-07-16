@@ -4,6 +4,7 @@ import { describe, expect, test } from 'vitest'
 import { createGroupPeer } from '../src/peer.js'
 import { defineGroupProtocol } from '../src/protocol.js'
 import { commitTopic, protocolTopic } from '../src/topic.js'
+import { createMemoryAnchorStore } from './fixtures/anchor.js'
 import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
@@ -65,11 +66,13 @@ function makeRoomPeer(
     onAdvance: (e) => crypto.setEpoch(e),
   })
   const journal = createMemoryCommitJournal()
+  const anchorStore = createMemoryAnchorStore()
   const peer = createGroupPeer<Protocols>({
     hub,
     crypto,
     mls,
     journal,
+    anchorStore,
     adoptJournalled: async (blob) => {
       adoptJournalledBlob(mls, blob)
     },
@@ -78,7 +81,7 @@ function makeRoomPeer(
     handlers: { room: handlers } as never,
     ...(options.recovery != null ? { recovery: options.recovery } : {}),
   })
-  return { peer, crypto, mls }
+  return { peer, crypto, mls, anchorStore }
 }
 
 describe('the app topic is stable within a roster-change-bounded segment', () => {
