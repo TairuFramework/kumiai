@@ -1,6 +1,7 @@
 import type { TransportType } from '@enkaku/transport'
 import { Disposer } from '@sozai/async'
 
+import { buildEventMessage } from './event-frame.js'
 import type { BroadcastMessage } from './transport.js'
 import { defaultRandomID } from './utils.js'
 
@@ -60,7 +61,7 @@ export class BroadcastClient extends Disposer {
   }
 
   async dispatch(prc: string, data: Record<string, unknown> = {}): Promise<void> {
-    await this.#transport.write({ payload: { typ: 'event', prc, data } })
+    await this.#transport.write(buildEventMessage(prc, data))
   }
 
   async request(prc: string, prm: unknown = {}, options: RequestOptions = {}): Promise<unknown> {

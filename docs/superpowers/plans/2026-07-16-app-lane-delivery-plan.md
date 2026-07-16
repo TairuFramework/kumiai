@@ -207,3 +207,36 @@ condition; a member away beyond the window triggers it.
 ---
 
 ## Decision Log
+
+### 2026-07-16 — Question 1.1: per-procedure retention makes logged events pull-drainable
+
+**Findings:** Confirmed. An `event` procedure declaring `retain: 'log'` in the rpc-owned
+`defineGroupProtocol` publishes via `mux.publish({ retain: 'log' })`; the frame is live-pushed to
+online subscribers AND returned by `mux.fetchTopic`. An ephemeral event (default) is live-only — not
+returned by `fetchTopic`. Both classes coexist on one app topic; `fetchTopic` returns only the logged
+frames. The guardrail (`retain:'log'` on a `request`/`gather` procedure) is rejected at the type level
+(constraint clause, one clean `// @ts-expect-error`) and by a runtime throw at definition time. No
+`@kumiai/mls` change; `@kumiai/broadcast` gained only additive exports (see below). Verify green:
+`pnpm run build && rtk proxy pnpm run lint && pnpm test` → rpc 176 passed / 1 pre-existing skip,
+30/30 tasks.
+
+**Spec impact:** none beyond what the pre-probe discussion already folded (kind × retention;
+correlation always ephemeral; declared per procedure). Blast radius refined: `@kumiai/broadcast` is
+touched, but only **additively** — `encode`, `buildEventMessage`, `encodeEventFrame` now exported so
+the log lane and `BroadcastClient.dispatch` share one event-frame encoder (byte-identity no longer
+duplicated). rpc's `app-frame.ts` removed.
+
+**Learned:**
+- The type guardrail must be a type-parameter **constraint**, not a mapped **parameter** type: under
+  `const` inference a mapped parameter type reverse-maps and collapses the offending entry to `never`,
+  scattering the error across every property. The constraint form lands exactly one error on the
+  `retain` line. (Reusable pattern for "this field only valid on entries of shape X".)
+- Receive is naturally unified: a `retain:'log'` publish and a mailbox publish land on the same topic
+  and reach subscribers through the same mux drain, so only the **publish** path branches by
+  retention — live receive is untouched. The returning-member drain (Phase 3) reads the same log via
+  `fetchTopic`.
+- `retentionOf` reads a runtime `.retain` off the definition, so the marker only takes effect through
+  rpc's `defineGroupProtocol`; a protocol authored another way defaults to ephemeral (correct).
+- `GroupProtocolDefinition` export shape changed (was `= ProtocolDefinition`, now rpc's
+  `Record<string, GroupProcedureDefinition>`) — a structural superset; Kubun's typecheck against it is
+  a migration-branch follow-up, not verified here.

@@ -6,6 +6,7 @@ import {
   createBroadcastTransport,
   defaultJitter,
   defaultRandomID,
+  encodeEventFrame,
   type GatheredReply,
   type GatherOptions,
   type RequestOptions,
@@ -34,6 +35,7 @@ import { adaptBusHandlers } from './handlers.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from './handshake.js'
 import { createHubMux, type HubMux } from './hub-mux.js'
 import { createLedgerEntryResolver, encodeLedgerEntries } from './ledger-entries.js'
+import { retentionOf } from './protocol.js'
 import {
   decodeLedgerReply,
   decodeLedgerRequest,
@@ -216,6 +218,8 @@ export type GroupPeer<Protocols extends Record<string, ProtocolDefinition>> = {
 }
 
 type ProtocolRuntime = {
+  /** The app topic this protocol's frames are published to and read back from at this epoch. */
+  topicID: string
   client: BroadcastClient
   busServer: { dispose: () => Promise<void> }
   acceptor: { dispose: () => Promise<void> }
@@ -297,7 +301,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         wrap: crypto.wrap,
         unwrap: crypto.unwrap,
       })
-      next.set(name, { client, busServer, acceptor, directed: new Map() })
+      next.set(name, { topicID, client, busServer, acceptor, directed: new Map() })
     }
     runtimes = next
   }
@@ -325,7 +329,22 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     const runtime = runtimes.get(name)
     if (runtime == null) throw new Error(`Unknown protocol: ${name}`)
     return {
-      dispatch: (prc, data) => runtime.client.dispatch(prc, data),
+      dispatch: async (prc, data) => {
+        // Route by the procedure's declared retention. A `log` event is published to the app
+        // topic's log lane — retained and pullable — while an ephemeral event (the default) and
+        // all RPC stay on the live mailbox lane. The log payload is byte-identical to the frame
+        // the broadcast transport would have produced, so the live receive path stays symmetric:
+        // a logged event still reaches online subscribers through the same drain.
+        if (retentionOf(protocols[name], prc) === 'log') {
+          await mux.publish({
+            topicID: runtime.topicID,
+            payload: await crypto.wrap(encodeEventFrame(prc, data ?? {})),
+            retain: 'log',
+          })
+          return
+        }
+        await runtime.client.dispatch(prc, data)
+      },
       request: (prc, prm, options) => runtime.client.request(prc, prm, options),
       gather: (prc, prm, options) => runtime.client.gather(prc, prm, options),
       to: (memberDID) => {

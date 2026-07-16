@@ -4,8 +4,6 @@
  * @module rpc
  */
 
-export { defineGroupProtocol, type GroupProtocolDefinition } from '@kumiai/broadcast'
-
 export {
   type CommitClassifierState,
   type CommitDisposition,
@@ -62,6 +60,14 @@ export {
   type GroupPeerParams,
   type ProtocolSurface,
 } from './peer.js'
+export {
+  defineGroupProtocol,
+  type GroupProcedureDefinition,
+  type GroupProtocolDefinition,
+  type RetainableEventProcedureDefinition,
+  type Retention,
+  retentionOf,
+} from './protocol.js'
 export {
   decodeLedgerReply,
   decodeLedgerRequest,

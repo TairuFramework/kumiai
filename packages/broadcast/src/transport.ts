@@ -35,7 +35,7 @@ export type BroadcastTransportParams = {
 const identityWrap: ByteTransform = (bytes) => bytes
 const identityUnwrap: Unwrap = (bytes) => bytes
 
-function encode(value: unknown): Uint8Array {
+export function encode(value: unknown): Uint8Array {
   return fromUTF(JSON.stringify(value))
 }
 
