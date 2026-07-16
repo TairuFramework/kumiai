@@ -46,7 +46,7 @@ import {
   encodeRecoveryReply,
   encodeRecoveryRequest,
 } from './recovery.js'
-import { detectRemoval } from './roster.js'
+import { detectRosterChange } from './roster.js'
 import { commitTopic, inboxTopic, protocolTopic, rendezvousTopic } from './topic.js'
 
 const DEFAULT_RECOVERY_TIMEOUT_MS = 5000
@@ -216,18 +216,22 @@ export type GroupPeer<Protocols extends Record<string, ProtocolDefinition>> = {
   recover: () => Promise<{ advanced: boolean; reenact: Array<string> }>
   resync: () => Promise<void>
   /**
-   * The epoch the app-lane anchor sits at. Seeded at genesis and advanced ONLY when a Commit this
-   * peer applied dropped a leaf (a Remove, including the Add+Remove-in-one-commit case) — an
-   * Add-only, update, no-op or external-commit rejoin leaves it put. It is the anchor the
-   * forward-secret app-lane topic derivation is bound to, exposed so a caller can observe a
-   * removal being detected without reaching into the port.
+   * The epoch the app-lane anchor sits at: the last commit this peer applied that CHANGED the
+   * roster — an Add, a Remove, or both in one commit. Seeded at genesis; an update, a no-op or a
+   * ledger-only commit leaves it put however far the live epoch runs ahead. It is the anchor the
+   * app-lane topic derivation is bound to, exposed so a caller can observe a roster change being
+   * detected without reaching into the port.
    */
   anchorEpoch: () => number
   dispose: () => Promise<void>
 }
 
 type ProtocolRuntime = {
-  /** The app topic this protocol's frames are published to and read back from at this epoch. */
+  /**
+   * The app topic this protocol's frames are published to and read back from. Anchor-bound:
+   * stable within a roster-change-bounded segment, rotated onto a new ID when a Commit that
+   * changes the roster is applied.
+   */
   topicID: string
   client: BroadcastClient
   busServer: { dispose: () => Promise<void> }
@@ -252,23 +256,33 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   const mux: HubMux = createHubMux({ hub, localDID })
 
   let runtimes = new Map<string, ProtocolRuntime>()
-  let secret: Uint8Array<ArrayBufferLike> = new Uint8Array()
   /**
-   * The epoch the app lane is built at, seeded from the handle, not zero. Zero is not neutral:
-   * `frameCommit` refuses to seal bodies when the live handle has moved past this, and the first
-   * lane operation (the seed: replay then pull) runs BEFORE the app lane is built — so a peer that
-   * restarted holding a journalled commit would have its own replay refused at startup by a guard
-   * about a host adopting early, and recover only if the host called a lane operation later.
+   * The live epoch this peer frames commits at, seeded from the handle, not zero. Not the app
+   * lane's epoch — that is anchor-bound — but the commit lane's: `frameCommit` refuses to seal
+   * bodies when the live handle has moved past this. Zero is not neutral, because the first lane
+   * operation (the seed: replay then pull) runs BEFORE this is re-read from the handle — so a peer
+   * that restarted holding a journalled commit would have its own replay refused at startup by a
+   * guard about a host adopting early, and recover only if the host called a lane operation later.
    */
   let epoch = crypto.epoch()
 
   /**
-   * The app-lane anchor: the per-epoch secret and epoch the forward-secret app-lane topic
-   * derivation is bound to. Seeded at genesis (a group with no removals yet anchors at its
-   * initial epoch) and rotated ONLY when an applied Commit drops a leaf — captured from the
-   * port's own post-commit epoch secret, never the recovery secret. The topic derivation and
-   * subscription rotation that consume the secret are built on top of this; here it is only
-   * recorded, and only the epoch is observable (see {@link GroupPeer.anchorEpoch}).
+   * The app-lane anchor: the per-epoch secret and epoch the app-lane topic derivation is bound
+   * to. Seeded at genesis (a group with no roster change yet anchors at its initial epoch) and
+   * rotated when an applied Commit changes the roster — captured from the port's own post-commit
+   * epoch secret, never the recovery secret.
+   *
+   * It sits at the last roster change because two constraints meet there and nowhere else. A
+   * Remove must move it: the evicted member keeps every topic ID it derived, so the group must
+   * leave them. An Add must move it too: MLS ratchets forward, so a member added at epoch E
+   * cannot export the secret of any earlier epoch, and an anchor left behind is one the newest
+   * member cannot derive. `max(last add, last remove)` is the only epoch both after every removal
+   * and held by every current member — and every member reaches it by applying the same commit,
+   * so they agree natively, the joiner seeding at its own add epoch included.
+   *
+   * The topic derivation and subscription rotation that consume the secret are built on top of
+   * this; here it is only recorded, and only the epoch is observable (see
+   * {@link GroupPeer.anchorEpoch}).
    */
   let anchor: { secret: Uint8Array<ArrayBufferLike>; epoch: number } = {
     secret: new Uint8Array(),
@@ -276,18 +290,21 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   }
 
   const buildEpoch = async (): Promise<void> => {
-    secret = await crypto.exportSecret()
     epoch = crypto.epoch()
     const next = new Map<string, ProtocolRuntime>()
     for (const [name, protocol] of Object.entries(protocols)) {
-      const topicID = protocolTopic(secret, epoch, name)
+      // The app topic is bound to the ANCHOR, not the live epoch: it holds constant while epochs
+      // advance without touching the roster, and rotates onto a new topic when a roster change is
+      // applied (the anchor moves then, and buildEpoch re-runs). Content stays sealed under the
+      // live epoch crypto below — only the topic ID is anchor-bound.
+      const topicID = protocolTopic(anchor.secret, anchor.epoch, name)
       // Subscribed for the member's whole life, like the commit and rendezvous topics: a
       // rotation tears down the LISTENERS on an epoch it left, never the subscriptions (the mux
       // guarantees it — nothing there unsubscribes). Unsubscribing tells the hub to drop this
       // member's pending deliveries and free any frame it was the last reader of, so a peer that
       // gave up the subscription as it rotated would delete its own unread messages, and
       // everyone else's copy of them.
-      const selfInbox = inboxTopic(secret, epoch, localDID)
+      const selfInbox = inboxTopic(anchor.secret, anchor.epoch, localDID)
       const client = new BroadcastClient({
         transport: createBroadcastTransport({
           topicID,
@@ -317,7 +334,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         mux,
         localDID,
         selfInboxTopic: selfInbox,
-        resolveSendTopic: (senderDID) => inboxTopic(secret, epoch, senderDID),
+        resolveSendTopic: (senderDID) => inboxTopic(anchor.secret, anchor.epoch, senderDID),
         protocol: protocol as ProtocolDefinition,
         handlers: handlers[name] as unknown as ProcedureHandlers<ProtocolDefinition>,
         wrap: crypto.wrap,
@@ -376,8 +393,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           mux,
           localDID,
           memberDID,
-          secret,
-          epoch,
+          secret: anchor.secret,
+          epoch: anchor.epoch,
           wrap: crypto.wrap,
           unwrap: crypto.unwrap,
           ...(getRandomID != null ? { getRandomID } : {}),
@@ -793,6 +810,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         // The roster this handle holds BEFORE applying, to diff against the roster after. Only an
         // applied commit can change it, so the after-read and the diff run only when the epoch
         // advanced — but the before-read must happen here, ahead of the apply that would change it.
+        // Read unconditionally, because whether the diff will be needed is not knowable until the
+        // apply has already destroyed the answer.
         const rosterBefore = await port.rosterDIDs()
         let applied: { advanced: boolean }
         try {
@@ -832,11 +851,13 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           advancedEpoch = true
           // The fork check's record; the only place it is written from the log.
           appliedByEpoch.set(framedEpoch, position)
-          // A commit that dropped a leaf rotates the app-lane anchor. Diff the roster around the
-          // apply: a DID present before and absent after is a Remove (robust to Add+Remove in one
-          // commit, where the count is unchanged). Capture the port's post-commit epoch secret —
-          // the per-epoch secret the group advanced to, never the recovery secret.
-          if (detectRemoval(rosterBefore, await port.rosterDIDs())) {
+          // A commit that CHANGED the roster rotates the app-lane anchor. Diff the roster around
+          // the apply: any difference between the DIDs held before and after is a roster change —
+          // an Add, a Remove, or both in one commit (where the count is unchanged). Capture the
+          // port's post-commit epoch secret — the per-epoch secret the group advanced to, never
+          // the recovery secret. Every member applying this same commit runs this same diff and
+          // lands on this same epoch, which is what makes the anchor agreed rather than local.
+          if (detectRosterChange(rosterBefore, await port.rosterDIDs())) {
             anchor = { secret: await crypto.exportSecret(), epoch: crypto.epoch() }
           }
         }
@@ -1487,9 +1508,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   }
 
   const ready = (async () => {
-    // Seed the app-lane anchor at genesis BEFORE the seed pull: a group with no removals yet
-    // anchors at its initial epoch, and a removal the seed pull applies must be able to rotate it
-    // off that seed rather than have a later re-seed overwrite the rotation.
+    // Seed the app-lane anchor at genesis BEFORE the seed pull: a group with no roster change yet
+    // anchors at its initial epoch, and a roster change the seed pull applies must be able to
+    // rotate it off that seed rather than have a later re-seed overwrite the rotation. A member
+    // booting over a handle it was just added to seeds HERE, at its own add epoch — the same
+    // epoch every existing member rotates to on applying that add, which is what makes the two
+    // agree with no exchange between them.
     anchor = { secret: await crypto.exportSecret(), epoch: crypto.epoch() }
     await initControlLanes()
     await buildEpoch()

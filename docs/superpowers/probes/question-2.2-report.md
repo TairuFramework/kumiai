@@ -1,194 +1,159 @@
-# Probe report — anchor-derived app topic: stable across non-removal, rotates on Remove
+# Probe report — anchor at the last ROSTER CHANGE: stable, rotating, and AGREED
 
-**Status: DONE as specified, with one blocking finding the lane must resolve before it can ship.**
+**Status: ANSWERED — YES, with one bounded exception that is NOT the persistence question.**
 
-The approved approach did not fight the code. The topic-derivation swap is four lines, `topic.ts` is
-untouched, and rotation fell out of the existing `rebuildEpoch` path with no new plumbing. Both
-required tests pass, and the whole suite is green.
+Deriving the app topics from an anchor at the last roster change holds the topic stable within a
+segment, rotates it on any roster change, and keeps every member agreeing on it — including the
+decisive case of a member whose peer boots at a later epoch than the anchor. The agreement is
+native: no exchange, no negotiation, no persistence.
 
-The finding is not about the swap. It is that binding the topic to the anchor makes a latent defect
-in the anchor's **seeding** (committed under Q2.1, outside this question's scope) load-bearing and
-fatal: two members whose peer objects bootstrap at different epochs derive **different app topics
-and cannot hear each other at all**, with no Remove anywhere in sight. Measured below.
+The exception: an **external-commit rejoin by a member the roster still holds** changes no DID, so
+the approved set-inequality predicate cannot see it and no member rotates. This contradicts the
+spec's "recovery re-synchronizes the anchor for free", and it is not fixable within this probe's
+scope. Details in **Concerns**, and it is the reason one test the brief expected me to invert is
+left asserting what it already asserted. Nothing was weakened to make anything pass.
 
-## The exact question, answered
-
-Yes, on both halves, for members that share an anchor:
-
-- **Stable across non-removal:** epochs advance (update / no-op / add-only commits), the anchor does
-  not, and `buildEpoch` re-derives the identical topic. Delivery continues; all frames land on the
-  one topic ID.
-- **Rotates on Remove:** the applied Remove moves the anchor (`peer.ts:846`), `rebuildEpoch` re-runs
-  `buildEpoch`, and it derives a new topic ID. Delivery continues across the rotation, both
-  directions.
+---
 
 ## Changes
 
-All in `packages/rpc/src/peer.ts`. `topic.ts` unchanged — the functions receive anchor values
-instead of live per-epoch ones, exactly as the spec said they would.
+### Detection widened (the one behavioural change)
 
-| Line | Change |
-| --- | --- |
-| `289` | `protocolTopic(anchor.secret, anchor.epoch, name)` — was `(secret, epoch, name)` |
-| `296` | `selfInbox = inboxTopic(anchor.secret, anchor.epoch, localDID)` |
-| `326` | acceptor `resolveSendTopic: (senderDID) => inboxTopic(anchor.secret, anchor.epoch, senderDID)` |
-| `385-386` | `createDirectedClient({ secret: anchor.secret, epoch: anchor.epoch })` |
-| `230-233` | `ProtocolRuntime.topicID` doc: records the anchor-bound invariant |
-| `256-263` | `epoch` doc: rewritten — it is no longer "the epoch the app lane is built at" |
-
-`wrap: crypto.wrap` / `unwrap: crypto.unwrap` are **unchanged**: content stays sealed under the live
-epoch, only the topic ID is anchor-bound.
-
-### The `secret` / `epoch` module vars
-
-Checked every reader, as instructed.
-
-- **`secret` (was `peer.ts:255`, written `:279`) — REMOVED.** After the swap its only four readers
-  were the derivations above, leaving it write-only. Both the declaration and the
-  `secret = await crypto.exportSecret()` line in `buildEpoch` are gone.
-- **`epoch` (`:266`) — KEPT.** Not app-lane-only: `frameCommit` (`:956`) reads it for the commit-lane
-  guard `if (crypto.epoch() !== epoch)`, which refuses to seal bodies once the host has advanced past
-  the framed epoch. It is still written in `buildEpoch` (`:280`) and genuinely read, so it is not
-  write-only. Its doc comment claimed it was "the epoch the app lane is built at", which the swap
-  made false; rewritten to describe what it actually is now (the live epoch the commit lane frames
-  at), keeping the load-bearing "zero is not neutral" rationale.
-
-### Rotation: the existing rebuild path was enough
-
-No new plumbing, per the brief. `pullCommits` sets the anchor on an applied Remove (`:846`) and
-returns `advanced: true`; every caller already rebuilds on an advance — `reconcileCommits` (`:867`),
-`onCommitDelivery` (`:885`), `commit` (`:1262`), `recover` (`:1442`). `buildEpoch` re-reads `anchor`
-each run, so a moved anchor produces the new topic and an unmoved one reproduces the same string.
-The ordering is already correct: the anchor is written during the pull, strictly before the rebuild
-that reads it.
-
-I did **not** take the optional "skip the rebuild when the anchor is unchanged" optimisation.
-Correctness was the bar and the rebuild is harmless: `hub-mux` refcounts local listeners and never
-unsubscribes, and `FakeHub.subscribe` only adds a DID to a set, so re-subscribing to the same topic
-redelivers nothing and costs nothing observable.
-
-## The test
-
-New: `packages/rpc/test/peer-app-topic.test.ts`, two tests, both passing.
-
-`makeMLSPeer` hardcodes the `chat` protocol, which has no `retain:'log'` procedure, so the file has a
-local `makeRoomPeer` wiring the same MLS port (`createMemoryGroupMLS` + `onAdvance` → crypto) to a
-`room` protocol with `'room/posted': { type: 'event', retain: 'log' }`.
-
-1. **Stable across non-removal** — alice and bob exchange logged events across an update/no-op commit
-   and an add-only commit (epochs 1→2→3). Every event reaches the other's handler; both anchors stay
-   at 1; the topic ID is unchanged throughout. Tied to the wire, not just the derivation:
-   `hub.fetchTopic(genesisTopic)` returns **all three** frames, and the per-epoch topics the group
-   would otherwise have moved onto have **zero subscribers**.
-2. **Rotates on Remove** — carol is evicted; both members independently rotate to anchor epoch 2 and
-   agree; the new topic ID differs from the pre-removal one; delivery continues both ways;
-   `fetchTopic` shows 2 frames on the new topic and the original 1 still on the old.
-
-**The tests are not vacuous.** Reverting `:289` to the per-epoch derivation fails test 1 with
-`expected [ Array(1) ] to have a length of 3` — the frames scatter across three topics. Test 2 still
-passes under the *old* derivation (per-epoch rotates on every commit, including Removes), which is
-precisely why test 1 is the discriminating one; the file's header comment says so, so nobody later
-mistakes test 2 for sufficient.
-
-### Existing tests: 5 failed, all encoding the old per-epoch premise
-
-The brief expected `peer-control-lanes.test.ts` to stay green. It did not, and neither did four
-others. None was a regression in the swap — each asserted, as its premise, that an epoch advance
-rotates the app topic. That is the behaviour this change deliberately removes. Updated to the new
-invariant rather than weakened:
-
-- `peer-commit-lane.test.ts:45-51` — "his app lane was rebuilt at the epoch he reached, not the one
-  he joined at" is now exactly backwards. **Inverted**: dave sits on his anchor's topic (epoch 1),
-  not the live epoch 3 he pulled up to. This test is the clearest statement of the finding below.
-- `peer-control-lanes.test.ts:20` — its real subject is "a rotation never unsubscribes", which a
-  stable topic would leave untested. **Rewritten to keep it**: it now drives a genuine Remove
-  (`publishCommit({ removes: ['carol'] })`) so the topic really rotates, and still asserts the
-  rotated-off subscription survives. The old test faked rotation with `crypto.setEpoch(2)` +
-  `resync()`, which left the MLS port at epoch 0 while the crypto sat at 1 — the two were decoupled
-  and no commit was ever applied. Driving a real commit required `epoch: 1` and `onAdvance` on the
-  port to make them agree.
-- `peer-control-lanes.test.ts:116,164` — non-removal commits. **Inverted**: the topic holds, and the
-  per-epoch topic has zero subscribers.
-- `peer-recovery.test.ts:46` — an external-commit rejoin only adds a leaf. **Inverted**: eve's anchor
-  is untouched by her rejoin and nobody moves onto an epoch-4 topic.
-
-## Finding: the anchor is seeded per-peer, not per-group — this breaks delivery on restart
-
-**This is the one thing that must not be lost from this report.**
-
-`peer.ts:1499` seeds the anchor at construction:
+`packages/rpc/src/roster.ts` — `detectRemoval` → **`detectRosterChange`**, set difference → set
+**inequality** (`:22`). Size compare, then membership:
 
 ```ts
-anchor = { secret: await crypto.exportSecret(), epoch: crypto.epoch() }
+export function detectRosterChange(before: Array<string>, after: Array<string>): boolean {
+  const held = new Set(before)
+  const present = new Set(after)
+  if (held.size !== present.size) return true
+  for (const did of held) {
+    if (!present.has(did)) return true
+  }
+  return false
+}
 ```
 
-That is a **local, construction-time** value. The spec defines the anchor as captured "at the last
-commit containing a Remove" — a fact about **group history** that every member must agree on. The
-implementation approximates it with "the epoch this peer object happened to boot at". Those coincide
-only for members that boot together at genesis — which is exactly the shape of every test in the
-suite, and why this was invisible until now.
+The size compare is what catches the Add (the old loop only ever saw losses); the membership loop
+still catches the Remove and the Add+Remove-in-one-commit case. Sets on both sides, so duplicate
+leaves for one DID do not read as a change — asserted at
+`packages/rpc/test/peer-roster-change-detect.test.ts:176`.
 
-Two members that bootstrap at different epochs derive different anchors, hence different app topics,
-hence **hear nothing from each other** — silently, with no Remove involved, forever (until a Remove
-happens to resynchronise them). Measured with a throwaway probe (not committed): alice boots at
-epoch 1, the group advances twice with non-removal commits, dave's peer then boots over a handle
-already at epoch 3 (a restart, or a late join), alice dispatches one event:
+Doc-comment rewritten to the corrected rationale: the anchor must be ≥ every current member's join
+(MLS ratchets forward — a member added at E cannot export an earlier epoch's secret) **and** after
+every removal (forward secrecy), and `max(last add, last remove)` is the only epoch that is both.
 
-| | messages dave received |
-| --- | --- |
-| Per-epoch derivation (before this change) | **1** |
-| Anchor derivation (after this change) | **0** |
+### Call site and export
 
-alice anchors at 1, dave at 3. Before the change both converged to epoch 3 and agreed on the topic,
-so it worked; after, they diverge permanently. This is a **regression introduced by making the topic
-anchor-bound**, and it fires on the most ordinary event in the system: a phone restarting.
+- `packages/rpc/src/peer.ts:49` — import renamed.
+- `packages/rpc/src/peer.ts:848` — the predicate at the apply site; comment now states that every
+  member applying the same commit runs the same diff and lands on the same epoch, which is *why*
+  the anchor is agreed rather than merely local.
+- `packages/rpc/src/peer.ts:799-804` — noted that `rosterBefore` is read unconditionally because
+  whether the diff is needed is not knowable until the apply has destroyed the answer.
+- `packages/rpc/src/index.ts:81` — export renamed.
 
-`peer-commit-lane.test.ts` and `peer-recovery.test.ts` now document this in passing — dave anchors at
-1 while the group is at 3; eve anchors at 1 while carol and dave anchor at 3, on a different app
-topic. Those tests pass only because they never exchange app messages.
+### Kept from the previous probe, as instructed
 
-I did **not** fix it. It is outside this question's stated scope ("topic-ID source only"; the anchor
-state and its seeding are Q2.1's committed work), and the fix is a design decision, not plumbing —
-the anchor must become group-derived and durable. Roughly, the options:
+The derivation swap is untouched and correct: `protocolTopic(anchor.secret, anchor.epoch, name)`
+(`peer.ts:289`), `selfInbox = inboxTopic(anchor.secret, anchor.epoch, localDID)` (`:296`), the
+acceptor's `resolveSendTopic` (`:326`), `createDirectedClient` (`:385-386`). `wrap`/`unwrap` still
+on live `crypto`; the `secret` module var still gone; `epoch` still kept for `frameCommit`.
+`topic.ts` untouched. `peer.ts` was already carrying the committed anchor machinery (the `anchor`
+var `:276`, `anchorEpoch()` `:1533`, the genesis seed `:1499`) — I changed none of its structure,
+only the predicate that drives it and the doc comments that described the old invariant.
 
-1. **Derive it from the commit log.** The log is the group's agreed history and every member already
-   walks it; the last Remove in it is a value they would all compute alike. Costs: a member whose
-   backlog was trimmed past the last Remove cannot compute it, and the secret at that epoch is not
-   recoverable by replay (MLS ratchets forward), so this needs the secret carried, not recomputed.
-2. **Carry it in the Welcome / GroupInfo**, so a joiner adopts the group's anchor instead of minting
-   its own. Does not by itself fix restart — see 3.
-3. **Persist the anchor** alongside the handle, so a restart restores rather than re-seeds it. Needed
-   under any of the above; the anchor is currently in-memory only, so today a restart re-seeds it
-   from the live epoch even for a founding member.
+### Doc comments re-stated to the corrected invariant
 
-(1)+(3) or (2)+(3) both look viable; (3) alone is not sufficient for a genuine late joiner.
+`peer.ts:218-224` (`anchorEpoch`), `:231-234` (`ProtocolRuntime.topicID`), `:268-285` (the `anchor`
+var — now carries the two-constraint argument), `:285-288` (`buildEpoch`), `:1496-1501` (the genesis
+seed — now states that a member booting over a freshly-added handle seeds at its own add epoch,
+which is the same epoch every existing member rotates to; that sentence *is* the agreement).
 
-## Surprises
+---
 
-- **`epoch` survived; `secret` did not.** The brief anticipated both might go. `frameCommit`'s guard
-  is a non-app-lane reader of `epoch`, so removing it would have broken the commit lane.
-- **The old control-lanes rotation test never applied a commit.** It hand-set the crypto epoch while
-  the MLS port sat at epoch 0. It asserted rotation without ever exercising the path that rotates.
-- **`fetchTopic` throws rather than returning empty** for a non-subscriber, so "the group never used
-  the per-epoch topic" is asserted with `subscriberCount(...) === 0` — a stronger claim than an empty
-  fetch anyway: the topic was never even subscribed to.
+## Tests re-inverted (which, and why)
 
-## Concerns
+The previous probe wrote these to the old "rotate only on Remove" invariant.
 
-1. **Blocking — the anchor is not group-agreed or durable** (above). This change is correct in
-   isolation and unshippable until that is resolved; it trades "rotates too often" for "silently
-   partitions the group on restart". The required tests cannot catch it, because both their peers
-   boot at the same epoch.
-2. Directed-lane topics are now anchor-bound too, per the approved approach. Same divergence applies,
-   and the scope boundary (a directed message sent during a segment the member never subscribed
-   remains out of scope) is respected.
-3. `peer-app-drain.test.ts`'s skipped test is unaffected and still correctly skipped; the app lane
-   still has no pull-readable back-fill, so the log-class frames on a rotated-off topic are retained
-   but nothing reads them back. That is Phase 3 (the returning-member drain), not built here.
+| File | Was | Now | Why |
+|---|---|---|---|
+| `peer-roster-change-detect.test.ts:68` (renamed from `peer-remove-detect.test.ts`) | add-only → anchor stays `1` | add-only → anchor **`2`** | An add-only commit rotates. Dave joins at 2 and can export no secret older than it. |
+| `peer-roster-change-detect.test.ts:100` | external rejoin → anchor stays `1` | rejoin of a DID the roster **lost** → anchor **`2`** | Bob's roster gains `dave`, so the DID set moves. |
+| `peer-roster-change-detect.test.ts:127` | *(new)* | rejoin of a DID the roster **still holds** → anchor stays `1` | The predicate's honest edge, pinned rather than left to be discovered. See Concerns. |
+| `peer-roster-change-detect.test.ts:154+` | `detectRemoval` set-difference unit cases | `detectRosterChange` set-inequality | `add-only` flips `false`→`true` — the exact case the old predicate missed. |
+| `peer-app-topic.test.ts:105-118` (old) | add-only folded into the "stable" test as a non-rotating commit | replaced with a **ledger-only** commit; the add-only case promoted to its own rotation test (`:200`) | An Add is no longer a non-event, so it cannot serve as filler in a stability test. The stability test now uses update/no-op + ledger-only, exactly as the brief specifies. |
+| `peer-recovery.test.ts:45-63` | anchor stays `1` | **still `1`**, comment corrected, divergence now asserted | Not inverted — see Concerns. The brief predicted rotation; the approved predicate cannot produce it. |
+| `peer-commit-lane.test.ts:47`, `peer-control-lanes.test.ts:145,194` | "dropped no leaf" | "touched no leaf" | Wording only. These commits carry no roster op, so they were already right; the *reason* they hold changed. |
 
-## Verify — real output
+`peer-control-lanes.test.ts:20-83` needed no inversion — the previous probe had already given it a
+genuine roster change (a Remove) to drive its real subject, "a rotation never unsubscribes". That
+subject is preserved intact.
 
-`pnpm run build && rtk proxy pnpm run lint && pnpm test --force` (repo root, uncached, `EXIT=0`):
+Renamed `peer-remove-detect.test.ts` → **`peer-roster-change-detect.test.ts`** (via `git mv`); the
+old name had become a misnomer.
+
+---
+
+## The agreement test, and its mutation result
+
+`packages/rpc/test/peer-app-topic.test.ts:264-355` — *"a member booting at a later epoch than the
+anchor derives the same topic and exchanges events"*.
+
+The setup separates the anchor from every peer's live epoch, so that nothing but the anchor can
+explain agreement:
+
+1. Alice boots at epoch 1 with `['alice','bob']`. Anchor = 1.
+2. Two non-roster-changing commits — an update and a ledger enact. Alice's live epoch → **3**, her
+   anchor stays **1**: a whole segment of drift.
+3. Dave is added by a commit framed at 3. Alice applies it → live epoch 4, and her anchor **jumps
+   1 → 4 in one step**, skipping the two epochs she actually walked through.
+4. Dave's peer boots over a handle already at **4** — the epoch his Welcome left him at, two past
+   where Alice's peer booted. He seeds his anchor there natively. He never applies the add commit
+   at all: it is framed at 3 and he is at 4.
+
+Both land on 4. `protocolTopic(secret, 4, 'room')` is one topic ID, asserted equal (`:340`), and
+then asserted **on the wire**: Alice→Dave and Dave→Alice both deliver, and a `fetchTopic` as Dave
+finds exactly the two frames on that one topic (`:353`). Neither peer could have reached the
+other's number by any local means — Alice cannot know Dave's boot epoch, and Dave's handle can
+export nothing from before his add. The add commit is the only thing they share, and it is what
+puts them on the same topic.
+
+### Mutation check — required, and it passes
+
+Temporarily reverted `detectRosterChange` to the removal-only set difference (the pre-correction
+predicate) and re-ran:
+
+```
+ FAIL  test/peer-app-topic.test.ts > every member agrees on the anchor, including one that boots
+       after it > a member booting at a later epoch than the anchor derives the same topic and
+       exchanges events
+AssertionError: expected 1 to be 4 // Object.is equality
+
+- Expected
++ Received
+
+- 4
++ 1
+
+ ❯ test/peer-app-topic.test.ts:318:38
+    318|     expect(alice.peer.anchorEpoch()).toBe(4)
+       |                                      ^
+```
+
+Under the mutation Alice's anchor stays at **1** while Dave's seeds at **4**: the two derive
+different topic IDs and the group silently partitions on Dave's arrival — no Remove anywhere in the
+scenario. Repo-wide the mutation took **6 tests red** (193 pass → 187 pass / 6 fail), the agreement
+test among them. Mutation reverted; `git diff packages/rpc/src/roster.ts` confirms the clean
+predicate is what is in the tree, and the suite is back to 193 passing.
+
+The test therefore fails for exactly the reason the brief requires it to.
+
+---
+
+## Verify
+
+`pnpm run build && rtk proxy pnpm run lint && pnpm test`, repo root:
 
 ```
  Tasks:    8 successful, 8 total
@@ -196,15 +161,96 @@ Cached:    8 cached, 8 total
   Time:    22ms >>> FULL TURBO
 
 $ biome check --write ./packages ./tests
-Checked 214 files in 169ms. No fixes applied.
+Checked 214 files in 168ms. No fixes applied.
 
+@kumiai/broadcast:test:unit:  Test Files  8 passed (8)
+@kumiai/broadcast:test:unit:       Tests  35 passed (35)
+@kumiai/hub-protocol:test:unit:  Test Files  1 passed (1)
+@kumiai/hub-protocol:test:unit:       Tests  8 passed (8)
+@kumiai/mls:test:unit:  Test Files  25 passed (25)
+@kumiai/mls:test:unit:       Tests  306 passed (306)
+@kumiai/hub-tunnel:test:unit:  Test Files  20 passed (20)
+@kumiai/hub-tunnel:test:unit:       Tests  63 passed (63)
+@kumiai/hub-server:test:unit:  Test Files  5 passed (5)
+@kumiai/hub-server:test:unit:       Tests  69 passed (69)
 @kumiai/rpc:test:unit:  Test Files  32 passed (32)
-@kumiai/rpc:test:unit:       Tests  190 passed | 1 skipped (191)
+@kumiai/rpc:test:unit:       Tests  193 passed | 1 skipped (194)
 
  Tasks:    30 successful, 30 total
-Cached:    0 cached, 30 total
-  Time:    15.308s
 ```
 
-The 1 skipped test is the pre-existing, deliberate skip in `peer-app-drain.test.ts` (documented there
-as failing for the right reason), untouched by this work.
+Green. The 1 skip is pre-existing and unrelated. `@kumiai/rpc` went 190 → 193 (3 net new: the
+add-rotation test, the agreement test, the rejoin-edge test; the unit cases moved rather than grew).
+
+---
+
+## Surprises
+
+**1. The anchor is the POST-commit epoch, not the epoch the commit is framed at.** A commit framed
+at 3 leaves the anchor at 4, because `enact` advances before `anchor` is captured. The spec's prose
+("a member added at epoch E seeds its anchor at E") reads as if the add commit's own framing epoch
+were the anchor. It is not, and it does not need to be — the joiner's handle boots at the *post*-add
+epoch, which is the same 4, so the two still meet. The prose and the code agree on the outcome while
+disagreeing on the label. I drafted the agreement test to the spec's label first and it failed;
+worth fixing the prose before it misleads someone again.
+
+**2. The brief's expectation for `peer-recovery.test.ts` was wrong, and the old assertion was
+accidentally right.** The brief lists it as inverted-by-the-old-probe and requiring re-inversion to
+"rotate". It does not rotate — for a reason unrelated to the old removal-only model. See below.
+
+---
+
+## Concerns
+
+**1. (Material) The set-inequality predicate cannot see an external-commit rejoin, and the spec
+claims it can.** The spec asserts "An external-commit rejoin adds a leaf, so it rotates too" and
+"recovery re-synchronizes the anchor for free". Both are false under the approved predicate,
+because the two clauses of the spec are inconsistent with each other:
+
+- "the two DID sets differ at all" is a statement about **DIDs**;
+- "a rejoin adds a **leaf**" is a statement about **leaves**.
+
+An external commit with `resync: true` removes the rejoiner's old leaf and adds a new one for the
+same DID. The leaf multiset changes; **the DID set does not**. So the diff sees nothing — not for
+the rejoiner, and not for the members applying the rejoin. Measured in `peer-recovery.test.ts`:
+after Eve's successful rejoin at epoch 4, `eve.peer.anchorEpoch() === 1` and
+`carol.peer.anchorEpoch() === dave.peer.anchorEpoch() === 3`. They are partitioned, and the heal did
+not close it. I have asserted all three (`peer-recovery.test.ts:56-63`) so the hole is recorded
+rather than latent, and pinned the predicate's edge directly at
+`peer-roster-change-detect.test.ts:127`.
+
+This is **not** the persistence question (Q2.3), though Q2.3 is tangled in it. Two distinct causes
+stack here:
+
+- *Boot re-seed (Q2.3):* Carol anchors at 3 only because she booted at 3. Expected, in-scope-to-
+  ignore, and the brief said so.
+- *Rejoin blind spot (this question):* the rejoin is the event that ought to have reunited them, and
+  it is invisible. Persistence alone does **not** fix it — a rejoined handle is fresh and cannot
+  export the anchor epoch's secret however faithfully the peer remembered which epoch that was. It
+  needs the rejoin to rotate everyone, which needs the predicate to see it.
+
+I did not fix it, deliberately. Making it rotate correctly requires *both* sides to rotate, and the
+members applying the external commit have no way to know it was one: `readCommitHeader` returns
+`{ epoch, committerDID }` and nothing more, and the port exposes only `rosterDIDs()` — DIDs, not
+leaves. Closing this means widening the port API (an `external` flag on the header, or a leaf-level
+roster read). That is a redesign, and the brief said to report rather than redesign. **Flagging it
+as the natural successor question to Q2.3, and noting the spec text needs correcting either way.**
+
+**2. `detectRosterChange` is now misnamed relative to what it detects.** It detects a *DID-set*
+change, not a roster change — the gap in concern 1 is exactly the difference. The name is the
+brief's and I kept it, but it papers over the distinction that bites. `detectMemberSetChange` would
+not have let this hide.
+
+**3. The double's epoch-independent `exportSecret()` hides the real failure mode.** Every app-topic
+assertion here varies with the anchor *epoch* alone; with a real ratcheting MLS, a peer anchored at
+an epoch it cannot export the secret for does not derive a *different* topic — it derives *nothing*
+and fails differently. The agreement test proves the two peers compute the same anchor epoch, which
+is the property in question, but it cannot prove Dave *can* export epoch 4's secret. He can, by
+construction (he boots there). Alice's ability to export 4's secret at the moment she rotates is
+likewise real. So the conclusion holds — but nothing in this suite would catch a regression that
+anchors somewhere underivable. Worth a real-MLS integration test before this leaves probe status.
+
+**4. Out of scope, untouched, and confirmed still broken:** a restart re-seeds the anchor from the
+live epoch and still partitions (Q2.3). No anchor persistence was implemented. Nothing in the
+required tests needed it — the agreement test boots Dave *fresh*, which is precisely why it does not
+need persistence to pass.

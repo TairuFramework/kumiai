@@ -42,10 +42,13 @@ describe('the commit lane is pull-driven', () => {
     expect(dave.mls.epoch()).toBe(3)
     expect(dave.mls.commits()).toBe(2)
 
-    // And his app lane was rebuilt at the epoch he reached, not the one he joined at.
+    // And his app lane sits on the topic his ANCHOR names, not the live epoch he pulled up to:
+    // the two commits he walked touched no leaf, so they moved his epoch and left his anchor —
+    // and so his app topic — exactly where it was.
     const secret = await dave.crypto.exportSecret()
-    expect(hub.subscriberCount(protocolTopic(secret, 3, 'chat'))).toBe(1)
-    expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(0)
+    expect(dave.peer.anchorEpoch()).toBe(1)
+    expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(1)
+    expect(hub.subscriberCount(protocolTopic(secret, 3, 'chat'))).toBe(0)
 
     // He needed no help from another member: he asked for no recovery. (Walking frames
     // from epochs he never held is ordinary catch-up, not evidence of a fork.)

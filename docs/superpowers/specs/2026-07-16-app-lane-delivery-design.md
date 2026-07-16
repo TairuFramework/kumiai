@@ -148,10 +148,30 @@ one epoch:
 `max(last add, last remove)` = **the last roster change**. That is not a preference; it is what the two
 constraints leave.
 
-It also makes the hard cases self-synchronize with **no announced value**: a member added at epoch E
-seeds its anchor at E, and every existing member rotates to E on applying that same add — they agree
-natively, each holding E's secret. An external-commit rejoin adds a leaf, so recovery re-synchronizes
-the anchor for free.
+It also makes an **add** self-synchronize with **no announced value**: a member added by a commit
+framed at epoch E boots at the post-commit epoch and seeds its anchor there, and every existing member
+lands on that same post-commit epoch when it applies that add — they agree natively, each holding that
+epoch's secret. (The anchor is the **post-commit** epoch, not the epoch the commit is framed at: the
+handle advances, *then* the anchor is captured. An existing member's anchor can jump several epochs in
+one step, skipping epochs it actually walked through, and that is correct — the joiner lands on the same
+number without ever applying the commit.)
+
+**A rejoin does NOT self-synchronize — it needs an explicit signal** (corrected 2026-07-16; an earlier
+draft of this spec claimed recovery re-synchronized "for free", and it does not). An external-commit
+rejoin by a member the roster still holds changes **no DID**, so the roster diff of §3 cannot see it.
+Worse, it changes no occupied **leaf index** either: ts-mls's resync blanks the member's old leaf and
+then places the new one at the *leftmost blank* — the leaf it just blanked (RFC 9420 §12.4.3.2). kumiai's
+`joinGroupExternal` types `resync` as the literal `true`, so **every** kumiai rejoin takes that
+index-reusing path. Left undetected, the rejoiner anchors where its fresh handle booted while the group
+stays put — measured as a three-way divergence (eve at 1, carol and dave at 3).
+
+So a rejoin rotates the anchor on an **explicit external-commit signal**, not a roster diff: the applied
+commit's header reports whether it was an external commit (structurally detectable pre-apply via
+`senderType === new_member_commit`; `GroupHandle.readExternalCommit` already does exactly this), and the
+lane rotates on `rosterChanged || external`. The rejoining member sets its own anchor at the rejoined
+epoch, and every member applying that external commit rotates to the same post-commit epoch. This keeps
+the model's invariant intact — the anchor is ≥ every current member's **effective** join, and a
+rejoiner's effective join is its rejoin epoch.
 
 **The anchor must be durable.** A restart is the one case derivation cannot cover: a member rebooting
 at epoch 12 whose last roster change was epoch 5 cannot re-export `secret@5`, and re-seeding from the
@@ -185,9 +205,17 @@ two sets — a leaf gained or lost — rotates the anchor**.
 Set **inequality**, not set difference: per §2 the anchor sits at the last roster change, so an Add
 rotates it just as a Remove does. A commit carrying both an Add and a Remove leaves the leaf count
 unchanged and still rotates (a count check would miss it). A self-removal or leave rotates — the leaf
-disappears for every member. An external-commit rejoin adds a leaf, so it rotates too, which is what
-re-synchronizes a recovering member's anchor with the group (§2). An update, no-op, or ledger-only
-commit touches no leaf and does not rotate. No `@kumiai/mls` change.
+disappears for every member. An update, no-op, or ledger-only commit touches no leaf and does not
+rotate. No `@kumiai/mls` change.
+
+**A DID-set diff cannot see a rejoin, and that is by design here** — a resync rejoin's DID is already in
+the roster. The rejoin is caught by the explicit external-commit signal instead (§2), and the lane
+rotates on `rosterChanged || external`. Diffing occupied **leaf indices** was considered as a unified
+alternative and rejected on evidence: it is blind to a resync rejoin (the new leaf takes the
+just-blanked old index) *and* blind to a same-commit Remove(X)+Add(Y) (the Remove frees an index the Add
+immediately takes), which the DID-set diff catches. Leaf **keys** are the opposite failure — an Update
+rotates a leaf key on routine commits, so a key-level diff would rotate constantly. DID-set for
+membership + an explicit flag for rejoin is the combination that is exact on all four shapes.
 
 ### 4. Why a removed member is blind
 

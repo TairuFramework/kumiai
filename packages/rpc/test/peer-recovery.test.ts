@@ -43,7 +43,23 @@ describe('recovery rendezvous', () => {
     expect(carol.mls.epoch()).toBe(4)
     expect(hub.published.filter((m) => m.topicID === commitTopic(rs))).toHaveLength(1)
     const secret = await eve.crypto.exportSecret()
-    expect(hub.subscriberCount(protocolTopic(secret, 4, 'chat'))).toBeGreaterThanOrEqual(1)
+    // Eve was stranded, never evicted, so the roster held her DID throughout: her rejoin REPLACES
+    // her leaf and the DID set is identical before and after it. The anchor is rotated by a change
+    // in that set, so no member rotates here — not Eve, and not the members applying her external
+    // commit. Her app lane stays on the topic her anchor names, and nobody moves onto a topic named
+    // by the epoch the rejoin reached.
+    expect(eve.peer.anchorEpoch()).toBe(1)
+    expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBeGreaterThanOrEqual(1)
+    expect(hub.subscriberCount(protocolTopic(secret, 4, 'chat'))).toBe(0)
+    // And that leaves Eve and Carol anchored apart — 1 against 3 — which is asserted here rather
+    // than left to be discovered, because it is the one place the anchor does NOT deliver
+    // agreement. The two causes are separate. Carol anchors at 3 because she BOOTED at 3 and
+    // re-seeds from the live handle: nothing in this segment's history reaches her, so the two
+    // peers were already apart before the heal, and the rejoin's job was to close that. It does
+    // not: a rejoin that changes no DID is invisible to the diff, so the heal that reunites Eve's
+    // MLS state with the group leaves her app lane exactly where it was.
+    expect(carol.peer.anchorEpoch()).toBe(3)
+    expect(dave.peer.anchorEpoch()).toBe(3)
     // Carol (fast) replies; Dave (slow) observes that reply and suppresses his own.
     expect(recoveryReplyCount(hub, rs)).toBe(1)
     // The group's tree holds ONE leaf for the rejoined member, not two.

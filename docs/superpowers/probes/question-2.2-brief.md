@@ -1,94 +1,110 @@
-# Probe brief — anchor-derived app topic: stable across non-removal, rotates on Remove
+# Probe brief (REVISED) — anchor at the last ROSTER CHANGE: stable, rotating, and AGREED
 
 Implementation probe in `/Users/paul/dev/yulsi/kumiai`, package `packages/rpc`, branch
-`feat/app-lane-delivery` (do NOT switch; leave changes uncommitted). Small, focused.
+`feat/app-lane-delivery`. Do NOT switch branches. Leave changes uncommitted for review.
 
-Builds directly on already-committed work:
-- Q2.1 records app-lane **anchor state** `anchor: { secret, epoch }` in `peer.ts` — seeded at genesis,
-  rotated (to the post-commit per-epoch secret) only when an applied Commit drops a leaf. Exposed via
-  `peer.anchorEpoch()`. That state currently has **no reader** — this question makes the app topics
-  read it.
-- Q1.1 added per-procedure `retain:'log'` (logged app events publish via `mux.publish({retain:'log'})`,
-  pullable via `mux.fetchTopic`).
+## Read this first: the working tree already has a partial, PARTLY-WRONG attempt
+
+A previous probe answered this question under an **older design that has since been corrected**. Its
+changes are **uncommitted in your working tree**. Do not start from scratch and do not assume they are
+right:
+
+- **Correct and keep:** the topic-derivation swap in `peer.ts` — `protocolTopic(anchor.secret,
+  anchor.epoch, name)` (~`:289`), `selfInbox = inboxTopic(anchor.secret, anchor.epoch, localDID)`
+  (~`:296`), the acceptor's `resolveSendTopic` (~`:326`), `createDirectedClient` (~`:385-386`);
+  `wrap`/`unwrap` left on live `crypto`; the `secret` module var removed; `epoch` kept
+  (`frameCommit:956` reads it). `topic.ts` untouched.
+- **Now wrong, must be re-inverted:** that probe updated several existing tests to the old
+  "rotate only on Remove" invariant. Under the corrected model an **Add also rotates**, so at minimum
+  `packages/rpc/test/peer-recovery.test.ts` (asserts a rejoin leaves the anchor put — a rejoin adds a
+  leaf, so it must now ROTATE) and the add-only cases in `packages/rpc/test/peer-remove-detect.test.ts`
+  (committed, asserts add-only does NOT rotate — it must now rotate) are backwards. Re-check every test
+  it touched: `peer-commit-lane.test.ts`, `peer-control-lanes.test.ts`, `peer-recovery.test.ts`,
+  `peer-app-topic.test.ts` (new).
 
 ## The exact question
 
-Does deriving the app-lane topics from the **anchor** (`anchor.secret`/`anchor.epoch`) instead of the
-current epoch hold the topic constant while epochs advance without a Remove, and rotate it onto a new
-topic exactly when a Remove is applied — with delivery continuing across both?
+Does deriving the app topics from an anchor at the **last roster change** hold the topic stable within
+a segment, rotate it on any roster change, and — the decisive part — keep every member **agreeing** on
+it, including one whose peer boots at a later epoch than the anchor?
+
+## Why the design changed (context you need)
+
+The anchor secret is `exportSecret(anchorEpoch)`; MLS ratchets forward, so a member cannot export the
+secret of an epoch it never held. Anchoring at the last **Remove** is therefore underivable by anyone
+who joined after it. Two constraints decide the anchor: it must be an epoch **every current member
+holds the secret for** (≥ the newest join) and **after every removal** (forward secrecy). Their
+intersection is `max(last add, last remove)` — **the last roster change**.
+
+The previous probe measured the failure it causes: alice boots at epoch 1, the group advances twice
+with non-roster-changing commits, dave's peer boots over a handle already at epoch 3, alice dispatches
+one event → dave received **0** (per-epoch derivation delivered 1). Silent permanent partition, no
+Remove involved.
 
 ## Relevant spec section (verbatim)
 
-> `appTopic = protocolTopic(anchorSecret, anchorEpoch, name)` and `inboxTopic(anchorSecret,
-> anchorEpoch, did)`, captured from `exportSecret()` at the last commit containing a Remove.
-> Non-removal commits leave the topic stable; a Remove rotates it. `topic.ts` needs no signature
-> change — the existing functions receive anchor values instead of the current per-epoch values.
-> Online: subscribe the current app topic, live push. On applying a Remove, update the anchor, drop
-> the old subscription (safe — log-class), subscribe the new topic. wrap/unwrap stay on the live epoch
-> crypto (MLS content is sealed under the current epoch; only the topic ID is anchor-bound).
+> The anchor sits at the last commit that changed the roster — an Add or a Remove. A commit that leaves
+> the roster untouched (update, no-op, ledger-only) leaves the topic stable; any roster change rotates
+> it. ... The anchor epoch must be one every current member holds the secret for, so it must be ≥ the
+> newest member's join epoch ... and after every removal ... `max(last add, last remove)` = the last
+> roster change. ... a member added at epoch E seeds its anchor at E, and every existing member rotates
+> to E on applying that same add — they agree natively, each holding E's secret. An external-commit
+> rejoin adds a leaf, so recovery re-synchronizes the anchor for free.
+>
+> Set inequality, not set difference: an Add rotates it just as a Remove does. A commit carrying both an
+> Add and a Remove leaves the leaf count unchanged and still rotates. A self-removal or leave rotates. An
+> external-commit rejoin adds a leaf, so it rotates too. An update, no-op, or ledger-only commit touches
+> no leaf and does not rotate.
 
-## Approved approach (follow this; BLOCKED if it fights the code — do not redesign)
+## Approved approach
 
-In `buildEpoch` (`peer.ts:252-303`), switch every app-lane / inbox / directed **topic derivation**
-from the current `secret`/`epoch` to `anchor.secret`/`anchor.epoch`:
-- `protocolTopic(anchor.secret, anchor.epoch, name)` (currently `:257`)
-- `selfInbox = inboxTopic(anchor.secret, anchor.epoch, localDID)` (currently `:264`)
-- the acceptor's `resolveSendTopic` (currently `inboxTopic(secret, epoch, senderDID)`, `:294`)
-- `createDirectedClient({ ..., secret, epoch })` (currently `:338-339`) → pass `anchor.secret`/
-  `anchor.epoch`.
-
-Keep `wrap: crypto.wrap` / `unwrap: crypto.unwrap` (`:269-270`) UNCHANGED — the content stays sealed
-under the live epoch; only the topic ID becomes anchor-bound.
-
-Rotation should fall out of the existing structure: `reconcileCommits` / `onCommitDelivery` already
-call `rebuildEpoch` on an advance. A non-removal advance leaves the anchor unchanged → `buildEpoch`
-re-derives the **same** topic (continuity); a removal changed the anchor (Q2.1) → `buildEpoch` derives
-the **new** topic (rotation), and the old log-class subscription is safe to drop. Do NOT add new
-rotation plumbing unless the existing rebuild path demonstrably fails to rotate — if it does, report
-what you found before changing it.
-
-Optional (only if trivially clean): skip the app-lane rebuild when the anchor is unchanged, to cut
-churn. Correctness (continuity + rotation) is the bar; do not let an optimization risk it. If unsure,
-leave the rebuild as-is.
-
-Now that topics are anchor-bound, the module `secret`/`epoch` vars (`:253-254`) may end up unused for
-app-lane derivation. Check every reader: if they are genuinely unused after the switch, remove them; if
-still read elsewhere (e.g. by non-app-lane code), leave them. Do not leave a write-only variable.
-
-`topic.ts` MUST keep its current signatures — you are only changing the *arguments* passed.
-
-## Scope boundary
-
-Topic-ID source only. Do NOT build the returning-member drain (Phase 3) and do NOT change
-directed-lane delivery semantics beyond the topic-derivation swap. A directed message sent to a member
-during a segment it never subscribed remains out of scope.
+1. **Widen the detection** — `packages/rpc/src/roster.ts` currently exports `detectRemoval(before,
+   after)` (set difference, committed). Rename to **`detectRosterChange`** and widen to set
+   **inequality**: true iff the two DID sets differ at all (gained or lost a leaf). Update its
+   doc-comment rationale and its call site in `peer.ts` (~`:846`) and the `index.ts` export.
+2. **Keep the derivation swap** already in the tree (see above).
+3. **Fix the tests the old model got backwards** (see above). Do not weaken a test to make it pass —
+   invert it to the corrected invariant, and if a test's real subject was something else (e.g.
+   "a rotation never unsubscribes"), preserve that subject by driving a genuine roster change.
+4. **Do NOT implement anchor persistence** — a restart still re-seeds and still partitions. That is the
+   next question (Q2.3), deliberately separate. If a test would need persistence to pass, it is out of
+   scope: say so in the report rather than building it.
 
 ## Done when (all required)
 
-New test `packages/rpc/test/peer-app-topic.test.ts`:
-1. **Stable across non-removal:** two online members (e.g. alice, bob) exchange **logged** app events
-   (`retain:'log'` procedure) across several non-removal commits; every event is received by the
-   subscriber's handler, and the app topic ID is unchanged the whole time.
-2. **Rotates on Remove:** apply a Remove commit (evict a third member); after it, the members exchange
-   logged events again and delivery continues — on a **new** topic ID, different from the pre-removal
-   one.
+`packages/rpc/test/peer-app-topic.test.ts` (extend the existing new file):
+1. **Stable within a segment** — two online members exchange logged (`retain:'log'`) events across
+   several non-roster-changing commits (update/no-op/ledger-only) on one topic ID; assert on the wire
+   (all frames on the one topic; the per-epoch topics the group would otherwise have used have zero
+   subscribers).
+2. **Rotates on a Remove** — delivery continues on a new topic ID.
+3. **Rotates on an Add** — an add-only commit also rotates both members onto a new topic and delivery
+   continues. (New under the corrected model.)
+4. **AGREEMENT — the decisive test.** A member whose peer boots at a **later epoch than the group's
+   anchor** agrees and exchanges messages: seed a group, advance it with non-roster-changing commits,
+   then have a new member added at the later epoch and boot its peer over a handle at that epoch. The
+   add rotates every existing member to the joiner's add epoch, and the joiner seeds there natively —
+   so both must derive the same topic and exchange logged events in both directions.
+   **This test must fail if the anchor is seeded per-peer from the live epoch with no rotation on
+   add** — verify that by mutation (temporarily revert `detectRosterChange` to removal-only and confirm
+   this test goes red). Report the mutation result.
 
-Assert the topic **identity**, not just delivery. The fake crypto's `exportSecret()` is
-epoch-independent (a fixed secret — see `fixtures/fake-crypto.ts`), so the app topic depends only on
-`anchor.epoch` (+ the protocol name): compute the expected topic with
-`protocolTopic(fixedSecret, peer.anchorEpoch(), name)` before and after the Remove and assert it is the
-same across non-removal commits and different after the Remove. Use `mux.fetchTopic` / the known fake
-secret to tie the assertion to the real topic the frames landed on.
+Existing tests green — `peer-remove-detect.test.ts` (invert its add-only/external-rejoin cases; the
+file name is now a misnomer, feel free to rename it to reflect roster-change detection),
+`peer-app-retention.test.ts`, `peer-control-lanes.test.ts`, `peer-commit-lane.test.ts`,
+`peer-recovery.test.ts`.
 
-Existing tests stay green — especially `peer-remove-detect.test.ts`, `peer-app-retention.test.ts`,
-`peer-control-lanes.test.ts`.
+## Scope boundary
+
+Topic-ID source, detection predicate, and agreement only. NO anchor persistence (Q2.3), NO
+returning-member drain (Phase 3), NO directed delivery-semantics change.
 
 ## Conventions
 
-Read `kigu:conventions` + repo `AGENTS.md`/`CLAUDE.md`. `type` not `interface`; `Array<T>`; no `any`;
-capital `ID`; `#fields`; don't edit `lib/`. Code/comments/tests never name plan questions or phases —
-capture the invariant ("the app topic is stable within a removal-bounded segment and rotates on a
-Remove").
+`kigu:conventions` + repo `AGENTS.md`/`CLAUDE.md`. `type` not `interface`; `Array<T>`; no `any`;
+capital `ID`; `#fields`; never edit `lib/`. Code/comments/tests never name plan questions or phases —
+state the invariant ("the app topic is stable within a roster-change-bounded segment; every member
+anchors at the last roster change").
 
 ## Verify (repo root, paste real output)
 
@@ -97,6 +113,7 @@ Remove").
 
 ## Report contract
 
-Full report → `docs/superpowers/probes/question-2.2-report.md` (changes with file:line, whether the
-existing rebuild path rotated as hoped or needed help, the test, pasted verify output, surprises,
-concerns). Return ONLY: status, uncommitted-changes note, one-line test summary, concerns. No full diff.
+Full report → `docs/superpowers/probes/question-2.2-report.md` (OVERWRITE the previous one; changes with
+file:line, which old-model tests you re-inverted and why, the agreement test + its mutation result,
+pasted verify output, surprises, concerns). Return ONLY: status, uncommitted-changes note, one-line test
+summary, concerns. No full diff.

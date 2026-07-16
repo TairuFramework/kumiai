@@ -78,7 +78,7 @@ export {
   encodeRecoveryReply,
   encodeRecoveryRequest,
 } from './recovery.js'
-export { detectRemoval } from './roster.js'
+export { detectRosterChange } from './roster.js'
 export {
   COMMIT_LABEL,
   commitTopic,

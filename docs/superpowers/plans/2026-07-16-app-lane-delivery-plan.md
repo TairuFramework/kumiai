@@ -107,7 +107,31 @@ standalone: rename + widen the predicate, invert the add-only and external-rejoi
   applying that same add — they agree natively, each holding E's secret."
 - **Verify:** `pnpm run build && rtk proxy pnpm run lint && pnpm test`
 
-### Question 2.3: Does a durably persisted anchor survive a restart without partitioning?
+### Question 2.3: Does an external-commit rejoin rotate the anchor, so a recovering member agrees with the group?
+
+- **Assumption:** a resync rejoin changes no DID and no occupied leaf index, so no diff can see it; but
+  it is structurally detectable pre-apply (`senderType === new_member_commit`), and
+  `GroupHandle.readExternalCommit` (`group-handle.ts:178-198`) already does exactly that. Surfacing it
+  as an optional `external` on `CommitHeader` costs nothing at the call site — the lane already calls
+  `readCommitHeader` on every frame (`classifyCommit`, `peer.ts:~704`). Rotating on
+  `rosterChanged || external`, plus the rejoining peer setting its own anchor at the rejoined epoch,
+  makes rejoiner and group land on the same post-commit epoch.
+- **Done when:** a test rejoins a member by external commit against a group whose anchor is older than
+  the rejoin epoch, and asserts (a) every member applying the external commit rotates to the rejoin's
+  post-commit epoch, (b) the rejoiner anchors there too, and (c) they exchange logged events on one
+  agreed topic. `peer-recovery.test.ts`'s pinned three-way divergence is **inverted** — it now
+  converges. Mutation-check: dropping the `external` term turns it red.
+- **Spec excerpt:** "A rejoin does NOT self-synchronize — it needs an explicit signal ... An
+  external-commit rejoin by a member the roster still holds changes no DID ... Worse, it changes no
+  occupied leaf index either: ts-mls's resync blanks the member's old leaf and then places the new one at
+  the leftmost blank — the leaf it just blanked ... So a rejoin rotates the anchor on an explicit
+  external-commit signal, not a roster diff ... the anchor is ≥ every current member's effective join,
+  and a rejoiner's effective join is its rejoin epoch."
+- **Also fix:** `GroupHandle.listMembers()`'s doc comment (`group-handle.ts:526-528`) advertises the
+  before/after diff idiom as the way to detect membership change — unsound for rejoin. Correct it.
+- **Verify:** `pnpm run build && rtk proxy pnpm run lint && pnpm test`
+
+### Question 2.4: Does a durably persisted anchor survive a restart without partitioning?
 
 - **Assumption:** a member rebooting over a handle already past the anchor epoch cannot re-export that
   epoch's secret, so `{anchorSecret, anchorEpoch}` must be persisted and restored at construction
@@ -126,7 +150,7 @@ standalone: rename + widen the predicate, invert the add-only and external-rejoi
   port method, or host-persisted state alongside the handle.
 - **Verify:** `pnpm run build && rtk proxy pnpm run lint && pnpm test`
 
-### Question 2.4: Is a removed member unable to derive or read the post-removal app topic?
+### Question 2.5: Is a removed member unable to derive or read the post-removal app topic?
 
 - **Assumption:** because the anchor feeds the **per-epoch** `exportSecret()` (never the lifelong
   recovery secret), a member removed at the rotation commit cannot derive the new epoch's secret,
@@ -239,6 +263,51 @@ condition; a member away beyond the window triggers it.
 ---
 
 ## Decision Log
+
+### 2026-07-16 — Question 2.2: anchor at the last roster change — stable, rotating, agreed (with one known hole)
+
+**Findings:** Confirmed for adds/removes. Deriving app topics from `anchor.secret`/`anchor.epoch` holds
+a segment stable, rotates on any roster change, and members **agree natively** — no exchange, no
+persistence. The agreement test is decisive: alice boots at 1 and drifts to live epoch 3 with anchor
+still 1; dave is added by a commit framed at 3, alice's anchor jumps **1→4 in one step**; dave boots
+over a handle already at 4 and **never applies the add commit** (framed at 3, he is at 4). Both land on
+4, asserted on the wire both directions. Mutation check (revert to removal-only detection):
+`expected 1 to be 4`, 6 tests red. Verify green: rpc 193 passed / 1 skip, 30/30.
+
+`detectRemoval` → `detectRosterChange` (set difference → set **inequality**; the size compare is what
+catches an Add). Derivation swap kept from the earlier attempt; `secret` module var removed, `epoch`
+kept (`frameCommit:956` reads it). `topic.ts` untouched. `peer-remove-detect.test.ts` renamed to
+`peer-roster-change-detect.test.ts`.
+
+**KNOWN HOLE (open — closed by Q2.3):** an **external-commit rejoin changes no DID**, so the DID-set
+predicate cannot see it and nobody rotates. The spec's claim that "recovery re-synchronizes the anchor
+for free" was **wrong**. Measured: after eve's rejoin, eve anchors at 1 while carol and dave anchor at
+3. `peer-recovery.test.ts` was deliberately NOT inverted — the old assertion was accidentally right; its
+reasoning comment was corrected and the three-way divergence pinned so the hole is recorded, not latent.
+
+**Spec impact:** §2/§3 corrected — the "recovery re-synchronizes for free" claim removed; the rejoin
+needs an explicit external-commit signal (Q2.3). Also corrected: the anchor lands on the **post-commit**
+epoch, not the commit's framing epoch ("a member added at epoch E seeds at E" was mislabelled — outcome
+right, label wrong).
+
+**Learned:**
+- **ts-mls resync reuses the old leaf index.** Verified against the library's own tree primitives: a
+  rejoin blanks the old leaf then takes the **leftmost blank** — the leaf it just blanked (RFC 9420
+  §12.4.3.2; `createCommit.js:255-265`, `ratchetTree.js:111-131`). Even removing the rightmost leaf does
+  not shrink the tree (re-padded to `2^d-1`). So **an occupied-leaf-index diff is blind to a rejoin** —
+  and kumiai's `joinGroupExternal` types `resync` as the literal `true` (`group-welcome.ts:176`), so
+  every kumiai rejoin is that path. Not an edge case; the only case.
+- An index diff is also blind to a same-commit Remove(X)+Add(Y) (Remove frees the index, Add takes it —
+  `clientState.js:678-697`), which the DID-set diff **catches**. DID-set is strictly better than indices.
+- The exact rejoin signal already exists in our own wrapper: `readExternalCommit`
+  (`group-handle.ts:178-198`) — pre-apply, structural (`senderType === new_member_commit`), pulling the
+  joiner's DID from the commit's own UpdatePath leaf credential.
+- `GroupHandle.listMembers()`'s doc comment (`group-handle.ts:526-528`) **advertises the before/after
+  diff idiom**, which is unsound for rejoin. Misleading doc worth fixing.
+- Sealing the anchor into the recovery reply (the rejected alternative) would have bought nothing:
+  frames are sealed under their **sending** epoch, so a member rejoining at R cannot decrypt epochs
+  < R whatever topic they are on — the anchor secret would only let it fetch ciphertext it cannot open,
+  while adding attested-payload surface where a mistake is an anchor-injection channel.
 
 ### 2026-07-16 — Question 2.1: roster-set diff detects a Remove (incl. Add+Remove)
 

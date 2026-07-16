@@ -21,7 +21,13 @@ describe('control lane lifecycle', () => {
     const hub = new FakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x33)
     const crypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
-    const mls = createMemoryGroupMLS({ recoverySecret })
+    const mls = createMemoryGroupMLS({
+      recoverySecret,
+      epoch: 1,
+      localDID: 'alice',
+      members: ['alice', 'carol'],
+      onAdvance: (e) => crypto.setEpoch(e),
+    })
     const peer = createGroupPeer<Protocols>({
       hub,
       crypto,
@@ -44,15 +50,23 @@ describe('control lane lifecycle', () => {
     expect(hub.subscriberCount(rendezvous)).toBe(1)
     expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(1)
 
-    // Advance the epoch and resync: app topics rotate, both control topics persist.
-    crypto.setEpoch(2)
+    // A resync rebuilds the app lane onto the SAME topic — it is bound to the anchor, and a
+    // resync moves no anchor — and both control topics persist.
     await peer.resync()
     await flush()
 
     expect(hub.subscriberCount(commits)).toBe(1)
     expect(hub.subscriberCount(rendezvous)).toBe(1)
+    expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(1)
+
+    // Evicting carol is what rotates the app lane: the topic moves, both control topics stay.
+    await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, removes: ['carol'] })
+    await flush()
+
+    expect(hub.subscriberCount(commits)).toBe(1)
+    expect(hub.subscriberCount(rendezvous)).toBe(1)
     expect(hub.subscriberCount(protocolTopic(secret, 2, 'chat'))).toBe(1)
-    // The epoch it left is a topic it no longer LISTENS on — and still subscribes to. At the
+    // The topic it rotated OFF is one it no longer LISTENS on — and still subscribes to. At the
     // hub, unsubscribing frees this member's undelivered frames; a peer that dropped the
     // subscription as it rotated would delete its own unread mail on the way past.
     expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(1)
@@ -128,10 +142,10 @@ describe('control lane lifecycle', () => {
 
     expect(bob.mls.epoch()).toBe(2)
     expect(carol.mls.epoch()).toBe(2)
-    expect(hub.subscriberCount(protocolTopic(secret, 2, 'chat'))).toBe(2)
-    // Both keep the subscription they rotated off: it is what stops the hub freeing the
-    // frames they were sent at that epoch and have not read.
+    // The Commit touched no leaf, so both rebuilt onto the topic they were already on: an
+    // epoch advancing is not a reason to move the group's messages.
     expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(2)
+    expect(hub.subscriberCount(protocolTopic(secret, 2, 'chat'))).toBe(0)
 
     await bob.peer.dispose()
     await carol.peer.dispose()
@@ -177,10 +191,11 @@ describe('control lane lifecycle', () => {
     await alice.peer.commit(buildLedgerCommit(alice, []))
     await flush()
 
-    // Bob pulled the Commit, advanced, and resynced; Alice rebuilt to epoch 2.
+    // Bob pulled the Commit, advanced, and resynced; Alice rebuilt at epoch 2. Neither app
+    // lane moved with them — a ledger commit touches no leaf.
     expect(bob.mls.epoch()).toBe(2)
-    expect(hub.subscriberCount(protocolTopic(secret, 2, 'chat'))).toBe(2)
     expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(2)
+    expect(hub.subscriberCount(protocolTopic(secret, 2, 'chat'))).toBe(0)
     // It went to the log, not the mailbox: it moved the topic's head, so it is still
     // there for a member invited tomorrow.
     const committed = hub.published.filter((m) => m.topicID === commitTopic(recoverySecret))
