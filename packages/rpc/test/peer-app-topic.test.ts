@@ -5,6 +5,7 @@ import { createGroupPeer } from '../src/peer.js'
 import { defineGroupProtocol } from '../src/protocol.js'
 import { commitTopic, protocolTopic } from '../src/topic.js'
 import { createMemoryAnchorStore } from './fixtures/anchor.js'
+import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
@@ -72,12 +73,14 @@ function makeRoomPeer(
   })
   const journal = createMemoryCommitJournal()
   const anchorStore = createMemoryAnchorStore()
+  const appCursorStore = createMemoryAppCursorStore()
   const peer = createGroupPeer<Protocols>({
     hub,
     crypto,
     mls,
     journal,
     anchorStore,
+    appCursorStore,
     adoptJournalled: async (blob) => {
       adoptJournalledBlob(mls, blob)
     },
@@ -86,7 +89,7 @@ function makeRoomPeer(
     handlers: { room: handlers } as never,
     ...(options.recovery != null ? { recovery: options.recovery } : {}),
   })
-  return { peer, crypto, mls, anchorStore }
+  return { peer, crypto, mls, anchorStore, appCursorStore }
 }
 
 describe('the app topic is stable within a roster-change-bounded segment', () => {

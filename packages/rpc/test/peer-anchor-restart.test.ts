@@ -5,6 +5,7 @@ import { createGroupPeer } from '../src/peer.js'
 import { defineGroupProtocol } from '../src/protocol.js'
 import { protocolTopic } from '../src/topic.js'
 import { createMemoryAnchorStore, type MemoryAnchorStore } from './fixtures/anchor.js'
+import { createMemoryAppCursorStore, type MemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto, type FakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
@@ -47,6 +48,8 @@ type RoomPeerOptions = {
   crypto?: FakeCrypto
   /** Reuse an existing anchor store. It must OUTLIVE the peer: that is what durability means. */
   anchorStore?: MemoryAnchorStore
+  /** Reuse an existing app-lane cursor store — durable across the restart for the same reason. */
+  appCursorStore?: MemoryAppCursorStore
 }
 
 function makeRoomPeer(
@@ -67,12 +70,14 @@ function makeRoomPeer(
       onAdvance: (e) => crypto.setEpoch(e),
     })
   const anchorStore = options.anchorStore ?? createMemoryAnchorStore()
+  const appCursorStore = options.appCursorStore ?? createMemoryAppCursorStore()
   const peer = createGroupPeer<Protocols>({
     hub,
     crypto,
     mls,
     journal: createMemoryCommitJournal(),
     anchorStore,
+    appCursorStore,
     adoptJournalled: async (blob) => {
       adoptJournalledBlob(mls, blob)
     },
@@ -80,7 +85,7 @@ function makeRoomPeer(
     protocols: { room },
     handlers: { room: handlers } as never,
   })
-  return { peer, crypto, mls, anchorStore }
+  return { peer, crypto, mls, anchorStore, appCursorStore }
 }
 
 describe('the app-lane anchor survives a restart', () => {
@@ -125,6 +130,7 @@ describe('the app-lane anchor survives a restart', () => {
       mls: bob.mls,
       crypto: bob.crypto,
       anchorStore: bob.anchorStore,
+      appCursorStore: bob.appCursorStore,
     })
     await flush()
 
@@ -206,6 +212,7 @@ describe('the app-lane anchor survives a restart', () => {
         mls: bob.mls,
         crypto: bob.crypto,
         anchorStore: bob.anchorStore,
+        appCursorStore: bob.appCursorStore,
       },
     )
     await flush()

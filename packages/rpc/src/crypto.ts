@@ -30,6 +30,30 @@ export type GroupCrypto = {
   exportSecret(): Uint8Array | Promise<Uint8Array>
   wrap: ByteTransform
   unwrap: Unwrap
+  /**
+   * The epoch a sealed frame was sealed at, read from its own CLEARTEXT without opening it —
+   * structural and pre-open, like {@link GroupMLS.readCommitHeader} is pre-apply. `null` for bytes
+   * that are not a readable sealed frame (garbage, truncated). It must NOT throw: it is asked about
+   * every frame a log holds, most of which are not this handle's to open.
+   *
+   * WHAT IT IS FOR: `unwrap` throwing says "not my epoch" and cannot say WHICH not-my-epoch. A
+   * frame sealed AHEAD of a reader that is walking forward will open once the walk gets there; a
+   * frame sealed BELOW it can never be opened again, because MLS ratchets forward. Those are the
+   * same exception. A reader that cannot tell them apart cannot hold a durable read position:
+   * passing a frame it has merely not reached yet loses it on the next restart, and refusing to
+   * pass anything pins the position forever. This is the distinction, and it is what makes the app
+   * lane's cursor (see {@link "app-cursor".AppCursorStore}) safe.
+   *
+   * It is the frame's word — which is to say the PUBLISHER's, carried in the clear and relayed by
+   * an untrusted hub — never the handle's, so it may only be used to decide what to try and what to
+   * pass, never to decide that bytes are authentic. Only `unwrap` is authoritative about opening,
+   * and a frame that claims this handle's epoch and will not open is treated as any other frame
+   * that will not open.
+   *
+   * One line for a real host: MLS carries the epoch in a PrivateMessage's cleartext, and
+   * `@kumiai/mls` exports `readMessageEpoch`.
+   */
+  frameEpoch(bytes: Uint8Array): number | null
 }
 
 /**

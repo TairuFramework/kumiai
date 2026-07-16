@@ -5,6 +5,7 @@ import { createGroupPeer } from '../src/peer.js'
 import { defineGroupProtocol } from '../src/protocol.js'
 import { protocolTopic } from '../src/topic.js'
 import { createMemoryAnchorStore } from './fixtures/anchor.js'
+import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
@@ -55,12 +56,14 @@ function makeRoomPeer(
     onAdvance: (e) => crypto.setEpoch(e),
   })
   const anchorStore = createMemoryAnchorStore()
+  const appCursorStore = createMemoryAppCursorStore()
   const peer = createGroupPeer<Protocols>({
     hub,
     crypto,
     mls,
     journal: createMemoryCommitJournal(),
     anchorStore,
+    appCursorStore,
     adoptJournalled: async (blob) => {
       adoptJournalledBlob(mls, blob)
     },
@@ -68,7 +71,7 @@ function makeRoomPeer(
     protocols: { room },
     handlers: { room: handlers } as never,
   })
-  return { peer, crypto, mls, anchorStore }
+  return { peer, crypto, mls, anchorStore, appCursorStore }
 }
 
 describe('a member removed at the rotation cannot reach the topic the group rotates onto', () => {

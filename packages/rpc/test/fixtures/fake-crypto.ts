@@ -85,6 +85,19 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
     return sealed
   }
 
+  /**
+   * The epoch a frame says it was sealed at, read from the two bytes `wrap` writes in the clear —
+   * a stand-in for the epoch a real MLS PrivateMessage carries in its own cleartext (which is what
+   * `@kumiai/mls`'s `readMessageEpoch` reads).
+   *
+   * Never throws, and answers for bytes this member cannot open — that is the whole of what it is
+   * for. Bytes too short to hold the field are not a sealed frame: `null`.
+   */
+  const frameEpoch: GroupCrypto['frameEpoch'] = (bytes) => {
+    if (bytes.length < 2) return null
+    return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint16(0, true)
+  }
+
   const unwrap: Unwrap = (bytes) => {
     if (bytes.length < 2) throw new Error('cannot open: not sealed bytes')
     const sealedAt = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint16(
@@ -110,6 +123,7 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
     exportSecret: () => fakeEpochSecret(epoch, secret),
     wrap,
     unwrap,
+    frameEpoch,
     setEpoch: (n) => {
       epoch = n
     },

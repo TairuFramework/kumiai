@@ -5,6 +5,7 @@
  */
 
 export type { Anchor, AnchorStore } from './anchor.js'
+export type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
 export {
   type CommitClassifierState,
   type CommitDisposition,

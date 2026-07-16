@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest'
 import { createGroupPeer } from '../src/peer.js'
 import { commitTopic, protocolTopic, rendezvousTopic } from '../src/topic.js'
 import { createMemoryAnchorStore } from './fixtures/anchor.js'
+import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
@@ -35,6 +36,7 @@ describe('control lane lifecycle', () => {
       mls,
       journal: createMemoryCommitJournal(),
       anchorStore: createMemoryAnchorStore(),
+      appCursorStore: createMemoryAppCursorStore(),
       adoptJournalled: async (blob) => {
         adoptJournalledBlob(mls, blob)
       },
@@ -98,6 +100,7 @@ describe('control lane lifecycle', () => {
       mls,
       journal: createMemoryCommitJournal(),
       anchorStore: createMemoryAnchorStore(),
+      appCursorStore: createMemoryAppCursorStore(),
       adoptJournalled: async (blob) => {
         adoptJournalledBlob(mls, blob)
       },

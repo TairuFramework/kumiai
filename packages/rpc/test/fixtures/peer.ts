@@ -1,9 +1,11 @@
 import type { LogHub } from '@kumiai/hub-tunnel'
 
+import type { AppWindowPruned } from '../../src/app-cursor.js'
 import type { PendingCommit } from '../../src/commit.js'
 import { createGroupPeer, type GroupPeer } from '../../src/peer.js'
 import type { GroupProtocolDefinition } from '../../src/protocol.js'
 import { createMemoryAnchorStore, type MemoryAnchorStore } from './anchor.js'
+import { createMemoryAppCursorStore, type MemoryAppCursorStore } from './app-cursor.js'
 import { createFakeCrypto, type FakeCrypto } from './fake-crypto.js'
 import { createMemoryCommitJournal, type MemoryCommitJournal } from './journal.js'
 import {
@@ -46,6 +48,7 @@ export type TestPeer = {
   mls: MemoryGroupMLS
   journal: MemoryCommitJournal
   anchorStore: MemoryAnchorStore
+  appCursorStore: MemoryAppCursorStore
   /** Every Welcome this host delivered, in order. Records the at-least-once repeats too. */
   welcomes: Array<string>
 }
@@ -60,12 +63,14 @@ export type MakeMLSPeerOptions = {
    * A RESTART: a new peer over everything a dead one left behind — its handle, its crypto, its
    * journal, its anchor store, its Welcome record — carried as one.
    *
-   * It is one option and not four because a restart needs ALL of them and a host cannot be told
+   * It is one option and not five because a restart needs ALL of them and a host cannot be told
    * which: hand-copying the list is how a piece goes missing, and each piece goes missing
    * quietly. A journal left behind loses the commit whose process died in the acceptance window.
    * An anchor store left behind re-seeds the anchor at the live epoch and partitions the peer
-   * from its own group — it derives its own topics, sees nobody, and nothing reports it. Naming
-   * the dead peer instead of its parts is what makes those unwritable.
+   * from its own group — it derives its own topics, sees nobody, and nothing reports it. A cursor
+   * store left behind re-reads the app history from the hub's oldest retained frame, re-delivers
+   * it, and cannot see a pruned window. Naming the dead peer instead of its parts is what makes
+   * those unwritable.
    *
    * Any option below still overrides what this carries — a restart onto a DIFFERENT journal is a
    * real scenario, and saying so explicitly is the point.
@@ -82,6 +87,14 @@ export type MakeMLSPeerOptions = {
    * forward is a peer that partitions from its own group.
    */
   anchorStore?: MemoryAnchorStore
+  /**
+   * Reuse an existing app-lane cursor store. It must OUTLIVE the peer, like the anchor store: a
+   * read position that dies with the process leaves the drain unable to tell where it got to from
+   * where the hub's retention now begins.
+   */
+  appCursorStore?: MemoryAppCursorStore
+  /** The host's notice that an app topic's retention floor passed this peer's read position. */
+  onAppWindowPruned?: (event: AppWindowPruned) => void
   /**
    * The host's adoption of a journalled post-commit handle, overridden. The default adopts
    * the blob and nothing else, which is the whole of what a `ledger` commit's handle carries.
@@ -125,6 +138,8 @@ export function makeMLSPeer(
     })
   const journal = options.journal ?? restartOf?.journal ?? createMemoryCommitJournal()
   const anchorStore = options.anchorStore ?? restartOf?.anchorStore ?? createMemoryAnchorStore()
+  const appCursorStore =
+    options.appCursorStore ?? restartOf?.appCursorStore ?? createMemoryAppCursorStore()
   const welcomes = options.welcomes ?? restartOf?.welcomes ?? []
   const peer = createGroupPeer<Protocols>({
     hub,
@@ -132,6 +147,8 @@ export function makeMLSPeer(
     mls,
     journal,
     anchorStore,
+    appCursorStore,
+    ...(options.onAppWindowPruned != null ? { onAppWindowPruned: options.onAppWindowPruned } : {}),
     // The restart half of onAccepted, over the same blob — and idempotent, as it must be.
     adoptJournalled: async (blob) => {
       if (options.adoptJournalled != null) {
@@ -146,7 +163,7 @@ export function makeMLSPeer(
     ...(options.commitDeadlineMs != null ? { commitDeadlineMs: options.commitDeadlineMs } : {}),
     ...(options.recovery != null ? { recovery: options.recovery } : {}),
   })
-  return { peer, crypto, mls, journal, anchorStore, welcomes }
+  return { peer, crypto, mls, journal, anchorStore, appCursorStore, welcomes }
 }
 
 export type LedgerCommitOptions = {

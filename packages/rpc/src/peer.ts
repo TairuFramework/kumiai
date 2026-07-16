@@ -18,6 +18,7 @@ import type { LogHub } from '@kumiai/hub-tunnel'
 import { toUTF } from '@sozai/codec'
 
 import type { Anchor, AnchorStore } from './anchor.js'
+import type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
 import { createGroupBusServer } from './bus-server.js'
 import { classifyCommit } from './classify.js'
 import {
@@ -102,13 +103,15 @@ const SUPPRESSED_REQUESTS_MAX = 1024
 
 /**
  * The MLS half of a peer: the lifecycle port, the durable journal that carries a pending commit
- * across a crash, the host hook that adopts one after a restart, and the durable store that
- * carries the app-lane anchor across the same restart. They arrive together or not at all — a
- * peer with a port and no journal would silently lose every commit whose process died in the
- * acceptance window, and a peer with a port and no anchor store would silently partition from its
- * own group on the next restart, re-seeding the anchor at its live epoch while every member that
- * stayed up holds the real one. Both failures are silent, and the type is what stops a host
- * wiring either.
+ * across a crash, the host hook that adopts one after a restart, and the durable stores that carry
+ * the app-lane anchor and the app-lane read position across the same restart. They arrive together
+ * or not at all — a peer with a port and no journal would silently lose every commit whose process
+ * died in the acceptance window; a peer with a port and no anchor store would silently partition
+ * from its own group on the next restart, re-seeding the anchor at its live epoch while every
+ * member that stayed up holds the real one; and a peer with a port and no cursor store would
+ * silently re-read its app history from the hub's oldest retained frame every restart, re-deliver
+ * what it already delivered, and have no place to notice the retention floor passing it. Every one
+ * of those failures is silent, and the type is what stops a host wiring any of them.
  */
 export type GroupPeerMLSParams = {
   /** MLS lifecycle port. When provided, the peer runs the commit lane. */
@@ -121,6 +124,16 @@ export type GroupPeerMLSParams = {
    * handle runs ahead of it, and a rebooted handle can never re-export an earlier epoch's secret.
    */
   anchorStore: AnchorStore
+  /**
+   * Durable read position for the app lane, per topic. Written as each drain finishes, read as
+   * each segment is pulled. It is what makes a returning peer read from where it got to instead of
+   * from wherever the hub's retention now begins — and the only thing a below-retention gap can be
+   * detected against, since the gap IS the distance between the two.
+   *
+   * The drain may only advance it past a frame it is done with: delivered, or sealed at an epoch
+   * this peer can never hold again. See {@link "app-cursor".AppCursorStore}.
+   */
+  appCursorStore: AppCursorStore
   /**
    * Adopt a journalled commit now confirmed accepted — the restart half of
    * {@link PendingCommit.onAccepted}, over the same opaque blob: deserialize the post-commit
@@ -159,9 +172,28 @@ export type GroupPeerParams<Protocols extends Record<string, ProtocolDefinition>
    * the expected path, not an error path.
    */
   commitDeadlineMs?: number
+  /**
+   * Called when the app lane finds a gap below the hub's retention floor: frames published to a
+   * topic this peer had a read position on, and aged out before it came back for them.
+   *
+   * OPTIONAL, unlike the stores beside it, and the line is exactly the one they fail: a host that
+   * ignores this loses no message — the frames that survived are delivered either way — where a
+   * host that skips a store loses messages and is never told. This only turns an absence a host
+   * cannot see into one it can, so it is a notice to opt into, not an obligation.
+   *
+   * Fire-and-forget: a throw is swallowed and the drain carries on. Delivering the history a
+   * returning member does still have is not the host's error handling to lose.
+   */
+  onAppWindowPruned?: (event: AppWindowPruned) => void | Promise<void>
 } & (
   | GroupPeerMLSParams
-  | { mls?: undefined; journal?: undefined; adoptJournalled?: undefined; anchorStore?: undefined }
+  | {
+      mls?: undefined
+      journal?: undefined
+      adoptJournalled?: undefined
+      anchorStore?: undefined
+      appCursorStore?: undefined
+    }
 )
 
 export type ProtocolSurface<Protocol extends ProtocolDefinition> = {
@@ -268,11 +300,13 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     journal,
     adoptJournalled,
     anchorStore,
+    appCursorStore,
     localDID,
     protocols,
     handlers,
     suppress,
   } = params
+  const onAppWindowPruned = params.onAppWindowPruned
   const getRandomID = params.getRandomID
   const newPublishID = getRandomID ?? defaultRandomID
   const recoveryTimeoutMs = params.recovery?.timeoutMs ?? DEFAULT_RECOVERY_TIMEOUT_MS
@@ -349,15 +383,32 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   }
 
   /**
-   * The current SEGMENT's retained app frames, per protocol, in log order — still sealed, each
-   * removed as it is delivered. A segment is the run of epochs between two roster changes, which
-   * is exactly the run of epochs one app topic spans, so it is pulled once (below) and then
-   * dispensed epoch by epoch as the commit walk passes through it.
+   * One buffered app frame: where it sits in the topic's log, and its bytes until the drain is
+   * DONE with it.
    *
-   * Ciphertext, not plaintext: which frames are readable is a question only the handle can answer,
-   * and only at the epoch it is at right now.
+   * `sealed` is ciphertext, not plaintext: which frames are readable is a question only the handle
+   * can answer, and only at the epoch it is at right now. It goes `null` the moment the frame is
+   * done — delivered, or dead — which frees the bytes at the same point the old buffer dropped the
+   * frame outright. The POSITION outlives them, because the cursor moves over a run of done frames
+   * and a done frame's place in that run is the whole of what it still has to say.
    */
-  let appSegment = new Map<string, Array<Uint8Array>>()
+  type AppFrame = { position: LogPosition; sealed: Uint8Array | null }
+
+  /**
+   * The current SEGMENT's retained app frames, per protocol, in log order. A segment is the run of
+   * epochs between two roster changes, which is exactly the run of epochs one app topic spans, so
+   * it is pulled once (below) and then dispensed epoch by epoch as the commit walk passes through
+   * it.
+   */
+  let appSegment = new Map<string, Array<AppFrame>>()
+
+  /**
+   * The app lane's read position per protocol for the CURRENT segment: the topic it was pulled
+   * from, and the last position {@link appCursorStore} was told about — held so a drain that moved
+   * nothing writes nothing, and so the position is compared against the store's own last word
+   * rather than re-read.
+   */
+  let appCursors = new Map<string, { topicID: string; position: LogPosition | null }>()
 
   /**
    * Whether {@link appSegment} holds this segment's pull. Pulled ONCE per segment and not per
@@ -387,7 +438,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     // already read everything openable at every epoch it passed on its way here, so what remains
     // is what no epoch this peer will ever hold again can open. The next drain pulls the new
     // segment's topic, which is where the group's messages now are.
+    //
+    // The cursors go with the buffer, and nothing is cleared at the STORE: a cursor is keyed by
+    // topic, the next segment is a different topic, and what this peer read to on the topic it is
+    // leaving stays true of that topic forever.
     appSegment = new Map()
+    appCursors = new Map()
     appSegmentLoaded = false
   }
 
@@ -774,13 +830,46 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   }
 
   /**
-   * Pull this segment's retained app frames into {@link appSegment}, once. Returns silently if
-   * the buffer already holds them.
+   * Tell the host that a topic's retention floor has passed this peer's read position: the frames
+   * between the two aged out unread, and a returning member is holding a partial history it has no
+   * other way to know is partial. A gap below retention is REPORTED, never silent.
+   *
+   * `oldest > cursor` is the whole test, and it is the only one available: the peer knows where it
+   * read to and where the hub's log now begins, and nothing anywhere can say which frames used to
+   * sit between them. So this reports the floor having passed the cursor, which over-reports (the
+   * cursor's own frame aging out with nothing behind it reads the same) and never under-reports.
+   * With no cursor there is no gap to speak of — a peer that has never read this topic is missing
+   * nothing it ever had.
+   */
+  const reportPrunedWindow = async (
+    name: string,
+    cursor: LogPosition | null,
+    oldest: string | null,
+  ): Promise<void> => {
+    if (onAppWindowPruned == null || commitTopicID == null) return
+    if (cursor == null || oldest == null || oldest <= cursor) return
+    try {
+      await onAppWindowPruned({ groupID: commitTopicID, protocol: name, cursor, oldest })
+    } catch {
+      // The host's notice is the host's problem. The frames that survived are still to be
+      // delivered below, and a throwing subscriber must not cost a returning member those too.
+    }
+  }
+
+  /**
+   * Pull this segment's retained app frames into {@link appSegment}, once, FROM THIS PEER'S DURABLE
+   * READ POSITION. Returns silently if the buffer already holds them.
    *
    * ONE pull for the whole segment: every epoch between two roster changes shares one app topic
    * (the topic is anchor-bound, and the anchor only moves at a roster change), so a peer walking
    * five epochs inside a segment reads one log, not five. The frames come back sealed and stay
    * that way — {@link deliverAppFrames} opens them one epoch at a time.
+   *
+   * From the CURSOR and not from the topic's oldest retained frame: the position is what this peer
+   * is done with, so everything before it is either delivered or unopenable forever, and re-reading
+   * it re-delivers the first kind and re-buffers the second. Without the position the two places a
+   * peer might start reading from — where it got to, and where the hub's retention now begins — are
+   * indistinguishable, which is exactly what makes a pruned window silent.
    *
    * Subscribed before pulled: the hub gates a topic fetch on the caller's own subscription, and a
    * segment reached by ROTATING onto it mid-walk has never been subscribed — the app lane is
@@ -788,35 +877,67 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    */
   const loadAppSegment = async (): Promise<void> => {
     if (appSegmentLoaded) return
-    const loaded = new Map<string, Array<Uint8Array>>()
+    const loaded = new Map<string, Array<AppFrame>>()
+    const cursors = new Map<string, { topicID: string; position: LogPosition | null }>()
     for (const name of Object.keys(protocols)) {
       const topicID = protocolTopic(anchor.secret, anchor.epoch, name)
       mux.retainTopic(topicID)
-      const frames: Array<Uint8Array> = []
-      let after: LogPosition | null = null
+      const stored = (await appCursorStore?.load(topicID)) ?? null
+      const cursor = stored != null ? asLogPosition(stored) : null
+      cursors.set(name, { topicID, position: cursor })
+      const frames: Array<AppFrame> = []
+      let after: LogPosition | null = cursor
+      let reported = false
       while (true) {
         const result = await mux.fetchTopic({
           topicID,
-          // No cursor: the whole segment from its oldest retained frame. A cursor would have to
-          // be durable to mean anything across the restart this drain exists for, and the
-          // buffer's own per-epoch trial decryption is what keeps a re-read from re-delivering.
           ...(after != null ? { after } : {}),
           limit: APP_FETCH_LIMIT,
         })
-        // SEAM: `result.oldest` is where the hub's retention now begins. A frame published to this
-        // segment and aged out below it is gone, and this is the only place that is knowable —
-        // but telling the host so needs a durable read position to compare against, and there is
-        // none here. Nothing is reported; a pruned frame is silently absent.
+        if (!reported) {
+          // `result.oldest` is where the hub's retention begins, and only the FIRST page's reply is
+          // asked: every later page reports the same floor, and a gap is one gap.
+          reported = true
+          await reportPrunedWindow(name, cursor, result.oldest)
+        }
         for (const message of result.messages) {
-          frames.push(message.payload)
-          after = asLogPosition(message.sequenceID)
+          const position = asLogPosition(message.sequenceID)
+          frames.push({ position, sealed: message.payload })
+          after = position
         }
         if (result.messages.length < APP_FETCH_LIMIT) break
       }
       loaded.set(name, frames)
     }
     appSegment = loaded
+    appCursors = cursors
     appSegmentLoaded = true
+  }
+
+  /**
+   * Move this topic's read position over the frames the drain has finished with, and persist it.
+   *
+   * The advance stops at the FIRST frame that is not done, and that stop is the safety property: a
+   * cursor may only pass a frame that is delivered or dead. A done frame further along the buffer
+   * is left where it is — its turn comes once the frame in front of it is done too — because a
+   * position is a place in the LOG, and passing it passes everything before it as well.
+   *
+   * The passed frames are dropped from the buffer here and only here: the cursor is what remembers
+   * them from now on.
+   */
+  const advanceAppCursor = async (name: string, frames: Array<AppFrame>): Promise<void> => {
+    const cursor = appCursors.get(name)
+    if (cursor == null) return
+    let passed = 0
+    let position: LogPosition | null = null
+    while (passed < frames.length && (frames[passed] as AppFrame).sealed == null) {
+      position = (frames[passed] as AppFrame).position
+      passed += 1
+    }
+    if (passed > 0) frames.splice(0, passed)
+    if (position == null || position === cursor.position) return
+    cursor.position = position
+    await appCursorStore?.save(cursor.topicID, position)
   }
 
   /**
@@ -829,18 +950,27 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * of the apply, not after it, and the binding is per-FRAME-EPOCH, not per-rotation: every epoch
    * inside a segment has to be dispensed as the walk passes through it, not once at the anchor.
    *
-   * `unwrap` throwing is how a frame says "not my epoch" — ordinary control flow, exactly as on
-   * the live path (see the port contract in `crypto.ts`). A frame that does not open is put back:
-   * it is either from an epoch still ahead of the walk, or from one the handle can no longer
-   * reach, and this cannot tell the two apart without the walk playing out.
+   * Which frames are this epoch's is read from their own cleartext (`crypto.frameEpoch`) rather
+   * than found by trying every buffered frame and catching. That is not an optimisation: the epoch
+   * a frame was sealed at is what separates one it cannot open YET from one it can never open
+   * again, `unwrap` throwing says only "not my epoch" and cannot tell them apart, and the cursor
+   * below is safe only because that distinction exists. `unwrap` stays authoritative for anything
+   * that claims this epoch — a frame's cleartext is the publisher's word relayed by an untrusted
+   * hub, and a claim that will not open is treated exactly as any frame that will not open.
    *
-   * Every frame is tried rather than stopping at the first that will not open. Publish order IS
-   * non-decreasing in seal-epoch in an honest group, which would make each epoch's frames a
-   * contiguous run at the front and the two identical — but the front can also hold a frame from
-   * an epoch the handle has ALREADY passed (a journal replay advances it before this pull ever
-   * runs), and stopping there would wedge every readable frame behind an unreadable one for the
-   * rest of the segment. Trying all of them delivers a superset, in publish order, and drops
-   * nothing.
+   * Publish order IS non-decreasing in seal-epoch in an honest group, but the front of the buffer
+   * can still hold a frame from an epoch the handle has ALREADY passed (a journal replay advances
+   * it before this pull ever runs), so the buffer is walked whole rather than stopping at the first
+   * frame that is not this epoch's. Delivery is in publish order and drops nothing.
+   *
+   * THE CURSOR ADVANCES over a run of frames this drain is DONE with, and stops dead at the first
+   * frame it is not: a cursor may only pass a frame that is DELIVERED or DEAD. A frame sealed
+   * BELOW this handle's epoch is dead (MLS ratchets forward — those bytes are ciphertext forever),
+   * and so is one that claims this epoch and will not open, and so are bytes that are not a sealed
+   * frame at all: no epoch this peer will ever hold again opens any of them. A frame sealed AHEAD
+   * of the walk is neither delivered nor dead — it opens once the walk gets there — so the cursor
+   * stops behind it and the frame stays buffered. Passing it would drop it on the next restart,
+   * which is the whole loss this cursor exists to stop.
    *
    * A LAGGARD publisher is the one case no ordering saves: a member still at epoch E writing to
    * this topic after the rest of the group rotated past E seals bytes nobody can open again.
@@ -861,16 +991,32 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     for (const [name, frames] of appSegment) {
       const eventHandlers = appEventHandlers.get(name)
       if (eventHandlers == null || frames.length === 0) continue
-      const remaining: Array<Uint8Array> = []
-      for (const sealed of frames) {
+      for (const frame of frames) {
+        const sealed = frame.sealed
+        if (sealed == null) continue // done on an earlier pass, and only holding its place
+        const sealedAt = crypto.frameEpoch(sealed)
+        if (sealedAt !== crypto.epoch()) {
+          // Not sealed at the epoch the handle is at right now, by the frame's own word. Ahead of
+          // the walk: it keeps its bytes and its place, and the cursor may not pass it. Otherwise
+          // (below the walk, or not a readable sealed frame at all) it is dead — no epoch this
+          // peer can still reach opens it — and dead is done.
+          if (sealedAt != null && sealedAt > crypto.epoch()) continue
+          frame.sealed = null
+          continue
+        }
         let opened: UnwrapResult
         try {
           const result = await crypto.unwrap(sealed)
           opened = result instanceof Uint8Array ? { payload: result } : result
         } catch {
-          remaining.push(sealed) // not this epoch's frame: it keeps its place in the buffer
+          // It claimed this epoch and the handle refused it. Only `unwrap` is authoritative, and
+          // the handle never comes back to this epoch, so nothing will ever open these bytes: dead.
+          frame.sealed = null
           continue
         }
+        // Opened, so it is done whatever the payload turns out to be — every path below either
+        // delivers it or drops it exactly as the live transport would.
+        frame.sealed = null
         if (opened.senderDID === localDID) continue // its own echo, as the live path would not
         let message: { payload?: { typ?: string; prc?: unknown; data?: unknown } }
         try {
@@ -892,7 +1038,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           // would be the drain retrying the host's own bug at it, so the frame is consumed.
         }
       }
-      appSegment.set(name, remaining)
+      await advanceAppCursor(name, frames)
     }
   }
 
