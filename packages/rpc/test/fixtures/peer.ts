@@ -204,6 +204,11 @@ export function buildLedgerCommit(
  * adopts the post-commit handle, which it does in `onAccepted` and nowhere else. A remove
  * that never lands therefore leaves the member exactly where they were, and the notice the
  * peer hands back is the ONLY thing that tells the admin so.
+ *
+ * The Remove rides the COMMIT, so the author adopting it and every member applying it from the
+ * log drop the same leaf. An eviction the author kept to itself would be one no other member ever
+ * enacted — and a test built on one could only ever exercise an author whose roster nobody else
+ * agreed had changed.
  */
 export function buildRemoveCommit(
   member: TestPeer,
@@ -213,7 +218,7 @@ export function buildRemoveCommit(
   return async () => {
     await options.onBuild?.()
     options.framedAt?.push(member.mls.epoch())
-    const commit = member.mls.buildCommit([])
+    const commit = member.mls.buildCommit([], { removes: [victimDID] })
     return {
       commit,
       bodies: [],
@@ -221,7 +226,6 @@ export function buildRemoveCommit(
       journal: commit,
       onAccepted: async () => {
         adoptJournalledBlob(member.mls, commit)
-        member.mls.evict(victimDID)
       },
     }
   }
@@ -229,7 +233,9 @@ export function buildRemoveCommit(
 
 /**
  * A host's `build()` for an invite. Its Welcome lives in `onAccepted` and nowhere else —
- * it is not in `bodies`, and the peer has no way to produce one.
+ * it is not in `bodies`, and the peer has no way to produce one. The Add rides the commit, as a
+ * Remove does: every member reads the new leaf out of the frame, and the author out of the
+ * post-commit handle it adopts.
  */
 export function buildInviteCommit(
   member: TestPeer,
@@ -239,7 +245,7 @@ export function buildInviteCommit(
   return async () => {
     await options.onBuild?.()
     options.framedAt?.push(member.mls.epoch())
-    const commit = member.mls.buildCommit([])
+    const commit = member.mls.buildCommit([], { adds: [inviteeDID] })
     return {
       commit,
       bodies: [],

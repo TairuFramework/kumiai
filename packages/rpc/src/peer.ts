@@ -292,13 +292,13 @@ export type GroupPeer<Protocols extends Record<string, ProtocolDefinition>> = {
   dispose: () => Promise<void>
 }
 
+/**
+ * A protocol's live lane at the epoch it was built for. It holds no topic ID: the topic these
+ * transports bind to is anchor-bound and stable within a roster-change-bounded segment, but a
+ * runtime is rebuilt only once a whole commit walk returns, so what it remembers of the topic can
+ * be a segment out of date. A publisher asks the live anchor instead (see `sealForSegment`).
+ */
 type ProtocolRuntime = {
-  /**
-   * The app topic this protocol's frames are published to and read back from. Anchor-bound:
-   * stable within a roster-change-bounded segment, rotated onto a new ID when a Commit that
-   * changes the roster is applied.
-   */
-  topicID: string
   client: BroadcastClient
   busServer: { dispose: () => Promise<void> }
   acceptor: { dispose: () => Promise<void> }
@@ -520,7 +520,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         wrap: crypto.wrap,
         unwrap: crypto.unwrap,
       })
-      next.set(name, { topicID, client, busServer, acceptor, directed: new Map() })
+      next.set(name, { client, busServer, acceptor, directed: new Map() })
     }
     runtimes = next
   }
@@ -544,6 +544,36 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     }
   }
 
+  /**
+   * Seal an app frame and name the segment it belongs on, as ONE answer: a frame must land on the
+   * segment that CONTAINS its seal epoch, and only the live anchor knows which segment that is.
+   *
+   * Read from the live anchor and never from a `runtime`, because the two come apart exactly when
+   * it matters. A rotation moves the anchor and the handle together, inside the commit walk; the
+   * runtimes are rebuilt only once the whole walk returns. A dispatch takes no mutex, so in that
+   * window it seals under the NEW epoch — and a frame published to the topic the runtime still
+   * holds would land on the segment the group just left, readable by nobody, ever: the members on
+   * the new topic are not listening on the old one, the members still on the old topic cannot open
+   * the new seal, and this peer's own drain never pulls the old segment again.
+   *
+   * The anchor is re-read AFTER the seal and the pair is thrown away if it moved, which is what
+   * makes the two halves one segment's: an anchor that did not move across the seal is one whose
+   * segment runs from its own epoch to a rotation that has not happened, and the seal epoch is
+   * inside that span. Identity, not epoch equality — every capture mints a fresh anchor, and the
+   * frame is re-sealed under the one that is now live rather than published against the one it
+   * missed.
+   */
+  const sealForSegment = async (
+    name: string,
+    bytes: Uint8Array,
+  ): Promise<{ topicID: string; payload: Uint8Array }> => {
+    while (true) {
+      const at = anchor
+      const payload = await crypto.wrap(bytes)
+      if (anchor === at) return { topicID: protocolTopic(at.secret, at.epoch, name), payload }
+    }
+  }
+
   const surfaceFor = (name: string): ProtocolSurface<ProtocolDefinition> => {
     const runtime = runtimes.get(name)
     if (runtime == null) throw new Error(`Unknown protocol: ${name}`)
@@ -555,11 +585,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         // the broadcast transport would have produced, so the live receive path stays symmetric:
         // a logged event still reaches online subscribers through the same drain.
         if (retentionOf(protocols[name], prc) === 'log') {
-          await mux.publish({
-            topicID: runtime.topicID,
-            payload: await crypto.wrap(encodeEventFrame(prc, data ?? {})),
-            retain: 'log',
-          })
+          const { topicID, payload } = await sealForSegment(name, encodeEventFrame(prc, data ?? {}))
+          await mux.publish({ topicID, payload, retain: 'log' })
           return
         }
         await runtime.client.dispatch(prc, data)
@@ -1068,6 +1095,56 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   }
 
   /**
+   * THE ONE PATH THE HANDLE RATCHETS ON, and the invariant it holds: a handle does not ratchet
+   * past an epoch until that epoch's frames are read and its anchor is taken. Both are one-way
+   * doors — after the advance those frames are ciphertext forever, and that epoch's secret can
+   * never be exported again — so neither can be done afterwards, by this or by anything else.
+   *
+   * A seam and not a rule, because a rule is only as good as the next site that advances the
+   * handle: the peer ratchets in four places (a commit applied from the log, one this peer
+   * AUTHORS, one adopted out of the journal on restart, and a rejoin), they are far apart, and
+   * each was free to uphold half of this or none of it. Route them all through here and the fifth
+   * cannot get it wrong — there is nowhere left to write the mistake.
+   *
+   * `advance` does the ratcheting and nothing else; everything around it is this function's.
+   *
+   * The ROSTER DIFF is what decides the rotation: the DIDs the handle held before the advance
+   * against the DIDs it holds after — an Add, a Remove, or both in one commit, where the leaf
+   * count does not move. It answers for membership, which is the question, and it answers the
+   * same for a commit this peer applied and one it wrote. The before-read is unconditional and
+   * has to be: whether the diff will be needed is not knowable until the advance has already
+   * destroyed the answer.
+   *
+   * `rotatesAnyway` is the one thing no diff can see. An external-commit rejoin by a member the
+   * roster still holds replaces that member's leaf and moves no DID — nothing observable changes —
+   * and it must rotate all the same, because the anchor is >= every current member's EFFECTIVE
+   * join and a rejoiner's effective join is its rejoin epoch: its rejoined handle exports no
+   * secret from before it. So that one rotation rides the commit's own word about itself.
+   *
+   * The anchor is captured from the port's POST-advance handle: the epoch the group moved to, and
+   * the same epoch every other member lands on by making this same advance — which is what makes
+   * the anchor agreed rather than local.
+   */
+  const advanceHandle = async <T>(
+    port: GroupMLS,
+    advance: () => Promise<T>,
+    rotatesAnyway: (advanced: T) => boolean = () => false,
+  ): Promise<T> => {
+    // Read this epoch's app frames BEFORE the advance that leaves it. A frame is opened at the
+    // epoch it was sealed at, so this is the last moment it can be read: the advance ratchets the
+    // handle on, and the key material for this epoch goes with it. Every epoch the walk passes
+    // gets this — the constraint is per frame-epoch, not per rotation, so a segment spanning five
+    // epochs is dispensed five times off the one pull.
+    await deliverAppFrames()
+    const rosterBefore = await port.rosterDIDs()
+    const advanced = await advance()
+    if (detectRosterChange(rosterBefore, await port.rosterDIDs()) || rotatesAnyway(advanced)) {
+      await captureAnchor()
+    }
+    return advanced
+  }
+
+  /**
    * Read the commit log forward from the cursor, classify every frame, advance the cursor over
    * each one it is done with. Returns whether any advanced the epoch.
    *
@@ -1196,31 +1273,30 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         // Framed at this peer's epoch, by somebody else: a frame it can apply. Everything below is
         // the port's answer to it.
         const framedEpoch = crypto.epoch()
-        // Read this epoch's app frames BEFORE the commit that leaves it. A frame is opened at the
-        // epoch it was sealed at, so this is the last moment it can be read: the apply below
-        // ratchets the handle to the next epoch, and the key material for this one goes with it.
-        // Every epoch the walk passes gets this — the constraint is per frame-epoch, not per
-        // rotation, so a segment spanning five epochs is dispensed five times off the one pull.
-        await deliverAppFrames()
-        // The roster this handle holds BEFORE applying, to diff against the roster after. Only an
-        // applied commit can change it, so the after-read and the diff run only when the epoch
-        // advanced — but the before-read must happen here, ahead of the apply that would change it.
-        // Read unconditionally, because whether the diff will be needed is not knowable until the
-        // apply has already destroyed the answer.
-        const rosterBefore = await port.rosterDIDs()
         let applied: { advanced: boolean }
         try {
-          applied = await port.processCommit(commitFrame.commit, {
-            senderDID: message.senderDID,
-            // The resolver, not the bodies: the blob is opened only if the port asks for the
-            // entries this commit names, and it asks only for a commit it is applying — framed at
-            // this peer's epoch, which is the epoch the blob is sealed under. That makes body
-            // delivery atomic with the commit.
-            resolveLedgerEntries: createLedgerEntryResolver(
-              commitFrame.sealedEntries,
-              crypto.unwrap,
-            ),
-          })
+          // Through the seam, like every other site that ratchets the handle: it reads this
+          // epoch's app frames ahead of the apply and takes the anchor if the roster moved.
+          applied = await advanceHandle(
+            port,
+            () =>
+              port.processCommit(commitFrame.commit, {
+                senderDID: message.senderDID,
+                // The resolver, not the bodies: the blob is opened only if the port asks for the
+                // entries this commit names, and it asks only for a commit it is applying — framed
+                // at this peer's epoch, which is the epoch the blob is sealed under. That makes
+                // body delivery atomic with the commit.
+                resolveLedgerEntries: createLedgerEntryResolver(
+                  commitFrame.sealedEntries,
+                  crypto.unwrap,
+                ),
+              }),
+            // A REJOIN rotates the anchor too, from a member the roster diff cannot see: an
+            // external commit by a member the roster still holds replaces that member's leaf and
+            // leaves every DID where it was. Only a commit the port APPLIED says anything about
+            // the group — a refused one is a flag on a frame nobody enacted.
+            (result) => result.advanced && header?.external === true,
+          )
         } catch (error) {
           if (!isMissingLedgerEntries(error)) {
             // The port broke its contract. The cursor stays and the frame is re-read — the pull is
@@ -1246,33 +1322,6 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           advancedEpoch = true
           // The fork check's record; the only place it is written from the log.
           appliedByEpoch.set(framedEpoch, position)
-          // A commit that CHANGED the roster rotates the app-lane anchor, and so does a REJOIN.
-          //
-          // The roster change is a diff around the apply: any difference between the DIDs held
-          // before and after — an Add, a Remove, or both in one commit (where the count is
-          // unchanged). It answers for membership, and a rejoin is not a membership change: an
-          // external commit by a member the roster still holds replaces that member's leaf and
-          // leaves every DID exactly where it was, so the diff reads false and no diff over any
-          // other before/after state would read true either (the resync reuses the very leaf index
-          // it blanks). Nothing observable here moves — which is why the commit says so itself,
-          // and why the anchor rotates on the header's own word rather than on a diff.
-          //
-          // It must rotate, because the anchor is >= every current member's effective join and a
-          // rejoiner's effective join is its rejoin epoch: its rejoined handle can export no
-          // secret from before the rejoin, so an anchor the group left behind is one it could
-          // never derive. Rotating carries the group to where the rejoiner necessarily starts —
-          // the same place the rejoiner sets its own anchor as it adopts the rejoined handle.
-          //
-          // Capture the port's post-commit epoch secret — the per-epoch secret the group advanced
-          // to, never the recovery secret. Every member applying this same commit reads this same
-          // header, runs this same diff, and lands on this same epoch, which is what makes the
-          // anchor agreed rather than local.
-          if (
-            detectRosterChange(rosterBefore, await port.rosterDIDs()) ||
-            header?.external === true
-          ) {
-            await captureAnchor()
-          }
         }
         // `{ advanced: false }` here is the port REFUSING a well-formed commit at this peer's own
         // epoch from another member: poison on the same terms as an unresolvable one — advances,
@@ -1437,7 +1486,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       reconciledHead = accepted
       commitLogHead = accepted
       appliedByEpoch.set(entry.epoch, accepted)
-      await adoptJournalled(entry.journal)
+      // Through the seam: the adopt ratchets the handle, so this epoch's app frames are read
+      // first and the anchor is taken if the journalled commit moved the roster. A peer coming
+      // back to a roster change it made and never adopted advances exactly as far as any other
+      // site does, and no further.
+      await advanceHandle(mls, () => adoptJournalled(entry.journal))
       await journal.clear(entry.publishID)
       return true
     }
@@ -1494,7 +1547,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     reconciledHead = accepted
     commitLogHead = accepted
     appliedByEpoch.set(entry.epoch, accepted)
-    await adoptJournalled(entry.journal)
+    await advanceHandle(mls, () => adoptJournalled(entry.journal))
     await journal.clear(entry.publishID)
     return true
   }
@@ -1705,7 +1758,13 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         // it joins the fork record on the same terms. Without it a second commit at an epoch this
         // peer OWNS would read as history.
         appliedByEpoch.set(framedEpoch, accepted)
-        await pending.onAccepted()
+        // The host adopts here, and adopting ratchets the handle — so it goes through the seam,
+        // exactly as an applied commit does. A member never processes its own commit, so the
+        // apply site never runs for the one commit that changes the roster this peer just
+        // changed: without this, the author of a Remove keeps publishing to the topic the removed
+        // member still holds, and the author of an Add sits on a topic the new member's handle
+        // cannot derive — silently, in both directions, and no restart heals it.
+        await advanceHandle(mls, () => pending.onAccepted())
         await slot.clear(publishID)
         await rebuildEpoch()
         return takeLost()
@@ -1874,18 +1933,20 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         //    current epoch) stays quiet; the original heal condition still holds, the peer rejoins
         //    again, and `resync` collects the leaf the orphan added. Leaves do not accumulate.
         const rejoinedAtEpoch = (await port.readCommitHeader(pending.commit))?.epoch
-        await pending.onAccepted()
-        // The anchor, set from the rejoined handle — the peer's own half of the rotation every
-        // member applying this same external commit performs. It can never take the other half:
-        // a member does not process its own commit, so the apply site above never runs for the
-        // one commit that put this peer back in the group.
+        // Through the seam, like every other site that ratchets the handle — and it rotates
+        // ANYWAY: this is the rejoin, and no roster diff can see it. The peer's own half of the
+        // rotation every member applying this same external commit performs; it can never take
+        // the other half, since a member does not process its own commit.
         //
-        // AFTER `onAccepted`, and that ordering is the whole of it: the anchor is the POST-commit
-        // epoch, not the epoch the commit is framed at. The handle advances, and only then is the
-        // anchor captured — which is exactly where an applying member lands, since applying this
-        // commit is what carries them off the epoch it is framed at. Reading it before the adopt
-        // would anchor this peer one epoch below the group, on a topic no member is on.
-        await captureAnchor()
+        // The anchor is the POST-commit epoch, not the epoch the commit is framed at, and the
+        // seam is what makes that so: the handle advances inside it and only then is the anchor
+        // captured — exactly where an applying member lands, since applying this commit is what
+        // carries them off the epoch it is framed at.
+        await advanceHandle(
+          port,
+          () => pending.onAccepted(),
+          () => true,
+        )
         const accepted = asLogPosition(sequenceID)
         reconciledHead = accepted
         commitLogHead = accepted

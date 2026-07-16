@@ -24,14 +24,21 @@ export type MemoryGroupMLS = GroupMLS & {
   /** The members this handle's ratchet tree holds a leaf for, one entry per leaf. */
   leaves: () => Array<string>
   /**
-   * Produce a Commit at this member's CURRENT epoch, enacting these signed tokens. Like
-   * the real thing it is non-mutating: the group advances when the commit is adopted,
-   * so the bodies can still be sealed under the epoch every receiver is at.
+   * Produce a Commit at this member's CURRENT epoch, enacting these signed tokens and the roster
+   * op in `options`. Like the real thing it is non-mutating: the group advances when the commit is
+   * adopted, so the bodies can still be sealed under the epoch every receiver is at.
    *
    * The Commit carries its committer, as a real one does — the author is authenticated by
-   * the Commit's own signature, not by whoever handed it to the hub.
+   * the Commit's own signature, not by whoever handed it to the hub. It carries its Add/Remove
+   * the same way, and for the same reason: a roster change is a property of the commit every
+   * member reads out of it, not of the author's own bookkeeping — the author adopting the
+   * post-commit handle and a receiver applying the frame must land on the same roster, or the two
+   * halves of one eviction disagree about who is in the group.
    */
-  buildCommit: (tokens?: Array<string>) => Uint8Array
+  buildCommit: (
+    tokens?: Array<string>,
+    options?: { adds?: Array<string>; removes?: Array<string> },
+  ) => Uint8Array
   /** Adopt a Commit this member produced: enact its entries and advance. */
   adopt: (commit: Uint8Array) => void
   /**
@@ -483,7 +490,10 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     failNextRecoveryAdopt() {
       failRecoveryAdopt = true
     },
-    buildCommit(tokens: Array<string> = []) {
+    buildCommit(
+      tokens: Array<string> = [],
+      options: { adds?: Array<string>; removes?: Array<string> } = {},
+    ) {
       const entryIDs = tokens.map((token) => {
         const id = memoryEntryID(token)
         bodies.set(id, token)
@@ -491,6 +501,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       })
       return encodeMemoryCommit(epoch, localDID ?? '', entryIDs, {
         head: memoryLedgerHead([...ledger, ...entryIDs]),
+        ...(options.adds != null ? { adds: options.adds } : {}),
+        ...(options.removes != null ? { removes: options.removes } : {}),
       })
     },
     adopt(commit: Uint8Array) {
