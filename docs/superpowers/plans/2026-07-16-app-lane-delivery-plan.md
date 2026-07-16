@@ -54,47 +54,79 @@ green. `@kumiai/broadcast` public surface unchanged except at most one additive 
 
 ---
 
-## Phase 2: Anchor topic model and Remove detection
+## Phase 2: Anchor topic model and roster-change detection
 
-The topic must be derived from an anchor captured at the last Remove, and rotate exactly when a
-Remove is applied — no sooner (non-removal commits keep it stable), no later.
+The topic must be derived from an anchor captured at the last **roster change** (add or remove), and
+rotate exactly when the roster changes — no sooner (update/no-op/ledger-only commits keep it stable),
+no later. **Every member must agree on that anchor**, including one whose peer boots at a later epoch
+than the anchor (a late joiner, a rejoin, a restart).
 
-**Exit criteria:** roster-set diff flags a Remove (including an Add+Remove in one commit) and only a
-Remove; the online app topic is anchor-derived and rotates on a Remove but is stable across
-non-removal commits; a removed member cannot derive the post-removal topic.
+> **Corrected 2026-07-16, mid-phase.** The original design anchored at the last **Remove**. Q2.2's
+> probe proved that unimplementable: the anchor secret is `exportSecret(anchorEpoch)` and MLS ratchets
+> forward, so a member added after that Remove can never derive it — and binding the topic to a
+> per-peer boot-time seed silently partitions the group (measured: a peer booting at epoch 3 against a
+> group anchored at 1 received **0** messages, where per-epoch derivation delivered 1). The anchor must
+> be `max(last add, last remove)` = the last roster change, and durably persisted. See spec §2.
 
-### Question 2.1: Does a roster-set diff around `processCommit` detect a Remove — and only a Remove — including Add+Remove in one commit?
+**Exit criteria:** roster-set diff flags any roster change (add, remove, add+remove in one commit) and
+only a roster change; the app topic is anchor-derived, stable across non-roster-changing commits, and
+rotates on a roster change; **a member booting at a later epoch than the group's anchor agrees with the
+group** (joiner, rejoin) and a **restart restores the persisted anchor** rather than re-seeding; a
+removed member cannot derive the post-removal topic.
 
-- **Assumption:** capturing `GroupHandle.listMembers()` DIDs before applying a commit and comparing to
-  after reliably yields "a Remove happened" iff some leaf present-before is absent-after; an
-  Add-only or Update-only commit yields no removal; an Add+Remove commit still flags the removal;
-  external-commit rejoin (add) does not flag.
-- **Done when:** a test drives commits of each shape (add-only, update/no-op, remove-only,
-  add+remove, external-commit add) and asserts the diff's removal verdict matches for each.
-- **Spec excerpt:** "detect a Remove by diffing the roster around application: capture
-  `GroupHandle.listMembers()` DIDs before `processCommit`, compare to after; **any leaf
-  present-before-and-absent-after means a Remove was applied** → rotate the anchor. This is robust to
-  the Add+Remove-in-one-commit case (a count check is not) and to self-removal/leave. External-commit
-  rejoin only *adds* a leaf, so it correctly does not rotate. No `@kumiai/mls` change."
+### Question 2.1: Does a roster-set diff around `processCommit` detect a roster change, including Add+Remove in one commit? — ANSWERED (see decision log), needs amendment
+
+Answered 2026-07-16 and committed (`47c2659`) as **removal** detection (`detectRemoval`, set
+difference). Per the §2 correction it must become **roster-change** detection (`detectRosterChange`,
+set **inequality**) so an Add rotates too. Small amend, carried by Q2.2's probe rather than re-run
+standalone: rename + widen the predicate, invert the add-only and external-rejoin cases in
+`peer-remove-detect.test.ts` (they must now rotate), keep the add+remove and update/no-op cases.
+
+### Question 2.2: Does an anchor-derived app topic stay stable within a segment, rotate on a roster change, and stay AGREED across members booting at different epochs?
+
+- **Assumption:** peer state `anchorSecret`/`anchorEpoch`, captured from `exportSecret()` at the last
+  roster change and fed to `protocolTopic`/`inboxTopic`, holds the topic constant while epochs advance
+  without a roster change; a roster change updates the anchor, drops the old (log-class, safe) app
+  subscription, and subscribes the new topic; and — the decisive part — a member whose peer boots at a
+  **later epoch than the anchor** still agrees, because its own add is itself a roster change that
+  rotates every existing member onto the joiner's add epoch, whose secret the joiner natively holds.
+- **Done when:**
+  - two online members exchange logged app frames across several non-roster-changing commits on one
+    stable topic, asserted on the wire (all frames on the one topic ID; the per-epoch topics the group
+    would otherwise have used have zero subscribers);
+  - a roster change (remove, and separately an add) rotates both onto a new topic and delivery
+    continues;
+  - **anchor agreement:** a member added/rejoining at a later epoch derives the same topic as an
+    existing member and they exchange messages — the case the old design failed. This test must fail if
+    the anchor is seeded per-peer from the live epoch.
+  - `topic.ts` signatures unchanged.
+- **Spec excerpt:** "the anchor sits at the last commit that changed the roster — an Add or a Remove ...
+  The anchor epoch must be one every current member holds the secret for, so it must be ≥ the newest
+  member's join epoch ... and after every removal ... `max(last add, last remove)` = the last roster
+  change ... a member added at epoch E seeds its anchor at E, and every existing member rotates to E on
+  applying that same add — they agree natively, each holding E's secret."
 - **Verify:** `pnpm run build && rtk proxy pnpm run lint && pnpm test`
 
-### Question 2.2: Does an anchor-derived app topic stay stable across non-removal commits and rotate (drop old sub, subscribe new) on a Remove?
+### Question 2.3: Does a durably persisted anchor survive a restart without partitioning?
 
-- **Assumption:** new peer state `anchorSecret`/`anchorEpoch`, captured from `exportSecret()` at the
-  last Remove and fed to `protocolTopic`/`inboxTopic`, holds the topic constant while epochs advance
-  without a Remove; applying a Remove updates the anchor, drops the old (log-class, safe) app
-  subscription, and subscribes the new topic; a live publisher and a live subscriber mid-segment
-  agree on the topic.
-- **Done when:** a test shows two online members exchanging app frames across several non-removal
-  commits on one stable topic, then a Remove rotates both onto a new topic and delivery continues;
-  `topic.ts` signatures unchanged.
-- **Spec excerpt:** "`appTopic = protocolTopic(anchorSecret, anchorEpoch, name)` ... captured from
-  `exportSecret()` at the **last commit containing a Remove**. Non-removal commits leave the topic
-  stable; a Remove rotates it. ... On applying a Remove, update the anchor, drop the old subscription
-  (safe — log-class), subscribe the new topic."
+- **Assumption:** a member rebooting over a handle already past the anchor epoch cannot re-export that
+  epoch's secret, so `{anchorSecret, anchorEpoch}` must be persisted and restored at construction
+  rather than re-seeded from the live epoch. Restored, it derives the same topic as a member that never
+  restarted.
+- **Done when:** a test boots a peer, advances the group past the anchor with non-roster-changing
+  commits, restarts the peer over the same handle, and asserts it (a) restores the persisted anchor
+  (not the live epoch) and (b) still receives logged events from a member that never restarted.
+  Mutation-check: removing the restore turns it red.
+- **Spec excerpt:** "A restart is the one case derivation cannot cover: a member rebooting at epoch 12
+  whose last roster change was epoch 5 cannot re-export `secret@5`, and re-seeding from the live epoch
+  would put it on a topic no one else uses — a silent, permanent partition triggered by a phone
+  restarting ... `{anchorSecret, anchorEpoch}` is persisted alongside the handle and restored on
+  construction."
+- **Open (decide in Step 1):** where the anchor persists — the existing commit journal, a new additive
+  port method, or host-persisted state alongside the handle.
 - **Verify:** `pnpm run build && rtk proxy pnpm run lint && pnpm test`
 
-### Question 2.3: Is a removed member unable to derive or read the post-removal app topic?
+### Question 2.4: Is a removed member unable to derive or read the post-removal app topic?
 
 - **Assumption:** because the anchor feeds the **per-epoch** `exportSecret()` (never the lifelong
   recovery secret), a member removed at the rotation commit cannot derive the new epoch's secret,

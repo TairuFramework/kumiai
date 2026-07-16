@@ -123,24 +123,71 @@ additive optional field on the group protocol definition (`defineGroupProtocol`)
 sidecar map — and how a logged event's publish reaches `mux.publish({ retain: 'log' })` while ephemeral
 events and all RPC stay on the existing live path. Both directions are additive / non-breaking.
 
-### 2. Topic model — derived anchor, rotate on removal
+### 2. Topic model — derived anchor at the last ROSTER CHANGE, durably held
 
 `appTopic = protocolTopic(anchorSecret, anchorEpoch, name)` and `inboxTopic(anchorSecret,
 anchorEpoch, did)`, where `anchorSecret`/`anchorEpoch` are captured from `exportSecret()` at the
-**last commit containing a Remove**. Non-removal commits leave the topic stable; a Remove rotates
-it. New peer state `anchorSecret`/`anchorEpoch`, updated whenever a Remove-bearing commit is applied.
-`topic.ts` needs no signature change — the existing functions receive anchor values instead of the
-current per-epoch values.
+**last commit that changed the roster — an Add or a Remove**. A commit that leaves the roster
+untouched (update, no-op, ledger-only) leaves the topic stable; any roster change rotates it. New peer
+state `anchorSecret`/`anchorEpoch`, updated whenever a roster-changing commit is applied, and
+**durably persisted** (see below). `topic.ts` needs no signature change — the existing functions
+receive anchor values instead of the current per-epoch values.
 
-### 3. Detecting a Remove (Fork 2 — roster-set diff, no mls change)
+**Why the last roster change and not the last Remove** (corrected 2026-07-16 — the original
+"last Remove" is not implementable, and binding the topic to it silently partitions the group):
+
+The anchor *secret* is `exportSecret(anchorEpoch)`, and MLS ratchets forward — a member cannot export
+the exporter secret of an epoch it did not hold. Two constraints follow, and they intersect at exactly
+one epoch:
+
+- The anchor epoch must be one **every current member holds the secret for**, so it must be ≥ the
+  newest member's join epoch. Otherwise a member added after the anchor can never derive the topic —
+  no seeding trick fixes this; the secret is simply gone forward.
+- The anchor epoch must be **after every removal**, so a removed member cannot derive it (§4).
+
+`max(last add, last remove)` = **the last roster change**. That is not a preference; it is what the two
+constraints leave.
+
+It also makes the hard cases self-synchronize with **no announced value**: a member added at epoch E
+seeds its anchor at E, and every existing member rotates to E on applying that same add — they agree
+natively, each holding E's secret. An external-commit rejoin adds a leaf, so recovery re-synchronizes
+the anchor for free.
+
+**The anchor must be durable.** A restart is the one case derivation cannot cover: a member rebooting
+at epoch 12 whose last roster change was epoch 5 cannot re-export `secret@5`, and re-seeding from the
+live epoch would put it on a topic no one else uses — a silent, permanent partition triggered by a
+phone restarting (measured: a peer booting at epoch 3 against a group anchored at 1 received **0** of
+the messages it should have). So `{anchorSecret, anchorEpoch}` is persisted alongside the handle and
+restored on construction, rather than re-seeded. This is consistent with the existing at-rest posture —
+the MLS handle already persists epoch secrets in order to decrypt at all.
+
+**Rejected — carry the anchor in Welcome/GroupInfo** (keeping "last Remove", announcing the value to
+joiners): it does not avoid persistence (a restart still cannot re-export an old secret, so persistence
+is needed anyway — announcing is *additional*, not alternative); the secret cannot ride a GroupContext
+extension, because extensions are public to all members and a later-removed member would have seen it,
+defeating §4; and handing a joiner `secret@anchorEpoch` lets it derive the topic for the segment
+*before* it joined, so with log-class retention it can `fetchTopic` that pre-join history — ciphertext
+it cannot open, but message count, timing and sender DIDs it can. Under the chosen model a joiner's
+anchor is its own add epoch, so it can derive nothing prior.
+
+**Cost, stated:** rotating on adds means more segments than rotating on removes alone — segments are
+bounded by roster changes in the retention window rather than removals. The drain does one `fetchTopic`
+per segment (§5), so this is a handful of extra fetches, traded against transporting a secret.
+
+### 3. Detecting a roster change (Fork 2 — roster-set diff, no mls change)
 
 No accessor exposes a commit's proposals today (`readCommitHeader` returns only `{ epoch,
-committerDID }`, `crypto.ts:96`). Rather than add one, detect a Remove by diffing the roster around
-application: capture `GroupHandle.listMembers()` DIDs before `processCommit`, compare to after; **any
-leaf present-before-and-absent-after means a Remove was applied** → rotate the anchor. This is robust
-to the Add+Remove-in-one-commit case (a count check is not) and to self-removal/leave (the leaf
-disappears for everyone). External-commit rejoin only *adds* a leaf, so it correctly does not rotate.
-No `@kumiai/mls` change.
+committerDID }`, `crypto.ts:96`). Rather than add one, detect a roster change by diffing the roster
+around application: capture the member DIDs before `processCommit` (via the additive `rosterDIDs()`
+port accessor, surfacing `GroupHandle.listMembers()`), compare to after; **any difference between the
+two sets — a leaf gained or lost — rotates the anchor**.
+
+Set **inequality**, not set difference: per §2 the anchor sits at the last roster change, so an Add
+rotates it just as a Remove does. A commit carrying both an Add and a Remove leaves the leaf count
+unchanged and still rotates (a count check would miss it). A self-removal or leave rotates — the leaf
+disappears for every member. An external-commit rejoin adds a leaf, so it rotates too, which is what
+re-synchronizes a recovering member's anchor with the group (§2). An update, no-op, or ledger-only
+commit touches no leaf and does not rotate. No `@kumiai/mls` change.
 
 ### 4. Why a removed member is blind
 
@@ -151,16 +198,21 @@ removed members already follow `commitTopic` for life, so they already observe t
 
 **Load-bearing:** the anchor must feed the **per-epoch** `exportSecret()`, never the lifelong
 recovery secret (which removed members keep for life). A topic derived from the recovery secret plus
-a guessable epoch number would cut nobody off.
+a guessable epoch number would cut nobody off. This is also why the anchor cannot be announced in
+public group state (§2): a value every member can see is a value a later-removed member has kept.
+
+Adds rotate the anchor too (§2), which costs nothing here — an Add does not need to cut anyone off,
+and rotating on it is what keeps the anchor derivable by the member being added.
 
 ### 5. Delivery and drain (peer-internal)
 
-- **Online:** subscribe the current app topic, live push. On applying a Remove, update the anchor,
-  drop the old subscription (safe — log-class), subscribe the new topic.
+- **Online:** subscribe the current app topic, live push. On applying a roster-changing commit, update
+  the anchor, drop the old subscription (safe — log-class), subscribe the new topic.
 - **Returning (peer-internal, automatic on construct/reconnect):** walk the commit log epoch by
   epoch (deriving each `exportSecret()`), pulling **once per segment** — the run of epochs between
-  two removals is one stable topic — to head, decrypting each frame under the epoch its MLS
-  ciphertext names; at each Remove boundary update the anchor and move to the next segment's topic.
+  two roster changes is one stable topic — to head, decrypting each frame under the epoch its MLS
+  ciphertext names; at each roster-change boundary update the anchor and move to the next segment's
+  topic.
   All members (publishers included) derive from the anchor, so a live publisher mid-segment writes
   the same topic a returning peer pulls. Delivered frames reach the host through the **existing
   `handlers` map** — no new host delivery API. The drain pulls only **logged-event** frames
@@ -198,9 +250,14 @@ log-class / `fetchTopic` / retention surface the control-ledger release already 
 Touched:
 - `peer.ts` — route a **logged** event's publish to `mux.publish({ retain: 'log' })` while ephemeral
   events and all RPC (`request`/`gather`/`reply`) stay on the existing live path; add `anchorSecret`/
-  `anchorEpoch` state; roster-set-diff Remove detection around `processCommit`; anchor-based topic
-  derivation in `buildEpoch`; the returning-member per-segment internal drain that pulls only logged
-  events; subscribe-current + pull-old; emit the pruned-window event.
+  `anchorEpoch` state; roster-set-diff **roster-change** detection around `processCommit`;
+  anchor-based topic derivation in `buildEpoch`; the returning-member per-segment internal drain that
+  pulls only logged events; subscribe-current + pull-old; emit the pruned-window event.
+- **Durable anchor** (§2) — `{anchorSecret, anchorEpoch}` must survive a restart, so it is persisted
+  alongside the handle and restored at construction instead of re-seeded from the live epoch. Whether
+  that rides the existing commit journal, a new additive port method, or host-persisted state is an
+  implementation seam decided in the plan; either way it is additive, and the handle already persists
+  epoch secrets so it is no new class of at-rest exposure.
 - The per-procedure `retain` marker on the group protocol definition — an additive optional field on
   `defineGroupProtocol` **or** an rpc-side sidecar map (Q1.1 decides). If it lands on the protocol
   definition it is an **additive** field, not a break. Definition-time enforcement rejects
@@ -229,6 +286,13 @@ a convergence assertion on the line above the failure). Cover:
   after restart), each now delivered by pull.
 - A removal rotates the topic and the **removed member cannot derive or read** the post-removal topic.
 - A returning member **drains across a rotation boundary** in order under the correct per-epoch keys.
+- **Anchor agreement** (the case the original design got wrong, and which same-epoch-boot tests
+  structurally cannot catch): a member whose peer boots at a **later epoch than the group's anchor** —
+  a late joiner and an external-commit rejoin — still derives the same topic as everyone else and
+  exchanges messages with them. An add rotates the anchor for existing members and the joiner alike.
+- **Restart agreement:** a member restarting over a handle already past the anchor epoch restores the
+  persisted anchor rather than re-seeding from the live epoch, and does not partition. Assert it
+  receives messages from a member that never restarted.
 - A member away beyond the window gets a **surfaced pruned-window event**, not a silent gap; assert
   the event fires and names the group.
 - Roster-set-diff correctness: a commit carrying **both an Add and a Remove** still rotates.
@@ -247,13 +311,25 @@ the pruned-window emit — each must turn a green test red.
 - A returning member re-derives per-epoch keys across the drained span (bounded by retention; it
   walks the commit log to rebuild anyway).
 - High app volume × 30-day retention is real hub storage; the operator's `maxRetention` is the cap.
+- Rotating on adds (§2) means more segments than rotating on removals alone, so a returning member
+  does one `fetchTopic` per roster change in its window rather than per removal. Bounded and small
+  (roster changes are rare next to commits), and it is the price of an anchor every member can derive
+  without transporting a secret.
 
 ## Resolved open calls
 
 - **Retention model** — two orthogonal dimensions (kind × retention); only events may be `log`,
   correlation is always ephemeral (§1). Retention is declared **per procedure** in the group protocol
   definition (not per call), enforced at definition time. Send API stays a single `dispatch`.
-- **Remove detection** — roster-set diff (§3), no additive mls accessor needed.
+- **Anchor definition** (corrected 2026-07-16, mid-implementation) — the anchor sits at the last
+  **roster change**, not the last Remove, and is **durably persisted** (§2). Forced by two constraints:
+  the anchor epoch must be one every current member holds the secret for (≥ the newest join, since MLS
+  ratchets forward and the secret cannot be reached back for), and after every removal (§4). Their
+  intersection is `max(last add, last remove)`. Rejected the alternative of announcing the anchor in
+  Welcome/GroupInfo — it still needs persistence, cannot use a public GroupContext extension without
+  defeating §4, and leaks pre-join metadata to joiners.
+- **Roster-change detection** — roster-set diff (§3), set **inequality**, no additive mls accessor
+  needed beyond `rosterDIDs()` on the rpc port.
 - **Pruned-window signal shape** — an rpc **event** shaped to feed a host health condition (§6),
   not a return value; forced by Kubun's eager-peer / no-`ready()` / no-host-catch-up model.
 
