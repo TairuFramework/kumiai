@@ -144,6 +144,17 @@ type MemoryCommit = {
   head?: string
   /** An external commit: the committer is rejoining, and its leaf replaces any it still had. */
   external?: boolean
+  /**
+   * The roster op this Commit enacts, applied to `leaves` when the commit ADVANCES this handle.
+   * The real double has no MLS proposals, so this stands in for the one tree effect a Commit's
+   * Add/Remove has — the effect adopting the post-commit handle would produce. A commit carrying
+   * both is faithful to the Add+Remove-in-one-commit case a roster diff has to catch.
+   *
+   * Absent on a commit that touches no membership (a ledger enact, an update, a no-op): the
+   * roster it found is the roster it leaves.
+   */
+  adds?: Array<string>
+  removes?: Array<string>
 }
 
 /**
@@ -161,7 +172,12 @@ export function encodeMemoryCommit(
   epoch: number,
   committerDID: string,
   entryIDs: Array<string> = [],
-  options: { head?: string; external?: boolean } = {},
+  options: {
+    head?: string
+    external?: boolean
+    adds?: Array<string>
+    removes?: Array<string>
+  } = {},
 ): Uint8Array {
   // A commit that enacts nothing proposes no head extension: the head it found is the head it
   // leaves. Only a committer that enacts entries folds a new one, and it folds it over its
@@ -174,6 +190,8 @@ export function encodeMemoryCommit(
     entryIDs,
     ...(head != null ? { head } : {}),
     ...(options.external === true ? { external: true } : {}),
+    ...(options.adds != null && options.adds.length > 0 ? { adds: options.adds } : {}),
+    ...(options.removes != null && options.removes.length > 0 ? { removes: options.removes } : {}),
   }
   return fromUTF(JSON.stringify(commit))
 }
@@ -182,11 +200,15 @@ export function decodeMemoryCommit(commit: Uint8Array): MemoryCommit | null {
   if (commit.length === 0) return null
   try {
     const value = JSON.parse(toUTF(commit)) as MemoryCommit
+    const isDIDArray = (v: unknown): boolean =>
+      Array.isArray(v) && v.every((did) => typeof did === 'string')
     if (
       typeof value?.epoch !== 'number' ||
       typeof value?.committerDID !== 'string' ||
       (value.head != null && typeof value.head !== 'string') ||
-      !Array.isArray(value.entryIDs)
+      !Array.isArray(value.entryIDs) ||
+      (value.adds != null && !isDIDArray(value.adds)) ||
+      (value.removes != null && !isDIDArray(value.removes))
     ) {
       return null
     }
@@ -405,6 +427,22 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     // must stay visibly incomplete rather than re-anchor on its own truncated fold. A commit
     // that enacted nothing carries none, and leaves the head where it found it.
     if (parsed.head != null) ledgerHead = parsed.head
+    // The tree effect the post-commit handle would carry: a Remove drops the leaf, an Add
+    // appends one. Applied together and remove-first, so a Commit that Adds and Removes at once
+    // leaves the roster changed in both directions — the case a roster diff must catch and a
+    // leaf count cannot.
+    if (parsed.removes != null) {
+      for (const did of parsed.removes) {
+        for (let i = leaves.length - 1; i >= 0; i--) {
+          if (leaves[i] === did) leaves.splice(i, 1)
+        }
+      }
+    }
+    if (parsed.adds != null) {
+      for (const did of parsed.adds) {
+        if (!leaves.includes(did)) leaves.push(did)
+      }
+    }
     if (parsed.external) {
       // `resync: true`: the rejoining member's prior leaf is atomically removed, so a peer
       // that rejoined twice — an orphaned external commit, then a fresh one — leaves one leaf
@@ -430,6 +468,9 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     lastSender: () => lastSender,
     ledgerIDs: () => [...ledger],
     leaves: () => [...leaves],
+    async rosterDIDs() {
+      return [...leaves]
+    },
     fold: () => {
       const folded = new Map<string, string>()
       for (const token of ledgerTokens()) {

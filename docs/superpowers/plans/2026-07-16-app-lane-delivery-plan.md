@@ -208,6 +208,32 @@ condition; a member away beyond the window triggers it.
 
 ## Decision Log
 
+### 2026-07-16 — Question 2.1: roster-set diff detects a Remove (incl. Add+Remove)
+
+**Findings:** Confirmed. Reading member DIDs before `processCommit` and diffing against after flags a
+Remove iff a leaf present-before is absent-after — a **set** difference, not a count, so a commit
+carrying both an Add and a Remove (leaf count unchanged) is detected. Add-only, update/no-op, and an
+external-commit rejoin do not flag. Landed additively: `rosterDIDs()` on the `GroupMLS` port, a pure
+`detectRemoval` helper (`roster.ts`), and a capture at the apply site in `pullCommits` that rotates
+anchor state (`{secret, epoch}` from the post-commit per-epoch secret) on a detected removal. Observable
+via a new `anchorEpoch()` getter. Verify green: `pnpm run build && rtk proxy pnpm run lint && pnpm test`
+→ rpc 188 passed / 1 skip, 30/30 tasks; new `peer-remove-detect.test.ts` 12/12 (5 lane-driven shapes +
+7 `detectRemoval` units).
+
+**Spec impact:** none — matches §3 as written. Blast radius: `GroupMLS` port gains a **required**
+additive method `rosterDIDs()` (Kubun adapter must implement it: `listMembers()→DIDs` — the tracked
+Kubun follow-up). No `@kumiai/mls` core change.
+
+**Learned:**
+- The roster before-read must be unconditional at the apply site (it must precede the apply that would
+  change the roster); the after-read + diff run only when the commit advanced, since only an applied
+  commit moves the roster.
+- Anchor state must be seeded at genesis **before** the seed pull, so a removal the seed pull applies
+  rotates the anchor rather than being overwritten by a later re-seed.
+- `anchor.secret` is captured but has no reader until Q2.2's topic derivation consumes it (recorded
+  the anchor as a single `{secret, epoch}` object so the not-yet-read secret rides cleanly, no
+  write-only-local lint warning).
+
 ### 2026-07-16 — Question 1.1: per-procedure retention makes logged events pull-drainable
 
 **Findings:** Confirmed. An `event` procedure declaring `retain: 'log'` in the rpc-owned

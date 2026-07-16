@@ -46,6 +46,7 @@ import {
   encodeRecoveryReply,
   encodeRecoveryRequest,
 } from './recovery.js'
+import { detectRemoval } from './roster.js'
 import { commitTopic, inboxTopic, protocolTopic, rendezvousTopic } from './topic.js'
 
 const DEFAULT_RECOVERY_TIMEOUT_MS = 5000
@@ -214,6 +215,14 @@ export type GroupPeer<Protocols extends Record<string, ProtocolDefinition>> = {
    */
   recover: () => Promise<{ advanced: boolean; reenact: Array<string> }>
   resync: () => Promise<void>
+  /**
+   * The epoch the app-lane anchor sits at. Seeded at genesis and advanced ONLY when a Commit this
+   * peer applied dropped a leaf (a Remove, including the Add+Remove-in-one-commit case) — an
+   * Add-only, update, no-op or external-commit rejoin leaves it put. It is the anchor the
+   * forward-secret app-lane topic derivation is bound to, exposed so a caller can observe a
+   * removal being detected without reaching into the port.
+   */
+  anchorEpoch: () => number
   dispose: () => Promise<void>
 }
 
@@ -252,6 +261,19 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * about a host adopting early, and recover only if the host called a lane operation later.
    */
   let epoch = crypto.epoch()
+
+  /**
+   * The app-lane anchor: the per-epoch secret and epoch the forward-secret app-lane topic
+   * derivation is bound to. Seeded at genesis (a group with no removals yet anchors at its
+   * initial epoch) and rotated ONLY when an applied Commit drops a leaf — captured from the
+   * port's own post-commit epoch secret, never the recovery secret. The topic derivation and
+   * subscription rotation that consume the secret are built on top of this; here it is only
+   * recorded, and only the epoch is observable (see {@link GroupPeer.anchorEpoch}).
+   */
+  let anchor: { secret: Uint8Array<ArrayBufferLike>; epoch: number } = {
+    secret: new Uint8Array(),
+    epoch: crypto.epoch(),
+  }
 
   const buildEpoch = async (): Promise<void> => {
     secret = await crypto.exportSecret()
@@ -768,6 +790,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         // Framed at this peer's epoch, by somebody else: a frame it can apply. Everything below is
         // the port's answer to it.
         const framedEpoch = crypto.epoch()
+        // The roster this handle holds BEFORE applying, to diff against the roster after. Only an
+        // applied commit can change it, so the after-read and the diff run only when the epoch
+        // advanced — but the before-read must happen here, ahead of the apply that would change it.
+        const rosterBefore = await port.rosterDIDs()
         let applied: { advanced: boolean }
         try {
           applied = await port.processCommit(commitFrame.commit, {
@@ -806,6 +832,13 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           advancedEpoch = true
           // The fork check's record; the only place it is written from the log.
           appliedByEpoch.set(framedEpoch, position)
+          // A commit that dropped a leaf rotates the app-lane anchor. Diff the roster around the
+          // apply: a DID present before and absent after is a Remove (robust to Add+Remove in one
+          // commit, where the count is unchanged). Capture the port's post-commit epoch secret —
+          // the per-epoch secret the group advanced to, never the recovery secret.
+          if (detectRemoval(rosterBefore, await port.rosterDIDs())) {
+            anchor = { secret: await crypto.exportSecret(), epoch: crypto.epoch() }
+          }
         }
         // `{ advanced: false }` here is the port REFUSING a well-formed commit at this peer's own
         // epoch from another member: poison on the same terms as an unresolvable one — advances,
@@ -1454,6 +1487,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   }
 
   const ready = (async () => {
+    // Seed the app-lane anchor at genesis BEFORE the seed pull: a group with no removals yet
+    // anchors at its initial epoch, and a removal the seed pull applies must be able to rotate it
+    // off that seed rather than have a later re-seed overwrite the rotation.
+    anchor = { secret: await crypto.exportSecret(), epoch: crypto.epoch() }
     await initControlLanes()
     await buildEpoch()
   })()
@@ -1486,6 +1523,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       await ready
       await rebuildEpoch()
     },
+    anchorEpoch: () => anchor.epoch,
     dispose: async () => {
       // Tear down even a peer whose init failed — it still holds a hub drain.
       await settled

@@ -31,6 +31,15 @@ export type PublishCommitParams = {
    * new entries alone is a head no receiver's ledger reproduces.
    */
   ledgerBefore?: Array<string>
+  /**
+   * The roster op this Commit enacts on the receiver's tree when it advances: DIDs to add, DIDs
+   * to remove. A Commit carrying both models the Add+Remove-in-one-commit case. Omitted, the
+   * Commit touches no membership.
+   */
+  adds?: Array<string>
+  removes?: Array<string>
+  /** An external commit: the committer is rejoining, and its leaf replaces any it still had. */
+  external?: boolean
   /** Override the commit bytes (an empty commit is a no-op the receiver cannot apply). */
   commit?: Uint8Array
   /**
@@ -58,6 +67,9 @@ export async function publishCommit(params: PublishCommitParams): Promise<{ sequ
       ...(entryIDs.length > 0
         ? { head: memoryLedgerHead([...ledgerBefore.map(memoryEntryID), ...entryIDs]) }
         : {}),
+      ...(params.adds != null ? { adds: params.adds } : {}),
+      ...(params.removes != null ? { removes: params.removes } : {}),
+      ...(params.external === true ? { external: true } : {}),
     })
   const sealed = await crypto.wrap(encodeLedgerEntries(entries))
   return hub.publish({

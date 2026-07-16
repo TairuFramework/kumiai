@@ -83,6 +83,18 @@ export type PendingRecovery = {
  */
 export type GroupMLS = {
   /**
+   * The DIDs this handle's ratchet tree currently holds a leaf for — the members
+   * `GroupHandle.listMembers()` would report, one entry per leaf. Purely local, reads no
+   * secret and advances nothing.
+   *
+   * Read around {@link processCommit} to tell a Commit that dropped a leaf from one that did
+   * not: a DID present before applying and absent after means a Remove was enacted (robust to
+   * a Commit carrying both an Add and a Remove, where a count is unchanged), and a commit that
+   * drops a leaf rotates the app-lane anchor. Order is not significant — the lane compares as a
+   * set.
+   */
+  rosterDIDs(): Promise<Array<string>>
+  /**
    * Read what a Commit says about itself — epoch and committer — WITHOUT advancing state.
    * `null` for bytes that are not a Commit. Lets the lane classify a frame (epoch = this
    * peer's to apply? committer = this peer's own?) before touching it; neither question may
