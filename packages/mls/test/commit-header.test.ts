@@ -66,6 +66,8 @@ describe('GroupHandle.readCommitHeader — member commit', () => {
     expect(header).not.toBeNull()
     expect(header?.committerDID).toBe(alice.id)
     expect(header?.epoch).toBe(bobGroup.epoch)
+    // A commit from a member that already holds a leaf is not external. Absent, not false.
+    expect(header?.external).toBeUndefined()
     // The committer the reader resolved is the DID at that sender leaf in Bob's tree.
     expect(bobGroup.findMemberLeafIndex(alice.id)).toBeDefined()
   })
@@ -111,6 +113,12 @@ describe('GroupHandle.readCommitHeader — external commit and non-commit', () =
     expect(header?.committerDID).toBe(bob.id)
     // External commit's header epoch is the pre-commit (sending) epoch.
     expect(header?.epoch).toBe(aliceAfterBob.epoch)
+    // The rejoin says so itself, because nothing else can say it for it: Bob keeps his id and
+    // — the resync blanking his leaf and the new one taking the leftmost blank — his leaf
+    // index, so no before/after diff of the roster moves. A reader that must know membership
+    // shifted has only this flag.
+    expect(header?.external).toBe(true)
+    expect(aliceAfterBob.findMemberLeafIndex(bob.id)).toBeDefined()
   })
 
   test('returns null for a non-commit frame and for garbage bytes', async () => {

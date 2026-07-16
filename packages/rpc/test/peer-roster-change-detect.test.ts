@@ -19,11 +19,16 @@ const flush = () => new Promise((r) => setTimeout(r, 30))
  * earlier one. The anchor has to be both after every removal and derivable by every current
  * member, and only the last roster change is both.
  *
+ * A REJOIN rotates it too, and cannot be detected this way at all: an external commit by a member
+ * the roster still holds changes no DID, so the diff reads false. It rotates on the commit's own
+ * external flag — the same invariant from the same side, since a rejoiner's effective join is its
+ * rejoin epoch.
+ *
  * Each case drives a commit through the commit lane (an off-stage admin publishes, the peer wakes
  * and pulls) and reads the anchor epoch: it advances to the post-commit epoch on a roster change
- * and stays at genesis otherwise.
+ * or a rejoin, and stays at genesis otherwise.
  */
-describe('a commit that changes the roster rotates the app-lane anchor', () => {
+describe('a commit that changes the roster or rejoins a member rotates the app-lane anchor', () => {
   test('a remove-only commit is detected: the anchor advances', async () => {
     const hub = new FakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x21)
@@ -127,17 +132,17 @@ describe('a commit that changes the roster rotates the app-lane anchor', () => {
     await bob.peer.dispose()
   })
 
-  test('an external-commit rejoin by a member still IN the roster is invisible to a DID diff', async () => {
+  test('an external-commit rejoin by a member still IN the roster is invisible to a DID diff, and rotates anyway', async () => {
     const hub = new FakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x26)
     // Dave never lost his leaf here — he is stranded on an old epoch, not evicted — so his rejoin
     // REPLACES a leaf the roster already held for him, and the DID set does not move.
     //
-    // The predicate's honest edge, asserted rather than left to be discovered: the diff compares
-    // DIDs, and a rejoin that replaces a leaf changes no DID. It stays consistent — every member
-    // runs this same diff over this same commit, none rotates, and they still agree on the topic —
-    // but it leaves the rejoined handle deriving an anchor epoch it no longer holds the secret
-    // for, which the epoch-independent secret in this double hides.
+    // The predicate's blind spot, asserted rather than left to be discovered: the diff compares
+    // DIDs, and a rejoin that replaces a leaf changes no DID. So the rotation cannot come from the
+    // diff, and it does not — it comes from the commit's own external flag. It MUST rotate: Dave's
+    // rejoined handle can export no secret from before the rejoin, so an anchor the group left
+    // behind is one he could never derive, exactly as for a member added by an Add.
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { members: ['bob', 'dave'] })
     await flush()
 
@@ -153,7 +158,9 @@ describe('a commit that changes the roster rotates the app-lane anchor', () => {
 
     expect(bob.mls.epoch()).toBe(2)
     expect(bob.mls.leaves()).toEqual(['bob', 'dave']) // one leaf for dave, and the same DIDs
-    expect(bob.peer.anchorEpoch()).toBe(1)
+    // The diff saw nothing — the DIDs are identical before and after — and Bob rotated regardless.
+    expect(detectRosterChange(['bob', 'dave'], bob.mls.leaves())).toBe(false)
+    expect(bob.peer.anchorEpoch()).toBe(2)
 
     await bob.peer.dispose()
   })

@@ -206,6 +206,7 @@ export function decodeMemoryCommit(commit: Uint8Array): MemoryCommit | null {
       typeof value?.epoch !== 'number' ||
       typeof value?.committerDID !== 'string' ||
       (value.head != null && typeof value.head !== 'string') ||
+      (value.external != null && typeof value.external !== 'boolean') ||
       !Array.isArray(value.entryIDs) ||
       (value.adds != null && !isDIDArray(value.adds)) ||
       (value.removes != null && !isDIDArray(value.removes))
@@ -506,8 +507,16 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     },
     async readCommitHeader(commit: Uint8Array): Promise<CommitHeader | null> {
       // Reads the commit's own bytes and nothing else: no epoch secret, no blob, no state.
+      // `external` included: a real one is structural too — a public message from a non-member
+      // carrying a commit — and it is the ONLY thing a rejoin changes that a reader can see.
       const parsed = decodeMemoryCommit(commit)
-      return parsed == null ? null : { epoch: parsed.epoch, committerDID: parsed.committerDID }
+      return parsed == null
+        ? null
+        : {
+            epoch: parsed.epoch,
+            committerDID: parsed.committerDID,
+            ...(parsed.external === true ? { external: true } : {}),
+          }
     },
     async processCommit(commit: Uint8Array, context: CommitContext) {
       lastSender = context.senderDID

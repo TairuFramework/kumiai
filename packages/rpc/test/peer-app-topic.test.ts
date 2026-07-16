@@ -3,7 +3,7 @@ import { describe, expect, test } from 'vitest'
 
 import { createGroupPeer } from '../src/peer.js'
 import { defineGroupProtocol } from '../src/protocol.js'
-import { protocolTopic } from '../src/topic.js'
+import { commitTopic, protocolTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
@@ -49,7 +49,11 @@ function makeRoomPeer(
   localDID: string,
   recoverySecret: Uint8Array,
   handlers: Record<string, unknown>,
-  options: { epoch?: number; members?: Array<string> } = {},
+  options: {
+    epoch?: number
+    members?: Array<string>
+    recovery?: { timeoutMs?: number; getDelayMs?: () => number; deadlineMs?: number }
+  } = {},
 ) {
   const epoch = options.epoch ?? 1
   const crypto = createFakeCrypto({ epoch, localDID })
@@ -72,6 +76,7 @@ function makeRoomPeer(
     localDID,
     protocols: { room },
     handlers: { room: handlers } as never,
+    ...(options.recovery != null ? { recovery: options.recovery } : {}),
   })
   return { peer, crypto, mls }
 }
@@ -355,5 +360,112 @@ describe('every member agrees on the anchor, including one that boots after it',
 
     await alice.peer.dispose()
     await dave.peer.dispose()
+  })
+})
+
+describe('a rejoining member and the group agree on one app topic', () => {
+  /**
+   * The case no diff can reach. Eve is stranded on a stale epoch and rejoins by external commit —
+   * and she is a member the roster never stopped holding, so her rejoin changes no DID and no
+   * occupied leaf index (the resync blanks her old leaf, and her new one takes the leftmost blank:
+   * the leaf it just blanked). There is nothing to diff. The rotation rides the applied commit's
+   * own external flag, and Eve — who can never apply her own commit — sets her anchor from the
+   * handle her rejoin derived.
+   *
+   * The group's anchor is DRIFTED behind its live epoch first, with commits that touch no leaf. It
+   * is the whole point: if the anchor already sat at the epoch the rejoin lands on, agreement would
+   * be an accident of arithmetic and would hold with no rotation at all.
+   */
+  test('a rejoin rotates the anchor: the group and the rejoiner land on the same post-commit epoch', async () => {
+    const hub = new FakeHub()
+    const recoverySecret = new Uint8Array(32).fill(0x55)
+    const aliceSaw: Array<unknown> = []
+    const eveSaw: Array<unknown> = []
+    const members = ['alice', 'eve']
+
+    const alice = makeRoomPeer(
+      hub,
+      'alice',
+      recoverySecret,
+      { 'room/posted': (ctx: { data: unknown }) => void aliceSaw.push(ctx.data) },
+      { members, recovery: { getDelayMs: () => 5 } },
+    )
+    await flush()
+
+    const secret = await alice.crypto.exportSecret()
+    const anchoredTopic = protocolTopic(secret, 1, 'room')
+    expect(alice.peer.anchorEpoch()).toBe(1)
+
+    // Drift: two commits that touch no leaf. Alice's live epoch runs to 3; her anchor stays at 1,
+    // so the epoch a rejoin will land on is one nothing has taken the group to.
+    await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1 })
+    await flush()
+    await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 2 })
+    await flush()
+    expect(alice.mls.epoch()).toBe(3)
+    expect(alice.peer.anchorEpoch()).toBe(1) // two epochs behind her live one
+
+    // The hub sweeps the log past its retention — the head outlives the frames it named. This is
+    // what strands Eve: she was offline while the group moved, and the backlog that would have
+    // carried her is gone. Her handle is still at 1, and no pull can ever fix that.
+    hub.trim(commitTopic(recoverySecret), '999999999999')
+
+    const eve = makeRoomPeer(
+      hub,
+      'eve',
+      recoverySecret,
+      { 'room/posted': (ctx: { data: unknown }) => void eveSaw.push(ctx.data) },
+      { epoch: 1, members },
+    )
+    await flush()
+
+    // Eve is silently partitioned: two epochs below the group, anchored where she booted, and on
+    // the same topic as Alice only because Alice has not moved either.
+    expect(eve.mls.epoch()).toBe(1)
+    expect(eve.peer.anchorEpoch()).toBe(1)
+    expect(alice.mls.leaves()).toContain('eve') // the roster never stopped holding her
+
+    const rejoined = await eve.peer.recover()
+    await flush()
+    expect(rejoined.advanced).toBe(true)
+
+    // The rejoin was framed at 3 — the epoch Alice's GroupInfo described — so applying it carries
+    // her to 4, and Eve's rejoined handle starts there too. The anchor is the POST-commit epoch,
+    // not the epoch the commit is framed at.
+    expect(alice.mls.epoch()).toBe(4)
+    expect(eve.mls.epoch()).toBe(4)
+    // Nothing about the roster moved across it, which is why no diff could have done this: one
+    // leaf for Eve before, one leaf for Eve after, and the same DIDs either way.
+    expect(alice.mls.leaves().filter((did) => did === 'eve')).toHaveLength(1)
+
+    // The agreement. Alice rotated by applying Eve's external commit; Eve set hers from the handle
+    // that commit derived — the only way she can, since she never applies her own commit. Both
+    // left the anchor they shared at 1, and landed on the same one.
+    expect(alice.peer.anchorEpoch()).toBe(4)
+    expect(eve.peer.anchorEpoch()).toBe(4)
+
+    const aliceTopic = protocolTopic(secret, alice.peer.anchorEpoch(), 'room')
+    const eveTopic = protocolTopic(secret, eve.peer.anchorEpoch(), 'room')
+    expect(eveTopic).toBe(aliceTopic)
+    expect(aliceTopic).not.toBe(anchoredTopic) // and it is not where either of them started
+
+    // And the wire agrees with the derivation, both ways.
+    await alice.peer.protocol('room').dispatch('room/posted', { n: 'to-eve' })
+    await flush()
+    expect(eveSaw).toEqual([{ n: 'to-eve' }])
+
+    await eve.peer.protocol('room').dispatch('room/posted', { n: 'from-eve' })
+    await flush()
+    expect(aliceSaw).toEqual([{ n: 'from-eve' }])
+
+    // Both logged frames landed on the one topic, read back as Eve — the member whose agreement is
+    // in question — and the topic the group would have stayed on holds neither.
+    const landed = await hub.fetchTopic({ subscriberDID: 'eve', topicID: aliceTopic })
+    expect(landed.messages).toHaveLength(2)
+    const abandoned = await hub.fetchTopic({ subscriberDID: 'eve', topicID: anchoredTopic })
+    expect(abandoned.messages).toHaveLength(0)
+
+    await alice.peer.dispose()
+    await eve.peer.dispose()
   })
 })

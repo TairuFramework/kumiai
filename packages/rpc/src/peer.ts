@@ -269,8 +269,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   /**
    * The app-lane anchor: the per-epoch secret and epoch the app-lane topic derivation is bound
    * to. Seeded at genesis (a group with no roster change yet anchors at its initial epoch) and
-   * rotated when an applied Commit changes the roster — captured from the port's own post-commit
-   * epoch secret, never the recovery secret.
+   * rotated when an applied Commit changes the roster OR rejoins a member — captured from the
+   * port's own post-commit epoch secret, never the recovery secret.
    *
    * It sits at the last roster change because two constraints meet there and nowhere else. A
    * Remove must move it: the evicted member keeps every topic ID it derived, so the group must
@@ -279,6 +279,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * member cannot derive. `max(last add, last remove)` is the only epoch both after every removal
    * and held by every current member — and every member reaches it by applying the same commit,
    * so they agree natively, the joiner seeding at its own add epoch included.
+   *
+   * A REJOIN moves it for the second reason, from a member the first one cannot see. The
+   * invariant is that the anchor is >= every current member's EFFECTIVE join, and a rejoiner's
+   * effective join is its rejoin epoch — its rejoined handle exports no secret from before it,
+   * exactly as a newly added member's cannot. But a rejoin by a member the roster still holds
+   * changes no DID, so nothing the roster diff reads moves: it rotates on the applied commit's
+   * own external flag instead, and the rejoiner sets this from its rejoined handle in
+   * `recover()`, the one place it can — a member never applies its own commit.
    *
    * The topic derivation and subscription rotation that consume the secret are built on top of
    * this; here it is only recorded, and only the epoch is observable (see
@@ -759,11 +767,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         // `message.senderDID` — the hub-authenticated publisher, the hub's word about who handed
         // it over, and the hub is not trusted: a hub that could name the committer could stamp
         // every recipient's own DID onto one poison frame and make the whole group heal at once.
-        const disposition = classifyCommit(
-          await port.readCommitHeader(commitFrame.commit),
-          position,
-          { localDID, epoch: crypto.epoch(), appliedByEpoch },
-        )
+        const header = await port.readCommitHeader(commitFrame.commit)
+        const disposition = classifyCommit(header, position, {
+          localDID,
+          epoch: crypto.epoch(),
+          appliedByEpoch,
+        })
 
         if (disposition.row === 'own-unmerged') {
           // This peer's own commit, at the epoch it is still at: the hub took it, the group moved
@@ -851,13 +860,31 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           advancedEpoch = true
           // The fork check's record; the only place it is written from the log.
           appliedByEpoch.set(framedEpoch, position)
-          // A commit that CHANGED the roster rotates the app-lane anchor. Diff the roster around
-          // the apply: any difference between the DIDs held before and after is a roster change —
-          // an Add, a Remove, or both in one commit (where the count is unchanged). Capture the
-          // port's post-commit epoch secret — the per-epoch secret the group advanced to, never
-          // the recovery secret. Every member applying this same commit runs this same diff and
-          // lands on this same epoch, which is what makes the anchor agreed rather than local.
-          if (detectRosterChange(rosterBefore, await port.rosterDIDs())) {
+          // A commit that CHANGED the roster rotates the app-lane anchor, and so does a REJOIN.
+          //
+          // The roster change is a diff around the apply: any difference between the DIDs held
+          // before and after — an Add, a Remove, or both in one commit (where the count is
+          // unchanged). It answers for membership, and a rejoin is not a membership change: an
+          // external commit by a member the roster still holds replaces that member's leaf and
+          // leaves every DID exactly where it was, so the diff reads false and no diff over any
+          // other before/after state would read true either (the resync reuses the very leaf index
+          // it blanks). Nothing observable here moves — which is why the commit says so itself,
+          // and why the anchor rotates on the header's own word rather than on a diff.
+          //
+          // It must rotate, because the anchor is >= every current member's effective join and a
+          // rejoiner's effective join is its rejoin epoch: its rejoined handle can export no
+          // secret from before the rejoin, so an anchor the group left behind is one it could
+          // never derive. Rotating carries the group to where the rejoiner necessarily starts —
+          // the same place the rejoiner sets its own anchor as it adopts the rejoined handle.
+          //
+          // Capture the port's post-commit epoch secret — the per-epoch secret the group advanced
+          // to, never the recovery secret. Every member applying this same commit reads this same
+          // header, runs this same diff, and lands on this same epoch, which is what makes the
+          // anchor agreed rather than local.
+          if (
+            detectRosterChange(rosterBefore, await port.rosterDIDs()) ||
+            header?.external === true
+          ) {
             anchor = { secret: await crypto.exportSecret(), epoch: crypto.epoch() }
           }
         }
@@ -1442,6 +1469,17 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         //    again, and `resync` collects the leaf the orphan added. Leaves do not accumulate.
         const rejoinedAtEpoch = (await port.readCommitHeader(pending.commit))?.epoch
         await pending.onAccepted()
+        // The anchor, set from the rejoined handle — the peer's own half of the rotation every
+        // member applying this same external commit performs. It can never take the other half:
+        // a member does not process its own commit, so the apply site above never runs for the
+        // one commit that put this peer back in the group.
+        //
+        // AFTER `onAccepted`, and that ordering is the whole of it: the anchor is the POST-commit
+        // epoch, not the epoch the commit is framed at. The handle advances, and only then is the
+        // anchor captured — which is exactly where an applying member lands, since applying this
+        // commit is what carries them off the epoch it is framed at. Reading it before the adopt
+        // would anchor this peer one epoch below the group, on a topic no member is on.
+        anchor = { secret: await crypto.exportSecret(), epoch: crypto.epoch() }
         const accepted = asLogPosition(sequenceID)
         reconciledHead = accepted
         commitLogHead = accepted

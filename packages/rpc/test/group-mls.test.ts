@@ -136,9 +136,13 @@ describe('GroupMLS port', () => {
     // peer that adopted first would be alone on a branch the moment it lost.
     expect(pending).not.toBeNull()
     expect(stranded.epoch()).toBe(0)
+    // And the commit says it is a REJOIN, before it is applied and without being applied. Nothing
+    // else about it will ever say so: it replaces a leaf the roster already holds, so it changes
+    // no DID and no occupied leaf index, and a member applying it has only this to rotate on.
     expect(await stranded.readCommitHeader(pending?.commit as Uint8Array)).toEqual({
       epoch: 2,
       committerDID: 'stranded',
+      external: true,
     })
 
     await pending?.onAccepted()

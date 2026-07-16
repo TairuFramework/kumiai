@@ -18,15 +18,33 @@ export type GroupCrypto = {
 
 /**
  * What a Commit says about itself, readable WITHOUT applying it and without decrypting: the
- * epoch it is framed at, and its author. Both classify a frame before the peer touches it, and
- * both come from the commit's own bytes (authenticated by its signature), never from the
- * frame's transport sender — that is the hub's word, and the hub is not trusted.
+ * epoch it is framed at, its author, and whether it is an external commit. All three classify a
+ * frame before the peer touches it, and all three come from the commit's own bytes
+ * (authenticated by its signature), never from the frame's transport sender — that is the hub's
+ * word, and the hub is not trusted.
  */
 export type CommitHeader = {
   /** The epoch the Commit is framed at — the epoch every member that can apply it is at. */
   epoch: number
   /** The MLS-authenticated author of the Commit. Not the publisher of the frame. */
   committerDID: string
+  /**
+   * Whether this Commit is an EXTERNAL commit: its committer joined the group with the commit
+   * itself rather than from a leaf it already held — a rejoin.
+   *
+   * The app-lane anchor rotates on it, and CANNOT be told any other way. A rejoin by a member
+   * the roster still holds changes no DID, so {@link rosterDIDs} reads the same set before and
+   * after; it changes no occupied leaf index either, because the resync blanks the member's old
+   * leaf and the new one lands on the leftmost blank — the leaf it just blanked. Nothing a
+   * before/after diff can see moves, and the rejoiner's fresh handle would anchor where it
+   * booted while the group stayed put. So the commit has to say so itself.
+   *
+   * Structural and pre-apply, like its neighbours: an external commit is a public message from a
+   * non-member carrying a commit, which is readable from the frame without advancing state, and
+   * carries its committer's DID in its own UpdatePath leaf (the committer has no pre-commit leaf
+   * to resolve one from). Absent — like `false` — for an ordinary member commit.
+   */
+  external?: boolean
 }
 
 /** Context delivered alongside a received Commit on the raw handshake lane. */
@@ -92,18 +110,24 @@ export type GroupMLS = {
    * a Commit carrying both an Add and a Remove, where a count is unchanged), and a commit that
    * drops a leaf rotates the app-lane anchor. Order is not significant — the lane compares as a
    * set.
+   *
+   * It answers for membership and nothing else. A rejoin by a member the roster still holds
+   * changes no DID and is invisible here, by construction — {@link CommitHeader.external} is
+   * what the lane rotates on for that, and the two together are the whole rotation rule.
    */
   rosterDIDs(): Promise<Array<string>>
   /**
-   * Read what a Commit says about itself — epoch and committer — WITHOUT advancing state.
-   * `null` for bytes that are not a Commit. Lets the lane classify a frame (epoch = this
-   * peer's to apply? committer = this peer's own?) before touching it; neither question may
-   * be answered by trying and failing.
+   * Read what a Commit says about itself — epoch, committer, and whether it is external —
+   * WITHOUT advancing state. `null` for bytes that are not a Commit. Lets the lane classify a
+   * frame (epoch = this peer's to apply? committer = this peer's own? a rejoin?) before touching
+   * it; none of those may be answered by trying and failing.
    *
    * Async and handle-bound: a real host recovers a member commit's committer by decrypting
    * its sender-data with the epoch secret (an open, not an apply) and mapping the sender leaf
    * to a DID against the ratchet tree — both reachable only on the handle the host already
-   * holds. The port reaches its own handle internally; the lane awaits.
+   * holds. An external commit needs neither: it is a public message, and its committer's DID
+   * rides its own UpdatePath leaf, which is also what makes it recognizable as external. The
+   * port reaches its own handle internally; the lane awaits.
    */
   readCommitHeader(commit: Uint8Array): Promise<CommitHeader | null>
   /**

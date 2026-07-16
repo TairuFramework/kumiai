@@ -264,6 +264,41 @@ condition; a member away beyond the window triggers it.
 
 ## Decision Log
 
+### 2026-07-16 — Question 2.3: an external-commit rejoin rotates the anchor
+
+**Findings:** Confirmed. `CommitHeader` gains an optional `external`; the lane rotates on
+`rosterChanged || external`, and the rejoining peer captures its own anchor at the rejoined epoch (it
+never `processCommit`s its own commit — the handle is adopted in `PendingRecovery.onAccepted`). Rejoiner
+and group land on the same post-commit epoch and exchange logged events on one topic. Q2.2's pinned
+three-way divergence is now convergence. Mutation (drop `|| external`): `expected 1 to be 4` — alice
+stuck at 1 while eve reached 4, the exact partition. Verify green: rpc 194 passed / 1 skip, mls 306,
+30/30.
+
+**The probe's finding, and the fix it was scoped out of:** `@kumiai/mls`'s `readCommitHeader` **already
+computed** the external branch (`group-handle.ts:747`) — it needs it to resolve a committer that holds
+no pre-commit leaf — and then **discarded the fact**, returning `{epoch, committerDID}`. So the rpc port
+declared `external`, the memory fake implemented it, and **no real host could populate it**: the hole
+would have been closed in tests and left open in production. The brief's "mls doc-only" constraint was
+simply wrong. Fixed here (additive: `external: true` on the external branch only, absent = member
+commit), and asserted on the **real** path in `packages/mls/test/commit-header.test.ts` — which already
+drives a genuine `resync: true` rejoin — plus a member-commit case pinning `external` undefined.
+Mutation-checked: dropping `external: true` → `expected undefined to be true`, 1 failed / 305 passed.
+
+**Spec impact:** none — §2/§3 already carry the explicit-signal model. Blast radius: `@kumiai/mls` is now
+touched with **behaviour** (one additive field), not doc-only.
+
+**Learned:**
+- A rotation tears down **listeners** but never **subscriptions** (`hub-mux` refcounts locally and never
+  unsubscribes), so a rejoiner keeps its stale pre-rejoin topic subscription **by design**. The probe
+  could not simply mirror `peer-recovery.test.ts`'s subscriber assertion; it replaced it with the
+  decisive fact (all three members on the rejoin epoch's topic). A "no longer subscribed" assertion after
+  a rotation would be asserting something the architecture deliberately does not do.
+- `readExternalCommit` is **module-private**, not a `GroupHandle` method (the Q2.2 brief said otherwise).
+  The corrected `listMembers()` doc therefore points at the structural property rather than at a callable.
+- `peer-roster-change-detect.test.ts`'s rejoin case gained a direct `detectRosterChange(...) === false`
+  assertion alongside the rotation — preserving its subject (the predicate's blind spot) rather than
+  hiding it now that the rotation happens for a different reason.
+
 ### 2026-07-16 — Question 2.2: anchor at the last roster change — stable, rotating, agreed (with one known hole)
 
 **Findings:** Confirmed for adds/removes. Deriving app topics from `anchor.secret`/`anchor.epoch` holds

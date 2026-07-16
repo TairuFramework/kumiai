@@ -525,6 +525,20 @@ export class GroupHandle {
    * order. Leaves whose credential identity fails to parse are skipped (like
    * findMemberLeafIndex). Reflects current #state — call before and after
    * processMessage to diff a commit's membership change.
+   *
+   * The diff sees MEMBERSHIP, and only membership: an Add, a Remove, or both in
+   * one commit (compare as a set — a count misses that last case). It does NOT
+   * see an external-commit REJOIN by a member the group still holds. That member
+   * keeps its id, so the id set is unchanged; and its leaf index is unchanged
+   * too, because a resync blanks the member's old leaf and the new leaf then
+   * takes the leftmost blank — the one just blanked (RFC 9420 §12.4.3.2). No
+   * field of this result moves, and no before/after diff of it can be made to.
+   * A caller that must detect a rejoin reads the COMMIT instead — an external
+   * commit is structurally one: a public message from a non-member carrying a
+   * commit, recognizable from its own bytes before it is applied, and carrying
+   * its committer's id in its own UpdatePath leaf. That is the read
+   * {@link readCommitHeader} already makes internally to resolve such a
+   * committer, and it does not surface the fact today.
    */
   listMembers(): Array<GroupMember> {
     return [...this.#iterateMembers()]
@@ -712,7 +726,7 @@ export class GroupHandle {
    */
   async readCommitHeader(
     commit: Uint8Array,
-  ): Promise<{ epoch: bigint; committerDID: string } | null> {
+  ): Promise<{ epoch: bigint; committerDID: string; external?: boolean } | null> {
     return mutexFor(this).run(async () => {
       let decoded: unknown
       try {
@@ -730,9 +744,16 @@ export class GroupHandle {
 
       // External-join commit: the committer holds no pre-commit leaf, so its DID rides the
       // commit's own UpdatePath leaf. No tree lookup, no sender-data decrypt.
+      //
+      // `external: true` is reported, not just consumed to find the committer: a resync rejoin
+      // is invisible to every before/after diff a caller could run — it changes no member DID
+      // (the roster already held it) and no occupied leaf index (the new leaf lands on the
+      // leftmost blank, which is the one the resync just blanked). A caller that must know the
+      // group's membership shifted has no other way to see it, so the fact is surfaced here
+      // rather than discarded. Absent means a member commit.
       const external = readExternalCommit(decoded)
       if (external != null) {
-        return external.did == null ? null : { epoch, committerDID: external.did }
+        return external.did == null ? null : { epoch, committerDID: external.did, external: true }
       }
 
       const pm = readPrivateCommitFrame(decoded)
