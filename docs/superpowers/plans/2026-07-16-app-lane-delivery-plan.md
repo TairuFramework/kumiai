@@ -178,15 +178,18 @@ are delivered by pull; the skipped test is un-skipped and green.
 
 - **Assumption:** on coming up / reconnecting, the peer walks the commit log epoch by epoch, deriving
   each `exportSecret()`, pulling **once per segment** to head, decrypting each frame under the epoch
-  its MLS ciphertext names; at each Remove boundary it updates the anchor and moves to the next
-  segment's topic. Delivered frames reach the host through the existing `handlers` map.
+  its MLS ciphertext names; at each **roster-change** boundary it updates the anchor and moves to the
+  next segment's topic. Delivered frames reach the host through the existing `handlers` map.
+- **Corrected 2026-07-16:** this entry said "Remove boundary" and "between two removals", which
+  predates the Question 2.2 anchor correction — the anchor sits at the last **roster change** (add OR
+  remove), so a segment is the run between roster changes. Spec §5 is correct; the plan was stale.
 - **Done when:** a test seeds app frames across at least two segments separated by a Remove, brings a
   peer up cold, and asserts the handler receives every frame's plaintext in publish order.
 - **Spec excerpt:** "walk the commit log epoch by epoch (deriving each `exportSecret()`), pulling
-  **once per segment** — the run of epochs between two removals is one stable topic — to head,
-  decrypting each frame under the epoch its MLS ciphertext names; at each Remove boundary update the
-  anchor and move to the next segment's topic. ... Delivered frames reach the host through the
-  existing `handlers` map — no new host delivery API."
+  **once per segment** — the run of epochs between two roster changes is one stable topic — to head,
+  decrypting each frame under the epoch its MLS ciphertext names; at each roster-change boundary
+  update the anchor and move to the next segment's topic. ... Delivered frames reach the host through
+  the existing `handlers` map — no new host delivery API."
 - **Verify:** `pnpm run build && rtk proxy pnpm run lint && pnpm test`
 
 ### Question 3.2: Are all three loss scenarios delivered by pull, with the skipped test un-skipped?
@@ -263,6 +266,64 @@ condition; a member away beyond the window triggers it.
 ---
 
 ## Decision Log
+
+### 2026-07-16 — Question 3.1 (first attempt): BLOCKED, and the brief was wrong
+
+**The block, and it is correct.** The brief specified drain-AFTER-apply (`processCommit` → capture the
+new anchor → drain the segment just left, holding its anchor as pending in a multi-slot store). The
+probe refused it and proved why at the peer level rather than arguing it: at that site every frame of
+the segment just left is already undecryptable — `cannot open bytes sealed at epoch 1: this member is
+at 2` — and the same frame opens one `processCommit` earlier.
+
+**The error was mine: two different secrets, conflated.** The anchor is a **topic-derivation** secret —
+it names WHERE frames live. It is not a message key and opens nothing; frames are sealed and opened by
+`crypto.wrap`/`unwrap`, bound to the handle. So retaining a segment's anchor past the apply buys
+nothing: it fetches ciphertext the peer can no longer open. **The multi-slot store is dead and Q2.4's
+single slot stands** — crash before the apply and the single slot already restores it; crash after and
+the frames are gone whatever the store holds. Done-when #2 asked the probe to assert the opposite of the
+port contract; there was no green test for its own mutation to redden, which is how it surfaced.
+
+**Spec §5 was right the whole time** — "walk epoch by epoch (deriving each `exportSecret()`) …
+decrypting each frame under the epoch its ciphertext names" is drain-BEFORE-apply. Same hook site the
+brief named, opposite side of it. The plan followed the brief; the spec did not need changing.
+
+### 2026-07-16 — Fact: ts-mls retains exactly 4 past epochs, and the drain must not lean on it
+
+**Measured, not reasoned** (`docs/superpowers/probes/ts-mls-past-epoch-decrypt.md` — a throwaway script
+driving ts-mls directly). A `ClientState` at epoch N CAN decrypt application messages sealed at N-1 …
+N-4; at epoch 8, epoch 2 gives `ValidationError: Cannot process message, epoch too old`.
+
+- `ClientState.historicalReceiverData: Map<bigint, EpochReceiverData>` snapshots each departing epoch's
+  secret tree, ratchet tree, sender-data secret and group context on every transition, evicting all but
+  the most recent `retainKeysForEpochs` (**default 4**, `keyRetentionConfig.js:1-6`).
+- **Structural, not an API limit:** eviction collects the dropped epoch's secrets into `consumed`, which
+  `group-handle.ts:800` **zeroes**. No recovery path.
+- Application messages only — a past-epoch commit or proposal throws by design.
+- `@kumiai/mls` preserves this fully and never sets `clientConfig`, so the default always applies.
+
+**Why the drain must not use it.** The window is spent by **epoch transitions, not time** — the
+catch-up walk destroys the very keys it would need. A member away four commits could read; a member away
+a week could not. That is a correctness cliff disguised as a working design, and it fails silently for
+exactly the users this work exists for. Batching in chunks of ≤4 was available and **rejected**: it
+couples the drain's correctness to an undeclared default of a dependency that kumiai never sets and does
+not expose. Four is not a contract; it is a value we currently get by accident.
+
+**Consequence — the fake's strictness becomes the contract.** `createFakeCrypto.unwrap` opens only at
+the sealing epoch; real MLS opens a 4-epoch window. Interleaved decryption sits inside both, so a drain
+green against the fake is correct in production — the fake is conservative, not wrong. But that was an
+accident, and `GroupCrypto.unwrap`'s doc is silent on the question, which is the gap this question fell
+into. State it: rpc requires `unwrap` to open frames sealed at the handle's CURRENT epoch, and the drain
+never relies on past-epoch decryption.
+
+**Noted, not acted on:** a fresh joiner's window is empty (`joinGroup` → `new Map()`) — correct by
+design, a joiner must not read pre-join content (§4). Out-of-order reads within one epoch are bounded by
+`retainKeysForGenerations: 10`; draining in log order reads each sender in generation order, inside the
+bound.
+
+**Hub-fake audit (clean).** `FakeHub`/`DurableFakeHub` are faithful on all ten properties the drain
+relies on, checked against `types.ts`, `memoryStore.ts` and `@kumiai/hub-conformance`: log-class-only,
+not delivery-filtered, exclusive `after`, retained without subscribers, `head` surviving trim,
+limit-after-class-filter, subscription-gated fetch.
 
 ### 2026-07-16 — Question 2.5: the removed member is blind, and the doubles were hiding it
 
