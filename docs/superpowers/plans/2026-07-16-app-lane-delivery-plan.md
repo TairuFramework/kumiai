@@ -1,6 +1,6 @@
 # App-lane delivery — plan
 
-**Stage:** executing
+**Stage:** reviewing
 **Mode:** learning-loop
 **Spec:** docs/superpowers/specs/2026-07-16-app-lane-delivery-design.md
 
@@ -247,7 +247,7 @@ place a gap is knowable, and it cannot report one because it has no durable posi
 **Exit criteria:** members subscribe app topics with a 30-day retention request;
 `docs/agents/architecture.md` documents the retention-class / lane concept map.
 
-### Question 5.1: Do members request a 30-day retention on app-topic subscribe, overridable up to the operator cap?
+### Question 5.1: Do members request a 30-day retention on app-topic subscribe, overridable up to the operator cap? ✅
 
 - **Assumption:** app-topic subscribes pass `SubscribeParams.retention` = 30 days by default; the
   value is a member-carried default (the hub operator's `maxRetention` remains the real cap); a
@@ -259,7 +259,7 @@ place a gap is knowable, and it cannot report one because it has no durable posi
   up to the operator cap remains possible."
 - **Verify:** `pnpm run build && rtk proxy pnpm run lint && pnpm test`
 
-### Question 5.2: Does `docs/agents/architecture.md` now carry the retention-class / lane concept map?
+### Question 5.2: Does `docs/agents/architecture.md` now carry the retention-class / lane concept map? ✅
 
 - **Assumption:** the 14-line stub can be expanded into the durable overview: the two retention
   classes, the three lanes (commit / rendezvous / app), the anchor model, and usage examples.
