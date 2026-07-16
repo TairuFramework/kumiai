@@ -5,6 +5,7 @@ import type { GroupCrypto } from '../../src/crypto.js'
 
 export type FakeCryptoOptions = {
   epoch?: number
+  /** The base `exportSecret` is derived from, per epoch. Defaults to {@link FAKE_BASE_SECRET}. */
   secret?: Uint8Array
   /** XOR key byte. Must be non-zero to be observable. Shared by all members. */
   key?: number
@@ -13,6 +14,29 @@ export type FakeCryptoOptions = {
 }
 
 export type FakeCrypto = GroupCrypto & { setEpoch: (n: number) => void }
+
+/** The base secret every fake member shares, so members at the same epoch export the same bytes. */
+export const FAKE_BASE_SECRET = new Uint8Array(32).fill(0xab)
+
+/**
+ * What {@link createFakeCrypto} exports at `epoch`: the base secret with the epoch mixed in, so
+ * that a different epoch is different bytes. That one property is the whole of it, and the port
+ * contract names it — `exportSecret` is an epoch-bound topic-derivation secret, and a fake that
+ * returned a fixed value would be a lifelong secret plus a guessable epoch number, the exact
+ * shape the app-lane topic must not have.
+ *
+ * Exported because a test that wants the topic the group is on needs the secret of the ANCHOR
+ * epoch, which the live handle has usually run past — the same reason the anchor is persisted.
+ *
+ * A mix, NOT a ratchet: it models none of MLS's one-wayness, and a member holding one epoch's
+ * bytes can trivially compute another's. That truth is real only where the crypto is (see
+ * `@kumiai/mls`); here the fake is a double for wiring and must not pretend otherwise.
+ */
+export function fakeEpochSecret(epoch: number, base: Uint8Array = FAKE_BASE_SECRET): Uint8Array {
+  const out = new Uint8Array(base.length)
+  for (let i = 0; i < base.length; i++) out[i] = (base[i] as number) ^ ((epoch + i) & 0xff)
+  return out
+}
 
 /**
  * Deterministic GroupCrypto for tests. `wrap` seals under the CURRENT epoch's key:
@@ -30,7 +54,7 @@ export type FakeCrypto = GroupCrypto & { setEpoch: (n: number) => void }
  */
 export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
   let epoch = options.epoch ?? 1
-  const secret = options.secret ?? new Uint8Array(32).fill(0xab)
+  const secret = options.secret ?? FAKE_BASE_SECRET
   const key = options.key ?? 0x5a
   const localDID = options.localDID ?? ''
 
@@ -75,7 +99,7 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
 
   return {
     epoch: () => epoch,
-    exportSecret: () => secret,
+    exportSecret: () => fakeEpochSecret(epoch, secret),
     wrap,
     unwrap,
     setEpoch: (n) => {

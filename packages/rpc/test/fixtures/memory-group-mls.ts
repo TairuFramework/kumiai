@@ -532,6 +532,18 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       if (parsed.epoch !== epoch) {
         return { advanced: false }
       }
+      // A Commit that REMOVES this member is one it can never apply: the commit's path excludes
+      // the leaf it drops, so the removed member is handed nothing to derive the new epoch's
+      // secrets from. Its handle stops here, at the last epoch it holds — and that is what
+      // cutting a member off means. It keeps every secret it ever exported and every topic it
+      // ever derived; the per-epoch secret is what it cannot follow.
+      //
+      // `{ advanced: false }`, not a throw: the frame is well-formed and there is nothing to
+      // retry. The tree is left alone too — a member that cannot apply the commit does not learn
+      // its roster from it, so it goes on holding the stale view it had.
+      if (localDID != null && parsed.removes?.includes(localDID)) {
+        return { advanced: false }
+      }
       // A member can never apply the frame that is its OWN commit: MLS merges a pending
       // commit, it does not process one, and the pending state is the only thing that could
       // have carried it. A member that meets its own commit in the log has lost that state,

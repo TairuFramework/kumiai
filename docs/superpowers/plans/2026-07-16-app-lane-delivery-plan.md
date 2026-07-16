@@ -150,7 +150,7 @@ standalone: rename + widen the predicate, invert the add-only and external-rejoi
   port method, or host-persisted state alongside the handle.
 - **Verify:** `pnpm run build && rtk proxy pnpm run lint && pnpm test`
 
-### Question 2.5: Is a removed member unable to derive or read the post-removal app topic?
+### Question 2.5: Is a removed member unable to derive or read the post-removal app topic? ✅
 
 - **Assumption:** because the anchor feeds the **per-epoch** `exportSecret()` (never the lifelong
   recovery secret), a member removed at the rotation commit cannot derive the new epoch's secret,
@@ -263,6 +263,51 @@ condition; a member away beyond the window triggers it.
 ---
 
 ## Decision Log
+
+### 2026-07-16 — Question 2.5: the removed member is blind, and the doubles were hiding it
+
+**Findings:** Confirmed, and **no `src/` change was needed** — the property already held. All the work
+was making it provable, because nothing in the suite could see it. Verify green: rpc 200 passed / 1 skip,
+mls 307, 30/30.
+
+**Both doubles denied the property, in the same way, one file apart.**
+
+- `fake-crypto.ts:78` was `exportSecret: () => secret` — a **fixed** value at every epoch, i.e. exactly
+  "a lifelong secret plus a guessable epoch number", the shape the spec names as the bug. It also
+  contradicted its own port doc ("an epoch-bound topic-derivation secret", `crypto.ts:4`). Now
+  epoch-derived via `fakeEpochSecret(epoch, base)`, documented as **a mix, not a ratchet** — it models
+  none of MLS's one-wayness and must not pretend to.
+- `memory-group-mls.ts:544` (found by the probe, not predicted): a removed member **applied its own
+  removal and advanced**, exporting the post-removal secret and rotating onto the group's topic. The
+  property was inexpressible against it whatever the anchor sealed from. Now a Commit removing
+  `localDID` is `{advanced: false}`, matching the real UpdatePath exclusion. No existing test ever
+  removed its own local peer, which is why it survived.
+
+**The assertion is the topic ID, not the delivery.** Every secret Carol still holds (recovery secret,
+her last per-epoch secret) × every epoch number 0–6 — they are counters, so she can name them all —
+against the group's topic read from a member's own anchor store. Mutation (seal the anchor from the
+recovery secret): red, saying `carol derives the group's topic from the recovery secret, hers for life,
+at epoch 2`. Nothing in the suite could catch that before.
+
+**A prediction in the brief was wrong, and the probe was right to say so.** I claimed reverting the fake
+would make that mutation stop being caught. It does not: the test catches it via the **recovery secret**,
+which the fake never supplied (it comes from `mls.exportRecoverySecret()`). The fixture fix is
+load-bearing in the other direction — **old fake + correct, unmutated code → the test fails**, because
+Carol's fixed per-epoch secret *is* the group's. Against the old fake, a correct implementation and the
+named bug are the same object.
+
+**The exporter secret was the untested half in `@kumiai/mls` too.** `crypto.test.ts`'s existing
+`member removal with forward secrecy` covers **message decryption** only — what a removed member can
+READ. The topic derives from the **exporter** secret, which decides what it can NAME. Added alongside:
+a removed member's state is stuck at the pre-removal epoch, still produces the old exporter secret for
+life, and differs from the group's at every label.
+
+**Known gap — the two halves are proved in places that never meet.** `@kumiai/mls` exposes no
+exporter-secret surface; the host derives it from ts-mls itself. So a host implementing `exportSecret()`
+as `exportRecoverySecret()` passes everything on both sides. See the `next/` item.
+
+**Honest limit:** "she receives nothing" is true and asserted but catches no bug — once she is correctly
+stranded, her epoch number alone keeps her off the topic. Only the topic-ID assertion has teeth.
 
 ### 2026-07-16 — Question 2.4: the anchor is persisted state, in a store of its own
 

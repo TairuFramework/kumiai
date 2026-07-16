@@ -6,7 +6,7 @@ import { defineGroupProtocol } from '../src/protocol.js'
 import { protocolTopic } from '../src/topic.js'
 import { createMemoryAnchorStore, type MemoryAnchorStore } from './fixtures/anchor.js'
 import { publishCommit } from './fixtures/commits.js'
-import { createFakeCrypto, type FakeCrypto } from './fixtures/fake-crypto.js'
+import { createFakeCrypto, type FakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryCommitJournal } from './fixtures/journal.js'
 import { createMemoryGroupMLS, type MemoryGroupMLS } from './fixtures/memory-group-mls.js'
@@ -28,9 +28,10 @@ const flush = () => new Promise((r) => setTimeout(r, 50))
  * that do not touch the roster before the restart — with the anchor and the live epoch equal, a
  * peer that re-seeded and a peer that restored are indistinguishable and this proves nothing.
  *
- * The fake crypto's `exportSecret()` is epoch-independent, so the app topic varies with the
- * anchor EPOCH alone: `protocolTopic(secret, anchorEpoch, 'room')` is the topic frames actually
- * land on, and `fetchTopic` on that ID ties the assertion to the wire.
+ * The anchor's two halves come from ONE epoch — the secret exported at it and its number — and
+ * that pair is the topic frames actually land on; `fetchTopic` on that ID ties the assertion to
+ * the wire. It is also why the store cannot be dropped: neither half of an epoch the handle has
+ * ratcheted past is readable from that handle again.
  */
 const room = defineGroupProtocol({
   'room/posted': { type: 'event', retain: 'log', data: { type: 'object' } },
@@ -146,7 +147,7 @@ describe('the app-lane anchor survives a restart', () => {
     // and the live epoch's topic was never reached for at all.
     const drained = await hub.fetchTopic({ subscriberDID: 'alice', topicID: anchorTopic })
     expect(drained.messages).toHaveLength(2)
-    expect(hub.subscriberCount(protocolTopic(secret, 3, 'room'))).toBe(0)
+    expect(hub.subscriberCount(protocolTopic(fakeEpochSecret(3), 3, 'room'))).toBe(0)
 
     await alice.peer.dispose()
     await restarted.peer.dispose()

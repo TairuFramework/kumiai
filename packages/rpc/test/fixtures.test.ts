@@ -1,7 +1,7 @@
 import { fromUTF, toUTF } from '@sozai/codec'
 import { describe, expect, test } from 'vitest'
 
-import { createFakeCrypto } from './fixtures/fake-crypto.js'
+import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 
 describe('fake crypto', () => {
@@ -23,6 +23,21 @@ describe('fake crypto', () => {
     expect(secret).toBeInstanceOf(Uint8Array)
     crypto.setEpoch(2)
     expect(crypto.epoch()).toBe(2)
+  })
+
+  test('exportSecret is bound to the epoch: a different epoch is different bytes', async () => {
+    const crypto = createFakeCrypto({ epoch: 1 })
+    const atOne = await crypto.exportSecret()
+    crypto.setEpoch(2)
+    const atTwo = await crypto.exportSecret()
+    // The property the port contract asks for and the app-lane topic rests on. A fake exporting a
+    // fixed value would be a lifelong secret plus a guessable epoch number — the one thing a
+    // topic derivation must not be, and it would look identical to a correct one from here.
+    expect(atTwo).not.toEqual(atOne)
+    // Every member is the same function of the epoch, so members AT an epoch agree — and one
+    // stuck behind does not follow.
+    expect(await createFakeCrypto({ epoch: 2 }).exportSecret()).toEqual(atTwo)
+    expect(fakeEpochSecret(1)).toEqual(atOne)
   })
 })
 

@@ -3,7 +3,7 @@ import { createGroupPeer } from '../src/peer.js'
 import { commitTopic, protocolTopic, rendezvousTopic } from '../src/topic.js'
 import { createMemoryAnchorStore } from './fixtures/anchor.js'
 import { publishCommit } from './fixtures/commits.js'
-import { createFakeCrypto } from './fixtures/fake-crypto.js'
+import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryCommitJournal } from './fixtures/journal.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
@@ -47,10 +47,13 @@ describe('control lane lifecycle', () => {
     const commits = commitTopic(recoverySecret)
     const rendezvous = rendezvousTopic(recoverySecret)
     expect(commits).not.toBe(rendezvous)
-    const secret = await crypto.exportSecret()
+    // The app topic of the segment anchored at an epoch: that epoch's secret, under that epoch —
+    // the pair the anchor holds, and the only pair any member is on.
+    const chatTopic = (epoch: number): string =>
+      protocolTopic(fakeEpochSecret(epoch), epoch, 'chat')
     expect(hub.subscriberCount(commits)).toBe(1)
     expect(hub.subscriberCount(rendezvous)).toBe(1)
-    expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(1)
+    expect(hub.subscriberCount(chatTopic(1))).toBe(1)
 
     // A resync rebuilds the app lane onto the SAME topic — it is bound to the anchor, and a
     // resync moves no anchor — and both control topics persist.
@@ -59,7 +62,7 @@ describe('control lane lifecycle', () => {
 
     expect(hub.subscriberCount(commits)).toBe(1)
     expect(hub.subscriberCount(rendezvous)).toBe(1)
-    expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(1)
+    expect(hub.subscriberCount(chatTopic(1))).toBe(1)
 
     // Evicting carol is what rotates the app lane: the topic moves, both control topics stay.
     await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, removes: ['carol'] })
@@ -67,11 +70,11 @@ describe('control lane lifecycle', () => {
 
     expect(hub.subscriberCount(commits)).toBe(1)
     expect(hub.subscriberCount(rendezvous)).toBe(1)
-    expect(hub.subscriberCount(protocolTopic(secret, 2, 'chat'))).toBe(1)
+    expect(hub.subscriberCount(chatTopic(2))).toBe(1)
     // The topic it rotated OFF is one it no longer LISTENS on — and still subscribes to. At the
     // hub, unsubscribing frees this member's undelivered frames; a peer that dropped the
     // subscription as it rotated would delete its own unread mail on the way past.
-    expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(1)
+    expect(hub.subscriberCount(chatTopic(1))).toBe(1)
 
     // Disposing stops this process reading. It does not resign the member's subscriptions —
     // not the control topics, and not the app topics it rotated through. The hub goes on
@@ -80,8 +83,8 @@ describe('control lane lifecycle', () => {
     await flush()
     expect(hub.subscriberCount(commits)).toBe(1)
     expect(hub.subscriberCount(rendezvous)).toBe(1)
-    expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(1)
-    expect(hub.subscriberCount(protocolTopic(secret, 2, 'chat'))).toBe(1)
+    expect(hub.subscriberCount(chatTopic(1))).toBe(1)
+    expect(hub.subscriberCount(chatTopic(2))).toBe(1)
   })
 
   test('the commit topic is subscribed with the log retention window', async () => {
@@ -146,9 +149,11 @@ describe('control lane lifecycle', () => {
     expect(bob.mls.epoch()).toBe(2)
     expect(carol.mls.epoch()).toBe(2)
     // The Commit touched no leaf, so both rebuilt onto the topic they were already on: an
-    // epoch advancing is not a reason to move the group's messages.
+    // epoch advancing is not a reason to move the group's messages. And the topic a live-epoch
+    // derivation would have moved them to — epoch 2's secret, under epoch 2 — was never reached
+    // for at all.
     expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(2)
-    expect(hub.subscriberCount(protocolTopic(secret, 2, 'chat'))).toBe(0)
+    expect(hub.subscriberCount(protocolTopic(fakeEpochSecret(2), 2, 'chat'))).toBe(0)
 
     await bob.peer.dispose()
     await carol.peer.dispose()

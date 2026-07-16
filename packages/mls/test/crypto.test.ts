@@ -1,6 +1,7 @@
 import { gcm } from '@noble/ciphers/aes.js'
 import { chacha20poly1305 } from '@noble/ciphers/chacha.js'
 import {
+  type ClientState,
   type Credential,
   createApplicationMessage,
   createCommit,
@@ -13,6 +14,7 @@ import {
   joinGroup,
   type MlsContext,
   type MlsWelcomeMessage,
+  mlsExporter,
   type PrivateKey,
   processMessage,
   unsafeTestingAuthenticationService,
@@ -219,6 +221,100 @@ describe('nobleCryptoProvider', () => {
         message: privateMessage,
       }),
     ).rejects.toThrow()
+  })
+
+  /**
+   * Its neighbour above covers the message keys: a removed member cannot READ what the group
+   * says next. This covers the EXPORTER secret, which is a different key with a different job —
+   * the app-lane topic is derived from it, so it decides what a removed member can NAME, not
+   * just what it can read. A member removed at the rotation keeps every exporter secret it ever
+   * produced and every topic it ever derived from them; the group's protection is that the
+   * post-removal epoch's is not among them, and cannot be reached from what it holds.
+   */
+  test('a removed member cannot produce the post-removal exporter secret', async () => {
+    const context = await makeContext()
+    const cipherSuite = context.cipherSuite
+    const label = 'kumiai/app-topic/v1'
+    const exporterContext = new TextEncoder().encode('room')
+    const exportAt = (state: ClientState): Promise<Uint8Array> =>
+      mlsExporter(state.keySchedule.exporterSecret, label, exporterContext, 32, cipherSuite)
+
+    const alice = await generateKeyPackage({
+      credential: makeCredential('alice'),
+      cipherSuite,
+    })
+    let aliceState = await createGroup({
+      context,
+      groupId: new TextEncoder().encode('noble-exporter'),
+      keyPackage: alice.publicPackage,
+      privateKeyPackage: alice.privatePackage,
+    })
+
+    const bob = await generateKeyPackage({
+      credential: makeCredential('bob'),
+      cipherSuite,
+    })
+    const addBob = await createCommit({
+      context,
+      state: aliceState,
+      extraProposals: [
+        { proposalType: defaultProposalTypes.add, add: { keyPackage: bob.publicPackage } },
+      ],
+    })
+    aliceState = addBob.newState
+    const bobState = await joinGroup({
+      context,
+      welcome: requireWelcome(addBob.welcome).welcome,
+      keyPackage: bob.publicPackage,
+      privateKeys: bob.privatePackage,
+      ratchetTree: aliceState.ratchetTree,
+    })
+
+    // While Bob is a member the two agree, which is what makes the topic a shared one at all.
+    const beforeRemoval = await exportAt(aliceState)
+    expect(await exportAt(bobState)).toEqual(beforeRemoval)
+
+    // Remove Bob. The commit's UpdatePath excludes his leaf, so nothing in it carries the new
+    // epoch's secrets to him: his state stays where it was, and there is no message he can be
+    // sent that would move it.
+    const removeBob = await createCommit({
+      context,
+      state: aliceState,
+      extraProposals: [{ proposalType: defaultProposalTypes.remove, remove: { removed: 1 } }],
+    })
+    aliceState = removeBob.newState
+    expect(aliceState.groupContext.epoch).toBe(2n)
+    expect(bobState.groupContext.epoch).toBe(1n)
+
+    // The rotation: the group's exporter secret moved with the epoch.
+    const afterRemoval = await exportAt(aliceState)
+    expect(afterRemoval).not.toEqual(beforeRemoval)
+
+    // And what Bob keeps is the OLD one. He is not broken — he can still produce, for life, the
+    // exact secret the group used while he was in it, and every topic he derived from it. He
+    // simply cannot follow it forward: the best his state can do is the epoch he was removed at.
+    expect(await exportAt(bobState)).toEqual(beforeRemoval)
+    expect(await exportAt(bobState)).not.toEqual(afterRemoval)
+
+    // Nor is it the label that separates them: at the post-removal epoch every export Bob can
+    // make differs from the group's, whatever he asks for.
+    for (const other of ['kumiai/app-topic/v1', 'kumiai/inbox/v1', '']) {
+      const fromBob = await mlsExporter(
+        bobState.keySchedule.exporterSecret,
+        other,
+        exporterContext,
+        32,
+        cipherSuite,
+      )
+      const fromGroup = await mlsExporter(
+        aliceState.keySchedule.exporterSecret,
+        other,
+        exporterContext,
+        32,
+        cipherSuite,
+      )
+      expect(fromBob).not.toEqual(fromGroup)
+    }
   })
 
   test('HPKE seal and open round-trip', async () => {

@@ -6,7 +6,7 @@ import { defineGroupProtocol } from '../src/protocol.js'
 import { commitTopic, protocolTopic } from '../src/topic.js'
 import { createMemoryAnchorStore } from './fixtures/anchor.js'
 import { publishCommit } from './fixtures/commits.js'
-import { createFakeCrypto } from './fixtures/fake-crypto.js'
+import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryCommitJournal } from './fixtures/journal.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
@@ -32,9 +32,11 @@ const flush = () => new Promise((r) => setTimeout(r, 50))
  * still delivers — both members rebuild together and land on the same new topic — so delivery
  * alone cannot tell the two designs apart. The topic ID is what can.
  *
- * The fake crypto's `exportSecret()` is epoch-independent, so the app topic here varies with the
- * anchor EPOCH alone: `protocolTopic(secret, anchorEpoch, 'room')` is the topic the frames must
- * actually land on, and `fetchTopic` on that ID is what ties the assertion to the wire.
+ * The anchor's two halves come from ONE epoch — the secret exported at it and its number — so
+ * `roomTopic(anchorEpoch)` below names the topic the frames must actually land on, and
+ * `fetchTopic` on that ID is what ties the assertion to the wire. Pairing one epoch's secret with
+ * another epoch's number derives a topic no member is on, which is why neither half is read from
+ * a live handle that has run past the anchor.
  */
 const room = defineGroupProtocol({
   'room/posted': { type: 'event', retain: 'log', data: { type: 'object' } },
@@ -43,6 +45,9 @@ const room = defineGroupProtocol({
 type Protocols = { room: typeof room }
 
 const MEMBERS = ['alice', 'bob', 'carol']
+
+/** The room topic of the segment anchored at `epoch`: that epoch's secret, under that epoch. */
+const roomTopic = (epoch: number): string => protocolTopic(fakeEpochSecret(epoch), epoch, 'room')
 
 /** A member of the group at `epoch`, wired with an MLS port so commits can drive its epoch. */
 function makeRoomPeer(
@@ -99,10 +104,9 @@ describe('the app topic is stable within a roster-change-bounded segment', () =>
     })
     await flush()
 
-    const secret = await alice.crypto.exportSecret()
-    const genesisTopic = protocolTopic(secret, 1, 'room')
+    const genesisTopic = roomTopic(1)
     expect(alice.peer.anchorEpoch()).toBe(1)
-    expect(protocolTopic(secret, alice.peer.anchorEpoch(), 'room')).toBe(genesisTopic)
+    expect(roomTopic(alice.peer.anchorEpoch())).toBe(genesisTopic)
 
     await alice.peer.protocol('room').dispatch('room/posted', { n: 1 })
     await flush()
@@ -138,7 +142,7 @@ describe('the app topic is stable within a roster-change-bounded segment', () =>
     // moved, and the topic every frame above was published to is still the genesis one.
     expect(alice.peer.anchorEpoch()).toBe(1)
     expect(bob.peer.anchorEpoch()).toBe(1)
-    expect(protocolTopic(secret, alice.peer.anchorEpoch(), 'room')).toBe(genesisTopic)
+    expect(roomTopic(alice.peer.anchorEpoch())).toBe(genesisTopic)
 
     // Tie it to the wire, not just to the derivation: all three logged frames are on the ONE
     // topic. A per-epoch derivation would have scattered them across three.
@@ -147,7 +151,7 @@ describe('the app topic is stable within a roster-change-bounded segment', () =>
     // The per-epoch topics the group would otherwise have moved onto were never even reached
     // for: nobody subscribed to them, so there is nothing on them to fetch.
     for (const staleEpoch of [2, 3]) {
-      expect(hub.subscriberCount(protocolTopic(secret, staleEpoch, 'room'))).toBe(0)
+      expect(hub.subscriberCount(roomTopic(staleEpoch))).toBe(0)
     }
 
     await alice.peer.dispose()
@@ -168,8 +172,7 @@ describe('the app topic is stable within a roster-change-bounded segment', () =>
     })
     await flush()
 
-    const secret = await alice.crypto.exportSecret()
-    const beforeTopic = protocolTopic(secret, alice.peer.anchorEpoch(), 'room')
+    const beforeTopic = roomTopic(alice.peer.anchorEpoch())
 
     await alice.peer.protocol('room').dispatch('room/posted', { n: 'before' })
     await flush()
@@ -192,7 +195,7 @@ describe('the app topic is stable within a roster-change-bounded segment', () =>
     expect(alice.peer.anchorEpoch()).toBe(2)
     expect(bob.peer.anchorEpoch()).toBe(2)
 
-    const afterTopic = protocolTopic(secret, alice.peer.anchorEpoch(), 'room')
+    const afterTopic = roomTopic(alice.peer.anchorEpoch())
     expect(afterTopic).not.toBe(beforeTopic)
 
     // Delivery continues across the rotation, both ways.
@@ -229,8 +232,7 @@ describe('the app topic is stable within a roster-change-bounded segment', () =>
     })
     await flush()
 
-    const secret = await alice.crypto.exportSecret()
-    const beforeTopic = protocolTopic(secret, alice.peer.anchorEpoch(), 'room')
+    const beforeTopic = roomTopic(alice.peer.anchorEpoch())
 
     await alice.peer.protocol('room').dispatch('room/posted', { n: 'before' })
     await flush()
@@ -249,7 +251,7 @@ describe('the app topic is stable within a roster-change-bounded segment', () =>
     expect(alice.peer.anchorEpoch()).toBe(2)
     expect(bob.peer.anchorEpoch()).toBe(2)
 
-    const afterTopic = protocolTopic(secret, alice.peer.anchorEpoch(), 'room')
+    const afterTopic = roomTopic(alice.peer.anchorEpoch())
     expect(afterTopic).not.toBe(beforeTopic)
 
     await alice.peer.protocol('room').dispatch('room/posted', { n: 'after' })
@@ -296,7 +298,6 @@ describe('every member agrees on the anchor, including one that boots after it',
     )
     await flush()
 
-    const secret = await alice.crypto.exportSecret()
     expect(alice.peer.anchorEpoch()).toBe(1)
 
     // Advance the group twice without touching the roster: an update and a ledger enact. Alice's
@@ -343,8 +344,8 @@ describe('every member agrees on the anchor, including one that boots after it',
     expect(dave.peer.anchorEpoch()).toBe(4)
     expect(alice.peer.anchorEpoch()).toBe(4)
 
-    const aliceTopic = protocolTopic(secret, alice.peer.anchorEpoch(), 'room')
-    const daveTopic = protocolTopic(secret, dave.peer.anchorEpoch(), 'room')
+    const aliceTopic = roomTopic(alice.peer.anchorEpoch())
+    const daveTopic = roomTopic(dave.peer.anchorEpoch())
     expect(daveTopic).toBe(aliceTopic)
 
     // And the wire agrees with the derivation, in both directions.
@@ -395,8 +396,7 @@ describe('a rejoining member and the group agree on one app topic', () => {
     )
     await flush()
 
-    const secret = await alice.crypto.exportSecret()
-    const anchoredTopic = protocolTopic(secret, 1, 'room')
+    const anchoredTopic = roomTopic(1)
     expect(alice.peer.anchorEpoch()).toBe(1)
 
     // Drift: two commits that touch no leaf. Alice's live epoch runs to 3; her anchor stays at 1,
@@ -447,8 +447,8 @@ describe('a rejoining member and the group agree on one app topic', () => {
     expect(alice.peer.anchorEpoch()).toBe(4)
     expect(eve.peer.anchorEpoch()).toBe(4)
 
-    const aliceTopic = protocolTopic(secret, alice.peer.anchorEpoch(), 'room')
-    const eveTopic = protocolTopic(secret, eve.peer.anchorEpoch(), 'room')
+    const aliceTopic = roomTopic(alice.peer.anchorEpoch())
+    const eveTopic = roomTopic(eve.peer.anchorEpoch())
     expect(eveTopic).toBe(aliceTopic)
     expect(aliceTopic).not.toBe(anchoredTopic) // and it is not where either of them started
 

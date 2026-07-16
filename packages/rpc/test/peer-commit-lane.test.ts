@@ -5,7 +5,7 @@ import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../s
 import { createGroupPeer } from '../src/peer.js'
 import { commitTopic, protocolTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
-import { createFakeCrypto } from './fixtures/fake-crypto.js'
+import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { buildLedgerCommit, chat, makeMLSPeer, type Protocols } from './fixtures/peer.js'
 
@@ -44,11 +44,12 @@ describe('the commit lane is pull-driven', () => {
 
     // And his app lane sits on the topic his ANCHOR names, not the live epoch he pulled up to:
     // the two commits he walked touched no leaf, so they moved his epoch and left his anchor —
-    // and so his app topic — exactly where it was.
-    const secret = await dave.crypto.exportSecret()
+    // and so his app topic — exactly where it was. Both halves of that topic are epoch 1's: the
+    // secret exported there, under its number, which is what his anchor holds and what his live
+    // handle at 3 could no longer export.
     expect(dave.peer.anchorEpoch()).toBe(1)
-    expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(1)
-    expect(hub.subscriberCount(protocolTopic(secret, 3, 'chat'))).toBe(0)
+    expect(hub.subscriberCount(protocolTopic(fakeEpochSecret(1), 1, 'chat'))).toBe(1)
+    expect(hub.subscriberCount(protocolTopic(fakeEpochSecret(3), 3, 'chat'))).toBe(0)
 
     // He needed no help from another member: he asked for no recovery. (Walking frames
     // from epochs he never held is ordinary catch-up, not evidence of a fork.)
