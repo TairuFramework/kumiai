@@ -69,6 +69,14 @@ const DEFAULT_RECOVERY_DEADLINE_MS = 30_000
  */
 const DEFAULT_COMMIT_LOG_RETENTION_SECONDS = 30 * 24 * 60 * 60
 
+/**
+ * How long the hub is asked to keep an app topic's log. Aligned to the commit window so the two
+ * bounds a returning member converges under coincide: there is no span where it can rebuild its
+ * membership by pulling commits but not its messages. A separate dial rather than the commit
+ * one reused, because the alignment is a CHOICE — a host with reason to move one bound moves it.
+ */
+const DEFAULT_APP_LOG_RETENTION_SECONDS = 30 * 24 * 60 * 60
+
 /** How many commit frames a single pull asks for. Pull loops until the log is drained. */
 const COMMIT_FETCH_LIMIT = 100
 
@@ -167,6 +175,13 @@ export type GroupPeerParams<Protocols extends Record<string, ProtocolDefinition>
    * must heal it.
    */
   commitLogRetentionSeconds?: number
+  /**
+   * App-log retention the hub is asked to hold, in seconds. Default 30 days — the commit window,
+   * so a member asks the hub to hold its app log as long as its commit log and the two bounds
+   * coincide: no span where it can rebuild its membership but not its messages. Overridable up to
+   * the hub operator's own cap, which is what governs real storage.
+   */
+  appLogRetentionSeconds?: number
   /**
    * How long `commit` rebases before giving up, in ms. Default 30s. Losing a compare-and-set is
    * the expected path, not an error path.
@@ -315,6 +330,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     params.recovery?.getDelayMs ?? (() => defaultJitter(DEFAULT_RECOVERY_JITTER_MS))
   const commitLogRetentionSeconds =
     params.commitLogRetentionSeconds ?? DEFAULT_COMMIT_LOG_RETENTION_SECONDS
+  const appLogRetentionSeconds = params.appLogRetentionSeconds ?? DEFAULT_APP_LOG_RETENTION_SECONDS
   const commitDeadlineMs = params.commitDeadlineMs ?? DEFAULT_COMMIT_DEADLINE_MS
   const mux: HubMux = createHubMux({ hub, localDID })
 
@@ -462,6 +478,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       // member's pending deliveries and free any frame it was the last reader of, so a peer that
       // gave up the subscription as it rotated would delete its own unread messages, and
       // everyone else's copy of them.
+      //
+      // Subscribed HERE and not left to the transports below, because the subscription is also
+      // what asks the hub how long to hold the log, and a bus is a fan-out abstraction that
+      // carries no such request. The mux subscribes a topic once, so this is the subscribe the
+      // hub sees for the live lane and it is the one that must carry the window.
+      mux.retainTopic(topicID, { retention: appLogRetentionSeconds })
       const selfInbox = inboxTopic(anchor.secret, anchor.epoch, localDID)
       const client = new BroadcastClient({
         transport: createBroadcastTransport({
@@ -881,7 +903,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     const cursors = new Map<string, { topicID: string; position: LogPosition | null }>()
     for (const name of Object.keys(protocols)) {
       const topicID = protocolTopic(anchor.secret, anchor.epoch, name)
-      mux.retainTopic(topicID)
+      // Carrying the window on the listener-less subscribe too: this is the one a member that is
+      // AWAY makes — a segment reached by rotating onto it mid-walk is pulled here and has never
+      // been listened on — and it is the subscribe that asks the hub to still have the log.
+      mux.retainTopic(topicID, { retention: appLogRetentionSeconds })
       const stored = (await appCursorStore?.load(topicID)) ?? null
       const cursor = stored != null ? asLogPosition(stored) : null
       cursors.set(name, { topicID, position: cursor })

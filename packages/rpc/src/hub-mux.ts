@@ -59,9 +59,10 @@ export type HubMux = {
    * Not paired with a release, deliberately: an app topic is subscribed for the member's whole
    * life (a rotation tears down listeners, never subscriptions), so there is no later moment
    * this could correctly be undone at. Idempotent by the refcount — a topic already subscribed
-   * is not re-subscribed at the hub.
+   * is not re-subscribed at the hub, so `options` are the FIRST caller's and a later retain of
+   * the same topic carries none.
    */
-  retainTopic: (topicID: string) => void
+  retainTopic: (topicID: string, options?: HubSubscribeOptions) => void
   /** Pull a topic's log as the local DID. */
   fetchTopic: (params: MuxFetchTopicParams) => Promise<HubFetchTopicResult>
   onInbound: (
@@ -273,8 +274,8 @@ export function createHubMux(params: HubMuxParams): HubMux {
     bus,
     mailbox,
     publish,
-    retainTopic: (topicID) => {
-      retain(topicID)
+    retainTopic: (topicID, options) => {
+      retain(topicID, options)
     },
     fetchTopic,
     onInbound,

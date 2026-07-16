@@ -118,6 +118,106 @@ describe('control lane lifecycle', () => {
     await peer.dispose()
   })
 
+  test('an app topic is subscribed with the app-log window, and it defaults to the commit window', async () => {
+    const hub = new FakeHub()
+    const recoverySecret = new Uint8Array(32).fill(0x35)
+    const crypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
+    const mls = createMemoryGroupMLS({ recoverySecret })
+    const peer = createGroupPeer<Protocols>({
+      hub,
+      crypto,
+      mls,
+      journal: createMemoryCommitJournal(),
+      anchorStore: createMemoryAnchorStore(),
+      appCursorStore: createMemoryAppCursorStore(),
+      adoptJournalled: async (blob) => {
+        adoptJournalledBlob(mls, blob)
+      },
+      localDID: 'alice',
+      protocols: { chat },
+      handlers: { chat: {} } as never,
+    })
+    await flush()
+
+    const thirtyDays = 30 * 24 * 60 * 60
+    // A member asks the hub to hold its app log as long as its commit log, so the two bounds
+    // coincide: there is no span where it can rebuild its membership and not its messages.
+    expect(hub.requestedRetention(protocolTopic(fakeEpochSecret(1), 1, 'chat'))).toBe(thirtyDays)
+    expect(hub.requestedRetention(commitTopic(recoverySecret))).toBe(thirtyDays)
+
+    await peer.dispose()
+  })
+
+  test('a host may move the app window off the commit window, one dial each', async () => {
+    const hub = new FakeHub()
+    const recoverySecret = new Uint8Array(32).fill(0x36)
+    const crypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
+    const mls = createMemoryGroupMLS({ recoverySecret })
+    const peer = createGroupPeer<Protocols>({
+      hub,
+      crypto,
+      mls,
+      journal: createMemoryCommitJournal(),
+      anchorStore: createMemoryAnchorStore(),
+      appCursorStore: createMemoryAppCursorStore(),
+      adoptJournalled: async (blob) => {
+        adoptJournalledBlob(mls, blob)
+      },
+      localDID: 'alice',
+      protocols: { chat },
+      handlers: { chat: {} } as never,
+      appLogRetentionSeconds: 4321,
+    })
+    await flush()
+
+    // The override reaches the hub on the app topic's own subscribe, and moves nothing else: the
+    // two windows are aligned by choice, so they are two dials and the commit one stays home.
+    expect(hub.requestedRetention(protocolTopic(fakeEpochSecret(1), 1, 'chat'))).toBe(4321)
+    expect(hub.requestedRetention(commitTopic(recoverySecret))).toBe(30 * 24 * 60 * 60)
+
+    await peer.dispose()
+  })
+
+  test('the topic a rotation lands on carries the window on its listener-less subscribe', async () => {
+    const hub = new FakeHub()
+    const recoverySecret = new Uint8Array(32).fill(0x37)
+    const crypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
+    const mls = createMemoryGroupMLS({
+      recoverySecret,
+      epoch: 1,
+      localDID: 'alice',
+      members: ['alice', 'carol'],
+      onAdvance: (e) => crypto.setEpoch(e),
+    })
+    const peer = createGroupPeer<Protocols>({
+      hub,
+      crypto,
+      mls,
+      journal: createMemoryCommitJournal(),
+      anchorStore: createMemoryAnchorStore(),
+      appCursorStore: createMemoryAppCursorStore(),
+      adoptJournalled: async (blob) => {
+        adoptJournalledBlob(mls, blob)
+      },
+      localDID: 'alice',
+      protocols: { chat },
+      handlers: { chat: {} } as never,
+      appLogRetentionSeconds: 4321,
+    })
+    await flush()
+
+    // Evicting carol rotates the anchor: the group's messages move to a topic this peer reaches
+    // by PULLING it — the drain subscribes the segment it rotated onto before anything listens
+    // there. That subscribe is the one a member that is away makes, and it asks for the window.
+    await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, removes: ['carol'] })
+    await flush()
+
+    expect(hub.subscriberCount(protocolTopic(fakeEpochSecret(2), 2, 'chat'))).toBe(1)
+    expect(hub.requestedRetention(protocolTopic(fakeEpochSecret(2), 2, 'chat'))).toBe(4321)
+
+    await peer.dispose()
+  })
+
   test('no control subscriptions when mls is omitted', async () => {
     const hub = new FakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x33)
@@ -133,6 +233,26 @@ describe('control lane lifecycle', () => {
 
     expect(hub.subscriberCount(commitTopic(recoverySecret))).toBe(0)
     expect(hub.subscriberCount(rendezvousTopic(recoverySecret))).toBe(0)
+    await peer.dispose()
+  })
+
+  test('a peer with no commit lane still asks for the app window when it builds the lane', async () => {
+    const hub = new FakeHub()
+    const crypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
+    const peer = createGroupPeer<Protocols>({
+      hub,
+      crypto,
+      localDID: 'alice',
+      protocols: { chat },
+      handlers: { chat: {} } as never,
+      appLogRetentionSeconds: 4321,
+    })
+    await flush()
+
+    // Nothing pulls here — no commit lane, so no drain ever subscribes this topic ahead of the
+    // live lane. Building the lane is the app topic's only subscribe, and it carries the window
+    // like every other one: what asks the hub to hold the log is the subscribe, wherever it is.
+    expect(hub.requestedRetention(protocolTopic(fakeEpochSecret(1), 1, 'chat'))).toBe(4321)
     await peer.dispose()
   })
 
