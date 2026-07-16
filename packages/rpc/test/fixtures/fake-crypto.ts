@@ -49,6 +49,14 @@ export function fakeEpochSecret(epoch: number, base: Uint8Array = FAKE_BASE_SECR
  * every frame from before it joined. `unwrap` throws for those, which is what a member
  * walking a log full of them has to survive without calling them corrupt.
  *
+ * STRICTER THAN REAL MLS, deliberately, and it must stay that way. A real handle also opens a
+ * few epochs BELOW its current one (ts-mls keeps four); this opens the current epoch and nothing
+ * else. That is not an omission — it is the port contract in `crypto.ts` enforced: group-rpc may
+ * only ever require the CURRENT epoch, and reads every retained frame ahead of the commit that
+ * ratchets past it. Anything that passes against this fake therefore passes against a real
+ * handle, whose window is a superset. Loosening it here would let a past-epoch dependency in
+ * silently, and the walk spends the real window it would be leaning on.
+ *
  * NOT real encryption. All members in a test share `key` so they can decrypt each other
  * at a shared epoch; different keys model different groups.
  */

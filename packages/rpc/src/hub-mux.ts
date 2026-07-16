@@ -51,6 +51,17 @@ export type HubMux = {
   /** A mailbox-shaped view of the drain, for the directed tunnels. It carries no log. */
   readonly mailbox: MailboxHub
   publish: (params: MuxPublishParams) => Promise<{ sequenceID: string }>
+  /**
+   * Subscribe the local DID to a topic with NO listener, and never release it. The hub gates a
+   * topic fetch on the caller's own subscription, so a reader that only wants to PULL a topic
+   * still has to be a subscriber of it — and it is also what asks the hub to hold the log.
+   *
+   * Not paired with a release, deliberately: an app topic is subscribed for the member's whole
+   * life (a rotation tears down listeners, never subscriptions), so there is no later moment
+   * this could correctly be undone at. Idempotent by the refcount — a topic already subscribed
+   * is not re-subscribed at the hub.
+   */
+  retainTopic: (topicID: string) => void
   /** Pull a topic's log as the local DID. */
   fetchTopic: (params: MuxFetchTopicParams) => Promise<HubFetchTopicResult>
   onInbound: (
@@ -262,6 +273,9 @@ export function createHubMux(params: HubMuxParams): HubMux {
     bus,
     mailbox,
     publish,
+    retainTopic: (topicID) => {
+      retain(topicID)
+    },
     fetchTopic,
     onInbound,
     dispose: async () => {

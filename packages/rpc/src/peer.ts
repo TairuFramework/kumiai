@@ -11,9 +11,11 @@ import {
   type GatherOptions,
   type RequestOptions,
   type SuppressConfig,
+  type UnwrapResult,
 } from '@kumiai/broadcast'
 import type { StoredMessage } from '@kumiai/hub-protocol'
 import type { LogHub } from '@kumiai/hub-tunnel'
+import { toUTF } from '@sozai/codec'
 
 import type { Anchor, AnchorStore } from './anchor.js'
 import { createGroupBusServer } from './bus-server.js'
@@ -32,7 +34,7 @@ import { type CommitFrame, decodeCommitFrame, encodeCommitFrame } from './commit
 import { type GroupCrypto, type GroupMLS, isMissingLedgerEntries } from './crypto.js'
 import { asLogPosition, type LogPosition } from './cursor.js'
 import { createDirectedClient, createInboxAcceptor } from './directed.js'
-import { adaptBusHandlers } from './handlers.js'
+import { adaptBusHandlers, type BusHandlerMaps } from './handlers.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from './handshake.js'
 import { createHubMux, type HubMux } from './hub-mux.js'
 import { createLedgerEntryResolver, encodeLedgerEntries } from './ledger-entries.js'
@@ -68,6 +70,9 @@ const DEFAULT_COMMIT_LOG_RETENTION_SECONDS = 30 * 24 * 60 * 60
 
 /** How many commit frames a single pull asks for. Pull loops until the log is drained. */
 const COMMIT_FETCH_LIMIT = 100
+
+/** Page size for the app-lane segment pull. Paged for the same reason the commit log is. */
+const APP_FETCH_LIMIT = 100
 
 /**
  * How long `commit` keeps rebasing before giving up. A deadline, not an attempt count: several
@@ -280,6 +285,22 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   const mux: HubMux = createHubMux({ hub, localDID })
 
   let runtimes = new Map<string, ProtocolRuntime>()
+
+  /**
+   * The host's app event handlers, per protocol, as the drain calls them — the same adaptation
+   * the live bus server is built from, so a drained frame and a pushed one reach the host by the
+   * same door. Built once: the handlers a host passed at construction do not change, and the
+   * drain outlives any one epoch's runtime (it runs mid-walk, when the app lane has been torn
+   * down and not yet rebuilt).
+   */
+  const appEventHandlers = new Map<string, BusHandlerMaps['eventHandlers']>()
+  for (const [name, protocol] of Object.entries(protocols)) {
+    appEventHandlers.set(
+      name,
+      adaptBusHandlers(protocol, handlers[name] as Record<string, unknown>, suppress).eventHandlers,
+    )
+  }
+
   /**
    * The live epoch this peer frames commits at, seeded from the handle, not zero. Not the app
    * lane's epoch — that is anchor-bound — but the commit lane's: `frameCommit` refuses to seal
@@ -328,6 +349,24 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   }
 
   /**
+   * The current SEGMENT's retained app frames, per protocol, in log order — still sealed, each
+   * removed as it is delivered. A segment is the run of epochs between two roster changes, which
+   * is exactly the run of epochs one app topic spans, so it is pulled once (below) and then
+   * dispensed epoch by epoch as the commit walk passes through it.
+   *
+   * Ciphertext, not plaintext: which frames are readable is a question only the handle can answer,
+   * and only at the epoch it is at right now.
+   */
+  let appSegment = new Map<string, Array<Uint8Array>>()
+
+  /**
+   * Whether {@link appSegment} holds this segment's pull. Pulled ONCE per segment and not per
+   * commit: a re-pull would re-deliver every frame the buffer had already dispensed, and the log
+   * is the same log at every epoch inside the segment.
+   */
+  let appSegmentLoaded = false
+
+  /**
    * Capture the anchor from the port's post-commit handle and persist it. The one place the
    * anchor is written from the live epoch, and the one place it is saved.
    *
@@ -340,6 +379,16 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   const captureAnchor = async (): Promise<void> => {
     anchor = { secret: await crypto.exportSecret(), epoch: crypto.epoch() }
     await anchorStore?.save(anchor)
+    // The anchor moving IS the segment boundary — there is no other definition of one — so every
+    // capture ends the segment the buffer belongs to. Reset here rather than at the call sites so
+    // a future capture cannot forget to.
+    //
+    // Dropping UNDELIVERED frames is correct and not a loss: the walk that reached this rotation
+    // already read everything openable at every epoch it passed on its way here, so what remains
+    // is what no epoch this peer will ever hold again can open. The next drain pulls the new
+    // segment's topic, which is where the group's messages now are.
+    appSegment = new Map()
+    appSegmentLoaded = false
   }
 
   const buildEpoch = async (): Promise<void> => {
@@ -725,6 +774,129 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   }
 
   /**
+   * Pull this segment's retained app frames into {@link appSegment}, once. Returns silently if
+   * the buffer already holds them.
+   *
+   * ONE pull for the whole segment: every epoch between two roster changes shares one app topic
+   * (the topic is anchor-bound, and the anchor only moves at a roster change), so a peer walking
+   * five epochs inside a segment reads one log, not five. The frames come back sealed and stay
+   * that way — {@link deliverAppFrames} opens them one epoch at a time.
+   *
+   * Subscribed before pulled: the hub gates a topic fetch on the caller's own subscription, and a
+   * segment reached by ROTATING onto it mid-walk has never been subscribed — the app lane is
+   * rebuilt only once the walk is over.
+   */
+  const loadAppSegment = async (): Promise<void> => {
+    if (appSegmentLoaded) return
+    const loaded = new Map<string, Array<Uint8Array>>()
+    for (const name of Object.keys(protocols)) {
+      const topicID = protocolTopic(anchor.secret, anchor.epoch, name)
+      mux.retainTopic(topicID)
+      const frames: Array<Uint8Array> = []
+      let after: LogPosition | null = null
+      while (true) {
+        const result = await mux.fetchTopic({
+          topicID,
+          // No cursor: the whole segment from its oldest retained frame. A cursor would have to
+          // be durable to mean anything across the restart this drain exists for, and the
+          // buffer's own per-epoch trial decryption is what keeps a re-read from re-delivering.
+          ...(after != null ? { after } : {}),
+          limit: APP_FETCH_LIMIT,
+        })
+        // SEAM: `result.oldest` is where the hub's retention now begins. A frame published to this
+        // segment and aged out below it is gone, and this is the only place that is knowable —
+        // but telling the host so needs a durable read position to compare against, and there is
+        // none here. Nothing is reported; a pruned frame is silently absent.
+        for (const message of result.messages) {
+          frames.push(message.payload)
+          after = asLogPosition(message.sequenceID)
+        }
+        if (result.messages.length < APP_FETCH_LIMIT) break
+      }
+      loaded.set(name, frames)
+    }
+    appSegment = loaded
+    appSegmentLoaded = true
+  }
+
+  /**
+   * Deliver every buffered app frame the handle can open AT THE EPOCH IT IS AT RIGHT NOW, and
+   * leave the rest buffered. Called before each apply and once more when the walk ends.
+   *
+   * The invariant it exists for: a frame is opened at the epoch it was sealed at, so it must be
+   * read BEFORE the handle ratchets past that epoch. Once the commit is applied the handle holds
+   * a different epoch's key material and those bytes are ciphertext forever — so this runs ahead
+   * of the apply, not after it, and the binding is per-FRAME-EPOCH, not per-rotation: every epoch
+   * inside a segment has to be dispensed as the walk passes through it, not once at the anchor.
+   *
+   * `unwrap` throwing is how a frame says "not my epoch" — ordinary control flow, exactly as on
+   * the live path (see the port contract in `crypto.ts`). A frame that does not open is put back:
+   * it is either from an epoch still ahead of the walk, or from one the handle can no longer
+   * reach, and this cannot tell the two apart without the walk playing out.
+   *
+   * Every frame is tried rather than stopping at the first that will not open. Publish order IS
+   * non-decreasing in seal-epoch in an honest group, which would make each epoch's frames a
+   * contiguous run at the front and the two identical — but the front can also hold a frame from
+   * an epoch the handle has ALREADY passed (a journal replay advances it before this pull ever
+   * runs), and stopping there would wedge every readable frame behind an unreadable one for the
+   * rest of the segment. Trying all of them delivers a superset, in publish order, and drops
+   * nothing.
+   *
+   * A LAGGARD publisher is the one case no ordering saves: a member still at epoch E writing to
+   * this topic after the rest of the group rotated past E seals bytes nobody can open again.
+   * Inherent, and not this drain's to repair.
+   *
+   * NOT delivered: this member's own frames. The live fan-out never echoes a publisher its own
+   * broadcast, and a drain that did would make a returning member the only one to see its own
+   * messages arrive.
+   */
+  const deliverAppFrames = async (): Promise<void> => {
+    try {
+      await loadAppSegment()
+    } catch {
+      // The pull failed (not yet subscribed, hub down). The buffer stays unloaded and the next
+      // pull retries it; the commit walk is not this drain's to break.
+      return
+    }
+    for (const [name, frames] of appSegment) {
+      const eventHandlers = appEventHandlers.get(name)
+      if (eventHandlers == null || frames.length === 0) continue
+      const remaining: Array<Uint8Array> = []
+      for (const sealed of frames) {
+        let opened: UnwrapResult
+        try {
+          const result = await crypto.unwrap(sealed)
+          opened = result instanceof Uint8Array ? { payload: result } : result
+        } catch {
+          remaining.push(sealed) // not this epoch's frame: it keeps its place in the buffer
+          continue
+        }
+        if (opened.senderDID === localDID) continue // its own echo, as the live path would not
+        let message: { payload?: { typ?: string; prc?: unknown; data?: unknown } }
+        try {
+          message = JSON.parse(toUTF(opened.payload))
+        } catch {
+          continue // malformed: dropped, exactly as the live transport drops it
+        }
+        const prc = message.payload?.prc
+        if (message.payload?.typ !== 'event' || typeof prc !== 'string') continue
+        // A retained frame naming an EPHEMERAL procedure was published `retain: 'log'` by a member
+        // whose dispatch would never do that. Retention is the protocol's word, not the frame's.
+        if (retentionOf(protocols[name], prc) !== 'log') continue
+        const handler = eventHandlers[prc]
+        if (handler == null) continue
+        try {
+          await handler(message.payload.data ?? {}, opened.senderDID)
+        } catch {
+          // A host handler that threw has been delivered to. Re-delivering it on the next pull
+          // would be the drain retrying the host's own bug at it, so the frame is consumed.
+        }
+      }
+      appSegment.set(name, remaining)
+    }
+  }
+
+  /**
    * Read the commit log forward from the cursor, classify every frame, advance the cursor over
    * each one it is done with. Returns whether any advanced the epoch.
    *
@@ -747,15 +919,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * record the tip (the head is genuinely beyond this peer) — and the `stranded` flag, not a
    * withheld tip, then stops the next `commit()` racing at it.
    */
-  const pullCommits = async (): Promise<boolean> => {
-    if (!journalReplayed) {
-      throw new Error(
-        'pullCommits: the journal must be replayed first in every lane operation, or a peer that crashed on its own commit heals from it instead of adopting it',
-      )
-    }
-    if (mls == null || commitTopicID == null) return false
-    const port = mls
-    const topicID = commitTopicID
+  const walkCommits = async (port: GroupMLS, topicID: string): Promise<boolean> => {
     let advancedEpoch = false
     // The tip from the SAME reply whose frames were processed, so it can never run ahead of them.
     const takeHead = (head: string | null): void => {
@@ -861,6 +1025,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         // Framed at this peer's epoch, by somebody else: a frame it can apply. Everything below is
         // the port's answer to it.
         const framedEpoch = crypto.epoch()
+        // Read this epoch's app frames BEFORE the commit that leaves it. A frame is opened at the
+        // epoch it was sealed at, so this is the last moment it can be read: the apply below
+        // ratchets the handle to the next epoch, and the key material for this one goes with it.
+        // Every epoch the walk passes gets this — the constraint is per frame-epoch, not per
+        // rotation, so a segment spanning five epochs is dispensed five times off the one pull.
+        await deliverAppFrames()
         // The roster this handle holds BEFORE applying, to diff against the roster after. Only an
         // applied commit can change it, so the after-read and the diff run only when the epoch
         // advanced — but the before-read must happen here, ahead of the apply that would change it.
@@ -946,6 +1116,26 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         return advancedEpoch
       }
     }
+  }
+
+  /**
+   * The commit walk, with this segment's retained app frames delivered around it.
+   *
+   * The walk reads each epoch's frames ahead of the apply that leaves it; this adds the one epoch
+   * that has no apply after it — the head the walk stops at. Its frames are readable now and
+   * nothing further is coming to prompt them, so a peer whose backlog is entirely at its current
+   * epoch (or whose log held no commits at all) would otherwise never read a thing.
+   */
+  const pullCommits = async (): Promise<boolean> => {
+    if (!journalReplayed) {
+      throw new Error(
+        'pullCommits: the journal must be replayed first in every lane operation, or a peer that crashed on its own commit heals from it instead of adopting it',
+      )
+    }
+    if (mls == null || commitTopicID == null) return false
+    const advanced = await walkCommits(mls, commitTopicID)
+    await deliverAppFrames()
+    return advanced
   }
 
   /** Pull the commit log, and rebuild the app lane if the pull moved the epoch. */

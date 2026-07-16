@@ -8,6 +8,22 @@ import type { ByteTransform, Unwrap } from '@kumiai/broadcast'
  * `epoch()` and `exportSecret()` are read on init and every {@link "peer".GroupPeer.resync}.
  * `wrap`/`unwrap` close over the live group, so they always use current epoch state. `unwrap`
  * returns the authenticated sender (`senderDID`) recovered from the ciphertext.
+ *
+ * WHAT `unwrap` MUST OPEN, and what group-rpc must never ask of it: it must open bytes sealed at
+ * the handle's CURRENT epoch. That is the whole requirement. A real MLS handle also opens a few
+ * epochs BELOW the current one — ts-mls keeps four, and evicting the fifth zeroes its key
+ * material — but group-rpc must not depend on that window, and does not: it reads every retained
+ * frame at the epoch its ciphertext was sealed at, ahead of the commit that would ratchet the
+ * handle past it. The window is spent by epoch TRANSITIONS rather than by time, so a peer
+ * catching up destroys the very keys a past-epoch read would need — a member away four commits
+ * could read and a member away a week could not. Leaning on it would make correctness turn on how
+ * far behind a peer happened to fall.
+ *
+ * So `unwrap` throwing is ORDINARY CONTROL FLOW on the read paths, not an error: it is how a
+ * frame says "not my epoch". Every reader here walks logs full of frames from epochs it does not
+ * hold — a late joiner reaches the commit that added it — and drops them without calling them
+ * corrupt. An implementation that opens strictly at the current epoch is a correct implementation
+ * of this port.
  */
 export type GroupCrypto = {
   epoch(): number

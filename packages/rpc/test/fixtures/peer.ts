@@ -1,8 +1,8 @@
-import type { ProtocolDefinition } from '@enkaku/protocol'
 import type { LogHub } from '@kumiai/hub-tunnel'
 
 import type { PendingCommit } from '../../src/commit.js'
 import { createGroupPeer, type GroupPeer } from '../../src/peer.js'
+import type { GroupProtocolDefinition } from '../../src/protocol.js'
 import { createMemoryAnchorStore, type MemoryAnchorStore } from './anchor.js'
 import { createFakeCrypto, type FakeCrypto } from './fake-crypto.js'
 import { createMemoryCommitJournal, type MemoryCommitJournal } from './journal.js'
@@ -12,9 +12,16 @@ import {
   type MemoryGroupMLS,
 } from './memory-group-mls.js'
 
+/**
+ * `chat/changed` is EPHEMERAL — live push, nothing retained, nothing drainable — and every test
+ * that uses it depends on that. `chat/posted` is the retained one, alongside it rather than
+ * instead of it: flipping `chat/changed` would quietly hand a log to tests written about a
+ * mailbox, and both classes sharing one topic is the real shape anyway.
+ */
 export const chat = {
   'chat/changed': { type: 'event', data: { type: 'object' } },
-} as const satisfies ProtocolDefinition
+  'chat/posted': { type: 'event', retain: 'log', data: { type: 'object' } },
+} as const satisfies GroupProtocolDefinition
 
 export type Protocols = { chat: typeof chat }
 
