@@ -222,7 +222,7 @@ the **same mechanism** the pruned-window signal needs: the `// SEAM:` in `loadAp
 place a gap is knowable, and it cannot report one because it has no durable position to compare
 `result.oldest` against. One cursor answers both; they are one question, not two.
 
-### Question 4.1: Does the drain detect a below-retention gap and emit a pruned-window event (not a silent drop)?
+### Question 4.1: Does the drain detect a below-retention gap and emit a pruned-window event (not a silent drop)? ✅
 
 - **Assumption:** the drain can tell a genuine gap (hub oldest-retained newer than the needed cursor)
   from a clean pull; on a gap it emits an rpc event naming the group, carrying the gap boundary as a
@@ -274,6 +274,46 @@ place a gap is knowable, and it cannot report one because it has no durable posi
 ---
 
 ## Decision Log
+
+### 2026-07-16 — Question 4.1: the cursor, and the distinction that makes it safe
+
+**Findings:** Confirmed. Three additive surfaces, load-bearing for each other: `GroupCrypto.frameEpoch`
+(`crypto.ts`), `AppCursorStore` (`app-cursor.ts`, keyed by topic ID, required alongside
+`mls`/`journal`/`anchorStore`), and an **optional** `onAppWindowPruned` callback. Verify green: rpc 209
+passed, 30/30. Mutations: reverting the emit reds the pruned test **on the emit alone** (the delivery
+assertion above it still passed — the event is what is being tested, not delivery); deleting the line
+that holds the advance rule reds the advance-rule test, and with that assertion relaxed the
+future-sealed frame is **silently lost**, which is the bug itself.
+
+**The advance rule is the safety property.** A cursor may only pass a frame that is DELIVERED or DEAD.
+`advanceAppCursor` walks the contiguous **done prefix** of the buffer and stops dead at the first frame
+that is not done — a position is a place in the LOG, so passing it passes everything before it. A frame
+sealed ahead of the walk is neither delivered nor dead; the cursor waits behind it.
+
+**Why the port had to grow.** The rule needs a distinction `unwrap` cannot make: it throws "not my
+epoch" and cannot say WHICH. Sealed-ahead (opens later) and sealed-below (never opens again) are the
+same exception. `frameEpoch` reads the epoch from the frame's own cleartext, pre-open, as
+`readCommitHeader` is pre-apply — one line for a host, over `@kumiai/mls`'s existing
+`readMessageEpoch`. **Trust boundary, stated in the doc:** it is the publisher's word relayed by an
+untrusted hub, so it decides only what to try and what to pass, never what is authentic; `unwrap`
+remains the only authority on opening. It also retired the `O(frames × commits)` trial decrypt.
+
+**Required vs optional, and the line between them.** The stores are required in the type; the callback
+is optional. The test is whether omitting it loses messages: a host with no cursor store silently
+partitions or re-reads forever, while a host ignoring the pruned signal loses nothing it would not have
+lost anyway — it is merely not told.
+
+**Concerns carried, not closed:**
+- **`oldest > cursor` over-reports and cannot do otherwise.** Nothing records which positions a topic
+  used to hold, so a peer whose own cursor frame ages out with nothing behind it reads identically to a
+  real gap. Conservative by choice (never silent about a real gap). Kubun should wire it as a health
+  **condition**, not a user-facing message count.
+- **The cursor tracks the drain, not the live lane**, so a restart can re-deliver frames that arrived
+  live and sit after the cursor. Strictly better than the old whole-segment re-pull, not a regression —
+  but the drain is at-least-once against the live path.
+- **`groupID` is the group's commit topic** (the only stable group-lifetime name rpc has). Drops into
+  `GroupHealthMonitor.signal(groupID, condition)` cleanly, but Kubun keys health by its own group ID and
+  will need the mapping. Confirm when that follow-up lands.
 
 ### 2026-07-16 — Question 3.1: the drain runs BEFORE each apply, and three rulings
 
