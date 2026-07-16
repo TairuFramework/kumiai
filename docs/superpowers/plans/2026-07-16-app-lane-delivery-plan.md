@@ -1,8 +1,47 @@
 # App-lane delivery — plan
 
-**Stage:** reviewing
+**Stage:** reviewing (PAUSED 2026-07-16 — resume at Fix 2 below)
 **Mode:** learning-loop
 **Spec:** docs/superpowers/specs/2026-07-16-app-lane-delivery-design.md
+
+## Resume here
+
+All five phases are answered and green (rpc 218, mls 307, 30/30). An adversarial branch review
+(`docs/superpowers/probes/branch-review.md`) found 8 defects. **Fix 1 landed** (`a300a54`). Two fixes
+remain, and the branch is NOT finishable until they do.
+
+**Fix 2 — the drain's trust and freshness.** Brief not yet written. Three findings, one area
+(`loadAppSegment`/`deliverAppFrames`):
+- **F4 (promote to HIGH — security).** `peer.ts` future-epoch claim has no upper bound. One frame
+  claiming epoch `65535` — injectable by the untrusted hub, which sees every topic ID in the clear —
+  pins the cursor for the segment's whole life: `advanceAppCursor` stops at the first frame with
+  `sealed != null`, forever. Unbounded buffer growth, whole-segment re-delivery every boot, permanent
+  spurious `onAppWindowPruned`. For a stable-roster group there is no bound at all. It converts an
+  untrusted party's word into durable local state — the one thing `frameEpoch`'s trust-boundary doc
+  exists to prevent (it covers claims-current, says nothing about claims-future). Fix shape: a claim
+  above what the commit log's head can justify is DEAD, not "ahead" — no walk will reach it.
+- **F3.** `deliverAppFrames` swallows a `loadAppSegment` failure and the walk ratchets on. The comment
+  ("the next pull retries it") is true of the pull and false of the delivery: one transient fetch error
+  mid-walk destroys the backlog at every epoch passed. No fault injection exists anywhere in the suite.
+- **F5.** The one-pull-per-segment latch, justified by a comment false on both clauses ("the log is the
+  same log" — it grows; "a re-pull would re-deliver" — the pull is FROM THE CURSOR). The latch was
+  written in Q3.1, before Q4.1's cursor existed, and the cursor falsified it without the prose being
+  revisited. It defeats the cursor it is redundant with, and reintroduces dropped-if-not-listening
+  inside the drain.
+
+**Fix 3 — test quality.** F7: the `retentionOf` re-check guard and the self-echo guard both survive
+deletion (no test holds them); `peer-app-drain.test.ts:20` sits in the drain suite but dispatches an
+ephemeral procedure and tests the live lane. F8: `peer-removed-blind.test.ts`'s title claims forward
+secrecy the XOR fake cannot express (it does catch the two anchor regressions that matter).
+
+**Open question, from Fix 1's report — needs a ruling.** Fix 1 made the LOGGED publish take its topic
+from the live anchor. The ephemeral/RPC lane still binds to its runtime's topic, so a mailbox frame in
+the rotation window lands on the lane the group just left. That is the accepted-laggard shape inverted
+rather than readable-by-nobody. Fold into Fix 2, or file.
+
+**Then:** qa → completing → finishing. Kubun-side follow-ups are queued in `docs/agents/plans/next/`
+(`rosterDIDs()`, `external`, `frameEpoch`, the pruned event into `GroupHealthMonitor`, the reserved
+namespace prefix, the mux subscribe swallow, the exporter-secret surface).
 
 > Verify command for every question (run from repo root):
 > `pnpm run build && rtk proxy pnpm run lint && pnpm test`
