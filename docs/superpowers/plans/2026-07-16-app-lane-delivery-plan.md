@@ -15,29 +15,41 @@
 
 ---
 
-## Phase 1: App frames become log-class and pullable
+## Phase 1: Per-procedure retention — logged events become pullable
 
-Foundation. Everything downstream (drain, anchor rotation, pruned signal) assumes app frames are
-retained and pullable. Validate that before building on it.
+Foundation. Everything downstream (drain, anchor rotation, pruned signal) assumes **logged events**
+are retained and pullable, while ephemeral events and all RPC stay live. Retention is a per-procedure
+property of the group protocol definition; only events may be `log` (correlation is always ephemeral).
+Validate that split before building on it.
 
-**Exit criteria:** an online subscriber still receives app frames live; the same frame is
-independently retrievable via `mux.fetchTopic` on the app topic; no `@kumiai/broadcast` public
-signature changed; existing rpc tests stay green.
+**Exit criteria:** a `retain:'log'` event published to an app topic is both live-pushed to an online
+subscriber AND independently retrievable via `mux.fetchTopic`; an ephemeral event is live-pushed but
+**not** returned by `fetchTopic`; declaring `retain:'log'` on a `request`/`gather` procedure is
+rejected at definition time; RPC (`request`/`gather`/`reply`) is unchanged; existing rpc tests stay
+green. `@kumiai/broadcast` public surface unchanged except at most one additive optional field if the
+`retain` marker lands on `defineGroupProtocol`.
 
-### Question 1.1: Can the app-lane publish be redirected to `mux.publish({ retain: 'log' })` while `BroadcastClient` keeps live-push subscribe and wrap/unwrap?
+### Question 1.1: Does a per-procedure `retain:'log'` marker make a logged event pull-drainable while ephemeral events and RPC stay live?
 
-- **Assumption:** the publish leg of `createBroadcastTransport` can be pointed at `mux.publish` with
-  `retain: 'log'` (via an injected publish fn or a thin log-transport variant) without touching
-  `BroadcastBus`'s public shape; live push via `bus.subscribe`/`onInbound` is unaffected; the frame
-  is now retained and pullable.
-- **Done when:** a test shows (a) an online subscriber receives a dispatched app frame live, AND
-  (b) a fresh `mux.fetchTopic` on that app topic returns the same (wrapped) frame; `@kumiai/broadcast`
-  exports are unchanged; `peer-control-lanes.test.ts` and the existing (non-skipped) app tests pass.
-- **Spec excerpt:** "App publish routes through `mux.publish({ topicID, payload, retain: 'log' })` —
-  the exact machinery the commit lane already uses and tests. `BroadcastClient` is kept **only** for
-  live-push subscribe (`bus.subscribe` → `onInbound`) and for its `wrap`/`unwrap` (encryption)
-  responsibilities; its publish leg is redirected to `mux.publish` with `retain: 'log'`. No
-  `@kumiai/broadcast` public signature changes — the transport is handed a publish function."
+- **Assumption:** an event procedure can declare `retain:'log'` (additive field on
+  `defineGroupProtocol` or an rpc-side sidecar — pick the cleaner in Step 1); a logged event publishes
+  via `mux.publish({ retain:'log' })`, an ephemeral event via the existing live path; the send API
+  stays a single `dispatch(prc, data)` routing by the declared retention; the receive side is
+  unchanged; the definition rejects `retain:'log'` on a `request`/`gather` procedure.
+- **Done when:** a test shows (a) an online subscriber receives a logged event live AND a fresh
+  `mux.fetchTopic` on that topic returns the same (wrapped) frame; (b) an ephemeral event is received
+  live but `mux.fetchTopic` does **not** return it; (c) declaring `retain:'log'` on a
+  `request`/`gather` procedure is a definition-time error; `request`/`gather` still work; existing
+  `peer-control-lanes.test.ts` and the non-skipped app tests pass.
+- **Spec excerpt:** "Only events may be `log`. `request` / `gather` / `reply` are always ephemeral ...
+  Retention is declared per procedure in the group protocol definition — not chosen per call. An event
+  procedure marks `retain: 'log'`; the default is ephemeral ... The protocol definition is also where
+  the guardrail is enforced: declaring `retain: 'log'` on a `request` / `gather` procedure is rejected
+  at definition time ... The send API stays a single `dispatch(prc, data)` that routes by the
+  procedure's declared retention ... A topic may carry both classes — `fetchTopic` returns only
+  `retain:'log'` frames."
+- **Open (decide in Step 1):** `retain` marker home (additive `defineGroupProtocol` field vs. rpc
+  sidecar); the publish seam so a logged event reaches `mux.publish` while live traffic is untouched.
 - **Verify:** `pnpm run build && rtk proxy pnpm run lint && pnpm test`
 
 ---

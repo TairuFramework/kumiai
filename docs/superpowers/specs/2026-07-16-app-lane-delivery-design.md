@@ -74,22 +74,54 @@ We further validated against the real host, **Kubun** (feature branch mid-migrat
 
 ## The design
 
-### 1. App frames become log-class and pullable (Fork 1 — via `mux.publish`/`fetchTopic`)
+### 1. Retention is a per-procedure property; only events may be logged (Fork 1)
 
-App publish routes through `mux.publish({ topicID, payload, retain: 'log' })` — the exact machinery
-the commit lane already uses and tests. `BroadcastClient` is kept **only** for live-push subscribe
-(`bus.subscribe` → `onInbound`) and for its `wrap`/`unwrap` (encryption) responsibilities; its
-publish leg is redirected to `mux.publish` with `retain: 'log'`. No `@kumiai/broadcast` public
-signature changes — the transport is handed a publish function.
+App traffic has two **orthogonal** dimensions, chosen independently:
 
-A log-class frame pushes live to online subscribers **and** is retained for pull, so "drain epoch E
-fully" becomes a `fetchTopic` the peer can complete and *know* it completed. Accumulation is a
-non-issue: unsubscribing a log-class topic frees nothing, so a peer subscribes only the *current*
-app topic for live push and reaches old ones by pull.
+- **Kind** — `event` (fire-and-forget, 1→N) | `request` / `gather` / `reply` (RPC correlation). All
+  four primitives stay.
+- **Retention** — `log` (retained by the hub, pullable to a cursor, drained on return) | `ephemeral`
+  (live push, mailbox-class, dropped if no subscriber at publish).
 
-Rejected alternatives: widening `BroadcastBus.publish` with `retain` + adding a pull method (pushes
-log semantics into a generic fan-out lib and changes its public surface); fully retiring
-`BroadcastClient` for the app lane (largest rewrite, no benefit over reusing `mux`).
+**Guardrail: only events may be `log`. `request` / `gather` / `reply` are always ephemeral.** Retaining
+correlation traffic is unsafe on two counts: a `request` re-pulled during a drain re-fires its
+responder, so a returning member would re-run RPCs that already ran; and the `rid` / timeout / quorum
+a reply correlates against is long dead by the time a member returns. Durability is expressed as a
+**logged event applied idempotently**, never as a retained request.
+
+**Retention is declared per procedure in the group protocol definition — not chosen per call.** An
+event procedure marks `retain: 'log'`; the default is ephemeral. Every `dispatch` of that procedure is
+retained regardless of the call site, so retention is an intrinsic property of the *message type* and
+cannot be fumbled per-call (silent loss from a wrong per-call choice is the exact failure this feature
+exists to prevent). The protocol definition is also where the guardrail is **enforced**: declaring
+`retain: 'log'` on a `request` / `gather` procedure is rejected at definition time.
+
+- **Logged events** (e.g. `chat/message`, mutations) publish via the hub's log class
+  (`mux.publish({ retain: 'log' })` — the machinery the commit lane already uses and tests), retained
+  and pullable; a returning member drains them.
+- **Ephemeral events** (e.g. `chat/typing`, presence, cursors) publish live (mailbox), never retained,
+  never drained. Presence itself is **out of scope**; the point is only that the knob exists so a
+  signal stream is never *forced* onto the log — a retained "online" outlives the device, and flap
+  would pollute every returning member's drain.
+
+The send API stays a single `dispatch(prc, data)` that routes by the procedure's declared retention;
+the receive side is unchanged (handlers keyed by procedure name). A topic may carry both classes —
+`fetchTopic` returns only `retain:'log'` frames, so the drain pulls every app topic and receives
+exactly the logged events; mixing on one topic is safe. A log-class frame also pushes live to online
+subscribers, so "drain epoch E fully" becomes a `fetchTopic` the peer can complete and *know* it
+completed; accumulation is a non-issue because unsubscribing a log-class topic frees nothing (subscribe
+only the current topic for live push, reach old ones by pull).
+
+Rejected API shapes: a per-call `retain` flag on `dispatch` (a load-bearing choice buried in an options
+bag, one typo from silent loss); two send methods `dispatch` / `post` (explicit at the call site, but
+the method name is the only guard — same fumble risk). Rejected transport shapes: widening
+`BroadcastBus.publish` with `retain` + a pull method, or retiring `BroadcastClient` for the app lane —
+both touch the generic fan-out lib's public surface for no gain.
+
+**Implementation seam (resolved in Q1.1):** where the per-procedure `retain` marker lives — an
+additive optional field on the group protocol definition (`defineGroupProtocol`) vs. an rpc-side
+sidecar map — and how a logged event's publish reaches `mux.publish({ retain: 'log' })` while ephemeral
+events and all RPC stay on the existing live path. Both directions are additive / non-breaking.
 
 ### 2. Topic model — derived anchor, rotate on removal
 
@@ -131,7 +163,8 @@ a guessable epoch number would cut nobody off.
   ciphertext names; at each Remove boundary update the anchor and move to the next segment's topic.
   All members (publishers included) derive from the anchor, so a live publisher mid-segment writes
   the same topic a returning peer pulls. Delivered frames reach the host through the **existing
-  `handlers` map** — no new host delivery API.
+  `handlers` map** — no new host delivery API. The drain pulls only **logged-event** frames
+  (`fetchTopic` returns only `retain:'log'`); ephemeral events and all RPC never enter the drain.
 
 ### 6. Pruned-window signal (Fork 3 — event, not return value)
 
@@ -163,16 +196,20 @@ remains possible.
 log-class / `fetchTopic` / retention surface the control-ledger release already ships.
 
 Touched:
-- `peer.ts` — redirect app-lane publish to `mux.publish({ retain: 'log' })`; add `anchorSecret`/
+- `peer.ts` — route a **logged** event's publish to `mux.publish({ retain: 'log' })` while ephemeral
+  events and all RPC (`request`/`gather`/`reply`) stay on the existing live path; add `anchorSecret`/
   `anchorEpoch` state; roster-set-diff Remove detection around `processCommit`; anchor-based topic
-  derivation in `buildEpoch`; the returning-member per-segment internal drain; subscribe-current +
-  pull-old; emit the pruned-window event.
+  derivation in `buildEpoch`; the returning-member per-segment internal drain that pulls only logged
+  events; subscribe-current + pull-old; emit the pruned-window event.
+- The per-procedure `retain` marker on the group protocol definition — an additive optional field on
+  `defineGroupProtocol` **or** an rpc-side sidecar map (Q1.1 decides). If it lands on the protocol
+  definition it is an **additive** field, not a break. Definition-time enforcement rejects
+  `retain:'log'` on a `request`/`gather` procedure.
 - `topic.ts` — no signature change (fed anchor values).
-- A small transport seam so `BroadcastClient`'s publish reaches `mux.publish` with `retain: 'log'`
-  while its subscribe path is unchanged.
 
-Not touched: `@kumiai/broadcast` public signatures; `@kumiai/mls` (roster-set diff avoids the
-accessor); hub contracts.
+Not touched: `@kumiai/mls` (roster-set diff avoids the accessor); hub contracts. `@kumiai/broadcast`
+public surface is untouched **unless** Q1.1 puts the `retain` marker on `defineGroupProtocol`, in which
+case it gains one additive optional field.
 
 ## Deliverables
 
@@ -195,6 +232,10 @@ a convergence assertion on the line above the failure). Cover:
 - A member away beyond the window gets a **surfaced pruned-window event**, not a silent gap; assert
   the event fires and names the group.
 - Roster-set-diff correctness: a commit carrying **both an Add and a Remove** still rotates.
+- **Retention split:** an `ephemeral` event (e.g. a typing/presence-shaped procedure) is **not**
+  drained — a returning member receives logged events but no ephemeral history.
+- **Guardrail:** declaring `retain:'log'` on a `request`/`gather` procedure is rejected at protocol
+  definition time.
 
 **Mutation-check** the decisive tests: revert the log-class publish; revert the anchor update; revert
 the pruned-window emit — each must turn a green test red.
@@ -209,15 +250,19 @@ the pruned-window emit — each must turn a green test red.
 
 ## Resolved open calls
 
+- **Retention model** — two orthogonal dimensions (kind × retention); only events may be `log`,
+  correlation is always ephemeral (§1). Retention is declared **per procedure** in the group protocol
+  definition (not per call), enforced at definition time. Send API stays a single `dispatch`.
 - **Remove detection** — roster-set diff (§3), no additive mls accessor needed.
 - **Pruned-window signal shape** — an rpc **event** shaped to feed a host health condition (§6),
   not a return value; forced by Kubun's eager-peer / no-`ready()` / no-host-catch-up model.
 
 ## Deferred to the plan
 
+- Where the per-procedure `retain` marker lives (additive `defineGroupProtocol` field vs. rpc sidecar)
+  and how a logged event's publish reaches `mux.publish({ retain: 'log' })` — the Q1.1 seam; both
+  additive/non-breaking.
 - Exact event name/payload type for the pruned-window signal (rpc side) and the matching
   `GroupHealthCondition` (Kubun side, follow-up).
-- The precise seam by which `BroadcastClient` publish reaches `mux.publish` (inject a publish fn vs.
-  a thin log-transport variant) — an implementation choice, both non-breaking.
 - Plan mode: this design carries validated-but-unexercised integration assumptions (the 0.3 recovery
   lane is undriven by any host today), which leans `learning-loop`; confirm at planning.
