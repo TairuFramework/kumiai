@@ -208,11 +208,19 @@ are delivered by pull; the skipped test is un-skipped and green.
 
 ---
 
-## Phase 4: Pruned-window signal
+## Phase 4: Durable app cursor + pruned-window signal
 
-**Exit criteria:** when the drain finds the hub's oldest retained frame is newer than the cursor it
-needs, the peer emits an event naming the group (not a silent gap), shaped to feed a host health
-condition; a member away beyond the window triggers it.
+**Exit criteria:** the drain reads from a durable app-lane cursor rather than re-pulling a segment
+whole; when the hub's oldest retained frame is newer than that cursor, the peer emits an event naming
+the group (not a silent gap), shaped to feed a host health condition; a member away beyond the window
+triggers it.
+
+**Folded in from Question 3.1 (2026-07-16).** The drain currently pulls a segment from its oldest
+retained frame every time, so a roster-stable group — one segment forever — buffers its entire app
+history at construction, bounded only by retention. The fix is a durable per-topic read cursor. That is
+the **same mechanism** the pruned-window signal needs: the `// SEAM:` in `loadAppSegment` marks the one
+place a gap is knowable, and it cannot report one because it has no durable position to compare
+`result.oldest` against. One cursor answers both; they are one question, not two.
 
 ### Question 4.1: Does the drain detect a below-retention gap and emit a pruned-window event (not a silent drop)?
 
@@ -266,6 +274,45 @@ condition; a member away beyond the window triggers it.
 ---
 
 ## Decision Log
+
+### 2026-07-16 — Question 3.1: the drain runs BEFORE each apply, and three rulings
+
+**Findings:** Confirmed. The drain hooks in ahead of `port.processCommit` (`peer.ts:~1029`), pulls one
+segment once (`loadAppSegment`), buffers sealed, and dispenses per epoch (`deliverAppFrames`). Mutation
+(move it after the apply — the first brief's design): red, `expected [ { text: 'at three' } ] to deeply
+equal [ { text: 'at one' }, …(2) ]` — only the epoch the walk stops at survives. Verify green: rpc 202
+passed / 1 skip, 30/30.
+
+**Two things the brief missed, both load-bearing.** The "before each apply" rule never covers the epoch
+the walk STOPS at, so an end-of-walk flush is required — hence the `pullCommits`/`walkCommits` split,
+placing the flush after the walk and the early return but not the throw. And `fetchTopic` is
+subscription-gated, so a segment rotated onto mid-walk must be `mux.retainTopic`'d before it can be
+pulled.
+
+**Ruling — the self-echo skip STAYS.** `deliverAppFrames` drops frames whose `senderDID` is the local
+member. The live fan-out never echoes a publisher its own broadcast, and a drain that did would make a
+returning member the only one that ever sees its own messages arrive — the same group state producing
+different host-visible history depending on whether you were online. Live/drain symmetry wins; a host
+that needs its own sends has them at the point it sent them.
+
+**Ruling — the unbounded buffer is Phase 4's, not a residual.** One pull per segment means a
+roster-stable group is one segment forever, so construction buffers the whole app history (bounded only
+by retention). The fix is a durable app-lane cursor — which is also what the pruned-window signal needs
+to compare against, and the `// SEAM:` in `loadAppSegment` is exactly where both land. One mechanism,
+one question: folded into Phase 4.
+
+**Ruling — the `O(frames × commits)` trial decrypt stays.** Every buffered frame is tried rather than
+stopping at the first that will not open, because `replayJournal` advances the handle before the pull,
+so the buffer's front can hold an already-passed epoch's frame that would wedge everything behind it.
+It delivers a superset, in order, dropping nothing. The cost only bites on a long walk with a large
+backlog, which Phase 4's cursor bounds anyway.
+
+**Process failure, mine, recorded so it is not repeated.** Re-running the mutation myself I reverted it
+with `git checkout packages/rpc/src/peer.ts` — on a file whose changes were never committed — and
+destroyed the probe's implementation. The same mistake the probe had reported making. It was
+recoverable only because `lib/peer.js` had been built from the lost version and swc preserves comments;
+the restore round-tripped byte-identical. **Commit probe output before mutating it.** Earlier questions
+survived this only because their work was already committed.
 
 ### 2026-07-16 — Question 3.1 (first attempt): BLOCKED, and the brief was wrong
 
