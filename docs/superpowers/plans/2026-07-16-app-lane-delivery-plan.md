@@ -174,7 +174,7 @@ the spec is most likely to move.
 the correct per-epoch keys, in order, across a rotation boundary; all three original loss scenarios
 are delivered by pull; the skipped test is un-skipped and green.
 
-### Question 3.1: Does a peer-internal per-segment drain deliver retained app frames in order under the correct per-epoch keys, across a rotation boundary?
+### Question 3.1: Does a peer-internal per-segment drain deliver retained app frames in order under the correct per-epoch keys, across a rotation boundary? ✅
 
 - **Assumption:** on coming up / reconnecting, the peer walks the commit log epoch by epoch, deriving
   each `exportSecret()`, pulling **once per segment** to head, decrypting each frame under the epoch
@@ -192,7 +192,7 @@ are delivered by pull; the skipped test is un-skipped and green.
   the existing `handlers` map — no new host delivery API."
 - **Verify:** `pnpm run build && rtk proxy pnpm run lint && pnpm test`
 
-### Question 3.2: Are all three loss scenarios delivered by pull, with the skipped test un-skipped?
+### Question 3.2: Are all three loss scenarios delivered by pull, with the skipped test un-skipped? ✅
 
 - **Assumption:** the drain closes each of (epoch never held; own-epoch published after the leaving
   commit; own-epoch after restart). The fixture can register an app handler so the plaintext is
