@@ -8,6 +8,8 @@
   },
   "devDependencies": {
     "@kumiai/mls": "workspace:^",
+    "@kumiai/mls-rpc": "workspace:^",
+    "@kumiai/rpc": "workspace:^",
     "@kumiai/hub-client": "workspace:^",
     "@kumiai/hub-protocol": "workspace:^",
     "@kumiai/hub-server": "workspace:^",

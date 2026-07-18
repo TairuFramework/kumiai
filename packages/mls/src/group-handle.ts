@@ -8,6 +8,7 @@ import {
   type IncomingMessageAction,
   type IncomingMessageCallback,
   type MlsContext,
+  mlsExporter,
   mlsMessageDecoder,
   mlsMessageEncoder,
   processMessage as mlsProcessMessage,
@@ -133,10 +134,14 @@ function readPrivateCommit(decoded: unknown): { authenticatedData: Uint8Array } 
 }
 
 /**
- * Narrow a decoded frame to the PrivateMessage-commit fields sender-data decrypt reads.
- * Returns undefined for anything that is not a PrivateMessage of contentType commit.
+ * Narrow a decoded frame to the PrivateMessage fields sender-data decrypt reads, for one
+ * content type. Returns undefined for anything that is not a PrivateMessage of that type.
+ *
+ * The sender-data derivation (RFC 9420 §6.3.2) is content-type-agnostic — the type is one
+ * byte of the AAD — so the same read serves a commit's committer and an application
+ * message's author.
  */
-function readPrivateCommitFrame(decoded: unknown): PrivateCommitFrame | undefined {
+function readPrivateFrame(decoded: unknown, contentType: number): PrivateCommitFrame | undefined {
   if (decoded == null || typeof decoded !== 'object') return undefined
   const frame = decoded as { wireformat?: unknown; privateMessage?: unknown }
   if (frame.wireformat !== wireformats.mls_private_message) return undefined
@@ -149,7 +154,7 @@ function readPrivateCommitFrame(decoded: unknown): PrivateCommitFrame | undefine
         ciphertext?: unknown
       }
     | undefined
-  if (pm == null || pm.contentType !== contentTypes.commit) return undefined
+  if (pm == null || pm.contentType !== contentType) return undefined
   if (
     !(pm.groupId instanceof Uint8Array) ||
     typeof pm.epoch !== 'bigint' ||
@@ -551,6 +556,32 @@ export class GroupHandle {
   }
 
   /**
+   * The MLS exporter (RFC 9420 §8.5): a secret derived from THIS EPOCH's exporter secret,
+   * a label and a context. Every member at the epoch derives the same bytes; a member at
+   * any other epoch derives different ones, and cannot reach this epoch's from what it holds.
+   *
+   * That per-epoch property is the point, and it is the only thing that cuts a removed member
+   * off from anything keyed on it. A removed member keeps every exporter secret it ever held
+   * and every value it ever derived, and epoch numbers are a counter it can enumerate — so a
+   * consumer deriving a rotating name (an app-lane topic, say) must feed it from HERE and never
+   * from a lifelong group secret, which would rotate onto a name the removed member walks
+   * straight back onto.
+   *
+   * Non-mutating and consumes no ratchet key: the exporter secret is epoch-level. A handle a
+   * commit has superseded exports its own pre-commit epoch's secret, which is a feature — a
+   * reader opening a retained frame needs the secret of the epoch that frame was sealed at.
+   */
+  async exportSecret(label: string, context: Uint8Array, length = 32): Promise<Uint8Array> {
+    return await mlsExporter(
+      this.#state.keySchedule.exporterSecret,
+      label,
+      context,
+      length,
+      this.#context.cipherSuite,
+    )
+  }
+
+  /**
    * Encrypt an application message for the group at this handle's current epoch,
    * returning framed wire bytes. A handle a commit has already superseded (see
    * {@link commitInvite}, {@link removeMember}, {@link commitLedgerEntries}) must not
@@ -567,6 +598,58 @@ export class GroupHandle {
       this.#state = newState
       zeroAll(consumed)
       return encode(mlsMessageEncoder, message)
+    })
+  }
+
+  /**
+   * Open an application message sealed for the group and recover WHO SENT IT — the
+   * counterpart to {@link encrypt}, and the read half of the group's application lane.
+   *
+   * Throws for bytes this handle cannot open, which for an application message means
+   * ANY epoch but its own: MLS ratchets forward, so a frame sealed below this handle's
+   * epoch is gone and one sealed above it has not arrived yet. That is ordinary control
+   * flow for a caller walking a retained log full of frames from epochs it does not hold
+   * — it is how a frame says "not mine" — and such a caller must not read the throw as
+   * corruption. Use {@link readMessageEpoch} to tell those two cases apart before trying.
+   *
+   * WHY THE SENDER IS AUTHENTICATED and not merely claimed: the leaf index comes from the
+   * message's sender-data, encrypted under this epoch's sender-data secret, and the
+   * message body then opens only under the ratchet key derived at THAT leaf. A frame
+   * naming a leaf it was not sealed at does not open, so a sender that survives to be
+   * returned is one the AEAD has vouched for. The leaf is resolved to a DID against this
+   * handle's own ratchet tree, never from anything the frame carries.
+   *
+   * `senderDID` is absent only when the authenticated leaf holds no parsable credential —
+   * absent means "I cannot name the author", never "there is no author".
+   *
+   * ts-mls's own `processMessage` returns an application message's plaintext WITHOUT any
+   * sender, which is why this exists rather than delegating.
+   */
+  async decrypt(message: Uint8Array): Promise<{ payload: Uint8Array; senderDID?: string }> {
+    const decoded = decode(mlsMessageDecoder, message)
+    if (decoded == null) throw new Error('decrypt: failed to decode MLSMessage')
+    return mutexFor(this).run(async () => {
+      const pm = readPrivateFrame(decoded, contentTypes.application)
+      if (pm == null) throw new Error('decrypt: not a PrivateMessage application frame')
+      // Read the sender BEFORE opening: the sender-data secret is epoch-level and this
+      // consumes no ratchet key, so a frame that then fails to open has cost nothing.
+      const leafIndex = await readSenderLeafIndex(
+        this.#context,
+        this.#state.keySchedule.senderDataSecret,
+        pm,
+      )
+      const result = await mlsProcessMessage({
+        context: this.#context,
+        state: this.#state,
+        message: decoded as Parameters<typeof mlsProcessMessage>[0]['message'],
+      })
+      this.#state = result.newState
+      zeroAll(result.consumed)
+      if (result.kind !== 'applicationMessage') {
+        throw new Error('decrypt: frame was not an application message')
+      }
+      const senderDID = leafIndex == null ? undefined : this.#didOfLeaf(leafIndex)
+      return { payload: result.message, ...(senderDID != null && { senderDID }) }
     })
   }
 
@@ -842,7 +925,7 @@ export class GroupHandle {
         }
       }
 
-      const pm = readPrivateCommitFrame(decoded)
+      const pm = readPrivateFrame(decoded, contentTypes.commit)
       // The ONLY "not a Commit" verdict on this path, and the only thing `null` is for: the
       // frame is not a PrivateMessage of contentType commit. Both of those fields are cleartext,
       // so this verdict needs no key and is the same at every epoch.
