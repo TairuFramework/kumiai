@@ -40,6 +40,12 @@ export type PublishCommitParams = {
   removes?: Array<string>
   /** An external commit: the committer is rejoining, and its leaf replaces any it still had. */
   external?: boolean
+  /**
+   * Forge: publish a commit that CLAIMS `committerDID` but is signed by somebody else. A publisher
+   * who observed a frame can rewrite the field naming its author and cannot re-sign it, so this is
+   * what a forged commit looks like on the wire.
+   */
+  signerDID?: string
   /** Override the commit bytes (an empty commit is a no-op the receiver cannot apply). */
   commit?: Uint8Array
   /**
@@ -70,6 +76,7 @@ export async function publishCommit(params: PublishCommitParams): Promise<{ sequ
       ...(params.adds != null ? { adds: params.adds } : {}),
       ...(params.removes != null ? { removes: params.removes } : {}),
       ...(params.external === true ? { external: true } : {}),
+      ...(params.signerDID != null ? { signerDID: params.signerDID } : {}),
     })
   const sealed = await crypto.wrap(encodeLedgerEntries(entries))
   return hub.publish({

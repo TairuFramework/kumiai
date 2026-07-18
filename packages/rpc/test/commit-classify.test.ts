@@ -120,6 +120,24 @@ describe('the cursor table', () => {
       expect(classifyCommit({ epoch: 5 }, 's9', bob())).toEqual({ row: 'poison' })
     })
 
+    test('an EXTERNAL header buys no exemption: no committer at this epoch is still poison', () => {
+      // `external` is structural — wireformat and sender type, both cleartext — so it is present
+      // on a frame anyone can shape, and it must not be a way into a row the committer guards.
+      // An external commit whose signature did not verify arrives here as exactly this: the epoch,
+      // the flag, and no author. It is poison, on the same terms as any other authorless frame at
+      // this epoch, and specifically NOT `own-unmerged`, which heals and holds the cursor.
+      expect(classifyCommit({ epoch: 5, external: true }, 's9', bob())).toEqual({ row: 'poison' })
+      // The flag does not reach the heal row by any route, including one naming this peer — the
+      // committer is what that row reads, and an unauthenticated one never gets written there.
+      expect(classifyCommit({ epoch: 5, external: true }, 's9', bob())).not.toEqual({
+        row: 'own-unmerged',
+      })
+      // A VERIFIED external commit at this epoch is unaffected: authored elsewhere, so applicable.
+      expect(
+        classifyCommit({ epoch: 5, committerDID: 'zoe', external: true }, 's9', bob()),
+      ).toEqual({ row: 'apply' })
+    })
+
     test('own-unmerged still requires the committer, and still only its own', () => {
       // The authenticated read, unchanged: present and equal heals, present and foreign applies.
       expect(classifyCommit({ epoch: 5, committerDID: 'bob' }, 's9', bob())).toEqual({

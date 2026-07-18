@@ -20,15 +20,43 @@ arbitrary DID and an arbitrary epoch.
 epoch classifies as `ahead` and drives an honest peer to heal (rejoin). One hostile publish, M peers
 heal, M group-wide epoch advances.
 
+> **CORRECTION — this is real but it is not an external-commit defect, and no signature check closes
+> it.** `ahead` is decided on the cleartext epoch alone, before the committer is ever consulted. The
+> cheapest version needs no key, no signature, and no external commit at all: take any genuine
+> member commit (a PrivateMessage), rewrite only its cleartext epoch, re-encode. Measured against
+> unmodified code, `readCommitHeader` returns `{ epoch: 9999n }` and the frame classifies `ahead`.
+> Closing the external path leaves this at identical attacker cost. It belongs to whoever gates
+> publish authorization on the commit topic and is not closable in `classify.ts`.
+>
+> **What the signature check actually closes** is a different and worse hole, at the peer's OWN
+> epoch, where the context to verify does exist: a forged external commit carrying the victim's DID
+> classifies `own-unmerged`, which heals AND holds the cursor — so the frame is re-read and
+> re-healed on every pull. A targeted, permanent heal loop for one publish. See
+> `docs/agents/plans/next/2026-07-18-external-commit-amplification.md`.
+
 The bound that keeps it survivable — one heal per frame, no loop, lane not wedged — is now pinned by a
 test. That is a bound, not a fix.
 
 ## Approved approach (follow it; BLOCKED if it fights the code — do not redesign)
 
 **Verify the external commit's own signature before returning a committer.** An external commit is
-self-signed by the joining leaf's key, and that key is in the UpdatePath leaf the DID was read from — so
-the signature is checkable with nothing but the frame itself, no group secret and no tree. Check it, and
-return `null` (not a header) when it does not verify.
+self-signed by the joining leaf's key, and that key is in the UpdatePath leaf the DID was read from.
+
+> **CORRECTION — the original brief was wrong here, and the probe was right to refuse it.** It said
+> the signature is "checkable with nothing but the frame itself, no group secret and no tree". It is
+> not. RFC 9420 §6.1 binds the full GroupContext into the signed `FramedContentTBS` whenever the
+> sender type is `member` **or `new_member_commit`**; ts-mls implements exactly that. Verifying
+> therefore needs the group context the signer signed against — group id, epoch, tree hash, confirmed
+> transcript hash, extensions — which a peer holds only for the epoch it stands at. It holds nothing
+> for an epoch AHEAD of it, so this check can NEVER fire on a forged future-epoch claim.
+>
+> Two consequences the original brief got wrong as a result:
+> - **`null` is the wrong return.** Returning `null` for anything that does not verify would file
+>   every ahead-framed external commit as poison, including genuine ones, and cost a behind peer the
+>   `ahead` signal that is the only thing telling it it fell out. Return `{ epoch, external: true }`
+>   with **no committer** instead: the epoch always, the committer only where it authenticates,
+>   which is the invariant `classify.ts` already runs on.
+> - **The exposure below is not what this closes.** See the correction under "The defect".
 
 Be precise in the doc comment about what this does and does not buy, because the difference matters:
 

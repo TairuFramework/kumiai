@@ -23,8 +23,10 @@ import type { CommitHeader } from './crypto.js'
  * **The header carries two facts with different trust, and each row must say which it uses.**
  * The epoch is cleartext, keyless, readable at any epoch, and only the publisher's word. The
  * committer is MLS-authenticated but recoverable only for a commit framed at this peer's own
- * epoch, because resolving it means decrypting sender-data with the epoch secret this peer holds
- * right now. So the rows split cleanly: `ahead`, `history` and `fork` dispatch on the EPOCH
+ * epoch — a member commit's needs the epoch's sender-data secret to decrypt, and an external
+ * commit's needs that epoch's group context to check the signature binding the leaf credential to
+ * its key. Different mechanisms, same reach, and no exemption for either. So the rows split
+ * cleanly: `ahead`, `history` and `fork` dispatch on the EPOCH
  * ALONE — they must, since they are about frames this peer holds no key for — while every row at
  * this peer's own epoch requires the AUTHENTICATED committer and refuses to fire without it.
  * Conflating the two is not a style question: a classifier that demands a committer before
@@ -67,11 +69,10 @@ export type CommitDisposition =
    * group-wide recovery storm {@link CommitDisposition} refuses to fund on `own-unmerged`.
    *
    * WHY IT IS ACCEPTED ANYWAY:
-   * - **It is not new, and closing this row does not close it.** An EXTERNAL commit's header
-   *   needs no secret at all — its committer rides its own UpdatePath leaf, structurally read
-   *   and signature-unverified — so a forged external commit claiming a high epoch already
-   *   reaches this row and always did. Reading a member commit's epoch adds a second route to a
-   *   door that does not shut.
+   * - **It is not new, and no authentication closes it.** The cheapest forgery needs no key and
+   *   no signature at all: a PrivateMessage commit frame with a rewritten cleartext epoch reaches
+   *   this row, because the epoch is the only thing this row reads. Authenticating committers
+   *   cannot help — this row asks for none, and none could be given.
    * - **It is unclosable by construction.** Any signal that says "you fell out of the group" is
    *   a signal a hostile publisher can also emit, because a peer that fell out is by definition
    *   one that cannot authenticate what the group is doing now. There is no key on this side of

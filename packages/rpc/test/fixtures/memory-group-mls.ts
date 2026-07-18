@@ -152,6 +152,18 @@ type MemoryCommit = {
   /** An external commit: the committer is rejoining, and its leaf replaces any it still had. */
   external?: boolean
   /**
+   * Who the key that SIGNED this commit belongs to, as distinct from `committerDID`, which is only
+   * who the commit says authored it.
+   *
+   * The two are one field in a genuine commit and `encodeMemoryCommit` keeps them equal, because a
+   * real committer signs with the key of the same leaf whose credential names it. They come apart
+   * exactly where a real one does: a forger who observed a frame can rewrite the credential naming
+   * the author, and cannot produce the signature that would match — leaving a frame whose claimed
+   * author and actual signer disagree. Modelled as a field so a test can build that frame, since
+   * the double has no real signature to break.
+   */
+  signerDID?: string
+  /**
    * The roster op this Commit enacts, applied to `leaves` when the commit ADVANCES this handle.
    * The real double has no MLS proposals, so this stands in for the one tree effect a Commit's
    * Add/Remove has — the effect adopting the post-commit handle would produce. A commit carrying
@@ -184,6 +196,8 @@ export function encodeMemoryCommit(
     external?: boolean
     adds?: Array<string>
     removes?: Array<string>
+    /** Override the signer to forge: the commit claims `committerDID` but is signed by this. */
+    signerDID?: string
   } = {},
 ): Uint8Array {
   // A commit that enacts nothing proposes no head extension: the head it found is the head it
@@ -197,6 +211,8 @@ export function encodeMemoryCommit(
     entryIDs,
     ...(head != null ? { head } : {}),
     ...(options.external === true ? { external: true } : {}),
+    // A genuine commit is signed by the member it names. Only a forger passes these apart.
+    signerDID: options.signerDID ?? committerDID,
     ...(options.adds != null && options.adds.length > 0 ? { adds: options.adds } : {}),
     ...(options.removes != null && options.removes.length > 0 ? { removes: options.removes } : {}),
   }
@@ -214,6 +230,7 @@ export function decodeMemoryCommit(commit: Uint8Array): MemoryCommit | null {
       typeof value?.committerDID !== 'string' ||
       (value.head != null && typeof value.head !== 'string') ||
       (value.external != null && typeof value.external !== 'boolean') ||
+      (value.signerDID != null && typeof value.signerDID !== 'string') ||
       !Array.isArray(value.entryIDs) ||
       (value.adds != null && !isDIDArray(value.adds)) ||
       (value.removes != null && !isDIDArray(value.removes))
@@ -531,16 +548,30 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       // is as gone as one never reached. It comes back absent, and a double that answered anyway
       // would let the lane lean on an answer the real port cannot give — and did.
       //
-      // `external` is exempt and must stay so: an external commit is a public message carrying its
-      // committer in its own UpdatePath leaf, so it needs no secret and no tree, and a rejoin is
-      // framed at the group's epoch — ahead of the stranded peer that most needs to read it.
+      // `external` is NOT exempt. An external commit needs no epoch secret and no tree — its
+      // committer rides its own UpdatePath leaf — but that leaf's credential is a field, and the
+      // thing that binds it to an author is the commit's own signature. Verifying that signature
+      // needs the group context it was signed against, which this member holds only for the epoch
+      // it stands at, so the committer is available on exactly the same terms as a member commit's
+      // and absent on the same terms. `external` itself is reported either way: it is structural,
+      // as keyless as the epoch, and says nothing about who wrote the frame.
       const parsed = decodeMemoryCommit(commit)
       if (parsed == null) return null
-      if (parsed.external === true) {
-        return { epoch: parsed.epoch, committerDID: parsed.committerDID, external: true }
+      const isExternal = parsed.external === true
+      if (parsed.epoch !== epoch) {
+        return { epoch: parsed.epoch, ...(isExternal ? { external: true } : {}) }
       }
-      if (parsed.epoch !== epoch) return { epoch: parsed.epoch }
-      return { epoch: parsed.epoch, committerDID: parsed.committerDID }
+      // At this member's epoch the signature is checkable, and a commit whose claimed author is
+      // not who signed it authenticates nobody. The real port answers this with crypto; here the
+      // forgery is the two fields disagreeing.
+      if ((parsed.signerDID ?? parsed.committerDID) !== parsed.committerDID) {
+        return { epoch: parsed.epoch, ...(isExternal ? { external: true } : {}) }
+      }
+      return {
+        epoch: parsed.epoch,
+        committerDID: parsed.committerDID,
+        ...(isExternal ? { external: true } : {}),
+      }
     },
     async processCommit(commit: Uint8Array, context: CommitContext) {
       lastSender = context.senderDID

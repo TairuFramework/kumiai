@@ -103,6 +103,10 @@ export type CommitHeader = {
    * non-member carrying a commit, which is readable from the frame without advancing state, and
    * carries its committer's DID in its own UpdatePath leaf (the committer has no pre-commit leaf
    * to resolve one from). Absent — like `false` — for an ordinary member commit.
+   *
+   * Structural means UNAUTHENTICATED, and this flag is reported on a frame whose committer did
+   * not authenticate. It says what shape the frame is, never that the rejoin it describes is
+   * genuine — so it must not be read as permission for anything the committer guards.
    */
   external?: boolean
 }
@@ -197,10 +201,14 @@ export type GroupMLS = {
    * its sender-data with the epoch secret (an open, not an apply) and mapping the sender leaf
    * to a DID against the ratchet tree — both reachable only on the handle the host already
    * holds, and both only for a Commit framed at the epoch that handle is at. That is exactly why
-   * the committer is optional and the epoch is not. An external commit needs neither: it is a
-   * public message, and its committer's DID rides its own UpdatePath leaf, which is also what
-   * makes it recognizable as external. The port reaches its own handle internally; the lane
-   * awaits.
+   * the committer is optional and the epoch is not. An external commit needs neither secret nor
+   * tree — its committer's DID rides its own UpdatePath leaf, which is also what makes it
+   * recognizable as external — but it is NOT exempt from authenticating: the credential carrying
+   * that DID is a plain field, so the port must check the commit's own signature before reporting
+   * a committer, and that check needs the group context of the epoch the commit was framed at.
+   * Same reach as the member path, reached differently. A port that reported an external
+   * committer it had not checked would let anything that can publish choose who a frame is from.
+   * The port reaches its own handle internally; the lane awaits.
    */
   readCommitHeader(commit: Uint8Array): Promise<CommitHeader | null>
   /**

@@ -1,4 +1,5 @@
 import { randomIdentity } from '@kokuin/token'
+import { decode, encode, mlsMessageDecoder, mlsMessageEncoder, wireformats } from 'ts-mls'
 import { describe, expect, test } from 'vitest'
 
 import { controlCapabilities } from '../src/anchor.js'
@@ -56,6 +57,45 @@ async function addSomeone(
     permission: 'member',
   })
   return await commitInvite(group, bundle.publicPackage, invite)
+}
+
+/**
+ * Forge an external commit that CLAIMS `did`: re-encode a genuine one with only the UpdatePath
+ * leaf's credential identity replaced. The leaf's signature key is untouched, so the frame still
+ * carries the original signer's key and its signature no longer matches its content — exactly what
+ * a publisher who holds no key can produce from a frame it observed.
+ */
+function rewriteExternalCommitIdentity(commit: Uint8Array, did: string): Uint8Array {
+  const decoded = decode(mlsMessageDecoder, commit)
+  if (decoded == null || decoded.wireformat !== wireformats.mls_public_message) {
+    throw new Error('not a public message')
+  }
+  const content = decoded.publicMessage.content as unknown as {
+    commit: { path: { leafNode: { credential: { identity: Uint8Array } } } }
+  }
+  const path = content.commit.path
+  return encode(mlsMessageEncoder, {
+    ...decoded,
+    publicMessage: {
+      ...decoded.publicMessage,
+      content: {
+        ...content,
+        commit: {
+          ...content.commit,
+          path: {
+            ...path,
+            leafNode: {
+              ...path.leafNode,
+              credential: {
+                ...path.leafNode.credential,
+                identity: new TextEncoder().encode(JSON.stringify({ id: did })),
+              },
+            },
+          },
+        },
+      },
+    },
+  } as never)
 }
 
 describe('GroupHandle.readCommitHeader — member commit', () => {
@@ -173,6 +213,56 @@ describe('GroupHandle.readCommitHeader — external commit and non-commit', () =
     // shifted has only this flag.
     expect(header?.external).toBe(true)
     expect(aliceAfterBob.findMemberLeafIndex(bob.id)).toBeDefined()
+  })
+
+  test('reports NO committer for an external commit whose leaf credential was rewritten', async () => {
+    const { alice, bob, aliceAfterBob, bobCred } = await twoMemberGroup()
+    const { groupInfo } = await exportGroupInfo({ group: aliceAfterBob })
+    const { commitMessage } = await joinGroupExternal({
+      identity: bob,
+      groupInfo,
+      credential: bobCred,
+      resync: true,
+    })
+
+    // The forgery this check exists for: take a genuine external commit and rewrite ONLY the
+    // UpdatePath leaf's credential identity, to the DID of the peer that will read it. Nothing
+    // else moves, so the frame stays structurally a valid external commit framed at Alice's own
+    // epoch — but the signature is now over content that no longer matches, and the key that
+    // signed it is still Bob's. Left unauthenticated, this is a frame that names its reader as
+    // its own author, which is the one claim a reader acts on by healing.
+    const forged = rewriteExternalCommitIdentity(commitMessage, alice.id)
+
+    const header = await aliceAfterBob.readCommitHeader(forged)
+    // Still a commit, and still recognizably external: both facts are cleartext and neither
+    // depends on who signed. The epoch is reported, because the epoch rows are entitled to it.
+    expect(header).not.toBeNull()
+    expect(header?.epoch).toBe(aliceAfterBob.epoch)
+    expect(header?.external).toBe(true)
+    // The committer is what a forger does not get to choose.
+    expect(header?.committerDID).toBeUndefined()
+  })
+
+  test('reports NO committer for an external commit framed at an epoch this handle is not at', async () => {
+    const { alice, bob, aliceAfterBob, bobCred } = await twoMemberGroup()
+    const { groupInfo } = await exportGroupInfo({ group: aliceAfterBob })
+    const { commitMessage } = await joinGroupExternal({
+      identity: bob,
+      groupInfo,
+      credential: bobCred,
+      resync: true,
+    })
+    // Genuine and readable where it was framed.
+    expect((await aliceAfterBob.readCommitHeader(commitMessage))?.committerDID).toBe(bob.id)
+
+    // Alice moves on. An external commit's signature is bound to the GroupContext it was made
+    // against, so from her new epoch she holds nothing to check this one with — and reports no
+    // committer rather than the DID the bytes claim. Same rule as a member commit off-epoch.
+    const { newGroup: aliceAhead } = await addSomeone(aliceAfterBob, alice)
+    const header = await aliceAhead.readCommitHeader(commitMessage)
+    expect(header?.epoch).toBe(aliceAfterBob.epoch)
+    expect(header?.external).toBe(true)
+    expect(header?.committerDID).toBeUndefined()
   })
 
   test('returns null for a non-commit frame and for garbage bytes', async () => {

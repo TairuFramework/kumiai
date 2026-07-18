@@ -5,6 +5,7 @@ import {
   createApplicationMessage,
   decode,
   encode,
+  type IncomingMessageAction,
   type IncomingMessageCallback,
   type MlsContext,
   mlsMessageDecoder,
@@ -167,13 +168,18 @@ function readPrivateCommitFrame(decoded: unknown): PrivateCommitFrame | undefine
 }
 
 /**
- * Read the DID an external-join commit proves control of. An external join is a
+ * Read the DID an external-join commit CLAIMS control of. An external join is a
  * PublicMessage from a joining non-member (senderType new_member_commit) carrying a
  * commit; the committer holds no pre-commit leaf, so its DID rides the commit's own
  * UpdatePath leaf credential. Returns undefined for anything else (keeps the
  * pre-envelope path). Returns `{ did: undefined }` when the UpdatePath is absent or
  * the leaf credential does not resolve to a basic-credential DID — cannot be a valid
  * resync, so the caller rejects it. Narrows structurally.
+ *
+ * CLAIMS, not proves: this reads the credential and checks no signature, and the
+ * credential is a plain field any publisher can write. The DID it yields is the
+ * frame's word until {@link GroupHandle.readCommitHeader} has authenticated it, and
+ * a caller that reports it unauthenticated hands a forger the choice of committer.
  */
 function readExternalCommit(decoded: unknown): { did: string | undefined } | undefined {
   if (decoded == null || typeof decoded !== 'object') return undefined
@@ -701,6 +707,53 @@ export class GroupHandle {
     return { callback: wrapCommitPolicy(combined, capture), capture, applyOnAccept }
   }
 
+  /**
+   * Does this external commit carry a signature that verifies as its own UpdatePath leaf's?
+   *
+   * An external commit is self-signed: the key that signed it is the `signaturePublicKey` of the
+   * same UpdatePath leaf whose credential names the committer. So a verified signature binds the
+   * two — whoever authored these bytes held the key of the leaf claiming that DID — and an
+   * unverified one means the credential is a field somebody wrote, nothing more.
+   *
+   * WHAT IT REQUIRES, and why the answer is only ever available at this handle's own epoch.
+   * MLS binds the full GroupContext into the signed FramedContentTBS for a new_member_commit
+   * sender, so verifying needs the group context the signer signed against: group id, epoch, tree
+   * hash, confirmed transcript hash, extensions. This handle holds exactly one — its current
+   * epoch's. It holds none for an epoch AHEAD of it, which no peer can, and that is not a gap
+   * this check can close: a peer that has fallen behind holds nothing to check the group's future
+   * with. So a commit framed anywhere but here answers false, and the caller reports no committer
+   * rather than an unauthenticated one.
+   *
+   * WHAT IT DOES NOT ESTABLISH. Possession of a key is not permission to use it: a verified
+   * signature says "the holder of that leaf key authored these bytes", never "this member may
+   * rejoin". And it is a property of the bytes, not of their delivery — a GENUINE external commit
+   * captured and re-published verifies exactly as it did the first time.
+   *
+   * Implemented by asking the MLS library to process the message with a callback that refuses it,
+   * which runs the real verification and stops before anything is applied. Deliberately not a
+   * reimplementation: a check that verified less than the apply path does would pass frames the
+   * apply path rejects, and the two must not drift. Non-mutating — the refusal returns this same
+   * state, and the result is discarded either way. Any throw is a "no": the library raises on a
+   * bad signature, on an epoch that is not this one, and on a malformed frame, and none of those
+   * is an authenticated committer.
+   */
+  async #externalCommitAuthenticates(decoded: unknown): Promise<boolean> {
+    try {
+      const result = await mlsProcessMessage({
+        context: this.#context,
+        state: this.#state,
+        message: decoded as Parameters<typeof mlsProcessMessage>[0]['message'],
+        callback: (): IncomingMessageAction => 'reject',
+      })
+      // Zeroed rather than assumed empty: the refusal path hands back nothing to retire today,
+      // and this must not become a way to leak retired key material if that ever changes.
+      zeroAll(result.consumed)
+      return result.kind === 'newState' && result.actionTaken === 'reject'
+    } catch {
+      return false
+    }
+  }
+
   /** The DID at a ratchet-tree leaf index, or undefined if that leaf is empty/unparsable. */
   #didOfLeaf(leafIndex: number): string | undefined {
     for (const member of this.#iterateMembers()) {
@@ -729,10 +782,16 @@ export class GroupHandle {
    *   otherwise. Absent is "I cannot vouch for the author", never "there is no author": a
    *   caller must not substitute an unauthenticated one.
    *
-   * An external commit is exempt and needs neither secret nor tree: it is a public message and
-   * its committer's DID rides its own UpdatePath leaf (see {@link readExternalCommit}), which
-   * is also what makes it recognizable as external. That read is structural and verifies no
-   * signature, so its committer is authenticated no further than the bytes claim.
+   * An external commit needs no epoch secret and no tree lookup — it is a public message and its
+   * committer's DID rides its own UpdatePath leaf (see {@link readExternalCommit}), which is also
+   * what makes it recognizable as external. It is NOT exempt from authentication. The credential
+   * carrying that DID is a plain field, so it is returned only once the commit's own self-signed
+   * signature verifies, and it is ABSENT otherwise — the same rule the member path follows, for
+   * the same reason. Verifiable only at this handle's own epoch, since MLS binds the GroupContext
+   * into what an external commit signs; a commit framed elsewhere reports no committer.
+   *
+   * `external: true` is reported either way: it is read from the wireformat and sender type, both
+   * cleartext, so it is as available as the epoch and says nothing about who authored the frame.
    *
    * Runs on the handle mutex so the epoch secret, tree, and epoch are one snapshot against a
    * concurrent processMessage. Non-mutating: sender-data decrypt is epoch-level and consumes
@@ -768,12 +827,18 @@ export class GroupHandle {
       const external = readExternalCommit(decoded)
       if (external != null) {
         // It IS a commit, so it gets a header even when the leaf credential will not parse to a
-        // DID — the epoch is readable and the caller's epoch rows are entitled to it. Only the
-        // committer goes missing.
+        // DID and even when the signature will not verify — the epoch is readable and the
+        // caller's epoch rows are entitled to it. Only the committer goes missing.
+        //
+        // The signature is checkable only where this handle holds the GroupContext the commit's
+        // signature is bound to, which is the epoch this handle stands at. A commit framed
+        // anywhere else comes back with no committer — indistinguishable, from here, from a
+        // forgery, and treated as one.
+        const authentic = external.did != null && (await this.#externalCommitAuthenticates(decoded))
         return {
           epoch,
           external: true,
-          ...(external.did != null && { committerDID: external.did }),
+          ...(authentic && { committerDID: external.did }),
         }
       }
 
