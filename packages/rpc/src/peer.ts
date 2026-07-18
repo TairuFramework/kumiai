@@ -923,6 +923,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * Subscribed before pulled: the hub gates a topic fetch on the caller's own subscription, and a
    * segment reached by ROTATING onto it mid-walk has never been subscribed — the app lane is
    * rebuilt only once the walk is over.
+   *
+   * A FAILED FETCH RAISES, and the latch is taken only once the whole segment is in hand: the
+   * caller's walk stops on the failure rather than stepping over an epoch whose frames were never
+   * read, and the retry re-pulls from the cursor with nothing half-buffered behind it.
    */
   const loadAppSegment = async (): Promise<void> => {
     if (appSegmentLoaded) return
@@ -964,6 +968,53 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     appSegment = loaded
     appCursors = cursors
     appSegmentLoaded = true
+  }
+
+  /**
+   * The highest epoch the group's OWN COMMIT LOG can justify a frame having been sealed at.
+   *
+   * A member seals at epoch E only after applying the commit that produced E, so a legitimate
+   * frame at E always has that commit already published: a log whose furthest commit is framed at
+   * H bounds every member at H + 1, and a claim above that is one no member could have made. The
+   * bound the drain needs, and the only one available that does not take an untrusted party's word
+   * for it.
+   *
+   * READ FRESH, at the moment a claim is judged, and never from this peer's own view of the log: a
+   * returning member is behind by however long it was away, so its view bounds the group at the
+   * epoch IT reached — which would kill exactly the frames it came back for. Reading the live log
+   * closes the honest race instead of trading one loss for another.
+   *
+   * Epochs are read pre-apply from the commit's own bytes, as the walk reads them, and every frame
+   * is asked rather than only the last: the log's furthest frame may be poison or a fork loser, and
+   * neither justifies anything. Nothing readable in the log means nothing says the group ever left
+   * this handle's epoch, and the bound is that epoch.
+   */
+  const justifiedEpochCeiling = async (): Promise<number> => {
+    let ceiling = crypto.epoch()
+    const port = mls
+    if (port == null || commitTopicID == null) return ceiling
+    let after: LogPosition | null = null
+    while (true) {
+      const result = await mux.fetchTopic({
+        topicID: commitTopicID,
+        ...(after != null ? { after } : {}),
+        limit: COMMIT_FETCH_LIMIT,
+      })
+      for (const message of result.messages) {
+        after = asLogPosition(message.sequenceID)
+        let commit: Uint8Array
+        try {
+          const frame = decodeHandshakeFrame(message.payload)
+          if (frame.kind !== HANDSHAKE_KIND.commit) continue
+          commit = decodeCommitFrame(frame.payload).commit
+        } catch {
+          continue // not a commit frame: it says nothing about where the group got to
+        }
+        const header = await port.readCommitHeader(commit)
+        if (header != null && header.epoch + 1 > ceiling) ceiling = header.epoch + 1
+      }
+      if (result.messages.length < COMMIT_FETCH_LIMIT) return ceiling
+    }
   }
 
   /**
@@ -1010,6 +1061,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * that claims this epoch — a frame's cleartext is the publisher's word relayed by an untrusted
    * hub, and a claim that will not open is treated exactly as any frame that will not open.
    *
+   * A CLAIM OF A FUTURE EPOCH IS BOUNDED BY THE COMMIT LOG, for the same reason. Waiting on a
+   * claim nothing can check turns an untrusted party's word into durable local state: one frame
+   * claiming an epoch the group will never reach pins the cursor behind it for the segment's whole
+   * life — the buffer grows without bound, the whole segment is re-delivered on every boot, and the
+   * pruned-window notice fires forever — and against a roster-stable group nothing ever rotates the
+   * segment out from under it. So the claim is checked against what the group's own commit log can
+   * justify (see {@link justifiedEpochCeiling}), and a claim above that is DEAD, not ahead.
+   *
    * Publish order IS non-decreasing in seal-epoch in an honest group, but the front of the buffer
    * can still hold a frame from an epoch the handle has ALREADY passed (a journal replay advances
    * it before this pull ever runs), so the buffer is walked whole rather than stopping at the first
@@ -1022,7 +1081,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * frame at all: no epoch this peer will ever hold again opens any of them. A frame sealed AHEAD
    * of the walk is neither delivered nor dead — it opens once the walk gets there — so the cursor
    * stops behind it and the frame stays buffered. Passing it would drop it on the next restart,
-   * which is the whole loss this cursor exists to stop.
+   * which is the whole loss this cursor exists to stop. A claim the commit log cannot justify is
+   * not ahead of anything, and joins the dead.
+   *
+   * A FAILED PULL STALLS THE WALK. `loadAppSegment` raising propagates, `advanceHandle` never
+   * reaches its advance, and no epoch is passed unread — the pull is a retry and the delivery is
+   * not, so one dropped fetch mid-walk would otherwise destroy the backlog at every epoch the walk
+   * then ratcheted through. A hub outage stalling commit processing is the accepted cost; the live
+   * lane is dead in that window anyway.
    *
    * A LAGGARD publisher is the one case no ordering saves: a member still at epoch E writing to
    * this topic after the rest of the group rotated past E seals bytes nobody can open again.
@@ -1033,12 +1099,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * messages arrive.
    */
   const deliverAppFrames = async (): Promise<void> => {
-    try {
-      await loadAppSegment()
-    } catch {
-      // The pull failed (not yet subscribed, hub down). The buffer stays unloaded and the next
-      // pull retries it; the commit walk is not this drain's to break.
-      return
+    await loadAppSegment()
+    // Read once per drain and only if a frame actually claims to be ahead: the log is a network
+    // read, the honest buffer holds no such claim, and this handle's epoch does not move under a
+    // single drain.
+    let ceiling: number | null = null
+    const justifies = async (claim: number): Promise<boolean> => {
+      ceiling ??= await justifiedEpochCeiling()
+      return claim <= ceiling
     }
     for (const [name, frames] of appSegment) {
       const eventHandlers = appEventHandlers.get(name)
@@ -1049,10 +1117,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         const sealedAt = crypto.frameEpoch(sealed)
         if (sealedAt !== crypto.epoch()) {
           // Not sealed at the epoch the handle is at right now, by the frame's own word. Ahead of
-          // the walk: it keeps its bytes and its place, and the cursor may not pass it. Otherwise
-          // (below the walk, or not a readable sealed frame at all) it is dead — no epoch this
+          // the walk AND justified by the group's commit log: it keeps its bytes and its place, and
+          // the cursor may not pass it. Otherwise (below the walk, claiming an epoch no member
+          // could have sealed at, or not a readable sealed frame at all) it is dead — no epoch this
           // peer can still reach opens it — and dead is done.
-          if (sealedAt != null && sealedAt > crypto.epoch()) continue
+          if (sealedAt != null && sealedAt > crypto.epoch() && (await justifies(sealedAt))) continue
           frame.sealed = null
           continue
         }
