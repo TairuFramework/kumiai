@@ -47,6 +47,7 @@
     "@noble/hashes": "catalog:"
   },
   "devDependencies": {
+    "@kumiai/hub-conformance": "workspace:^",
     "@noble/curves": "catalog:",
     "vitest": "catalog:"
   }

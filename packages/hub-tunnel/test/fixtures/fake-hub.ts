@@ -1,10 +1,19 @@
-import type { StoredMessage } from '@kumiai/hub-protocol'
+import { RetentionExceededError, type StoredMessage } from '@kumiai/hub-protocol'
 
 import type {
   HubPublishParams,
+  HubSubscribeOptions,
   MailboxHubEvent,
   MailboxHubEventListener,
 } from '../../src/transport.js'
+
+/** 30 days in seconds — `createMemoryStore`'s own default ceiling. */
+export const DEFAULT_MAX_RETENTION = 2_592_000
+
+export type FakeHubOptions = {
+  /** Retention ceiling in seconds. Default {@link DEFAULT_MAX_RETENTION}. */
+  maxRetention?: number
+}
 
 export type FakeHubPublishParams = HubPublishParams
 export type FakeHubMessage = StoredMessage
@@ -34,6 +43,12 @@ export class FakeHub {
   #pendingSwap = 0
   #heldForSwap: Array<{ recipient: string; message: FakeHubMessage }> = []
   #eventListeners = new Set<MailboxHubEventListener>()
+  /** Retention ceiling in seconds. See {@link FakeHub.subscribe}. */
+  #maxRetention: number
+
+  constructor(options: FakeHubOptions = {}) {
+    this.#maxRetention = options.maxRetention ?? DEFAULT_MAX_RETENTION
+  }
 
   events = {
     subscribe: (listener: MailboxHubEventListener): (() => void) => {
@@ -62,7 +77,23 @@ export class FakeHub {
     this.#emitEvent({ type: 'disconnected' })
   }
 
-  subscribe(subscriberDID: string, topicID: string): void {
+  /**
+   * Refuses a retention above the ceiling, exactly as `createMemoryStore` does
+   * (`hub-server/src/memoryStore.ts`) and as the hub contract states in as many words
+   * (`HubSubscribeOptions.retention`: "refused, never clamped"). An infallible fixture cannot model
+   * a hub saying no, and a subscribe that cannot fail is a subscribe whose failure handling is
+   * never executed — which is how the transport below came to swallow every one of them unnoticed
+   * (`createHubTunnelTransport`, "Best-effort subscribe; rejection is swallowed").
+   *
+   * Throws SYNCHRONOUSLY, which `HubBase.subscribe` allows (`Promise<void> | void`): a caller that
+   * only catches a rejection is as broken as one that catches nothing.
+   */
+  subscribe(subscriberDID: string, topicID: string, options?: HubSubscribeOptions): void {
+    if (options?.retention != null && options.retention > this.#maxRetention) {
+      throw new RetentionExceededError(
+        `Requested retention of ${options.retention}s exceeds the maximum of ${this.#maxRetention}s`,
+      )
+    }
     let set = this.#topics.get(topicID)
     if (set == null) {
       set = new Set()

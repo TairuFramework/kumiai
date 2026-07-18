@@ -46,6 +46,7 @@
     "@enkaku/client": "catalog:",
     "@enkaku/protocol": "catalog:",
     "@enkaku/server": "catalog:",
-    "@kokuin/token": "catalog:"
+    "@kokuin/token": "catalog:",
+    "@kumiai/hub-conformance": "workspace:^"
   }
 }

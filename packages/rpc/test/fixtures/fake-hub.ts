@@ -34,9 +34,19 @@ function formatSequenceID(counter: number): string {
  */
 export const DEFAULT_MAX_RETENTION = 2_592_000
 
+/**
+ * Per-topic log-class depth, matching `createMemoryStore`'s own default. Kept in step for the same
+ * reason the retention ceiling is: a fixture that retains unconditionally never produces a cursor
+ * below `oldest` on its own, so every path that must survive a trimmed log is only ever reached by
+ * a test that remembered to call `trim()` by hand.
+ */
+export const DEFAULT_MAX_DEPTH = 1000
+
 export type FakeHubOptions = {
   /** Retention ceiling in seconds. Default {@link DEFAULT_MAX_RETENTION}. */
   maxRetention?: number
+  /** Per-topic log-class depth before the oldest is evicted. Default {@link DEFAULT_MAX_DEPTH}. */
+  maxDepth?: number
 }
 
 /**
@@ -156,6 +166,8 @@ export class FakeHub implements LogHub {
    * infinitely permissive one.
    */
   #maxRetention: number
+  /** Per-topic log-class depth bound. See {@link DEFAULT_MAX_DEPTH}. */
+  #maxDepth: number
   /** One-shot transient failures to inject, per topic. See {@link FakeHub.failSubscribeOnce}. */
   #transientFailures = new Map<string, number>()
   /** Every subscribe ASKED FOR, per topic, refused or not — what a retry loop is counted with. */
@@ -163,6 +175,7 @@ export class FakeHub implements LogHub {
 
   constructor(options: FakeHubOptions = {}) {
     this.#maxRetention = options.maxRetention ?? DEFAULT_MAX_RETENTION
+    this.#maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH
   }
 
   /**
@@ -254,6 +267,20 @@ export class FakeHub implements LogHub {
     if (params.retain === 'log') {
       this.#logClass.add(sequenceID)
       this.#heads.set(params.topicID, sequenceID)
+      // The depth bound, as the store enforces it: a trim like any other — it moves `oldest` and
+      // leaves the head alone — counting LOG frames only. A mailbox frame is bounded by ack and
+      // age, not depth; counting it here would let any member evict the commit log with a mailbox
+      // flood. Only a log publish can push the log-class count over the bound.
+      let logDepth = log.reduce(
+        (count, m) => (this.#logClass.has(m.sequenceID) ? count + 1 : count),
+        0,
+      )
+      while (logDepth > this.#maxDepth) {
+        const index = log.findIndex((m) => this.#logClass.has(m.sequenceID))
+        if (index === -1) break
+        log.splice(index, 1)
+        logDepth--
+      }
     }
 
     // An accepted log frame is retained AND pushed — the push is not an alternative to

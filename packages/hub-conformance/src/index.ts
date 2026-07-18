@@ -829,3 +829,13 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
     }
   })
 }
+
+export {
+  type ConformanceLogHub,
+  type ConformanceMailboxHub,
+  type ConformancePublishParams,
+  type ConformanceReceiveSubscription,
+  type MailboxHubConformanceParams,
+  testLogHubConformance,
+  testMailboxHubConformance,
+} from './log-hub.js'

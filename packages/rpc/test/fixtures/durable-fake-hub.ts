@@ -13,7 +13,7 @@ import type {
   LogHub,
 } from '@kumiai/hub-tunnel'
 
-import { DEFAULT_MAX_RETENTION, type FakeHubOptions } from './fake-hub.js'
+import { DEFAULT_MAX_DEPTH, DEFAULT_MAX_RETENTION, type FakeHubOptions } from './fake-hub.js'
 
 type Sink = {
   push: (message: StoredMessage) => void
@@ -52,9 +52,12 @@ export class DurableFakeHub implements LogHub {
 
   /** Retention ceiling in seconds — the memory store's default, for the reason FakeHub's is. */
   #maxRetention: number
+  /** Per-topic log-class depth bound — the store's, for the reason its retention ceiling is. */
+  #maxDepth: number
 
   constructor(options: FakeHubOptions = {}) {
     this.#maxRetention = options.maxRetention ?? DEFAULT_MAX_RETENTION
+    this.#maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH
   }
 
   /** Refuses a retention above the ceiling, as `createMemoryStore` does. See {@link FakeHub}. */
@@ -107,6 +110,17 @@ export class DurableFakeHub implements LogHub {
     if (params.retain === 'log') {
       this.#logClass.add(sequenceID)
       this.#heads.set(params.topicID, sequenceID)
+      // The depth bound, as the store enforces it: log-class frames only, oldest evicted first,
+      // head untouched. A double that retains unconditionally never hands a returning peer a
+      // cursor below `oldest` unless a test remembered to arrange one.
+      const topicLog = this.#log.filter(
+        (m) => m.topicID === params.topicID && this.#logClass.has(m.sequenceID),
+      )
+      const excess = topicLog.length - this.#maxDepth
+      if (excess > 0) {
+        const evicted = new Set(topicLog.slice(0, excess).map((m) => m.sequenceID))
+        this.#log = this.#log.filter((m) => !evicted.has(m.sequenceID))
+      }
     }
     for (const did of this.#topics.get(params.topicID) ?? []) {
       if (did === params.senderDID) continue
