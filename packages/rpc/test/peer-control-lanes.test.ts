@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'vitest'
-import { createGroupPeer } from '../src/peer.js'
+import {
+  createGroupPeer,
+  DEFAULT_APP_LOG_RETENTION_SECONDS,
+  DEFAULT_COMMIT_LOG_RETENTION_SECONDS,
+} from '../src/peer.js'
 import { commitTopic, protocolTopic, rendezvousTopic } from '../src/topic.js'
 import { createMemoryAnchorStore } from './fixtures/anchor.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
@@ -139,11 +143,17 @@ describe('control lane lifecycle', () => {
     })
     await flush()
 
-    const thirtyDays = 30 * 24 * 60 * 60
     // A member asks the hub to hold its app log as long as its commit log, so the two bounds
-    // coincide: there is no span where it can rebuild its membership and not its messages.
-    expect(hub.requestedRetention(protocolTopic(fakeEpochSecret(1), 1, 'chat'))).toBe(thirtyDays)
-    expect(hub.requestedRetention(commitTopic(recoverySecret))).toBe(thirtyDays)
+    // coincide: there is no span where it can rebuild its membership and not its messages. Read
+    // off the constants rather than restated, so the two can only be aligned or the build breaks;
+    // that they sit strictly BELOW a default hub's ceiling is asserted in
+    // `hub-mux-subscribe-failure.test.ts`.
+    expect(hub.requestedRetention(protocolTopic(fakeEpochSecret(1), 1, 'chat'))).toBe(
+      DEFAULT_APP_LOG_RETENTION_SECONDS,
+    )
+    expect(hub.requestedRetention(commitTopic(recoverySecret))).toBe(
+      DEFAULT_COMMIT_LOG_RETENTION_SECONDS,
+    )
 
     await peer.dispose()
   })
@@ -173,7 +183,9 @@ describe('control lane lifecycle', () => {
     // The override reaches the hub on the app topic's own subscribe, and moves nothing else: the
     // two windows are aligned by choice, so they are two dials and the commit one stays home.
     expect(hub.requestedRetention(protocolTopic(fakeEpochSecret(1), 1, 'chat'))).toBe(4321)
-    expect(hub.requestedRetention(commitTopic(recoverySecret))).toBe(30 * 24 * 60 * 60)
+    expect(hub.requestedRetention(commitTopic(recoverySecret))).toBe(
+      DEFAULT_COMMIT_LOG_RETENTION_SECONDS,
+    )
 
     await peer.dispose()
   })

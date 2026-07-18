@@ -1,4 +1,9 @@
-import { HeadMismatchError, NotSubscribedError, type StoredMessage } from '@kumiai/hub-protocol'
+import {
+  HeadMismatchError,
+  NotSubscribedError,
+  RetentionExceededError,
+  type StoredMessage,
+} from '@kumiai/hub-protocol'
 import type {
   HubFetchTopicParams,
   HubFetchTopicResult,
@@ -20,6 +25,18 @@ type Sink = {
  */
 function formatSequenceID(counter: number): string {
   return String(counter).padStart(12, '0')
+}
+
+/**
+ * 30 days in seconds — `createMemoryStore`'s own default ceiling. Kept in step deliberately: a
+ * fixture with a laxer ceiling than the store it stands in for silently stops modelling the one
+ * refusal that matters.
+ */
+export const DEFAULT_MAX_RETENTION = 2_592_000
+
+export type FakeHubOptions = {
+  /** Retention ceiling in seconds. Default {@link DEFAULT_MAX_RETENTION}. */
+  maxRetention?: number
 }
 
 /**
@@ -132,7 +149,54 @@ export class FakeHub implements LogHub {
     return { ...message, senderDID: this.#senderLie(message, readerDID) }
   }
 
+  /**
+   * The retention ceiling, in seconds. Defaults to the memory store's own
+   * ({@link DEFAULT_MAX_RETENTION}), so the default fixture refuses exactly what a default real
+   * hub refuses — a test that never mentions retention gets the operator's real answer, not an
+   * infinitely permissive one.
+   */
+  #maxRetention: number
+  /** One-shot transient failures to inject, per topic. See {@link FakeHub.failSubscribeOnce}. */
+  #transientFailures = new Map<string, number>()
+  /** Every subscribe ASKED FOR, per topic, refused or not — what a retry loop is counted with. */
+  #subscribeAttempts = new Map<string, number>()
+
+  constructor(options: FakeHubOptions = {}) {
+    this.#maxRetention = options.maxRetention ?? DEFAULT_MAX_RETENTION
+  }
+
+  /**
+   * Make the next `count` subscribes to `topicID` fail with a transport error — a hub that is
+   * unreachable rather than one that has answered. The distinction is the whole retry policy: a
+   * caller must retry this and must NOT retry a RetentionExceededError.
+   */
+  failSubscribeOnce(topicID: string, count = 1): void {
+    this.#transientFailures.set(topicID, (this.#transientFailures.get(topicID) ?? 0) + count)
+  }
+
+  /**
+   * Refuses a retention above the ceiling, exactly as `createMemoryStore` does
+   * (`hub-server/src/memoryStore.ts`) and as the conformance suite asserts of any real store. An
+   * infallible fixture cannot model a hub saying no, and a subscribe that cannot fail is a
+   * subscribe whose failure handling is never executed — which is precisely how the mux came to
+   * swallow every one of them unnoticed.
+   *
+   * Throws SYNCHRONOUSLY, which `HubBase.subscribe` allows (`Promise<void> | void`): a caller that
+   * only catches a rejection is as broken as one that catches nothing, and the fixture should be
+   * able to show that.
+   */
   subscribe(subscriberDID: string, topicID: string, options?: HubSubscribeOptions): void {
+    this.#subscribeAttempts.set(topicID, (this.#subscribeAttempts.get(topicID) ?? 0) + 1)
+    const pending = this.#transientFailures.get(topicID) ?? 0
+    if (pending > 0) {
+      this.#transientFailures.set(topicID, pending - 1)
+      throw new Error(`FakeHub: subscribe to ${topicID} failed (injected transport failure)`)
+    }
+    if (options?.retention != null && options.retention > this.#maxRetention) {
+      throw new RetentionExceededError(
+        `Requested retention of ${options.retention}s exceeds the maximum of ${this.#maxRetention}s`,
+      )
+    }
     let set = this.#topics.get(topicID)
     if (set == null) {
       set = new Set()
@@ -319,6 +383,11 @@ export class FakeHub implements LogHub {
   /** The topic's head: the last accepted log publish, or null. */
   head(topicID: string): string | null {
     return this.#heads.get(topicID) ?? null
+  }
+
+  /** How many times a subscribe to this topic was attempted, refused or not. */
+  subscribeAttempts(topicID: string): number {
+    return this.#subscribeAttempts.get(topicID) ?? 0
   }
 
   /** The retention in seconds this topic was last subscribed with. */

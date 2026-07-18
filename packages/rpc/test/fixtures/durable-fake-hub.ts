@@ -1,11 +1,19 @@
-import { HeadMismatchError, NotSubscribedError, type StoredMessage } from '@kumiai/hub-protocol'
+import {
+  HeadMismatchError,
+  NotSubscribedError,
+  RetentionExceededError,
+  type StoredMessage,
+} from '@kumiai/hub-protocol'
 import type {
   HubFetchTopicParams,
   HubFetchTopicResult,
   HubPublishParams,
   HubReceiveSubscription,
+  HubSubscribeOptions,
   LogHub,
 } from '@kumiai/hub-tunnel'
+
+import { DEFAULT_MAX_RETENTION, type FakeHubOptions } from './fake-hub.js'
 
 type Sink = {
   push: (message: StoredMessage) => void
@@ -42,7 +50,20 @@ export class DurableFakeHub implements LogHub {
   /** Append-only record of every published message, for test assertions. */
   published: Array<StoredMessage> = []
 
-  subscribe(subscriberDID: string, topicID: string): void {
+  /** Retention ceiling in seconds — the memory store's default, for the reason FakeHub's is. */
+  #maxRetention: number
+
+  constructor(options: FakeHubOptions = {}) {
+    this.#maxRetention = options.maxRetention ?? DEFAULT_MAX_RETENTION
+  }
+
+  /** Refuses a retention above the ceiling, as `createMemoryStore` does. See {@link FakeHub}. */
+  subscribe(subscriberDID: string, topicID: string, options?: HubSubscribeOptions): void {
+    if (options?.retention != null && options.retention > this.#maxRetention) {
+      throw new RetentionExceededError(
+        `Requested retention of ${options.retention}s exceeds the maximum of ${this.#maxRetention}s`,
+      )
+    }
     let set = this.#topics.get(topicID)
     if (set == null) {
       set = new Set()

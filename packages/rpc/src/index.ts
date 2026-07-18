@@ -50,6 +50,7 @@ export {
   HANDSHAKE_VERSION,
   type HandshakeKind,
 } from './handshake.js'
+export type { SubscribeFailure } from './hub-mux.js'
 export {
   createLedgerEntryResolver,
   decodeLedgerEntries,

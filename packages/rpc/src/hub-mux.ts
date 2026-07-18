@@ -1,5 +1,5 @@
 import type { BroadcastBus } from '@kumiai/broadcast'
-import type { StoredMessage } from '@kumiai/hub-protocol'
+import { RetentionExceededError, type StoredMessage } from '@kumiai/hub-protocol'
 import type {
   HubFetchTopicResult,
   HubReceiveSubscription,
@@ -10,11 +10,44 @@ import type {
 
 import { asDeliveryPosition } from './cursor.js'
 
+/**
+ * A subscribe the hub refused for good — either a permanent refusal (it has answered, and the
+ * answer will not change) or a transient one the retry schedule ran out on. Either way this peer
+ * is NOT a subscriber of `topicID`: nothing is pushed to it there and it cannot pull it.
+ */
+export type SubscribeFailure = {
+  topicID: string
+  error: unknown
+  /**
+   * True when the hub settled it (e.g. RetentionExceededError) and no retry was attempted; false
+   * when it was retried to the end of the schedule and never succeeded.
+   */
+  permanent: boolean
+}
+
+/**
+ * Backoff for a TRANSIENT subscribe failure, in ms. Short enough that an ordinary reconnect blip
+ * heals before the first lane operation, bounded so a hub that is answering "no" in a shape this
+ * code cannot classify is not asked forever.
+ */
+const DEFAULT_SUBSCRIBE_RETRY_DELAYS_MS: ReadonlyArray<number> = [100, 500, 2_000, 10_000]
+
 export type HubMuxParams = {
   /** The real hub. It must serve a log: the commit lane reads one. */
   hub: LogHub
   /** Authenticated DID used to drain `hub.receive` and stamp bus publishes. */
   localDID: string
+  /**
+   * Called once per topic the hub has definitively refused. A NOTICE, not the enforcement: the
+   * enforcement is that every publish and fetch on a refused topic throws (see
+   * {@link createHubMux}). This exists because a peer that only READS a topic calls nothing that
+   * could throw, so without it a pure consumer would sit silent — which is the whole defect.
+   *
+   * Fire-and-forget; a throw here is swallowed rather than allowed to kill the retry path.
+   */
+  onSubscribeFailed?: (failure: SubscribeFailure) => void
+  /** Backoff schedule for transient subscribe failures. Default {@link DEFAULT_SUBSCRIBE_RETRY_DELAYS_MS}. */
+  subscribeRetryDelaysMs?: ReadonlyArray<number>
 }
 
 /**
@@ -58,9 +91,9 @@ export type HubMux = {
    *
    * Not paired with a release, deliberately: an app topic is subscribed for the member's whole
    * life (a rotation tears down listeners, never subscriptions), so there is no later moment
-   * this could correctly be undone at. Idempotent by the refcount — a topic already subscribed
-   * is not re-subscribed at the hub, so `options` are the FIRST caller's and a later retain of
-   * the same topic carries none.
+   * this could correctly be undone at. Idempotent over a topic that is HELD or being asked for —
+   * that one is not re-subscribed, so `options` are the FIRST caller's. A topic the hub REFUSED
+   * is not held, so a later retain asks again, carrying its own `options`.
    */
   retainTopic: (topicID: string, options?: HubSubscribeOptions) => void
   /** Pull a topic's log as the local DID. */
@@ -84,6 +117,46 @@ type Sink = {
 }
 
 /**
+ * The state of the SUBSCRIPTION at the hub, per topic — deliberately NOT the refcount, which
+ * counts local listeners. Conflating the two is the defect this replaces: a listener registration
+ * bumped the count, the count gated the subscribe, and a REFUSED subscribe left behind a count
+ * saying "held" about a topic the hub had said no to. Nothing ever asked again, and every later
+ * fetch of that topic died of `NotSubscribedError` forever.
+ *
+ * `asking` covers the in-flight request AND the gaps between retries: a topic being asked for is
+ * not asked for twice concurrently, but a topic that has been refused is not "held" and the next
+ * retain is a fresh chance to ask.
+ */
+type TopicSubscription =
+  | { kind: 'asking' }
+  | { kind: 'held' }
+  /**
+   * `permanent` and `retention` together decide what a later retain may do. A refusal is a refusal
+   * OF A REQUEST: only a different explicit request can be answered differently, so a permanent
+   * refusal of `retention: N` is cleared by a retain asking for something other than N, and by
+   * nothing else. A retry-exhausted failure carries no answer at all, so any retain re-asks.
+   */
+  | { kind: 'refused'; error: unknown; permanent: boolean; retention: number | undefined }
+
+/**
+ * Permanent means the hub has ANSWERED, not that it failed. A retention above the operator's cap
+ * is a settled fact about this request: retrying it is a busy loop against an answer that will
+ * never change, and the peer's only route out is the host changing what it asks for. Anything
+ * else — a socket that dropped, a hub mid-restart — is assumed transient and retried, because the
+ * cost of retrying a failure that was really permanent is a bounded schedule, while the cost of
+ * NOT retrying one that was really transient is a peer that never comes back.
+ */
+function isPermanentSubscribeFailure(error: unknown): boolean {
+  // Name as well as instance: a hub reached over the tunnel rebuilds the error from its wire code
+  // (`hubErrorFromCode`), and a host bundling two copies of hub-protocol would break `instanceof`
+  // alone — turning a permanent refusal back into a retry loop, silently.
+  return (
+    error instanceof RetentionExceededError ||
+    (error instanceof Error && error.name === 'RetentionExceededError')
+  )
+}
+
+/**
  * Multiplex a single hub `receive` drain into a BroadcastBus view, a mailbox-hub view (for
  * directed tunnels), and an onInbound hook (for lazy directed-server accept).
  *
@@ -91,6 +164,35 @@ type Sink = {
  * to every `mailbox.receive` sink — so a listener may create a directed tunnel synchronously
  * and still receive the triggering frame. Topics are refcounted across all three views; the
  * first registration subscribes on the hub.
+ *
+ * ## A subscribe the hub refuses
+ *
+ * The hub may say no — `RetentionExceededError` when a host asks to hold a log longer than the
+ * operator allows, refused rather than clamped on purpose. A peer that is not a subscriber of a
+ * topic is pushed nothing on it and cannot pull it: no commit applies, no app frame arrives. That
+ * failure has to be impossible to miss, and there are three candidate surfaces:
+ *
+ * - **Retry with backoff** answers a dropped socket and nothing else. Retrying a settled refusal
+ *   is a busy loop against an answer that will not change, so it is the answer for TRANSIENT
+ *   failures only. Used, bounded, and never for a permanent one.
+ * - **Raising into the caller** cannot be the whole answer: `retainTopic` is called for its effect
+ *   and returns before the hub has answered, and the callers that would catch it (the commit-lane
+ *   seed, the app-segment load) are the ones already written to swallow.
+ * - **A host callback** is optional by nature, and an optional notice cannot be the guarantee: an
+ *   unwired host would be exactly as blind as today.
+ *
+ * So the guarantee is a LATCH, and the callback is a convenience on top of it. A refused topic is
+ * recorded as refused, and every `publish`, `bus.publish`, `mailbox.publish` and `fetchTopic` on it
+ * throws the hub's own error. A peer that cannot receive on a topic does not go on transmitting
+ * there as though it were whole — it fails at the first operation that touches the topic, with the
+ * reason rather than the `NotSubscribedError` symptom. That is what makes it impossible for a peer
+ * whose subscribe was refused to report itself healthy, whatever the host wired.
+ *
+ * `onSubscribeFailed` exists on top because a peer that only READS a topic calls nothing that
+ * could throw. The latch cannot reach it; the notice can.
+ *
+ * A refused topic is not held, so the next `retain` asks again — a host that lowered its retention
+ * recovers on the next rotation without restarting.
  *
  * **The refcount tracks LOCAL LISTENERS and never unsubscribes.** A subscription is a durable
  * member-topic relationship, not a session: the hub holds a subscriber's undelivered frames,
@@ -102,17 +204,95 @@ type Sink = {
  * what backgrounding a mobile app calls.
  */
 export function createHubMux(params: HubMuxParams): HubMux {
-  const { hub, localDID } = params
+  const { hub, localDID, onSubscribeFailed } = params
+  const retryDelaysMs = params.subscribeRetryDelaysMs ?? DEFAULT_SUBSCRIBE_RETRY_DELAYS_MS
 
   const listeners = new Map<string, Set<InboundListener>>()
   const refcount = new Map<string, number>()
+  const subscriptions = new Map<string, TopicSubscription>()
   const sinks = new Set<Sink>()
   let disposed = false
 
+  const reportFailure = (failure: SubscribeFailure): void => {
+    try {
+      onSubscribeFailed?.(failure)
+    } catch {
+      // a host's notice handler must not break the mux
+    }
+  }
+
+  /**
+   * Ask the hub, once, and record what it said. Runs to the first `await` SYNCHRONOUSLY, so a hub
+   * whose `subscribe` registers synchronously is registered by the time `retain` returns — the
+   * subscribe-then-pull ordering the commit lane depends on is unchanged.
+   */
+  const attemptSubscribe = async (
+    topicID: string,
+    options: HubSubscribeOptions | undefined,
+    attempt: number,
+  ): Promise<void> => {
+    subscriptions.set(topicID, { kind: 'asking' })
+    try {
+      // Inside the try, and awaited: `subscribe` may reject OR throw synchronously (the type
+      // allows `void`), and the old code's `Promise.resolve(...).catch()` caught only the first.
+      await hub.subscribe(localDID, topicID, options)
+      if (disposed) return
+      subscriptions.set(topicID, { kind: 'held' })
+      return
+    } catch (error) {
+      if (disposed) return
+      const permanent = isPermanentSubscribeFailure(error)
+      const delay = retryDelaysMs[attempt]
+      if (permanent || delay === undefined) {
+        // The refusal is LATCHED, not just reported: see the note on `createHubMux` for why a
+        // notice a host may not have wired cannot be the whole answer.
+        subscriptions.set(topicID, {
+          kind: 'refused',
+          error,
+          permanent,
+          retention: options?.retention,
+        })
+        reportFailure({ topicID, error, permanent })
+        return
+      }
+      await new Promise((resolve) => setTimeout(resolve, delay))
+      if (disposed) return
+      await attemptSubscribe(topicID, options, attempt + 1)
+    }
+  }
+
   const retain = (topicID: string, options?: HubSubscribeOptions): void => {
-    const next = (refcount.get(topicID) ?? 0) + 1
-    refcount.set(topicID, next)
-    if (next === 1) void Promise.resolve(hub.subscribe(localDID, topicID, options)).catch(() => {})
+    refcount.set(topicID, (refcount.get(topicID) ?? 0) + 1)
+    // Gated on the SUBSCRIPTION, never on the refcount. A topic held, or currently being asked
+    // for, is not asked for again. A refused one may be: the hub said no, so this peer does not
+    // hold it, and the data structure must not pretend otherwise.
+    const state = subscriptions.get(topicID)
+    if (state == null) {
+      void attemptSubscribe(topicID, options, 0)
+      return
+    }
+    if (state.kind !== 'refused') return
+    // A PERMANENT refusal is an answer to a specific request, and is re-asked only under a
+    // different one. In particular a retain carrying NO retention does not clear it: a caller with
+    // no opinion about the window must not overrule the one that had an opinion and was refused —
+    // subscribing anyway would land the peer on the hub's default and quietly deliver the silent
+    // downgrade the hub refused to perform, which is worse than the refusal it replaces.
+    //
+    // A retry-exhausted failure carries no answer, so any retain re-asks.
+    if (state.permanent && (options?.retention == null || options.retention === state.retention)) {
+      return
+    }
+    void attemptSubscribe(topicID, options, 0)
+  }
+
+  /**
+   * The enforcement half. A topic the hub refused is one this peer cannot read, so it does not go
+   * on transmitting there as a full participant either: every publish and every fetch on it
+   * rejects with the hub's own error.
+   */
+  const assertSubscribable = (topicID: string): void => {
+    const state = subscriptions.get(topicID)
+    if (state?.kind === 'refused') throw state.error
   }
 
   // Drops a local listener's reference, and NOTHING at the hub. The subscription stands: the
@@ -180,13 +360,18 @@ export function createHubMux(params: HubMuxParams): HubMux {
   })()
 
   const bus: BroadcastBus = {
-    publish: (topicID, payload) =>
-      Promise.resolve(hub.publish({ senderDID: localDID, topicID, payload })).then(() => {}),
+    publish: async (topicID, payload) => {
+      assertSubscribable(topicID)
+      await hub.publish({ senderDID: localDID, topicID, payload })
+    },
     subscribe: (topicID, onMessage) => onInbound(topicID, (message) => onMessage(message.payload)),
   }
 
   const mailbox: MailboxHub = {
-    publish: (publishParams) => hub.publish(publishParams),
+    publish: async (publishParams) => {
+      assertSubscribable(publishParams.topicID)
+      return await hub.publish(publishParams)
+    },
     subscribe: (_subscriberDID, topicID) => {
       retain(topicID)
     },
@@ -243,8 +428,9 @@ export function createHubMux(params: HubMuxParams): HubMux {
     },
   }
 
-  const publish = (params: MuxPublishParams): Promise<{ sequenceID: string }> =>
-    Promise.resolve(
+  const publish = async (params: MuxPublishParams): Promise<{ sequenceID: string }> => {
+    assertSubscribable(params.topicID)
+    return await Promise.resolve(
       hub.publish({
         senderDID: localDID,
         topicID: params.topicID,
@@ -257,11 +443,16 @@ export function createHubMux(params: HubMuxParams): HubMux {
         ...(params.publishID != null ? { publishID: params.publishID } : {}),
       }),
     )
+  }
 
-  const fetchTopic = (params: MuxFetchTopicParams): Promise<HubFetchTopicResult> =>
+  const fetchTopic = async (params: MuxFetchTopicParams): Promise<HubFetchTopicResult> => {
+    // A fetch of a refused topic would die of `NotSubscribedError` — the SYMPTOM, naming the mux's
+    // own failure to subscribe as if it were the caller's mistake. The latched refusal is raised
+    // instead, so what reaches the host is the reason.
+    assertSubscribable(params.topicID)
     // Called on `hub`, not through a detached reference: a LogHub is often a class, and
     // an unbound method loses its receiver.
-    Promise.resolve(
+    return await Promise.resolve(
       hub.fetchTopic({
         subscriberDID: localDID,
         topicID: params.topicID,
@@ -269,6 +460,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
         ...(params.limit != null ? { limit: params.limit } : {}),
       }),
     )
+  }
 
   return {
     bus,

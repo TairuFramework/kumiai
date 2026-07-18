@@ -144,7 +144,7 @@ any other frame that will not open.
 
 ## Retention window
 
-Members request **30 days** on subscribe, for both the commit log and the app log. They are
+Members request **28 days** on subscribe, for both the commit log and the app log. They are
 **aligned by choice**, so the membership-rebuild bound and the app-drain bound coincide: there is no
 span in which a member can rebuild its membership but not its messages.
 
@@ -154,10 +154,35 @@ span in which a member can rebuild its membership but not its messages.
 The hub **operator** governs real storage via its own `maxRetention` cap; this is a default members
 carry, not a mechanism. A per-member override is possible up to that cap.
 
-> **Footgun:** `hub-mux` currently swallows every `subscribe` failure, including the
-> `RetentionExceededError` the hub raises rather than downgrade silently. A host overriding above the
-> operator's cap is therefore **not subscribed at all**, and told nothing. See
-> `docs/agents/plans/next/2026-07-16-mux-swallows-subscribe-failure.md`.
+**Four weeks, not thirty days, and the two days are the margin.** `createMemoryStore`'s reference
+ceiling is thirty days, and a hub **refuses** a retention above its ceiling rather than clamping it.
+A default sitting exactly *on* the ceiling leaves the documented per-member override nowhere to go:
+every upward move is refused outright. The relationship is asserted, not merely written down —
+`packages/rpc/test/hub-mux-subscribe-failure.test.ts` fails if the defaults drift up to the ceiling
+or apart from each other.
+
+### A subscribe the hub refuses
+
+An operator may still set a tighter cap than the reference one, so the refusal has to be survivable.
+A peer that is not a subscriber of a topic is pushed nothing on it and cannot pull it — no commit
+applies, no app frame arrives — so `hub-mux` treats a refusal as follows:
+
+| | |
+| --- | --- |
+| Transient (a dropped socket) | Retried on a bounded backoff. Not reported if it heals. |
+| Permanent (`RetentionExceededError`) | **Not** retried — the hub has answered, and asking again is a busy loop against a settled result. |
+| Either, once given up on | **Latched**, and reported via `onSubscribeFailed`. |
+
+A latched topic is not a topic this peer holds, so it is not recorded as one: a later `retainTopic`
+asking for a *different* window tries again. A later retain carrying **no** window does not — a
+caller with no opinion about retention must not overrule the one that had an opinion and was
+refused, since subscribing anyway would land the peer on the hub's default and deliver exactly the
+silent downgrade the `RetentionExceededError` exists to refuse.
+
+The latch, not the callback, is the guarantee: every `publish` and `fetchTopic` on a refused topic
+throws the hub's own error. A host that wires no callback therefore still cannot mistake such a peer
+for a healthy one — a peer that cannot receive on a topic does not go on transmitting there. The
+callback exists because a peer that only *reads* a topic calls nothing that could throw.
 
 When the drain finds the hub's oldest retained frame is newer than its cursor, the peer fires
 `onAppWindowPruned` — a **notice**, not an error (surviving frames are delivered anyway), naming the

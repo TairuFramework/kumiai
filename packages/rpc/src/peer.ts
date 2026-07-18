@@ -37,7 +37,7 @@ import { asLogPosition, type LogPosition } from './cursor.js'
 import { createDirectedClient, createInboxAcceptor } from './directed.js'
 import { adaptBusHandlers, type BusHandlerMaps } from './handlers.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from './handshake.js'
-import { createHubMux, type HubMux } from './hub-mux.js'
+import { createHubMux, type HubMux, type SubscribeFailure } from './hub-mux.js'
 import { createLedgerEntryResolver, encodeLedgerEntries } from './ledger-entries.js'
 import { retentionOf } from './protocol.js'
 import {
@@ -64,10 +64,21 @@ const DEFAULT_RECOVERY_JITTER_MS = 250
 const DEFAULT_RECOVERY_DEADLINE_MS = 30_000
 
 /**
- * How long the hub is asked to keep the commit log. Bounds how long a member may be offline and
- * still converge by pulling alone, without another member awake to heal it.
+ * How long the hub is asked to keep the commit log: **28 days**. Bounds how long a member may be
+ * offline and still converge by pulling alone, without another member awake to heal it.
+ *
+ * Four weeks, not thirty days, and the two days are the point. A hub refuses a retention above its
+ * ceiling rather than clamping it, and the reference ceiling (`createMemoryStore`'s
+ * `DEFAULT_MAX_RETENTION`) is thirty days. A default sitting exactly ON the ceiling leaves a host
+ * no room at all: any upward override is refused outright, and the peer is then not a subscriber
+ * of its own commit topic. Below the ceiling, the ordinary override has somewhere to go.
+ *
+ * The relationship is asserted, not just documented — see `peer-control-lanes.test.ts`. Nothing
+ * stops an operator setting a tighter cap than the reference one, and against such a hub this
+ * default IS refused; that is why the refusal has to reach the host (see `hub-mux`), and why it
+ * must not be the DEFAULT configuration that trips it.
  */
-const DEFAULT_COMMIT_LOG_RETENTION_SECONDS = 30 * 24 * 60 * 60
+export const DEFAULT_COMMIT_LOG_RETENTION_SECONDS = 28 * 24 * 60 * 60
 
 /**
  * How long the hub is asked to keep an app topic's log. Aligned to the commit window so the two
@@ -75,7 +86,7 @@ const DEFAULT_COMMIT_LOG_RETENTION_SECONDS = 30 * 24 * 60 * 60
  * membership by pulling commits but not its messages. A separate dial rather than the commit
  * one reused, because the alignment is a CHOICE — a host with reason to move one bound moves it.
  */
-const DEFAULT_APP_LOG_RETENTION_SECONDS = 30 * 24 * 60 * 60
+export const DEFAULT_APP_LOG_RETENTION_SECONDS = DEFAULT_COMMIT_LOG_RETENTION_SECONDS
 
 /** How many commit frames a single pull asks for. Pull loops until the log is drained. */
 const COMMIT_FETCH_LIMIT = 100
@@ -200,6 +211,21 @@ export type GroupPeerParams<Protocols extends Record<string, ProtocolDefinition>
    * returning member does still have is not the host's error handling to lose.
    */
   onAppWindowPruned?: (event: AppWindowPruned) => void | Promise<void>
+  /**
+   * Called when the hub definitively refuses to subscribe this peer to a topic — most plausibly a
+   * `commitLogRetentionSeconds` / `appLogRetentionSeconds` above the operator's own cap, which a
+   * hub refuses rather than clamps.
+   *
+   * Optional, but NOT optional in the way `onAppWindowPruned` is. That one reports an absence a
+   * host loses nothing by ignoring; this reports a topic the peer is not a subscriber of, on which
+   * it will receive nothing, ever. It is optional only because it is not the enforcement: every
+   * publish and fetch on a refused topic throws (see {@link "hub-mux".createHubMux}), so a host
+   * that wires nothing still cannot mistake such a peer for a healthy one. This is how a host
+   * learns PROMPTLY, and the only way a peer that merely reads a topic tells anyone at all.
+   *
+   * Fire-and-forget: a throw is swallowed.
+   */
+  onSubscribeFailed?: (failure: SubscribeFailure) => void
 } & (
   | GroupPeerMLSParams
   | {
@@ -332,7 +358,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     params.commitLogRetentionSeconds ?? DEFAULT_COMMIT_LOG_RETENTION_SECONDS
   const appLogRetentionSeconds = params.appLogRetentionSeconds ?? DEFAULT_APP_LOG_RETENTION_SECONDS
   const commitDeadlineMs = params.commitDeadlineMs ?? DEFAULT_COMMIT_DEADLINE_MS
-  const mux: HubMux = createHubMux({ hub, localDID })
+  const mux: HubMux = createHubMux({
+    hub,
+    localDID,
+    ...(params.onSubscribeFailed != null ? { onSubscribeFailed: params.onSubscribeFailed } : {}),
+  })
 
   let runtimes = new Map<string, ProtocolRuntime>()
 
