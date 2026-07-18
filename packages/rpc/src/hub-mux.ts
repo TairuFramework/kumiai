@@ -213,6 +213,27 @@ export function createHubMux(params: HubMuxParams): HubMux {
   const sinks = new Set<Sink>()
   let disposed = false
 
+  /**
+   * Retry backoffs currently sleeping, each as the function that ends its sleep early.
+   *
+   * A timer nobody can reach still holds the process open, so a `dispose` that only sets a flag
+   * leaves the caller waiting out the longest backoff for work already abandoned. Cancelling ENDS
+   * the sleep rather than dropping it: clearing the timeout alone would leave the awaiting retry
+   * suspended on a promise that can never settle, trading a held timer for a leaked one.
+   */
+  const sleeping = new Set<() => void>()
+
+  const sleep = (ms: number): Promise<void> =>
+    new Promise<void>((resolve) => {
+      const wake = (): void => {
+        clearTimeout(timer)
+        sleeping.delete(wake)
+        resolve()
+      }
+      const timer = setTimeout(wake, ms)
+      sleeping.add(wake)
+    })
+
   const reportFailure = (failure: SubscribeFailure): void => {
     try {
       onSubscribeFailed?.(failure)
@@ -255,7 +276,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
         reportFailure({ topicID, error, permanent })
         return
       }
-      await new Promise((resolve) => setTimeout(resolve, delay))
+      await sleep(delay)
       if (disposed) return
       await attemptSubscribe(topicID, options, attempt + 1)
     }
@@ -474,6 +495,9 @@ export function createHubMux(params: HubMuxParams): HubMux {
     dispose: async () => {
       if (disposed) return
       disposed = true
+      // Before anything else: a retry sleeping out its backoff is work already abandoned, and
+      // every path it could wake into checks `disposed` and returns.
+      for (const wake of [...sleeping]) wake()
       for (const sink of [...sinks]) sink.close()
       sinks.clear()
       // Listeners go, the drain stops, SUBSCRIPTIONS STAND. Disposing means "stopped reading",

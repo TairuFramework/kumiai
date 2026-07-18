@@ -1,6 +1,6 @@
 import { NotSubscribedError, RetentionExceededError } from '@kumiai/hub-protocol'
 import { fromUTF } from '@sozai/codec'
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 import { createHubMux, type SubscribeFailure } from '../src/hub-mux.js'
 import {
@@ -178,6 +178,34 @@ describe('a subscribe the hub refuses', () => {
     await expect(mux.fetchTopic({ topicID: 'topic:dead' })).rejects.toThrow(/injected transport/)
 
     await mux.dispose()
+  })
+
+  test('disposing releases a retry backoff rather than leaving its timer to run', async () => {
+    // The timer is the whole observable. `dispose` does not await the retry, so neither how long
+    // it takes nor how many attempts follow can see this: a backoff left running holds the process
+    // open with nothing to report, and only the timer count says so.
+    vi.useFakeTimers()
+    try {
+      const hub = new FakeHub()
+      const mux = createHubMux({ hub, localDID: 'bob', subscribeRetryDelaysMs: [30_000] })
+
+      hub.failSubscribeOnce('topic:slow', 99)
+      mux.retainTopic('topic:slow', { retention: 60 })
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(hub.subscribeAttempts('topic:slow')).toBe(1)
+      expect(vi.getTimerCount()).toBe(1)
+
+      await mux.dispose()
+      expect(vi.getTimerCount()).toBe(0)
+
+      // Ended, not merely dropped: the retry woke into a disposed mux and stopped there, rather
+      // than staying suspended on a promise that can never settle.
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(hub.subscribeAttempts('topic:slow')).toBe(1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
