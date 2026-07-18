@@ -1,10 +1,77 @@
 # App-lane delivery — plan
 
-**Stage:** reviewing (PAUSED 2026-07-16 — resume at Fix 2 below)
+**Stage:** reviewing (PAUSED 2026-07-18 — resume at "Open, in priority order" below)
 **Mode:** learning-loop
 **Spec:** docs/superpowers/specs/2026-07-16-app-lane-delivery-design.md
 
-## Resume here
+## Resume here — 2026-07-18
+
+**The branch is RED on purpose: 3 rpc tests fail and must not be made green by weakening them.**
+Everything else passes — mls 317, mls-rpc 33, integration 29 (nothing skipped), build and lint clean.
+44 commits. Last commit `1399409`.
+
+**What changed since the 2026-07-16 pause.** Fix 2 (`60e8b28`, `b61f35d`), Fix 2b — the commit
+classifier's trust split (`6b31331`), three security fixes (`3d66321`, `b544707`, `223c10c`), the mux
+dispose leak (`c397108`), the ephemeral publish topic (`dab7bce`), hub conformance (`4318ca4`), test
+quality (`bdb40f8`), F5 unblocked via the hub carrying a log position on log-class pushes (`a5b3d36`),
+the real ports and first real run (`e33319d`), the two real-MLS defects fixed (`434e422`), and rpc port
+conformance (`1399409`).
+
+**The thesis now passes over real crypto** — a member goes offline, the group exchanges messages and
+both adds and removes members, and the returning member receives every missed message in order, exactly
+once, each opened at its sealing epoch. Over a real hub server, real MLS, real crypto. It had never run
+that way before; `@kumiai/mls-rpc` is the first real implementation of the rpc ports.
+
+**The through-line of this whole review: a double answered where its real port refuses.** Six defects,
+one root cause. Both conformance suites (`hub-conformance`, `rpc-conformance`) exist to stop the
+seventh. Do not make a double lenient to close a red — that is what hid all of these.
+
+## Open, in priority order
+
+1. **PRODUCTION DEFECT — directed RPC opens every frame twice.** The inbox acceptor (`peer.ts:692`) and
+   `to(memberDID)`'s directed client (`directed.ts:45`) listen on the same inbox topic and each call
+   `crypto.unwrap`; real MLS spends the message key on the first open, so a directed request is never
+   answered. This is the same defect as the app lane's, in a lane `real-mls-defects-report.md` declared
+   correct — check the OTHER lanes for it too rather than fixing only this one. Two of the three red
+   tests are this. Fix shape is known and proven: one inbound path per topic, open once, fan the
+   plaintext out (see `434e422`).
+2. **The third red test** (`peer-app-drain-integrity.test.ts`) expects a duplicate delivery real MLS
+   cannot produce. Decide what it should assert now that the fake consumes properly.
+3. **`rosterDIDs` shrinks on a commit the member could not apply** — a removed member's own leaf
+   disappears at an unchanged epoch. `peer.ts:1574-1577` diffs the roster regardless of whether the
+   advance advanced, so a removed member re-anchors and discards undelivered frames. Not fixed; the
+   conformance clause is documented as not expressible against both implementations.
+4. **A host reconnecting before its old channel is torn down gets no push lane and no error** —
+   `hub-server` binds one receive writer per DID and refuses the second, and the rejection lands on a
+   channel promise nobody awaits. Same silent-failure shape as the swallowed subscribe. Hub/host
+   territory.
+5. **XChaCha20-Poly1305 for `sealEntries` wants a reviewer who is not the author.** The key comes from
+   the negotiated exporter, but the cipher is not tied to the group's negotiated ciphersuite — a second
+   cipher in the stack, chosen inside a bugfix.
+6. **Entry-blob format change is not self-healing.** An entry-carrying commit already on a hub's commit
+   log fails the new AEAD, the resolver answers `[]`, and the frame files as poison — no wedge, but
+   those entries are never enacted. Journal is fine (plaintext bodies, re-sealed on replay). Pre-1.0,
+   likely moot, but real.
+
+**Filed, not closable where they surface** (`docs/agents/plans/next/`): the commit-topic storm (one
+publish with a rewritten cleartext epoch makes every peer heal — belongs to publish authorization),
+external-commit replay, the RPC receive binding mid-rotation, `createMemoryBus` lacking sender identity,
+the `ahead`-row item, and the conformance-suite item.
+
+**Accepted residuals — do NOT re-report:** the `processCommit`→anchor-`save` crash window; the laggard
+publisher; a fresh joiner's empty ts-mls window; `oldest > cursor` over-reporting; the drain being
+at-least-once against the live path.
+
+**Then:** qa → completing → finishing.
+
+> **Verify honestly.** `pnpm test` reports CACHED turbo results and proves nothing after an edit. Use
+> `pnpm exec turbo run test:types test:unit --force` and check it says `Cached: 0`. `pnpm test -- --force`
+> is broken — the flag reaches vitest/tsc, not turbo, and `test:types` fails on it. Integration:
+> `pnpm exec vitest run --root tests/integration`.
+
+---
+
+## Earlier resume note — 2026-07-16 (superseded, kept for history)
 
 All five phases are answered and green (rpc 218, mls 307, 30/30). An adversarial branch review
 (`docs/superpowers/probes/branch-review.md`) found 8 defects. **Fix 1 landed** (`a300a54`). Two fixes
