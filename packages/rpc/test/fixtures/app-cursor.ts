@@ -22,6 +22,15 @@ export function createMemoryAppCursorStore(): MemoryAppCursorStore {
       return positions.get(topicID) ?? null
     },
     async save(topicID: string, position: string) {
+      // A READ POSITION ONLY MOVES FORWARD, and this is the only place that can say so. The
+      // advance rule lives entirely in the peer, so a store that took any position would let a
+      // regression there write a cursor backwards and be caught by nothing — the peer would go on
+      // converging, and the next restart would silently re-deliver everything between the two
+      // positions. Equal is allowed: re-saving the position already held is a no-op, not a move.
+      const held = positions.get(topicID)
+      if (held != null && position < held) {
+        throw new Error(`app cursor for ${topicID} may not move back from ${held} to ${position}`)
+      }
       positions.set(topicID, position)
       const log = writes.get(topicID)
       if (log == null) writes.set(topicID, [position])

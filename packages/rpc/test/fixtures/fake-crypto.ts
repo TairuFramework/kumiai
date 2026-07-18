@@ -100,12 +100,27 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
    *
    * Never throws, and answers for bytes this member cannot open — that is the whole of what it is
    * for. Bytes that are neither shape: `null`.
+   *
+   * STRUCTURE IS CHECKED, not just length. A sealed frame is `[epoch(2)][ xor([didLen(2)][did]
+   * [payload]) ]`, so it is at least four bytes long and its own length holds the sender it
+   * declares — a check every member can make, because the epoch and the XOR key are in the clear.
+   * Without it any two bytes are an epoch, and garbage whose leading bytes read as a number the
+   * commit log justifies is indistinguishable from a frame sealed ahead of the walk: the reader
+   * keeps its place and the cursor rests behind it. The port's word for bytes that are not a
+   * readable sealed frame is `null`, and a double that invents a plausible one instead is a double
+   * that can never be asked this question.
    */
   const frameEpoch: GroupCrypto['frameEpoch'] = (bytes) => {
     const commit = decodeMemoryCommit(bytes)
     if (commit != null) return commit.epoch
-    if (bytes.length < 2) return null
-    return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint16(0, true)
+    if (bytes.length < 4) return null
+    const sealedAt = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint16(
+      0,
+      true,
+    )
+    const framed = xor(bytes.subarray(2), sealedAt)
+    const didLen = new DataView(framed.buffer).getUint16(0, true)
+    return 2 + didLen <= framed.length ? sealedAt : null
   }
 
   const unwrap: Unwrap = (bytes) => {

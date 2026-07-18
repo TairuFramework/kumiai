@@ -32,6 +32,15 @@ const flush = () => new Promise((r) => setTimeout(r, 50))
  *
  * The group's topic is read from a member's own anchor store rather than recomputed here, so the
  * comparison follows the lane to wherever it actually sealed the anchor from.
+ *
+ * WHAT THIS CANNOT SAY, and must not be read as saying: that the removed member cannot GET the
+ * post-removal epoch secret. That is MLS's forward secrecy and it lives in the handle, not here —
+ * the fake's per-epoch secret is a reversible mix of a shared base (see `fakeEpochSecret`), so in
+ * this test's own crypto she can compute epoch 2's secret and with it the group's topic. Handing
+ * that secret to the loop below turns it red, which is the honest measure of what the loop proves:
+ * that the anchor is sealed from `exportSecret()` and not from the lifelong recovery secret, so
+ * the wiring puts the topic BEHIND forward secrecy. Whether forward secrecy then holds is the
+ * handle's answer, and `GroupCrypto` has no implementation in this repo to ask it of.
  */
 const room = defineGroupProtocol({
   'room/posted': { type: 'event', retain: 'log', data: { type: 'object' } },
@@ -74,8 +83,8 @@ function makeRoomPeer(
   return { peer, crypto, mls, anchorStore, appCursorStore }
 }
 
-describe('a member removed at the rotation cannot reach the topic the group rotates onto', () => {
-  test('nothing the removed member still holds derives the new topic, and nothing reaches her', async () => {
+describe('the rotation puts the group on a topic only the post-removal epoch secret names', () => {
+  test('the lifelong recovery secret does not derive the new topic, and nothing reaches her', async () => {
     const hub = new FakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x71)
     const aliceSaw: Array<unknown> = []
@@ -145,9 +154,10 @@ describe('a member removed at the rotation cannot reach the topic the group rota
     // Carol heard neither. Her handlers are the same ones that took the first event.
     expect(carolSaw).toEqual([{ said: 'while carol is here' }])
 
-    // THE ASSERTION. Every secret Carol still holds, against every epoch number she can name —
-    // and they are counters, so she can name all of them, including the one the group is at.
-    // None of it is the topic the group moved to.
+    // THE ASSERTION, and it is about where the anchor is sealed FROM. Both secrets are tried
+    // against every epoch number Carol can name — and they are counters, so she can name all of
+    // them, including the one the group is at. The recovery secret is the load-bearing one: it is
+    // hers for life, and an anchor sealed from it would put the group's topic one counter away.
     const held = [
       ['the recovery secret, hers for life', carolRecoverySecret],
       ['the per-epoch secret of the last epoch she holds', carolEpochSecret],

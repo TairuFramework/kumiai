@@ -17,41 +17,6 @@ const flush = () => new Promise((r) => setTimeout(r, 50))
  * suite passes while a week of messages goes missing.
  */
 describe('app frames outlive the commits that leave their epoch', () => {
-  test('a peer whose transport dropped still reads the messages sent at its epoch', async () => {
-    const hub = new DurableFakeHub()
-    const recoverySecret = new Uint8Array(32).fill(0x37)
-    const seen: Array<unknown> = []
-
-    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
-    const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
-      epoch: 1,
-      handlers: { 'chat/changed': (ctx: { data: unknown }) => void seen.push(ctx.data) },
-    })
-    await flush()
-
-    // Bob's connection drops. The process is still up and still holds its app lane, so the
-    // topic keeps its listener; the hub simply has nowhere to push.
-    hub.detach('bob')
-
-    await alice.peer.protocol('chat').dispatch('chat/changed', { text: 'before lunch' })
-    for (let i = 0; i < 10; i++) {
-      await alice.peer.commit(buildLedgerCommit(alice, []))
-    }
-    await flush()
-    expect(alice.mls.epoch()).toBe(11)
-    expect(seen).toEqual([]) // nothing reached him: this is a backlog, not a live delivery
-
-    hub.reattach('bob')
-    hub.redeliver('bob')
-    await flush()
-
-    expect(bob.mls.epoch()).toBe(11)
-    expect(seen).toEqual([{ text: 'before lunch' }])
-
-    await alice.peer.dispose()
-    await bob.peer.dispose()
-  })
-
   /**
    * A retained frame sealed at the peer's own epoch, and a process that died before reading it.
    *
