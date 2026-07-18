@@ -542,6 +542,65 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   }
 
   /**
+   * The opened form of a live frame, keyed by the plaintext the open produced. Written by the
+   * inbound path below and read by every transport built on it, so that one open serves all of
+   * them.
+   */
+  const openedFrames = new WeakMap<Uint8Array, UnwrapResult>()
+
+  /**
+   * ONE INBOUND PATH PER APP TOPIC, shared by every transport built on it.
+   *
+   * OPENING IS A CONSUMING OPERATION. `crypto.unwrap` spends the frame's own per-message ratchet
+   * key on the handle it opens against, so the same bytes open exactly once and every later open
+   * of them fails — not because the frame is bad, but because its key is gone. The port says so
+   * (see {@link GroupCrypto.unwrap}); it cannot be duplicated, and a lane that gave two consumers
+   * an `unwrap` each would have them race for one key with the loser silently dropping the frame.
+   *
+   * So the frame is opened HERE, once, and the opened result is fanned out. Each consumer's own
+   * `unwrap` is then a pure lookup of that result — the fan-out is over plaintext, and nothing
+   * downstream touches the handle.
+   *
+   * Subscribed through the mux's raw inbound path rather than its bus view, because the bus view
+   * hands on the payload alone and the frame's log position is the one thing this lane could not
+   * previously write down. The note is taken before the open, so it is taken at the epoch the
+   * frame is about to be opened against.
+   *
+   * The mux subscription is held for as long as a consumer wants it and released with the last
+   * one, which is what keeps a rotation's teardown from leaving a listener behind on a topic the
+   * group has left.
+   */
+  const createInboundPath = (name: string, topicID: string) => {
+    const listeners = new Set<(payload: Uint8Array) => void>()
+    let unsubscribe: (() => void) | undefined
+    return (onOpened: (payload: Uint8Array) => void): (() => void) => {
+      listeners.add(onOpened)
+      unsubscribe ??= mux.onInbound(topicID, (message) => {
+        noteLiveAppFrame(name, topicID, message)
+        void Promise.resolve(crypto.unwrap(message.payload))
+          .then((result) => {
+            const opened = result instanceof Uint8Array ? { payload: result } : result
+            openedFrames.set(opened.payload, opened)
+            // Snapshot: a consumer disposing from inside its own delivery must not perturb the
+            // fan-out of the frame it is being given.
+            for (const listener of [...listeners]) listener(opened.payload)
+          })
+          .catch(() => {
+            // A frame this handle cannot open — another epoch's, another group's, or not a frame
+            // at all. Ordinary on a shared log, and the read paths are built to walk past it.
+          })
+      })
+      return () => {
+        listeners.delete(onOpened)
+        if (listeners.size === 0) {
+          unsubscribe?.()
+          unsubscribe = undefined
+        }
+      }
+    }
+  }
+
+  /**
    * One protocol's live-lane transport: it LISTENS on the topic the runtime is built for, and
    * PUBLISHES to the segment that contains each frame's own seal epoch.
    *
@@ -563,7 +622,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * The subscribe keeps the runtime's topic. A rotation rebuilds the listeners, and a topic is
    * subscribed at the mux for the member's whole life either way.
    */
-  const segmentBoundTransport = (name: string, topicID: string) => {
+  const segmentBoundTransport = (
+    name: string,
+    topicID: string,
+    inbound: (onOpened: (payload: Uint8Array) => void) => () => void,
+  ) => {
     const sealedOn = new WeakMap<Uint8Array, string>()
     return createBroadcastTransport({
       topicID,
@@ -574,22 +637,16 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         publish: async (builtFor, payload) => {
           await mux.bus.publish(sealedOn.get(payload) ?? builtFor, payload)
         },
-        // Subscribed through the mux's raw inbound path rather than its bus view, because the bus
-        // view hands on the payload alone and the frame's log position is the one thing this lane
-        // could not previously write down. The note is taken before the payload is passed on, so it
-        // is taken at the epoch the transport is about to unwrap against.
-        subscribe: (listenOn, onMessage) =>
-          mux.onInbound(listenOn, (message) => {
-            noteLiveAppFrame(name, listenOn, message)
-            onMessage(message.payload)
-          }),
+        // Already-opened plaintext, from the topic's one inbound path. The `unwrap` below only
+        // recovers the sender the open already authenticated.
+        subscribe: (_listenOn, onMessage) => inbound(onMessage),
       },
       wrap: async (bytes) => {
         const sealed = await sealForSegment(name, bytes)
         sealedOn.set(sealed.payload, sealed.topicID)
         return sealed.payload
       },
-      unwrap: crypto.unwrap,
+      unwrap: (payload) => openedFrames.get(payload) ?? payload,
     })
   }
 
@@ -615,8 +672,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       // hub sees for the live lane and it is the one that must carry the window.
       mux.retainTopic(topicID, { retention: appLogRetentionSeconds })
       const selfInbox = inboxTopic(anchor.secret, anchor.epoch, localDID)
+      // One path, two consumers: the frame is opened once here and both are given the plaintext.
+      const inbound = createInboundPath(name, topicID)
       const client = new BroadcastClient({
-        transport: segmentBoundTransport(name, topicID),
+        transport: segmentBoundTransport(name, topicID, inbound),
         ...(getRandomID != null ? { getRandomID } : {}),
       })
       const { eventHandlers, requestHandlers } = adaptBusHandlers(
@@ -625,7 +684,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         suppress,
       )
       const busServer = createGroupBusServer({
-        transport: segmentBoundTransport(name, topicID),
+        transport: segmentBoundTransport(name, topicID, inbound),
         from: localDID,
         eventHandlers,
         requestHandlers,
@@ -1662,9 +1721,13 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
                 // entries this commit names, and it asks only for a commit it is applying — framed
                 // at this peer's epoch, which is the epoch the blob is sealed under. That makes
                 // body delivery atomic with the commit.
+                //
+                // The port calls this from INSIDE the apply, on the handle it is applying to, so
+                // the open must not touch that handle's ratchet: `openEntries` reads only the
+                // epoch's exporter secret and is pure.
                 resolveLedgerEntries: createLedgerEntryResolver(
                   commitFrame.sealedEntries,
-                  crypto.unwrap,
+                  crypto.openEntries,
                 ),
               }),
             // A REJOIN rotates the anchor too, from a member the roster diff cannot see: an
@@ -1820,10 +1883,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   }
 
   /**
-   * Frame a commit for the log: `[commit][wrap(bodies)]`, bodies sealed under the epoch secret the
-   * commit is FRAMED at — the epoch every member that can apply it is at, and the one this group
-   * stays at until the commit is adopted. A host that adopted first has rotated past it and can
-   * seal for nobody, so it is told rather than publishing a blob no member can open.
+   * Frame a commit for the log: `[commit][sealEntries(bodies)]`, bodies sealed under a key derived
+   * from the epoch the commit is FRAMED at — the epoch every member that can apply it is at, and
+   * the one this group stays at until the commit is adopted. A host that adopted first has rotated
+   * past it and can seal for nobody, so it is told rather than publishing a blob no member can
+   * open.
    */
   const frameCommit = async (commit: Uint8Array, bodies: Array<string>): Promise<Uint8Array> => {
     if (crypto.epoch() !== epoch) {
@@ -1831,7 +1895,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         'commit: the local group has already advanced past the epoch this commit was framed at. A commit is adopted in onAccepted, never before.',
       )
     }
-    const sealedEntries = await crypto.wrap(encodeLedgerEntries(bodies))
+    const sealedEntries = await crypto.sealEntries(encodeLedgerEntries(bodies))
     return encodeHandshakeFrame(HANDSHAKE_KIND.commit, encodeCommitFrame(commit, sealedEntries))
   }
 

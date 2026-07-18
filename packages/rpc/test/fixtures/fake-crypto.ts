@@ -50,13 +50,13 @@ export function fakeEpochSecret(epoch: number, base: Uint8Array = FAKE_BASE_SECR
  * every frame from before it joined. `unwrap` throws for those, which is what a member
  * walking a log full of them has to survive without calling them corrupt.
  *
- * STRICTER THAN REAL MLS, deliberately, and it must stay that way. A real handle also opens a
- * few epochs BELOW its current one (ts-mls keeps four); this opens the current epoch and nothing
- * else. That is not an omission — it is the port contract in `crypto.ts` enforced: group-rpc may
- * only ever require the CURRENT epoch, and reads every retained frame ahead of the commit that
- * ratchets past it. Anything that passes against this fake therefore passes against a real
- * handle, whose window is a superset. Loosening it here would let a past-epoch dependency in
- * silently, and the walk spends the real window it would be leaning on.
+ * CURRENT EPOCH ONLY, and it must stay that way — because that is what the real port does too,
+ * not because it is a margin. ts-mls is documented as retaining a few epochs' key material, but
+ * nothing reaches it through this surface: a real `unwrap` goes through ts-mls's `processMessage`,
+ * which resolves against the CURRENT epoch's secret tree alone. So this is the port contract in
+ * `crypto.ts` enforced at parity, not above it: group-rpc may only ever require the current epoch,
+ * and reads every retained frame ahead of the commit that ratchets past it. There is no safety
+ * margin underneath, so loosening this would let in a dependency the real port cannot serve.
  *
  * NOT real encryption. All members in a test share `key` so they can decrypt each other
  * at a shared epoch; different keys model different groups.
@@ -143,12 +143,61 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
     return { payload, senderDID }
   }
 
+  /**
+   * The ledger-entry seal, modelled as a keystream XOR under a key derived from the epoch's
+   * own secret, with a four-byte tag standing in for an AEAD's.
+   *
+   * The three properties the port requires, and the ones the tests here rest on:
+   *
+   * - PER-EPOCH: the key comes from {@link fakeEpochSecret}, so a member at another epoch derives
+   *   a different one and its tag check fails.
+   * - AGREED: every member at an epoch derives the same bytes from the base secret they share,
+   *   with nothing exchanged.
+   * - PURE: sealing and opening read `epoch` and touch nothing else, so opening twice gives the
+   *   same answer. That is what lets it be called from inside a commit apply, which is the whole
+   *   reason it is not `wrap`/`unwrap`.
+   *
+   * The tag is what makes "not my epoch" a REFUSAL rather than plausible garbage — an AEAD's
+   * authentication, modelled — and the blob says nothing in the clear about which epoch it is
+   * from, exactly as a real seal does not.
+   */
+  const entryKey = (at: number): Uint8Array => fakeEpochSecret(at, secret)
+
+  const entryStream = (bytes: Uint8Array, key: Uint8Array): Uint8Array => {
+    const out = new Uint8Array(bytes.length)
+    for (let i = 0; i < bytes.length; i++) out[i] = bytes[i] ^ (key[i % key.length] as number)
+    return out
+  }
+
+  const ENTRY_TAG_BYTES = 4
+
+  const sealEntries: GroupCrypto['sealEntries'] = (bytes) => {
+    const key = entryKey(epoch)
+    const sealed = new Uint8Array(ENTRY_TAG_BYTES + bytes.length)
+    sealed.set(key.subarray(0, ENTRY_TAG_BYTES), 0)
+    sealed.set(entryStream(bytes, key), ENTRY_TAG_BYTES)
+    return sealed
+  }
+
+  const openEntries: GroupCrypto['openEntries'] = (sealed) => {
+    if (sealed.length < ENTRY_TAG_BYTES) throw new Error('cannot open: not a sealed entry blob')
+    const key = entryKey(epoch)
+    for (let i = 0; i < ENTRY_TAG_BYTES; i++) {
+      if (sealed[i] !== key[i]) {
+        throw new Error(`cannot open entry blob: this member is at epoch ${epoch}`)
+      }
+    }
+    return entryStream(sealed.subarray(ENTRY_TAG_BYTES), key)
+  }
+
   return {
     epoch: () => epoch,
     exportSecret: () => fakeEpochSecret(epoch, secret),
     wrap,
     unwrap,
     frameEpoch,
+    sealEntries,
+    openEntries,
     setEpoch: (n) => {
       epoch = n
     },

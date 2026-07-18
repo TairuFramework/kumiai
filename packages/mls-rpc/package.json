@@ -37,7 +37,9 @@
   "dependencies": {
     "@kokuin/token": "catalog:",
     "@kumiai/mls": "workspace:^",
-    "@kumiai/rpc": "workspace:^"
+    "@kumiai/rpc": "workspace:^",
+    "@noble/ciphers": "catalog:",
+    "@sozai/runtime": "catalog:"
   },
   "devDependencies": {
     "vitest": "catalog:"

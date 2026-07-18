@@ -104,13 +104,12 @@ describe('createGroupCrypto', () => {
   /**
    * DIVERGENCE FROM THE FAKE, and the one that matters most. The fake's `unwrap` is a pure
    * XOR: opening the same frame twice gives the same answer, for free, forever. Real MLS
-   * consumes the message's ratchet key on the first open and refuses the second — so any
-   * caller that unwraps a frame more than once loses it against a real handle while passing
-   * against the fake.
+   * consumes the message's ratchet key on the first open and refuses the second.
    *
-   * `peer.ts` is such a caller today: it builds two broadcast transports on one protocol
-   * topic (peer.ts:619 and :628) and each unwraps every inbound frame. This test is the
-   * bound that says so at the port level.
+   * OPENING IS A CONSUMING OPERATION, and this is where that is pinned. A caller that opens a
+   * frame twice loses it here while passing against the fake, so anything with two consumers on
+   * one topic must open once and fan the plaintext out, and anything that must open re-entrantly
+   * (the ledger-entry blob, below) must not use this surface at all.
    */
   test('unwrap is SINGLE-USE per frame: the second open of the same bytes is refused', async () => {
     const { aliceGroup, bobGroup } = await twoMemberGroup('ports-single-use')
@@ -146,6 +145,60 @@ describe('createGroupCrypto', () => {
     await expect(bob.crypto.unwrap(atTwo)).rejects.toThrow()
     // And the handle that ratcheted forward cannot go back for the epoch-1 frame.
     await expect(alice.crypto.unwrap(atOne)).rejects.toThrow()
+  })
+
+  /**
+   * The ledger-entry seal. It exists as its own surface because the MLS port opens the blob from
+   * INSIDE the apply of the commit that carries it, and `wrap`/`unwrap` cannot be used there: they
+   * consume a ratchet generation and mutate the handle. The three properties below are what make
+   * the derived key a correct replacement, and each is required rather than incidental.
+   */
+  describe('the ledger-entry seal', () => {
+    test('is PER-EPOCH: a member at another epoch cannot open the blob', async () => {
+      const { aliceGroup, bobGroup } = await twoMemberGroup('ports-entry-per-epoch')
+      const alice = cryptoOver(aliceGroup)
+      const bob = cryptoOver(bobGroup)
+
+      const atOne = await alice.crypto.sealEntries(utf8.encode('entries at one'))
+      const removed = await removeMember(aliceGroup, 1)
+      alice.adopt(removed.newGroup)
+      const atTwo = await alice.crypto.sealEntries(utf8.encode('entries at two'))
+
+      // The removal boundary, and it rests on this exactly as the app-lane anchor does: Bob keeps
+      // epoch 1's key for life and it opens nothing the group sealed after he left.
+      expect(bob.crypto.epoch()).toBe(1)
+      expect(new TextDecoder().decode(await bob.crypto.openEntries(atOne))).toBe('entries at one')
+      await expect(bob.crypto.openEntries(atTwo)).rejects.toThrow()
+      // And the handle that ratcheted forward derives a different key too.
+      await expect(alice.crypto.openEntries(atOne)).rejects.toThrow()
+    })
+
+    test('is AGREED: every member at an epoch opens what any other sealed, with nothing exchanged', async () => {
+      const { aliceGroup, bobGroup } = await twoMemberGroup('ports-entry-agreed')
+      const alice = cryptoOver(aliceGroup)
+      const bob = cryptoOver(bobGroup)
+
+      // Both directions: the key is derived from shared epoch state, not from the sealer.
+      const fromAlice = await alice.crypto.sealEntries(utf8.encode('alice sealed'))
+      expect(new TextDecoder().decode(await bob.crypto.openEntries(fromAlice))).toBe('alice sealed')
+      const fromBob = await bob.crypto.sealEntries(utf8.encode('bob sealed'))
+      expect(new TextDecoder().decode(await alice.crypto.openEntries(fromBob))).toBe('bob sealed')
+    })
+
+    test('is PURE: opening twice gives the same answer and consumes no ratchet generation', async () => {
+      const { aliceGroup, bobGroup } = await twoMemberGroup('ports-entry-pure')
+      const alice = cryptoOver(aliceGroup)
+      const bob = cryptoOver(bobGroup)
+
+      const sealed = await alice.crypto.sealEntries(utf8.encode('opened twice'))
+      expect(await bob.crypto.openEntries(sealed)).toEqual(await bob.crypto.openEntries(sealed))
+
+      // Nothing the open could have spent: an application frame sealed after those opens still
+      // opens, which it would not if the entry open had taken a generation off the same chain.
+      const frame = await alice.crypto.wrap(utf8.encode('still works'))
+      const opened = (await bob.crypto.unwrap(frame)) as { payload: Uint8Array }
+      expect(new TextDecoder().decode(opened.payload)).toBe('still works')
+    })
   })
 
   describe('frameEpoch', () => {

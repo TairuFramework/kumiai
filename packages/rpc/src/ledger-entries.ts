@@ -1,15 +1,16 @@
-import type { Unwrap } from '@kumiai/broadcast'
 import { fromUTF, toUTF } from '@sozai/codec'
+
+import type { GroupCrypto } from './crypto.js'
 
 /**
  * The blob a commit frame carries: the signed control-ledger tokens the Commit enacts, sealed
- * with `GroupCrypto.wrap` under the epoch secret the Commit is framed at (the epoch every peer
- * that can apply it holds). The hub sees only the sealed bytes, never a body.
+ * with `GroupCrypto.sealEntries` under a key derived from the epoch the Commit is framed at (the
+ * epoch every peer that can apply it holds). The hub sees only the sealed bytes, never a body.
  *
  *   [ count(2, LE) | (tokenLength(4, LE) | token utf8)... ]
  *
  * This module is the ONLY place a commit frame's blob is opened, via a resolver that runs only
- * when the MLS port asks for the bodies of a commit it is applying. Unwrapping is a consequence
+ * when the MLS port asks for the bodies of a commit it is applying. Opening is a consequence
  * of "I can apply this frame", never a precondition of reading it.
  */
 
@@ -71,19 +72,22 @@ export function decodeLedgerEntries(bytes: Uint8Array): Array<string> {
  * — never reported as corruption. In practice this cannot arise on the apply path: the port
  * asks only for a commit it is applying, framed at this peer's epoch, the epoch the blob is
  * sealed under.
+ *
+ * Opened with {@link GroupCrypto.openEntries} and NOT with `unwrap`, because this runs INSIDE the
+ * MLS port's apply of the commit it is resolving for. `unwrap` consumes a ratchet generation and
+ * mutates the handle; an open that does either is unsound while the handle is mid-apply, whatever
+ * order it is scheduled in. `openEntries` derives its key from the epoch's exporter secret, so it
+ * is pure and re-entrant and this resolver may be called from anywhere the epoch is right.
  */
 export function createLedgerEntryResolver(
   sealedEntries: Uint8Array,
-  unwrap: Unwrap,
+  openEntries: GroupCrypto['openEntries'],
 ): (ids: Array<string>) => Promise<Array<string>> {
   return async (_ids: Array<string>): Promise<Array<string>> => {
     try {
-      const opened = await unwrap(sealedEntries)
-      const payload = opened instanceof Uint8Array ? opened : opened.payload
       // Body trust comes from the token's own signature + content-address, which the caller
-      // re-verifies — not from the seal, which only buys confidentiality from the hub. The
-      // recovered sender is deliberately unused.
-      return decodeLedgerEntries(payload)
+      // re-verifies — not from the seal, which only buys confidentiality from the hub.
+      return decodeLedgerEntries(await openEntries(sealedEntries))
     } catch {
       return []
     }

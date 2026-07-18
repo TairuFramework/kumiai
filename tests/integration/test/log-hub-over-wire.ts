@@ -84,9 +84,20 @@ function receiveOverWire(client: HubClient): HubReceiveSubscription {
   }
 }
 
+/**
+ * One member's connection: a {@link LogHub} plus the ability to drop the connection under it.
+ *
+ * `disconnect` is not a convenience. The hub binds ONE receive writer per DID and refuses a
+ * second (`receive writer already bound`), which is right — two live push channels for one
+ * member is a bug. So a member whose process died has to be modelled as a connection that went
+ * away, not just a peer that stopped: leave the socket up and the restarted process is refused
+ * its push channel, reads its backlog by pull, and then silently receives nothing live.
+ */
+export type WireConnection = LogHub & { disconnect: () => Promise<void> }
+
 export type WireHub = {
   /** A LogHub for one member, over its own authenticated client connection. */
-  connect: (identity: OwnIdentity) => LogHub
+  connect: (identity: OwnIdentity) => WireConnection
   dispose: () => Promise<void>
 }
 
@@ -106,7 +117,7 @@ export function createWireHub(options: { retentionSeconds?: number } = {}): Wire
   let firstUsed = false
   const subscriptions: Array<HubReceiveSubscription> = []
 
-  function connect(identity: OwnIdentity): LogHub {
+  function connect(identity: OwnIdentity): WireConnection {
     let transports: HubTransports
     if (firstUsed) {
       transports = new DirectTransports()
@@ -166,6 +177,11 @@ export function createWireHub(options: { retentionSeconds?: number } = {}): Wire
         const subscription = receiveOverWire(client)
         subscriptions.push(subscription)
         return subscription
+      },
+      disconnect: async () => {
+        const index = allTransports.indexOf(transports)
+        if (index >= 0) allTransports.splice(index, 1)
+        await transports.dispose()
       },
     }
   }

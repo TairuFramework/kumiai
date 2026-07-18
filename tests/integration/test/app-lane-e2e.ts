@@ -126,6 +126,12 @@ export type Member = {
   journal: ReturnType<typeof createMemoryCommitJournal>
   stateStore: StateStore
   entrySlot: LedgerEntrySlot
+  /**
+   * Drop this member's hub connection — the other half of a process dying. Disposing the peer
+   * stops the peer; it does not take the socket down, and the hub binds one receive writer per
+   * DID, so a restart onto a connection that never went away is refused its push channel.
+   */
+  disconnect: () => Promise<void>
 }
 
 export type MakeMemberParams = {
@@ -162,8 +168,9 @@ export function makeMember(params: MakeMemberParams): Member {
     persist: (next) => stateStore.save(next),
   })
 
+  const connection = hub.connect(identity)
   const peer = createGroupPeer<Protocols>({
-    hub: hub.connect(identity),
+    hub: connection,
     crypto,
     mls,
     journal,
@@ -199,6 +206,7 @@ export function makeMember(params: MakeMemberParams): Member {
     journal,
     stateStore,
     entrySlot,
+    disconnect: connection.disconnect,
   }
 }
 

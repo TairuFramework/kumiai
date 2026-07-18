@@ -2,8 +2,14 @@ import type { ByteTransform, Unwrap } from '@kumiai/broadcast'
 
 /**
  * Consumer-supplied MLS crypto port: epoch number, an epoch-bound topic-derivation secret,
- * byte-level encrypt (`wrap`) and decrypt-plus-recover-sender (`unwrap`). group-rpc never
- * imports MLS.
+ * byte-level encrypt (`wrap`) and decrypt-plus-recover-sender (`unwrap`), and the ledger-entry
+ * seal (`sealEntries`/`openEntries`). group-rpc never imports MLS.
+ *
+ * TWO SEALS, and they are not interchangeable. `wrap`/`unwrap` carry app traffic and are
+ * ratchet-backed: each open consumes a message key and mutates the handle. `sealEntries`/
+ * `openEntries` carry a commit's ledger-entry blob under a key DERIVED from the epoch, so
+ * opening is pure and may run from inside the apply of the commit that carries it — which is the
+ * only place it does run, and which the ratchet-backed pair cannot serve.
  *
  * `epoch()` and `exportSecret()` are read on init and every {@link "peer".GroupPeer.resync}.
  * `wrap`/`unwrap` close over the live group, so they always use current epoch state. `unwrap`
@@ -54,6 +60,48 @@ export type GroupCrypto = {
    * `@kumiai/mls` exports `readMessageEpoch`.
    */
   frameEpoch(bytes: Uint8Array): number | null
+  /**
+   * Seal the ledger-entry blob a Commit carries, under a key derived from THIS epoch's exporter
+   * secret. Its twin is {@link openEntries}.
+   *
+   * SEPARATE FROM `wrap`/`unwrap`, and that separation is the whole point. A blob sealed as an
+   * application message is opened by `unwrap`, and `unwrap` on a real handle CONSUMES a ratchet
+   * generation and mutates the handle's state. The entry blob is opened from inside the apply of
+   * the commit that carries it — the MLS port asks for the bodies while it holds the handle — so
+   * an open that mutates is unsound there however it is scheduled, and against a handle that
+   * serializes its own state it does not even complete. Derived-key sealing makes opening PURE:
+   * idempotent, re-entrant, and costing no ratchet generation, so the question of when it is safe
+   * to open stops existing rather than being managed.
+   *
+   * PER-EPOCH, and required to be: a different epoch derives a different key, which is the same
+   * property the app-lane anchor rests on. A removed member must not open the entries of a commit
+   * enacted after its removal, and an epoch-independent key would hand it every one of them for
+   * life.
+   *
+   * AGREED WITHOUT EXCHANGE: every member at an epoch derives the same key from state it already
+   * holds. Nothing is transported, and there is no key to distribute or lose.
+   *
+   * WHY THE APPLYING PEER ALWAYS HOLDS THE RIGHT KEY, which is the load-bearing argument: a Commit
+   * is applied at the epoch it is framed at, and its author sealed the blob at that same epoch (a
+   * host that has already advanced cannot frame a commit — see the peer's own check). So a peer in
+   * a position to apply the Commit is by construction at the epoch the blob was sealed under —
+   * including a returning member replaying the commit log in order, which reaches each commit at
+   * its own framed epoch.
+   *
+   * Confidentiality from the hub is all this buys. The bodies are signed, content-addressed
+   * tokens whose trust comes from their own signatures, which the MLS port re-verifies; the seal
+   * authenticates nobody and is not asked to.
+   */
+  sealEntries(bytes: Uint8Array): Uint8Array | Promise<Uint8Array>
+  /**
+   * Open a blob {@link sealEntries} produced at THIS epoch. Throws for bytes sealed at any other
+   * epoch, for a group this member is not in, and for bytes that are not a sealed blob — the same
+   * "not mine" that `unwrap` throwing means, and read the same way.
+   *
+   * PURE, and the port may not implement it otherwise: opening the same bytes twice gives the same
+   * answer and changes no handle state. Callers open from inside an apply.
+   */
+  openEntries(sealed: Uint8Array): Uint8Array | Promise<Uint8Array>
 }
 
 /**

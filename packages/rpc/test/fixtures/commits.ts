@@ -59,7 +59,7 @@ export type PublishCommitParams = {
 
 /**
  * A member that is not a peer in the test — an admin off-stage — publishing a commit
- * frame, exactly as a peer's `commit()` builds one: `[commit][wrap(bodies)]`, with the
+ * frame, exactly as a peer's `commit()` builds one: `[commit][sealEntries(bodies)]`, with the
  * bodies sealed under the pre-commit epoch secret.
  */
 export async function publishCommit(params: PublishCommitParams): Promise<{ sequenceID: string }> {
@@ -78,7 +78,7 @@ export async function publishCommit(params: PublishCommitParams): Promise<{ sequ
       ...(params.external === true ? { external: true } : {}),
       ...(params.signerDID != null ? { signerDID: params.signerDID } : {}),
     })
-  const sealed = await crypto.wrap(encodeLedgerEntries(entries))
+  const sealed = await crypto.sealEntries(encodeLedgerEntries(entries))
   return hub.publish({
     senderDID,
     topicID: commitTopic(recoverySecret),

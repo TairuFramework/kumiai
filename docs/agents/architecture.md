@@ -109,11 +109,14 @@ dispensed five times off the one pull. Delivered frames reach the host through t
 `handlers` map; there is no separate delivery API. Its own frames are not echoed back to it, as the
 live fan-out would not.
 
-> **ts-mls retains 4 past epochs — do not lean on it.** A state at epoch N can decrypt application
-> messages sealed at N-1…N-4 (`retainKeysForEpochs`, default 4; eviction *zeroes* the key material).
-> But the window is spent by **epoch transitions, not time**, so a catch-up walk destroys the very
-> keys it would need: a member away four commits could read, a member away a week could not. That is
-> a correctness cliff disguised as a working design. rpc reads at the sealing epoch, full stop.
+> **There is no past-epoch window here.** ts-mls holds key material for 4 past epochs
+> (`retainKeysForEpochs`, default 4; eviction *zeroes* it), but nothing reaches it through this
+> port: `unwrap` goes through `processMessage`, which resolves against the **current** epoch's
+> secret tree alone, so a frame sealed below the handle's epoch does not open — measured against
+> real MLS, not assumed. Leaning on the window would be wrong even if it were reachable, because it
+> is spent by **epoch transitions, not time**: a catch-up walk destroys the very keys it would need,
+> and a member away four commits could read where a member away a week could not. rpc reads at the
+> sealing epoch, full stop.
 
 **`unwrap` throwing is ordinary control flow** on every read path — it is how a frame says "not my
 epoch". An implementation that opens strictly at the current epoch is a correct implementation of

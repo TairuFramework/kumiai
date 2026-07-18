@@ -266,6 +266,12 @@ importers:
       '@kumiai/rpc':
         specifier: workspace:^
         version: link:../rpc
+      '@noble/ciphers':
+        specifier: 'catalog:'
+        version: 2.2.0
+      '@sozai/runtime':
+        specifier: 'catalog:'
+        version: 0.1.0
     devDependencies:
       vitest:
         specifier: 'catalog:'

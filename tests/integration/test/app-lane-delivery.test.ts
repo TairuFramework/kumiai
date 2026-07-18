@@ -29,32 +29,19 @@ const flush = (ms = 120) => new Promise((resolve) => setTimeout(resolve, ms))
  */
 describe('app-lane delivery across a roster rotation, end to end', () => {
   /**
-   * BLOCKED, and deliberately left written out rather than deleted — it is the branch's thesis
-   * and it is the shape the fix has to satisfy. Two defects stop it, both found by this run and
-   * both invisible to every existing test because the doubles are pure functions:
+   * The whole thesis in one scenario: a member is away while the group both talks and changes
+   * its roster twice — an add AND a remove, so the anchor rotates for both reasons — and comes
+   * back to find every message it missed, in order, exactly once, across the rotation.
    *
-   * 1. **Re-entrancy deadlock (blocks the roster change).** `CommitContext.resolveLedgerEntries`
-   *    opens the entry blob with `GroupCrypto.unwrap`, and the port calls it from inside
-   *    `GroupMLS.processCommit`. Against one real `GroupHandle` both are the same object and
-   *    `processMessage` already holds its mutex, so the resolver waits forever on the lock the
-   *    commit it is resolving for is holding. Confirmed by substituting a resolver that does not
-   *    re-enter the handle: the add applies, the remove applies, and an absent member walks
-   *    2 -> 3 -> 4 with the roster right. The mutex is not the whole problem — `unwrap` also
-   *    mutates handle state, so opening a blob mid-apply would be unsound even if it could be
-   *    reached. The two ports cannot both be served by one handle as specified.
+   * Two invariants carry it here that no fake can express, and both are about opening:
    *
-   * 2. **`unwrap` is called twice per live frame.** `peer.ts` builds two
-   *    `segmentBoundTransport(name, topicID)` instances on the same protocol topic — one for the
-   *    `BroadcastClient` (peer.ts:619), one for `createGroupBusServer` (peer.ts:628) — and each
-   *    registers its own listener that unwraps every inbound frame. Real MLS consumes the
-   *    per-message ratchet key on the first open, so the second fails with ts-mls's
-   *    `Desired gen in the past` and whichever transport loses the race drops the message. The
-   *    XOR fake is a pure function, so double-unwrapping is free against it.
-   *
-   * Both live in `packages/rpc/src`, which this probe may report on but not change. See
-   * `docs/superpowers/probes/e2e-report.md`.
+   * - A live frame is opened ONCE. Opening consumes the frame's ratchet key on a real handle,
+   *   so the two consumers this lane puts on one topic share a single open.
+   * - A commit's entry blob is opened with a DERIVED key, not as an application message. The MLS
+   *   port opens it from inside the apply of the very commit that carries it, where an open that
+   *   spends a ratchet generation or touches handle state is unsound however it is scheduled.
    */
-  test.skip('an absent member returns and receives every message it missed, in order, exactly once', async () => {
+  test('an absent member returns and receives every message it missed, in order, exactly once', async () => {
     const hub = createWireHub()
     const bodies = createEntryBodies()
 
@@ -325,10 +312,11 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
   /**
    * The durable cursor survives a restart: nothing lost, nothing duplicated.
    *
-   * BLOCKED on defect 2 alone (the double `unwrap`) — it drives no roster change, so the
-   * deadlock never fires. Not one app frame reaches a handler over real MLS.
+   * No roster change here, so nothing rotates: what is under test is the read position alone,
+   * and the two deliverers that write it — the pull that hands over the backlog and the live
+   * push that resumes behind it — agreeing about where the member had got to.
    */
-  test.skip('a peer restarted mid-history loses nothing and duplicates nothing', async () => {
+  test('a peer restarted mid-history loses nothing and duplicates nothing', async () => {
     const hub = createWireHub()
     const bodies = createEntryBodies()
     const { createLedgerEntrySlot } = await import('@kumiai/mls-rpc')
@@ -384,8 +372,11 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     expect(seen).toEqual([{ text: 'before restart' }])
 
     // Bob's process dies and comes back over everything it persisted — its handle, its
-    // anchor store, its cursor store, its journal.
+    // anchor store, its cursor store, its journal. The connection goes with the process: the
+    // hub holds one receive writer per member, so a restart onto a socket that never closed is
+    // refused its push channel and reads by pull alone.
     await bob.peer.dispose()
+    await bob.disconnect()
     await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'while away' })
     await flush()
 

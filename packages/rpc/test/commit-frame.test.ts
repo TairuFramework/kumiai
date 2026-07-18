@@ -51,18 +51,29 @@ describe('the sealed ledger-entry blob', () => {
 
   test('the resolver serves the bodies sealed into the frame being applied', async () => {
     const crypto = createFakeCrypto({ epoch: 3, localDID: 'alice' })
-    const sealed = await crypto.wrap(encodeLedgerEntries(['a-token']))
-    const resolve = createLedgerEntryResolver(sealed, crypto.unwrap)
+    const sealed = await crypto.sealEntries(encodeLedgerEntries(['a-token']))
+    const resolve = createLedgerEntryResolver(sealed, crypto.openEntries)
+    expect(await resolve(['some-id'])).toEqual(['a-token'])
+  })
+
+  test('the resolver may be called twice and answers the same both times', async () => {
+    // The property the derived key buys, and the reason the blob is not an application message:
+    // the MLS port calls this from inside the apply of the commit that carries it, so an open
+    // that consumed a ratchet generation would be unsound however it was scheduled.
+    const crypto = createFakeCrypto({ epoch: 3, localDID: 'alice' })
+    const sealed = await crypto.sealEntries(encodeLedgerEntries(['a-token']))
+    const resolve = createLedgerEntryResolver(sealed, crypto.openEntries)
+    expect(await resolve(['some-id'])).toEqual(['a-token'])
     expect(await resolve(['some-id'])).toEqual(['a-token'])
   })
 
   test('a blob this member cannot open yields no entries, and no error', async () => {
     const admin = createFakeCrypto({ epoch: 3, localDID: 'alice' })
-    const sealed = await admin.wrap(encodeLedgerEntries(['a-token']))
-    // A member at another epoch does not hold that epoch's secret. The frame is history it
-    // cannot open, not corruption: it answers with nothing rather than raising.
+    const sealed = await admin.sealEntries(encodeLedgerEntries(['a-token']))
+    // A member at another epoch derives a different key. The frame is history it cannot open,
+    // not corruption: it answers with nothing rather than raising.
     const behind = createFakeCrypto({ epoch: 1, localDID: 'dave' })
-    const resolve = createLedgerEntryResolver(sealed, behind.unwrap)
+    const resolve = createLedgerEntryResolver(sealed, behind.openEntries)
     expect(await resolve(['some-id'])).toEqual([])
   })
 })
