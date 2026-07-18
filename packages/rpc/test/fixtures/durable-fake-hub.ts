@@ -103,6 +103,9 @@ export class DurableFakeHub implements LogHub {
       senderDID: params.senderDID,
       topicID: params.topicID,
       payload: params.payload,
+      // Present iff log-class, as the contract says: the place `fetchTopic` serves this frame at.
+      // A mailbox frame has none, and carries no key rather than an empty one.
+      ...(params.retain === 'log' ? { logPosition: sequenceID } : {}),
     }
     this.published.push(message)
     this.#log.push(message)

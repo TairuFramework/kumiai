@@ -449,34 +449,62 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   let appSegment = new Map<string, Array<AppFrame>>()
 
   /**
-   * The app lane's read position per protocol for the CURRENT segment: the topic it was pulled
-   * from, and the last position {@link appCursorStore} was told about — held so a drain that moved
-   * nothing writes nothing, and so the position is compared against the store's own last word
-   * rather than re-read.
+   * The app lane's TWO read positions per protocol for the CURRENT segment, which are not the same
+   * position and must not be conflated:
+   *
+   * - `position` is the DURABLE CURSOR: the last frame this drain is done with, and the last thing
+   *   {@link appCursorStore} was told. It is held here so a drain that moved nothing writes nothing,
+   *   and so the value is compared against the store's own last word rather than re-read.
+   * - `fetched` is the LAST-FETCHED POSITION: how far down the log the buffer has been filled from.
+   *   It runs AHEAD of the cursor exactly when a buffered frame is not done — an ahead-of-the-walk
+   *   frame pins the cursor behind it while the pull has long since read past it — and it is where
+   *   the next pull resumes, so a re-pull costs one short page rather than the whole tail.
+   *
+   * Both are per SEGMENT and reset with it, alongside `topicID`, which is the topic they are
+   * positions in.
    */
-  let appCursors = new Map<string, { topicID: string; position: LogPosition | null }>()
+  let appCursors = new Map<
+    string,
+    { topicID: string; position: LogPosition | null; fetched: LogPosition | null }
+  >()
 
   /**
-   * Whether {@link appSegment} holds this segment's pull. Pulled ONCE per segment and not per
-   * commit.
+   * Log-class app frames the LIVE lane was pushed and the buffer has not taken in yet, per protocol,
+   * with the topic each was pushed on.
    *
-   * THE REASON IS THE LIVE LANE, and it is worth stating exactly, because the obvious reasons are
-   * both false. The log is NOT the same log at every epoch inside the segment — it grows, and a
-   * frame published while this peer walks is one this latch makes invisible to it. And a re-pull
-   * would NOT re-deliver what the drain already dispensed — the pull is from the cursor, which is
-   * past it.
+   * Staged rather than written straight into {@link appSegment} because the push arrives on the
+   * mux's own drain loop, which runs outside every lane operation: writing there would splice the
+   * array {@link deliverAppFrames} is midway through iterating and awaiting inside. Everything that
+   * touches the buffer goes through {@link runAppLane} instead, and this is the hand-off.
    *
-   * What a re-pull would re-deliver is what the LIVE LANE delivered. The live path (see
-   * {@link buildEpoch}) hands a log-retained frame to the host straight off the bus and advances no
-   * read position at all, so for an online peer the cursor sits behind every frame it was pushed,
-   * and a second pull of the same segment reads them all back. One position, two deliverers, and
-   * only one of them keeps it.
-   *
-   * So this latch is load-bearing for the wrong reason, and it costs a real frame: the one
-   * published mid-walk. Both halves are the same missing thing — a read position the live lane also
-   * advances — and neither can be fixed without it.
+   * The topic travels with the frame because a rotation can land between the push and the merge,
+   * and a position in the segment the group just left means nothing in the one it moved to.
    */
-  let appSegmentLoaded = false
+  let appStaged = new Map<string, Array<{ topicID: string; frame: AppFrame }>>()
+
+  /** App topics whose retention this segment has already been asked for. See {@link loadAppSegment}. */
+  let appRetained = new Set<string>()
+
+  /**
+   * The app lane's own mutex: everything that reads or writes {@link appSegment} and
+   * {@link appCursors} runs through here, one task at a time.
+   *
+   * It is NOT the commit mutex, and cannot be. That one is entered by every lane operation and
+   * resets the journal-replay flag on entry, so a cursor write taking it would tell the next pull
+   * the journal had not been replayed. And it is not reentrant, while the app lane is reached from
+   * inside a commit walk and from the mux's push loop at once — which is the collision this exists
+   * for: the buffer is an ordered array that {@link deliverAppFrames} iterates and awaits inside,
+   * and a push splicing it mid-iteration would step over frames.
+   */
+  let appLaneTail: Promise<void> = Promise.resolve()
+  const runAppLane = <T>(fn: () => Promise<T>): Promise<T> => {
+    const op = appLaneTail.then(fn)
+    appLaneTail = op.then(
+      () => {},
+      () => {},
+    )
+    return op
+  }
 
   /**
    * Capture the anchor from the port's post-commit handle and persist it. The one place the
@@ -505,7 +533,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     // leaving stays true of that topic forever.
     appSegment = new Map()
     appCursors = new Map()
-    appSegmentLoaded = false
+    // Staged pushes go with the buffer, and for the same reason: a position in the segment being
+    // left is not a position in the one being entered. Frames pushed DURING the rotation carry
+    // their own topic and are dropped by the merge if it does not match the live anchor's, so this
+    // clear and that check are two halves of one rule.
+    appStaged = new Map()
+    appRetained = new Set()
   }
 
   /**
@@ -541,7 +574,15 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         publish: async (builtFor, payload) => {
           await mux.bus.publish(sealedOn.get(payload) ?? builtFor, payload)
         },
-        subscribe: (listenOn, onMessage) => mux.bus.subscribe(listenOn, onMessage),
+        // Subscribed through the mux's raw inbound path rather than its bus view, because the bus
+        // view hands on the payload alone and the frame's log position is the one thing this lane
+        // could not previously write down. The note is taken before the payload is passed on, so it
+        // is taken at the epoch the transport is about to unwrap against.
+        subscribe: (listenOn, onMessage) =>
+          mux.onInbound(listenOn, (message) => {
+            noteLiveAppFrame(name, listenOn, message)
+            onMessage(message.payload)
+          }),
       },
       wrap: async (bytes) => {
         const sealed = await sealForSegment(name, bytes)
@@ -985,48 +1026,115 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   }
 
   /**
-   * Pull this segment's retained app frames into {@link appSegment}, once, FROM THIS PEER'S DURABLE
-   * READ POSITION. Returns silently if the buffer already holds them.
+   * The buffer for one protocol, and the two positions that go with it, created on first use.
    *
-   * ONE pull for the whole segment: every epoch between two roster changes shares one app topic
-   * (the topic is anchor-bound, and the anchor only moves at a roster change), so a peer walking
-   * five epochs inside a segment reads one log, not five. The frames come back sealed and stay
-   * that way — {@link deliverAppFrames} opens them one epoch at a time.
+   * Lazy because the LIVE lane can reach the buffer before any drain does — a peer that is online
+   * and has walked no commit still has to keep a read position over what it was pushed — so the
+   * durable cursor cannot be something only a pull establishes.
+   */
+  const appLaneFor = async (
+    name: string,
+  ): Promise<{
+    frames: Array<AppFrame>
+    cursor: { topicID: string; position: LogPosition | null; fetched: LogPosition | null }
+  }> => {
+    let frames = appSegment.get(name)
+    if (frames == null) {
+      frames = []
+      appSegment.set(name, frames)
+    }
+    let cursor = appCursors.get(name)
+    if (cursor == null) {
+      const topicID = protocolTopic(anchor.secret, anchor.epoch, name)
+      const stored = (await appCursorStore?.load(topicID)) ?? null
+      cursor = { topicID, position: stored != null ? asLogPosition(stored) : null, fetched: null }
+      appCursors.set(name, cursor)
+    }
+    return { frames, cursor }
+  }
+
+  /**
+   * Take one frame into the buffer at its place in the log, or reconcile it with the copy already
+   * there. The ONE way a frame enters {@link appSegment}, from either deliverer.
    *
-   * Once and not per drain because the live lane keeps no read position, so a re-pull would hand
-   * the host a second copy of everything it was pushed — see {@link appSegmentLoaded}, which is
-   * where that constraint is written down. It costs this drain the frames published mid-walk.
+   * A POSITION IS TAKEN ONCE. The two deliverers see the same frame — the live lane is pushed it and
+   * the pull reads it back out of the log — and a second entry for a position already held is a
+   * second delivery of one message, which is the duplicate the cursor exists to make impossible.
+   * So a repeat is a reconcile, never an append.
    *
-   * From the CURSOR and not from the topic's oldest retained frame: the position is what this peer
-   * is done with, so everything before it is either delivered or unopenable forever, and re-reading
-   * it re-delivers the first kind and re-buffers the second. Without the position the two places a
-   * peer might start reading from — where it got to, and where the hub's retention now begins — are
-   * indistinguishable, which is exactly what makes a pruned window silent.
+   * The reconcile only ever marks a frame DONE, never undoes it: `sealed: null` is the live lane
+   * saying it had this frame at the epoch it was sealed at, and a pull that reads the same frame
+   * back afterwards must not hand its bytes to the drain to deliver a second time.
+   *
+   * Kept in log order by insertion rather than by append, because the two deliverers do not arrive
+   * in one order: a pull runs from a position behind the live stream and returns frames the pushes
+   * already brought.
+   */
+  const takeAppFrame = (frames: Array<AppFrame>, incoming: AppFrame): void => {
+    let index = frames.length
+    while (index > 0 && (frames[index - 1] as AppFrame).position > incoming.position) index -= 1
+    const existing = index > 0 ? (frames[index - 1] as AppFrame) : undefined
+    if (existing?.position === incoming.position) {
+      if (incoming.sealed == null) existing.sealed = null
+      return
+    }
+    frames.splice(index, 0, incoming)
+  }
+
+  /**
+   * Merge the live lane's staged pushes into the buffer, then pull this segment's log forward from
+   * the LAST-FETCHED position and buffer whatever is new.
+   *
+   * PULLED EVERY DRAIN, not once per segment. The log is not the same log at every epoch inside the
+   * segment — it grows, and a frame published while this peer walks is one a single pull can never
+   * see. What used to make a re-pull unaffordable was that the live lane kept no read position, so a
+   * second pull read back everything the pushes had already delivered; now the push carries its own
+   * log position (`StoredMessage.logPosition`), {@link takeAppFrame} recognises a frame the buffer
+   * already holds, and a re-pull returns only what was genuinely never delivered.
+   *
+   * From `fetched` and not from the cursor: the cursor is pinned behind any frame the walk has not
+   * reached, and resuming there would re-read the whole tail on every drain to re-discover frames
+   * already buffered. The union of the two ranges is still every position above the cursor, which is
+   * what the advance rule needs — `fetched` is only ever moved by a pull that read the range below
+   * it.
+   *
+   * MERGED BEFORE PULLED, and both inside one {@link runAppLane} task: a staged frame merged after
+   * the pull would be a position above the pull's end, and the cursor may only walk a range some
+   * pull has proved complete.
    *
    * Subscribed before pulled: the hub gates a topic fetch on the caller's own subscription, and a
    * segment reached by ROTATING onto it mid-walk has never been subscribed — the app lane is
-   * rebuilt only once the walk is over.
+   * rebuilt only once the walk is over. Asked once per segment, since a retain is refcounted.
    *
-   * A FAILED FETCH RAISES, and the latch is taken only once the whole segment is in hand: the
-   * caller's walk stops on the failure rather than stepping over an epoch whose frames were never
-   * read, and the retry re-pulls from the cursor with nothing half-buffered behind it.
+   * A FAILED FETCH RAISES. The caller's walk stops on the failure rather than stepping over an epoch
+   * whose frames were never read, and `fetched` is moved only by pages that arrived.
    */
   const loadAppSegment = async (): Promise<void> => {
-    if (appSegmentLoaded) return
-    const loaded = new Map<string, Array<AppFrame>>()
-    const cursors = new Map<string, { topicID: string; position: LogPosition | null }>()
     for (const name of Object.keys(protocols)) {
-      const topicID = protocolTopic(anchor.secret, anchor.epoch, name)
+      const { frames, cursor } = await appLaneFor(name)
+      const topicID = cursor.topicID
       // Carrying the window on the listener-less subscribe too: this is the one a member that is
       // AWAY makes — a segment reached by rotating onto it mid-walk is pulled here and has never
       // been listened on — and it is the subscribe that asks the hub to still have the log.
-      mux.retainTopic(topicID, { retention: appLogRetentionSeconds })
-      const stored = (await appCursorStore?.load(topicID)) ?? null
-      const cursor = stored != null ? asLogPosition(stored) : null
-      cursors.set(name, { topicID, position: cursor })
-      const frames: Array<AppFrame> = []
-      let after: LogPosition | null = cursor
-      let reported = false
+      if (!appRetained.has(topicID)) {
+        appRetained.add(topicID)
+        mux.retainTopic(topicID, { retention: appLogRetentionSeconds })
+      }
+
+      // A push that landed on a topic this peer has since rotated off names a position in a log
+      // this segment's cursor knows nothing about. Dropped, not merged: the frames of the segment
+      // being left were read on the way out of it.
+      for (const staged of appStaged.get(name) ?? []) {
+        if (staged.topicID === topicID) takeAppFrame(frames, staged.frame)
+      }
+      appStaged.delete(name)
+
+      // The gap question is asked on the segment's FIRST pull and no other. It compares where this
+      // peer had read to against where the hub's retention now begins, and both are answers about
+      // the peer arriving — every later pull starts from a position this peer reached itself, so
+      // the floor having passed it again would be the same gap reported twice.
+      let reported = cursor.fetched != null
+      let after: LogPosition | null = cursor.fetched ?? cursor.position
       while (true) {
         const result = await mux.fetchTopic({
           topicID,
@@ -1037,20 +1145,17 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           // `result.oldest` is where the hub's retention begins, and only the FIRST page's reply is
           // asked: every later page reports the same floor, and a gap is one gap.
           reported = true
-          await reportPrunedWindow(name, cursor, result.oldest)
+          await reportPrunedWindow(name, cursor.position, result.oldest)
         }
         for (const message of result.messages) {
           const position = asLogPosition(message.sequenceID)
-          frames.push({ position, sealed: message.payload })
+          takeAppFrame(frames, { position, sealed: message.payload })
           after = position
         }
+        cursor.fetched = after
         if (result.messages.length < APP_FETCH_LIMIT) break
       }
-      loaded.set(name, frames)
     }
-    appSegment = loaded
-    appCursors = cursors
-    appSegmentLoaded = true
   }
 
   /**
@@ -1141,6 +1246,86 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   }
 
   /**
+   * Record a log-class frame the LIVE lane was pushed, at the moment it arrives.
+   *
+   * THIS IS THE OTHER DELIVERER TAKING THE SAME READ POSITION. The live path hands a retained frame
+   * to the host straight off the bus; before the push carried its log position there was nothing for
+   * it to write down, so the cursor sat behind every frame an online peer had already been given and
+   * every re-pull read them all back. One position, two deliverers, and only one of them kept it.
+   *
+   * WHAT IS RECORDED IS DONE-NESS, NOT DELIVERY, and the two are the same thing here. The transport
+   * that carries this frame to the host is the same object, unwrapping with the same handle, so the
+   * only question is whether the handle is at the frame's own seal epoch RIGHT NOW:
+   *
+   * - At it: this is the live lane's frame and its one chance is now. Whether the bytes open, or
+   *   parse, or name a procedure anyone handles, the outcome is the drain's own — every path there
+   *   either delivers or drops exactly as the transport does — so the frame is DONE either way.
+   * - Above it: the frame is ahead of the walk. The transport cannot open it and drops it, so its
+   *   bytes are kept and the drain delivers it when the walk reaches that epoch. Whether the claim
+   *   is one the group's log can justify is the drain's question, asked with a network read this
+   *   path must not make.
+   * - Below it, or not a readable frame at all: dead. MLS ratchets forward, so no epoch this peer
+   *   will ever hold again opens those bytes — a later pull would classify it dead too, which is
+   *   why marking it done here loses nothing that was still recoverable.
+   *
+   * The epoch is read HERE and not at the merge, because the handle moves under the app lane's own
+   * mutex-free push loop and the answer is only true of the moment the frame arrived.
+   *
+   * A MAILBOX frame has no place in any log and is skipped outright: nothing to advance over. That
+   * is the whole reason the class has to travel with the push — ephemeral and logged app traffic
+   * share one topic, so a peer that guessed from the topic would move its cursor over frames the log
+   * does not contain.
+   */
+  const noteLiveAppFrame = (name: string, topicID: string, message: StoredMessage): void => {
+    const position = message.logPosition
+    if (position == null) return
+    const sealedAt = crypto.frameEpoch(message.payload)
+    const ahead = sealedAt != null && sealedAt > crypto.epoch()
+    let staged = appStaged.get(name)
+    if (staged == null) {
+      staged = []
+      appStaged.set(name, staged)
+    }
+    staged.push({
+      topicID,
+      frame: { position: asLogPosition(position), sealed: ahead ? message.payload : null },
+    })
+    scheduleAppLaneSync()
+  }
+
+  /**
+   * Take the staged pushes into the buffer and move the durable cursor over them, off the back of
+   * live traffic alone.
+   *
+   * A peer that is online and walks no commit still has to keep its position: without this the
+   * cursor moves only when a commit does, and a group that is quiet on the commit lane and busy on
+   * the app lane re-delivers its whole backlog on the next restart — which is the loss the cursor
+   * exists to stop.
+   *
+   * It does NOT deliver. Delivery unwraps against the live handle, and this runs outside the commit
+   * mutex where the handle can be mid-ratchet; a frame classified at one epoch and unwrapped at the
+   * next would be called dead and dropped. So the buffer is filled and the cursor is advanced, and
+   * anything still holding bytes waits for {@link deliverAppFrames}, which runs where the handle is
+   * held still.
+   *
+   * COALESCED: a burst of pushes collapses into one pass, and the flag is cleared on entry so a
+   * frame arriving during the pass schedules the next one rather than being left staged.
+   */
+  let appLaneSyncScheduled = false
+  const scheduleAppLaneSync = (): void => {
+    if (appLaneSyncScheduled) return
+    appLaneSyncScheduled = true
+    void runAppLane(async () => {
+      appLaneSyncScheduled = false
+      await loadAppSegment()
+      for (const [name, frames] of appSegment) await advanceAppCursor(name, frames)
+    }).catch(() => {
+      // A hub that would not answer leaves the cursor where it is and the frames staged or
+      // buffered; the next push, or the next drain, asks again.
+    })
+  }
+
+  /**
    * Deliver every buffered app frame the handle can open AT THE EPOCH IT IS AT RIGHT NOW, and
    * leave the rest buffered. Called before each apply and once more when the walk ends.
    *
@@ -1195,7 +1380,32 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * broadcast, and a drain that did would make a returning member the only one to see its own
    * messages arrive.
    */
-  const deliverAppFrames = async (): Promise<void> => {
+  /**
+   * TAKEN UNDER THE APP LANE'S MUTEX, and the thing it excludes is the live lane's own cursor work
+   * ({@link scheduleAppLaneSync}), which runs off the mux's push loop and therefore under no lock at
+   * all. Two deliverers now write one read position, and every way they can interleave corrupts it:
+   *
+   * - The buffer is an ORDERED ARRAY this function walks while awaiting `unwrap` and a host handler
+   *   inside the loop. A push splicing a frame in below the walk's index shifts every later element
+   *   back one, so the walk re-reads one frame — a second delivery of a message already given to the
+   *   host — and steps over another entirely.
+   * - {@link advanceAppCursor} passes a run of done frames and then splices them off. A sync running
+   *   between the read of the run and the splice passes the same frames again and cuts a second time,
+   *   dropping frames the cursor never covered — silent loss of exactly the messages this position
+   *   exists to protect.
+   * - The cursor is DURABLE. Both paths end in `appCursorStore.save`, so an interleave does not just
+   *   confuse the process, it writes the wrong position to disk, and a restart reads it back.
+   *
+   * NO DEADLOCK against the commit mutex, which is the one caller that holds a lock here: the two
+   * are ordered, never nested the other way. Every call to this is from inside `runSerial` and takes
+   * the app lane second; nothing that runs inside the app lane takes `runSerial`. The one path that
+   * could is a HOST handler re-entering the peer from the delivery below — and that already
+   * deadlocks on `runSerial` itself today, which is not reentrant, so this adds no reachable case.
+   * The live sync never calls a handler, and so cannot re-enter at all.
+   */
+  const deliverAppFrames = (): Promise<void> => runAppLane(drainAppFrames)
+
+  const drainAppFrames = async (): Promise<void> => {
     await loadAppSegment()
     // Read once per drain and only if a frame actually claims to be ahead: the log is a network
     // read, the honest buffer holds no such claim, and this handle's epoch does not move under a

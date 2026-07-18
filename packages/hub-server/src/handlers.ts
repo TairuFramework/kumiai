@@ -150,13 +150,25 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       // row removed. Re-running the loop would push a frame every current subscriber has already
       // applied, named by a dead sequenceID. Live fan-out is for a genuine append only.
       if (!deduped) {
+        // The frame's place in the topic's LOG travels with the push, and only when there is one.
+        // A pushed frame otherwise names only a place in the recipient's delivery queue, and a
+        // recipient holding a durable log cursor cannot get from one to the other. The store minted
+        // this sequenceID for an accepted append, so for a log-class publish it IS the log position;
+        // a mailbox publish has none and carries none.
+        const logPosition = ctx.param.retain === 'log' ? { logPosition: sequenceID } : {}
         // Live-deliver to currently-connected subscribers (minus the sender).
         const subscribers = await store.getSubscribers(topicID)
         for (const recipientDID of subscribers) {
           if (recipientDID === senderDID) continue
           const client = registry.getClient(recipientDID)
           if (client?.sendMessage != null) {
-            client.sendMessage({ sequenceID, senderDID, topicID, payload: payloadBytes })
+            client.sendMessage({
+              sequenceID,
+              senderDID,
+              topicID,
+              payload: payloadBytes,
+              ...logPosition,
+            })
           }
         }
       }
@@ -230,6 +242,10 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
               senderDID: message.senderDID,
               topicID: message.topicID,
               payload: toB64(message.payload),
+              // Spread, never a plain assignment: `logPosition: undefined` on a mailbox frame is a
+              // present key with a falsy value once it is off the wire, and the whole point of the
+              // field is that a reader can tell "no place in any log" from a place.
+              ...(message.logPosition != null ? { logPosition: message.logPosition } : {}),
             })
             .catch(() => {})
         })
@@ -247,6 +263,7 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
               senderDID: msg.senderDID,
               topicID: msg.topicID,
               payload: toB64(msg.payload),
+              ...(msg.logPosition != null ? { logPosition: msg.logPosition } : {}),
             })
           }
           cursor = result.cursor

@@ -110,6 +110,10 @@ function wrapHub({ hub, encryptor, groupID, onEvent, onEncryptError }: WrapHubPa
               senderDID: message.senderDID,
               topicID: message.topicID,
               payload: plaintext,
+              // Carried through: this wrapper re-writes the payload and nothing else, and dropping
+              // the log position here would silently strip it from every lane behind an encrypting
+              // hub — leaving a reader unable to advance a log cursor over a frame it was pushed.
+              ...(message.logPosition != null ? { logPosition: message.logPosition } : {}),
             }
             return { value: decrypted, done: false }
           }

@@ -157,6 +157,66 @@ describe('the drain bounds what a frame may claim, and passes no epoch it failed
   })
 
   /**
+   * BYTES THAT ARE NOT A FRAME AT ALL, whose first two happen to read as an epoch the commit log
+   * does justify. Nothing about them is a publisher's claim — no member wrote them — but a reader
+   * that answers "what epoch does this claim?" structurally, without asking whether the bytes are
+   * a frame, mints one out of the noise and then honours it.
+   *
+   * The cost is the cursor: a claim of AHEAD-and-justified is the one answer that makes a frame
+   * keep its place, so the position sits behind the garbage for every epoch between here and the
+   * claim, and every frame delivered in that window is re-read and re-delivered by a restart. The
+   * port's answer for bytes that are not a readable sealed frame is `null`, which is DEAD, and
+   * dead is done at the first epoch that sees it.
+   */
+  test('bytes that are not a frame claim no epoch, however their leading bytes read', async () => {
+    const hub = new DurableFakeHub()
+    const recoverySecret = new Uint8Array(32).fill(0x97)
+    const seen: Array<unknown> = []
+    const handlers = { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) }
+    const topicID = protocolTopic(fakeEpochSecret(1), 1, 'chat')
+
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
+    await flush()
+    await bob.peer.dispose()
+    hub.detach('bob')
+
+    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'at epoch one' })
+    // `03 00` little-endian is epoch 3, and the two commits below carry the group there — so the
+    // log justifies the number, and only the shape of the rest can refuse it.
+    await hub.publish({
+      senderDID: 'mallory',
+      topicID,
+      retain: 'log',
+      payload: new Uint8Array([0x03, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]),
+    })
+    await alice.peer.commit(buildLedgerCommit(alice, []))
+    await flush()
+    await alice.peer.commit(buildLedgerCommit(alice, []))
+    await flush()
+    expect(alice.mls.epoch()).toBe(3)
+    expect(alice.peer.anchorEpoch()).toBe(1) // one segment, one topic
+
+    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob, handlers })
+    hub.reattach('bob')
+    await flush()
+
+    expect(restarted.mls.epoch()).toBe(3)
+    expect(seen).toEqual([{ text: 'at epoch one' }])
+
+    // ONE write, and it is the last position: the garbage was resolved at the same epoch as the
+    // frame in front of it, so the cursor never rested behind it. A second, earlier write is the
+    // stall — the window in which a restart re-delivers everything the drain had already handed
+    // over.
+    const frames = hub.published.filter((m) => m.topicID === topicID)
+    expect(frames).toHaveLength(2)
+    expect(bob.appCursorStore.history(topicID)).toEqual([frames[1]?.sequenceID])
+
+    await alice.peer.dispose()
+    await restarted.peer.dispose()
+  })
+
+  /**
    * A hub that drops one fetch mid-walk. The pull is a retry and can be made again; the DELIVERY
    * cannot — the walk that carries on ratchets the handle past every epoch it then passes, and
    * those frames are ciphertext forever. So a failed pull stalls the walk rather than being
@@ -212,14 +272,14 @@ describe('the drain bounds what a frame may claim, and passes no epoch it failed
    * it stood when the walk began, and every frame published in between is one no later pull ever
    * asks for — dropped-if-not-listening, reintroduced inside the very drain that exists to end it.
    *
-   * SKIPPED, and it is red: the one-pull-per-segment latch is still there, because removing it
-   * makes the drain re-deliver everything the LIVE lane already handed the host. The pull is from a
-   * position, but only the drain's own deliveries ever move that position — a live delivery moves
-   * nothing — so an online peer's second pull re-reads every frame it was pushed. Four existing
-   * tests catch it. Closing this needs a read position the live lane also advances, which is a
-   * wider change than the drain.
+   * What used to make the re-pull unaffordable — and kept this test skipped — was that only the
+   * drain's own deliveries moved the read position, so an online peer's second pull re-read every
+   * frame the LIVE lane had already handed the host. The push now carries its own log position
+   * (`StoredMessage.logPosition`), the live lane takes that position, and a re-pull returns only
+   * what was never delivered. The last assertion is the half that could not be written before: the
+   * cursor ends on the mid-walk frame, so a restart does not read it again.
    */
-  test.skip('a frame published while the walk is still walking is picked up by it', async () => {
+  test('a frame published while the walk is still walking is picked up by it', async () => {
     const hub = new DurableFakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x94)
     const seen: Array<unknown> = []
@@ -267,6 +327,120 @@ describe('the drain bounds what a frame may claim, and passes no epoch it failed
     const posted = hub.published.filter((m) => m.topicID === topicID)
     expect(posted).toHaveLength(2)
     expect(bob.appCursorStore.stored(topicID)).toBe(posted[1]?.sequenceID)
+
+    await alice.peer.dispose()
+    await restarted.peer.dispose()
+  })
+})
+
+/**
+ * A drain hands the host what the LIVE lane would have handed it and nothing besides. The log is
+ * the only place these two frames can come from — the live fan-out never produces either — so each
+ * one is a way for a pull to deliver what a push never could.
+ */
+describe('the drain delivers only what the live lane would', () => {
+  /**
+   * Retention is the PROTOCOL's word about a procedure, not the frame's about itself. A frame
+   * naming an ephemeral procedure that is nonetheless sitting in a topic's log was published
+   * `retain: 'log'` by a member whose own dispatch would never do that — a hub or a member free to
+   * choose the flag, promoting a procedure the group declared unretained into history.
+   *
+   * Both procedures are on one protocol and one topic, so nothing here is topic separation: the
+   * ephemeral frame is in the very log the drain just pulled, sealed at the epoch the reader is
+   * at, naming a procedure the reader has a handler for.
+   */
+  test('a retained frame naming an ephemeral procedure is not delivered', async () => {
+    const hub = new DurableFakeHub()
+    const recoverySecret = new Uint8Array(32).fill(0x95)
+    const posted: Array<unknown> = []
+    const changed: Array<unknown> = []
+    const handlers = {
+      'chat/posted': (ctx: { data: unknown }) => void posted.push(ctx.data),
+      'chat/changed': (ctx: { data: unknown }) => void changed.push(ctx.data),
+    }
+    const topicID = protocolTopic(fakeEpochSecret(1), 1, 'chat')
+
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
+    await flush()
+    await bob.peer.dispose()
+    hub.detach('bob')
+
+    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'a logged event' })
+    // Alice's dispatch would never retain this one, so it is published around her peer: same
+    // topic, same epoch key, same sender, `retain: 'log'` on a procedure that never declared it.
+    const atOne = createFakeCrypto({ epoch: 1, localDID: 'alice' })
+    await hub.publish({
+      senderDID: 'alice',
+      topicID,
+      retain: 'log',
+      payload: await atOne.wrap(encodeEventFrame('chat/changed', { text: 'alice is typing' })),
+    })
+    await flush()
+
+    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob, handlers })
+    hub.reattach('bob')
+    await flush()
+
+    expect(posted).toEqual([{ text: 'a logged event' }])
+    expect(changed).toEqual([])
+
+    // And it is consumed rather than left to be re-offered: the cursor is past both frames.
+    const frames = hub.published.filter((m) => m.topicID === topicID)
+    expect(frames).toHaveLength(2)
+    expect(bob.appCursorStore.stored(topicID)).toBe(frames[1]?.sequenceID)
+
+    await alice.peer.dispose()
+    await restarted.peer.dispose()
+  })
+
+  /**
+   * A member's own frames are in the log it drains — the hub retains one copy of a topic, not one
+   * per reader — and the live fan-out never echoes a publisher its own broadcast. So a pull that
+   * delivered them would hand the host its own sends back, and only on the paths that pull: the
+   * same event would be seen once when online and twice across a restart.
+   *
+   * Alice's frame is the control. It proves the drain ran, opened this epoch's bytes and reached
+   * the handler, so bob's silence about his own frame is the skip and not an empty pull.
+   */
+  test("a member's own frame in the log is not delivered back to it", async () => {
+    const hub = new DurableFakeHub()
+    const recoverySecret = new Uint8Array(32).fill(0x96)
+    const seen: Array<unknown> = []
+    const handlers = { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) }
+    const topicID = protocolTopic(fakeEpochSecret(1), 1, 'chat')
+
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
+    await flush()
+
+    // Bob publishes, and his own peer never sees it come back: the hub does not push a frame at
+    // the member that sent it. Nothing has moved his read position past it.
+    await bob.peer.protocol('chat').dispatch('chat/posted', { text: 'bob said this' })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'alice said this' })
+    await flush()
+    expect(seen).toEqual([{ text: 'alice said this' }])
+
+    await bob.peer.dispose()
+    hub.detach('bob')
+    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'alice said more' })
+    await flush()
+
+    // The restart drains the whole topic from the cursor — his own frame included, because the
+    // log holds it and the position never passed it.
+    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob, handlers })
+    hub.reattach('bob')
+    await flush()
+
+    expect(seen).toEqual([
+      { text: 'alice said this' },
+      { text: 'alice said this' },
+      { text: 'alice said more' },
+    ])
+
+    const frames = hub.published.filter((m) => m.topicID === topicID)
+    expect(frames).toHaveLength(3)
+    expect(bob.appCursorStore.stored(topicID)).toBe(frames[2]?.sequenceID)
 
     await alice.peer.dispose()
     await restarted.peer.dispose()

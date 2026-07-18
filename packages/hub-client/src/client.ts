@@ -51,6 +51,12 @@ type ReceiveMessage = {
   senderDID: string
   topicID: string
   payload: string
+  /**
+   * Where the frame sits in its topic's log, present iff it is log-class. `sequenceID` names a place
+   * in this recipient's delivery queue instead — a different sequence — so a caller advancing a log
+   * cursor over a pushed frame reads this one.
+   */
+  logPosition?: string
 }
 
 type ReceiveAck = {

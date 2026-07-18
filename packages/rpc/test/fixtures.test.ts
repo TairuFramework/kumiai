@@ -1,6 +1,7 @@
 import { fromUTF, toUTF } from '@sozai/codec'
 import { describe, expect, test } from 'vitest'
 
+import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 
@@ -38,6 +39,41 @@ describe('fake crypto', () => {
     // stuck behind does not follow.
     expect(await createFakeCrypto({ epoch: 2 }).exportSecret()).toEqual(atTwo)
     expect(fakeEpochSecret(1)).toEqual(atOne)
+  })
+})
+
+describe('fake crypto reads a frame’s epoch, and refuses to read one out of bytes that are not a frame', () => {
+  test('a sealed frame answers with the epoch it was sealed at', async () => {
+    const crypto = createFakeCrypto({ epoch: 4, localDID: 'did:key:alice' })
+    const sealed = await crypto.wrap(fromUTF('hello group'))
+    // Asked by a member at a DIFFERENT epoch, which is the only interesting case: the answer is
+    // read from the frame's cleartext, so it does not need the key that opens it.
+    expect(createFakeCrypto({ epoch: 9 }).frameEpoch(sealed)).toBe(4)
+  })
+
+  test('bytes that are not a frame answer null, however their leading bytes read', () => {
+    const crypto = createFakeCrypto({ epoch: 1 })
+    expect(crypto.frameEpoch(new Uint8Array([0x03]))).toBeNull()
+    // Two bytes that read as a perfectly plausible epoch, and nothing behind them that could be
+    // a sender: `null` is the port's answer, and the epoch it would otherwise invent is a claim
+    // no publisher made — one the drain would honour by holding its cursor behind it.
+    expect(crypto.frameEpoch(new Uint8Array([0x03, 0x00, 0xff, 0xff, 0xff, 0xff]))).toBeNull()
+  })
+})
+
+describe('the durable app-cursor double refuses what the real store must', () => {
+  test('a position older than the one it holds is refused', async () => {
+    const store = createMemoryAppCursorStore()
+    await store.save('t', '000000000005')
+    await expect(store.save('t', '000000000004')).rejects.toThrow(/may not move back/)
+    // Refused, not silently ignored, and nothing was written: the guard exists so that a peer
+    // that regressed its advance rule cannot leave a store that looks correct.
+    expect(store.stored('t')).toBe('000000000005')
+    expect(store.history('t')).toEqual(['000000000005'])
+    // Forward, and standing still, are both fine.
+    await store.save('t', '000000000005')
+    await store.save('t', '000000000006')
+    expect(store.stored('t')).toBe('000000000006')
   })
 })
 

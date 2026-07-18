@@ -254,6 +254,11 @@ export class FakeHub implements LogHub {
       senderDID: params.senderDID,
       topicID: params.topicID,
       payload: params.payload,
+      // A log-class frame carries its place in the topic's log wherever it is handed out — pushed
+      // or pulled. This hub mints one sequence for both classes, so that place IS the sequenceID
+      // here; what the contract fixes is that a reader is TOLD it rather than assuming the two
+      // sequences coincide. A mailbox frame has no place in a log and carries no key at all.
+      ...(params.retain === 'log' ? { logPosition: sequenceID } : {}),
     }
     this.published.push(message)
 

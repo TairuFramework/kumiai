@@ -56,6 +56,27 @@ function formatSequenceID(counter: number): string {
 }
 
 /**
+ * The entry as a reader sees it, with the ONE piece of routing metadata a reader cannot recover for
+ * itself: where the frame sits in its topic's log.
+ *
+ * Present iff the entry is log-class, and the key is left off entirely otherwise — a mailbox frame
+ * has no place in a log, and a falsy placeholder is a position a reader's cursor would move to,
+ * skipping every log frame below it. This store mints one sequence for both, so the log position of
+ * a log-class frame IS its sequenceID here; a store that mints a separate per-recipient delivery
+ * sequence reports its log's own value, and the conformance suite pins the equality that matters —
+ * a pushed log frame's `logPosition` is the position `fetchTopic` serves that same frame at.
+ */
+function asStoredMessage(entry: LogEntry): StoredMessage {
+  return {
+    sequenceID: entry.sequenceID,
+    senderDID: entry.senderDID,
+    topicID: entry.topicID,
+    payload: entry.payload,
+    ...(entry.retain === 'log' ? { logPosition: entry.sequenceID } : {}),
+  }
+}
+
+/**
  * In-memory HubStore for testing and development.
  *
  * Retention is a class (per publish) and a duration (per subscribe):
@@ -288,12 +309,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
       for (const sequenceID of selected) {
         const entry = entries.get(sequenceID)
         if (entry != null) {
-          resultMessages.push({
-            sequenceID: entry.sequenceID,
-            senderDID: entry.senderDID,
-            topicID: entry.topicID,
-            payload: entry.payload,
-          })
+          resultMessages.push(asStoredMessage(entry))
         }
       }
 
@@ -333,12 +349,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
       for (const sequenceID of limited) {
         const entry = entries.get(sequenceID)
         if (entry != null) {
-          messages.push({
-            sequenceID: entry.sequenceID,
-            senderDID: entry.senderDID,
-            topicID: entry.topicID,
-            payload: entry.payload,
-          })
+          messages.push(asStoredMessage(entry))
         }
       }
 

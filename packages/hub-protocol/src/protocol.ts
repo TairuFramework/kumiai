@@ -147,6 +147,14 @@ export const hubProtocol = {
         senderDID: { type: 'string' },
         topicID: { type: 'string' },
         payload: { type: 'string', contentEncoding: 'base64' },
+        /**
+         * Where the frame sits in its topic's log — the position `hub/topic/fetch` serves it at.
+         * Present iff the frame is log-class; a mailbox frame has no place in a log and carries no
+         * key. `sequenceID` above names a place in THIS recipient's delivery queue instead, which is
+         * a different sequence, so a reader advancing a log cursor over a pushed frame reads this
+         * and never that.
+         */
+        logPosition: { type: 'string', maxLength: 64 },
       },
       required: ['sequenceID', 'senderDID', 'topicID', 'payload'],
       additionalProperties: false,

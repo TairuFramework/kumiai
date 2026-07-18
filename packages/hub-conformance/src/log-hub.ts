@@ -321,6 +321,46 @@ export function testLogHubConformance<Hub extends ConformanceLogHub>(
       expect(result.messages.map((message) => message.sequenceID)).toEqual([first])
     })
 
+    test('a pushed log frame names its place in the log, and a pushed mailbox frame names none', async () => {
+      const hub = await createHub({ maxRetention, maxDepth })
+      hub.subscribe(ALICE, TOPIC)
+      hub.subscribe(BOB, TOPIC)
+      const toBob = hub.receive(BOB)
+
+      const { sequenceID: first } = await hub.publish({
+        senderDID: ALICE,
+        topicID: TOPIC,
+        payload: payload(1),
+        retain: 'log',
+      })
+      await hub.publish({ senderDID: ALICE, topicID: TOPIC, payload: payload(2) })
+      const { sequenceID: second } = await hub.publish({
+        senderDID: ALICE,
+        topicID: TOPIC,
+        payload: payload(3),
+        retain: 'log',
+      })
+
+      const pushed = await drain(toBob, 3)
+      expect(pushed).toHaveLength(3)
+
+      // A push otherwise says only where the frame sits in THIS recipient's delivery queue, which
+      // is a different sequence from the topic's log — it carries the mailbox frame below, skips
+      // the recipient's own frames, and empties as it is acked. A recipient holding a durable log
+      // cursor cannot derive the log position from it and must not guess: the store assigned both,
+      // so the store is what says. Without this a peer either re-reads its whole log on every
+      // restart or crosses the two sequences and loses messages for good.
+      const log = await hub.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
+      expect(log.messages.map((message) => message.sequenceID)).toEqual([first, second])
+      expect(pushed[0]?.logPosition).toBe(first)
+      expect(pushed[2]?.logPosition).toBe(second)
+
+      // ABSENT on the mailbox frame, not empty and not zero. It has no place in any log, and a
+      // falsy placeholder is a position a cursor would happily move to — past every log frame
+      // below it.
+      expect(pushed[1]?.logPosition).toBeUndefined()
+    })
+
     test('a log topic trims itself once its depth bound is exceeded', async () => {
       const hub = await createHub({ maxRetention, maxDepth })
       hub.subscribe(BOB, TOPIC)

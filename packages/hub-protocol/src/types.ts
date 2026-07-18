@@ -14,6 +14,22 @@ export type StoredMessage = {
   senderDID: string
   topicID: string
   payload: Uint8Array
+  /**
+   * Where this frame sits in its TOPIC'S LOG — the position a `fetchTopic` reader would meet it at,
+   * and therefore the only value a reader's log cursor may be moved to.
+   *
+   * Present exactly when the frame is log-class, and ABSENT otherwise. A mailbox frame has no place
+   * in any log, so there is nothing to report: an empty string or a zero would be a lie a cursor
+   * acts on, and a cursor moved to a position the log does not contain skips every frame between it
+   * and the real one, permanently and silently.
+   *
+   * It exists because a PUSHED frame otherwise says only where it sits in this recipient's delivery
+   * queue, which is a different sequence — it runs across every subscribed topic, skips the
+   * recipient's own frames, and is emptied by acking. A recipient that must advance a log cursor
+   * over a frame it was pushed can neither derive this nor infer it; the store is the one party that
+   * knows, because it assigned both. See `@kumiai/rpc`'s `cursor.ts` for the two brands.
+   */
+  logPosition?: string
 }
 
 export type PublishParams = {
