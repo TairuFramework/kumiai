@@ -48,6 +48,7 @@
   },
   "devDependencies": {
     "@kumiai/hub-conformance": "workspace:^",
+    "@kumiai/rpc-conformance": "workspace:^",
     "@noble/curves": "catalog:",
     "vitest": "catalog:"
   }

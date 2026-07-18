@@ -53,15 +53,20 @@ export type GroupCryptoParams = {
  *
  * ## Where this diverges from the fake in `@kumiai/rpc`'s test fixtures
  *
- * 1. **`unwrap` opens strictly at the handle's current epoch, and so does the fake — but
- *    for different reasons.** The fake refuses every other epoch by construction. This one
- *    refuses them because ts-mls does: a frame below the handle's epoch has had its keys
- *    ratcheted away, and one above it has no keys yet. Real MLS is documented as keeping a
- *    four-epoch window, and this implementation does NOT reach into it — `GroupHandle.decrypt`
- *    delegates to ts-mls's `processMessage`, which opens against the current epoch's secret
- *    tree only. So the port contract's "an implementation that opens strictly at the current
- *    epoch is a correct implementation" is what actually ships, not a stricter-than-necessary
- *    double. **The fake is not stricter than the real port here. It is the same.**
+ * 1. **`unwrap` refuses every epoch the handle has not REACHED, and opens a bounded window
+ *    below it. The fake refuses everything but its current epoch, so the fake IS stricter.**
+ *    Above the handle there are no keys yet and both refuse. Below it, this implementation
+ *    reaches ts-mls's retained key material: a frame sealed at epoch 3 opens against a handle
+ *    that `processMessage` carried to epoch 4, and the same read six transitions later is
+ *    refused with ts-mls's own "Cannot process message, epoch too old". An earlier note here
+ *    claimed parity with the fake — that `GroupHandle.decrypt` delegating to `processMessage`
+ *    resolved against the current epoch's secret tree alone — and that is not what happens.
+ *    (It looks true for a handle REPLACED wholesale, as when a member adopts the derived handle
+ *    of its own commit: that handle starts with no history.)
+ *
+ *    The port contract is right either way — "an implementation that opens strictly at the
+ *    current epoch is a correct implementation of this port", and group-rpc must not depend on
+ *    the window, which is spent by epoch TRANSITIONS rather than by time.
  *
  * 2. **`exportSecret` is one-way; the fake's is not.** The fake XORs the epoch into a fixed
  *    base, so any member holding one epoch's bytes computes every other epoch's. This exports

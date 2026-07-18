@@ -2,6 +2,7 @@ import { type OwnIdentity, randomIdentity } from '@kokuin/token'
 import {
   type ClientState,
   commitInvite,
+  commitLedgerEntries,
   createGroup,
   createInvite,
   createKeyPackageBundle,
@@ -14,6 +15,7 @@ import {
   processWelcome,
   removeMember,
   restoreGroup,
+  signLedgerEntry,
 } from '@kumiai/mls'
 import { createGroupCrypto, createGroupMLS, type LedgerEntrySlot } from '@kumiai/mls-rpc'
 import type {
@@ -316,6 +318,45 @@ export function buildRemoveCommit(member: Member, victimDID: string): () => Prom
       commit: committed.commitMessage,
       bodies: [],
       kind: 'remove',
+      journal: encodeClientState(committed.newGroup.state),
+      onAccepted: async () => {
+        member.adopt(committed.newGroup)
+      },
+    }
+  }
+}
+
+/**
+ * A host's `build()` for a ROSTER-NEUTRAL commit: it enacts a ledger entry and touches no
+ * membership, so the app-lane anchor does not move and the group stays on one topic across it.
+ *
+ * That is what makes it the right advance for the drain scenarios below. A commit that added or
+ * removed a member would rotate the anchor, and a frame published mid-walk would land on a
+ * different topic from the one the walk had already pulled — which is a different scenario, and
+ * not the one where the log GROWS under a walk that has already read it.
+ *
+ * It also carries real ledger bodies, so the entry seal is exercised on the way: the commit's
+ * blob is sealed under the epoch it is framed at and opened from inside the applying peer's own
+ * apply of it.
+ */
+export function buildLedgerCommit(
+  member: Member,
+  identity: OwnIdentity,
+  subject: string,
+  value: string,
+): () => Promise<PendingCommit> {
+  return async () => {
+    const token = await signLedgerEntry(identity, {
+      type: 'group.role',
+      groupID: member.handle().groupID,
+      subject,
+      value,
+    })
+    const committed = await commitLedgerEntries(member.handle(), [token])
+    return {
+      commit: committed.commitMessage,
+      bodies: [token],
+      kind: 'ledger',
       journal: encodeClientState(committed.newGroup.state),
       onAccepted: async () => {
         member.adopt(committed.newGroup)

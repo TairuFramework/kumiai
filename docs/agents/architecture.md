@@ -109,13 +109,16 @@ dispensed five times off the one pull. Delivered frames reach the host through t
 `handlers` map; there is no separate delivery API. Its own frames are not echoed back to it, as the
 live fan-out would not.
 
-> **There is no past-epoch window here.** ts-mls holds key material for 4 past epochs
-> (`retainKeysForEpochs`, default 4; eviction *zeroes* it), but nothing reaches it through this
-> port: `unwrap` goes through `processMessage`, which resolves against the **current** epoch's
-> secret tree alone, so a frame sealed below the handle's epoch does not open — measured against
-> real MLS, not assumed. Leaning on the window would be wrong even if it were reachable, because it
-> is spent by **epoch transitions, not time**: a catch-up walk destroys the very keys it would need,
-> and a member away four commits could read where a member away a week could not. rpc reads at the
+> **The past-epoch window IS reachable here, and rpc still must not use it.** ts-mls holds key
+> material for 4 past epochs (`retainKeysForEpochs`, default 4; eviction *zeroes* it), and it does
+> reach this port: a frame sealed at epoch 3 opens against a handle that `processMessage` carried
+> to epoch 4, while the same read six transitions on is refused with ts-mls's own "Cannot process
+> message, epoch too old" — measured, and the correction of an earlier claim here that the window
+> was unreachable. (That claim held only for a handle **replaced wholesale**, as when a member
+> adopts the derived handle of a commit it authored: that handle starts with no history, which is
+> the case it was measured on.) Leaning on the window is wrong anyway, because it is spent by
+> **epoch transitions, not time**: a catch-up walk destroys the very keys it would need, and a
+> member away four commits could read where a member away a week could not. rpc reads at the
 > sealing epoch, full stop.
 
 **`unwrap` throwing is ordinary control flow** on every read path — it is how a frame says "not my

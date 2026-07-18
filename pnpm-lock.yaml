@@ -273,6 +273,12 @@ importers:
         specifier: 'catalog:'
         version: 0.1.0
     devDependencies:
+      '@kumiai/rpc-conformance':
+        specifier: workspace:^
+        version: link:../rpc-conformance
+      ts-mls:
+        specifier: 'catalog:'
+        version: 2.0.0-rc.13(@noble/ciphers@2.2.0)(@noble/curves@2.2.0)
       vitest:
         specifier: 'catalog:'
         version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.1.1)(@vitest/ui@4.1.9(vitest@4.1.9))(vite@8.0.16(@types/node@26.1.1)(esbuild@0.28.1)(terser@5.49.0)(tsx@4.23.0)(yaml@2.9.0))
@@ -310,12 +316,21 @@ importers:
       '@kumiai/hub-conformance':
         specifier: workspace:^
         version: link:../hub-conformance
+      '@kumiai/rpc-conformance':
+        specifier: workspace:^
+        version: link:../rpc-conformance
       '@noble/curves':
         specifier: 'catalog:'
         version: 2.2.0
       vitest:
         specifier: 'catalog:'
         version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.1.0)(@vitest/ui@4.1.9(vitest@4.1.9))(vite@8.0.16(@types/node@26.1.1)(esbuild@0.28.1)(terser@5.49.0)(tsx@4.23.0)(yaml@2.9.0))
+
+  packages/rpc-conformance:
+    devDependencies:
+      vitest:
+        specifier: 'catalog:'
+        version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.1.1)(@vitest/ui@4.1.9(vitest@4.1.9))(vite@8.0.16(@types/node@26.1.1)(esbuild@0.28.1)(terser@5.49.0)(tsx@4.23.0)(yaml@2.9.0))
 
   tests/e2e-expo:
     dependencies:

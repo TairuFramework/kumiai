@@ -65,7 +65,12 @@ describe('per-procedure retention for app events', () => {
     const drained = await hub.fetchTopic({ subscriberDID: 'bob', topicID })
     expect(drained.messages).toHaveLength(1)
 
-    const opened = await bob.crypto.unwrap(drained.messages[0].payload)
+    // Opened by a member of the group that has NOT already read this frame, and not by bob's own
+    // crypto: opening is a consuming operation on the real port (a ratchet generation is spent),
+    // and bob's peer opened this frame on the live lane above. The claim under test is that the
+    // frame is RETAINED and openable at this epoch, which is exactly what a fresh reader shows.
+    const reader = createFakeCrypto({ epoch: 1, localDID: 'carol' })
+    const opened = await reader.unwrap(drained.messages[0].payload)
     const bytes = opened instanceof Uint8Array ? opened : opened.payload
     expect(JSON.parse(toUTF(bytes))).toEqual({
       payload: { typ: 'event', prc: 'room/posted', data: { text: 'kept' } },
