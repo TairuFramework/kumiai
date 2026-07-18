@@ -81,7 +81,10 @@ export class FakeHub {
   }
 
   async publish(params: FakeHubPublishParams): Promise<{ sequenceID: string }> {
-    const sequenceID = String(++this.#sequence)
+    // WHY: zero-padded to 12 digits like the real store (hub-server memoryStore), so lexicographic
+    // `>` on sequenceIDs orders the same way here as in production. A bare decimal breaks at the
+    // 9→10 boundary ('10' < '9'), which would let a fixture-only bug hide an ordering defect.
+    const sequenceID = String(++this.#sequence).padStart(12, '0')
     const message: FakeHubMessage = {
       sequenceID,
       senderDID: params.senderDID,
@@ -92,6 +95,10 @@ export class FakeHub {
     const recipients = this.#topics.get(params.topicID)
     if (recipients != null) {
       for (const recipient of recipients) {
+        // WHY: the real hub never echoes a publish back to its sender (hub-server handlers.ts
+        // skips `recipientDID === senderDID`). A fixture that echoes lets a transport under test
+        // see its own frames on a topic it both publishes to and subscribes to.
+        if (recipient === params.senderDID) continue
         const action = this.#nextAction()
         this.#deliver(recipient, message, action)
       }
