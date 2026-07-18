@@ -2,6 +2,7 @@ import type { Unwrap } from '@kumiai/broadcast'
 import { fromUTF, toUTF } from '@sozai/codec'
 
 import type { GroupCrypto } from '../../src/crypto.js'
+import { decodeMemoryCommit } from './memory-group-mls.js'
 
 export type FakeCryptoOptions = {
   epoch?: number
@@ -86,14 +87,23 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
   }
 
   /**
-   * The epoch a frame says it was sealed at, read from the two bytes `wrap` writes in the clear —
-   * a stand-in for the epoch a real MLS PrivateMessage carries in its own cleartext (which is what
-   * `@kumiai/mls`'s `readMessageEpoch` reads).
+   * The epoch an MLS MESSAGE says it carries, read from its own cleartext — a stand-in for
+   * `@kumiai/mls`'s `readMessageEpoch`, which reads the epoch field every MLSMessage has.
+   *
+   * BOTH message shapes, because the real one answers for both. A sealed app frame carries it in
+   * the two bytes `wrap` writes in the clear; a COMMIT is an MLSMessage too and carries the same
+   * field, so a caller bounding a claim against the commit log reads it from here rather than
+   * asking a handle to authenticate a commit it is not yet at the epoch to authenticate. The two
+   * encodings are distinct here only because the doubles are: in MLS they are one format with one
+   * epoch field, and a fake that answered for only one of them would make the epoch of a commit
+   * look unreadable when it is the most readable thing about it.
    *
    * Never throws, and answers for bytes this member cannot open — that is the whole of what it is
-   * for. Bytes too short to hold the field are not a sealed frame: `null`.
+   * for. Bytes that are neither shape: `null`.
    */
   const frameEpoch: GroupCrypto['frameEpoch'] = (bytes) => {
+    const commit = decodeMemoryCommit(bytes)
+    if (commit != null) return commit.epoch
     if (bytes.length < 2) return null
     return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint16(0, true)
   }

@@ -1,113 +1,143 @@
 # Probe report — Fix 2: the drain's bound, its failed pull, and its latch
 
-Branch `feat/app-lane-delivery`, uncommitted. **Status: PARTIAL.** F4 and F3 are implemented and
-green. **F5 is BLOCKED** — the approved fix is incomplete in a way the brief's reasoning did not
-anticipate, and shipping it breaks four existing tests. One existing test conflicts with F4 and is
-left red by instruction rather than weakened.
+Branch `feat/app-lane-delivery`. Checkpoint `60e8b28` holds the first pass; everything since is
+uncommitted on top of it.
+
+**Status: F4 and F3 done. F5 blocked and filed.** The three branch-owner rulings are all applied. The
+suite's remaining red is a single finding, exposed on purpose by ruling 1 and filed rather than
+fixed.
 
 ---
 
-## F4 — the bound. DONE.
+## F4 — the bound. DONE, now on cleartext.
 
 **Changes**
 
-- `packages/rpc/src/peer.ts:989-1025` — new `justifiedEpochCeiling()`. Pages the commit topic fresh
-  from the hub, reads each frame's epoch pre-apply with `port.readCommitHeader` (the same read the
-  walk makes at `:1298`), and returns `max(header.epoch + 1)` over the log, floored at
-  `crypto.epoch()`. A commit framed at H produces epoch H+1 when applied, so H+1 is the highest
-  epoch any member can have sealed at.
-- `packages/rpc/src/peer.ts:1123-1131` — the ceiling is read lazily, once per drain, and only if a
-  frame actually claims to be ahead. The honest buffer holds no such claim, so the honest path makes
-  no extra network read.
-- `packages/rpc/src/peer.ts:1155-1160` — the ahead-branch now requires the claim to be justified.
-  Unjustified → `frame.sealed = null`, and the cursor passes it.
-- `packages/rpc/src/peer.ts:1085-1093` — `frameEpoch`'s trust-boundary doc extended to cover a claim
+- `packages/rpc/src/peer.ts:1021` — `justifiedEpochCeiling()`. Pages the commit topic fresh from the
+  hub and returns `max(framedEpoch + 1)` over every commit frame in it, floored at `crypto.epoch()`.
+  A commit framed at H produces epoch H+1 when applied, so H+1 bounds every member.
+- `packages/rpc/src/peer.ts:1046` — the epoch comes from **`crypto.frameEpoch(commit)`**, the
+  cleartext read that sits over `readMessageEpoch`, and no longer from `readCommitHeader`. Ruling 1.
+  `readCommitHeader` authenticates the committer against the handle's *current* epoch secret, so it
+  answers `null` for every commit framed ahead of this peer — which is every commit a returning
+  member has yet to walk. The old ceiling would have collapsed to `crypto.epoch()` in production for
+  exactly the member the lane exists for. No new port method was needed.
+- `packages/rpc/src/peer.ts:1157` — the ahead-branch requires the claim to be justified; unjustified
+  → `frame.sealed = null`, and the cursor passes it.
+- `packages/rpc/src/peer.ts:1135-1145` — the ceiling is read once per drain and only if some frame
+  actually claims to be ahead, so the honest path makes no extra network read.
+- `packages/rpc/src/peer.ts:1090-1103` — `frameEpoch`'s trust-boundary doc extended to cover a claim
   of a *future* epoch, which it was silent on.
 
-**Why every frame is asked and not only the head:** the log's furthest frame may be poison or a
-fork loser, and neither justifies an epoch. Taking the max over readable headers is the same answer
-in the honest case and safe in the others.
+**The trust argument, stated at the function** (`peer.ts:982-999`), because it is the whole
+justification for reading an unauthenticated field: a commit's framed epoch is the hub's word, and a
+hub free to inject onto the commit topic can **raise** this ceiling at will. It can never **lower**
+it — the honest commits are in the log too and the ceiling is the maximum over all of them, so no
+injected frame can hide one. Raising it reaches, at worst, the unbounded wait that exists today,
+which is the defect being bounded. Lowering it is what would destroy an honest member's frames, and
+that is unreachable. Bounded by an untrusted party is strictly better than unbounded. The asymmetry
+is why it is acceptable here and would not be for opening: this decides how long to **wait**, never
+what to believe — what is read out of a frame is still `unwrap`'s answer alone.
 
 ## F3 — the failed pull. DONE.
 
-- `packages/rpc/src/peer.ts:1122` — the `try/catch { return }` around `loadAppSegment()` is gone.
-  The failure propagates through `advanceHandle` (`:1177`), which never reaches its `advance()`, so
-  no epoch is passed unread. `initControlLanes` (`:1512`) and `onCommitDelivery` (`:1456`) already
-  catch a failed pull and leave the cursor put, so the stall is a stall and not a crash.
-- `packages/rpc/src/peer.ts:1112-1117` and `:938-941` — the stall and its accepted cost are stated
-  where the walk and the pull each need them.
+- `packages/rpc/src/peer.ts:1135` — the `try/catch { return }` around `loadAppSegment()` is gone. The
+  failure propagates through `advanceHandle`, which never reaches its `advance()`, so no epoch is
+  passed unread. `initControlLanes` and `onCommitDelivery` already catch a failed pull and leave the
+  cursor put, so the stall is a stall and not a crash.
+- The latch's placement makes this safe on its own: `appSegmentLoaded` is taken only after the whole
+  segment is in hand, so a failed pull leaves it `false` and the retry re-pulls cleanly.
+- **Fault injection added:** `FlakyFetchHub` in `packages/rpc/test/peer-app-drain-integrity.test.ts`
+  — a `DurableFakeHub` whose `fetchTopic` fails once per armed topic.
 
-The latch's placement makes this safe on its own: `appSegmentLoaded` is taken only after the whole
-segment is in hand, so a failed pull leaves it `false` and the retry re-pulls from the cursor with
-nothing half-buffered behind it.
+## F5 — the latch. BLOCKED, filed, and the comment corrected.
 
-**Fault injection added:** `FlakyFetchHub` in `packages/rpc/test/peer-app-drain-integrity.test.ts:20`
-— a `DurableFakeHub` whose `fetchTopic` fails once per armed topic.
+Not implemented, per ruling 2. The latch stands.
 
-## F5 — the latch. BLOCKED. Not implemented.
-
-The brief's justification for dropping the latch is:
-
-> *"a re-pull would re-deliver" — the pull is FROM THE CURSOR, so it would not.*
-
-That holds only for frames **the drain itself delivered**. It does not hold for frames the **live
-lane** delivered, and nothing reconciles the two:
-
-- The live app lane is built in `buildEpoch` (`packages/rpc/src/peer.ts:502-527`) out of
-  `mux.bus` → `BroadcastClient` / `createGroupBusServer`. It hands log-retained frames to the host's
-  handlers and **never touches `appCursors`, `appCursorStore`, or any read position** — grep for
-  `appCursors` returns only `loadAppSegment` and `advanceAppCursor`.
-- So for an online peer the cursor stays behind every live delivery, and the *second* pull of a
-  segment re-reads and re-delivers frames the host already has.
-
-The latch is what has been hiding this. Removing it makes the drain re-deliver on every commit.
-Implemented in full and run against the suite:
-
-```
-PASS (217) FAIL (5)
-
-2. the app topic is stable within a roster-change-bounded segment epochs advancing without a roster change leave the app topic put, and delivery continues
-   AssertionError: expected [ { n: 1 }, { n: 1 }, { n: 3 } ] to deeply equal [ { n: 1 }, { n: 3 } ]
-       at packages/rpc/test/peer-app-topic.test.ts:142:20
-3. the app topic is stable within a roster-change-bounded segment a Remove rotates the app topic onto a new ID, and delivery continues across it
-   AssertionError: expected [ { n: 'before' }, …(2) ] to deeply equal [ { n: 'before' }, { n: 'after' } ]
-       at packages/rpc/test/peer-app-topic.test.ts:207:20
-4. the app topic is stable within a roster-change-bounded segment an add-only commit rotates the app topic too, and delivery continues across it
-   AssertionError: expected [ { n: 'before' }, …(2) ] to deeply equal [ { n: 'before' }, { n: 'after' } ]
-       at packages/rpc/test/peer-app-topic.test.ts:262:20
-5. a member removed at the rotation cannot reach the topic the group rotates onto nothing the removed member still holds derives the new topic, and nothing reaches her
-   AssertionError: expected [ …(3) ] to deeply equal [ …(2) ]
-       at packages/rpc/test/peer-removed-blind.test.ts:143:20
-```
-
-Restoring only the latch and changing nothing else makes exactly those four go green again, which
-isolates the cause to the latch and not to the F5 restructure.
-
-These are duplicate deliveries to a **live** peer, not the accepted at-least-once of a returning
-one, and repairing them means giving the live lane a read position it advances — a change to the
-live lane and to what the cursor means, not to the drain. That is a redesign of the approved
-approach, so I stopped.
-
-The F5 implementation I wrote (per-topic `appFetchedTo` in-memory fetch position, distinct from the
-durable cursor, plus a per-segment pruned-window report so the gap is still reported once) was
-reverted by hand. **It worked** — done-when (4) passed under it. It is the live-lane overlap alone
-that blocks it. The regression test is left in place as `test.skip` at
-`packages/rpc/test/peer-app-drain-integrity.test.ts:213` with the blocker written above it.
-
-**How the two positions were kept apart** (for whoever unblocks this): the cursor is read from the
-store exactly once per segment, seeds `appFetchedTo`, and thereafter moves only in
-`advanceAppCursor` over delivered-or-dead frames; `appFetchedTo` moves per fetched message and runs
-ahead of the cursor by every buffered frame still waiting for its epoch. Re-pulling from the cursor
-re-buffers those; writing the cursor from `appFetchedTo` passes frames nobody read. They coincide
-only on the first pull, when nothing is buffered.
+- `packages/rpc/src/peer.ts:449-467` — the false justification is replaced with the true one. Both
+  old clauses were wrong: the log **does** grow, and a re-pull would **not** re-deliver what the
+  drain dispensed (the pull is from the cursor, which is past it). What a re-pull re-delivers is what
+  the **live lane** delivered — the live path hands log-retained frames to the host straight off the
+  bus and advances no read position at all, so an online peer's cursor sits behind every frame it was
+  pushed. One position, two deliverers, only one keeps it. The comment now names that, and names what
+  the latch costs: the frame published mid-walk.
+- `packages/rpc/src/peer.ts:923-925` — `loadAppSegment`'s doc points at the same constraint.
+- **Filed:** `docs/agents/plans/next/2026-07-18-live-lane-read-position.md` — the gap, the four tests
+  that went red, the four things a fix has to change (getting the sequenceID past the bus abstraction;
+  which position advances; ephemeral frames sharing the topic; ordering against the drain's buffer),
+  and three options. Leans toward making the app lane's delivery a wakeup like the commit lane
+  already is, which removes the problem instead of managing it.
+- The regression test stays in the tree as `test.skip` in `peer-app-drain-integrity.test.ts` with the
+  blocker written above it.
 
 ---
 
-## Tests added
+## Ruling 1's second half: the memory double, and what it was hiding
 
-`packages/rpc/test/peer-app-drain-integrity.test.ts` (new, 4 tests).
+`packages/rpc/test/fixtures/memory-group-mls.ts:520` read a commit at any epoch and its comment
+asserted that as the contract — *"Reads the commit's own bytes and nothing else: no epoch secret, no
+blob, no state."* That is the opposite of what the real handle does. It now refuses a non-external
+commit framed above its own epoch, modelling `group-handle.ts:758-767`. External commits stay exempt
+and must: they carry their committer in their own UpdatePath leaf, need no secret, and are framed at
+the group's epoch — ahead of the stranded peer that most needs to read one.
 
-Red against today's code, before any source change:
+**That reddened four tests, and the finding is a serious one: `classifyCommit`'s `ahead` row is
+unreachable against a real MLS port.** `null` is settled as poison before any epoch question, so a
+peer that falls behind reads every later commit as poison, steps over it, drains to the end, and
+reports itself fully reconciled — stuck at a dead epoch with a clean bill of health. That is the exact
+outcome the row exists to prevent, and `peer-cursor-table.test.ts:363-366` says so in its own comment.
+
+```
+1. a peer the group left behind learns it from a later frame, not from the one it could not apply, and heals
+   AssertionError: expected 1 to be 4 // Object.is equality
+       at packages/rpc/test/peer-cursor-table.test.ts:366:29
+2. a heal trigger under a failed heal a frame framed ahead of it: no responder — commit() refuses, and nothing lands
+   Error: promise resolved "{}" instead of rejecting
+       at packages/rpc/test/peer-failed-heal-strand.test.ts:143:79
+3. a heal trigger under a failed heal a frame framed ahead of it: a responder answers — the peer heals, then commits
+   AssertionError: expected 1 to be greater than 1
+       at packages/rpc/test/peer-failed-heal-strand.test.ts:166:31
+4. a heal re-enacts by ledger membership an entry the group already holds is not re-enacted, and a later admin is not reverted
+   AssertionError: expected 2 to be 4 // Object.is equality
+       at packages/rpc/test/peer-recover-lane.test.ts:140:31
+```
+
+All four are the same mechanism. **These tests assert the right behaviour** — they are red because the
+double stopped lying, not because the intent changed, so none of them was touched.
+
+Not fixed here, and deliberately: the repair is not the one-liner it looks like. Classifying from the
+cleartext epoch separates the two facts the classifier reads from a commit, and only one is available
+without a key — the **committer** is what needs the epoch secret, and it is what `own-unmerged` turns
+on, the row whose doc is emphatic that the committer must be MLS-authenticated and never the hub's
+word. Which rows may depend on an unauthenticated field has to be argued per row. Filed with options
+at `docs/agents/plans/next/2026-07-18-ahead-row-unreachable.md`, including the note that the real
+handle refuses commits framed **below** its epoch too, so the `history` row and the fork check rest on
+the same read and should be checked before designing the fix.
+
+## Ruling 3: the conflicting test, rewritten
+
+`packages/rpc/test/peer-app-cursor.test.ts:105` — *"a justified frame ahead of a stranded peer is
+never passed, however often it restarts"*. Green.
+
+The old version staged an ahead frame with an empty commit log — an unjustified claim, which F4
+defines as dead — and asserted the cursor waited behind it. Rewritten on the only shape where waiting
+across restarts is still real: bob meets his **own un-merged commit** at the head of his walk, which
+stops the drain dead; commits framed at 2 and 3 sit further along the log and justify a frame sealed
+at epoch 4; no responder is live, so the heal finds nobody and he stays at epoch 1 across three boots.
+The cursor sits on the frame he delivered and never passes the one he could not.
+
+The comment says why the frame must be justified, and one thing worth flagging: **the delivery half
+is gone, and that is not an omission.** A stranded peer's only exit is a rejoin, a rejoin rotates the
+anchor, and a rotation moves to a new topic and drops the buffer — so "delivered when the walk reaches
+it" belongs to a *lagging* peer, not a stranded one. That half is covered by done-when (2) in
+`peer-app-drain-integrity.test.ts`, which stages it within a single walk.
+
+---
+
+## Tests
+
+`packages/rpc/test/peer-app-drain-integrity.test.ts` (new, 4 tests). Red against today's code, before
+any source change:
 
 ```
 PASS (1) FAIL (3)
@@ -123,18 +153,20 @@ PASS (1) FAIL (3)
        at packages/rpc/test/peer-app-drain-integrity.test.ts:260:18
 ```
 
-Done-when (2) — "a justified claim still waits" — is the one that **cannot** be red before the fix:
-it is a non-regression guard against F4 over-reaching, and today's unbounded code trivially satisfies
-it. It is given teeth by Mutation B below, and it is staged two epochs ahead rather than one so that
-a bound taken from the peer's own handle fails it.
+Two tests here **cannot** be red before the fix, and both are guards against F4 over-reaching rather
+than tests of it: done-when (2), and the rewritten stranded-peer test. Today's unbounded code
+trivially satisfies both. Mutation B is what gives them teeth, and it reddens both.
 
 ## Mutation checks
 
-**A — restore the unbounded ahead-branch** (`peer.ts:1160` → `if (sealedAt != null && sealedAt >
+All re-run against the final cleartext-based ceiling. Inverted by hand. No `git checkout`,
+`git restore`, or `git stash` was run at any point.
+
+**A — restore the unbounded ahead-branch** (`peer.ts:1157` → `if (sealedAt != null && sealedAt >
 crypto.epoch()) continue`). Done-when (1) goes red:
 
 ```
-PASS (2) FAIL (1) skipped (1)
+PASS (5) FAIL (1) skipped (1)
 
 1. ... a frame claiming an epoch the commit log cannot justify is dead, and the cursor passes it
    AssertionError: expected '000000000001' to be '000000000002' // Object.is equality
@@ -142,20 +174,23 @@ PASS (2) FAIL (1) skipped (1)
 ```
 
 **B — take the bound from the peer's own epoch instead of the log** (`justifiedEpochCeiling` →
-`return crypto.epoch() + 1`). Done-when (2) goes red — the honest ahead frame is eaten, which is
-precisely the failure mode (2) exists to catch:
+`return crypto.epoch() + 1`). Both non-regression guards go red — the honest ahead frame is eaten,
+which is precisely what they exist to catch:
 
 ```
-PASS (2) FAIL (1) skipped (1)
+PASS (4) FAIL (2) skipped (1)
 
-1. ... a frame the commit log justifies keeps its place, and the cursor passes it only on delivery
+1. ... a justified frame ahead of a stranded peer is never passed, however often it restarts
+   AssertionError: expected '000000000005' to be '000000000004' // Object.is equality
+       at packages/rpc/test/peer-app-cursor.test.ts:150:50
+2. ... a frame the commit log justifies keeps its place, and the cursor passes it only on delivery
    AssertionError: expected [ { text: 'at epoch one' } ] to deeply equal [ { text: 'at epoch one' }, …(1) ]
        at packages/rpc/test/peer-app-drain-integrity.test.ts:143:18
 ```
 
 **C — restore the swallowed load failure** (`try { await loadAppSegment() } catch { return }`).
-Done-when (3) goes red, and red in the exact shape F3 describes: the walk ratcheted to epoch 2 and
-the epoch-1 frame was destroyed on the way:
+Done-when (3) goes red in the exact shape F3 describes — the walk ratcheted to epoch 2 and destroyed
+the epoch-1 frame on the way:
 
 ```
 PASS (2) FAIL (1) skipped (1)
@@ -168,64 +203,32 @@ PASS (2) FAIL (1) skipped (1)
 **D — restore the latch.** Not a mutation on this diff: the latch is in the tree, because F5 is
 blocked. Its red is the third failure in the pre-change run above, taken against the same code.
 
-All mutations were inverted by hand. No `git checkout`, `git restore`, or `git stash` was run at any
-point.
-
----
-
-## Conflicting existing test — NOT weakened, NOT deleted
-
-`packages/rpc/test/peer-app-cursor.test.ts:84` — *"a frame sealed ahead of the walk survives
-restarts and is delivered when the walk reaches it"* — is red under F4 and I left it red:
-
-```
-1. the app-lane drain reads from a durable position and reports what aged out below it a frame sealed ahead of the walk survives restarts and is delivered when the walk reaches it
-   AssertionError: expected '000000000002' to be '000000000001' // Object.is equality
-       at packages/rpc/test/peer-app-cursor.test.ts:120:48
-```
-
-It stages an ahead frame that F4 defines as dead. Its own comment says so (`:98-99`): *"A frame
-sealed at epoch 4 ... while the group's log has no commit that leaves epoch 1."* An unjustified
-claim, and the test asserts the cursor waits behind it — the exact behaviour F4 removes.
-
-**It cannot be minimally repaired**, and that is the finding worth more than the failure. Its staging
-needs the frame to survive *several restarts* without the walk moving. Under F4, what justifies the
-wait is a commit in the log — and any commit in the log that justifies epoch 4 also carries the
-restarting peer to epoch 4 on its next walk. So "an ahead frame waits across restarts" is, after
-F4, only reachable for a peer that is stranded (own-unmerged commit, or commits it cannot apply).
-The invariant the test exists for is preserved by the new done-when (2) test, which stages it
-two-epochs-ahead within a single walk and asserts the cursor's whole write history.
-
-Deciding what replaces it is a call for the branch owner, not for this probe.
-
 ## Suite
 
-- `pnpm run build` — 8/8 tasks successful.
-- `rtk proxy pnpm run lint` — `Checked 224 files in 218ms. No fixes applied.`
-- `pnpm test` — 29/30 turbo tasks. mls **307/307 green**. rpc **220 passed, 1 skipped, 1 failed** —
-  the failure is the conflicting test above and nothing else; the skip is the blocked F5 regression.
+- `pnpm run build` — `Tasks: 8 successful, 8 total`.
+- `rtk proxy pnpm run lint` — `Checked 224 files in 219ms. Fixed 1 file.` (formatting on the rewritten
+  test; clean on re-run).
+- `pnpm test` — `Tasks: 29 successful, 30 total`. mls **307/307**. rpc **217 passed, 1 skipped, 4
+  failed** — the four are the `ahead`-row finding above and nothing else; the skip is the blocked F5
+  regression. The test that conflicted with F4 in the first pass is now green.
 
 ## Concerns
 
-1. **`readCommitHeader` may return `null` for a future-epoch commit against a real handle.**
-   `packages/mls/src/group-handle.ts:758-767` resolves a member commit's committer by decrypting
-   sender-data with *this* handle's epoch secret, so a commit framed above the handle's epoch
-   returns `null` even though its epoch is public cleartext (`readMessageEpoch`, read at `:740`,
-   succeeds). The memory double (`packages/rpc/test/fixtures/memory-group-mls.ts:520`) has no such
-   restriction, so the suite cannot see it. If that is the real behaviour, `justifiedEpochCeiling`
-   degrades to `crypto.epoch() + 1` against a real port, and a peer more than one epoch behind would
-   have honest ahead frames declared dead. **This is not introduced by F4** — the commit lane's
-   `ahead` row (`packages/rpc/src/classify.ts`, disposition `'ahead'`) depends on the same read and
-   would be misfiled as poison today — but F4 gives it a second way to lose data. The port contract
-   in `packages/rpc/src/crypto.ts:172` promises `null` only for "bytes that are not a Commit", so
-   the mls implementation is the side that deviates. Worth its own probe.
-
-2. **The ceiling costs a full commit-log read** when a frame claims to be ahead. Lazy and rare, but
-   an attacker who can publish to the app topic can force one commit-log page walk per drain by
-   including one ahead-claiming frame. Bounded work per drain, not per frame, and far cheaper than
-   the unbounded buffer growth F4 removes — but it is not free.
-
-3. **F5's blocker is the more interesting finding of the three.** The drain and the live lane both
-   deliver from the same topic and only one of them keeps a position. That is what makes the latch
-   load-bearing, and the latch is what makes mid-walk publishes invisible. Whichever way the branch
-   goes, those two facts are the same fact.
+1. **The `ahead` row is the biggest thing found on this probe, and it is not an app-lane bug.** A peer
+   that falls behind never heals against a real MLS port. Filed at
+   `docs/agents/plans/next/2026-07-18-ahead-row-unreachable.md`. It wants its own probe before the
+   branch merges, because four green-looking tests were covering it.
+2. **Doubles that are more capable than the port they stand for hide exactly this class of defect.**
+   Both problems on this probe trace to one: `memory-group-mls`'s `readCommitHeader` answered at any
+   epoch and stated that as the contract. Worth a sweep of the other doubles for the same shape — the
+   fake crypto's deliberate *strictness* (`unwrap` refusing any epoch but the live one, documented as
+   "stricter than real MLS, deliberately") is the pattern that works, and it works because it errs
+   toward refusing.
+3. **The ceiling costs a commit-log read** when a frame claims to be ahead. Lazy and rare, but an
+   attacker who can publish to the app topic can force one log walk per drain by including a single
+   ahead-claiming frame. Bounded per drain, not per frame, and far cheaper than the unbounded buffer
+   growth it removes — but not free.
+4. **`crypto.frameEpoch` now answers for two message shapes in the fake** (`fake-crypto.ts`), because
+   the real `readMessageEpoch` answers for one format that covers both a commit and an app frame. The
+   doubles encode them differently, so the fake decodes both. Documented there; worth a glance from
+   whoever owns the fixture layering.

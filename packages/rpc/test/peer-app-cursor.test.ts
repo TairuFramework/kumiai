@@ -3,11 +3,12 @@ import { describe, expect, test } from 'vitest'
 
 import type { AppWindowPruned } from '../src/app-cursor.js'
 import { commitTopic, protocolTopic } from '../src/topic.js'
+import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
-import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
+import { makeMLSPeer } from './fixtures/peer.js'
 
-const flush = () => new Promise((r) => setTimeout(r, 50))
+const flush = (ms = 50) => new Promise((r) => setTimeout(r, ms))
 
 /**
  * Where a returning peer starts reading its app history from, and what it is told about the part
@@ -72,82 +73,104 @@ describe('the app-lane drain reads from a durable position and reports what aged
 
   /**
    * THE ADVANCE RULE, and the test that holds it: a frame sealed AHEAD of the walk is not done, and
-   * a cursor may not pass it.
+   * a cursor may not pass it — across restart after restart, for as long as the peer stays behind.
    *
-   * The frame here is sealed at epoch 4 and reaches a peer sitting at epoch 1 — a publisher the
-   * group has carried further than this reader. `unwrap` refuses it exactly as it refuses a frame
-   * from an epoch already spent, and that is the whole difficulty: one of those will open later and
-   * the other never will, and only the frame's own cleartext epoch tells them apart. A drain that
+   * The frame is sealed at epoch 4 and reaches a peer sitting at epoch 1 — a publisher the group
+   * has carried further than this reader. `unwrap` refuses it exactly as it refuses a frame from an
+   * epoch already spent, and that is the whole difficulty: one of those will open later and the
+   * other never will, and only the frame's own cleartext epoch tells them apart. A drain that
    * treated "will not open" as done would write a position past this frame, and the next restart
    * would fetch after it and never see it again. Nothing would report that.
+   *
+   * THE FRAME MUST BE JUSTIFIED, and that is what shapes the staging below. A claim to be ahead is
+   * only honoured as far as the group's own commit log can vouch for it — a member seals at epoch 4
+   * only after applying the commit that produced 4, so that commit is in the log — and a claim the
+   * log cannot justify is dead, not waiting. So the log here really does carry the group to epoch
+   * 4, and the reader really is a member that cannot get there.
+   *
+   * WHICH MAKES THE READER A STRANDED ONE, necessarily. A peer that merely lags reads the log,
+   * applies what is in it, and arrives — the very commits that justify the frame are the ones that
+   * carry it to the frame's epoch, so the wait lasts one walk and no longer (that is the case
+   * `peer-app-drain-integrity` covers). For the wait to survive a restart the peer has to be unable
+   * to apply what it can see, which is a strand: here, bob meets his OWN un-merged commit at the
+   * head of his walk, the drain stops dead on it, and no restart gets him past it while no
+   * responder exists to heal him.
+   *
+   * The frame is never delivered in this test, and that is not an omission. A stranded peer's only
+   * exit is a rejoin, a rejoin rotates the anchor, and a rotation moves the group to a new topic and
+   * drops this buffer — so "delivered when the walk reaches it" belongs to the lagging peer, not to
+   * this one. What this holds is the half that is real for a strand: it is not his to skip, it is
+   * his to wait for, and the cursor never passes it.
    */
-  test('a frame sealed ahead of the walk survives restarts and is delivered when the walk reaches it', async () => {
+  test('a justified frame ahead of a stranded peer is never passed, however often it restarts', async () => {
     const hub = new DurableFakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x82)
     const seen: Array<unknown> = []
     const handlers = { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) }
     const topicID = protocolTopic(fakeEpochSecret(1), 1, 'chat')
+    // Fast enough that a heal which will find nobody gives up inside the test.
+    const recovery = { timeoutMs: 60, getDelayMs: () => 5, deadlineMs: 250 }
 
-    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
-    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
-    await flush()
-    await bob.peer.dispose()
-    hub.detach('bob')
+    // Bob's own commit, accepted by the hub at epoch 1, with his process dead before he adopted it
+    // and no journal to repair him. He can never apply the frame that is his own commit.
+    await publishCommit({ hub, senderDID: 'bob', recoverySecret, epoch: 1 })
+    // The group applied it and carried on without him: commits framed at 2 and 3 leave it at epoch
+    // 4. This is what makes the frame below justified — and none of it is reachable by bob, whose
+    // walk stops at his own commit before it ever reads these.
+    await publishCommit({ hub, senderDID: 'zoe', recoverySecret, epoch: 2 })
+    await publishCommit({ hub, senderDID: 'zoe', recoverySecret, epoch: 3 })
 
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'at epoch one' })
-    // A frame sealed at epoch 4, onto the segment's topic, while the group's log has no commit
-    // that leaves epoch 1. Its publisher is a member the group carried on without this reader.
-    const future = createFakeCrypto({ epoch: 4, localDID: 'alice' })
-    await hub.publish({
-      senderDID: 'alice',
-      topicID,
-      retain: 'log',
-      payload: await future.wrap(encodeEventFrame('chat/posted', { text: 'from epoch four' })),
-    })
-    await flush()
-
-    // Bob comes back at epoch 1 and walks nowhere: there is nothing in the commit log to apply.
-    const first = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob, handlers })
-    hub.reattach('bob')
-    await flush()
-    expect(first.mls.epoch()).toBe(1)
-    expect(seen).toEqual([{ text: 'at epoch one' }])
-
-    // The position stopped at the frame he read and did NOT pass the one he could not: it is not
-    // his to skip, it is his to wait for.
+    // Two app frames on the segment's topic — the anchor never moves, since no commit here touches
+    // a leaf. One at bob's own epoch, one at the epoch the group reached.
+    const atOne = createFakeCrypto({ epoch: 1, localDID: 'alice' })
+    const atFour = createFakeCrypto({ epoch: 4, localDID: 'alice' })
+    for (const [crypto, text] of [
+      [atOne, 'at epoch one'],
+      [atFour, 'from epoch four'],
+    ] as const) {
+      await hub.publish({
+        senderDID: 'alice',
+        topicID,
+        retain: 'log',
+        payload: await crypto.wrap(encodeEventFrame('chat/posted', { text })),
+      })
+    }
     const posted = hub.published.filter((m) => m.topicID === topicID)
     expect(posted).toHaveLength(2)
-    expect(bob.appCursorStore.stored(topicID)).toBe(posted[0]?.sequenceID)
 
-    // A restart that reaches no further epoch than the last one changes nothing, and loses
-    // nothing: the frame is neither delivered nor gone.
-    await first.peer.dispose()
-    const second = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: first, handlers })
-    hub.reattach('bob')
-    await flush()
-    expect(second.mls.epoch()).toBe(1)
+    // Bob comes up at epoch 1 and strands: nobody is live to answer his rendezvous, so the heal
+    // finds no responder and he stays exactly where he is.
+    const first = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers, recovery })
+    await flush(300)
+    expect(first.mls.epoch()).toBe(1)
+
+    // He read what his epoch opens, and stopped: the position sits on the frame he delivered and
+    // NOT on the one he could not.
     expect(seen).toEqual([{ text: 'at epoch one' }])
-    await second.peer.dispose()
+    expect(first.appCursorStore.stored(topicID)).toBe(posted[0]?.sequenceID)
 
-    // Now the group's log carries him to the epoch the frame was sealed at, across yet another
-    // restart. The frame's key is finally his, and the frame is still there for it.
-    for (let i = 0; i < 3; i++) {
-      await alice.peer.commit(buildLedgerCommit(alice, []))
+    // Restart after restart over the same durable state changes nothing and loses nothing. The
+    // frame is neither delivered nor gone, and the position never moves past it — which is the only
+    // reason a later epoch could still open it.
+    let previous = first
+    for (let restart = 0; restart < 2; restart++) {
+      await previous.peer.dispose()
+      const next = makeMLSPeer(hub, 'bob', recoverySecret, {
+        restartOf: previous,
+        handlers,
+        recovery,
+      })
+      await flush(300)
+      expect(next.mls.epoch()).toBe(1)
+      expect(seen).toEqual([{ text: 'at epoch one' }])
+      expect(next.appCursorStore.stored(topicID)).toBe(posted[0]?.sequenceID)
+      previous = next
     }
-    await flush()
-    expect(alice.mls.epoch()).toBe(4)
-    expect(alice.peer.anchorEpoch()).toBe(1) // no roster change: one segment, one topic
 
-    const third = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: second, handlers })
-    hub.reattach('bob')
-    await flush()
+    // And the frame is still on the hub, still sealed, still waiting: nothing consumed it.
+    expect(hub.published.filter((m) => m.topicID === topicID)).toHaveLength(2)
 
-    expect(third.mls.epoch()).toBe(4)
-    expect(seen).toEqual([{ text: 'at epoch one' }, { text: 'from epoch four' }])
-    expect(bob.appCursorStore.stored(topicID)).toBe(posted[1]?.sequenceID)
-
-    await alice.peer.dispose()
-    await third.peer.dispose()
+    await previous.peer.dispose()
   })
 
   /**

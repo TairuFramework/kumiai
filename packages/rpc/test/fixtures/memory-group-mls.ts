@@ -518,17 +518,23 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       }
     },
     async readCommitHeader(commit: Uint8Array): Promise<CommitHeader | null> {
-      // Reads the commit's own bytes and nothing else: no epoch secret, no blob, no state.
-      // `external` included: a real one is structural too — a public message from a non-member
-      // carrying a commit — and it is the ONLY thing a rejoin changes that a reader can see.
+      // The COMMITTER is what needs a key, and that is what bounds this. A real handle recovers a
+      // member commit's committer by decrypting the commit's sender-data with the epoch secret it
+      // holds RIGHT NOW and mapping the sender leaf against its own tree, so a commit framed at an
+      // epoch it is not at authenticates to nobody and comes back `null`. Modelled here, because a
+      // double that answered for every epoch would let the lane lean on an answer the real port
+      // cannot give — and did: it is what let a ceiling built on this look sound.
+      //
+      // `external` is exempt and must stay so: an external commit is a public message carrying its
+      // committer in its own UpdatePath leaf, so it needs no secret and no tree, and a rejoin is
+      // framed at the group's epoch — ahead of the stranded peer that most needs to read it.
       const parsed = decodeMemoryCommit(commit)
-      return parsed == null
-        ? null
-        : {
-            epoch: parsed.epoch,
-            committerDID: parsed.committerDID,
-            ...(parsed.external === true ? { external: true } : {}),
-          }
+      if (parsed == null) return null
+      if (parsed.external === true) {
+        return { epoch: parsed.epoch, committerDID: parsed.committerDID, external: true }
+      }
+      if (parsed.epoch > epoch) return null
+      return { epoch: parsed.epoch, committerDID: parsed.committerDID }
     },
     async processCommit(commit: Uint8Array, context: CommitContext) {
       lastSender = context.senderDID

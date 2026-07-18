@@ -428,8 +428,23 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
 
   /**
    * Whether {@link appSegment} holds this segment's pull. Pulled ONCE per segment and not per
-   * commit: a re-pull would re-deliver every frame the buffer had already dispensed, and the log
-   * is the same log at every epoch inside the segment.
+   * commit.
+   *
+   * THE REASON IS THE LIVE LANE, and it is worth stating exactly, because the obvious reasons are
+   * both false. The log is NOT the same log at every epoch inside the segment — it grows, and a
+   * frame published while this peer walks is one this latch makes invisible to it. And a re-pull
+   * would NOT re-deliver what the drain already dispensed — the pull is from the cursor, which is
+   * past it.
+   *
+   * What a re-pull would re-deliver is what the LIVE LANE delivered. The live path (see
+   * {@link buildEpoch}) hands a log-retained frame to the host straight off the bus and advances no
+   * read position at all, so for an online peer the cursor sits behind every frame it was pushed,
+   * and a second pull of the same segment reads them all back. One position, two deliverers, and
+   * only one of them keeps it.
+   *
+   * So this latch is load-bearing for the wrong reason, and it costs a real frame: the one
+   * published mid-walk. Both halves are the same missing thing — a read position the live lane also
+   * advances — and neither can be fixed without it.
    */
   let appSegmentLoaded = false
 
@@ -914,6 +929,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * five epochs inside a segment reads one log, not five. The frames come back sealed and stay
    * that way — {@link deliverAppFrames} opens them one epoch at a time.
    *
+   * Once and not per drain because the live lane keeps no read position, so a re-pull would hand
+   * the host a second copy of everything it was pushed — see {@link appSegmentLoaded}, which is
+   * where that constraint is written down. It costs this drain the frames published mid-walk.
+   *
    * From the CURSOR and not from the topic's oldest retained frame: the position is what this peer
    * is done with, so everything before it is either delivered or unopenable forever, and re-reading
    * it re-delivers the first kind and re-buffers the second. Without the position the two places a
@@ -975,24 +994,33 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    *
    * A member seals at epoch E only after applying the commit that produced E, so a legitimate
    * frame at E always has that commit already published: a log whose furthest commit is framed at
-   * H bounds every member at H + 1, and a claim above that is one no member could have made. The
-   * bound the drain needs, and the only one available that does not take an untrusted party's word
-   * for it.
+   * H bounds every member at H + 1, and a claim above that is one no member could have made.
    *
    * READ FRESH, at the moment a claim is judged, and never from this peer's own view of the log: a
    * returning member is behind by however long it was away, so its view bounds the group at the
    * epoch IT reached — which would kill exactly the frames it came back for. Reading the live log
    * closes the honest race instead of trading one loss for another.
    *
-   * Epochs are read pre-apply from the commit's own bytes, as the walk reads them, and every frame
-   * is asked rather than only the last: the log's furthest frame may be poison or a fork loser, and
-   * neither justifies anything. Nothing readable in the log means nothing says the group ever left
-   * this handle's epoch, and the bound is that epoch.
+   * THIS IS THE HUB'S WORD, and it is load-bearing that it can only ever be wrong in ONE direction.
+   * A commit's framed epoch is cleartext — unauthenticated until the commit is applied — so a hub
+   * free to inject frames onto the commit topic can RAISE this ceiling at will. It can never LOWER
+   * it: the honest commits are in the log too, and the ceiling is the maximum over all of them, so
+   * no injected frame can hide one. Raising it costs the attacker nothing and buys nothing — the
+   * worst it reaches is the unbounded wait that exists today, which is the defect this bounds.
+   * Lowering it is what would destroy an honest member's frames, and that is unreachable.
+   *
+   * That asymmetry is the whole argument, and it is why an untrusted field is acceptable HERE and
+   * would not be for opening a frame: this decides how long to WAIT, never what to believe. What
+   * is finally read out of a frame is still `unwrap`'s answer alone.
+   *
+   * Epochs are read pre-apply from the commit's own cleartext, and every frame is asked rather than
+   * only the last: the log's furthest frame may be poison or a fork loser, and neither justifies
+   * anything. Nothing readable in the log means nothing says the group ever left this handle's
+   * epoch, and the bound is that epoch.
    */
   const justifiedEpochCeiling = async (): Promise<number> => {
     let ceiling = crypto.epoch()
-    const port = mls
-    if (port == null || commitTopicID == null) return ceiling
+    if (commitTopicID == null) return ceiling
     let after: LogPosition | null = null
     while (true) {
       const result = await mux.fetchTopic({
@@ -1010,8 +1038,13 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         } catch {
           continue // not a commit frame: it says nothing about where the group got to
         }
-        const header = await port.readCommitHeader(commit)
-        if (header != null && header.epoch + 1 > ceiling) ceiling = header.epoch + 1
+        // The commit's CLEARTEXT epoch, and deliberately not `readCommitHeader`: that resolves the
+        // committer against this handle's own epoch secret, so it answers `null` for every commit
+        // framed ahead of this peer — which is every commit a returning member has yet to walk. A
+        // ceiling built on it would collapse to this peer's own epoch for exactly the member the
+        // lane exists for, and kill the frames it came back to read.
+        const framedAt = crypto.frameEpoch(commit)
+        if (framedAt != null && framedAt + 1 > ceiling) ceiling = framedAt + 1
       }
       if (result.messages.length < COMMIT_FETCH_LIMIT) return ceiling
     }
