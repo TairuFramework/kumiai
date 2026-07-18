@@ -518,12 +518,18 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       }
     },
     async readCommitHeader(commit: Uint8Array): Promise<CommitHeader | null> {
-      // The COMMITTER is what needs a key, and that is what bounds this. A real handle recovers a
-      // member commit's committer by decrypting the commit's sender-data with the epoch secret it
-      // holds RIGHT NOW and mapping the sender leaf against its own tree, so a commit framed at an
-      // epoch it is not at authenticates to nobody and comes back `null`. Modelled here, because a
-      // double that answered for every epoch would let the lane lean on an answer the real port
-      // cannot give — and did: it is what let a ceiling built on this look sound.
+      // Two facts, two availabilities — the whole point of the port's contract, modelled exactly.
+      //
+      // The EPOCH is cleartext in a real frame, so it is readable for a commit framed at ANY
+      // epoch and is always returned. `null` is reserved for bytes that are not a commit, which
+      // here is bytes that will not decode.
+      //
+      // The COMMITTER is what needs a key. A real handle recovers a member commit's committer by
+      // decrypting the commit's sender-data with the epoch secret it holds RIGHT NOW and mapping
+      // the sender leaf against its own tree, so a commit framed at an epoch it is not at
+      // authenticates to nobody — in BOTH directions, since the secret for a ratcheted-past epoch
+      // is as gone as one never reached. It comes back absent, and a double that answered anyway
+      // would let the lane lean on an answer the real port cannot give — and did.
       //
       // `external` is exempt and must stay so: an external commit is a public message carrying its
       // committer in its own UpdatePath leaf, so it needs no secret and no tree, and a rejoin is
@@ -533,7 +539,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       if (parsed.external === true) {
         return { epoch: parsed.epoch, committerDID: parsed.committerDID, external: true }
       }
-      if (parsed.epoch > epoch) return null
+      if (parsed.epoch !== epoch) return { epoch: parsed.epoch }
       return { epoch: parsed.epoch, committerDID: parsed.committerDID }
     },
     async processCommit(commit: Uint8Array, context: CommitContext) {

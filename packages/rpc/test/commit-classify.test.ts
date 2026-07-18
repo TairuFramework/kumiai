@@ -78,6 +78,59 @@ describe('the cursor table', () => {
     expect(classifyCommit(null, 's9', bob())).toEqual({ row: 'poison' })
   })
 
+  describe('the epoch is cleartext and the committer needs a key, so the rows split on which they use', () => {
+    // A port can only MLS-authenticate a committer for a commit framed at the epoch whose
+    // sender-data secret it holds — its own. Every other frame arrives with an epoch and no
+    // committer, and that is the NORMAL shape of the frames these three rows exist for: a peer
+    // that fell behind, a joiner reading history, a peer shown the branch it lost. A classifier
+    // that needed a committer first would be unable to read any of them.
+
+    test('a frame AHEAD is ahead on its epoch alone', () => {
+      expect(classifyCommit({ epoch: 6 }, 's9', bob())).toEqual({ row: 'ahead' })
+    })
+
+    test('a frame BELOW is history on its epoch alone', () => {
+      expect(classifyCommit({ epoch: 1 }, 's1', bob())).toEqual({ row: 'history' })
+    })
+
+    test('the fork check runs on the epoch and the sequenceID, and never on the committer', () => {
+      // The fork detector is reached through the below-epoch branch, so it only ever sees frames
+      // whose committer is unavailable — it MUST NOT need one. It settles on this peer's own
+      // applied-commit record and the hub's chaining, and a fork that required an authenticated
+      // author would be a fork detector that never fires against a real port.
+      expect(classifyCommit({ epoch: 3 }, 's7', bob())).toEqual({
+        row: 'fork',
+        appliedSequenceID: 's3',
+        branch: 'winning',
+      })
+      expect(classifyCommit({ epoch: 3 }, 's1', bob())).toEqual({
+        row: 'fork',
+        appliedSequenceID: 's3',
+        branch: 'losing',
+      })
+    })
+
+    test('at this peer’s OWN epoch a missing committer is poison — never own-unmerged, never apply', () => {
+      // This is the one epoch where the committer IS available, so a commit here without one is
+      // nothing honest. It must not soften into `own-unmerged`: that row heals, and a frame that
+      // could talk its way into it would let anything that can publish heal a peer on demand —
+      // or, published once, storm the whole group. Nor may it fall through to `apply`: the port
+      // would be handed a frame it cannot process, and a port that throws on it leaves the
+      // cursor where it is and wedges the lane on that frame forever.
+      expect(classifyCommit({ epoch: 5 }, 's9', bob())).toEqual({ row: 'poison' })
+    })
+
+    test('own-unmerged still requires the committer, and still only its own', () => {
+      // The authenticated read, unchanged: present and equal heals, present and foreign applies.
+      expect(classifyCommit({ epoch: 5, committerDID: 'bob' }, 's9', bob())).toEqual({
+        row: 'own-unmerged',
+      })
+      expect(classifyCommit({ epoch: 5, committerDID: 'mallory' }, 's9', bob())).toEqual({
+        row: 'apply',
+      })
+    })
+  })
+
   describe('the rows are evaluated in the order written', () => {
     test('epoch is settled before authorship: this peer’s own commit at an epoch it has PASSED is history', () => {
       // A peer that healed and rejoined meets its own orphaned commit again, now framed at

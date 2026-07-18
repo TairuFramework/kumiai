@@ -58,16 +58,36 @@ export type GroupCrypto = {
 
 /**
  * What a Commit says about itself, readable WITHOUT applying it and without decrypting: the
- * epoch it is framed at, its author, and whether it is an external commit. All three classify a
- * frame before the peer touches it, and all three come from the commit's own bytes
- * (authenticated by its signature), never from the frame's transport sender — that is the hub's
- * word, and the hub is not trusted.
+ * epoch it is framed at, its author, and whether it is an external commit. All classify a frame
+ * before the peer touches it, and all come from the commit's own bytes, never from the frame's
+ * transport sender — that is the hub's word, and the hub is not trusted.
+ *
+ * **The two facts have different trust and different availability, and conflating them is a
+ * defect.** The epoch is CLEARTEXT: keyless, readable at any epoch, and only the publisher's
+ * word. The committer is AUTHENTICATED: recovering it needs the epoch's sender-data secret, so
+ * it is available only for a commit framed at the reader's own current epoch. A header that
+ * demanded both would be unreadable for every commit framed anywhere but here — which is
+ * precisely the frame a peer that fell behind must be able to read.
  */
 export type CommitHeader = {
-  /** The epoch the Commit is framed at — the epoch every member that can apply it is at. */
+  /**
+   * The epoch the Commit is framed at — the epoch every member that can apply it is at. Always
+   * present: it rides the message's cleartext and needs no key.
+   *
+   * UNAUTHENTICATED, and it must only be used to decide what to TRY, never to decide that bytes
+   * are authentic. Anything that can put a frame on the commit topic can claim any epoch here.
+   */
   epoch: number
-  /** The MLS-authenticated author of the Commit. Not the publisher of the frame. */
-  committerDID: string
+  /**
+   * The MLS-authenticated author of the Commit. Not the publisher of the frame.
+   *
+   * ABSENT when it cannot be authenticated — for a member commit, that is every epoch but the
+   * reader's own, since resolving it means decrypting the commit's sender-data with the epoch
+   * secret the reader holds right now. Absent is "I cannot vouch for who wrote this", NEVER "no
+   * one wrote it": a reader must not substitute an unauthenticated committer for a missing one,
+   * and no row that turns on authorship may fire without it.
+   */
+  committerDID?: string
   /**
    * Whether this Commit is an EXTERNAL commit: its committer joined the group with the commit
    * itself rather than from a leaf it already held — a rejoin.
@@ -158,16 +178,29 @@ export type GroupMLS = {
   rosterDIDs(): Promise<Array<string>>
   /**
    * Read what a Commit says about itself — epoch, committer, and whether it is external —
-   * WITHOUT advancing state. `null` for bytes that are not a Commit. Lets the lane classify a
-   * frame (epoch = this peer's to apply? committer = this peer's own? a rejoin?) before touching
-   * it; none of those may be answered by trying and failing.
+   * WITHOUT advancing state. Lets the lane classify a frame (epoch = this peer's to apply?
+   * committer = this peer's own? a rejoin?) before touching it; none of those may be answered by
+   * trying and failing.
+   *
+   * `null` means ONE thing: **these bytes are not a Commit at all** — undecodable, truncated, or
+   * a message of some other kind. It does NOT mean "a Commit I could not read", and returning it
+   * for one is the bug this contract exists to forbid: the lane files `null` as poison and steps
+   * over it, so a port that answered `null` for every commit framed away from its own epoch
+   * would make a peer that fell behind read the group's entire future as garbage, walk to the end
+   * of the log, and report itself fully reconciled at a dead epoch.
+   *
+   * So: if the bytes are a Commit, return its `epoch`. Return `committerDID` only when the Commit
+   * itself authenticates one — leave it ABSENT rather than guessing, and never fill it from the
+   * frame's transport sender.
    *
    * Async and handle-bound: a real host recovers a member commit's committer by decrypting
    * its sender-data with the epoch secret (an open, not an apply) and mapping the sender leaf
    * to a DID against the ratchet tree — both reachable only on the handle the host already
-   * holds. An external commit needs neither: it is a public message, and its committer's DID
-   * rides its own UpdatePath leaf, which is also what makes it recognizable as external. The
-   * port reaches its own handle internally; the lane awaits.
+   * holds, and both only for a Commit framed at the epoch that handle is at. That is exactly why
+   * the committer is optional and the epoch is not. An external commit needs neither: it is a
+   * public message, and its committer's DID rides its own UpdatePath leaf, which is also what
+   * makes it recognizable as external. The port reaches its own handle internally; the lane
+   * awaits.
    */
   readCommitHeader(commit: Uint8Array): Promise<CommitHeader | null>
   /**

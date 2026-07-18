@@ -710,15 +710,29 @@ export class GroupHandle {
   }
 
   /**
-   * Read a Commit's MLS-authenticated committer against this handle, WITHOUT advancing
-   * state. `null` for bytes that are not a Commit.
+   * Read what a Commit says about itself against this handle, WITHOUT advancing state.
    *
-   * A member commit (PrivateMessage) has its committer encrypted under the epoch's
-   * sender-data secret: decrypt it to the sender leaf index and resolve that against this
-   * handle's ratchet tree — the same leaf->DID the commit policy sees as
-   * `didOfLeaf(senderLeafIndex)`. An external commit's committer rides its UpdatePath leaf
-   * instead (see {@link readExternalCommit}) — no tree lookup, no sender-data decrypt.
-   * `null` for anything that is neither.
+   * **`null` means "these bytes are not a Commit" and nothing else.** It does not mean "a
+   * Commit I could not read": callers file `null` as poison and step over it, so answering it
+   * for a Commit this handle merely cannot authenticate would make a reader treat every commit
+   * framed away from its own epoch as garbage — including the ones that say it fell behind.
+   *
+   * The two facts the header carries are NOT equally available, and the return type says so:
+   * - `epoch` is in the message's CLEARTEXT ({@link readMessageEpoch}). Keyless, so it is
+   *   readable for a Commit framed at any epoch — and unauthenticated, so it is the
+   *   publisher's word and may only be used to decide what to try.
+   * - `committerDID` needs the epoch's sender-data secret. A member commit (PrivateMessage)
+   *   has its committer encrypted under it: decrypt to the sender leaf index and resolve that
+   *   against this handle's ratchet tree — the same leaf->DID the commit policy sees as
+   *   `didOfLeaf(senderLeafIndex)`. Both the secret and the tree are THIS epoch's, so the
+   *   committer resolves only for a Commit framed where this handle stands, and is ABSENT
+   *   otherwise. Absent is "I cannot vouch for the author", never "there is no author": a
+   *   caller must not substitute an unauthenticated one.
+   *
+   * An external commit is exempt and needs neither secret nor tree: it is a public message and
+   * its committer's DID rides its own UpdatePath leaf (see {@link readExternalCommit}), which
+   * is also what makes it recognizable as external. That read is structural and verifies no
+   * signature, so its committer is authenticated no further than the bytes claim.
    *
    * Runs on the handle mutex so the epoch secret, tree, and epoch are one snapshot against a
    * concurrent processMessage. Non-mutating: sender-data decrypt is epoch-level and consumes
@@ -726,7 +740,7 @@ export class GroupHandle {
    */
   async readCommitHeader(
     commit: Uint8Array,
-  ): Promise<{ epoch: bigint; committerDID: string; external?: boolean } | null> {
+  ): Promise<{ epoch: bigint; committerDID?: string; external?: boolean } | null> {
     return mutexFor(this).run(async () => {
       let decoded: unknown
       try {
@@ -753,19 +767,33 @@ export class GroupHandle {
       // rather than discarded. Absent means a member commit.
       const external = readExternalCommit(decoded)
       if (external != null) {
-        return external.did == null ? null : { epoch, committerDID: external.did, external: true }
+        // It IS a commit, so it gets a header even when the leaf credential will not parse to a
+        // DID — the epoch is readable and the caller's epoch rows are entitled to it. Only the
+        // committer goes missing.
+        return {
+          epoch,
+          external: true,
+          ...(external.did != null && { committerDID: external.did }),
+        }
       }
 
       const pm = readPrivateCommitFrame(decoded)
-      if (pm == null) return null // non-commit frame
+      // The ONLY "not a Commit" verdict on this path, and the only thing `null` is for: the
+      // frame is not a PrivateMessage of contentType commit. Both of those fields are cleartext,
+      // so this verdict needs no key and is the same at every epoch.
+      if (pm == null) return null
+      // From here the bytes ARE a commit, and every exit carries its epoch. The committer is
+      // what may be missing: sender-data is sealed under the epoch secret this handle holds
+      // right now, so a commit framed at any other epoch decrypts to nothing, and a leaf this
+      // tree does not hold resolves to nobody. Neither is a reason to call the frame garbage.
       const leafIndex = await readSenderLeafIndex(
         this.#context,
         this.#state.keySchedule.senderDataSecret,
         pm,
       )
-      if (leafIndex == null) return null
+      if (leafIndex == null) return { epoch }
       const committerDID = this.#didOfLeaf(leafIndex)
-      return committerDID == null ? null : { epoch, committerDID }
+      return committerDID == null ? { epoch } : { epoch, committerDID }
     })
   }
 

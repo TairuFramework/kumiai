@@ -37,9 +37,25 @@ async function twoMemberGroup() {
     keyPackageBundle: bobBundle,
   })
   // Bob applies Alice's add-commit is unnecessary — the Welcome lands him at the post-invite
-  // epoch. Return the handles at that shared epoch.
-  void commitMessage
-  return { alice, bob, aliceAfterBob, bobGroup, bobCred }
+  // epoch. Return the handles at that shared epoch, and the add-commit itself: it is framed at
+  // epoch 0, BELOW both of them, which is the shape a peer walking history reads.
+  return { alice, bob, aliceAfterBob, bobGroup, bobCred, addBobCommit: commitMessage }
+}
+
+/** A commit by alice adding a fresh member, framed at `group`'s current epoch. */
+async function addSomeone(
+  group: Awaited<ReturnType<typeof createGroup>>['group'],
+  alice: ReturnType<typeof randomIdentity>,
+) {
+  const newcomer = randomIdentity()
+  const bundle = await createKeyPackageBundle(newcomer, { capabilities: controlCapabilities() })
+  const { invite } = await createInvite({
+    group,
+    identity: alice,
+    recipientDID: newcomer.id,
+    permission: 'member',
+  })
+  return await commitInvite(group, bundle.publicPackage, invite)
 }
 
 describe('GroupHandle.readCommitHeader — member commit', () => {
@@ -92,6 +108,44 @@ describe('GroupHandle.readCommitHeader — member commit', () => {
     const before = bobGroup.epoch
     await bobGroup.readCommitHeader(commitMessage)
     expect(bobGroup.epoch).toBe(before)
+  })
+})
+
+describe('GroupHandle.readCommitHeader — a commit framed at another epoch', () => {
+  // The committer needs this epoch's sender-data secret and the epoch does not, so a commit
+  // framed anywhere but here yields the epoch and no committer. Answering `null` instead is
+  // what makes a peer read the group's future as garbage: `null` is filed as poison and stepped
+  // over, so a peer that fell behind would walk the whole log, heal off nothing, and report
+  // itself fully reconciled at a dead epoch.
+
+  test('a commit framed AHEAD reports its epoch, and no committer', async () => {
+    const { alice, aliceAfterBob, bobGroup } = await twoMemberGroup()
+    // Alice commits once (Bob does not apply it, so he stays put) and then again. The second
+    // commit is framed one epoch ABOVE Bob — the frame that tells a fallen-behind peer so.
+    const first = await addSomeone(aliceAfterBob, alice)
+    const second = await addSomeone(first.newGroup, alice)
+    expect(second.newGroup.epoch).toBeGreaterThan(bobGroup.epoch + 1n)
+
+    const header = await bobGroup.readCommitHeader(second.commitMessage)
+    // It IS a commit, and it says so — that is the whole point.
+    expect(header).not.toBeNull()
+    expect(header?.epoch).toBe(bobGroup.epoch + 1n)
+    // And Bob cannot vouch for who wrote it: the sender-data is sealed under an epoch secret he
+    // does not hold. Absent, never guessed — not from a leaf, not from the transport.
+    expect(header?.committerDID).toBeUndefined()
+  })
+
+  test('a commit framed BELOW reports its epoch, and no committer', async () => {
+    const { bobGroup, addBobCommit } = await twoMemberGroup()
+    // The commit that added Bob, framed at epoch 0 — below the epoch his Welcome landed him at.
+    // Every healthy peer reads frames like this: a joiner's first pull is nothing else.
+    expect(bobGroup.epoch).toBeGreaterThan(0n)
+
+    const header = await bobGroup.readCommitHeader(addBobCommit)
+    expect(header).not.toBeNull()
+    expect(header?.epoch).toBe(0n)
+    // A ratcheted-past epoch's secret is as gone as one never reached. Same answer, same reason.
+    expect(header?.committerDID).toBeUndefined()
   })
 })
 

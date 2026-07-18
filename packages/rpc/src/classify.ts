@@ -7,17 +7,29 @@ import type { CommitHeader } from './crypto.js'
  *
  * | Frame | Cursor |
  * |---|---|
- * | Not a commit at all (unreadable header) | advance (poison — never retry, never heal); settled first, before any epoch question |
+ * | Not a commit at all (no header) | advance (poison — never retry, never heal); settled first, before any epoch question |
  * | Framed at an epoch AHEAD of this peer's | advance; heal — the group moved on without it |
  * | Below this peer's epoch, with no recorded applied-commit | advance, no fork check, no unwrap attempt |
  * | Below this peer's epoch, with a record naming a different sequenceID | advance; the fork trigger |
+ * | At this peer's current epoch, with no authenticated committer | advance (poison — never retry, never heal) |
  * | At this peer's current epoch, committed by THIS peer | do not advance; heal |
  * | At this peer's current epoch, committed by another — handed to the port | applied: advance and record this epoch -> sequenceID for the fork check; refused by policy or entries unresolvable: advance (poison — never retry, never heal) |
  *
- * Five rows are decided here, reading bytes and decrypting nothing; only the last — a frame at
+ * Six rows are decided here, reading bytes and decrypting nothing; only the last — a frame at
  * this peer's epoch authored by someone else — is handed to the MLS port, whose answer is the
- * sixth row. Malformed-poison settles at the top because headerless bytes cannot be asked the
- * epoch questions the other rows turn on.
+ * seventh row. Headerless-poison settles at the top because bytes that are not a commit cannot
+ * be asked the epoch questions the other rows turn on.
+ *
+ * **The header carries two facts with different trust, and each row must say which it uses.**
+ * The epoch is cleartext, keyless, readable at any epoch, and only the publisher's word. The
+ * committer is MLS-authenticated but recoverable only for a commit framed at this peer's own
+ * epoch, because resolving it means decrypting sender-data with the epoch secret this peer holds
+ * right now. So the rows split cleanly: `ahead`, `history` and `fork` dispatch on the EPOCH
+ * ALONE — they must, since they are about frames this peer holds no key for — while every row at
+ * this peer's own epoch requires the AUTHENTICATED committer and refuses to fire without it.
+ * Conflating the two is not a style question: a classifier that demands a committer before
+ * reading an epoch cannot read any frame the peer has fallen behind, which is the one frame that
+ * says it fell behind.
  *
  * **Classify by epoch first, unwrap only what you can apply.** A frame's blob is sealed under
  * the epoch the commit is framed at, so a peer walking history (late joiner, rejoiner,
@@ -39,17 +51,56 @@ export type CommitDisposition =
    * a dropped frame: a frame nobody can resolve blocks the whole group (nobody applies it),
    * whereas a frame only THIS peer cannot resolve is a fault of its own — observable only
    * later, when the group commits past it and lands here.
+   *
+   * **Decided on the epoch alone, which is UNAUTHENTICATED — deliberately, and unavoidably.**
+   * The epoch rides the commit's cleartext; the committer would need the epoch's sender-data
+   * secret, and a peer that has fallen behind holds no such secret for the epoch it fell behind
+   * from. Requiring one here does not make the row safer, it makes the row unreachable — and an
+   * unreachable `ahead` is the worst outcome available, since the peer then files the group's
+   * entire future as poison, steps over all of it, and reports itself fully reconciled while
+   * permanently stuck. Silent, and worse than message loss because nothing reports it.
+   *
+   * WHAT IT COSTS: anything that can put a frame on the commit topic — a removed member who
+   * keeps the topic forever, or the untrusted hub — can claim a high epoch here and make every
+   * honest peer heal at once, for one publish. A heal is not free: a rendezvous, a sealed
+   * GroupInfo from every responder, an external commit, and a compare-and-set. That is the same
+   * group-wide recovery storm {@link CommitDisposition} refuses to fund on `own-unmerged`.
+   *
+   * WHY IT IS ACCEPTED ANYWAY:
+   * - **It is not new, and closing this row does not close it.** An EXTERNAL commit's header
+   *   needs no secret at all — its committer rides its own UpdatePath leaf, structurally read
+   *   and signature-unverified — so a forged external commit claiming a high epoch already
+   *   reaches this row and always did. Reading a member commit's epoch adds a second route to a
+   *   door that does not shut.
+   * - **It is unclosable by construction.** Any signal that says "you fell out of the group" is
+   *   a signal a hostile publisher can also emit, because a peer that fell out is by definition
+   *   one that cannot authenticate what the group is doing now. There is no key on this side of
+   *   the gap to check it with.
+   * - **A liar can only TRIGGER a heal, never suppress one.** Honest ahead-frames are in the log
+   *   too and are classified independently, so no forgery hides them.
+   * - **It is bounded to one heal per frame, and cannot loop.** The frame is stepped over before
+   *   the heal is asked for, so it is never re-read; a peer that heals lands at the group's real
+   *   epoch and is not returned here by the same frame. The attacker pays one published frame
+   *   per heal, which is a write capability any member has anyway.
    */
   | { row: 'ahead' }
   /**
    * A frame from an epoch BELOW this peer's with no applied-commit record: pre-join,
    * pre-rejoin, or re-seeded history. Advance, no fork check, no unwrap. Neither fork nor
    * poison — every healthy peer reads some.
+   *
+   * On the epoch alone, for the same reason as `ahead` and with far less at stake: this peer
+   * holds no sender-data secret for an epoch it has ratcheted past, so no committer is
+   * recoverable here either. Nothing is spent on the answer — the frame is stepped over, never
+   * handed to the port, its blob never touched — so a lie about the epoch buys a liar the right
+   * to have their frame ignored slightly differently.
    */
   | { row: 'history' }
   /**
    * Two different commits at one epoch: this peer applied `appliedSequenceID`, the log now
-   * carries another. The hub accepted both — only possible by serving different logs to
+   * carries another. Reached on the epoch alone and settled on sequenceIDs, which are the
+   * hub's own chaining and not the commit's word; the committer is neither read nor available.
+   * The hub accepted both — only possible by serving different logs to
    * different members. Advance, and heal if on the losing branch: the branch whose commit
    * carries the HIGHER sequenceID, a tiebreak both sides evaluate alone once they see both.
    */
@@ -68,12 +119,32 @@ export type CommitDisposition =
    * Read the committer from the commit itself, where MLS authenticates it — NEVER from the
    * frame's transport sender, the untrusted hub's word. A hub that stamped each recipient's
    * own DID onto one poison frame would otherwise heal the whole group at will.
+   *
+   * **AUTHENTICATED OR NOT AT ALL.** This row is the one place a peer heals off a claim of
+   * authorship, so an unauthenticated committer must never reach it — not from the transport
+   * sender, and not as a fallback when the authenticated read comes back empty. It is only ever
+   * reachable at this peer's CURRENT epoch, which is exactly the epoch whose sender-data secret
+   * the peer holds, so a genuine member commit here always authenticates and the row loses
+   * nothing by refusing the rest. A header at this epoch with no committer is `poison`, and the
+   * temptation to soften that into "well, it might be mine" is the whole attack: a forged frame
+   * naming this peer would heal it on demand, and one naming everybody would storm the group.
    */
   | { row: 'own-unmerged' }
   /**
-   * Not a commit at all. Advance — poison is stepped over, never retried. It is the LAST
-   * resort, never the fallback for "I could not apply this": a crash victim's own commit
-   * misfiled as malformed would walk the peer to the log's end stuck at its epoch forever.
+   * A frame there is nothing further to do with. Advance — poison is stepped over, never
+   * retried. It is the LAST resort, never the fallback for "I could not apply this": a crash
+   * victim's own commit misfiled as malformed would walk the peer to the log's end stuck at its
+   * epoch forever.
+   *
+   * TWO classifications land here, and they are deliberately one row because the cursor
+   * treatment is identical — advance, never retry, never heal:
+   * - **Not a commit at all**: no header. Undecodable bytes, or a message of another kind.
+   * - **A commit at this peer's own epoch whose committer will not authenticate**: it is a
+   *   commit, and the epoch says this peer should be able to read its author, and it cannot.
+   *   Nothing honest looks like this. It must NOT fall through to `apply`: the port would be
+   *   handed a frame it cannot process, and a port that throws on it leaves the cursor put and
+   *   the lane wedged on that frame forever. It must not fall through to `own-unmerged`
+   *   either — see that row.
    *
    * Two more cases are filed here on the port's answer, not this classification: a
    * policy-refused commit, and a commit whose ledger entries will not resolve. Both advance,
@@ -115,16 +186,19 @@ export type CommitClassifierState = {
  * Classify one frame of the commit log against this peer's state, before anything is
  * applied and before anything is decrypted.
  *
- * `header` is the commit's own epoch and committer, read out of the commit bytes by the MLS
- * port — `null` for bytes that are not a commit at all.
+ * `header` is what the commit says about itself, read out of its own bytes by the MLS port:
+ * `null` for bytes that are not a commit at all, and otherwise the commit's epoch — always, it
+ * is cleartext — with `committerDID` present only where the port could MLS-authenticate one.
  */
 export function classifyCommit(
   header: CommitHeader | null,
   sequenceID: string,
   state: CommitClassifierState,
 ): CommitDisposition {
-  // Headerless bytes cannot be asked the questions below, so settle first. Overlaps no other
-  // row: an unreadable frame is not somebody's commit, least of all this peer's own.
+  // Bytes that are not a commit cannot be asked the questions below, so settle first. Overlaps
+  // no other row: a frame that is not a commit is not somebody's commit, least of all this
+  // peer's own. NOTE what this does NOT cover: a commit the port could read the epoch of but not
+  // the author of is a header, not a null, and it is classified on its epoch below.
   if (header == null) return { row: 'poison' }
 
   // AHEAD, settled before `history`: the two are otherwise indistinguishable, since a peer
@@ -137,8 +211,14 @@ export function classifyCommit(
   // below N as history, applies N, and rises with the log. So a frame ahead of this peer means
   // exactly one thing: the group advanced at an epoch this peer did not (trimmed frames, or a
   // frame it alone could not apply). Advance, and heal.
+  //
+  // On the epoch ALONE. No committer is asked for and none could be given: the epoch's
+  // sender-data secret is exactly what a peer that fell behind does not hold. See the row's doc
+  // for what that costs and why it is accepted.
   if (header.epoch > state.epoch) return { row: 'ahead' }
 
+  // Below this peer's epoch: also on the epoch alone, and also because there is no choice — a
+  // ratcheted-past epoch's secret is gone. Nothing below spends anything on the answer.
   if (header.epoch < state.epoch) {
     const applied = state.appliedByEpoch.get(header.epoch)
     // No record for that epoch -> history, not fork. "A commit at an epoch the peer already
@@ -152,8 +232,18 @@ export function classifyCommit(
     }
   }
 
-  // At this peer's epoch. Discriminate by authorship, NOT applicability: a peer can never
-  // apply its own commit, and a frame it merely fails to apply is not a reason to heal.
+  // At this peer's epoch — and ONLY here is the committer both required and available. This is
+  // the epoch whose sender-data secret this peer holds, so an honest member commit authenticates
+  // its author; one that does not is poison, and must not reach either row below. Falling
+  // through to `apply` would hand the port a frame it cannot process (a throw there leaves the
+  // cursor put and wedges the lane on it forever), and falling through to `own-unmerged` would
+  // let a forged frame heal this peer on demand.
+  if (header.committerDID == null) return { row: 'poison' }
+
+  // Discriminate by authorship, NOT applicability: a peer can never apply its own commit, and a
+  // frame it merely fails to apply is not a reason to heal. The committer read here is the
+  // MLS-authenticated one or nothing — never the transport sender, never an unauthenticated
+  // fallback.
   if (header.committerDID === state.localDID) return { row: 'own-unmerged' }
 
   return { row: 'apply' }
