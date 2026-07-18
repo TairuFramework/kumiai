@@ -211,6 +211,65 @@ describe('a peer that adopts a journalled roster change reads its backlog and ro
   })
 })
 
+describe('an ephemeral dispatch lands on the segment that contains its seal epoch', () => {
+  /**
+   * The same window as the logged dispatch below, and the same requirement: a frame is opened at
+   * the epoch it was sealed at, so it must be published to the topic that epoch's segment is
+   * anchored to. The retention class changes what a mismatch COSTS — a mailbox frame is dropped
+   * rather than retained, so it is a lost event or an RPC that times out and never a segment left
+   * holding bytes nobody can open — and changes nothing about what is correct.
+   *
+   * Asserted on the PUBLISH and not on a delivery, because a mailbox frame reaches only the
+   * members subscribed at publish time: mid-rotation that is a set the test would be racing to
+   * arrange, and the frame landing on the segment that contains its seal epoch is true whether or
+   * not anyone was there to hear it.
+   */
+  test('an ephemeral dispatch racing a rotation is published to the segment it is sealed under', async () => {
+    const hub = new FakeHub()
+    const recoverySecret = new Uint8Array(32).fill(0x95)
+
+    let raceTheRotation: (() => Promise<void>) | null = null
+    const written = createMemoryAnchorStore()
+    const anchorStore: MemoryAnchorStore = {
+      ...written,
+      save: async (next) => {
+        await written.save(next)
+        const race = raceTheRotation
+        raceTheRotation = null
+        await race?.()
+      },
+    }
+
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, {
+      epoch: 1,
+      members: MEMBERS,
+      anchorStore,
+    })
+    await flush()
+
+    // The anchor store's write is the window: the anchor and the handle are already at epoch 2 and
+    // the lane Alice still holds was built for the segment anchored at 1.
+    raceTheRotation = async () => {
+      await alice.peer.protocol('chat').dispatch('chat/changed', { text: 'mid-rotation' })
+    }
+    await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, removes: ['carol'] })
+    await flush()
+
+    expect(alice.peer.anchorEpoch()).toBe(2)
+    expect(raceTheRotation).toBeNull() // the race did run
+
+    // One frame on a chat topic, and it is on the segment anchored at 2 — the segment that
+    // CONTAINS the epoch it was sealed under. The segment the group just left was published to
+    // never.
+    const onChat = hub.published.filter(
+      (message) => message.topicID === chatTopic(1) || message.topicID === chatTopic(2),
+    )
+    expect(onChat.map((message) => message.topicID)).toEqual([chatTopic(2)])
+
+    await alice.peer.dispose()
+  })
+})
+
 describe('a logged dispatch lands on the segment that contains its seal epoch', () => {
   /**
    * The rotation is not a moment: the anchor and the handle move together inside the commit walk,

@@ -508,6 +508,50 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     appSegmentLoaded = false
   }
 
+  /**
+   * One protocol's live-lane transport: it LISTENS on the topic the runtime is built for, and
+   * PUBLISHES to the segment that contains each frame's own seal epoch.
+   *
+   * The two halves have to be separated because the rotation is not a moment. The anchor and the
+   * handle move together inside the commit walk and the runtimes are rebuilt only once the whole
+   * walk returns, so a dispatch — which takes no mutex — can run in between and seal under the
+   * epoch the group has just moved to. Published to the topic this runtime still holds, that frame
+   * is sealed under an epoch no member on that topic has reached. Mailbox class, so what it costs
+   * is the frame dropped rather than a segment left holding bytes nobody can ever open, and a
+   * dropped frame is still a frame that had somewhere correct to go.
+   *
+   * The topic is decided by the SEAL and carried to the publish, because they are two calls with
+   * an anchor that can move between them: `wrap` seals against a re-read anchor (see
+   * {@link sealForSegment} — that re-read is what makes the pair one segment's) and records the
+   * topic under the ciphertext it produced, and the bus view routes by that record. Keyed by the
+   * bytes' own identity rather than a slot: two transports share this lane and each one's writes
+   * interleave with the other's, so a slot would let one publish take the other's topic.
+   *
+   * The subscribe keeps the runtime's topic. A rotation rebuilds the listeners, and a topic is
+   * subscribed at the mux for the member's whole life either way.
+   */
+  const segmentBoundTransport = (name: string, topicID: string) => {
+    const sealedOn = new WeakMap<Uint8Array, string>()
+    return createBroadcastTransport({
+      topicID,
+      bus: {
+        // `builtFor` is the topic this transport was constructed with, and it is the fallback
+        // rather than the answer: anything published through here was sealed by the `wrap` below,
+        // so the recorded topic is the one that agrees with the seal.
+        publish: async (builtFor, payload) => {
+          await mux.bus.publish(sealedOn.get(payload) ?? builtFor, payload)
+        },
+        subscribe: (listenOn, onMessage) => mux.bus.subscribe(listenOn, onMessage),
+      },
+      wrap: async (bytes) => {
+        const sealed = await sealForSegment(name, bytes)
+        sealedOn.set(sealed.payload, sealed.topicID)
+        return sealed.payload
+      },
+      unwrap: crypto.unwrap,
+    })
+  }
+
   const buildEpoch = async (): Promise<void> => {
     epoch = crypto.epoch()
     const next = new Map<string, ProtocolRuntime>()
@@ -531,12 +575,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       mux.retainTopic(topicID, { retention: appLogRetentionSeconds })
       const selfInbox = inboxTopic(anchor.secret, anchor.epoch, localDID)
       const client = new BroadcastClient({
-        transport: createBroadcastTransport({
-          topicID,
-          bus: mux.bus,
-          wrap: crypto.wrap,
-          unwrap: crypto.unwrap,
-        }),
+        transport: segmentBoundTransport(name, topicID),
         ...(getRandomID != null ? { getRandomID } : {}),
       })
       const { eventHandlers, requestHandlers } = adaptBusHandlers(
@@ -545,12 +584,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         suppress,
       )
       const busServer = createGroupBusServer({
-        transport: createBroadcastTransport({
-          topicID,
-          bus: mux.bus,
-          wrap: crypto.wrap,
-          unwrap: crypto.unwrap,
-        }),
+        transport: segmentBoundTransport(name, topicID),
         from: localDID,
         eventHandlers,
         requestHandlers,
