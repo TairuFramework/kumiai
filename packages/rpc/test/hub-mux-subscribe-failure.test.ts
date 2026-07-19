@@ -343,8 +343,8 @@ describe('the hub doubles refuse what a real hub refuses', () => {
 describe('a subscribe failure with no handler wired', () => {
   test('is warned rather than swallowed, and a wired handler replaces the warning', async () => {
     const warnings: Array<unknown> = []
-    const warn = console.warn
-    console.warn = (...args: Array<unknown>) => void warnings.push(args[0])
+    const warn = console.error
+    console.error = (...args: Array<unknown>) => void warnings.push(args[0])
     try {
       // A retention above the hub's ceiling: refused outright, and permanently.
       const refusing = new FakeHub({ maxRetention: 100 })
@@ -373,7 +373,7 @@ describe('a subscribe failure with no handler wired', () => {
       await bare.dispose()
       await wired.dispose()
     } finally {
-      console.warn = warn
+      console.error = warn
     }
   })
 })

@@ -1,5 +1,6 @@
 import type { StoredMessage } from '@kumiai/hub-protocol'
 import type { HubReceiveSubscription, LogHub } from '@kumiai/hub-tunnel'
+import { reset, setup } from '@sozai/log'
 import { describe, expect, test } from 'vitest'
 
 import { createHubMux, type ReceiveLaneEnded } from '../src/hub-mux.js'
@@ -122,15 +123,15 @@ describe('the mux reports a push lane that ended without being asked to', () => 
    * and is not — every call keeps succeeding and the group merely appears to have gone quiet —
    * so the host least likely to notice is precisely the one that wired no handler.
    *
-   * `console.warn` rather than a logger: a logging library with no sink configured is silent,
-   * which is the failure being removed.
+   * Routed through `@sozai/log`, and to the console only when logging is NOT configured — an
+   * unconfigured logtape discards records, which would put this back where it started.
    */
   test('with no handler wired, the ending is warned rather than swallowed', async () => {
     const hub = new FakeHub()
     const wrapped = endableHub(hub, 'done')
     const warnings: Array<unknown> = []
-    const warn = console.warn
-    console.warn = (...args: Array<unknown>) => void warnings.push(args[0])
+    const warn = console.error
+    console.error = (...args: Array<unknown>) => void warnings.push(args[0])
     try {
       let lane: { endLane: () => void } | undefined
       const mux = createHubMux({
@@ -158,7 +159,7 @@ describe('the mux reports a push lane that ended without being asked to', () => 
       expect(String(warnings[0])).toContain('push lane ended')
       await mux.dispose()
     } finally {
-      console.warn = warn
+      console.error = warn
     }
   })
 
@@ -167,8 +168,8 @@ describe('the mux reports a push lane that ended without being asked to', () => 
     const wrapped = endableHub(hub, 'done')
     const warnings: Array<unknown> = []
     const ended: Array<ReceiveLaneEnded> = []
-    const warn = console.warn
-    console.warn = (...args: Array<unknown>) => void warnings.push(args[0])
+    const warn = console.error
+    console.error = (...args: Array<unknown>) => void warnings.push(args[0])
     try {
       let lane: { endLane: () => void } | undefined
       const mux = createHubMux({
@@ -197,7 +198,63 @@ describe('the mux reports a push lane that ended without being asked to', () => 
       expect(warnings).toEqual([])
       await mux.dispose()
     } finally {
-      console.warn = warn
+      console.error = warn
+    }
+  })
+
+  /**
+   * THE PATH AN APP ACTUALLY TAKES. An app configures `@sozai/log` and collects what this stack
+   * reports; the console fallback exists only for the case where it has not. Asserted separately
+   * because the two branches fail in opposite directions — a record that goes to the console when
+   * logging IS configured is noise an app cannot route, and one that goes to the logger when it
+   * is NOT is silence.
+   */
+  test('with logging configured, the report goes to the logger and not the console', async () => {
+    const hub = new FakeHub()
+    const wrapped = endableHub(hub, 'done')
+    const records: Array<{ category: ReadonlyArray<string>; level: string }> = []
+    const consoleErrors: Array<unknown> = []
+    const realError = console.error
+    console.error = (...args: Array<unknown>) => void consoleErrors.push(args[0])
+    setup({
+      sinks: {
+        capture: (record) => {
+          records.push({ category: record.category, level: record.level })
+        },
+      },
+      loggers: [{ category: ['kumiai'], lowestLevel: 'debug', sinks: ['capture'] }],
+    })
+    try {
+      let lane: { endLane: () => void } | undefined
+      const mux = createHubMux({
+        hub: {
+          ...wrapped,
+          receive: (did: string) => {
+            const subscription = wrapped.receive(did)
+            lane = subscription as unknown as { endLane: () => void }
+            return subscription
+          },
+        } as LogHub,
+        localDID: 'bob',
+      })
+      mux.onInbound('topic:x', () => {})
+      await hub.publish({ senderDID: 'alice', topicID: 'topic:x', payload: new Uint8Array([1]) })
+      await flush()
+
+      lane?.endLane()
+      await hub.publish({ senderDID: 'alice', topicID: 'topic:x', payload: new Uint8Array([2]) })
+      await flush()
+
+      expect(records).toHaveLength(1)
+      expect(records[0]?.category).toEqual(['kumiai', 'rpc'])
+      // ERROR, not warn: `@sozai/log`'s own default config admits error and drops warn, so a
+      // warning would be discarded by the setup most apps start from.
+      expect(records[0]?.level).toBe('error')
+      expect(consoleErrors).toEqual([])
+      await mux.dispose()
+    } finally {
+      console.error = realError
+      reset()
     }
   })
 

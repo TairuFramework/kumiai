@@ -7,6 +7,7 @@ import type {
   LogHub,
   MailboxHub,
 } from '@kumiai/hub-tunnel'
+import { getLogger, isSetup } from '@sozai/log'
 
 import { asDeliveryPosition } from './cursor.js'
 
@@ -48,25 +49,51 @@ export type ReceiveLaneEnded = {
 }
 
 /**
+ * The logger these fall back to. `['kumiai', 'rpc']` — an app routing this category sees them
+ * with everything else it collects.
+ */
+const logger = getLogger(['kumiai', 'rpc'])
+
+/**
  * THE FALLBACK, used when a host wires no handler: say it out loud rather than nowhere.
  *
  * Both conditions leave a peer that looks healthy and is not — every call still succeeds, and
  * the group simply appears to have gone quiet. A host that has not wired the notice is exactly
  * the host that will not otherwise find out, so the default has to be loud rather than tidy.
  *
- * `console.warn` and not a logger, deliberately. A logging library with no sink configured is
- * silent, which is the failure being removed; this is the one output every runtime shows without
- * being set up first. A host that has handled the condition silences it by passing its own
- * handler — including an empty one, which is how it says so on purpose.
+ * AT ERROR LEVEL, not warn, and that is not emphasis: `@sozai/log`'s own default configuration
+ * admits `error` and drops `warn`, so a warning would be discarded by the very setup most apps
+ * start from. A condition that silently loses every message this peer is sent belongs above that
+ * line anyway.
  *
- * Only these two. `rpc/src` swallows failures in twenty-odd other places and every one of them is
- * ordinary control flow on a shared log — a frame sealed for another epoch, a host handler that
- * threw, a retry that ran out. Logging those would be constant noise, and a warning nobody can
- * afford to read is worth no more than silence.
+ * AND CONSOLE WHEN LOGGING IS NOT CONFIGURED, because logtape with no configuration discards
+ * records — which would put this back exactly where it started. `isSetup()` is the difference
+ * between "the app collects this" and "nobody will ever see it".
+ *
+ * KNOWN GAP, filed in `docs/agents/plans/next/2026-07-19-logging-reaches-a-sink.md`: `isSetup()`
+ * answers whether logging is configured, not whether THIS category reaches a sink. An app calling
+ * `@sozai/log`'s `setup()` with no argument gets a config covering `['sozai']` and nothing else,
+ * so these records are dropped while the console fallback stays out of the way. Fixing it means
+ * choosing between logtape's own emit check, a root sink in the shared default, and a documented
+ * requirement — a decision that belongs to the logging story rather than to this file.
+ *
+ * Only these two conditions. `rpc/src` swallows failures in twenty-odd other places and every one
+ * of them is ordinary control flow on a shared log — a frame sealed for another epoch, a host
+ * handler that threw, a retry that ran out. Logging those would be constant noise, and a warning
+ * nobody can afford to read is worth no more than silence.
  */
+const report = (message: string, error: unknown): void => {
+  if (isSetup()) {
+    logger.error(message, { error })
+    return
+  }
+  // Last resort: no logging configured, so the app has nowhere to collect this.
+  console.error(`[@kumiai/rpc] ${message}`, error)
+}
+
 const warnSubscribeFailed = (failure: SubscribeFailure): void => {
-  console.warn(
-    `[@kumiai/rpc] hub refused the subscription to ${failure.topicID}` +
+  report(
+    `hub refused the subscription to ${failure.topicID}` +
       `${failure.permanent ? ' (permanently)' : ' (after exhausting retries)'}. ` +
       'This peer receives nothing on that topic and cannot pull it; every publish and fetch on ' +
       'it now throws. Wire `onSubscribeFailed` to handle this.',
@@ -75,10 +102,10 @@ const warnSubscribeFailed = (failure: SubscribeFailure): void => {
 }
 
 const warnReceiveEnded = (ended: ReceiveLaneEnded): void => {
-  console.warn(
-    '[@kumiai/rpc] the hub push lane ended and will not restart on its own. This peer will ' +
-      'receive nothing further — no error, and every call keeps succeeding — until the host ' +
-      'reconnects and builds a new peer. Wire `onReceiveEnded` to handle this.',
+  report(
+    'the hub push lane ended and will not restart on its own. This peer will receive nothing ' +
+      'further — no error, and every call keeps succeeding — until the host reconnects and ' +
+      'builds a new peer. Wire `onReceiveEnded` to handle this.',
     ended.error,
   )
 }

@@ -36,15 +36,16 @@
     "prepublishOnly": "pnpm run build"
   },
   "dependencies": {
-    "@kumiai/broadcast": "workspace:^",
     "@enkaku/client": "catalog:",
-    "@sozai/codec": "catalog:",
-    "@kumiai/hub-protocol": "workspace:^",
-    "@kumiai/hub-tunnel": "workspace:^",
     "@enkaku/protocol": "catalog:",
     "@enkaku/server": "catalog:",
     "@enkaku/transport": "catalog:",
-    "@noble/hashes": "catalog:"
+    "@kumiai/broadcast": "workspace:^",
+    "@kumiai/hub-protocol": "workspace:^",
+    "@kumiai/hub-tunnel": "workspace:^",
+    "@noble/hashes": "catalog:",
+    "@sozai/codec": "catalog:",
+    "@sozai/log": "catalog:"
   },
   "devDependencies": {
     "@kumiai/hub-conformance": "workspace:^",

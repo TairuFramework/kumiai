@@ -42,6 +42,9 @@ catalogs:
     '@sozai/event':
       specifier: ^0.1.1
       version: 0.1.1
+    '@sozai/log':
+      specifier: ^0.2.0
+      version: 0.2.0
     '@sozai/runtime':
       specifier: ^0.1.0
       version: 0.1.0
@@ -301,6 +304,9 @@ importers:
         specifier: 'catalog:'
         version: 2.2.0
       '@sozai/codec':
+        specifier: 'catalog:'
+        version: 0.2.0
+      '@sozai/log':
         specifier: 'catalog:'
         version: 0.2.0
     devDependencies:
@@ -1629,6 +1635,9 @@ packages:
 
   '@sozai/log@0.1.0':
     resolution: {integrity: sha512-vhCp3GK9UguYwopntaz6/juJSKFpB9GAAsKC9nxdakdQrD/Ix4r5fmZWIPArNtynbzsaUwdVoFYmDzbu90UNxg==}
+
+  '@sozai/log@0.2.0':
+    resolution: {integrity: sha512-QxBBFSSC9be7Es/r2KYPs/yMWu/zGl+oV4QJE8ycaN47KP1CtoOXd7M6dPsHhHJfHYNFTOmXW4DJ9ALq3f8cyg==}
 
   '@sozai/otel@0.2.0':
     resolution: {integrity: sha512-QA6VNAabL9D36nALM92fTtvTO2V9wI3P72rvQFFj9dRNZyZ9s4l9PK5RXKEMNN1KFgYUKus+7KBMiqRo6kYrTw==}
@@ -5724,6 +5733,10 @@ snapshots:
       '@sozai/result': 0.1.1
 
   '@sozai/log@0.1.0':
+    dependencies:
+      '@logtape/logtape': 2.2.4
+
+  '@sozai/log@0.2.0':
     dependencies:
       '@logtape/logtape': 2.2.4
 
