@@ -12,7 +12,22 @@
 /** Leading marker identifying a handshake frame ("EK"). */
 export const HANDSHAKE_MAGIC = Uint8Array.from([0x45, 0x4b])
 
-/** Current handshake wire-format version. */
+/**
+ * Current handshake wire-format version.
+ *
+ * DO NOT BUMP THIS TO SIGNAL A CHANGE IN SOMETHING THE FRAME MERELY CARRIES, and the sealed
+ * ledger-entry blob is the case that will tempt you. An old peer meeting an unknown version
+ * fails at `decodeHandshakeFrame`, and the commit lane catches that BEFORE it reads the header —
+ * so the frame is stepped over without ever being classified. It is the classification that
+ * makes a peer notice the group has moved past it (`ahead`) and heal. Step over every new frame
+ * instead, and the peer walks to the end of the log, reports itself fully reconciled, and sits
+ * at a dead epoch forever: no error, no heal, no restart that fixes it.
+ *
+ * A change to a payload's own format belongs inside that payload, where an old peer fails the
+ * OPEN — which it already survives, by filing the commit as poison and healing from the next
+ * frame — rather than failing the decode, which it does not survive. Bump this only when the
+ * header itself changes, and only alongside a plan for peers that cannot read it.
+ */
 export const HANDSHAKE_VERSION = 1
 
 const HEADER_LENGTH = HANDSHAKE_MAGIC.length + 2

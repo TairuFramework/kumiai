@@ -38,6 +38,29 @@ const SECRET_LENGTH = 32
 /** XChaCha20-Poly1305's nonce, carried in the clear ahead of the ciphertext. */
 const ENTRY_NONCE_BYTES = 24
 
+/**
+ * The sealed blob's format version, first byte, in the clear:
+ *
+ *   [ VERSION(1) | NONCE(24) | CIPHERTEXT... ]
+ *
+ * INSIDE THE BLOB and not in the frame header, because of what each failure costs a peer that
+ * cannot read it. An unknown blob version fails the OPEN, which a peer survives: the commit is
+ * filed as poison, stepped over, and the next frame — framed at an epoch ahead of it — strands
+ * it into a rejoin that re-gathers the whole ledger. An unknown FRAME version would fail the
+ * decode instead, before the frame is ever classified, and a peer that steps over every frame
+ * without classifying one never learns the group moved past it. See `rpc/src/handshake.ts`.
+ *
+ * Unauthenticated, necessarily — it is read to decide how to open, so it cannot be under the
+ * seal. A hub that rewrites it only changes which error the peer reports; it cannot make bytes
+ * open that would not have.
+ *
+ * It buys diagnosis, not compatibility. There is no version of this a v1 peer can read, and a
+ * format change is a flag day whatever this byte says. What it changes is that the failure
+ * reads as "this blob is v2 and I speak v1" rather than an AEAD refusal indistinguishable from
+ * a wrong epoch or a tampered frame.
+ */
+const ENTRY_VERSION = 1
+
 const runtime = createRuntime()
 
 export type GroupCryptoParams = {
@@ -111,20 +134,28 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
       // 24-byte nonce makes a collision unreachable without any counter to persist.
       const nonce = runtime.getRandomValues(new Uint8Array(ENTRY_NONCE_BYTES))
       const ciphertext = xchacha20poly1305(key, nonce).encrypt(bytes)
-      const sealed = new Uint8Array(nonce.length + ciphertext.length)
-      sealed.set(nonce, 0)
-      sealed.set(ciphertext, nonce.length)
+      const sealed = new Uint8Array(1 + nonce.length + ciphertext.length)
+      sealed[0] = ENTRY_VERSION
+      sealed.set(nonce, 1)
+      sealed.set(ciphertext, 1 + nonce.length)
       return sealed
     },
 
     openEntries: async (sealed) => {
-      if (sealed.length < ENTRY_NONCE_BYTES) throw new Error('openEntries: not a sealed blob')
+      if (sealed.length <= 1 + ENTRY_NONCE_BYTES) throw new Error('openEntries: not a sealed blob')
+      if (sealed[0] !== ENTRY_VERSION) {
+        // Distinguishable on purpose. Every other failure here is an opaque AEAD refusal, and a
+        // peer that reported them alike could not tell a version it does not speak from a wrong
+        // epoch or a tampered frame. The lane treats all three the same way — poison, advance,
+        // heal from the next frame — so this changes what an operator sees, not what happens.
+        throw new Error(`openEntries: unsupported blob version ${sealed[0]}`)
+      }
       // PURE: the exporter secret is epoch-level and reading it consumes no ratchet key and
       // touches no handle state, so this may be called from inside the apply of the very commit
       // whose blob it opens — which is the only place it is called from.
       const key = await handle().exportSecret(entryLabel, EXPORT_CONTEXT, SECRET_LENGTH)
-      return xchacha20poly1305(key, sealed.subarray(0, ENTRY_NONCE_BYTES)).decrypt(
-        sealed.subarray(ENTRY_NONCE_BYTES),
+      return xchacha20poly1305(key, sealed.subarray(1, 1 + ENTRY_NONCE_BYTES)).decrypt(
+        sealed.subarray(1 + ENTRY_NONCE_BYTES),
       )
     },
 

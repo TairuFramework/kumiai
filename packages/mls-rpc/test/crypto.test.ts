@@ -173,6 +173,36 @@ describe('createGroupCrypto', () => {
       await expect(alice.crypto.openEntries(atOne)).rejects.toThrow()
     })
 
+    /**
+     * The blob carries its own format version, so a peer meeting a format it does not speak says
+     * so instead of reporting an indistinguishable AEAD refusal.
+     *
+     * The byte lives here rather than in the frame header deliberately: an unknown blob version
+     * fails the OPEN, which a peer survives (the commit files as poison and the next frame
+     * strands it into a heal), while an unknown FRAME version fails the decode before the frame
+     * is ever classified — and a peer that steps over every frame without classifying one never
+     * learns it has fallen behind. See `rpc/src/handshake.ts`.
+     */
+    test('carries its format version, and refuses one it does not speak', async () => {
+      const { aliceGroup } = await twoMemberGroup('ports-entry-version')
+      const alice = cryptoOver(aliceGroup)
+
+      const sealed = await alice.crypto.sealEntries(utf8.encode('versioned'))
+      expect(sealed[0]).toBe(1)
+      expect(new TextDecoder().decode(await alice.crypto.openEntries(sealed))).toBe('versioned')
+
+      // A blob from a future format: refused, and DISTINGUISHABLY — this is the whole value of
+      // the byte, since every other failure here is one opaque refusal.
+      const future = Uint8Array.from(sealed)
+      future[0] = 2
+      await expect(alice.crypto.openEntries(future)).rejects.toThrow('unsupported blob version 2')
+
+      // And a blob with no room for anything after the header is not a blob.
+      await expect(alice.crypto.openEntries(new Uint8Array(25))).rejects.toThrow(
+        'not a sealed blob',
+      )
+    })
+
     test('is AGREED: every member at an epoch opens what any other sealed, with nothing exchanged', async () => {
       const { aliceGroup, bobGroup } = await twoMemberGroup('ports-entry-agreed')
       const alice = cryptoOver(aliceGroup)
