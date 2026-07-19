@@ -594,9 +594,19 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       // ever derived; the per-epoch secret is what it cannot follow.
       //
       // `{ advanced: false }`, not a throw: the frame is well-formed and there is nothing to
-      // retry. The tree is left alone too — a member that cannot apply the commit does not learn
-      // its roster from it, so it goes on holding the stale view it had.
+      // retry.
+      //
+      // THE TREE STILL LOSES THE LEAF, and this half was measured against real MLS rather than
+      // reasoned about. ts-mls does not throw on a self-removing commit: it applies the proposals
+      // to the tree — so `listMembers()` no longer holds the removed member — and leaves the
+      // epoch where it was, because there is no key material to move it. So the handle reports a
+      // CHANGED ROSTER AT AN UNCHANGED EPOCH, which is the one combination nothing else produces.
+      // A double that kept the stale roster was the more permissive one, and it hid a peer that
+      // re-anchored off that diff.
       if (localDID != null && parsed.removes?.includes(localDID)) {
+        for (let i = leaves.length - 1; i >= 0; i--) {
+          if (leaves[i] === localDID) leaves.splice(i, 1)
+        }
         return { advanced: false }
       }
       // A member can never apply the frame that is its OWN commit: MLS merges a pending

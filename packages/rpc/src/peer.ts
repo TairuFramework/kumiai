@@ -1565,8 +1565,29 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     // epochs is dispensed five times off the one pull.
     await deliverAppFrames()
     const rosterBefore = await port.rosterDIDs()
+    const epochBefore = crypto.epoch()
     const advanced = await advance()
-    if (detectRosterChange(rosterBefore, await port.rosterDIDs()) || rotatesAnyway(advanced)) {
+    // GATED ON THE HANDLE ACTUALLY RATCHETING, because a roster diff alone is not evidence that
+    // it did. A commit that REMOVES this member does not advance its handle — there is no epoch
+    // it can move to, since the commit's path excludes the leaf it drops — and yet real MLS still
+    // applies its proposals to the tree, so the roster comes back WITHOUT this member at an epoch
+    // that did not move. (Measured against ts-mls: `processMessage` returns without throwing, the
+    // epoch stays, `listMembers()` has lost the leaf.) That is the one combination nothing else
+    // produces, and undiscriminated it reads as a rotation.
+    //
+    // What an ungated capture costs: an anchor re-derived at the epoch it already names — the same
+    // value, written again — and, with it, the segment buffer cleared. {@link captureAnchor} drops
+    // undelivered frames because a rotation makes them unopenable forever, which is true of a
+    // rotation and false here: this handle is still at the epoch those frames were sealed at. A
+    // frame the live lane staged while the walk was running is openable and gets thrown away.
+    //
+    // The gate costs nothing in the other direction: a roster change IS a commit, and a commit
+    // this handle applied moved its epoch.
+    const ratcheted = crypto.epoch() !== epochBefore
+    if (
+      ratcheted &&
+      (detectRosterChange(rosterBefore, await port.rosterDIDs()) || rotatesAnyway(advanced))
+    ) {
       await captureAnchor()
     }
     return advanced

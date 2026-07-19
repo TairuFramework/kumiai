@@ -229,16 +229,17 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
             advanced: false,
           })
 
-          // NOT ASSERTED HERE, and the omission is a finding rather than an oversight: what
-          // `rosterDIDs` reports on the member that just refused its own removal. The two
-          // implementations disagree, and the disagreement is real. The memory double leaves the
-          // tree alone on purpose — "a member that cannot apply the commit does not learn its
-          // roster from it". A real handle does not: ts-mls's `processMessage` returns a new state
-          // with the member's OWN leaf gone and `GroupHandle` adopts it unconditionally, so the
-          // removed member's roster shrinks by one at an epoch that did not move (observed: 4
-          // members to 3, still at epoch 3n, the lost DID its own). See
-          // `docs/superpowers/probes/port-conformance-report.md` — it reaches `peer.ts`'s
-          // unconditional roster diff, which is out of this suite's scope to change.
+          // ITS OWN LEAF IS GONE, AND THE EPOCH DID NOT MOVE. This was the one clause the two
+          // implementations disagreed about, and the double was the wrong one: it left the tree
+          // alone on the reasoning that "a member that cannot apply the commit does not learn its
+          // roster from it". ts-mls does learn it — `processMessage` applies the proposals to the
+          // tree and returns without throwing — so the removed member reports a roster short by
+          // one at an epoch that did not move.
+          //
+          // That combination exists nowhere else, and undiscriminated it reads as a rotation, so
+          // it is a clause and not a footnote: `peer.ts` gates its roster diff on the handle
+          // having actually ratcheted precisely because of it.
+          expect(await carol.mls.rosterDIDs()).not.toContain(carol.did)
 
           // And the commit is perfectly applicable by everyone else, so what refused it was the
           // removal and not the bytes.
