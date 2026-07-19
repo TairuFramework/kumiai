@@ -1,1 +1,9 @@
-export { HubClient, type HubClientParams, type PublishParams } from './client.js'
+export {
+  type FetchTopicParams,
+  type FetchTopicResult,
+  HubClient,
+  type HubClientParams,
+  type PublishParams,
+  type ReceiveOptions,
+  type SubscribeOptions,
+} from './client.js'

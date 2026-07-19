@@ -19,7 +19,12 @@
  * @module mls-rpc
  */
 
-export { APP_TOPIC_LABEL, createGroupCrypto, type GroupCryptoParams } from './crypto.js'
+export {
+  APP_TOPIC_LABEL,
+  createGroupCrypto,
+  ENTRY_SEAL_LABEL,
+  type GroupCryptoParams,
+} from './crypto.js'
 export {
   createGroupMLS,
   createLedgerEntrySlot,

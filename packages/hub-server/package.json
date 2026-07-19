@@ -37,11 +37,9 @@
   "dependencies": {
     "@sozai/codec": "catalog:",
     "@sozai/event": "catalog:",
-    "@kumiai/mls": "workspace:^",
     "@kumiai/hub-protocol": "workspace:^",
     "@enkaku/protocol": "catalog:",
     "@enkaku/server": "catalog:",
-    "@sozai/stream": "catalog:",
     "@kokuin/token": "catalog:"
   },
   "devDependencies": {

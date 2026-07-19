@@ -51,9 +51,6 @@ catalogs:
     '@sozai/schema':
       specifier: ^0.1.1
       version: 0.1.1
-    '@sozai/stream':
-      specifier: ^0.2.0
-      version: 0.2.0
     '@types/react':
       specifier: ^19.2.17
       version: 19.2.17
@@ -177,18 +174,12 @@ importers:
       '@kumiai/hub-protocol':
         specifier: workspace:^
         version: link:../hub-protocol
-      '@kumiai/mls':
-        specifier: workspace:^
-        version: link:../mls
       '@sozai/codec':
         specifier: 'catalog:'
         version: 0.2.0
       '@sozai/event':
         specifier: 'catalog:'
         version: 0.1.1
-      '@sozai/stream':
-        specifier: 'catalog:'
-        version: 0.2.0
     devDependencies:
       '@enkaku/client':
         specifier: 'catalog:'
