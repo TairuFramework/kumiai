@@ -1,13 +1,19 @@
 # App-lane delivery — plan
 
-**Stage:** reviewing
+**Stage:** completing
 **Mode:** learning-loop
 **Spec:** docs/superpowers/specs/2026-07-16-app-lane-delivery-design.md
 
 ## Resume here — 2026-07-19
 
-**The branch is GREEN** — rpc 306, mls 318, mls-rpc 35, hub-server 81, integration 32 (nothing
-skipped), build and lint clean. 52 commits. Verify with
+**The branch is GREEN** — rpc 320, mls 318, mls-rpc 45, hub-server 84, integration 32 (nothing
+skipped), build and lint clean. 58 commits ahead of main, nothing behind.
+
+**QA is done** (2026-07-19): two blind audits — one for tests that pass regardless of the behaviour
+they name, one for prose contradicting code — plus the conformance gap they exposed. One test was
+genuinely vacuous and five more asserted an absence with no positive control; all six now have one.
+The `GroupMLS` port went from 4 of 12 members contracted to all 12, both conformance packages gained
+a compile-time tripwire against future drift, and every package has a README. Verify with
 `pnpm exec turbo run test:types test:unit --force` (check `Cached: 0`) and
 `pnpm exec vitest run --root tests/integration`.
 
