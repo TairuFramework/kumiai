@@ -23,7 +23,16 @@ export const ENTRY_SEAL_LABEL = 'kumiai/ledger-entries/v1'
 /** The exporter context. Fixed: the label already separates each consumer. */
 const EXPORT_CONTEXT = new Uint8Array()
 
-/** Bytes an exported secret is: the ciphersuite's KDF output length. */
+/**
+ * Bytes to ask the exporter for: 32, because XChaCha20-Poly1305 takes a 256-bit key.
+ *
+ * NOT the ciphersuite's KDF output length, though it happens to equal it for every suite this
+ * repo can instantiate. The MLS exporter is HKDF-Expand with a caller-chosen output length
+ * (RFC 9420 §8.5), capped only at 255·hashLen, and the length is bound into the info field — so
+ * 32 bytes come back under any suite, and a same-label export at another length is an
+ * independent key. Deriving this from the suite instead would return 48 on a SHA-384 suite and
+ * make every seal throw.
+ */
 const SECRET_LENGTH = 32
 
 /** XChaCha20-Poly1305's nonce, carried in the clear ahead of the ciphertext. */

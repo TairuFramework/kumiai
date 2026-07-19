@@ -346,6 +346,38 @@ export function testGroupCryptoConformance(params: GroupCryptoConformanceParams)
         })
       })
 
+      /**
+       * IT IS AUTHENTICATED, and this clause exists because the lane spends that assumption
+       * without ever having checked it. A commit whose entries will not resolve is filed as
+       * POISON — stepped over, cursor advanced, never re-read — on the reasoning that a blob this
+       * peer cannot open is one no member at this epoch can. That reasoning holds only if the
+       * bytes on the wire are the bytes the author sealed. A seal that opened tampered bytes, or
+       * that returned a truncated plaintext instead of refusing, would let anyone who can modify
+       * a frame in transit turn any commit into poison for a chosen peer.
+       *
+       * Refusal, not silence: an implementation that returned empty bytes for a tampered blob
+       * would be indistinguishable from one that opened an empty one.
+       */
+      test('is AUTHENTICATED: a tampered blob is refused, not opened', async () => {
+        await withGroup(2, 'entries-tampered', async ({ members }) => {
+          const alice = memberAt(members, 0)
+          const bob = memberAt(members, 1)
+          const sealed = await alice.crypto.sealEntries(utf8.encode('the real entries'))
+          expect(text(await bob.crypto.openEntries(sealed))).toBe('the real entries')
+
+          // Every byte position, one at a time: a seal whose tail is authenticated but whose
+          // header is not would pass a test that only flipped one end.
+          for (const index of [0, Math.floor(sealed.length / 2), sealed.length - 1]) {
+            const tampered = Uint8Array.from(sealed)
+            tampered[index] = ((tampered[index] as number) ^ 0xff) & 0xff
+            await refuses(() => bob.crypto.openEntries(tampered))
+          }
+
+          // Truncation is tampering too, and it is the one a length check alone would miss.
+          await refuses(() => bob.crypto.openEntries(sealed.subarray(0, sealed.length - 1)))
+        })
+      })
+
       test('is AGREED: every member at an epoch opens what any other sealed, with nothing exchanged', async () => {
         await withGroup(2, 'entries-agreed', async ({ members }) => {
           const alice = memberAt(members, 0)

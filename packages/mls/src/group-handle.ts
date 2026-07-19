@@ -25,7 +25,7 @@ import {
   parseMLSCredentialIdentity,
 } from './credential.js'
 import { decodeControlEnvelope } from './envelope.js'
-import { foldEnvelope } from './envelope-fold.js'
+import { foldEnvelope, GROUP_TYPE_PREFIX } from './envelope-fold.js'
 import type { FoldInput } from './fold.js'
 import { readMessageEpoch } from './group-info.js'
 import {
@@ -490,11 +490,30 @@ export class GroupHandle {
         log.push({ entryID: entryIDs[index] as string, token, verified })
       }
 
+      // What this bootstrap ADDS, in log order, minus the reserved `group.*` types the fold
+      // consumes itself — the same rule the commit path surfaces by.
+      const surfaced = log
+        .filter(
+          ({ entryID, verified }) =>
+            !this.#entryBodies.has(entryID) && !verified.entry.type.startsWith(GROUP_TYPE_PREFIX),
+        )
+        .map(({ verified }) => verified)
+
       this.#ledger = log
       this.#entryBodies = new Map(
         log.map(({ entryID, token, verified }) => [entryID, { token, verified }]),
       )
       this.#roster = foldLedgerRoster(log, this.#anchor, this.groupID)
+
+      // SURFACED HERE TOO, not only on the commit path. A heal is how a peer that missed commits
+      // catches up — it rejoins, gathers the whole ledger, and lands here — so a bootstrap that
+      // said nothing left a host consuming `onLedgerEntries` as an event stream permanently
+      // unaware of everything enacted while it was away. The state was right and the host was
+      // never told, which is the worst of both.
+      //
+      // Deduped against what this handle already held, so a peer bootstrapping over a partial
+      // ledger is not re-notified of entries it has already seen.
+      if (surfaced.length > 0) this.#onLedgerEntries?.(surfaced)
     })
   }
 
@@ -570,6 +589,13 @@ export class GroupHandle {
    * Non-mutating and consumes no ratchet key: the exporter secret is epoch-level. A handle a
    * commit has superseded exports its own pre-commit epoch's secret, which is a feature — a
    * reader opening a retained frame needs the secret of the epoch that frame was sealed at.
+   *
+   * DELIBERATELY NOT MUTEX-WRAPPED, unlike its neighbours, and two things depend on that. A
+   * consumer resolving a commit's ledger entries is called from INSIDE `processMessage`, which
+   * holds the mutex — so taking it here would deadlock every commit-apply. And `#state` is
+   * replaced only after resolution returns, so a read from in there sees the PRE-commit epoch's
+   * exporter secret, which is the epoch the blob being opened was sealed under. Both are silent
+   * consequences of this method's plainness; wrapping it "for consistency" breaks both.
    */
   async exportSecret(label: string, context: Uint8Array, length = 32): Promise<Uint8Array> {
     return await mlsExporter(

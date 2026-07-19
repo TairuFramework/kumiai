@@ -278,6 +278,72 @@ describe('bootstrapping a ledger from an untrusted responder', () => {
   })
 })
 
+/**
+ * A HEAL TELLS THE HOST WHAT IT MISSED.
+ *
+ * `onLedgerEntries` is how a consumer learns that a notarized, admin-authored, non-`group.*`
+ * entry was enacted. The commit path fires it; `bootstrapLedger` did not — so the peer that was
+ * away, rejoined, and gathered the whole ledger ended up holding every entry in its state with
+ * its host never told about any of them. State right, host blind, which is the worst combination:
+ * nothing reports an error and nothing is missing to look at.
+ *
+ * A heal is the ONLY way a peer that missed commits catches up, so this is not an edge case of
+ * the migration that surfaced it — it is every heal.
+ */
+describe('bootstrapLedger surfaces what it brought in', () => {
+  test('the host is told about entries enacted while it was away, once', async () => {
+    const fixture = createFixture()
+    const alice = randomIdentity()
+    const carol = randomIdentity()
+    const groupID = 'bootstrap-surfaces'
+
+    const { group: created } = await createGroup(alice, groupID, {
+      resolveLedgerEntries: fixture.resolveLedgerEntries,
+    })
+    const withCarol = await inviteMember(fixture, created, alice, carol)
+
+    // An app-level entry: notarized, admin-authored, and NOT `group.*`, so it is the kind a
+    // consumer is told about rather than one the fold consumes itself.
+    const appToken = await signLedgerEntry(alice, {
+      type: 'note',
+      groupID,
+      subject: carol.id,
+      value: 'enacted while carol was away',
+    })
+    fixture.record(appToken)
+    const enacted = await commitLedgerEntries(withCarol.admin, [appToken])
+    const aliceGroup = enacted.newGroup
+
+    const surfaced: Array<string> = []
+    // The rejoined handle carries no sink, so nothing before the bootstrap can fire one.
+    const carolRejoined = await rejoin(fixture, carol, withCarol.group, aliceGroup)
+
+    const healed = await restoreGroup({
+      state: carolRejoined.state,
+      credential: carolRejoined.credential,
+      ledgerEntries: [],
+      options: {
+        resolveLedgerEntries: fixture.resolveLedgerEntries,
+        onLedgerEntries: (entries) => {
+          for (const entry of entries) surfaced.push(String(entry.entry.value))
+        },
+      },
+    })
+
+    await healed.bootstrapLedger(await aliceGroup.getLedger())
+
+    // The app entry, and only it: the invite's role entries are `group.*`, which the roster fold
+    // consumes rather than surfacing.
+    expect(surfaced).toEqual(['enacted while carol was away'])
+    expect(healed.roster.roles.get(normalizeDID(carol.id))).toBe('member')
+
+    // Bootstrapping again over the same ledger says nothing more — a peer is not re-notified of
+    // entries it already holds.
+    await healed.bootstrapLedger(await aliceGroup.getLedger())
+    expect(surfaced).toEqual(['enacted while carol was away'])
+  })
+})
+
 // ---------------------------------------------------------------------------
 // The liveness test: an empty ledger is a roster reset, not a blank slate
 // ---------------------------------------------------------------------------

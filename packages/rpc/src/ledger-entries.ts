@@ -67,11 +67,23 @@ export function decodeLedgerEntries(bytes: Uint8Array): Array<string> {
  * content-addressed, so the caller binds each body to its id by digesting, and an unrequested
  * body is ignored. A responder can fail to answer, never inject.
  *
- * A blob this peer cannot open yields NO entries, not an error: the commit fails to resolve,
- * the port raises missing-entries, and the lane leaves the cursor put so the frame is re-read
- * — never reported as corruption. In practice this cannot arise on the apply path: the port
- * asks only for a commit it is applying, framed at this peer's epoch, the epoch the blob is
- * sealed under.
+ * A blob this peer cannot open yields NO entries, not an error: the commit fails to resolve and
+ * the port raises missing-entries, never corruption. THE OPEN GETS EXACTLY ONE ATTEMPT — the lane
+ * files that commit as poison, advances the cursor over it and never re-reads it (`peer.ts`, the
+ * `isMissingLedgerEntries` branch of the walk). So this must not be used to absorb a failure that
+ * a retry would fix: there is no retry. In practice it should not arise at all on the apply path,
+ * since the port asks only for a commit it is applying, framed at this peer's epoch, which is the
+ * epoch the blob is sealed under.
+ *
+ * The `catch` is deliberately narrow about what it means and deliberately blind to which of three
+ * things happened: the AEAD refused the bytes, the plaintext did not decode as an entry list, or
+ * the blob genuinely lacked the ids. Only the first is reachable by TAMPERING — a hub that flips
+ * one byte turns that commit into poison for the targeted peer, silently and unattributably. The
+ * cost is bounded and known: the peer skips the commit, the next one is framed ahead of it, and
+ * the `ahead` disposition strands it into a rejoin that re-gathers the ledger. Nothing is
+ * injected, because bodies are content-addressed and signature-verified downstream. But the
+ * poison rule's justification — "a blob this peer cannot open is one no member at this epoch can"
+ * — holds only for an honest hub, and this is where that assumption is spent.
  *
  * Opened with {@link GroupCrypto.openEntries} and NOT with `unwrap`, because this runs INSIDE the
  * MLS port's apply of the commit it is resolving for. `unwrap` consumes a ratchet generation and

@@ -19,7 +19,7 @@ export type EnvelopeFoldResult =
   | { ok: true; roster: RosterState; surfaced: Array<VerifiedLedgerEntry> }
   | { ok: false; reason: string; entryID: string }
 
-const GROUP_TYPE_PREFIX = 'group.'
+export const GROUP_TYPE_PREFIX = 'group.'
 
 function isRoleValue(value: unknown): value is GroupPermission {
   return value === 'admin' || value === 'member'

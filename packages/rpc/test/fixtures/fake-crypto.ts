@@ -218,25 +218,52 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
     return out
   }
 
-  const ENTRY_TAG_BYTES = 4
+  const ENTRY_TAG_BYTES = 8
+
+  /**
+   * A keyed tag over the CIPHERTEXT, not a copy of the key's first bytes.
+   *
+   * The earlier tag named the epoch and nothing else, so it refused another epoch's blob and
+   * opened a tampered one — which is not what an AEAD does, and the lane leans on the difference:
+   * a commit whose entries will not resolve is filed as poison, stepped over and never re-read,
+   * because "a blob this peer cannot open is one no member at this epoch can". Tampering breaks
+   * that reasoning, so a double that cannot refuse tampering cannot see the failure.
+   *
+   * One tag for every failure, deliberately: a real AEAD cannot tell "wrong key" from "wrong
+   * bytes", and a double that reported them differently would let a test depend on a distinction
+   * the real port does not offer.
+   */
+  const entryTag = (ciphertext: Uint8Array, key: Uint8Array): Uint8Array => {
+    const tag = new Uint8Array(ENTRY_TAG_BYTES)
+    for (let i = 0; i < ENTRY_TAG_BYTES; i++) tag[i] = key[i] as number
+    for (let i = 0; i < ciphertext.length; i++) {
+      const slot = i % ENTRY_TAG_BYTES
+      // Position-dependent, so reordering or truncating the ciphertext changes the tag.
+      tag[slot] = ((tag[slot] as number) ^ ((ciphertext[i] as number) + i)) & 0xff
+    }
+    return tag
+  }
 
   const sealEntries: GroupCrypto['sealEntries'] = (bytes) => {
     const key = entryKey(epoch)
-    const sealed = new Uint8Array(ENTRY_TAG_BYTES + bytes.length)
-    sealed.set(key.subarray(0, ENTRY_TAG_BYTES), 0)
-    sealed.set(entryStream(bytes, key), ENTRY_TAG_BYTES)
+    const ciphertext = entryStream(bytes, key)
+    const sealed = new Uint8Array(ENTRY_TAG_BYTES + ciphertext.length)
+    sealed.set(entryTag(ciphertext, key), 0)
+    sealed.set(ciphertext, ENTRY_TAG_BYTES)
     return sealed
   }
 
   const openEntries: GroupCrypto['openEntries'] = (sealed) => {
     if (sealed.length < ENTRY_TAG_BYTES) throw new Error('cannot open: not a sealed entry blob')
     const key = entryKey(epoch)
+    const ciphertext = sealed.subarray(ENTRY_TAG_BYTES)
+    const expected = entryTag(ciphertext, key)
     for (let i = 0; i < ENTRY_TAG_BYTES; i++) {
-      if (sealed[i] !== key[i]) {
-        throw new Error(`cannot open entry blob: this member is at epoch ${epoch}`)
+      if (sealed[i] !== expected[i]) {
+        throw new Error(`cannot open entry blob: wrong epoch or tampered (at epoch ${epoch})`)
       }
     }
-    return entryStream(sealed.subarray(ENTRY_TAG_BYTES), key)
+    return entryStream(ciphertext, key)
   }
 
   return {
