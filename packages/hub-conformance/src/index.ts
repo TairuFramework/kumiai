@@ -827,6 +827,58 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
         expect(survived.head).toBe(commit)
       })
     }
+
+    /**
+     * The subscriber list IS the fan-out. A server reads it to decide who a published frame goes
+     * to, so a store that answers it wrongly delivers to the wrong members or to nobody — and the
+     * frame is gone either way, since a mailbox frame nobody was listening for is dropped.
+     */
+    test('getSubscribers reflects the subscriptions, and unsubscribing removes one', async () => {
+      const store = await createStore()
+      expect(await store.getSubscribers(TOPIC)).toEqual([])
+
+      await store.subscribe({ subscriberDID: ALICE, topicID: TOPIC })
+      await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+      expect([...(await store.getSubscribers(TOPIC))].sort()).toEqual([ALICE, BOB].sort())
+
+      await store.unsubscribe(BOB, TOPIC)
+      expect(await store.getSubscribers(TOPIC)).toEqual([ALICE])
+    })
+
+    /**
+     * KEY PACKAGES ARE SINGLE-USE, and this is the one clause here that is an MLS requirement
+     * rather than a hub one. A KeyPackage carries an init key an inviter encrypts a Welcome to;
+     * handing the same one to two inviters means two members joining on one key, which breaks the
+     * forward secrecy the whole stack rests on.
+     *
+     * The store is the only thing in a position to enforce it — nothing downstream can tell a
+     * fresh package from a re-served one — so a store that fetched without consuming would be
+     * silently wrong in the one way nobody else can catch.
+     */
+    test('a fetched key package is consumed, and is never served twice', async () => {
+      const store = await createStore()
+      await store.storeKeyPackage(ALICE, 'kp-1')
+      await store.storeKeyPackage(ALICE, 'kp-2')
+
+      const first = await store.fetchKeyPackages(ALICE, 1)
+      expect(first).toHaveLength(1)
+      const second = await store.fetchKeyPackages(ALICE, 1)
+      expect(second).toHaveLength(1)
+      expect(second).not.toEqual(first)
+
+      // The shelf is empty, and an empty shelf is an empty answer rather than an error: an
+      // inviter that cannot get a package has to be told, not thrown at.
+      expect(await store.fetchKeyPackages(ALICE, 1)).toEqual([])
+    })
+
+    test('fetchKeyPackages returns what it has when asked for more, and nothing for a stranger', async () => {
+      const store = await createStore()
+      await store.storeKeyPackage(ALICE, 'kp-only')
+
+      expect(await store.fetchKeyPackages(BOB, 1)).toEqual([])
+      // Fewer than asked for, rather than a throw or a padded list.
+      expect(await store.fetchKeyPackages(ALICE, 5)).toEqual(['kp-only'])
+    })
   })
 }
 
