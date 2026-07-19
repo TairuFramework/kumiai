@@ -6,8 +6,8 @@
 
 ## Resume here — 2026-07-19
 
-**The branch is GREEN and has been since `79c73a2`** — rpc 302, mls 317, mls-rpc 33, integration 31
-(nothing skipped), build and lint clean. 47 commits. Verify with
+**The branch is GREEN** — rpc 306, mls 318, mls-rpc 35, hub-server 81, integration 32 (nothing
+skipped), build and lint clean. 52 commits. Verify with
 `pnpm exec turbo run test:types test:unit --force` (check `Cached: 0`) and
 `pnpm exec vitest run --root tests/integration`.
 
@@ -25,24 +25,36 @@
 - **Item 2 — the third red test.** Its thesis (a member's own frame is not delivered back to it) is
   now asserted directly, and the duplicate it used to expect is explained as key exhaustion rather
   than a delivery rule.
+- **The reconnect (`5cf0061`).** A second `hub/receive` for a DID now takes the lane instead of
+  being refused, because a client reconnects BECAUSE its connection broke and the server learns
+  that last. The mux reports a lane that ended without being asked (`onReceiveEnded`), which the
+  drain used to swallow whole.
+- **The entry seal (`a40e822`, `7a6cd7e`).** Two independent reviews. The cipher is cleared; what
+  they found instead was `bootstrapLedger` never firing `onLedgerEntries` (every heal, not just
+  this migration), two comments asserting the opposite of the code, `exportSecret`'s deliberate
+  lack of a mutex being undocumented and load-bearing, and a fake entry seal that opened tampered
+  bytes. The blob now carries a format version — inside the blob, never the frame header, because
+  an unknown frame version would leave old peers silently dead at a stale epoch.
 - **Item 3 — the roster diff (`fd8c28e`).** Gated on the handle having actually ratcheted. The
   premise was verified against ts-mls first: a self-removing commit does not throw, leaves the epoch
   put, and drops the member's own leaf. The memory double was the permissive side and is corrected,
   which made the conformance clause that was "not expressible" expressible.
 
-## Open, in priority order
+## Open
 
-1. **A host reconnecting before its old channel is torn down gets no push lane and no error** —
-   `hub-server` binds one receive writer per DID and refuses the second, and the rejection lands on
-   a channel promise nobody awaits. Same silent-failure shape as the swallowed subscribe. Hub/host
-   territory.
-2. **XChaCha20-Poly1305 for `sealEntries` wants a reviewer who is not the author.** The key comes
-   from the negotiated exporter, but the cipher is not tied to the group's negotiated ciphersuite —
-   a second cipher in the stack, chosen inside a bugfix.
-3. **Entry-blob format change is not self-healing.** An entry-carrying commit already on a hub's
-   commit log fails the new AEAD, the resolver answers `[]`, and the frame files as poison — no
-   wedge, but those entries are never enacted. Journal is fine (plaintext bodies, re-sealed on
-   replay). Pre-1.0, likely moot, but real.
+Nothing from the review list. All six items the branch was paused on are closed, and the two
+security items were reviewed by agents that were not told what answer to reach.
+
+**The cipher choice is NOT a defect and is unchanged.** A fixed XChaCha20-Poly1305 with a fixed
+32-byte exported key is a deliberate decoupling from the negotiated MLS ciphersuite. The exporter
+is HKDF-Expand with a caller-chosen output length, so 32 bytes come back under any suite; the seal
+is a full 256 bits even under a suite whose own AEAD is AES-128; nonce margin is ~80 orders of
+magnitude; the labels are length-prefixed through `expandWithLabel`, so the app-topic secret and
+the seal key are siblings under a one-way KDF. No AAD is needed — the replay it would prevent is
+already dead, because entry bodies are content-addressed and their digests are named in the
+commit's own signed envelope.
+
+**Next: qa → completing → finishing.**
 
 **Filed, not closable where they surface** (`docs/agents/plans/next/`): the commit-topic storm (one
 publish with a rewritten cleartext epoch makes every peer heal — belongs to publish authorization),
@@ -52,8 +64,6 @@ the `ahead`-row item, and the conformance-suite item.
 **Accepted residuals — do NOT re-report:** the `processCommit`→anchor-`save` crash window; the laggard
 publisher; a fresh joiner's empty ts-mls window; `oldest > cursor` over-reporting; the drain being
 at-least-once against the live path.
-
-**Then:** qa → completing → finishing.
 
 > **Verify honestly.** `pnpm test` reports CACHED turbo results and proves nothing after an edit. Use
 > `pnpm exec turbo run test:types test:unit --force` and check it says `Cached: 0`. `pnpm test -- --force`
