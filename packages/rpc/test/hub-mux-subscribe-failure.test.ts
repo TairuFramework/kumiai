@@ -64,7 +64,15 @@ describe('a subscribe the hub refuses', () => {
 
   test('a refusal leaves no phantom refcount: a later retain asks again', async () => {
     const hub = new FakeHub({ maxRetention: 100 })
-    const mux = createHubMux({ hub, localDID: 'bob', subscribeRetryDelaysMs: FAST_RETRIES })
+    const mux = createHubMux({
+      hub,
+      localDID: 'bob',
+      subscribeRetryDelaysMs: FAST_RETRIES,
+      // Silenced on purpose: this case is about the refcount/attempt behaviour, not the notice,
+      // and an explicit handler is how a caller says the condition is handled. Left off, the
+      // mux warns to the console — which is the point of the default and not wanted here.
+      onSubscribeFailed: () => {},
+    })
 
     mux.retainTopic('topic:again', { retention: 101 })
     await flush()
@@ -116,7 +124,15 @@ describe('a subscribe the hub refuses', () => {
 
   test('a permanent refusal is asked exactly once — no spin against a settled answer', async () => {
     const hub = new FakeHub({ maxRetention: 100 })
-    const mux = createHubMux({ hub, localDID: 'bob', subscribeRetryDelaysMs: FAST_RETRIES })
+    const mux = createHubMux({
+      hub,
+      localDID: 'bob',
+      subscribeRetryDelaysMs: FAST_RETRIES,
+      // Silenced on purpose: this case is about the refcount/attempt behaviour, not the notice,
+      // and an explicit handler is how a caller says the condition is handled. Left off, the
+      // mux warns to the console — which is the point of the default and not wanted here.
+      onSubscribeFailed: () => {},
+    })
 
     mux.retainTopic('topic:settled', { retention: 101 })
     await flush()
@@ -130,7 +146,15 @@ describe('a subscribe the hub refuses', () => {
 
   test('a later retain with no window does not quietly settle for the hub default', async () => {
     const hub = new FakeHub({ maxRetention: 100 })
-    const mux = createHubMux({ hub, localDID: 'bob', subscribeRetryDelaysMs: FAST_RETRIES })
+    const mux = createHubMux({
+      hub,
+      localDID: 'bob',
+      subscribeRetryDelaysMs: FAST_RETRIES,
+      // Silenced on purpose: this case is about the refcount/attempt behaviour, not the notice,
+      // and an explicit handler is how a caller says the condition is handled. Left off, the
+      // mux warns to the console — which is the point of the default and not wanted here.
+      onSubscribeFailed: () => {},
+    })
 
     mux.retainTopic('topic:downgrade', { retention: 101 })
     await flush()
@@ -314,4 +338,42 @@ describe('the hub doubles refuse what a real hub refuses', () => {
       ).not.toThrow()
     })
   }
+})
+
+describe('a subscribe failure with no handler wired', () => {
+  test('is warned rather than swallowed, and a wired handler replaces the warning', async () => {
+    const warnings: Array<unknown> = []
+    const warn = console.warn
+    console.warn = (...args: Array<unknown>) => void warnings.push(args[0])
+    try {
+      // A retention above the hub's ceiling: refused outright, and permanently.
+      const refusing = new FakeHub({ maxRetention: 100 })
+
+      // No handler: the peer is not a subscriber of that topic and nothing else would say so.
+      const bare = createHubMux({ hub: refusing, localDID: 'bob' })
+      bare.retainTopic('topic:x', { retention: 101 })
+      await flush()
+      expect(refusing.subscriberCount('topic:x')).toBe(0)
+      expect(warnings).toHaveLength(1)
+      expect(String(warnings[0])).toContain('refused the subscription')
+
+      // Wired: the host's handler takes over and the fallback stays quiet.
+      warnings.length = 0
+      const failures: Array<unknown> = []
+      const wired = createHubMux({
+        hub: refusing,
+        localDID: 'carol',
+        onSubscribeFailed: (failure) => failures.push(failure),
+      })
+      wired.retainTopic('topic:x', { retention: 101 })
+      await flush()
+      expect(failures).toHaveLength(1)
+      expect(warnings).toEqual([])
+
+      await bare.dispose()
+      await wired.dispose()
+    } finally {
+      console.warn = warn
+    }
+  })
 })

@@ -47,6 +47,42 @@ export type ReceiveLaneEnded = {
   error?: unknown
 }
 
+/**
+ * THE FALLBACK, used when a host wires no handler: say it out loud rather than nowhere.
+ *
+ * Both conditions leave a peer that looks healthy and is not — every call still succeeds, and
+ * the group simply appears to have gone quiet. A host that has not wired the notice is exactly
+ * the host that will not otherwise find out, so the default has to be loud rather than tidy.
+ *
+ * `console.warn` and not a logger, deliberately. A logging library with no sink configured is
+ * silent, which is the failure being removed; this is the one output every runtime shows without
+ * being set up first. A host that has handled the condition silences it by passing its own
+ * handler — including an empty one, which is how it says so on purpose.
+ *
+ * Only these two. `rpc/src` swallows failures in twenty-odd other places and every one of them is
+ * ordinary control flow on a shared log — a frame sealed for another epoch, a host handler that
+ * threw, a retry that ran out. Logging those would be constant noise, and a warning nobody can
+ * afford to read is worth no more than silence.
+ */
+const warnSubscribeFailed = (failure: SubscribeFailure): void => {
+  console.warn(
+    `[@kumiai/rpc] hub refused the subscription to ${failure.topicID}` +
+      `${failure.permanent ? ' (permanently)' : ' (after exhausting retries)'}. ` +
+      'This peer receives nothing on that topic and cannot pull it; every publish and fetch on ' +
+      'it now throws. Wire `onSubscribeFailed` to handle this.',
+    failure.error,
+  )
+}
+
+const warnReceiveEnded = (ended: ReceiveLaneEnded): void => {
+  console.warn(
+    '[@kumiai/rpc] the hub push lane ended and will not restart on its own. This peer will ' +
+      'receive nothing further — no error, and every call keeps succeeding — until the host ' +
+      'reconnects and builds a new peer. Wire `onReceiveEnded` to handle this.',
+    ended.error,
+  )
+}
+
 export type HubMuxParams = {
   /** The real hub. It must serve a log: the commit lane reads one. */
   hub: LogHub
@@ -59,6 +95,9 @@ export type HubMuxParams = {
    * could throw, so without it a pure consumer would sit silent — which is the whole defect.
    *
    * Fire-and-forget; a throw here is swallowed rather than allowed to kill the retry path.
+   *
+   * Omitted, the failure is warned to the console instead of passing silently — see
+   * {@link warnSubscribeFailed}. Pass an empty handler to silence it deliberately.
    */
   onSubscribeFailed?: (failure: SubscribeFailure) => void
   /**
@@ -66,6 +105,9 @@ export type HubMuxParams = {
    * on `dispose` — an ending the caller asked for is not news.
    *
    * Fire-and-forget: a throw here is swallowed rather than allowed to escape into the drain.
+   *
+   * Omitted, the condition is warned to the console instead of passing silently — see
+   * {@link warnReceiveEnded}. Pass an empty handler to silence it deliberately.
    */
   onReceiveEnded?: (ended: ReceiveLaneEnded) => void
   /** Backoff schedule for transient subscribe failures. Default {@link DEFAULT_SUBSCRIBE_RETRY_DELAYS_MS}. */
@@ -226,7 +268,9 @@ function isPermanentSubscribeFailure(error: unknown): boolean {
  * what backgrounding a mobile app calls.
  */
 export function createHubMux(params: HubMuxParams): HubMux {
-  const { hub, localDID, onSubscribeFailed, onReceiveEnded } = params
+  const { hub, localDID } = params
+  const onSubscribeFailed = params.onSubscribeFailed ?? warnSubscribeFailed
+  const onReceiveEnded = params.onReceiveEnded ?? warnReceiveEnded
   const retryDelaysMs = params.subscribeRetryDelaysMs ?? DEFAULT_SUBSCRIBE_RETRY_DELAYS_MS
 
   const listeners = new Map<string, Set<InboundListener>>()

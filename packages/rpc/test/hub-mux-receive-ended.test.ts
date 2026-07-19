@@ -117,6 +117,90 @@ describe('the mux reports a push lane that ended without being asked to', () => 
     await mux.dispose()
   })
 
+  /**
+   * A HOST THAT WIRED NOTHING STILL FINDS OUT. Both conditions leave a peer that looks healthy
+   * and is not — every call keeps succeeding and the group merely appears to have gone quiet —
+   * so the host least likely to notice is precisely the one that wired no handler.
+   *
+   * `console.warn` rather than a logger: a logging library with no sink configured is silent,
+   * which is the failure being removed.
+   */
+  test('with no handler wired, the ending is warned rather than swallowed', async () => {
+    const hub = new FakeHub()
+    const wrapped = endableHub(hub, 'done')
+    const warnings: Array<unknown> = []
+    const warn = console.warn
+    console.warn = (...args: Array<unknown>) => void warnings.push(args[0])
+    try {
+      let lane: { endLane: () => void } | undefined
+      const mux = createHubMux({
+        hub: {
+          ...wrapped,
+          receive: (did: string) => {
+            const subscription = wrapped.receive(did)
+            lane = subscription as unknown as { endLane: () => void }
+            return subscription
+          },
+        } as LogHub,
+        localDID: 'bob',
+        // No onReceiveEnded.
+      })
+      mux.onInbound('topic:x', () => {})
+      await hub.publish({ senderDID: 'alice', topicID: 'topic:x', payload: new Uint8Array([1]) })
+      await flush()
+      expect(warnings).toEqual([])
+
+      lane?.endLane()
+      await hub.publish({ senderDID: 'alice', topicID: 'topic:x', payload: new Uint8Array([2]) })
+      await flush()
+
+      expect(warnings).toHaveLength(1)
+      expect(String(warnings[0])).toContain('push lane ended')
+      await mux.dispose()
+    } finally {
+      console.warn = warn
+    }
+  })
+
+  test('a handler the host DID wire replaces the warning rather than adding to it', async () => {
+    const hub = new FakeHub()
+    const wrapped = endableHub(hub, 'done')
+    const warnings: Array<unknown> = []
+    const ended: Array<ReceiveLaneEnded> = []
+    const warn = console.warn
+    console.warn = (...args: Array<unknown>) => void warnings.push(args[0])
+    try {
+      let lane: { endLane: () => void } | undefined
+      const mux = createHubMux({
+        hub: {
+          ...wrapped,
+          receive: (did: string) => {
+            const subscription = wrapped.receive(did)
+            lane = subscription as unknown as { endLane: () => void }
+            return subscription
+          },
+        } as LogHub,
+        localDID: 'bob',
+        onReceiveEnded: (event) => ended.push(event),
+      })
+      mux.onInbound('topic:x', () => {})
+      await hub.publish({ senderDID: 'alice', topicID: 'topic:x', payload: new Uint8Array([1]) })
+      await flush()
+
+      lane?.endLane()
+      await hub.publish({ senderDID: 'alice', topicID: 'topic:x', payload: new Uint8Array([2]) })
+      await flush()
+
+      // The host handled it, so the fallback stays out of the way — including an empty handler,
+      // which is how a host says "handled" on purpose.
+      expect(ended).toHaveLength(1)
+      expect(warnings).toEqual([])
+      await mux.dispose()
+    } finally {
+      console.warn = warn
+    }
+  })
+
   test('dispose ends the lane and says nothing, because the caller asked for it', async () => {
     const hub = new FakeHub()
     const ended: Array<ReceiveLaneEnded> = []
