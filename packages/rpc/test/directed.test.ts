@@ -4,7 +4,7 @@ import type { ProcedureHandlers } from '@enkaku/server'
 import type { Unwrap } from '@kumiai/broadcast'
 import { describe, expect, test } from 'vitest'
 
-import { createDirectedClient, createInboxAcceptor } from '../src/directed.js'
+import { createDirectedClient, createInboxAcceptor, createInboxPath } from '../src/directed.js'
 import { createHubMux } from '../src/hub-mux.js'
 import { inboxTopic } from '../src/topic.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
@@ -20,20 +20,47 @@ const protocol = {
 type Protocol = typeof protocol
 type Handlers = ProcedureHandlers<Protocol>
 
-function member(hub: FakeHub, localDID: string, handlers: Record<string, unknown>) {
+function member(
+  hub: FakeHub,
+  localDID: string,
+  handlers: Record<string, unknown>,
+  unwrap?: Unwrap,
+) {
   const crypto = createFakeCrypto({ localDID })
   const mux = createHubMux({ hub, localDID })
+  const topicID = inboxTopic(SECRET, EPOCH, localDID)
   const acceptor = createInboxAcceptor({
     mux,
     localDID,
-    selfInboxTopic: inboxTopic(SECRET, EPOCH, localDID),
+    selfInboxTopic: topicID,
+    inbound: createInboxPath({ mux, topicID, unwrap: unwrap ?? crypto.unwrap }),
     resolveSendTopic: (senderDID) => inboxTopic(SECRET, EPOCH, senderDID),
     protocol,
     handlers: handlers as Handlers,
     wrap: crypto.wrap,
-    unwrap: crypto.unwrap,
   })
   return { mux, acceptor }
+}
+
+/**
+ * A caller's own inbox path, shared by every directed client it builds — the same sharing the
+ * peer does, because the reply topic is the caller's one inbox whoever it is talking to.
+ */
+function caller(hub: FakeHub, localDID: string, memberDID: string, sessionID: string) {
+  const crypto = createFakeCrypto({ localDID })
+  const mux = createHubMux({ hub, localDID })
+  const receiveTopicID = inboxTopic(SECRET, EPOCH, localDID)
+  const created = createDirectedClient<Protocol>({
+    mux,
+    localDID,
+    memberDID,
+    sendTopicID: inboxTopic(SECRET, EPOCH, memberDID),
+    receiveTopicID,
+    inbound: createInboxPath({ mux, topicID: receiveTopicID, unwrap: crypto.unwrap }),
+    getRandomID: () => sessionID,
+    wrap: crypto.wrap,
+  })
+  return { ...created, mux, crypto }
 }
 
 describe('directed RPC', () => {
@@ -42,18 +69,7 @@ describe('directed RPC', () => {
     const bob = member(hub, 'bob', {
       'rpc/double': (ctx: { param: { n: number } }) => ({ n: ctx.param.n * 2 }),
     })
-    const aliceCrypto = createFakeCrypto({ localDID: 'alice' })
-    const aliceMux = createHubMux({ hub, localDID: 'alice' })
-    const { client, dispose } = createDirectedClient<Protocol>({
-      mux: aliceMux,
-      localDID: 'alice',
-      memberDID: 'bob',
-      secret: SECRET,
-      epoch: EPOCH,
-      getRandomID: () => 'session-a-b',
-      wrap: aliceCrypto.wrap,
-      unwrap: aliceCrypto.unwrap,
-    })
+    const { client, dispose, mux: aliceMux } = caller(hub, 'alice', 'bob', 'session-a-b')
 
     const result = await client.request('rpc/double', { param: { n: 21 } })
     expect(result).toEqual({ n: 42 })
@@ -77,18 +93,7 @@ describe('directed RPC', () => {
       n: number
     }
     const callers: Array<CallerEntry> = ['alice', 'carol'].map((localDID, i) => {
-      const callerCrypto = createFakeCrypto({ localDID })
-      const mux = createHubMux({ hub, localDID })
-      const { client, dispose } = createDirectedClient<Protocol>({
-        mux,
-        localDID,
-        memberDID: 'bob',
-        secret: SECRET,
-        epoch: EPOCH,
-        getRandomID: () => `session-${localDID}`,
-        wrap: callerCrypto.wrap,
-        unwrap: callerCrypto.unwrap,
-      })
+      const { mux, client, dispose } = caller(hub, localDID, 'bob', `session-${localDID}`)
       return { mux, client, dispose, n: (i + 1) * 10 }
     })
 
@@ -109,23 +114,46 @@ describe('directed RPC', () => {
 describe('directed RPC security', () => {
   const flush = (ms = 30) => new Promise((r) => setTimeout(r, ms))
 
+  test('a frame that opens without an authenticated sender never reaches a handler', async () => {
+    const hub = new FakeHub()
+    const calls: Array<number> = []
+    // An open that discards the sender it recovered. The hub-asserted one is NOT a fallback: a
+    // lane that fell back to it would take a lying hub's word for who wrote the frame, and every
+    // directed session is bound to that value.
+    const bobCrypto = createFakeCrypto({ localDID: 'bob' })
+    const senderless: Unwrap = async (bytes) => {
+      const result = await bobCrypto.unwrap(bytes)
+      return result instanceof Uint8Array ? result : result.payload
+    }
+    const bob = member(
+      hub,
+      'bob',
+      {
+        'rpc/double': (ctx: { param: { n: number } }) => {
+          calls.push(ctx.param.n)
+          return { n: ctx.param.n * 2 }
+        },
+      },
+      senderless,
+    )
+    const { client, dispose, mux: aliceMux } = caller(hub, 'alice', 'bob', 'session-a-b')
+
+    void client.request('rpc/double', { param: { n: 3 } }).catch(() => {})
+    await flush(60)
+    expect(calls).toEqual([])
+
+    await dispose()
+    await aliceMux.dispose()
+    await bob.acceptor.dispose()
+    await bob.mux.dispose()
+  })
+
   test('the hub never sees directed request plaintext', async () => {
     const hub = new FakeHub()
     const bob = member(hub, 'bob', {
       'rpc/double': (ctx: { param: { n: number } }) => ({ n: ctx.param.n * 2 }),
     })
-    const aliceCrypto = createFakeCrypto({ localDID: 'alice' })
-    const aliceMux = createHubMux({ hub, localDID: 'alice' })
-    const { client, dispose } = createDirectedClient<Protocol>({
-      mux: aliceMux,
-      localDID: 'alice',
-      memberDID: 'bob',
-      secret: SECRET,
-      epoch: EPOCH,
-      getRandomID: () => 'session-a-b',
-      wrap: aliceCrypto.wrap,
-      unwrap: aliceCrypto.unwrap,
-    })
+    const { client, dispose, mux: aliceMux } = caller(hub, 'alice', 'bob', 'session-a-b')
 
     const result = await client.request('rpc/double', { param: { n: 21 } })
     expect(result).toEqual({ n: 42 })
@@ -150,18 +178,7 @@ describe('directed RPC security', () => {
         return { n: ctx.param.n * 2 }
       },
     })
-    const aliceCrypto = createFakeCrypto({ localDID: 'alice' })
-    const aliceMux = createHubMux({ hub, localDID: 'alice' })
-    const { client, dispose } = createDirectedClient<Protocol>({
-      mux: aliceMux,
-      localDID: 'alice',
-      memberDID: 'bob',
-      secret: SECRET,
-      epoch: EPOCH,
-      getRandomID: () => 'session-a-b',
-      wrap: aliceCrypto.wrap,
-      unwrap: aliceCrypto.unwrap,
-    })
+    const { client, dispose, mux: aliceMux } = caller(hub, 'alice', 'bob', 'session-a-b')
     await client.request('rpc/double', { param: { n: 1 } })
     expect(calls).toEqual([1])
 
@@ -215,10 +232,12 @@ describe('directed RPC security', () => {
       return bobCrypto.unwrap(bytes)
     }
 
+    const bobTopic = inboxTopic(SECRET, EPOCH, 'bob')
     const bobAcceptor = createInboxAcceptor({
       mux: bobMux,
       localDID: 'bob',
-      selfInboxTopic: inboxTopic(SECRET, EPOCH, 'bob'),
+      selfInboxTopic: bobTopic,
+      inbound: createInboxPath({ mux: bobMux, topicID: bobTopic, unwrap: delayedUnwrap }),
       resolveSendTopic: (senderDID) => inboxTopic(SECRET, EPOCH, senderDID),
       protocol,
       handlers: {
@@ -228,21 +247,9 @@ describe('directed RPC security', () => {
         },
       } as unknown as Handlers,
       wrap: bobCrypto.wrap,
-      unwrap: delayedUnwrap,
     })
 
-    const aliceCrypto = createFakeCrypto({ localDID: 'alice' })
-    const aliceMux = createHubMux({ hub, localDID: 'alice' })
-    const { client, dispose } = createDirectedClient<Protocol>({
-      mux: aliceMux,
-      localDID: 'alice',
-      memberDID: 'bob',
-      secret: SECRET,
-      epoch: EPOCH,
-      getRandomID: () => 'session-a-b',
-      wrap: aliceCrypto.wrap,
-      unwrap: aliceCrypto.unwrap,
-    })
+    const { client, dispose, mux: aliceMux } = caller(hub, 'alice', 'bob', 'session-a-b')
 
     // Fire both requests on the same session without awaiting the first, so
     // both frames land on bob's inbox back-to-back and race at the unwrap

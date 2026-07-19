@@ -432,11 +432,14 @@ describe('the drain delivers only what the live lane would', () => {
     hub.reattach('bob')
     await flush()
 
-    expect(seen).toEqual([
-      { text: 'alice said this' },
-      { text: 'alice said this' },
-      { text: 'alice said more' },
-    ])
+    // Bob's own frame is skipped, and alice's frames arrive in log order. Her FIRST one does not
+    // arrive a second time: the live open spent its per-message key, and a restart carries the
+    // handle's state forward rather than rewinding it, so the drain's re-open of those same bytes
+    // fails the way any spent frame does. That is key exhaustion, not a delivery rule — the drain
+    // is at-least-once against the live path, and a frame whose key outlived the restart may well
+    // be handed over twice. The rule under test is the skip, asserted on its own below.
+    expect(seen).toEqual([{ text: 'alice said this' }, { text: 'alice said more' }])
+    expect(seen).not.toContainEqual({ text: 'bob said this' })
 
     const frames = hub.published.filter((m) => m.topicID === topicID)
     expect(frames).toHaveLength(3)

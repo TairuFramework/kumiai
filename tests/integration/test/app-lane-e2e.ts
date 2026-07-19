@@ -32,10 +32,16 @@ import { createGroupPeer } from '@kumiai/rpc'
 
 import type { WireHub } from './log-hub-over-wire.js'
 
-/** The app protocol under test: one logged procedure, one ephemeral one beside it. */
+/**
+ * The app protocol under test: one logged procedure, one ephemeral one beside it, and one
+ * REQUEST — the directed lane's, which runs over the members' inbox topics rather than the app
+ * topic. A member supplies a handler only for what it answers, so adding this costs the
+ * event-lane tests nothing.
+ */
 export const chat = {
   'chat/changed': { type: 'event', data: { type: 'object' } },
   'chat/posted': { type: 'event', retain: 'log', data: { type: 'object' } },
+  'chat/double': { type: 'request', param: { type: 'object' }, result: { type: 'object' } },
 } as const satisfies GroupProtocolDefinition
 
 export type Protocols = { chat: typeof chat }

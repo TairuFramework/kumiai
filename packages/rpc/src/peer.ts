@@ -34,11 +34,17 @@ import {
 import { type CommitFrame, decodeCommitFrame, encodeCommitFrame } from './commit-frame.js'
 import { type GroupCrypto, type GroupMLS, isMissingLedgerEntries } from './crypto.js'
 import { asLogPosition, type LogPosition } from './cursor.js'
-import { createDirectedClient, createInboxAcceptor } from './directed.js'
+import {
+  createDirectedClient,
+  createInboxAcceptor,
+  createInboxPath,
+  type InboundPath,
+} from './directed.js'
 import { adaptBusHandlers, type BusHandlerMaps } from './handlers.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from './handshake.js'
 import { createHubMux, type HubMux, type SubscribeFailure } from './hub-mux.js'
 import { createLedgerEntryResolver, encodeLedgerEntries } from './ledger-entries.js'
+import { createOpenOncePath } from './open-once.js'
 import { retentionOf } from './protocol.js'
 import {
   decodeLedgerReply,
@@ -367,6 +373,13 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   let runtimes = new Map<string, ProtocolRuntime>()
 
   /**
+   * The epoch's self-inbox topic and the one path that opens its frames. Held per peer rather
+   * than per protocol because the topic is not per protocol, and rebuilt with the epoch — the
+   * topic is anchor-bound, so a roster change moves it.
+   */
+  let inboxLane: { topicID: string; path: InboundPath } | undefined
+
+  /**
    * The host's app event handlers, per protocol, as the drain calls them — the same adaptation
    * the live bus server is built from, so a drained frame and a pushed one reach the host by the
    * same door. Built once: the handlers a host passed at construction do not change, and the
@@ -549,56 +562,24 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   const openedFrames = new WeakMap<Uint8Array, UnwrapResult>()
 
   /**
-   * ONE INBOUND PATH PER APP TOPIC, shared by every transport built on it.
+   * The app lane's inbound path: one open per topic, fanned out as plaintext, with each frame's
+   * log position noted before the open — so it is noted at the epoch the frame is about to be
+   * opened against. Every consumer's own `unwrap` is then a pure lookup of the opened result
+   * ({@link openedFrames}), and nothing downstream touches the handle.
    *
-   * OPENING IS A CONSUMING OPERATION. `crypto.unwrap` spends the frame's own per-message ratchet
-   * key on the handle it opens against, so the same bytes open exactly once and every later open
-   * of them fails — not because the frame is bad, but because its key is gone. The port says so
-   * (see {@link GroupCrypto.unwrap}); it cannot be duplicated, and a lane that gave two consumers
-   * an `unwrap` each would have them race for one key with the loser silently dropping the frame.
-   *
-   * So the frame is opened HERE, once, and the opened result is fanned out. Each consumer's own
-   * `unwrap` is then a pure lookup of that result — the fan-out is over plaintext, and nothing
-   * downstream touches the handle.
-   *
-   * Subscribed through the mux's raw inbound path rather than its bus view, because the bus view
-   * hands on the payload alone and the frame's log position is the one thing this lane could not
-   * previously write down. The note is taken before the open, so it is taken at the epoch the
-   * frame is about to be opened against.
-   *
-   * The mux subscription is held for as long as a consumer wants it and released with the last
-   * one, which is what keeps a rotation's teardown from leaving a listener behind on a topic the
-   * group has left.
+   * See {@link createOpenOncePath} for why a lane may only open a frame once.
    */
-  const createInboundPath = (name: string, topicID: string) => {
-    const listeners = new Set<(payload: Uint8Array) => void>()
-    let unsubscribe: (() => void) | undefined
-    return (onOpened: (payload: Uint8Array) => void): (() => void) => {
-      listeners.add(onOpened)
-      unsubscribe ??= mux.onInbound(topicID, (message) => {
-        noteLiveAppFrame(name, topicID, message)
-        void Promise.resolve(crypto.unwrap(message.payload))
-          .then((result) => {
-            const opened = result instanceof Uint8Array ? { payload: result } : result
-            openedFrames.set(opened.payload, opened)
-            // Snapshot: a consumer disposing from inside its own delivery must not perturb the
-            // fan-out of the frame it is being given.
-            for (const listener of [...listeners]) listener(opened.payload)
-          })
-          .catch(() => {
-            // A frame this handle cannot open — another epoch's, another group's, or not a frame
-            // at all. Ordinary on a shared log, and the read paths are built to walk past it.
-          })
-      })
-      return () => {
-        listeners.delete(onOpened)
-        if (listeners.size === 0) {
-          unsubscribe?.()
-          unsubscribe = undefined
-        }
-      }
-    }
-  }
+  const createInboundPath = (name: string, topicID: string) =>
+    createOpenOncePath<Uint8Array>({
+      mux,
+      topicID,
+      unwrap: crypto.unwrap,
+      project: (_message, opened) => {
+        openedFrames.set(opened.payload, opened)
+        return opened.payload
+      },
+      note: (message) => noteLiveAppFrame(name, topicID, message),
+    })
 
   /**
    * One protocol's live-lane transport: it LISTENS on the topic the runtime is built for, and
@@ -653,6 +634,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   const buildEpoch = async (): Promise<void> => {
     epoch = crypto.epoch()
     const next = new Map<string, ProtocolRuntime>()
+    // ONE inbox lane for the whole peer, not one per protocol. The topic does not name a
+    // protocol, so every protocol's acceptor and every directed client read the same frames, and
+    // each one opening them itself is the defect this shape exists to prevent.
+    const selfInbox = inboxTopic(anchor.secret, anchor.epoch, localDID)
+    inboxLane = {
+      topicID: selfInbox,
+      path: createInboxPath({ mux, topicID: selfInbox, unwrap: crypto.unwrap }),
+    }
     for (const [name, protocol] of Object.entries(protocols)) {
       // The app topic is bound to the ANCHOR, not the live epoch: it holds constant while epochs
       // advance without touching the roster, and rotates onto a new topic when a roster change is
@@ -671,7 +660,6 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       // carries no such request. The mux subscribes a topic once, so this is the subscribe the
       // hub sees for the live lane and it is the one that must carry the window.
       mux.retainTopic(topicID, { retention: appLogRetentionSeconds })
-      const selfInbox = inboxTopic(anchor.secret, anchor.epoch, localDID)
       // One path, two consumers: the frame is opened once here and both are given the plaintext.
       const inbound = createInboundPath(name, topicID)
       const client = new BroadcastClient({
@@ -693,11 +681,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         mux,
         localDID,
         selfInboxTopic: selfInbox,
+        inbound: inboxLane.path,
         resolveSendTopic: (senderDID) => inboxTopic(anchor.secret, anchor.epoch, senderDID),
         protocol: protocol as ProtocolDefinition,
         handlers: handlers[name] as unknown as ProcedureHandlers<ProtocolDefinition>,
         wrap: crypto.wrap,
-        unwrap: crypto.unwrap,
       })
       next.set(name, { client, busServer, acceptor, directed: new Map() })
     }
@@ -775,14 +763,19 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       to: (memberDID) => {
         const cached = runtime.directed.get(memberDID)
         if (cached != null) return cached.client
+        const lane = inboxLane
+        if (lane == null) throw new Error('Peer is not started')
         const created = createDirectedClient<ProtocolDefinition>({
           mux,
           localDID,
           memberDID,
-          secret: anchor.secret,
-          epoch: anchor.epoch,
+          sendTopicID: inboxTopic(anchor.secret, anchor.epoch, memberDID),
+          // The epoch's own inbox topic and its one open path, taken together: reading replies
+          // through a path built for a topic this client does not receive on would open frames
+          // for a lane nobody is listening to, and spend their keys doing it.
+          receiveTopicID: lane.topicID,
+          inbound: lane.path,
           wrap: crypto.wrap,
-          unwrap: crypto.unwrap,
           ...(getRandomID != null ? { getRandomID } : {}),
         })
         runtime.directed.set(memberDID, created)
