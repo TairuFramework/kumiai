@@ -32,6 +32,21 @@ export type SubscribeFailure = {
  */
 const DEFAULT_SUBSCRIBE_RETRY_DELAYS_MS: ReadonlyArray<number> = [100, 500, 2_000, 10_000]
 
+/**
+ * The push lane has ended, and it will not restart on its own.
+ *
+ * `receive` is one long-lived channel and this mux drains it once. When it ends — the hub refused
+ * it, the connection died, the server replaced it with a newer one for the same DID — nothing
+ * downstream is told: every listener simply stops being called, and a peer that is only READING
+ * looks identical to a peer whose group has gone quiet. That silence is the defect. The host owns
+ * the connection, so the host is the only thing that can reconnect it; this is how it finds out
+ * it has to.
+ */
+export type ReceiveLaneEnded = {
+  /** What the drain threw, or `undefined` when the channel simply ended. */
+  error?: unknown
+}
+
 export type HubMuxParams = {
   /** The real hub. It must serve a log: the commit lane reads one. */
   hub: LogHub
@@ -46,6 +61,13 @@ export type HubMuxParams = {
    * Fire-and-forget; a throw here is swallowed rather than allowed to kill the retry path.
    */
   onSubscribeFailed?: (failure: SubscribeFailure) => void
+  /**
+   * Called once when the push lane ends, for any reason. See {@link ReceiveLaneEnded}. Not called
+   * on `dispose` — an ending the caller asked for is not news.
+   *
+   * Fire-and-forget: a throw here is swallowed rather than allowed to escape into the drain.
+   */
+  onReceiveEnded?: (ended: ReceiveLaneEnded) => void
   /** Backoff schedule for transient subscribe failures. Default {@link DEFAULT_SUBSCRIBE_RETRY_DELAYS_MS}. */
   subscribeRetryDelaysMs?: ReadonlyArray<number>
 }
@@ -204,7 +226,7 @@ function isPermanentSubscribeFailure(error: unknown): boolean {
  * what backgrounding a mobile app calls.
  */
 export function createHubMux(params: HubMuxParams): HubMux {
-  const { hub, localDID, onSubscribeFailed } = params
+  const { hub, localDID, onSubscribeFailed, onReceiveEnded } = params
   const retryDelaysMs = params.subscribeRetryDelaysMs ?? DEFAULT_SUBSCRIBE_RETRY_DELAYS_MS
 
   const listeners = new Map<string, Set<InboundListener>>()
@@ -352,15 +374,31 @@ export function createHubMux(params: HubMuxParams): HubMux {
 
   const subscription = hub.receive(localDID)
   const iterator = subscription[Symbol.asyncIterator]()
+  // Reported once, and only for an ending nobody asked for. `dispose` ends the drain too, and a
+  // host being told its lane died in response to its own teardown is noise that trains hosts to
+  // ignore the notice.
+  const reportEnded = (ended: ReceiveLaneEnded): void => {
+    if (disposed) return
+    try {
+      onReceiveEnded?.(ended)
+    } catch {
+      // a host's notice handler must not break the mux
+    }
+  }
   void (async () => {
     while (true) {
       let result: IteratorResult<StoredMessage>
       try {
         result = await iterator.next()
-      } catch {
+      } catch (error) {
+        reportEnded({ error })
         return
       }
-      if (disposed || result.done) return
+      if (disposed) return
+      if (result.done) {
+        reportEnded({})
+        return
+      }
       const message = result.value
       const ack = () => {
         // An ack names a place in THIS recipient's delivery queue, not in the topic's

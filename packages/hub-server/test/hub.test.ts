@@ -291,19 +291,59 @@ describe('hub pub/sub', () => {
     await ctx.dispose()
   })
 
-  test('hub/receive rejects a second concurrent open for the same DID', async () => {
+  /**
+   * A SECOND `hub/receive` FOR THE SAME DID TAKES THE LANE, and the first one ends.
+   *
+   * The rule used to be the opposite — refuse the second — which reads as the safer one and is
+   * not. A client reconnects BECAUSE its connection broke, and the server is the last to know: it
+   * still holds a writer pointing at a socket that is already gone. Refusing on that stale belief
+   * turns the reconnect away and leaves the member with no push lane until a timeout it cannot
+   * see. Worse, the refusal arrives on a channel promise the mux never awaited, so the member was
+   * deaf AND silent about it.
+   *
+   * Both channels belong to one authenticated DID, so nothing here lets anyone displace anyone
+   * else. Asserted on where a message actually LANDS, not on the binding: the binding is
+   * bookkeeping, delivery is the property.
+   */
+  test('a second hub/receive for the same DID takes over the push lane', async () => {
     const ctx = createTestHub()
+    const { client: alice } = ctx.connect()
     const bobIdentity = randomIdentity()
     const { client: bob } = ctx.connect(bobIdentity)
-    const channel1 = bob.createChannel('hub/receive', { param: {} })
-    channel1.readable.getReader()
+    await bob.request('hub/subscribe', { param: { topicID: TOPIC } })
+
+    // The stale channel: still open as far as the server knows.
+    const stale = bob.createChannel('hub/receive', { param: {} })
+    const staleReader = stale.readable.getReader()
+    let staleDelivered = false
+    // `value != null` and not merely "the read settled": ending the stale channel settles the
+    // pending read too, with `{ done: true }`, and a test that counted that as a delivery would
+    // report one for the very close it is asserting about.
+    void staleReader.read().then(
+      (result) => {
+        if (result.value != null) staleDelivered = true
+      },
+      () => {},
+    )
     await delay(20)
 
-    const channel2 = bob.createChannel('hub/receive', { param: {} })
-    await expect(channel2).rejects.toThrow('already bound')
+    // The reconnect. It is not refused, and the old channel ends on its own.
+    const live = bob.createChannel('hub/receive', { param: {} })
+    const liveReader = live.readable.getReader()
+    await delay(20)
+    // It ENDS rather than errors: being replaced is not the old channel's fault, and the client
+    // that replaced it is the same client.
+    await expect(stale).resolves.toBeUndefined()
 
-    channel1.close()
-    await expect(channel1).rejects.toEqual('Close')
+    await alice.request('hub/publish', {
+      param: { topicID: TOPIC, payload: encodePayload('after the reconnect') },
+    })
+    const received = await liveReader.read()
+    expect(received.value?.topicID).toBe(TOPIC)
+    expect(staleDelivered).toBe(false)
+
+    live.close()
+    await expect(live).rejects.toEqual('Close')
     await delay(20)
     await ctx.dispose()
   })

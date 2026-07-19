@@ -42,7 +42,12 @@ import {
 } from './directed.js'
 import { adaptBusHandlers, type BusHandlerMaps } from './handlers.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from './handshake.js'
-import { createHubMux, type HubMux, type SubscribeFailure } from './hub-mux.js'
+import {
+  createHubMux,
+  type HubMux,
+  type ReceiveLaneEnded,
+  type SubscribeFailure,
+} from './hub-mux.js'
 import { createLedgerEntryResolver, encodeLedgerEntries } from './ledger-entries.js'
 import { createOpenOncePath } from './open-once.js'
 import { retentionOf } from './protocol.js'
@@ -232,6 +237,17 @@ export type GroupPeerParams<Protocols extends Record<string, ProtocolDefinition>
    * Fire-and-forget: a throw is swallowed.
    */
   onSubscribeFailed?: (failure: SubscribeFailure) => void
+  /**
+   * The push lane has ended and nothing will restart it. See {@link "hub-mux".ReceiveLaneEnded}.
+   *
+   * The connection belongs to the HOST — the peer is handed a hub, it does not dial one — so the
+   * host is the only thing that can reconnect. Without this the ending is invisible: listeners
+   * just stop being called, and a peer with a dead lane is indistinguishable from a group with
+   * nothing to say. A host that reconnects should build a new peer over the new connection.
+   *
+   * Not called on `dispose`. Fire-and-forget: a throw is swallowed.
+   */
+  onReceiveEnded?: (ended: ReceiveLaneEnded) => void
 } & (
   | GroupPeerMLSParams
   | {
@@ -368,6 +384,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     hub,
     localDID,
     ...(params.onSubscribeFailed != null ? { onSubscribeFailed: params.onSubscribeFailed } : {}),
+    ...(params.onReceiveEnded != null ? { onReceiveEnded: params.onReceiveEnded } : {}),
   })
 
   let runtimes = new Map<string, ProtocolRuntime>()

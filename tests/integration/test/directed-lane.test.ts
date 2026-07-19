@@ -156,3 +156,98 @@ describe('directed RPC over real MLS, end to end', () => {
     await hub.dispose()
   })
 })
+
+/**
+ * RECONNECTING BEFORE THE OLD CONNECTION IS TORN DOWN.
+ *
+ * This is what a phone does: the socket dies, the client dials again, and the server is the last
+ * to know the old one is gone — it still holds a receive writer pointing at it. The rule used to
+ * be that the second `hub/receive` for a DID was refused, so the reconnect made precisely because
+ * the connection broke was the one turned away, and the refusal arrived on a channel promise
+ * nothing awaited: no push lane, and no error either.
+ *
+ * Modelled the strict way — the old connection is NEVER dropped — because that is the shape the
+ * old rule failed on. Over the real wire and the real hub server.
+ */
+describe('a member that reconnects while its old connection is still up', () => {
+  test('takes over the push lane and receives what is published after it', async () => {
+    const hub = createWireHub()
+    const bodies = createEntryBodies()
+
+    const aliceID = newIdentity()
+    const bobID = newIdentity()
+    const aliceSlot = createLedgerEntrySlot()
+    const bobSlot = createLedgerEntrySlot()
+    for (const slot of [aliceSlot, bobSlot]) {
+      slot.install(async (ids) =>
+        ids.map((id) => {
+          const token = bodies.get(id)
+          if (token == null) throw new Error(`unknown ledger entry ${id}`)
+          return token
+        }),
+      )
+    }
+
+    let aliceHandle = await createFoundingGroup(aliceID, 'reconnect-e2e', aliceSlot)
+    const material = await mintInvite({
+      admin: aliceHandle,
+      adminIdentity: aliceID,
+      invitee: bobID,
+      bodies,
+    })
+    const addBob = await commitInvite(aliceHandle, material.bundle.publicPackage, material.invite)
+    aliceHandle = addBob.newGroup
+    const bobHandle = await joinFromWelcome({
+      identity: bobID,
+      invite: material.invite,
+      welcome: addBob.welcomeMessage,
+      bundle: material.bundle,
+      ratchetTree: aliceHandle.state.ratchetTree,
+      entrySlot: bobSlot,
+    })
+
+    const alice = makeMember({ hub, identity: aliceID, group: aliceHandle, entrySlot: aliceSlot })
+    const first: Array<unknown> = []
+    const bob = makeMember({
+      hub,
+      identity: bobID,
+      group: bobHandle,
+      entrySlot: bobSlot,
+      handlers: { 'chat/posted': (ctx: { data: unknown }) => void first.push(ctx.data) },
+    })
+    await flush()
+
+    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'before' })
+    await flush()
+    expect(first).toEqual([{ text: 'before' }])
+
+    // The process dies. Its peer stops, its SOCKET DOES NOT — nothing calls `disconnect` — so the
+    // hub still believes the old receive writer is good.
+    await bob.peer.dispose()
+
+    const second: Array<unknown> = []
+    const reconnected = makeMember({
+      hub,
+      identity: bobID,
+      group: bobHandle,
+      entrySlot: bobSlot,
+      restartOf: bob,
+      handlers: { 'chat/posted': (ctx: { data: unknown }) => void second.push(ctx.data) },
+    })
+    await flush()
+
+    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'after' })
+    await flush()
+
+    // The new connection has the lane, and the stale one is not holding anything back.
+    expect(second).toEqual([{ text: 'after' }])
+    expect(first).toEqual([{ text: 'before' }])
+
+    await alice.peer.dispose()
+    await reconnected.peer.dispose()
+    await alice.disconnect()
+    await bob.disconnect()
+    await reconnected.disconnect()
+    await hub.dispose()
+  })
+})

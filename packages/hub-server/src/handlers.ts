@@ -224,31 +224,45 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       const { after } = ctx.param ?? {}
 
       registry.register(clientDID)
-      if (registry.isWriterBound(clientDID)) {
-        throw new HandlerError({
-          code: 'EK01',
-          message: `receive writer already bound for DID ${clientDID}`,
-        })
-      }
 
       const writer = ctx.writable.getWriter()
       const reader = ctx.readable.getReader()
 
+      // Ends this channel when a NEWER one for the same DID takes the lane. Resolved rather than
+      // thrown: being replaced is not this channel's error, and the client that replaced it is
+      // the same client.
+      let endEvicted: (() => void) | undefined
+      const evictedHere = new Promise<void>((resolve) => {
+        endEvicted = resolve
+      })
+      let receiveToken: symbol | undefined
+
       try {
-        registry.setReceiveWriter(clientDID, (message: StoredMessage) => {
-          writer
-            .write({
-              sequenceID: message.sequenceID,
-              senderDID: message.senderDID,
-              topicID: message.topicID,
-              payload: toB64(message.payload),
-              // Spread, never a plain assignment: `logPosition: undefined` on a mailbox frame is a
-              // present key with a falsy value once it is off the wire, and the whole point of the
-              // field is that a reader can tell "no place in any log" from a place.
-              ...(message.logPosition != null ? { logPosition: message.logPosition } : {}),
-            })
-            .catch(() => {})
-        })
+        // Binding EVICTS whatever held the lane. A reconnect happens because the old connection
+        // broke, and the server learns that last — so the stale writer must give way to the live
+        // one rather than the other way round. See `HubClientRegistry.bindReceiveWriter`.
+        const { token, evicted } = registry.bindReceiveWriter(
+          clientDID,
+          (message: StoredMessage) => {
+            writer
+              .write({
+                sequenceID: message.sequenceID,
+                senderDID: message.senderDID,
+                topicID: message.topicID,
+                payload: toB64(message.payload),
+                // Spread, never a plain assignment: `logPosition: undefined` on a mailbox frame is
+                // a present key with a falsy value once it is off the wire, and the whole point of
+                // the field is that a reader can tell "no place in any log" from a place.
+                ...(message.logPosition != null ? { logPosition: message.logPosition } : {}),
+              })
+              .catch(() => {})
+          },
+          () => endEvicted?.(),
+        )
+        receiveToken = token
+        // After the bind, so the lane is never unheld between the two: a frame arriving in that
+        // window would have nowhere to go, and mailbox frames are dropped when nobody is there.
+        evicted?.()
 
         let cursor: string | null | undefined = after
         while (true) {
@@ -270,12 +284,13 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
           if (!result.hasMore) break
         }
       } catch (error) {
-        registry.clearReceiveWriter(clientDID)
+        if (receiveToken != null) registry.releaseReceiveWriter(clientDID, receiveToken)
         registry.unregisterIfIdle(clientDID)
         reader.cancel().catch(() => {})
         writer.abort(error).catch(() => {})
         throw error
       }
+      const token = receiveToken
 
       void (async () => {
         try {
@@ -292,17 +307,19 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       })()
 
       return new Promise((resolve) => {
-        ctx.signal.addEventListener(
-          'abort',
-          () => {
-            registry.clearReceiveWriter(clientDID)
-            registry.unregisterIfIdle(clientDID)
-            reader.cancel().catch(() => {})
-            writer.close().catch(() => {})
-            resolve(undefined as never)
-          },
-          { once: true },
-        )
+        const finish = (): void => {
+          // Token-scoped, so a channel that has already been evicted cannot unbind the one that
+          // replaced it on its way out.
+          if (token != null) registry.releaseReceiveWriter(clientDID, token)
+          registry.unregisterIfIdle(clientDID)
+          reader.cancel().catch(() => {})
+          writer.close().catch(() => {})
+          resolve(undefined as never)
+        }
+        // Evicted by a newer channel: end this one, and let the successor keep the binding it
+        // took — `finish` releases only its own token, and this channel's is no longer current.
+        void evictedHere.then(finish)
+        ctx.signal.addEventListener('abort', finish, { once: true })
       })
     }) as ChannelHandler<HubProtocol, 'hub/receive'>,
 
