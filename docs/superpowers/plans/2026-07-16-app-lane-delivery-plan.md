@@ -1,57 +1,48 @@
 # App-lane delivery — plan
 
-**Stage:** reviewing (PAUSED 2026-07-18 — resume at "Open, in priority order" below)
+**Stage:** reviewing
 **Mode:** learning-loop
 **Spec:** docs/superpowers/specs/2026-07-16-app-lane-delivery-design.md
 
-## Resume here — 2026-07-18
+## Resume here — 2026-07-19
 
-**The branch is RED on purpose: 3 rpc tests fail and must not be made green by weakening them.**
-Everything else passes — mls 317, mls-rpc 33, integration 29 (nothing skipped), build and lint clean.
-44 commits. Last commit `1399409`.
+**The branch is GREEN and has been since `79c73a2`** — rpc 302, mls 317, mls-rpc 33, integration 31
+(nothing skipped), build and lint clean. 47 commits. Verify with
+`pnpm exec turbo run test:types test:unit --force` (check `Cached: 0`) and
+`pnpm exec vitest run --root tests/integration`.
 
-**What changed since the 2026-07-16 pause.** Fix 2 (`60e8b28`, `b61f35d`), Fix 2b — the commit
-classifier's trust split (`6b31331`), three security fixes (`3d66321`, `b544707`, `223c10c`), the mux
-dispose leak (`c397108`), the ephemeral publish topic (`dab7bce`), hub conformance (`4318ca4`), test
-quality (`bdb40f8`), F5 unblocked via the hub carrying a log position on log-class pushes (`a5b3d36`),
-the real ports and first real run (`e33319d`), the two real-MLS defects fixed (`434e422`), and rpc port
-conformance (`1399409`).
+**What closed on 2026-07-19.**
 
-**The thesis now passes over real crypto** — a member goes offline, the group exchanges messages and
-both adds and removes members, and the returning member receives every missed message in order, exactly
-once, each opened at its sealing epoch. Over a real hub server, real MLS, real crypto. It had never run
-that way before; `@kumiai/mls-rpc` is the first real implementation of the rpc ports.
-
-**The through-line of this whole review: a double answered where its real port refuses.** Six defects,
-one root cause. Both conformance suites (`hub-conformance`, `rpc-conformance`) exist to stop the
-seventh. Do not make a double lenient to close a red — that is what hid all of these.
+- **Item 1 — directed RPC opened every frame twice (`79c73a2`).** The acceptor and every directed
+  client held an `unwrap` each on one inbox topic and raced for one per-message key, so a directed
+  request was never answered over real MLS. One open-once path per topic now serves both lanes
+  (`packages/rpc/src/open-once.ts`), opens chained so a variable-latency `unwrap` cannot reorder a
+  lane, and `sealDirectedHub` is deleted as unreachable. THE OTHER LANES WERE CHECKED: the commit
+  and rendezvous topics have one listener each and neither opens with `unwrap`; the drain's re-open
+  of a logged frame is the known at-least-once residual. `peer-inbox-single-open.test.ts` counts
+  opens per frame, and `tests/integration/test/directed-lane.test.ts` runs the lane over the real
+  hub, MLS and crypto for the first time — both hang against the pre-fix shape.
+- **Item 2 — the third red test.** Its thesis (a member's own frame is not delivered back to it) is
+  now asserted directly, and the duplicate it used to expect is explained as key exhaustion rather
+  than a delivery rule.
+- **Item 3 — the roster diff (`fd8c28e`).** Gated on the handle having actually ratcheted. The
+  premise was verified against ts-mls first: a self-removing commit does not throw, leaves the epoch
+  put, and drops the member's own leaf. The memory double was the permissive side and is corrected,
+  which made the conformance clause that was "not expressible" expressible.
 
 ## Open, in priority order
 
-1. **PRODUCTION DEFECT — directed RPC opens every frame twice.** The inbox acceptor (`peer.ts:692`) and
-   `to(memberDID)`'s directed client (`directed.ts:45`) listen on the same inbox topic and each call
-   `crypto.unwrap`; real MLS spends the message key on the first open, so a directed request is never
-   answered. This is the same defect as the app lane's, in a lane `real-mls-defects-report.md` declared
-   correct — check the OTHER lanes for it too rather than fixing only this one. Two of the three red
-   tests are this. Fix shape is known and proven: one inbound path per topic, open once, fan the
-   plaintext out (see `434e422`).
-2. **The third red test** (`peer-app-drain-integrity.test.ts`) expects a duplicate delivery real MLS
-   cannot produce. Decide what it should assert now that the fake consumes properly.
-3. **`rosterDIDs` shrinks on a commit the member could not apply** — a removed member's own leaf
-   disappears at an unchanged epoch. `peer.ts:1574-1577` diffs the roster regardless of whether the
-   advance advanced, so a removed member re-anchors and discards undelivered frames. Not fixed; the
-   conformance clause is documented as not expressible against both implementations.
-4. **A host reconnecting before its old channel is torn down gets no push lane and no error** —
-   `hub-server` binds one receive writer per DID and refuses the second, and the rejection lands on a
-   channel promise nobody awaits. Same silent-failure shape as the swallowed subscribe. Hub/host
+1. **A host reconnecting before its old channel is torn down gets no push lane and no error** —
+   `hub-server` binds one receive writer per DID and refuses the second, and the rejection lands on
+   a channel promise nobody awaits. Same silent-failure shape as the swallowed subscribe. Hub/host
    territory.
-5. **XChaCha20-Poly1305 for `sealEntries` wants a reviewer who is not the author.** The key comes from
-   the negotiated exporter, but the cipher is not tied to the group's negotiated ciphersuite — a second
-   cipher in the stack, chosen inside a bugfix.
-6. **Entry-blob format change is not self-healing.** An entry-carrying commit already on a hub's commit
-   log fails the new AEAD, the resolver answers `[]`, and the frame files as poison — no wedge, but
-   those entries are never enacted. Journal is fine (plaintext bodies, re-sealed on replay). Pre-1.0,
-   likely moot, but real.
+2. **XChaCha20-Poly1305 for `sealEntries` wants a reviewer who is not the author.** The key comes
+   from the negotiated exporter, but the cipher is not tied to the group's negotiated ciphersuite —
+   a second cipher in the stack, chosen inside a bugfix.
+3. **Entry-blob format change is not self-healing.** An entry-carrying commit already on a hub's
+   commit log fails the new AEAD, the resolver answers `[]`, and the frame files as poison — no
+   wedge, but those entries are never enacted. Journal is fine (plaintext bodies, re-sealed on
+   replay). Pre-1.0, likely moot, but real.
 
 **Filed, not closable where they surface** (`docs/agents/plans/next/`): the commit-topic storm (one
 publish with a rewritten cleartext epoch makes every peer heal — belongs to publish authorization),
