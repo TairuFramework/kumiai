@@ -125,8 +125,14 @@ describe('the mux reports a push lane that ended without being asked to', () => 
       localDID: 'bob',
       onReceiveEnded: (event) => ended.push(event),
     })
-    mux.onInbound('topic:x', () => {})
+    // Opened AND delivering first, so the silence below is a lane that ended quietly rather than
+    // one that was never there — a mux that never called `receive` would also report nothing.
+    const got: Array<string> = []
+    mux.onInbound('topic:x', (message) => got.push(message.sequenceID))
+    await hub.publish({ senderDID: 'alice', topicID: 'topic:x', payload: new Uint8Array([1]) })
     await flush()
+    expect(got).toHaveLength(1)
+
     await mux.dispose()
     await flush()
     expect(ended).toEqual([])

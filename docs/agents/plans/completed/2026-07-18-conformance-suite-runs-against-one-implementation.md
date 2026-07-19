@@ -1,5 +1,11 @@
 # The conformance suite checks the one hub nothing runs against
 
+> **CLOSED 2026-07-19 on `feat/app-lane-delivery`.** `hub-conformance` now runs against
+> `createMemoryStore`, the hub-tunnel doubles and the rpc fakes (`log-hub-conformance.test.ts`,
+> `hub-tunnel/test/hub-conformance.test.ts`, `rpc/test/hub-conformance.test.ts`), and
+> `rpc-conformance` runs the port contracts against both the fakes and the real `mls-rpc` ports.
+> The text below is the gap as it stood, kept for the reasoning.
+
 ## The gap
 
 `@kumiai/hub-conformance` is the contract for a hub, and it runs against exactly one

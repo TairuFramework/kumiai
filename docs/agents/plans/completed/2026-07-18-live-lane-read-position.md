@@ -1,5 +1,10 @@
 # The live lane advances no read position, so the drain must pull once per segment
 
+> **CLOSED 2026-07-19 on `feat/app-lane-delivery`.** The hub now carries a `logPosition` on every
+> log-class push (`hub-protocol/src/types.ts`), so the live lane does have a read position, and the
+> `appSegmentLoaded` latch this plan describes no longer exists — the drain re-pulls every time and
+> dedupes by that position. The text below is the gap as it stood, kept for the reasoning.
+
 ## The gap
 
 The app lane has two deliverers and one read position, and only one of them keeps it.

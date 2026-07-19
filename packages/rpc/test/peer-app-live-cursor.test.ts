@@ -120,6 +120,14 @@ describe('the live lane and the drain share one read position', () => {
     expect(restarted.mls.epoch()).toBe(1)
     expect(seen).toEqual([{ text: 'read live' }])
 
+    // ASSERTED ON THE STORE, because silence is ambiguous: no re-delivery is also what a restart
+    // that never pulled the segment looks like, and that would make this test green forever
+    // whether or not the live lane writes a position. The written position is the claim.
+    const topicID = protocolTopic(fakeEpochSecret(1), 1, 'chat')
+    const published = hub.published.filter((message) => message.topicID === topicID)
+    expect(published).toHaveLength(1)
+    expect(bob.appCursorStore.stored(topicID)).toBe(published[0]?.sequenceID)
+
     await alice.peer.dispose()
     await restarted.peer.dispose()
   })

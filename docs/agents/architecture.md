@@ -8,6 +8,12 @@ mls (E2EE identity + membership via MLS -- the crypto core), broadcast (generic 
 the hub subsystem (hub-protocol, hub-client, hub-server, hub-tunnel), and rpc. Locked group
 while pre-1.0 (young, tightly coupled).
 
+Alongside them: **mls-rpc**, the real implementation of rpc's two consumer ports over a live MLS
+handle — until it existed nothing had ever run the ports outside fixtures — and two contract
+suites, **rpc-conformance** (`GroupCrypto`, `GroupMLS`) and **hub-conformance** (the hub store and
+the log/mailbox hub views). Both suites run against every implementation AND every double, because
+every serious defect this stack has had came from a double answering where its real port refuses.
+
 ## Position in the stack
 
 Depends downward on sozai, kokuin, and enkaku; nothing depends on kumiai. See the stack
@@ -34,13 +40,21 @@ topic serve live ephemeral traffic and a drainable history at once.
 
 ## Lanes
 
-Three, over the same hub, distinguished by what derives their topic and what they retain.
+Four, over the same hub, distinguished by what derives their topic and what they retain.
 
 | Lane | Topic derived from | Class | Read by |
 | --- | --- | --- | --- |
 | **Commit** | the group's lifelong recovery secret | `log` | pull, from a cursor |
 | **Rendezvous** | the recovery secret | `mailbox` | push |
 | **App** | the **anchor** (a per-epoch secret) | both | push (live) + pull (drain) |
+| **Inbox** | the anchor + the member's own DID | `mailbox` | push |
+
+The inbox lane carries directed 1:1 RPC. One topic per member, and it has more consumers than any
+other lane: the acceptor for each protocol, plus one directed client per member being spoken to. All
+of them read it through **one open-once path** (`rpc/src/open-once.ts`), because opening consumes the
+frame's per-message ratchet key — two consumers each calling `unwrap` race for one key and the loser
+silently drops the frame. That was a real defect: directed RPC answered nothing over real MLS while
+the fake, whose `unwrap` was pure, kept every test green.
 
 The commit lane's secret is epoch-independent and lives as long as the group, which is what lets a
 member absent for weeks find its way back. The app lane's cannot be, for the reason below.
@@ -103,8 +117,11 @@ commit that leaves it. After that apply the handle holds different key material 
 ciphertext forever.
 
 So the drain is **interleaved with the commit walk, ahead of each apply** — never after it. It pulls
-a segment's topic once, buffers the frames sealed, and dispenses each epoch's as the walk passes
-through. The binding is per **frame-epoch**, not per rotation: a segment spanning five epochs is
+the segment's topic on **every drain**, not once per segment: the log is not the same log at every
+epoch inside the segment — it grows, and a frame published while this peer walks is one a single
+pull could never see. Frames already seen are deduped by their `logPosition`, the place in the
+topic's log that the hub reports on a log-class push. The pull buffers the frames sealed and
+dispenses each epoch's as the walk passes through. The binding is per **frame-epoch**, not per rotation: a segment spanning five epochs is
 dispensed five times off the one pull. Delivered frames reach the host through the existing
 `handlers` map; there is no separate delivery API. Its own frames are not echoed back to it, as the
 live fan-out would not.
@@ -196,6 +213,25 @@ group and the gap's edges. It carries **no wall-clock**: "messages since \<date\
 sentence, from the host's own HLC. It over-reports, because a peer whose cursor frame has aged out
 cannot prove nothing followed it — that is the side to be wrong on.
 
+## Two seals, and they are not interchangeable
+
+App traffic is sealed with `wrap`/`unwrap` — MLS application messages, which **consume** a
+per-message ratchet key and mutate the handle. A Commit's **ledger-entry blob** is not: it is sealed
+with `sealEntries`/`openEntries` under a key derived from the epoch's MLS exporter secret
+(RFC 9420 §8.5), which is epoch-level, one-way and derivable by every member at that epoch with
+nothing exchanged.
+
+The separation is forced by *where* the blob is opened. The resolver runs **inside** the MLS port's
+apply of the very commit carrying the blob, so an open that spent a ratchet generation or touched
+handle state would be unsound however it was scheduled. The exporter read is pure and re-entrant,
+and it sees the pre-commit epoch — the epoch the blob was sealed under.
+
+The blob carries a leading version byte. It sits **inside the blob, never in the frame header**: an
+unknown blob version fails the open, which a peer survives (the commit files as poison and the next
+frame strands it into a heal), while an unknown *frame* version fails the decode before the frame is
+ever classified — and a peer that steps over every frame without classifying one never learns the
+group moved past it, so it would sit at a dead epoch forever, silently.
+
 ## What a host wires
 
 `createGroupPeer` takes two ports and three durable stores. **The stores are required alongside the
@@ -203,7 +239,7 @@ cannot prove nothing followed it — that is the side to be wrong on.
 
 | | |
 | --- | --- |
-| `GroupCrypto` | `epoch`, `exportSecret`, `wrap`, `unwrap`, `frameEpoch` |
+| `GroupCrypto` | `epoch`, `exportSecret`, `wrap`, `unwrap`, `frameEpoch`, `sealEntries`, `openEntries` |
 | `GroupMLS` | commit lifecycle, `rosterDIDs`, `readCommitHeader` (incl. `external`) |
 | `CommitJournal` | single slot; loses a commit whose process died in the acceptance window |
 | `AnchorStore` | the anchor; without it a restart partitions the peer from its own group |

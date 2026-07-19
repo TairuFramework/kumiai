@@ -142,6 +142,24 @@ describe('directed RPC security', () => {
     await flush(60)
     expect(calls).toEqual([])
 
+    // THE CONTROL. An empty `calls` is also what a wrong topic, an unsubscribed acceptor or too
+    // short a flush produce, so on its own it proves nothing about the sender check. The same
+    // request against an acceptor whose open DOES recover a sender must reach the handler.
+    const answering = member(hub, 'bob-answering', {
+      'rpc/double': (ctx: { param: { n: number } }) => {
+        calls.push(ctx.param.n)
+        return { n: ctx.param.n * 2 }
+      },
+    })
+    const second = caller(hub, 'alice-answering', 'bob-answering', 'session-a-b2')
+    await second.client.request('rpc/double', { param: { n: 3 } })
+    expect(calls).toEqual([3])
+
+    await second.dispose()
+    await second.mux.dispose()
+    await answering.acceptor.dispose()
+    await answering.mux.dispose()
+
     await dispose()
     await aliceMux.dispose()
     await bob.acceptor.dispose()

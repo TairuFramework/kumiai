@@ -267,6 +267,15 @@ describe('hub pub/sub', () => {
     expect(delivered).toBe(false)
     expect((await ctx.store.fetch({ recipientDID: bobIdentity.id })).messages).toHaveLength(0)
 
+    // THE CONTROL. Nothing above proves the push lane works at all — a receive channel that
+    // delivered NOTHING, ever, passes every assertion so far. A frame on the topic bob really is
+    // subscribed to has to arrive, or the silence about `topic:B` means nothing.
+    await alice.request('hub/publish', {
+      param: { topicID: 'topic:A', payload: encodePayload('subscribed') },
+    })
+    await delay(20)
+    expect(delivered).toBe(true)
+
     channel.close()
     await expect(channel).rejects.toEqual('Close')
     await delay(20)

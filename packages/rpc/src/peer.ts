@@ -192,13 +192,15 @@ export type GroupPeerParams<Protocols extends Record<string, ProtocolDefinition>
    */
   recovery?: { timeoutMs?: number; getDelayMs?: () => number; deadlineMs?: number }
   /**
-   * Commit-log retention the hub is asked to hold, in seconds. Default 30 days. A liveness dial:
+   * Commit-log retention the hub is asked to hold, in seconds. Default 28 days — deliberately two
+   * days BELOW the reference hub ceiling, so an upward override has somewhere to go rather than
+   * being refused outright (see {@link DEFAULT_COMMIT_LOG_RETENTION_SECONDS}). A liveness dial:
    * within it a returning member converges by pulling the log; beyond it, another live member
    * must heal it.
    */
   commitLogRetentionSeconds?: number
   /**
-   * App-log retention the hub is asked to hold, in seconds. Default 30 days — the commit window,
+   * App-log retention the hub is asked to hold, in seconds. Default 28 days — the commit window,
    * so a member asks the hub to hold its app log as long as its commit log and the two bounds
    * coincide: no span where it can rebuild its membership but not its messages. Overridable up to
    * the hub operator's own cap, which is what governs real storage.

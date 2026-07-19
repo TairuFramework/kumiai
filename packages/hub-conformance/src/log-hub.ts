@@ -201,6 +201,15 @@ export function testMailboxHubConformance<Hub extends ConformanceMailboxHub>(
       // The boundary is inclusive, and it matters: the app lane's default retention sits exactly
       // ON the store's default ceiling. A hub refusing at the boundary rejects every default peer.
       await expect(subscribing(hub, BOB, TOPIC, { retention: maxRetention })).resolves.not.toThrow()
+
+      // ACCEPTED, not merely un-refused. Not throwing is what a store that silently registered
+      // nothing also does, and a peer that is not a subscriber of its own topic receives nothing
+      // and is told nothing — the same silent downgrade the clause above forbids for clamping.
+      // Proved through the subscription's own consequence rather than through a registry read:
+      // a frame published to the topic has to reach the subscriber it was accepted for.
+      const toBob = hub.receive(BOB)
+      await hub.publish({ senderDID: ALICE, topicID: TOPIC, payload: payload(1) })
+      expect((await drain(toBob, 1)).map((message) => message.topicID)).toEqual([TOPIC])
     })
   })
 }

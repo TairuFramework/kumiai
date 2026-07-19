@@ -272,6 +272,20 @@ remains possible.
 
 ## Blast radius
 
+> **RETRACTED 2026-07-19 — the implementation is NOT rpc-only.** Delivering this needed four
+> public-contract changes outside rpc, each forced by something the spec had not foreseen:
+> `hub-protocol` gained `StoredMessage.logPosition` (the live lane had no read position, so the
+> drain could not advance a cursor from a push); `hub-server`'s receive binding became
+> last-writer-wins (a reconnecting host was refused its push lane and told nothing);
+> `mls` gained the exporter surface and now fires `onLedgerEntries` from `bootstrapLedger`; and
+> three packages were added — `mls-rpc`, `rpc-conformance`, `hub-conformance`. Read the claim below
+> as the estimate it was, not as a description of what landed.
+>
+> Five smaller divergences are recorded in the plan and probe reports: the retention default is 28
+> days rather than 30; the drain pulls every time rather than once per segment; a roster diff
+> rotates only when the handle actually ratcheted; a rotation tears down listeners but never
+> subscriptions; and `readCommitHeader` also returns `external`.
+
 **rpc-only, no `@kumiai/hub-protocol`/`hub-server`/`mls` public-contract change.** It reuses the
 log-class / `fetchTopic` / retention surface the control-ledger release already ships.
 

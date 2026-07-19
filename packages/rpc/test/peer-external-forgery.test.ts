@@ -82,6 +82,15 @@ describe('an external commit cannot name its reader as its author unless it auth
     // And she was not knocked off the group in the process.
     expect(alice.mls.epoch()).toBe(1)
 
+    // THE CONTROL, and without it the assertion above proves nothing: a poison frame emits no
+    // recovery request whether the cursor stepped over it or is parked on it forever, so counting
+    // requests cannot tell the two apart. A genuine commit published BEHIND the forgery can: it
+    // is only reachable by a cursor that got past the poison.
+    await publishCommit({ hub, senderDID: 'bob', recoverySecret: rs, epoch: 1 })
+    await flush(200)
+    expect(alice.mls.epoch()).toBe(2)
+    expect(recoveryRequests(hub, rs)).toHaveLength(afterFirst)
+
     await alice.peer.dispose()
   })
 
