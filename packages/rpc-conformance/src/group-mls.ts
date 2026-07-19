@@ -28,12 +28,20 @@ export type ConformanceCommitContext = {
   resolveLedgerEntries?: (ids: Array<string>) => Promise<Array<string>>
 }
 
+/** The `PendingRecovery` of `@kumiai/rpc`, re-declared structurally. */
+export type ConformancePendingRecovery = {
+  commit: Uint8Array
+  onAccepted: () => Promise<void>
+}
+
 /**
- * The subset of `GroupMLS` this suite exercises. The recovery half (`createRecoveryRequest`,
- * `sealGroupInfo`, `applyRecovery`, `sealLedger`, `openSealedLedger`, `bootstrapLedger`) is
- * deliberately absent: it is a multi-party rendezvous whose harness would be most of a peer, and
- * a suite that mocked it would be testing the harness. `exportRecoverySecret` IS here, because its
- * one required property — epoch independence — is checkable with nothing but a rotation.
+ * The `GroupMLS` this suite exercises — ALL of it.
+ *
+ * An earlier version left the recovery and ledger half out, on the reasoning that it is "a
+ * multi-party rendezvous whose harness would be most of a peer". That was wrong, and the omission
+ * was invisible: eight of twelve port members had no contract, on the two lanes that carry a
+ * group's whole authority state. The rendezvous is a lane concern; the PORT is three calls
+ * passing bytes between two instances, which is all the clauses below do.
  */
 export type ConformanceGroupMLS = {
   rosterDIDs: () => Promise<Array<string>>
@@ -43,6 +51,17 @@ export type ConformanceGroupMLS = {
     context: ConformanceCommitContext,
   ) => Promise<{ advanced: boolean }>
   exportRecoverySecret: () => Uint8Array | Promise<Uint8Array>
+  createRecoveryRequest: (requestID: string) => Promise<Uint8Array>
+  sealGroupInfo: (request: Uint8Array) => Promise<Uint8Array>
+  applyRecovery: (
+    sealed: Uint8Array,
+    requestID: string,
+  ) => Promise<ConformancePendingRecovery | null>
+  isLedgerComplete: () => Promise<boolean>
+  getLedger: () => Promise<Array<string>>
+  sealLedger: (request: Uint8Array) => Promise<Uint8Array>
+  openSealedLedger: (sealed: Uint8Array, requestID: string) => Promise<Array<string> | null>
+  bootstrapLedger: (tokens: Array<string>) => Promise<void>
 }
 
 export type ConformanceMLSMember = {
@@ -383,6 +402,200 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           expect(fake?.epoch).toBe(real?.epoch)
           // And the committer is what a forger does not get to choose.
           expect(fake?.committerDID).toBeUndefined()
+        })
+      })
+    })
+
+    /**
+     * THE RECOVERY LANE. A stranded peer asks the group for current state on a topic derived from
+     * a secret the whole group shares for life, so anyone who ever held it — including a member
+     * the group removed — can mint a well-formed request and put it there. What keeps that from
+     * being a way back in is the RESPONDER, and only the responder.
+     */
+    describe('the recovery round trip', () => {
+      test('a member answers another member, and the reply rebuilds a rejoin', async () => {
+        await withGroup(2, 'recovery-round-trip', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const bob = memberAt(group.members, 1)
+
+          const request = await bob.mls.createRecoveryRequest('req-1')
+          const sealed = await alice.mls.sealGroupInfo(request)
+          const pending = await bob.mls.applyRecovery(sealed, 'req-1')
+
+          expect(pending).not.toBeNull()
+          expect(pending?.commit).toBeInstanceOf(Uint8Array)
+          expect((pending?.commit as Uint8Array).length).toBeGreaterThan(0)
+        })
+      })
+
+      /**
+       * AUTHORIZATION IS ROSTER-INTRINSIC, not a check a caller can forget. A removed member keeps
+       * the rendezvous secret for life — it is epoch-independent by design, so a stranded peer on
+       * any epoch can always reach the group — so the request it mints is indistinguishable from
+       * an honest one. The only thing standing between it and the group's current GroupInfo is
+       * that no responder holding its removal will answer.
+       *
+       * A double that answered anyway would make eviction cosmetic, and nothing else in the stack
+       * would notice: the lane's job is to deliver the request, not to judge it.
+       */
+      test('a responder that has applied a removal refuses the removed member', async () => {
+        await withGroup(2, 'recovery-refuses-removed', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const bob = memberAt(group.members, 1)
+
+          // Bob is removed. Alice applies it; Bob cannot, so he still holds a live handle and the
+          // rendezvous secret — exactly the position an evicted member is in.
+          const removal = await group.buildCommit({ removes: 1 })
+          expect(await alice.mls.processCommit(removal.commit, removal.context)).toEqual({
+            advanced: true,
+          })
+          expect(await alice.mls.rosterDIDs()).not.toContain(bob.did)
+
+          const request = await bob.mls.createRecoveryRequest('req-removed')
+          await expect(alice.mls.sealGroupInfo(request)).rejects.toThrow()
+        })
+      })
+
+      test('a reply minted for another request does not open', async () => {
+        await withGroup(2, 'recovery-wrong-request', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const bob = memberAt(group.members, 1)
+
+          const request = await bob.mls.createRecoveryRequest('req-a')
+          const sealed = await alice.mls.sealGroupInfo(request)
+
+          // The same bytes, opened against a different request's key. `null` or a throw — the lane
+          // reads both the same way — but never a PendingRecovery.
+          await expect(bob.mls.applyRecovery(sealed, 'req-b').catch(() => null)).resolves.toBeNull()
+        })
+      })
+
+      /**
+       * The rendezvous topic must be reachable by a peer at ANY epoch, including one that has
+       * fallen far behind — that is the whole point of a lane for peers that cannot follow the
+       * group. A secret that moved with the epoch would strand exactly the peers it exists for.
+       */
+      test('the recovery secret does not move with the epoch', async () => {
+        await withGroup(2, 'recovery-secret-stable', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const before = await alice.mls.exportRecoverySecret()
+          const commit = await group.buildCommit()
+          await alice.mls.processCommit(commit.commit, commit.context)
+          expect(await alice.mls.exportRecoverySecret()).toEqual(before)
+        })
+      })
+    })
+
+    /**
+     * THE LEDGER GATHER. The ledger is the group's whole authority state — who is an admin, and so
+     * who may add, remove, promote and demote. It travels on the same public secretless topic, so
+     * every clause here is about a responder refusing, or a requester refusing to believe.
+     */
+    describe('the ledger gather', () => {
+      test('a member seals its whole ordered ledger to another member, who opens it', async () => {
+        await withGroup(2, 'ledger-round-trip', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const bob = memberAt(group.members, 1)
+
+          const request = await bob.mls.createRecoveryRequest('gather-1')
+          const sealed = await alice.mls.sealLedger(request)
+          const opened = await bob.mls.openSealedLedger(sealed, 'gather-1')
+
+          expect(opened).toEqual(await alice.mls.getLedger())
+        })
+      })
+
+      /**
+       * Same roster-intrinsic authorization as `sealGroupInfo`, and it matters more here: this
+       * reply is the group's entire authority state, sealed to whatever key the requester put in
+       * its own request. A responder that sealed without checking would hand every role and
+       * promotion to any stranger who minted one.
+       */
+      test('a responder that has applied a removal refuses to seal its ledger', async () => {
+        await withGroup(2, 'ledger-refuses-removed', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const bob = memberAt(group.members, 1)
+
+          const removal = await group.buildCommit({ removes: 1 })
+          await alice.mls.processCommit(removal.commit, removal.context)
+
+          const request = await bob.mls.createRecoveryRequest('gather-removed')
+          await expect(alice.mls.sealLedger(request)).rejects.toThrow()
+        })
+      })
+
+      /**
+       * THE KEY IS NOT CONSUMED, and the lane depends on it: every responder answers one gather,
+       * so the requester opens reply after reply until one folds to its authenticated head. A port
+       * that spent the key on the first open would leave a peer able to consider exactly one
+       * responder — and the first reply may be the forged one.
+       */
+      test('opening one reply does not prevent opening the next', async () => {
+        await withGroup(3, 'ledger-two-replies', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const bob = memberAt(group.members, 1)
+          const carol = memberAt(group.members, 2)
+
+          const request = await carol.mls.createRecoveryRequest('gather-many')
+          const fromAlice = await alice.mls.sealLedger(request)
+          const fromBob = await bob.mls.sealLedger(request)
+
+          expect(await carol.mls.openSealedLedger(fromAlice, 'gather-many')).not.toBeNull()
+          expect(await carol.mls.openSealedLedger(fromBob, 'gather-many')).not.toBeNull()
+        })
+      })
+
+      test('a reply sealed for another request does not open', async () => {
+        await withGroup(2, 'ledger-wrong-request', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const bob = memberAt(group.members, 1)
+
+          const request = await bob.mls.createRecoveryRequest('gather-a')
+          const sealed = await alice.mls.sealLedger(request)
+          await expect(
+            bob.mls.openSealedLedger(sealed, 'gather-b').catch(() => null),
+          ).resolves.toBeNull()
+        })
+      })
+
+      /**
+       * OPENING PROVES NOTHING ABOUT WHO SEALED IT — the gather reply carries no attestation, and
+       * an observer of the request can forge one that decrypts. The bound is `bootstrapLedger`'s
+       * head check: a list reproducing the head this handle's OWN GroupContext attests to is the
+       * group's whole ledger in order, and anything else is refused. A lying responder can
+       * withhold; it can never rewrite.
+       */
+      test('bootstrapLedger refuses a ledger that does not fold to the head this handle attests to', async () => {
+        await withGroup(2, 'ledger-head-check', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const bob = memberAt(group.members, 1)
+
+          const honest = await alice.mls.getLedger()
+          if (honest.length === 0) {
+            // Nothing to doctor: this implementation's groups carry no ledger entries, so the
+            // clause has no subject. Stated rather than silently passing.
+            expect(await bob.mls.getLedger()).toEqual([])
+            return
+          }
+
+          // Genuinely signed tokens, one dropped. No forgery is required, which is the point.
+          await expect(bob.mls.bootstrapLedger(honest.slice(0, -1))).rejects.toThrow()
+
+          // And the honest list is accepted, so what refused above was the omission.
+          await expect(bob.mls.bootstrapLedger(honest)).resolves.toBeUndefined()
+          expect(await bob.mls.getLedger()).toEqual(honest)
+        })
+      })
+
+      /**
+       * `isLedgerComplete` is how a peer knows it must gather before it can be trusted to fold a
+       * roster or judge a commit. A port that answered `true` for a handle holding nothing would
+       * let a rejoined peer judge commits against an empty authority state.
+       */
+      test('reports completeness against the head the handle carries', async () => {
+        await withGroup(2, 'ledger-complete', async (group) => {
+          const alice = memberAt(group.members, 0)
+          expect(await alice.mls.isLedgerComplete()).toBe(true)
         })
       })
     })

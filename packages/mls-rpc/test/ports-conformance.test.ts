@@ -23,6 +23,18 @@ import { buildRealCommit, buildRealExternalCommit, createRealGroup } from './fix
 const _cryptoIsAPort = (crypto: GroupCrypto): ConformanceCryptoMember['crypto'] => crypto
 const _mlsIsAPort = (mls: GroupMLS): ConformanceMLSMember['mls'] => mls
 
+// THE TRIPWIRE, and the reverse direction is the whole point of it. The assignments above only
+// prove the suite asks for nothing the port lacks; they say nothing about a port member the suite
+// has never heard of. That gap is invisible by construction — a member with no clause produces no
+// failure — and it was real: eight of `GroupMLS`'s twelve members had no contract at all, across
+// the recovery and ledger lanes, which carry the group's whole authority state.
+//
+// These assignments fail to compile the moment a port grows a member the conformance shape does
+// not carry. Adding one is then a decision — write the clause, or widen the shape and say why it
+// has none — rather than something that happens silently.
+const _cryptoCoversPort = (crypto: ConformanceCryptoMember['crypto']): GroupCrypto => crypto
+const _mlsCoversPort = (mls: ConformanceMLSMember['mls']): GroupMLS => mls
+
 testGroupCryptoConformance({
   label: 'createGroupCrypto over a real GroupHandle',
   createGroup: async (size, id) => {

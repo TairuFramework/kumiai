@@ -7,7 +7,11 @@ import {
 
 import type { GroupCrypto, GroupMLS } from '../src/crypto.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
-import { createMemoryGroupMLS, encodeMemoryCommit } from './fixtures/memory-group-mls.js'
+import {
+  createMemoryGroupMLS,
+  encodeMemoryCommit,
+  memoryEntryID,
+} from './fixtures/memory-group-mls.js'
 
 /**
  * The two doubles the whole rpc suite executes against, run against the port contracts
@@ -63,17 +67,45 @@ const COMMITTER_DID = 'did:key:committer'
 
 testGroupMLSConformance({
   label: 'createMemoryGroupMLS',
-  createGroup: async (size) => {
+  createGroup: async (size, id) => {
     const dids = Array.from({ length: size }, (_, index) => didAt(index))
     const roster = [COMMITTER_DID, ...dids]
+    // A NON-EMPTY LEDGER, because several clauses have no subject without one — the head check
+    // has nothing to doctor against an empty list, and it would pass by taking its early return
+    // while the same clause against real MLS (whose invites enact role entries) does real work.
+    // A conformance clause exercised on one side only is the thing these suites exist to prevent.
+    const ledgerTokens = [`ledger-a-${id}`, `ledger-b-${id}`]
     const members = dids.map((did) => ({
       did,
-      mls: createMemoryGroupMLS({ localDID: did, members: roster, epoch: 0 }),
+      mls: createMemoryGroupMLS({
+        localDID: did,
+        members: roster,
+        epoch: 0,
+        bodies: ledgerTokens,
+      }),
     }))
     // The committer is OUTSIDE `members`, so every commit the suite hands a port is a RECEIVED
     // one. It keeps its own epoch: building a commit is what advances its author, and nothing
     // else may advance a member.
     let committerEpoch = 0
+
+    // Enact the ledger entries, so every member holds the same non-empty ledger the way it would
+    // in life: a commit carrying them, applied. No new harness method — the group simply comes
+    // with a ledger, as the real one does.
+    const seed = encodeMemoryCommit(
+      committerEpoch,
+      COMMITTER_DID,
+      ledgerTokens.map(memoryEntryID),
+      {},
+    )
+    committerEpoch += 1
+    for (const member of members) {
+      await member.mls.processCommit(seed, {
+        senderDID: COMMITTER_DID,
+        resolveLedgerEntries: async () => ledgerTokens,
+      })
+    }
+
     return {
       members,
       committerDID: COMMITTER_DID,
