@@ -7,7 +7,7 @@ import type {
 } from 'ts-mls'
 import { defaultProposalTypes, isDefaultProposal } from 'ts-mls'
 
-import { LEDGER_HEAD_EXTENSION_TYPE } from './anchor.js'
+import { LEDGER_HEAD_EXTENSION_TYPE, RESERVED_EXTENSION_TYPE } from './anchor.js'
 import type { RosterState } from './roster.js'
 
 /**
@@ -76,13 +76,17 @@ function isAdmin(context: CommitPolicyContext, leafIndex: number | undefined): b
 /**
  * The group-context-extensions rule: an admin may replace the extension list
  * only to move the ledger-head extension to the head this commit's envelope
- * accounts for. A GCE proposal replaces the *entire* list, so the proposed list
- * must positionally equal the current list — same length, same extension types in
- * the same positions, byte-identical data — with the single exception of the
- * ledger_head entry, whose data must equal the expected head. This pins the anchor
- * and every other extension: an admin cannot inject or strip an extension (e.g.
- * external_senders, which grants a non-member the ability to inject proposals)
- * inside an otherwise-valid head move.
+ * accounts for, or to additionally install {@link RESERVED_EXTENSION_TYPE}
+ * empty. A GCE proposal replaces the *entire* list, so the proposed list must
+ * positionally equal the current list — same length, same extension types in
+ * the same positions, byte-identical data — with two exceptions: the
+ * ledger_head entry, whose data must equal the expected head, and at most one
+ * added entry of type `RESERVED_EXTENSION_TYPE` carrying empty data. This pins
+ * the anchor and every other extension: an admin cannot inject or strip an
+ * extension (e.g. external_senders, which grants a non-member the ability to
+ * inject proposals) inside an otherwise-valid head move, and cannot install
+ * the reserved type carrying anything but nothing — the type is reserved, not
+ * yet consumed by anything, so no policy exists yet for what its data may say.
  *
  * The head must equal the current head extended by the envelope's entry ids, in
  * envelope order. A head moved to anything else — including moved at all by a
@@ -101,9 +105,31 @@ function evaluateGroupContextExtensions(
         }
       : ext,
   )
-  if (extensions.length !== expected.length) return 'reject'
+  // The only degree of freedom this rule grants beyond the head move: one added
+  // entry installing RESERVED_EXTENSION_TYPE with empty data, and only when the
+  // current list does not already carry it — this is an install, not a second
+  // copy. Strip that one entry, if present, before the positional compare below
+  // — every other difference (a second addition, non-empty data, an unreserved
+  // type, or "adding" a type already installed) falls through to that compare
+  // and is rejected exactly as today.
+  let candidate = extensions
+  const reservedAlreadyInstalled = expected.some(
+    (ext) => ext.extensionType === RESERVED_EXTENSION_TYPE,
+  )
+  if (!reservedAlreadyInstalled && extensions.length === expected.length + 1) {
+    const reservedIndex = extensions.findIndex(
+      (ext) =>
+        ext.extensionType === RESERVED_EXTENSION_TYPE &&
+        ext.extensionData instanceof Uint8Array &&
+        ext.extensionData.length === 0,
+    )
+    if (reservedIndex !== -1) {
+      candidate = extensions.slice(0, reservedIndex).concat(extensions.slice(reservedIndex + 1))
+    }
+  }
+  if (candidate.length !== expected.length) return 'reject'
   for (let i = 0; i < expected.length; i++) {
-    const got = extensions[i]
+    const got = candidate[i]
     const want = expected[i]
     if (got.extensionType !== want.extensionType) return 'reject'
     // Both sides must be raw bytes to byte-compare. ts-mls's own extensionsEqual

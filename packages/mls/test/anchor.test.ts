@@ -10,6 +10,7 @@ import {
   GROUP_ANCHOR_EXTENSION_TYPE,
   type GroupAnchor,
   LEDGER_HEAD_EXTENSION_TYPE,
+  RESERVED_EXTENSION_TYPE,
   readGroupAnchor,
   readGroupAnchorExtension,
 } from '../src/anchor.js'
@@ -122,20 +123,23 @@ describe('group anchor', () => {
     expect(decodeGroupAnchor(enc(JSON.stringify({ creatorDID: 'did:x', version: '1' })))).toBeNull()
   })
 
-  test('controlCapabilities advertises both extension types, exactly once each', () => {
+  test('controlCapabilities advertises all three extension types, exactly once each', () => {
     expect(GROUP_ANCHOR_EXTENSION_TYPE).toBe(0xf100)
     expect(LEDGER_HEAD_EXTENSION_TYPE).toBe(0xf101)
+    expect(RESERVED_EXTENSION_TYPE).toBe(0xf102)
 
     const caps = controlCapabilities()
     expect(caps.extensions).toContain(GROUP_ANCHOR_EXTENSION_TYPE)
     expect(caps.extensions).toContain(LEDGER_HEAD_EXTENSION_TYPE)
+    expect(caps.extensions).toContain(RESERVED_EXTENSION_TYPE)
 
     // Idempotent: each control type appears exactly once. (defaultCapabilities()
     // seeds random GREASE extension values that vary per call, so the array is
-    // asserted only for the two control types, never for exact contents.)
+    // asserted only for the three control types, never for exact contents.)
     const occurrences = (type: number) => caps.extensions.filter((e) => e === type).length
     expect(occurrences(GROUP_ANCHOR_EXTENSION_TYPE)).toBe(1)
     expect(occurrences(LEDGER_HEAD_EXTENSION_TYPE)).toBe(1)
+    expect(occurrences(RESERVED_EXTENSION_TYPE)).toBe(1)
   })
 
   test('an anchored group invites and admits a member who reads the same anchor', async () => {

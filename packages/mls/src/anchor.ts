@@ -18,6 +18,17 @@ export const GROUP_ANCHOR_EXTENSION_TYPE = 0xf100
  */
 export const LEDGER_HEAD_EXTENSION_TYPE = 0xf101
 
+/**
+ * Reserved for a future control extension, carrying no data today.
+ *
+ * Reserved and advertised BEFORE it carries anything, for the same reason
+ * {@link LEDGER_HEAD_EXTENSION_TYPE} was: RFC 9420 requires every member leaf to advertise
+ * each custom GroupContext extension type, and leaves cannot be rewritten. A type introduced
+ * after members have joined cannot be installed in their group at all — the only remedy is
+ * re-admitting every member. Reserving costs one line now and is unavailable forever after.
+ */
+export const RESERVED_EXTENSION_TYPE = 0xf102
+
 const CURRENT_VERSION = 1
 
 const encoder = new TextEncoder()
@@ -92,13 +103,14 @@ export function buildCurrentGroupAnchorExtension(
 }
 
 /**
- * Leaf-node capabilities advertising both control GroupContext extension types
- * (genesis anchor and ledger head). RFC 9420 requires every member leaf to
- * advertise each custom GroupContext extension type, or `commitInvite` rejects
- * the added leaf. Both types are advertised from the outset — even before the
- * ledger head carries data — so an anchored group can later grow a head without
- * re-admitting members. Pass these at both `createGroup` (creator leaf) and
- * `createKeyPackageBundle` (invitee leaf) so a control group can be joined.
+ * Leaf-node capabilities advertising all three control GroupContext extension
+ * types (genesis anchor, ledger head, and the reserved third type). RFC 9420
+ * requires every member leaf to advertise each custom GroupContext extension
+ * type, or `commitInvite` rejects the added leaf. All three are advertised from
+ * the outset — even before the ledger head or the reserved type carry data —
+ * so an anchored group can later grow a head, or install the reserved type,
+ * without re-admitting members. Pass these at both `createGroup` (creator leaf)
+ * and `createKeyPackageBundle` (invitee leaf) so a control group can be joined.
  *
  * Idempotent: each type appears exactly once even if the defaults already carry
  * it.
@@ -108,6 +120,7 @@ export function controlCapabilities(): Capabilities {
   const extensions = new Set<number>(base.extensions)
   extensions.add(GROUP_ANCHOR_EXTENSION_TYPE)
   extensions.add(LEDGER_HEAD_EXTENSION_TYPE)
+  extensions.add(RESERVED_EXTENSION_TYPE)
   return { ...base, extensions: [...extensions] }
 }
 
