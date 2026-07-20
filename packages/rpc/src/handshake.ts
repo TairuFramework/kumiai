@@ -15,18 +15,26 @@ export const HANDSHAKE_MAGIC = Uint8Array.from([0x45, 0x4b])
 /**
  * Current handshake wire-format version.
  *
- * DO NOT BUMP THIS TO SIGNAL A CHANGE IN SOMETHING THE FRAME MERELY CARRIES, and the sealed
- * ledger-entry blob is the case that will tempt you. An old peer meeting an unknown version
- * fails at `decodeHandshakeFrame`, and the commit lane catches that BEFORE it reads the header —
- * so the frame is stepped over without ever being classified. It is the classification that
- * makes a peer notice the group has moved past it (`ahead`) and heal. Step over every new frame
- * instead, and the peer walks to the end of the log, reports itself fully reconciled, and sits
- * at a dead epoch forever: no error, no heal, no restart that fixes it.
+ * BUMPING THIS IS SURVIVABLE, and that is a property of the reader, not of the byte. An old peer
+ * meeting an unknown version does not fail the decode — {@link decodeHandshakeFrame} hands the
+ * version back rather than throwing — and on the COMMIT topic the lane files an unreadable frame
+ * as {@link "classify".CommitDisposition} `ahead`: the group moved on to something this build
+ * cannot read, so step over the frame, heal, and stay stranded until the heal lands.
  *
- * A change to a payload's own format belongs inside that payload, where an old peer fails the
- * OPEN — which it already survives, by filing the commit as poison and healing from the next
- * frame — rather than failing the decode, which it does not survive. Bump this only when the
- * header itself changes, and only alongside a plan for peers that cannot read it.
+ * It has to work that way, because the obvious alternative does not. Filing an unreadable frame
+ * as poison holds only while SOME frames stay readable, and after a version bump none do: there
+ * is no "next frame" to heal from, so the peer steps over the group's entire future, drains to
+ * the end of the log, and reports itself fully reconciled at a dead epoch. Silent, and no restart
+ * fixes it. The heal direction is also the safe one — a forged unknown-version frame can only
+ * TRIGGER a heal, never suppress one, the same asymmetry the `ahead` row already accepts on a
+ * cleartext epoch.
+ *
+ * STILL PREFER PUTTING A FORMAT CHANGE INSIDE THE PAYLOAD, and the sealed ledger-entry blob is
+ * the case that will tempt you to bump this instead. A payload change costs an old peer one
+ * commit (it fails the OPEN, files that commit as poison, and heals from the next frame); a
+ * header bump costs it a full rejoin, on every frame, from the bump onwards. Bump this only when
+ * the HEADER itself changes — and only alongside a plan for the peers that cannot read it, whose
+ * whole recourse is the heal above.
  */
 export const HANDSHAKE_VERSION = 1
 
@@ -69,10 +77,19 @@ export function encodeHandshakeFrame(kind: HandshakeKind, payload: Uint8Array): 
 }
 
 /**
- * Validate the header and split a frame into its kind and payload. Throws on a
- * short frame, a bad magic, an unsupported version, or an unknown kind.
+ * Validate the header and split a frame into its version, kind and payload. Throws on a short
+ * frame, a bad magic, or an unknown kind — bytes that are not this protocol at all.
+ *
+ * DOES NOT throw on an unsupported VERSION: it returns it, because the right answer differs by
+ * lane and only the caller knows which lane it is on. Every caller MUST compare `version` against
+ * {@link HANDSHAKE_VERSION} before trusting `payload`, which is a format this build has never
+ * seen. On the commit topic an unknown version is evidence the group moved on and the peer heals
+ * (see {@link HANDSHAKE_VERSION}); everywhere else it is a frame that says nothing, and is
+ * dropped like any other unreadable one.
  */
 export function decodeHandshakeFrame(frame: Uint8Array): {
+  /** The frame's wire version. Equal to {@link HANDSHAKE_VERSION} for a frame this build reads. */
+  version: number
   kind: HandshakeKind
   payload: Uint8Array
 } {
@@ -83,12 +100,9 @@ export function decodeHandshakeFrame(frame: Uint8Array): {
     throw new Error('handshake frame has a bad magic')
   }
   const version = frame[HANDSHAKE_MAGIC.length]
-  if (version !== HANDSHAKE_VERSION) {
-    throw new Error(`unsupported handshake version: ${version}`)
-  }
   const kind = frame[HANDSHAKE_MAGIC.length + 1]
   if (!isHandshakeKind(kind)) {
     throw new Error(`unknown handshake kind: ${kind}`)
   }
-  return { kind, payload: frame.subarray(HEADER_LENGTH) }
+  return { version, kind, payload: frame.subarray(HEADER_LENGTH) }
 }

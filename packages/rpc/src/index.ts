@@ -9,7 +9,9 @@ export type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
 export {
   type CommitClassifierState,
   type CommitDisposition,
+  type CommitFrameEvidence,
   classifyCommit,
+  UNKNOWN_FRAME_VERSION,
 } from './classify.js'
 export {
   CommitDeadlineError,
@@ -24,6 +26,7 @@ export {
   RecoveryRequiredError,
 } from './commit.js'
 export {
+  COMMIT_FRAME_VERSION,
   type CommitFrame,
   decodeCommitFrame,
   encodeCommitFrame,
@@ -55,6 +58,7 @@ export {
   createLedgerEntryResolver,
   decodeLedgerEntries,
   encodeLedgerEntries,
+  LEDGER_ENTRIES_VERSION,
 } from './ledger-entries.js'
 export {
   createGroupPeer,

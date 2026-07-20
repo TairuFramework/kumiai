@@ -7,24 +7,40 @@ import type { GroupCrypto } from './crypto.js'
  * with `GroupCrypto.sealEntries` under a key derived from the epoch the Commit is framed at (the
  * epoch every peer that can apply it holds). The hub sees only the sealed bytes, never a body.
  *
- *   [ count(2, LE) | (tokenLength(4, LE) | token utf8)... ]
+ *   [ VERSION(1) | count(2, LE) | (tokenLength(4, LE) | token utf8)... ]
  *
  * This module is the ONLY place a commit frame's blob is opened, via a resolver that runs only
  * when the MLS port asks for the bodies of a commit it is applying. Opening is a consequence
  * of "I can apply this frame", never a precondition of reading it.
  */
 
+/**
+ * Current ledger-entry blob format version.
+ *
+ * Unversioned, this format degrades tolerably only by ACCIDENT: the resolver's `catch` turns a
+ * mis-parse into an empty answer, which the lane files as poison. That is an accident and not a
+ * contract — nothing stops a later layout from parsing as a plausible token list under today's
+ * rules — so the version byte makes the refusal a decision instead of a lucky one.
+ *
+ * An unknown version is REFUSED here, distinguishably. It does not heal: the blob rides INSIDE a
+ * commit frame, and it is the handshake header the lane reads first that carries the heal rule.
+ */
+export const LEDGER_ENTRIES_VERSION = 1
+
+const VERSION_BYTES = 1
 const COUNT_BYTES = 2
+const HEADER_BYTES = VERSION_BYTES + COUNT_BYTES
 const LENGTH_BYTES = 4
 
 /** Encode the signed tokens a Commit enacts, for sealing into its frame. */
 export function encodeLedgerEntries(tokens: Array<string>): Uint8Array {
   const encoded = tokens.map((token) => fromUTF(token))
-  const size = encoded.reduce((total, bytes) => total + LENGTH_BYTES + bytes.length, COUNT_BYTES)
+  const size = encoded.reduce((total, bytes) => total + LENGTH_BYTES + bytes.length, HEADER_BYTES)
   const out = new Uint8Array(size)
   const view = new DataView(out.buffer)
-  view.setUint16(0, encoded.length, true)
-  let offset = COUNT_BYTES
+  out[0] = LEDGER_ENTRIES_VERSION
+  view.setUint16(VERSION_BYTES, encoded.length, true)
+  let offset = HEADER_BYTES
   for (const bytes of encoded) {
     view.setUint32(offset, bytes.length, true)
     out.set(bytes, offset + LENGTH_BYTES)
@@ -33,15 +49,22 @@ export function encodeLedgerEntries(tokens: Array<string>): Uint8Array {
   return out
 }
 
-/** Decode the signed tokens sealed into a commit frame. Throws on bytes that are not a list. */
+/**
+ * Decode the signed tokens sealed into a commit frame. Throws on bytes that are not a list, and
+ * on a version this build does not know.
+ */
 export function decodeLedgerEntries(bytes: Uint8Array): Array<string> {
-  if (bytes.length < COUNT_BYTES) {
+  if (bytes.length < HEADER_BYTES) {
     throw new Error('ledger entry blob is too short')
   }
+  const version = bytes[0]
+  if (version !== LEDGER_ENTRIES_VERSION) {
+    throw new Error(`unsupported ledger entry blob version: ${version}`)
+  }
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-  const count = view.getUint16(0, true)
+  const count = view.getUint16(VERSION_BYTES, true)
   const tokens: Array<string> = []
-  let offset = COUNT_BYTES
+  let offset = HEADER_BYTES
   for (let i = 0; i < count; i++) {
     if (offset + LENGTH_BYTES > bytes.length) {
       throw new Error('ledger entry blob is truncated')

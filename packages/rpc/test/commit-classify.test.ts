@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'vitest'
 
-import { type CommitClassifierState, classifyCommit } from '../src/classify.js'
+import {
+  type CommitClassifierState,
+  classifyCommit,
+  UNKNOWN_FRAME_VERSION,
+} from '../src/classify.js'
 
 /** A peer at epoch 5, which enacted commit `s3` at epoch 3 and `s4` at epoch 4. */
 function bob(overrides: Partial<CommitClassifierState> = {}): CommitClassifierState {
@@ -76,6 +80,24 @@ describe('the cursor table', () => {
 
   test('bytes that are not a commit are poison', () => {
     expect(classifyCommit(null, 's9', bob())).toEqual({ row: 'poison' })
+  })
+
+  test('a frame in a wire version this build cannot read is AHEAD, and not poison', () => {
+    // The distinction the two assertions make together: `null` is "readable bytes that are not a
+    // commit" and is poison; this is "the group is speaking a language I do not have" and is
+    // proof it moved without this peer. Filing it as poison is the silent killer — after a
+    // version bump every frame lands here, so there is no readable next frame to heal from.
+    expect(classifyCommit(UNKNOWN_FRAME_VERSION, 's9', bob())).toEqual({ row: 'ahead' })
+    expect(classifyCommit(UNKNOWN_FRAME_VERSION, 's9', bob())).not.toEqual({ row: 'poison' })
+  })
+
+  test('it is ahead whatever this peer’s epoch is: no epoch was readable to compare', () => {
+    // Every other row turns on an epoch read out of the frame. There is none here, so the row
+    // cannot be conditioned on one — and must not be, or a peer at a high epoch would file the
+    // frame as poison exactly when it is furthest from the group.
+    for (const epoch of [0, 1, 5, 99]) {
+      expect(classifyCommit(UNKNOWN_FRAME_VERSION, 's9', bob({ epoch }))).toEqual({ row: 'ahead' })
+    }
   })
 
   describe('the epoch is cleartext and the committer needs a key, so the rows split on which they use', () => {

@@ -48,10 +48,24 @@ describe('handshake frame codec', () => {
     expect(() => decodeHandshakeFrame(new Uint8Array([0x00, 0x00, 1, 0, 9]))).toThrow(/magic/)
   })
 
-  test('rejects an unsupported version', () => {
-    expect(() =>
-      decodeHandshakeFrame(new Uint8Array([HANDSHAKE_MAGIC[0], HANDSHAKE_MAGIC[1], 99, 0, 9])),
-    ).toThrow(/version/)
+  test('reports the version rather than throwing on one it does not know', () => {
+    // Deliberately NOT a throw, and the one place this codec defers instead of refusing. The
+    // right answer to an unreadable frame differs by lane — on the commit topic it is evidence
+    // the group moved on and the peer heals, everywhere else it is dropped — and only the caller
+    // knows which lane it is on. A decoder that threw here would decide for all of them, which
+    // is how a version bump strands every old peer at a dead epoch.
+    const decoded = decodeHandshakeFrame(
+      new Uint8Array([HANDSHAKE_MAGIC[0], HANDSHAKE_MAGIC[1], 99, 0, 9]),
+    )
+    expect(decoded.version).toBe(99)
+    expect(decoded.version).not.toBe(HANDSHAKE_VERSION)
+  })
+
+  test('a frame this build does read reports the current version', () => {
+    const decoded = decodeHandshakeFrame(
+      encodeHandshakeFrame(HANDSHAKE_KIND.commit, new Uint8Array([1])),
+    )
+    expect(decoded.version).toBe(HANDSHAKE_VERSION)
   })
 
   test('rejects an unknown kind tag', () => {

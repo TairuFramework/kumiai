@@ -11,9 +11,9 @@ and a format change is a flag day whatever it says. What changes is that the fai
 epoch or a tampered frame.
 
 **It lives inside the blob, and never in the frame header.** An unknown blob version fails the
-open, which a peer survives: the commit files as poison, is stepped over, and the next frame —
-framed at an epoch ahead of it — strands the peer into a rejoin that re-gathers the ledger. An
-unknown frame version would fail the decode instead, before the frame is ever classified, and
-a peer that steps over every frame without classifying one never learns the group moved past
-it. It would report itself fully reconciled at a dead epoch, forever, with no error and no
-heal.
+open, which a peer survives cheaply: the commit files as poison, is stepped over, and the next
+frame — framed at an epoch ahead of it — strands the peer into a rejoin that re-gathers the
+ledger. That costs an old peer one commit. Bumping the frame header instead costs it a full
+rejoin on every frame from the bump onwards — survivable now that `@kumiai/rpc` heals on an
+unknown frame version rather than filing it as poison, but still the expensive door. Use this
+one.

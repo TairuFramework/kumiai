@@ -1,12 +1,13 @@
 import type { CommitHeader } from './crypto.js'
 
 /**
- * What the lane does with one frame from the commit log. Six rows, in EVALUATION order — the
+ * What the lane does with one frame from the commit log. Seven rows, in EVALUATION order — the
  * order is load-bearing, and this table is the `if` chain of {@link classifyCommit} plus the
  * port's answer to its last row:
  *
  * | Frame | Cursor |
  * |---|---|
+ * | A wire version this build cannot read at all | advance; heal — the group moved on to a format this build does not have |
  * | Not a commit at all (no header) | advance (poison — never retry, never heal); settled first, before any epoch question |
  * | Framed at an epoch AHEAD of this peer's | advance; heal — the group moved on without it |
  * | Below this peer's epoch, with no recorded applied-commit | advance, no fork check, no unwrap attempt |
@@ -15,10 +16,11 @@ import type { CommitHeader } from './crypto.js'
  * | At this peer's current epoch, committed by THIS peer | do not advance; heal |
  * | At this peer's current epoch, committed by another — handed to the port | applied: advance and record this epoch -> sequenceID for the fork check; refused by policy or entries unresolvable: advance (poison — never retry, never heal) |
  *
- * Six rows are decided here, reading bytes and decrypting nothing; only the last — a frame at
+ * Seven rows are decided here, reading bytes and decrypting nothing; only the last — a frame at
  * this peer's epoch authored by someone else — is handed to the MLS port, whose answer is the
- * seventh row. Headerless-poison settles at the top because bytes that are not a commit cannot
- * be asked the epoch questions the other rows turn on.
+ * eighth row. Headerless-poison settles at the top because bytes that are not a commit cannot
+ * be asked the epoch questions the other rows turn on — and the unreadable-version row settles
+ * above even that, because such a frame cannot be asked whether it is a commit either.
  *
  * **The header carries two facts with different trust, and each row must say which it uses.**
  * The epoch is cleartext, keyless, readable at any epoch, and only the publisher's word. The
@@ -164,6 +166,24 @@ export type CommitDisposition =
    */
   | { row: 'poison' }
 
+/**
+ * A frame on the commit topic whose handshake version this build does not know: unreadable, in
+ * the one place where being unreadable is itself evidence.
+ *
+ * Passed to {@link classifyCommit} in the header's place, because there IS no header — the bytes
+ * behind the version byte are a format this build has never seen, and reading them would be
+ * guessing. It is not a `null` header: `null` means "readable bytes that are not a commit", which
+ * is poison. This means "the group is speaking a language I do not have", which is `ahead`.
+ */
+export const UNKNOWN_FRAME_VERSION = 'unknown-frame-version'
+
+/**
+ * What the lane could get out of one frame before classifying it: the commit's own header,
+ * `null` for bytes that are not a commit, or {@link UNKNOWN_FRAME_VERSION} for a frame this
+ * build cannot read at all.
+ */
+export type CommitFrameEvidence = CommitHeader | null | typeof UNKNOWN_FRAME_VERSION
+
 /** What the classifier reads about this peer. Nothing here needs the network or a key. */
 export type CommitClassifierState = {
   /** This peer's own identity — the DID that authenticates a commit this peer authored. */
@@ -189,13 +209,31 @@ export type CommitClassifierState = {
  *
  * `header` is what the commit says about itself, read out of its own bytes by the MLS port:
  * `null` for bytes that are not a commit at all, and otherwise the commit's epoch — always, it
- * is cleartext — with `committerDID` present only where the port could MLS-authenticate one.
+ * is cleartext — with `committerDID` present only where the port could MLS-authenticate one. It
+ * is {@link UNKNOWN_FRAME_VERSION} where the frame's wire version put the header itself out of
+ * reach.
  */
 export function classifyCommit(
-  header: CommitHeader | null,
+  header: CommitFrameEvidence,
   sequenceID: string,
   state: CommitClassifierState,
 ): CommitDisposition {
+  // A frame this build cannot read AT ALL, settled above every other row — including the
+  // headerless one, since bytes in an unknown format cannot be asked whether they are a commit.
+  //
+  // `ahead`, and for the same reason that row exists: on the commit topic a frame nobody could
+  // have written except a build past this one is proof the group moved where this peer did not.
+  // POISON IS THE DANGEROUS ANSWER HERE, uniquely so. Every other poison frame is one frame among
+  // readable ones, so the peer heals off the next; after a version bump EVERY frame is
+  // unreadable, so there is no next — the peer steps over the group's whole future, drains to the
+  // end of the log, and reports itself fully reconciled at a dead epoch, permanently and
+  // silently.
+  //
+  // Costs exactly what the `ahead` row costs and no more, on the same asymmetry: anything that
+  // can publish here can forge one of these and trigger a heal, and nothing can forge one that
+  // SUPPRESSES a heal. See that row for why that trade is accepted.
+  if (header === UNKNOWN_FRAME_VERSION) return { row: 'ahead' }
+
   // Bytes that are not a commit cannot be asked the questions below, so settle first. Overlaps
   // no other row: a frame that is not a commit is not somebody's commit, least of all this
   // peer's own. NOTE what this does NOT cover: a commit the port could read the epoch of but not

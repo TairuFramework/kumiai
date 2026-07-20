@@ -20,7 +20,7 @@ import { toUTF } from '@sozai/codec'
 import type { Anchor, AnchorStore } from './anchor.js'
 import type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
 import { createGroupBusServer } from './bus-server.js'
-import { classifyCommit } from './classify.js'
+import { classifyCommit, UNKNOWN_FRAME_VERSION } from './classify.js'
 import {
   CommitDeadlineError,
   type CommitJournal,
@@ -41,7 +41,12 @@ import {
   type InboundPath,
 } from './directed.js'
 import { adaptBusHandlers, type BusHandlerMaps } from './handlers.js'
-import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from './handshake.js'
+import {
+  decodeHandshakeFrame,
+  encodeHandshakeFrame,
+  HANDSHAKE_KIND,
+  HANDSHAKE_VERSION,
+} from './handshake.js'
 import {
   createHubMux,
   type HubMux,
@@ -1273,6 +1278,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         let commit: Uint8Array
         try {
           const frame = decodeHandshakeFrame(message.payload)
+          // An unknown wire version is unreadable here and stays unreadable: this ceiling is
+          // built from epochs read out of commit bytes, and a frame this build cannot parse
+          // yields none. It is NOT the heal signal the drain makes of it — that signal is the
+          // drain's to raise, and raising it twice would not raise it harder.
+          if (frame.version !== HANDSHAKE_VERSION) continue
           if (frame.kind !== HANDSHAKE_KIND.commit) continue
           commit = decodeCommitFrame(frame.payload).commit
         } catch {
@@ -1671,6 +1681,27 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           reconciledHead = position // malformed: dropped, and the cursor still steps over it
           continue
         }
+        // A wire version this build does not know, settled BEFORE the kind byte: under an
+        // unknown version nothing behind the magic means what this build thinks it means, the
+        // kind included. On the commit topic — and only here — that is evidence in itself, so it
+        // goes to the classifier rather than being dropped, and comes back `ahead`: the group
+        // moved on to a format this build cannot read. Step over, heal, strand.
+        if (frame.version !== HANDSHAKE_VERSION) {
+          const unreadable = classifyCommit(UNKNOWN_FRAME_VERSION, position, {
+            localDID,
+            epoch: crypto.epoch(),
+            appliedByEpoch,
+          })
+          reconciledHead = position
+          // Do what the classifier said rather than what this branch assumes. It answers `ahead`
+          // for this evidence today; anything else it ever answers is a row that steps over the
+          // frame and spends nothing, which is what the bare cursor advance above already did.
+          if (unreadable.row === 'ahead') {
+            healRequested = true
+            stranded = true
+          }
+          continue
+        }
         if (frame.kind !== HANDSHAKE_KIND.commit) {
           reconciledHead = position // the commit lane carries commits, and nothing else
           continue
@@ -1871,6 +1902,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     } catch {
       return // malformed frames are dropped
     }
+    // Dropped, exactly as before, and deliberately NOT the commit lane's heal: the rendezvous
+    // carries request/reply traffic, so a frame here in a format this build cannot read says
+    // nothing about where the group's line got to. Only the commit topic carries that evidence.
+    if (frame.version !== HANDSHAKE_VERSION) return
     try {
       if (frame.kind === HANDSHAKE_KIND.recoveryRequest) {
         handleRecoveryRequest(decodeRecoveryRequest(frame.payload))
