@@ -157,8 +157,24 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       const { topicID, payload } = ctx.param
       const senderDID = getClientDID(ctx)
       // `payloadBytes` is computed before the authorize call (rather than after, as before) so the
-      // hook can see the decoded size; decoding is pure and side-effect free, so doing it earlier
-      // changes nothing else. `retain` defaults to 'mailbox' when absent, matching the same default
+      // hook can see the decoded size. Decoding is pure, but moving it earlier is NOT free, and
+      // two consequences are deliberate rather than overlooked:
+      //
+      //   - `fromB64` THROWS on malformed base64, so a caller who is both unauthorized and sending
+      //     junk now gets that uncoded decoder error instead of `EK02 Not authorized`. Malformed
+      //     input is answered before authorization, which leaks nothing about the topic — the
+      //     decode cannot tell whether the caller was authorized — but it does mean EK02 is not
+      //     the only answer an unauthorized publish can get.
+      //   - the decode also runs before both rate limiters below, so a flood of oversized payloads
+      //     is decoded before it is throttled. Bounded by the transport's own message limit.
+      //
+      // The alternative — decode after the limiters and hand the hook a size computed arithmetically
+      // from the base64 length — was rejected: it re-derives `@sozai/codec`'s notion of a valid
+      // encoding (it trims surrounding whitespace and accepts optional padding), and a size that
+      // drifts from the real decoded length is handed to a hook that may enforce a size cap. A
+      // wrong number in the authorization path is worse than either cost above.
+      //
+      // `retain` defaults to 'mailbox' when absent, matching the same default
       // the store applies below (`params.retain ?? 'mailbox'` in memoryStore.ts) — the hook must
       // never see an absent retain, since `AuthorizeRequest`'s `publish` variant declares it required.
       const payloadBytes = fromB64(payload)

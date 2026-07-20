@@ -29,9 +29,11 @@ DID from the **verified issuer** of the signed message, never from a wire field 
 another sender. The `identity` param is required for that reason.
 
 Authorization is two layers, and only the second one knows about topics: `accessRules` gate the
-procedures (the default lets any authenticated DID call them), and the optional `authorize(did,
-action, topicID)` hook decides publish and subscribe per topic. The default allows any authenticated
-DID.
+procedures (the default lets any authenticated DID call them), and the optional
+`authorize(request)` hook decides publish and subscribe per topic. It takes one discriminated
+`AuthorizeRequest` — narrow on `request.action` — and returns `AuthorizeDecision`, either a boolean
+or `{ allow, reason?, code?, retryAfterMs? }`. `AuthorizeRequest` names six actions, but only
+`publish` and `subscribe` are dispatched today. The default allows any authenticated DID.
 
 ## Durable subscription, ephemeral connection
 

@@ -3,7 +3,9 @@
 ---
 
 The sealed ledger-entry blob now carries a format version: `[ VERSION(1) | NONCE(24) |
-CIPHERTEXT ]`, and `ENTRY_SEAL_LABEL` is exported alongside `APP_TOPIC_LABEL`.
+CIPHERTEXT ]`, and `ENTRY_SEAL_LABEL` is exported — the label the seal derives its key under, so
+a caller overriding it via `GroupCryptoParams.entryLabel` can name what it is replacing.
+(`APP_TOPIC_LABEL` is no longer exported from this package; it lives in `@kumiai/rpc`.)
 
 The byte buys diagnosis, not compatibility — there is no version of this a v1 peer can read,
 and a format change is a flag day whatever it says. What changes is that the failure reads as

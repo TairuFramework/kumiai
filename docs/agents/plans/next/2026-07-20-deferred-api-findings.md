@@ -90,3 +90,27 @@ change, and closing them now was out of scope for the task that found them.
   `directed.ts`'s matching transport glue, both still declared against `@kumiai/broadcast`'s
   optional-sender `UnwrapResult` and shared by other consumers beyond Task 6's scope. Type-safety
   debt with a runtime guard already under it, not a live gap.
+
+## Found during the final whole-change review
+
+- **The `0xf102` hatch opens narrower than it reads.** `@kumiai/mls` reserves and advertises the
+  third control extension type, so a future control extension can be INSTALLED into a live group
+  without re-admitting every member — but only empty. `packages/mls/src/policy.ts:119-125` permits
+  the added entry solely when its data is a zero-length `Uint8Array`, and every later change to the
+  GroupContext extension list goes through the same positional compare
+  (`evaluateGroupContextExtensions`), which requires byte-identical data at every position bar the
+  ledger head. So POPULATING `0xf102` — the step that actually makes it useful — is still a policy
+  change every peer must ship before any peer can commit it. What the reservation buys is the
+  extension TYPE surviving into existing groups' extension lists and every member's capabilities;
+  it does not buy a data channel that can be opened later without a flag day. Worth stating plainly
+  because the changeset's "escape hatches with a closing window" framing invites the stronger read.
+- **`GroupAnchor.version` is carried but never enforced.** `packages/mls/src/anchor.ts:79` checks
+  that `version` is a `number` and `:82` copies it onto the returned anchor, but nothing ever
+  compares it against `CURRENT_VERSION` (`:102`, the only writer) — so an anchor written by a
+  future build parses as if this build understood it, and its `app` payload is handed to the
+  consumer under a version this build has never seen. Pre-existing, not touched by this branch, and
+  genuinely lower-stakes than the frame formats: the anchor is written once at group creation and
+  is immutable, so there is no live lane on which an old peer meets a new anchor except a join, and
+  a `null` there is not obviously better than a tolerated one. Recorded because after this branch
+  it is the one remaining format in the repo where a version is declared and not enforced — the
+  exact shape of the commit-frame defect this review caught, in the one place still holding it.

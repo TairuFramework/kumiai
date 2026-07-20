@@ -27,12 +27,21 @@ at. No error, no heal, and no restart that fixes it.
 - Healing is the safe direction: a forged unknown-version frame can only *trigger* a heal, never
   suppress one — the asymmetry the `ahead` row already accepts on a cleartext epoch.
 
-**Both payload formats gained a version byte**, and neither heals — an unknown version is a
-named error. `encodeCommitFrame` is now `[ VERSION(1) | commitLength(4, LE) | commit | sealed
-blob ]`, closing the worst failure mode in the package: a later frame with a third section
-decoded v1 *successfully*, its new section silently swallowed into `sealedEntries`.
-`encodeLedgerEntries` is now `[ VERSION(1) | count(2, LE) | ... ]`; unversioned it degraded
-tolerably only by accident, via the resolver's `catch`.
+**Both payload formats gained a version byte.** `encodeCommitFrame` is now `[ VERSION(1) |
+commitLength(4, LE) | commit | sealed blob ]`, closing the worst failure mode in the package: a
+later frame with a third section decoded v1 *successfully*, its new section silently swallowed into
+`sealedEntries`. `encodeLedgerEntries` is now `[ VERSION(1) | count(2, LE) | ... ]`; unversioned it
+degraded tolerably only by accident, via the resolver's `catch`.
+
+**The two bytes fail differently, and the difference is the whole point.** The commit frame's
+version is read *before* the commit bytes are extracted, so a bump there has the same no-next-frame
+problem as the handshake header — it therefore takes the same route, to `classifyCommit` as
+`UNKNOWN_FRAME_VERSION`, and the peer heals and strands. `decodeCommitFrame` throws
+`UnsupportedCommitFrameVersionError` for exactly that case, and `isUnsupportedCommitFrameVersion`
+is the boundary predicate the lane branches on; bytes that are merely not a frame (too short,
+truncated) keep throwing a plain error and are still dropped silently. The ledger-entries blob's
+version is the one that does *not* heal: its failure lands after the commit has been read, so the
+commit files as poison and the peer reads on.
 
 Both are wire-breaking: a v1 peer cannot read either new format, so the group must move
 together.
