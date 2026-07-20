@@ -25,9 +25,14 @@ export type { ClientState }
 const CLIENT_STATE_VERSION = 1
 
 export function decodeClientState(encoded: Uint8Array): ClientState | undefined {
-  // encoded[0] is `undefined` on an empty array, which already hits this check — no
-  // separate empty-input guard needed.
-  //
+  // Too short to hold the version byte is a TRUNCATED read, not a version this build does not
+  // speak, and the two are separate diagnoses — the same split `@kumiai/mls-rpc`'s `openEntries`
+  // makes ("not a sealed blob" before "unsupported blob version"). Without this guard `encoded[0]`
+  // is `undefined` on an empty buffer, which falls into the version branch below and reports
+  // "unsupported client-state version undefined": the loudest possible way to misdescribe an
+  // empty store as a format from the future. Truncated bytes return `undefined`, as every other
+  // truncated read here does.
+  if (encoded.length === 0) return undefined
   // Distinguishable on purpose. `decode()` below returns `undefined` for malformed or
   // truncated bytes reaching `ts-mls`, and that stays `undefined` — but an unknown version
   // byte is not that kind of failure, so it throws instead of returning the same `undefined`

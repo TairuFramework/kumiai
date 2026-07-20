@@ -276,6 +276,28 @@ describe('defaultCommitPolicy', () => {
     ).toBe('reject')
   })
 
+  test('group_context_extensions rejects installing the reserved extension with non-empty data', () => {
+    // The `extensionData.length === 0` conjunct, which nothing else in this file can fail on:
+    // every other case here passes empty data, so deleting that conjunct (or the `instanceof`
+    // beside it) leaves all of them green. What survives that mutation is not theoretical — an
+    // admin installing 0xf102 with bytes OF HIS CHOOSING into the GroupContext inside an
+    // otherwise-valid head move, which is exactly what this policy's doc comment promises cannot
+    // happen. The type is reserved and nothing consumes it yet, so no policy exists for what its
+    // data may say; until one does, the only permitted data is none.
+    const current = [anchorExtension(ANCHOR_BYTES.slice()), headExtension(HEAD_BYTES.slice())]
+    const installsWithData = gceProposal([
+      anchorExtension(ANCHOR_BYTES.slice()),
+      headExtension(HEAD_BYTES.slice()),
+      reservedExtension(Uint8Array.from([0x01])),
+    ])
+    expect(
+      defaultCommitPolicy(
+        commit(ADMIN_LEAF, [withSender(installsWithData, undefined)]),
+        context({ currentExtensions: current, expectedHeadExtensionData: HEAD_BYTES }),
+      ),
+    ).toBe('reject')
+  })
+
   test('group_context_extensions rejects a second copy of an already-installed reserved extension', () => {
     // Once installed, the reserved type is carried like any other extension —
     // the added-entry allowance is for installing it, not for duplicating it.

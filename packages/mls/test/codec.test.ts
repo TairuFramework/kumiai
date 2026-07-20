@@ -66,4 +66,12 @@ describe('encodeClientState / decodeClientState', () => {
       'decodeClientState: unsupported client-state version 2',
     )
   })
+
+  test('an empty buffer is a truncated read, not a version from the future', () => {
+    // The two diagnoses stay apart. Without the length guard `encoded[0]` is `undefined` here and
+    // the version branch reports "unsupported client-state version undefined" — an empty or
+    // never-written store described as a format this build is too old to read, which is the one
+    // wrong thing that byte exists to stop it saying.
+    expect(decodeClientState(new Uint8Array())).toBeUndefined()
+  })
 })
