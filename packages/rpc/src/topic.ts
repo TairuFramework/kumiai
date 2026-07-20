@@ -3,15 +3,15 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { fromUTF, toB64U } from '@sozai/codec'
 
 /** Reserved label for per-member unicast inbox topics. */
-export const INBOX_LABEL = 'enkaku/inbox/v1'
+export const INBOX_LABEL = 'kumiai/inbox/v1'
 
 /** Reserved label for the non-rotating MLS commit topic. */
-export const COMMIT_LABEL = 'enkaku/commit/v1'
+export const COMMIT_LABEL = 'kumiai/commit/v1'
 
 /** Reserved label for the non-rotating recovery-rendezvous topic. */
-export const RENDEZVOUS_LABEL = 'enkaku/rendezvous/v1'
+export const RENDEZVOUS_LABEL = 'kumiai/rendezvous/v1'
 
-const DISCOVERY_PREFIX = 'enkaku/discovery/v1'
+const DISCOVERY_PREFIX = 'kumiai/discovery/v1'
 const SEP = '\0'
 
 /**
