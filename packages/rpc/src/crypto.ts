@@ -1,4 +1,4 @@
-import type { ByteTransform, Unwrap } from '@kumiai/broadcast'
+import type { ByteTransform } from '@kumiai/broadcast'
 
 /**
  * Consumer-supplied MLS crypto port: epoch number, as many epoch-bound, domain-separated
@@ -14,7 +14,8 @@ import type { ByteTransform, Unwrap } from '@kumiai/broadcast'
  *
  * `epoch()` and `exportSecret(label)` are read on init and every {@link "peer".GroupPeer.resync}.
  * `wrap`/`unwrap` close over the live group, so they always use current epoch state. `unwrap`
- * returns the authenticated sender (`senderDID`) recovered from the ciphertext.
+ * returns the authenticated sender (`senderDID`) recovered from the ciphertext, and REQUIRES one
+ * — see {@link GroupUnwrapResult}.
  *
  * WHAT `unwrap` MUST OPEN, and what group-rpc must never ask of it: it must open bytes sealed at
  * the handle's CURRENT epoch. That is the whole requirement. A real MLS handle also opens a few
@@ -63,7 +64,17 @@ export type GroupCrypto = {
    */
   exportSecret(label: string, length?: number): Uint8Array | Promise<Uint8Array>
   wrap: ByteTransform
-  unwrap: Unwrap
+  /**
+   * Open a sealed app frame and recover who sent it. Returns {@link GroupUnwrapResult}, whose
+   * `senderDID` is REQUIRED — deliberately narrower than `@kumiai/broadcast`'s own `Unwrap`, whose
+   * `UnwrapResult` carries `senderDID?: string` because broadcast serves transports with no
+   * identity at all. group-rpc's app lane is always MLS-sealed, so there is no identity-less case
+   * for this port to accommodate: an implementation that cannot name the sender has not opened the
+   * frame, and must throw rather than return one with the field missing. See
+   * {@link GroupUnwrapResult} for why optional was rejected here for the same reason it was
+   * rejected on `exportSecret`'s `label`.
+   */
+  unwrap(bytes: Uint8Array): GroupUnwrapResult | Promise<GroupUnwrapResult>
   /**
    * The epoch a sealed frame was sealed at, read from its own CLEARTEXT without opening it —
    * structural and pre-open, like {@link GroupMLS.readCommitHeader} is pre-apply. `null` for bytes
@@ -130,6 +141,29 @@ export type GroupCrypto = {
    * answer and changes no handle state. Callers open from inside an apply.
    */
   openEntries(sealed: Uint8Array): Uint8Array | Promise<Uint8Array>
+}
+
+/**
+ * `GroupCrypto.unwrap`'s result: an opened app frame's plaintext and the AUTHENTICATED sender the
+ * open recovered from it. rpc's OWN type, not `@kumiai/broadcast`'s `UnwrapResult` — deliberately,
+ * even though the two are otherwise identical in shape.
+ *
+ * `senderDID` IS REQUIRED, and that is the entire point of this type rather than an accident of
+ * it — the same argument `exportSecret`'s `label` makes, aimed at the same failure. Broadcast's
+ * `UnwrapResult` carries `senderDID?: string` because broadcast also serves transports that open
+ * bytes with no identity to recover at all; reusing it here would let an implementation return a
+ * frame with no sender and every caller downstream would silently treat "unauthenticated" the same
+ * as "authenticated as nobody in particular". group-rpc's app lane is always MLS-sealed — there is
+ * no identity-less case for it to accommodate — so any future rpc-level authorization needs a
+ * foundation it can actually build on: a sender that is either PRESENT and CORRECT, or a throw.
+ * Optional would type-check against exactly the implementation that has no sender to give and
+ * quietly returns one anyway; required is the only shape that fails loudly. Do not widen this back
+ * to an optional field; the next reader who does has reintroduced the hole `exportSecret`'s `label`
+ * was made required to close.
+ */
+export type GroupUnwrapResult = {
+  payload: Uint8Array
+  senderDID: string
 }
 
 /**

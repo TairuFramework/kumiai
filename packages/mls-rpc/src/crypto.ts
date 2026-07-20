@@ -172,7 +172,16 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
       // Throws for any epoch but this handle's. That is ordinary control flow on the read
       // paths — it is how a retained frame says "not mine" — and the caller drops it.
       const { payload, senderDID } = await handle().decrypt(bytes)
-      return { payload, ...(senderDID != null && { senderDID }) }
+      // `GroupCrypto.unwrap` REQUIRES a sender (see its doc); `GroupHandle.decrypt` does not
+      // guarantee one — it is absent only when the authenticated leaf holds no parsable
+      // credential, which `@kumiai/mls`'s own doc treats as "I cannot name the author", never "no
+      // author". That is not a shape this port may hand upward: group-rpc's app lane has no
+      // identity-less case to give it to, so an unnamed sender is treated the same as bytes this
+      // handle cannot open — refused here rather than returned with the field missing.
+      if (senderDID == null) {
+        throw new Error('unwrap: opened frame has no authenticated sender')
+      }
+      return { payload, senderDID }
     },
 
     frameEpoch: (bytes) => {

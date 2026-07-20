@@ -36,6 +36,7 @@ export {
   type CommitHeader,
   type GroupCrypto,
   type GroupMLS,
+  type GroupUnwrapResult,
   isMissingLedgerEntries,
   type PendingRecovery,
 } from './crypto.js'

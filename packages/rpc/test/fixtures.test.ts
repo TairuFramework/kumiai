@@ -12,8 +12,9 @@ describe('fake crypto', () => {
     const plain = fromUTF('hello group')
     const wrapped = await crypto.wrap(plain)
     expect(toUTF(wrapped)).not.toContain('hello group')
-    const result = await crypto.unwrap(wrapped)
-    const out = result instanceof Uint8Array ? { payload: result, senderDID: undefined } : result
+    // `unwrap` returns `GroupUnwrapResult` directly — `senderDID` is REQUIRED, so no
+    // Uint8Array-shortcut normalization is needed here anymore.
+    const out = await crypto.unwrap(wrapped)
     expect(toUTF(out.payload)).toBe('hello group')
     expect(out.senderDID).toBe('did:key:alice')
   })

@@ -32,7 +32,12 @@ import {
   RecoveryRequiredError,
 } from './commit.js'
 import { type CommitFrame, decodeCommitFrame, encodeCommitFrame } from './commit-frame.js'
-import { type GroupCrypto, type GroupMLS, isMissingLedgerEntries } from './crypto.js'
+import {
+  type GroupCrypto,
+  type GroupMLS,
+  type GroupUnwrapResult,
+  isMissingLedgerEntries,
+} from './crypto.js'
 import { asLogPosition, type LogPosition } from './cursor.js'
 import {
   createDirectedClient,
@@ -1519,10 +1524,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           frame.sealed = null
           continue
         }
-        let opened: UnwrapResult
+        let opened: GroupUnwrapResult
         try {
-          const result = await crypto.unwrap(sealed)
-          opened = result instanceof Uint8Array ? { payload: result } : result
+          // `crypto.unwrap` always returns the full result — `senderDID` is REQUIRED — so there is
+          // no bare-`Uint8Array` shortcut left to normalize away here.
+          opened = await crypto.unwrap(sealed)
         } catch {
           // It claimed this epoch and the handle refused it. Only `unwrap` is authoritative, and
           // the handle never comes back to this epoch, so nothing will ever open these bytes: dead.

@@ -71,8 +71,7 @@ describe('per-procedure retention for app events', () => {
     // frame is RETAINED and openable at this epoch, which is exactly what a fresh reader shows.
     const reader = createFakeCrypto({ epoch: 1, localDID: 'carol' })
     const opened = await reader.unwrap(drained.messages[0].payload)
-    const bytes = opened instanceof Uint8Array ? opened : opened.payload
-    expect(JSON.parse(toUTF(bytes))).toEqual({
+    expect(JSON.parse(toUTF(opened.payload))).toEqual({
       payload: { typ: 'event', prc: 'room/posted', data: { text: 'kept' } },
     })
 

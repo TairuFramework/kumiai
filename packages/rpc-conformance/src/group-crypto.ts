@@ -15,17 +15,23 @@
  */
 import { describe, expect, test } from 'vitest'
 
-/** The `UnwrapResult` of `@kumiai/broadcast`, re-declared. */
-export type ConformanceUnwrapResult = { payload: Uint8Array; senderDID?: string }
+/**
+ * The `GroupUnwrapResult` of `@kumiai/rpc`, re-declared — NOT `@kumiai/broadcast`'s
+ * `UnwrapResult`, and the difference is load-bearing: `senderDID` is REQUIRED here, matching the
+ * real port. `@kumiai/rpc`'s app lane is always MLS-sealed, so an unwrap with no sender to name is
+ * not a value this port may return — it is bytes the implementation could not open, and must throw
+ * instead. A conformance shape that still allowed the optional field would let an implementation
+ * that returns one with the sender missing satisfy this suite, which is exactly the silent hole
+ * the real type was narrowed to close.
+ */
+export type ConformanceUnwrapResult = { payload: Uint8Array; senderDID: string }
 
 /** The `GroupCrypto` of `@kumiai/rpc`, re-declared structurally. */
 export type ConformanceGroupCrypto = {
   epoch: () => number
   exportSecret: (label: string, length?: number) => Uint8Array | Promise<Uint8Array>
   wrap: (bytes: Uint8Array) => Uint8Array | Promise<Uint8Array>
-  unwrap: (
-    bytes: Uint8Array,
-  ) => Uint8Array | ConformanceUnwrapResult | Promise<Uint8Array | ConformanceUnwrapResult>
+  unwrap: (bytes: Uint8Array) => ConformanceUnwrapResult | Promise<ConformanceUnwrapResult>
   frameEpoch: (bytes: Uint8Array) => number | null
   sealEntries: (bytes: Uint8Array) => Uint8Array | Promise<Uint8Array>
   openEntries: (sealed: Uint8Array) => Uint8Array | Promise<Uint8Array>
@@ -104,8 +110,9 @@ async function opened(
   crypto: ConformanceGroupCrypto,
   bytes: Uint8Array,
 ): Promise<ConformanceUnwrapResult> {
-  const result = await crypto.unwrap(bytes)
-  return result instanceof Uint8Array ? { payload: result } : result
+  // No more `Uint8Array` shortcut to normalize away: `unwrap` REQUIRES a sender, so its only
+  // conformant return is the full result.
+  return await crypto.unwrap(bytes)
 }
 
 export function testGroupCryptoConformance(params: GroupCryptoConformanceParams): void {
@@ -200,14 +207,26 @@ export function testGroupCryptoConformance(params: GroupCryptoConformanceParams)
     })
 
     describe('wrap / unwrap', () => {
+      /**
+       * `senderDID` must be PRESENT AND CORRECT, not merely present — an implementation that
+       * always returns the SAME did (say, the first member ever seen) would still pass a clause
+       * that only checked one direction, because that constant happens to equal `alice.did` here.
+       * Reversing the direction and requiring bob's own DID back is what a constant cannot supply
+       * for both, which is the whole reason this runs both ways rather than one.
+       */
       test('round-trips and names the AUTHENTICATED sender', async () => {
         await withGroup(2, 'roundtrip', async ({ members }) => {
           const alice = memberAt(members, 0)
           const bob = memberAt(members, 1)
-          const sealed = await alice.crypto.wrap(utf8.encode('hello'))
-          const result = await opened(bob.crypto, sealed)
-          expect(text(result.payload)).toBe('hello')
-          expect(result.senderDID).toBe(alice.did)
+
+          const fromAlice = await opened(bob.crypto, await alice.crypto.wrap(utf8.encode('hello')))
+          expect(text(fromAlice.payload)).toBe('hello')
+          expect(fromAlice.senderDID).toBe(alice.did)
+
+          const fromBob = await opened(alice.crypto, await bob.crypto.wrap(utf8.encode('hi back')))
+          expect(text(fromBob.payload)).toBe('hi back')
+          expect(fromBob.senderDID).toBe(bob.did)
+          expect(fromBob.senderDID).not.toBe(fromAlice.senderDID)
         })
       })
 

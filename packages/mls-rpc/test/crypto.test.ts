@@ -131,8 +131,9 @@ describe('createGroupCrypto', () => {
     const bob = cryptoOver(bobGroup)
 
     const sealed = await alice.crypto.wrap(utf8.encode('hello'))
-    const opened = await bob.crypto.unwrap(sealed)
-    const result = opened as { payload: Uint8Array; senderDID?: string }
+    // `unwrap` returns `GroupUnwrapResult` directly now — `senderDID` is REQUIRED, so no cast or
+    // narrowing is needed to read it.
+    const result = await bob.crypto.unwrap(sealed)
     expect(new TextDecoder().decode(result.payload)).toBe('hello')
     expect(result.senderDID).toBe(aliceID.id)
   })
@@ -262,7 +263,7 @@ describe('createGroupCrypto', () => {
       // Nothing the open could have spent: an application frame sealed after those opens still
       // opens, which it would not if the entry open had taken a generation off the same chain.
       const frame = await alice.crypto.wrap(utf8.encode('still works'))
-      const opened = (await bob.crypto.unwrap(frame)) as { payload: Uint8Array }
+      const opened = await bob.crypto.unwrap(frame)
       expect(new TextDecoder().decode(opened.payload)).toBe('still works')
     })
   })

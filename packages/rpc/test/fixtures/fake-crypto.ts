@@ -1,4 +1,3 @@
-import type { Unwrap } from '@kumiai/broadcast'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { fromUTF, toUTF } from '@sozai/codec'
 
@@ -191,7 +190,7 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
     return FRAMED_HEADER_BYTES + didLen <= framed.length ? sealedAt : null
   }
 
-  const unwrap: Unwrap = (bytes) => {
+  const unwrap: GroupCrypto['unwrap'] = (bytes) => {
     if (bytes.length < 2 + FRAMED_HEADER_BYTES) throw new Error('cannot open: not sealed bytes')
     const sealedAt = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint16(
       0,
