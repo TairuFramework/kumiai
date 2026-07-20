@@ -15,18 +15,16 @@ import type { CommitContext, CommitHeader, GroupMLS, PendingRecovery } from '@ku
 const utf8 = new TextEncoder()
 
 /**
- * The label the non-rotating rendezvous secret is derived under.
+ * The label the non-rotating recovery secret is derived under. This secret is the root of
+ * BOTH the commit topic and the rendezvous topic — everything downstream of it depends on
+ * this one label.
  *
  * **This secret is NOT epoch-bound and must never be used for anything that a removed
  * member has to be cut off from.** The port asks for exactly that — a value stable for the
  * group's whole life, so a peer stranded at any epoch can still name the topic it heals on —
  * and a removed member keeps it for life by design.
- *
- * Spelled identically to `@kumiai/rpc`'s `RENDEZVOUS_LABEL` (topic.ts), which is a topic
- * label, not an MLS exporter label. The match is incidental — two independent KDF domains
- * at different stages of the same chain — and must not be collapsed into one constant.
  */
-export const RECOVERY_LABEL = 'kumiai/rendezvous/v1'
+export const RECOVERY_LABEL = 'kumiai/recovery/v1'
 
 /**
  * A per-commit ledger-entry resolver, installed at handle-construction time and swapped

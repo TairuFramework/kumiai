@@ -30,7 +30,9 @@ what is not theirs to define.
   rather than surfacing the entry unread. An entry in a reserved,
   authority-bearing namespace that no one understands must never be passed on.
 - **`kumiai/`** — topic labels (`kumiai/inbox/v1`, `kumiai/commit/v1`,
-  `kumiai/rendezvous/v1`, `kumiai/discovery/v1`, `kumiai/topic/v1`).
+  `kumiai/rendezvous/v1`, `kumiai/discovery/v1`, `kumiai/topic/v1`), plus
+  `kumiai/recovery/v1` — not a topic label but the secret-derivation label the
+  recovery secret is exported under, reserved in the same namespace.
 
 **Application entry types and topic labels must not start with either prefix.**
 Everything else is yours, including `group.` — it was reserved until

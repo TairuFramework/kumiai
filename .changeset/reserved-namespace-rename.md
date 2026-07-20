@@ -1,6 +1,7 @@
 ---
 '@kumiai/broadcast': minor
 '@kumiai/mls': minor
+'@kumiai/mls-rpc': minor
 '@kumiai/rpc': minor
 ---
 
@@ -23,3 +24,10 @@ compiling while the values underneath move. Two consequences:
 
 Code that hardcoded `'group.role'` rather than importing the constant breaks
 with no diagnostic. Import the constants.
+
+`@kumiai/mls-rpc`'s `RECOVERY_LABEL` also moves, from `kumiai/rendezvous/v1`
+to `kumiai/recovery/v1` — it was colliding with `@kumiai/rpc`'s
+`RENDEZVOUS_LABEL` and the two now have distinct values. Since the recovery
+secret is exported under this label and both the commit topic and the
+rendezvous topic are derived from that secret, all three — the recovery
+secret and both topics derived from it — move together.
