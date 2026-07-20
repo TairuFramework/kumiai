@@ -1,12 +1,14 @@
 import type { Unwrap } from '@kumiai/broadcast'
+import { sha256 } from '@noble/hashes/sha2.js'
 import { fromUTF, toUTF } from '@sozai/codec'
 
 import type { GroupCrypto } from '../../src/crypto.js'
+import { APP_TOPIC_LABEL } from '../../src/topic.js'
 import { decodeMemoryCommit } from './memory-group-mls.js'
 
 export type FakeCryptoOptions = {
   epoch?: number
-  /** The base `exportSecret` is derived from, per epoch. Defaults to {@link FAKE_BASE_SECRET}. */
+  /** The base `exportSecret` is derived from, per epoch AND per label. Defaults to {@link FAKE_BASE_SECRET}. */
   secret?: Uint8Array
   /** XOR key byte. Must be non-zero to be observable. Shared by all members. */
   key?: number
@@ -20,22 +22,46 @@ export type FakeCrypto = GroupCrypto & { setEpoch: (n: number) => void }
 export const FAKE_BASE_SECRET = new Uint8Array(32).fill(0xab)
 
 /**
- * What {@link createFakeCrypto} exports at `epoch`: the base secret with the epoch mixed in, so
- * that a different epoch is different bytes. That one property is the whole of it, and the port
- * contract names it — `exportSecret` is an epoch-bound topic-derivation secret, and a fake that
- * returned a fixed value would be a lifelong secret plus a guessable epoch number, the exact
- * shape the app-lane topic must not have.
+ * What {@link createFakeCrypto} exports at `epoch` for `label`: the base secret with the epoch
+ * AND the label mixed in, so a different epoch is different bytes and — the property the widened
+ * port signature exists to provide — a different label at the SAME epoch is different bytes too.
+ * A fake that mixed in only the epoch would be exactly the port this repo used to have: every
+ * label collapsing onto one value, silent cross-domain key reuse the moment a second consumer
+ * asked this method for anything. See `GroupCrypto.exportSecret`'s doc for why that must fail
+ * loudly rather than quietly, and `@kumiai/rpc-conformance`'s `PER-LABEL` clause (in
+ * `group-crypto.ts`) for the exact property this is pinned against.
+ *
+ * `label` defaults to {@link APP_TOPIC_LABEL} — the one label `@kumiai/rpc`'s own peer ever
+ * passes — so every pre-existing call site that only cared about the epoch (there are many, all
+ * computing "the topic the anchor names at this epoch") keeps computing the same thing without
+ * naming the label at every call. The default is a convenience of THIS helper, not of the port:
+ * {@link createFakeCrypto}'s own `exportSecret` never uses it, and takes `label` from its caller
+ * like any other implementation must.
  *
  * Exported because a test that wants the topic the group is on needs the secret of the ANCHOR
  * epoch, which the live handle has usually run past — the same reason the anchor is persisted.
  *
- * A mix, NOT a ratchet: it models none of MLS's one-wayness, and a member holding one epoch's
- * bytes can trivially compute another's. That truth is real only where the crypto is (see
- * `@kumiai/mls`); here the fake is a double for wiring and must not pretend otherwise.
+ * The epoch mix is a XOR, NOT a ratchet: it models none of MLS's one-wayness, and a member
+ * holding one epoch's bytes can trivially compute another's for the same label. That truth is
+ * real only where the crypto is (see `@kumiai/mls`); here the fake is a double for wiring and
+ * must not pretend otherwise. The label mix (a SHA-256 of the label, cycled across the output) is
+ * not modelling anything MLS does either — it exists only so two labels are two different
+ * keystreams, deterministically and with nothing exchanged, which is all any clause here asks of
+ * domain separation.
  */
-export function fakeEpochSecret(epoch: number, base: Uint8Array = FAKE_BASE_SECRET): Uint8Array {
-  const out = new Uint8Array(base.length)
-  for (let i = 0; i < base.length; i++) out[i] = (base[i] as number) ^ ((epoch + i) & 0xff)
+export function fakeEpochSecret(
+  epoch: number,
+  label: string = APP_TOPIC_LABEL,
+  length: number = FAKE_BASE_SECRET.length,
+  base: Uint8Array = FAKE_BASE_SECRET,
+): Uint8Array {
+  const mask = sha256(fromUTF(label))
+  const out = new Uint8Array(length)
+  for (let i = 0; i < length; i++) {
+    const baseByte = base[i % base.length] as number
+    const maskByte = mask[i % mask.length] as number
+    out[i] = (baseByte ^ ((epoch + i) & 0xff) ^ maskByte) & 0xff
+  }
   return out
 }
 
@@ -209,8 +235,17 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
    * The tag is what makes "not my epoch" a REFUSAL rather than plausible garbage — an AEAD's
    * authentication, modelled — and the blob says nothing in the clear about which epoch it is
    * from, exactly as a real seal does not.
+   *
+   * Under its OWN label, {@link FAKE_ENTRY_LABEL} — never {@link APP_TOPIC_LABEL} or whatever
+   * label a caller passes `exportSecret`. The real port makes the identical choice (a separate
+   * `ENTRY_SEAL_LABEL`, asked of the handle directly rather than routed through its own
+   * `exportSecret`), for the reason `GroupCrypto`'s doc gives: sharing one exported secret
+   * between a topic name and a ledger key would make every holder of the name a reader of the
+   * bodies.
    */
-  const entryKey = (at: number): Uint8Array => fakeEpochSecret(at, secret)
+  const FAKE_ENTRY_LABEL = 'kumiai/fake-entries/v1'
+  const entryKey = (at: number): Uint8Array =>
+    fakeEpochSecret(at, FAKE_ENTRY_LABEL, secret.length, secret)
 
   const entryStream = (bytes: Uint8Array, key: Uint8Array): Uint8Array => {
     const out = new Uint8Array(bytes.length)
@@ -268,7 +303,11 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
 
   return {
     epoch: () => epoch,
-    exportSecret: () => fakeEpochSecret(epoch, secret),
+    // `label` is the CALLER's, taken as given and never defaulted or ignored here — a fake that
+    // fell back to a default for an omitted label would hide the exact caller mistake the port's
+    // required parameter exists to make loud. See {@link fakeEpochSecret}: its own default label
+    // is a convenience for OTHER test call sites, not something this method may lean on.
+    exportSecret: (label, length = secret.length) => fakeEpochSecret(epoch, label, length, secret),
     wrap,
     unwrap,
     frameEpoch,

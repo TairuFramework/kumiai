@@ -87,6 +87,7 @@ export {
 } from './recovery.js'
 export { detectRosterChange } from './roster.js'
 export {
+  APP_TOPIC_LABEL,
   COMMIT_LABEL,
   commitTopic,
   discoveryTopic,

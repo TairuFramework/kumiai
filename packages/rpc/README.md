@@ -11,9 +11,10 @@ epoch-rotating opaque topics, with an authenticated sender on every surface.
 group-rpc never imports MLS. It owns transport and orchestration; the consumer supplies the crypto
 half through two ports:
 
-- **`GroupCrypto`** — the epoch number, the epoch-bound topic-derivation secret, `wrap`/`unwrap` for
-  app traffic, `frameEpoch` to read a sealed frame's epoch from its cleartext, and
-  `sealEntries`/`openEntries` for a commit's ledger-entry blob.
+- **`GroupCrypto`** — the epoch number, `exportSecret(label, length?)` for as many epoch-bound,
+  domain-separated exported secrets as there are labels, `wrap`/`unwrap` for app traffic,
+  `frameEpoch` to read a sealed frame's epoch from its cleartext, and `sealEntries`/`openEntries`
+  for a commit's ledger-entry blob.
 - **`GroupMLS`** — the lifecycle half: read a Commit's own claims before touching it, apply the ones
   this member is in a position to apply, report the roster the apply left behind, and drive the
   recovery/ledger rendezvous.

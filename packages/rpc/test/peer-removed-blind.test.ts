@@ -3,7 +3,7 @@ import { describe, expect, test } from 'vitest'
 
 import { createGroupPeer } from '../src/peer.js'
 import { defineGroupProtocol } from '../src/protocol.js'
-import { protocolTopic } from '../src/topic.js'
+import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { createMemoryAnchorStore } from './fixtures/anchor.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { publishCommit } from './fixtures/commits.js'
@@ -112,7 +112,7 @@ describe('the rotation puts the group on a topic only the post-removal epoch sec
     // What Carol keeps, and keeps forever: the epoch-independent recovery secret, the per-epoch
     // secret of the last epoch her handle holds, and the topic she was on.
     const carolRecoverySecret = await carol.mls.exportRecoverySecret()
-    const carolEpochSecret = await carol.crypto.exportSecret()
+    const carolEpochSecret = await carol.crypto.exportSecret(APP_TOPIC_LABEL)
     const carolTopic = protocolTopic(carolEpochSecret, carol.peer.anchorEpoch(), 'room')
 
     // The eviction. An admin off-stage commits it; every member that can apply it rotates.

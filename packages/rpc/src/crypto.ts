@@ -1,9 +1,10 @@
 import type { ByteTransform, Unwrap } from '@kumiai/broadcast'
 
 /**
- * Consumer-supplied MLS crypto port: epoch number, an epoch-bound topic-derivation secret,
- * byte-level encrypt (`wrap`) and decrypt-plus-recover-sender (`unwrap`), and the ledger-entry
- * seal (`sealEntries`/`openEntries`). group-rpc never imports MLS.
+ * Consumer-supplied MLS crypto port: epoch number, as many epoch-bound, domain-separated
+ * exported secrets as callers have labels for (`exportSecret`), byte-level encrypt (`wrap`) and
+ * decrypt-plus-recover-sender (`unwrap`), and the ledger-entry seal (`sealEntries`/
+ * `openEntries`). group-rpc never imports MLS.
  *
  * TWO SEALS, and they are not interchangeable. `wrap`/`unwrap` carry app traffic and are
  * ratchet-backed: each open consumes a message key and mutates the handle. `sealEntries`/
@@ -33,7 +34,31 @@ import type { ByteTransform, Unwrap } from '@kumiai/broadcast'
  */
 export type GroupCrypto = {
   epoch(): number
-  exportSecret(): Uint8Array | Promise<Uint8Array>
+  /**
+   * An MLS exporter secret for THIS epoch, domain-separated by `label`. There is not one
+   * "the" exported secret — there are as many as there are labels, each epoch-bound the same
+   * way, and each independent of every other: two different labels at the same epoch MUST
+   * derive different bytes (that is what "domain-separated" means operationally, and it is a
+   * conformance clause, not a suggestion).
+   *
+   * `label` IS REQUIRED, and that is the entire point of this signature rather than an
+   * accident of it. An optional label type-checks against an implementation that ignores it —
+   * every implementation before this one did — and such an implementation returns identical
+   * bytes for every purpose that calls this method: the app-lane topic secret, and anything
+   * else this port is ever asked to export, would silently collide on one key, so holding one
+   * is holding the other. That is cross-domain key reuse, and it is SILENT: nothing throws,
+   * nothing type-errors, callers get bytes back and move on. Required is the only shape that
+   * fails loudly — a caller that forgets to pass a label gets a compile error, not a working
+   * program with a latent key-reuse bug. Do not make this optional and do not give it a
+   * default; the next reader who does either has reintroduced exactly this.
+   *
+   * `length` defaults to whatever the implementation considers its natural export length
+   * (32 bytes for every real implementation in this repo, matching XChaCha20-Poly1305's key
+   * size) and MAY be overridden — RFC 9420's exporter is HKDF-Expand with a caller-chosen
+   * output length, so a same-label export at a different length is itself an independent key,
+   * not a truncation or extension of the default-length one.
+   */
+  exportSecret(label: string, length?: number): Uint8Array | Promise<Uint8Array>
   wrap: ByteTransform
   unwrap: Unwrap
   /**

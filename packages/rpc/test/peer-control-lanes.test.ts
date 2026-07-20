@@ -4,7 +4,7 @@ import {
   DEFAULT_APP_LOG_RETENTION_SECONDS,
   DEFAULT_COMMIT_LOG_RETENTION_SECONDS,
 } from '../src/peer.js'
-import { commitTopic, protocolTopic, rendezvousTopic } from '../src/topic.js'
+import { APP_TOPIC_LABEL, commitTopic, protocolTopic, rendezvousTopic } from '../src/topic.js'
 import { createMemoryAnchorStore } from './fixtures/anchor.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { publishCommit } from './fixtures/commits.js'
@@ -275,7 +275,7 @@ describe('control lane lifecycle', () => {
     const carol = makeMLSPeer(hub, 'carol', recoverySecret)
     await flush()
 
-    const secret = await bob.crypto.exportSecret()
+    const secret = await bob.crypto.exportSecret(APP_TOPIC_LABEL)
     expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(2)
 
     await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
@@ -300,7 +300,7 @@ describe('control lane lifecycle', () => {
     const bob = makeMLSPeer(hub, 'bob', recoverySecret)
     await flush()
 
-    const secret = await bob.crypto.exportSecret()
+    const secret = await bob.crypto.exportSecret(APP_TOPIC_LABEL)
     // A Commit with no bytes: read as a frame, but nothing a member can apply.
     await publishCommit({
       hub,
@@ -325,7 +325,7 @@ describe('control lane lifecycle', () => {
     const bob = makeMLSPeer(hub, 'bob', recoverySecret)
     await flush()
 
-    const secret = await alice.crypto.exportSecret()
+    const secret = await alice.crypto.exportSecret(APP_TOPIC_LABEL)
     expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(2)
 
     // Alice builds a Commit and does NOT adopt it: the group is still at the epoch it was

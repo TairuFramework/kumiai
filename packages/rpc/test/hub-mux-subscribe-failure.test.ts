@@ -9,7 +9,7 @@ import {
   DEFAULT_COMMIT_LOG_RETENTION_SECONDS,
 } from '../src/peer.js'
 import { defineGroupProtocol } from '../src/protocol.js'
-import { protocolTopic } from '../src/topic.js'
+import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { DEFAULT_MAX_RETENTION, FakeHub } from './fixtures/fake-hub.js'
@@ -258,7 +258,7 @@ describe('a peer whose app-topic subscribe is refused', () => {
     })
     await flush()
 
-    const secret = await crypto.exportSecret()
+    const secret = await crypto.exportSecret(APP_TOPIC_LABEL)
     const topicID = protocolTopic(secret, 1, 'room')
 
     expect(hub.subscriberCount(topicID)).toBe(0)

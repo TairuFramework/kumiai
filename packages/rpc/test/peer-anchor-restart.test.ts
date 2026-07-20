@@ -3,7 +3,7 @@ import { describe, expect, test } from 'vitest'
 
 import { createGroupPeer } from '../src/peer.js'
 import { defineGroupProtocol } from '../src/protocol.js'
-import { protocolTopic } from '../src/topic.js'
+import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { createMemoryAnchorStore, type MemoryAnchorStore } from './fixtures/anchor.js'
 import { createMemoryAppCursorStore, type MemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { publishCommit } from './fixtures/commits.js'
@@ -102,7 +102,7 @@ describe('the app-lane anchor survives a restart', () => {
     const bob = makeRoomPeer(hub, 'bob', recoverySecret, bobHandlers)
     await flush()
 
-    const secret = await alice.crypto.exportSecret()
+    const secret = await alice.crypto.exportSecret(APP_TOPIC_LABEL)
     const anchorTopic = protocolTopic(secret, 1, 'room')
     expect(bob.peer.anchorEpoch()).toBe(1)
 
@@ -169,7 +169,7 @@ describe('the app-lane anchor survives a restart', () => {
     expect(alice.peer.anchorEpoch()).toBe(1)
     const stored = alice.anchorStore.stored()
     expect(stored?.epoch).toBe(1)
-    expect(stored?.secret).toEqual(await alice.crypto.exportSecret())
+    expect(stored?.secret).toEqual(await alice.crypto.exportSecret(APP_TOPIC_LABEL))
     // Written once, at the seed. Nothing rotated it: the group has had no roster change.
     expect(alice.anchorStore.saves()).toBe(1)
 

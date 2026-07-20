@@ -16,6 +16,10 @@ import { createGroupCrypto } from '../src/crypto.js'
 
 const utf8 = new TextEncoder()
 
+/** An arbitrary label for the `exportSecret` tests below — the port assigns it no meaning. */
+const LABEL = 'kumiai/mls-rpc-test/export'
+const OTHER_LABEL = 'kumiai/mls-rpc-test/export-other'
+
 async function twoMemberGroup(groupID: string) {
   const alice = randomIdentity()
   const bob = randomIdentity()
@@ -71,8 +75,12 @@ describe('createGroupCrypto', () => {
 
     expect(alice.crypto.epoch()).toBe(1)
     expect(bob.crypto.epoch()).toBe(1)
-    const shared = await alice.crypto.exportSecret()
-    expect(await bob.crypto.exportSecret()).toEqual(shared)
+    const shared = await alice.crypto.exportSecret(LABEL)
+    expect(await bob.crypto.exportSecret(LABEL)).toEqual(shared)
+
+    // A different label at the SAME epoch is a different secret — the caller's label reaches the
+    // handle's own exporter untouched, rather than this implementation closing over one of its own.
+    expect(await alice.crypto.exportSecret(OTHER_LABEL)).not.toEqual(shared)
 
     // The handle swap a peer makes when it adopts its own commit: the port follows it, and the
     // secret moves with the epoch. A crypto closing over the handle it was built with would
@@ -80,13 +88,13 @@ describe('createGroupCrypto', () => {
     const removed = await removeMember(aliceGroup, 1)
     alice.adopt(removed.newGroup)
     expect(alice.crypto.epoch()).toBe(2)
-    const rotated = await alice.crypto.exportSecret()
+    const rotated = await alice.crypto.exportSecret(LABEL)
     expect(rotated).not.toEqual(shared)
 
     // Bob, removed, is left holding the old one for life and cannot reach the new one. This is
     // the property the whole app-lane topic rests on, and the only implementation that has it.
-    expect(await bob.crypto.exportSecret()).toEqual(shared)
-    expect(await bob.crypto.exportSecret()).not.toEqual(rotated)
+    expect(await bob.crypto.exportSecret(LABEL)).toEqual(shared)
+    expect(await bob.crypto.exportSecret(LABEL)).not.toEqual(rotated)
   })
 
   test('wrap and unwrap round-trip and name the authenticated sender', async () => {

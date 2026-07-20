@@ -2,6 +2,22 @@ import { deriveTopicID } from '@kumiai/broadcast'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { fromUTF, toB64U } from '@sozai/codec'
 
+/**
+ * The label the app-lane anchor is exported under — the one `GroupCrypto.exportSecret` call in
+ * this package, made once per anchor capture (`captureAnchor` in `peer.ts`, on init and every
+ * roster-changing commit). Fixed rather than per-protocol: the secret it produces is not itself
+ * a topic, it is what {@link protocolTopic} and {@link inboxTopic} derive every app-lane topic
+ * FROM, so one label covers every protocol a host defines and `protocol`/`scope` do the
+ * discriminating below it.
+ *
+ * MUST MATCH the label a real host's `GroupCrypto` implementation is exercised with, and there is
+ * nothing that checks that at compile time: `@kumiai/rpc` cannot depend on `@kumiai/mls-rpc` (see
+ * that package's module doc — the dependency runs the other way, so it cannot re-export this for
+ * rpc to import), so the two packages agree on the string by convention, not by sharing a
+ * constant. Changing it changes every topic ID this package has ever derived.
+ */
+export const APP_TOPIC_LABEL = 'kumiai/app-topic/v1'
+
 /** Reserved label for per-member unicast inbox topics. */
 export const INBOX_LABEL = 'kumiai/inbox/v1'
 

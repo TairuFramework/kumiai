@@ -67,7 +67,13 @@ import {
   encodeRecoveryRequest,
 } from './recovery.js'
 import { detectRosterChange } from './roster.js'
-import { commitTopic, inboxTopic, protocolTopic, rendezvousTopic } from './topic.js'
+import {
+  APP_TOPIC_LABEL,
+  commitTopic,
+  inboxTopic,
+  protocolTopic,
+  rendezvousTopic,
+} from './topic.js'
 
 const DEFAULT_RECOVERY_TIMEOUT_MS = 5000
 const DEFAULT_RECOVERY_JITTER_MS = 250
@@ -554,7 +560,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * already committed and returned.
    */
   const captureAnchor = async (): Promise<void> => {
-    anchor = { secret: await crypto.exportSecret(), epoch: crypto.epoch() }
+    anchor = { secret: await crypto.exportSecret(APP_TOPIC_LABEL), epoch: crypto.epoch() }
     await anchorStore?.save(anchor)
     // The anchor moving IS the segment boundary — there is no other definition of one — so every
     // capture ends the segment the buffer belongs to. Reset here rather than at the call sites so

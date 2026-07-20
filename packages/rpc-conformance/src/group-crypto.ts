@@ -21,7 +21,7 @@ export type ConformanceUnwrapResult = { payload: Uint8Array; senderDID?: string 
 /** The `GroupCrypto` of `@kumiai/rpc`, re-declared structurally. */
 export type ConformanceGroupCrypto = {
   epoch: () => number
-  exportSecret: () => Uint8Array | Promise<Uint8Array>
+  exportSecret: (label: string, length?: number) => Uint8Array | Promise<Uint8Array>
   wrap: (bytes: Uint8Array) => Uint8Array | Promise<Uint8Array>
   unwrap: (
     bytes: Uint8Array,
@@ -75,6 +75,14 @@ const utf8 = new TextEncoder()
 const text = (bytes: Uint8Array): string => new TextDecoder().decode(bytes)
 
 /**
+ * Two labels the `exportSecret` clauses below exercise. Arbitrary strings — the port assigns
+ * them no meaning beyond domain separation — but fixed so a clause that reads one twice gets
+ * the same label both times.
+ */
+const EXPORT_LABEL_A = 'kumiai/conformance/export-a'
+const EXPORT_LABEL_B = 'kumiai/conformance/export-b'
+
+/**
  * A call the port is expected to REFUSE.
  *
  * Wrapped rather than passed straight to `expect().rejects`, because the port's own types allow a
@@ -125,10 +133,10 @@ export function testGroupCryptoConformance(params: GroupCryptoConformanceParams)
       test('every member at an epoch derives the SAME secret, with nothing exchanged', async () => {
         await withGroup(3, 'export-agreed', async ({ members }) => {
           const first = memberAt(members, 0)
-          const secret = await first.crypto.exportSecret()
+          const secret = await first.crypto.exportSecret(EXPORT_LABEL_A)
           expect(secret.length).toBeGreaterThan(0)
           for (const member of members.slice(1)) {
-            expect(await member.crypto.exportSecret()).toEqual(secret)
+            expect(await member.crypto.exportSecret(EXPORT_LABEL_A)).toEqual(secret)
           }
         })
       })
@@ -142,17 +150,39 @@ export function testGroupCryptoConformance(params: GroupCryptoConformanceParams)
         await withGroup(3, 'export-per-epoch', async (group) => {
           const alice = memberAt(group.members, 0)
           const carol = memberAt(group.members, 2)
-          const before = await alice.crypto.exportSecret()
-          expect(await carol.crypto.exportSecret()).toEqual(before)
+          const before = await alice.crypto.exportSecret(EXPORT_LABEL_A)
+          expect(await carol.crypto.exportSecret(EXPORT_LABEL_A)).toEqual(before)
 
           await group.removeMember(2)
 
-          const after = await alice.crypto.exportSecret()
+          const after = await alice.crypto.exportSecret(EXPORT_LABEL_A)
           expect(after).not.toEqual(before)
           // Carol never advanced, so she is left holding the value she had — for life, and it is
           // not the one the group moved to.
-          expect(await carol.crypto.exportSecret()).toEqual(before)
-          expect(await carol.crypto.exportSecret()).not.toEqual(after)
+          expect(await carol.crypto.exportSecret(EXPORT_LABEL_A)).toEqual(before)
+          expect(await carol.crypto.exportSecret(EXPORT_LABEL_A)).not.toEqual(after)
+        })
+      })
+
+      /**
+       * PER-LABEL, and this is the property the whole widened signature exists to provide. A port
+       * that ignored `label` and returned one value per epoch — as a zero-argument `exportSecret`
+       * necessarily did — would hand every consumer of this method the SAME bytes: the app-lane
+       * topic secret and any other purpose this method is ever asked to serve would collide on one
+       * key, so holding one is holding the other. That is silent cross-domain key reuse, and this
+       * clause exists to make it loud: two labels, same epoch, same member — different secrets.
+       */
+      test('is PER-LABEL: two different labels at the same epoch derive different secrets', async () => {
+        await withGroup(2, 'export-per-label', async ({ members }) => {
+          const alice = memberAt(members, 0)
+          const bob = memberAt(members, 1)
+          const a = await alice.crypto.exportSecret(EXPORT_LABEL_A)
+          const b = await alice.crypto.exportSecret(EXPORT_LABEL_B)
+          expect(a).not.toEqual(b)
+          // Domain separation, not disagreement: every member still agrees on EACH label taken on
+          // its own.
+          expect(await bob.crypto.exportSecret(EXPORT_LABEL_A)).toEqual(a)
+          expect(await bob.crypto.exportSecret(EXPORT_LABEL_B)).toEqual(b)
         })
       })
 

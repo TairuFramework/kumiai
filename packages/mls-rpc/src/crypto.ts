@@ -5,18 +5,13 @@ import { xchacha20poly1305 } from '@noble/ciphers/chacha.js'
 import { createRuntime } from '@sozai/runtime'
 
 /**
- * The label the app-lane topic secret is exported under. Domain separation, in the MLS
- * exporter's own label field: a secret exported here is not the one any other consumer of
- * the same epoch gets, whatever context it asks with.
- */
-export const APP_TOPIC_LABEL = 'kumiai/app-topic/v1'
-
-/**
- * The label the ledger-entry seal key is exported under. A DIFFERENT label from the app-lane
- * topic's, and that is required rather than tidy: the topic secret names a topic and is handed
- * to anything that derives one, while this key opens the group's control-ledger bodies. Sharing
- * one exported secret between a name and a key would make every holder of the name a reader of
- * the bodies.
+ * The label the ledger-entry seal key is exported under. UNCHANGED by `GroupCrypto.exportSecret`
+ * taking a caller-supplied label: `sealEntries`/`openEntries` are their own port members, not
+ * routed through `exportSecret`, and this is the label THIS implementation asks the handle's own
+ * exporter with for that separate purpose. It must differ from whatever label a caller passes to
+ * `exportSecret` — the topic secret names a topic and is handed to anything that derives one,
+ * while this key opens the group's control-ledger bodies, and sharing one exported secret between
+ * a name and a key would make every holder of the name a reader of the bodies.
  */
 export const ENTRY_SEAL_LABEL = 'kumiai/ledger-entries/v1'
 
@@ -70,8 +65,6 @@ export type GroupCryptoParams = {
    * over the handle it was built with would silently seal at a dead epoch forever.
    */
   handle: () => GroupHandle
-  /** Override the exporter label. Changing it changes every topic the group derives. */
-  label?: string
   /**
    * Override the ledger-entry seal's exporter label. Changing it changes the key every commit's
    * entry blob is sealed under, so a group whose members disagree on it cannot apply each other's
@@ -100,11 +93,12 @@ export type GroupCryptoParams = {
  *    current epoch is a correct implementation of this port", and group-rpc must not depend on
  *    the window, which is spent by epoch TRANSITIONS rather than by time.
  *
- * 2. **`exportSecret` is one-way; the fake's is not.** The fake XORs the epoch into a fixed
- *    base, so any member holding one epoch's bytes computes every other epoch's. This exports
- *    from the MLS epoch's exporter secret, which a removed member cannot reach forward from.
- *    That difference is the entire security property the app-lane topic rests on, and it is
- *    real only here.
+ * 2. **`exportSecret` is one-way; the fake's is not.** The fake XORs the epoch (and the label —
+ *    see {@link fakeEpochSecret} in `@kumiai/rpc`'s fixtures) into a fixed base, so any member
+ *    holding one epoch's bytes for one label computes every other epoch's for that label. This
+ *    exports from the MLS epoch's exporter secret, which a removed member cannot reach forward
+ *    from. That difference is the entire security property the app-lane topic (and anything
+ *    else a caller labels) rests on, and it is real only here.
  *
  * 3. **`wrap` mutates.** The fake's `wrap` is pure. This one consumes a per-message ratchet
  *    key from the handle's own sending chain, so sealing twice gives different bytes for the
@@ -118,12 +112,17 @@ export type GroupCryptoParams = {
  *    for anything ts-mls will not decode as a message, and never throws, which is the contract.
  */
 export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
-  const { handle, label = APP_TOPIC_LABEL, entryLabel = ENTRY_SEAL_LABEL } = params
+  const { handle, entryLabel = ENTRY_SEAL_LABEL } = params
 
   return {
     epoch: () => Number(handle().epoch),
 
-    exportSecret: () => handle().exportSecret(label, EXPORT_CONTEXT, SECRET_LENGTH),
+    // The caller's label, passed straight through to the handle's own exporter — this
+    // implementation chooses no label of its own. It used to: a fixed `label` closed over here
+    // was the only value any caller could ever get, and the caller that closed over it
+    // (`@kumiai/rpc`'s peer, via `APP_TOPIC_LABEL`) is the one place that value is preserved.
+    exportSecret: (label, length = SECRET_LENGTH) =>
+      handle().exportSecret(label, EXPORT_CONTEXT, length),
 
     wrap: (bytes) => handle().encrypt(bytes),
 
