@@ -48,8 +48,8 @@ export type GroupOptions = {
    */
   resolveLedgerEntries?: (ids: Array<string>) => Promise<Array<string>>
   /**
-   * Surface the notarized non-`group.role` ledger entries an accepted commit
-   * carried, in envelope order. Never read by kumiai — `group.role` entries fold
+   * Surface the notarized non-`kumiai.role` ledger entries an accepted commit
+   * carried, in envelope order. Never read by kumiai — `kumiai.role` entries fold
    * into the roster, everything else is handed to the consumer here.
    */
   onLedgerEntries?: (entries: Array<VerifiedLedgerEntry>) => void

@@ -23,7 +23,7 @@ export type CommitPolicyContext = {
   /** Roster before this commit applies. Judges every proposal sender's authority:
    *  a promotion riding this same commit does not grant its subject commit authority. */
   baseRoster: RosterState
-  /** Roster after foldEnvelope applies this commit's group.role entries. Judges the
+  /** Roster after foldEnvelope applies this commit's kumiai.role entries. Judges the
    *  removed target: a Remove of a leaf still `admin` here carried no demotion and is rejected. */
   candidateRoster: RosterState
   didOfLeaf: (leafIndex: number) => string | undefined

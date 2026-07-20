@@ -30,7 +30,7 @@ describe('signLedgerEntry / verifyLedgerEntry', () => {
   test('round trip: verify recovers issuer and the full entry, without ord', async () => {
     const signer = await createSigner()
     const entry: LedgerEntry<string> = {
-      type: 'group.role',
+      type: 'kumiai.role',
       groupID: 'A',
       subject: 'did:example:subject',
       value: 'admin',
@@ -49,7 +49,7 @@ describe('signLedgerEntry / verifyLedgerEntry', () => {
   test('round trip: an entry carrying ord recovers ord too', async () => {
     const signer = await createSigner()
     const entry: LedgerEntry<{ level: number }> = {
-      type: 'group.role',
+      type: 'kumiai.role',
       groupID: 'A',
       subject: 'did:example:subject',
       value: { level: 2 },
@@ -69,7 +69,7 @@ describe('signLedgerEntry / verifyLedgerEntry', () => {
     const mallory = await createSigner()
     // A well-formed, correctly signed grant of admin in group A.
     const entry: LedgerEntry<string> = {
-      type: 'group.role',
+      type: 'kumiai.role',
       groupID: 'A',
       subject: 'did:mallory',
       value: 'admin',
@@ -104,7 +104,7 @@ describe('signLedgerEntry / verifyLedgerEntry', () => {
     const forged = stringifyToken(
       createUnsignedToken({
         iss: 'did:example:mallory',
-        type: 'group.role',
+        type: 'kumiai.role',
         groupID: 'A',
         subject: 'did:mallory',
         value: 'admin',
@@ -124,7 +124,7 @@ describe('signLedgerEntry / verifyLedgerEntry', () => {
   test('returns null on a signed token whose payload omits groupID', async () => {
     const signer = await createSigner()
     const signed = await signer.signToken(
-      { type: 'group.role', subject: 'did:example:subject', value: 'admin' },
+      { type: 'kumiai.role', subject: 'did:example:subject', value: 'admin' },
       { embedLongForm: true },
     )
     await expect(verifyLedgerEntry(stringifyToken(signed))).resolves.toBeNull()
@@ -133,7 +133,7 @@ describe('signLedgerEntry / verifyLedgerEntry', () => {
   test('returns null on a signed token whose groupID is not a string', async () => {
     const signer = await createSigner()
     const signed = await signer.signToken(
-      { type: 'group.role', groupID: 123, subject: 'did:example:subject', value: 'admin' },
+      { type: 'kumiai.role', groupID: 123, subject: 'did:example:subject', value: 'admin' },
       { embedLongForm: true },
     )
     await expect(verifyLedgerEntry(stringifyToken(signed))).resolves.toBeNull()
@@ -151,7 +151,7 @@ describe('signLedgerEntry / verifyLedgerEntry', () => {
   test('returns null on a signed token whose ord is not a string', async () => {
     const signer = await createSigner()
     const signed = await signer.signToken(
-      { type: 'group.role', groupID: 'A', subject: 'did:example:subject', value: 'admin', ord: 7 },
+      { type: 'kumiai.role', groupID: 'A', subject: 'did:example:subject', value: 'admin', ord: 7 },
       { embedLongForm: true },
     )
     await expect(verifyLedgerEntry(stringifyToken(signed))).resolves.toBeNull()
@@ -160,7 +160,7 @@ describe('signLedgerEntry / verifyLedgerEntry', () => {
   test('tamper: flipping one byte of the token makes verification return null', async () => {
     const signer = await createSigner()
     const token = await signLedgerEntry(signer, {
-      type: 'group.role',
+      type: 'kumiai.role',
       groupID: 'A',
       subject: 'did:example:subject',
       value: 'admin',
@@ -185,7 +185,7 @@ describe('ledgerEntryDigest', () => {
   test('is deterministic for the same token string', async () => {
     const signer = await createSigner()
     const token = await signLedgerEntry(signer, {
-      type: 'group.role',
+      type: 'kumiai.role',
       groupID: 'A',
       subject: 'did:example:subject',
       value: 'admin',
@@ -196,13 +196,13 @@ describe('ledgerEntryDigest', () => {
   test('differs for two different tokens', async () => {
     const signer = await createSigner()
     const tokenA = await signLedgerEntry(signer, {
-      type: 'group.role',
+      type: 'kumiai.role',
       groupID: 'A',
       subject: 'did:example:subject',
       value: 'admin',
     })
     const tokenB = await signLedgerEntry(signer, {
-      type: 'group.role',
+      type: 'kumiai.role',
       groupID: 'B',
       subject: 'did:example:subject',
       value: 'admin',

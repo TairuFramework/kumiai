@@ -22,11 +22,11 @@ const utf8 = new TextEncoder()
 
 /** `type` tag on every recovery-request token. Domain-separates it, so a token
  *  minted for another purpose can never pose as a request for group state. */
-export const RECOVERY_REQUEST_TYPE = 'group.recovery-request'
+export const RECOVERY_REQUEST_TYPE = 'kumiai.recovery-request'
 
 /** `type` tag on a responder's GroupInfo attestation. Domain-separates the
  *  membership proof, so no token minted elsewhere can stand in for it. */
-export const RECOVERY_GROUPINFO_TYPE = 'group.recovery-groupinfo'
+export const RECOVERY_GROUPINFO_TYPE = 'kumiai.recovery-groupinfo'
 
 /** The only sealed-reply format this build produces or opens. */
 export const SEALED_GROUP_INFO_VERSION = 1

@@ -93,7 +93,7 @@ async function commitRole(
   others: Array<GroupHandle> = [],
 ): Promise<{ admin: GroupHandle; token: string }> {
   const token = await signLedgerEntry(adminIdentity, {
-    type: 'group.role',
+    type: 'kumiai.role',
     groupID: admin.groupID,
     subject: subject.id,
     value,
@@ -281,7 +281,7 @@ describe('bootstrapping a ledger from an untrusted responder', () => {
 /**
  * A HEAL TELLS THE HOST WHAT IT MISSED.
  *
- * `onLedgerEntries` is how a consumer learns that a notarized, admin-authored, non-`group.*`
+ * `onLedgerEntries` is how a consumer learns that a notarized, admin-authored, non-`kumiai.*`
  * entry was enacted. The commit path fires it; `bootstrapLedger` did not — so the peer that was
  * away, rejoined, and gathered the whole ledger ended up holding every entry in its state with
  * its host never told about any of them. State right, host blind, which is the worst combination:
@@ -302,7 +302,7 @@ describe('bootstrapLedger surfaces what it brought in', () => {
     })
     const withCarol = await inviteMember(fixture, created, alice, carol)
 
-    // An app-level entry: notarized, admin-authored, and NOT `group.*`, so it is the kind a
+    // An app-level entry: notarized, admin-authored, and NOT `kumiai.*`, so it is the kind a
     // consumer is told about rather than one the fold consumes itself.
     const appToken = await signLedgerEntry(alice, {
       type: 'note',
@@ -332,7 +332,7 @@ describe('bootstrapLedger surfaces what it brought in', () => {
 
     await healed.bootstrapLedger(await aliceGroup.getLedger())
 
-    // The app entry, and only it: the invite's role entries are `group.*`, which the roster fold
+    // The app entry, and only it: the invite's role entries are `kumiai.*`, which the roster fold
     // consumes rather than surfacing.
     expect(surfaced).toEqual(['enacted while carol was away'])
     expect(healed.roster.roles.get(normalizeDID(carol.id))).toBe('member')
@@ -381,7 +381,7 @@ async function promotedAdminWorld(groupID: string) {
 
   // Bob, the promoted admin, authors a commit.
   const bobToken = await signLedgerEntry(bob, {
-    type: 'group.role',
+    type: 'kumiai.role',
     groupID,
     subject: carol.id,
     value: 'admin',

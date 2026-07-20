@@ -224,7 +224,7 @@ export type HeldLedgerEntry = {
 export type LedgerLogEntry = HeldLedgerEntry & { entryID: string }
 
 /**
- * Project a held ledger into the roster. foldRoster drops every non-`group.role`
+ * Project a held ledger into the roster. foldRoster drops every non-`kumiai.role`
  * entry by type, so the mixed-type log is fed in whole. Replayed in order, repeats
  * and all: a claim re-enacted at a later position must undo what came between.
  */
@@ -253,7 +253,7 @@ export type GroupHandleParams = {
   commitPolicy?: IncomingMessageCallback
   /** Fetch control-ledger entry bodies the local ledger lacks (commit pre-pass). */
   resolveLedgerEntries?: (ids: Array<string>) => Promise<Array<string>>
-  /** Surface an accepted commit's notarized non-`group.role` entries to the consumer. */
+  /** Surface an accepted commit's notarized non-`kumiai.role` entries to the consumer. */
   onLedgerEntries?: (entries: Array<VerifiedLedgerEntry>) => void
 }
 
@@ -490,7 +490,7 @@ export class GroupHandle {
         log.push({ entryID: entryIDs[index] as string, token, verified })
       }
 
-      // What this bootstrap ADDS, in log order, minus the reserved `group.*` types the fold
+      // What this bootstrap ADDS, in log order, minus the reserved `kumiai.*` types the fold
       // consumes itself — the same rule the commit path surfaces by.
       const surfaced = log
         .filter(
