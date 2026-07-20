@@ -313,7 +313,7 @@ describe('foldEnvelope', () => {
       [],
       [input({ issuer: CREATOR_DID, type: 'circle.member', value: {}, entryID: 'c1' })],
       [input({ issuer: MEMBER_DID, type: 'circle.member', value: {}, entryID: 'c2' })],
-      [input({ issuer: CREATOR_DID, type: 'group.mystery', value: 1, entryID: 'c3' })],
+      [input({ issuer: CREATOR_DID, type: 'kumiai.mystery', value: 1, entryID: 'c3' })],
       [
         input({
           issuer: CREATOR_DID,
