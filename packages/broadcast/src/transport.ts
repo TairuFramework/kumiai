@@ -61,7 +61,7 @@ export type BroadcastTransportParams = {
 const identityWrap: ByteTransform = (bytes) => bytes
 const identityUnwrap: Unwrap = (bytes) => bytes
 
-export function encode(value: unknown): Uint8Array {
+function encode(value: unknown): Uint8Array {
   return fromUTF(JSON.stringify(value))
 }
 
@@ -72,9 +72,10 @@ export function encode(value: unknown): Uint8Array {
  * byte-identical to a live dispatch.
  */
 export function encodeFrame(message: BroadcastMessage): Uint8Array {
-  // Version first and spread second: a message that already carries `v` keeps its position, so
-  // the same message encodes to the same bytes whichever producer built it.
-  return encode({ v: BROADCAST_VERSION, ...message })
+  // Message first and stamp second: the stamp is applied LAST, so it always wins — a message
+  // that somehow carried its own `v` would have that value overwritten by `BROADCAST_VERSION`
+  // rather than published under whatever it claimed.
+  return encode({ ...message, v: BROADCAST_VERSION })
 }
 
 /**

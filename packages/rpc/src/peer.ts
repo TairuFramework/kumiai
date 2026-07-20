@@ -618,12 +618,15 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       project: (_message, opened) => {
         const { payload, senderDID } = opened
         if (typeof senderDID !== 'string' || senderDID === '') {
-          // `createOpenOncePath` catches this and drops the frame, which is the answer wanted:
-          // the app lane is always MLS-sealed, so an open that recovered no sender is not a
-          // frame to deliver unattributed — it is one nothing on this lane can vouch for. Fails
-          // CLOSED, so the widening `UnwrapResult` still leaves in the shared open-once
-          // signature cannot become a delivery of an unauthenticated frame here.
-          throw new Error(`app lane "${name}": opened frame carries no authenticated sender`)
+          // Returning `undefined` is `project`'s documented way to drop a frame (see
+          // `OpenOncePathParams.project`) — used deliberately here rather than thrown, so this
+          // refusal goes through the same path as any other project-level drop instead of
+          // relying on landing in `createOpenOncePath`'s catch, which also swallows an ordinary
+          // undecodable frame. The app lane is always MLS-sealed, so an open that recovered no
+          // sender is not a frame to deliver unattributed — it is one nothing on this lane can
+          // vouch for. Fails CLOSED, so the widening `UnwrapResult` still leaves in the shared
+          // open-once signature cannot become a delivery of an unauthenticated frame here.
+          return undefined
         }
         openedFrames.set(payload, { payload, senderDID })
         return payload
