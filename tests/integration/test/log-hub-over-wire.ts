@@ -11,9 +11,9 @@ import type { HubReceiveSubscription, LogHub } from '@kumiai/hub-tunnel'
  * A {@link LogHub} over the REAL hub-server, reached over the real Enkaku wire.
  *
  * This is transport glue and nothing else: every publish, subscribe, fetch and delivery
- * crosses `hub/publish`, `hub/subscribe`, `hub/topic/fetch` and `hub/receive` on an actual
- * `createHub`, against an actual store. It substitutes no hub behaviour — the only work here
- * is the base64 the protocol carries payloads as, which `LogHub` states in bytes.
+ * crosses `hub/v1/publish`, `hub/v1/subscribe`, `hub/v1/topic/fetch` and `hub/v1/receive` on
+ * an actual `createHub`, against an actual store. It substitutes no hub behaviour — the only
+ * work here is the base64 the protocol carries payloads as, which `LogHub` states in bytes.
  */
 
 type HubTransports = DirectTransports<
@@ -35,7 +35,7 @@ function fromBase64(text: string): Uint8Array {
 }
 
 /**
- * The receive side, as a poll over `hub/receive`'s channel. The channel is opened lazily on
+ * The receive side, as a poll over `hub/v1/receive`'s channel. The channel is opened lazily on
  * first iteration because `createGroupPeer` calls `receive` during construction, and a peer
  * that is disposed before it ever reads must not leave a channel open.
  */

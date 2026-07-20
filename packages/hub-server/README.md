@@ -24,9 +24,9 @@ const { server } = createHub({ transport, identity, store: createMemoryStore() }
 ## The hub is blind, and identity comes only from the signature
 
 Topic IDs are opaque and payloads are ciphertext the hub never opens. Every handler takes the caller
-DID from the **verified issuer** of the signed message, never from a wire field — so `hub/topic/fetch`
-cannot be pointed at someone else's subscription, and a publish cannot claim another sender. The
-`identity` param is required for that reason.
+DID from the **verified issuer** of the signed message, never from a wire field — so
+`hub/v1/topic/fetch` cannot be pointed at someone else's subscription, and a publish cannot claim
+another sender. The `identity` param is required for that reason.
 
 Authorization is two layers, and only the second one knows about topics: `accessRules` gate the
 procedures (the default lets any authenticated DID call them), and the optional `authorize(did,
@@ -36,7 +36,7 @@ DID.
 ## Durable subscription, ephemeral connection
 
 Subscription state lives in the store. `HubClientRegistry` holds only currently-connected clients and
-their live `hub/receive` writers, so it routes push fan-out and nothing else — a restart loses no
+their live `hub/v1/receive` writers, so it routes push fan-out and nothing else — a restart loses no
 subscription.
 
 Binding a receive channel **evicts** whatever held the lane for that DID. A reconnect happens because
@@ -44,7 +44,7 @@ the old connection broke and the server learns that last, so the stale writer mu
 live one, not the other way round. The evicted channel is resolved rather than thrown: being replaced
 is not its error, and the client that replaced it is the same client.
 
-`hub/receive` is always added to the server's `longLivedProcedures`, so open mailbox channels are
+`hub/v1/receive` is always added to the server's `longLivedProcedures`, so open mailbox channels are
 exempt from `controllerTimeoutMs` and from the `maxConcurrentHandlers` cap. A host passing its own
 `limits` does not need to remember this.
 
@@ -55,7 +55,7 @@ already delivered to whoever was subscribed then, and its sequenceID may since h
 its delivery row removed — so re-running the loop would push a frame every current subscriber has
 already applied, named by a dead sequenceID. Fan-out is for a genuine append only.
 
-The sender is excluded from its own fan-out. `hub/topic/fetch` makes no such exclusion — a topic's
+The sender is excluded from its own fan-out. `hub/v1/topic/fetch` makes no such exclusion — a topic's
 log holds every log-class frame including the caller's own — so a reader that must not see its own
 messages twice filters them itself, as `@kumiai/rpc`'s drain does.
 
@@ -79,4 +79,4 @@ Mailbox frames on the same topic are not counted, so a member cannot evict the l
 flood.
 
 Publish rate limits are per DID (20/s, burst 50) and per topic (100/s, burst 200), merged over
-`DEFAULT_RATE_LIMITS`; `hub/keypackage/fetch` has its own request quota per requester DID.
+`DEFAULT_RATE_LIMITS`; `hub/v1/keypackage/fetch` has its own request quota per requester DID.

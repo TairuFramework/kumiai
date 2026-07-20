@@ -162,7 +162,7 @@ describe('directed RPC over real MLS, end to end', () => {
  *
  * This is what a phone does: the socket dies, the client dials again, and the server is the last
  * to know the old one is gone — it still holds a receive writer pointing at it. The rule used to
- * be that the second `hub/receive` for a DID was refused, so the reconnect made precisely because
+ * be that the second `hub/v1/receive` for a DID was refused, so the reconnect made precisely because
  * the connection broke was the one turned away, and the refusal arrived on a channel promise
  * nothing awaited: no push lane, and no error either.
  *

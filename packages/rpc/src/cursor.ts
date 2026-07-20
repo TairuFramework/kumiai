@@ -4,7 +4,7 @@
  * - A **log position** is a place in a *topic's log*: `fetchTopic`'s `after`, `head`,
  *   `oldest`. Every reader of the topic sees the same log in the same order.
  * - A **delivery position** is a place in *this recipient's delivery queue*:
- *   `hub/receive`'s `after` and `ack`. It runs across every subscribed topic, skips the
+ *   `hub/v1/receive`'s `after` and `ack`. It runs across every subscribed topic, skips the
  *   recipient's own frames, and is emptied by acking.
  *
  * Different sequences, different frames, different orders. Crossing them silently mis-pages

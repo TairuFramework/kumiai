@@ -6,9 +6,9 @@ that cross the wire. Types and schemas only — no client, no server, no storage
 
 ## Exports
 
-- `hubProtocol` / `HubProtocol` — the enkaku protocol definition: `hub/publish`, `hub/subscribe`,
-  `hub/unsubscribe`, `hub/topic/fetch`, `hub/receive` (a channel), `hub/keypackage/upload`,
-  `hub/keypackage/fetch`.
+- `hubProtocol` / `HubProtocol` — the enkaku protocol definition: `hub/v1/publish`,
+  `hub/v1/subscribe`, `hub/v1/unsubscribe`, `hub/v1/topic/fetch`, `hub/v1/receive` (a channel),
+  `hub/v1/keypackage/upload`, `hub/v1/keypackage/fetch`.
 - `HubStore` and its params/result types — the storage contract, verified by
   `@kumiai/hub-conformance`.
 - `HeadMismatchError`, `NotSubscribedError`, `RetentionExceededError`, `HUB_ERROR_CODES`,
@@ -62,11 +62,11 @@ Two more things a plausible store gets wrong:
 
 ## `logPosition` is not `sequenceID`
 
-A pushed frame on `hub/receive` carries both. `sequenceID` names its place in **this recipient's
+A pushed frame on `hub/v1/receive` carries both. `sequenceID` names its place in **this recipient's
 delivery queue** — a sequence that runs across every subscribed topic, skips the recipient's own
 frames, and is emptied by acking. `logPosition` names where the frame sits in **its topic's log**,
-which is the position `hub/topic/fetch` would serve it at, and therefore the only value a reader's
-log cursor may be moved to.
+which is the position `hub/v1/topic/fetch` would serve it at, and therefore the only value a
+reader's log cursor may be moved to.
 
 It is present exactly when the frame is log-class and absent otherwise. A mailbox frame has no place
 in any log, so an empty string or a zero would be a lie a cursor acts on — and a cursor moved to a

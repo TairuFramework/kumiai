@@ -153,7 +153,7 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
   }
 
   return {
-    'hub/publish': (async (ctx) => {
+    'hub/v1/publish': (async (ctx) => {
       const { topicID, payload } = ctx.param
       const senderDID = getClientDID(ctx)
       // `payloadBytes` is computed before the authorize call (rather than after, as before) so the
@@ -232,9 +232,9 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       }
 
       return { sequenceID }
-    }) as RequestHandler<HubProtocol, 'hub/publish'>,
+    }) as RequestHandler<HubProtocol, 'hub/v1/publish'>,
 
-    'hub/subscribe': (async (ctx) => {
+    'hub/v1/subscribe': (async (ctx) => {
       const { topicID, retention } = ctx.param
       const clientDID = getClientDID(ctx)
       const decision = normalizeAuthorizeDecision(
@@ -252,9 +252,9 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         rethrowAsHandlerError(error)
       }
       return { subscribed: true }
-    }) as RequestHandler<HubProtocol, 'hub/subscribe'>,
+    }) as RequestHandler<HubProtocol, 'hub/v1/subscribe'>,
 
-    'hub/topic/fetch': (async (ctx) => {
+    'hub/v1/topic/fetch': (async (ctx) => {
       const { topicID, after, limit } = ctx.param
       // The subscriber is the authenticated caller, taken from the verified issuer of the signed
       // message — never a wire field, or any member could read a topic's log by naming another.
@@ -274,16 +274,16 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       } catch (error) {
         rethrowAsHandlerError(error)
       }
-    }) as RequestHandler<HubProtocol, 'hub/topic/fetch'>,
+    }) as RequestHandler<HubProtocol, 'hub/v1/topic/fetch'>,
 
-    'hub/unsubscribe': (async (ctx) => {
+    'hub/v1/unsubscribe': (async (ctx) => {
       const { topicID } = ctx.param
       const clientDID = getClientDID(ctx)
       await store.unsubscribe(clientDID, topicID)
       return { unsubscribed: true }
-    }) as RequestHandler<HubProtocol, 'hub/unsubscribe'>,
+    }) as RequestHandler<HubProtocol, 'hub/v1/unsubscribe'>,
 
-    'hub/receive': (async (ctx) => {
+    'hub/v1/receive': (async (ctx) => {
       const clientDID = getClientDID(ctx)
       const { after } = ctx.param ?? {}
 
@@ -385,22 +385,22 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         void evictedHere.then(finish)
         ctx.signal.addEventListener('abort', finish, { once: true })
       })
-    }) as ChannelHandler<HubProtocol, 'hub/receive'>,
+    }) as ChannelHandler<HubProtocol, 'hub/v1/receive'>,
 
-    'hub/keypackage/upload': (async (ctx) => {
+    'hub/v1/keypackage/upload': (async (ctx) => {
       const { keyPackages } = ctx.param
       const clientDID = getClientDID(ctx)
       await Promise.all(keyPackages.map((kp: string) => store.storeKeyPackage(clientDID, kp)))
       return { stored: keyPackages.length }
-    }) as RequestHandler<HubProtocol, 'hub/keypackage/upload'>,
+    }) as RequestHandler<HubProtocol, 'hub/v1/keypackage/upload'>,
 
-    'hub/keypackage/fetch': (async (ctx) => {
+    'hub/v1/keypackage/fetch': (async (ctx) => {
       const requesterDID = getClientDID(ctx)
       assertKeyPackageFetchAllowed(requesterDID)
       const { did, count } = ctx.param
       const cappedCount = Math.min(Math.max(count ?? 1, 1), fetchLimits.maxCount)
       const keyPackages = await store.fetchKeyPackages(did, cappedCount)
       return { keyPackages }
-    }) as RequestHandler<HubProtocol, 'hub/keypackage/fetch'>,
+    }) as RequestHandler<HubProtocol, 'hub/v1/keypackage/fetch'>,
   }
 }
