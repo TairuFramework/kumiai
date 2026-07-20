@@ -8,8 +8,10 @@ import {
   HANDSHAKE_MAGIC,
   HANDSHAKE_VERSION,
 } from '../src/handshake.js'
+import { decodeRecoveryRequest, encodeRecoveryReply } from '../src/recovery.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { FakeHub } from './fixtures/fake-hub.js'
+import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
 
 const flush = (ms = 40) => new Promise((r) => setTimeout(r, ms))
@@ -58,6 +60,25 @@ function healsBy(hub: FakeHub, rs: Uint8Array, did: string): Array<unknown> {
 
 const commitFrames = (hub: FakeHub, rs: Uint8Array): number =>
   hub.published.filter((m) => m.topicID === commitTopic(rs)).length
+
+/**
+ * The recovery request bob's own heal put on the wire, decoded — so a reply can be forged
+ * against its EXACT requestID and the ephemeral key inside it. Throws if there is none, rather
+ * than handing back `undefined` for a test to silently forge a reply nobody was waiting for.
+ */
+function bobsRecoveryRequest(
+  hub: FakeHub,
+  rs: Uint8Array,
+): { requestID: string; request: Uint8Array } {
+  const topic = rendezvousTopic(rs)
+  const message = hub.published.find((m) => m.topicID === topic && m.senderDID === 'bob')
+  if (message == null) throw new Error('bob never published a recovery request')
+  const frame = decodeHandshakeFrame(message.payload)
+  if (frame.kind !== HANDSHAKE_KIND.recoveryRequest) {
+    throw new Error('bob published something other than a recovery request on the rendezvous')
+  }
+  return decodeRecoveryRequest(frame.payload)
+}
 
 /**
  * A frame whose handshake version this build does not know is the one unreadable frame that
@@ -131,26 +152,61 @@ describe('a frame whose handshake version this build does not know', () => {
     await bob.peer.dispose()
   })
 
-  test('on the rendezvous topic: it is dropped, not routed to the heal', async () => {
+  test('on the rendezvous topic: a well-formed reply is dropped, not routed to the heal', async () => {
     const hub = new FakeHub()
-    const rs = new Uint8Array(32).fill(0x73)
+    const rs = new Uint8Array(32).fill(0x74)
 
-    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
-    await flush() // let Bob subscribe before the frame is published, or push never reaches him
+    await publishFutureFrame(hub, rs)
+    // A short per-attempt timeout, deliberately: `commit()` and `recover()` share one
+    // non-reentrant mutex, so the assertion below cannot run until bob's OWN heal attempt gives
+    // up waiting for a reply — and with the default 5s timeout that outlasts vitest's own test
+    // timeout. 350ms is short enough to give the mutex back quickly and long enough that this
+    // test's own reply-forging (well under it) is still the live request when the forged reply
+    // arrives.
+    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery: { timeoutMs: 350 } })
+    await flush(100)
+
+    const { requestID, request } = bobsRecoveryRequest(hub, rs)
+
+    // A genuine responder answers bob's exact request: sealed to the ephemeral key bob's own
+    // request carried, over group state that is unremarkable in every way that matters here.
+    // `sealGroupInfo` is the very port call `handleRecoveryRequest` makes to build a real reply —
+    // called directly, rather than standing up a second live peer whose own correctly-versioned
+    // reply would race this test's forged one and heal bob anyway, for a reason unrelated to the
+    // version check this test exists to pin.
+    const responder = createMemoryGroupMLS({ recoverySecret: rs, epoch: 1, members })
+    const groupInfo = await responder.sealGroupInfo(request)
+
+    // Today's kind, today's envelope — `encodeRecoveryReply`, exactly as the real responder path
+    // builds one — wrapping a genuinely sealed reply to bob's own outstanding request. Only the
+    // version byte is wrong. If `peer.ts`'s version check were gone, this decodes, opens with the
+    // ephemeral key bob's own request minted, and lands his rejoin — the same path exercised by
+    // `handleRecoveryReply` (peer.ts:1003) and the rejoin-landing block that clears `stranded`
+    // (peer.ts:2440-2469).
+    const forged = encodeHandshakeFrame(
+      HANDSHAKE_KIND.recoveryReply,
+      encodeRecoveryReply(requestID, groupInfo),
+    )
+    forged[HANDSHAKE_MAGIC.length] = HANDSHAKE_VERSION + 1
 
     await hub.publish({
       senderDID: 'zoe',
       topicID: rendezvousTopic(rs),
-      payload: futureVersionFrame(),
-      retain: 'log',
+      payload: forged,
     })
+    // Past bob's own 350ms per-attempt timeout: his heal has already given up waiting for a
+    // reply and released the lane mutex `commit()` shares with it, so the assertion below is not
+    // itself waiting out that timeout.
     await flush(500)
 
-    // The narrow scoping this task adds: the rendezvous carries request/reply traffic, not
-    // evidence the group moved on, so an unknown version here is dropped like any other
-    // unreadable frame — never routed to the heal the commit topic's `ahead` row triggers.
-    expect(healsBy(hub, rs, 'bob')).toHaveLength(0)
+    // Dropped: bob's epoch never moved, and — the assertion `healsBy`/`epoch()` alone cannot
+    // make here, since nothing else in this test was ever going to answer bob for real either —
+    // he is still refusing commits exactly as test 2's genuinely-stranded bob does, not merely
+    // un-healed by coincidence of timing.
     expect(bob.mls.epoch()).toBe(1)
+    await expect(bob.peer.commit(buildLedgerCommit(bob, ['role:zoe=admin']))).rejects.toThrow(
+      RecoveryRequiredError,
+    )
 
     await bob.peer.dispose()
   })
