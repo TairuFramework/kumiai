@@ -17,7 +17,7 @@ depend on both.
 
 ## Exports
 
-- `createGroupCrypto({ handle, label?, entryLabel? })` — `GroupCrypto` over a live handle.
+- `createGroupCrypto({ handle, entryLabel? })` — `GroupCrypto` over a live handle.
 - `createGroupMLS({ handle, adopt, identity, entrySlot, persist? })` — `GroupMLS` over the same.
 - `createLedgerEntrySlot()` — the per-commit ledger-entry resolver seam (see below).
 - `RECOVERY_LABEL` — the exporter label `exportRecoverySecret` derives under.
