@@ -35,7 +35,15 @@ export type AuthorizeRequest =
   | { action: 'keypackage/upload'; did: string; count: number }
   | { action: 'keypackage/fetch'; did: string; targetDID: string; count: number }
 
-/** A plain `boolean` is shorthand for `{ allow: boolean }`, with no reason, code, or retry hint. */
+/**
+ * A plain `boolean` is shorthand for `{ allow: boolean }`, with no reason, code, or retry hint.
+ *
+ * **`reason` is the only field a caller sees today.** `code` and `retryAfterMs` are reserved for
+ * the enforcement layer that has not been built yet: a hook may return them, and both are
+ * silently dropped before the refusal reaches the client. They ship now rather than later
+ * because widening this union is the break the surface exists to avoid — but until enforcement
+ * lands, do not depend on either reaching a caller.
+ */
 export type AuthorizeDecision =
   | boolean
   | { allow: boolean; reason?: string; code?: string; retryAfterMs?: number }
