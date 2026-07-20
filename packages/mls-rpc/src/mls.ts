@@ -21,6 +21,10 @@ const utf8 = new TextEncoder()
  * member has to be cut off from.** The port asks for exactly that — a value stable for the
  * group's whole life, so a peer stranded at any epoch can still name the topic it heals on —
  * and a removed member keeps it for life by design.
+ *
+ * Spelled identically to `@kumiai/rpc`'s `RENDEZVOUS_LABEL` (topic.ts), which is a topic
+ * label, not an MLS exporter label. The match is incidental — two independent KDF domains
+ * at different stages of the same chain — and must not be collapsed into one constant.
  */
 export const RECOVERY_LABEL = 'kumiai/rendezvous/v1'
 

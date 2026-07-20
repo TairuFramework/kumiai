@@ -8,7 +8,13 @@ export const INBOX_LABEL = 'kumiai/inbox/v1'
 /** Reserved label for the non-rotating MLS commit topic. */
 export const COMMIT_LABEL = 'kumiai/commit/v1'
 
-/** Reserved label for the non-rotating recovery-rendezvous topic. */
+/**
+ * Reserved label for the non-rotating recovery-rendezvous topic.
+ *
+ * Spelled identically to `@kumiai/mls-rpc`'s `RECOVERY_LABEL` (mls.ts), which is an MLS
+ * exporter label, not a topic label. The match is incidental — two independent KDF domains
+ * at different stages of the same chain — and must not be collapsed into one constant.
+ */
 export const RENDEZVOUS_LABEL = 'kumiai/rendezvous/v1'
 
 const DISCOVERY_PREFIX = 'kumiai/discovery/v1'

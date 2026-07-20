@@ -13,6 +13,7 @@ import {
   type KeyPackageBundle,
   ledgerEntryDigest,
   processWelcome,
+  ROLE_ENTRY_TYPE,
   removeMember,
   restoreGroup,
   signLedgerEntry,
@@ -337,8 +338,10 @@ export function buildRemoveCommit(member: Member, victimDID: string): () => Prom
 }
 
 /**
- * A host's `build()` for a ROSTER-NEUTRAL commit: it enacts a ledger entry and touches no
- * membership, so the app-lane anchor does not move and the group stays on one topic across it.
+ * A host's `build()` for a commit that is NEUTRAL FOR THE APP-LANE ANCHOR: it carries a genuine
+ * `kumiai.role` entry — granting or demoting `subject`'s permission — but adds or removes no MLS
+ * leaf, so the app-lane anchor, which rotates only on membership change, does not move and the
+ * group stays on one topic across it.
  *
  * That is what makes it the right advance for the drain scenarios below. A commit that added or
  * removed a member would rotate the anchor, and a frame published mid-walk would land on a
@@ -357,7 +360,7 @@ export function buildLedgerCommit(
 ): () => Promise<PendingCommit> {
   return async () => {
     const token = await signLedgerEntry(identity, {
-      type: 'group.role',
+      type: ROLE_ENTRY_TYPE,
       groupID: member.handle().groupID,
       subject,
       value,

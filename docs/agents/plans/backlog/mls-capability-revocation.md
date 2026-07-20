@@ -52,7 +52,7 @@ So eviction is complete **via the ratchet tree**, not via the roster.
 What genuinely remains, and it is narrower than this doc assumes:
 
 - **Removal is not revocation of the roster grant.** `removeMember` evicts the leaf but leaves the
-  removed DID's `group.role` entry standing. That grant confers nothing without a leaf, so it is not
+  removed DID's `kumiai.role` entry standing. That grant confers nothing without a leaf, so it is not
   currently exploitable — but it means the roster and the tree disagree about who is a member. An
   admin who wants the grant gone must sign a demotion entry as well.
 - **The exposure would return if a non-resync external join were ever exposed.** Such a join adds a
