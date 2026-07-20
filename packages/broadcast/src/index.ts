@@ -26,10 +26,13 @@ export {
 } from './responder.js'
 export { deriveTopicID } from './topic.js'
 export {
+  BROADCAST_VERSION,
   type BroadcastMessage,
   type BroadcastTransportParams,
   type ByteTransform,
   createBroadcastTransport,
+  decodeFrame,
+  encodeFrame,
   type Unwrap,
   type UnwrapResult,
 } from './transport.js'

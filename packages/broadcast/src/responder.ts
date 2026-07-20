@@ -24,6 +24,13 @@ export function suppressible(
 
 export type BroadcastResponderParams = {
   transport: TransportType<BroadcastMessage, BroadcastMessage>
+  /**
+   * This responder's own name, for buses that have NO authenticated sender to offer — the memory
+   * bus, and doubles built on it. It is written as the outgoing message's transport-level
+   * `senderDID`, not into the reply body, so a receiver reads one field either way: on an
+   * authenticating transport `unwrap` overwrites it with what it recovered, and this value never
+   * reaches a consumer. Self-asserted, and only ever believed where there is no one else to ask.
+   */
   from: string
   handlers: Record<string, BroadcastHandler | SuppressibleHandler>
   sleep?: (ms: number) => Promise<void>
@@ -72,12 +79,11 @@ export function createBroadcastResponder(params: BroadcastResponderParams): {
     let reply: ReplyData
     try {
       const ok = await handler(request.prm, { senderDID })
-      reply = { kind: 'res', rid: request.rid, from, ok }
+      reply = { kind: 'res', rid: request.rid, ok }
     } catch (error) {
       reply = {
         kind: 'res',
         rid: request.rid,
-        from,
         err: error instanceof Error ? error.message : String(error),
       }
     }
@@ -87,14 +93,17 @@ export function createBroadcastResponder(params: BroadcastResponderParams): {
     if (!isGather) {
       markReplied(request.rid, ttlMs)
     }
-    // Best-effort write: ignore rejections (e.g. transport disposed mid-flight).
-    await transport.write({ payload: { typ: 'event', prc, data: reply } }).catch(() => {})
+    // Best-effort write: ignore rejections (e.g. transport disposed mid-flight). `senderDID`
+    // rides at the transport level, where an authenticating transport replaces it with what it
+    // recovered; see {@link BroadcastResponderParams.from}.
+    await transport
+      .write({ payload: { typ: 'event', prc, data: reply }, senderDID: from })
+      .catch(() => {})
   }
 
   type InboundData = {
     kind?: string
     rid?: string
-    from?: string
     prm?: unknown
     ok?: unknown
     err?: string

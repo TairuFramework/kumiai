@@ -1,4 +1,4 @@
-import { type BroadcastMessage, encode } from './transport.js'
+import { type BroadcastMessage, encodeFrame } from './transport.js'
 
 /**
  * Build the canonical fire-and-forget event message a producer publishes to a broadcast topic:
@@ -14,10 +14,11 @@ export function buildEventMessage(
 
 /**
  * Encode an event to the exact plaintext bytes the broadcast transport produces before wrapping —
- * `encode(buildEventMessage(prc, data))`. A producer that publishes an event off the transport (e.g.
- * a log-retained lane) uses this so its bytes stay byte-identical to a live dispatch, keeping the
- * receive side (`unwrap` then decode) symmetric across both.
+ * `encodeFrame(buildEventMessage(prc, data))`. A producer that publishes an event off the transport
+ * (e.g. a log-retained lane) uses this so its bytes stay byte-identical to a live dispatch, keeping
+ * the receive side (`unwrap` then decode) symmetric across both — including the wire version stamp,
+ * which `encodeFrame` is the one place to write.
  */
 export function encodeEventFrame(prc: string, data: Record<string, unknown> = {}): Uint8Array {
-  return encode(buildEventMessage(prc, data))
+  return encodeFrame(buildEventMessage(prc, data))
 }

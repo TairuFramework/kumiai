@@ -6,11 +6,26 @@ import type { BroadcastMessage } from './transport.js'
 import { defaultRandomID } from './utils.js'
 
 export type RequestData = { kind: 'req'; rid: string; prm: unknown; gather?: boolean }
-export type ReplyData = { kind: 'res'; rid: string; from: string; ok?: unknown; err?: string }
+/**
+ * A reply body. It says WHAT the answer is and nothing about WHO gave it — deliberately: the
+ * sender travels at the transport level as `BroadcastMessage.senderDID`, where only an
+ * authenticating `unwrap` can set it, and there is no second place for a responder to name
+ * itself. A `from` field lived here once; anything a responder writes into a reply body is a
+ * claim it makes about itself, and this one was being believed.
+ */
+export type ReplyData = { kind: 'res'; rid: string; ok?: unknown; err?: string }
 
 export type RequestOptions = { errorThreshold?: number; timeoutMs?: number }
 export type GatherOptions = { quorum?: number; timeoutMs?: number }
-export type GatheredReply = { from: string; value: unknown }
+/**
+ * One gathered reply, attributed to the AUTHENTICATED sender the transport established.
+ *
+ * `senderDID`, not `from`: the field this replaced carried whatever name the responder wrote into
+ * its own reply body, and every consumer that treated it as an identity was trusting the party it
+ * was identifying. The rename is the break — a consumer reading `from` no longer compiles, which
+ * is the only way to tell it that the meaning moved from asserted to authenticated.
+ */
+export type GatheredReply = { senderDID: string; value: unknown }
 
 export type BroadcastClientParams = {
   transport: TransportType<BroadcastMessage, BroadcastMessage>
@@ -20,7 +35,8 @@ export type BroadcastClientParams = {
 const DEFAULT_TIMEOUT_MS = 5000
 
 type PendingEntry = {
-  collect: (reply: ReplyData) => void
+  /** `senderDID` is separate from `reply` because it is not the responder's to state. */
+  collect: (reply: ReplyData, senderDID: string) => void
   onDispose: () => void
 }
 
@@ -54,9 +70,19 @@ export class BroadcastClient extends Disposer {
         continue
       }
       const data = payload.data as Partial<ReplyData> | undefined
-      if (data?.kind === 'res' && typeof data.rid === 'string') {
-        this.#pending.get(data.rid)?.collect(data as ReplyData)
+      if (data?.kind !== 'res' || typeof data.rid !== 'string') {
+        continue
       }
+      // A reply this transport cannot attribute is DROPPED, not delivered unattributed. An
+      // authenticating transport clears `senderDID` whenever the open recovered no identity, so
+      // the only way past here is a sender the transport itself established. Applied to every
+      // reply and not just gathered ones: `request` resolves on the first answer it accepts, and
+      // accepting one from nobody would let an unauthenticated frame settle the call.
+      const senderDID = (msg as { senderDID?: unknown }).senderDID
+      if (typeof senderDID !== 'string' || senderDID === '') {
+        continue
+      }
+      this.#pending.get(data.rid)?.collect(data as ReplyData, senderDID)
     }
   }
 
@@ -126,12 +152,18 @@ export class BroadcastClient extends Disposer {
       }
       const timer = setTimeout(finish, timeoutMs)
       this.#pending.set(rid, {
-        collect: (reply) => {
-          if (reply.err != null || seen.has(reply.from)) {
+        // `seen` is keyed on the AUTHENTICATED sender, and that is what makes this a quorum
+        // rather than a count of frames. Keyed on a name the reply asserted, one member could
+        // suppress another's real answer by racing a forgery under its DID (the forgery takes the
+        // slot, the real reply is discarded as a duplicate), and could reach a quorum of N alone
+        // by answering N times under N names. Neither is reachable through a sender only the
+        // holder of that member's key can produce.
+        collect: (reply, senderDID) => {
+          if (reply.err != null || seen.has(senderDID)) {
             return
           }
-          seen.add(reply.from)
-          replies.push({ from: reply.from, value: reply.ok })
+          seen.add(senderDID)
+          replies.push({ senderDID, value: reply.ok })
           if (replies.length >= quorum) {
             finish()
           }

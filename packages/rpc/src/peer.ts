@@ -11,7 +11,6 @@ import {
   type GatherOptions,
   type RequestOptions,
   type SuppressConfig,
-  type UnwrapResult,
 } from '@kumiai/broadcast'
 import type { StoredMessage } from '@kumiai/hub-protocol'
 import type { LogHub } from '@kumiai/hub-tunnel'
@@ -593,8 +592,15 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * The opened form of a live frame, keyed by the plaintext the open produced. Written by the
    * inbound path below and read by every transport built on it, so that one open serves all of
    * them.
+   *
+   * {@link GroupUnwrapResult}, not `@kumiai/broadcast`'s `UnwrapResult`: what is stored here is
+   * what reaches `BroadcastClient.gather` as the sender it keys its quorum on, and broadcast's
+   * type says `senderDID?`. Typing the map at the optional shape would carry an "authenticated
+   * as nobody" past the point where anything downstream could still tell. `crypto.unwrap`
+   * REQUIRES the field — see the type's own doc — so the narrowing below is checking a promise
+   * already made, and a frame that breaks it is refused rather than fanned out.
    */
-  const openedFrames = new WeakMap<Uint8Array, UnwrapResult>()
+  const openedFrames = new WeakMap<Uint8Array, GroupUnwrapResult>()
 
   /**
    * The app lane's inbound path: one open per topic, fanned out as plaintext, with each frame's
@@ -610,8 +616,17 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       topicID,
       unwrap: crypto.unwrap,
       project: (_message, opened) => {
-        openedFrames.set(opened.payload, opened)
-        return opened.payload
+        const { payload, senderDID } = opened
+        if (typeof senderDID !== 'string' || senderDID === '') {
+          // `createOpenOncePath` catches this and drops the frame, which is the answer wanted:
+          // the app lane is always MLS-sealed, so an open that recovered no sender is not a
+          // frame to deliver unattributed — it is one nothing on this lane can vouch for. Fails
+          // CLOSED, so the widening `UnwrapResult` still leaves in the shared open-once
+          // signature cannot become a delivery of an unauthenticated frame here.
+          throw new Error(`app lane "${name}": opened frame carries no authenticated sender`)
+        }
+        openedFrames.set(payload, { payload, senderDID })
+        return payload
       },
       note: (message) => noteLiveAppFrame(name, topicID, message),
     })

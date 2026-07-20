@@ -1,3 +1,4 @@
+import { BROADCAST_VERSION } from '@kumiai/broadcast'
 import { toUTF } from '@sozai/codec'
 import { describe, expect, test } from 'vitest'
 
@@ -71,7 +72,11 @@ describe('per-procedure retention for app events', () => {
     // frame is RETAINED and openable at this epoch, which is exactly what a fresh reader shows.
     const reader = createFakeCrypto({ epoch: 1, localDID: 'carol' })
     const opened = await reader.unwrap(drained.messages[0].payload)
+    // `v` included deliberately: the retained bytes are produced by `encodeEventFrame` off the
+    // transport, and a retained frame that omitted the wire version would be refused by the
+    // decode a live one passes. Pinning it here is what says the two paths agree.
     expect(JSON.parse(toUTF(opened.payload))).toEqual({
+      v: BROADCAST_VERSION,
       payload: { typ: 'event', prc: 'room/posted', data: { text: 'kept' } },
     })
 
