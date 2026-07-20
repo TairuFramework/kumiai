@@ -206,8 +206,11 @@ describe('Hub groups: authorized-DID pub/sub', () => {
 
   function setupGroupHub(groupID: string, memberDIDs: Array<string>) {
     const members = new Set(memberDIDs)
-    const authorize: AuthorizeHook = (did, _action, topicID) => {
-      if (topicID === groupTopic(groupID)) return members.has(did)
+    const authorize: AuthorizeHook = (req) => {
+      // Only the topic-scoped actions carry a `topicID`; anything else (a keypackage
+      // request, or an action added later) is not this gate's business and passes.
+      if (!('topicID' in req)) return true
+      if (req.topicID === groupTopic(groupID)) return members.has(req.did)
       return true
     }
     return createTestHub({ authorize })
