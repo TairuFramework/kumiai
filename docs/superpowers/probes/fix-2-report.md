@@ -110,9 +110,16 @@ cleartext epoch separates the two facts the classifier reads from a commit, and 
 without a key — the **committer** is what needs the epoch secret, and it is what `own-unmerged` turns
 on, the row whose doc is emphatic that the committer must be MLS-authenticated and never the hub's
 word. Which rows may depend on an unauthenticated field has to be argued per row. Filed with options
-at `docs/agents/plans/next/2026-07-18-ahead-row-unreachable.md`, including the note that the real
-handle refuses commits framed **below** its epoch too, so the `history` row and the fork check rest on
-the same read and should be checked before designing the fix.
+at the time, including the note that the real handle refuses commits framed **below** its epoch too,
+so the `history` row and the fork check rest on the same read and should be checked before designing
+the fix.
+
+> **Resolved later on this same branch, at `6b31331`.** `readCommitHeader` was widened to return the
+> cleartext `epoch` at any epoch and to withhold only the `committerDID` it cannot authenticate, so
+> `ahead`, `history` and `fork` all dispatch on the epoch (`classify.ts:29`) while `own-unmerged`
+> keeps the authenticated read it requires — which answers the `history`/fork question above at the
+> same time. The four tests below are green; the backlog file this paragraph used to point at was
+> deleted as spent.
 
 ## Ruling 3: the conflicting test, rewritten
 
@@ -215,9 +222,9 @@ blocked. Its red is the third failure in the pre-change run above, taken against
 ## Concerns
 
 1. **The `ahead` row is the biggest thing found on this probe, and it is not an app-lane bug.** A peer
-   that falls behind never heals against a real MLS port. Filed at
-   `docs/agents/plans/next/2026-07-18-ahead-row-unreachable.md`. It wants its own probe before the
-   branch merges, because four green-looking tests were covering it.
+   that falls behind never heals against a real MLS port. Filed at the time; **fixed before the
+   branch merged, at `6b31331`** (see the resolution note under Ruling 2). It wanted its own probe
+   because four green-looking tests were covering it.
 2. **Doubles that are more capable than the port they stand for hide exactly this class of defect.**
    Both problems on this probe trace to one: `memory-group-mls`'s `readCommitHeader` answered at any
    epoch and stated that as the contract. Worth a sweep of the other doubles for the same shape — the
