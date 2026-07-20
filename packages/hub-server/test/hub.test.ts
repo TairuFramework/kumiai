@@ -3,10 +3,10 @@ import type { AnyClientMessageOf, AnyServerMessageOf } from '@enkaku/protocol'
 import { DirectTransports } from '@enkaku/transport'
 import { type OwnIdentity, randomIdentity } from '@kokuin/token'
 import type { HubProtocol, HubStore } from '@kumiai/hub-protocol'
-import { fromUTF, toB64 } from '@sozai/codec'
+import { fromB64, fromUTF, toB64 } from '@sozai/codec'
 import { describe, expect, test, vi } from 'vitest'
 
-import { createHandlers } from '../src/handlers.js'
+import { type AuthorizeRequest, createHandlers } from '../src/handlers.js'
 import { type CreateHubParams, createHub, type HubInstance } from '../src/hub.js'
 import { createMemoryStore } from '../src/memoryStore.js'
 import { HubClientRegistry } from '../src/registry.js'
@@ -368,6 +368,64 @@ describe('hub authorization', () => {
     await expect(alice.request('hub/subscribe', { param: { topicID: TOPIC } })).rejects.toThrow(
       'Not authorized',
     )
+    await ctx.dispose()
+  })
+
+  test('a publish request reaches the hook as a discriminated request with retain and payloadSize', async () => {
+    const seen: Array<AuthorizeRequest> = []
+    const ctx = createTestHub({
+      authorize: (req: AuthorizeRequest) => {
+        seen.push(req)
+        return true
+      },
+    })
+    const { client: alice, identity } = ctx.connect()
+    const payload = encodePayload('hello, hub')
+
+    await alice.request('hub/publish', { param: { topicID: TOPIC, payload, retain: 'log' } })
+
+    expect(seen).toHaveLength(1)
+    const req = seen[0]
+    // Narrow via the discriminant itself: if `publish` requests ever stopped reaching the hook
+    // shaped this way, the assertions below it would never run and the test would pass for the
+    // wrong reason. Assert the discriminant explicitly first.
+    expect(req?.action).toBe('publish')
+    if (req?.action !== 'publish') throw new Error('expected a publish request')
+    expect(req.did).toBe(identity.id)
+    expect(req.topicID).toBe(TOPIC)
+    expect(req.retain).toBe('log')
+    expect(req.payloadSize).toBe(fromB64(payload).length)
+
+    await ctx.dispose()
+  })
+
+  test('a hook returning { allow: false, reason } refuses, and the reason reaches the error', async () => {
+    const ctx = createTestHub({
+      authorize: () => ({ allow: false, reason: 'topic quota exceeded for this DID' }),
+    })
+    const { client: alice } = ctx.connect()
+
+    await expect(
+      alice.request('hub/publish', { param: { topicID: TOPIC, payload: encodePayload('x') } }),
+    ).rejects.toThrow('topic quota exceeded for this DID')
+    await expect(alice.request('hub/subscribe', { param: { topicID: TOPIC } })).rejects.toThrow(
+      'topic quota exceeded for this DID',
+    )
+
+    await ctx.dispose()
+  })
+
+  test('a hook returning true for everything permits everything, as today', async () => {
+    const ctx = createTestHub({ authorize: () => true })
+    const { client: alice } = ctx.connect()
+
+    await expect(
+      alice.request('hub/publish', { param: { topicID: TOPIC, payload: encodePayload('x') } }),
+    ).resolves.toMatchObject({ sequenceID: expect.any(String) })
+    await expect(alice.request('hub/subscribe', { param: { topicID: TOPIC } })).resolves.toEqual({
+      subscribed: true,
+    })
+
     await ctx.dispose()
   })
 })

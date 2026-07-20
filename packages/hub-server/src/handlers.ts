@@ -11,13 +11,45 @@ import { fromB64, toB64 } from '@sozai/codec'
 import { createRateLimiter, type RateLimitConfig } from './rateLimit.js'
 import type { HubClientRegistry } from './registry.js'
 
-export type AuthorizeAction = 'publish' | 'subscribe'
+/**
+ * A single request to authorize. All six variants are always present, even though only
+ * `publish` and `subscribe` are currently enforced by the handlers below: the union itself is
+ * the exhaustive-switch surface a host's own `switch (req.action)` closes over, so adding a
+ * seventh variant later is precisely the compatibility break this type exists to avoid.
+ *
+ * A host's `switch` need not handle every action today — an action it does not recognize should
+ * default to allow, so a hook written before a new variant shipped does not silently start
+ * refusing a procedure that was previously ungated.
+ */
+export type AuthorizeRequest =
+  | {
+      action: 'publish'
+      did: string
+      topicID: string
+      retain: 'log' | 'mailbox'
+      payloadSize: number
+    }
+  | { action: 'subscribe'; did: string; topicID: string; retention?: number }
+  | { action: 'unsubscribe'; did: string; topicID: string }
+  | { action: 'topic/fetch'; did: string; topicID: string }
+  | { action: 'keypackage/upload'; did: string; count: number }
+  | { action: 'keypackage/fetch'; did: string; targetDID: string; count: number }
+
+/** A plain `boolean` is shorthand for `{ allow: boolean }`, with no reason, code, or retry hint. */
+export type AuthorizeDecision =
+  | boolean
+  | { allow: boolean; reason?: string; code?: string; retryAfterMs?: number }
 
 export type AuthorizeHook = (
-  did: string,
-  action: AuthorizeAction,
-  topicID: string,
-) => boolean | Promise<boolean>
+  req: AuthorizeRequest,
+) => AuthorizeDecision | Promise<AuthorizeDecision>
+
+function normalizeAuthorizeDecision(decision: AuthorizeDecision): {
+  allow: boolean
+  reason?: string
+} {
+  return typeof decision === 'boolean' ? { allow: decision } : decision
+}
 
 export type HubRateLimits = {
   perDID: RateLimitConfig
@@ -116,8 +148,27 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
     'hub/publish': (async (ctx) => {
       const { topicID, payload } = ctx.param
       const senderDID = getClientDID(ctx)
-      if (!(await authorize(senderDID, 'publish', topicID))) {
-        throw new HandlerError({ code: 'EK02', message: 'Not authorized to publish to topic' })
+      // `payloadBytes` is computed before the authorize call (rather than after, as before) so the
+      // hook can see the decoded size; decoding is pure and side-effect free, so doing it earlier
+      // changes nothing else. `retain` defaults to 'mailbox' when absent, matching the same default
+      // the store applies below (`params.retain ?? 'mailbox'` in memoryStore.ts) — the hook must
+      // never see an absent retain, since `AuthorizeRequest`'s `publish` variant declares it required.
+      const payloadBytes = fromB64(payload)
+      const retain = ctx.param.retain ?? 'mailbox'
+      const decision = normalizeAuthorizeDecision(
+        await authorize({
+          action: 'publish',
+          did: senderDID,
+          topicID,
+          retain,
+          payloadSize: payloadBytes.length,
+        }),
+      )
+      if (!decision.allow) {
+        throw new HandlerError({
+          code: 'EK02',
+          message: decision.reason ?? 'Not authorized to publish to topic',
+        })
       }
       if (!didLimiter.tryConsume(senderDID)) {
         throw new HandlerError({ code: 'EK01', message: 'Publish rate limit exceeded for DID' })
@@ -125,7 +176,6 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       if (!topicLimiter.tryConsume(topicID)) {
         throw new HandlerError({ code: 'EK01', message: 'Publish rate limit exceeded for topic' })
       }
-      const payloadBytes = fromB64(payload)
       let sequenceID: string
       let deduped: boolean
       try {
@@ -177,13 +227,19 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
     }) as RequestHandler<HubProtocol, 'hub/publish'>,
 
     'hub/subscribe': (async (ctx) => {
-      const { topicID } = ctx.param
+      const { topicID, retention } = ctx.param
       const clientDID = getClientDID(ctx)
-      if (!(await authorize(clientDID, 'subscribe', topicID))) {
-        throw new HandlerError({ code: 'EK02', message: 'Not authorized to subscribe to topic' })
+      const decision = normalizeAuthorizeDecision(
+        await authorize({ action: 'subscribe', did: clientDID, topicID, retention }),
+      )
+      if (!decision.allow) {
+        throw new HandlerError({
+          code: 'EK02',
+          message: decision.reason ?? 'Not authorized to subscribe to topic',
+        })
       }
       try {
-        await store.subscribe({ subscriberDID: clientDID, topicID, retention: ctx.param.retention })
+        await store.subscribe({ subscriberDID: clientDID, topicID, retention })
       } catch (error) {
         rethrowAsHandlerError(error)
       }
