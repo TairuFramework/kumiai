@@ -19,6 +19,23 @@ every serious defect this stack has had came from a double answering where its r
 Depends downward on sozai, kokuin, and enkaku; nothing depends on kumiai. See the stack
 overview: https://github.com/TairuFramework/kigu/blob/main/docs/stack.md
 
+## Reserved namespaces
+
+kumiai reserves two prefixes. Both name kumiai, so a host can tell at a glance
+what is not theirs to define.
+
+- **`kumiai.`** — control-ledger entry types (`kumiai.role`,
+  `kumiai.recovery-request`, `kumiai.recovery-groupinfo`). The envelope fold
+  **fails closed** on an unknown `kumiai.*` type: it rejects the whole commit
+  rather than surfacing the entry unread. An entry in a reserved,
+  authority-bearing namespace that no one understands must never be passed on.
+- **`kumiai/`** — topic labels (`kumiai/inbox/v1`, `kumiai/commit/v1`,
+  `kumiai/rendezvous/v1`, `kumiai/discovery/v1`, `kumiai/topic/v1`).
+
+**Application entry types and topic labels must not start with either prefix.**
+Everything else is yours, including `group.` — it was reserved until
+2026-07-20 and is now application space.
+
 ---
 
 ## Retention classes
