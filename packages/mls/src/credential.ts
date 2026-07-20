@@ -16,8 +16,15 @@ export type MemberCredential = {
  * - did:key identities omit `longForm`.
  * - did:peer:4 identities MUST carry `longForm`; the auth service decodes it
  *   inline and binds the MLS leaf signature key to a verification method.
+ *
+ * `v` is the format version. Unlike the client-state blob, this is baked into an MLS leaf and
+ * covered by its signature — leaves can never be rewritten. So an identity written before `v`
+ * existed lives in a leaf that will exist forever, and absent `v` MUST read as `1` permanently.
+ * That tolerance is not a courtesy owed to a transition; there is no version of this code that
+ * can stop honoring it without refusing leaves nothing is wrong with.
  */
 export type MLSCredentialIdentity = {
+  v?: 1
   id: string
   longForm?: string
 }
@@ -41,6 +48,11 @@ export function parseMLSCredentialIdentity(identity: Uint8Array): MLSCredentialI
     throw new Error('Invalid MLS credential: identity must be a JSON object')
   }
   const candidate = parsed as Record<string, unknown>
+  // Absent `v` is v1, permanently — not a default that will one day stop applying. Leaves
+  // written before this field existed are signed and can never be rewritten to add it.
+  if ('v' in candidate && candidate.v !== 1) {
+    throw new Error(`Invalid MLS credential: unsupported identity version ${String(candidate.v)}`)
+  }
   if (typeof candidate.id !== 'string') {
     throw new Error('Invalid MLS credential: id must be a string')
   }

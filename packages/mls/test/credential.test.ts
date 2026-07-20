@@ -44,6 +44,23 @@ describe('parseMLSCredentialIdentity', () => {
     const bytes = new TextEncoder().encode(JSON.stringify({ id: 'did:key:z', longForm: 42 }))
     expect(() => parseMLSCredentialIdentity(bytes)).toThrow(/longForm/i)
   })
+
+  it('parses an identity encoded with v: 1', () => {
+    const bytes = new TextEncoder().encode(JSON.stringify({ v: 1, id: 'did:key:z6MkABC' }))
+    const parsed = parseMLSCredentialIdentity(bytes)
+    expect(parsed.id).toBe('did:key:z6MkABC')
+  })
+
+  it('parses an identity with no v field as v1 (leaves written before this change can never be rewritten)', () => {
+    const bytes = new TextEncoder().encode(JSON.stringify({ id: 'did:key:z6MkABC' }))
+    const parsed = parseMLSCredentialIdentity(bytes)
+    expect(parsed.id).toBe('did:key:z6MkABC')
+  })
+
+  it('rejects an identity with an unknown v', () => {
+    const bytes = new TextEncoder().encode(JSON.stringify({ v: 2, id: 'did:key:z6MkABC' }))
+    expect(() => parseMLSCredentialIdentity(bytes)).toThrow(/v(ersion)?/i)
+  })
 })
 
 describe('populateCacheFromCredential', () => {
@@ -91,6 +108,11 @@ describe('makeMLSCredential', () => {
     const parsed = parseMLSCredentialIdentity((credential as { identity: Uint8Array }).identity)
     expect(parsed.id).toBe(identity.id)
     expect(parsed.longForm).toBeUndefined()
+
+    const raw = JSON.parse(
+      new TextDecoder().decode((credential as { identity: Uint8Array }).identity),
+    )
+    expect(raw.v).toBe(1)
   })
 
   it('emits JSON { id, longForm } for a did:peer:4 identity', async () => {
