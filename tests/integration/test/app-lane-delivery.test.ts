@@ -1,4 +1,4 @@
-import { protocolTopic } from '@kumiai/rpc'
+import { APP_TOPIC_LABEL, protocolTopic } from '@kumiai/rpc'
 import { describe, expect, test } from 'vitest'
 
 import {
@@ -261,9 +261,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
 
     // Everything Bob holds while he is still a member — including the exact topic the group
     // is on, which he can name because he is on it.
-    const bobSecretAsMember = await bob
-      .handle()
-      .exportSecret('kumiai/app-topic/v1', new Uint8Array())
+    const bobSecretAsMember = await bob.handle().exportSecret(APP_TOPIC_LABEL, new Uint8Array())
     const topicAsMember = protocolTopic(bobSecretAsMember, Number(bob.handle().epoch), 'chat')
 
     const removal = await alice.peer.commit(buildRemoveCommit(alice, bobID.id))
@@ -272,7 +270,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     expect(alice.handle().epoch).toBe(2n)
 
     // The group's topic after the rotation.
-    const groupSecret = await alice.handle().exportSecret('kumiai/app-topic/v1', new Uint8Array())
+    const groupSecret = await alice.handle().exportSecret(APP_TOPIC_LABEL, new Uint8Array())
     const groupTopic = protocolTopic(groupSecret, Number(alice.handle().epoch), 'chat')
     expect(groupTopic).not.toBe(topicAsMember)
 
@@ -283,7 +281,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     // Nothing Bob holds names the group's new topic. Not his own secret, at any epoch number
     // he cares to try — and enumerating them is free.
     const bobsGuesses = new Set<string>()
-    const bobSecret = await bob.handle().exportSecret('kumiai/app-topic/v1', new Uint8Array())
+    const bobSecret = await bob.handle().exportSecret(APP_TOPIC_LABEL, new Uint8Array())
     for (let epoch = 0; epoch <= 8; epoch++) {
       bobsGuesses.add(protocolTopic(bobSecret, epoch, 'chat'))
       bobsGuesses.add(protocolTopic(bobSecretAsMember, epoch, 'chat'))

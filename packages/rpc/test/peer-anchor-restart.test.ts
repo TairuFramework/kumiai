@@ -153,7 +153,9 @@ describe('the app-lane anchor survives a restart', () => {
     // and the live epoch's topic was never reached for at all.
     const drained = await hub.fetchTopic({ subscriberDID: 'alice', topicID: anchorTopic })
     expect(drained.messages).toHaveLength(2)
-    expect(hub.subscriberCount(protocolTopic(fakeEpochSecret(3), 3, 'room'))).toBe(0)
+    expect(hub.subscriberCount(protocolTopic(fakeEpochSecret(3, APP_TOPIC_LABEL), 3, 'room'))).toBe(
+      0,
+    )
 
     await alice.peer.dispose()
     await restarted.peer.dispose()

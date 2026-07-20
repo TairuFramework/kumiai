@@ -8,10 +8,11 @@ import { createRuntime } from '@sozai/runtime'
  * The label the ledger-entry seal key is exported under. UNCHANGED by `GroupCrypto.exportSecret`
  * taking a caller-supplied label: `sealEntries`/`openEntries` are their own port members, not
  * routed through `exportSecret`, and this is the label THIS implementation asks the handle's own
- * exporter with for that separate purpose. It must differ from whatever label a caller passes to
- * `exportSecret` — the topic secret names a topic and is handed to anything that derives one,
- * while this key opens the group's control-ledger bodies, and sharing one exported secret between
- * a name and a key would make every holder of the name a reader of the bodies.
+ * exporter with for that separate purpose. `createGroupCrypto`'s `exportSecret` refuses this
+ * label from a caller (see there) for exactly the reason it must differ from whatever label a
+ * caller passes: the topic secret names a topic and is handed to anything that derives one, while
+ * this key opens the group's control-ledger bodies, and sharing one exported secret between a
+ * name and a key would make every holder of the name a reader of the bodies.
  */
 export const ENTRY_SEAL_LABEL = 'kumiai/ledger-entries/v1'
 
@@ -121,8 +122,17 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
     // implementation chooses no label of its own. It used to: a fixed `label` closed over here
     // was the only value any caller could ever get, and the caller that closed over it
     // (`@kumiai/rpc`'s peer, via `APP_TOPIC_LABEL`) is the one place that value is preserved.
-    exportSecret: (label, length = SECRET_LENGTH) =>
-      handle().exportSecret(label, EXPORT_CONTEXT, length),
+    //
+    // ONE label is off limits: `entryLabel` names the exact exporter call `sealEntries`/
+    // `openEntries` make below (same context, same `SECRET_LENGTH`), so a caller reaching this
+    // method with it back would not get an independent export — it would get the ledger-entry
+    // seal key under another name. Refused here, loudly, rather than left to the doc alone.
+    exportSecret: (label, length = SECRET_LENGTH) => {
+      if (label === entryLabel) {
+        throw new Error(`exportSecret: label '${label}' is reserved for the ledger-entry seal`)
+      }
+      return handle().exportSecret(label, EXPORT_CONTEXT, length)
+    },
 
     wrap: (bytes) => handle().encrypt(bytes),
 

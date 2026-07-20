@@ -12,7 +12,7 @@ import type { ByteTransform, Unwrap } from '@kumiai/broadcast'
  * opening is pure and may run from inside the apply of the commit that carries it — which is the
  * only place it does run, and which the ratchet-backed pair cannot serve.
  *
- * `epoch()` and `exportSecret()` are read on init and every {@link "peer".GroupPeer.resync}.
+ * `epoch()` and `exportSecret(label)` are read on init and every {@link "peer".GroupPeer.resync}.
  * `wrap`/`unwrap` close over the live group, so they always use current epoch state. `unwrap`
  * returns the authenticated sender (`senderDID`) recovered from the ciphertext.
  *
@@ -54,9 +54,12 @@ export type GroupCrypto = {
    *
    * `length` defaults to whatever the implementation considers its natural export length
    * (32 bytes for every real implementation in this repo, matching XChaCha20-Poly1305's key
-   * size) and MAY be overridden — RFC 9420's exporter is HKDF-Expand with a caller-chosen
-   * output length, so a same-label export at a different length is itself an independent key,
-   * not a truncation or extension of the default-length one.
+   * size) and MAY be overridden — RFC 9420's exporter binds `length` into the `KDFLabel`
+   * struct it runs `ExpandWithLabel` over (§8.5), not merely into HKDF-Expand's own output-length
+   * argument, so a same-label export at a different length is itself an independent key, not a
+   * truncation or extension of the default-length one. (Plain HKDF-Expand alone would not buy
+   * this — a shorter output IS a prefix of a longer one under the same info; it is `KDFLabel`
+   * binding `length` into the input that makes the two lengths independent.)
    */
   exportSecret(label: string, length?: number): Uint8Array | Promise<Uint8Array>
   wrap: ByteTransform

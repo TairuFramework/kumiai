@@ -1,7 +1,7 @@
 import { encodeEventFrame } from '@kumiai/broadcast'
 import { describe, expect, test } from 'vitest'
 
-import { protocolTopic } from '../src/topic.js'
+import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { createMemoryAnchorStore, type MemoryAnchorStore } from './fixtures/anchor.js'
 import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
@@ -14,7 +14,8 @@ const flush = () => new Promise((r) => setTimeout(r, 50))
 const MEMBERS = ['alice', 'bob', 'carol']
 
 /** The chat topic of the segment anchored at `epoch`: that epoch's secret, under that epoch. */
-const chatTopic = (epoch: number): string => protocolTopic(fakeEpochSecret(epoch), epoch, 'chat')
+const chatTopic = (epoch: number): string =>
+  protocolTopic(fakeEpochSecret(epoch, APP_TOPIC_LABEL), epoch, 'chat')
 
 /**
  * A handle does not ratchet past an epoch until that epoch's frames are read and its anchor is

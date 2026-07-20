@@ -39,7 +39,7 @@ describe('fake crypto', () => {
     // Every member is the same function of the epoch, so members AT an epoch agree — and one
     // stuck behind does not follow.
     expect(await createFakeCrypto({ epoch: 2 }).exportSecret(APP_TOPIC_LABEL)).toEqual(atTwo)
-    expect(fakeEpochSecret(1)).toEqual(atOne)
+    expect(fakeEpochSecret(1, APP_TOPIC_LABEL)).toEqual(atOne)
   })
 
   test('exportSecret is bound to the label: two labels at the same epoch are different bytes', async () => {

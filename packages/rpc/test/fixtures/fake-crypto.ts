@@ -3,7 +3,6 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { fromUTF, toUTF } from '@sozai/codec'
 
 import type { GroupCrypto } from '../../src/crypto.js'
-import { APP_TOPIC_LABEL } from '../../src/topic.js'
 import { decodeMemoryCommit } from './memory-group-mls.js'
 
 export type FakeCryptoOptions = {
@@ -31,12 +30,13 @@ export const FAKE_BASE_SECRET = new Uint8Array(32).fill(0xab)
  * loudly rather than quietly, and `@kumiai/rpc-conformance`'s `PER-LABEL` clause (in
  * `group-crypto.ts`) for the exact property this is pinned against.
  *
- * `label` defaults to {@link APP_TOPIC_LABEL} — the one label `@kumiai/rpc`'s own peer ever
- * passes — so every pre-existing call site that only cared about the epoch (there are many, all
- * computing "the topic the anchor names at this epoch") keeps computing the same thing without
- * naming the label at every call. The default is a convenience of THIS helper, not of the port:
- * {@link createFakeCrypto}'s own `exportSecret` never uses it, and takes `label` from its caller
- * like any other implementation must.
+ * `label` is REQUIRED, on this standalone helper same as on the port method it stands in for
+ * ({@link createFakeCrypto}'s own `exportSecret`, `:310`). It used to default to
+ * {@link APP_TOPIC_LABEL} as a convenience for the many pre-existing call sites that only cared
+ * about the epoch (all computing "the topic the anchor names at this epoch"), but a default here
+ * is exactly the shape the port's required `label` exists to rule out: a future call site that
+ * means a different label and forgets to say so would silently get the app label instead of a
+ * compile error. Callers that want the app topic pass {@link APP_TOPIC_LABEL} explicitly.
  *
  * Exported because a test that wants the topic the group is on needs the secret of the ANCHOR
  * epoch, which the live handle has usually run past — the same reason the anchor is persisted.
@@ -44,18 +44,23 @@ export const FAKE_BASE_SECRET = new Uint8Array(32).fill(0xab)
  * The epoch mix is a XOR, NOT a ratchet: it models none of MLS's one-wayness, and a member
  * holding one epoch's bytes can trivially compute another's for the same label. That truth is
  * real only where the crypto is (see `@kumiai/mls`); here the fake is a double for wiring and
- * must not pretend otherwise. The label mix (a SHA-256 of the label, cycled across the output) is
- * not modelling anything MLS does either — it exists only so two labels are two different
- * keystreams, deterministically and with nothing exchanged, which is all any clause here asks of
- * domain separation.
+ * must not pretend otherwise. The label-AND-length mix (a SHA-256 of `label` and `length`
+ * together, cycled across the output) is not modelling anything MLS does either — it exists only
+ * so two labels, or two lengths of the same label, are different keystreams, deterministically and
+ * with nothing exchanged, which is all any clause here asks of domain separation. `length` is
+ * folded into the same hash as `label` rather than mixed in some other way so that a length-16
+ * export is not a prefix of the length-32 one — `GroupCrypto.exportSecret`'s doc claims a
+ * same-label export at a different length is an independent key, never a truncation, and a fake
+ * whose short export were a prefix of its long one would make that claim false for the one
+ * implementation every other test in this repo runs against.
  */
 export function fakeEpochSecret(
   epoch: number,
-  label: string = APP_TOPIC_LABEL,
+  label: string,
   length: number = FAKE_BASE_SECRET.length,
   base: Uint8Array = FAKE_BASE_SECRET,
 ): Uint8Array {
-  const mask = sha256(fromUTF(label))
+  const mask = sha256(fromUTF(`${label}:${length}`))
   const out = new Uint8Array(length)
   for (let i = 0; i < length; i++) {
     const baseByte = base[i % base.length] as number

@@ -2,7 +2,7 @@ import { encodeEventFrame } from '@kumiai/broadcast'
 import { describe, expect, test } from 'vitest'
 
 import type { AppWindowPruned } from '../src/app-cursor.js'
-import { commitTopic, protocolTopic } from '../src/topic.js'
+import { APP_TOPIC_LABEL, commitTopic, protocolTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
@@ -32,7 +32,7 @@ describe('the app-lane drain reads from a durable position and reports what aged
     const recoverySecret = new Uint8Array(32).fill(0x81)
     const seen: Array<unknown> = []
     const handlers = { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) }
-    const topicID = protocolTopic(fakeEpochSecret(1), 1, 'chat')
+    const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
 
     const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
@@ -107,7 +107,7 @@ describe('the app-lane drain reads from a durable position and reports what aged
     const recoverySecret = new Uint8Array(32).fill(0x82)
     const seen: Array<unknown> = []
     const handlers = { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) }
-    const topicID = protocolTopic(fakeEpochSecret(1), 1, 'chat')
+    const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
     // Fast enough that a heal which will find nobody gives up inside the test.
     const recovery = { timeoutMs: 60, getDelayMs: () => 5, deadlineMs: 250 }
 
@@ -185,7 +185,7 @@ describe('the app-lane drain reads from a durable position and reports what aged
     const seen: Array<unknown> = []
     const pruned: Array<AppWindowPruned> = []
     const handlers = { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) }
-    const topicID = protocolTopic(fakeEpochSecret(1), 1, 'chat')
+    const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
 
     const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })

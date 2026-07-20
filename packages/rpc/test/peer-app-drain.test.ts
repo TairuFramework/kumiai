@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest'
 
-import { commitTopic, protocolTopic } from '../src/topic.js'
+import { APP_TOPIC_LABEL, commitTopic, protocolTopic } from '../src/topic.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
@@ -144,7 +144,7 @@ describe('app frames outlive the commits that leave their epoch', () => {
 
     const commits = hub.published.filter((m) => m.topicID === commitTopic(recoverySecret))
     const posted = hub.published.filter(
-      (m) => m.topicID === protocolTopic(fakeEpochSecret(1), 1, 'chat'),
+      (m) => m.topicID === protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat'),
     )
     expect(commits).toHaveLength(1)
     expect(posted).toHaveLength(1)

@@ -3,7 +3,7 @@ import { describe, expect, test } from 'vitest'
 
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import { createGroupPeer } from '../src/peer.js'
-import { commitTopic, protocolTopic, rendezvousTopic } from '../src/topic.js'
+import { APP_TOPIC_LABEL, commitTopic, protocolTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
@@ -48,8 +48,12 @@ describe('the commit lane is pull-driven', () => {
     // secret exported there, under its number, which is what his anchor holds and what his live
     // handle at 3 could no longer export.
     expect(dave.peer.anchorEpoch()).toBe(1)
-    expect(hub.subscriberCount(protocolTopic(fakeEpochSecret(1), 1, 'chat'))).toBe(1)
-    expect(hub.subscriberCount(protocolTopic(fakeEpochSecret(3), 3, 'chat'))).toBe(0)
+    expect(hub.subscriberCount(protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat'))).toBe(
+      1,
+    )
+    expect(hub.subscriberCount(protocolTopic(fakeEpochSecret(3, APP_TOPIC_LABEL), 3, 'chat'))).toBe(
+      0,
+    )
 
     // He needed no help from another member: he asked for no recovery. (Walking frames
     // from epochs he never held is ordinary catch-up, not evidence of a fork.)

@@ -3,7 +3,7 @@ import { describe, expect, test } from 'vitest'
 
 import { createGroupPeer } from '../src/peer.js'
 import { defineGroupProtocol } from '../src/protocol.js'
-import { commitTopic, protocolTopic } from '../src/topic.js'
+import { APP_TOPIC_LABEL, commitTopic, protocolTopic } from '../src/topic.js'
 import { createMemoryAnchorStore } from './fixtures/anchor.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { publishCommit } from './fixtures/commits.js'
@@ -48,7 +48,8 @@ type Protocols = { room: typeof room }
 const MEMBERS = ['alice', 'bob', 'carol']
 
 /** The room topic of the segment anchored at `epoch`: that epoch's secret, under that epoch. */
-const roomTopic = (epoch: number): string => protocolTopic(fakeEpochSecret(epoch), epoch, 'room')
+const roomTopic = (epoch: number): string =>
+  protocolTopic(fakeEpochSecret(epoch, APP_TOPIC_LABEL), epoch, 'room')
 
 /** A member of the group at `epoch`, wired with an MLS port so commits can drive its epoch. */
 function makeRoomPeer(

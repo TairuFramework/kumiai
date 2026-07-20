@@ -3,7 +3,7 @@ import type { HubFetchTopicParams, HubFetchTopicResult } from '@kumiai/hub-tunne
 import { describe, expect, test } from 'vitest'
 
 import type { AppWindowPruned } from '../src/app-cursor.js'
-import { protocolTopic } from '../src/topic.js'
+import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
@@ -58,7 +58,7 @@ describe('the drain bounds what a frame may claim, and passes no epoch it failed
     const seen: Array<unknown> = []
     const pruned: Array<AppWindowPruned> = []
     const handlers = { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) }
-    const topicID = protocolTopic(fakeEpochSecret(1), 1, 'chat')
+    const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
 
     const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
@@ -115,7 +115,7 @@ describe('the drain bounds what a frame may claim, and passes no epoch it failed
     const recoverySecret = new Uint8Array(32).fill(0x92)
     const seen: Array<unknown> = []
     const handlers = { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) }
-    const topicID = protocolTopic(fakeEpochSecret(1), 1, 'chat')
+    const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
 
     const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
@@ -173,7 +173,7 @@ describe('the drain bounds what a frame may claim, and passes no epoch it failed
     const recoverySecret = new Uint8Array(32).fill(0x97)
     const seen: Array<unknown> = []
     const handlers = { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) }
-    const topicID = protocolTopic(fakeEpochSecret(1), 1, 'chat')
+    const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
 
     const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
@@ -227,7 +227,7 @@ describe('the drain bounds what a frame may claim, and passes no epoch it failed
     const recoverySecret = new Uint8Array(32).fill(0x93)
     const seen: Array<unknown> = []
     const handlers = { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) }
-    const topicID = protocolTopic(fakeEpochSecret(1), 1, 'chat')
+    const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
 
     const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
@@ -283,7 +283,7 @@ describe('the drain bounds what a frame may claim, and passes no epoch it failed
     const hub = new DurableFakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x94)
     const seen: Array<unknown> = []
-    const topicID = protocolTopic(fakeEpochSecret(1), 1, 'chat')
+    const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
 
     const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1 })
@@ -358,7 +358,7 @@ describe('the drain delivers only what the live lane would', () => {
       'chat/posted': (ctx: { data: unknown }) => void posted.push(ctx.data),
       'chat/changed': (ctx: { data: unknown }) => void changed.push(ctx.data),
     }
-    const topicID = protocolTopic(fakeEpochSecret(1), 1, 'chat')
+    const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
 
     const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
@@ -408,7 +408,7 @@ describe('the drain delivers only what the live lane would', () => {
     const recoverySecret = new Uint8Array(32).fill(0x96)
     const seen: Array<unknown> = []
     const handlers = { 'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data) }
-    const topicID = protocolTopic(fakeEpochSecret(1), 1, 'chat')
+    const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
 
     const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })

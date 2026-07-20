@@ -56,7 +56,7 @@ describe('control lane lifecycle', () => {
     // The app topic of the segment anchored at an epoch: that epoch's secret, under that epoch —
     // the pair the anchor holds, and the only pair any member is on.
     const chatTopic = (epoch: number): string =>
-      protocolTopic(fakeEpochSecret(epoch), epoch, 'chat')
+      protocolTopic(fakeEpochSecret(epoch, APP_TOPIC_LABEL), epoch, 'chat')
     expect(hub.subscriberCount(commits)).toBe(1)
     expect(hub.subscriberCount(rendezvous)).toBe(1)
     expect(hub.subscriberCount(chatTopic(1))).toBe(1)
@@ -148,9 +148,9 @@ describe('control lane lifecycle', () => {
     // off the constants rather than restated, so the two can only be aligned or the build breaks;
     // that they sit strictly BELOW a default hub's ceiling is asserted in
     // `hub-mux-subscribe-failure.test.ts`.
-    expect(hub.requestedRetention(protocolTopic(fakeEpochSecret(1), 1, 'chat'))).toBe(
-      DEFAULT_APP_LOG_RETENTION_SECONDS,
-    )
+    expect(
+      hub.requestedRetention(protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')),
+    ).toBe(DEFAULT_APP_LOG_RETENTION_SECONDS)
     expect(hub.requestedRetention(commitTopic(recoverySecret))).toBe(
       DEFAULT_COMMIT_LOG_RETENTION_SECONDS,
     )
@@ -182,7 +182,9 @@ describe('control lane lifecycle', () => {
 
     // The override reaches the hub on the app topic's own subscribe, and moves nothing else: the
     // two windows are aligned by choice, so they are two dials and the commit one stays home.
-    expect(hub.requestedRetention(protocolTopic(fakeEpochSecret(1), 1, 'chat'))).toBe(4321)
+    expect(
+      hub.requestedRetention(protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')),
+    ).toBe(4321)
     expect(hub.requestedRetention(commitTopic(recoverySecret))).toBe(
       DEFAULT_COMMIT_LOG_RETENTION_SECONDS,
     )
@@ -224,8 +226,12 @@ describe('control lane lifecycle', () => {
     await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, removes: ['carol'] })
     await flush()
 
-    expect(hub.subscriberCount(protocolTopic(fakeEpochSecret(2), 2, 'chat'))).toBe(1)
-    expect(hub.requestedRetention(protocolTopic(fakeEpochSecret(2), 2, 'chat'))).toBe(4321)
+    expect(hub.subscriberCount(protocolTopic(fakeEpochSecret(2, APP_TOPIC_LABEL), 2, 'chat'))).toBe(
+      1,
+    )
+    expect(
+      hub.requestedRetention(protocolTopic(fakeEpochSecret(2, APP_TOPIC_LABEL), 2, 'chat')),
+    ).toBe(4321)
 
     await peer.dispose()
   })
@@ -264,7 +270,9 @@ describe('control lane lifecycle', () => {
     // Nothing pulls here — no commit lane, so no drain ever subscribes this topic ahead of the
     // live lane. Building the lane is the app topic's only subscribe, and it carries the window
     // like every other one: what asks the hub to hold the log is the subscribe, wherever it is.
-    expect(hub.requestedRetention(protocolTopic(fakeEpochSecret(1), 1, 'chat'))).toBe(4321)
+    expect(
+      hub.requestedRetention(protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')),
+    ).toBe(4321)
     await peer.dispose()
   })
 
@@ -288,7 +296,9 @@ describe('control lane lifecycle', () => {
     // derivation would have moved them to — epoch 2's secret, under epoch 2 — was never reached
     // for at all.
     expect(hub.subscriberCount(protocolTopic(secret, 1, 'chat'))).toBe(2)
-    expect(hub.subscriberCount(protocolTopic(fakeEpochSecret(2), 2, 'chat'))).toBe(0)
+    expect(hub.subscriberCount(protocolTopic(fakeEpochSecret(2, APP_TOPIC_LABEL), 2, 'chat'))).toBe(
+      0,
+    )
 
     await bob.peer.dispose()
     await carol.peer.dispose()

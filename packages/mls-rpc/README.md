@@ -20,7 +20,7 @@ depend on both.
 - `createGroupCrypto({ handle, label?, entryLabel? })` — `GroupCrypto` over a live handle.
 - `createGroupMLS({ handle, adopt, identity, entrySlot, persist? })` — `GroupMLS` over the same.
 - `createLedgerEntrySlot()` — the per-commit ledger-entry resolver seam (see below).
-- `APP_TOPIC_LABEL`, `RECOVERY_LABEL` — the exporter labels the derivations use.
+- `RECOVERY_LABEL` — the exporter label `exportRecoverySecret` derives under.
 
 ## The handle is a function, not a value
 

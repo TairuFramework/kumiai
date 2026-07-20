@@ -10,11 +10,13 @@ import { fromUTF, toB64U } from '@sozai/codec'
  * FROM, so one label covers every protocol a host defines and `protocol`/`scope` do the
  * discriminating below it.
  *
- * MUST MATCH the label a real host's `GroupCrypto` implementation is exercised with, and there is
- * nothing that checks that at compile time: `@kumiai/rpc` cannot depend on `@kumiai/mls-rpc` (see
- * that package's module doc — the dependency runs the other way, so it cannot re-export this for
- * rpc to import), so the two packages agree on the string by convention, not by sharing a
- * constant. Changing it changes every topic ID this package has ever derived.
+ * Chosen by and internal to this package alone — `GroupCrypto.exportSecret` takes `label` as a
+ * required argument with no default (see that method's doc in `crypto.ts`), so a conforming
+ * implementation is label-agnostic by construction: it passes whatever label its caller supplies
+ * straight to the underlying exporter and closes over none of its own. `@kumiai/mls-rpc`'s
+ * `createGroupCrypto` is exactly that — a pass-through. No implementation should hardcode this
+ * string or any other; the only caller that is allowed to know it is this package's own peer.
+ * Changing it changes every topic ID this package has ever derived.
  */
 export const APP_TOPIC_LABEL = 'kumiai/app-topic/v1'
 

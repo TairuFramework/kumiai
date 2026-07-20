@@ -12,7 +12,7 @@ import {
 } from '@kumiai/mls'
 import { describe, expect, test } from 'vitest'
 
-import { createGroupCrypto } from '../src/crypto.js'
+import { createGroupCrypto, ENTRY_SEAL_LABEL } from '../src/crypto.js'
 
 const utf8 = new TextEncoder()
 
@@ -95,6 +95,34 @@ describe('createGroupCrypto', () => {
     // the property the whole app-lane topic rests on, and the only implementation that has it.
     expect(await bob.crypto.exportSecret(LABEL)).toEqual(shared)
     expect(await bob.crypto.exportSecret(LABEL)).not.toEqual(rotated)
+  })
+
+  /**
+   * The one collision the widened signature opened: `sealEntries`/`openEntries` ask the handle's
+   * own exporter for `entryLabel` under the same context and length `exportSecret` would use, so
+   * a caller reaching `exportSecret` with that label back would receive the ledger-entry seal key
+   * under another name rather than an independent export. Refused loudly instead of merely
+   * documented.
+   */
+  test('exportSecret refuses the entryLabel: it names the ledger-entry seal key, not a topic', async () => {
+    const { aliceGroup } = await twoMemberGroup('ports-export-entry-collision')
+    const alice = cryptoOver(aliceGroup)
+
+    // Thrown synchronously — a validation failure ahead of any exporter call, same as any other
+    // guard clause in this file — so it is asserted the way a synchronous throw is asserted.
+    expect(() => alice.crypto.exportSecret(ENTRY_SEAL_LABEL)).toThrow(
+      `label '${ENTRY_SEAL_LABEL}' is reserved for the ledger-entry seal`,
+    )
+
+    // A custom entryLabel is refused too — the collision is with whatever label sealEntries
+    // actually uses, not with the default constant.
+    const customLabel = 'kumiai/mls-rpc-test/custom-entry-label'
+    const customCrypto = createGroupCrypto({ handle: () => aliceGroup, entryLabel: customLabel })
+    expect(() => customCrypto.exportSecret(customLabel)).toThrow(
+      `label '${customLabel}' is reserved for the ledger-entry seal`,
+    )
+    // Every other label is unaffected.
+    await expect(customCrypto.exportSecret(LABEL)).resolves.toBeInstanceOf(Uint8Array)
   })
 
   test('wrap and unwrap round-trip and name the authenticated sender', async () => {
