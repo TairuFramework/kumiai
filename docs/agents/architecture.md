@@ -38,6 +38,14 @@ what is not theirs to define.
 Everything else is yours, including `group.` — it was reserved until
 2026-07-20 and is now application space.
 
+A third reservation, of a different kind: three MLS GroupContext extension type numbers
+(`packages/mls/src/anchor.ts`), advertised by every member leaf from the moment it joins —
+`0xf100` the genesis anchor, `0xf101` the control-ledger head, `0xf102` reserved and unused
+today. RFC 9420 requires a leaf to advertise a custom extension type before it can be installed,
+and leaves cannot be rewritten, so a type introduced after members have already joined can never
+be installed into their group — the only remedy is re-admitting everyone. `0xf102` is reserved
+now, for that reason, before anything needs it.
+
 ---
 
 ## Retention classes
