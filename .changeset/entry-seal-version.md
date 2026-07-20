@@ -13,7 +13,8 @@ epoch or a tampered frame.
 **It lives inside the blob, and never in the frame header.** An unknown blob version fails the
 open, which a peer survives cheaply: the commit files as poison, is stepped over, and the next
 frame — framed at an epoch ahead of it — strands the peer into a rejoin that re-gathers the
-ledger. That costs an old peer one commit. Bumping the frame header instead costs it a full
-rejoin on every frame from the bump onwards — survivable now that `@kumiai/rpc` heals on an
-unknown frame version rather than filing it as poison, but still the expensive door. Use this
-one.
+ledger. That costs an old peer one commit. Bumping the frame header instead costs it a loud stall
+on every frame from the bump onwards — survivable now that `@kumiai/rpc` heals on an unknown
+frame version rather than filing it as poison, though landing the rejoin still needs the new
+build to keep answering old peers' rendezvous in a version they can read. Still the expensive
+door. Use this one.

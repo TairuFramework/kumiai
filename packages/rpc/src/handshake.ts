@@ -19,7 +19,10 @@ export const HANDSHAKE_MAGIC = Uint8Array.from([0x45, 0x4b])
  * meeting an unknown version does not fail the decode — {@link decodeHandshakeFrame} hands the
  * version back rather than throwing — and on the COMMIT topic the lane files an unreadable frame
  * as {@link "classify".CommitDisposition} `ahead`: the group moved on to something this build
- * cannot read, so step over the frame, heal, and stay stranded until the heal lands.
+ * cannot read, so step over the frame and heal. What the heal alone GUARANTEES is a loud, correct
+ * stall in place of a silent one — landing the rejoin it attempts additionally requires the new
+ * build to still answer old peers' rendezvous requests in a version they can read, which is a
+ * property of the responder, not of this byte.
  *
  * It has to work that way, because the obvious alternative does not. Filing an unreadable frame
  * as poison holds only while SOME frames stay readable, and after a version bump none do: there
@@ -32,15 +35,24 @@ export const HANDSHAKE_MAGIC = Uint8Array.from([0x45, 0x4b])
  * STILL PREFER PUTTING A FORMAT CHANGE INSIDE THE PAYLOAD, and the sealed ledger-entry blob is
  * the case that will tempt you to bump this instead. A payload change costs an old peer one
  * commit (it fails the OPEN, files that commit as poison, and heals from the next frame); a
- * header bump costs it a full rejoin, on every frame, from the bump onwards. Bump this only when
- * the HEADER itself changes — and only alongside a plan for the peers that cannot read it, whose
- * whole recourse is the heal above.
+ * header bump costs it a loud stall, on every frame, from the bump onwards — and a landed rejoin
+ * only where the new build keeps answering. Bump this only when the HEADER itself changes — and
+ * only alongside a plan for the peers that cannot read it: the heal above is that plan's engine,
+ * but a plan that leaves their rendezvous reply unreadable makes the heal decorative.
  */
 export const HANDSHAKE_VERSION = 1
 
 const HEADER_LENGTH = HANDSHAKE_MAGIC.length + 2
 
-/** The message kinds carried on the handshake lane. */
+/**
+ * The message kinds carried on the handshake lane. {@link decodeHandshakeFrame} rejects a kind
+ * byte not listed here by THROWING, before the caller ever learns the frame's version — and on
+ * the commit topic a throw is filed as poison, not routed to the heal. So no future version may
+ * publish a kind byte this enum does not already have: `commit` stays `0` forever, and a new
+ * commit-topic message needs its kind added HERE, not merely allowed by a version bump. That is
+ * the price of validating kind before version in `decodeHandshakeFrame` — deliberate, not an
+ * oversight.
+ */
 export const HANDSHAKE_KIND = {
   /** An MLS Commit fanned out to advance every member's epoch. */
   commit: 0,

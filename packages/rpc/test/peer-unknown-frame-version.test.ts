@@ -107,9 +107,10 @@ describe('a frame whose handshake version this build does not know', () => {
 
     await publishFutureFrame(hub, rs)
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
-    // The heal has already run and found nobody. Bob's only evidence he is off the group's line
-    // is now the in-memory strand: the frame that raised it is behind his cursor and the live
-    // tip is recorded, exactly as on the `ahead` path.
+    // Short of the 250ms deadline, so the heal may still be retrying — nobody is there to answer
+    // it either way. Bob's only evidence he is off the group's line is the in-memory strand: the
+    // frame that raised it is behind his cursor and the live tip is recorded, exactly as on the
+    // `ahead` path.
     await flush(220)
 
     const headBefore = hub.head(commitTopic(rs))
@@ -126,6 +127,30 @@ describe('a frame whose handshake version this build does not know', () => {
     expect(hub.head(commitTopic(rs))).toBe(headBefore)
     expect(bob.mls.epoch()).toBe(1)
     expect(bob.journal.slot()).toBeNull()
+
+    await bob.peer.dispose()
+  })
+
+  test('on the rendezvous topic: it is dropped, not routed to the heal', async () => {
+    const hub = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x73)
+
+    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
+    await flush() // let Bob subscribe before the frame is published, or push never reaches him
+
+    await hub.publish({
+      senderDID: 'zoe',
+      topicID: rendezvousTopic(rs),
+      payload: futureVersionFrame(),
+      retain: 'log',
+    })
+    await flush(500)
+
+    // The narrow scoping this task adds: the rendezvous carries request/reply traffic, not
+    // evidence the group moved on, so an unknown version here is dropped like any other
+    // unreadable frame — never routed to the heal the commit topic's `ahead` row triggers.
+    expect(healsBy(hub, rs, 'bob')).toHaveLength(0)
+    expect(bob.mls.epoch()).toBe(1)
 
     await bob.peer.dispose()
   })
