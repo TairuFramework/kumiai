@@ -25,9 +25,17 @@ export type { ClientState }
 const CLIENT_STATE_VERSION = 1
 
 export function decodeClientState(encoded: Uint8Array): ClientState | undefined {
-  // encoded[0] is `undefined` on an empty array, which already fails this check — no
+  // encoded[0] is `undefined` on an empty array, which already hits this check — no
   // separate empty-input guard needed.
-  if (encoded[0] !== CLIENT_STATE_VERSION) return undefined
+  //
+  // Distinguishable on purpose. `decode()` below returns `undefined` for malformed or
+  // truncated bytes reaching `ts-mls`, and that stays `undefined` — but an unknown version
+  // byte is not that kind of failure, so it throws instead of returning the same `undefined`
+  // a decode failure would. Without this, a version mismatch and a corrupted store are the
+  // same value of the same type and a caller cannot tell them apart.
+  if (encoded[0] !== CLIENT_STATE_VERSION) {
+    throw new Error(`decodeClientState: unsupported client-state version ${encoded[0]}`)
+  }
   return decode(clientStateDecoder, encoded.subarray(1))
 }
 

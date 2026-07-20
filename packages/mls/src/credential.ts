@@ -59,6 +59,10 @@ export function parseMLSCredentialIdentity(identity: Uint8Array): MLSCredentialI
   if ('longForm' in candidate && typeof candidate.longForm !== 'string') {
     throw new Error('Invalid MLS credential: longForm must be a string when present')
   }
+  // `v` is not echoed back into the result. It is a wire concern — it tells this function how
+  // to read the bytes — not something a caller needs to act on; every parsed identity is
+  // already normalized to what v1 means by the time it gets here. Add it back only if a
+  // caller needs to distinguish a v1-tagged payload from an untagged one, which none do today.
   const result: MLSCredentialIdentity = { id: candidate.id }
   if (typeof candidate.longForm === 'string') {
     result.longForm = candidate.longForm

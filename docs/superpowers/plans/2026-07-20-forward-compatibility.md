@@ -153,7 +153,11 @@ Expected: FAIL on the version cases; the round-trip cases should already pass.
 
 - [ ] **Step 3: Add the client-state version byte**
 
-`packages/mls/src/codec.ts`. Prepend a version byte on encode; on decode, read it, and return `undefined` for anything other than `1`. Follow the pattern already established at `packages/mls-rpc/src/crypto.ts:41-61` — read its comment first, since it argues this exact case ("it buys diagnosis, not compatibility") and this code should say the same thing the same way.
+`packages/mls/src/codec.ts`. Prepend a version byte on encode; on decode, read it, and **throw a descriptive error** for anything other than `1`. Other decode failures (malformed or truncated bytes) keep returning `undefined`.
+
+Follow the pattern already established at `packages/mls-rpc/src/crypto.ts:144-152` — read its comment first, since it argues this exact case ("it buys diagnosis, not compatibility") and this code should say the same thing the same way. That pattern throws `` `openEntries: unsupported blob version ${sealed[0]}` ``; returning a bare `undefined` here would be indistinguishable from any other decode failure, since `ts-mls`'s `decode<T>()` is itself typed `T | undefined`.
+
+> **Corrected mid-execution.** This step originally said "return `undefined` for anything other than `1`", which contradicted the Global Constraint that an unknown version be rejected distinguishably and never merely falsy. Task 2's review caught it; the human ruled that the constraint governs.
 
 - [ ] **Step 4: Add the credential-identity version field**
 

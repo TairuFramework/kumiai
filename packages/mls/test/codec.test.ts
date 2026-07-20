@@ -60,8 +60,10 @@ describe('encodeClientState / decodeClientState', () => {
     // Not merely falsy: this must be the version guard rejecting the blob before it ever
     // reaches the decoder, not an incidental decode failure. The payload after byte 0 is
     // untouched and would decode fine at v1 — so a decoder that ignored the version byte
-    // would succeed here. It must not.
-    const result = decodeClientState(tampered)
-    expect(result).toBeUndefined()
+    // would succeed here. It must not. Asserting on the thrown message (not just "it threw")
+    // means this test fails differently than a "garbage bytes" case would.
+    expect(() => decodeClientState(tampered)).toThrow(
+      'decodeClientState: unsupported client-state version 2',
+    )
   })
 })
