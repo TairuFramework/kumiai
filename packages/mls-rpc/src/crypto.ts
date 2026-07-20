@@ -173,8 +173,16 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
       // paths — it is how a retained frame says "not mine" — and the caller drops it.
       const { payload, senderDID } = await handle().decrypt(bytes)
       // `GroupCrypto.unwrap` REQUIRES a sender (see its doc); `GroupHandle.decrypt` does not
-      // guarantee one — it is absent only when the authenticated leaf holds no parsable
-      // credential, which `@kumiai/mls`'s own doc treats as "I cannot name the author", never "no
+      // guarantee one, and there are three distinct reasons it can come back absent
+      // (`packages/mls/src/group-handle.ts:677`, deriving `senderDID` from two calls):
+      //   - `readSenderLeafIndex` returns `null` — the sender-data AEAD open fails
+      //     (`sender-data.ts:120`) or the opened plaintext is shorter than the 4-byte
+      //     leaf-index field it must carry (`sender-data.ts:123`);
+      //   - `#didOfLeaf` finds no member at the authenticated leaf index
+      //     (`group-handle.ts:867-872`);
+      //   - the leaf's credential fails to parse, so `#iterateMembers` skips it
+      //     (`group-handle.ts:536-537`, the `continue` in the credential-parse `catch`).
+      // `@kumiai/mls`'s own doc treats all three as "I cannot name the author", never "no
       // author". That is not a shape this port may hand upward: group-rpc's app lane has no
       // identity-less case to give it to, so an unnamed sender is treated the same as bytes this
       // handle cannot open — refused here rather than returned with the field missing.

@@ -139,6 +139,37 @@ describe('createGroupCrypto', () => {
   })
 
   /**
+   * The throw this implementation adds over `GroupHandle.decrypt` (`../src/crypto.ts`, in
+   * `unwrap`) is the only runtime enforcement, anywhere in the real implementation, of
+   * `GroupCrypto.unwrap`'s required `senderDID`. `GroupHandle.decrypt` itself types the field
+   * optional and no fixture here constructs a credential-less leaf to make it actually come back
+   * absent — so this reaches the throw the way it is actually reachable: a `handle` whose
+   * `decrypt` resolves without `senderDID`, which `GroupCryptoParams.handle` is an injected
+   * function specifically to allow swapping in per test.
+   *
+   * A `Proxy` over a real handle rather than a hand-built stub: every method but `decrypt`
+   * still needs to behave like `GroupHandle` for `createGroupCrypto` to construct and call
+   * against it, and the proxy gets that for free from the real handle underneath.
+   */
+  test('unwrap refuses an opened frame with no authenticated sender', async () => {
+    const { bobGroup } = await twoMemberGroup('ports-unwrap-no-sender')
+    const senderlessHandle = new Proxy(bobGroup, {
+      get(target, prop, receiver) {
+        if (prop === 'decrypt') {
+          return async (): Promise<{ payload: Uint8Array }> => ({
+            payload: utf8.encode('no sender'),
+          })
+        }
+        return Reflect.get(target, prop, receiver)
+      },
+    })
+    const crypto = createGroupCrypto({ handle: () => senderlessHandle })
+    await expect(crypto.unwrap(new Uint8Array([0]))).rejects.toThrow(
+      'unwrap: opened frame has no authenticated sender',
+    )
+  })
+
+  /**
    * DIVERGENCE FROM THE FAKE, and the one that matters most. The fake's `unwrap` is a pure
    * XOR: opening the same frame twice gives the same answer, for free, forever. Real MLS
    * consumes the message's ratchet key on the first open and refuses the second.
