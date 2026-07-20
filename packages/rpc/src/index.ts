@@ -30,6 +30,8 @@ export {
   type CommitFrame,
   decodeCommitFrame,
   encodeCommitFrame,
+  isUnsupportedCommitFrameVersion,
+  UnsupportedCommitFrameVersionError,
 } from './commit-frame.js'
 export {
   type CommitContext,

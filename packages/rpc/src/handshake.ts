@@ -33,7 +33,12 @@ export const HANDSHAKE_MAGIC = Uint8Array.from([0x45, 0x4b])
  * cleartext epoch.
  *
  * STILL PREFER PUTTING A FORMAT CHANGE INSIDE THE PAYLOAD, and the sealed ledger-entry blob is
- * the case that will tempt you to bump this instead. A payload change costs an old peer one
+ * the case that will tempt you to bump this instead — BUT "inside the payload" is not one place.
+ * The commit frame ({@link "commit-frame".COMMIT_FRAME_VERSION}) is the first payload layer this
+ * advice reaches, and it does NOT behave like the blob: its version byte is read before the commit
+ * bytes are extracted, so a bump there strands every old peer exactly as a bump here does, and it
+ * is routed to the same heal for that reason. Only the blob ITSELF gets the cheap outcome below,
+ * because its failure lands after the commit has been read. A blob change costs an old peer one
  * commit (it fails the OPEN, files that commit as poison, and heals from the next frame); a
  * header bump costs it a loud stall, on every frame, from the bump onwards — and a landed rejoin
  * only where the new build keeps answering. Bump this only when the HEADER itself changes — and

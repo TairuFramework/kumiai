@@ -25,9 +25,21 @@
  * something false about what rode with it. A reader that accepts corrupt input cannot be taught
  * later to reject it — the rule has to be in the build that ships first.
  *
- * An unknown version is REFUSED, not healed from: the heal rule belongs to the handshake header
- * (see {@link "handshake".HANDSHAKE_VERSION}), which the lane reads before this. Here the value
- * is diagnosis — a named error instead of a plausible mis-parse.
+ * BUMPING THIS STRANDS EVERY OLD PEER, and the heal is what makes that a loud stall rather than a
+ * silent one. Do not read {@link "handshake".HANDSHAKE_VERSION}'s "prefer putting a format change
+ * inside the payload" as covering this byte: that advice is about the SEALED LEDGER-ENTRY BLOB,
+ * whose failure lands after the commit bytes have been read, so the frame is filed as poison and
+ * the peer heals off the next readable frame. This version byte is read BEFORE the commit bytes
+ * are extracted, so there is no next frame to heal from — after a bump every frame fails here.
+ * The lane therefore routes an unknown version to {@link "classify".classifyCommit} as
+ * {@link "classify".UNKNOWN_FRAME_VERSION}, exactly as it does an unknown handshake version, and
+ * {@link isUnsupportedCommitFrameVersion} is what lets it tell that failure apart from bytes that
+ * are simply not a frame. Which payload changes heal, precisely:
+ *
+ *   - the blob's OWN version/contents (`ledger-entries`): heals — poison one commit, read on.
+ *   - a change to THIS frame's shape (a third section, a wider length field): does NOT heal by
+ *     itself. It needs this byte bumped, and the bump needs the heal above plus a responder that
+ *     still answers old peers' rendezvous requests in a version they can read.
  */
 export const COMMIT_FRAME_VERSION = 1
 
@@ -54,9 +66,42 @@ export function encodeCommitFrame(commit: Uint8Array, sealedEntries: Uint8Array)
 }
 
 /**
+ * Thrown by {@link decodeCommitFrame} for a frame whose version byte this build does not know —
+ * and ONLY for that. A distinct type because the lane must act differently on it: "not a frame"
+ * (too short, truncated) is dropped, while "a frame from the future" is evidence the group moved
+ * to a format this build cannot read, and goes to the classifier to raise a heal. Distinguishing
+ * those two by message text would not be something to branch on, which is why this exists.
+ */
+export class UnsupportedCommitFrameVersionError extends Error {
+  #version: number
+
+  constructor(version: number) {
+    super(`unsupported commit frame version: ${version}`)
+    this.name = 'UnsupportedCommitFrameVersionError'
+    this.#version = version
+  }
+
+  /** The version byte read off the frame — the one this build does not know. */
+  get version(): number {
+    return this.#version
+  }
+}
+
+/**
+ * Whether a {@link decodeCommitFrame} failure was an unknown VERSION rather than bytes that are
+ * not a frame at all. The lane's branch, mirroring {@link "crypto".isMissingLedgerEntries}: this
+ * error is thrown in-package, so the check is by class rather than by name.
+ */
+export function isUnsupportedCommitFrameVersion(error: unknown): boolean {
+  return error instanceof UnsupportedCommitFrameVersionError
+}
+
+/**
  * Split a commit frame into its two halves. Throws only on bytes that are not a frame at
- * all — too short, an unknown version, or a length that runs past the end. An unopenable blob is
- * not a decoding failure: this never looks at the blob.
+ * all — too short, or a length that runs past the end — plus the one failure that is NOT
+ * "not a frame": an unknown version, thrown as {@link UnsupportedCommitFrameVersionError} so the
+ * caller can route it to the heal instead of dropping it. An unopenable blob is not a decoding
+ * failure: this never looks at the blob.
  */
 export function decodeCommitFrame(frame: Uint8Array): CommitFrame {
   if (frame.length < HEADER_BYTES) {
@@ -64,7 +109,7 @@ export function decodeCommitFrame(frame: Uint8Array): CommitFrame {
   }
   const version = frame[0]
   if (version !== COMMIT_FRAME_VERSION) {
-    throw new Error(`unsupported commit frame version: ${version}`)
+    throw new UnsupportedCommitFrameVersionError(version)
   }
   const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
   const commitLength = view.getUint32(VERSION_BYTES, true)

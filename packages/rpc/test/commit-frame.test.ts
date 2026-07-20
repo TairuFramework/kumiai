@@ -1,6 +1,12 @@
 import { describe, expect, test } from 'vitest'
 
-import { COMMIT_FRAME_VERSION, decodeCommitFrame, encodeCommitFrame } from '../src/commit-frame.js'
+import {
+  COMMIT_FRAME_VERSION,
+  decodeCommitFrame,
+  encodeCommitFrame,
+  isUnsupportedCommitFrameVersion,
+  UnsupportedCommitFrameVersionError,
+} from '../src/commit-frame.js'
 import {
   createLedgerEntryResolver,
   decodeLedgerEntries,
@@ -55,9 +61,41 @@ describe('the commit frame', () => {
     // empty frame.
     const frame = encodeCommitFrame(Uint8Array.from([1, 2]), Uint8Array.from([3]))
     frame[0] = COMMIT_FRAME_VERSION + 1
+    expect(() => decodeCommitFrame(frame)).toThrow(UnsupportedCommitFrameVersionError)
     expect(() => decodeCommitFrame(frame)).toThrow(/unsupported commit frame version: 2/)
   })
+
+  test('an unknown version is DISTINGUISHABLE from bytes that are not a frame', () => {
+    // The lane branches on this: an unknown version heals (the group moved to a format this build
+    // cannot read), while "not a frame" is dropped. Proving only that both throw — which is all
+    // this file did while the lane dropped both — is how that distinction went missing for a
+    // whole release. `peer-unknown-commit-frame-version.test.ts` proves the lane end of it.
+    const unknownVersion = encodeCommitFrame(Uint8Array.from([1, 2]), new Uint8Array())
+    unknownVersion[0] = COMMIT_FRAME_VERSION + 1
+    expect(isUnsupportedCommitFrameVersion(caught(unknownVersion))).toBe(true)
+
+    // Too short to hold the header, and a commit length running past the end: genuinely not a
+    // frame, and nothing a future build would have written.
+    expect(
+      isUnsupportedCommitFrameVersion(caught(Uint8Array.from([COMMIT_FRAME_VERSION, 0]))),
+    ).toBe(false)
+    const truncated = encodeCommitFrame(Uint8Array.from([1, 2, 3, 4]), new Uint8Array()).subarray(
+      0,
+      6,
+    )
+    expect(isUnsupportedCommitFrameVersion(caught(truncated))).toBe(false)
+  })
 })
+
+/** The error `decodeCommitFrame` threw, so the predicate can be asked about it. */
+function caught(frame: Uint8Array): unknown {
+  try {
+    decodeCommitFrame(frame)
+  } catch (error) {
+    return error
+  }
+  throw new Error('decodeCommitFrame accepted bytes the test expected it to refuse')
+}
 
 describe('the sealed ledger-entry blob', () => {
   test('round-trips the signed tokens a commit enacts', () => {

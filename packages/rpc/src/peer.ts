@@ -30,7 +30,12 @@ import {
   type PendingCommit,
   RecoveryRequiredError,
 } from './commit.js'
-import { type CommitFrame, decodeCommitFrame, encodeCommitFrame } from './commit-frame.js'
+import {
+  type CommitFrame,
+  decodeCommitFrame,
+  encodeCommitFrame,
+  isUnsupportedCommitFrameVersion,
+} from './commit-frame.js'
 import {
   type GroupCrypto,
   type GroupMLS,
@@ -1744,8 +1749,29 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         let commitFrame: CommitFrame
         try {
           commitFrame = decodeCommitFrame(frame.payload)
-        } catch {
-          reconciledHead = position // malformed: dropped, and the cursor still steps over it
+        } catch (error) {
+          // Same split as the handshake version above, one layer down, and for the same reason.
+          // An unknown COMMIT-FRAME version is not "not a frame": it is a frame this build cannot
+          // read, and it fails BEFORE the commit bytes are extracted — so unlike the sealed blob
+          // there is no next frame to heal from, and dropping it would step over the group's whole
+          // future and report this peer reconciled at a dead epoch. To the classifier, as `ahead`.
+          if (isUnsupportedCommitFrameVersion(error)) {
+            const unreadable = classifyCommit(UNKNOWN_FRAME_VERSION, position, {
+              localDID,
+              epoch: crypto.epoch(),
+              appliedByEpoch,
+            })
+            reconciledHead = position
+            // The classifier's answer, not this branch's assumption — as above.
+            if (unreadable.row === 'ahead') {
+              healRequested = true
+              stranded = true
+            }
+            continue
+          }
+          // Too short, or a commit length running past the end: genuinely not a frame, and
+          // nothing a future build would have written. Dropped, and the cursor steps over it.
+          reconciledHead = position
           continue
         }
 
