@@ -128,11 +128,11 @@ describe('foldEnvelope', () => {
     }
   })
 
-  test('rejects an unknown group.* type', () => {
+  test('rejects an unknown kumiai.* type', () => {
     const base = roster([[CREATOR_DID, 'admin']])
     const mystery = input({
       issuer: CREATOR_DID,
-      type: 'group.mystery',
+      type: 'kumiai.mystery',
       value: 42,
       entryID: 'm1',
     })
@@ -141,8 +141,26 @@ describe('foldEnvelope', () => {
 
     expect(result.ok).toBe(false)
     if (!result.ok) {
-      expect(result.reason).toBe('unknown group.* type')
+      expect(result.reason).toBe('unknown kumiai.* type')
       expect(result.entryID).toBe('m1')
+    }
+  })
+
+  test('surfaces a host entry under the freed `group.` prefix, no longer reserved', () => {
+    const base = roster([[CREATOR_DID, 'admin']])
+    const hostEntry = input({
+      issuer: CREATOR_DID,
+      type: 'group.settings',
+      value: { theme: 'dark' },
+      entryID: 'h1',
+    })
+
+    const result = foldEnvelope(base, [hostEntry], GROUP_ID)
+
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.roster.roles).toEqual(base.roles)
+      expect(result.surfaced).toEqual([hostEntry.verified])
     }
   })
 
@@ -228,7 +246,7 @@ describe('foldEnvelope', () => {
     }
   })
 
-  test('rejects a group.role whose value is neither admin nor member', () => {
+  test('rejects a kumiai.role whose value is neither admin nor member', () => {
     const base = roster([[CREATOR_DID, 'admin']])
     const bogus = input({
       issuer: CREATOR_DID,
@@ -295,7 +313,7 @@ describe('foldEnvelope', () => {
       [],
       [input({ issuer: CREATOR_DID, type: 'circle.member', value: {}, entryID: 'c1' })],
       [input({ issuer: MEMBER_DID, type: 'circle.member', value: {}, entryID: 'c2' })],
-      [input({ issuer: CREATOR_DID, type: 'group.mystery', value: 1, entryID: 'c3' })],
+      [input({ issuer: CREATOR_DID, type: 'kumiai.mystery', value: 1, entryID: 'c3' })],
       [
         input({
           issuer: CREATOR_DID,

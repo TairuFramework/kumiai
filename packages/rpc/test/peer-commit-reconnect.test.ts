@@ -4,6 +4,8 @@ import { describe, expect, test } from 'vitest'
 import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import { createGroupPeer } from '../src/peer.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
+import { createMemoryAnchorStore } from './fixtures/anchor.js'
+import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
@@ -48,6 +50,8 @@ function makeDurablePeer(hub: DurableFakeHub, localDID: string, recoverySecret: 
     crypto,
     mls,
     journal: createMemoryCommitJournal(),
+    anchorStore: createMemoryAnchorStore(),
+    appCursorStore: createMemoryAppCursorStore(),
     adoptJournalled: async (blob) => {
       adoptJournalledBlob(mls, blob)
     },

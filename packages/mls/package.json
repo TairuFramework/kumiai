@@ -1,7 +1,6 @@
 {
   "name": "@kumiai/mls",
-  "version": "0.3.1",
-  "license": "MIT",
+  "version": "0.4.0",
   "description": "E2EE group identity and membership for Enkaku using MLS",
   "keywords": [
     "mls",
@@ -14,32 +13,33 @@
     "url": "https://github.com/TairuFramework/kumiai",
     "directory": "packages/mls"
   },
+  "license": "MIT",
+  "sideEffects": false,
   "type": "module",
-  "main": "lib/index.js",
-  "types": "lib/index.d.ts",
   "exports": {
     ".": "./lib/index.js"
   },
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
   "files": [
     "lib/*"
   ],
-  "sideEffects": false,
   "scripts": {
+    "build": "pnpm run build:clean && pnpm run build:js && pnpm run build:types",
     "build:clean": "del lib",
     "build:js": "swc src -d ./lib --config-file ../../node_modules/@kigu/dev/swc.json --strip-leading-paths",
     "build:types": "tsc --emitDeclarationOnly --skipLibCheck",
-    "build": "pnpm run build:clean && pnpm run build:js && pnpm run build:types",
-    "test:types": "tsc --noEmit --skipLibCheck -p tsconfig.test.json",
-    "test:unit": "vitest run",
+    "prepublishOnly": "pnpm run build",
     "test": "pnpm run test:types && pnpm run test:unit",
-    "prepublishOnly": "pnpm run build"
+    "test:types": "tsc --noEmit --skipLibCheck -p tsconfig.test.json",
+    "test:unit": "vitest run"
   },
   "dependencies": {
-    "@sozai/runtime": "catalog:",
     "@kokuin/token": "catalog:",
     "@noble/ciphers": "catalog:",
     "@noble/curves": "catalog:",
     "@noble/hashes": "catalog:",
+    "@sozai/runtime": "catalog:",
     "ts-mls": "catalog:"
   }
 }

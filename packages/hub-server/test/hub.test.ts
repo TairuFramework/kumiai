@@ -3,10 +3,10 @@ import type { AnyClientMessageOf, AnyServerMessageOf } from '@enkaku/protocol'
 import { DirectTransports } from '@enkaku/transport'
 import { type OwnIdentity, randomIdentity } from '@kokuin/token'
 import type { HubProtocol, HubStore } from '@kumiai/hub-protocol'
-import { fromUTF, toB64 } from '@sozai/codec'
+import { fromB64, fromUTF, toB64 } from '@sozai/codec'
 import { describe, expect, test, vi } from 'vitest'
 
-import { createHandlers } from '../src/handlers.js'
+import { type AuthorizeRequest, createHandlers } from '../src/handlers.js'
 import { type CreateHubParams, createHub, type HubInstance } from '../src/hub.js'
 import { createMemoryStore } from '../src/memoryStore.js'
 import { HubClientRegistry } from '../src/registry.js'
@@ -90,7 +90,7 @@ describe('hub authentication', () => {
     const anonymous = new Client<HubProtocol>({ transport: transports.client })
 
     await expect(
-      anonymous.request('hub/publish', {
+      anonymous.request('hub/v1/publish', {
         param: { topicID: TOPIC, payload: encodePayload('nope') },
       }),
     ).rejects.toThrow('Message is not signed')
@@ -104,8 +104,8 @@ describe('hub authentication', () => {
     const store = createMemoryStore()
     const handlers = createHandlers({ registry, store })
     await expect(
-      handlers['hub/publish']({
-        message: { header: {}, payload: { typ: 'request', prc: 'hub/publish', rid: '1' } },
+      handlers['hub/v1/publish']({
+        message: { header: {}, payload: { typ: 'request', prc: 'hub/v1/publish', rid: '1' } },
         param: { topicID: TOPIC, payload: encodePayload('x') },
         signal: new AbortController().signal,
       } as never),
@@ -120,12 +120,14 @@ describe('hub pub/sub', () => {
     const bobIdentity = randomIdentity()
     const { client: bob } = ctx.connect(bobIdentity)
 
-    await bob.request('hub/subscribe', { param: { topicID: TOPIC } })
-    const channel = bob.createChannel('hub/receive', { param: {} })
+    await bob.request('hub/v1/subscribe', { param: { topicID: TOPIC } })
+    const channel = bob.createChannel('hub/v1/receive', { param: {} })
     const reader = channel.readable.getReader()
     await delay(20)
 
-    await alice.request('hub/publish', { param: { topicID: TOPIC, payload: encodePayload('hi') } })
+    await alice.request('hub/v1/publish', {
+      param: { topicID: TOPIC, payload: encodePayload('hi') },
+    })
 
     const msg = await reader.read()
     expect(msg.done).toBe(false)
@@ -143,7 +145,7 @@ describe('hub pub/sub', () => {
     const ctx = createTestHub({ store })
     const { client: alice } = ctx.connect()
 
-    await alice.request('hub/publish', {
+    await alice.request('hub/v1/publish', {
       param: { topicID: TOPIC, payload: encodePayload('void') },
     })
     await delay(20)
@@ -159,15 +161,15 @@ describe('hub pub/sub', () => {
     const bobIdentity = randomIdentity()
 
     const { client: bobSetup } = ctx.connect(bobIdentity)
-    await bobSetup.request('hub/subscribe', { param: { topicID: TOPIC } })
+    await bobSetup.request('hub/v1/subscribe', { param: { topicID: TOPIC } })
 
-    await alice.request('hub/publish', {
+    await alice.request('hub/v1/publish', {
       param: { topicID: TOPIC, payload: encodePayload('queued') },
     })
     await delay(20)
 
     const { client: bob } = ctx.connect(bobIdentity)
-    const channel = bob.createChannel('hub/receive', { param: {} })
+    const channel = bob.createChannel('hub/v1/receive', { param: {} })
     const reader = channel.readable.getReader()
     const msg = await reader.read()
     expect(msg.value?.payload).toBe(encodePayload('queued'))
@@ -185,13 +187,15 @@ describe('hub pub/sub', () => {
     const { client: alice } = ctx.connect()
     const bobIdentity = randomIdentity()
     const { client: bobSetup } = ctx.connect(bobIdentity)
-    await bobSetup.request('hub/subscribe', { param: { topicID: TOPIC } })
+    await bobSetup.request('hub/v1/subscribe', { param: { topicID: TOPIC } })
 
-    await alice.request('hub/publish', { param: { topicID: TOPIC, payload: encodePayload('m1') } })
+    await alice.request('hub/v1/publish', {
+      param: { topicID: TOPIC, payload: encodePayload('m1') },
+    })
     await delay(20)
 
     const { client: bob } = ctx.connect(bobIdentity)
-    const channel = bob.createChannel('hub/receive', { param: {} })
+    const channel = bob.createChannel('hub/v1/receive', { param: {} })
     const reader = channel.readable.getReader()
     const msg = await reader.read()
     const sequenceID = msg.value?.sequenceID as string
@@ -210,14 +214,16 @@ describe('hub pub/sub', () => {
     const { client: alice } = ctx.connect()
     const bobIdentity = randomIdentity()
     const { client: bobSetup } = ctx.connect(bobIdentity)
-    await bobSetup.request('hub/subscribe', { param: { topicID: TOPIC } })
+    await bobSetup.request('hub/v1/subscribe', { param: { topicID: TOPIC } })
 
-    await alice.request('hub/publish', { param: { topicID: TOPIC, payload: encodePayload('m1') } })
+    await alice.request('hub/v1/publish', {
+      param: { topicID: TOPIC, payload: encodePayload('m1') },
+    })
     await delay(20)
 
     // First connect: read the message but do NOT ack it.
     const { client: bobFirst } = ctx.connect(bobIdentity)
-    const firstChannel = bobFirst.createChannel('hub/receive', { param: {} })
+    const firstChannel = bobFirst.createChannel('hub/v1/receive', { param: {} })
     const firstReader = firstChannel.readable.getReader()
     const firstMsg = await firstReader.read()
     expect(firstMsg.value?.payload).toBe(encodePayload('m1'))
@@ -227,7 +233,7 @@ describe('hub pub/sub', () => {
 
     // Reconnect the same identity: the unacked message is delivered again.
     const { client: bobSecond } = ctx.connect(bobIdentity)
-    const secondChannel = bobSecond.createChannel('hub/receive', { param: {} })
+    const secondChannel = bobSecond.createChannel('hub/v1/receive', { param: {} })
     const secondReader = secondChannel.readable.getReader()
     const secondMsg = await secondReader.read()
     expect(secondMsg.value?.payload).toBe(encodePayload('m1'))
@@ -244,8 +250,8 @@ describe('hub pub/sub', () => {
     const bobIdentity = randomIdentity()
     const { client: bob } = ctx.connect(bobIdentity)
 
-    await bob.request('hub/subscribe', { param: { topicID: 'topic:A' } })
-    const channel = bob.createChannel('hub/receive', { param: {} })
+    await bob.request('hub/v1/subscribe', { param: { topicID: 'topic:A' } })
+    const channel = bob.createChannel('hub/v1/receive', { param: {} })
     const reader = channel.readable.getReader()
     let delivered = false
     // Floating read: it stays pending (no matching topic), then settles when the
@@ -259,13 +265,22 @@ describe('hub pub/sub', () => {
     )
     await delay(20)
 
-    await alice.request('hub/publish', {
+    await alice.request('hub/v1/publish', {
       param: { topicID: 'topic:B', payload: encodePayload('other') },
     })
     await delay(20)
 
     expect(delivered).toBe(false)
     expect((await ctx.store.fetch({ recipientDID: bobIdentity.id })).messages).toHaveLength(0)
+
+    // THE CONTROL. Nothing above proves the push lane works at all — a receive channel that
+    // delivered NOTHING, ever, passes every assertion so far. A frame on the topic bob really is
+    // subscribed to has to arrive, or the silence about `topic:B` means nothing.
+    await alice.request('hub/v1/publish', {
+      param: { topicID: 'topic:A', payload: encodePayload('subscribed') },
+    })
+    await delay(20)
+    expect(delivered).toBe(true)
 
     channel.close()
     await expect(channel).rejects.toEqual('Close')
@@ -279,11 +294,11 @@ describe('hub pub/sub', () => {
     const bobIdentity = randomIdentity()
     const { client: bob } = ctx.connect(bobIdentity)
 
-    await bob.request('hub/subscribe', { param: { topicID: TOPIC } })
-    await bob.request('hub/unsubscribe', { param: { topicID: TOPIC } })
+    await bob.request('hub/v1/subscribe', { param: { topicID: TOPIC } })
+    await bob.request('hub/v1/unsubscribe', { param: { topicID: TOPIC } })
 
     expect(await ctx.store.getSubscribers(TOPIC)).toEqual([])
-    await alice.request('hub/publish', {
+    await alice.request('hub/v1/publish', {
       param: { topicID: TOPIC, payload: encodePayload('gone') },
     })
     await delay(20)
@@ -291,19 +306,59 @@ describe('hub pub/sub', () => {
     await ctx.dispose()
   })
 
-  test('hub/receive rejects a second concurrent open for the same DID', async () => {
+  /**
+   * A SECOND `hub/v1/receive` FOR THE SAME DID TAKES THE LANE, and the first one ends.
+   *
+   * The rule used to be the opposite — refuse the second — which reads as the safer one and is
+   * not. A client reconnects BECAUSE its connection broke, and the server is the last to know: it
+   * still holds a writer pointing at a socket that is already gone. Refusing on that stale belief
+   * turns the reconnect away and leaves the member with no push lane until a timeout it cannot
+   * see. Worse, the refusal arrives on a channel promise the mux never awaited, so the member was
+   * deaf AND silent about it.
+   *
+   * Both channels belong to one authenticated DID, so nothing here lets anyone displace anyone
+   * else. Asserted on where a message actually LANDS, not on the binding: the binding is
+   * bookkeeping, delivery is the property.
+   */
+  test('a second hub/v1/receive for the same DID takes over the push lane', async () => {
     const ctx = createTestHub()
+    const { client: alice } = ctx.connect()
     const bobIdentity = randomIdentity()
     const { client: bob } = ctx.connect(bobIdentity)
-    const channel1 = bob.createChannel('hub/receive', { param: {} })
-    channel1.readable.getReader()
+    await bob.request('hub/v1/subscribe', { param: { topicID: TOPIC } })
+
+    // The stale channel: still open as far as the server knows.
+    const stale = bob.createChannel('hub/v1/receive', { param: {} })
+    const staleReader = stale.readable.getReader()
+    let staleDelivered = false
+    // `value != null` and not merely "the read settled": ending the stale channel settles the
+    // pending read too, with `{ done: true }`, and a test that counted that as a delivery would
+    // report one for the very close it is asserting about.
+    void staleReader.read().then(
+      (result) => {
+        if (result.value != null) staleDelivered = true
+      },
+      () => {},
+    )
     await delay(20)
 
-    const channel2 = bob.createChannel('hub/receive', { param: {} })
-    await expect(channel2).rejects.toThrow('already bound')
+    // The reconnect. It is not refused, and the old channel ends on its own.
+    const live = bob.createChannel('hub/v1/receive', { param: {} })
+    const liveReader = live.readable.getReader()
+    await delay(20)
+    // It ENDS rather than errors: being replaced is not the old channel's fault, and the client
+    // that replaced it is the same client.
+    await expect(stale).resolves.toBeUndefined()
 
-    channel1.close()
-    await expect(channel1).rejects.toEqual('Close')
+    await alice.request('hub/v1/publish', {
+      param: { topicID: TOPIC, payload: encodePayload('after the reconnect') },
+    })
+    const received = await liveReader.read()
+    expect(received.value?.topicID).toBe(TOPIC)
+    expect(staleDelivered).toBe(false)
+
+    live.close()
+    await expect(live).rejects.toEqual('Close')
     await delay(20)
     await ctx.dispose()
   })
@@ -314,11 +369,71 @@ describe('hub authorization', () => {
     const ctx = createTestHub({ authorize: () => false })
     const { client: alice } = ctx.connect()
     await expect(
-      alice.request('hub/publish', { param: { topicID: TOPIC, payload: encodePayload('x') } }),
+      alice.request('hub/v1/publish', { param: { topicID: TOPIC, payload: encodePayload('x') } }),
     ).rejects.toThrow('Not authorized')
-    await expect(alice.request('hub/subscribe', { param: { topicID: TOPIC } })).rejects.toThrow(
+    await expect(alice.request('hub/v1/subscribe', { param: { topicID: TOPIC } })).rejects.toThrow(
       'Not authorized',
     )
+    await ctx.dispose()
+  })
+
+  test('a publish request reaches the hook as a discriminated request with retain and payloadSize', async () => {
+    const seen: Array<AuthorizeRequest> = []
+    const ctx = createTestHub({
+      authorize: (req: AuthorizeRequest) => {
+        seen.push(req)
+        return true
+      },
+    })
+    const { client: alice, identity } = ctx.connect()
+    const payload = encodePayload('hello, hub')
+
+    await alice.request('hub/v1/publish', { param: { topicID: TOPIC, payload, retain: 'log' } })
+
+    expect(seen).toHaveLength(1)
+    const req = seen[0]
+    // Narrow via the discriminant itself: if `publish` requests ever stopped reaching the hook
+    // shaped this way, the assertions below it would never run and the test would pass for the
+    // wrong reason. Assert the discriminant explicitly first.
+    expect(req?.action).toBe('publish')
+    if (req?.action !== 'publish') throw new Error('expected a publish request')
+    expect(req.did).toBe(identity.id)
+    expect(req.topicID).toBe(TOPIC)
+    expect(req.retain).toBe('log')
+    expect(req.payloadSize).toBe(fromB64(payload).length)
+
+    await ctx.dispose()
+  })
+
+  test('a hook returning { allow: false, reason } refuses, and the reason reaches the error', async () => {
+    const ctx = createTestHub({
+      authorize: () => ({ allow: false, reason: 'topic quota exceeded for this DID' }),
+    })
+    const { client: alice } = ctx.connect()
+
+    await expect(
+      alice.request('hub/v1/publish', { param: { topicID: TOPIC, payload: encodePayload('x') } }),
+    ).rejects.toThrow('topic quota exceeded for this DID')
+    await expect(alice.request('hub/v1/subscribe', { param: { topicID: TOPIC } })).rejects.toThrow(
+      'topic quota exceeded for this DID',
+    )
+
+    await ctx.dispose()
+  })
+
+  test('a hook returning true for everything permits everything, as today', async () => {
+    const ctx = createTestHub({ authorize: () => true })
+    const { client: alice } = ctx.connect()
+
+    await expect(
+      alice.request('hub/v1/publish', { param: { topicID: TOPIC, payload: encodePayload('x') } }),
+    ).resolves.toMatchObject({ sequenceID: expect.any(String) })
+    await expect(alice.request('hub/v1/subscribe', { param: { topicID: TOPIC } })).resolves.toEqual(
+      {
+        subscribed: true,
+      },
+    )
+
     await ctx.dispose()
   })
 })
@@ -327,10 +442,14 @@ describe('hub rate limiting', () => {
   test('rejects publishes beyond the per-DID burst', async () => {
     const ctx = createTestHub({ rateLimits: { perDID: { rate: 0, burst: 2 } } })
     const { client: alice } = ctx.connect()
-    await alice.request('hub/publish', { param: { topicID: TOPIC, payload: encodePayload('1') } })
-    await alice.request('hub/publish', { param: { topicID: TOPIC, payload: encodePayload('2') } })
+    await alice.request('hub/v1/publish', {
+      param: { topicID: TOPIC, payload: encodePayload('1') },
+    })
+    await alice.request('hub/v1/publish', {
+      param: { topicID: TOPIC, payload: encodePayload('2') },
+    })
     await expect(
-      alice.request('hub/publish', { param: { topicID: TOPIC, payload: encodePayload('3') } }),
+      alice.request('hub/v1/publish', { param: { topicID: TOPIC, payload: encodePayload('3') } }),
     ).rejects.toThrow('rate limit')
     await ctx.dispose()
   })
@@ -340,13 +459,13 @@ describe('hub key packages', () => {
   test('upload then fetch consumes packages', async () => {
     const ctx = createTestHub()
     const { client: alice, identity } = ctx.connect()
-    const uploaded = await alice.request('hub/keypackage/upload', {
+    const uploaded = await alice.request('hub/v1/keypackage/upload', {
       param: { keyPackages: ['kp-1', 'kp-2'] },
     })
     expect(uploaded.stored).toBe(2)
 
     const { client: bob } = ctx.connect()
-    const fetched = await bob.request('hub/keypackage/fetch', {
+    const fetched = await bob.request('hub/v1/keypackage/fetch', {
       param: { did: identity.id, count: 1 },
     })
     expect(fetched.keyPackages).toEqual(['kp-1'])

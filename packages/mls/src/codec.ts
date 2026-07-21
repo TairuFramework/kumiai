@@ -9,12 +9,47 @@ import {
 
 export type { ClientState }
 
+/**
+ * The client-state blob's format version, first byte.
+ *
+ * This code is the only reader this blob ever has: `encodeClientState` and `decodeClientState`
+ * are one process serializing its own state to itself (to disk, to storage, wherever), never a
+ * wire format another peer or another build reads. So there is no peer to stay compatible with —
+ * an unknown version is refused outright, not migrated.
+ *
+ * It buys diagnosis, not compatibility. There is no version of this a v1 build can read, and a
+ * format change is a flag day whatever this byte says. What it changes is that the failure reads
+ * as "this blob is v2 and I speak v1" rather than an opaque decode failure indistinguishable from
+ * truncated bytes or a corrupted store.
+ */
+const CLIENT_STATE_VERSION = 1
+
 export function decodeClientState(encoded: Uint8Array): ClientState | undefined {
-  return decode(clientStateDecoder, encoded)
+  // Too short to hold the version byte is a TRUNCATED read, not a version this build does not
+  // speak, and the two are separate diagnoses — the same split `@kumiai/mls-rpc`'s `openEntries`
+  // makes ("not a sealed blob" before "unsupported blob version"). Without this guard `encoded[0]`
+  // is `undefined` on an empty buffer, which falls into the version branch below and reports
+  // "unsupported client-state version undefined": the loudest possible way to misdescribe an
+  // empty store as a format from the future. Truncated bytes return `undefined`, as every other
+  // truncated read here does.
+  if (encoded.length === 0) return undefined
+  // Distinguishable on purpose. `decode()` below returns `undefined` for malformed or
+  // truncated bytes reaching `ts-mls`, and that stays `undefined` — but an unknown version
+  // byte is not that kind of failure, so it throws instead of returning the same `undefined`
+  // a decode failure would. Without this, a version mismatch and a corrupted store are the
+  // same value of the same type and a caller cannot tell them apart.
+  if (encoded[0] !== CLIENT_STATE_VERSION) {
+    throw new Error(`decodeClientState: unsupported client-state version ${encoded[0]}`)
+  }
+  return decode(clientStateDecoder, encoded.subarray(1))
 }
 
 export function encodeClientState(state: ClientState): Uint8Array {
-  return encode(clientStateEncoder, state)
+  const body = encode(clientStateEncoder, state)
+  const out = new Uint8Array(1 + body.length)
+  out[0] = CLIENT_STATE_VERSION
+  out.set(body, 1)
+  return out
 }
 
 export function sanitizeRatchetTree(tree: ReadonlyArray<unknown>): RatchetTree {

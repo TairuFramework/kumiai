@@ -4,12 +4,14 @@
  * @module rpc
  */
 
-export { defineGroupProtocol, type GroupProtocolDefinition } from '@kumiai/broadcast'
-
+export type { Anchor, AnchorStore } from './anchor.js'
+export type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
 export {
   type CommitClassifierState,
   type CommitDisposition,
+  type CommitFrameEvidence,
   classifyCommit,
+  UNKNOWN_FRAME_VERSION,
 } from './classify.js'
 export {
   CommitDeadlineError,
@@ -24,15 +26,19 @@ export {
   RecoveryRequiredError,
 } from './commit.js'
 export {
+  COMMIT_FRAME_VERSION,
   type CommitFrame,
   decodeCommitFrame,
   encodeCommitFrame,
+  isUnsupportedCommitFrameVersion,
+  UnsupportedCommitFrameVersionError,
 } from './commit-frame.js'
 export {
   type CommitContext,
   type CommitHeader,
   type GroupCrypto,
   type GroupMLS,
+  type GroupUnwrapResult,
   isMissingLedgerEntries,
   type PendingRecovery,
 } from './crypto.js'
@@ -50,10 +56,12 @@ export {
   HANDSHAKE_VERSION,
   type HandshakeKind,
 } from './handshake.js'
+export type { ReceiveLaneEnded, SubscribeFailure } from './hub-mux.js'
 export {
   createLedgerEntryResolver,
   decodeLedgerEntries,
   encodeLedgerEntries,
+  LEDGER_ENTRIES_VERSION,
 } from './ledger-entries.js'
 export {
   createGroupPeer,
@@ -62,6 +70,14 @@ export {
   type GroupPeerParams,
   type ProtocolSurface,
 } from './peer.js'
+export {
+  defineGroupProtocol,
+  type GroupProcedureDefinition,
+  type GroupProtocolDefinition,
+  type RetainableEventProcedureDefinition,
+  type Retention,
+  retentionOf,
+} from './protocol.js'
 export {
   decodeLedgerReply,
   decodeLedgerRequest,
@@ -72,7 +88,9 @@ export {
   encodeRecoveryReply,
   encodeRecoveryRequest,
 } from './recovery.js'
+export { detectRosterChange } from './roster.js'
 export {
+  APP_TOPIC_LABEL,
   COMMIT_LABEL,
   commitTopic,
   discoveryTopic,

@@ -6,6 +6,7 @@ import type {
 } from '@kumiai/hub-tunnel'
 import { describe, expect, test } from 'vitest'
 
+import { classifyCommit } from '../src/classify.js'
 import { RecoveryRequiredError } from '../src/commit.js'
 import {
   decodeHandshakeFrame,
@@ -130,8 +131,7 @@ describe('a heal re-enacts by ledger membership', () => {
     // landed, so she adopts it and now HOLDS the entry — and then the log tells her the group
     // went on without her: she meets a frame framed ahead of her, and heals.
     const alice = makeMLSPeer(hub, 'alice', rs, {
-      mls: dead.mls,
-      crypto: dead.crypto,
+      restartOf: dead,
       journal,
       members,
       recovery,
@@ -313,7 +313,7 @@ describe('a hub that forked the log', () => {
   test('the winning branch sees the same fork and does not heal', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x59)
-    const { winner, loserSeq } = await setUpFork(hub, rs)
+    const { winner, winnerSeq, loserSeq } = await setUpFork(hub, rs)
 
     const carol = makeMLSPeer(hub, 'carol', rs, { epoch: 1, members, recovery })
     await flush(80)
@@ -333,6 +333,20 @@ describe('a hub that forked the log', () => {
     expect(carol.mls.commits()).toBe(1)
     expect(carol.mls.ledgerIDs()).toEqual([memoryEntryID(winner)])
     expect(carol.mls.fold().get('role:bob')).toBeUndefined()
+
+    // THE VERDICT, which the peer cannot be asked for. Everything above is an absence, and a
+    // WINNING fork and plain history are the same three statements inside the lane — step over
+    // the frame, move the head, heal nothing — so every assertion above holds just as well for a
+    // peer that diagnosed no fork at all. The classifier is the only place the two are different
+    // things, and this asks it about the scenario's OWN frames at the positions the hub gave
+    // them: the tiebreak has to fall this way round for Carol's silence to be a decision.
+    expect(
+      classifyCommit({ epoch: 1, committerDID: 'yolanda' }, loserSeq, {
+        localDID: 'carol',
+        epoch: 2,
+        appliedByEpoch: new Map([[1, winnerSeq]]),
+      }),
+    ).toEqual({ row: 'fork', appliedSequenceID: winnerSeq, branch: 'winning' })
 
     await carol.peer.dispose()
   })

@@ -17,7 +17,7 @@ export function makeMLSCredential(identity: OwnIdentity): Credential {
       'peer:4 identity is missing longForm; only identities from createIdentity can be used as MLS members',
     )
   }
-  const payload: MLSCredentialIdentity = { id }
+  const payload: MLSCredentialIdentity = { v: 1, id }
   if (isPeer) {
     payload.longForm = (identity as unknown as { longForm: string }).longForm
   }

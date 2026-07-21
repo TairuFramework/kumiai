@@ -41,6 +41,17 @@ describe('createHubMux', () => {
     await mux.dispose()
   })
 
+  test('retainTopic subscribes with no listener and passes its options to the hub', async () => {
+    const hub = new FakeHub()
+    const mux = createHubMux({ hub, localDID: 'bob' })
+    // The listener-less subscribe is a subscribe, and it is the one that asks the hub to hold
+    // the topic's log for a member that is not here to be pushed to. So it carries the window.
+    mux.retainTopic('topic:r', { retention: 4321 })
+    expect(hub.subscriberCount('topic:r')).toBe(1)
+    expect(hub.requestedRetention('topic:r')).toBe(4321)
+    await mux.dispose()
+  })
+
   test('onInbound fires before sinks receive, exposing senderDID', async () => {
     const hub = new FakeHub()
     const mux = createHubMux({ hub, localDID: 'bob' })

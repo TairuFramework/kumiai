@@ -4,7 +4,6 @@ import { SessionNotEstablishedError } from '../src/errors.js'
 import type { ObservabilityEvent } from '../src/events.js'
 import { decodeFrame, encodeFrame, type HubFrame, type HubFrameMessageBody } from '../src/frame.js'
 import { createHubTunnelTransport, type MailboxHub } from '../src/transport.js'
-
 import { FakeHub } from './fixtures/fake-hub.js'
 
 type Msg = HubFrameMessageBody

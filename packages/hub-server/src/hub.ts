@@ -46,12 +46,15 @@ export type CreateHubParams = {
   authorize?: AuthorizeHook
   /** Publish rate limits. Merged over {@link DEFAULT_RATE_LIMITS}. */
   rateLimits?: Partial<HubRateLimits>
-  /** Quotas applied to hub/keypackage/fetch. Merged over {@link DEFAULT_KEYPACKAGE_FETCH_LIMITS}. */
+  /**
+   * Quotas applied to hub/v1/keypackage/fetch. Merged over
+   * {@link DEFAULT_KEYPACKAGE_FETCH_LIMITS}.
+   */
   keyPackageFetchLimits?: Partial<KeyPackageFetchLimits>
   /** Scheduled purge of expired stored messages. Set to `false` to disable. */
   purge?: HubPurgeOptions | false
   /**
-   * Server resource limits. `hub/receive` is always added to
+   * Server resource limits. `hub/v1/receive` is always added to
    * `longLivedProcedures` so open mailbox channels are exempt from
    * `controllerTimeoutMs` and from the `maxConcurrentHandlers` cap.
    */
@@ -75,7 +78,7 @@ export function createHub(params: CreateHubParams): HubInstance {
   const limits: Partial<ResourceLimits> = {
     ...params.limits,
     longLivedProcedures: [
-      ...new Set([...(params.limits?.longLivedProcedures ?? []), 'hub/receive']),
+      ...new Set([...(params.limits?.longLivedProcedures ?? []), 'hub/v1/receive']),
     ],
   }
   const server = serve<HubProtocol>({

@@ -3,7 +3,6 @@ import { describe, expect, test } from 'vitest'
 import { createEncryptedHubTunnelTransport } from '../src/encrypted-transport.js'
 import { DecryptError } from '../src/errors.js'
 import type { ObservabilityEvent } from '../src/events.js'
-
 import { FakeEncryptor } from './fixtures/fake-encryptor.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 

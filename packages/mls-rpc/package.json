@@ -1,0 +1,49 @@
+{
+  "name": "@kumiai/mls-rpc",
+  "version": "0.4.0",
+  "description": "The @kumiai/rpc consumer ports (GroupCrypto, GroupMLS) implemented over @kumiai/mls",
+  "keywords": [
+    "mls",
+    "rpc",
+    "group",
+    "e2ee"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TairuFramework/kumiai",
+    "directory": "packages/mls-rpc"
+  },
+  "license": "MIT",
+  "sideEffects": false,
+  "type": "module",
+  "exports": {
+    ".": "./lib/index.js"
+  },
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "files": [
+    "lib/*"
+  ],
+  "scripts": {
+    "build": "pnpm run build:clean && pnpm run build:js && pnpm run build:types",
+    "build:clean": "del lib",
+    "build:js": "swc src -d ./lib --config-file ../../node_modules/@kigu/dev/swc.json --strip-leading-paths",
+    "build:types": "tsc --emitDeclarationOnly --skipLibCheck",
+    "prepublishOnly": "pnpm run build",
+    "test": "pnpm run test:types && pnpm run test:unit",
+    "test:types": "tsc --noEmit --skipLibCheck -p tsconfig.test.json",
+    "test:unit": "vitest run"
+  },
+  "dependencies": {
+    "@kokuin/token": "catalog:",
+    "@kumiai/mls": "workspace:^",
+    "@kumiai/rpc": "workspace:^",
+    "@noble/ciphers": "catalog:",
+    "@sozai/runtime": "catalog:"
+  },
+  "devDependencies": {
+    "@kumiai/rpc-conformance": "workspace:^",
+    "ts-mls": "catalog:",
+    "vitest": "catalog:"
+  }
+}

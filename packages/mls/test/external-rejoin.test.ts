@@ -13,7 +13,6 @@ import {
 import { describe, expect, test } from 'vitest'
 
 import { controlCapabilities } from '../src/anchor.js'
-
 import {
   commitInvite,
   createGroup,

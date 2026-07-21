@@ -1,25 +1,38 @@
 import type { TransportType } from '@enkaku/transport'
 import { Disposer } from '@sozai/async'
+import { createRuntime, type Runtime } from '@sozai/runtime'
 
+import { buildEventMessage } from './event-frame.js'
 import type { BroadcastMessage } from './transport.js'
-import { defaultRandomID } from './utils.js'
 
 export type RequestData = { kind: 'req'; rid: string; prm: unknown; gather?: boolean }
-export type ReplyData = { kind: 'res'; rid: string; from: string; ok?: unknown; err?: string }
+/**
+ * A reply body: WHAT the answer is, never WHO gave it. The sender travels at the transport level
+ * as `BroadcastMessage.senderDID`, settable only by an authenticating `unwrap` — there is no
+ * second place for a responder to name itself. Never add a `from` field here: anything a
+ * responder writes into its own reply is a self-asserted claim, not an identity.
+ */
+export type ReplyData = { kind: 'res'; rid: string; ok?: unknown; err?: string }
 
 export type RequestOptions = { errorThreshold?: number; timeoutMs?: number }
 export type GatherOptions = { quorum?: number; timeoutMs?: number }
-export type GatheredReply = { from: string; value: unknown }
+/**
+ * One gathered reply, attributed to the AUTHENTICATED sender the transport established — never a
+ * self-asserted `from` in the reply body.
+ */
+export type GatheredReply = { senderDID: string; value: unknown }
 
 export type BroadcastClientParams = {
   transport: TransportType<BroadcastMessage, BroadcastMessage>
-  getRandomID?: () => string
+  /** Runtime providing platform primitives. Defaults to `createRuntime()`. */
+  runtime?: Runtime
 }
 
 const DEFAULT_TIMEOUT_MS = 5000
 
 type PendingEntry = {
-  collect: (reply: ReplyData) => void
+  /** `senderDID` is separate from `reply` because it is not the responder's to state. */
+  collect: (reply: ReplyData, senderDID: string) => void
   onDispose: () => void
 }
 
@@ -41,7 +54,7 @@ export class BroadcastClient extends Disposer {
       },
     })
     this.#transport = params.transport
-    this.#getRandomID = params.getRandomID ?? defaultRandomID
+    this.#getRandomID = (params.runtime ?? createRuntime()).getRandomID
     // Discard the promise intentionally; read errors are best-effort here.
     void this.#read().catch(() => {})
   }
@@ -53,14 +66,23 @@ export class BroadcastClient extends Disposer {
         continue
       }
       const data = payload.data as Partial<ReplyData> | undefined
-      if (data?.kind === 'res' && typeof data.rid === 'string') {
-        this.#pending.get(data.rid)?.collect(data as ReplyData)
+      if (data?.kind !== 'res' || typeof data.rid !== 'string') {
+        continue
       }
+      // A reply this transport can't attribute is DROPPED, not delivered unattributed — an
+      // authenticating transport clears `senderDID` when the open recovers no identity, so only a
+      // sender the transport itself established gets through. Applies to every reply, not just
+      // gathered ones, since `request` resolves on the first accepted answer.
+      const senderDID = (msg as { senderDID?: unknown }).senderDID
+      if (typeof senderDID !== 'string' || senderDID === '') {
+        continue
+      }
+      this.#pending.get(data.rid)?.collect(data as ReplyData, senderDID)
     }
   }
 
   async dispatch(prc: string, data: Record<string, unknown> = {}): Promise<void> {
-    await this.#transport.write({ payload: { typ: 'event', prc, data } })
+    await this.#transport.write(buildEventMessage(prc, data))
   }
 
   async request(prc: string, prm: unknown = {}, options: RequestOptions = {}): Promise<unknown> {
@@ -125,12 +147,16 @@ export class BroadcastClient extends Disposer {
       }
       const timer = setTimeout(finish, timeoutMs)
       this.#pending.set(rid, {
-        collect: (reply) => {
-          if (reply.err != null || seen.has(reply.from)) {
+        // Keyed on the AUTHENTICATED sender — that's what makes this a quorum rather than a frame
+        // count. Keyed on an asserted name instead, one member could suppress another's real
+        // answer by racing a forgery under its DID, or reach a quorum of N alone by answering N
+        // times under N names.
+        collect: (reply, senderDID) => {
+          if (reply.err != null || seen.has(senderDID)) {
             return
           }
-          seen.add(reply.from)
-          replies.push({ from: reply.from, value: reply.ok })
+          seen.add(senderDID)
+          replies.push({ senderDID, value: reply.ok })
           if (replies.length >= quorum) {
             finish()
           }

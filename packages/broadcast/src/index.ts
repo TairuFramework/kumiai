@@ -14,6 +14,7 @@ export {
   type RequestData,
   type RequestOptions,
 } from './client.js'
+export { buildEventMessage, encodeEventFrame } from './event-frame.js'
 export { defineGroupProtocol, type GroupProtocolDefinition } from './protocol.js'
 export {
   type BroadcastHandler,
@@ -25,10 +26,13 @@ export {
 } from './responder.js'
 export { deriveTopicID } from './topic.js'
 export {
+  BROADCAST_VERSION,
   type BroadcastMessage,
   type BroadcastTransportParams,
   type ByteTransform,
   createBroadcastTransport,
+  decodeFrame,
+  encodeFrame,
   type Unwrap,
   type UnwrapResult,
 } from './transport.js'

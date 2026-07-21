@@ -5,8 +5,10 @@ import {
   createApplicationMessage,
   decode,
   encode,
+  type IncomingMessageAction,
   type IncomingMessageCallback,
   type MlsContext,
+  mlsExporter,
   mlsMessageDecoder,
   mlsMessageEncoder,
   processMessage as mlsProcessMessage,
@@ -23,7 +25,7 @@ import {
   parseMLSCredentialIdentity,
 } from './credential.js'
 import { decodeControlEnvelope } from './envelope.js'
-import { foldEnvelope } from './envelope-fold.js'
+import { foldEnvelope, GROUP_TYPE_PREFIX } from './envelope-fold.js'
 import type { FoldInput } from './fold.js'
 import { readMessageEpoch } from './group-info.js'
 import {
@@ -132,10 +134,14 @@ function readPrivateCommit(decoded: unknown): { authenticatedData: Uint8Array } 
 }
 
 /**
- * Narrow a decoded frame to the PrivateMessage-commit fields sender-data decrypt reads.
- * Returns undefined for anything that is not a PrivateMessage of contentType commit.
+ * Narrow a decoded frame to the PrivateMessage fields sender-data decrypt reads, for one
+ * content type. Returns undefined for anything that is not a PrivateMessage of that type.
+ *
+ * The sender-data derivation (RFC 9420 §6.3.2) is content-type-agnostic — the type is one
+ * byte of the AAD — so the same read serves a commit's committer and an application
+ * message's author.
  */
-function readPrivateCommitFrame(decoded: unknown): PrivateCommitFrame | undefined {
+function readPrivateFrame(decoded: unknown, contentType: number): PrivateCommitFrame | undefined {
   if (decoded == null || typeof decoded !== 'object') return undefined
   const frame = decoded as { wireformat?: unknown; privateMessage?: unknown }
   if (frame.wireformat !== wireformats.mls_private_message) return undefined
@@ -148,7 +154,7 @@ function readPrivateCommitFrame(decoded: unknown): PrivateCommitFrame | undefine
         ciphertext?: unknown
       }
     | undefined
-  if (pm == null || pm.contentType !== contentTypes.commit) return undefined
+  if (pm == null || pm.contentType !== contentType) return undefined
   if (
     !(pm.groupId instanceof Uint8Array) ||
     typeof pm.epoch !== 'bigint' ||
@@ -167,13 +173,18 @@ function readPrivateCommitFrame(decoded: unknown): PrivateCommitFrame | undefine
 }
 
 /**
- * Read the DID an external-join commit proves control of. An external join is a
+ * Read the DID an external-join commit CLAIMS control of. An external join is a
  * PublicMessage from a joining non-member (senderType new_member_commit) carrying a
  * commit; the committer holds no pre-commit leaf, so its DID rides the commit's own
  * UpdatePath leaf credential. Returns undefined for anything else (keeps the
  * pre-envelope path). Returns `{ did: undefined }` when the UpdatePath is absent or
  * the leaf credential does not resolve to a basic-credential DID — cannot be a valid
  * resync, so the caller rejects it. Narrows structurally.
+ *
+ * CLAIMS, not proves: this reads the credential and checks no signature, and the
+ * credential is a plain field any publisher can write. The DID it yields is the
+ * frame's word until {@link GroupHandle.readCommitHeader} has authenticated it, and
+ * a caller that reports it unauthenticated hands a forger the choice of committer.
  */
 function readExternalCommit(decoded: unknown): { did: string | undefined } | undefined {
   if (decoded == null || typeof decoded !== 'object') return undefined
@@ -213,7 +224,7 @@ export type HeldLedgerEntry = {
 export type LedgerLogEntry = HeldLedgerEntry & { entryID: string }
 
 /**
- * Project a held ledger into the roster. foldRoster drops every non-`group.role`
+ * Project a held ledger into the roster. foldRoster drops every non-`kumiai.role`
  * entry by type, so the mixed-type log is fed in whole. Replayed in order, repeats
  * and all: a claim re-enacted at a later position must undo what came between.
  */
@@ -242,7 +253,7 @@ export type GroupHandleParams = {
   commitPolicy?: IncomingMessageCallback
   /** Fetch control-ledger entry bodies the local ledger lacks (commit pre-pass). */
   resolveLedgerEntries?: (ids: Array<string>) => Promise<Array<string>>
-  /** Surface an accepted commit's notarized non-`group.role` entries to the consumer. */
+  /** Surface an accepted commit's notarized non-`kumiai.role` entries to the consumer. */
   onLedgerEntries?: (entries: Array<VerifiedLedgerEntry>) => void
 }
 
@@ -479,11 +490,30 @@ export class GroupHandle {
         log.push({ entryID: entryIDs[index] as string, token, verified })
       }
 
+      // What this bootstrap ADDS, in log order, minus the reserved `kumiai.*` types the fold
+      // consumes itself — the same rule the commit path surfaces by.
+      const surfaced = log
+        .filter(
+          ({ entryID, verified }) =>
+            !this.#entryBodies.has(entryID) && !verified.entry.type.startsWith(GROUP_TYPE_PREFIX),
+        )
+        .map(({ verified }) => verified)
+
       this.#ledger = log
       this.#entryBodies = new Map(
         log.map(({ entryID, token, verified }) => [entryID, { token, verified }]),
       )
       this.#roster = foldLedgerRoster(log, this.#anchor, this.groupID)
+
+      // SURFACED HERE TOO, not only on the commit path. A heal is how a peer that missed commits
+      // catches up — it rejoins, gathers the whole ledger, and lands here — so a bootstrap that
+      // said nothing left a host consuming `onLedgerEntries` as an event stream permanently
+      // unaware of everything enacted while it was away. The state was right and the host was
+      // never told, which is the worst of both.
+      //
+      // Deduped against what this handle already held, so a peer bootstrapping over a partial
+      // ledger is not re-notified of entries it has already seen.
+      if (surfaced.length > 0) this.#onLedgerEntries?.(surfaced)
     })
   }
 
@@ -525,9 +555,56 @@ export class GroupHandle {
    * order. Leaves whose credential identity fails to parse are skipped (like
    * findMemberLeafIndex). Reflects current #state — call before and after
    * processMessage to diff a commit's membership change.
+   *
+   * The diff sees MEMBERSHIP, and only membership: an Add, a Remove, or both in
+   * one commit (compare as a set — a count misses that last case). It does NOT
+   * see an external-commit REJOIN by a member the group still holds. That member
+   * keeps its id, so the id set is unchanged; and its leaf index is unchanged
+   * too, because a resync blanks the member's old leaf and the new leaf then
+   * takes the leftmost blank — the one just blanked (RFC 9420 §12.4.3.2). No
+   * field of this result moves, and no before/after diff of it can be made to.
+   * A caller that must detect a rejoin reads the COMMIT instead — an external
+   * commit is structurally one: a public message from a non-member carrying a
+   * commit, recognizable from its own bytes before it is applied, and carrying
+   * its committer's id in its own UpdatePath leaf. That is the read
+   * {@link readCommitHeader} already makes internally to resolve such a
+   * committer, and it does not surface the fact today.
    */
   listMembers(): Array<GroupMember> {
     return [...this.#iterateMembers()]
+  }
+
+  /**
+   * The MLS exporter (RFC 9420 §8.5): a secret derived from THIS EPOCH's exporter secret,
+   * a label and a context. Every member at the epoch derives the same bytes; a member at
+   * any other epoch derives different ones, and cannot reach this epoch's from what it holds.
+   *
+   * That per-epoch property is the point, and it is the only thing that cuts a removed member
+   * off from anything keyed on it. A removed member keeps every exporter secret it ever held
+   * and every value it ever derived, and epoch numbers are a counter it can enumerate — so a
+   * consumer deriving a rotating name (an app-lane topic, say) must feed it from HERE and never
+   * from a lifelong group secret, which would rotate onto a name the removed member walks
+   * straight back onto.
+   *
+   * Non-mutating and consumes no ratchet key: the exporter secret is epoch-level. A handle a
+   * commit has superseded exports its own pre-commit epoch's secret, which is a feature — a
+   * reader opening a retained frame needs the secret of the epoch that frame was sealed at.
+   *
+   * DELIBERATELY NOT MUTEX-WRAPPED, unlike its neighbours, and two things depend on that. A
+   * consumer resolving a commit's ledger entries is called from INSIDE `processMessage`, which
+   * holds the mutex — so taking it here would deadlock every commit-apply. And `#state` is
+   * replaced only after resolution returns, so a read from in there sees the PRE-commit epoch's
+   * exporter secret, which is the epoch the blob being opened was sealed under. Both are silent
+   * consequences of this method's plainness; wrapping it "for consistency" breaks both.
+   */
+  async exportSecret(label: string, context: Uint8Array, length = 32): Promise<Uint8Array> {
+    return await mlsExporter(
+      this.#state.keySchedule.exporterSecret,
+      label,
+      context,
+      length,
+      this.#context.cipherSuite,
+    )
   }
 
   /**
@@ -547,6 +624,58 @@ export class GroupHandle {
       this.#state = newState
       zeroAll(consumed)
       return encode(mlsMessageEncoder, message)
+    })
+  }
+
+  /**
+   * Open an application message sealed for the group and recover WHO SENT IT — the
+   * counterpart to {@link encrypt}, and the read half of the group's application lane.
+   *
+   * Throws for bytes this handle cannot open, which for an application message means
+   * ANY epoch but its own: MLS ratchets forward, so a frame sealed below this handle's
+   * epoch is gone and one sealed above it has not arrived yet. That is ordinary control
+   * flow for a caller walking a retained log full of frames from epochs it does not hold
+   * — it is how a frame says "not mine" — and such a caller must not read the throw as
+   * corruption. Use {@link readMessageEpoch} to tell those two cases apart before trying.
+   *
+   * WHY THE SENDER IS AUTHENTICATED and not merely claimed: the leaf index comes from the
+   * message's sender-data, encrypted under this epoch's sender-data secret, and the
+   * message body then opens only under the ratchet key derived at THAT leaf. A frame
+   * naming a leaf it was not sealed at does not open, so a sender that survives to be
+   * returned is one the AEAD has vouched for. The leaf is resolved to a DID against this
+   * handle's own ratchet tree, never from anything the frame carries.
+   *
+   * `senderDID` is absent only when the authenticated leaf holds no parsable credential —
+   * absent means "I cannot name the author", never "there is no author".
+   *
+   * ts-mls's own `processMessage` returns an application message's plaintext WITHOUT any
+   * sender, which is why this exists rather than delegating.
+   */
+  async decrypt(message: Uint8Array): Promise<{ payload: Uint8Array; senderDID?: string }> {
+    const decoded = decode(mlsMessageDecoder, message)
+    if (decoded == null) throw new Error('decrypt: failed to decode MLSMessage')
+    return mutexFor(this).run(async () => {
+      const pm = readPrivateFrame(decoded, contentTypes.application)
+      if (pm == null) throw new Error('decrypt: not a PrivateMessage application frame')
+      // Read the sender BEFORE opening: the sender-data secret is epoch-level and this
+      // consumes no ratchet key, so a frame that then fails to open has cost nothing.
+      const leafIndex = await readSenderLeafIndex(
+        this.#context,
+        this.#state.keySchedule.senderDataSecret,
+        pm,
+      )
+      const result = await mlsProcessMessage({
+        context: this.#context,
+        state: this.#state,
+        message: decoded as Parameters<typeof mlsProcessMessage>[0]['message'],
+      })
+      this.#state = result.newState
+      zeroAll(result.consumed)
+      if (result.kind !== 'applicationMessage') {
+        throw new Error('decrypt: frame was not an application message')
+      }
+      const senderDID = leafIndex == null ? undefined : this.#didOfLeaf(leafIndex)
+      return { payload: result.message, ...(senderDID != null && { senderDID }) }
     })
   }
 
@@ -687,6 +816,53 @@ export class GroupHandle {
     return { callback: wrapCommitPolicy(combined, capture), capture, applyOnAccept }
   }
 
+  /**
+   * Does this external commit carry a signature that verifies as its own UpdatePath leaf's?
+   *
+   * An external commit is self-signed: the key that signed it is the `signaturePublicKey` of the
+   * same UpdatePath leaf whose credential names the committer. So a verified signature binds the
+   * two — whoever authored these bytes held the key of the leaf claiming that DID — and an
+   * unverified one means the credential is a field somebody wrote, nothing more.
+   *
+   * WHAT IT REQUIRES, and why the answer is only ever available at this handle's own epoch.
+   * MLS binds the full GroupContext into the signed FramedContentTBS for a new_member_commit
+   * sender, so verifying needs the group context the signer signed against: group id, epoch, tree
+   * hash, confirmed transcript hash, extensions. This handle holds exactly one — its current
+   * epoch's. It holds none for an epoch AHEAD of it, which no peer can, and that is not a gap
+   * this check can close: a peer that has fallen behind holds nothing to check the group's future
+   * with. So a commit framed anywhere but here answers false, and the caller reports no committer
+   * rather than an unauthenticated one.
+   *
+   * WHAT IT DOES NOT ESTABLISH. Possession of a key is not permission to use it: a verified
+   * signature says "the holder of that leaf key authored these bytes", never "this member may
+   * rejoin". And it is a property of the bytes, not of their delivery — a GENUINE external commit
+   * captured and re-published verifies exactly as it did the first time.
+   *
+   * Implemented by asking the MLS library to process the message with a callback that refuses it,
+   * which runs the real verification and stops before anything is applied. Deliberately not a
+   * reimplementation: a check that verified less than the apply path does would pass frames the
+   * apply path rejects, and the two must not drift. Non-mutating — the refusal returns this same
+   * state, and the result is discarded either way. Any throw is a "no": the library raises on a
+   * bad signature, on an epoch that is not this one, and on a malformed frame, and none of those
+   * is an authenticated committer.
+   */
+  async #externalCommitAuthenticates(decoded: unknown): Promise<boolean> {
+    try {
+      const result = await mlsProcessMessage({
+        context: this.#context,
+        state: this.#state,
+        message: decoded as Parameters<typeof mlsProcessMessage>[0]['message'],
+        callback: (): IncomingMessageAction => 'reject',
+      })
+      // Zeroed rather than assumed empty: the refusal path hands back nothing to retire today,
+      // and this must not become a way to leak retired key material if that ever changes.
+      zeroAll(result.consumed)
+      return result.kind === 'newState' && result.actionTaken === 'reject'
+    } catch {
+      return false
+    }
+  }
+
   /** The DID at a ratchet-tree leaf index, or undefined if that leaf is empty/unparsable. */
   #didOfLeaf(leafIndex: number): string | undefined {
     for (const member of this.#iterateMembers()) {
@@ -696,15 +872,35 @@ export class GroupHandle {
   }
 
   /**
-   * Read a Commit's MLS-authenticated committer against this handle, WITHOUT advancing
-   * state. `null` for bytes that are not a Commit.
+   * Read what a Commit says about itself against this handle, WITHOUT advancing state.
    *
-   * A member commit (PrivateMessage) has its committer encrypted under the epoch's
-   * sender-data secret: decrypt it to the sender leaf index and resolve that against this
-   * handle's ratchet tree — the same leaf->DID the commit policy sees as
-   * `didOfLeaf(senderLeafIndex)`. An external commit's committer rides its UpdatePath leaf
-   * instead (see {@link readExternalCommit}) — no tree lookup, no sender-data decrypt.
-   * `null` for anything that is neither.
+   * **`null` means "these bytes are not a Commit" and nothing else.** It does not mean "a
+   * Commit I could not read": callers file `null` as poison and step over it, so answering it
+   * for a Commit this handle merely cannot authenticate would make a reader treat every commit
+   * framed away from its own epoch as garbage — including the ones that say it fell behind.
+   *
+   * The two facts the header carries are NOT equally available, and the return type says so:
+   * - `epoch` is in the message's CLEARTEXT ({@link readMessageEpoch}). Keyless, so it is
+   *   readable for a Commit framed at any epoch — and unauthenticated, so it is the
+   *   publisher's word and may only be used to decide what to try.
+   * - `committerDID` needs the epoch's sender-data secret. A member commit (PrivateMessage)
+   *   has its committer encrypted under it: decrypt to the sender leaf index and resolve that
+   *   against this handle's ratchet tree — the same leaf->DID the commit policy sees as
+   *   `didOfLeaf(senderLeafIndex)`. Both the secret and the tree are THIS epoch's, so the
+   *   committer resolves only for a Commit framed where this handle stands, and is ABSENT
+   *   otherwise. Absent is "I cannot vouch for the author", never "there is no author": a
+   *   caller must not substitute an unauthenticated one.
+   *
+   * An external commit needs no epoch secret and no tree lookup — it is a public message and its
+   * committer's DID rides its own UpdatePath leaf (see {@link readExternalCommit}), which is also
+   * what makes it recognizable as external. It is NOT exempt from authentication. The credential
+   * carrying that DID is a plain field, so it is returned only once the commit's own self-signed
+   * signature verifies, and it is ABSENT otherwise — the same rule the member path follows, for
+   * the same reason. Verifiable only at this handle's own epoch, since MLS binds the GroupContext
+   * into what an external commit signs; a commit framed elsewhere reports no committer.
+   *
+   * `external: true` is reported either way: it is read from the wireformat and sender type, both
+   * cleartext, so it is as available as the epoch and says nothing about who authored the frame.
    *
    * Runs on the handle mutex so the epoch secret, tree, and epoch are one snapshot against a
    * concurrent processMessage. Non-mutating: sender-data decrypt is epoch-level and consumes
@@ -712,7 +908,7 @@ export class GroupHandle {
    */
   async readCommitHeader(
     commit: Uint8Array,
-  ): Promise<{ epoch: bigint; committerDID: string } | null> {
+  ): Promise<{ epoch: bigint; committerDID?: string; external?: boolean } | null> {
     return mutexFor(this).run(async () => {
       let decoded: unknown
       try {
@@ -730,21 +926,48 @@ export class GroupHandle {
 
       // External-join commit: the committer holds no pre-commit leaf, so its DID rides the
       // commit's own UpdatePath leaf. No tree lookup, no sender-data decrypt.
+      //
+      // `external: true` is reported, not just consumed to find the committer: a resync rejoin
+      // is invisible to every before/after diff a caller could run — it changes no member DID
+      // (the roster already held it) and no occupied leaf index (the new leaf lands on the
+      // leftmost blank, which is the one the resync just blanked). A caller that must know the
+      // group's membership shifted has no other way to see it, so the fact is surfaced here
+      // rather than discarded. Absent means a member commit.
       const external = readExternalCommit(decoded)
       if (external != null) {
-        return external.did == null ? null : { epoch, committerDID: external.did }
+        // It IS a commit, so it gets a header even when the leaf credential will not parse to a
+        // DID and even when the signature will not verify — the epoch is readable and the
+        // caller's epoch rows are entitled to it. Only the committer goes missing.
+        //
+        // The signature is checkable only where this handle holds the GroupContext the commit's
+        // signature is bound to, which is the epoch this handle stands at. A commit framed
+        // anywhere else comes back with no committer — indistinguishable, from here, from a
+        // forgery, and treated as one.
+        const authentic = external.did != null && (await this.#externalCommitAuthenticates(decoded))
+        return {
+          epoch,
+          external: true,
+          ...(authentic && { committerDID: external.did }),
+        }
       }
 
-      const pm = readPrivateCommitFrame(decoded)
-      if (pm == null) return null // non-commit frame
+      const pm = readPrivateFrame(decoded, contentTypes.commit)
+      // The ONLY "not a Commit" verdict on this path, and the only thing `null` is for: the
+      // frame is not a PrivateMessage of contentType commit. Both of those fields are cleartext,
+      // so this verdict needs no key and is the same at every epoch.
+      if (pm == null) return null
+      // From here the bytes ARE a commit, and every exit carries its epoch. The committer is
+      // what may be missing: sender-data is sealed under the epoch secret this handle holds
+      // right now, so a commit framed at any other epoch decrypts to nothing, and a leaf this
+      // tree does not hold resolves to nobody. Neither is a reason to call the frame garbage.
       const leafIndex = await readSenderLeafIndex(
         this.#context,
         this.#state.keySchedule.senderDataSecret,
         pm,
       )
-      if (leafIndex == null) return null
+      if (leafIndex == null) return { epoch }
       const committerDID = this.#didOfLeaf(leafIndex)
-      return committerDID == null ? null : { epoch, committerDID }
+      return committerDID == null ? { epoch } : { epoch, committerDID }
     })
   }
 

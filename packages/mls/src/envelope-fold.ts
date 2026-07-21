@@ -11,7 +11,7 @@ import {
 
 /**
  * The outcome of folding an envelope's control entries. On accept: the candidate
- * roster (base ∪ this envelope's group.role entries) and the non-group entries to
+ * roster (base ∪ this envelope's kumiai.role entries) and the non-group entries to
  * surface to the consumer, in envelope order. On reject: a reason and the offending
  * entry id. A rejection is a value — the caller turns it into a commit rejection.
  */
@@ -19,7 +19,7 @@ export type EnvelopeFoldResult =
   | { ok: true; roster: RosterState; surfaced: Array<VerifiedLedgerEntry> }
   | { ok: false; reason: string; entryID: string }
 
-const GROUP_TYPE_PREFIX = 'group.'
+export const GROUP_TYPE_PREFIX = 'kumiai.'
 
 function isRoleValue(value: unknown): value is GroupPermission {
   return value === 'admin' || value === 'member'
@@ -36,9 +36,9 @@ function isRoleValue(value: unknown): value is GroupPermission {
  *
  * One pass, one rule. `baseRoster` is the state folded from the ledger the handle
  * already holds; this reasons only about *this* envelope's new entries, using it as
- * the starting state-so-far and mutating a copy as `group.role` entries apply. Every
+ * the starting state-so-far and mutating a copy as `kumiai.role` entries apply. Every
  * entry's issuer must be an admin at its own position — the universal invariant that
- * subsumes `group.role`'s own authority rule. State-so-far, not a pre-commit
+ * subsumes `kumiai.role`'s own authority rule. State-so-far, not a pre-commit
  * snapshot, so an envelope of `[promote Bob, entry-issued-by-Bob]` is accepted.
  */
 export function foldEnvelope(
@@ -78,9 +78,9 @@ export function foldEnvelope(
       continue
     }
 
-    // `group.*` is reserved for @kumiai/mls; an unknown one fails closed.
+    // `kumiai.*` is reserved for @kumiai/mls; an unknown one fails closed.
     if (entry.type.startsWith(GROUP_TYPE_PREFIX)) {
-      return { ok: false, reason: 'unknown group.* type', entryID }
+      return { ok: false, reason: 'unknown kumiai.* type', entryID }
     }
 
     // Notarized (verified, admin-authored, group-scoped) and handed on unread.

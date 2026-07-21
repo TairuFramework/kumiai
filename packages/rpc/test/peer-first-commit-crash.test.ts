@@ -5,6 +5,7 @@ import type {
   LogHub,
 } from '@kumiai/hub-tunnel'
 import { describe, expect, test } from 'vitest'
+
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryCommitJournal } from './fixtures/journal.js'
@@ -130,10 +131,7 @@ async function crashBeforeTheHostAdopted(
  */
 function restart(hub: LogHub, recoverySecret: Uint8Array, seed: TestPeer): TestPeer {
   return makeMLSPeer(hub, 'alice', recoverySecret, {
-    mls: seed.mls,
-    crypto: seed.crypto,
-    journal: seed.journal,
-    welcomes: seed.welcomes,
+    restartOf: seed,
     adoptJournalled: (blob) => {
       adoptJournalledBlob(seed.mls, blob)
       seed.welcomes.push('dave')

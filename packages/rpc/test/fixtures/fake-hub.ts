@@ -1,4 +1,9 @@
-import { HeadMismatchError, NotSubscribedError, type StoredMessage } from '@kumiai/hub-protocol'
+import {
+  HeadMismatchError,
+  NotSubscribedError,
+  RetentionExceededError,
+  type StoredMessage,
+} from '@kumiai/hub-protocol'
 import type {
   HubFetchTopicParams,
   HubFetchTopicResult,
@@ -20,6 +25,28 @@ type Sink = {
  */
 function formatSequenceID(counter: number): string {
   return String(counter).padStart(12, '0')
+}
+
+/**
+ * 30 days in seconds — `createMemoryStore`'s own default ceiling. Kept in step deliberately: a
+ * fixture with a laxer ceiling than the store it stands in for silently stops modelling the one
+ * refusal that matters.
+ */
+export const DEFAULT_MAX_RETENTION = 2_592_000
+
+/**
+ * Per-topic log-class depth, matching `createMemoryStore`'s own default. Kept in step for the same
+ * reason the retention ceiling is: a fixture that retains unconditionally never produces a cursor
+ * below `oldest` on its own, so every path that must survive a trimmed log is only ever reached by
+ * a test that remembered to call `trim()` by hand.
+ */
+export const DEFAULT_MAX_DEPTH = 1000
+
+export type FakeHubOptions = {
+  /** Retention ceiling in seconds. Default {@link DEFAULT_MAX_RETENTION}. */
+  maxRetention?: number
+  /** Per-topic log-class depth before the oldest is evicted. Default {@link DEFAULT_MAX_DEPTH}. */
+  maxDepth?: number
 }
 
 /**
@@ -132,7 +159,57 @@ export class FakeHub implements LogHub {
     return { ...message, senderDID: this.#senderLie(message, readerDID) }
   }
 
+  /**
+   * The retention ceiling, in seconds. Defaults to the memory store's own
+   * ({@link DEFAULT_MAX_RETENTION}), so the default fixture refuses exactly what a default real
+   * hub refuses — a test that never mentions retention gets the operator's real answer, not an
+   * infinitely permissive one.
+   */
+  #maxRetention: number
+  /** Per-topic log-class depth bound. See {@link DEFAULT_MAX_DEPTH}. */
+  #maxDepth: number
+  /** One-shot transient failures to inject, per topic. See {@link FakeHub.failSubscribeOnce}. */
+  #transientFailures = new Map<string, number>()
+  /** Every subscribe ASKED FOR, per topic, refused or not — what a retry loop is counted with. */
+  #subscribeAttempts = new Map<string, number>()
+
+  constructor(options: FakeHubOptions = {}) {
+    this.#maxRetention = options.maxRetention ?? DEFAULT_MAX_RETENTION
+    this.#maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH
+  }
+
+  /**
+   * Make the next `count` subscribes to `topicID` fail with a transport error — a hub that is
+   * unreachable rather than one that has answered. The distinction is the whole retry policy: a
+   * caller must retry this and must NOT retry a RetentionExceededError.
+   */
+  failSubscribeOnce(topicID: string, count = 1): void {
+    this.#transientFailures.set(topicID, (this.#transientFailures.get(topicID) ?? 0) + count)
+  }
+
+  /**
+   * Refuses a retention above the ceiling, exactly as `createMemoryStore` does
+   * (`hub-server/src/memoryStore.ts`) and as the conformance suite asserts of any real store. An
+   * infallible fixture cannot model a hub saying no, and a subscribe that cannot fail is a
+   * subscribe whose failure handling is never executed — which is precisely how the mux came to
+   * swallow every one of them unnoticed.
+   *
+   * Throws SYNCHRONOUSLY, which `HubBase.subscribe` allows (`Promise<void> | void`): a caller that
+   * only catches a rejection is as broken as one that catches nothing, and the fixture should be
+   * able to show that.
+   */
   subscribe(subscriberDID: string, topicID: string, options?: HubSubscribeOptions): void {
+    this.#subscribeAttempts.set(topicID, (this.#subscribeAttempts.get(topicID) ?? 0) + 1)
+    const pending = this.#transientFailures.get(topicID) ?? 0
+    if (pending > 0) {
+      this.#transientFailures.set(topicID, pending - 1)
+      throw new Error(`FakeHub: subscribe to ${topicID} failed (injected transport failure)`)
+    }
+    if (options?.retention != null && options.retention > this.#maxRetention) {
+      throw new RetentionExceededError(
+        `Requested retention of ${options.retention}s exceeds the maximum of ${this.#maxRetention}s`,
+      )
+    }
     let set = this.#topics.get(topicID)
     if (set == null) {
       set = new Set()
@@ -177,6 +254,11 @@ export class FakeHub implements LogHub {
       senderDID: params.senderDID,
       topicID: params.topicID,
       payload: params.payload,
+      // A log-class frame carries its place in the topic's log wherever it is handed out — pushed
+      // or pulled. This hub mints one sequence for both classes, so that place IS the sequenceID
+      // here; what the contract fixes is that a reader is TOLD it rather than assuming the two
+      // sequences coincide. A mailbox frame has no place in a log and carries no key at all.
+      ...(params.retain === 'log' ? { logPosition: sequenceID } : {}),
     }
     this.published.push(message)
 
@@ -190,6 +272,20 @@ export class FakeHub implements LogHub {
     if (params.retain === 'log') {
       this.#logClass.add(sequenceID)
       this.#heads.set(params.topicID, sequenceID)
+      // The depth bound, as the store enforces it: a trim like any other — it moves `oldest` and
+      // leaves the head alone — counting LOG frames only. A mailbox frame is bounded by ack and
+      // age, not depth; counting it here would let any member evict the commit log with a mailbox
+      // flood. Only a log publish can push the log-class count over the bound.
+      let logDepth = log.reduce(
+        (count, m) => (this.#logClass.has(m.sequenceID) ? count + 1 : count),
+        0,
+      )
+      while (logDepth > this.#maxDepth) {
+        const index = log.findIndex((m) => this.#logClass.has(m.sequenceID))
+        if (index === -1) break
+        log.splice(index, 1)
+        logDepth--
+      }
     }
 
     // An accepted log frame is retained AND pushed — the push is not an alternative to
@@ -319,6 +415,11 @@ export class FakeHub implements LogHub {
   /** The topic's head: the last accepted log publish, or null. */
   head(topicID: string): string | null {
     return this.#heads.get(topicID) ?? null
+  }
+
+  /** How many times a subscribe to this topic was attempted, refused or not. */
+  subscribeAttempts(topicID: string): number {
+    return this.#subscribeAttempts.get(topicID) ?? 0
   }
 
   /** The retention in seconds this topic was last subscribed with. */

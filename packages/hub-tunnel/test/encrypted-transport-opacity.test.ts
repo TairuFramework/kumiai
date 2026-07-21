@@ -3,7 +3,6 @@ import { describe, expect, test } from 'vitest'
 
 import { createEncryptedHubTunnelTransport } from '../src/encrypted-transport.js'
 import { decodeEnvelope } from '../src/envelope.js'
-
 import { FakeEncryptor } from './fixtures/fake-encryptor.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 
@@ -16,7 +15,7 @@ type Msg = {
 }
 
 describe('createEncryptedHubTunnelTransport wire opacity', () => {
-  test('hub/publish payload bytes contain no plaintext frame fields or body markers', async () => {
+  test('hub/v1/publish payload bytes contain no plaintext frame fields or body markers', async () => {
     const hub = new FakeHub()
     const sessionID = 'session-opacity'
     const groupID = 'group-opacity'

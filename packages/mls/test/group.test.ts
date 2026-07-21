@@ -1146,7 +1146,7 @@ describe('GroupHandle control state', () => {
     const { group } = await createGroup(alice, 'promote')
 
     const token = await signLedgerEntry(alice, {
-      type: 'group.role',
+      type: 'kumiai.role',
       groupID: group.groupID,
       subject: bob.id,
       value: 'admin',
@@ -1172,14 +1172,14 @@ describe('GroupHandle control state', () => {
 
     // Signed for a different group — a replayed grant, dropped on the groupID guard.
     const crossGroup = await signLedgerEntry(alice, {
-      type: 'group.role',
+      type: 'kumiai.role',
       groupID: 'some-other-group',
       subject: bob.id,
       value: 'admin',
     })
     // Signed by a non-admin — authority fails against the seeded roster.
     const memberSigned = await signLedgerEntry(bob, {
-      type: 'group.role',
+      type: 'kumiai.role',
       groupID: group.groupID,
       subject: charlie.id,
       value: 'admin',
@@ -1196,7 +1196,7 @@ describe('GroupHandle control state', () => {
     const { group: aliceGroup } = await createGroup(alice, 'derived-ledger')
 
     const promoteBob = await signLedgerEntry(alice, {
-      type: 'group.role',
+      type: 'kumiai.role',
       groupID: aliceGroup.groupID,
       subject: bob.id,
       value: 'admin',
@@ -1244,7 +1244,7 @@ describe('GroupHandle control state', () => {
     const { group, credential } = await createGroup(alice, 'rehydrate')
 
     const token = await signLedgerEntry(alice, {
-      type: 'group.role',
+      type: 'kumiai.role',
       groupID: group.groupID,
       subject: bob.id,
       value: 'admin',
@@ -1451,7 +1451,7 @@ describe('GroupHandle commit enforcement (default-on)', () => {
     })
 
     const roleToken = await signLedgerEntry(alice, {
-      type: 'group.role',
+      type: 'kumiai.role',
       groupID,
       subject: bob.id,
       value: 'admin',
@@ -1480,7 +1480,7 @@ describe('GroupHandle commit enforcement (default-on)', () => {
     const { alice, bob, aliceGroup, bobGroup, groupID } = await twoMemberGroup()
 
     const roleToken = await signLedgerEntry(alice, {
-      type: 'group.role',
+      type: 'kumiai.role',
       groupID,
       subject: bob.id,
       value: 'admin',
@@ -1528,7 +1528,7 @@ describe('GroupHandle commit enforcement (default-on)', () => {
     })
 
     const bobToken = await signLedgerEntry(bob, {
-      type: 'group.role',
+      type: 'kumiai.role',
       groupID,
       subject: bob.id,
       value: 'admin',
@@ -1656,7 +1656,7 @@ describe('GroupHandle commit enforcement (caller policy override)', () => {
     void bob
 
     const roleToken = await signLedgerEntry(alice, {
-      type: 'group.role',
+      type: 'kumiai.role',
       groupID,
       subject: bob.id,
       value: 'admin',
@@ -1685,7 +1685,7 @@ describe('GroupHandle authority is state-so-far, not post-commit', () => {
     // missing body: the issuer is judged against the state so far, where Bob is
     // not an admin, so the whole commit is rejected. Bob cannot lift himself.
     const selfPromote = await signLedgerEntry(bob, {
-      type: 'group.role',
+      type: 'kumiai.role',
       groupID,
       subject: bob.id,
       value: 'admin',
@@ -1713,7 +1713,7 @@ describe('GroupHandle authority is state-so-far, not post-commit', () => {
     // candidate roster makes Bob admin — but the Add's sender authority is judged
     // against the base roster, where Bob is still a member, so it is rejected.
     const promoteBob = await signLedgerEntry(alice, {
-      type: 'group.role',
+      type: 'kumiai.role',
       groupID,
       subject: bob.id,
       value: 'admin',
@@ -1742,7 +1742,7 @@ describe('GroupHandle authority is state-so-far, not post-commit', () => {
     })
 
     const promoteBob = await signLedgerEntry(alice, {
-      type: 'group.role',
+      type: 'kumiai.role',
       groupID,
       subject: bob.id,
       value: 'admin',
@@ -1896,7 +1896,7 @@ describe('an invite carries the group ledger', () => {
     const { group: aliceGroup } = await createGroup(alice, 'ledger-before-join')
 
     const promoteBob = await signLedgerEntry(alice, {
-      type: 'group.role',
+      type: 'kumiai.role',
       groupID: aliceGroup.groupID,
       subject: bob.id,
       value: 'admin',
@@ -1937,7 +1937,7 @@ describe('an invite carries the group ledger', () => {
     const dave = randomIdentity()
 
     const promoteBob = await signLedgerEntry(alice, {
-      type: 'group.role',
+      type: 'kumiai.role',
       groupID,
       subject: bob.id,
       value: 'admin',
@@ -1991,7 +1991,7 @@ describe('an invite carries the group ledger', () => {
     const carol = randomIdentity()
 
     const promoteBob = await signLedgerEntry(alice, {
-      type: 'group.role',
+      type: 'kumiai.role',
       groupID,
       subject: bob.id,
       value: 'admin',
@@ -2035,7 +2035,7 @@ describe('an invite carries the group ledger', () => {
     const { group: aliceGroup } = await createGroup(alice, 'token-roundtrip')
 
     const promoteBob = await signLedgerEntry(alice, {
-      type: 'group.role',
+      type: 'kumiai.role',
       groupID: aliceGroup.groupID,
       subject: bob.id,
       value: 'admin',
@@ -2071,7 +2071,7 @@ describe('an invite carries the group ledger', () => {
     // Bob is only a member: his role entry verifies, but authority is rooted at the
     // anchor and grows only through admins-so-far, so no fold will ever apply it.
     const bobPromotesCarol = await signLedgerEntry(bob, {
-      type: 'group.role',
+      type: 'kumiai.role',
       groupID,
       subject: carol.id,
       value: 'admin',
@@ -2105,13 +2105,13 @@ describe('an invite carries the group ledger', () => {
     const { group: aliceGroup } = await createGroup(alice, 'ordered-ledger')
 
     const promoteBob = await signLedgerEntry(alice, {
-      type: 'group.role',
+      type: 'kumiai.role',
       groupID: aliceGroup.groupID,
       subject: bob.id,
       value: 'admin',
     })
     const demoteBob = await signLedgerEntry(alice, {
-      type: 'group.role',
+      type: 'kumiai.role',
       groupID: aliceGroup.groupID,
       subject: bob.id,
       value: 'member',
@@ -2275,7 +2275,7 @@ describe("a non-creator admin's invite authority follows the roster", () => {
 
     // Alice promotes Bob: he is now an admin the group agrees on, though not the creator.
     const promoteBob = await signLedgerEntry(alice, {
-      type: 'group.role',
+      type: 'kumiai.role',
       groupID,
       subject: bob.id,
       value: 'admin',
@@ -2319,13 +2319,13 @@ describe("a non-creator admin's invite authority follows the roster", () => {
     const carol = randomIdentity()
 
     const promoteBob = await signLedgerEntry(alice, {
-      type: 'group.role',
+      type: 'kumiai.role',
       groupID,
       subject: bob.id,
       value: 'admin',
     })
     const demoteBob = await signLedgerEntry(alice, {
-      type: 'group.role',
+      type: 'kumiai.role',
       groupID,
       subject: bob.id,
       value: 'member',

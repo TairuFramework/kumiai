@@ -7,33 +7,30 @@ import type {
 } from 'ts-mls'
 import { defaultProposalTypes, isDefaultProposal } from 'ts-mls'
 
-import { LEDGER_HEAD_EXTENSION_TYPE } from './anchor.js'
+import { LEDGER_HEAD_EXTENSION_TYPE, RESERVED_EXTENSION_TYPE } from './anchor.js'
 import type { RosterState } from './roster.js'
 
 /**
- * Everything the receiving-side gate needs, resolved by the caller. Pure: no
- * group handle, no I/O. `didOfLeaf` maps a pre-commit ratchet-tree leaf index to
- * its member DID (undefined for an empty or unresolvable leaf).
- * `currentExtensions` is the pre-commit GroupContext extension list, the baseline
- * the group-context-extensions rule pins. `externalCommitDID` is the DID resolved
- * from an external commit's UpdatePath leaf (precomputed by the caller); undefined
- * for a non-external commit.
+ * Everything the receiving-side gate needs, resolved by the caller. Pure: no group handle, no
+ * I/O. `didOfLeaf` maps a pre-commit leaf index to its member DID (undefined if unresolvable).
+ * `currentExtensions` is the pre-commit extension list the group-context-extensions rule pins
+ * against. `externalCommitDID` is the DID resolved from an external commit's UpdatePath leaf
+ * (precomputed by the caller); undefined for a non-external commit.
  */
 export type CommitPolicyContext = {
-  /** Roster before this commit applies. Judges every proposal sender's authority:
-   *  a promotion riding this same commit does not grant its subject commit authority. */
+  /** Roster before the commit. Judges every sender's authority — a promotion riding this same
+   *  commit doesn't grant its subject commit authority. */
   baseRoster: RosterState
-  /** Roster after foldEnvelope applies this commit's group.role entries. Judges the
-   *  removed target: a Remove of a leaf still `admin` here carried no demotion and is rejected. */
+  /** Roster after foldEnvelope applies this commit's kumiai.role entries. Judges the removed
+   *  target: a Remove of a leaf still `admin` here carried no demotion and is rejected. */
   candidateRoster: RosterState
   didOfLeaf: (leafIndex: number) => string | undefined
-  /** The pre-commit GroupContext extension list. A group_context_extensions commit
-   *  may change nothing in it but the ledger_head entry. */
+  /** The pre-commit GroupContext extension list. A group_context_extensions commit may change
+   *  nothing in it but the ledger_head entry. */
   currentExtensions: Array<GroupContextExtension>
-  /** The head extension bytes this commit must install: the current head extended by
-   *  the commit's envelope entry ids, in envelope order. Equals the current head when
-   *  the commit enacts nothing, so a commit that moves the head without enacting
-   *  anything is rejected too. */
+  /** The head extension bytes this commit must install: the current head extended by the
+   *  commit's envelope entry ids, in order. Equals the current head when the commit enacts
+   *  nothing, so a commit that moves the head without enacting anything is rejected too. */
   expectedHeadExtensionData: Uint8Array
   /** Whether the commit's envelope names any entries. */
   commitEnactsEntries: boolean
@@ -58,9 +55,8 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
 }
 
 /**
- * Fail-closed admin check: a leaf that resolves to no DID, or a DID absent from
- * the roster, or one holding any role but `admin`, is not an admin. An undefined
- * leaf (external commit with no committer leaf) is never an admin.
+ * Fail-closed admin check: no DID, a DID absent from the roster, or any role but `admin`, is
+ * not admin. An undefined leaf (external commit with no committer) is never admin.
  */
 function isAdmin(context: CommitPolicyContext, leafIndex: number | undefined): boolean {
   if (leafIndex === undefined) {
@@ -74,20 +70,19 @@ function isAdmin(context: CommitPolicyContext, leafIndex: number | undefined): b
 }
 
 /**
- * The group-context-extensions rule: an admin may replace the extension list
- * only to move the ledger-head extension to the head this commit's envelope
- * accounts for. A GCE proposal replaces the *entire* list, so the proposed list
- * must positionally equal the current list — same length, same extension types in
- * the same positions, byte-identical data — with the single exception of the
- * ledger_head entry, whose data must equal the expected head. This pins the anchor
- * and every other extension: an admin cannot inject or strip an extension (e.g.
- * external_senders, which grants a non-member the ability to inject proposals)
- * inside an otherwise-valid head move.
+ * The group-context-extensions rule: an admin may replace the extension list only to move the
+ * ledger-head to the head this commit's envelope accounts for, or to also install
+ * {@link RESERVED_EXTENSION_TYPE} empty. A GCE proposal replaces the *entire* list, so the
+ * proposed list must positionally equal the current one — same length, types, positions,
+ * byte-identical data — except the ledger_head entry (must equal the expected head) and at
+ * most one added `RESERVED_EXTENSION_TYPE` entry with empty data. This pins every other
+ * extension, so an admin can't inject or strip one (e.g. external_senders, which lets a
+ * non-member inject proposals) inside a head move, nor install the reserved type with
+ * non-empty data — it isn't consumed by anything yet, so no policy exists for its data.
  *
- * The head must equal the current head extended by the envelope's entry ids, in
- * envelope order. A head moved to anything else — including moved at all by a
- * commit that enacts nothing — would stop proving which entries the group has
- * enacted, which is the omission hole the head exists to close.
+ * The head must equal the current head extended by the envelope's entry ids in order; moved to
+ * anything else, or moved by a commit enacting nothing, and it stops proving what the group
+ * enacted.
  */
 function evaluateGroupContextExtensions(
   extensions: Array<{ extensionType: number; extensionData: unknown }>,
@@ -101,18 +96,36 @@ function evaluateGroupContextExtensions(
         }
       : ext,
   )
-  if (extensions.length !== expected.length) return 'reject'
+  // The only freedom beyond the head move: one added RESERVED_EXTENSION_TYPE entry with empty
+  // data, and only if not already installed — an install, not a second copy. Strip it, if
+  // present, before the positional compare below; every other difference falls through and is
+  // rejected as before.
+  let candidate = extensions
+  const reservedAlreadyInstalled = expected.some(
+    (ext) => ext.extensionType === RESERVED_EXTENSION_TYPE,
+  )
+  if (!reservedAlreadyInstalled && extensions.length === expected.length + 1) {
+    const reservedIndex = extensions.findIndex((ext) => {
+      return (
+        ext.extensionType === RESERVED_EXTENSION_TYPE &&
+        ext.extensionData instanceof Uint8Array &&
+        ext.extensionData.length === 0
+      )
+    })
+    if (reservedIndex !== -1) {
+      candidate = extensions.slice(0, reservedIndex).concat(extensions.slice(reservedIndex + 1))
+    }
+  }
+  if (candidate.length !== expected.length) return 'reject'
   for (let i = 0; i < expected.length; i++) {
-    const got = extensions[i]
+    const got = candidate[i]
     const want = expected[i]
     if (got.extensionType !== want.extensionType) return 'reject'
-    // Both sides must be raw bytes to byte-compare. ts-mls's own extensionsEqual
-    // is not re-exported, so this hand-rolled compare only handles Uint8Array
-    // extensionData; a default-typed (decoded-object) extension — e.g.
-    // external_senders or required_capabilities — fails the instanceof guard and
-    // is rejected even when it is an honest, unmodified carry-over. That is
-    // fail-closed liveness, not a security gap: no group in this repo anchors
-    // such an extension today. Revisit this compare if one is introduced.
+    // Both sides must be raw bytes to compare. ts-mls's extensionsEqual isn't re-exported, so
+    // this hand-rolled compare only handles Uint8Array data; a decoded-object extension (e.g.
+    // external_senders, required_capabilities) fails the instanceof guard and is rejected even
+    // if unmodified — fail-closed liveness, not a security gap, since no group here anchors one
+    // today. Revisit if one is introduced.
     if (
       !(got.extensionData instanceof Uint8Array) ||
       !(want.extensionData instanceof Uint8Array) ||
@@ -125,10 +138,8 @@ function evaluateGroupContextExtensions(
 }
 
 /**
- * Apply one proposal's row using the given effective sender. Unknown or custom
- * proposal types fail closed. `external_init` is evaluated at the commit level,
- * never here, so it rejects if it reaches a per-proposal row (a standalone
- * external_init).
+ * Apply one proposal's row for the given effective sender. Unknown/custom types fail closed.
+ * `external_init` is judged at the commit level, never here — a standalone one rejects.
  */
 function evaluateProposal(
   proposal: Proposal,
@@ -144,10 +155,9 @@ function evaluateProposal(
     case defaultProposalTypes.reinit:
       return isAdmin(context, effectiveSender) ? 'accept' : 'reject'
     case defaultProposalTypes.remove: {
-      // A removed admin must have been demoted in this same envelope: the candidate
-      // roster then shows them `member`. Still `admin` here means no demotion rode the
-      // commit. Checked before the self-removal shortcut, so an admin cannot self-remove
-      // without demoting itself.
+      // A removed admin must have been demoted in this same envelope — still `admin` in the
+      // candidate roster means no demotion rode the commit. Checked before the self-removal
+      // shortcut, so an admin can't self-remove without demoting itself.
       const removedDID = context.didOfLeaf(proposal.remove.removed)
       if (
         removedDID !== undefined &&
@@ -174,11 +184,10 @@ function evaluateProposal(
 }
 
 /**
- * The whole-commit external-init rule. An external commit joins by proving
- * control of a roster DID's key and removing that DID's stale leaf, so it is
- * accepted only when `externalCommitDID` is a roster member and the commit's
- * proposals are exactly one `external_init` plus one `remove` of the leaf whose
- * DID equals `externalCommitDID` — nothing else.
+ * The whole-commit external-init rule. An external commit joins by proving control of a
+ * roster DID's key and removing that DID's stale leaf: accepted only when `externalCommitDID`
+ * is a roster member and the proposals are exactly one `external_init` plus one `remove` of the
+ * leaf whose DID matches — nothing else.
  */
 function evaluateExternalCommit(
   proposals: Array<ProposalWithSender>,
@@ -212,21 +221,18 @@ function evaluateExternalCommit(
 }
 
 /**
- * Pure receiving-side commit policy. Given the resolved context, decides whether
- * an incoming commit or standalone proposal is admissible. Never throws.
+ * Pure receiving-side commit policy: given the resolved context, decides whether an incoming
+ * commit or standalone proposal is admissible. Never throws.
  *
- * Per proposal the effective sender is the proposal's own `senderLeafIndex` when
- * present, else the committer's — a commit may carry by-reference proposals
- * authored by other members, so checking only the committer would let an admin
- * launder a member's Remove. A commit is accepted only when every proposal
- * passes its row; the first failing proposal rejects the whole commit. A commit
- * with no proposals is a key rotation any member may make. When any proposal is
- * an `external_init`, the whole commit is judged by the external-init rule rather
- * than the per-proposal loop.
+ * Per proposal, the effective sender is its own `senderLeafIndex` if present, else the
+ * committer's — a commit may carry by-reference proposals from other members, so checking only
+ * the committer would let an admin launder a member's Remove. Every proposal must pass its row
+ * or the whole commit rejects; no proposals is a key rotation any member may make. An
+ * `external_init` anywhere routes the whole commit to the external-init rule instead of the
+ * per-proposal loop.
  *
- * One rule is not a proposal's own: a commit that enacts ledger entries must carry
- * a group-context-extensions proposal, or it would enact entries without moving the
- * head, and the head would stop covering the ledger.
+ * One rule isn't a proposal's own: a commit enacting ledger entries must carry a
+ * group-context-extensions proposal, or entries would be enacted without moving the head.
  */
 export function defaultCommitPolicy(
   incoming: IncomingMessage,
@@ -264,10 +270,9 @@ export function defaultCommitPolicy(
 }
 
 /**
- * Thrown by the caller's resolver path when the entry bodies an envelope names
- * cannot be resolved from the ledger. Carries the unresolved ids. Defined here
- * because it belongs to the commit-policy resolution boundary, but it is never
- * thrown by {@link defaultCommitPolicy}, which is pure and total.
+ * Thrown by the caller's resolver when an envelope names entry ids the ledger can't resolve.
+ * Belongs to the commit-policy resolution boundary, but {@link defaultCommitPolicy} itself is
+ * pure and total, and never throws it.
  */
 export class MissingLedgerEntriesError extends Error {
   #ids: Array<string>

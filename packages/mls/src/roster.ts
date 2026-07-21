@@ -7,7 +7,7 @@ import { type FoldDrop, type FoldInput, foldLedger, type LedgerReducer } from '.
 export type GroupPermission = 'admin' | 'member'
 
 /** The ledger entry `type` the roster projects. */
-export const ROLE_ENTRY_TYPE = 'group.role'
+export const ROLE_ENTRY_TYPE = 'kumiai.role'
 
 /** A role claim's value: the permission the subject is granted. */
 export type RoleValue = GroupPermission
@@ -55,7 +55,7 @@ export const roleReducer: LedgerReducer<RoleValue, RosterState> = {
 }
 
 /**
- * Fold a group's `group.role` ledger into the current roster.
+ * Fold a group's `kumiai.role` ledger into the current roster.
  *
  * The reducer cannot filter by `groupID` on its own — the anchor carries no
  * group id — so the group is passed explicitly and closed over here: an entry

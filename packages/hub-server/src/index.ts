@@ -1,6 +1,7 @@
 export type {
-  AuthorizeAction,
+  AuthorizeDecision,
   AuthorizeHook,
+  AuthorizeRequest,
   CreateHandlersParams,
   HubRateLimits,
   KeyPackageFetchLimits,

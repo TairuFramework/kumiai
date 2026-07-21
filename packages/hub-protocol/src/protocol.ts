@@ -1,7 +1,13 @@
 import type { ProtocolDefinition } from '@enkaku/protocol'
 
+/**
+ * Namespaced `hub/v1/*` so the series stays regular: a future shape change ships as a new
+ * versioned procedure (`hub/v2/publish`, say) — additive in an enkaku protocol — never by
+ * widening an existing schema. Every `additionalProperties: false` below stays sealed; if a
+ * later change wants a wider param or result, it belongs on a new procedure, not here.
+ */
 export const hubProtocol = {
-  'hub/publish': {
+  'hub/v1/publish': {
     type: 'request',
     description: 'Publish an opaque message to a topic; fans out to current subscribers',
     param: {
@@ -31,7 +37,7 @@ export const hubProtocol = {
       additionalProperties: false,
     },
   },
-  'hub/subscribe': {
+  'hub/v1/subscribe': {
     type: 'request',
     description: 'Subscribe to a topic, creating a durable inbox for the caller',
     param: {
@@ -56,7 +62,7 @@ export const hubProtocol = {
       additionalProperties: false,
     },
   },
-  'hub/unsubscribe': {
+  'hub/v1/unsubscribe': {
     type: 'request',
     description: "Unsubscribe from a topic, dropping the caller's inbox for it",
     param: {
@@ -76,7 +82,7 @@ export const hubProtocol = {
       additionalProperties: false,
     },
   },
-  'hub/topic/fetch': {
+  'hub/v1/topic/fetch': {
     type: 'request',
     description:
       "Pull a topic's log. Gated on subscription: the caller is the authenticated DID, never a wire field, so a member cannot read a topic's log by naming someone else",
@@ -117,7 +123,7 @@ export const hubProtocol = {
       additionalProperties: false,
     },
   },
-  'hub/receive': {
+  'hub/v1/receive': {
     type: 'channel',
     description:
       'Bidirectional mailbox channel — hub pushes messages across all subscribed topics, device pushes acks',
@@ -147,6 +153,14 @@ export const hubProtocol = {
         senderDID: { type: 'string' },
         topicID: { type: 'string' },
         payload: { type: 'string', contentEncoding: 'base64' },
+        /**
+         * Where the frame sits in its topic's log — the position `hub/v1/topic/fetch` serves it at.
+         * Present iff the frame is log-class; a mailbox frame has no place in a log and carries no
+         * key. `sequenceID` above names a place in THIS recipient's delivery queue instead, which is
+         * a different sequence, so a reader advancing a log cursor over a pushed frame reads this
+         * and never that.
+         */
+        logPosition: { type: 'string', maxLength: 64 },
       },
       required: ['sequenceID', 'senderDID', 'topicID', 'payload'],
       additionalProperties: false,
@@ -157,7 +171,7 @@ export const hubProtocol = {
       additionalProperties: false,
     },
   },
-  'hub/keypackage/upload': {
+  'hub/v1/keypackage/upload': {
     type: 'request',
     description: 'Upload key packages for later retrieval',
     param: {
@@ -182,7 +196,7 @@ export const hubProtocol = {
       additionalProperties: false,
     },
   },
-  'hub/keypackage/fetch': {
+  'hub/v1/keypackage/fetch': {
     type: 'request',
     description: 'Fetch and consume key packages for a DID',
     param: {

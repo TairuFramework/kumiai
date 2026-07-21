@@ -11,11 +11,20 @@ import {
 const DEFAULT_JITTER_MS = 250
 const DEFAULT_SUPPRESS_TTL_MS = 30_000
 
-type ReplyData = { kind: 'res'; rid: string; from: string; ok?: unknown; err?: string }
+// Hand-copied from `@kumiai/broadcast`'s `ReplyData`/`RequestData` and changes with them. The
+// reply body names no sender: see the doc on the broadcast type. The sender rides at the
+// transport level, where only an authenticating `unwrap` may set it.
+type ReplyData = { kind: 'res'; rid: string; ok?: unknown; err?: string }
 type RequestData = { kind: 'req'; rid: string; prm: unknown; gather?: boolean }
 
 export type GroupBusServerParams = {
   transport: TransportType<BroadcastMessage, BroadcastMessage>
+  /**
+   * This server's own name, for buses with no authenticated sender. Written as the outgoing
+   * message's transport-level `senderDID`, never into a reply body; over MLS the receiver's
+   * `unwrap` overwrites it and it never reaches a consumer. Mirrors
+   * `BroadcastResponderParams.from`.
+   */
   from: string
   /** Fire-and-forget event procedures: prc -> handler(data, senderDID). */
   eventHandlers: Record<string, (data: unknown, senderDID?: string) => void | Promise<void>>
@@ -31,6 +40,8 @@ export type GroupBusServerParams = {
  * jitter + observe-and-suppress storm-collapse as `createBroadcastResponder`),
  * forwarding the unwrap-recovered `senderDID` to both.
  */
+type InboundData = { kind?: string; rid?: string; prm?: unknown; gather?: boolean }
+
 export function createGroupBusServer(params: GroupBusServerParams): {
   dispose: () => Promise<void>
 } {
@@ -62,12 +73,11 @@ export function createGroupBusServer(params: GroupBusServerParams): {
     let reply: ReplyData
     try {
       const ok = await handler(request.prm, { senderDID })
-      reply = { kind: 'res', rid: request.rid, from, ok }
+      reply = { kind: 'res', rid: request.rid, ok }
     } catch (error) {
       reply = {
         kind: 'res',
         rid: request.rid,
-        from,
         err: error instanceof Error ? error.message : String(error),
       }
     }
@@ -75,10 +85,10 @@ export function createGroupBusServer(params: GroupBusServerParams): {
       ? (handler.suppress.suppressTtlMs ?? DEFAULT_SUPPRESS_TTL_MS)
       : DEFAULT_SUPPRESS_TTL_MS
     if (!isGather) markReplied(request.rid, ttlMs)
-    await transport.write({ payload: { typ: 'event', prc, data: reply } }).catch(() => {})
+    await transport
+      .write({ payload: { typ: 'event', prc, data: reply }, senderDID: from })
+      .catch(() => {})
   }
-
-  type InboundData = { kind?: string; rid?: string; prm?: unknown; gather?: boolean }
 
   void (async () => {
     for await (const msg of transport) {

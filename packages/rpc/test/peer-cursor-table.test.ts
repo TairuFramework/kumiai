@@ -300,6 +300,48 @@ describe('a hostile commit cannot make an honest peer do expensive work', () => 
 
     await bob.peer.dispose()
   })
+
+  test('a forged epoch claim buys exactly ONE heal per frame, and does not wedge or loop', async () => {
+    const hub = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x4a)
+    const bob = makeMLSPeer(hub, 'bob', rs, { members, recovery: fastRecovery })
+    await flush()
+    const healthy = bob.mls.epoch()
+
+    // The `ahead` row is decided on the commit's CLEARTEXT epoch, because the committer needs a
+    // secret a fallen-behind peer does not have. So mallory can claim any epoch she likes, and
+    // this is the bill: one publish, one heal, from every peer that reads it. It is accepted
+    // rather than closed because it cannot be closed — any signal that says "you fell out of the
+    // group" is one a peer outside the group cannot authenticate — and because it is not new:
+    // an EXTERNAL commit's header needs no secret at all, so this exact frame with `external`
+    // set has always reached this row.
+    await publishCommit({
+      hub,
+      senderDID: 'mallory',
+      recoverySecret: rs,
+      epoch: 0,
+      commit: encodeMemoryCommit(healthy + 999, 'mallory', []),
+    })
+    await flush(300)
+
+    // What is bounded is the AMOUNT. The frame is stepped over before the heal is asked for, so
+    // it is read once and never again: one heal, not a rejoin loop, and not a peer that re-reads
+    // the lie on every wakeup it will ever have. That bound is the whole reason this is
+    // survivable, and it is what this assertion protects.
+    expect(heals(hub, rs)).toHaveLength(1)
+    // And the peer landed back on the group's real epoch, not on the forged one.
+    expect(bob.mls.epoch()).toBeLessThan(healthy + 999)
+
+    // The lane is not wedged behind it either: the group's next honest commit lands and applies.
+    const before = bob.mls.epoch()
+    await publishCommit({ hub, senderDID: 'alice', recoverySecret: rs, epoch: before })
+    await flush(200)
+    expect(bob.mls.epoch()).toBe(before + 1)
+    // Still one heal. The forged frame did not come back.
+    expect(heals(hub, rs)).toHaveLength(1)
+
+    await bob.peer.dispose()
+  })
 })
 
 describe('a peer that must recover before it can commit', () => {

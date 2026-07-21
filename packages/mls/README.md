@@ -7,7 +7,7 @@ Credential-aware MLS (RFC 9420) group lifecycle for enkaku. Wraps [`ts-mls`](htt
 - `createGroup` — creator opens a new group as its sole member and first admin
 - `createInvite` + `commitInvite` — an admin signs the invitee's role entry and produces the MLS Commit + Welcome
 - `processWelcome` — invitee joins after folding the ledger the invite carries and checking its head
-- `commitLedgerEntries` — an admin promotes or demotes by committing signed `group.role` entries
+- `commitLedgerEntries` — an admin promotes or demotes by committing signed `kumiai.role` entries
 - `removeMember` — an admin evicts a leaf and rotates keys
 - `restoreGroup` — rehydrate a `GroupHandle` from persisted `ClientState` and the stored ledger tokens
 - `exportGroupInfo` + `joinGroupExternal` — stale-device self-rejoin (see below)
@@ -16,7 +16,7 @@ Credential-aware MLS (RFC 9420) group lifecycle for enkaku. Wraps [`ts-mls`](htt
 
 Authority is a **roster**, folded from a signed **control ledger** and rooted at a genesis anchor installed in the GroupContext when the group is created. There is no capability chain: a member's right to act is decided by the roster every peer computes independently, not by a token the member carries.
 
-- **The ledger is an ordered log of enactments.** Each entry is a token signed by its issuer (a `group.role` entry names a subject DID and grants `admin` or `member`). The log is replayable and position-dependent: the same claim recurring later is meaningful — a demotion back to a previously-held role is exactly that.
+- **The ledger is an ordered log of enactments.** Each entry is a token signed by its issuer (a `kumiai.role` entry names a subject DID and grants it `admin` or `member` of the group). The log is replayable and position-dependent: the same claim recurring later is meaningful — a demotion back to a previously-held role is exactly that.
 - **The roster is the fold.** `foldRoster` applies each entry only if its issuer was an admin *in the state so far, at that entry's own position*. A token signed by a since-demoted admin is dead paper whoever carries it. The fold starts from the anchor (`{creator: 'admin'}`), so no one can promote themselves by padding an invite.
 - **Enactment is admin-only, structurally.** Entries reach the group inside a commit, and a commit that enacts entries must extend the GroupContext ledger-head extension by exactly those ids, in order. Moving the head needs a `group_context_extensions` proposal, which needs admin. A plain member's only permitted proposal is `update`; attaching an envelope to it fails for want of a head move. The write path runs the receivers' own fold before authoring, so it never builds a commit the group would reject.
 - **`GroupPermission` is `'admin' | 'member'` — there is no read-only tier.** It cannot exist: a group member holds the epoch secrets, which is what membership *is* in MLS. A `read` member derives the same application keys as any other member and can decrypt everything. Read-only observers do not belong in the group; gate them outside MLS, at the transport or storage layer.
@@ -67,7 +67,7 @@ An external commit is enforced as a **resync of an existing roster member**, nev
 
 ### ⚠️ Security: removal is not revocation
 
-MLS has no cryptographic member revocation. `removeMember` evicts a leaf; it does not erase the removed DID's `group.role` grant, which lives in the roster independently of MLS membership. So a device that retains its `MemberCredential` can rejoin via `joinGroupExternal` **even after being removed** — its DID is still a roster member, so the external-commit policy admits the resync — provided it can still obtain a fresh `GroupInfo`. (The policy stops *strangers*, who are in no roster; it does not stop a removed member.) Consumers must assume a removed member can rejoin until role revocation lands in a follow-up spec. Mitigations available today:
+MLS has no cryptographic member revocation. `removeMember` evicts a leaf; it does not erase the removed DID's `kumiai.role` grant — its role in the group — which lives in the roster independently of MLS membership. So a device that retains its `MemberCredential` can rejoin via `joinGroupExternal` **even after being removed** — its DID is still a roster member, so the external-commit policy admits the resync — provided it can still obtain a fresh `GroupInfo`. (The policy stops *strangers*, who are in no roster; it does not stop a removed member.) Consumers must assume a removed member can rejoin until role revocation lands in a follow-up spec. Mitigations available today:
 
 - Rotate the group: create a new group, migrate non-removed members via fresh invites, abandon the old group.
 - Enforce access control outside MLS: block the removed device at the transport layer (e.g. hub auth).

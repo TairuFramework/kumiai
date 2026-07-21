@@ -1,8 +1,11 @@
-import type { ProtocolDefinition } from '@enkaku/protocol'
 import type { LogHub } from '@kumiai/hub-tunnel'
 
+import type { AppWindowPruned } from '../../src/app-cursor.js'
 import type { PendingCommit } from '../../src/commit.js'
 import { createGroupPeer, type GroupPeer } from '../../src/peer.js'
+import type { GroupProtocolDefinition } from '../../src/protocol.js'
+import { createMemoryAnchorStore, type MemoryAnchorStore } from './anchor.js'
+import { createMemoryAppCursorStore, type MemoryAppCursorStore } from './app-cursor.js'
 import { createFakeCrypto, type FakeCrypto } from './fake-crypto.js'
 import { createMemoryCommitJournal, type MemoryCommitJournal } from './journal.js'
 import {
@@ -11,9 +14,16 @@ import {
   type MemoryGroupMLS,
 } from './memory-group-mls.js'
 
+/**
+ * `chat/changed` is EPHEMERAL — live push, nothing retained, nothing drainable — and every test
+ * that uses it depends on that. `chat/posted` is the retained one, alongside it rather than
+ * instead of it: flipping `chat/changed` would quietly hand a log to tests written about a
+ * mailbox, and both classes sharing one topic is the real shape anyway.
+ */
 export const chat = {
   'chat/changed': { type: 'event', data: { type: 'object' } },
-} as const satisfies ProtocolDefinition
+  'chat/posted': { type: 'event', retain: 'log', data: { type: 'object' } },
+} as const satisfies GroupProtocolDefinition
 
 export type Protocols = { chat: typeof chat }
 
@@ -37,6 +47,8 @@ export type TestPeer = {
   crypto: FakeCrypto
   mls: MemoryGroupMLS
   journal: MemoryCommitJournal
+  anchorStore: MemoryAnchorStore
+  appCursorStore: MemoryAppCursorStore
   /** Every Welcome this host delivered, in order. Records the at-least-once repeats too. */
   welcomes: Array<string>
 }
@@ -47,11 +59,42 @@ export type MakeMLSPeerOptions = {
   bodies?: Array<string>
   /** The members this handle's tree holds a leaf for. A responder seals only to those. */
   members?: Array<string>
-  /** Reuse an existing group state — a "restart" is a new peer over the same handle. */
+  /**
+   * A RESTART: a new peer over everything a dead one left behind — its handle, its crypto, its
+   * journal, its anchor store, its Welcome record — carried as one.
+   *
+   * It is one option and not five because a restart needs ALL of them and a host cannot be told
+   * which: hand-copying the list is how a piece goes missing, and each piece goes missing
+   * quietly. A journal left behind loses the commit whose process died in the acceptance window.
+   * An anchor store left behind re-seeds the anchor at the live epoch and partitions the peer
+   * from its own group — it derives its own topics, sees nobody, and nothing reports it. A cursor
+   * store left behind re-reads the app history from the hub's oldest retained frame, re-delivers
+   * it, and cannot see a pruned window. Naming the dead peer instead of its parts is what makes
+   * those unwritable.
+   *
+   * Any option below still overrides what this carries — a restart onto a DIFFERENT journal is a
+   * real scenario, and saying so explicitly is the point.
+   */
+  restartOf?: TestPeer
+  /** Reuse an existing group state without a restart — a peer built over a handle made here. */
   mls?: MemoryGroupMLS
   crypto?: FakeCrypto
   /** Reuse an existing journal — durability across a restart is exactly this. */
   journal?: MemoryCommitJournal
+  /**
+   * Reuse an existing anchor store. The store must OUTLIVE the peer: the anchor is persisted
+   * state a rebooted handle can never re-export, so a restart that does not carry the store
+   * forward is a peer that partitions from its own group.
+   */
+  anchorStore?: MemoryAnchorStore
+  /**
+   * Reuse an existing app-lane cursor store. It must OUTLIVE the peer, like the anchor store: a
+   * read position that dies with the process leaves the drain unable to tell where it got to from
+   * where the hub's retention now begins.
+   */
+  appCursorStore?: MemoryAppCursorStore
+  /** The host's notice that an app topic's retention floor passed this peer's read position. */
+  onAppWindowPruned?: (event: AppWindowPruned) => void
   /**
    * The host's adoption of a journalled post-commit handle, overridden. The default adopts
    * the blob and nothing else, which is the whole of what a `ledger` commit's handle carries.
@@ -76,9 +119,11 @@ export function makeMLSPeer(
   options: MakeMLSPeerOptions = {},
 ): TestPeer {
   const epoch = options.epoch ?? 1
-  const crypto = options.crypto ?? createFakeCrypto({ epoch, localDID })
+  const restartOf = options.restartOf
+  const crypto = options.crypto ?? restartOf?.crypto ?? createFakeCrypto({ epoch, localDID })
   const mls =
     options.mls ??
+    restartOf?.mls ??
     createMemoryGroupMLS({
       recoverySecret,
       epoch,
@@ -91,13 +136,19 @@ export function makeMLSPeer(
       ...(options.acceptsCommitter != null ? { acceptsCommitter: options.acceptsCommitter } : {}),
       onAdvance: (e) => crypto.setEpoch(e),
     })
-  const journal = options.journal ?? createMemoryCommitJournal()
-  const welcomes = options.welcomes ?? []
+  const journal = options.journal ?? restartOf?.journal ?? createMemoryCommitJournal()
+  const anchorStore = options.anchorStore ?? restartOf?.anchorStore ?? createMemoryAnchorStore()
+  const appCursorStore =
+    options.appCursorStore ?? restartOf?.appCursorStore ?? createMemoryAppCursorStore()
+  const welcomes = options.welcomes ?? restartOf?.welcomes ?? []
   const peer = createGroupPeer<Protocols>({
     hub,
     crypto,
     mls,
     journal,
+    anchorStore,
+    appCursorStore,
+    ...(options.onAppWindowPruned != null ? { onAppWindowPruned: options.onAppWindowPruned } : {}),
     // The restart half of onAccepted, over the same blob — and idempotent, as it must be.
     adoptJournalled: async (blob) => {
       if (options.adoptJournalled != null) {
@@ -112,7 +163,7 @@ export function makeMLSPeer(
     ...(options.commitDeadlineMs != null ? { commitDeadlineMs: options.commitDeadlineMs } : {}),
     ...(options.recovery != null ? { recovery: options.recovery } : {}),
   })
-  return { peer, crypto, mls, journal, welcomes }
+  return { peer, crypto, mls, journal, anchorStore, appCursorStore, welcomes }
 }
 
 export type LedgerCommitOptions = {
@@ -153,6 +204,11 @@ export function buildLedgerCommit(
  * adopts the post-commit handle, which it does in `onAccepted` and nowhere else. A remove
  * that never lands therefore leaves the member exactly where they were, and the notice the
  * peer hands back is the ONLY thing that tells the admin so.
+ *
+ * The Remove rides the COMMIT, so the author adopting it and every member applying it from the
+ * log drop the same leaf. An eviction the author kept to itself would be one no other member ever
+ * enacted — and a test built on one could only ever exercise an author whose roster nobody else
+ * agreed had changed.
  */
 export function buildRemoveCommit(
   member: TestPeer,
@@ -162,7 +218,7 @@ export function buildRemoveCommit(
   return async () => {
     await options.onBuild?.()
     options.framedAt?.push(member.mls.epoch())
-    const commit = member.mls.buildCommit([])
+    const commit = member.mls.buildCommit([], { removes: [victimDID] })
     return {
       commit,
       bodies: [],
@@ -170,7 +226,6 @@ export function buildRemoveCommit(
       journal: commit,
       onAccepted: async () => {
         adoptJournalledBlob(member.mls, commit)
-        member.mls.evict(victimDID)
       },
     }
   }
@@ -178,7 +233,9 @@ export function buildRemoveCommit(
 
 /**
  * A host's `build()` for an invite. Its Welcome lives in `onAccepted` and nowhere else —
- * it is not in `bodies`, and the peer has no way to produce one.
+ * it is not in `bodies`, and the peer has no way to produce one. The Add rides the commit, as a
+ * Remove does: every member reads the new leaf out of the frame, and the author out of the
+ * post-commit handle it adopts.
  */
 export function buildInviteCommit(
   member: TestPeer,
@@ -188,7 +245,7 @@ export function buildInviteCommit(
   return async () => {
     await options.onBuild?.()
     options.framedAt?.push(member.mls.epoch())
-    const commit = member.mls.buildCommit([])
+    const commit = member.mls.buildCommit([], { adds: [inviteeDID] })
     return {
       commit,
       bodies: [],

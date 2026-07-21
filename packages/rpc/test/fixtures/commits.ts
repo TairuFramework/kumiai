@@ -31,6 +31,21 @@ export type PublishCommitParams = {
    * new entries alone is a head no receiver's ledger reproduces.
    */
   ledgerBefore?: Array<string>
+  /**
+   * The roster op this Commit enacts on the receiver's tree when it advances: DIDs to add, DIDs
+   * to remove. A Commit carrying both models the Add+Remove-in-one-commit case. Omitted, the
+   * Commit touches no membership.
+   */
+  adds?: Array<string>
+  removes?: Array<string>
+  /** An external commit: the committer is rejoining, and its leaf replaces any it still had. */
+  external?: boolean
+  /**
+   * Forge: publish a commit that CLAIMS `committerDID` but is signed by somebody else. A publisher
+   * who observed a frame can rewrite the field naming its author and cannot re-sign it, so this is
+   * what a forged commit looks like on the wire.
+   */
+  signerDID?: string
   /** Override the commit bytes (an empty commit is a no-op the receiver cannot apply). */
   commit?: Uint8Array
   /**
@@ -44,7 +59,7 @@ export type PublishCommitParams = {
 
 /**
  * A member that is not a peer in the test — an admin off-stage — publishing a commit
- * frame, exactly as a peer's `commit()` builds one: `[commit][wrap(bodies)]`, with the
+ * frame, exactly as a peer's `commit()` builds one: `[commit][sealEntries(bodies)]`, with the
  * bodies sealed under the pre-commit epoch secret.
  */
 export async function publishCommit(params: PublishCommitParams): Promise<{ sequenceID: string }> {
@@ -58,8 +73,12 @@ export async function publishCommit(params: PublishCommitParams): Promise<{ sequ
       ...(entryIDs.length > 0
         ? { head: memoryLedgerHead([...ledgerBefore.map(memoryEntryID), ...entryIDs]) }
         : {}),
+      ...(params.adds != null ? { adds: params.adds } : {}),
+      ...(params.removes != null ? { removes: params.removes } : {}),
+      ...(params.external === true ? { external: true } : {}),
+      ...(params.signerDID != null ? { signerDID: params.signerDID } : {}),
     })
-  const sealed = await crypto.wrap(encodeLedgerEntries(entries))
+  const sealed = await crypto.sealEntries(encodeLedgerEntries(entries))
   return hub.publish({
     senderDID,
     topicID: commitTopic(recoverySecret),

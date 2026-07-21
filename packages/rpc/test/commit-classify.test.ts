@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'vitest'
 
-import { type CommitClassifierState, classifyCommit } from '../src/classify.js'
+import {
+  type CommitClassifierState,
+  classifyCommit,
+  UNKNOWN_FRAME_VERSION,
+} from '../src/classify.js'
 
 /** A peer at epoch 5, which enacted commit `s3` at epoch 3 and `s4` at epoch 4. */
 function bob(overrides: Partial<CommitClassifierState> = {}): CommitClassifierState {
@@ -76,6 +80,95 @@ describe('the cursor table', () => {
 
   test('bytes that are not a commit are poison', () => {
     expect(classifyCommit(null, 's9', bob())).toEqual({ row: 'poison' })
+  })
+
+  test('a frame in a wire version this build cannot read is AHEAD, and not poison', () => {
+    // The distinction the two assertions make together: `null` is "readable bytes that are not a
+    // commit" and is poison; this is "the group is speaking a language I do not have" and is
+    // proof it moved without this peer. Filing it as poison is the silent killer — after a
+    // version bump every frame lands here, so there is no readable next frame to heal from.
+    expect(classifyCommit(UNKNOWN_FRAME_VERSION, 's9', bob())).toEqual({ row: 'ahead' })
+    expect(classifyCommit(UNKNOWN_FRAME_VERSION, 's9', bob())).not.toEqual({ row: 'poison' })
+  })
+
+  test('it is ahead whatever this peer’s epoch is: no epoch was readable to compare', () => {
+    // Every other row turns on an epoch read out of the frame. There is none here, so the row
+    // cannot be conditioned on one — and must not be, or a peer at a high epoch would file the
+    // frame as poison exactly when it is furthest from the group.
+    for (const epoch of [0, 1, 5, 99]) {
+      expect(classifyCommit(UNKNOWN_FRAME_VERSION, 's9', bob({ epoch }))).toEqual({ row: 'ahead' })
+    }
+  })
+
+  describe('the epoch is cleartext and the committer needs a key, so the rows split on which they use', () => {
+    // A port can only MLS-authenticate a committer for a commit framed at the epoch whose
+    // sender-data secret it holds — its own. Every other frame arrives with an epoch and no
+    // committer, and that is the NORMAL shape of the frames these three rows exist for: a peer
+    // that fell behind, a joiner reading history, a peer shown the branch it lost. A classifier
+    // that needed a committer first would be unable to read any of them.
+
+    test('a frame AHEAD is ahead on its epoch alone', () => {
+      expect(classifyCommit({ epoch: 6 }, 's9', bob())).toEqual({ row: 'ahead' })
+    })
+
+    test('a frame BELOW is history on its epoch alone', () => {
+      expect(classifyCommit({ epoch: 1 }, 's1', bob())).toEqual({ row: 'history' })
+    })
+
+    test('the fork check runs on the epoch and the sequenceID, and never on the committer', () => {
+      // The fork detector is reached through the below-epoch branch, so it only ever sees frames
+      // whose committer is unavailable — it MUST NOT need one. It settles on this peer's own
+      // applied-commit record and the hub's chaining, and a fork that required an authenticated
+      // author would be a fork detector that never fires against a real port.
+      expect(classifyCommit({ epoch: 3 }, 's7', bob())).toEqual({
+        row: 'fork',
+        appliedSequenceID: 's3',
+        branch: 'winning',
+      })
+      expect(classifyCommit({ epoch: 3 }, 's1', bob())).toEqual({
+        row: 'fork',
+        appliedSequenceID: 's3',
+        branch: 'losing',
+      })
+    })
+
+    test('at this peer’s OWN epoch a missing committer is poison — never own-unmerged, never apply', () => {
+      // This is the one epoch where the committer IS available, so a commit here without one is
+      // nothing honest. It must not soften into `own-unmerged`: that row heals, and a frame that
+      // could talk its way into it would let anything that can publish heal a peer on demand —
+      // or, published once, storm the whole group. Nor may it fall through to `apply`: the port
+      // would be handed a frame it cannot process, and a port that throws on it leaves the
+      // cursor where it is and wedges the lane on that frame forever.
+      expect(classifyCommit({ epoch: 5 }, 's9', bob())).toEqual({ row: 'poison' })
+    })
+
+    test('an EXTERNAL header buys no exemption: no committer at this epoch is still poison', () => {
+      // `external` is structural — wireformat and sender type, both cleartext — so it is present
+      // on a frame anyone can shape, and it must not be a way into a row the committer guards.
+      // An external commit whose signature did not verify arrives here as exactly this: the epoch,
+      // the flag, and no author. It is poison, on the same terms as any other authorless frame at
+      // this epoch, and specifically NOT `own-unmerged`, which heals and holds the cursor.
+      expect(classifyCommit({ epoch: 5, external: true }, 's9', bob())).toEqual({ row: 'poison' })
+      // The flag does not reach the heal row by any route, including one naming this peer — the
+      // committer is what that row reads, and an unauthenticated one never gets written there.
+      expect(classifyCommit({ epoch: 5, external: true }, 's9', bob())).not.toEqual({
+        row: 'own-unmerged',
+      })
+      // A VERIFIED external commit at this epoch is unaffected: authored elsewhere, so applicable.
+      expect(
+        classifyCommit({ epoch: 5, committerDID: 'zoe', external: true }, 's9', bob()),
+      ).toEqual({ row: 'apply' })
+    })
+
+    test('own-unmerged still requires the committer, and still only its own', () => {
+      // The authenticated read, unchanged: present and equal heals, present and foreign applies.
+      expect(classifyCommit({ epoch: 5, committerDID: 'bob' }, 's9', bob())).toEqual({
+        row: 'own-unmerged',
+      })
+      expect(classifyCommit({ epoch: 5, committerDID: 'mallory' }, 's9', bob())).toEqual({
+        row: 'apply',
+      })
+    })
   })
 
   describe('the rows are evaluated in the order written', () => {

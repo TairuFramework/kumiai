@@ -1,6 +1,7 @@
-# Make anycast sound: success-only suppression + authenticated reply identity
+# Make anycast sound: success-only suppression
 
-**Priority:** 5.
+**Priority:** 5. The authenticated-reply-identity half shipped on
+`feat/app-lane-delivery`; success-only suppression is what is left.
 **Origin:** 2026-07-02 audit (commit `bb343d9`), milestone
 `milestones/2026-07-audit-remediation.md`.
 
@@ -12,12 +13,23 @@
   `packages/rpc/src/bus-server.ts:77,89-90`) — error replies suppress healthy
   responders.** Any observed `res` — including error replies — calls `markReplied`, so for
   suppressible anycast one fast *failing* responder suppresses all would-be-successful
-  ones and the client times out. Fix: only suppress on `err == null` replies.
-- **`packages/broadcast/src/client.ts:56-57,129-133` — reply identity is self-asserted.**
+  ones and the client times out. Fix: only suppress on `err == null` replies. Still open
+  as of `feat/app-lane-delivery`: `responder.ts:123` and `bus-server.ts:100` both call
+  `markReplied` on any observed reply, unconditionally. Note the gather *client* now
+  discards error replies (`client.ts:162`) — that bounds what a failed reply pollutes in
+  the result set, and does nothing about the responder-side suppression, which is the bug.
+- ~~**`packages/broadcast/src/client.ts:56-57,129-133` — reply identity is self-asserted.**
   Replies are keyed and attributed by the unauthenticated `from` field while the
   MLS-authenticated `msg.senderDID` from `unwrap` is ignored, so any group member can
-  forge another member's identity in `gather` results. Fix: use `senderDID` as (or check
-  it against) the reply identity.
+  forge another member's identity in `gather` results.~~ **Done** on
+  `feat/app-lane-delivery` (commit `a85c0fa`). `ReplyData` no longer carries `from` at
+  all; `GatheredReply` is `{ senderDID, value }`, `collect` takes the authenticated
+  sender as a separate argument because it is not the responder's to state
+  (`client.ts:38`), the dedup set is keyed on it (`client.ts:161-166`), and a frame whose
+  open recovered no identity is dropped rather than attributed (`client.ts:81-85`).
+  Removing `from` rather than checking it against `senderDID` was deliberate: the rename
+  is the break, so a consumer reading the asserted field stops compiling instead of
+  silently reading a field that changed meaning.
 
 ### Medium (same code paths, fold in)
 

@@ -6,6 +6,7 @@ export type {
   ProposalWithSender,
 } from 'ts-mls'
 export { defaultCapabilities, defaultProposalTypes, makeCustomExtension } from 'ts-mls'
+
 export {
   buildCurrentGroupAnchorExtension,
   buildGroupAnchorExtension,

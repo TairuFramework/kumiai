@@ -1,5 +1,4 @@
 import type { ReadableStreamReadResult } from 'node:stream/web'
-
 import { fromUTF } from '@sozai/codec'
 import { describe, expect, test } from 'vitest'
 
@@ -9,6 +8,9 @@ import { type BroadcastMessage, createBroadcastTransport } from '../src/transpor
 function makeMessage(prc: string, data: Record<string, unknown>): BroadcastMessage {
   return { payload: { typ: 'event', prc, data } }
 }
+
+/** The losing arm of a `Promise.race` against a read: a sentinel, and its own type. */
+const TIMEOUT = 'timeout' as const
 
 describe('createBroadcastTransport', () => {
   test('fans written messages to other transports on the same topic', async () => {
@@ -60,8 +62,6 @@ describe('createBroadcastTransport', () => {
 
     // dispose() → writer.close() → in the fixed code → readable controller.close()
     await transport.dispose()
-
-    const TIMEOUT = 'timeout' as const
     const result = await Promise.race([
       readPromise,
       new Promise<typeof TIMEOUT>((resolve) => setTimeout(() => resolve(TIMEOUT), 500)),
@@ -106,8 +106,6 @@ describe('createBroadcastTransport', () => {
     // Now publish a well-formed event — the subscription must still be alive.
     const sender = createBroadcastTransport({ topicID: 'topic-x', bus })
     await sender.write(makeMessage('hello', { n: 1 }))
-
-    const TIMEOUT = 'timeout' as const
     const result = await Promise.race([
       receiver.read(),
       new Promise<typeof TIMEOUT>((resolve) => setTimeout(() => resolve(TIMEOUT), 500)),

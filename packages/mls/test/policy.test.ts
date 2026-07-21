@@ -3,7 +3,11 @@ import type { GroupContextExtension, Proposal, ProposalWithSender } from 'ts-mls
 import { defaultProposalTypes, makeCustomExtension } from 'ts-mls'
 import { describe, expect, test } from 'vitest'
 
-import { GROUP_ANCHOR_EXTENSION_TYPE, LEDGER_HEAD_EXTENSION_TYPE } from '../src/anchor.js'
+import {
+  GROUP_ANCHOR_EXTENSION_TYPE,
+  LEDGER_HEAD_EXTENSION_TYPE,
+  RESERVED_EXTENSION_TYPE,
+} from '../src/anchor.js'
 import {
   type CommitPolicyContext,
   defaultCommitPolicy,
@@ -91,6 +95,10 @@ const EXTRA_BYTES = new Uint8Array([0x09, 0x08, 0x07])
 
 function extraExtension(bytes: Uint8Array): GroupContextExtension {
   return makeCustomExtension({ extensionType: EXTRA_EXTENSION_TYPE, extensionData: bytes })
+}
+
+function reservedExtension(bytes: Uint8Array): GroupContextExtension {
+  return makeCustomExtension({ extensionType: RESERVED_EXTENSION_TYPE, extensionData: bytes })
 }
 
 /** The list a legitimate head update installs: the unchanged anchor and the head. */
@@ -230,6 +238,79 @@ describe('defaultCommitPolicy', () => {
       anchorExtension(ANCHOR_BYTES.slice()),
       headExtension(HEAD_BYTES.slice()),
       extraExtension(EXTRA_BYTES.slice()),
+    ])
+    expect(
+      defaultCommitPolicy(
+        commit(ADMIN_LEAF, [withSender(gce, undefined)]),
+        context({ currentExtensions: current, expectedHeadExtensionData: HEAD_BYTES }),
+      ),
+    ).toBe('reject')
+  })
+
+  test('group_context_extensions accepts installing the reserved extension with empty data, but not an unreserved one', () => {
+    // The rule must permit exactly one new thing — installing RESERVED_EXTENSION_TYPE
+    // with no data — not open the gate to any addition.
+    const current = [anchorExtension(ANCHOR_BYTES.slice()), headExtension(HEAD_BYTES.slice())]
+    const installsReserved = gceProposal([
+      anchorExtension(ANCHOR_BYTES.slice()),
+      headExtension(HEAD_BYTES.slice()),
+      reservedExtension(new Uint8Array()),
+    ])
+    expect(
+      defaultCommitPolicy(
+        commit(ADMIN_LEAF, [withSender(installsReserved, undefined)]),
+        context({ currentExtensions: current, expectedHeadExtensionData: HEAD_BYTES }),
+      ),
+    ).toBe('accept')
+
+    const installsUnreserved = gceProposal([
+      anchorExtension(ANCHOR_BYTES.slice()),
+      headExtension(HEAD_BYTES.slice()),
+      extraExtension(EXTRA_BYTES.slice()),
+    ])
+    expect(
+      defaultCommitPolicy(
+        commit(ADMIN_LEAF, [withSender(installsUnreserved, undefined)]),
+        context({ currentExtensions: current, expectedHeadExtensionData: HEAD_BYTES }),
+      ),
+    ).toBe('reject')
+  })
+
+  test('group_context_extensions rejects installing the reserved extension with non-empty data', () => {
+    // The `extensionData.length === 0` conjunct, which nothing else in this file can fail on:
+    // every other case here passes empty data, so deleting that conjunct (or the `instanceof`
+    // beside it) leaves all of them green. What survives that mutation is not theoretical — an
+    // admin installing 0xf102 with bytes OF HIS CHOOSING into the GroupContext inside an
+    // otherwise-valid head move, which is exactly what this policy's doc comment promises cannot
+    // happen. The type is reserved and nothing consumes it yet, so no policy exists for what its
+    // data may say; until one does, the only permitted data is none.
+    const current = [anchorExtension(ANCHOR_BYTES.slice()), headExtension(HEAD_BYTES.slice())]
+    const installsWithData = gceProposal([
+      anchorExtension(ANCHOR_BYTES.slice()),
+      headExtension(HEAD_BYTES.slice()),
+      reservedExtension(Uint8Array.from([0x01])),
+    ])
+    expect(
+      defaultCommitPolicy(
+        commit(ADMIN_LEAF, [withSender(installsWithData, undefined)]),
+        context({ currentExtensions: current, expectedHeadExtensionData: HEAD_BYTES }),
+      ),
+    ).toBe('reject')
+  })
+
+  test('group_context_extensions rejects a second copy of an already-installed reserved extension', () => {
+    // Once installed, the reserved type is carried like any other extension —
+    // the added-entry allowance is for installing it, not for duplicating it.
+    const current = [
+      anchorExtension(ANCHOR_BYTES.slice()),
+      headExtension(HEAD_BYTES.slice()),
+      reservedExtension(new Uint8Array()),
+    ]
+    const gce = gceProposal([
+      anchorExtension(ANCHOR_BYTES.slice()),
+      headExtension(HEAD_BYTES.slice()),
+      reservedExtension(new Uint8Array()),
+      reservedExtension(new Uint8Array()),
     ])
     expect(
       defaultCommitPolicy(

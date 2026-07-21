@@ -24,8 +24,12 @@ function startResponder(
         payload: {
           typ: 'event',
           prc: msg.payload.prc,
-          data: { kind: 'res', rid: data.rid, from, ...out },
+          data: { kind: 'res', rid: data.rid, ...out },
         },
+        // No `unwrap` on this bus, so nothing authenticates the sender and the responder's own
+        // name is all there is — carried where an authenticating transport would put the
+        // recovered one, so the client reads a single field either way.
+        senderDID: from,
       })
     }
   })()
@@ -116,7 +120,7 @@ describe('BroadcastClient.gather', () => {
 
     const replies = await client.gather('census', {}, { quorum: 2, timeoutMs: 1000 })
     expect(replies).toHaveLength(2)
-    expect(replies.every((r) => typeof r.from === 'string')).toBe(true)
+    expect(replies.every((r) => typeof r.senderDID === 'string')).toBe(true)
 
     await client.dispose()
     await r1.dispose()
@@ -132,7 +136,7 @@ describe('BroadcastClient.gather', () => {
     })
 
     const replies = await client.gather('census', {}, { quorum: 5, timeoutMs: 100 })
-    expect(replies).toEqual([{ from: 'peer-1', value: 'a' }])
+    expect(replies).toEqual([{ senderDID: 'peer-1', value: 'a' }])
 
     await client.dispose()
     await r1.dispose()
@@ -161,7 +165,7 @@ describe('BroadcastClient.gather', () => {
           setTimeout(() => reject(new Error('gather did not settle promptly')), 500),
         ),
       ]),
-    ).resolves.toEqual([{ from: 'peer-1', value: 'partial' }])
+    ).resolves.toEqual([{ senderDID: 'peer-1', value: 'partial' }])
 
     await r1.dispose()
   })

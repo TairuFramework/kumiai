@@ -3,7 +3,6 @@ import { describe, expect, test } from 'vitest'
 import { BackpressureError } from '../src/errors.js'
 import { encodeFrame, type HubFrame } from '../src/frame.js'
 import { createHubTunnelTransport } from '../src/transport.js'
-
 import { FakeHub } from './fixtures/fake-hub.js'
 
 describe('createHubTunnelTransport backpressure', () => {

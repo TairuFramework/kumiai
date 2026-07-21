@@ -2,16 +2,34 @@ import { deriveTopicID } from '@kumiai/broadcast'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { fromUTF, toB64U } from '@sozai/codec'
 
+/**
+ * The label the app-lane anchor is exported under — the one `GroupCrypto.exportSecret` call in
+ * this package, made once per anchor capture (`captureAnchor` in `peer.ts`, on init and every
+ * roster-changing commit). Fixed rather than per-protocol: the secret it produces is not itself
+ * a topic, it is what {@link protocolTopic} and {@link inboxTopic} derive every app-lane topic
+ * FROM, so one label covers every protocol a host defines and `protocol`/`scope` do the
+ * discriminating below it.
+ *
+ * Chosen by and internal to this package alone — `GroupCrypto.exportSecret` takes `label` as a
+ * required argument with no default (see that method's doc in `crypto.ts`), so a conforming
+ * implementation is label-agnostic by construction: it passes whatever label its caller supplies
+ * straight to the underlying exporter and closes over none of its own. `@kumiai/mls-rpc`'s
+ * `createGroupCrypto` is exactly that — a pass-through. No implementation should hardcode this
+ * string or any other; the only caller that is allowed to know it is this package's own peer.
+ * Changing it changes every topic ID this package has ever derived.
+ */
+export const APP_TOPIC_LABEL = 'kumiai/app-topic/v1'
+
 /** Reserved label for per-member unicast inbox topics. */
-export const INBOX_LABEL = 'enkaku/inbox/v1'
+export const INBOX_LABEL = 'kumiai/inbox/v1'
 
 /** Reserved label for the non-rotating MLS commit topic. */
-export const COMMIT_LABEL = 'enkaku/commit/v1'
+export const COMMIT_LABEL = 'kumiai/commit/v1'
 
 /** Reserved label for the non-rotating recovery-rendezvous topic. */
-export const RENDEZVOUS_LABEL = 'enkaku/rendezvous/v1'
+export const RENDEZVOUS_LABEL = 'kumiai/rendezvous/v1'
 
-const DISCOVERY_PREFIX = 'enkaku/discovery/v1'
+const DISCOVERY_PREFIX = 'kumiai/discovery/v1'
 const SEP = '\0'
 
 /**

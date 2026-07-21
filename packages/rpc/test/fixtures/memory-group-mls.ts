@@ -24,14 +24,21 @@ export type MemoryGroupMLS = GroupMLS & {
   /** The members this handle's ratchet tree holds a leaf for, one entry per leaf. */
   leaves: () => Array<string>
   /**
-   * Produce a Commit at this member's CURRENT epoch, enacting these signed tokens. Like
-   * the real thing it is non-mutating: the group advances when the commit is adopted,
-   * so the bodies can still be sealed under the epoch every receiver is at.
+   * Produce a Commit at this member's CURRENT epoch, enacting these signed tokens and the roster
+   * op in `options`. Like the real thing it is non-mutating: the group advances when the commit is
+   * adopted, so the bodies can still be sealed under the epoch every receiver is at.
    *
    * The Commit carries its committer, as a real one does — the author is authenticated by
-   * the Commit's own signature, not by whoever handed it to the hub.
+   * the Commit's own signature, not by whoever handed it to the hub. It carries its Add/Remove
+   * the same way, and for the same reason: a roster change is a property of the commit every
+   * member reads out of it, not of the author's own bookkeeping — the author adopting the
+   * post-commit handle and a receiver applying the frame must land on the same roster, or the two
+   * halves of one eviction disagree about who is in the group.
    */
-  buildCommit: (tokens?: Array<string>) => Uint8Array
+  buildCommit: (
+    tokens?: Array<string>,
+    options?: { adds?: Array<string>; removes?: Array<string> },
+  ) => Uint8Array
   /** Adopt a Commit this member produced: enact its entries and advance. */
   adopt: (commit: Uint8Array) => void
   /**
@@ -144,6 +151,29 @@ type MemoryCommit = {
   head?: string
   /** An external commit: the committer is rejoining, and its leaf replaces any it still had. */
   external?: boolean
+  /**
+   * Who the key that SIGNED this commit belongs to, as distinct from `committerDID`, which is only
+   * who the commit says authored it.
+   *
+   * The two are one field in a genuine commit and `encodeMemoryCommit` keeps them equal, because a
+   * real committer signs with the key of the same leaf whose credential names it. They come apart
+   * exactly where a real one does: a forger who observed a frame can rewrite the credential naming
+   * the author, and cannot produce the signature that would match — leaving a frame whose claimed
+   * author and actual signer disagree. Modelled as a field so a test can build that frame, since
+   * the double has no real signature to break.
+   */
+  signerDID?: string
+  /**
+   * The roster op this Commit enacts, applied to `leaves` when the commit ADVANCES this handle.
+   * The real double has no MLS proposals, so this stands in for the one tree effect a Commit's
+   * Add/Remove has — the effect adopting the post-commit handle would produce. A commit carrying
+   * both is faithful to the Add+Remove-in-one-commit case a roster diff has to catch.
+   *
+   * Absent on a commit that touches no membership (a ledger enact, an update, a no-op): the
+   * roster it found is the roster it leaves.
+   */
+  adds?: Array<string>
+  removes?: Array<string>
 }
 
 /**
@@ -161,7 +191,14 @@ export function encodeMemoryCommit(
   epoch: number,
   committerDID: string,
   entryIDs: Array<string> = [],
-  options: { head?: string; external?: boolean } = {},
+  options: {
+    head?: string
+    external?: boolean
+    adds?: Array<string>
+    removes?: Array<string>
+    /** Override the signer to forge: the commit claims `committerDID` but is signed by this. */
+    signerDID?: string
+  } = {},
 ): Uint8Array {
   // A commit that enacts nothing proposes no head extension: the head it found is the head it
   // leaves. Only a committer that enacts entries folds a new one, and it folds it over its
@@ -174,6 +211,10 @@ export function encodeMemoryCommit(
     entryIDs,
     ...(head != null ? { head } : {}),
     ...(options.external === true ? { external: true } : {}),
+    // A genuine commit is signed by the member it names. Only a forger passes these apart.
+    signerDID: options.signerDID ?? committerDID,
+    ...(options.adds != null && options.adds.length > 0 ? { adds: options.adds } : {}),
+    ...(options.removes != null && options.removes.length > 0 ? { removes: options.removes } : {}),
   }
   return fromUTF(JSON.stringify(commit))
 }
@@ -182,11 +223,17 @@ export function decodeMemoryCommit(commit: Uint8Array): MemoryCommit | null {
   if (commit.length === 0) return null
   try {
     const value = JSON.parse(toUTF(commit)) as MemoryCommit
+    const isDIDArray = (v: unknown): boolean =>
+      Array.isArray(v) && v.every((did) => typeof did === 'string')
     if (
       typeof value?.epoch !== 'number' ||
       typeof value?.committerDID !== 'string' ||
       (value.head != null && typeof value.head !== 'string') ||
-      !Array.isArray(value.entryIDs)
+      (value.external != null && typeof value.external !== 'boolean') ||
+      (value.signerDID != null && typeof value.signerDID !== 'string') ||
+      !Array.isArray(value.entryIDs) ||
+      (value.adds != null && !isDIDArray(value.adds)) ||
+      (value.removes != null && !isDIDArray(value.removes))
     ) {
       return null
     }
@@ -356,8 +403,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     let parsed: MemoryRecoveryRequest
     try {
       parsed = JSON.parse(toUTF(request)) as MemoryRecoveryRequest
-    } catch {
-      throw new Error(`${label}: the request does not parse`)
+    } catch (cause) {
+      throw new Error(`${label}: the request does not parse`, { cause })
     }
     if (
       typeof parsed?.requesterDID !== 'string' ||
@@ -405,6 +452,22 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     // must stay visibly incomplete rather than re-anchor on its own truncated fold. A commit
     // that enacted nothing carries none, and leaves the head where it found it.
     if (parsed.head != null) ledgerHead = parsed.head
+    // The tree effect the post-commit handle would carry: a Remove drops the leaf, an Add
+    // appends one. Applied together and remove-first, so a Commit that Adds and Removes at once
+    // leaves the roster changed in both directions — the case a roster diff must catch and a
+    // leaf count cannot.
+    if (parsed.removes != null) {
+      for (const did of parsed.removes) {
+        for (let i = leaves.length - 1; i >= 0; i--) {
+          if (leaves[i] === did) leaves.splice(i, 1)
+        }
+      }
+    }
+    if (parsed.adds != null) {
+      for (const did of parsed.adds) {
+        if (!leaves.includes(did)) leaves.push(did)
+      }
+    }
     if (parsed.external) {
       // `resync: true`: the rejoining member's prior leaf is atomically removed, so a peer
       // that rejoined twice — an orphaned external commit, then a fresh one — leaves one leaf
@@ -430,6 +493,9 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     lastSender: () => lastSender,
     ledgerIDs: () => [...ledger],
     leaves: () => [...leaves],
+    async rosterDIDs() {
+      return [...leaves]
+    },
     fold: () => {
       const folded = new Map<string, string>()
       for (const token of ledgerTokens()) {
@@ -441,7 +507,10 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     failNextRecoveryAdopt() {
       failRecoveryAdopt = true
     },
-    buildCommit(tokens: Array<string> = []) {
+    buildCommit(
+      tokens: Array<string> = [],
+      options: { adds?: Array<string>; removes?: Array<string> } = {},
+    ) {
       const entryIDs = tokens.map((token) => {
         const id = memoryEntryID(token)
         bodies.set(id, token)
@@ -449,6 +518,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       })
       return encodeMemoryCommit(epoch, localDID ?? '', entryIDs, {
         head: memoryLedgerHead([...ledger, ...entryIDs]),
+        ...(options.adds != null ? { adds: options.adds } : {}),
+        ...(options.removes != null ? { removes: options.removes } : {}),
       })
     },
     adopt(commit: Uint8Array) {
@@ -464,9 +535,43 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       }
     },
     async readCommitHeader(commit: Uint8Array): Promise<CommitHeader | null> {
-      // Reads the commit's own bytes and nothing else: no epoch secret, no blob, no state.
+      // Two facts, two availabilities — the whole point of the port's contract, modelled exactly.
+      //
+      // The EPOCH is cleartext in a real frame, so it is readable for a commit framed at ANY
+      // epoch and is always returned. `null` is reserved for bytes that are not a commit, which
+      // here is bytes that will not decode.
+      //
+      // The COMMITTER is what needs a key. A real handle recovers a member commit's committer by
+      // decrypting the commit's sender-data with the epoch secret it holds RIGHT NOW and mapping
+      // the sender leaf against its own tree, so a commit framed at an epoch it is not at
+      // authenticates to nobody — in BOTH directions, since the secret for a ratcheted-past epoch
+      // is as gone as one never reached. It comes back absent, and a double that answered anyway
+      // would let the lane lean on an answer the real port cannot give — and did.
+      //
+      // `external` is NOT exempt. An external commit needs no epoch secret and no tree — its
+      // committer rides its own UpdatePath leaf — but that leaf's credential is a field, and the
+      // thing that binds it to an author is the commit's own signature. Verifying that signature
+      // needs the group context it was signed against, which this member holds only for the epoch
+      // it stands at, so the committer is available on exactly the same terms as a member commit's
+      // and absent on the same terms. `external` itself is reported either way: it is structural,
+      // as keyless as the epoch, and says nothing about who wrote the frame.
       const parsed = decodeMemoryCommit(commit)
-      return parsed == null ? null : { epoch: parsed.epoch, committerDID: parsed.committerDID }
+      if (parsed == null) return null
+      const isExternal = parsed.external === true
+      if (parsed.epoch !== epoch) {
+        return { epoch: parsed.epoch, ...(isExternal ? { external: true } : {}) }
+      }
+      // At this member's epoch the signature is checkable, and a commit whose claimed author is
+      // not who signed it authenticates nobody. The real port answers this with crypto; here the
+      // forgery is the two fields disagreeing.
+      if ((parsed.signerDID ?? parsed.committerDID) !== parsed.committerDID) {
+        return { epoch: parsed.epoch, ...(isExternal ? { external: true } : {}) }
+      }
+      return {
+        epoch: parsed.epoch,
+        committerDID: parsed.committerDID,
+        ...(isExternal ? { external: true } : {}),
+      }
     },
     async processCommit(commit: Uint8Array, context: CommitContext) {
       lastSender = context.senderDID
@@ -480,6 +585,28 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       // joiner's own add-commit is exactly this — and NOT corruption. The blob riding it
       // is never opened, because the entries are never resolved.
       if (parsed.epoch !== epoch) {
+        return { advanced: false }
+      }
+      // A Commit that REMOVES this member is one it can never apply: the commit's path excludes
+      // the leaf it drops, so the removed member is handed nothing to derive the new epoch's
+      // secrets from. Its handle stops here, at the last epoch it holds — and that is what
+      // cutting a member off means. It keeps every secret it ever exported and every topic it
+      // ever derived; the per-epoch secret is what it cannot follow.
+      //
+      // `{ advanced: false }`, not a throw: the frame is well-formed and there is nothing to
+      // retry.
+      //
+      // THE TREE STILL LOSES THE LEAF, and this half was measured against real MLS rather than
+      // reasoned about. ts-mls does not throw on a self-removing commit: it applies the proposals
+      // to the tree — so `listMembers()` no longer holds the removed member — and leaves the
+      // epoch where it was, because there is no key material to move it. So the handle reports a
+      // CHANGED ROSTER AT AN UNCHANGED EPOCH, which is the one combination nothing else produces.
+      // A double that kept the stale roster was the more permissive one, and it hid a peer that
+      // re-anchored off that diff.
+      if (localDID != null && parsed.removes?.includes(localDID)) {
+        for (let i = leaves.length - 1; i >= 0; i--) {
+          if (leaves[i] === localDID) leaves.splice(i, 1)
+        }
         return { advanced: false }
       }
       // A member can never apply the frame that is its OWN commit: MLS merges a pending

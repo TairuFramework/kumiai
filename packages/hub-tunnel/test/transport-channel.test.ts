@@ -4,7 +4,6 @@ import { randomIdentity } from '@kokuin/token'
 import { describe, expect, test } from 'vitest'
 
 import { createHubTunnelTransport } from '../src/transport.js'
-
 import {
   type EchoClientMessage,
   type EchoProtocol,

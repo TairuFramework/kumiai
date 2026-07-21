@@ -3,7 +3,6 @@ import { describe, expect, test } from 'vitest'
 
 import { encodeFrame, type HubFrame, type HubFrameMessageBody } from '../src/frame.js'
 import { createHubTunnelTransport } from '../src/transport.js'
-
 import { FakeHub } from './fixtures/fake-hub.js'
 
 type Msg = HubFrameMessageBody

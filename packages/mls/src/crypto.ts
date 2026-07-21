@@ -230,6 +230,18 @@ type HpkeAlg = {
   kdf: string
 }
 
+type AEADCipher = (
+  key: Uint8Array,
+  nonce: Uint8Array,
+  aad: Uint8Array,
+) => {
+  encrypt: (plaintext: Uint8Array) => Uint8Array
+  decrypt: (ciphertext: Uint8Array) => Uint8Array
+}
+
+/** ts-mls expects CryptoKey-like objects; these wrap raw bytes to satisfy that shape. */
+type NobleKey = { raw: Uint8Array; type: string }
+
 function makeHpke(hpkeAlg: HpkeAlg): Hpke {
   if (!hpkeAlg.kem.includes('X25519')) {
     throw new Error(`Unsupported KEM: ${hpkeAlg.kem}. Only DHKEM-X25519-HKDF-SHA256 is supported.`)
@@ -239,15 +251,6 @@ function makeHpke(hpkeAlg: HpkeAlg): Hpke {
   const nSecret = 32 // SHA-256 output length
 
   // AEAD parameters — dispatch on the suite's AEAD algorithm
-  type AEADCipher = (
-    key: Uint8Array,
-    nonce: Uint8Array,
-    aad: Uint8Array,
-  ) => {
-    encrypt: (plaintext: Uint8Array) => Uint8Array
-    decrypt: (ciphertext: Uint8Array) => Uint8Array
-  }
-
   let aeadKeySize: number
   let createAEADCipher: AEADCipher
   switch (hpkeAlg.aead) {
@@ -281,9 +284,6 @@ function makeHpke(hpkeAlg: HpkeAlg): Hpke {
   )
 
   const { hash: kdfHash } = getHashFn(hpkeAlg.kdf.replace('HKDF-', ''))
-
-  // Opaque key wrappers — ts-mls expects CryptoKey-like objects but we use raw bytes
-  type NobleKey = { raw: Uint8Array; type: string }
 
   function wrapPrivateKey(raw: Uint8Array): NobleKey {
     return { raw, type: 'private' }

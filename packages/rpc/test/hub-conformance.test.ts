@@ -1,0 +1,27 @@
+import { testLogHubConformance } from '@kumiai/hub-conformance'
+
+import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
+import { FakeHub } from './fixtures/fake-hub.js'
+
+const MAX_RETENTION = 30 * 24 * 60 * 60
+const MAX_DEPTH = 6
+
+/**
+ * The doubles the whole rpc suite executes against, run against the hub contract itself. Every
+ * peer-level test in this package holds one of these and none of them checked that it behaves like
+ * a hub — which is how three separate doubles came to have an infallible `subscribe` while the real
+ * hub refuses, leaving `hub-mux`'s swallowed subscribe failure unreachable from every test here.
+ */
+testLogHubConformance({
+  label: 'FakeHub',
+  createHub: (options) => new FakeHub(options),
+  maxRetention: MAX_RETENTION,
+  maxDepth: MAX_DEPTH,
+})
+
+testLogHubConformance({
+  label: 'DurableFakeHub',
+  createHub: (options) => new DurableFakeHub(options),
+  maxRetention: MAX_RETENTION,
+  maxDepth: MAX_DEPTH,
+})

@@ -136,9 +136,24 @@ describe('GroupMLS port', () => {
     // peer that adopted first would be alone on a branch the moment it lost.
     expect(pending).not.toBeNull()
     expect(stranded.epoch()).toBe(0)
+    // And the commit says it is a REJOIN, before it is applied and without being applied. Nothing
+    // else about it will ever say so: it replaces a leaf the roster already holds, so it changes
+    // no DID and no occupied leaf index, and a member applying it has only this to rotate on.
+    //
+    // The rejoiner itself reads NO committer off it. The flag and the epoch are structural, but an
+    // external commit's committer is only as available as the signature that binds it, and that is
+    // checkable only against the group context of the epoch it was framed at — epoch 2, where the
+    // rejoiner is not. It is still at 0, having built the commit and not adopted it.
     expect(await stranded.readCommitHeader(pending?.commit as Uint8Array)).toEqual({
       epoch: 2,
+      external: true,
+    })
+    // A member that IS at that epoch reads the committer, off the same bytes. The committer is not
+    // withheld from the group — it is withheld from anyone who cannot check it.
+    expect(await live.readCommitHeader(pending?.commit as Uint8Array)).toEqual({
+      epoch: 2,
       committerDID: 'stranded',
+      external: true,
     })
 
     await pending?.onAccepted()

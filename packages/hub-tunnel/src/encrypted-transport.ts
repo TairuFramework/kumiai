@@ -83,6 +83,19 @@ function wrapHub({ hub, encryptor, groupID, onEvent, onEncryptError }: WrapHubPa
               }
               throw error
             }
+            // WHY: the envelope states its group in the clear and we stamp ours on publish, so a
+            // frame addressed to another group is dropped before we ever hand it to the cipher.
+            // Honestly: against a working AEAD this catches little — a foreign group's frame is
+            // encrypted under a key we do not hold and would fail to decrypt anyway. What it does
+            // catch is the same-key case the cipher cannot see: a misroute or a configuration
+            // error that puts two groups on one key or one topic, where the bytes authenticate
+            // perfectly and are still not ours. It is one string compare, before any crypto, so
+            // the cost of keeping it is nil and the cost of trusting the cipher alone for a
+            // property the envelope states outright is a silent cross-group delivery.
+            if (envelope.groupID !== groupID) {
+              onEvent?.({ type: 'frame-dropped', reason: 'group-mismatch' })
+              continue
+            }
             let plaintext: Uint8Array
             try {
               plaintext = await encryptor.decrypt(fromB64(envelope.ciphertext))
@@ -97,6 +110,10 @@ function wrapHub({ hub, encryptor, groupID, onEvent, onEncryptError }: WrapHubPa
               senderDID: message.senderDID,
               topicID: message.topicID,
               payload: plaintext,
+              // Carried through: this wrapper re-writes the payload and nothing else, and dropping
+              // the log position here would silently strip it from every lane behind an encrypting
+              // hub — leaving a reader unable to advance a log cursor over a frame it was pushed.
+              ...(message.logPosition != null ? { logPosition: message.logPosition } : {}),
             }
             return { value: decrypted, done: false }
           }
