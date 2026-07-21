@@ -1,6 +1,6 @@
 {
   "name": "@kumiai/hub-tunnel",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Peer-to-peer Enkaku transport tunneled through a hub relay",
   "keywords": [
     "enkaku",
