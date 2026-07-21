@@ -1,12 +1,13 @@
 # Deferred API findings from the forward-compatibility audits
 
 Four parallel API-surface audits ran over all ten packages on 2026-07-20, ahead of the
-forward-compatibility plan (`docs/superpowers/plans/2026-07-20-forward-compatibility.md`) that
-plan drew from. The audits found roughly thirty things that cannot change after 1.0 without
-breaking a consumer; the plan took the handful where deferring made the later fix *impossible*
-rather than merely expensive, and explicitly left the rest for whenever something actually needs
-them (`docs/superpowers/specs/2026-07-20-forward-compatibility-design.md`, "Why these changes and
-not the other twenty").
+forward-compatibility work that drew from them (see
+`docs/agents/plans/completed/2026-07-21-forward-compatibility.complete.md`). The audits found
+roughly thirty things that cannot change after 1.0 without breaking a consumer; that work took only
+the handful where deferring makes the later fix *impossible* rather than merely expensive — a
+mechanism that must exist in the code shipping before the code that needs it — and explicitly left
+the rest for whenever something actually needs them. The governing ruling: *do not pile up breaking
+changes with every follow-up doc; address necessary changes as they are discovered.*
 
 **Every item below will cost a breaking change when it is finally taken — every package here is
 0.x, so that cost is a `minor` bump, never `major`. This was accepted deliberately, per that

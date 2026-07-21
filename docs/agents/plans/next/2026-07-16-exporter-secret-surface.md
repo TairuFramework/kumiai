@@ -51,6 +51,9 @@ that skips it.
 
 ## Context
 
-Found during the app-lane delivery work, Question 2.5. See
-`docs/superpowers/specs/2026-07-16-app-lane-delivery-design.md` §2 — "**Load-bearing:** the anchor must
-feed the per-epoch `exportSecret()`, never the lifelong recovery secret".
+Found during the app-lane delivery work (see
+`docs/agents/plans/completed/2026-07-21-app-lane-delivery.complete.md`), whose design states the
+constraint this file exists to protect: **the anchor must feed the per-epoch `exportSecret()`, never
+the lifelong recovery secret.** A removed member keeps the recovery secret for life and can
+enumerate epoch numbers, so an anchor sealed from it would cut nobody off — the per-epoch export is
+the only thing that makes a removed member blind to the rotated topic.
