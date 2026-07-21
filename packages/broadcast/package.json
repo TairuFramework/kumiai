@@ -38,6 +38,7 @@
   "dependencies": {
     "@sozai/async": "catalog:",
     "@sozai/codec": "catalog:",
+    "@sozai/runtime": "catalog:",
     "@enkaku/protocol": "catalog:",
     "@enkaku/transport": "catalog:",
     "@noble/hashes": "catalog:"

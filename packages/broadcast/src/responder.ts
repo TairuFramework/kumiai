@@ -37,6 +37,14 @@ export type BroadcastResponderParams = {
   getJitterMs?: (maxMs: number) => number
 }
 
+type InboundData = {
+  kind?: string
+  rid?: string
+  prm?: unknown
+  ok?: unknown
+  err?: string
+}
+
 export function createBroadcastResponder(params: BroadcastResponderParams): {
   dispose: () => Promise<void>
 } {
@@ -99,14 +107,6 @@ export function createBroadcastResponder(params: BroadcastResponderParams): {
     await transport
       .write({ payload: { typ: 'event', prc, data: reply }, senderDID: from })
       .catch(() => {})
-  }
-
-  type InboundData = {
-    kind?: string
-    rid?: string
-    prm?: unknown
-    ok?: unknown
-    err?: string
   }
 
   void (async () => {

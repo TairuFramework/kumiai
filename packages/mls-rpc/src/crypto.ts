@@ -2,7 +2,7 @@ import type { GroupHandle } from '@kumiai/mls'
 import { readMessageEpoch } from '@kumiai/mls'
 import type { GroupCrypto } from '@kumiai/rpc'
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js'
-import { createRuntime } from '@sozai/runtime'
+import { createRuntime, type Runtime } from '@sozai/runtime'
 
 /**
  * The label the ledger-entry seal key is exported under. UNCHANGED by `GroupCrypto.exportSecret`
@@ -57,8 +57,6 @@ const ENTRY_NONCE_BYTES = 24
  */
 const ENTRY_VERSION = 1
 
-const runtime = createRuntime()
-
 export type GroupCryptoParams = {
   /**
    * The handle the peer is at RIGHT NOW. A function and not a value because the peer's
@@ -72,6 +70,8 @@ export type GroupCryptoParams = {
    * commits.
    */
   entryLabel?: string
+  /** Runtime providing platform primitives. Defaults to `createRuntime()`. */
+  runtime?: Runtime
 }
 
 /**
@@ -113,7 +113,7 @@ export type GroupCryptoParams = {
  *    for anything ts-mls will not decode as a message, and never throws, which is the contract.
  */
 export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
-  const { handle, entryLabel = ENTRY_SEAL_LABEL } = params
+  const { handle, entryLabel = ENTRY_SEAL_LABEL, runtime = createRuntime() } = params
 
   return {
     epoch: () => Number(handle().epoch),

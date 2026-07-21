@@ -549,15 +549,15 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
         retain: 'log',
       })
 
-      const racers = [2, 3, 4, 5, 6].map((byte) =>
-        store.publish({
+      const racers = [2, 3, 4, 5, 6].map((byte) => {
+        return store.publish({
           senderDID: ALICE,
           topicID: TOPIC,
           payload: payload(byte),
           retain: 'log',
           expectedHead: first,
-        }),
-      )
+        })
+      })
       const outcomes = await Promise.allSettled(racers)
 
       const accepted = outcomes.filter((outcome) => outcome.status === 'fulfilled')

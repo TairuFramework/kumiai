@@ -42,6 +42,8 @@ export type ProcessWelcomeParams = {
 /**
  * Process a Welcome message to join a group.
  */
+type JoinGroupParams = Parameters<typeof mlsJoinGroup>[0]
+
 export async function processWelcome(params: ProcessWelcomeParams): Promise<ProcessWelcomeResult> {
   const { identity, invite, welcome, keyPackageBundle, ratchetTree, options } = params
   const cache = options?.cache ?? createInMemoryDIDCache()
@@ -76,7 +78,6 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
     resolvedWelcome = decoded.welcome
   }
 
-  type JoinGroupParams = Parameters<typeof mlsJoinGroup>[0]
   const sanitizedTree = Array.isArray(ratchetTree) ? sanitizeRatchetTree(ratchetTree) : ratchetTree
   const state = await mlsJoinGroup({
     context,

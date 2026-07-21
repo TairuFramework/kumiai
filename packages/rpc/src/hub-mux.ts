@@ -316,8 +316,8 @@ export function createHubMux(params: HubMuxParams): HubMux {
    */
   const sleeping = new Set<() => void>()
 
-  const sleep = (ms: number): Promise<void> =>
-    new Promise<void>((resolve) => {
+  const sleep = (ms: number): Promise<void> => {
+    return new Promise<void>((resolve) => {
       const wake = (): void => {
         clearTimeout(timer)
         sleeping.delete(wake)
@@ -326,6 +326,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
       const timer = setTimeout(wake, ms)
       sleeping.add(wake)
     })
+  }
 
   const reportFailure = (failure: SubscribeFailure): void => {
     try {

@@ -107,6 +107,9 @@ importers:
       '@sozai/codec':
         specifier: 'catalog:'
         version: 0.2.0
+      '@sozai/runtime':
+        specifier: 'catalog:'
+        version: 0.1.0
     devDependencies:
       vitest:
         specifier: 'catalog:'
@@ -309,6 +312,9 @@ importers:
       '@sozai/log':
         specifier: 'catalog:'
         version: 0.2.0
+      '@sozai/runtime':
+        specifier: 'catalog:'
+        version: 0.1.0
     devDependencies:
       '@kumiai/hub-conformance':
         specifier: workspace:^

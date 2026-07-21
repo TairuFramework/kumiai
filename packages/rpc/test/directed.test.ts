@@ -2,6 +2,7 @@ import type { Client } from '@enkaku/client'
 import type { ProtocolDefinition } from '@enkaku/protocol'
 import type { ProcedureHandlers } from '@enkaku/server'
 import type { Unwrap } from '@kumiai/broadcast'
+import { createRuntime } from '@sozai/runtime'
 import { describe, expect, test } from 'vitest'
 
 import { createDirectedClient, createInboxAcceptor, createInboxPath } from '../src/directed.js'
@@ -57,7 +58,7 @@ function caller(hub: FakeHub, localDID: string, memberDID: string, sessionID: st
     sendTopicID: inboxTopic(SECRET, EPOCH, memberDID),
     receiveTopicID,
     inbound: createInboxPath({ mux, topicID: receiveTopicID, unwrap: crypto.unwrap }),
-    getRandomID: () => sessionID,
+    runtime: createRuntime({ getRandomID: () => sessionID }),
     wrap: crypto.wrap,
   })
   return { ...created, mux, crypto }

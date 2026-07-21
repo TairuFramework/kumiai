@@ -45,7 +45,8 @@
     "@kumiai/hub-tunnel": "workspace:^",
     "@noble/hashes": "catalog:",
     "@sozai/codec": "catalog:",
-    "@sozai/log": "catalog:"
+    "@sozai/log": "catalog:",
+    "@sozai/runtime": "catalog:"
   },
   "devDependencies": {
     "@kumiai/hub-conformance": "workspace:^",

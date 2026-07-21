@@ -5,7 +5,6 @@ import {
   BroadcastClient,
   createBroadcastTransport,
   defaultJitter,
-  defaultRandomID,
   encodeEventFrame,
   type GatheredReply,
   type GatherOptions,
@@ -15,6 +14,7 @@ import {
 import type { StoredMessage } from '@kumiai/hub-protocol'
 import type { LogHub } from '@kumiai/hub-tunnel'
 import { toUTF } from '@sozai/codec'
+import { createRuntime, type Runtime } from '@sozai/runtime'
 
 import type { Anchor, AnchorStore } from './anchor.js'
 import type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
@@ -204,7 +204,8 @@ export type GroupPeerParams<Protocols extends Record<string, ProtocolDefinition>
   protocols: Protocols
   handlers: { [K in keyof Protocols]: ProcedureHandlers<Protocols[K]> }
   suppress?: SuppressConfig
-  getRandomID?: () => string
+  /** Runtime providing platform primitives. Defaults to `createRuntime()`. */
+  runtime?: Runtime
   /**
    * Recovery rendezvous tuning. `timeoutMs`: how long one request waits for a reply. `getDelayMs`:
    * responder reply jitter. `deadlineMs`: how long `recover()` keeps re-requesting and rebuilding
@@ -368,6 +369,13 @@ export type GroupPeer<Protocols extends Record<string, ProtocolDefinition>> = {
  * runtime is rebuilt only once a whole commit walk returns, so what it remembers of the topic can
  * be a segment out of date. A publisher asks the live anchor instead (see `sealForSegment`).
  */
+/**
+ * One buffered app frame. `sealed` goes `null` once the frame is done — delivered or dead — but
+ * the position outlives it: the cursor advances over a RUN of done frames, so a done frame's
+ * place in that run is the whole of what it still has to say.
+ */
+type AppFrame = { position: LogPosition; sealed: Uint8Array | null }
+
 type ProtocolRuntime = {
   client: BroadcastClient
   busServer: { dispose: () => Promise<void> }
@@ -392,8 +400,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     suppress,
   } = params
   const onAppWindowPruned = params.onAppWindowPruned
-  const getRandomID = params.getRandomID
-  const newPublishID = getRandomID ?? defaultRandomID
+  // Destructured rather than held as `runtime`: that name is taken in this scope by
+  // {@link ProtocolRuntime}, which is a different thing entirely.
+  const { getRandomID } = params.runtime ?? createRuntime()
+  const newPublishID = getRandomID
   const recoveryTimeoutMs = params.recovery?.timeoutMs ?? DEFAULT_RECOVERY_TIMEOUT_MS
   const recoveryDeadlineMs = params.recovery?.deadlineMs ?? DEFAULT_RECOVERY_DEADLINE_MS
   const getReplyDelayMs =
@@ -479,18 +489,6 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     secret: new Uint8Array(),
     epoch: crypto.epoch(),
   }
-
-  /**
-   * One buffered app frame: where it sits in the topic's log, and its bytes until the drain is
-   * DONE with it.
-   *
-   * `sealed` is ciphertext, not plaintext: which frames are readable is a question only the handle
-   * can answer, and only at the epoch it is at right now. It goes `null` the moment the frame is
-   * done — delivered, or dead — which frees the bytes at the same point the old buffer dropped the
-   * frame outright. The POSITION outlives them, because the cursor moves over a run of done frames
-   * and a done frame's place in that run is the whole of what it still has to say.
-   */
-  type AppFrame = { position: LogPosition; sealed: Uint8Array | null }
 
   /**
    * The current SEGMENT's retained app frames, per protocol, in log order. A segment is the run of
@@ -615,8 +613,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    *
    * See {@link createOpenOncePath} for why a lane may only open a frame once.
    */
-  const createInboundPath = (name: string, topicID: string) =>
-    createOpenOncePath<Uint8Array>({
+  const createInboundPath = (name: string, topicID: string) => {
+    return createOpenOncePath<Uint8Array>({
       mux,
       topicID,
       unwrap: crypto.unwrap,
@@ -638,6 +636,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       },
       note: (message) => noteLiveAppFrame(name, topicID, message),
     })
+  }
 
   /**
    * One protocol's live-lane transport: it LISTENS on the topic the runtime is built for, and
@@ -722,7 +721,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       const inbound = createInboundPath(name, topicID)
       const client = new BroadcastClient({
         transport: segmentBoundTransport(name, topicID, inbound),
-        ...(getRandomID != null ? { getRandomID } : {}),
+        ...(params.runtime != null ? { runtime: params.runtime } : {}),
       })
       const { eventHandlers, requestHandlers } = adaptBusHandlers(
         protocol,
@@ -834,7 +833,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           receiveTopicID: lane.topicID,
           inbound: lane.path,
           wrap: crypto.wrap,
-          ...(getRandomID != null ? { getRandomID } : {}),
+          ...(params.runtime != null ? { runtime: params.runtime } : {}),
         })
         runtime.directed.set(memberDID, created)
         return created.client
@@ -1220,7 +1219,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * whose frames were never read, and `fetched` is moved only by pages that arrived.
    */
   const loadAppSegment = async (): Promise<void> => {
-    for (const name of Object.keys(protocols)) {
+    // One protocol per lane, and the lanes share nothing: a topic is derived per protocol NAME, so
+    // no two can name the same log, and the buffers, cursors and staged frames are all per-name.
+    // Paged concurrently — otherwise each protocol waits out the previous one's whole pull.
+    const loadOne = async (name: string): Promise<void> => {
       const { frames, cursor } = await appLaneFor(name)
       const topicID = cursor.topicID
       // Carrying the window on the listener-less subscribe too: this is the one a member that is
@@ -1266,6 +1268,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         if (result.messages.length < APP_FETCH_LIMIT) break
       }
     }
+    // NOT `allSettled`: a failed pull must reach the caller, whose walk stops on it rather than
+    // stepping over an epoch whose frames were never read.
+    await Promise.all(Object.keys(protocols).map(loadOne))
   }
 
   /**
@@ -1834,8 +1839,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           // epoch's app frames ahead of the apply and takes the anchor if the roster moved.
           applied = await advanceHandle(
             port,
-            () =>
-              port.processCommit(commitFrame.commit, {
+            () => {
+              return port.processCommit(commitFrame.commit, {
                 senderDID: message.senderDID,
                 // The resolver, not the bodies: the blob is opened only if the port asks for the
                 // entries this commit names, and it asks only for a commit it is applying — framed
@@ -1849,7 +1854,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
                   commitFrame.sealedEntries,
                   crypto.openEntries,
                 ),
-              }),
+              })
+            },
             // A REJOIN rotates the anchor too, from a member the roster diff cannot see: an
             // external commit by a member the roster still holds replaces that member's leaf and
             // leaves every DID where it was. Only a commit the port APPLIED says anything about

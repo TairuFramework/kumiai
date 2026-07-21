@@ -2,9 +2,9 @@ import { Client } from '@enkaku/client'
 import type { ClientTransportOf, ProtocolDefinition, ServerTransportOf } from '@enkaku/protocol'
 import { type ProcedureHandlers, Server } from '@enkaku/server'
 import type { ByteTransform, Unwrap } from '@kumiai/broadcast'
-import { defaultRandomID } from '@kumiai/broadcast'
 import type { StoredMessage } from '@kumiai/hub-protocol'
 import { createHubTunnelTransport, decodeFrame, type MailboxHub } from '@kumiai/hub-tunnel'
+import { createRuntime, type Runtime } from '@sozai/runtime'
 
 import type { HubMux } from './hub-mux.js'
 import { createOpenOncePath } from './open-once.js'
@@ -69,7 +69,8 @@ export type DirectedClientParams = {
   /** The self-inbox topic's one open-once path, shared with the acceptor. */
   inbound: InboundPath
   wrap: ByteTransform
-  getRandomID?: () => string
+  /** Runtime providing platform primitives. Defaults to `createRuntime()`. */
+  runtime?: Runtime
 }
 
 /**
@@ -84,7 +85,7 @@ export function createDirectedClient<Protocol extends ProtocolDefinition>(
   params: DirectedClientParams,
 ): { client: Client<Protocol>; dispose: () => Promise<void> } {
   const { mux, localDID, memberDID, sendTopicID, receiveTopicID, inbound, wrap } = params
-  const getRandomID = params.getRandomID ?? defaultRandomID
+  const { getRandomID } = params.runtime ?? createRuntime()
   let unsubscribe: (() => void) | undefined
   const hub: MailboxHub = {
     async publish(publishParams) {

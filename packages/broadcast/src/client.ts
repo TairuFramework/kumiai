@@ -1,9 +1,9 @@
 import type { TransportType } from '@enkaku/transport'
 import { Disposer } from '@sozai/async'
+import { createRuntime, type Runtime } from '@sozai/runtime'
 
 import { buildEventMessage } from './event-frame.js'
 import type { BroadcastMessage } from './transport.js'
-import { defaultRandomID } from './utils.js'
 
 export type RequestData = { kind: 'req'; rid: string; prm: unknown; gather?: boolean }
 /**
@@ -29,7 +29,8 @@ export type GatheredReply = { senderDID: string; value: unknown }
 
 export type BroadcastClientParams = {
   transport: TransportType<BroadcastMessage, BroadcastMessage>
-  getRandomID?: () => string
+  /** Runtime providing platform primitives. Defaults to `createRuntime()`. */
+  runtime?: Runtime
 }
 
 const DEFAULT_TIMEOUT_MS = 5000
@@ -58,7 +59,7 @@ export class BroadcastClient extends Disposer {
       },
     })
     this.#transport = params.transport
-    this.#getRandomID = params.getRandomID ?? defaultRandomID
+    this.#getRandomID = (params.runtime ?? createRuntime()).getRandomID
     // Discard the promise intentionally; read errors are best-effort here.
     void this.#read().catch(() => {})
   }

@@ -117,12 +117,13 @@ function evaluateGroupContextExtensions(
     (ext) => ext.extensionType === RESERVED_EXTENSION_TYPE,
   )
   if (!reservedAlreadyInstalled && extensions.length === expected.length + 1) {
-    const reservedIndex = extensions.findIndex(
-      (ext) =>
+    const reservedIndex = extensions.findIndex((ext) => {
+      return (
         ext.extensionType === RESERVED_EXTENSION_TYPE &&
         ext.extensionData instanceof Uint8Array &&
-        ext.extensionData.length === 0,
-    )
+        ext.extensionData.length === 0
+      )
+    })
     if (reservedIndex !== -1) {
       candidate = extensions.slice(0, reservedIndex).concat(extensions.slice(reservedIndex + 1))
     }

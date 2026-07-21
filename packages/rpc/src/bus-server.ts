@@ -40,6 +40,8 @@ export type GroupBusServerParams = {
  * jitter + observe-and-suppress storm-collapse as `createBroadcastResponder`),
  * forwarding the unwrap-recovered `senderDID` to both.
  */
+type InboundData = { kind?: string; rid?: string; prm?: unknown; gather?: boolean }
+
 export function createGroupBusServer(params: GroupBusServerParams): {
   dispose: () => Promise<void>
 } {
@@ -87,8 +89,6 @@ export function createGroupBusServer(params: GroupBusServerParams): {
       .write({ payload: { typ: 'event', prc, data: reply }, senderDID: from })
       .catch(() => {})
   }
-
-  type InboundData = { kind?: string; rid?: string; prm?: unknown; gather?: boolean }
 
   void (async () => {
     for await (const msg of transport) {
