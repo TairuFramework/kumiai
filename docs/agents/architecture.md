@@ -164,6 +164,26 @@ live fan-out would not.
 > **epoch transitions, not time**: a catch-up walk destroys the very keys it would need, and a
 > member away four commits could read where a member away a week could not. rpc reads at the
 > sealing epoch, full stop.
+>
+> Three further structural bounds on that window, measured against `ts-mls@2.0.0-rc.13` and worth
+> having written down before anyone reaches for it again:
+>
+> - **Past-epoch reads are application-messages-only, by explicit design.** A commit or proposal
+>   from a former epoch throws rather than being processed, so a retained frame can never re-drive
+>   group state — the window lets a peer read payloads it missed, never catch up through them.
+> - **A freshly joined handle's window is empty**, not partially filled. The join path, the create
+>   path, and the **external-commit** path all initialize the history map from scratch, so a member
+>   that resyncs by external commit — which is how a stranded peer rejoins — can read nothing
+>   sealed before that rejoin, in principle and not merely in practice.
+> - **Within a single epoch the ordering slack is also bounded**: ts-mls keeps only the 10 most
+>   recent skipped generations and caps forward jumps at 200. A drain reading one sender's frames
+>   in generation order is unaffected; one reading them out of order can lose keys more than 10
+>   generations behind the highest it has already consumed.
+>
+> None of this is tunable from `@kumiai/mls` today: `resolveMlsContext` never sets `clientConfig`,
+> and `GroupOptions` exposes no knob, so the defaults always apply. Widening the window would be a
+> code change here, not a caller option — and would trade a hard bound for a tunable one while
+> keeping stale key material alive longer, which is the wrong direction.
 
 **`unwrap` throwing is ordinary control flow** on every read path — it is how a frame says "not my
 epoch". An implementation that opens strictly at the current epoch is a correct implementation of

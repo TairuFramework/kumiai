@@ -58,6 +58,19 @@ commit frames only from current members, or a per-epoch publish credential, boun
 removed member, who keeps the topic forever, and the untrusted hub, which sees every topic ID in the
 clear — can emit it today.
 
+### Adjacent, on the other lane: one app-topic frame forces a commit-log walk
+
+Not the same finding, but the same shape and the reader who cares about one cares about the other.
+The app-lane drain bounds a frame's future-epoch claim against what the commit log can justify
+(`justifiedEpochCeiling`, `packages/rpc/src/peer.ts:1300`), and that ceiling pages the whole commit
+topic. It is read lazily — once per drain, and only if some frame actually claims to be ahead — so
+the honest path pays nothing. But anyone who can publish to the app topic can include one
+ahead-claiming frame and force one commit-log walk per drain.
+
+Bounded per drain rather than per frame, and far cheaper than the unbounded buffer growth it
+replaced (a single frame claiming a wild epoch used to pin the cursor for the segment's whole life).
+Recorded as a known cost of that fix, not as a regression.
+
 ## 2. STILL OPEN — replay of a genuine external commit
 
 A signature check proves possession of a key, never authorization to use it. It is a property of the

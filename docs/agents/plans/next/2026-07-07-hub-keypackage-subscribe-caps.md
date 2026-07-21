@@ -47,6 +47,15 @@ DIDs, no confidentiality impact.
 - `packages/hub-server/src/rateLimit.ts:20-27` — limiter buckets never pruned. One entry
   per distinct key, forever; publishing to many random topic IDs grows memory without
   bound. Fix: evict full-capacity buckets past a TTL.
+- **When subscribe authorization lands, teach the client which refusals are permanent.**
+  `isPermanentSubscribeFailure` (`packages/rpc/src/hub-mux.ts:240`) recognises only
+  `RetentionExceededError`, by instance *and* by `error.name` — the name check is there
+  because a hub reached over the tunnel rebuilds the error from its wire code. An
+  authorization refusal, once one exists, would fall through to the transient branch: run
+  the whole retry schedule against a settled answer, then latch as non-permanent. Correct
+  behaviour with the wrong label and a slow start, and the fix belongs with whichever
+  change first makes a subscribe refusable on authorization grounds rather than
+  retention.
 
 ## Sketch (carried from the enkaku backlog item)
 
