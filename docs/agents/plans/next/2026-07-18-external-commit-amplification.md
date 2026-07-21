@@ -27,6 +27,21 @@ against unmodified code, `readCommitHeader` returns `{ epoch: 9999n }`. `classif
 `ahead` on `header.epoch > state.epoch` before the committer is consulted at all, so the frame never
 reaches any authentication.
 
+**As of `feat/app-lane-delivery`, the row has a second and cheaper trigger.** An unreadable
+commit-frame *version* now settles `ahead` as well (`packages/rpc/src/classify.ts:235`, commit
+`0777b86`), above every other row including the headerless one. So an attacker no longer needs a
+genuine commit to rewrite the epoch of — a single garbage byte in the frame's version field asks
+every peer to heal, with no commit bytes behind it at all.
+
+That is the same trade this section already describes, taken knowingly and for a stronger reason,
+and the alternative is worse in exactly the way the paragraph below says: after a real version bump
+EVERY frame is unreadable, so a peer that filed them as poison has no next frame to heal from — it
+drains to the end of the log and reports itself reconciled at a dead epoch, permanently and
+silently. The asymmetry that justifies the `ahead` row holds here too: anything that can publish to
+the commit topic can forge one of these and trigger a heal, and nothing can forge one that
+*suppresses* a heal. Recorded because it widens the blast radius of an open finding, and the bound
+is the same publish-authorization gate named below — not anything in `classify.ts`.
+
 **Why no signature check helps.** `ahead` asks for no committer, and none could be given: verifying
 an external commit needs the group context of the epoch it was framed at, and an ahead-framed commit
 is by definition at an epoch this peer holds no context for. A peer that has fallen behind holds

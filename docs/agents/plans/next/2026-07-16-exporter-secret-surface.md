@@ -13,11 +13,20 @@ itself. Both of those are now false, on this branch:
 
 - `GroupHandle.exportSecret` (`packages/mls/src/group-handle.ts:600`, added in `e33319d`) is the MLS
   exporter (RFC 9420 §8.5), documented at length with the removed-member reasoning above.
-- `@kumiai/mls-rpc` wires the port to it (`packages/mls-rpc/src/crypto.ts:126`), so the ordinary path
+- `@kumiai/mls-rpc` wires the port to it (`packages/mls-rpc/src/crypto.ts:130`), so the ordinary path
   is right by construction rather than by care.
 - The seam is watched: `rpc-conformance`'s clause *"is PER-EPOCH: the group rotates onto a different
-  secret and the removed member keeps the old one"* (`packages/rpc-conformance/src/group-crypto.ts:141`)
+  secret and the removed member keeps the old one"* (`packages/rpc-conformance/src/group-crypto.ts:156`)
   runs over the real `createGroupCrypto` from `packages/mls-rpc/test/ports-conformance.test.ts`.
+
+Since this was filed, `GroupCrypto.exportSecret` gained a caller-supplied `label` and optional
+`length` (`packages/rpc/src/crypto.ts:65`, commit `d24fd24`), which widens what a host's own
+implementation must get right rather than narrowing it: the label now flows through from the
+caller, so a hand-rolled implementation that ignores it derives one secret for every purpose. The
+`@kumiai/mls-rpc` implementation additionally refuses the ledger-entry seal label outright
+(`packages/mls-rpc/src/crypto.ts:130-135`), since a caller passing that label would otherwise be
+handed the ledger-entry key. A host writing its own `exportSecret` gets neither the pass-through
+nor the refusal for free.
 
 ## The residue
 
