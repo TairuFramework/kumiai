@@ -11,8 +11,8 @@
  * THE ADVANCE RULE, which the store's whole value rests on: a cursor may only pass a frame that is
  * DELIVERED or DEAD. A frame sealed at an epoch the walk has not reached yet is neither — it is
  * openable later, and only later — and a cursor that passed it would drop it on the next restart,
- * which is the exact loss this store exists to stop. See the drain in `peer.ts`, which is where the
- * rule is enforced.
+ * which is the exact loss this store exists to stop. See the drain in `app-lane.ts`, which is where
+ * the rule is enforced.
  *
  * Keyed by TOPIC ID, and not folded into {@link "anchor".AnchorStore}: a topic ID already encodes
  * both the segment (it is anchor-bound) and the protocol, which is exactly the granularity a read

@@ -81,7 +81,7 @@ change, and closing them now was out of scope for the task that found them.
   `unwrap` is not assignable to that 1-argument type today, a structural arity mismatch that would
   need its own reshape independent of the AAD question. (An earlier version of this finding also
   argued the app lane's resync/replay drain could not determine its own context; that argument did
-  not survive a second reading of `loadAppSegment`/`drainAppFrames`, which bind every frame to one
+  not survive a second reading of `app-lane.ts`'s `loadSegment`/`drain`, which bind every frame to one
   topic before `unwrap` is ever called — the conclusion to drop the AAD half stands, that specific
   reason does not.)
 - **`open-once.ts` and `directed.ts`'s residual `UnwrapResult` typing.** Task 6 closed the runtime
