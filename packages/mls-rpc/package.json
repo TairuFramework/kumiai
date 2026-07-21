@@ -1,6 +1,6 @@
 {
   "name": "@kumiai/mls-rpc",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "The @kumiai/rpc consumer ports (GroupCrypto, GroupMLS) implemented over @kumiai/mls",
   "keywords": [
     "mls",

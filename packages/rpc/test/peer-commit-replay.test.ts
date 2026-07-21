@@ -43,7 +43,8 @@ function commitFrames(hub: FakeHub, recoverySecret: Uint8Array) {
  */
 async function journalledButNeverPublished(
   member: TestPeer,
-  entry: Pick<JournalEntry, 'expectedHead' | 'kind' | 'bodies'>,
+  entry: Pick<JournalEntry, 'expectedHead' | 'kind' | 'bodies'> &
+    Partial<Pick<JournalEntry, 'journal'>>,
 ): Promise<MemoryCommitJournal> {
   const commit = member.mls.buildCommit(entry.bodies)
   return createMemoryCommitJournal({
@@ -56,7 +57,10 @@ async function journalledButNeverPublished(
       commit,
       bodies: entry.bodies,
       kind: entry.kind,
-      journal: commit,
+      // The blob is the HOST's, opaque here. It defaults to the commit bytes because most of
+      // these tests only need one to exist; a test asserting what comes back passes its own,
+      // so the bytes it expects cannot be bytes the peer could have reconstructed anyway.
+      journal: entry.journal ?? commit,
     },
   })
 }
@@ -233,10 +237,14 @@ describe('restart replay closes the crash window', () => {
     const token = 'signed-token: carol is an admin'
 
     const seed = makeMLSPeer(hub, 'alice', recoverySecret)
+    // Host bookkeeping: which of ITS operations this commit was carrying. Opaque to the peer,
+    // and the only thing that can name the lost work as something a user asked for.
+    const blob = new TextEncoder().encode('{"requestID":"req-promote-carol"}')
     const journal = await journalledButNeverPublished(seed, {
       expectedHead: null,
       kind: 'ledger',
       bodies: [token],
+      journal: blob,
     })
     await seed.peer.dispose()
 
@@ -254,7 +262,11 @@ describe('restart replay closes the crash window', () => {
     // The tokens are signed and epoch-independent, so the WORK survived the restart even
     // though the commit did not. There is no build() to call again — the process that held
     // it is gone — so the peer hands the tokens back and the host re-issues them.
-    expect(result.lost).toEqual({ kind: 'ledger', tokens: [token] })
+    //
+    // The blob comes back with them, and it has to: the tokens are the work, not the request.
+    // Re-issuing them under a fresh identity reports an outcome for an operation nobody is
+    // holding, and leaves the one the user IS holding pending forever.
+    expect(result.lost).toEqual({ kind: 'ledger', tokens: [token], journal: blob })
     expect(journal.slot()).toBeNull() // cleared, and surfaced. Never cleared silently.
     expect(commitFrames(hub, recoverySecret)).toHaveLength(1) // only the winner's
     expect(alice.mls.ledgerIDs()).toEqual([]) // this commit did not happen
@@ -267,10 +279,12 @@ describe('restart replay closes the crash window', () => {
     const recoverySecret = new Uint8Array(32).fill(0x35)
 
     const seed = makeMLSPeer(hub, 'alice', recoverySecret)
+    const blob = new TextEncoder().encode('{"requestID":"req-invite-carol"}')
     const journal = await journalledButNeverPublished(seed, {
       expectedHead: null,
       kind: 'invite',
       bodies: [], // the intent is in the Add proposal and the KeyPackage, not here
+      journal: blob,
     })
     await seed.peer.dispose()
     await publishCommit({ hub, senderDID: 'zoe', recoverySecret, epoch: 1 })
@@ -285,7 +299,10 @@ describe('restart replay closes the crash window', () => {
     // it cannot construct one. The host must re-issue the invite or tell the user. The one
     // thing that must not happen is a silent clear — for a remove, that is an admin who
     // believes a member was evicted when they were not.
-    expect(result.lost).toEqual({ kind: 'invite' })
+    // No tokens — there is nothing to re-issue — but the blob still comes back, and here it
+    // carries the whole value of the notice: "an invite failed" is not actionable, "the invite
+    // you sent Carol failed" is. This is the only path by which the host can say which.
+    expect(result.lost).toEqual({ kind: 'invite', journal: blob })
     expect(alice.welcomes).toEqual([]) // nothing was re-enacted behind the host's back
     expect(journal.slot()).toBeNull()
 
@@ -341,7 +358,9 @@ describe('restart replay closes the crash window', () => {
     // and the admin is told the removal failed while this device quietly acts as if it did —
     // it stops sealing to her, and diverges from a group that still holds her leaf. Only the
     // pair of assertions below can tell those apart, and both must hold.
-    expect(lost).toEqual({ kind: 'remove' })
+    // The blob here is the post-commit handle this test hands to `adoptJournalled` above, so
+    // it is asserted by shape only; what it must CARRY is the invite test's subject.
+    expect(lost).toEqual({ kind: 'remove', journal: expect.any(Uint8Array) })
     expect(alice.mls.leaves()).toContain('mallory')
     expect(commitFrames(hub, recoverySecret)).toHaveLength(1) // only zoe's: the remove never landed
     expect(journal.slot()).toBeNull() // surfaced, then cleared. Never cleared silently.
@@ -393,7 +412,7 @@ describe('restart replay closes the crash window', () => {
     ])
     await flush()
 
-    expect(lost).toEqual({ kind: 'ledger', tokens: [token] })
+    expect(lost).toEqual({ kind: 'ledger', tokens: [token], journal: expect.any(Uint8Array) })
     // Re-issued and landed: the work survived the restart intact, and nothing was lost.
     expect(alice.mls.ledgerIDs()).toEqual([memoryEntryID(token)])
     expect(alice.mls.epoch()).toBe(3) // zoe's commit, then the re-issued one

@@ -1451,7 +1451,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       // the notice must not be lost, never the slot.
       await journal.clear(entry.publishID)
       lostCommit =
-        entry.kind === 'ledger' ? { kind: 'ledger', tokens: entry.bodies } : { kind: entry.kind }
+        entry.kind === 'ledger'
+          ? { kind: 'ledger', tokens: entry.bodies, journal: entry.journal }
+          : { kind: entry.kind, journal: entry.journal }
       return false
     }
     // Accepted — just now, or by the process that published it and died; the store's dedup makes

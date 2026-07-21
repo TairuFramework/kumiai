@@ -1,5 +1,12 @@
 # @kumiai/mls-rpc
 
+## 0.4.1
+
+### Patch Changes
+
+- Updated dependencies
+  - @kumiai/rpc@0.5.0
+
 ## 0.4.0
 
 ### Minor Changes

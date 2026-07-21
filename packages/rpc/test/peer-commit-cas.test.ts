@@ -98,8 +98,15 @@ describe('the commit loop converges, serializes and journals', () => {
       }),
     )
     void aliceCommit.then(() => releaseBob?.())
-    await Promise.all([aliceCommit, bobCommit])
+    const [, bobResult] = await Promise.all([aliceCommit, bobCommit])
     await flush()
+
+    // Bob lost a compare-and-set and cleared his slot — the same two motions a lost commit
+    // makes, and the reason this assertion is here rather than assumed. A rebase is the
+    // expected path, so it reports NOTHING: a host told otherwise would tell its user an
+    // operation failed while the retry that carries it is still in flight, and for a remove
+    // that is the security-relevant direction to be wrong in.
+    expect(bobResult.lost).toBeUndefined()
 
     // Bob framed at epoch 1, lost the compare-and-set, pulled Alice's commit, and framed
     // the SECOND attempt at epoch 2 — against the handle her commit rebased him onto.

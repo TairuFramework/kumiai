@@ -1,6 +1,6 @@
 {
   "name": "@kumiai/rpc",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "High-level MLS-aware group RPC for Enkaku: bus broadcast/anycast/gather plus directed RPC over the pub/sub hub",
   "keywords": [
     "rpc",

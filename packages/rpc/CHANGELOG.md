@@ -1,5 +1,20 @@
 # @kumiai/rpc
 
+## 0.4.1
+
+### Patch Changes
+
+- `LostCommit` now carries the lost entry's `journal` — the host's own blob, the same one
+  `adoptJournalled` receives when a commit lands.
+
+  Both obligations a lost commit creates are about a specific operation the host started: re-issue
+  the right tokens, or tell the user which action did not happen. The peer held nothing that named
+  it — the `build()` closure died with its process, and a `ledger` commit's tokens are the work, not
+  the request — so a host could learn only that _something_ was lost. For a `remove` that is the
+  security-relevant case, and it was exactly the one with no tokens to identify it by.
+
+  Hosts consuming `lost` see one new field; nothing constructs `LostCommit` outside the peer.
+
 ## 0.4.0
 
 ### Minor Changes

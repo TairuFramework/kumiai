@@ -116,8 +116,19 @@ export type CommitJournal = {
  * reconstructed, so the host must re-issue or tell the user. For a remove the notice is
  * security-relevant: an admin who believes a member was evicted when they were not has no other
  * signal.
+ *
+ * Both carry `journal`, the host's own blob from the lost entry, because both obligations are
+ * about a specific operation the host started: re-issuing the right tokens, or telling the user
+ * which action did not happen. The peer holds nothing else that names it — the `build()` closure
+ * died with its process, and the tokens are the work, not the request. Handing back the kind
+ * alone would say only that SOMETHING was lost.
+ *
+ * It is the same blob `adoptJournalled` receives when a commit lands, and deliberately so: a host
+ * reads its own bookkeeping the same way on both outcomes, and the two paths stay symmetric.
  */
-export type LostCommit = { kind: 'ledger'; tokens: Array<string> } | { kind: 'invite' | 'remove' }
+export type LostCommit =
+  | { kind: 'ledger'; tokens: Array<string>; journal: Uint8Array }
+  | { kind: 'invite' | 'remove'; journal: Uint8Array }
 
 /**
  * What a lane operation found that the host must act on. Always a RETURN VALUE, never a callback:
