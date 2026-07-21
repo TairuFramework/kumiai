@@ -17,7 +17,7 @@ every peer-level and tunnel-level test in the repo runs against a *double* —
 So the hub the suites actually execute against may diverge from the hub the contract describes, and
 the divergence is invisible until production. It has already happened once: all three doubles had an
 **infallible** `subscribe`, so `hub-mux`'s swallowed subscribe failure was unreachable from every
-test in the repo. See `docs/superpowers/probes/sec-2-report.md`.
+test in the repo.
 
 Two of the three now enforce a retention ceiling the way the store does (the rpc pair, fixed with
 that defect). `packages/hub-tunnel/test/fixtures/fake-hub.ts` still does not — it was out of that

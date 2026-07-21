@@ -7,23 +7,18 @@ import type { BroadcastMessage } from './transport.js'
 
 export type RequestData = { kind: 'req'; rid: string; prm: unknown; gather?: boolean }
 /**
- * A reply body. It says WHAT the answer is and nothing about WHO gave it — deliberately: the
- * sender travels at the transport level as `BroadcastMessage.senderDID`, where only an
- * authenticating `unwrap` can set it, and there is no second place for a responder to name
- * itself. A `from` field lived here once; anything a responder writes into a reply body is a
- * claim it makes about itself, and this one was being believed.
+ * A reply body: WHAT the answer is, never WHO gave it. The sender travels at the transport level
+ * as `BroadcastMessage.senderDID`, settable only by an authenticating `unwrap` — there is no
+ * second place for a responder to name itself. Never add a `from` field here: anything a
+ * responder writes into its own reply is a self-asserted claim, not an identity.
  */
 export type ReplyData = { kind: 'res'; rid: string; ok?: unknown; err?: string }
 
 export type RequestOptions = { errorThreshold?: number; timeoutMs?: number }
 export type GatherOptions = { quorum?: number; timeoutMs?: number }
 /**
- * One gathered reply, attributed to the AUTHENTICATED sender the transport established.
- *
- * `senderDID`, not `from`: the field this replaced carried whatever name the responder wrote into
- * its own reply body, and every consumer that treated it as an identity was trusting the party it
- * was identifying. The rename is the break — a consumer reading `from` no longer compiles, which
- * is the only way to tell it that the meaning moved from asserted to authenticated.
+ * One gathered reply, attributed to the AUTHENTICATED sender the transport established — never a
+ * self-asserted `from` in the reply body.
  */
 export type GatheredReply = { senderDID: string; value: unknown }
 
@@ -74,11 +69,10 @@ export class BroadcastClient extends Disposer {
       if (data?.kind !== 'res' || typeof data.rid !== 'string') {
         continue
       }
-      // A reply this transport cannot attribute is DROPPED, not delivered unattributed. An
-      // authenticating transport clears `senderDID` whenever the open recovered no identity, so
-      // the only way past here is a sender the transport itself established. Applied to every
-      // reply and not just gathered ones: `request` resolves on the first answer it accepts, and
-      // accepting one from nobody would let an unauthenticated frame settle the call.
+      // A reply this transport can't attribute is DROPPED, not delivered unattributed — an
+      // authenticating transport clears `senderDID` when the open recovers no identity, so only a
+      // sender the transport itself established gets through. Applies to every reply, not just
+      // gathered ones, since `request` resolves on the first accepted answer.
       const senderDID = (msg as { senderDID?: unknown }).senderDID
       if (typeof senderDID !== 'string' || senderDID === '') {
         continue
@@ -153,12 +147,10 @@ export class BroadcastClient extends Disposer {
       }
       const timer = setTimeout(finish, timeoutMs)
       this.#pending.set(rid, {
-        // `seen` is keyed on the AUTHENTICATED sender, and that is what makes this a quorum
-        // rather than a count of frames. Keyed on a name the reply asserted, one member could
-        // suppress another's real answer by racing a forgery under its DID (the forgery takes the
-        // slot, the real reply is discarded as a duplicate), and could reach a quorum of N alone
-        // by answering N times under N names. Neither is reachable through a sender only the
-        // holder of that member's key can produce.
+        // Keyed on the AUTHENTICATED sender — that's what makes this a quorum rather than a frame
+        // count. Keyed on an asserted name instead, one member could suppress another's real
+        // answer by racing a forgery under its DID, or reach a quorum of N alone by answering N
+        // times under N names.
         collect: (reply, senderDID) => {
           if (reply.err != null || seen.has(senderDID)) {
             return

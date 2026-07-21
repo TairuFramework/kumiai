@@ -6,13 +6,12 @@ import type { BroadcastBus } from './bus.js'
 /**
  * The version every broadcast frame this build writes carries, and the only one it reads.
  *
- * Broadcast is loose JSON, so ADDING a field was always safe and needed no version to be safe.
- * What the discriminant buys is the other two moves: REMOVING a field and REINTERPRETING one.
- * `ReplyData.from` was both — taken off the wire, and its meaning ("who this reply says it is
- * from") replaced by a transport-level `senderDID` that only an authenticating `unwrap` may set.
- * A v0 frame reaching a v1 reader would present a self-asserted name in a position the reader
- * now treats as authenticated, which is precisely the confusion this whole change exists to end,
- * so an unrecognised version is REFUSED rather than best-efforted.
+ * Broadcast is loose JSON, so adding a field needs no version bump. What the discriminant buys is
+ * removing or reinterpreting one: `ReplyData.from` was reinterpreted — taken off the wire, its
+ * meaning ("who sent this") replaced by transport-level `senderDID`, settable only by an
+ * authenticating `unwrap`. A v0 frame reaching a v1 reader would present a self-asserted name
+ * where the reader now expects an authenticated one, so an unrecognised version is REFUSED, not
+ * best-effort.
  */
 export const BROADCAST_VERSION = 1
 
@@ -22,16 +21,15 @@ export type BroadcastMessage = {
   /**
    * WHO SENT THIS, as established by the transport — never by the frame's own contents.
    *
-   * On a transport with an `unwrap` (an authenticating one), this is set from what `unwrap`
-   * recovered from the ciphertext and from nothing else: a `senderDID` present in the encoded
-   * bytes is discarded before it is read, because on such a transport it is a claim anyone could
-   * have written. On a transport WITHOUT an `unwrap` there is no authority to appeal to, so the
-   * wire-carried value stands — that is the memory bus, and the reason
-   * `BroadcastResponderParams.from` still exists.
+   * On an authenticating transport (one with `unwrap`), this is set only from what `unwrap`
+   * recovered from the ciphertext; a `senderDID` present in the encoded bytes is discarded, since
+   * on such a transport it's a claim anyone could have written. Without an `unwrap` there's no
+   * authority to appeal to, so the wire-carried value stands instead — that's the memory bus, and
+   * why `BroadcastResponderParams.from` still exists.
    *
-   * Absent means "this transport could not say who sent it". Consumers that attribute — notably
-   * `BroadcastClient.gather`, which keys its dedup on this — drop such a message rather than
-   * attribute it to nobody in particular.
+   * Absent means "this transport couldn't say who sent it". Consumers that attribute — notably
+   * `BroadcastClient.gather`, which dedups on this — drop such a message rather than attribute it
+   * to nobody.
    */
   senderDID?: string
 }
@@ -72,20 +70,18 @@ function encode(value: unknown): Uint8Array {
  * byte-identical to a live dispatch.
  */
 export function encodeFrame(message: BroadcastMessage): Uint8Array {
-  // Message first and stamp second: the stamp is applied LAST, so it always wins — a message
-  // that somehow carried its own `v` would have that value overwritten by `BROADCAST_VERSION`
-  // rather than published under whatever it claimed.
+  // Stamp applied last, so it always wins — a message that somehow carried its own `v` gets
+  // overwritten rather than published under its claimed value.
   return encode({ ...message, v: BROADCAST_VERSION })
 }
 
 /**
  * Decode plaintext broadcast bytes, refusing any version this build does not speak.
  *
- * Distinguishable on purpose, and message-bearing: every other failure on this path is an opaque
- * JSON or decrypt error, and a reader that reported them alike could not tell a frame from a
- * future build from one belonging to another group. The transport treats both the same way —
- * drop the frame, keep the subscription — so this changes what an operator sees, not what
- * happens.
+ * Message-bearing on purpose: every other failure on this path is an opaque JSON or decrypt
+ * error, and a reader that reported them alike couldn't tell a frame from a future build apart
+ * from one belonging to another group. The transport handles both the same way — drop the frame,
+ * keep the subscription — so this changes what an operator sees, not what happens.
  */
 export function decodeFrame(bytes: Uint8Array): BroadcastMessage {
   const { v, ...message } = JSON.parse(toUTF(bytes)) as BroadcastMessage & { v?: unknown }
@@ -114,11 +110,10 @@ export function createBroadcastTransport<R = BroadcastMessage, W = BroadcastMess
 ): TransportType<R, W> {
   const { topicID, bus, wrap = identityWrap, unwrap = identityUnwrap, signal } = params
   /**
-   * Whether this transport can establish who sent a frame. Configuring an `unwrap` is what makes
-   * it so — and it is the question asked, rather than "did this particular unwrap return a
-   * sender", because the two answers must differ: an authenticating transport whose `unwrap`
-   * recovered nothing from one frame has established that it does not know, which is not the
-   * same as having no authority and falling back to what the frame says about itself.
+   * Whether this transport can establish who sent a frame — true iff `unwrap` is configured. Asked
+   * this way rather than "did this unwrap return a sender", because the two differ: an
+   * authenticating transport whose `unwrap` recovered nothing has established that it doesn't
+   * know, which isn't the same as having no authority and falling back to the frame's own claim.
    */
   const authenticating = params.unwrap != null
 
@@ -146,19 +141,18 @@ export function createBroadcastTransport<R = BroadcastMessage, W = BroadcastMess
             const { payload: bytes, senderDID } = normalizeUnwrap(result)
             const message = decodeFrame(bytes)
             if (authenticating) {
-              // The recovered sender is the ONLY sender here, and it REPLACES what the bytes
-              // claimed even when nothing was recovered — otherwise a forged claim would survive
-              // exactly when the open failed to produce an identity to contradict it. Left alone
-              // on a non-authenticating transport, where the wire value is all there is.
+              // The recovered sender is the ONLY sender here and REPLACES what the bytes claimed
+              // even when nothing was recovered — else a forged claim would survive exactly when
+              // the open failed to contradict it. Left alone on a non-authenticating transport,
+              // where the wire value is all there is.
               if (senderDID == null) delete message.senderDID
               else message.senderDID = senderDID
             }
             controller.enqueue(message as R)
           })
           .catch(() => {
-            // Per-message decode/unwrap failure: drop this message and keep the
-            // subscription alive so later valid messages still arrive.
-            // Expected for messages from other groups/epochs where decryption fails.
+            // Drop this message and keep the subscription alive — expected for messages from
+            // other groups/epochs where decryption fails.
           })
       })
     },

@@ -15,48 +15,38 @@ export const HANDSHAKE_MAGIC = Uint8Array.from([0x45, 0x4b])
 /**
  * Current handshake wire-format version.
  *
- * BUMPING THIS IS SURVIVABLE, and that is a property of the reader, not of the byte. An old peer
- * meeting an unknown version does not fail the decode — {@link decodeHandshakeFrame} hands the
- * version back rather than throwing — and on the COMMIT topic the lane files an unreadable frame
- * as {@link "classify".CommitDisposition} `ahead`: the group moved on to something this build
- * cannot read, so step over the frame and heal. What the heal alone GUARANTEES is a loud, correct
- * stall in place of a silent one — landing the rejoin it attempts additionally requires the new
- * build to still answer old peers' rendezvous requests in a version they can read, which is a
- * property of the responder, not of this byte.
+ * BUMPING THIS IS SURVIVABLE, but only because of what the reader does with it, not the byte
+ * itself: {@link decodeHandshakeFrame} hands an unknown version back rather than throwing, and on
+ * the COMMIT topic the lane files it as {@link "classify".CommitDisposition} `ahead` — the group
+ * moved to a format this build can't read, so step over the frame and heal. That heal only
+ * GUARANTEES a loud stall in place of a silent one; landing the rejoin additionally needs the new
+ * build to still answer old peers' rendezvous requests in a version they can read.
  *
- * It has to work that way, because the obvious alternative does not. Filing an unreadable frame
- * as poison holds only while SOME frames stay readable, and after a version bump none do: there
- * is no "next frame" to heal from, so the peer steps over the group's entire future, drains to
- * the end of the log, and reports itself fully reconciled at a dead epoch. Silent, and no restart
- * fixes it. The heal direction is also the safe one — a forged unknown-version frame can only
- * TRIGGER a heal, never suppress one, the same asymmetry the `ahead` row already accepts on a
- * cleartext epoch.
+ * It has to be `ahead`, not poison: poison only works while SOME frames stay readable, and after
+ * a bump none do — there's no "next frame" to heal from, so the peer drains to the end of the
+ * log and reports itself reconciled at a dead epoch, silently, permanently. The heal direction is
+ * also the safe one: a forged unknown-version frame can only TRIGGER a heal, never suppress one —
+ * the same asymmetry the `ahead` row accepts on a cleartext epoch.
  *
- * STILL PREFER PUTTING A FORMAT CHANGE INSIDE THE PAYLOAD, and the sealed ledger-entry blob is
- * the case that will tempt you to bump this instead — BUT "inside the payload" is not one place.
- * The commit frame ({@link "commit-frame".COMMIT_FRAME_VERSION}) is the first payload layer this
- * advice reaches, and it does NOT behave like the blob: its version byte is read before the commit
- * bytes are extracted, so a bump there strands every old peer exactly as a bump here does, and it
- * is routed to the same heal for that reason. Only the blob ITSELF gets the cheap outcome below,
- * because its failure lands after the commit has been read. A blob change costs an old peer one
- * commit (it fails the OPEN, files that commit as poison, and heals from the next frame); a
- * header bump costs it a loud stall, on every frame, from the bump onwards — and a landed rejoin
- * only where the new build keeps answering. Bump this only when the HEADER itself changes — and
- * only alongside a plan for the peers that cannot read it: the heal above is that plan's engine,
- * but a plan that leaves their rendezvous reply unreadable makes the heal decorative.
+ * STILL PREFER PUTTING A FORMAT CHANGE INSIDE THE PAYLOAD — but "the payload" isn't one place.
+ * The commit frame ({@link "commit-frame".COMMIT_FRAME_VERSION}) does NOT get the cheap outcome:
+ * its version byte is read before the commit bytes are extracted, so a bump there strands every
+ * old peer exactly as a bump here does, and routes to the same heal. Only the sealed ledger-entry
+ * blob gets the cheap outcome, because its failure lands after the commit is read (poisons one
+ * commit, heals from the next). Bump this only when the HEADER itself changes, and only alongside
+ * a responder that keeps answering old peers' rendezvous requests — without that, the heal above
+ * is decorative.
  */
 export const HANDSHAKE_VERSION = 1
 
 const HEADER_LENGTH = HANDSHAKE_MAGIC.length + 2
 
 /**
- * The message kinds carried on the handshake lane. {@link decodeHandshakeFrame} rejects a kind
- * byte not listed here by THROWING, before the caller ever learns the frame's version — and on
- * the commit topic a throw is filed as poison, not routed to the heal. So no future version may
- * publish a kind byte this enum does not already have: `commit` stays `0` forever, and a new
- * commit-topic message needs its kind added HERE, not merely allowed by a version bump. That is
- * the price of validating kind before version in `decodeHandshakeFrame` — deliberate, not an
- * oversight.
+ * The message kinds carried on the handshake lane. {@link decodeHandshakeFrame} THROWS on a kind
+ * byte not listed here, before the caller learns the frame's version — and on the commit topic a
+ * throw is poison, not the heal. So no future version may publish a kind this enum lacks:
+ * `commit` stays `0` forever, and a new commit-topic message needs its kind added HERE, not just
+ * allowed by a version bump. Deliberate — kind is validated before version.
  */
 export const HANDSHAKE_KIND = {
   /** An MLS Commit fanned out to advance every member's epoch. */
@@ -97,12 +87,10 @@ export function encodeHandshakeFrame(kind: HandshakeKind, payload: Uint8Array): 
  * Validate the header and split a frame into its version, kind and payload. Throws on a short
  * frame, a bad magic, or an unknown kind — bytes that are not this protocol at all.
  *
- * DOES NOT throw on an unsupported VERSION: it returns it, because the right answer differs by
- * lane and only the caller knows which lane it is on. Every caller MUST compare `version` against
- * {@link HANDSHAKE_VERSION} before trusting `payload`, which is a format this build has never
- * seen. On the commit topic an unknown version is evidence the group moved on and the peer heals
- * (see {@link HANDSHAKE_VERSION}); everywhere else it is a frame that says nothing, and is
- * dropped like any other unreadable one.
+ * DOES NOT throw on an unsupported VERSION; it returns it, since the right answer differs by
+ * lane and only the caller knows which lane it's on. Every caller MUST compare `version` against
+ * {@link HANDSHAKE_VERSION} before trusting `payload` — see {@link HANDSHAKE_VERSION} for what an
+ * unknown one means on the commit topic versus everywhere else.
  */
 export function decodeHandshakeFrame(frame: Uint8Array): {
   /** The frame's wire version. Equal to {@link HANDSHAKE_VERSION} for a frame this build reads. */

@@ -102,4 +102,4 @@ Found by the Fix 2 probe on `feat/app-lane-delivery` while implementing F5 (drop
 F4 (bound the ahead-claim) and F3 (stall the walk on a failed pull) landed; F5 is blocked on this.
 The regression test is in the tree, skipped, with the blocker written above it:
 `packages/rpc/test/peer-app-drain-integrity.test.ts` — *"a frame published while the walk is still
-walking is picked up by it"*. See `docs/superpowers/probes/fix-2-report.md`.
+walking is picked up by it"*.

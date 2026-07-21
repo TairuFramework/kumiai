@@ -4,28 +4,24 @@ import { defaultCapabilities, makeCustomExtension } from 'ts-mls'
 import type { GroupHandle } from './group.js'
 
 /**
- * MLS GroupContext extension type carrying the genesis anchor. A uint16 outside
- * the MLS default extension types (1–5) and clear of every reserved GREASE
- * value, so it can never collide with a ts-mls built-in or a probing extension.
+ * MLS GroupContext extension type for the genesis anchor. A uint16 outside the MLS default
+ * range (1–5) and clear of GREASE values, so it never collides with a built-in or a probe.
  */
 export const GROUP_ANCHOR_EXTENSION_TYPE = 0xf100
 
 /**
- * MLS GroupContext extension type carrying the control-ledger head. Its update
- * logic arrives in a later step, but its type is reserved and advertised from
- * the outset (see {@link controlCapabilities}) so an anchored group can later
- * grow a head without every member's leaf being rejected.
+ * MLS GroupContext extension type for the control-ledger head. Update logic lands in a later
+ * step; the type is reserved and advertised now (see {@link controlCapabilities}) so member
+ * leaves don't need to be rejected once it grows data.
  */
 export const LEDGER_HEAD_EXTENSION_TYPE = 0xf101
 
 /**
- * Reserved for a future control extension, carrying no data today.
- *
- * Reserved and advertised BEFORE it carries anything, for the same reason
- * {@link LEDGER_HEAD_EXTENSION_TYPE} was: RFC 9420 requires every member leaf to advertise
- * each custom GroupContext extension type, and leaves cannot be rewritten. A type introduced
- * after members have joined cannot be installed in their group at all — the only remedy is
- * re-admitting every member. Reserving costs one line now and is unavailable forever after.
+ * Reserved for a future control extension; carries no data today. Reserved and advertised now
+ * for the same reason as {@link LEDGER_HEAD_EXTENSION_TYPE}: RFC 9420 requires every member
+ * leaf to advertise each custom GroupContext extension type it can carry, and leaves cannot be
+ * rewritten — a type introduced after members join can never be installed without re-admitting
+ * everyone.
  */
 export const RESERVED_EXTENSION_TYPE = 0xf102
 
@@ -35,35 +31,28 @@ const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 
 /**
- * Genesis anchor baked into the MLS GroupContext at group creation: the creator
- * DID is the epoch-0 admin. It survives every epoch and is authenticated by the
- * GroupInfo signature, so every joiner reads the same value. Treated as
- * immutable for the lifetime of the group.
+ * Genesis anchor baked into the MLS GroupContext at creation: the creator DID is the epoch-0
+ * admin. Survives every epoch, authenticated by the GroupInfo signature, treated as immutable.
  */
 export type GroupAnchor = {
   creatorDID: string
   version: number
   /**
-   * Opaque consumer payload, written once at group creation. `@kumiai/mls`
-   * never reads or interprets it — it is any JSON value the consumer chooses. A
-   * consumer holding raw bytes encodes them to a JSON-safe form (e.g. base64)
-   * itself; the anchor container is already JSON, so it does not double-encode.
-   * Kubun stores its recovery seed here.
+   * Opaque consumer payload written once at creation; `@kumiai/mls` never reads or interprets
+   * it. A consumer holding raw bytes must JSON-safe-encode them (e.g. base64) itself. Kubun
+   * stores its recovery seed here.
    */
   app?: unknown
 }
 
-/** Serialize an anchor to its GroupContext extension bytes. */
 export function encodeGroupAnchor(anchor: GroupAnchor): Uint8Array {
   return encoder.encode(JSON.stringify(anchor))
 }
 
 /**
- * Tolerant decode: returns null on malformed bytes or wrong shape, never
- * throws. `creatorDID` must be a string and `version` a number; `app` is
- * optional and any JSON value, so an anchor without it is valid, not malformed.
- * (A consumer that requires a specific `app` shape enforces that in its own
- * decode of `app`, not here.)
+ * Tolerant decode: null on malformed bytes or wrong shape, never throws. `creatorDID` must be a
+ * string and `version` a number; `app` is optional, so its absence isn't malformed. A consumer
+ * needing a specific `app` shape validates that itself.
  */
 export function decodeGroupAnchor(bytes: Uint8Array): GroupAnchor | null {
   let parsed: unknown
@@ -86,7 +75,6 @@ export function decodeGroupAnchor(bytes: Uint8Array): GroupAnchor | null {
   return anchor
 }
 
-/** Build the genesis-anchor GroupContext extension for an anchor value. */
 export function buildGroupAnchorExtension(anchor: GroupAnchor): GroupContextExtension {
   return makeCustomExtension({
     extensionType: GROUP_ANCHOR_EXTENSION_TYPE,
@@ -103,17 +91,13 @@ export function buildCurrentGroupAnchorExtension(
 }
 
 /**
- * Leaf-node capabilities advertising all three control GroupContext extension
- * types (genesis anchor, ledger head, and the reserved third type). RFC 9420
- * requires every member leaf to advertise each custom GroupContext extension
- * type, or `commitInvite` rejects the added leaf. All three are advertised from
- * the outset — even before the ledger head or the reserved type carry data —
- * so an anchored group can later grow a head, or install the reserved type,
- * without re-admitting members. Pass these at both `createGroup` (creator leaf)
- * and `createKeyPackageBundle` (invitee leaf) so a control group can be joined.
+ * Leaf capabilities advertising all three control GroupContext extension types (genesis
+ * anchor, ledger head, reserved). RFC 9420 requires every leaf to advertise each custom
+ * extension type or `commitInvite` rejects it; all three are advertised now, before the latter
+ * two carry data, so they can be grown later without re-admitting members. Pass at both
+ * `createGroup` (creator leaf) and `createKeyPackageBundle` (invitee leaf).
  *
- * Idempotent: each type appears exactly once even if the defaults already carry
- * it.
+ * Idempotent: each type appears once even if the defaults already carry it.
  */
 export function controlCapabilities(): Capabilities {
   const base = defaultCapabilities()
@@ -131,33 +115,24 @@ function findAnchorExtension(handle: GroupHandle): GroupContextExtension | undef
 }
 
 /**
- * The anchor's raw GroupContext extension, exactly as it sits in the group, or
- * null when genuinely absent. Unlike {@link readGroupAnchor} this does not
- * decode — it is the source of the verbatim bytes a future group-context-
- * extensions (GCE) proposal must copy.
- *
- * A GCE proposal replaces the *entire* GroupContext extension list, so every
- * ledger-head update must re-include the anchor unchanged, and the receiving
- * commit policy byte-compares the proposed anchor's `extensionData` against its
- * own. Re-encoding a decoded {@link GroupAnchor} instead of copying these bytes
- * can make that comparison fail on identical content (JSON key order, number
- * formatting, dropped `undefined` keys) — an intermittent failure that looks
- * exactly like an anchor-tampering attack. The decoded anchor is for reading;
- * these bytes are for round-tripping.
+ * The anchor's raw extension bytes, exactly as stored, or null if absent. Unlike
+ * {@link readGroupAnchor} this doesn't decode — a GCE (group-context-extensions) proposal must
+ * copy these verbatim, since it replaces the *entire* extension list and the commit policy
+ * byte-compares the proposed anchor's `extensionData` against this. Re-encoding a decoded
+ * {@link GroupAnchor} instead can fail that comparison on identical content (JSON key order,
+ * number formatting, dropped `undefined` keys) — indistinguishable from tampering. Use these
+ * bytes for round-tripping; the decoded anchor is for reading only.
  */
 export function readGroupAnchorExtension(handle: GroupHandle): GroupContextExtension | null {
   return findAnchorExtension(handle) ?? null
 }
 
 /**
- * Read and decode the genesis anchor from a group handle. Returns null only
- * when the anchor extension is genuinely absent. A present-but-undecodable
- * extension is corruption, not absence, and throws — so a control gate reads it
- * as "anchor unreadable" and fails closed rather than silently downgrading. (The
- * anchor is written once at creation and authenticated by the GroupInfo
- * signature, so this is a corruption guard, not a forgery path.) For bytes to
- * copy into a proposal, use {@link readGroupAnchorExtension}, never a re-encode
- * of this result.
+ * Read and decode the genesis anchor. Null only when genuinely absent; a present-but-
+ * undecodable extension is corruption and throws, so a control gate fails closed instead of
+ * silently downgrading (the anchor is authenticated by the GroupInfo signature, so this guards
+ * corruption, not forgery). Use {@link readGroupAnchorExtension} for bytes to copy into a
+ * proposal — never a re-encode of this result.
  */
 export function readGroupAnchor(handle: GroupHandle): GroupAnchor | null {
   const extension = findAnchorExtension(handle)
