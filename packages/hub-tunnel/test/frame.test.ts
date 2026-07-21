@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'vitest'
+
 import { FrameDecodeError } from '../src/errors.js'
 import { decodeFrame, encodeFrame, HUB_FRAME_VERSION, type HubFrame } from '../src/frame.js'
 

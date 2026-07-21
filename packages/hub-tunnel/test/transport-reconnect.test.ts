@@ -7,7 +7,6 @@ import {
   type HubReceiveSubscription,
   type MailboxHub,
 } from '../src/transport.js'
-
 import { FakeHub } from './fixtures/fake-hub.js'
 
 type Msg = HubFrameMessageBody

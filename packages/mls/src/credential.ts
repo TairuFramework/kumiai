@@ -41,8 +41,8 @@ export function parseMLSCredentialIdentity(identity: Uint8Array): MLSCredentialI
   let parsed: unknown
   try {
     parsed = JSON.parse(text)
-  } catch {
-    throw new Error('Invalid MLS credential: identity bytes are not valid JSON')
+  } catch (cause) {
+    throw new Error('Invalid MLS credential: identity bytes are not valid JSON', { cause })
   }
   if (parsed == null || typeof parsed !== 'object') {
     throw new Error('Invalid MLS credential: identity must be a JSON object')

@@ -139,8 +139,8 @@ type Protocol = typeof protocol
 describe('hub-tunnel echo', () => {
   test('client → server round-trip via in-memory hub', async () => {
     const hub = createInMemoryHub()
-    const C2S = 'tunnel:client-to-server'
-    const S2C = 'tunnel:server-to-client'
+    const clientToServer = 'tunnel:client-to-server'
+    const serverToClient = 'tunnel:server-to-client'
 
     const clientTransport = createHubTunnelTransport<
       AnyServerMessageOf<Protocol>,
@@ -149,8 +149,8 @@ describe('hub-tunnel echo', () => {
       hub,
       sessionID: 'session-1',
       localDID: 'client',
-      sendTopicID: C2S,
-      receiveTopicID: S2C,
+      sendTopicID: clientToServer,
+      receiveTopicID: serverToClient,
     })
 
     const serverTransport = createHubTunnelTransport<
@@ -160,8 +160,8 @@ describe('hub-tunnel echo', () => {
       hub,
       sessionID: 'session-1',
       localDID: 'server',
-      sendTopicID: S2C,
-      receiveTopicID: C2S,
+      sendTopicID: serverToClient,
+      receiveTopicID: clientToServer,
     })
 
     const echoHandler: RequestHandler<Protocol, 'echo'> = async ({ param }) => param

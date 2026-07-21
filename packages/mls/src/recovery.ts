@@ -66,21 +66,21 @@ type SealedReplyKind = {
   /** The frame's version byte. */
   version: number
   /** Raised when a reply of this kind will not open. */
-  fail: (reason: SealedReplyRejection, message: string) => Error
+  fail: (reason: SealedReplyRejection, message: string, options?: ErrorOptions) => Error
 }
 
 const GROUP_INFO_REPLY: SealedReplyKind = {
   hpkeInfo: utf8.encode('kumiai/mls/recovery/v1'),
   aadDomain: utf8.encode('kumiai/mls/recovery-aad/v1'),
   version: SEALED_GROUP_INFO_VERSION,
-  fail: (reason, message) => new SealedGroupInfoError(reason, message),
+  fail: (reason, message, options) => new SealedGroupInfoError(reason, message, options),
 }
 
 const LEDGER_REPLY: SealedReplyKind = {
   hpkeInfo: utf8.encode('kumiai/mls/recovery-ledger/v1'),
   aadDomain: utf8.encode('kumiai/mls/recovery-ledger-aad/v1'),
   version: SEALED_LEDGER_VERSION,
-  fail: (reason, message) => new SealedLedgerError(reason, message),
+  fail: (reason, message, options) => new SealedLedgerError(reason, message, options),
 }
 
 /**
@@ -131,8 +131,8 @@ export type RecoveryRequestRejection =
 export class RecoveryRequestError extends Error {
   #reason: RecoveryRequestRejection
 
-  constructor(reason: RecoveryRequestRejection, message: string) {
-    super(message)
+  constructor(reason: RecoveryRequestRejection, message: string, options?: ErrorOptions) {
+    super(message, options)
     this.name = 'RecoveryRequestError'
     this.#reason = reason
   }
@@ -178,8 +178,8 @@ export type SealedLedgerRejection = SealedReplyRejection
 export class SealedGroupInfoError extends Error {
   #reason: SealedGroupInfoRejection
 
-  constructor(reason: SealedGroupInfoRejection, message: string) {
-    super(message)
+  constructor(reason: SealedGroupInfoRejection, message: string, options?: ErrorOptions) {
+    super(message, options)
     this.name = 'SealedGroupInfoError'
     this.#reason = reason
   }
@@ -195,8 +195,8 @@ export class SealedGroupInfoError extends Error {
 export class SealedLedgerError extends Error {
   #reason: SealedReplyRejection
 
-  constructor(reason: SealedReplyRejection, message: string) {
-    super(message)
+  constructor(reason: SealedReplyRejection, message: string, options?: ErrorOptions) {
+    super(message, options)
     this.name = 'SealedLedgerError'
     this.#reason = reason
   }
@@ -310,8 +310,11 @@ async function verifyRecoveryRequest(token: string): Promise<VerifiedRecoveryReq
   let verified: Awaited<ReturnType<typeof verifyToken<RecoveryRequest>>>
   try {
     verified = await verifyToken<RecoveryRequest>(token)
-  } catch {
-    throw new RecoveryRequestError('unverified', 'recovery request signature did not verify')
+  } catch (cause) {
+    // biome-ignore lint/style/useErrorCause: cause IS passed; the rule only reads argument 1, and these take (reason, message, options).
+    throw new RecoveryRequestError('unverified', 'recovery request signature did not verify', {
+      cause,
+    })
   }
   if (!isVerifiedToken<SignedPayload & RecoveryRequest>(verified)) {
     throw new RecoveryRequestError('unverified', 'recovery request is not signed')
@@ -330,8 +333,11 @@ async function verifyRecoveryRequest(token: string): Promise<VerifiedRecoveryReq
   let ephemeralPublicKey: Uint8Array
   try {
     ephemeralPublicKey = decodeMultibase(ephemeralKey)
-  } catch {
-    throw new RecoveryRequestError('malformed', 'recovery request ephemeral key is not multibase')
+  } catch (cause) {
+    // biome-ignore lint/style/useErrorCause: cause IS passed; the rule only reads argument 1, and these take (reason, message, options).
+    throw new RecoveryRequestError('malformed', 'recovery request ephemeral key is not multibase', {
+      cause,
+    })
   }
   if (ephemeralPublicKey.length !== KEM_OUTPUT_LENGTH) {
     throw new RecoveryRequestError(
@@ -488,8 +494,10 @@ async function openSealedReply(
 
   try {
     return await hpke.open(privateKey, enc, ct, kind.hpkeInfo, aad)
-  } catch {
-    throw kind.fail('not-for-me', 'sealed reply does not open for this member and request')
+  } catch (cause) {
+    throw kind.fail('not-for-me', 'sealed reply does not open for this member and request', {
+      cause,
+    })
   }
 }
 
@@ -579,10 +587,12 @@ async function assertResponderIsMember(
   let verified: Awaited<ReturnType<typeof verifyToken<ResponderAttestation>>>
   try {
     verified = await verifyToken<ResponderAttestation>(attestation)
-  } catch {
+  } catch (cause) {
+    // biome-ignore lint/style/useErrorCause: cause IS passed; the rule only reads argument 1, and these take (reason, message, options).
     throw new SealedGroupInfoError(
       'unauthenticated',
       'responder attestation signature did not verify',
+      { cause },
     )
   }
   if (!isVerifiedToken<SignedPayload & ResponderAttestation>(verified)) {
@@ -662,20 +672,24 @@ export async function openSealedGroupInfo(params: OpenSealedGroupInfoParams): Pr
   let groupInfo: Uint8Array
   try {
     ;({ attestation, groupInfo } = unframeAttestedGroupInfo(plaintext))
-  } catch {
+  } catch (cause) {
+    // biome-ignore lint/style/useErrorCause: cause IS passed; the rule only reads argument 1, and these take (reason, message, options).
     throw new SealedGroupInfoError(
       'malformed',
       'sealed plaintext is not a framed, attested GroupInfo',
+      { cause },
     )
   }
 
   // Parse as a GroupInfo before anything trusts its fields.
   try {
     inspectGroupInfo(groupInfo)
-  } catch {
+  } catch (cause) {
+    // biome-ignore lint/style/useErrorCause: cause IS passed; the rule only reads argument 1, and these take (reason, message, options).
     throw new SealedGroupInfoError(
       'malformed',
       'sealed plaintext is not a framed MLSMessage(GroupInfo)',
+      { cause },
     )
   }
 
@@ -803,7 +817,10 @@ export async function openSealedLedger(params: OpenSealedLedgerParams): Promise<
   )
   try {
     return decodeLedgerTokens(plaintext)
-  } catch {
-    throw new SealedLedgerError('malformed', 'sealed plaintext is not a framed ledger')
+  } catch (cause) {
+    // biome-ignore lint/style/useErrorCause: cause IS passed; the rule only reads argument 1, and these take (reason, message, options).
+    throw new SealedLedgerError('malformed', 'sealed plaintext is not a framed ledger', {
+      cause,
+    })
   }
 }

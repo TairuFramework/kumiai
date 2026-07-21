@@ -403,8 +403,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     let parsed: MemoryRecoveryRequest
     try {
       parsed = JSON.parse(toUTF(request)) as MemoryRecoveryRequest
-    } catch {
-      throw new Error(`${label}: the request does not parse`)
+    } catch (cause) {
+      throw new Error(`${label}: the request does not parse`, { cause })
     }
     if (
       typeof parsed?.requesterDID !== 'string' ||

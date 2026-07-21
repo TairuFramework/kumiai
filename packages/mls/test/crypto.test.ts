@@ -24,6 +24,7 @@ import { describe, expect, test } from 'vitest'
 import { nobleCryptoProvider } from '../src/crypto.js'
 
 const CIPHERSUITE_NAME = 'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519' as const
+const CHACHA_SUITE_NAME = 'MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519' as const
 
 function requireWelcome(welcome: MlsWelcomeMessage | undefined): MlsWelcomeMessage {
   if (welcome == null) throw new Error('Expected welcome message')
@@ -463,8 +464,6 @@ describe('nobleCryptoProvider', () => {
 })
 
 describe('nobleCryptoProvider ChaCha20-Poly1305 suite (ID 3)', () => {
-  const CHACHA_SUITE_NAME = 'MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519' as const
-
   async function getChaChaImpl() {
     return await getImpl(CHACHA_SUITE_NAME, nobleCryptoProvider)
   }

@@ -19,7 +19,7 @@ catalog:
   '@enkaku/server': ^0.19.0
   '@enkaku/transport': ^0.19.1
   '@kokuin/capability': ^0.1.0
-  '@kokuin/token': ^0.2.0
+  '@kokuin/token': ^0.3.0
   '@sozai/async': ^0.2.1
   '@sozai/codec': ^0.2.0
   '@sozai/event': ^0.1.1
@@ -27,10 +27,10 @@ catalog:
   '@sozai/runtime': ^0.1.0
   '@sozai/schema': ^0.1.1
   '@sozai/stream': ^0.2.0
-  '@kokuin/expo': ^0.2.1
+  '@kokuin/expo': ^0.3.0
   '@sozai/runtime-expo': ^0.2.1
-  'expo': ^57.0.4
-  'expo-status-bar': ^57.0.0
+  'expo': ^57.0.7
+  'expo-status-bar': ^57.0.1
   'react': 19.2.3
   'react-native': ^0.86.0
   '@types/react': ^19.2.17

@@ -5,6 +5,7 @@ import type {
   LogHub,
 } from '@kumiai/hub-tunnel'
 import { describe, expect, test } from 'vitest'
+
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryCommitJournal } from './fixtures/journal.js'

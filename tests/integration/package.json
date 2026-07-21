@@ -4,22 +4,22 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test:types": "tsc --noEmit --skipLibCheck",
-    "test": "pnpm run test:types && vitest run"
+    "test": "pnpm run test:types && vitest run",
+    "test:types": "tsc --noEmit --skipLibCheck"
   },
   "devDependencies": {
-    "@kumiai/mls": "workspace:^",
-    "@kumiai/mls-rpc": "workspace:^",
-    "@kumiai/rpc": "workspace:^",
+    "@enkaku/client": "catalog:",
+    "@enkaku/protocol": "catalog:",
+    "@enkaku/server": "catalog:",
+    "@enkaku/transport": "catalog:",
+    "@kokuin/token": "catalog:",
     "@kumiai/hub-client": "workspace:^",
     "@kumiai/hub-protocol": "workspace:^",
     "@kumiai/hub-server": "workspace:^",
     "@kumiai/hub-tunnel": "workspace:^",
-    "@enkaku/client": "catalog:",
-    "@enkaku/protocol": "catalog:",
-    "@enkaku/transport": "catalog:",
-    "@enkaku/server": "catalog:",
-    "@kokuin/token": "catalog:",
+    "@kumiai/mls": "workspace:^",
+    "@kumiai/mls-rpc": "workspace:^",
+    "@kumiai/rpc": "workspace:^",
     "vitest": "catalog:"
   }
 }

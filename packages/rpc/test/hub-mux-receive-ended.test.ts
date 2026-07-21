@@ -114,7 +114,9 @@ describe('the mux reports a push lane that ended without being asked to', () => 
     await flush()
 
     expect(ended).toHaveLength(1)
-    expect((ended[0]?.error as Error).message).toContain('already bound')
+    const first = ended[0]
+    if (first == null) throw new Error('expected one lane-ended report')
+    expect((first.error as Error).message).toContain('already bound')
     await mux.dispose()
   })
 

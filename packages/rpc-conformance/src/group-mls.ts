@@ -422,9 +422,11 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const sealed = await alice.mls.sealGroupInfo(request)
           const pending = await bob.mls.applyRecovery(sealed, 'req-1')
 
-          expect(pending).not.toBeNull()
-          expect(pending?.commit).toBeInstanceOf(Uint8Array)
-          expect((pending?.commit as Uint8Array).length).toBeGreaterThan(0)
+          // Narrowed rather than optional-chained: `expect` does not narrow, and a chain that
+          // short-circuits would TypeError on `.length` instead of failing this assertion.
+          if (pending == null) throw new Error('applyRecovery returned no pending commit')
+          expect(pending.commit).toBeInstanceOf(Uint8Array)
+          expect(pending.commit.length).toBeGreaterThan(0)
         })
       })
 

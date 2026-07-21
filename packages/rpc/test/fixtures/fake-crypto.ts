@@ -19,6 +19,22 @@ export type FakeCrypto = GroupCrypto & { setEpoch: (n: number) => void }
 /** The base secret every fake member shares, so members at the same epoch export the same bytes. */
 export const FAKE_BASE_SECRET = new Uint8Array(32).fill(0xab)
 
+/** Bytes of the per-sender generation counter, inside the sealed region. */
+const GENERATION_BYTES = 4
+/** The sealed region's fixed header: the generation and the sender-DID length. */
+const FRAMED_HEADER_BYTES = GENERATION_BYTES + 2
+/** Bytes of the keyed tag over an entry's ciphertext. */
+const ENTRY_TAG_BYTES = 8
+
+/**
+ * The label entry seals are keyed under — never {@link APP_TOPIC_LABEL} or whatever label a caller
+ * passes `exportSecret`. The real port makes the identical choice (a separate `ENTRY_SEAL_LABEL`,
+ * asked of the handle directly rather than routed through its own `exportSecret`), for the reason
+ * `GroupCrypto`'s doc gives: sharing one exported secret between a topic name and a ledger key
+ * would make every holder of the name a reader of the bodies.
+ */
+const FAKE_ENTRY_LABEL = 'kumiai/fake-entries/v1'
+
 /**
  * What {@link createFakeCrypto} exports at `epoch` for `label`: the base secret with the epoch
  * AND the label mixed in, so a different epoch is different bytes and — the property the widened
@@ -123,11 +139,6 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
     for (let i = 0; i < bytes.length; i++) out[i] = bytes[i] ^ epochKey
     return out
   }
-
-  /** Bytes of the per-sender generation counter, inside the sealed region. */
-  const GENERATION_BYTES = 4
-  /** The sealed region's fixed header: the generation and the sender-DID length. */
-  const FRAMED_HEADER_BYTES = GENERATION_BYTES + 2
 
   /** This sender's own sending chain: one generation per frame, never reused. */
   let generation = 0
@@ -240,14 +251,8 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
    * authentication, modelled — and the blob says nothing in the clear about which epoch it is
    * from, exactly as a real seal does not.
    *
-   * Under its OWN label, {@link FAKE_ENTRY_LABEL} — never {@link APP_TOPIC_LABEL} or whatever
-   * label a caller passes `exportSecret`. The real port makes the identical choice (a separate
-   * `ENTRY_SEAL_LABEL`, asked of the handle directly rather than routed through its own
-   * `exportSecret`), for the reason `GroupCrypto`'s doc gives: sharing one exported secret
-   * between a topic name and a ledger key would make every holder of the name a reader of the
-   * bodies.
+   * Under its OWN label, {@link FAKE_ENTRY_LABEL}.
    */
-  const FAKE_ENTRY_LABEL = 'kumiai/fake-entries/v1'
   const entryKey = (at: number): Uint8Array =>
     fakeEpochSecret(at, FAKE_ENTRY_LABEL, secret.length, secret)
 
@@ -256,8 +261,6 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
     for (let i = 0; i < bytes.length; i++) out[i] = bytes[i] ^ (key[i % key.length] as number)
     return out
   }
-
-  const ENTRY_TAG_BYTES = 8
 
   /**
    * A keyed tag over the CIPHERTEXT, not a copy of the key's first bytes.

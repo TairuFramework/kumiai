@@ -4,18 +4,18 @@
   "private": true,
   "main": "index.ts",
   "scripts": {
-    "start": "expo start",
     "android": "expo run:android",
     "android:release": "expo run:android --no-bundler --variant release",
     "ios": "expo run:ios",
     "ios:release": "expo run:ios --no-bundler --configuration Release",
-    "test:types": "tsc --noEmit -p tsconfig.json",
-    "test": "MAESTRO_CLI_NO_ANALYTICS=true MAESTRO_CLI_ANALYSIS_NOTIFICATION_DISABLED=true maestro test .maestro/"
+    "start": "expo start",
+    "test": "MAESTRO_CLI_NO_ANALYTICS=true MAESTRO_CLI_ANALYSIS_NOTIFICATION_DISABLED=true maestro test .maestro/",
+    "test:types": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@kumiai/mls": "workspace:^",
     "@kokuin/expo": "catalog:",
     "@kokuin/token": "catalog:",
+    "@kumiai/mls": "workspace:^",
     "@sozai/runtime-expo": "catalog:",
     "expo": "catalog:",
     "expo-status-bar": "catalog:",

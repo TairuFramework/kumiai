@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'vitest'
+
 import {
   createGroupPeer,
   DEFAULT_APP_LOG_RETENTION_SECONDS,

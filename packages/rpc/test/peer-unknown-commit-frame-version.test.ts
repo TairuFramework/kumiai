@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'vitest'
+
 import { RecoveryRequiredError } from '../src/commit.js'
 import { COMMIT_FRAME_VERSION, encodeCommitFrame } from '../src/commit-frame.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'

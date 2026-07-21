@@ -5,7 +5,6 @@ import { DecryptError, EnvelopeDecodeError } from '../src/errors.js'
 import type { ObservabilityEvent } from '../src/events.js'
 import { encodeFrame, type HubFrame } from '../src/frame.js'
 import { createHubTunnelTransport } from '../src/transport.js'
-
 import { FakeEncryptor } from './fixtures/fake-encryptor.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 

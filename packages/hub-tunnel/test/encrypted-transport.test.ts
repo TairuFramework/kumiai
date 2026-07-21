@@ -3,7 +3,6 @@ import { describe, expect, test } from 'vitest'
 import { createEncryptedHubTunnelTransport } from '../src/encrypted-transport.js'
 import type { Encryptor } from '../src/encryptor.js'
 import { decodeEnvelope } from '../src/envelope.js'
-
 import { FakeHub } from './fixtures/fake-hub.js'
 
 const identityEncryptor: Encryptor = {

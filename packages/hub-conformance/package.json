@@ -1,7 +1,6 @@
 {
   "name": "@kumiai/hub-conformance",
   "version": "0.3.0",
-  "license": "MIT",
   "description": "Conformance test suite for the @kumiai/hub-protocol HubStore contract",
   "keywords": [
     "hub",
@@ -13,32 +12,33 @@
     "url": "https://github.com/TairuFramework/kumiai",
     "directory": "packages/hub-conformance"
   },
+  "license": "MIT",
+  "sideEffects": false,
   "type": "module",
-  "main": "lib/index.js",
-  "types": "lib/index.d.ts",
   "exports": {
     ".": "./lib/index.js"
   },
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
   "files": [
     "lib/*"
   ],
-  "sideEffects": false,
   "scripts": {
+    "build": "pnpm run build:clean && pnpm run build:js && pnpm run build:types",
     "build:clean": "del lib",
     "build:js": "swc src -d ./lib --config-file ../../node_modules/@kigu/dev/swc.json --strip-leading-paths",
     "build:types": "tsc --emitDeclarationOnly --skipLibCheck",
-    "build": "pnpm run build:clean && pnpm run build:js && pnpm run build:types",
-    "test:types": "tsc --noEmit --skipLibCheck -p tsconfig.test.json",
+    "prepublishOnly": "pnpm run build",
     "test": "pnpm run test:types",
-    "prepublishOnly": "pnpm run build"
+    "test:types": "tsc --noEmit --skipLibCheck -p tsconfig.test.json"
   },
   "dependencies": {
     "@kumiai/hub-protocol": "workspace:^"
   },
-  "peerDependencies": {
+  "devDependencies": {
     "vitest": "catalog:"
   },
-  "devDependencies": {
+  "peerDependencies": {
     "vitest": "catalog:"
   }
 }

@@ -1645,8 +1645,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           //    the pending commit untouched, clear the slot, and go back to step 1.
           await slot.clear(publishID)
           if (Date.now() >= deadline) {
+            // The last lost compare-and-set, carried: it is the proximate reason this attempt
+            // restarted, and the deadline only names how many such losses ran out the clock.
             throw new CommitDeadlineError(
               `commit: still rebasing after ${commitDeadlineMs}ms and ${attempt + 1} attempts`,
+              { cause: error },
             )
           }
           continue
