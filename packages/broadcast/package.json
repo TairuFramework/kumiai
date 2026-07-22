@@ -1,6 +1,6 @@
 {
   "name": "@kumiai/broadcast",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Generic fan-out broadcast transport and anycast client for Enkaku RPC",
   "keywords": [
     "broadcast",

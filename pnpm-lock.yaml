@@ -7,17 +7,17 @@ settings:
 catalogs:
   default:
     '@enkaku/client':
-      specifier: ^0.19.0
-      version: 0.19.0
+      specifier: ^0.20.0
+      version: 0.20.0
     '@enkaku/protocol':
-      specifier: ^0.19.0
-      version: 0.19.0
+      specifier: ^0.20.0
+      version: 0.20.0
     '@enkaku/server':
-      specifier: ^0.19.0
-      version: 0.19.0
+      specifier: ^0.20.0
+      version: 0.20.0
     '@enkaku/transport':
-      specifier: ^0.19.1
-      version: 0.19.1
+      specifier: ^0.20.0
+      version: 0.20.0
     '@kokuin/expo':
       specifier: ^0.3.0
       version: 0.3.0
@@ -94,10 +94,10 @@ importers:
     dependencies:
       '@enkaku/protocol':
         specifier: 'catalog:'
-        version: 0.19.0
+        version: 0.20.0
       '@enkaku/transport':
         specifier: 'catalog:'
-        version: 0.19.1
+        version: 0.20.0
       '@noble/hashes':
         specifier: 'catalog:'
         version: 2.2.0
@@ -119,17 +119,17 @@ importers:
     dependencies:
       '@enkaku/client':
         specifier: 'catalog:'
-        version: 0.19.0
+        version: 0.20.0
       '@kumiai/hub-protocol':
         specifier: workspace:^
         version: link:../hub-protocol
     devDependencies:
       '@enkaku/protocol':
         specifier: 'catalog:'
-        version: 0.19.0
+        version: 0.20.0
       '@enkaku/transport':
         specifier: 'catalog:'
-        version: 0.19.1
+        version: 0.20.0
       '@kokuin/token':
         specifier: 'catalog:'
         version: 0.3.0
@@ -157,7 +157,7 @@ importers:
     dependencies:
       '@enkaku/protocol':
         specifier: 'catalog:'
-        version: 0.19.0
+        version: 0.20.0
       '@sozai/event':
         specifier: 'catalog:'
         version: 0.1.1
@@ -170,10 +170,10 @@ importers:
     dependencies:
       '@enkaku/protocol':
         specifier: 'catalog:'
-        version: 0.19.0
+        version: 0.20.0
       '@enkaku/server':
         specifier: 'catalog:'
-        version: 0.19.0
+        version: 0.20.0
       '@kokuin/token':
         specifier: 'catalog:'
         version: 0.3.0
@@ -189,10 +189,10 @@ importers:
     devDependencies:
       '@enkaku/client':
         specifier: 'catalog:'
-        version: 0.19.0
+        version: 0.20.0
       '@enkaku/transport':
         specifier: 'catalog:'
-        version: 0.19.1
+        version: 0.20.0
       '@kumiai/hub-conformance':
         specifier: workspace:^
         version: link:../hub-conformance
@@ -201,7 +201,7 @@ importers:
     dependencies:
       '@enkaku/transport':
         specifier: 'catalog:'
-        version: 0.19.1
+        version: 0.20.0
       '@kumiai/hub-protocol':
         specifier: workspace:^
         version: link:../hub-protocol
@@ -217,13 +217,13 @@ importers:
     devDependencies:
       '@enkaku/client':
         specifier: 'catalog:'
-        version: 0.19.0
+        version: 0.20.0
       '@enkaku/protocol':
         specifier: 'catalog:'
-        version: 0.19.0
+        version: 0.20.0
       '@enkaku/server':
         specifier: 'catalog:'
-        version: 0.19.0
+        version: 0.20.0
       '@kokuin/token':
         specifier: 'catalog:'
         version: 0.3.0
@@ -284,16 +284,16 @@ importers:
     dependencies:
       '@enkaku/client':
         specifier: 'catalog:'
-        version: 0.19.0
+        version: 0.20.0
       '@enkaku/protocol':
         specifier: 'catalog:'
-        version: 0.19.0
+        version: 0.20.0
       '@enkaku/server':
         specifier: 'catalog:'
-        version: 0.19.0
+        version: 0.20.0
       '@enkaku/transport':
         specifier: 'catalog:'
-        version: 0.19.1
+        version: 0.20.0
       '@kumiai/broadcast':
         specifier: workspace:^
         version: link:../broadcast
@@ -373,16 +373,16 @@ importers:
     devDependencies:
       '@enkaku/client':
         specifier: 'catalog:'
-        version: 0.19.0
+        version: 0.20.0
       '@enkaku/protocol':
         specifier: 'catalog:'
-        version: 0.19.0
+        version: 0.20.0
       '@enkaku/server':
         specifier: 'catalog:'
-        version: 0.19.0
+        version: 0.20.0
       '@enkaku/transport':
         specifier: 'catalog:'
-        version: 0.19.1
+        version: 0.20.0
       '@kokuin/token':
         specifier: 'catalog:'
         version: 0.3.0
@@ -886,20 +886,20 @@ packages:
   '@emnapi/wasi-threads@1.2.1':
     resolution: {integrity: sha512-uTII7OYF+/Mes/MrcIOYp5yOtSMLBWSIoLPpcgwipoiKbli6k322tcoFsxoIIxPDqW01SQGAgko4EzZi2BNv2w==}
 
-  '@enkaku/client@0.19.0':
-    resolution: {integrity: sha512-pqPe1WRN7b7dngPeLSgCVrTayMPMiF9PnCnPQJe1I7NFCW1jAKRxPjEr+P5brZPRr4BwO2tLA77UkSBveXnY+g==}
+  '@enkaku/client@0.20.0':
+    resolution: {integrity: sha512-yx4yBWZDbzlrcCqhNU6jXLJJFH8wFAj3msnemt7hiFkVSyU2QmOjrGwO3h2AjQ8sXhs+JuSIFYzi/vOgsMhS9A==}
 
-  '@enkaku/otel@0.19.0':
-    resolution: {integrity: sha512-ksFtN5R9OjKNvz/pzEJxnZkTX4UcGTCZj+1WtVz8+w3X7A7b7lJJebUCq7eWPR2E79vLzyUDZEJckpkQqA19Bw==}
+  '@enkaku/otel@0.20.0':
+    resolution: {integrity: sha512-XFTQXjhToEWEuumRtuZXtAHTS22Ly7gE97GFdLj1nzGbNFSOhLwgtmnKAo8Lw3tx94uaeRHmLu0J4baZylFufQ==}
 
-  '@enkaku/protocol@0.19.0':
-    resolution: {integrity: sha512-VRKxsDsxIVF5yUo15NEwm+u269yl812L6BnO5t518C+ij1iR+QYa63qx0KxtYTupKmrzdC+wmjm9u1Y8Q2hEIg==}
+  '@enkaku/protocol@0.20.0':
+    resolution: {integrity: sha512-jrkUcKiq947l/xK5sK6V3KMPeADMvq5JmRexgFL4sXdyULaer6KuPys52xVwFmtGiltkGRA+dxMQKD4bjmOfpg==}
 
-  '@enkaku/server@0.19.0':
-    resolution: {integrity: sha512-AXeq6uHjm5LbzzCWigEmmeqz0a2Jou5RA5coE+uvDxMBM+FYMMmJ0TluHw48feAvT5pmDpKLQiS6Bas5ZL1zXw==}
+  '@enkaku/server@0.20.0':
+    resolution: {integrity: sha512-hPA/gAKpIM0hpV4GX5gV6gn/MCKb1DpHQn7ck9btzcDW+0glUj7yyZJA2ENrLkTTJ3yexEdmuMRDIND6MPRekA==}
 
-  '@enkaku/transport@0.19.1':
-    resolution: {integrity: sha512-YxPO9qZdeckCgwS7dfxkHvRtuQHWCLPpfAjZNmYZuF1ggcXHWm7vgFUuLnK7SyErZpWl0OUUR4KYvkAUqNk8Ug==}
+  '@enkaku/transport@0.20.0':
+    resolution: {integrity: sha512-9ZUDJdqpyUAg01jKvBOpxnjsrXr6mKzeWUxEfJKLcvGf7t/H1w5NT3Dm58TGMk6dz7C3bpEV1g1XJuFzMWaUbA==}
 
   '@esbuild/aix-ppc64@0.28.1':
     resolution: {integrity: sha512-Svl7tq8k/08+p6CXPpRjQ1fKX+1odH/BQbb48fV6fj3CWHhsoIOoY87w1oHXm0qEpkIK3ZfVgp0hed3XBXzXMQ==}
@@ -1267,20 +1267,14 @@ packages:
   '@kigu/dev@0.1.4':
     resolution: {integrity: sha512-WIrpUSLsvY6CnicpKILxth+Z64NLiJO1qAMWwgZ3r+NWk6EpgwiY/jHdetfqra1CYIKcz48Pr/EIp7T8YqRdTA==}
 
-  '@kokuin/capability@0.2.0':
-    resolution: {integrity: sha512-iNIjlx+1cUKNPR8P4sISI/Zu52BQFN2HagfannU0TwnKrVF2jPXhTzCqt9Ir4IT8xSXnSMLwaXlz/Z1cfXXrKA==}
+  '@kokuin/capability@0.2.1':
+    resolution: {integrity: sha512-SCAis58pnh9cyheTSVDYzqUw6BvR+RdJ1qghjp4luXPW8adxXbCBCs4DsH3IL+okoeHXDE+Rs8HCchnqHm79HQ==}
 
   '@kokuin/expo@0.3.0':
     resolution: {integrity: sha512-pMj2gXLoItgUhFuY+LPU9GEGLZpFeVxRvCSRfpQinbdAwucTD75KEZrYkmzTkG1PDrYjEFifjS+AeQANyTPYwQ==}
 
-  '@kokuin/otel@0.1.0':
-    resolution: {integrity: sha512-eRN3SdICQZAMNilprC4szHXQUGUVdD3zM5d+qcJVi0Df59dyAF9Ca6urxAMYQyvPHIpUk98k+jn8Tgm73k5RYw==}
-
   '@kokuin/otel@0.3.0':
     resolution: {integrity: sha512-XwnBYkrglkV0aVcPx/ajDL6DNAZgFeZ7cNyzAHMW6ex4/RyY9xJ7htNYzl/sCFlYMNQ8M/lPayrzYf3hdN4dUQ==}
-
-  '@kokuin/token@0.2.0':
-    resolution: {integrity: sha512-GaDSiBtGvBr3VkDp8tnnk3ZElD72NqCTd5W63C2jOiz45GgZ2bbDOvEx8SbCwCXB6ULb/F+zM07F3ilaO3xILw==}
 
   '@kokuin/token@0.3.0':
     resolution: {integrity: sha512-31bRe9buWFFiSaNHvpGFgjWmp0IOXrkr7hHKgr/lrIB174budAaY0QE4XEmCIa69ziItwtNdFpwcWagHD/CU/g==}
@@ -1436,10 +1430,6 @@ packages:
   '@nodelib/fs.walk@1.2.8':
     resolution: {integrity: sha512-oGB+UxlgWcgQkgwo8GcEGwemoTFt3FIO9ababBmaGwXIoBKZ+GTy0pP185beGg7Llih/NSHSV2XAs1lnznocSg==}
     engines: {node: '>= 8'}
-
-  '@opentelemetry/api-logs@0.219.0':
-    resolution: {integrity: sha512-FFx7YnaYJlIjqWW/AG/yAZ0L/NEY724PipXXXQLdtZPbLwBGbUMTGL1i/esI56TWfTUXxhLfpgrnWJCG8aUJyg==}
-    engines: {node: '>=8.0.0'}
 
   '@opentelemetry/api-logs@0.220.0':
     resolution: {integrity: sha512-CmVa4ImJ+ynfrPMNaAXHET6Bhb44SwzmfyVJFq9ni2jgXJR/l7C6gfVFddNmHP+ZOkP9cf4f9DBe68qVLTHc9w==}
@@ -1646,23 +1636,17 @@ packages:
   '@sozai/event@0.1.1':
     resolution: {integrity: sha512-kWsu7tKy9SLq5mn8ZavcGqPg7E37mwMkI3F96cstNFh1zexmYqHphMl0ya43oXY/3ONW4j8o/zziw82MYrbLnA==}
 
-  '@sozai/execution@0.2.0':
-    resolution: {integrity: sha512-9beq2wuO+sIUqp7dClhkkf5R2iFMqdkS6KoyYwBI4iDT0XjhFZcc3ueqmiq7x2fQqiOiSg45m3hPTUnU2PsVPQ==}
-
-  '@sozai/log@0.1.0':
-    resolution: {integrity: sha512-vhCp3GK9UguYwopntaz6/juJSKFpB9GAAsKC9nxdakdQrD/Ix4r5fmZWIPArNtynbzsaUwdVoFYmDzbu90UNxg==}
+  '@sozai/execution@0.2.1':
+    resolution: {integrity: sha512-vQLquTIbnD+WQBpszBsDGQlU5DBIip/gZ7aqq0uHem2C5aN/TGPCrcpqelyiYMGswBNEJ2u/CL6/EmIo4cBHRA==}
 
   '@sozai/log@0.2.0':
     resolution: {integrity: sha512-QxBBFSSC9be7Es/r2KYPs/yMWu/zGl+oV4QJE8ycaN47KP1CtoOXd7M6dPsHhHJfHYNFTOmXW4DJ9ALq3f8cyg==}
 
-  '@sozai/otel@0.2.0':
-    resolution: {integrity: sha512-QA6VNAabL9D36nALM92fTtvTO2V9wI3P72rvQFFj9dRNZyZ9s4l9PK5RXKEMNN1KFgYUKus+7KBMiqRo6kYrTw==}
-
   '@sozai/otel@0.3.0':
     resolution: {integrity: sha512-NDS0yyuGid/LMDaLTiFCohEQWjet7hSvf/iznHofe2HDbEc0CoyeJrPjsXLVm6zJYyUwQLj4P06wdL5m9Wm2zQ==}
 
-  '@sozai/result@0.1.1':
-    resolution: {integrity: sha512-0WPhOLkd7xTBqxqc5Wmcr3+a9jjjUCLvH4FLyiAZh43qLkFFt4qFYv/RGVngmxMonzHGEm38xrKTLjfRfiMcvA==}
+  '@sozai/result@0.2.0':
+    resolution: {integrity: sha512-voMSX9KYJG6zlCvCYmiBvhMmgM1rCXQw0I/tOK+GaaXtZTDL+GXOhdN9eAs6tI/bLKub6UqZwsS/iw2JFKujTw==}
 
   '@sozai/runtime-expo@0.2.1':
     resolution: {integrity: sha512-QXu8lpewhRS/jOS64wZaxdpR75Rr1Ds33lmrrC/DEDl9gv1uQHrPYs/F86ALmQ6IIOdyG9gdo/1v9qFUE5pbnA==}
@@ -4814,42 +4798,42 @@ snapshots:
       tslib: 2.8.1
     optional: true
 
-  '@enkaku/client@0.19.0':
+  '@enkaku/client@0.20.0':
     dependencies:
-      '@enkaku/otel': 0.19.0
-      '@kokuin/token': 0.2.0
-      '@sozai/async': 0.2.0
+      '@enkaku/otel': 0.20.0
+      '@kokuin/token': 0.3.0
+      '@sozai/async': 0.2.1
       '@sozai/event': 0.1.1
-      '@sozai/execution': 0.2.0
-      '@sozai/log': 0.1.0
-      '@sozai/otel': 0.2.0
+      '@sozai/execution': 0.2.1
+      '@sozai/log': 0.2.0
+      '@sozai/otel': 0.3.0
       '@sozai/runtime': 0.1.0
       '@sozai/stream': 0.2.0
 
-  '@enkaku/otel@0.19.0':
+  '@enkaku/otel@0.20.0':
     dependencies:
       '@opentelemetry/api': 1.9.1
-      '@sozai/otel': 0.2.0
+      '@sozai/otel': 0.3.0
 
-  '@enkaku/protocol@0.19.0':
+  '@enkaku/protocol@0.20.0':
     dependencies:
-      '@kokuin/token': 0.2.0
+      '@kokuin/token': 0.3.0
 
-  '@enkaku/server@0.19.0':
+  '@enkaku/server@0.20.0':
     dependencies:
-      '@enkaku/otel': 0.19.0
-      '@enkaku/protocol': 0.19.0
-      '@kokuin/capability': 0.2.0
-      '@kokuin/token': 0.2.0
-      '@sozai/async': 0.2.0
+      '@enkaku/otel': 0.20.0
+      '@enkaku/protocol': 0.20.0
+      '@kokuin/capability': 0.2.1
+      '@kokuin/token': 0.3.0
+      '@sozai/async': 0.2.1
       '@sozai/event': 0.1.1
-      '@sozai/log': 0.1.0
-      '@sozai/otel': 0.2.0
+      '@sozai/log': 0.2.0
+      '@sozai/otel': 0.3.0
       '@sozai/runtime': 0.1.0
       '@sozai/schema': 0.1.1
       '@sozai/stream': 0.2.0
 
-  '@enkaku/transport@0.19.1':
+  '@enkaku/transport@0.20.0':
     dependencies:
       '@sozai/async': 0.2.1
       '@sozai/event': 0.1.1
@@ -5363,9 +5347,9 @@ snapshots:
       - supports-color
       - vite
 
-  '@kokuin/capability@0.2.0':
+  '@kokuin/capability@0.2.1':
     dependencies:
-      '@kokuin/token': 0.2.0
+      '@kokuin/token': 0.3.0
 
   '@kokuin/expo@0.3.0(expo@57.0.7)':
     dependencies:
@@ -5379,26 +5363,10 @@ snapshots:
     transitivePeerDependencies:
       - expo
 
-  '@kokuin/otel@0.1.0':
-    dependencies:
-      '@opentelemetry/api': 1.9.1
-      '@sozai/otel': 0.2.0
-
   '@kokuin/otel@0.3.0':
     dependencies:
       '@opentelemetry/api': 1.9.1
       '@sozai/otel': 0.3.0
-
-  '@kokuin/token@0.2.0':
-    dependencies:
-      '@kokuin/otel': 0.1.0
-      '@noble/ciphers': 2.2.0
-      '@noble/curves': 2.2.0
-      '@noble/hashes': 2.2.0
-      '@scure/base': 2.2.0
-      '@sozai/codec': 0.2.0
-      '@sozai/otel': 0.2.0
-      '@sozai/schema': 0.1.1
 
   '@kokuin/token@0.3.0':
     dependencies:
@@ -5527,10 +5495,6 @@ snapshots:
     dependencies:
       '@nodelib/fs.scandir': 2.1.5
       fastq: 1.20.1
-
-  '@opentelemetry/api-logs@0.219.0':
-    dependencies:
-      '@opentelemetry/api': 1.9.1
 
   '@opentelemetry/api-logs@0.220.0':
     dependencies:
@@ -5695,24 +5659,14 @@ snapshots:
     dependencies:
       '@sozai/async': 0.2.0
 
-  '@sozai/execution@0.2.0':
+  '@sozai/execution@0.2.1':
     dependencies:
-      '@sozai/async': 0.2.0
-      '@sozai/result': 0.1.1
-
-  '@sozai/log@0.1.0':
-    dependencies:
-      '@logtape/logtape': 2.2.4
+      '@sozai/async': 0.2.1
+      '@sozai/result': 0.2.0
 
   '@sozai/log@0.2.0':
     dependencies:
       '@logtape/logtape': 2.2.4
-
-  '@sozai/otel@0.2.0':
-    dependencies:
-      '@opentelemetry/api': 1.9.1
-      '@opentelemetry/api-logs': 0.219.0
-      '@sozai/log': 0.1.0
 
   '@sozai/otel@0.3.0':
     dependencies:
@@ -5720,9 +5674,9 @@ snapshots:
       '@opentelemetry/api-logs': 0.220.0
       '@sozai/log': 0.2.0
 
-  '@sozai/result@0.1.1':
+  '@sozai/result@0.2.0':
     dependencies:
-      '@sozai/async': 0.2.0
+      '@sozai/async': 0.2.1
 
   '@sozai/runtime-expo@0.2.1(expo@57.0.7)':
     dependencies:
@@ -5742,7 +5696,7 @@ snapshots:
 
   '@sozai/stream@0.2.0':
     dependencies:
-      '@sozai/async': 0.2.0
+      '@sozai/async': 0.2.1
 
   '@standard-schema/spec@1.1.0': {}
 

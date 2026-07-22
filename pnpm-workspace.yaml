@@ -14,10 +14,10 @@ catalog:
   '@noble/hashes': ^2.0.0
   'ts-mls': 2.0.0-rc.13
   'vitest': ^4.1.10
-  '@enkaku/client': ^0.19.0
-  '@enkaku/protocol': ^0.19.0
-  '@enkaku/server': ^0.19.0
-  '@enkaku/transport': ^0.19.1
+  '@enkaku/client': ^0.20.0
+  '@enkaku/protocol': ^0.20.0
+  '@enkaku/server': ^0.20.0
+  '@enkaku/transport': ^0.20.0
   '@kokuin/capability': ^0.1.0
   '@kokuin/token': ^0.3.0
   '@sozai/async': ^0.2.1
