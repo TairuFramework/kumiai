@@ -87,9 +87,9 @@ describe('per-procedure retention for app events', () => {
   test('retain:log on a request procedure is rejected at the type level and at runtime', () => {
     expect(() =>
       defineGroupProtocol({
+        // @ts-expect-error only 'event' procedures may declare retain; request is always ephemeral
         'room/ask': {
           type: 'request',
-          // @ts-expect-error only 'event' procedures may declare retain; request is always ephemeral
           retain: 'log',
           param: { type: 'object' },
           result: { type: 'object' },
