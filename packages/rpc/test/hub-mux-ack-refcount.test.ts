@@ -1,36 +1,11 @@
-import type { LogHub } from '@kumiai/hub-tunnel'
 import { describe, expect, test } from 'vitest'
 
 import { createHubMux } from '../src/hub-mux.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
+import { hubWithAckOverride } from './fixtures/hub-with-ack-override.js'
 
 const flush = () => new Promise((r) => setTimeout(r, 30))
 const payload = () => new Uint8Array([1])
-
-/**
- * A hub whose `receive` subscription's `ack` throws SYNCHRONOUSLY — the shape the port's type
- * permits (`void | Promise<void>`) but the mux's own ack guard used to assume away. Delegates to a
- * real `DurableFakeHub` instance explicitly: `DurableFakeHub` is a class, and `{...instance}`
- * copies only its own enumerable properties, silently dropping every prototype method.
- */
-function hubWithThrowingAck(instance: DurableFakeHub): LogHub {
-  return {
-    subscribe: (subscriberDID, topicID, options) =>
-      instance.subscribe(subscriberDID, topicID, options),
-    unsubscribe: (subscriberDID, topicID) => instance.unsubscribe(subscriberDID, topicID),
-    publish: (params) => instance.publish(params),
-    fetchTopic: (params) => instance.fetchTopic(params),
-    receive: (subscriberDID) => {
-      const subscription = instance.receive(subscriberDID)
-      return {
-        ...subscription,
-        ack: () => {
-          throw new Error('ack boom')
-        },
-      }
-    },
-  }
-}
 
 describe('the mux refcounts acks across its holders', () => {
   test('one holder acking does not ack upstream while another still holds the message', async () => {
@@ -158,7 +133,9 @@ describe('the mux refcounts acks across its holders', () => {
 
   test('a synchronously-throwing upstream ack does not break the drain', async () => {
     const instance = new DurableFakeHub()
-    const hub = hubWithThrowingAck(instance)
+    const hub = hubWithAckOverride(instance, () => {
+      throw new Error('ack boom')
+    })
     const mux = createHubMux({ hub, localDID: 'bob', onSubscribeFailed: () => {} })
 
     const received: Array<string> = []

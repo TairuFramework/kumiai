@@ -3,35 +3,21 @@ import { describe, expect, test } from 'vitest'
 
 import { createHubMux } from '../src/hub-mux.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
+import { hubWithAckOverride } from './fixtures/hub-with-ack-override.js'
 
 const flush = () => new Promise((r) => setTimeout(r, 30))
 
 /**
  * Spies on the raw upstream `ack`, counting calls rather than distinct sequenceIDs.
  * `DurableFakeHub.ackedCount` is the size of a `Set`, so it cannot tell a single ack from a
- * duplicate one — a wrapping hub delegating explicitly is the only way to see that. Built by
- * per-method delegation, not `{...instance}`: `DurableFakeHub` is a class, and the spread copies
- * only its own enumerable properties, dropping every prototype method.
+ * duplicate one — this counts the underlying calls directly instead.
  */
 function hubCountingAcks(instance: DurableFakeHub): { hub: LogHub; ackCalls: () => number } {
   let calls = 0
-  const hub: LogHub = {
-    subscribe: (subscriberDID, topicID, options) =>
-      instance.subscribe(subscriberDID, topicID, options),
-    unsubscribe: (subscriberDID, topicID) => instance.unsubscribe(subscriberDID, topicID),
-    publish: (params) => instance.publish(params),
-    fetchTopic: (params) => instance.fetchTopic(params),
-    receive: (subscriberDID) => {
-      const subscription = instance.receive(subscriberDID)
-      return {
-        ...subscription,
-        ack: (sequenceID: string) => {
-          calls += 1
-          return subscription.ack?.(sequenceID)
-        },
-      }
-    },
-  }
+  const hub = hubWithAckOverride(instance, (subscription, sequenceID) => {
+    calls += 1
+    return subscription.ack?.(sequenceID)
+  })
   return { hub, ackCalls: () => calls }
 }
 
@@ -110,8 +96,6 @@ describe('the mailbox facade relays its ack', () => {
     await flush()
     expect(ackCalls()).toBe(0)
 
-    // Not stranded either: a fresh delivery on the same sequenceID (what the next drain would
-    // do) must still resolve normally rather than finding a leftover entry from the closed sink.
     await mux.dispose()
   })
 
@@ -171,5 +155,65 @@ describe('the mailbox facade relays its ack', () => {
     await mux.dispose()
     // Closing after the explicit ack must not produce a second one for the same frame.
     expect(ackCalls()).toBe(1)
+  })
+
+  test('a closed sink does not strand a co-held entry', async () => {
+    const { hub: wrappedHub, ackCalls } = hubCountingAcks(new DurableFakeHub())
+    const mux = createHubMux({ hub: wrappedHub, localDID: 'bob', onSubscribeFailed: () => {} })
+
+    mux.mailbox.subscribe('bob', 'topic:x')
+    const a = mux.mailbox.receive('bob', { topicID: 'topic:x' })
+    const b = mux.mailbox.receive('bob', { topicID: 'topic:x' })
+    const iterA = a[Symbol.asyncIterator]()
+    const iterB = b[Symbol.asyncIterator]()
+    await flush()
+
+    await wrappedHub.publish({
+      senderDID: 'alice',
+      topicID: 'topic:x',
+      payload: new Uint8Array([1]),
+    })
+    await iterA.next()
+    const nextB = await iterB.next()
+
+    a.return?.()
+    await flush()
+    expect(ackCalls()).toBe(0)
+
+    // B is now the sole holder. A left in `holders` would swallow this ack entirely.
+    await b.ack?.(nextB.value.sequenceID)
+    await flush()
+    expect(ackCalls()).toBe(1)
+
+    b.return?.()
+    await mux.dispose()
+  })
+
+  test('acking a sequenceID after its sink already closed produces no upstream ack', async () => {
+    const { hub: wrappedHub, ackCalls } = hubCountingAcks(new DurableFakeHub())
+    const mux = createHubMux({ hub: wrappedHub, localDID: 'bob', onSubscribeFailed: () => {} })
+
+    mux.mailbox.subscribe('bob', 'topic:x')
+    const subscription = mux.mailbox.receive('bob', { topicID: 'topic:x' })
+    const iterator = subscription[Symbol.asyncIterator]()
+    await flush()
+
+    await wrappedHub.publish({
+      senderDID: 'alice',
+      topicID: 'topic:x',
+      payload: new Uint8Array([1]),
+    })
+    const next = await iterator.next()
+    expect(next.done).toBe(false)
+
+    subscription.return?.()
+    await flush()
+
+    // The claim was abandoned on close, not left behind for a later ack to find and release.
+    await subscription.ack?.(next.value.sequenceID)
+    await flush()
+    expect(ackCalls()).toBe(0)
+
+    await mux.dispose()
   })
 })
