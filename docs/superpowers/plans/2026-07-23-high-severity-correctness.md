@@ -1558,6 +1558,18 @@ out.
   from Task 3.
 - Produces: nothing later tasks rely on.
 
+**Coverage carried forward from Task 8's review.** Task 8 made the encrypting wrapper forward `ack`
+inward, but its test could only assert the *scope* half: `wrapHub` is not exported, and nothing
+outside could reach the wrapped subscription's `ack` to check it. That test still declares an
+`acked` array it never asserts on — a variable that proves nothing.
+
+This task is what makes it reachable, because the read pump is the caller that finally invokes
+`ack`. So also add an encrypted-transport case here: build `createEncryptedHubTunnelTransport` over
+an inner hub whose subscription records `ack` calls, publish a frame, and assert the ack arrives at
+the **inner** hub — proving the wrapper forwards it end to end. Then remove the unasserted `acked`
+array from `packages/hub-tunnel/test/encrypted-transport-ack.test.ts`, or give it the assertion it
+was always meant to have.
+
 - [ ] **Step 1: Write the failing test**
 
 Create `packages/hub-tunnel/test/transport-ack.test.ts`:
