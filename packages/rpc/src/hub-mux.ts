@@ -265,10 +265,11 @@ function isPermanentSubscribeFailure(error: unknown): boolean {
  * Multiplex a single hub `receive` drain into a BroadcastBus view, a mailbox-hub view (for
  * directed tunnels), and an onInbound hook (for lazy directed-server accept).
  *
- * Per inbound message, in order: (1) fire `onInbound` listeners for the topic, then (2) push
- * to every `mailbox.receive` sink — so a listener may create a directed tunnel synchronously
- * and still receive the triggering frame. Topics are refcounted across all three views; the
- * first registration subscribes on the hub.
+ * Per inbound message, in order: (1) fire `onInbound` listeners for the topic, then (2) push to
+ * every `mailbox.receive` sink whose topic scope matches — a sink naming no topic takes every
+ * message, one naming a topic only that one — so a listener may create a directed tunnel
+ * synchronously and still receive the triggering frame. Topics are refcounted across all three
+ * views; the first registration subscribes on the hub.
  *
  * ## A subscribe the hub refuses
  *
@@ -462,7 +463,10 @@ export function createHubMux(params: HubMuxParams): HubMux {
   const subscription = hub.receive(localDID)
   const iterator = subscription[Symbol.asyncIterator]()
 
-  type Holder = InboundListener | Sink
+  // `symbol` admits the drain's own claim (below) as a distinct holder identity — not a fake
+  // zero-arg `InboundListener` that would typecheck by TypeScript dropping trailing parameters
+  // but never be honest about what the value is.
+  type Holder = InboundListener | Sink | symbol
 
   /**
    * The holders of one delivered message that have not yet released it.
@@ -546,15 +550,17 @@ export function createHubMux(params: HubMuxParams): HubMux {
       // is and never reaches a log cursor.
       const position = asDeliveryPosition(message.sequenceID)
 
-      // Claimed for the listeners BEFORE they run: the commit and rendezvous lanes both ack as
-      // their first statement, and that synchronous release needs an entry already in `pending`.
-      if (matchedListeners.length > 0) {
-        pending.set(message.sequenceID, {
-          holders: new Set(matchedListeners),
-          position,
-          claimedAt: now,
-        })
-      }
+      // The drain holds a claim of its own across the whole fan-out. Without it, a listener that
+      // acks synchronously (the commit and rendezvous lanes both do, as their first statement)
+      // could empty the entry and ack upstream before `matchedSinks` below is even computed —
+      // leaving a sink pushed to after the frame was already told to the hub as durably handled,
+      // and a second `ackUpstream` when that sink later releases its own claim.
+      const drainClaim: Holder = Symbol('drain claim')
+      pending.set(message.sequenceID, {
+        holders: new Set<Holder>([drainClaim, ...matchedListeners]),
+        position,
+        claimedAt: now,
+      })
 
       for (const listener of matchedListeners) {
         try {
@@ -566,22 +572,20 @@ export function createHubMux(params: HubMuxParams): HubMux {
 
       // Sinks matched AFTER the listener loop, not before: a listener may synchronously create a
       // mailbox sink (the directed-tunnel lazy-accept race), and it must still receive the frame
-      // that triggered it.
+      // that triggered it. The entry is guaranteed present here — the drain's own claim above is
+      // still holding it — so there is no fresh-entry branch to fall into.
       const matchedSinks = [...sinks].filter(
         (sink) => sink.topicID == null || sink.topicID === message.topicID,
       )
-      if (matchedSinks.length > 0) {
-        const entry = pending.get(message.sequenceID) ?? {
-          holders: new Set<Holder>(),
-          position,
-          claimedAt: now,
-        }
+      const entry = pending.get(message.sequenceID)
+      if (entry != null) {
         for (const sink of matchedSinks) entry.holders.add(sink)
-        pending.set(message.sequenceID, entry)
-      } else if (matchedListeners.length === 0) {
-        // Nothing will ever handle it, so nothing will ever ack it.
-        ackUpstream(position)
       }
+
+      // Releasing the drain's own claim last acks upstream iff no listener or sink is still
+      // holding — which is also what covers the message nobody was interested in, with no
+      // separate branch for that case.
+      releaseClaim(message.sequenceID, drainClaim)
 
       for (const sink of matchedSinks) sink.push(message)
     }

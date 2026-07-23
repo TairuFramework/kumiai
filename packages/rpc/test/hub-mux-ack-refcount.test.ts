@@ -108,4 +108,25 @@ describe('the mux refcounts acks across its holders', () => {
 
     await mux.dispose()
   })
+
+  test('a listener acking synchronously does not free a message a live sink still holds', async () => {
+    const hub = new DurableFakeHub()
+    const mux = createHubMux({ hub, localDID: 'bob', onSubscribeFailed: () => {} })
+    const sub = mux.mailbox.receive('bob')
+    void (async () => {
+      for await (const _ of sub) {
+        /* holds it */
+      }
+    })()
+    mux.onInbound('topic:x', (_message, ack) => {
+      ack()
+    })
+    await flush()
+
+    await hub.publish({ senderDID: 'alice', topicID: 'topic:x', payload: payload() })
+    await flush()
+
+    expect(hub.ackedCount('bob')).toBe(0)
+    await mux.dispose()
+  })
 })
