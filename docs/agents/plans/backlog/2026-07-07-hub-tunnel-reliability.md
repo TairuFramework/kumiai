@@ -1,21 +1,26 @@
 # hub-tunnel reliability
 
-**Priority:** backlog — but contains one **high**-severity correctness item (the dead
-durable-ack contract); pull forward at next triage.
+**Priority:** backlog — ordering, error-path, and teardown hardening in `@kumiai/hub-tunnel`.
 **Origin:** 2026-07-02 audit (commit `bb343d9`), milestone
 `milestones/2026-07-audit-remediation.md`.
 
+> **The high-severity item moved out (2026-07-23).** The dead durable-ack contract was promoted to
+> `../next/2026-07-23-high-severity-correctness.md`, re-verified against `5eb220a` — and the stakes
+> rose: `HubPublishParams.retain`'s `'mailbox'` class (`transport.ts:52`) now defines reclamation in
+> terms of acks that never happen. Everything below stays here. Line numbers below are still
+> `bb343d9` and have drifted.
+
+> **The locally-declared hub port types are not a finding (verified 2026-07-23).**
+> `HubBase`/`MailboxHub`/`LogHub`/`HubReceiveSubscription`/`HubPublishParams` belong here: nothing
+> in `@kumiai/hub-protocol` declares them, and `@kumiai/rpc` already imports them from this package.
+> Reasoning in `2026-07-07-hub-protocol-server-cleanup.md`. One real defect came out of that check —
+> `LogHub.publish` (`transport.ts:139`) is typed narrower than `HubStore.publish`, dropping
+> `deduped` — and is tracked there with the wire-response gap it belongs to.
+
+> The `urn:enkaku:` schema `$id`s (`envelope.ts:14`, `frame.ts:56`) are tracked in
+> `2026-07-07-hub-protocol-server-cleanup.md`, whose scope was widened to cover them.
+
 ## Findings
-
-### High (correctness)
-
-- **`packages/hub-tunnel/src/transport.ts:22,119` — durable-ack contract dead.**
-  `HubReceiveSubscription` documents an `ack` contract, but the transport never calls
-  `subscription.ack`, so over a durable hub every tunnel frame is redelivered on every
-  reconnect until purge. The encrypted wrapper (`encrypted-transport.ts:105-112`) also
-  structurally drops the `ack` member. Fix: ack processed frames in the read pump
-  (forwarding through the wrapper), or delete the contract and document that durability
-  belongs to the rpc mux.
 
 ### Medium (correctness)
 

@@ -85,6 +85,6 @@ non-breaking feature MINOR despite the `GroupMLS`-port auth redesign it enables.
 ## Follow-on
 
 App-lane delivery — a member cannot receive app traffic from an epoch it slept through — is a real,
-separate bug (it predates this work). Design approved; tracked in
-[2026-07-15-app-lane-delivery.md](../next/2026-07-15-app-lane-delivery.md). It is **additive to rpc** (a
-later non-breaking MINOR), so it does not gate this release.
+separate bug (it predates this work). Design approved; it was **completed on 2026-07-21**, see
+[2026-07-21-app-lane-delivery.complete.md](./2026-07-21-app-lane-delivery.complete.md). It was
+**additive to rpc** (a non-breaking MINOR), so it did not gate this release.

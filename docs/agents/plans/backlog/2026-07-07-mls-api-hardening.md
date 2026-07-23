@@ -59,6 +59,48 @@ findings naming either are void rather than outstanding.
 Void: `validateGroupCapability` and `decrypt` no longer exist. `processMessage` fed wire-form
 application-message bytes is now covered. See `next/2026-07-07-test-gaps.md` for what remains.
 
+## Added 2026-07-23 — deferred forward-compatibility API findings
+
+Folded in from `next/2026-07-20-deferred-api-findings.md` at the 2026-07-23 triage. Origin: the four
+API-surface audits of 2026-07-20 that preceded
+`../completed/2026-07-21-forward-compatibility.complete.md`, which took only the items where
+deferring makes the later fix *impossible* and left these. Line numbers are as of `5eb220a`.
+
+Every item marked **breaking** costs a `minor` bump while `@kumiai/mls` is 0.x and a `major` after
+1.0 — see `../milestones/pre-1.0-breaking-api.md` for the deadline that implies. None is a
+correctness bug; each is a shape a filed consumer would force a break to fix, and none has one yet.
+
+- **A third `GroupPermission`** (breaking). `packages/mls/src/roster.ts` — the role model is exactly
+  `'admin' | 'member'`. Widening a value consumers exhaustively `switch` over is the same break class
+  `AuthorizeRequest` was built to avoid taking twice. No filed use needs a third role.
+- **The dead `GroupSyncScope` export** (breaking). `packages/mls/src/types.ts:62`, re-exported from
+  `index.ts:152`, referenced nowhere else in the repo — verified 2026-07-23. Removing an exported
+  type is the same break class as everything else here and costs nothing to leave until something
+  needs the removal.
+- **AAD on `GroupHandle.encrypt`/`decrypt`** (breaking). `packages/mls/src/group-handle.ts:617,654`
+  take no AAD parameter, so `@kumiai/rpc`'s B2 item — binding rpc's sealed bytes to a topic/segment
+  context, the same silent-failure shape as `exportSecret`'s label — cannot be built above them.
+  Only the required-`senderDID` half of that item shipped. The rpc-side blocker is tracked
+  separately in `rpc-api-surface.md`; this is the change that must come first.
+- **The `0xf102` hatch opens narrower than it reads** (non-breaking — documentation). `@kumiai/mls`
+  reserves and advertises the third control extension type, so a future control extension can be
+  *installed* into a live group without re-admitting members — but only empty.
+  `packages/mls/src/policy.ts:99-118` permits the added entry solely when it is not already
+  installed, the list grew by exactly one, and its data is a zero-length `Uint8Array`; the entry is
+  then stripped before the compare. Every later change to the GroupContext extension list goes
+  through the same
+  positional compare (`evaluateGroupContextExtensions`), requiring byte-identical data at every
+  position bar the ledger head. So *populating* `0xf102` — the step that makes it useful — remains a
+  policy change every peer must ship before any peer can commit it. The reservation buys the
+  extension *type* surviving into existing groups' extension lists and every member's capabilities;
+  it does not buy a data channel openable later without a flag day. Worth stating plainly at the
+  reservation, because the changeset's "escape hatches with a closing window" framing invites the
+  stronger read.
+
+`GroupAnchor.version` enforcement also came from this batch but is **not** filed here — it is
+ship-before-needed rather than deferrable debt, and lives in
+`../next/2026-07-23-group-anchor-version-enforcement.md`.
+
 ## Added 2026-07-11 — GroupContext extension-data compare is fail-closed on default-typed extensions
 
 `policy.ts`'s `group_context_extensions` rule byte-compares each extension's `extensionData`, which

@@ -4,7 +4,59 @@
 `src/`, `tests/`, root config, CI, docs). All findings were extracted into `next/` and
 `backlog/` plan docs; this milestone tracks the sequencing.
 
-All line numbers in the extracted docs reference the tree at commit `bb343d9`.
+All line numbers in the extracted docs reference the tree at commit `bb343d9` and have drifted
+substantially — the control ledger, app-lane delivery, directed-lane security, and
+forward-compatibility work have all landed since. Re-verify a finding against HEAD before acting on
+it; the 2026-07-23 triage found one whose named mechanism no longer exists (see Status below).
+
+## Status — 2026-07-23 triage
+
+**Phase 1 has not moved since 2026-07-07.** Items 1–3 landed in July; items 4–8 are still open in
+`next/` with no owner. Meanwhile Phase 2's note to "pull them forward at the next triage once Phase 1
+lands" gated three **high**-severity correctness findings behind that stalled **medium** work — a
+priority inversion rather than a sequencing decision.
+
+Resolved as follows:
+
+- The three high items were extracted into
+  [high-severity correctness](../next/2026-07-23-high-severity-correctness.md) at priority 1, ahead
+  of every Phase 1 item. All three were re-verified against `5eb220a` and confirmed still open, with
+  current line numbers. The `resync()` finding is **restated**: the `handshakeTail` it named no
+  longer exists; the serialization mechanism is now `commitTail` via `runSerial`, and `resync()` is
+  the sole `rebuildEpoch` caller that takes no lock.
+- Their source docs — `rpc-peer-lifecycle-hardening` and `hub-tunnel-reliability` — keep every
+  medium and low finding and stay in Phase 2. Their "pull forward at next triage" priority lines are
+  discharged.
+- `hub-protocol-server-cleanup`'s lead item ("no protocol version anywhere") is **done** — the
+  `hub/v1/` namespace shipped in
+  [forward compatibility](../completed/2026-07-21-forward-compatibility.complete.md). Struck in
+  place rather than deleted, so the surrounding line numbers still make sense.
+- `hub-protocol-server-cleanup`'s scope widened to cover `@kumiai/hub-tunnel`'s schema `$id`s.
+  Its long-standing "`PublishParams` defined three times / hub-tunnel's `HubLike` re-declares the
+  store surface" item was **verified and found void**: `@kumiai/hub-protocol` declares none of the
+  port types the finding says should be imported from it, `HubLike` was renamed to `MailboxHub` in a
+  shipped release, and the three data types the two packages genuinely share are structurally
+  identical. One real defect fell out of the check — `LogHub.publish` is typed narrower than
+  `HubStore.publish`, dropping `deduped` — and was folded into the wire-response gap it belongs to.
+- A new sibling doc, [rpc API surface](../backlog/rpc-api-surface.md), was split out of
+  `rpc-peer-lifecycle-hardening` for public-surface typing debt — different work from lifecycle
+  correctness.
+
+Phase 1's remaining items keep their existing priorities (4–7) and are now genuinely below the
+promoted work rather than nominally above it.
+
+## Related milestones
+
+The 2026-07-20 API-surface audits produced a separate body of findings, indexed by change cost
+rather than by subsystem:
+
+- [pre-1.0 breaking API surface](./pre-1.0-breaking-api.md) — items whose cost is a `minor` while
+  every package is 0.x (verified 2026-07-23: all ten are 0.4.x) and a `major` after.
+- [non-breaking API work](./non-breaking-api.md) — the short list that can land any time, plus
+  `GroupAnchor.version` enforcement, which has a ship-before-needed deadline of its own.
+
+Those findings live in the same per-package backlog docs this milestone sequences; the two axes
+cross-reference rather than compete.
 
 ## Goal
 
@@ -39,12 +91,11 @@ In order:
 
 ## Phase 2 — extracted backlog
 
-Grouped by subsystem; each doc is roughly one PR of related fixes. Note the first two
-contain **high-severity correctness** items (`to()` ready-gating, `resync()` tail
-serialization, the dead durable-ack contract) — pull them forward at the next triage once
-Phase 1 lands.
+Grouped by subsystem; each doc is roughly one PR of related fixes. The high-severity items these
+docs once carried were promoted on 2026-07-23 — see Status above.
 
 - [rpc peer lifecycle hardening](../backlog/2026-07-07-rpc-peer-lifecycle-hardening.md)
+- [rpc API surface](../backlog/rpc-api-surface.md) — split out 2026-07-23
 - [hub-tunnel reliability](../backlog/2026-07-07-hub-tunnel-reliability.md)
 - [broadcast robustness](../backlog/2026-07-07-broadcast-robustness.md)
 - [mls API hardening](../backlog/2026-07-07-mls-api-hardening.md)

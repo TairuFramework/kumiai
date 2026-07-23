@@ -47,6 +47,24 @@
   whole `WritableStream`, killing the transport for one caller mistake. Fix: reject the
   write without erroring the stream, or document.
 
+## Added 2026-07-23 — `deriveTopicID` NUL-injectivity
+
+Folded in from `next/2026-07-20-deferred-api-findings.md` at the 2026-07-23 triage. Origin: the
+2026-07-20 API-surface audits.
+
+- **`deriveTopicID` is not injective over NUL-bearing inputs** (non-breaking, if fixed by rejection).
+  `packages/broadcast/src/topic.ts:28` builds the HKDF `info` as
+  `` `${TOPIC_INFO_PREFIX}${SEP}${label}${SEP}${scope}` `` with `SEP = '\0'`, so a `label` or `scope`
+  containing a literal NUL can collide with a different `(label, scope)` pair. Every caller in this
+  repo passes a fixed, code-controlled label and scope, so it is unreachable today — and stays
+  unreachable only while no caller derives a topic from untrusted input.
+
+  Two fixes, with very different costs. **Rejecting** NUL in `label`/`scope` closes the hole, is
+  non-breaking (no current caller passes one), and preserves every already-derived topic ID.
+  **Re-encoding** the `info` construction — length-prefixing, say — is the more principled fix but
+  rotates every existing topic ID, which is a data break, not just an API one. Prefer rejection
+  unless a caller appears that legitimately needs NUL-bearing labels.
+
 ## Test hooks
 
 `sender.test.ts`/`transport.test.ts` use only synchronous `unwrap`; async-unwrap ordering

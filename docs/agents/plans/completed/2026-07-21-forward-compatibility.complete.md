@@ -92,4 +92,8 @@ package had a `test` script and no `test:types` one, so a breaking signature cha
 green while an integration test still called the old shape. The package gained a `test:types` script;
 the suite is now type-checked by the gate, though still not executed by it.
 
-Deferred items from the audits are recorded in `docs/agents/plans/next/2026-07-20-deferred-api-findings.md`.
+Deferred items from the audits were recorded in `docs/agents/plans/next/2026-07-20-deferred-api-findings.md`,
+which was dissolved at the 2026-07-23 triage: each finding was folded into the per-package backlog doc
+for the package it names, and indexed by change cost in
+[pre-1.0 breaking API surface](../milestones/pre-1.0-breaking-api.md) and
+[non-breaking API work](../milestones/non-breaking-api.md).

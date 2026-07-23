@@ -1,23 +1,33 @@
 # Infra batch (mechanical, one PR)
 
-**Priority:** 6 — CI/tooling fixes; mechanical, land as one PR.
+**Priority:** low — mechanical; land opportunistically rather than as its own PR. **Both High
+findings were retired 2026-07-23** (one void, one decided against); what remains is Medium and
+below.
 **Origin:** 2026-07-02 audit (commit `bb343d9`), milestone
 `milestones/2026-07-audit-remediation.md`.
 
 ## Findings
 
-### High
+### Retired 2026-07-23
 
-- **`package.json:10` — lint cannot fail in CI.** `lint` is `biome check --write ...` and
-  CI runs `pnpm run lint`, so auto-fixable violations are silently fixed on the runner and
-  exit 0. Fix: add a non-writing `biome ci ./packages ./tests` for CI.
-- **No release workflow.** `.github/workflows/` has no publish flow (kigu offers none
-  either); `pnpm release` is manual with no changesets automation and `.changeset/` has
-  zero pending changesets. Fix: add a `changesets/action`-based release workflow with npm
-  provenance.
-- **vitest undeclared in 5 of 7 packages** (`mls`, `hub-protocol`, `hub-client`,
-  `hub-server`, `hub-tunnel` run `vitest run` without declaring it; works only via
-  `nodeLinker: hoisted`). Fix: add `"vitest": "catalog:"` to each.
+- ~~**`package.json:10` — lint cannot fail in CI.**~~ — **void, verified.** The finding assumed CI
+  runs `pnpm run lint`. It does not: `.github/workflows/build-test.yml` delegates to kigu's shared
+  workflow, which runs `pnpm exec biome ci .`
+  (`../kigu/.github/workflows/build-test.yml:54`) — non-writing, and it fails on violations. The
+  root `lint` script is still `biome check --write ./packages ./tests`, but that is developer
+  convenience, not a CI hole. (Local note: an `rtk` shim intercepts `pnpm run lint`; use
+  `rtk proxy pnpm run lint` for real output.)
+- ~~**No release workflow.**~~ — **decided against 2026-07-23.** Releases stay manual
+  (`pnpm release` → `changeset publish`). Confirmed still true that no stack repo has a publish
+  workflow, kigu included, so automating it would be a stack-wide change rather than a kumiai one.
+  Revisit only if the stack decides to automate releases everywhere.
+
+### Medium — package manifests
+
+- **vitest undeclared in 4 of 10 packages** — `mls`, `hub-client`, `hub-server`, `hub-tunnel` run
+  `vitest run` without declaring it; works only via `nodeLinker: hoisted`. Fix: add
+  `"vitest": "catalog:"` to each. (Corrected 2026-07-23: the audit said "5 of 7" and named
+  `hub-protocol`, which now declares it; the repo has since grown to ten packages.)
 
 ### Medium — turbo task graph
 
@@ -47,15 +57,20 @@ the branch's whole MLS API reshape, so a broken consumer reached an open PR repo
   step, or run non-writing and fail.
 - `.githooks/pre-commit:13` — runs `build:types` (mutating `lib/`) instead of a `--noEmit`
   check. Use the `test:types` scripts.
-- No `LICENSE` file at root or in any package despite `"license": "MIT"` in all 7
+- No `LICENSE` file at root or in any package despite `"license": "MIT"` in all **10**
   manifests — npm tarballs ship no license text. Fix: root LICENSE, included per package.
+  (Re-verified 2026-07-23: still no `LICENSE` anywhere in the tree.)
 
 ### Low — conventions (one-liner)
 
-- `packages/rpc/src/hub-mux.ts:19-20` — `readonly bus` / `readonly hubLike` use the
-  prohibited `readonly` keyword. Fix: drop the modifiers.
+- `packages/rpc/src/hub-mux.ts:174,176` — `readonly bus` / `readonly mailbox` use the
+  prohibited `readonly` keyword. Fix: drop the modifiers. (Lines and the second field name
+  corrected 2026-07-23; the audit said `:19-20` / `hubLike`.) Note `packages/rpc/src/cursor.ts:23,26`
+  also read `readonly`, but as index signatures inside branded-type declarations — the idiomatic
+  branding pattern, not the prohibited property modifier. Leave those alone.
 
 ## Scope
 
-Root `package.json`, `turbo.json`, `.githooks/`, `.github/workflows/`, package manifests.
-Remaining lower-priority infra items live in `backlog/2026-07-07-infra-cleanup.md`.
+`turbo.json`, `.githooks/`, package manifests, root `LICENSE`. No longer touches
+`.github/workflows/` — see the retired findings above. Remaining lower-priority infra items live in
+`backlog/2026-07-07-infra-cleanup.md`.

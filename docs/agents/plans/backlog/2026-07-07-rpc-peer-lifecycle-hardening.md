@@ -1,22 +1,19 @@
 # rpc peer lifecycle hardening
 
-**Priority:** backlog — but contains two **high**-severity correctness items (`to()`
-gating, `resync()` serialization); pull forward at next triage.
+**Priority:** backlog — lifecycle, leak, and error-path hardening in `@kumiai/rpc`.
 **Origin:** 2026-07-02 audit (commit `bb343d9`), milestone
 `milestones/2026-07-audit-remediation.md`.
 
+> **The two high-severity items moved out (2026-07-23).** `to()` gating and `resync()`
+> serialization were promoted to `../next/2026-07-23-high-severity-correctness.md`, where both are
+> re-verified against `5eb220a` with current line numbers (the `resync()` finding is restated —
+> `handshakeTail` no longer exists; the mutex is now `commitTail`/`runSerial`). Everything below
+> stays here. Line numbers below are still `bb343d9` and have drifted.
+
+> Typing debt on the public surface — `ProtocolSurface`, and the residual `UnwrapResult`
+> declarations — is tracked separately in `rpc-api-surface.md`.
+
 ## Findings
-
-### High (correctness)
-
-- **`packages/rpc/src/peer.ts:368` — `to()` not gated on `ready`.** The only surface
-  method not wrapped in `withReady`; calling before init completes throws
-  `Unknown protocol: <name>` for a valid protocol. Fix: gate on `ready` like
-  dispatch/request/gather.
-- **`packages/rpc/src/peer.ts:373-376` — `resync()` bypasses `handshakeTail`,** so it can
-  interleave with an inbound-Commit rebuild and run two concurrent teardown/build cycles
-  over shared `runtimes`/`secret`/`epoch` state. Fix: chain onto `handshakeTail` like
-  `localCommitted`.
 
 ### Medium (correctness)
 

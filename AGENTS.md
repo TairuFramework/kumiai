@@ -11,16 +11,19 @@ The MLS / group stack: `mls` (E2EE identity + membership crypto core), `broadcas
 (generic fan-out), `hub-protocol`/`hub-client`/`hub-server`/`hub-tunnel` (the hub
 subsystem), `rpc` (group RPC), `mls-rpc` (the real implementation of rpc's consumer
 ports over `mls`), and the contract suites `rpc-conformance` and `hub-conformance`
-(every implementation AND every double must pass them). Young and tightly coupled — pre-1.0, the whole
-group moves together. Cross-repo deps (`@sozai/*`, `@kokuin/*`, `@enkaku/*`) are
-published `^` ranges, never `workspace:`.
+(every implementation AND every double must pass them). Young and tightly coupled — pre-1.0, the
+whole group moves together.
 
-## Conventions
+## Guardrails
 
-Follow the `conventions` skill from the `kigu` marketplace (the canonical source of
-truth). pnpm only. `type` not `interface`; `Array<T>` not `T[]`; never `any`; capital
-`ID`/`HTTP`/`JWT`/`DID`; ES `#fields`, never `private`/`readonly`. Do not edit
-generated files (`lib/`).
+See the `kigu:conventions` skill — canonical, do not restate here. Repo-specific only:
+
+- pnpm only.
+- Do not edit generated files (`lib/`).
+- Cross-repo deps (`@sozai/*`, `@kokuin/*`, `@enkaku/*`) go through the workspace catalog as
+  published `^` ranges, never `workspace:`. Internal `@kumiai/*` deps are `workspace:^`.
+- Changing a port means running **both** contract suites against the real implementation and the
+  doubles — see `docs/agents/architecture.md`.
 
 ## Toolchain
 
