@@ -1,5 +1,10 @@
 # Three high-severity correctness findings, promoted out of backlog
 
+> **In flight** on `fix/high-severity-correctness` since 2026-07-23. Design at
+> `docs/superpowers/specs/2026-07-23-high-severity-correctness-design.md` (ephemeral — branch only).
+> Finding 3's premise below is superseded there: the durable-ack contract is not dead, it is severed
+> at five relay points, so the "delete the contract" option is not available.
+
 **Priority:** 1 — ahead of every other `next/` item. These are the highest-severity findings the
 2026-07-02 audit produced, and they have sat in `backlog/` for three weeks behind a Phase 1 that
 has not moved.
