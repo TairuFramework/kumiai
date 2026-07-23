@@ -624,14 +624,9 @@ export function createHubMux(params: HubMuxParams): HubMux {
       const queue: Array<StoredMessage> = []
       let resolveNext: ((result: IteratorResult<StoredMessage>) => void) | undefined
       let closed = false
-      // The sequenceIDs of every message pushed to this sink that this sink itself has not yet
-      // released — either by ack or by close — so closing with outstanding claims can release
-      // each of them instead of stranding them in `pending` for the TTL sweep to find.
-      const held = new Set<string>()
       const sink: Sink = {
         push: (message) => {
           if (closed) return
-          held.add(message.sequenceID)
           if (resolveNext != null) {
             const resolve = resolveNext
             resolveNext = undefined
@@ -657,11 +652,17 @@ export function createHubMux(params: HubMuxParams): HubMux {
       const remove = () => {
         sink.close()
         sinks.delete(sink)
-        // A consumer that closes with messages outstanding must release them, not abandon them —
-        // otherwise every claim it joined sits in `pending` until the TTL sweep prunes it, and the
-        // sweep deliberately does not ack.
-        for (const sequenceID of held) releaseClaim(sequenceID, sink)
-        held.clear()
+        // A closing consumer has not handled what it still holds — whether never pulled out of
+        // `queue` or pulled and never acked — so its claims are ABANDONED, not acked: the same
+        // choice `sweepPending` makes, and for the same reason (telling the hub a frame was
+        // durably handled when it was not is a false success). The hub keeps the frames and
+        // redelivers them on the next drain. Scanning `pending` here, rather than a per-sink
+        // `held` set kept current on every push, costs one pass over an already TTL-bounded map
+        // and only on close, not on the per-message hot path.
+        for (const [sequenceID, entry] of pending) {
+          if (!entry.holders.delete(sink)) continue
+          if (entry.holders.size === 0) pending.delete(sequenceID)
+        }
       }
       const iter: AsyncIterator<StoredMessage> = {
         next: () => {
@@ -683,10 +684,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
       return {
         [Symbol.asyncIterator]: () => iter,
         return: remove,
-        ack: (sequenceID) => {
-          held.delete(sequenceID)
-          releaseClaim(sequenceID, sink)
-        },
+        ack: (sequenceID) => releaseClaim(sequenceID, sink),
       }
     },
   }
