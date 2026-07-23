@@ -1,3 +1,4 @@
+import type { LogHub } from '@kumiai/hub-tunnel'
 import { describe, expect, test } from 'vitest'
 
 import { createHubMux } from '../src/hub-mux.js'
@@ -5,6 +6,31 @@ import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 
 const flush = () => new Promise((r) => setTimeout(r, 30))
 const payload = () => new Uint8Array([1])
+
+/**
+ * A hub whose `receive` subscription's `ack` throws SYNCHRONOUSLY — the shape the port's type
+ * permits (`void | Promise<void>`) but the mux's own ack guard used to assume away. Delegates to a
+ * real `DurableFakeHub` instance explicitly: `DurableFakeHub` is a class, and `{...instance}`
+ * copies only its own enumerable properties, silently dropping every prototype method.
+ */
+function hubWithThrowingAck(instance: DurableFakeHub): LogHub {
+  return {
+    subscribe: (subscriberDID, topicID, options) =>
+      instance.subscribe(subscriberDID, topicID, options),
+    unsubscribe: (subscriberDID, topicID) => instance.unsubscribe(subscriberDID, topicID),
+    publish: (params) => instance.publish(params),
+    fetchTopic: (params) => instance.fetchTopic(params),
+    receive: (subscriberDID) => {
+      const subscription = instance.receive(subscriberDID)
+      return {
+        ...subscription,
+        ack: () => {
+          throw new Error('ack boom')
+        },
+      }
+    },
+  }
+}
 
 describe('the mux refcounts acks across its holders', () => {
   test('one holder acking does not ack upstream while another still holds the message', async () => {
@@ -127,6 +153,33 @@ describe('the mux refcounts acks across its holders', () => {
     await flush()
 
     expect(hub.ackedCount('bob')).toBe(0)
+    await mux.dispose()
+  })
+
+  test('a synchronously-throwing upstream ack does not break the drain', async () => {
+    const instance = new DurableFakeHub()
+    const hub = hubWithThrowingAck(instance)
+    const mux = createHubMux({ hub, localDID: 'bob', onSubscribeFailed: () => {} })
+
+    const received: Array<string> = []
+    mux.onInbound('topic:x', (message, ack) => {
+      received.push(message.sequenceID)
+      // The whole point: this must not throw back out at the caller, whatever the upstream
+      // hub's own ack does.
+      ack()
+    })
+    await flush()
+
+    await instance.publish({ senderDID: 'alice', topicID: 'topic:x', payload: payload() })
+    await flush()
+    expect(received).toHaveLength(1)
+
+    // The drain must still be running: a second message, published after the throw, is still
+    // delivered rather than silently lost.
+    await instance.publish({ senderDID: 'alice', topicID: 'topic:x', payload: payload() })
+    await flush()
+    expect(received).toHaveLength(2)
+
     await mux.dispose()
   })
 })

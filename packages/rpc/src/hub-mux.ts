@@ -483,7 +483,16 @@ export function createHubMux(params: HubMuxParams): HubMux {
   const pending = new Map<string, PendingAck>()
 
   const ackUpstream = (position: DeliveryPosition): void => {
-    void Promise.resolve(subscription.ack?.(position)).catch(() => {})
+    // A hub's ack may be synchronous, so it may throw synchronously — before `Promise.resolve`
+    // ever sees it, which is why the rejection guard alone is not enough. An ack that fails is
+    // the hub's problem: the frame ages out. A throw escaping here reaches whatever called the
+    // holder's release, and on the serialized open-once chain that skips the NEXT frame's open
+    // while still acking it as handled.
+    try {
+      void Promise.resolve(subscription.ack?.(position)).catch(() => {})
+    } catch {
+      // ignore
+    }
   }
 
   const releaseClaim = (sequenceID: string, holder: Holder): void => {
