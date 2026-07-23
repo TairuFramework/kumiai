@@ -1655,10 +1655,16 @@ survived unnoticed under a suite explicitly built to catch drift. These clauses 
 Every double must pass them, and a double may be stricter than its port but never more permissive.
 
 **Files:**
-- Modify: `packages/hub-conformance/src/log-hub.ts` (add clauses to `testLogHubConformance`)
-- Test: the clauses run from `packages/hub-server/test/log-hub-conformance.test.ts`,
-  `packages/rpc/test/hub-conformance.test.ts`, and
-  `packages/hub-tunnel/test/hub-conformance.test.ts`
+- Modify: `packages/hub-conformance/src/log-hub.ts` (add `testAckConformance`)
+- Modify: `packages/hub-conformance/src/index.ts` (export it)
+- Modify: `packages/rpc/test/hub-conformance.test.ts` (opt in — `DurableFakeHub` has an ack)
+- Test: the clauses run from whichever suites opt in
+
+**Ack clauses are an OPT-IN suite function, not part of `testLogHubConformance`.** A hub with
+no redelivery to gate conformingly declares no `ack`, so folding these into the main suite would
+make them pass without asserting anything on such a hub — the exact shape that let the severed
+relay hide. Instead, a double that HAS an ack calls `testAckConformance` and must pass; one that
+does not simply never calls it, and the opt-in is visible at the call site.
 
 **Interfaces:**
 - Consumes: `HubReceiveOptions` shape from Task 3.
@@ -1673,22 +1679,34 @@ closes the subscription unconditionally, which a poll-loop hub needs.
 
 Also read `packages/hub-server/test/log-hub-conformance.test.ts:13-37`. Its `pollingReceive` adapter
 returns `{ [Symbol.asyncIterator], return }` and declares no `ack`, which its docblock states
-deliberately. **That stays as it is.** `ack?` is optional on the contract — a hub with no
-redelivery to gate is conforming without one — so both new clauses guard on
-`if (subscription.ack == null) return` and this adapter simply does not exercise them. No change to
-`hub-server`, and its docblock stays accurate.
+deliberately. **That stays as it is** and simply does not opt in — no change to `hub-server`, and
+its docblock stays accurate.
 
-The clauses therefore bite on the doubles that *do* declare an ack, which is where the severed relay
-lived. `packages/rpc/test/fixtures/durable-fake-hub.ts:267` supplies one
-(`ack: (sequenceID) => this.#ack(subscriberDID, sequenceID)`), so `packages/rpc/test/hub-conformance.test.ts`
-is the run that matters.
+The clauses bite on the doubles that *do* declare an ack, which is where the severed relay lived.
+`packages/rpc/test/fixtures/durable-fake-hub.ts:267` supplies one
+(`ack: (sequenceID) => this.#ack(subscriberDID, sequenceID)`), so
+`packages/rpc/test/hub-conformance.test.ts` is the suite that opts in.
 
 - [ ] **Step 2: Write the failing clauses**
 
-Add to `testLogHubConformance` in `packages/hub-conformance/src/log-hub.ts`, inside its existing
-`describe` block:
+Add a new exported function to `packages/hub-conformance/src/log-hub.ts`, beside
+`testLogHubConformance` rather than inside it:
 
 ```ts
+/**
+ * The clauses a hub that DECLARES an `ack` must answer for. Opt-in, and separate from
+ * {@link testLogHubConformance} on purpose: `ack?` is optional on the contract — a hub with no
+ * redelivery to gate conformingly has none — so folding these into the main suite would make them
+ * pass without asserting anything on such a hub. That is the exact shape that let a severed ack
+ * relay survive a suite built to catch drift. A double with an ack calls this and must pass; one
+ * without never calls it, and the difference is visible at the call site.
+ */
+export function testAckConformance<Hub extends ConformanceLogHub>(
+  params: MailboxHubConformanceParams<Hub>,
+): void {
+  const { createHub, maxRetention, maxDepth, label } = params
+
+  describe(`${label}: ack conformance`, () => {
     test('an acked mailbox frame is not redelivered to a fresh receive', async () => {
       const hub = await createHub({ maxRetention, maxDepth })
       hub.subscribe(BOB, TOPIC)
@@ -1697,10 +1715,9 @@ Add to `testLogHubConformance` in `packages/hub-conformance/src/log-hub.ts`, ins
 
       const delivered = await drain(first, 1)
       expect(delivered).toHaveLength(1)
-      // A hub with no durability to gate legitimately omits `ack` — the member is optional, and a
-      // live transport that never redelivers is conforming without it.
-      if (first.ack == null) return
-      await first.ack(delivered[0]?.sequenceID as string)
+      // Asserted, not guarded: opting into this suite is the claim that this hub has an ack.
+      expect(first.ack).toBeDefined()
+      await first.ack?.(delivered[0]?.sequenceID as string)
 
       // The mailbox class is delivery-derived: its last ack is what frees it. A hub that
       // redelivers an acked frame hands a peer the same message on every reconnect for the whole
@@ -1722,8 +1739,8 @@ Add to `testLogHubConformance` in `packages/hub-conformance/src/log-hub.ts`, ins
 
       const delivered = await drain(subscription, 1)
       expect(delivered).toHaveLength(1)
-      if (subscription.ack == null) return
-      await subscription.ack(delivered[0]?.sequenceID as string)
+      expect(subscription.ack).toBeDefined()
+      await subscription.ack?.(delivered[0]?.sequenceID as string)
 
       // An ack frees a DELIVERY, not a log entry. A hub that lets an ack remove a log frame
       // breaks the member invited tomorrow who must apply the commits landing today.
@@ -1731,16 +1748,23 @@ Add to `testLogHubConformance` in `packages/hub-conformance/src/log-hub.ts`, ins
       expect(result.messages.map((message) => message.sequenceID)).toEqual([logged])
       expect(result.head).toBe(logged)
     })
+  })
+}
 ```
+
+Export it from `packages/hub-conformance/src/index.ts` alongside the existing `testLogHubConformance`
+export, and opt `packages/rpc/test/hub-conformance.test.ts` in by calling it with the same params
+that file already passes to its `LogHub` suite — `DurableFakeHub` supplies an ack at
+`durable-fake-hub.ts:267`.
 
 - [ ] **Step 3: Run the clauses against every double**
 
 Run: `pnpm --filter @kumiai/hub-server test`
-Expected: PASS, with both new clauses returning early — `pollingReceive` declares no `ack`, which is
-conforming.
+Expected: PASS, unchanged — it does not opt in, because `pollingReceive` conformingly has no `ack`.
 
 Run: `pnpm --filter @kumiai/rpc test`
-Expected: PASS.
+Expected: PASS, with two new `ack conformance` clauses appearing in the run. If they do not appear,
+the opt-in call was not wired.
 
 Run: `pnpm --filter @kumiai/hub-tunnel test`
 Expected: PASS. `hub-tunnel`'s `FakeHub` runs only `testMailboxHubConformance`, so these `LogHub`
