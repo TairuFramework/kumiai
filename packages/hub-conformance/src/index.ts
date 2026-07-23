@@ -888,6 +888,7 @@ export {
   type ConformancePublishParams,
   type ConformanceReceiveSubscription,
   type MailboxHubConformanceParams,
+  testAckConformance,
   testLogHubConformance,
   testMailboxHubConformance,
 } from './log-hub.js'

@@ -1,4 +1,4 @@
-import { testLogHubConformance } from '@kumiai/hub-conformance'
+import { testAckConformance, testLogHubConformance } from '@kumiai/hub-conformance'
 
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { FakeHub } from './fixtures/fake-hub.js'
@@ -20,6 +20,15 @@ testLogHubConformance({
 })
 
 testLogHubConformance({
+  label: 'DurableFakeHub',
+  createHub: (options) => new DurableFakeHub(options),
+  maxRetention: MAX_RETENTION,
+  maxDepth: MAX_DEPTH,
+})
+
+// DurableFakeHub declares an ack (`durable-fake-hub.ts`), so it opts into the clauses that assert
+// its presence and behaviour — FakeHub has none and does not opt in.
+testAckConformance({
   label: 'DurableFakeHub',
   createHub: (options) => new DurableFakeHub(options),
   maxRetention: MAX_RETENTION,

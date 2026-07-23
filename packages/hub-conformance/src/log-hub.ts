@@ -400,3 +400,61 @@ export function testLogHubConformance<Hub extends ConformanceLogHub>(
     })
   })
 }
+
+/**
+ * The clauses a hub that DECLARES an `ack` must answer for. Opt-in, and separate from
+ * {@link testLogHubConformance} on purpose: `ack?` is optional on the contract — a hub with no
+ * redelivery to gate conformingly has none — so folding these into the main suite would make them
+ * pass without asserting anything on such a hub. That is the exact shape that let a severed ack
+ * relay survive a suite built to catch drift. A double with an ack calls this and must pass; one
+ * without never calls it, and the difference is visible at the call site.
+ */
+export function testAckConformance<Hub extends ConformanceLogHub>(
+  params: MailboxHubConformanceParams<Hub>,
+): void {
+  const { createHub, maxRetention, maxDepth, label } = params
+
+  describe(`${label}: ack conformance`, () => {
+    test('an acked mailbox frame is not redelivered to a fresh receive', async () => {
+      const hub = await createHub({ maxRetention, maxDepth })
+      hub.subscribe(BOB, TOPIC)
+      const first = hub.receive(BOB, { topicID: TOPIC })
+      await hub.publish({ senderDID: ALICE, topicID: TOPIC, payload: payload(1) })
+
+      const delivered = await drain(first, 1)
+      expect(delivered).toHaveLength(1)
+      // Asserted, not guarded: opting into this suite is the claim that this hub has an ack.
+      expect(first.ack).toBeDefined()
+      await first.ack?.(delivered[0]?.sequenceID as string)
+
+      // The mailbox class is delivery-derived: its last ack is what frees it. A hub that
+      // redelivers an acked frame hands a peer the same message on every reconnect for the whole
+      // retention window.
+      const second = hub.receive(BOB, { topicID: TOPIC })
+      expect(await drain(second, 1)).toEqual([])
+    })
+
+    test('a log frame survives every ack', async () => {
+      const hub = await createHub({ maxRetention, maxDepth })
+      hub.subscribe(BOB, TOPIC)
+      const subscription = hub.receive(BOB, { topicID: TOPIC })
+      const { sequenceID: logged } = await hub.publish({
+        senderDID: ALICE,
+        topicID: TOPIC,
+        payload: payload(1),
+        retain: 'log',
+      })
+
+      const delivered = await drain(subscription, 1)
+      expect(delivered).toHaveLength(1)
+      expect(subscription.ack).toBeDefined()
+      await subscription.ack?.(delivered[0]?.sequenceID as string)
+
+      // An ack frees a DELIVERY, not a log entry. A hub that lets an ack remove a log frame
+      // breaks the member invited tomorrow who must apply the commits landing today.
+      const result = await hub.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
+      expect(result.messages.map((message) => message.sequenceID)).toEqual([logged])
+      expect(result.head).toBe(logged)
+    })
+  })
+}
