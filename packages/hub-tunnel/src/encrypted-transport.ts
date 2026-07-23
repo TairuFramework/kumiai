@@ -8,6 +8,7 @@ import { DecryptError, EncryptError, EnvelopeDecodeError } from './errors.js'
 import type { ObservabilityEventListener } from './events.js'
 import {
   createHubTunnelTransport,
+  type HubReceiveOptions,
   type HubReceiveSubscription,
   type HubSubscribeOptions,
   type HubTunnelTransportParams,
@@ -60,8 +61,8 @@ function wrapHub({ hub, encryptor, groupID, onEvent, onEncryptError }: WrapHubPa
     unsubscribe(subscriberDID: string, topicID: string): Promise<void> | void {
       return hub.unsubscribe?.(subscriberDID, topicID)
     },
-    receive(subscriberDID: string): HubReceiveSubscription {
-      const inner = hub.receive(subscriberDID)
+    receive(subscriberDID: string, options?: HubReceiveOptions): HubReceiveSubscription {
+      const inner = hub.receive(subscriberDID, options)
       const innerIterator = inner[Symbol.asyncIterator]()
 
       const iterator: AsyncIterator<StoredMessage> = {
@@ -131,6 +132,10 @@ function wrapHub({ hub, encryptor, groupID, onEvent, onEncryptError }: WrapHubPa
         return() {
           inner.return?.()
         },
+        // Carried through for the same reason `logPosition` is above: this wrapper re-writes the
+        // payload and nothing else. Dropping it severs the durable-ack contract for every lane
+        // behind an encrypting hub.
+        ...(inner.ack != null ? { ack: (sequenceID: string) => inner.ack?.(sequenceID) } : {}),
       }
     },
   }
