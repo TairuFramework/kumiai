@@ -19,6 +19,15 @@ it declares an `ack`, asserting the ack's presence and behaviour rather than gua
 main `testLogHubConformance` suite deliberately does not include these clauses, since folding them
 in would make them pass without asserting anything on a hub with no redelivery to gate.
 
+`testAckConformance` is now split into `testMailboxAckConformance` (the redelivery clause, needing
+only `subscribe`/`publish`/`receive`) and `testLogAckConformance` (the log-survives-ack clause,
+needing `fetchTopic`) — `testAckConformance` itself is unchanged and runs both, but a
+`MailboxHub`-shaped subject with no readable log can now opt into the redelivery clause alone.
+`mux.mailbox` (`@kumiai/rpc`) opts in as the first real (non-double) subject. Also fixed: the
+suite's `drain` helper closed a subscription unconditionally after a successful read, silently
+abandoning any still-open ack claim before a test's own explicit `ack` call ran — invisible against
+a DID-keyed fake, but wrong against a hub whose ack is scoped to the delivery it was just handed.
+
 `@kumiai/rpc` also gates `ProtocolSurface.to` on peer readiness, alongside `protocol()`'s other
 three methods. BREAKING: `ProtocolSurface.to` now returns `Promise<Client<Protocol>>`.
 

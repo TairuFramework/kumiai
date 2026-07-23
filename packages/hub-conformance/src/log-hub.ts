@@ -116,18 +116,26 @@ async function drain(
 ): Promise<Array<StoredMessage>> {
   const iterator = subscription[Symbol.asyncIterator]()
   const collected: Array<StoredMessage> = []
+  // Closed only on the branch that gives up early (timeout, or the source ending on its own): a
+  // hub whose `receive` is a poll loop over a pull API keeps polling until it is told to stop, and
+  // a clause asserting that nothing arrives would otherwise leave a timer running past the end of
+  // the run. A full, successful read is left OPEN on purpose — a hub whose ack is scoped to the
+  // still-open claim on THIS subscription, rather than a DID-keyed record independent of it (a
+  // `mux.mailbox`-shaped hub, not only a DID-keyed fake), needs the caller free to ack what `drain`
+  // just collected; closing here first would abandon it before that ack ever runs.
+  let gaveUpEarly = false
   while (collected.length < limit) {
     const next = await Promise.race([
       iterator.next(),
       sleep(timeoutMs).then(() => 'timeout' as const),
     ])
-    if (next === 'timeout' || next.done === true) break
+    if (next === 'timeout' || next.done === true) {
+      gaveUpEarly = true
+      break
+    }
     collected.push(next.value)
   }
-  // Closed unconditionally: a hub whose `receive` is a poll loop over a pull API keeps polling
-  // until it is told to stop, and a clause asserting that nothing arrives would otherwise leave a
-  // timer running past the end of the run.
-  subscription.return?.()
+  if (gaveUpEarly) subscription.return?.()
   return collected
 }
 
@@ -401,8 +409,8 @@ export function testLogHubConformance<Hub extends ConformanceLogHub>(
   })
 }
 
-/** Params for {@link testAckConformance}: the base params plus the required redelivery hook. */
-export type AckConformanceParams<Hub extends ConformanceLogHub> =
+/** Params for {@link testMailboxAckConformance}: the base params plus the required redelivery hook. */
+export type MailboxAckConformanceParams<Hub extends ConformanceMailboxHub> =
   MailboxHubConformanceParams<Hub> & {
     /**
      * Trigger the hub's reconnect-backlog replay for `subscriberDID` — whatever push already made
@@ -415,20 +423,25 @@ export type AckConformanceParams<Hub extends ConformanceLogHub> =
     redeliver: (hub: Hub, subscriberDID: string) => void | Promise<void>
   }
 
+/** Params for {@link testAckConformance}: the base params plus the required redelivery hook. */
+export type AckConformanceParams<Hub extends ConformanceLogHub> = MailboxAckConformanceParams<Hub>
+
 /**
- * The clauses a hub that DECLARES an `ack` must answer for. Opt-in, and separate from
- * {@link testLogHubConformance} on purpose: `ack?` is optional on the contract — a hub with no
- * redelivery to gate conformingly has none — so folding these into the main suite would make them
+ * The redelivery clause a hub that DECLARES an `ack` must answer for — needs only
+ * `subscribe`/`publish`/`receive`, so a `MailboxHub`-shaped subject (no readable log) can opt in
+ * directly, not only a `LogHub`-shaped one. Opt-in, and separate from
+ * {@link testMailboxHubConformance} on purpose: `ack?` is optional on the contract — a hub with no
+ * redelivery to gate conformingly has none — so folding this into the main suite would make it
  * pass without asserting anything on such a hub. That is the exact shape that let a severed ack
  * relay survive a suite built to catch drift. A double with an ack calls this and must pass; one
  * without never calls it, and the difference is visible at the call site.
  */
-export function testAckConformance<Hub extends ConformanceLogHub>(
-  params: AckConformanceParams<Hub>,
+export function testMailboxAckConformance<Hub extends ConformanceMailboxHub>(
+  params: MailboxAckConformanceParams<Hub>,
 ): void {
   const { createHub, maxRetention, maxDepth, label, redeliver } = params
 
-  describe(`${label}: ack conformance`, () => {
+  describe(`${label}: mailbox ack conformance`, () => {
     test('an acked mailbox frame is not redelivered to a fresh receive', async () => {
       const hub = await createHub({ maxRetention, maxDepth })
       hub.subscribe(BOB, TOPIC)
@@ -452,7 +465,21 @@ export function testAckConformance<Hub extends ConformanceLogHub>(
       const backlog = await drain(replayed, 1)
       expect(backlog.map((message) => message.sequenceID)).toEqual([delivered[1]?.sequenceID])
     })
+  })
+}
 
+/**
+ * The log-survives-ack clause a hub that DECLARES an `ack` must answer for — needs `fetchTopic`,
+ * so it stays `LogHub`-shaped only. Separate from {@link testMailboxAckConformance} for the same
+ * reason that one is separate from {@link testMailboxHubConformance}: this asserts something only
+ * on a subject that opts in, rather than passing vacuously on one that does not.
+ */
+export function testLogAckConformance<Hub extends ConformanceLogHub>(
+  params: MailboxHubConformanceParams<Hub>,
+): void {
+  const { createHub, maxRetention, maxDepth, label } = params
+
+  describe(`${label}: log ack conformance`, () => {
     test('a log frame survives every ack', async () => {
       const hub = await createHub({ maxRetention, maxDepth })
       hub.subscribe(BOB, TOPIC)
@@ -476,4 +503,17 @@ export function testAckConformance<Hub extends ConformanceLogHub>(
       expect(result.head).toBe(logged)
     })
   })
+}
+
+/**
+ * The composite for a `LogHub`-shaped double: both the redelivery clause and the log-survives-ack
+ * clause. Kept for the doubles that already opt into this name — {@link testMailboxAckConformance}
+ * and {@link testLogAckConformance} are the finer-grained entry points a `MailboxHub`-shaped
+ * subject (no `fetchTopic`) uses instead.
+ */
+export function testAckConformance<Hub extends ConformanceLogHub>(
+  params: AckConformanceParams<Hub>,
+): void {
+  testMailboxAckConformance(params)
+  testLogAckConformance(params)
 }

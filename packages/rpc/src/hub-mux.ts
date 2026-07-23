@@ -313,6 +313,17 @@ function isPermanentSubscribeFailure(error: unknown): boolean {
  * rest". Only an explicit leave-the-group would unsubscribe, and nothing here does. That
  * outliving subscription is what lets a member return and find its mail; disposing the peer is
  * what backgrounding a mobile app calls.
+ *
+ * ## The init-race window
+ *
+ * The drain below starts running synchronously, in this constructor, while the first
+ * `onInbound`/`mailbox.receive` listener is registered much later by the caller. A frame that
+ * arrives in that window matches no holder, is left pending (see the empty-interested-set branch
+ * below), and is pruned unacked once `sweepPending` reaches its TTL — so it returns only on the
+ * next reconnect, dropped for this session rather than lost outright. Deliberate, and a strict
+ * improvement over acking it: acking a frame nothing read would be the exact false success this
+ * whole relay exists to prevent. Left implicit; the options for closing the window itself are
+ * carried in `docs/agents/plans/backlog/2026-07-07-rpc-peer-lifecycle-hardening.md`.
  */
 export function createHubMux(params: HubMuxParams): HubMux {
   const { hub, localDID } = params
@@ -667,7 +678,17 @@ export function createHubMux(params: HubMuxParams): HubMux {
         releaseClaim(message.sequenceID, drainClaim)
       }
 
-      for (const sink of matchedSinks) sink.push(message)
+      for (const sink of matchedSinks) {
+        try {
+          sink.push(message)
+        } catch {
+          // A throwing push would escape this async IIFE and kill the drain PERMANENTLY — no
+          // `onReceiveEnded`, and a dead drain means no more sweeps and no more acks, ever, for
+          // any topic. Unreachable today (the only `push` in `sinks` is the closure built in
+          // `mailbox.receive`, which cannot throw); guarded anyway for symmetry with the listener
+          // loop above, which already treats a throwing consumer as its own problem.
+        }
+      }
     }
   })()
 

@@ -1,5 +1,11 @@
-import { testAckConformance, testLogHubConformance } from '@kumiai/hub-conformance'
+import {
+  testAckConformance,
+  testLogHubConformance,
+  testMailboxAckConformance,
+} from '@kumiai/hub-conformance'
+import type { MailboxHub } from '@kumiai/hub-tunnel'
 
+import { createHubMux } from '../src/hub-mux.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 
@@ -36,4 +42,46 @@ testAckConformance({
   // DurableFakeHub's own receive() never replays backlog — only this does — so this is the only
   // way the suite can observe the redelivery its ack suppresses.
   redeliver: (hub, subscriberDID) => hub.redeliver(subscriberDID),
+})
+
+/**
+ * `hub-mux`'s `mailbox` view is a real `MailboxHub` with a real `ack` wired to the drain's
+ * refcounted claim (`releaseClaim` in `../src/hub-mux.ts`) — none of the five relay points this
+ * branch fixed can answer `fetchTopic`, and this is the strongest of the five to opt in.
+ *
+ * It is not opted into `testMailboxHubConformance` above: that suite subscribes and receives as
+ * two DISTINCT identities (ALICE and BOB) on one shared hub, and `mailbox.subscribe`/`receive`
+ * both ignore the `subscriberDID` argument, always acting as the mux's own fixed `localDID` — so
+ * "Alice's receive" and "Bob's receive" would be the same underlying view, breaking the no-echo
+ * clause. The ack conformance suite below only ever subscribes/receives as ONE identity (Bob),
+ * which is exactly what a single-peer mailbox view is.
+ */
+const MUX_LOCAL_DID = 'did:key:mux-mailbox-subject'
+
+type MuxMailboxTestHub = MailboxHub & { redeliver: () => void }
+
+function createMuxMailboxHub(options: {
+  maxRetention: number
+  maxDepth: number
+}): MuxMailboxTestHub {
+  const inner = new DurableFakeHub(options)
+  const mux = createHubMux({
+    hub: inner,
+    localDID: MUX_LOCAL_DID,
+    onSubscribeFailed: () => {},
+  })
+  return Object.assign(mux.mailbox, {
+    // Same mechanism the suite uses for DurableFakeHub directly: push the subject's unacked
+    // retained messages back into the SAME upstream subscription the mux drains, which is what a
+    // reconnect's backlog replay looks like from underneath a mux that never itself reconnects.
+    redeliver: () => inner.redeliver(MUX_LOCAL_DID),
+  })
+}
+
+testMailboxAckConformance({
+  label: 'hub-mux mailbox (createHubMux(...).mailbox)',
+  createHub: (options) => createMuxMailboxHub(options),
+  maxRetention: MAX_RETENTION,
+  maxDepth: MAX_DEPTH,
+  redeliver: (hub) => hub.redeliver(),
 })
