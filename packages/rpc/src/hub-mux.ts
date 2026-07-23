@@ -9,7 +9,7 @@ import type {
 } from '@kumiai/hub-tunnel'
 import { getLogger, isSetup } from '@sozai/log'
 
-import { asDeliveryPosition } from './cursor.js'
+import { asDeliveryPosition, type DeliveryPosition } from './cursor.js'
 
 /**
  * A subscribe the hub refused for good — either a permanent refusal (it has answered, and the
@@ -32,6 +32,9 @@ export type SubscribeFailure = {
  * code cannot classify is not asked forever.
  */
 const DEFAULT_SUBSCRIBE_RETRY_DELAYS_MS: ReadonlyArray<number> = [100, 500, 2_000, 10_000]
+
+/** 60s: far above any real local handling time, far below the store's 30-day age bound. */
+const DEFAULT_ACK_TTL_MS = 60_000
 
 /**
  * The push lane has ended, and it will not restart on its own.
@@ -139,6 +142,15 @@ export type HubMuxParams = {
   onReceiveEnded?: (ended: ReceiveLaneEnded) => void
   /** Backoff schedule for transient subscribe failures. Default {@link DEFAULT_SUBSCRIBE_RETRY_DELAYS_MS}. */
   subscribeRetryDelaysMs?: ReadonlyArray<number>
+  /**
+   * How long a delivered message waits for its holders to ack before its claim is dropped.
+   * Default {@link DEFAULT_ACK_TTL_MS}.
+   *
+   * Expiry drops the claim and sends NO upstream ack: it means a holder is broken, and telling the
+   * hub the frame was durably handled would be a false success. The hub's own age bound reclaims
+   * it instead.
+   */
+  ackTTLMs?: number
 }
 
 /**
@@ -205,6 +217,8 @@ export type HubMux = {
 type Sink = {
   push: (message: StoredMessage) => void
   close: () => void
+  /** The topic this sink reads, when it named one. Absent: it takes every message. */
+  topicID?: string
 }
 
 /**
@@ -299,6 +313,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
   const onSubscribeFailed = params.onSubscribeFailed ?? warnSubscribeFailed
   const onReceiveEnded = params.onReceiveEnded ?? warnReceiveEnded
   const retryDelaysMs = params.subscribeRetryDelaysMs ?? DEFAULT_SUBSCRIBE_RETRY_DELAYS_MS
+  const ackTTLMs = params.ackTTLMs ?? DEFAULT_ACK_TTL_MS
 
   const listeners = new Map<string, Set<InboundListener>>()
   const refcount = new Map<string, number>()
@@ -446,6 +461,53 @@ export function createHubMux(params: HubMuxParams): HubMux {
 
   const subscription = hub.receive(localDID)
   const iterator = subscription[Symbol.asyncIterator]()
+
+  type Holder = InboundListener | Sink
+
+  /**
+   * The holders of one delivered message that have not yet released it.
+   *
+   * A SET OF IDENTITIES, never a counter — the same choice `LogEntry.pendingFor` makes in
+   * `hub-server/src/memoryStore.ts`. A holder that acks twice deletes itself twice, which is a
+   * no-op; a counter would reach zero and free a frame its other holders still hold.
+   */
+  type PendingAck = {
+    holders: Set<Holder>
+    position: DeliveryPosition
+    claimedAt: number
+  }
+  const pending = new Map<string, PendingAck>()
+
+  const ackUpstream = (position: DeliveryPosition): void => {
+    void Promise.resolve(subscription.ack?.(position)).catch(() => {})
+  }
+
+  const releaseClaim = (sequenceID: string, holder: Holder): void => {
+    const entry = pending.get(sequenceID)
+    // Absent: already released by every holder, or already swept. A late ack from a holder whose
+    // claim expired is deliberately not honoured — the claim was given up on.
+    if (entry == null) return
+    entry.holders.delete(holder)
+    if (entry.holders.size > 0) return
+    pending.delete(sequenceID)
+    ackUpstream(entry.position)
+  }
+
+  /**
+   * Drop claims older than the TTL, WITHOUT acking — the mirror of `memoryStore.purge`.
+   *
+   * Swept on each inbound message rather than on a timer: the drain is the only thing that adds
+   * entries, so a quiet drain has nothing to sweep, and a timer would need dispose handling and a
+   * cross-platform unref for no gain. A lingering entry holds no hub resource — the hub reclaims
+   * by its own age bound regardless.
+   */
+  const sweepPending = (now: number): void => {
+    const cutoff = now - ackTTLMs
+    for (const [sequenceID, entry] of pending) {
+      if (entry.claimedAt <= cutoff) pending.delete(sequenceID)
+    }
+  }
+
   // Reported once, and only for an ending nobody asked for. `dispose` ends the drain too, and a
   // host being told its lane died in response to its own teardown is noise that trains hosts to
   // ignore the notice.
@@ -472,21 +534,56 @@ export function createHubMux(params: HubMuxParams): HubMux {
         return
       }
       const message = result.value
-      const ack = () => {
-        // An ack names a place in THIS recipient's delivery queue, not in the topic's
-        // log. The two are different sequences and must never be crossed, so the
-        // position is named for what it is and never leaves this closure.
-        const position = asDeliveryPosition(message.sequenceID)
-        void Promise.resolve(subscription.ack?.(position)).catch(() => {})
+      const now = Date.now()
+      sweepPending(now)
+
+      // Listeners snapshotted BEFORE the fan-out: a listener that unsubscribes mid-delivery would
+      // otherwise be counted as pending and never receive the message it is being waited on for.
+      const matchedListeners = [...(listeners.get(message.topicID) ?? [])]
+
+      // An ack names a place in THIS recipient's delivery queue, not in the topic's log. The two
+      // are different sequences and must never be crossed, so the position is named for what it
+      // is and never reaches a log cursor.
+      const position = asDeliveryPosition(message.sequenceID)
+
+      // Claimed for the listeners BEFORE they run: the commit and rendezvous lanes both ack as
+      // their first statement, and that synchronous release needs an entry already in `pending`.
+      if (matchedListeners.length > 0) {
+        pending.set(message.sequenceID, {
+          holders: new Set(matchedListeners),
+          position,
+          claimedAt: now,
+        })
       }
-      for (const listener of listeners.get(message.topicID) ?? []) {
+
+      for (const listener of matchedListeners) {
         try {
-          listener(message, ack)
+          listener(message, () => releaseClaim(message.sequenceID, listener))
         } catch {
           // listener errors must not kill the drain
         }
       }
-      for (const sink of [...sinks]) sink.push(message)
+
+      // Sinks matched AFTER the listener loop, not before: a listener may synchronously create a
+      // mailbox sink (the directed-tunnel lazy-accept race), and it must still receive the frame
+      // that triggered it.
+      const matchedSinks = [...sinks].filter(
+        (sink) => sink.topicID == null || sink.topicID === message.topicID,
+      )
+      if (matchedSinks.length > 0) {
+        const entry = pending.get(message.sequenceID) ?? {
+          holders: new Set<Holder>(),
+          position,
+          claimedAt: now,
+        }
+        for (const sink of matchedSinks) entry.holders.add(sink)
+        pending.set(message.sequenceID, entry)
+      } else if (matchedListeners.length === 0) {
+        // Nothing will ever handle it, so nothing will ever ack it.
+        ackUpstream(position)
+      }
+
+      for (const sink of matchedSinks) sink.push(message)
     }
   })()
 
