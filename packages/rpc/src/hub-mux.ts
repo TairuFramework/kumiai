@@ -620,13 +620,18 @@ export function createHubMux(params: HubMuxParams): HubMux {
     unsubscribe: (_subscriberDID, topicID) => {
       release(topicID)
     },
-    receive: (_subscriberDID): HubReceiveSubscription => {
+    receive: (_subscriberDID, options): HubReceiveSubscription => {
       const queue: Array<StoredMessage> = []
       let resolveNext: ((result: IteratorResult<StoredMessage>) => void) | undefined
       let closed = false
+      // The sequenceIDs of every message pushed to this sink that this sink itself has not yet
+      // released — either by ack or by close — so closing with outstanding claims can release
+      // each of them instead of stranding them in `pending` for the TTL sweep to find.
+      const held = new Set<string>()
       const sink: Sink = {
         push: (message) => {
           if (closed) return
+          held.add(message.sequenceID)
           if (resolveNext != null) {
             const resolve = resolveNext
             resolveNext = undefined
@@ -643,11 +648,20 @@ export function createHubMux(params: HubMuxParams): HubMux {
             resolve({ value: undefined as unknown as StoredMessage, done: true })
           }
         },
+        // Unscoped, this sink is a pending holder for every message on every topic — including the
+        // ones it discards on topic mismatch, which would then wait out the TTL rather than being
+        // acked.
+        topicID: options?.topicID,
       }
       sinks.add(sink)
       const remove = () => {
         sink.close()
         sinks.delete(sink)
+        // A consumer that closes with messages outstanding must release them, not abandon them —
+        // otherwise every claim it joined sits in `pending` until the TTL sweep prunes it, and the
+        // sweep deliberately does not ack.
+        for (const sequenceID of held) releaseClaim(sequenceID, sink)
+        held.clear()
       }
       const iter: AsyncIterator<StoredMessage> = {
         next: () => {
@@ -666,7 +680,14 @@ export function createHubMux(params: HubMuxParams): HubMux {
           return Promise.resolve({ value: undefined as unknown as StoredMessage, done: true })
         },
       }
-      return { [Symbol.asyncIterator]: () => iter, return: remove }
+      return {
+        [Symbol.asyncIterator]: () => iter,
+        return: remove,
+        ack: (sequenceID) => {
+          held.delete(sequenceID)
+          releaseClaim(sequenceID, sink)
+        },
+      }
     },
   }
 
