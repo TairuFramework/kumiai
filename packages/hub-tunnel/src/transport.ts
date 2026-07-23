@@ -22,6 +22,17 @@ export type HubReceiveSubscription = AsyncIterable<StoredMessage> & {
   ack?: (sequenceID: string) => void | Promise<void>
 }
 
+/**
+ * Scope for a receive stream. A hub that knows which topic a subscription reads can tell which
+ * consumers will actually handle a frame, which is what a refcounted ack needs — an unscoped
+ * stream is a candidate holder for every message on every topic.
+ *
+ * Optional, and a hub is free to ignore it: the consumer still filters what it is handed.
+ */
+export type HubReceiveOptions = {
+  topicID?: string
+}
+
 export type MailboxHubEvent =
   | { type: 'reconnecting' }
   | { type: 'connected' }
@@ -110,7 +121,7 @@ export type HubBase = {
     options?: HubSubscribeOptions,
   ) => Promise<void> | void
   unsubscribe?: (subscriberDID: string, topicID: string) => Promise<void> | void
-  receive: (subscriberDID: string) => HubReceiveSubscription
+  receive: (subscriberDID: string, options?: HubReceiveOptions) => HubReceiveSubscription
   events?: MailboxHubEvents
 }
 
@@ -206,7 +217,7 @@ export function createHubTunnelTransport<R, W>(
   // Best-effort subscribe; rejection is swallowed (the receive stream still
   // attaches, and a missing subscription simply yields no inbound frames).
   void Promise.resolve(hub.subscribe(localDID, receiveTopicID)).catch(() => {})
-  const subscription = hub.receive(localDID)
+  const subscription = hub.receive(localDID, { topicID: receiveTopicID })
   const iterator = subscription[Symbol.asyncIterator]()
 
   let abortHandler: (() => void) | undefined

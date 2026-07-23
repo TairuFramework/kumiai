@@ -46,7 +46,7 @@ export type ConformanceMailboxHub = {
     options?: { retention?: number },
   ) => Promise<void> | void
   unsubscribe?: (subscriberDID: string, topicID: string) => Promise<void> | void
-  receive: (subscriberDID: string) => ConformanceReceiveSubscription
+  receive: (subscriberDID: string, options?: { topicID?: string }) => ConformanceReceiveSubscription
   publish: (params: ConformancePublishParams) => Promise<{ sequenceID: string }>
 }
 
