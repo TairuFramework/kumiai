@@ -1250,12 +1250,24 @@ release path. Before ticking the final step, confirm that a message delivered to
 by its consumer results in exactly one upstream ack, and that an unacked sink claim is the only
 thing the TTL is left to catch.
 
-**The close path counts too.** `remove()` (around `hub-mux.ts:638`) deletes the sink from `sinks`
-but leaves it in every `PendingAck.holders` set it had joined, stranding those claims until the
-sweep prunes them — and the sweep does not ack. A consumer that closes its subscription with
-messages outstanding must release them, not abandon them. Release on close as well as on ack, and
-cover it with a test: a sink that receives a message and then closes without acking must not leave
-the frame unacked upstream when it was the last holder.
+**The close path counts too, and it must NOT ack.** `remove()` (around `hub-mux.ts:638`) deletes the
+sink from `sinks` but leaves it in every `PendingAck.holders` set it had joined, so those entries sit
+until the sweep prunes them. Closing must drop the sink from every holders set it joined, and delete
+the entry outright if that empties it — **without acking upstream**, exactly as `sweepPending` does.
+
+A consumer that closes with frames outstanding has not durably handled them, and the file already
+states the rule for that case: telling the hub a frame was handled when it was not is a false
+success. Acking on close would also ack frames still sitting *queued* and never handed out, which a
+durable hub would then drop. Abandoning instead means the hub keeps them and redelivers — and it
+makes the delivered-versus-queued distinction moot, since neither is acked.
+
+Do not add a per-sink set of outstanding sequenceIDs to support this. `pending` is already bounded
+by the TTL sweep; a per-sink shadow of it is not bounded at all, because a consumer is permitted to
+omit `ack` entirely (`hub-tunnel/src/transport.ts:22`) and `createHubTunnelTransport` does exactly
+that today. Scan `pending` once per close instead.
+
+Cover with tests: a sink that receives a message and then closes must not strand the entry, and must
+not produce an upstream ack — including for frames it never read.
 
 - [ ] **Step 1: Write the failing test**
 
