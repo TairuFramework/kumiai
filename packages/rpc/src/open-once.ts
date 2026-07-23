@@ -17,13 +17,14 @@ export type OpenOncePathParams<Opened> = {
    * epoch the frame is about to be opened against. */
   note?: (message: StoredMessage) => void
   /**
-   * Consulted ONLY when `unwrap` throws. Answering `true` withholds the ack: this frame is not
-   * permanently unopenable, it is sealed at an epoch this handle has not reached yet — the
-   * ordinary window between a commit landing at the hub and this peer applying it — and must
-   * survive for a future reconnect once the handle catches up. Every other failure (another
-   * group's, an epoch already passed, or not a frame at all) still acks; `unwrap`'s throw alone
-   * can't tell those apart, which is why this is separate from `unwrap` itself. See
-   * `app-lane.ts`'s `note`/`ahead` for the same distinction made against a live push.
+   * Consulted when the open fails — `unwrap` throwing, but also a throw from `project` or from a
+   * listener in the fan-out, since all three run inside the same `catch`. Answering `true`
+   * withholds the ack: this frame is not permanently unopenable, it is sealed at an epoch this
+   * handle has not reached yet — the ordinary window between a commit landing at the hub and this
+   * peer applying it — and must survive for a future reconnect once the handle catches up. Every
+   * other failure (another group's, an epoch already passed, or not a frame at all) still acks;
+   * `unwrap`'s throw alone can't tell those apart, which is why this is separate from `unwrap`
+   * itself. See `app-lane.ts`'s `note`/`ahead` for the same distinction made against a live push.
    */
   retainOnFailure?: (message: StoredMessage) => boolean
 }

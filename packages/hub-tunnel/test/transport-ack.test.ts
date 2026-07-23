@@ -255,4 +255,71 @@ describe('the tunnel acks what it has handled', () => {
 
     await transport.dispose()
   })
+
+  test('a session-end frame is acked exactly once', async () => {
+    const fakeHub = new FakeHub()
+    const acked: Array<string> = []
+    // Models hub-mux's mailbox facade: `return` abandons the outstanding claim, so an ack
+    // attempted afterwards finds nothing left to honour and is silently lost. A fixture whose
+    // `ack` records unconditionally would pass even if the pump acked after closing.
+    let returned = false
+    const ackingHub: MailboxHub = {
+      publish: (params) => fakeHub.publish(params),
+      subscribe: (subscriberDID, topicID, options) =>
+        fakeHub.subscribe(subscriberDID, topicID, options),
+      unsubscribe: (subscriberDID, topicID) => fakeHub.unsubscribe(subscriberDID, topicID),
+      receive: (subscriberDID): HubReceiveSubscription => {
+        const inner = fakeHub.receive(subscriberDID)
+        return {
+          // The pump calls `.return()` on THIS iterator (`subscription[Symbol.asyncIterator]()`),
+          // not on the subscription's own `return` field — the abandon must be modeled here.
+          [Symbol.asyncIterator]: () => {
+            const iter = inner[Symbol.asyncIterator]()
+            return {
+              next: () => iter.next(),
+              return: () => {
+                returned = true
+                return iter.return?.() ?? Promise.resolve({ value: undefined, done: true })
+              },
+            }
+          },
+          ack: (sequenceID: string) => {
+            if (returned) return
+            acked.push(sequenceID)
+          },
+        }
+      },
+    }
+
+    let sessionEnded = 0
+    const transport = createHubTunnelTransport({
+      hub: ackingHub,
+      sessionID: 'session-end-ack',
+      localDID: 'did:key:ivan',
+      sendTopicID: 'topic:out-end',
+      receiveTopicID: 'topic:in-end',
+      onSessionEnd: () => {
+        sessionEnded++
+      },
+    })
+    await flush()
+
+    const endFrame: HubFrame = {
+      v: 1,
+      sessionID: 'session-end-ack',
+      kind: 'session-end',
+      seq: 0,
+    }
+    const { sequenceID } = await fakeHub.publish({
+      senderDID: 'did:key:judy',
+      topicID: 'topic:in-end',
+      payload: encodeFrame(endFrame),
+    })
+    await flush()
+
+    expect(sessionEnded).toBe(1)
+    expect(acked).toEqual([sequenceID])
+
+    await transport.dispose()
+  })
 })

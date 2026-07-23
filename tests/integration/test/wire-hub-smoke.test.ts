@@ -138,7 +138,7 @@ describe('Durable ack over the wire', () => {
     const aliceID = randomIdentity()
     const bobID = randomIdentity()
     const alice = hub.connect(aliceID)
-    const bob = hub.connect(bobID)
+    let bob = hub.connect(bobID)
     const topicID = 'topic:ack-log-survives'
 
     await bob.subscribe(bobID.id, topicID)
@@ -165,6 +165,22 @@ describe('Durable ack over the wire', () => {
     expect(fetched.messages.map((message) => message.sequenceID)).toEqual([published.sequenceID])
     expect(fetched.head).toBe(published.sequenceID)
 
+    // The log entry surviving is not proof the ack reached the wire — an ack that never left
+    // this process would produce the same fetchTopic result. Retire the DELIVERY too: a fresh
+    // receive for the same DID must not see the frame pushed again.
+    await bob.disconnect()
+    bob = hub.connect(bobID)
+    const receivedAfterAck: Array<string> = []
+    const freshSub = bob.receive(bobID.id)
+    void (async () => {
+      for await (const message of freshSub) {
+        receivedAfterAck.push(new TextDecoder().decode(message.payload))
+      }
+    })()
+    await flush()
+    expect(receivedAfterAck).toEqual([])
+
+    freshSub.return?.()
     await hub.dispose()
   })
 })

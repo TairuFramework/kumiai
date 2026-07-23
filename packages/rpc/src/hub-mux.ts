@@ -672,8 +672,10 @@ export function createHubMux(params: HubMuxParams): HubMux {
       //
       // So the drain's own claim is only released here — which may ack upstream — when something
       // was actually registered to receive this message. Left holding the drain claim alone, the
-      // entry is either matched by a listener that registers before the hub redelivers it, or
-      // pruned unacked by `sweepPending` at the TTL, same as a topic truly nobody ever reads.
+      // entry is pruned unacked by `sweepPending` at the TTL, same as a topic truly nobody ever
+      // reads — a late registration does not retroactively join THIS entry's holder set; matching
+      // happens only at delivery, so the message returns just on the next redelivery, matched then
+      // only if a listener is registered by that point (see "The init-race window" above).
       if (matchedListeners.length > 0 || matchedSinks.length > 0) {
         releaseClaim(message.sequenceID, drainClaim)
       }

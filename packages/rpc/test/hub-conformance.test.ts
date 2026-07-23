@@ -4,8 +4,9 @@ import {
   testMailboxAckConformance,
 } from '@kumiai/hub-conformance'
 import type { MailboxHub } from '@kumiai/hub-tunnel'
+import { afterEach } from 'vitest'
 
-import { createHubMux } from '../src/hub-mux.js'
+import { createHubMux, type HubMux } from '../src/hub-mux.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 
@@ -60,6 +61,11 @@ const MUX_LOCAL_DID = 'did:key:mux-mailbox-subject'
 
 type MuxMailboxTestHub = MailboxHub & { redeliver: () => void }
 
+// The conformance suite's `createHub` has no matching disposal hook — each case's mux would
+// otherwise leak a live drain loop for the rest of the process. Tracked here and torn down in
+// `afterEach` below, which fires for every test the suite generates in this file, not just this one.
+const muxInstances: Array<HubMux> = []
+
 function createMuxMailboxHub(options: {
   maxRetention: number
   maxDepth: number
@@ -70,6 +76,7 @@ function createMuxMailboxHub(options: {
     localDID: MUX_LOCAL_DID,
     onSubscribeFailed: () => {},
   })
+  muxInstances.push(mux)
   return Object.assign(mux.mailbox, {
     // Same mechanism the suite uses for DurableFakeHub directly: push the subject's unacked
     // retained messages back into the SAME upstream subscription the mux drains, which is what a
@@ -77,6 +84,10 @@ function createMuxMailboxHub(options: {
     redeliver: () => inner.redeliver(MUX_LOCAL_DID),
   })
 }
+
+afterEach(async () => {
+  await Promise.all(muxInstances.splice(0).map((mux) => mux.dispose()))
+})
 
 testMailboxAckConformance({
   label: 'hub-mux mailbox (createHubMux(...).mailbox)',

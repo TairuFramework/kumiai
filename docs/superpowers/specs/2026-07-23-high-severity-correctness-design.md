@@ -112,7 +112,9 @@ counted, and a sink cannot be filtered without knowing its topic.
 
 An **added optional parameter is additive**: an implementation declaring fewer parameters stays
 assignable, so every existing double and both conformance suites keep compiling. The tunnel passes
-`receiveTopicID` at `transport.ts:209` and stops filtering redundantly at `:334`.
+`receiveTopicID` at `transport.ts:220` and keeps its own topic filter at `:367` — `HubReceiveOptions`
+is a scope a hub is free to ignore (its own docblock says so), so the consumer-side filter stays
+load-bearing rather than becoming redundant.
 
 ### 3b. Mux refcount, mirroring `memoryStore`
 

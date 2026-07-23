@@ -1330,6 +1330,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   }
 
   const onRendezvousMessage = (message: StoredMessage, ack: () => void): void => {
+    // Acked immediately, unlike the commit lane: rendezvous is retried request/reply (see the
+    // "a refused or failed reply" note in `handleRecoveryRequest` above), so losing this specific
+    // delivery just means the requester's retry or another responder covers it.
     ack()
     if (mls == null) return
     let frame: ReturnType<typeof decodeHandshakeFrame>

@@ -312,6 +312,18 @@ export function createHubTunnelTransport<R, W>(
     lastActivity = Date.now()
   }
 
+  // A hub's ack may be synchronous, so it may throw synchronously — before
+  // `Promise.resolve` ever sees it, which is why the rejection guard alone is not
+  // enough (same hole, same fix, as `ackUpstream` in rpc/src/hub-mux.ts). Escaping
+  // here would surface inside the pump's IIFE as an unhandled rejection and kill it.
+  const ackHandled = (sequenceID: string): void => {
+    try {
+      void Promise.resolve(subscription.ack?.(sequenceID)).catch(() => {})
+    } catch {
+      // ignore
+    }
+  }
+
   const readable = new ReadableStream<R>(
     {
       start(controller) {
@@ -379,6 +391,11 @@ export function createHubTunnelTransport<R, W>(
                 } catch {
                   // already closed
                 }
+                // Before `iterator.return?.()`: a subscription whose close abandons its
+                // outstanding claims — hub-mux's mailbox facade does — can no longer honour
+                // an ack afterwards.
+                ackHandled(message.sequenceID)
+                handled = false
                 iterator.return?.()
                 onSessionEnd?.()
                 return
@@ -404,15 +421,7 @@ export function createHubTunnelTransport<R, W>(
               controller.enqueue(frame.body as R)
             } finally {
               if (handled) {
-                // A hub's ack may be synchronous, so it may throw synchronously — before
-                // `Promise.resolve` ever sees it, which is why the rejection guard alone is not
-                // enough (same hole, same fix, as `ackUpstream` in rpc/src/hub-mux.ts). Escaping
-                // here would surface inside this IIFE as an unhandled rejection and kill the pump.
-                try {
-                  void Promise.resolve(subscription.ack?.(message.sequenceID)).catch(() => {})
-                } catch {
-                  // ignore
-                }
+                ackHandled(message.sequenceID)
               }
             }
           }

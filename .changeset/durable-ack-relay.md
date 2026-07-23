@@ -9,7 +9,9 @@ Reconnects the durable-acknowledgement relay, which had been severed at six sepa
 between a peer's ack and the hub: the encrypting hub-tunnel wrapper dropped `ack` when it rebuilt
 the receive subscription; the mux's mailbox facade, its open-once path, and its bus view each held
 or forwarded an ack incorrectly; the broadcast subscribe callback had no ack parameter to forward
-at all; and the hub-tunnel transport's own read pump never acked a handled frame.
+at all; and the hub-tunnel transport's own read pump never acked a handled frame. Two of the six
+carry no in-repo traffic today (`mux.mailbox.receive` and `mux.bus.subscribe` have no production
+caller inside kumiai) — the reconnection is still correct and matters for external consumers.
 
 `@kumiai/hub-tunnel` gains `HubReceiveOptions` and an optional `receive` scope parameter (additive:
 a double declaring fewer parameters stays assignable) plus ack forwarding through the encrypting
@@ -30,6 +32,12 @@ a DID-keyed fake, but wrong against a hub whose ack is scoped to the delivery it
 
 `@kumiai/rpc` also gates `ProtocolSurface.to` on peer readiness, alongside `protocol()`'s other
 three methods. BREAKING: `ProtocolSurface.to` now returns `Promise<Client<Protocol>>`.
+
+`resync()` now runs under the same commit mutex as every other `rebuildEpoch` caller, closing a gap
+where a host-triggered resync could interleave with an inbound-commit rebuild and run two
+teardown/build cycles over one set of runtimes. User-visible: a host calling `resync()` while a
+commit-lane operation is in flight now waits for it to finish, where it previously ran
+concurrently.
 
 `@kumiai/hub-server` is unaffected — nothing under its `src/` changed.
 
