@@ -6,7 +6,6 @@ import type { HubReceiveSubscription, MailboxHub } from '../src/transport.js'
 
 describe('the encrypting wrapper forwards the ack', () => {
   test('ack and scope survive the wrapper', async () => {
-    const acked: Array<string> = []
     const scopes: Array<string | undefined> = []
     const inner: MailboxHub = {
       publish: async () => ({ sequenceID: '1' }),
@@ -22,7 +21,11 @@ describe('the encrypting wrapper forwards the ack', () => {
               }),
           }),
           return: () => {},
-          ack: (sequenceID) => void acked.push(sequenceID),
+          // Whether the wrapper actually forwards a call through `ack` — rather than merely
+          // preserving its presence — is proven end to end in transport-ack.test.ts, where a
+          // frame is decrypted and the inner ack fires. This stream never resolves, so `ack`
+          // could never be invoked here regardless.
+          ack: () => {},
         }
       },
     }

@@ -342,6 +342,11 @@ export function createHubTunnelTransport<R, W>(
               return
             }
             const message = result.value
+            // Every outcome below is a HANDLED outcome — enqueued, filtered, deduped or
+            // undecodable. Acked here, once, rather than at each `continue`: a frame this
+            // transport resolves and does not ack is redelivered on every reconnect until it ages
+            // out, and the paths that drop a frame are exactly the ones easiest to forget.
+            void Promise.resolve(subscription.ack?.(message.sequenceID)).catch(() => {})
             if (message.topicID !== receiveTopicID) {
               onEvent?.({ type: 'frame-dropped', reason: 'topic-mismatch' })
               continue
