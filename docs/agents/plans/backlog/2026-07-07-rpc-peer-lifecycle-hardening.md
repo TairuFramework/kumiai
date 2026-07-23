@@ -42,6 +42,45 @@
 - `packages/rpc/src/hub-mux.ts:108` — every sink receives every inbound message on every
   topic; filtering deferred to each tunnel — O(tunnels × messages). Fix: filter sink
   pushes by retained topics. (API design)
+  **Closed 2026-07-23** by the durable-ack work: `Sink.topicID` carries the scope a
+  `mailbox.receive` was opened with, and the drain filters on it. A sink that names no topic
+  still takes every message, which is the documented default.
+
+## Added 2026-07-23 — the peer-init drain race
+
+Filed out of the final review of `fix/high-severity-correctness`. **Not a defect in that branch —
+it made this strictly better — but the underlying race is still open.**
+
+`createHubMux` runs synchronously in the peer constructor (`packages/rpc/src/peer.ts:361`), so the
+drain starts reading the hub subscription immediately. The first `mux.onInbound` lands much later:
+inside `initControlLanes`, behind `await anchorStore?.load()` and `await mls.exportRecoverySecret()`,
+and the self-inbox listener later still, after `replayJournal` + `ensureLedger` + `pullCommits` —
+network round trips. Meanwhile the real hub pushes the recipient's entire undelivered backlog the
+instant the channel opens (`packages/hub-server/src/handlers.ts:331-349`).
+
+So a returning member's held mail is drained into a mux with no holders for it.
+
+**Where it stands now.** Those frames used to be acked and reclaimed — permanent loss. They are now
+left pending and pruned unacked by the TTL sweep, so the hub keeps them and redelivers on the next
+reconnect. Data loss became delay. That is where the branch left it, deliberately.
+
+**What is still wrong.** The frames are dropped *for that session*. A member returning after
+downtime does not see its held mail until something forces a reconnect, which nothing does promptly.
+
+**Options, none costed:**
+
+- **Buffer and replay in the mux.** Hold messages that match no holder for an opening window and
+  replay them to a listener that registers for that topic. Closes it fully; adds buffering state to
+  the drain's hot path, and needs a bound of its own.
+- **Defer the drain.** Do not start reading until `initControlLanes` has wired its listeners.
+  No buffer and no window — but it changes peer startup ordering, which the commit lane's
+  journal-replay invariants sit on top of, so it is not the small change it looks like.
+- **Leave it.** Delay-until-reconnect may simply be acceptable, in which case say so where the
+  behaviour is documented rather than leaving it implicit.
+
+Pick deliberately. The reason this is worth revisiting is that the *shape* of the bug — "nothing is
+listening yet, so nothing ever will be" — is what produced the one critical regression that branch
+had to fix.
 
 ## Test hooks
 
