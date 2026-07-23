@@ -1241,6 +1241,15 @@ consumer holding that subscription has no way to acknowledge. `mailbox` is publi
 - Produces: `mux.mailbox.receive(subscriberDID, options?)` returns a subscription carrying
   `ack: (sequenceID: string) => void`. Task 9's read pump calls it through the `MailboxHub` port.
 
+**Acceptance criterion carried forward from Task 4's review.** From Task 4 onward a sink is counted
+as a pending holder of every message it matches, but *nothing releases it* — so an open
+`mailbox.receive` currently holds every claim until the TTL sweep prunes it, and the sweep does not
+ack. The upstream ack is therefore lost for as long as a mailbox receive is open. **This task is
+what closes that**: wiring `ack` on the returned subscription is not optional polish, it is the
+release path. Before ticking the final step, confirm that a message delivered to a sink and acked
+by its consumer results in exactly one upstream ack, and that an unacked sink claim is the only
+thing the TTL is left to catch.
+
 - [ ] **Step 1: Write the failing test**
 
 Create `packages/rpc/test/hub-mux-mailbox-ack.test.ts`:
