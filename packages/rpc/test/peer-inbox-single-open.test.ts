@@ -65,12 +65,10 @@ describe('the inbox lane opens each frame once', () => {
     })
     await flush()
 
-    const result = await alice.peer
-      .protocol('chat')
-      .to('bob')
-      .request('chat/double', {
-        param: { n: 21 },
-      })
+    const client = await alice.peer.protocol('chat').to('bob')
+    const result = await client.request('chat/double', {
+      param: { n: 21 },
+    })
     expect(result).toEqual({ n: 42 })
 
     // Both sides opened frames — this is the control, so an empty count cannot pass — and neither
@@ -98,15 +96,11 @@ describe('the inbox lane opens each frame once', () => {
     // Two directed clients, both receiving on alice's ONE inbox topic. Each reply must be opened
     // once and reach the client it belongs to — the other client sees an authenticated sender
     // that is not its peer and leaves the frame alone rather than consuming it.
+    const bobClient = await alice.peer.protocol('chat').to('bob')
+    const carolClient = await alice.peer.protocol('chat').to('carol')
     const [fromBob, fromCarol] = await Promise.all([
-      alice.peer
-        .protocol('chat')
-        .to('bob')
-        .request('chat/double', { param: { n: 21 } }),
-      alice.peer
-        .protocol('chat')
-        .to('carol')
-        .request('chat/double', { param: { n: 21 } }),
+      bobClient.request('chat/double', { param: { n: 21 } }),
+      carolClient.request('chat/double', { param: { n: 21 } }),
     ])
     expect(fromBob).toEqual({ n: 42 })
     expect(fromCarol).toEqual({ n: 63 })

@@ -255,7 +255,7 @@ export type ProtocolSurface<Protocol extends ProtocolDefinition> = {
   dispatch: (prc: string, data?: Record<string, unknown>) => Promise<void>
   request: (prc: string, prm?: unknown, options?: RequestOptions) => Promise<unknown>
   gather: (prc: string, prm?: unknown, options?: GatherOptions) => Promise<Array<GatheredReply>>
-  to: (memberDID: string) => Client<Protocol>
+  to: (memberDID: string) => Promise<Client<Protocol>>
 }
 
 export type GroupPeer<Protocols extends Record<string, ProtocolDefinition>> = {
@@ -662,7 +662,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       },
       request: (prc, prm, options) => runtime.client.request(prc, prm, options),
       gather: (prc, prm, options) => runtime.client.gather(prc, prm, options),
-      to: (memberDID) => {
+      to: async (memberDID) => {
         const cached = runtime.directed.get(memberDID)
         if (cached != null) return cached.client
         const lane = inboxLane
@@ -1943,7 +1943,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         dispatch: (prc, data) => withReady(() => surfaceFor(key).dispatch(prc, data)),
         request: (prc, prm, options) => withReady(() => surfaceFor(key).request(prc, prm, options)),
         gather: (prc, prm, options) => withReady(() => surfaceFor(key).gather(prc, prm, options)),
-        to: (memberDID) => surfaceFor(key).to(memberDID),
+        to: (memberDID) => withReady(() => surfaceFor(key).to(memberDID)),
       } as ProtocolSurface<Protocols[K]>
     },
     commit,

@@ -79,10 +79,8 @@ describe('directed RPC over real MLS, end to end', () => {
     })
     await flush()
 
-    const reply = await alice.peer
-      .protocol('chat')
-      .to(bobID.id)
-      .request('chat/double', { param: { n: 21 } })
+    const client = await alice.peer.protocol('chat').to(bobID.id)
+    const reply = await client.request('chat/double', { param: { n: 21 } })
     expect(reply).toEqual({ n: 42 })
     expect(calls).toEqual([21])
 
@@ -144,7 +142,7 @@ describe('directed RPC over real MLS, end to end', () => {
     // The SECOND request is the one that matters. The directed client is cached per member, so
     // both run over one session and one inbox — every frame after the first is opened against a
     // ratchet the earlier frames have already advanced.
-    const to = alice.peer.protocol('chat').to(bobID.id)
+    const to = await alice.peer.protocol('chat').to(bobID.id)
     const first = await to.request('chat/double', { param: { n: 1 } })
     const second = await to.request('chat/double', { param: { n: 2 } })
     expect([first, second]).toEqual([{ n: 2 }, { n: 4 }])
