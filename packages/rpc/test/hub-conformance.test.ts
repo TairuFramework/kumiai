@@ -33,4 +33,7 @@ testAckConformance({
   createHub: (options) => new DurableFakeHub(options),
   maxRetention: MAX_RETENTION,
   maxDepth: MAX_DEPTH,
+  // DurableFakeHub's own receive() never replays backlog — only this does — so this is the only
+  // way the suite can observe the redelivery its ack suppresses.
+  redeliver: (hub, subscriberDID) => hub.redeliver(subscriberDID),
 })

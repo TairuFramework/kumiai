@@ -401,6 +401,20 @@ export function testLogHubConformance<Hub extends ConformanceLogHub>(
   })
 }
 
+/** Params for {@link testAckConformance}: the base params plus the required redelivery hook. */
+export type AckConformanceParams<Hub extends ConformanceLogHub> =
+  MailboxHubConformanceParams<Hub> & {
+    /**
+     * Trigger the hub's reconnect-backlog replay for `subscriberDID` — whatever push already made
+     * to an open `receive` subscription is not this; it must re-deliver retained, unacked frames
+     * the way a real reconnect would. Required, not optional: opting into this suite is a claim
+     * that the hub's ack suppresses a redelivery, and a hub that cannot demonstrate one cannot
+     * substantiate that claim. Without it, "not redelivered" is checked against a hub that never
+     * redelivers anything, acked or not, and the clause passes vacuously.
+     */
+    redeliver: (hub: Hub, subscriberDID: string) => void | Promise<void>
+  }
+
 /**
  * The clauses a hub that DECLARES an `ack` must answer for. Opt-in, and separate from
  * {@link testLogHubConformance} on purpose: `ack?` is optional on the contract — a hub with no
@@ -410,28 +424,33 @@ export function testLogHubConformance<Hub extends ConformanceLogHub>(
  * without never calls it, and the difference is visible at the call site.
  */
 export function testAckConformance<Hub extends ConformanceLogHub>(
-  params: MailboxHubConformanceParams<Hub>,
+  params: AckConformanceParams<Hub>,
 ): void {
-  const { createHub, maxRetention, maxDepth, label } = params
+  const { createHub, maxRetention, maxDepth, label, redeliver } = params
 
   describe(`${label}: ack conformance`, () => {
     test('an acked mailbox frame is not redelivered to a fresh receive', async () => {
       const hub = await createHub({ maxRetention, maxDepth })
       hub.subscribe(BOB, TOPIC)
-      const first = hub.receive(BOB, { topicID: TOPIC })
+      const subscription = hub.receive(BOB, { topicID: TOPIC })
       await hub.publish({ senderDID: ALICE, topicID: TOPIC, payload: payload(1) })
+      // Unacked control, published alongside the acked frame: without it, a redeliver that does
+      // nothing at all would also make this clause pass.
+      await hub.publish({ senderDID: ALICE, topicID: TOPIC, payload: payload(2) })
 
-      const delivered = await drain(first, 1)
-      expect(delivered).toHaveLength(1)
+      const delivered = await drain(subscription, 2)
+      expect(delivered).toHaveLength(2)
       // Asserted, not guarded: opting into this suite is the claim that this hub has an ack.
-      expect(first.ack).toBeDefined()
-      await first.ack?.(delivered[0]?.sequenceID as string)
+      expect(subscription.ack).toBeDefined()
+      await subscription.ack?.(delivered[0]?.sequenceID as string)
 
       // The mailbox class is delivery-derived: its last ack is what frees it. A hub that
       // redelivers an acked frame hands a peer the same message on every reconnect for the whole
       // retention window.
-      const second = hub.receive(BOB, { topicID: TOPIC })
-      expect(await drain(second, 1)).toEqual([])
+      const replayed = hub.receive(BOB, { topicID: TOPIC })
+      await redeliver(hub, BOB)
+      const backlog = await drain(replayed, 1)
+      expect(backlog.map((message) => message.sequenceID)).toEqual([delivered[1]?.sequenceID])
     })
 
     test('a log frame survives every ack', async () => {
