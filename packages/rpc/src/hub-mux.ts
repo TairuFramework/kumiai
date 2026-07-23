@@ -766,14 +766,18 @@ export function createHubMux(params: HubMuxParams): HubMux {
       // Before anything else: a retry sleeping out its backoff is work already abandoned, and
       // every path it could wake into checks `disposed` and returns.
       for (const wake of [...sleeping]) wake()
-      // Through the same abandon path a sink's own close uses: a dispose is a closing consumer
-      // too, and its outstanding claims are abandoned, never acked, for the same reason.
-      for (const sink of [...sinks]) abandonSink(sink)
-      // Whatever abandonSink left behind — entries held only by a listener or the drain's own
-      // claim, never a sink — dies here too: listeners are dropped below and the drain stops, so
-      // nothing will ever call these holders' release. Clearing without acking is the same
-      // abandon, not the false-success ack sweepPending and abandonSink both refuse to give.
+      // Cleared before closing sinks, not after: every claim dies here regardless of holder —
+      // sink, listener, or the drain's own — so `abandonSink`'s per-sink scan of `pending` would
+      // just be finding entries this clear is about to erase anyway. Clearing without acking is
+      // the same abandon, not the false-success ack sweepPending and abandonSink both refuse to
+      // give.
       pending.clear()
+      // A dispose is a closing consumer too, same as a sink's own close, so each sink is closed
+      // the same way — but without `abandonSink`'s now-redundant scan of the map just cleared.
+      for (const sink of [...sinks]) {
+        sink.close()
+        sinks.delete(sink)
+      }
       // Listeners go, the drain stops, SUBSCRIPTIONS STAND. Disposing means "stopped reading",
       // not "read everything, discard the rest". On mobile this is what backgrounding calls;
       // unsubscribing here would delete the user's unread mail on every app switch.

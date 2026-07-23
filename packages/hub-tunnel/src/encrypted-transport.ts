@@ -125,7 +125,11 @@ function wrapHub({ hub, encryptor, groupID, onEvent, onEncryptError }: WrapHubPa
               onEvent?.({ type: 'decrypt-failed', error: err })
               onEvent?.({ type: 'frame-dropped', reason: 'decrypt' })
               // Same reasoning as the other two drop paths: dropped here, never reaching the
-              // pump's ack site.
+              // pump's ack site. Unlike those two, this is not permanent by construction — it's
+              // a property of the key this reader currently holds, not of the bytes. Safe only
+              // because `Encryptor` has no rotation and is fixed for the transport's life; an
+              // epoch-keyed encryptor would make acking here discard a frame a later key could
+              // open, so that change must revisit this.
               ackHandled(message.sequenceID)
               continue
             }

@@ -23,3 +23,7 @@ in would make them pass without asserting anything on a hub with no redelivery t
 three methods. BREAKING: `ProtocolSurface.to` now returns `Promise<Client<Protocol>>`.
 
 `@kumiai/hub-server` is unaffected — nothing under its `src/` changed.
+
+A frame matching no listener and no sink is also no longer acked: the hub holds it to its age
+bound and redelivers it on reconnect, which a host may observe as a previously-silent frame now
+reappearing after restart.

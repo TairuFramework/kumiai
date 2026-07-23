@@ -56,8 +56,9 @@ describe('the encrypting wrapper passes the receive scope inward', () => {
 })
 
 describe('the encrypting wrapper acks its own drop paths', () => {
-  test('a foreign-group envelope and undecodable envelope bytes are both acked to the inner hub', async () => {
+  test('a foreign-group envelope, undecodable envelope bytes, and an undecryptable envelope are all acked to the inner hub', async () => {
     const acked: Array<string> = []
+    const undecryptable = toB64(new Uint8Array([0xde, 0xad]))
     let push: ((message: StoredMessage) => void) | undefined
     const inner: MailboxHub = {
       publish: async () => ({ sequenceID: '1' }),
@@ -96,7 +97,12 @@ describe('the encrypting wrapper acks its own drop paths', () => {
       hub: inner,
       encryptor: {
         encrypt: async (bytes: Uint8Array) => bytes,
-        decrypt: async (bytes: Uint8Array) => bytes,
+        decrypt: async (bytes: Uint8Array) => {
+          if (toB64(bytes) === undecryptable) {
+            throw new Error('decrypt failed')
+          }
+          return bytes
+        },
       },
       groupID: 'group-1',
       sessionID: 'session-1',
@@ -106,9 +112,9 @@ describe('the encrypting wrapper acks its own drop paths', () => {
     })
     await flush()
 
-    // Consumed off the inner subscription by the wrapper's own decode step, both of these never
-    // reach the read pump's ack site — the only way either is acked at all is the wrapper doing
-    // it itself.
+    // Consumed off the inner subscription by the wrapper's own decode/decrypt steps, none of
+    // these ever reach the read pump's ack site — the only way any is acked at all is the
+    // wrapper doing it itself.
     push?.({
       sequenceID: 'seq-foreign-group',
       senderDID: 'did:key:bob',
@@ -129,7 +135,19 @@ describe('the encrypting wrapper acks its own drop paths', () => {
     })
     await flush()
 
-    expect(acked).toEqual(['seq-foreign-group', 'seq-undecodable'])
+    push?.({
+      sequenceID: 'seq-undecryptable',
+      senderDID: 'did:key:bob',
+      topicID: 'topic:in',
+      payload: encodeEnvelope({
+        v: 1,
+        groupID: 'group-1',
+        ciphertext: undecryptable,
+      }),
+    })
+    await flush()
+
+    expect(acked).toEqual(['seq-foreign-group', 'seq-undecodable', 'seq-undecryptable'])
 
     await transport.dispose()
   })
