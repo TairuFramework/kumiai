@@ -507,6 +507,23 @@ export function createHubMux(params: HubMuxParams): HubMux {
   }
 
   /**
+   * Abandon a sink's claims — used both when a mailbox consumer closes its own subscription and
+   * when the whole mux is disposed. Never acks: the same choice `sweepPending` makes, and for the
+   * same reason (telling the hub a frame was durably handled when it was not is a false success).
+   * The hub keeps the frames and redelivers them on the next drain. Scanning `pending` here,
+   * rather than a per-sink `held` set kept current on every push, costs one pass over an
+   * already TTL-bounded map and only on close, not on the per-message hot path.
+   */
+  const abandonSink = (sink: Sink): void => {
+    sink.close()
+    sinks.delete(sink)
+    for (const [sequenceID, entry] of pending) {
+      if (!entry.holders.delete(sink)) continue
+      if (entry.holders.size === 0) pending.delete(sequenceID)
+    }
+  }
+
+  /**
    * Drop claims older than the TTL, WITHOUT acking — the mirror of `memoryStore.purge`.
    *
    * Swept on each inbound message rather than on a timer: the drain is the only thing that adds
@@ -565,11 +582,24 @@ export function createHubMux(params: HubMuxParams): HubMux {
       // leaving a sink pushed to after the frame was already told to the hub as durably handled,
       // and a second `ackUpstream` when that sink later releases its own claim.
       const drainClaim: Holder = Symbol('drain claim')
-      pending.set(message.sequenceID, {
+      // Naming the object here, rather than reading it back out of `pending`, makes "the entry is
+      // present" structural: nothing between this line and the `entry.holders.add` below can run
+      // and clear it, so there is no absent-entry case to branch on.
+      //
+      // `pending.set` OVERWRITES here when the hub redelivers a position this mux still has an
+      // outstanding claim on (a live reconnect racing a not-yet-swept claim). Traced benign:
+      // holder identities are stable across the overwrite and `matchedListeners`/`matchedSinks`
+      // are recomputed against current registrations, so the fresh entry is exactly what a
+      // from-scratch delivery of this position would produce. It matters more now than it did:
+      // the empty-holders branch below deliberately leaves a not-yet-read message pending rather
+      // than acking it, so a redelivered position with an outstanding claim is an expected shape,
+      // not a corner case.
+      const entry: PendingAck = {
         holders: new Set<Holder>([drainClaim, ...matchedListeners]),
         position,
         claimedAt: now,
-      })
+      }
+      pending.set(message.sequenceID, entry)
 
       for (const listener of matchedListeners) {
         try {
@@ -581,20 +611,29 @@ export function createHubMux(params: HubMuxParams): HubMux {
 
       // Sinks matched AFTER the listener loop, not before: a listener may synchronously create a
       // mailbox sink (the directed-tunnel lazy-accept race), and it must still receive the frame
-      // that triggered it. The entry is guaranteed present here — the drain's own claim above is
-      // still holding it — so there is no fresh-entry branch to fall into.
+      // that triggered it.
       const matchedSinks = [...sinks].filter(
         (sink) => sink.topicID == null || sink.topicID === message.topicID,
       )
-      const entry = pending.get(message.sequenceID)
-      if (entry != null) {
-        for (const sink of matchedSinks) entry.holders.add(sink)
-      }
+      for (const sink of matchedSinks) entry.holders.add(sink)
 
-      // Releasing the drain's own claim last acks upstream iff no listener or sink is still
-      // holding — which is also what covers the message nobody was interested in, with no
-      // separate branch for that case.
-      releaseClaim(message.sequenceID, drainClaim)
+      // An empty interested set here does NOT mean "nothing will ever handle this" — it is
+      // exactly the shape of a message that arrived before its listener was registered.
+      // `createHubMux` runs synchronously in the peer constructor and starts draining
+      // immediately, while the real hub pushes a returning member's whole backlog the instant
+      // the channel opens (see `hub-server/src/handlers.ts`) — long before `initControlLanes`
+      // wires the first `onInbound`. Acking on an empty set here would report that backlog as
+      // durably handled while nothing ever read it, which is permanent data loss: `memoryStore`
+      // keys `deliveries` by recipient DID, not by subscription instance, so an unacked frame is
+      // redelivered to the next `receive` — but an acked one is gone for good.
+      //
+      // So the drain's own claim is only released here — which may ack upstream — when something
+      // was actually registered to receive this message. Left holding the drain claim alone, the
+      // entry is either matched by a listener that registers before the hub redelivers it, or
+      // pruned unacked by `sweepPending` at the TTL, same as a topic truly nobody ever reads.
+      if (matchedListeners.length > 0 || matchedSinks.length > 0) {
+        releaseClaim(message.sequenceID, drainClaim)
+      }
 
       for (const sink of matchedSinks) sink.push(message)
     }
@@ -649,21 +688,10 @@ export function createHubMux(params: HubMuxParams): HubMux {
         topicID: options?.topicID,
       }
       sinks.add(sink)
-      const remove = () => {
-        sink.close()
-        sinks.delete(sink)
-        // A closing consumer has not handled what it still holds — whether never pulled out of
-        // `queue` or pulled and never acked — so its claims are ABANDONED, not acked: the same
-        // choice `sweepPending` makes, and for the same reason (telling the hub a frame was
-        // durably handled when it was not is a false success). The hub keeps the frames and
-        // redelivers them on the next drain. Scanning `pending` here, rather than a per-sink
-        // `held` set kept current on every push, costs one pass over an already TTL-bounded map
-        // and only on close, not on the per-message hot path.
-        for (const [sequenceID, entry] of pending) {
-          if (!entry.holders.delete(sink)) continue
-          if (entry.holders.size === 0) pending.delete(sequenceID)
-        }
-      }
+      // A closing consumer has not handled what it still holds — whether never pulled out of
+      // `queue` or pulled and never acked — so its claims are abandoned, not acked. See
+      // `abandonSink`.
+      const remove = () => abandonSink(sink)
       const iter: AsyncIterator<StoredMessage> = {
         next: () => {
           if (queue.length > 0) {
@@ -738,8 +766,14 @@ export function createHubMux(params: HubMuxParams): HubMux {
       // Before anything else: a retry sleeping out its backoff is work already abandoned, and
       // every path it could wake into checks `disposed` and returns.
       for (const wake of [...sleeping]) wake()
-      for (const sink of [...sinks]) sink.close()
-      sinks.clear()
+      // Through the same abandon path a sink's own close uses: a dispose is a closing consumer
+      // too, and its outstanding claims are abandoned, never acked, for the same reason.
+      for (const sink of [...sinks]) abandonSink(sink)
+      // Whatever abandonSink left behind — entries held only by a listener or the drain's own
+      // claim, never a sink — dies here too: listeners are dropped below and the drain stops, so
+      // nothing will ever call these holders' release. Clearing without acking is the same
+      // abandon, not the false-success ack sweepPending and abandonSink both refuse to give.
+      pending.clear()
       // Listeners go, the drain stops, SUBSCRIPTIONS STAND. Disposing means "stopped reading",
       // not "read everything, discard the rest". On mobile this is what backgrounding calls;
       // unsubscribing here would delete the user's unread mail on every app switch.

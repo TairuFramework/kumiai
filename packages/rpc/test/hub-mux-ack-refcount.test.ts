@@ -61,7 +61,7 @@ describe('the mux refcounts acks across its holders', () => {
     await mux.dispose()
   })
 
-  test('a message no holder is interested in is acked immediately', async () => {
+  test('a message no holder is interested in is left pending, not acked', async () => {
     const hub = new DurableFakeHub()
     const mux = createHubMux({ hub, localDID: 'bob', onSubscribeFailed: () => {} })
     mux.retainTopic('topic:unwatched')
@@ -70,8 +70,46 @@ describe('the mux refcounts acks across its holders', () => {
     await hub.publish({ senderDID: 'alice', topicID: 'topic:unwatched', payload: payload() })
     await flush()
 
-    // Nothing will ever handle it, so nothing will ever ack it. Leaving it pending would hold a
-    // frame in the hub mailbox until its age bound, for no reader.
+    // An empty interested set is NOT proof nothing will ever handle it — it is exactly the shape
+    // of a message that arrived before its listener was registered (see the peer-init test
+    // below). Acking here would be a false success the moment that turns out to be true, so the
+    // claim is left pending instead: reclaimed later by `sweepPending`'s TTL, never told upstream
+    // as durably handled.
+    expect(hub.ackedCount('bob')).toBe(0)
+
+    await mux.dispose()
+  })
+
+  test('a message that arrives before its listener is registered is not acked, and still reaches the listener once one registers', async () => {
+    const hub = new DurableFakeHub()
+    hub.subscribe('bob', 'topic:inbox')
+
+    // Held mail, published before this peer's mux even exists.
+    await hub.publish({ senderDID: 'alice', topicID: 'topic:inbox', payload: payload() })
+
+    // `createHubMux` runs synchronously in the peer constructor, before any `onInbound` is wired —
+    // exactly the window `initControlLanes`'s async setup opens in the real peer.
+    const mux = createHubMux({ hub, localDID: 'bob', onSubscribeFailed: () => {} })
+    await flush()
+
+    // The hub pushes the backlog the instant the channel opens, landing on a mux with zero
+    // holders. The old rule acked it here on the reasoning nothing would ever be interested.
+    hub.redeliver('bob')
+    await flush()
+    expect(hub.ackedCount('bob')).toBe(0)
+
+    // A listener registers afterward — the ordering the regression missed — and must still see
+    // the frame once the hub redelivers it again.
+    const received: Array<Uint8Array> = []
+    mux.onInbound('topic:inbox', (message, ack) => {
+      received.push(message.payload)
+      ack()
+    })
+    await flush()
+
+    hub.redeliver('bob')
+    await flush()
+    expect(received).toHaveLength(1)
     expect(hub.ackedCount('bob')).toBe(1)
 
     await mux.dispose()

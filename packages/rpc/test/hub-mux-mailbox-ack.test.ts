@@ -53,8 +53,15 @@ describe('the mailbox facade relays its ack', () => {
     const mux = createHubMux({ hub, localDID: 'bob', onSubscribeFailed: () => {} })
 
     mux.mailbox.subscribe('bob', 'topic:x')
-    mux.retainTopic('topic:y')
-    const subscription = mux.mailbox.receive('bob', { topicID: 'topic:x' })
+    // Held open and never read or acked: if this scoped sink were (wrongly) a holder for every
+    // topic rather than just its own, it would keep a topic:y frame pending forever, since
+    // nothing here ever closes or acks it.
+    mux.mailbox.receive('bob', { topicID: 'topic:x' })
+
+    let ackY: (() => void) | undefined
+    mux.onInbound('topic:y', (_message, ack) => {
+      ackY = ack
+    })
     await flush()
 
     await hub.publish({
@@ -64,11 +71,13 @@ describe('the mailbox facade relays its ack', () => {
     })
     await flush()
 
-    // Unscoped, this sink would be a pending holder for every message on every topic, and a frame
-    // it discards on topic mismatch would wait for an ack that never comes.
+    ackY?.()
+    await flush()
+
+    // The topic:x-scoped sink never held this frame, so the listener's own ack alone frees it.
+    // Were the sink unscoped, it would still be an outstanding holder and this would never reach 1.
     expect(hub.ackedCount('bob')).toBe(1)
 
-    subscription.return?.()
     await mux.dispose()
   })
 

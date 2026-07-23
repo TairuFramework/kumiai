@@ -65,6 +65,18 @@ function wrapHub({ hub, encryptor, groupID, onEvent, onEncryptError }: WrapHubPa
       const inner = hub.receive(subscriberDID, options)
       const innerIterator = inner[Symbol.asyncIterator]()
 
+      // A hub's ack may be synchronous, so it may throw synchronously — before `Promise.resolve`
+      // ever sees it, which is why the rejection guard alone is not enough (same hole, same fix,
+      // as `ackUpstream` in `rpc/src/hub-mux.ts`). Escaping here would kill this drain over a
+      // frame it is about to drop anyway.
+      const ackHandled = (sequenceID: string): void => {
+        try {
+          void Promise.resolve(inner.ack?.(sequenceID)).catch(() => {})
+        } catch {
+          // ignore
+        }
+      }
+
       const iterator: AsyncIterator<StoredMessage> = {
         async next(): Promise<IteratorResult<StoredMessage>> {
           while (true) {
@@ -80,6 +92,10 @@ function wrapHub({ hub, encryptor, groupID, onEvent, onEncryptError }: WrapHubPa
               if (error instanceof EnvelopeDecodeError) {
                 onEvent?.({ type: 'envelope-decode-failed', error })
                 onEvent?.({ type: 'frame-dropped', reason: 'envelope-decode' })
+                // Consumed off the inner subscription and never handed further: the read pump's
+                // single ack site can never see this sequenceID, so it must be acked here or it
+                // is undecodable forever and never durably handled.
+                ackHandled(message.sequenceID)
                 continue
               }
               throw error
@@ -95,6 +111,10 @@ function wrapHub({ hub, encryptor, groupID, onEvent, onEncryptError }: WrapHubPa
             // property the envelope states outright is a silent cross-group delivery.
             if (envelope.groupID !== groupID) {
               onEvent?.({ type: 'frame-dropped', reason: 'group-mismatch' })
+              // Permanently unhandleable — this reader will never hold the right key — so leaving
+              // it unacked would mean the hub redelivers it on every reconnect until the age
+              // bound, with the mailbox entry never reclaimed.
+              ackHandled(message.sequenceID)
               continue
             }
             let plaintext: Uint8Array
@@ -104,6 +124,9 @@ function wrapHub({ hub, encryptor, groupID, onEvent, onEncryptError }: WrapHubPa
               const err = new DecryptError('decrypt failed', { cause })
               onEvent?.({ type: 'decrypt-failed', error: err })
               onEvent?.({ type: 'frame-dropped', reason: 'decrypt' })
+              // Same reasoning as the other two drop paths: dropped here, never reaching the
+              // pump's ack site.
+              ackHandled(message.sequenceID)
               continue
             }
             const decrypted: StoredMessage = {
@@ -134,8 +157,9 @@ function wrapHub({ hub, encryptor, groupID, onEvent, onEncryptError }: WrapHubPa
         },
         // Carried through for the same reason `logPosition` is above: this wrapper re-writes the
         // payload and nothing else. Dropping it severs the durable-ack contract for every lane
-        // behind an encrypting hub.
-        ...(inner.ack != null ? { ack: (sequenceID: string) => inner.ack?.(sequenceID) } : {}),
+        // behind an encrypting hub. The same guarded helper the drop paths above use: a
+        // synchronous throw from `inner.ack` must not escape here either.
+        ...(inner.ack != null ? { ack: ackHandled } : {}),
       }
     },
   }
