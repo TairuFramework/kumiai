@@ -605,7 +605,8 @@ export function createHubMux(params: HubMuxParams): HubMux {
       assertSubscribable(topicID)
       await hub.publish({ senderDID: localDID, topicID, payload })
     },
-    subscribe: (topicID, onMessage) => onInbound(topicID, (message) => onMessage(message.payload)),
+    subscribe: (topicID, onMessage) =>
+      onInbound(topicID, (message, ack) => onMessage(message.payload, ack)),
   }
 
   const mailbox: MailboxHub = {

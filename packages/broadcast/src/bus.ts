@@ -4,7 +4,13 @@
  */
 export type BroadcastBus = {
   publish(topicID: string, payload: Uint8Array): void | Promise<void>
-  subscribe(topicID: string, onMessage: (payload: Uint8Array) => void): () => void
+  /**
+   * `ack` marks the payload durably handled, so a durable hub behind this bus stops redelivering
+   * it. Absent on an in-process bus that never redelivers, and ignorable by a subscriber that does
+   * not need the durability gate. A one-parameter callback stays assignable, so adding it broke
+   * nothing.
+   */
+  subscribe(topicID: string, onMessage: (payload: Uint8Array, ack?: () => void) => void): () => void
 }
 
 /**

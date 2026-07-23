@@ -135,7 +135,7 @@ export function createBroadcastTransport<R = BroadcastMessage, W = BroadcastMess
   const readable = new ReadableStream<R>({
     start(controller) {
       readableController = controller
-      unsubscribe = bus.subscribe(topicID, (payload) => {
+      unsubscribe = bus.subscribe(topicID, (payload, ack) => {
         Promise.resolve(unwrap(payload))
           .then((result) => {
             const { payload: bytes, senderDID } = normalizeUnwrap(result)
@@ -153,6 +153,12 @@ export function createBroadcastTransport<R = BroadcastMessage, W = BroadcastMess
           .catch(() => {
             // Drop this message and keep the subscription alive — expected for messages from
             // other groups/epochs where decryption fails.
+          })
+          .finally(() => {
+            // Both branches above are handled outcomes: a frame from another group or epoch is
+            // dropped on purpose, and leaving it unacked redelivers the same undecryptable bytes
+            // on every reconnect.
+            ack?.()
           })
       })
     },
