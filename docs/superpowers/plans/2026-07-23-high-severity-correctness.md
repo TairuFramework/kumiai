@@ -1250,6 +1250,13 @@ release path. Before ticking the final step, confirm that a message delivered to
 by its consumer results in exactly one upstream ack, and that an unacked sink claim is the only
 thing the TTL is left to catch.
 
+**The close path counts too.** `remove()` (around `hub-mux.ts:638`) deletes the sink from `sinks`
+but leaves it in every `PendingAck.holders` set it had joined, stranding those claims until the
+sweep prunes them — and the sweep does not ack. A consumer that closes its subscription with
+messages outstanding must release them, not abandon them. Release on close as well as on ack, and
+cover it with a test: a sink that receives a message and then closes without acking must not leave
+the frame unacked upstream when it was the last holder.
+
 - [ ] **Step 1: Write the failing test**
 
 Create `packages/rpc/test/hub-mux-mailbox-ack.test.ts`:
