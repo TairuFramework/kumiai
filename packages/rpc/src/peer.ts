@@ -1951,7 +1951,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     recover,
     resync: async () => {
       await ready
-      await rebuildEpoch()
+      // Every other `rebuildEpoch` caller runs under the commit mutex. Unlocked, a host-called
+      // resync interleaves with an inbound-commit rebuild and runs two teardown/build cycles over
+      // one set of runtimes. Safe to wrap only because `rebuildEpoch` takes no lock itself and
+      // this is a top-level entry — `runSerial` is not reentrant.
+      await runSerial(() => rebuildEpoch())
     },
     anchorEpoch: () => anchor.epoch,
     dispose: async () => {
