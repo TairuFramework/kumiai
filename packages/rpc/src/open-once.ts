@@ -55,7 +55,7 @@ export function createOpenOncePath<Opened>(
   let opening: Promise<void> = Promise.resolve()
   return (onOpened: (value: Opened) => void): (() => void) => {
     listeners.add(onOpened)
-    unsubscribe ??= mux.onInbound(topicID, (message) => {
+    unsubscribe ??= mux.onInbound(topicID, (message, ack) => {
       note?.(message)
       opening = opening
         .then(async () => {
@@ -71,6 +71,13 @@ export function createOpenOncePath<Opened>(
           // A frame this handle cannot open — another epoch's, another group's, or not a frame at
           // all. Ordinary on a shared log, and the read paths are built to walk past it. One
           // frame's failure must not break the chain the rest are opened on.
+        })
+        .finally(() => {
+          // Acked on BOTH paths, and only once this frame's link has settled. A frame that could
+          // not be opened has still been handled — leaving it unacked redelivers the same
+          // undecryptable bytes on every reconnect, forever. Acking on arrival instead would
+          // release it before the open that consumes its ratchet key had run.
+          ack()
         })
     })
     return () => {
