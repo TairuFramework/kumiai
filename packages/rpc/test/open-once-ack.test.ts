@@ -34,7 +34,7 @@ describe('the open-once path acks what it opens', () => {
     await mux.dispose()
   })
 
-  test('a frame that cannot be opened is acked too', async () => {
+  test('a permanently unopenable frame is acked', async () => {
     const hub = new DurableFakeHub()
     const mux = createHubMux({ hub, localDID: 'bob', onSubscribeFailed: () => {} })
 
@@ -42,7 +42,7 @@ describe('the open-once path acks what it opens', () => {
       mux,
       topicID: 'topic:app',
       unwrap: async () => {
-        throw new Error('another epoch')
+        throw new Error('another group, an epoch already passed, or not a frame at all')
       },
       project: (_message, result) => result.payload,
     })
@@ -56,9 +56,43 @@ describe('the open-once path acks what it opens', () => {
     })
     await flush()
 
-    // Unopenable frames are ordinary on a shared log. Leaving them unacked redelivers the same
-    // undecryptable bytes on every reconnect, forever.
+    // Permanently unopenable frames are ordinary on a shared log. Leaving them unacked
+    // redelivers the same undecryptable bytes on every reconnect, forever.
     expect(hub.ackedCount('bob')).toBe(1)
+
+    await mux.dispose()
+  })
+
+  test('a frame from an epoch not yet reached is retained, not acked', async () => {
+    const hub = new DurableFakeHub()
+    const mux = createHubMux({ hub, localDID: 'bob', onSubscribeFailed: () => {} })
+
+    const path = createOpenOncePath<Uint8Array>({
+      mux,
+      topicID: 'topic:app',
+      unwrap: async () => {
+        // Real MLS: `unwrap` refuses any epoch the handle hasn't reached. `retainOnFailure`
+        // stands in for reading the frame's own cleartext epoch against the handle's current one
+        // (see `peer.ts`'s wiring) without needing a real crypto port here.
+        throw new Error('epoch not reached yet')
+      },
+      retainOnFailure: () => true,
+      project: (_message, result) => result.payload,
+    })
+    path(() => {})
+    await flush()
+
+    await hub.publish({
+      senderDID: 'alice',
+      topicID: 'topic:app',
+      payload: new Uint8Array([1]),
+    })
+    await flush()
+
+    // A peer one commit behind the sender must still see this frame once it catches up. Acking
+    // it here — the pre-fix behaviour — is the store reclaiming a frame that was never handled:
+    // permanent data loss for the ordinary send-then-apply race, not a corrupt or foreign frame.
+    expect(hub.ackedCount('bob')).toBe(0)
 
     await mux.dispose()
   })

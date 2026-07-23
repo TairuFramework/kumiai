@@ -136,6 +136,12 @@ export function createBroadcastTransport<R = BroadcastMessage, W = BroadcastMess
     start(controller) {
       readableController = controller
       unsubscribe = bus.subscribe(topicID, (payload, ack) => {
+        // Mirrors `hub-tunnel/src/transport.ts`'s read pump: every outcome below is a HANDLED
+        // one — enqueued, or dropped as another group's/epoch's — except `enqueue` itself
+        // throwing, which means the readable had already closed (transport disposal, or the
+        // writable's own `close()`) racing this open. That frame never reached a consumer, so
+        // it must not be told upstream as durably handled.
+        let handled = true
         Promise.resolve(unwrap(payload))
           .then((result) => {
             const { payload: bytes, senderDID } = normalizeUnwrap(result)
@@ -148,17 +154,24 @@ export function createBroadcastTransport<R = BroadcastMessage, W = BroadcastMess
               if (senderDID == null) delete message.senderDID
               else message.senderDID = senderDID
             }
-            controller.enqueue(message as R)
+            try {
+              controller.enqueue(message as R)
+            } catch (error) {
+              handled = false
+              throw error
+            }
           })
           .catch(() => {
             // Drop this message and keep the subscription alive — expected for messages from
-            // other groups/epochs where decryption fails.
+            // other groups/epochs where decryption fails, and for the enqueue-after-close race
+            // above (already flagged unhandled there).
           })
           .finally(() => {
-            // Both branches above are handled outcomes: a frame from another group or epoch is
-            // dropped on purpose, and leaving it unacked redelivers the same undecryptable bytes
-            // on every reconnect.
-            ack?.()
+            // Acked unless `handled` was flipped false: a frame from another group or epoch is
+            // dropped ON PURPOSE and still acks — leaving it unacked would redeliver the same
+            // undecryptable bytes on every reconnect. A frame that never reached a consumer
+            // because the readable had already closed must NOT ack — the hub redelivers it.
+            if (handled) ack?.()
           })
       })
     },

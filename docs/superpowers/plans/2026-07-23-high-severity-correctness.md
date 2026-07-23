@@ -666,7 +666,7 @@ describe('the mux refcounts acks across its holders', () => {
     await mux.dispose()
   })
 
-  test('a message no holder is interested in is acked immediately', async () => {
+  test('a message no holder is interested in is left pending, not acked', async () => {
     const hub = new DurableFakeHub()
     const mux = createHubMux({ hub, localDID: 'bob', onSubscribeFailed: () => {} })
     mux.retainTopic('topic:unwatched')
@@ -675,9 +675,16 @@ describe('the mux refcounts acks across its holders', () => {
     await hub.publish({ senderDID: 'alice', topicID: 'topic:unwatched', payload: payload() })
     await flush()
 
-    // Nothing will ever handle it, so nothing will ever ack it. Leaving it pending would hold a
-    // frame in the hub mailbox until its age bound, for no reader.
-    expect(hub.ackedCount('bob')).toBe(1)
+    // SUPERSEDES an earlier version of this plan, which acked an empty interested set
+    // immediately on the reasoning "nothing will ever handle it". That is false: `createHubMux`
+    // runs synchronously in the peer constructor and starts draining before `initControlLanes`
+    // wires the first `onInbound`, and the real hub pushes a returning member's whole backlog the
+    // instant the channel opens — long before any listener exists to be interested. Acking on an
+    // empty set there reported that backlog durably handled while nothing had read it: permanent
+    // data loss, since `memoryStore` keys `deliveries` by recipient DID, not by subscription
+    // instance, so an unacked frame redelivers but an acked one is gone for good. So the entry is
+    // left pending instead, reclaimed only by the TTL sweep if nothing ever registers for it.
+    expect(hub.ackedCount('bob')).toBe(0)
 
     await mux.dispose()
   })

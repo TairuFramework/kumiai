@@ -149,6 +149,11 @@ export type HubMuxParams = {
    * Expiry drops the claim and sends NO upstream ack: it means a holder is broken, and telling the
    * hub the frame was durably handled would be a false success. The hub's own age bound reclaims
    * it instead.
+   *
+   * INTERNAL, currently unreachable from outside this module: `createHubMux` is not exported from
+   * `packages/rpc/src/index.ts`, a deep import of this file is blocked, and `GroupPeerParams` does
+   * not surface this field. Wired here for the tests in this package and any future surfacing, not
+   * as a dial a host can reach today.
    */
   ackTTLMs?: number
 }
@@ -457,6 +462,12 @@ export function createHubMux(params: HubMuxParams): HubMux {
       current?.delete(listener)
       if (current != null && current.size === 0) listeners.delete(topicID)
       release(topicID)
+      // Deliberately NOT dropped from any `pending` holder set the listener is already in — unlike
+      // `abandonSink`. Correct, not an oversight: the ack closure handed out at delivery time
+      // (`releaseClaim(message.sequenceID, listener)`) closes over `listener` by identity and
+      // keeps working after this unregisters, so there is nothing broken to clean up. Abandoning
+      // it here, the way a sink's close does, would drop a claim a caller may still be about to
+      // release from a frame it already received.
     }
   }
 
@@ -511,8 +522,10 @@ export function createHubMux(params: HubMuxParams): HubMux {
    * when the whole mux is disposed. Never acks: the same choice `sweepPending` makes, and for the
    * same reason (telling the hub a frame was durably handled when it was not is a false success).
    * The hub keeps the frames and redelivers them on the next drain. Scanning `pending` here,
-   * rather than a per-sink `held` set kept current on every push, costs one pass over an
-   * already TTL-bounded map and only on close, not on the per-message hot path.
+   * rather than a per-sink `held` set kept current on every push, costs one pass over a map
+   * usually small — bounded by the TTL only BETWEEN deliveries; an aggressively-redelivering hub
+   * keeps refreshing entries past it (see the redelivery overwrite above) — and only on close,
+   * not on the per-message hot path.
    */
   const abandonSink = (sink: Sink): void => {
     sink.close()
@@ -530,11 +543,20 @@ export function createHubMux(params: HubMuxParams): HubMux {
    * entries, so a quiet drain has nothing to sweep, and a timer would need dispose handling and a
    * cross-platform unref for no gain. A lingering entry holds no hub resource — the hub reclaims
    * by its own age bound regardless.
+   *
+   * BREAKS at the first entry not yet past the cutoff rather than scanning the whole map: `pending`
+   * is a `Map`, which iterates in insertion order, and the drain's `delete`-then-`set` on a
+   * redelivered position (below) re-inserts that entry at the end with a fresh `claimedAt` — so
+   * insertion order and `claimedAt` stay in the same non-decreasing order the break relies on.
+   * Without that re-insertion, an overwritten entry would keep its ORIGINAL position while
+   * carrying a NEWER timestamp, and this break could stop before reaching genuinely expired
+   * entries further along. Amortised O(1) per message rather than O(pending size).
    */
   const sweepPending = (now: number): void => {
     const cutoff = now - ackTTLMs
     for (const [sequenceID, entry] of pending) {
-      if (entry.claimedAt <= cutoff) pending.delete(sequenceID)
+      if (entry.claimedAt > cutoff) break
+      pending.delete(sequenceID)
     }
   }
 
@@ -594,11 +616,21 @@ export function createHubMux(params: HubMuxParams): HubMux {
       // the empty-holders branch below deliberately leaves a not-yet-read message pending rather
       // than acking it, so a redelivered position with an outstanding claim is an expected shape,
       // not a corner case.
+      //
+      // Also why a hub that redelivers aggressively never hits the TTL on this position: every
+      // redelivery refreshes `claimedAt` to `now`, so the effective bound on "how long can this
+      // sit unacked" is the HUB'S OWN retention/redelivery cadence, not the TTL below. The TTL
+      // only bounds a claim between deliveries — once redelivered, its clock restarts.
       const entry: PendingAck = {
         holders: new Set<Holder>([drainClaim, ...matchedListeners]),
         position,
         claimedAt: now,
       }
+      // Deleted before re-set so a redelivered position moves to the END of the Map's insertion
+      // order — `Map.prototype.set` on an EXISTING key updates in place without moving it, which
+      // would otherwise leave this entry's newer `claimedAt` sitting at its original (older)
+      // position and break `sweepPending`'s ordering assumption.
+      pending.delete(message.sequenceID)
       pending.set(message.sequenceID, entry)
 
       for (const listener of matchedListeners) {
@@ -712,6 +744,12 @@ export function createHubMux(params: HubMuxParams): HubMux {
       return {
         [Symbol.asyncIterator]: () => iter,
         return: remove,
+        // Advertised UNCONDITIONALLY, even when the upstream `subscription.ack` this mux itself
+        // reads from is absent (`ackUpstream`'s `?.` then makes the upstream call a no-op). Not
+        // "absence propagates as absence" here, deliberately: releasing this sink's claim does
+        // real local work regardless of the upstream hub — freeing the holder set entry, and
+        // letting other holders' acks free the frame — so withholding it would only make a
+        // mailbox consumer redundantly hold a claim nothing upstream will ever ask it to release.
         ack: (sequenceID) => releaseClaim(sequenceID, sink),
       }
     },

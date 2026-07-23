@@ -153,7 +153,11 @@ Two properties carried up deliberately, both easy to get wrong by re-deriving:
    still named for what it is and never reaches a log cursor.
 
 3. When a holder acks, delete it. At size 0, fire `subscription.ack?.(position)` upstream, once.
-4. An empty interested set acks immediately: nothing will ever handle the message.
+4. An empty interested set is left pending, not acked: it is exactly the shape of a message that
+   arrived before its listener was registered (a returning member's backlog lands the instant the
+   channel opens, ahead of `initControlLanes` wiring the first `onInbound`), so acking here would
+   report a frame nobody read as durably handled. The TTL sweep below prunes it unacked if nothing
+   ever does.
 5. A sweep prunes entries past a TTL **without acking**, mirroring `purge`. The frame stays in the
    hub mailbox, is redelivered on reconnect, and the hub's age bound reclaims it. Acking on give-up
    would report a broken consumer as durable success — the false-success the conventions skill's

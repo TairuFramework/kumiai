@@ -16,6 +16,16 @@ export type OpenOncePathParams<Opened> = {
   /** Called with the raw message BEFORE the open, for anything that must be recorded at the
    * epoch the frame is about to be opened against. */
   note?: (message: StoredMessage) => void
+  /**
+   * Consulted ONLY when `unwrap` throws. Answering `true` withholds the ack: this frame is not
+   * permanently unopenable, it is sealed at an epoch this handle has not reached yet — the
+   * ordinary window between a commit landing at the hub and this peer applying it — and must
+   * survive for a future reconnect once the handle catches up. Every other failure (another
+   * group's, an epoch already passed, or not a frame at all) still acks; `unwrap`'s throw alone
+   * can't tell those apart, which is why this is separate from `unwrap` itself. See
+   * `app-lane.ts`'s `note`/`ahead` for the same distinction made against a live push.
+   */
+  retainOnFailure?: (message: StoredMessage) => boolean
 }
 
 /**
@@ -49,7 +59,7 @@ export type OpenOncePathParams<Opened> = {
 export function createOpenOncePath<Opened>(
   params: OpenOncePathParams<Opened>,
 ): (onOpened: (value: Opened) => void) => () => void {
-  const { mux, topicID, unwrap, project, note } = params
+  const { mux, topicID, unwrap, project, note, retainOnFailure } = params
   const listeners = new Set<(value: Opened) => void>()
   let unsubscribe: (() => void) | undefined
   let opening: Promise<void> = Promise.resolve()
@@ -57,6 +67,10 @@ export function createOpenOncePath<Opened>(
     listeners.add(onOpened)
     unsubscribe ??= mux.onInbound(topicID, (message, ack) => {
       note?.(message)
+      // Every outcome below is a HANDLED one — opened, or permanently unopenable — except a
+      // failure `retainOnFailure` says is not yet reachable, which flips this false so the
+      // `finally` below withholds the ack.
+      let handled = true
       opening = opening
         .then(async () => {
           const result = await unwrap(message.payload)
@@ -71,13 +85,19 @@ export function createOpenOncePath<Opened>(
           // A frame this handle cannot open — another epoch's, another group's, or not a frame at
           // all. Ordinary on a shared log, and the read paths are built to walk past it. One
           // frame's failure must not break the chain the rest are opened on.
+          //
+          // `unwrap` throwing can't say WHICH of those it is, so it can't decide the ack alone: a
+          // frame sealed one epoch ahead — the ordinary window between a commit landing and this
+          // peer applying it — will open once the handle catches up, and acking it here would be
+          // the store reclaiming a frame that was never actually handled. `retainOnFailure` reads
+          // the frame's own cleartext epoch to tell that case apart; every other failure acks.
+          if (retainOnFailure?.(message) === true) handled = false
         })
         .finally(() => {
-          // Acked on BOTH paths, and only once this frame's link has settled. A frame that could
-          // not be opened has still been handled — leaving it unacked redelivers the same
-          // undecryptable bytes on every reconnect, forever. Acking on arrival instead would
-          // release it before the open that consumes its ratchet key had run.
-          ack()
+          // Acked once this frame's link has settled, UNLESS `handled` was flipped false above.
+          // Acking on arrival instead would release it before the open that consumes its ratchet
+          // key had run.
+          if (handled) ack()
         })
     })
     return () => {

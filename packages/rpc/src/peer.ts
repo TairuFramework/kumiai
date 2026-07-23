@@ -475,6 +475,21 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   const openedFrames = new WeakMap<Uint8Array, GroupUnwrapResult>()
 
   /**
+   * Whether a frame `unwrap` just refused might still open once this handle catches up, read from
+   * its own cleartext epoch — never from the throw itself, which can't tell "not reached yet"
+   * apart from "never again". Consulted only on the open-once failure path (see
+   * {@link "open-once".OpenOncePathParams.retainOnFailure}): answering `true` withholds the ack,
+   * so the frame survives for a reconnect once the handle is there. Same shape `app-lane.ts`'s
+   * live push uses to stage a frame ahead of the walk (`note`/`ahead` there) — mailbox-class
+   * frames have no such staging of their own, which is exactly what made acking them here on a
+   * transient refusal a permanent loss.
+   */
+  const retainOnFailure = (message: StoredMessage): boolean => {
+    const at = crypto.frameEpoch(message.payload)
+    return at != null && at > crypto.epoch()
+  }
+
+  /**
    * The app lane's inbound path: one open per topic, fanned out as plaintext, with each frame's
    * log position noted before the open. Every consumer's own `unwrap` is then a pure lookup of the
    * opened result ({@link openedFrames}), and nothing downstream touches the handle.
@@ -486,6 +501,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       mux,
       topicID,
       unwrap: crypto.unwrap,
+      retainOnFailure,
       project: (_message, opened) => {
         const { payload, senderDID } = opened
         if (typeof senderDID !== 'string' || senderDID === '') {
@@ -552,7 +568,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     const selfInbox = inboxTopic(anchor.secret, anchor.epoch, localDID)
     inboxLane = {
       topicID: selfInbox,
-      path: createInboxPath({ mux, topicID: selfInbox, unwrap: crypto.unwrap }),
+      path: createInboxPath({ mux, topicID: selfInbox, unwrap: crypto.unwrap, retainOnFailure }),
     }
     for (const [name, protocol] of Object.entries(protocols)) {
       // The app topic is bound to the ANCHOR, not the live epoch — see {@link sealForSegment}.
