@@ -1,7 +1,5 @@
 import {
   AuthorizationDeniedError,
-  HUB_ERROR_CODES,
-  hubErrorFromCode,
   NotSubscribedError,
   RetentionExceededError,
 } from '@kumiai/hub-protocol'
@@ -260,7 +258,7 @@ describe('a subscribe the hub refuses', () => {
     expect(failures[0]?.error).toBeInstanceOf(AuthorizationDeniedError)
   })
 
-  test('an authorization refusal rebuilt from its wire code is still permanent (tunnel path)', async () => {
+  test('a refusal carrying only the authz name (not the class) is still permanent (two-copies tunnel path)', async () => {
     const hub = new FakeHub({ maxRetention: 100 })
     const failures: Array<SubscribeFailure> = []
     const mux = createHubMux({
@@ -270,14 +268,17 @@ describe('a subscribe the hub refuses', () => {
       subscribeRetryDelaysMs: FAST_RETRIES,
     })
 
-    // A hub reached over the tunnel rebuilds the error from its wire code; instanceof alone would
-    // miss it if two hub-protocol copies were bundled. The name check must carry it.
-    const rebuilt = hubErrorFromCode(HUB_ERROR_CODES.authorizationDenied, 'policy says no')
-    hub.refuseSubscribeWith('topic:authz2', rebuilt as Error)
+    // Simulate a hub reached over the tunnel whose error is NOT `instanceof` our
+    // AuthorizationDeniedError (two bundled hub-protocol copies): only the name carries. If the
+    // name branch of isPermanentSubscribeFailure were removed, this would latch transient and retry.
+    const nameOnly = new Error('policy says no')
+    nameOnly.name = 'AuthorizationDeniedError'
+    hub.refuseSubscribeWith('topic:authz2', nameOnly)
     mux.retainTopic('topic:authz2', { retention: 50 })
     await flush()
 
     expect(hub.subscribeAttempts('topic:authz2')).toBe(1)
+    expect(failures).toHaveLength(1)
     expect(failures[0]?.permanent).toBe(true)
   })
 })
