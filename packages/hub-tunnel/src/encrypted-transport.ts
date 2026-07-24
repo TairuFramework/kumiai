@@ -154,9 +154,7 @@ function wrapHub({ hub, encryptor, groupID, onEvent, onEncryptError }: WrapHubPa
         ...(inner.ack != null ? { ack: ackHandled } : {}),
       }
     },
-  }
-  if (hub.events != null) {
-    wrapped.events = hub.events
+    ...(hub.events != null ? { events: hub.events } : {}),
   }
   return wrapped
 }

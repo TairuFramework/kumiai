@@ -40,6 +40,7 @@
     "@kumiai/hub-protocol": "workspace:^",
     "@sozai/async": "catalog:",
     "@sozai/codec": "catalog:",
+    "@sozai/event": "catalog:",
     "@sozai/schema": "catalog:"
   },
   "devDependencies": {

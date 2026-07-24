@@ -1,6 +1,7 @@
 import { Transport, type TransportType } from '@enkaku/transport'
 import type { StoredMessage } from '@kumiai/hub-protocol'
 import { AbortInterruption, TimeoutInterruption } from '@sozai/async'
+import type { EventEmitter } from '@sozai/event'
 
 import {
   BackpressureError,
@@ -36,11 +37,7 @@ export type MailboxHubEvent =
   | { type: 'connected' }
   | { type: 'disconnected' }
 
-export type MailboxHubEventListener = (event: MailboxHubEvent) => void
-
-export type MailboxHubEvents = {
-  subscribe: (listener: MailboxHubEventListener) => () => void
-}
+export type MailboxHubEvents = EventEmitter<{ status: MailboxHubEvent }>
 
 /**
  * A mailbox-class publish — the only kind a {@link MailboxHub} accepts. No retention class, no
@@ -120,7 +117,7 @@ export type HubBase = {
   ) => Promise<void> | void
   unsubscribe?: (subscriberDID: string, topicID: string) => Promise<void> | void
   receive: (subscriberDID: string, options?: HubReceiveOptions) => HubReceiveSubscription
-  events?: MailboxHubEvents
+  readonly events?: MailboxHubEvents
 }
 
 /**
@@ -481,7 +478,7 @@ export function createHubTunnelTransport<R, W>(
         teardown(new HubReconnectingError('reconnect timeout exceeded'))
       }, reconnectTimeoutMs)
     }
-    unsubscribeEvents = hub.events.subscribe((event) => {
+    unsubscribeEvents = hub.events.on('status', (event) => {
       if (torndown) return
       switch (event.type) {
         case 'reconnecting':

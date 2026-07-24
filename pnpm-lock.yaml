@@ -214,6 +214,9 @@ importers:
       '@sozai/codec':
         specifier: 'catalog:'
         version: 0.2.0
+      '@sozai/event':
+        specifier: 'catalog:'
+        version: 0.1.1
       '@sozai/schema':
         specifier: 'catalog:'
         version: 0.1.1

@@ -47,7 +47,6 @@ export {
   type LogHub,
   type MailboxHub,
   type MailboxHubEvent,
-  type MailboxHubEventListener,
   type MailboxHubEvents,
   type MailboxPublishParams,
 } from './transport.js'
