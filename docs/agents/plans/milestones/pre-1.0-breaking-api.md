@@ -84,8 +84,8 @@ in the linked doc; the one real defect the check turned up is folded into the `d
   2026-07-23** — `@kumiai/mls` has no such method; it is `@kumiai/rpc`'s consumer port, so the
   change also hits `@kumiai/mls-rpc` and the `@kumiai/rpc-conformance` contract suite.
 - **Bus control-frame `kind` discriminator shares the app-data namespace** (spans `@kumiai/broadcast`
-  + `@kumiai/rpc`). **Filed 2026-07-24** from the `fix/anycast-soundness` whole-branch review (design
-  spec `../../../superpowers/specs/2026-07-24-anycast-soundness-design.md`). On the bus, req/res
+  + `@kumiai/rpc`). **Filed 2026-07-24** from the `fix/anycast-soundness` whole-branch review (see
+  `../completed/2026-07-24-anycast-soundness.complete.md`). On the bus, req/res
   control messages ride as `typ:'event'` frames told apart from app events by inspecting `data.kind`
   (`packages/broadcast/src/responder.ts`; the `ReplyData`/`RequestData` shapes in `client.ts`). An app
   event whose `data` legitimately carries a top-level `kind` valued `'req'`/`'res'` — reachable
