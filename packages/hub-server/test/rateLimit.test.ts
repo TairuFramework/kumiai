@@ -62,4 +62,18 @@ describe('createRateLimiter', () => {
     l2.tryConsume('trigger')
     expect(l2.size()).toBe(1026) // nothing pruned: none are full
   })
+
+  test('preserves a spent bucket that is idle past the TTL but has not refilled to full', () => {
+    const limiter = createRateLimiter({ rate: 0.001, burst: 10, ttlMs: 1000 }) as ReturnType<
+      typeof createRateLimiter
+    > & { size(): number }
+    // 1025 keys each spend 1 token -> each at 9 tokens, well below burst=10.
+    for (let i = 0; i < 1025; i++) limiter.tryConsume(`k${i}`)
+    // Idle far past ttlMs. At rate 0.001/s, refill in 5s is 0.005 tokens -> still ~9, < burst.
+    vi.advanceTimersByTime(5000)
+    // Trigger the prune via a fresh cold-path key past the threshold.
+    limiter.tryConsume('trigger')
+    // None of the spent buckets may be evicted: they are idle-past-TTL but NOT full.
+    expect(limiter.size()).toBe(1026)
+  })
 })

@@ -22,6 +22,12 @@ type Bucket = {
 /** Threshold above which `tryConsume` sweeps for evictable buckets. */
 const PRUNE_AT = 1024
 
+/** Tokens a bucket would hold at `now` under continuous refill, capped at burst. */
+function refilledTokens(bucket: Bucket, now: number, rate: number, burst: number): number {
+  const elapsedSeconds = (now - bucket.lastRefill) / 1000
+  return Math.min(burst, bucket.tokens + elapsedSeconds * rate)
+}
+
 /** Per-key token-bucket rate limiter. */
 export function createRateLimiter(config: RateLimitConfig): RateLimiter {
   const buckets = new Map<string, Bucket>()
@@ -32,9 +38,14 @@ export function createRateLimiter(config: RateLimitConfig): RateLimiter {
       // Full-capacity AND idle past the TTL: carries no rate state, so dropping and re-creating it
       // on next use is identical. A partially-spent bucket is never dropped — that would refund a
       // caller their spent tokens.
-      const elapsedSeconds = (now - bucket.lastRefill) / 1000
-      const refilled = Math.min(config.burst, bucket.tokens + elapsedSeconds * config.rate)
-      if (refilled >= config.burst && now - bucket.lastRefill >= ttlMs) {
+      // Recompute fullness from elapsed time, do NOT read stored `tokens`: every tryConsume
+      // decrements, so a resting bucket's stored tokens is always < burst — a stored-value
+      // check would be inert and never prune. `refilledTokens` mirrors the hot-path refill,
+      // so this is true exactly when the bucket would be legitimately full if touched now.
+      if (
+        refilledTokens(bucket, now, config.rate, config.burst) >= config.burst &&
+        now - bucket.lastRefill >= ttlMs
+      ) {
         buckets.delete(key)
       }
     }
@@ -49,8 +60,7 @@ export function createRateLimiter(config: RateLimitConfig): RateLimiter {
         bucket = { tokens: config.burst, lastRefill: now }
         buckets.set(key, bucket)
       } else {
-        const elapsedSeconds = (now - bucket.lastRefill) / 1000
-        bucket.tokens = Math.min(config.burst, bucket.tokens + elapsedSeconds * config.rate)
+        bucket.tokens = refilledTokens(bucket, now, config.rate, config.burst)
         bucket.lastRefill = now
       }
       if (bucket.tokens < 1) {
