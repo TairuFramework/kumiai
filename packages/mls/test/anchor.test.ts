@@ -123,6 +123,48 @@ describe('group anchor', () => {
     expect(decodeGroupAnchor(enc(JSON.stringify({ creatorDID: 'did:x', version: '1' })))).toBeNull()
   })
 
+  test('decodeGroupAnchor withholds app when version is above CURRENT_VERSION', () => {
+    // A future build wrote this anchor (version 2 > the current 1) with an app
+    // payload this build cannot interpret. Structural fields stay; app is dropped.
+    const future = encodeGroupAnchor({
+      creatorDID: 'did:example:alice',
+      version: 2,
+      app: { recoverySecret: 'v2-seed', shape: 'unknown-to-v1' },
+    })
+    const decoded = decodeGroupAnchor(future)
+    expect(decoded).not.toBeNull()
+    expect(decoded?.creatorDID).toBe('did:example:alice')
+    // version is preserved, so a consumer can tell "future, app withheld"
+    // (version 2, app undefined) from "genuinely no app" (version 1, app undefined).
+    expect(decoded?.version).toBe(2)
+    expect(decoded?.app).toBeUndefined()
+    expect('app' in (decoded as object)).toBe(false)
+  })
+
+  test('decodeGroupAnchor keeps app for a version below CURRENT_VERSION', () => {
+    // No such anchor exists today (1 is the only value written), but by the
+    // backward-compat contract a lower, already-known version stays interpretable.
+    const older = encodeGroupAnchor({
+      creatorDID: 'did:example:alice',
+      version: 0,
+      app: { note: 'still readable' },
+    })
+    const decoded = decodeGroupAnchor(older)
+    expect(decoded?.version).toBe(0)
+    expect(decoded?.app).toEqual({ note: 'still readable' })
+  })
+
+  test('decodeGroupAnchor keeps app at the current version', () => {
+    const current = encodeGroupAnchor({
+      creatorDID: 'did:example:alice',
+      version: 1,
+      app: { recoverySecret: 'v1-seed' },
+    })
+    const decoded = decodeGroupAnchor(current)
+    expect(decoded?.version).toBe(1)
+    expect(decoded?.app).toEqual({ recoverySecret: 'v1-seed' })
+  })
+
   test('controlCapabilities advertises all three extension types, exactly once each', () => {
     expect(GROUP_ANCHOR_EXTENSION_TYPE).toBe(0xf100)
     expect(LEDGER_HEAD_EXTENSION_TYPE).toBe(0xf101)

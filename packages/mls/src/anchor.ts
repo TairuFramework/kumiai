@@ -53,6 +53,14 @@ export function encodeGroupAnchor(anchor: GroupAnchor): Uint8Array {
  * Tolerant decode: null on malformed bytes or wrong shape, never throws. `creatorDID` must be a
  * string and `version` a number; `app` is optional, so its absence isn't malformed. A consumer
  * needing a specific `app` shape validates that itself.
+ *
+ * Forward-compat gate: when `version > CURRENT_VERSION` (a future build wrote it), the returned
+ * anchor keeps `creatorDID` and `version` but drops `app` — the opaque payload may carry semantics
+ * this build has never seen, and a v1 consumer reading it as v1 (kubun keeps its recovery seed in
+ * `app`) cannot tell. `version` is preserved so a consumer distinguishes "future version, app
+ * withheld" from "genuinely no app". Contract this rests on: a `version` bump means `app` semantics
+ * changed and nothing else; any future control-relevant field must go in a new extension type, never
+ * inside the anchor where a version-tolerant older peer would silently ignore it.
  */
 export function decodeGroupAnchor(bytes: Uint8Array): GroupAnchor | null {
   let parsed: unknown
@@ -69,7 +77,12 @@ export function decodeGroupAnchor(bytes: Uint8Array): GroupAnchor | null {
     return null
   }
   const anchor: GroupAnchor = { creatorDID: record.creatorDID, version: record.version }
-  if ('app' in record && record.app !== undefined) {
+  // Withhold the app payload from a future build's anchor: a version this build
+  // has never seen may carry a payload with v2 semantics, and handing it to a
+  // consumer under v1 expectations is exactly the silent misread this guards.
+  // The structural fields (creatorDID, version) stay usable, so the member still
+  // joins — only the opaque payload it provably cannot interpret is dropped.
+  if (record.version <= CURRENT_VERSION && 'app' in record && record.app !== undefined) {
     anchor.app = record.app
   }
   return anchor
@@ -133,6 +146,10 @@ export function readGroupAnchorExtension(handle: GroupHandle): GroupContextExten
  * silently downgrading (the anchor is authenticated by the GroupInfo signature, so this guards
  * corruption, not forgery). Use {@link readGroupAnchorExtension} for bytes to copy into a
  * proposal — never a re-encode of this result.
+ *
+ * A future-version anchor is not corruption: {@link decodeGroupAnchor} decodes it (dropping `app`),
+ * so this returns a non-null anchor and the member joins. Only the payload a v1 build cannot
+ * interpret is withheld.
  */
 export function readGroupAnchor(handle: GroupHandle): GroupAnchor | null {
   const extension = findAnchorExtension(handle)
