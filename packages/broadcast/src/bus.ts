@@ -5,10 +5,9 @@
 export type BroadcastBus = {
   publish(topicID: string, payload: Uint8Array): void | Promise<void>
   /**
-   * `ack` marks the payload durably handled, so a durable hub behind this bus stops redelivering
-   * it. Absent on an in-process bus that never redelivers, and ignorable by a subscriber that does
-   * not need the durability gate. A one-parameter callback stays assignable, so adding it broke
-   * nothing.
+   * `ack` marks the payload durably handled so a durable hub stops redelivering it. Absent on an
+   * in-process bus that never redelivers; ignorable by a subscriber that needs no durability gate.
+   * A one-parameter callback stays assignable, so adding it broke nothing.
    */
   subscribe(topicID: string, onMessage: (payload: Uint8Array, ack?: () => void) => void): () => void
 }
@@ -16,19 +15,13 @@ export type BroadcastBus = {
 /**
  * In-memory fan-out bus for tests and in-process use.
  *
- * **Known divergence from the hub, NOT checked by `@kumiai/hub-conformance`.** This bus calls every
- * subscriber of a topic, including the publisher's own. The hub does not: it builds recipients as
- * "current subscribers MINUS the sender" (`hub-server/src/memoryStore.ts`), and the production
- * `BroadcastBus` (`rpc/src/hub-mux.ts`) is a per-peer view over exactly that fan-out. So a
- * component whose correctness turns on receiving its OWN publish — a gather counting its own reply
- * toward a quorum, a client confirming a publish by observing it arrive — passes here and delivers
- * nothing in production.
- *
- * The `LogHub` conformance suite locks that property down for every hub double, but it cannot be
- * applied here: `publish(topicID, payload)` carries no sender and `subscribe(topicID, onMessage)`
- * carries no subscriber identity, so "was this echoed to its sender?" is not a question this shape
- * can be asked. Closing it means putting identity on `BroadcastBus` itself, which changes the
- * production implementation in `rpc/src/hub-mux.ts`.
+ * **Known divergence from the hub, NOT checked by `@kumiai/hub-conformance`.** This bus echoes to
+ * every subscriber including the publisher's own; the hub delivers to "subscribers MINUS the sender"
+ * (`hub-server/src/memoryStore.ts`), and the production bus (`rpc/src/hub-mux.ts`) is a per-peer view
+ * of that. So anything relying on receiving its OWN publish (a gather counting its own reply) passes
+ * here and delivers nothing in production. The conformance suite can't catch it here: this shape
+ * carries no sender/subscriber identity to ask "was this echoed to its sender?". Closing it means
+ * putting identity on `BroadcastBus` itself.
  */
 export function createMemoryBus(): BroadcastBus {
   const topics = new Map<string, Set<(payload: Uint8Array) => void>>()

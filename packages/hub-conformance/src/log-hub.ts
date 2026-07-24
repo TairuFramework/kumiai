@@ -1,22 +1,15 @@
 /**
  * Conformance suite for the behaviour a hub exposes at the **`LogHub` / `MailboxHub` seam** — the
- * shape the peer and tunnel layers actually hold, and the shape every in-repo test double
- * implements.
+ * shape the peer and tunnel layers hold, and the shape every in-repo double implements.
  *
- * `testHubStoreConformance` (`./index.js`) checks a `HubStore`, and exactly one implementation runs
- * it. The doubles the rpc and tunnel suites execute against are `LogHub`s, and until this file they
- * were checked by nothing — which is how three separate doubles came to have an infallible
- * `subscribe` while the real hub refuses, hiding a swallowed subscribe failure that stalls a peer
- * permanently.
+ * `testHubStoreConformance` (`./index.js`) checks a `HubStore`; the rpc and tunnel doubles are
+ * `LogHub`s, checked by nothing until this file — which is how three doubles came to have an
+ * infallible `subscribe` while the real hub refuses, hiding a peer-stalling failure.
  *
- * This is deliberately NOT the `HubStore` suite bridged through an adapter. A `HubStore` adapter
- * over a `LogHub` would have to implement the storage semantics the suite checks (delivery-derived
- * mailbox GC, the age bound, ack accounting), at which point the suite tests the adapter. Only the
- * clauses a `LogHub` can answer for on its own are here; the rest stay on the `HubStore` suite.
- *
- * The hub shapes are re-declared structurally below rather than imported from `@kumiai/hub-tunnel`.
- * `hub-tunnel` runs this suite over its own double, so depending on it here would put a cycle in
- * the package graph. Structural typing means a real `LogHub` satisfies these without a cast.
+ * Deliberately NOT the `HubStore` suite over an adapter: an adapter would have to implement the
+ * storage semantics the suite checks, at which point it tests the adapter. Only clauses a `LogHub`
+ * can answer on its own live here. The hub shapes are re-declared structurally rather than imported
+ * from `@kumiai/hub-tunnel` (which runs this suite, so importing it would cycle the package graph).
  *
  * @module hub-conformance/log-hub
  */
@@ -116,13 +109,10 @@ async function drain(
 ): Promise<Array<StoredMessage>> {
   const iterator = subscription[Symbol.asyncIterator]()
   const collected: Array<StoredMessage> = []
-  // Closed only on the branch that gives up early (timeout, or the source ending on its own): a
-  // hub whose `receive` is a poll loop over a pull API keeps polling until it is told to stop, and
-  // a clause asserting that nothing arrives would otherwise leave a timer running past the end of
-  // the run. A full, successful read is left OPEN on purpose — a hub whose ack is scoped to the
-  // still-open claim on THIS subscription, rather than a DID-keyed record independent of it (a
-  // `mux.mailbox`-shaped hub, not only a DID-keyed fake), needs the caller free to ack what `drain`
-  // just collected; closing here first would abandon it before that ack ever runs.
+  // Closed only when giving up early (timeout, or the source ending), so a poll-loop hub stops
+  // polling. A full read is left OPEN on purpose: a hub whose ack is scoped to the still-open claim
+  // on THIS subscription (a `mux.mailbox`-shaped hub, not just a DID-keyed fake) needs the caller
+  // free to ack what `drain` collected; closing first would abandon it before the ack runs.
   let gaveUpEarly = false
   while (collected.length < limit) {
     const next = await Promise.race([
@@ -413,12 +403,9 @@ export function testLogHubConformance<Hub extends ConformanceLogHub>(
 export type MailboxAckConformanceParams<Hub extends ConformanceMailboxHub> =
   MailboxHubConformanceParams<Hub> & {
     /**
-     * Trigger the hub's reconnect-backlog replay for `subscriberDID` — whatever push already made
-     * to an open `receive` subscription is not this; it must re-deliver retained, unacked frames
-     * the way a real reconnect would. Required, not optional: opting into this suite is a claim
-     * that the hub's ack suppresses a redelivery, and a hub that cannot demonstrate one cannot
-     * substantiate that claim. Without it, "not redelivered" is checked against a hub that never
-     * redelivers anything, acked or not, and the clause passes vacuously.
+     * Trigger the hub's reconnect-backlog replay for `subscriberDID` — re-delivering retained,
+     * unacked frames as a real reconnect would. Required: without a hub that actually redelivers,
+     * "not redelivered" passes vacuously against one that never redelivers anything.
      */
     redeliver: (hub: Hub, subscriberDID: string) => void | Promise<void>
   }
@@ -428,13 +415,10 @@ export type AckConformanceParams<Hub extends ConformanceLogHub> = MailboxAckConf
 
 /**
  * The redelivery clause a hub that DECLARES an `ack` must answer for — needs only
- * `subscribe`/`publish`/`receive`, so a `MailboxHub`-shaped subject (no readable log) can opt in
- * directly, not only a `LogHub`-shaped one. Opt-in, and separate from
- * {@link testMailboxHubConformance} on purpose: `ack?` is optional on the contract — a hub with no
- * redelivery to gate conformingly has none — so folding this into the main suite would make it
- * pass without asserting anything on such a hub. That is the exact shape that let a severed ack
- * relay survive a suite built to catch drift. A double with an ack calls this and must pass; one
- * without never calls it, and the difference is visible at the call site.
+ * `subscribe`/`publish`/`receive`, so a `MailboxHub`-shaped subject (no readable log) can opt in.
+ * Opt-in and separate from {@link testMailboxHubConformance}: `ack?` is optional, so folding it in
+ * would let a hub with no ack pass vacuously — the exact shape that let a severed relay survive a
+ * suite built to catch drift.
  */
 export function testMailboxAckConformance<Hub extends ConformanceMailboxHub>(
   params: MailboxAckConformanceParams<Hub>,
@@ -457,9 +441,8 @@ export function testMailboxAckConformance<Hub extends ConformanceMailboxHub>(
       expect(subscription.ack).toBeDefined()
       await subscription.ack?.(delivered[0]?.sequenceID as string)
 
-      // The mailbox class is delivery-derived: its last ack is what frees it. A hub that
-      // redelivers an acked frame hands a peer the same message on every reconnect for the whole
-      // retention window.
+      // The mailbox class is delivery-derived: the last ack frees it. A hub that redelivers an
+      // acked frame hands a peer the same message on every reconnect for the retention window.
       const replayed = hub.receive(BOB, { topicID: TOPIC })
       await redeliver(hub, BOB)
       const backlog = await drain(replayed, 1)
@@ -469,10 +452,8 @@ export function testMailboxAckConformance<Hub extends ConformanceMailboxHub>(
 }
 
 /**
- * The log-survives-ack clause a hub that DECLARES an `ack` must answer for — needs `fetchTopic`,
- * so it stays `LogHub`-shaped only. Separate from {@link testMailboxAckConformance} for the same
- * reason that one is separate from {@link testMailboxHubConformance}: this asserts something only
- * on a subject that opts in, rather than passing vacuously on one that does not.
+ * The log-survives-ack clause a hub that DECLARES an `ack` must answer for — needs `fetchTopic`, so
+ * it stays `LogHub`-shaped. Opt-in like {@link testMailboxAckConformance}, so it can't pass vacuously.
  */
 export function testLogAckConformance<Hub extends ConformanceLogHub>(
   params: MailboxHubConformanceParams<Hub>,
@@ -496,8 +477,8 @@ export function testLogAckConformance<Hub extends ConformanceLogHub>(
       expect(subscription.ack).toBeDefined()
       await subscription.ack?.(delivered[0]?.sequenceID as string)
 
-      // An ack frees a DELIVERY, not a log entry. A hub that lets an ack remove a log frame
-      // breaks the member invited tomorrow who must apply the commits landing today.
+      // An ack frees a DELIVERY, not a log entry — else the member invited tomorrow can't apply the
+      // commits landing today.
       const result = await hub.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
       expect(result.messages.map((message) => message.sequenceID)).toEqual([logged])
       expect(result.head).toBe(logged)
@@ -506,10 +487,9 @@ export function testLogAckConformance<Hub extends ConformanceLogHub>(
 }
 
 /**
- * The composite for a `LogHub`-shaped double: both the redelivery clause and the log-survives-ack
- * clause. Kept for the doubles that already opt into this name — {@link testMailboxAckConformance}
- * and {@link testLogAckConformance} are the finer-grained entry points a `MailboxHub`-shaped
- * subject (no `fetchTopic`) uses instead.
+ * Composite for a `LogHub`-shaped double: both clauses. {@link testMailboxAckConformance} and
+ * {@link testLogAckConformance} are the finer-grained entry points a `MailboxHub`-shaped subject
+ * (no `fetchTopic`) uses instead.
  */
 export function testAckConformance<Hub extends ConformanceLogHub>(
   params: AckConformanceParams<Hub>,

@@ -58,32 +58,13 @@ export type ReceiveLaneEnded = {
 const logger = getLogger(['kumiai', 'rpc'])
 
 /**
- * THE FALLBACK, used when a host wires no handler: say it out loud rather than nowhere.
+ * Fallback when a host wires no handler: both conditions leave a peer that looks healthy but
+ * silently receives nothing. At ERROR level, not warn — `@sozai/log`'s default config drops `warn`.
+ * Falls back to console when logging is unconfigured (logtape discards records otherwise).
  *
- * Both conditions leave a peer that looks healthy and is not — every call still succeeds, and
- * the group simply appears to have gone quiet. A host that has not wired the notice is exactly
- * the host that will not otherwise find out, so the default has to be loud rather than tidy.
- *
- * AT ERROR LEVEL, not warn, and that is not emphasis: `@sozai/log`'s own default configuration
- * admits `error` and drops `warn`, so a warning would be discarded by the very setup most apps
- * start from. A condition that silently loses every message this peer is sent belongs above that
- * line anyway.
- *
- * AND CONSOLE WHEN LOGGING IS NOT CONFIGURED, because logtape with no configuration discards
- * records — which would put this back exactly where it started. `isSetup()` is the difference
- * between "the app collects this" and "nobody will ever see it".
- *
- * KNOWN GAP, filed in `docs/agents/plans/next/2026-07-19-logging-reaches-a-sink.md`: `isSetup()`
- * answers whether logging is configured, not whether THIS category reaches a sink. An app calling
- * `@sozai/log`'s `setup()` with no argument gets a config covering `['sozai']` and nothing else,
- * so these records are dropped while the console fallback stays out of the way. Fixing it means
- * choosing between logtape's own emit check, a root sink in the shared default, and a documented
- * requirement — a decision that belongs to the logging story rather than to this file.
- *
- * Only these two conditions. `rpc/src` swallows failures in twenty-odd other places and every one
- * of them is ordinary control flow on a shared log — a frame sealed for another epoch, a host
- * handler that threw, a retry that ran out. Logging those would be constant noise, and a warning
- * nobody can afford to read is worth no more than silence.
+ * KNOWN GAP (`docs/agents/plans/next/2026-07-19-logging-reaches-a-sink.md`): `isSetup()` reports
+ * whether logging is configured, not whether THIS category reaches a sink, so a `setup()` covering
+ * only `['sozai']` drops these while the console fallback stays quiet.
  */
 const report = (message: string, error: unknown): void => {
   if (isSetup()) {
@@ -143,17 +124,10 @@ export type HubMuxParams = {
   /** Backoff schedule for transient subscribe failures. Default {@link DEFAULT_SUBSCRIBE_RETRY_DELAYS_MS}. */
   subscribeRetryDelaysMs?: ReadonlyArray<number>
   /**
-   * How long a delivered message waits for its holders to ack before its claim is dropped.
-   * Default {@link DEFAULT_ACK_TTL_MS}.
-   *
-   * Expiry drops the claim and sends NO upstream ack: it means a holder is broken, and telling the
-   * hub the frame was durably handled would be a false success. The hub's own age bound reclaims
-   * it instead.
-   *
-   * INTERNAL, currently unreachable from outside this module: `createHubMux` is not exported from
-   * `packages/rpc/src/index.ts`, a deep import of this file is blocked, and `GroupPeerParams` does
-   * not surface this field. Wired here for the tests in this package and any future surfacing, not
-   * as a dial a host can reach today.
+   * How long a delivered message waits for its holders to ack before the claim is dropped.
+   * Default {@link DEFAULT_ACK_TTL_MS}. Expiry drops the claim WITHOUT acking — acking a frame no
+   * holder handled would be a false success; the hub's age bound reclaims it. Internal: not
+   * surfaced on `GroupPeerParams`, wired only for this package's tests.
    */
   ackTTLMs?: number
 }
@@ -270,60 +244,35 @@ function isPermanentSubscribeFailure(error: unknown): boolean {
  * Multiplex a single hub `receive` drain into a BroadcastBus view, a mailbox-hub view (for
  * directed tunnels), and an onInbound hook (for lazy directed-server accept).
  *
- * Per inbound message, in order: (1) fire `onInbound` listeners for the topic, then (2) push to
- * every `mailbox.receive` sink whose topic scope matches — a sink naming no topic takes every
- * message, one naming a topic only that one — so a listener may create a directed tunnel
- * synchronously and still receive the triggering frame. Topics are refcounted across all three
- * views; the first registration subscribes on the hub.
+ * Per inbound message: (1) fire the topic's `onInbound` listeners, then (2) push to every matching
+ * `mailbox.receive` sink (a sink naming no topic takes all; one naming a topic only that one).
+ * Listeners run first so one can create a directed tunnel synchronously and still receive the
+ * triggering frame. Topics are refcounted across all three views; the first registration subscribes.
  *
  * ## A subscribe the hub refuses
  *
- * The hub may say no — `RetentionExceededError` when a host asks to hold a log longer than the
- * operator allows, refused rather than clamped on purpose. A peer that is not a subscriber of a
- * topic is pushed nothing on it and cannot pull it: no commit applies, no app frame arrives. That
- * failure has to be impossible to miss, and there are three candidate surfaces:
- *
- * - **Retry with backoff** answers a dropped socket and nothing else. Retrying a settled refusal
- *   is a busy loop against an answer that will not change, so it is the answer for TRANSIENT
- *   failures only. Used, bounded, and never for a permanent one.
- * - **Raising into the caller** cannot be the whole answer: `retainTopic` is called for its effect
- *   and returns before the hub has answered, and the callers that would catch it (the commit-lane
- *   seed, the app-segment load) are the ones already written to swallow.
- * - **A host callback** is optional by nature, and an optional notice cannot be the guarantee: an
- *   unwired host would be exactly as blind as today.
- *
- * So the guarantee is a LATCH, and the callback is a convenience on top of it. A refused topic is
- * recorded as refused, and every `publish`, `bus.publish`, `mailbox.publish` and `fetchTopic` on it
- * throws the hub's own error. A peer that cannot receive on a topic does not go on transmitting
- * there as though it were whole — it fails at the first operation that touches the topic, with the
- * reason rather than the `NotSubscribedError` symptom. That is what makes it impossible for a peer
- * whose subscribe was refused to report itself healthy, whatever the host wired.
- *
- * `onSubscribeFailed` exists on top because a peer that only READS a topic calls nothing that
- * could throw. The latch cannot reach it; the notice can.
- *
- * A refused topic is not held, so the next `retain` asks again — a host that lowered its retention
- * recovers on the next rotation without restarting.
+ * The hub may refuse a subscribe (`RetentionExceededError`), leaving the peer unable to receive or
+ * pull the topic. Retry answers a transient drop only; raising into `retainTopic` can't (it returns
+ * before the hub answers, into callers that swallow); a host callback is optional and can't be the
+ * guarantee. So the guarantee is a LATCH: a refused topic is recorded, and every `publish`,
+ * `bus.publish`, `mailbox.publish` and `fetchTopic` on it throws the hub's own error rather than the
+ * `NotSubscribedError` symptom — a refused peer cannot report itself healthy. `onSubscribeFailed` is
+ * a convenience on top, for a pure reader that calls nothing that throws. A refused topic is not
+ * held, so the next `retain` re-asks.
  *
  * **The refcount tracks LOCAL LISTENERS and never unsubscribes.** A subscription is a durable
- * member-topic relationship, not a session: the hub holds a subscriber's undelivered frames,
- * and `unsubscribe` tells the store to drop them and free any mailbox frame it was the last
- * reader of. So no local lifecycle event may unsubscribe — dropping a listener, rotating an
- * epoch, disposing the mux all mean "not listening", never "I have read my mail, discard the
- * rest". Only an explicit leave-the-group would unsubscribe, and nothing here does. That
- * outliving subscription is what lets a member return and find its mail; disposing the peer is
- * what backgrounding a mobile app calls.
+ * member-topic relationship: the hub holds undelivered frames, and `unsubscribe` tells it to drop
+ * them. So no local lifecycle event (dropping a listener, rotating an epoch, disposing) unsubscribes
+ * — only an explicit leave-the-group would, and nothing here does. That outliving subscription is
+ * what lets a returning member find its mail.
  *
  * ## The init-race window
  *
- * The drain below starts running synchronously, in this constructor, while the first
- * `onInbound`/`mailbox.receive` listener is registered much later by the caller. A frame that
- * arrives in that window matches no holder, is left pending (see the empty-interested-set branch
- * below), and is pruned unacked once `sweepPending` reaches its TTL — so it returns only on the
- * next reconnect, dropped for this session rather than lost outright. Deliberate, and a strict
- * improvement over acking it: acking a frame nothing read would be the exact false success this
- * whole relay exists to prevent. Left implicit; the options for closing the window itself are
- * carried in `docs/agents/plans/backlog/2026-07-07-rpc-peer-lifecycle-hardening.md`.
+ * The drain starts synchronously in this constructor, before the caller registers the first
+ * listener. A frame arriving in that window matches no holder, is left pending, and is pruned
+ * unacked at the TTL — so it returns on the next reconnect rather than being lost. Acking it would
+ * be the exact false success this relay exists to prevent. Options for closing the window itself:
+ * `docs/agents/plans/backlog/2026-07-07-rpc-peer-lifecycle-hardening.md`.
  */
 export function createHubMux(params: HubMuxParams): HubMux {
   const { hub, localDID } = params
@@ -473,29 +422,22 @@ export function createHubMux(params: HubMuxParams): HubMux {
       current?.delete(listener)
       if (current != null && current.size === 0) listeners.delete(topicID)
       release(topicID)
-      // Deliberately NOT dropped from any `pending` holder set the listener is already in — unlike
-      // `abandonSink`. Correct, not an oversight: the ack closure handed out at delivery time
-      // (`releaseClaim(message.sequenceID, listener)`) closes over `listener` by identity and
-      // keeps working after this unregisters, so there is nothing broken to clean up. Abandoning
-      // it here, the way a sink's close does, would drop a claim a caller may still be about to
-      // release from a frame it already received.
+      // NOT dropped from any `pending` holder set (unlike `abandonSink`): the delivery-time ack
+      // closure keys on `listener` identity and keeps working after unregister, so a caller may
+      // still release a claim for a frame it already received.
     }
   }
 
   const subscription = hub.receive(localDID)
   const iterator = subscription[Symbol.asyncIterator]()
 
-  // `symbol` admits the drain's own claim (below) as a distinct holder identity — not a fake
-  // zero-arg `InboundListener` that would typecheck by TypeScript dropping trailing parameters
-  // but never be honest about what the value is.
+  // `symbol` admits the drain's own claim (below) as a distinct holder identity.
   type Holder = InboundListener | Sink | symbol
 
   /**
-   * The holders of one delivered message that have not yet released it.
-   *
-   * A SET OF IDENTITIES, never a counter — the same choice `LogEntry.pendingFor` makes in
-   * `hub-server/src/memoryStore.ts`. A holder that acks twice deletes itself twice, which is a
-   * no-op; a counter would reach zero and free a frame its other holders still hold.
+   * Holders of one delivered message that have not yet released it. A SET OF IDENTITIES, never a
+   * counter (mirrors `LogEntry.pendingFor` in `hub-server/src/memoryStore.ts`): a double-ack is a
+   * no-op, where a counter would reach zero and free a frame other holders still hold.
    */
   type PendingAck = {
     holders: Set<Holder>
@@ -505,11 +447,9 @@ export function createHubMux(params: HubMuxParams): HubMux {
   const pending = new Map<string, PendingAck>()
 
   const ackUpstream = (position: DeliveryPosition): void => {
-    // A hub's ack may be synchronous, so it may throw synchronously — before `Promise.resolve`
-    // ever sees it, which is why the rejection guard alone is not enough. An ack that fails is
-    // the hub's problem: the frame ages out. A throw escaping here reaches whatever called the
-    // holder's release, and on the serialized open-once chain that skips the NEXT frame's open
-    // while still acking it as handled.
+    // A hub's ack may be synchronous and throw synchronously, before `Promise.resolve` sees it —
+    // so the rejection guard alone is not enough. A throw escaping here reaches the holder's
+    // release; on the serialized open-once chain that would skip the next frame's open.
     try {
       void Promise.resolve(subscription.ack?.(position)).catch(() => {})
     } catch {
@@ -519,8 +459,8 @@ export function createHubMux(params: HubMuxParams): HubMux {
 
   const releaseClaim = (sequenceID: string, holder: Holder): void => {
     const entry = pending.get(sequenceID)
-    // Absent: already released by every holder, or already swept. A late ack from a holder whose
-    // claim expired is deliberately not honoured — the claim was given up on.
+    // Absent: already released by every holder, or swept. A late ack from an expired claim is not
+    // honoured — the claim was given up on.
     if (entry == null) return
     entry.holders.delete(holder)
     if (entry.holders.size > 0) return
@@ -529,14 +469,10 @@ export function createHubMux(params: HubMuxParams): HubMux {
   }
 
   /**
-   * Abandon a sink's claims — used both when a mailbox consumer closes its own subscription and
-   * when the whole mux is disposed. Never acks: the same choice `sweepPending` makes, and for the
-   * same reason (telling the hub a frame was durably handled when it was not is a false success).
-   * The hub keeps the frames and redelivers them on the next drain. Scanning `pending` here,
-   * rather than a per-sink `held` set kept current on every push, costs one pass over a map
-   * usually small — bounded by the TTL only BETWEEN deliveries; an aggressively-redelivering hub
-   * keeps refreshing entries past it (see the redelivery overwrite above) — and only on close,
-   * not on the per-message hot path.
+   * Abandon a sink's claims when a mailbox consumer closes its subscription (or the mux disposes).
+   * Never acks — a closing consumer has not handled what it still holds. Scans `pending` rather
+   * than keeping a per-sink `held` set: one pass over a usually-small map, only on close, off the
+   * per-message hot path.
    */
   const abandonSink = (sink: Sink): void => {
     sink.close()
@@ -548,20 +484,13 @@ export function createHubMux(params: HubMuxParams): HubMux {
   }
 
   /**
-   * Drop claims older than the TTL, WITHOUT acking — the mirror of `memoryStore.purge`.
+   * Drop claims older than the TTL, WITHOUT acking — the mirror of `memoryStore.purge`. Swept on
+   * each inbound message, not on a timer: the drain is the only thing that adds entries.
    *
-   * Swept on each inbound message rather than on a timer: the drain is the only thing that adds
-   * entries, so a quiet drain has nothing to sweep, and a timer would need dispose handling and a
-   * cross-platform unref for no gain. A lingering entry holds no hub resource — the hub reclaims
-   * by its own age bound regardless.
-   *
-   * BREAKS at the first entry not yet past the cutoff rather than scanning the whole map: `pending`
-   * is a `Map`, which iterates in insertion order, and the drain's `delete`-then-`set` on a
-   * redelivered position (below) re-inserts that entry at the end with a fresh `claimedAt` — so
-   * insertion order and `claimedAt` stay in the same non-decreasing order the break relies on.
-   * Without that re-insertion, an overwritten entry would keep its ORIGINAL position while
-   * carrying a NEWER timestamp, and this break could stop before reaching genuinely expired
-   * entries further along. Amortised O(1) per message rather than O(pending size).
+   * BREAKS at the first entry within the cutoff instead of scanning the whole map. Relies on
+   * `pending` (a `Map`) iterating in insertion order with `claimedAt` non-decreasing — held by the
+   * drain's `delete`-then-`set` on a redelivered position, which re-inserts it at the end with a
+   * fresh `claimedAt`. Amortised O(1) per message.
    */
   const sweepPending = (now: number): void => {
     const cutoff = now - ackTTLMs
@@ -600,47 +529,30 @@ export function createHubMux(params: HubMuxParams): HubMux {
       const now = Date.now()
       sweepPending(now)
 
-      // Listeners snapshotted BEFORE the fan-out: a listener that unsubscribes mid-delivery would
-      // otherwise be counted as pending and never receive the message it is being waited on for.
+      // Snapshotted BEFORE fan-out: a listener that unsubscribes mid-delivery must not be counted
+      // as a pending holder of a frame it is still receiving.
       const matchedListeners = [...(listeners.get(message.topicID) ?? [])]
 
-      // An ack names a place in THIS recipient's delivery queue, not in the topic's log. The two
-      // are different sequences and must never be crossed, so the position is named for what it
-      // is and never reaches a log cursor.
+      // A place in THIS recipient's delivery queue, not the topic's log — different sequences, never
+      // crossed, so this never reaches a log cursor.
       const position = asDeliveryPosition(message.sequenceID)
 
-      // The drain holds a claim of its own across the whole fan-out. Without it, a listener that
-      // acks synchronously (the commit and rendezvous lanes both do, as their first statement)
-      // could empty the entry and ack upstream before `matchedSinks` below is even computed —
-      // leaving a sink pushed to after the frame was already told to the hub as durably handled,
-      // and a second `ackUpstream` when that sink later releases its own claim.
+      // The drain holds its own claim across the whole fan-out. Without it a synchronously-acking
+      // listener (the commit and rendezvous lanes both ack first) could empty the entry and ack
+      // upstream before `matchedSinks` is even computed — pushing to a sink after the frame was
+      // reported handled, and double-acking when that sink later releases.
       const drainClaim: Holder = Symbol('drain claim')
-      // Naming the object here, rather than reading it back out of `pending`, makes "the entry is
-      // present" structural: nothing between this line and the `entry.holders.add` below can run
-      // and clear it, so there is no absent-entry case to branch on.
-      //
-      // `pending.set` OVERWRITES here when the hub redelivers a position this mux still has an
-      // outstanding claim on (a live reconnect racing a not-yet-swept claim). Traced benign:
-      // holder identities are stable across the overwrite and `matchedListeners`/`matchedSinks`
-      // are recomputed against current registrations, so the fresh entry is exactly what a
-      // from-scratch delivery of this position would produce. It matters more now than it did:
-      // the empty-holders branch below deliberately leaves a not-yet-read message pending rather
-      // than acking it, so a redelivered position with an outstanding claim is an expected shape,
-      // not a corner case.
-      //
-      // Also why a hub that redelivers aggressively never hits the TTL on this position: every
-      // redelivery refreshes `claimedAt` to `now`, so the effective bound on "how long can this
-      // sit unacked" is the HUB'S OWN retention/redelivery cadence, not the TTL below. The TTL
-      // only bounds a claim between deliveries — once redelivered, its clock restarts.
       const entry: PendingAck = {
         holders: new Set<Holder>([drainClaim, ...matchedListeners]),
         position,
         claimedAt: now,
       }
-      // Deleted before re-set so a redelivered position moves to the END of the Map's insertion
-      // order — `Map.prototype.set` on an EXISTING key updates in place without moving it, which
-      // would otherwise leave this entry's newer `claimedAt` sitting at its original (older)
-      // position and break `sweepPending`'s ordering assumption.
+      // `set` OVERWRITES when the hub redelivers a position with an outstanding claim (a reconnect
+      // racing a not-yet-swept claim): benign, since holders and matches are recomputed against
+      // current registrations. Deleted before re-set so the refreshed entry moves to the END of the
+      // Map — `set` on an existing key keeps its slot, which would leave a newer `claimedAt` at an
+      // older position and break `sweepPending`'s ordering. A redelivery also refreshes `claimedAt`,
+      // so an aggressively-redelivering hub is bounded by its own cadence, not the TTL.
       pending.delete(message.sequenceID)
       pending.set(message.sequenceID, entry)
 
@@ -652,30 +564,20 @@ export function createHubMux(params: HubMuxParams): HubMux {
         }
       }
 
-      // Sinks matched AFTER the listener loop, not before: a listener may synchronously create a
-      // mailbox sink (the directed-tunnel lazy-accept race), and it must still receive the frame
-      // that triggered it.
+      // Matched AFTER the listener loop: a listener may synchronously create a mailbox sink (the
+      // directed-tunnel lazy-accept race) that must still receive the triggering frame.
       const matchedSinks = [...sinks].filter(
         (sink) => sink.topicID == null || sink.topicID === message.topicID,
       )
       for (const sink of matchedSinks) entry.holders.add(sink)
 
-      // An empty interested set here does NOT mean "nothing will ever handle this" — it is
-      // exactly the shape of a message that arrived before its listener was registered.
-      // `createHubMux` runs synchronously in the peer constructor and starts draining
-      // immediately, while the real hub pushes a returning member's whole backlog the instant
-      // the channel opens (see `hub-server/src/handlers.ts`) — long before `initControlLanes`
-      // wires the first `onInbound`. Acking on an empty set here would report that backlog as
-      // durably handled while nothing ever read it, which is permanent data loss: `memoryStore`
-      // keys `deliveries` by recipient DID, not by subscription instance, so an unacked frame is
-      // redelivered to the next `receive` — but an acked one is gone for good.
-      //
-      // So the drain's own claim is only released here — which may ack upstream — when something
-      // was actually registered to receive this message. Left holding the drain claim alone, the
-      // entry is pruned unacked by `sweepPending` at the TTL, same as a topic truly nobody ever
-      // reads — a late registration does not retroactively join THIS entry's holder set; matching
-      // happens only at delivery, so the message returns just on the next redelivery, matched then
-      // only if a listener is registered by that point (see "The init-race window" above).
+      // An empty interested set is the shape of a frame that arrived before its listener registered
+      // (a returning member's backlog lands the instant the channel opens, ahead of
+      // `initControlLanes`). Acking here would report a frame nobody read as durably handled —
+      // permanent loss, since `memoryStore` keys `deliveries` by DID and redelivers an unacked frame
+      // but not an acked one. So the drain releases its own claim (which may ack) ONLY when something
+      // matched; otherwise the entry is pruned unacked at the TTL and the frame returns on the next
+      // redelivery (see "The init-race window" above).
       if (matchedListeners.length > 0 || matchedSinks.length > 0) {
         releaseClaim(message.sequenceID, drainClaim)
       }
@@ -684,11 +586,9 @@ export function createHubMux(params: HubMuxParams): HubMux {
         try {
           sink.push(message)
         } catch {
-          // A throwing push would escape this async IIFE and kill the drain PERMANENTLY — no
-          // `onReceiveEnded`, and a dead drain means no more sweeps and no more acks, ever, for
-          // any topic. Unreachable today (the only `push` in `sinks` is the closure built in
-          // `mailbox.receive`, which cannot throw); guarded anyway for symmetry with the listener
-          // loop above, which already treats a throwing consumer as its own problem.
+          // A throwing push would escape the IIFE and kill the drain permanently (no more sweeps or
+          // acks, no `onReceiveEnded`). Unreachable today — `mailbox.receive`'s push cannot throw —
+          // guarded for symmetry with the listener loop.
         }
       }
     }
@@ -737,15 +637,13 @@ export function createHubMux(params: HubMuxParams): HubMux {
             resolve({ value: undefined as unknown as StoredMessage, done: true })
           }
         },
-        // Unscoped, this sink is a pending holder for every message on every topic — including the
-        // ones it discards on topic mismatch, which would then wait out the TTL rather than being
-        // acked.
+        // Unscoped, this sink holds every message on every topic — including the ones it discards
+        // on topic mismatch, which would then wait out the TTL rather than being acked.
         topicID: options?.topicID,
       }
       sinks.add(sink)
-      // A closing consumer has not handled what it still holds — whether never pulled out of
-      // `queue` or pulled and never acked — so its claims are abandoned, not acked. See
-      // `abandonSink`.
+      // A closing consumer has not handled what it still holds, so its claims are abandoned, not
+      // acked. See `abandonSink`.
       const remove = () => abandonSink(sink)
       const iter: AsyncIterator<StoredMessage> = {
         next: () => {
@@ -767,12 +665,9 @@ export function createHubMux(params: HubMuxParams): HubMux {
       return {
         [Symbol.asyncIterator]: () => iter,
         return: remove,
-        // Advertised UNCONDITIONALLY, even when the upstream `subscription.ack` this mux itself
-        // reads from is absent (`ackUpstream`'s `?.` then makes the upstream call a no-op). Not
-        // "absence propagates as absence" here, deliberately: releasing this sink's claim does
-        // real local work regardless of the upstream hub — freeing the holder set entry, and
-        // letting other holders' acks free the frame — so withholding it would only make a
-        // mailbox consumer redundantly hold a claim nothing upstream will ever ask it to release.
+        // Advertised UNCONDITIONALLY, even when upstream `subscription.ack` is absent (`ackUpstream`
+        // then no-ops): releasing this sink's claim does real local work regardless — freeing the
+        // holder-set entry so other holders' acks can free the frame.
         ack: (sequenceID) => releaseClaim(sequenceID, sink),
       }
     },
@@ -827,14 +722,9 @@ export function createHubMux(params: HubMuxParams): HubMux {
       // Before anything else: a retry sleeping out its backoff is work already abandoned, and
       // every path it could wake into checks `disposed` and returns.
       for (const wake of [...sleeping]) wake()
-      // Cleared before closing sinks, not after: every claim dies here regardless of holder —
-      // sink, listener, or the drain's own — so `abandonSink`'s per-sink scan of `pending` would
-      // just be finding entries this clear is about to erase anyway. Clearing without acking is
-      // the same abandon, not the false-success ack sweepPending and abandonSink both refuse to
-      // give.
+      // Cleared without acking (the same abandon as `abandonSink`/`sweepPending`), before closing
+      // sinks so their per-sink scans have nothing left to find.
       pending.clear()
-      // A dispose is a closing consumer too, same as a sink's own close, so each sink is closed
-      // the same way — but without `abandonSink`'s now-redundant scan of the map just cleared.
       for (const sink of [...sinks]) {
         sink.close()
         sinks.delete(sink)

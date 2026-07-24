@@ -475,14 +475,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   const openedFrames = new WeakMap<Uint8Array, GroupUnwrapResult>()
 
   /**
-   * Whether a frame `unwrap` just refused might still open once this handle catches up, read from
-   * its own cleartext epoch — never from the throw itself, which can't tell "not reached yet"
-   * apart from "never again". Consulted only on the open-once failure path (see
-   * {@link "open-once".OpenOncePathParams.retainOnFailure}): answering `true` withholds the ack,
-   * so the frame survives for a reconnect once the handle is there. Same shape `app-lane.ts`'s
-   * live push uses to stage a frame ahead of the walk (`note`/`ahead` there) — mailbox-class
-   * frames have no such staging of their own, which is exactly what made acking them here on a
-   * transient refusal a permanent loss.
+   * Whether a frame `unwrap` just refused might still open once this handle catches up — read from
+   * its cleartext epoch, never the throw (which can't tell "not reached yet" from "never again").
+   * On the open-once failure path ({@link "open-once".OpenOncePathParams.retainOnFailure}) answering
+   * `true` withholds the ack so the frame survives a reconnect. Mailbox-class frames have no staging
+   * of their own (unlike `app-lane.ts`'s `note`/`ahead`), which is what made acking a transient
+   * refusal here a permanent loss.
    */
   const retainOnFailure = (message: StoredMessage): boolean => {
     const at = crypto.frameEpoch(message.payload)

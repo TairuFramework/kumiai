@@ -65,10 +65,8 @@ function wrapHub({ hub, encryptor, groupID, onEvent, onEncryptError }: WrapHubPa
       const inner = hub.receive(subscriberDID, options)
       const innerIterator = inner[Symbol.asyncIterator]()
 
-      // A hub's ack may be synchronous, so it may throw synchronously — before `Promise.resolve`
-      // ever sees it, which is why the rejection guard alone is not enough (same hole, same fix,
-      // as `ackUpstream` in `rpc/src/hub-mux.ts`). Escaping here would kill this drain over a
-      // frame it is about to drop anyway.
+      // A hub's ack may be synchronous and throw synchronously, before `Promise.resolve` sees it —
+      // so the rejection guard alone is not enough (same fix as `ackUpstream` in `rpc/src/hub-mux.ts`).
       const ackHandled = (sequenceID: string): void => {
         try {
           void Promise.resolve(inner.ack?.(sequenceID)).catch(() => {})
@@ -92,28 +90,21 @@ function wrapHub({ hub, encryptor, groupID, onEvent, onEncryptError }: WrapHubPa
               if (error instanceof EnvelopeDecodeError) {
                 onEvent?.({ type: 'envelope-decode-failed', error })
                 onEvent?.({ type: 'frame-dropped', reason: 'envelope-decode' })
-                // Consumed off the inner subscription and never handed further: the read pump's
-                // single ack site can never see this sequenceID, so it must be acked here or it
-                // is undecodable forever and never durably handled.
+                // Dropped here, never reaching the read pump's ack site — so acked here, or it is
+                // undecodable and redelivered forever.
                 ackHandled(message.sequenceID)
                 continue
               }
               throw error
             }
-            // WHY: the envelope states its group in the clear and we stamp ours on publish, so a
-            // frame addressed to another group is dropped before we ever hand it to the cipher.
-            // Honestly: against a working AEAD this catches little — a foreign group's frame is
-            // encrypted under a key we do not hold and would fail to decrypt anyway. What it does
-            // catch is the same-key case the cipher cannot see: a misroute or a configuration
-            // error that puts two groups on one key or one topic, where the bytes authenticate
-            // perfectly and are still not ours. It is one string compare, before any crypto, so
-            // the cost of keeping it is nil and the cost of trusting the cipher alone for a
-            // property the envelope states outright is a silent cross-group delivery.
+            // The envelope states its group in the clear and we stamp ours on publish. Against a
+            // working AEAD a foreign group's frame would fail to decrypt anyway; what this one string
+            // compare catches, before any crypto, is the same-key misroute the cipher cannot see —
+            // two groups on one key or topic, bytes authenticating perfectly and still not ours.
             if (envelope.groupID !== groupID) {
               onEvent?.({ type: 'frame-dropped', reason: 'group-mismatch' })
-              // Permanently unhandleable — this reader will never hold the right key — so leaving
-              // it unacked would mean the hub redelivers it on every reconnect until the age
-              // bound, with the mailbox entry never reclaimed.
+              // Permanently unhandleable — this reader never holds the right key — so acked, else
+              // redelivered every reconnect until the age bound.
               ackHandled(message.sequenceID)
               continue
             }
@@ -124,12 +115,10 @@ function wrapHub({ hub, encryptor, groupID, onEvent, onEncryptError }: WrapHubPa
               const err = new DecryptError('decrypt failed', { cause })
               onEvent?.({ type: 'decrypt-failed', error: err })
               onEvent?.({ type: 'frame-dropped', reason: 'decrypt' })
-              // Same reasoning as the other two drop paths: dropped here, never reaching the
-              // pump's ack site. Unlike those two, this is not permanent by construction — it's
-              // a property of the key this reader currently holds, not of the bytes. Safe only
-              // because `Encryptor` has no rotation and is fixed for the transport's life; an
-              // epoch-keyed encryptor would make acking here discard a frame a later key could
-              // open, so that change must revisit this.
+              // Acked like the other drop paths. Unlike them this is not permanent by construction —
+              // it's a property of the key this reader holds. Safe only because `Encryptor` is fixed
+              // for the transport's life; an epoch-keyed encryptor must revisit this (acking here
+              // would discard a frame a later key could open).
               ackHandled(message.sequenceID)
               continue
             }
@@ -159,10 +148,9 @@ function wrapHub({ hub, encryptor, groupID, onEvent, onEncryptError }: WrapHubPa
         return() {
           inner.return?.()
         },
-        // Carried through for the same reason `logPosition` is above: this wrapper re-writes the
-        // payload and nothing else. Dropping it severs the durable-ack contract for every lane
-        // behind an encrypting hub. The same guarded helper the drop paths above use: a
-        // synchronous throw from `inner.ack` must not escape here either.
+        // Forwarded through — this wrapper re-writes the payload and nothing else. Dropping it
+        // would sever the durable-ack contract for every lane behind an encrypting hub. Uses the
+        // guarded helper so a synchronous `inner.ack` throw does not escape.
         ...(inner.ack != null ? { ack: ackHandled } : {}),
       }
     },

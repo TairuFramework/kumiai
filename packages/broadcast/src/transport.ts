@@ -136,11 +136,9 @@ export function createBroadcastTransport<R = BroadcastMessage, W = BroadcastMess
     start(controller) {
       readableController = controller
       unsubscribe = bus.subscribe(topicID, (payload, ack) => {
-        // Mirrors `hub-tunnel/src/transport.ts`'s read pump: every outcome below is a HANDLED
-        // one — enqueued, or dropped as another group's/epoch's — except `enqueue` itself
-        // throwing, which means the readable had already closed (transport disposal, or the
-        // writable's own `close()`) racing this open. That frame never reached a consumer, so
-        // it must not be told upstream as durably handled.
+        // Mirrors `hub-tunnel/src/transport.ts`'s read pump: every outcome is HANDLED (enqueued, or
+        // dropped as another group's/epoch's) except `enqueue` throwing — the readable had already
+        // closed, so that frame never reached a consumer and must not ack.
         let handled = true
         Promise.resolve(unwrap(payload))
           .then((result) => {
@@ -167,10 +165,9 @@ export function createBroadcastTransport<R = BroadcastMessage, W = BroadcastMess
             // above (already flagged unhandled there).
           })
           .finally(() => {
-            // Acked unless `handled` was flipped false: a frame from another group or epoch is
-            // dropped ON PURPOSE and still acks — leaving it unacked would redeliver the same
-            // undecryptable bytes on every reconnect. A frame that never reached a consumer
-            // because the readable had already closed must NOT ack — the hub redelivers it.
+            // Acked unless `handled` was flipped false: a frame dropped on purpose (another
+            // group/epoch) still acks, else the same undecryptable bytes redeliver every reconnect.
+            // A frame lost to an already-closed readable must NOT ack — the hub redelivers it.
             if (handled) ack?.()
           })
       })

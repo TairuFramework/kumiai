@@ -23,10 +23,8 @@ export type HubReceiveSubscription = AsyncIterable<StoredMessage> & {
 }
 
 /**
- * Scope for a receive stream. A hub that knows which topic a subscription reads can tell which
- * consumers will actually handle a frame, which is what a refcounted ack needs — an unscoped
- * stream is a candidate holder for every message on every topic.
- *
+ * Scope for a receive stream. Naming the topic lets a refcounted-ack hub know which consumers will
+ * handle a frame — an unscoped stream is a candidate holder for every message on every topic.
  * Optional, and a hub is free to ignore it: the consumer still filters what it is handed.
  */
 export type HubReceiveOptions = {
@@ -312,10 +310,9 @@ export function createHubTunnelTransport<R, W>(
     lastActivity = Date.now()
   }
 
-  // A hub's ack may be synchronous, so it may throw synchronously — before
-  // `Promise.resolve` ever sees it, which is why the rejection guard alone is not
-  // enough (same hole, same fix, as `ackUpstream` in rpc/src/hub-mux.ts). Escaping
-  // here would surface inside the pump's IIFE as an unhandled rejection and kill it.
+  // A hub's ack may be synchronous and throw synchronously, before `Promise.resolve` sees it — so
+  // the rejection guard alone is not enough (same fix as `ackUpstream` in rpc/src/hub-mux.ts). An
+  // escape here would kill the pump's IIFE.
   const ackHandled = (sequenceID: string): void => {
     try {
       void Promise.resolve(subscription.ack?.(sequenceID)).catch(() => {})
@@ -354,14 +351,11 @@ export function createHubTunnelTransport<R, W>(
               return
             }
             const message = result.value
-            // `handled` starts true: every outcome below IS a handled outcome — enqueued,
-            // filtered, deduped, undecodable or session-end alike — except the two branches that
-            // tear the transport down instead of resolving the frame (backpressure overflow, a
-            // decode error that isn't a FrameDecodeError). Those flip it false before returning:
-            // the session is over and the frame never reached the consumer, so acking it would
-            // tell the hub a lost frame was durably handled. The ack itself stays in the `finally`
-            // below — one place, not one per `continue` — so a new dropped-frame path can't be
-            // added here without also acking it.
+            // Every outcome below is HANDLED (enqueued, filtered, deduped, undecodable, session-end)
+            // except the two teardown branches — backpressure overflow and a non-FrameDecodeError
+            // decode — which flip this false: the frame never reached the consumer, so acking would
+            // report a lost frame as handled. The ack lives in the `finally` (one place, not one per
+            // `continue`) so a new drop path can't skip it.
             let handled = true
             try {
               if (message.topicID !== receiveTopicID) {
@@ -391,9 +385,8 @@ export function createHubTunnelTransport<R, W>(
                 } catch {
                   // already closed
                 }
-                // Before `iterator.return?.()`: a subscription whose close abandons its
-                // outstanding claims — hub-mux's mailbox facade does — can no longer honour
-                // an ack afterwards.
+                // Before `iterator.return?.()`: a subscription whose close abandons outstanding
+                // claims (hub-mux's mailbox facade does) can no longer honour an ack afterwards.
                 ackHandled(message.sequenceID)
                 handled = false
                 iterator.return?.()
