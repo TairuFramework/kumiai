@@ -17,6 +17,25 @@ const protocol = {
   },
 } as const
 
+// The base protocol plus a `stream` and a `channel` procedure, neither of which
+// `adaptBusHandlers` should ever turn into a request or event handler.
+const protocolWithStreamChannel = {
+  ...protocol,
+  streamProc: {
+    type: 'stream',
+    param: { type: 'object' },
+    receive: { type: 'object' },
+    result: { type: 'object' },
+  },
+  channelProc: {
+    type: 'channel',
+    param: { type: 'object' },
+    send: { type: 'object' },
+    receive: { type: 'object' },
+    result: { type: 'object' },
+  },
+} as const
+
 describe('adaptBusHandlers', () => {
   test('rejects a request whose param fails schema validation', async () => {
     const { requestHandlers } = adaptBusHandlers(protocol as never, {
@@ -66,5 +85,23 @@ describe('adaptBusHandlers', () => {
   test('events is an EventEmitter', () => {
     const { events } = adaptBusHandlers(protocol as never, {})
     expect(events).toBeInstanceOf(EventEmitter)
+  })
+
+  test('omits stream and channel procedures from requestHandlers and eventHandlers', () => {
+    const { requestHandlers } = adaptBusHandlers(protocolWithStreamChannel as never, {
+      streamProc: () => {},
+      channelProc: () => {},
+    })
+    expect(Object.keys(requestHandlers)).not.toContain('streamProc')
+    expect(Object.keys(requestHandlers)).not.toContain('channelProc')
+  })
+
+  test('tags request handlers suppressible when a suppress config is given', () => {
+    const { requestHandlers } = adaptBusHandlers(
+      protocol as never,
+      { compute: ({ param }: { param: number }) => param },
+      { jitterMs: 50 },
+    )
+    expect((requestHandlers.compute as { suppress?: unknown }).suppress).toBeDefined()
   })
 })

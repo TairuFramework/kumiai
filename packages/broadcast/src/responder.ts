@@ -95,6 +95,11 @@ export function createBroadcastResponder(params: BroadcastResponderParams): {
       }
     }
 
+    // Disposed during the jitter sleep: the controller we'd create now would never be aborted.
+    if (!running) {
+      return
+    }
+
     const controller = new AbortController()
     inFlight.add(controller)
     let reply: ReplyData

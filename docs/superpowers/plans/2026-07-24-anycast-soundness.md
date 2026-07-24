@@ -17,7 +17,7 @@
 - pnpm only. Run repo scripts as `rtk proxy pnpm run <script>` (a shim otherwise redirects `pnpm run` to the wrong tool); or invoke tools directly, e.g. `pnpm exec biome check ...`.
 - Do not edit generated files (`lib/`).
 - Cross-repo deps (`@sozai/*`, `@enkaku/*`) go through the pnpm catalog as published `^` ranges (`catalog:` in `package.json`), never `workspace:`. Internal `@kumiai/*` deps are `workspace:^`.
-- Catalog versions to use: `@sozai/event: ^0.1.1`, `@sozai/schema: ^0.1.1`, `@sozai/log: ^0.2.0` (already present in `pnpm-workspace.yaml`).
+- Catalog versions to use: `@sozai/event: ^0.1.2`, `@sozai/schema: ^0.1.1`, `@sozai/log: ^0.2.0` (already present in `pnpm-workspace.yaml`).
 - Changing a port means running **both** contract suites (`rpc-conformance`, `hub-conformance`) against the real implementation **and** the doubles.
 - A test double may be **stricter** than its port, never more permissive.
 - Verify tests actually ran: `pnpm test` reports cached turbo results — force a real run and confirm `Cached: 0` in the summary. `pnpm test -- --force` is broken; use turbo's force path (`rtk proxy pnpm run test -- --force` is unreliable — prefer removing the turbo cache entry or running the package's vitest directly, e.g. `pnpm --filter @kumiai/broadcast exec vitest run`).
@@ -224,7 +224,7 @@ In `packages/broadcast/package.json`, add to `dependencies` (keep alphabetical):
 ```
 
 Run: `pnpm install`
-Expected: lockfile updates, `@sozai/event` resolves to `^0.1.1`.
+Expected: lockfile updates, `@sozai/event` resolves to `^0.1.2`.
 
 - [ ] **Step 2: Write the failing tests — event dispatch and dispose-aborted signal**
 
@@ -508,7 +508,7 @@ In `packages/rpc/package.json` `dependencies` (keep alphabetical among `@sozai/*
 ```
 
 Run: `pnpm install`
-Expected: `@sozai/event ^0.1.1` and `@sozai/schema ^0.1.1` resolve.
+Expected: `@sozai/event ^0.1.2` and `@sozai/schema ^0.1.1` resolve.
 
 - [ ] **Step 2: Write the failing tests — validation and signal forwarding**
 

@@ -447,6 +447,18 @@ export function createAppLane(params: AppLaneParams): AppLane {
         }
         const prc = message.payload?.prc
         if (message.payload?.typ !== 'event' || typeof prc !== 'string') continue
+        // Same door as the live push: a payload shaped like a control frame (kind 'req'/'res') is
+        // not an app event — the responder drops it, so the drain must too, or a frame is dropped
+        // live but delivered on replay.
+        const drainData = message.payload?.data
+        if (
+          drainData != null &&
+          typeof drainData === 'object' &&
+          ((drainData as { kind?: unknown }).kind === 'req' ||
+            (drainData as { kind?: unknown }).kind === 'res')
+        ) {
+          continue
+        }
         // A retained frame naming an EPHEMERAL procedure was published `retain: 'log'` by a member
         // whose dispatch would never do that. Retention is the protocol's word, not the frame's.
         if (retentionOf(protocols[name], prc) !== 'log') continue
