@@ -7,6 +7,7 @@ export const HUB_ERROR_CODES = {
   headMismatch: 'HUB_HEAD_MISMATCH',
   notSubscribed: 'HUB_NOT_SUBSCRIBED',
   retentionExceeded: 'HUB_RETENTION_EXCEEDED',
+  invalidPayload: 'HUB_INVALID_PAYLOAD',
 } as const
 
 export type HubErrorCode = (typeof HUB_ERROR_CODES)[keyof typeof HUB_ERROR_CODES]
@@ -29,11 +30,17 @@ export class RetentionExceededError extends Error {
   override name = 'RetentionExceededError'
 }
 
+/** A published payload was not decodable (e.g. malformed base64). The request is refused. */
+export class InvalidPayloadError extends Error {
+  override name = 'InvalidPayloadError'
+}
+
 /** The wire code a hub error crosses as, or null if it is not one of the named hub errors. */
 export function hubErrorCodeOf(error: unknown): HubErrorCode | null {
   if (error instanceof HeadMismatchError) return HUB_ERROR_CODES.headMismatch
   if (error instanceof NotSubscribedError) return HUB_ERROR_CODES.notSubscribed
   if (error instanceof RetentionExceededError) return HUB_ERROR_CODES.retentionExceeded
+  if (error instanceof InvalidPayloadError) return HUB_ERROR_CODES.invalidPayload
   return null
 }
 
@@ -50,6 +57,8 @@ export function hubErrorFromCode(code: string, message: string): Error | null {
       return new NotSubscribedError(message)
     case HUB_ERROR_CODES.retentionExceeded:
       return new RetentionExceededError(message)
+    case HUB_ERROR_CODES.invalidPayload:
+      return new InvalidPayloadError(message)
     default:
       return null
   }

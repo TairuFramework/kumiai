@@ -10,6 +10,7 @@ export {
   type HubErrorCode,
   hubErrorCodeOf,
   hubErrorFromCode,
+  InvalidPayloadError,
   NotSubscribedError,
   RetentionExceededError,
 } from './errors.js'
