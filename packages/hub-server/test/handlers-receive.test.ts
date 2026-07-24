@@ -77,3 +77,35 @@ describe('hub/v1/receive ack loop', () => {
     expect(applied).toEqual([['000000000002']])
   })
 })
+
+describe('hub/v1/receive pre-aborted signal', () => {
+  test('an already-aborted signal runs cleanup and resolves without leaking the writer', async () => {
+    const store = createMemoryStore()
+    const registry = new HubClientRegistry()
+    const handlers = createHandlers({ registry, store })
+
+    const controller = new AbortController()
+    controller.abort() // aborted BEFORE the handler runs
+
+    const written: Array<unknown> = []
+    const done = handlers['hub/v1/receive'](
+      receiveCtx({
+        acks: ackStream([]),
+        signal: controller.signal,
+        writable: collectingWritable(written),
+      }),
+    )
+
+    // Resolves promptly (cleanup ran); does not hang forever.
+    await Promise.race([
+      done,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('handler leaked: never resolved')), 100),
+      ),
+    ])
+
+    // The registry entry is gone — no bound writer left behind.
+    expect(registry.isWriterBound(DID)).toBe(false)
+    expect(registry.getClient(DID)).toBeUndefined()
+  })
+})

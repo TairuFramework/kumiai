@@ -395,6 +395,12 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
           writer.close().catch(() => {})
           resolve(undefined as never)
         }
+        // An already-aborted signal never fires 'abort'; run cleanup now or the writer, reader, and
+        // registry entry leak forever.
+        if (ctx.signal.aborted) {
+          finish()
+          return
+        }
         // Evicted by a newer channel: end this one; `finish` releases only its own token, which is
         // no longer current.
         void evictedHere.then(finish)
