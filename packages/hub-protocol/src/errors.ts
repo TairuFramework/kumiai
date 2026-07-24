@@ -8,6 +8,10 @@ export const HUB_ERROR_CODES = {
   notSubscribed: 'HUB_NOT_SUBSCRIBED',
   retentionExceeded: 'HUB_RETENTION_EXCEEDED',
   invalidPayload: 'HUB_INVALID_PAYLOAD',
+  authorizationDenied: 'HUB_AUTHORIZATION_DENIED',
+  keyPackageQuota: 'HUB_KEYPACKAGE_QUOTA',
+  subscriptionQuota: 'HUB_SUBSCRIPTION_QUOTA',
+  keyPackageFetchLimit: 'HUB_KEYPACKAGE_FETCH_LIMIT',
 } as const
 
 export type HubErrorCode = (typeof HUB_ERROR_CODES)[keyof typeof HUB_ERROR_CODES]
@@ -35,12 +39,39 @@ export class InvalidPayloadError extends Error {
   override name = 'InvalidPayloadError'
 }
 
+/** An authorize hook refused the request. A settled answer, not a transient failure: the caller
+ * must not retry it as though the hub were unreachable. */
+export class AuthorizationDeniedError extends Error {
+  override name = 'AuthorizationDeniedError'
+}
+
+/** An upload would push a DID's stored key packages past the hub's per-DID cap. Rejected, not
+ * evicted: dropping an existing package would discard one the owner expects to be consumed. */
+export class KeyPackageQuotaExceededError extends Error {
+  override name = 'KeyPackageQuotaExceededError'
+}
+
+/** A subscribe would push a DID past the hub's per-DID subscription cap. */
+export class SubscriptionQuotaExceededError extends Error {
+  override name = 'SubscriptionQuotaExceededError'
+}
+
+/** A key-package fetch was throttled — the per-requester window or the per-target consumption
+ * quota is exhausted. */
+export class KeyPackageFetchLimitError extends Error {
+  override name = 'KeyPackageFetchLimitError'
+}
+
 /** The wire code a hub error crosses as, or null if it is not one of the named hub errors. */
 export function hubErrorCodeOf(error: unknown): HubErrorCode | null {
   if (error instanceof HeadMismatchError) return HUB_ERROR_CODES.headMismatch
   if (error instanceof NotSubscribedError) return HUB_ERROR_CODES.notSubscribed
   if (error instanceof RetentionExceededError) return HUB_ERROR_CODES.retentionExceeded
   if (error instanceof InvalidPayloadError) return HUB_ERROR_CODES.invalidPayload
+  if (error instanceof AuthorizationDeniedError) return HUB_ERROR_CODES.authorizationDenied
+  if (error instanceof KeyPackageQuotaExceededError) return HUB_ERROR_CODES.keyPackageQuota
+  if (error instanceof SubscriptionQuotaExceededError) return HUB_ERROR_CODES.subscriptionQuota
+  if (error instanceof KeyPackageFetchLimitError) return HUB_ERROR_CODES.keyPackageFetchLimit
   return null
 }
 
@@ -59,6 +90,14 @@ export function hubErrorFromCode(code: string, message: string): Error | null {
       return new RetentionExceededError(message)
     case HUB_ERROR_CODES.invalidPayload:
       return new InvalidPayloadError(message)
+    case HUB_ERROR_CODES.authorizationDenied:
+      return new AuthorizationDeniedError(message)
+    case HUB_ERROR_CODES.keyPackageQuota:
+      return new KeyPackageQuotaExceededError(message)
+    case HUB_ERROR_CODES.subscriptionQuota:
+      return new SubscriptionQuotaExceededError(message)
+    case HUB_ERROR_CODES.keyPackageFetchLimit:
+      return new KeyPackageFetchLimitError(message)
     default:
       return null
   }

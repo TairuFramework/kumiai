@@ -1,5 +1,9 @@
 import type { BroadcastBus } from '@kumiai/broadcast'
-import { RetentionExceededError, type StoredMessage } from '@kumiai/hub-protocol'
+import {
+  AuthorizationDeniedError,
+  RetentionExceededError,
+  type StoredMessage,
+} from '@kumiai/hub-protocol'
 import type {
   HubFetchTopicResult,
   HubReceiveSubscription,
@@ -248,9 +252,15 @@ function isPermanentSubscribeFailure(error: unknown): boolean {
   // Name as well as instance: a hub reached over the tunnel rebuilds the error from its wire code
   // (`hubErrorFromCode`), and a host bundling two copies of hub-protocol would break `instanceof`
   // alone — turning a permanent refusal back into a retry loop, silently.
+  //
+  // `SubscriptionQuotaExceededError` is deliberately NOT here: a quota is clearable (it frees when
+  // another peer unsubscribes), so latching it permanent would strand a topic once capacity frees.
+  // Transient costs one bounded retry per hit; do not add it.
   return (
     error instanceof RetentionExceededError ||
-    (error instanceof Error && error.name === 'RetentionExceededError')
+    error instanceof AuthorizationDeniedError ||
+    (error instanceof Error &&
+      (error.name === 'RetentionExceededError' || error.name === 'AuthorizationDeniedError'))
   )
 }
 

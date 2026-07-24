@@ -32,7 +32,13 @@
  * @module hub-conformance
  */
 import type { HubStore } from '@kumiai/hub-protocol'
-import { HeadMismatchError, NotSubscribedError, RetentionExceededError } from '@kumiai/hub-protocol'
+import {
+  HeadMismatchError,
+  KeyPackageQuotaExceededError,
+  NotSubscribedError,
+  RetentionExceededError,
+  SubscriptionQuotaExceededError,
+} from '@kumiai/hub-protocol'
 import { describe, expect, test } from 'vitest'
 
 export type HubStoreConformanceParams = {
@@ -50,6 +56,18 @@ export type HubStoreConformanceParams = {
    * modest value (at least 11, to leave the ordering clause's frames intact) to keep the run quick.
    */
   maxDepth?: number
+  /**
+   * The per-DID key-package storage cap `createStore` is configured with. Omit to skip the
+   * key-package quota clause. When present, the store must reject an upload past this many stored
+   * packages for one owner with `KeyPackageQuotaExceededError`.
+   */
+  maxKeyPackagesPerDID?: number
+  /**
+   * The per-DID subscription cap `createStore` is configured with. Omit to skip the subscription
+   * quota clause. When present, the store must reject a subscribe past this many distinct topics
+   * for one DID with `SubscriptionQuotaExceededError`.
+   */
+  maxSubscriptionsPerDID?: number
 }
 
 const ALICE = 'did:key:alice'
@@ -62,7 +80,8 @@ function payload(byte: number): Uint8Array {
 }
 
 export function testHubStoreConformance(params: HubStoreConformanceParams): void {
-  const { createStore, maxRetention, maxDepth } = params
+  const { createStore, maxRetention, maxDepth, maxKeyPackagesPerDID, maxSubscriptionsPerDID } =
+    params
 
   describe('HubStore conformance', () => {
     test('the retention class governs deletion: an acked mailbox frame is gone, an acked log frame is not', async () => {
@@ -879,6 +898,42 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
       // Fewer than asked for, rather than a throw or a padded list.
       expect(await store.fetchKeyPackages(ALICE, 5)).toEqual(['kp-only'])
     })
+
+    if (maxKeyPackagesPerDID != null) {
+      test('an upload past the per-DID key-package cap is rejected, not evicted', async () => {
+        const store = await createStore()
+        for (let i = 0; i < maxKeyPackagesPerDID; i++) {
+          await store.storeKeyPackage(ALICE, `kp-${i}`)
+        }
+        await expect(store.storeKeyPackage(ALICE, 'kp-overflow')).rejects.toThrow(
+          KeyPackageQuotaExceededError,
+        )
+        // Reject, not evict: the earliest package is still there to be consumed.
+        expect(await store.fetchKeyPackages(ALICE, 1)).toEqual(['kp-0'])
+        // The cap is per DID: a different owner is unaffected.
+        await expect(store.storeKeyPackage(BOB, 'kp-bob')).resolves.toBeUndefined()
+      })
+    }
+
+    if (maxSubscriptionsPerDID != null) {
+      test('a subscribe past the per-DID subscription cap is rejected', async () => {
+        const store = await createStore()
+        for (let i = 0; i < maxSubscriptionsPerDID; i++) {
+          await store.subscribe({ subscriberDID: ALICE, topicID: `topic:${i}` })
+        }
+        await expect(
+          store.subscribe({ subscriberDID: ALICE, topicID: 'topic:overflow' }),
+        ).rejects.toThrow(SubscriptionQuotaExceededError)
+        // Re-subscribing to a topic ALICE already holds does not count against the cap.
+        await expect(
+          store.subscribe({ subscriberDID: ALICE, topicID: 'topic:0' }),
+        ).resolves.toBeUndefined()
+        // The cap is per DID.
+        await expect(
+          store.subscribe({ subscriberDID: BOB, topicID: 'topic:overflow' }),
+        ).resolves.toBeUndefined()
+      })
+    }
   })
 }
 

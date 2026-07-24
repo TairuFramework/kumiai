@@ -5,14 +5,18 @@
  */
 
 export {
+  AuthorizationDeniedError,
   HeadMismatchError,
   HUB_ERROR_CODES,
   type HubErrorCode,
   hubErrorCodeOf,
   hubErrorFromCode,
   InvalidPayloadError,
+  KeyPackageFetchLimitError,
+  KeyPackageQuotaExceededError,
   NotSubscribedError,
   RetentionExceededError,
+  SubscriptionQuotaExceededError,
 } from './errors.js'
 export type { HubProtocol } from './protocol.js'
 export { hubProtocol } from './protocol.js'
