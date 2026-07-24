@@ -422,16 +422,20 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
           if (!result.hasMore) break
         }
 
-        // Flush frames that arrived live during the drain, deduped against what the drain served,
-        // then go live. The flip is synchronous (no await between the flush enqueue and the
-        // assignment) so a concurrently-firing onLive cannot write ahead of the flush.
-        if (!tornDown) {
-          for (const frame of liveBuffer) {
+        // Flush frames that arrived live during the drain, deduped against what the drain already served,
+        // then go live. The flip happens only when the buffer is observed empty in the SAME synchronous
+        // step (no await between the empty check and the assignment), so a frame that arrived via onLive
+        // during a prior write is caught on the next iteration rather than stranded.
+        while (!tornDown) {
+          if (liveBuffer.length === 0) {
+            phase = 'live'
+            break
+          }
+          const batch = liveBuffer.splice(0)
+          for (const frame of batch) {
             if (frame.sequenceID > lastServed) pushWrite(frame)
           }
-          liveBuffer.length = 0
           await writeChain
-          phase = 'live'
         }
       } catch (error) {
         // A synchronous drain error (e.g. store.fetch threw): clean up and reject the handler.

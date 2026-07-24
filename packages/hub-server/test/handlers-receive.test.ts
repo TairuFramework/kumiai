@@ -209,6 +209,62 @@ describe('hub/v1/receive delivery ordering (H1)', () => {
 
     expect(written.map((m) => m.sequenceID)).toEqual(['000000000001', '000000000002'])
   })
+
+  test('a live frame pushed during the flush write window is delivered, in order (not stranded)', async () => {
+    let openDrain: () => void = () => {}
+    const drainGate = new Promise<void>((resolve) => {
+      openDrain = resolve
+    })
+    const { store } = drainGateStore([[frame('000000000001')]], drainGate)
+    const registry = new HubClientRegistry()
+    const handlers = createHandlers({ registry, store })
+
+    // A writable that gates the write of seq2 (the flushed frame) so seq3 can race into the flush
+    // window while phase is still 'draining'.
+    let openFlushWrite: () => void = () => {}
+    const flushWriteGate = new Promise<void>((resolve) => {
+      openFlushWrite = resolve
+    })
+    let sawSeq3Pushed = false
+    const written: Array<{ sequenceID: string }> = []
+    const writable = new WritableStream<{ sequenceID: string }>({
+      async write(chunk) {
+        written.push(chunk)
+        if (chunk.sequenceID === '000000000002') {
+          registry.getClient(DID)?.sendMessage?.(frame('000000000003'))
+          sawSeq3Pushed = true
+          await flushWriteGate
+        }
+      },
+    })
+
+    const controller = new AbortController()
+    const done = handlers['hub/v1/receive'](
+      receiveCtx({
+        acks: ackStream([]),
+        signal: controller.signal,
+        writable: writable as WritableStream,
+      }),
+    )
+
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    registry.getClient(DID)?.sendMessage?.(frame('000000000002')) // buffered during draining
+    openDrain()
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(sawSeq3Pushed).toBe(true) // seq3 raced into the flush write window
+    openFlushWrite()
+
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    controller.abort()
+    await done
+
+    // seq3 arrived during the flush write of seq2; it must still be delivered, in order — not stranded.
+    expect(written.map((m) => m.sequenceID)).toEqual([
+      '000000000001',
+      '000000000002',
+      '000000000003',
+    ])
+  })
 })
 
 describe('hub/v1/receive backpressure (H3)', () => {
