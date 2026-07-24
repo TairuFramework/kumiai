@@ -5,7 +5,12 @@ import {
   type RequestHandler,
 } from '@enkaku/server'
 import type { HubProtocol, HubStore, StoredMessage } from '@kumiai/hub-protocol'
-import { hubErrorCodeOf, InvalidPayloadError } from '@kumiai/hub-protocol'
+import {
+  HUB_ERROR_CODES,
+  hubErrorCodeOf,
+  InvalidPayloadError,
+  KeyPackageFetchLimitError,
+} from '@kumiai/hub-protocol'
 import { fromB64, toB64 } from '@sozai/codec'
 
 import { createRateLimiter, type RateLimitConfig } from './rateLimit.js'
@@ -74,6 +79,9 @@ export type KeyPackageFetchLimits = {
   maxCount: number
   /** Maximum number of fetch requests per requester DID per window. Default: 30 */
   maxRequests: number
+  /** Maximum number of key packages that may be consumed from ONE target DID per window,
+   * summed across all requesters. Bounds collective drain. Default: 60 */
+  maxPerTargetConsumed: number
   /** Rate-limit window duration in milliseconds. Default: 60000 (1 min) */
   windowMs: number
 }
@@ -81,6 +89,7 @@ export type KeyPackageFetchLimits = {
 export const DEFAULT_KEYPACKAGE_FETCH_LIMITS: KeyPackageFetchLimits = {
   maxCount: 10,
   maxRequests: 30,
+  maxPerTargetConsumed: 60,
   windowMs: 60_000,
 }
 
@@ -163,6 +172,8 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
     ...DEFAULT_KEYPACKAGE_FETCH_LIMITS,
     ...params.keyPackageFetchLimits,
   }
+  // Bounded by throughput x windowMs (entries expire, size > 1024 sweep drops them), not an
+  // absolute cap — the absolute per-DID bound is the store's caps, not this map.
   const fetchWindows = new Map<string, { count: number; resetAt: number }>()
 
   function assertKeyPackageFetchAllowed(requesterDID: string): void {
@@ -180,9 +191,39 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       return
     }
     if (window.count >= fetchLimits.maxRequests) {
-      throw new Error('Key package fetch rate limit exceeded')
+      throw new KeyPackageFetchLimitError('Key package fetch rate limit exceeded')
     }
     window.count++
+  }
+
+  // Bounded like fetchWindows: throughput x windowMs, not an absolute cap.
+  const targetWindows = new Map<string, { count: number; resetAt: number }>()
+
+  /** Charge `amount` packages against the target DID's consumption window. Throws when the
+   * window's budget is spent — this bounds how fast anyone, collectively, can drain a target. */
+  function assertTargetConsumptionAllowed(targetDID: string, amount: number): void {
+    const now = Date.now()
+    if (targetWindows.size > 1024) {
+      for (const [did, window] of targetWindows) {
+        if (window.resetAt <= now) targetWindows.delete(did)
+      }
+    }
+    const window = targetWindows.get(targetDID)
+    if (window == null || window.resetAt <= now) {
+      if (amount > fetchLimits.maxPerTargetConsumed) {
+        throw new KeyPackageFetchLimitError(
+          `Key package consumption limit exceeded for target ${targetDID}`,
+        )
+      }
+      targetWindows.set(targetDID, { count: amount, resetAt: now + fetchLimits.windowMs })
+      return
+    }
+    if (window.count + amount > fetchLimits.maxPerTargetConsumed) {
+      throw new KeyPackageFetchLimitError(
+        `Key package consumption limit exceeded for target ${targetDID}`,
+      )
+    }
+    window.count += amount
   }
 
   return {
@@ -286,9 +327,12 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       )
       if (!decision.allow) {
         throw new HandlerError({
-          code: 'EK02',
+          code: HUB_ERROR_CODES.authorizationDenied,
           message: decision.reason ?? 'Not authorized to subscribe to topic',
         })
+      }
+      if (!didLimiter.tryConsume(clientDID)) {
+        throw new HandlerError({ code: 'EK01', message: 'Subscribe rate limit exceeded for DID' })
       }
       try {
         await store.subscribe({ subscriberDID: clientDID, topicID, retention })
@@ -303,6 +347,15 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       // subscriberDID is the authenticated caller (verified issuer), never a wire field — or any
       // member could read another's topic log by naming them.
       const subscriberDID = getClientDID(ctx)
+      const decision = normalizeAuthorizeDecision(
+        await authorize({ action: 'topic/fetch', did: subscriberDID, topicID }),
+      )
+      if (!decision.allow) {
+        throw new HandlerError({
+          code: HUB_ERROR_CODES.authorizationDenied,
+          message: decision.reason ?? 'Not authorized to fetch topic',
+        })
+      }
       try {
         const result = await store.fetchTopic({ subscriberDID, topicID, after, limit })
         return {
@@ -323,6 +376,9 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
     'hub/v1/unsubscribe': (async (ctx) => {
       const { topicID } = ctx.param
       const clientDID = getClientDID(ctx)
+      if (!didLimiter.tryConsume(clientDID)) {
+        throw new HandlerError({ code: 'EK01', message: 'Unsubscribe rate limit exceeded for DID' })
+      }
       await store.unsubscribe(clientDID, topicID)
       return { unsubscribed: true }
     }) as RequestHandler<HubProtocol, 'hub/v1/unsubscribe'>,
@@ -503,16 +559,59 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
     'hub/v1/keypackage/upload': (async (ctx) => {
       const { keyPackages } = ctx.param
       const clientDID = getClientDID(ctx)
-      await Promise.all(keyPackages.map((kp: string) => store.storeKeyPackage(clientDID, kp)))
+      const decision = normalizeAuthorizeDecision(
+        await authorize({ action: 'keypackage/upload', did: clientDID, count: keyPackages.length }),
+      )
+      if (!decision.allow) {
+        throw new HandlerError({
+          code: HUB_ERROR_CODES.authorizationDenied,
+          message: decision.reason ?? 'Not authorized to upload key packages',
+        })
+      }
+      if (!didLimiter.tryConsume(clientDID)) {
+        throw new HandlerError({
+          code: 'EK01',
+          message: 'Key package upload rate limit exceeded for DID',
+        })
+      }
+      // A batch crossing the cap partially commits (the store enforces per-call, so the cap still
+      // holds) and rejects the rest with HUB_KEYPACKAGE_QUOTA; a retry finds the earlier ones stored.
+      try {
+        await Promise.all(keyPackages.map((kp: string) => store.storeKeyPackage(clientDID, kp)))
+      } catch (error) {
+        rethrowAsHandlerError(error)
+      }
       return { stored: keyPackages.length }
     }) as RequestHandler<HubProtocol, 'hub/v1/keypackage/upload'>,
 
     'hub/v1/keypackage/fetch': (async (ctx) => {
       const requesterDID = getClientDID(ctx)
-      assertKeyPackageFetchAllowed(requesterDID)
-      const { did, count } = ctx.param
+      const { did: targetDID, count } = ctx.param
       const cappedCount = Math.min(Math.max(count ?? 1, 1), fetchLimits.maxCount)
-      const keyPackages = await store.fetchKeyPackages(did, cappedCount)
+      const decision = normalizeAuthorizeDecision(
+        await authorize({
+          action: 'keypackage/fetch',
+          did: requesterDID,
+          targetDID,
+          count: cappedCount,
+        }),
+      )
+      if (!decision.allow) {
+        throw new HandlerError({
+          code: HUB_ERROR_CODES.authorizationDenied,
+          message: decision.reason ?? 'Not authorized to fetch key packages',
+        })
+      }
+      // Order matters: a refusal above never charged a window; per-requester before per-target so a
+      // throttled requester doesn't charge the target. rethrow maps KeyPackageFetchLimitError (no
+      // `code` of its own) to its wire code.
+      try {
+        assertKeyPackageFetchAllowed(requesterDID)
+        assertTargetConsumptionAllowed(targetDID, cappedCount)
+      } catch (error) {
+        rethrowAsHandlerError(error)
+      }
+      const keyPackages = await store.fetchKeyPackages(targetDID, cappedCount)
       return { keyPackages }
     }) as RequestHandler<HubProtocol, 'hub/v1/keypackage/fetch'>,
   }

@@ -212,9 +212,14 @@ export type HubStore = {
   ack(params: AckParams): Promise<void>
   purge(params: PurgeParams): Promise<Array<string>>
   trim(params: TrimParams): Promise<void>
+  /** Record a subscription. A store MAY cap the distinct topics one DID may subscribe to and
+   * reject a subscribe past its cap with `SubscriptionQuotaExceededError`. A re-subscribe to a
+   * topic the DID already holds never counts against the cap. */
   subscribe(params: SubscribeParams): Promise<void>
   unsubscribe(subscriberDID: string, topicID: string): Promise<void>
   getSubscribers(topicID: string): Promise<Array<string>>
+  /** Store one key package for later retrieval. A store MAY cap per-owner storage and reject an
+   * upload past its cap with `KeyPackageQuotaExceededError` (rejected, never evicted). */
   storeKeyPackage(ownerDID: string, keyPackage: string): Promise<void>
   fetchKeyPackages(ownerDID: string, count?: number): Promise<Array<string>>
 }

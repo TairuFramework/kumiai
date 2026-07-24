@@ -170,6 +170,8 @@ export class FakeHub implements LogHub {
   #maxDepth: number
   /** One-shot transient failures to inject, per topic. See {@link FakeHub.failSubscribeOnce}. */
   #transientFailures = new Map<string, number>()
+  /** A permanent refusal (an ANSWER, not a transport drop) to throw on the next subscribe. */
+  #permanentRefusals = new Map<string, Error>()
   /** Every subscribe ASKED FOR, per topic, refused or not — what a retry loop is counted with. */
   #subscribeAttempts = new Map<string, number>()
 
@@ -185,6 +187,15 @@ export class FakeHub implements LogHub {
    */
   failSubscribeOnce(topicID: string, count = 1): void {
     this.#transientFailures.set(topicID, (this.#transientFailures.get(topicID) ?? 0) + count)
+  }
+
+  /**
+   * Make the next subscribe to `topicID` throw `error` — a hub that has ANSWERED (e.g. an
+   * authorization refusal), which the mux must not retry. Distinct from `failSubscribeOnce`, a
+   * transport drop that must be retried.
+   */
+  refuseSubscribeWith(topicID: string, error: Error): void {
+    this.#permanentRefusals.set(topicID, error)
   }
 
   /**
@@ -204,6 +215,11 @@ export class FakeHub implements LogHub {
     if (pending > 0) {
       this.#transientFailures.set(topicID, pending - 1)
       throw new Error(`FakeHub: subscribe to ${topicID} failed (injected transport failure)`)
+    }
+    const refusal = this.#permanentRefusals.get(topicID)
+    if (refusal != null) {
+      this.#permanentRefusals.delete(topicID)
+      throw refusal
     }
     if (options?.retention != null && options.retention > this.#maxRetention) {
       throw new RetentionExceededError(

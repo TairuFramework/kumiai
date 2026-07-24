@@ -13,7 +13,13 @@ import type {
   SubscribeParams,
   TrimParams,
 } from '@kumiai/hub-protocol'
-import { HeadMismatchError, NotSubscribedError, RetentionExceededError } from '@kumiai/hub-protocol'
+import {
+  HeadMismatchError,
+  KeyPackageQuotaExceededError,
+  NotSubscribedError,
+  RetentionExceededError,
+  SubscriptionQuotaExceededError,
+} from '@kumiai/hub-protocol'
 import { EventEmitter } from '@sozai/event'
 
 type RetentionClass = 'log' | 'mailbox'
@@ -45,6 +51,10 @@ export type MemoryStoreOptions = {
   /** Per-topic max retained entries; oldest are trimmed beyond this. Default 1000. */
   maxDepth?: number
   retention?: MemoryStoreRetention
+  /** Max key packages stored per owner DID before an upload is rejected. Default: 100. */
+  maxKeyPackagesPerDID?: number
+  /** Max distinct topics one DID may subscribe to before a subscribe is rejected. Default: 1000. */
+  maxSubscriptionsPerDID?: number
 }
 
 const DEFAULT_MAX_DEPTH = 1000
@@ -96,6 +106,8 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
   const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH
   const defaultRetention = options.retention?.default ?? 0
   const maxRetention = options.retention?.max ?? DEFAULT_MAX_RETENTION
+  const maxKeyPackagesPerDID = options.maxKeyPackagesPerDID ?? 100
+  const maxSubscriptionsPerDID = options.maxSubscriptionsPerDID ?? 1000
   let counter = 0
   const entries = new Map<string, LogEntry>()
   const topicLogs = new Map<string, Array<string>>()
@@ -110,6 +122,8 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
   const publishRecords = new Map<string, string>()
   /** Per topic: the subscribers, each with the retention it asked for. */
   const subscriptions = new Map<string, Map<string, number>>()
+  // Reverse index for an O(1) per-DID subscription count. Kept in lockstep with `subscriptions`.
+  const subsByDID = new Map<string, Set<string>>()
   const keyPackages = new Map<string, Array<string>>()
   const events = new EventEmitter<HubStoreEvents>()
 
@@ -406,12 +420,28 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
           `Requested retention of ${requested}s exceeds the maximum of ${maxRetention}s`,
         )
       }
+
+      const held = subsByDID.get(params.subscriberDID)
+      const alreadyHeld = held?.has(params.topicID) ?? false
+      if (!alreadyHeld && (held?.size ?? 0) >= maxSubscriptionsPerDID) {
+        throw new SubscriptionQuotaExceededError(
+          `DID ${params.subscriberDID} exceeds the maximum of ${maxSubscriptionsPerDID} subscriptions`,
+        )
+      }
+
       let subscribers = subscriptions.get(params.topicID)
       if (subscribers == null) {
         subscribers = new Map()
         subscriptions.set(params.topicID, subscribers)
       }
       subscribers.set(params.subscriberDID, requested)
+
+      let ownTopics = subsByDID.get(params.subscriberDID)
+      if (ownTopics == null) {
+        ownTopics = new Set()
+        subsByDID.set(params.subscriberDID, ownTopics)
+      }
+      ownTopics.add(params.topicID)
     },
 
     async unsubscribe(subscriberDID: string, topicID: string): Promise<void> {
@@ -421,6 +451,11 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
         if (subscribers.size === 0) {
           subscriptions.delete(topicID)
         }
+      }
+      const ownTopics = subsByDID.get(subscriberDID)
+      if (ownTopics != null) {
+        ownTopics.delete(topicID)
+        if (ownTopics.size === 0) subsByDID.delete(subscriberDID)
       }
       // Drops this subscriber's pending deliveries for the topic — freeing a mailbox frame whose
       // last delivery this was, and leaving a log frame standing.
@@ -444,6 +479,11 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
       if (packages == null) {
         packages = []
         keyPackages.set(ownerDID, packages)
+      }
+      if (packages.length >= maxKeyPackagesPerDID) {
+        throw new KeyPackageQuotaExceededError(
+          `DID ${ownerDID} exceeds the maximum of ${maxKeyPackagesPerDID} stored key packages`,
+        )
       }
       packages.push(keyPackage)
     },
