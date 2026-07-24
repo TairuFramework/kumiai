@@ -62,6 +62,26 @@ describe('group anchor', () => {
     expect(read?.app).toBeUndefined()
   })
 
+  test('a future-version anchor carrying an app joins but reads back with app withheld', async () => {
+    const alice = randomIdentity()
+    // A future build wrote this anchor (version 2 > the current 1) with an app
+    // payload a v1 build cannot interpret. The member still joins — the
+    // GroupHandle constructor decodes the anchor (non-null) and seeds its roster
+    // from creatorDID — but the opaque payload is withheld end to end.
+    const app = { recoverySecret: 'v2-seed', shape: 'unknown-to-v1' }
+    const anchor: GroupAnchor = { creatorDID: alice.id, version: 2, app }
+
+    const { group } = await createGroup(alice, 'future-anchor', {
+      extensions: [buildGroupAnchorExtension(anchor)],
+      capabilities: controlCapabilities(),
+    })
+
+    const read = readGroupAnchor(group)
+    expect(read?.creatorDID).toBe(alice.id)
+    expect(read?.version).toBe(2)
+    expect(read?.app).toBeUndefined()
+  })
+
   test('createGroup without extensions auto-anchors with the default creator anchor', async () => {
     const alice = randomIdentity()
     const { group } = await createGroup(alice, 'plain')
