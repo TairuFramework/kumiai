@@ -252,6 +252,10 @@ function isPermanentSubscribeFailure(error: unknown): boolean {
   // Name as well as instance: a hub reached over the tunnel rebuilds the error from its wire code
   // (`hubErrorFromCode`), and a host bundling two copies of hub-protocol would break `instanceof`
   // alone — turning a permanent refusal back into a retry loop, silently.
+  //
+  // `SubscriptionQuotaExceededError` is deliberately NOT here: a quota is clearable (it frees when
+  // another peer unsubscribes), so latching it permanent would strand a topic once capacity frees.
+  // Transient costs one bounded retry per hit; do not add it.
   return (
     error instanceof RetentionExceededError ||
     error instanceof AuthorizationDeniedError ||
@@ -259,22 +263,6 @@ function isPermanentSubscribeFailure(error: unknown): boolean {
       (error.name === 'RetentionExceededError' || error.name === 'AuthorizationDeniedError'))
   )
 }
-
-/**
- * DESIGN DECISION: `SubscriptionQuotaExceededError` (wire code `HUB_SUBSCRIPTION_QUOTA`) is
- * deliberately NOT in the permanent set above, even though a mux subscribe can surface it.
- *
- * A quota refusal is a CLEARABLE resource condition — it frees the moment some other peer
- * unsubscribes from that topic — not a settled fact about the request the way retention (a
- * fixed policy number) or authz (a fixed policy decision) are. Latching it `permanent: true`
- * would strand a topic the peer legitimately wants: per the comment on `TopicSubscription`
- * above, a permanent refusal only clears on a retain asking for a *different* `retention`, so a
- * peer that keeps asking for the same topic would never re-ask once capacity frees, even though
- * nothing about ITS request changed. Leaving it transient costs one bounded retry schedule per
- * hit — the existing retry path already treats "no answer, try again" as cheap — and the topic
- * is naturally re-asked on the next retain regardless. That is the correct trade here; do not
- * "fix" this by adding `SubscriptionQuotaExceededError` to `isPermanentSubscribeFailure`.
- */
 
 /**
  * Multiplex a single hub `receive` drain into a BroadcastBus view, a mailbox-hub view (for

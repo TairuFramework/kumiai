@@ -172,11 +172,8 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
     ...DEFAULT_KEYPACKAGE_FETCH_LIMITS,
     ...params.keyPackageFetchLimits,
   }
-  // Bounded by request throughput x windowMs, not by an absolute cap: each entry expires after its
-  // own window and the size > 1024 sweep (below) drops expired entries, but there is no hard ceiling
-  // on distinct keys held concurrently. The absolute per-DID bound lives in the STORE's caps (see
-  // memoryStore's per-DID key-package/subscription quotas), not here — this is the pre-existing
-  // rate-window pattern (fetchWindows/targetWindows), acknowledged, not changed.
+  // Bounded by throughput x windowMs (entries expire, size > 1024 sweep drops them), not an
+  // absolute cap — the absolute per-DID bound is the store's caps, not this map.
   const fetchWindows = new Map<string, { count: number; resetAt: number }>()
 
   function assertKeyPackageFetchAllowed(requesterDID: string): void {
@@ -199,8 +196,7 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
     window.count++
   }
 
-  // Same bound as fetchWindows above: throughput x windowMs plus the size > 1024 expired-entry
-  // sweep, not an absolute cap — the absolute per-DID bound is the store's caps, not this map.
+  // Bounded like fetchWindows: throughput x windowMs, not an absolute cap.
   const targetWindows = new Map<string, { count: number; resetAt: number }>()
 
   /** Charge `amount` packages against the target DID's consumption window. Throws when the
@@ -578,11 +574,8 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
           message: 'Key package upload rate limit exceeded for DID',
         })
       }
-      // A batch that crosses the per-DID cap mid-way commits the packages before the cap and rejects
-      // the rest with HUB_KEYPACKAGE_QUOTA — Promise.all doesn't undo the ones that already
-      // resolved. The cap is still never exceeded (the store enforces it per-call), and a retrying
-      // client simply finds the earlier packages already stored. Cosmetic partial-store, documented
-      // not fixed.
+      // A batch crossing the cap partially commits (the store enforces per-call, so the cap still
+      // holds) and rejects the rest with HUB_KEYPACKAGE_QUOTA; a retry finds the earlier ones stored.
       try {
         await Promise.all(keyPackages.map((kp: string) => store.storeKeyPackage(clientDID, kp)))
       } catch (error) {
@@ -609,10 +602,9 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
           message: decision.reason ?? 'Not authorized to fetch key packages',
         })
       }
-      // Ordering: authorize first (a refusal must never consume rate budget), then the
-      // per-requester window, then the per-target window. Both quota errors are translated to
-      // their wire code via rethrowAsHandlerError (KeyPackageFetchLimitError has no `code` of its
-      // own — hubErrorCodeOf is what maps the class to HUB_ERROR_CODES.keyPackageFetchLimit).
+      // Order matters: a refusal above never charged a window; per-requester before per-target so a
+      // throttled requester doesn't charge the target. rethrow maps KeyPackageFetchLimitError (no
+      // `code` of its own) to its wire code.
       try {
         assertKeyPackageFetchAllowed(requesterDID)
         assertTargetConsumptionAllowed(targetDID, cappedCount)
