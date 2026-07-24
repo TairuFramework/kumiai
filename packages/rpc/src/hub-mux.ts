@@ -200,6 +200,20 @@ type Sink = {
   topicID?: string
 }
 
+// `symbol` admits the drain's own claim as a distinct holder identity.
+type Holder = InboundListener | Sink | symbol
+
+/**
+ * Holders of one delivered message that have not yet released it. A SET OF IDENTITIES, never a
+ * counter (mirrors `LogEntry.pendingFor` in `hub-server/src/memoryStore.ts`): a double-ack is a
+ * no-op, where a counter would reach zero and free a frame other holders still hold.
+ */
+type PendingAck = {
+  holders: Set<Holder>
+  position: DeliveryPosition
+  claimedAt: number
+}
+
 /**
  * The state of the SUBSCRIPTION at the hub, per topic — deliberately NOT the refcount, which
  * counts local listeners. Conflating the two is the defect this replaces: a listener registration
@@ -431,19 +445,6 @@ export function createHubMux(params: HubMuxParams): HubMux {
   const subscription = hub.receive(localDID)
   const iterator = subscription[Symbol.asyncIterator]()
 
-  // `symbol` admits the drain's own claim (below) as a distinct holder identity.
-  type Holder = InboundListener | Sink | symbol
-
-  /**
-   * Holders of one delivered message that have not yet released it. A SET OF IDENTITIES, never a
-   * counter (mirrors `LogEntry.pendingFor` in `hub-server/src/memoryStore.ts`): a double-ack is a
-   * no-op, where a counter would reach zero and free a frame other holders still hold.
-   */
-  type PendingAck = {
-    holders: Set<Holder>
-    position: DeliveryPosition
-    claimedAt: number
-  }
   const pending = new Map<string, PendingAck>()
 
   const ackUpstream = (position: DeliveryPosition): void => {
