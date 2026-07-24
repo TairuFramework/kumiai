@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Stage:** executing
+**Stage:** qa
 **Mode:** tasks
 
 **Goal:** Make `decodeGroupAnchor` withhold the `app` payload when an anchor's `version` exceeds the version this build understands, so a future-version payload never reaches a consumer as though it were current.
