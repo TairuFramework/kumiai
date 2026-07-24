@@ -10,6 +10,22 @@ import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
 
 const flush = (ms = 30) => new Promise((r) => setTimeout(r, ms))
 
+/** Poll until `condition` holds, rather than guessing how long a heal takes with a fixed sleep.
+ *  A heal is a rendezvous, a sealed GroupInfo from every responder, an external commit and a
+ *  compare-and-set — its wall-clock cost varies with machine and load, so a fixed `flush` that is
+ *  long enough locally races the deadline in CI. Waiting on the actual post-heal state instead is
+ *  both race-free and faster (it returns the instant the state settles). Used only for POSITIVE
+ *  outcomes — a non-event (nobody heals) has no condition to wait on and keeps a bounded sleep. */
+async function waitFor(condition: () => boolean, description: string, timeoutMs = 3000) {
+  const start = Date.now()
+  while (!condition()) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error(`Timeout waiting for ${description} after ${timeoutMs}ms`)
+    }
+    await new Promise((r) => setTimeout(r, 5))
+  }
+}
+
 /** Every recovery request this group put on the wire. A heal is not free — it is a
  *  rendezvous, a sealed GroupInfo from every responder, an external commit and a
  *  compare-and-set — so counting them is counting what an attacker gets for a publish. */
@@ -43,12 +59,15 @@ describe('a peer that meets its own un-merged commit', () => {
     await publishCommit({ hub, senderDID: 'alice', recoverySecret: rs, epoch: 1 })
 
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery: fastRecovery })
-    await flush()
+    await waitFor(() => bob.mls.epoch() === 2, "bob applies alice's orphaned commit")
     expect(bob.mls.epoch()).toBe(2)
 
     // Alice comes back at the epoch she died at, holding an empty journal, and reads the log.
     const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, recovery: fastRecovery })
-    await flush(200)
+    await waitFor(
+      () => alice.mls.epoch() === 3 && bob.mls.epoch() === 3,
+      'alice heals and the group advances to epoch 3',
+    )
 
     // She healed, by rejoining: the external commit is a commit like any other, so it lands on
     // the log and takes the whole group to the next epoch with her. The assertion is her
@@ -76,18 +95,23 @@ describe('a peer that meets its own un-merged commit', () => {
     // Alice's orphaned commit at epoch 1...
     await publishCommit({ hub, senderDID: 'alice', recoverySecret: rs, epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery: fastRecovery })
-    await flush()
+    await waitFor(() => bob.mls.epoch() === 2, "bob applies alice's orphaned commit")
     // ...and the group commits again on top of it, at epoch 2.
     const token = 'signed-token: bob enacted this while alice was dead'
     await bob.peer.commit(buildLedgerCommit(bob, [token]))
-    await flush()
+    await waitFor(() => bob.mls.epoch() === 3, "bob's own commit lands at epoch 3")
     expect(bob.mls.epoch()).toBe(3)
 
     // Alice restarts at epoch 1 and heals to the group's epoch. The rejoin moves her epoch; it
     // does not move her cursor over the frames she skipped, and at the epoch she lands on they
     // are history.
     const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, recovery: fastRecovery })
-    await flush(300)
+    // Wait on the ledger refold too, not just the epoch: bootstrap repopulates the ledger a beat
+    // after the heal advances the epoch, and this test asserts both.
+    await waitFor(
+      () => alice.mls.epoch() === 4 && bob.mls.epoch() === 4 && alice.mls.ledgerIDs().length === 1,
+      'alice heals to epoch 4 and refolds the ledger',
+    )
 
     expect(alice.mls.epoch()).toBe(4)
     expect(bob.mls.epoch()).toBe(4)
@@ -107,7 +131,7 @@ describe('a peer that meets its own un-merged commit', () => {
 
     // Her lane is live at the epoch she landed on: the next commit reaches her and applies.
     await publishCommit({ hub, senderDID: 'zoe', recoverySecret: rs, epoch: 4 })
-    await flush(80)
+    await waitFor(() => alice.mls.epoch() === 5, "zoe's commit reaches alice and applies")
     expect(alice.mls.seen()).toBe(1)
     expect(alice.mls.commits()).toBe(1)
     expect(alice.mls.epoch()).toBe(5)
@@ -137,7 +161,13 @@ describe('a hostile commit cannot make an honest peer do expensive work', () => 
     // refuses. It is exactly "a valid frame at my current epoch that I cannot apply" — and
     // that is not a description of a crash victim, it is a description of this.
     await publishCommit({ hub, senderDID: 'mallory', recoverySecret: rs, epoch: 1 })
-    await flush(200)
+    // Wait for the read, then give a full recovery deadline for a heal to appear: the claim is
+    // that none does, so the window must be at least as long as one would take.
+    await waitFor(
+      () => bob.mls.seen() === 1 && carol.mls.seen() === 1,
+      'both peers read the poison frame',
+    )
+    await flush(fastRecovery.deadlineMs)
 
     // They read it, judged it, refused it, and stepped over it.
     expect(bob.mls.seen()).toBe(1)
@@ -154,7 +184,10 @@ describe('a hostile commit cannot make an honest peer do expensive work', () => 
 
     // And the lane is not wedged behind the poison: the group's next commit lands and applies.
     await publishCommit({ hub, senderDID: 'alice', recoverySecret: rs, epoch: 1 })
-    await flush(80)
+    await waitFor(
+      () => bob.mls.epoch() === 2 && carol.mls.epoch() === 2,
+      'the honest commit lands behind the poison and applies',
+    )
     expect(bob.mls.epoch()).toBe(2)
     expect(carol.mls.epoch()).toBe(2)
     expect(heals(hub, rs)).toHaveLength(0)
@@ -181,7 +214,13 @@ describe('a hostile commit cannot make an honest peer do expensive work', () => 
     await flush()
 
     await publishCommit({ hub, senderDID: 'mallory', recoverySecret: rs, epoch: 1 })
-    await flush(200)
+    // Wait for the read, then give a full recovery deadline for a heal to appear before asserting
+    // none did.
+    await waitFor(
+      () => bob.mls.lastSender() === 'bob' && carol.mls.lastSender() === 'carol',
+      'both peers read the frame the hub mis-attributed to them',
+    )
+    await flush(fastRecovery.deadlineMs)
 
     // The lie bought the hub nothing. The committer is read out of the commit, where MLS
     // authenticates it, so it still says `mallory` — the frame is still poison, and the
@@ -220,7 +259,13 @@ describe('a hostile commit cannot make an honest peer do expensive work', () => 
       epoch: 1,
       commit: encodeMemoryCommit(1, 'mallory', [orphan]),
     })
-    await flush(250)
+    // Wait for the read, then give a full recovery deadline for a heal to appear before asserting
+    // none did.
+    await waitFor(
+      () => bob.mls.seen() === 1 && carol.mls.seen() === 1,
+      'both peers read the unresolvable frame',
+    )
+    await flush(fastRecovery.deadlineMs)
 
     // Read once, dropped, stepped over. No retry: a retry can only succeed if some member at
     // this epoch can open a blob none of them can, and it buys nothing but a delay.
@@ -237,7 +282,10 @@ describe('a hostile commit cannot make an honest peer do expensive work', () => 
     // The next honest commit is framed at the same epoch, lands behind the dead frame, and
     // everyone applies it. The lane is not wedged and the group is not stormed.
     await publishCommit({ hub, senderDID: 'alice', recoverySecret: rs, epoch: 1 })
-    await flush(80)
+    await waitFor(
+      () => bob.mls.epoch() === 2 && carol.mls.epoch() === 2,
+      'the honest commit lands behind the dead frame and applies',
+    )
     expect(bob.mls.commits()).toBe(1)
     expect(bob.mls.epoch()).toBe(2)
     expect(carol.mls.epoch()).toBe(2)
@@ -258,7 +306,7 @@ describe('a hostile commit cannot make an honest peer do expensive work', () => 
     // arrive separately, so each is the last frame of the pull that reads it — a cursor that
     // failed to step over EITHER is caught, rather than covered for by the other's advance.
     await publishCommit({ hub, senderDID: 'mallory', recoverySecret: rs, epoch: 1 })
-    await flush(80)
+    await waitFor(() => bob.mls.seen() === 1, 'bob reads the first poison frame')
     expect(bob.mls.seen()).toBe(1)
 
     const orphan = memoryEntryID('a body nobody can supply')
@@ -269,7 +317,7 @@ describe('a hostile commit cannot make an honest peer do expensive work', () => 
       epoch: 1,
       commit: encodeMemoryCommit(1, 'alice', [orphan]),
     })
-    await flush(80)
+    await waitFor(() => bob.mls.seen() === 2, 'bob reads the second poison frame')
     expect(bob.mls.seen()).toBe(2)
     expect(bob.mls.commits()).toBe(0)
     expect(bob.mls.epoch()).toBe(1)
@@ -287,7 +335,7 @@ describe('a hostile commit cannot make an honest peer do expensive work', () => 
       epoch: 1,
       entries: [token],
     })
-    await flush(80)
+    await waitFor(() => bob.mls.seen() === 3, 'bob reads the honest frame behind the dead ones')
 
     // Three frames on the topic; three reads, ever.
     expect(bob.mls.seen()).toBe(3)
@@ -322,7 +370,7 @@ describe('a hostile commit cannot make an honest peer do expensive work', () => 
       epoch: 0,
       commit: encodeMemoryCommit(healthy + 999, 'mallory', []),
     })
-    await flush(300)
+    await waitFor(() => heals(hub, rs).length === 1, 'the forged epoch claim buys exactly one heal')
 
     // What is bounded is the AMOUNT. The frame is stepped over before the heal is asked for, so
     // it is read once and never again: one heal, not a rejoin loop, and not a peer that re-reads
@@ -335,7 +383,7 @@ describe('a hostile commit cannot make an honest peer do expensive work', () => 
     // The lane is not wedged behind it either: the group's next honest commit lands and applies.
     const before = bob.mls.epoch()
     await publishCommit({ hub, senderDID: 'alice', recoverySecret: rs, epoch: before })
-    await flush(200)
+    await waitFor(() => bob.mls.epoch() === before + 1, "the group's next honest commit applies")
     expect(bob.mls.epoch()).toBe(before + 1)
     // Still one heal. The forged frame did not come back.
     expect(heals(hub, rs)).toHaveLength(1)
@@ -399,7 +447,10 @@ describe('a peer the group left behind', () => {
     // either — and then meets the NEXT frame, framed at epoch 2, ahead of him. That is the
     // observation that says the fault was his alone.
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery: fastRecovery })
-    await flush(300)
+    await waitFor(
+      () => bob.mls.epoch() === 4 && carol.mls.epoch() === 4,
+      'bob heals and the group advances to epoch 4',
+    )
 
     // He healed, and the assertion is his epoch: a peer missing this row calls the ahead
     // frame "history", advances over it, reaches the end of the log, and reports itself fully
@@ -444,7 +495,7 @@ describe('a peer the group left behind', () => {
       bodies: [daveRole],
       recovery: fastRecovery,
     })
-    await flush(250)
+    await waitFor(() => dave.mls.epoch() === 3, 'dave walks the log and rises to epoch 3')
 
     expect(dave.mls.epoch()).toBe(3)
     expect(dave.mls.commits()).toBe(2)

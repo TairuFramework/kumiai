@@ -15,15 +15,16 @@ filler alongside unrelated work, and because one of them has a deadline of a dif
 
 ### Ship-before-needed — has its own urgency
 
-- **[`GroupAnchor.version` enforcement](../next/2026-07-23-group-anchor-version-enforcement.md)** —
-  in `next/`, not backlog. Enforcing the version is non-breaking (`CURRENT_VERSION` is the only
-  writer, so nothing in the wild carries another value), but *deferring* it is the "degraded" class
-  from the forward-compatibility work: a later fix must forever carry a sniffing rule for the
-  unversioned era, and a build that tolerates unknown versions silently cannot be taught to stop.
-  After `feat/app-lane-delivery` this is the one remaining format in the repo where a version is
-  declared and never checked.
+- **~~`GroupAnchor.version` enforcement~~** — **shipped 2026-07-24**, see
+  [completed](../completed/2026-07-24-group-anchor-version-enforcement.complete.md). Enforcing the
+  version was non-breaking (`CURRENT_VERSION` is the only writer, so nothing in the wild carries
+  another value), but *deferring* it was the "degraded" class from the forward-compatibility work: a
+  later fix would forever carry a sniffing rule for the unversioned era, and a build that tolerates
+  unknown versions silently cannot be taught to stop. It was the one remaining format in the repo
+  where a version was declared and never checked. `decodeGroupAnchor` now withholds `app` from a
+  future-version anchor while the member still joins (accept-and-withhold over fail-closed).
 
-  The deadline is "the next release that ships", not 1.0.
+  Shipped ahead of its "next release that ships" deadline.
 
 ### Ordinary debt — no deadline
 
