@@ -25,9 +25,9 @@ Unblocked at the 2026-07-23 triage.
    [completed](./completed/2026-07-24-high-severity-correctness.complete.md). `to()` gated on
    `ready`, `resync()` under the commit mutex, and the durable-ack relay reconnected across five
    severed points.
-2. [`GroupAnchor.version` enforcement](./next/2026-07-23-group-anchor-version-enforcement.md) —
-   small, and ship-before-needed: the cost of deferring grows with every release that goes out
-   without it.
+2. ~~`GroupAnchor.version` enforcement~~ — **done** (2026-07-24), see
+   [completed](./completed/2026-07-24-group-anchor-version-enforcement.complete.md).
+   `decodeGroupAnchor` now withholds `app` from a future-version anchor; the member still joins.
 3. [Hub `receive` lifecycle](./next/2026-07-07-hub-receive-lifecycle.md) — duplicate and unordered
    delivery, leaked handlers, swallowed writes.
 4. [Anycast soundness](./next/2026-07-07-anycast-soundness.md) — success-only suppression. One fast

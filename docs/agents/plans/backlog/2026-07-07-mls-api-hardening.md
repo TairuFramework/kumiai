@@ -97,9 +97,9 @@ correctness bug; each is a shape a filed consumer would force a break to fix, an
   reservation, because the changeset's "escape hatches with a closing window" framing invites the
   stronger read.
 
-`GroupAnchor.version` enforcement also came from this batch but is **not** filed here — it is
-ship-before-needed rather than deferrable debt, and lives in
-`../next/2026-07-23-group-anchor-version-enforcement.md`.
+`GroupAnchor.version` enforcement also came from this batch but is **not** filed here — it was
+ship-before-needed rather than deferrable debt, and **shipped 2026-07-24**, see
+[completed](../completed/2026-07-24-group-anchor-version-enforcement.complete.md).
 
 ## Added 2026-07-11 — GroupContext extension-data compare is fail-closed on default-typed extensions
 
