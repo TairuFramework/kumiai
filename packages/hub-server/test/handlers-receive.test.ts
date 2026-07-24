@@ -1,4 +1,4 @@
-import type { StoredMessage } from '@kumiai/hub-protocol'
+import type { FetchParams, FetchResult, HubStore, StoredMessage } from '@kumiai/hub-protocol'
 import { describe, expect, test, vi } from 'vitest'
 
 import { createHandlers } from '../src/handlers.js'
@@ -107,5 +107,138 @@ describe('hub/v1/receive pre-aborted signal', () => {
     // The registry entry is gone — no bound writer left behind.
     expect(registry.isWriterBound(DID)).toBe(false)
     expect(registry.getClient(DID)).toBeUndefined()
+  })
+})
+
+/** A store whose `fetch` returns a controllable multi-page backlog and pauses on a gate. */
+function drainGateStore(
+  pages: Array<Array<StoredMessage>>,
+  gate: Promise<void>,
+): {
+  store: HubStore
+  fetchCalls: () => number
+} {
+  let call = 0
+  const store = {
+    ...createMemoryStore(),
+    async fetch(_params: FetchParams): Promise<FetchResult> {
+      const index = call++
+      if (index === 0) await gate // pause during the first page so a live push can race in
+      const messages = pages[index] ?? []
+      const cursor = messages.length > 0 ? messages[messages.length - 1].sequenceID : null
+      const hasMore = index < pages.length - 1
+      return hasMore ? { messages, cursor, hasMore: true } : { messages, cursor }
+    },
+  } as HubStore
+  return { store, fetchCalls: () => call }
+}
+
+function frame(seq: string, topic = 'topic:1'): StoredMessage {
+  return {
+    sequenceID: seq,
+    senderDID: 'did:key:alice',
+    topicID: topic,
+    payload: new Uint8Array([1]),
+  }
+}
+
+describe('hub/v1/receive delivery ordering (H1)', () => {
+  test('a frame pushed live during the drain is delivered once, after the backlog, in order', async () => {
+    let openGate: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve
+    })
+    const { store } = drainGateStore([[frame('000000000001'), frame('000000000002')]], gate)
+    const registry = new HubClientRegistry()
+    const handlers = createHandlers({ registry, store })
+
+    const controller = new AbortController()
+    const written: Array<{ sequenceID: string }> = []
+    const done = handlers['hub/v1/receive'](
+      receiveCtx({
+        acks: ackStream([]),
+        signal: controller.signal,
+        writable: collectingWritable(written) as WritableStream,
+      }),
+    )
+
+    // While the drain is paused on the gate, a publish live-pushes seq 3 (newer than the backlog).
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    registry.getClient(DID)?.sendMessage?.(frame('000000000003'))
+    openGate()
+
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    controller.abort()
+    await done
+
+    // Exactly once each, in sequence order: backlog (1,2) then the live frame (3). No duplicate 3.
+    expect(written.map((m) => m.sequenceID)).toEqual([
+      '000000000001',
+      '000000000002',
+      '000000000003',
+    ])
+  })
+
+  test('a live frame that is ALSO in the backlog is delivered once (deduped by lastServed)', async () => {
+    let openGate: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve
+    })
+    // seq 2 is both pushed live during the drain AND present in the second backlog page.
+    const { store } = drainGateStore([[frame('000000000001')], [frame('000000000002')]], gate)
+    const registry = new HubClientRegistry()
+    const handlers = createHandlers({ registry, store })
+
+    const controller = new AbortController()
+    const written: Array<{ sequenceID: string }> = []
+    const done = handlers['hub/v1/receive'](
+      receiveCtx({
+        acks: ackStream([]),
+        signal: controller.signal,
+        writable: collectingWritable(written) as WritableStream,
+      }),
+    )
+
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    registry.getClient(DID)?.sendMessage?.(frame('000000000002')) // duplicate of the 2nd page
+    openGate()
+
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    controller.abort()
+    await done
+
+    expect(written.map((m) => m.sequenceID)).toEqual(['000000000001', '000000000002'])
+  })
+})
+
+describe('hub/v1/receive backpressure (H3)', () => {
+  test('a stalled writer over the buffer limit tears down and releases the registry writer', async () => {
+    const store = createMemoryStore()
+    const registry = new HubClientRegistry()
+    const handlers = createHandlers({ registry, store, receiveBufferLimit: 4 })
+
+    const controller = new AbortController()
+    // A writable whose writes never resolve: the write queue backs up.
+    const stalled = new WritableStream({
+      write() {
+        return new Promise<void>(() => {})
+      },
+    })
+    const done = handlers['hub/v1/receive'](
+      receiveCtx({ acks: ackStream([]), signal: controller.signal, writable: stalled }),
+    )
+
+    await new Promise((resolve) => setTimeout(resolve, 10)) // empty backlog → live phase
+    // Push more than the limit; the queue exceeds receiveBufferLimit and teardown fires.
+    for (let i = 1; i <= 8; i++) {
+      registry.getClient(DID)?.sendMessage?.(frame(String(i).padStart(12, '0')))
+    }
+
+    await Promise.race([
+      done,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('never tore down')), 200)),
+    ])
+
+    expect(registry.isWriterBound(DID)).toBe(false)
   })
 })
