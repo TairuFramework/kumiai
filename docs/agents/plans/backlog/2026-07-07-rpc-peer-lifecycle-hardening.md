@@ -4,11 +4,12 @@
 **Origin:** 2026-07-02 audit (commit `bb343d9`), milestone
 `milestones/2026-07-audit-remediation.md`.
 
-> **The two high-severity items moved out (2026-07-23).** `to()` gating and `resync()`
-> serialization were promoted to `../next/2026-07-23-high-severity-correctness.md`, where both are
-> re-verified against `5eb220a` with current line numbers (the `resync()` finding is restated —
-> `handshakeTail` no longer exists; the mutex is now `commitTail`/`runSerial`). Everything below
-> stays here. Line numbers below are still `bb343d9` and have drifted.
+> **The two high-severity items shipped (2026-07-24).** `to()` gating and `resync()` serialization
+> were fixed on `fix/high-severity-correctness` — see
+> [completed](../completed/2026-07-24-high-severity-correctness.complete.md). `to()` now returns a
+> Promise (breaking, minor at 0.x); `resync()` runs under `commitTail`/`runSerial` (the `resync()`
+> finding was restated — `handshakeTail` no longer exists). Everything below stays here. Line
+> numbers below are still `bb343d9` and have drifted.
 
 > Typing debt on the public surface — `ProtocolSurface`, and the residual `UnwrapResult`
 > declarations — is tracked separately in `rpc-api-surface.md`.

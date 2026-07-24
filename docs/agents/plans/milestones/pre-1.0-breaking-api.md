@@ -87,9 +87,9 @@ in the linked doc; the one real defect the check turned up is folded into the `d
 ### Adjacent, tracked elsewhere
 
 - `to()` gaining `withReady` ([high-severity
-  correctness](../next/2026-07-23-high-severity-correctness.md)) changes a sync method to
-  `Promise`-returning. It is a correctness fix first, but it is also a break — worth bundling with
-  the `ProtocolSurface` retyping if both land in one window.
+  correctness](../completed/2026-07-24-high-severity-correctness.complete.md), **shipped 2026-07-24**)
+  changed a sync method to `Promise`-returning — a break landed as a correctness fix (minor at 0.x).
+  The `ProtocolSurface` retyping it opens the door to is still worth bundling if it lands soon.
 
 ## Sequencing
 

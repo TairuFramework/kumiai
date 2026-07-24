@@ -18,12 +18,13 @@ priority inversion rather than a sequencing decision.
 
 Resolved as follows:
 
-- The three high items were extracted into
-  [high-severity correctness](../next/2026-07-23-high-severity-correctness.md) at priority 1, ahead
-  of every Phase 1 item. All three were re-verified against `5eb220a` and confirmed still open, with
-  current line numbers. The `resync()` finding is **restated**: the `handshakeTail` it named no
-  longer exists; the serialization mechanism is now `commitTail` via `runSerial`, and `resync()` is
-  the sole `rebuildEpoch` caller that takes no lock.
+- The three high items were extracted into a high-severity-correctness plan at priority 1, ahead of
+  every Phase 1 item, and **shipped 2026-07-24** — see
+  [completed](../completed/2026-07-24-high-severity-correctness.complete.md). The `resync()` finding
+  was **restated** on the way in: the `handshakeTail` it named no longer exists; the serialization
+  mechanism is now `commitTail` via `runSerial`, and `resync()` was the sole `rebuildEpoch` caller
+  that took no lock. The durable-ack finding was also restated — not a dead contract but five
+  severed relay points.
 - Their source docs — `rpc-peer-lifecycle-hardening` and `hub-tunnel-reliability` — keep every
   medium and low finding and stay in Phase 2. Their "pull forward at next triage" priority lines are
   discharged.
