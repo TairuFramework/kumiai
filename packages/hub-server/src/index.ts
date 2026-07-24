@@ -6,7 +6,12 @@ export type {
   HubRateLimits,
   KeyPackageFetchLimits,
 } from './handlers.js'
-export { createHandlers, DEFAULT_KEYPACKAGE_FETCH_LIMITS, DEFAULT_RATE_LIMITS } from './handlers.js'
+export {
+  createHandlers,
+  DEFAULT_KEYPACKAGE_FETCH_LIMITS,
+  DEFAULT_RATE_LIMITS,
+  DEFAULT_RECEIVE_BUFFER_LIMIT,
+} from './handlers.js'
 export type { CreateHubParams, HubInstance, HubPurgeOptions } from './hub.js'
 export { createHub, DEFAULT_HUB_ACCESS_RULES } from './hub.js'
 export { createMemoryStore, type MemoryStoreOptions } from './memoryStore.js'

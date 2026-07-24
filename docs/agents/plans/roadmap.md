@@ -28,8 +28,11 @@ Unblocked at the 2026-07-23 triage.
 2. ~~`GroupAnchor.version` enforcement~~ — **done** (2026-07-24), see
    [completed](./completed/2026-07-24-group-anchor-version-enforcement.complete.md).
    `decodeGroupAnchor` now withholds `app` from a future-version anchor; the member still joins.
-3. [Hub `receive` lifecycle](./next/2026-07-07-hub-receive-lifecycle.md) — duplicate and unordered
-   delivery, leaked handlers, swallowed writes.
+3. ~~Hub `receive` lifecycle~~ — **done** (2026-07-24), see
+   [completed](./completed/2026-07-24-hub-receive-lifecycle.complete.md). Exactly-once/in-order
+   delivery via a buffer-then-flush state machine, a bounded write queue, ack-loop isolation, a
+   pre-abort cleanup guard, and `HUB_INVALID_PAYLOAD`. Two subtle concurrency defects (drain→live
+   stranding, unbounded drain-phase buffer) were caught in review and fixed.
 4. [Anycast soundness](./next/2026-07-07-anycast-soundness.md) — success-only suppression. One fast
    *failing* responder currently suppresses every healthy one.
 

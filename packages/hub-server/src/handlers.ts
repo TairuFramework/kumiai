@@ -5,7 +5,7 @@ import {
   type RequestHandler,
 } from '@enkaku/server'
 import type { HubProtocol, HubStore, StoredMessage } from '@kumiai/hub-protocol'
-import { hubErrorCodeOf } from '@kumiai/hub-protocol'
+import { hubErrorCodeOf, InvalidPayloadError } from '@kumiai/hub-protocol'
 import { fromB64, toB64 } from '@sozai/codec'
 
 import { createRateLimiter, type RateLimitConfig } from './rateLimit.js'
@@ -84,12 +84,24 @@ export const DEFAULT_KEYPACKAGE_FETCH_LIMITS: KeyPackageFetchLimits = {
   windowMs: 60_000,
 }
 
+/**
+ * Max frames queued-but-unflushed on a single receive channel before it falls back to the store.
+ *
+ * Should be >= the drain's 50-frame fetch page size: the drain enqueues a whole backlog page
+ * before awaiting, so a limit below 50 would trip the cap on the very first page regardless of
+ * writer health. The default of 256 is safely above it.
+ */
+export const DEFAULT_RECEIVE_BUFFER_LIMIT = 256
+
 export type CreateHandlersParams = {
   registry: HubClientRegistry
   store: HubStore
   authorize?: AuthorizeHook
   rateLimits?: Partial<HubRateLimits>
   keyPackageFetchLimits?: Partial<KeyPackageFetchLimits>
+  /** Max frames queued-but-unflushed on a receive channel. See {@link DEFAULT_RECEIVE_BUFFER_LIMIT}
+   * for the >= 50-frame-page floor this should respect. Default: 256 */
+  receiveBufferLimit?: number
 }
 
 function getClientDID(ctx: { message: { payload: Record<string, unknown> } }): string {
@@ -116,6 +128,26 @@ function rethrowAsHandlerError(error: unknown): never {
   throw error
 }
 
+type ReceiveFrame = {
+  sequenceID: string
+  senderDID: string
+  topicID: string
+  payload: string
+  logPosition?: string
+}
+
+function toReceiveFrame(message: StoredMessage): ReceiveFrame {
+  return {
+    sequenceID: message.sequenceID,
+    senderDID: message.senderDID,
+    topicID: message.topicID,
+    payload: toB64(message.payload),
+    // Spread, not assignment — `logPosition: undefined` would serialize as a present key, defeating
+    // the field's absent-vs-present meaning.
+    ...(message.logPosition != null ? { logPosition: message.logPosition } : {}),
+  }
+}
+
 export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<HubProtocol> {
   const { store, registry } = params
   const authorize: AuthorizeHook = params.authorize ?? (() => true)
@@ -125,6 +157,7 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
   }
   const didLimiter = createRateLimiter(rateLimits.perDID)
   const topicLimiter = createRateLimiter(rateLimits.perTopic)
+  const receiveBufferLimit = params.receiveBufferLimit ?? DEFAULT_RECEIVE_BUFFER_LIMIT
 
   const fetchLimits: KeyPackageFetchLimits = {
     ...DEFAULT_KEYPACKAGE_FETCH_LIMITS,
@@ -166,7 +199,16 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       // `retain` defaults to 'mailbox' here, matching the store's own default (`memoryStore.ts`) —
       // the hook must never see an absent retain, since `AuthorizeRequest`'s `publish` variant
       // declares it required.
-      const payloadBytes = fromB64(payload)
+      let payloadBytes: Uint8Array
+      try {
+        payloadBytes = fromB64(payload)
+      } catch (error) {
+        rethrowAsHandlerError(
+          new InvalidPayloadError(
+            error instanceof Error ? error.message : 'Invalid base64 payload encoding',
+          ),
+        )
+      }
       const retain = ctx.param.retain ?? 'mailbox'
       const decision = normalizeAuthorizeDecision(
         await authorize({
@@ -294,96 +336,168 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       const writer = ctx.writable.getWriter()
       const reader = ctx.readable.getReader()
 
-      // Ends this channel when a newer one for the same DID takes the lane. Resolved, not thrown —
-      // replacement isn't this channel's error, and it's the same client that replaced it.
       let endEvicted: (() => void) | undefined
       const evictedHere = new Promise<void>((resolve) => {
         endEvicted = resolve
       })
       let receiveToken: symbol | undefined
 
+      // Delivery state machine (H1) + bounded write queue (H3).
+      // - DRAINING: live pushes buffer instead of writing; the drain writes the backlog in order.
+      // - after the drain: flush buffered frames with sequenceID > lastServed (the dedup), then LIVE.
+      // - LIVE: live pushes write directly.
+      let phase: 'draining' | 'live' = 'draining'
+      const liveBuffer: Array<ReceiveFrame> = []
+      let lastServed = '' // highest sequenceID written; '' precedes every real (zero-padded) ID
+      let pending = 0 // frames queued or mid-write but not yet flushed to the socket
+      let tornDown = false
+      let writeChain: Promise<void> = Promise.resolve()
+
+      let resolveDone: () => void = () => {}
+      const done = new Promise<void>((resolve) => {
+        resolveDone = resolve
+      })
+
+      // Idempotent teardown, shared by every failure and end path. Frames stay pending in the store
+      // and redeliver on the next connect (store-and-forward).
+      function finish(): void {
+        if (tornDown) return
+        tornDown = true
+        if (receiveToken != null) registry.releaseReceiveWriter(clientDID, receiveToken)
+        registry.unregisterIfIdle(clientDID)
+        reader.cancel().catch(() => {})
+        writer.abort(new Error('receive channel torn down')).catch(() => {})
+        resolveDone()
+      }
+
+      // Serialize writes one at a time (preserves order). Over the cap or on a write rejection, tear
+      // the channel down rather than swallow the error or grow without bound.
+      function pushWrite(frame: ReceiveFrame): void {
+        if (tornDown) return
+        pending++
+        if (pending > receiveBufferLimit) {
+          finish()
+          return
+        }
+        writeChain = writeChain.then(async () => {
+          if (tornDown) return
+          try {
+            await writer.ready
+            await writer.write(frame)
+            if (frame.sequenceID > lastServed) lastServed = frame.sequenceID
+          } catch {
+            finish()
+          } finally {
+            pending--
+          }
+        })
+      }
+
+      // The registry callback (publish fan-out). Buffers during the drain, writes once live.
+      // INVARIANT this and the flush's `> lastServed` dedup both depend on: the publish path must
+      // keep a FIXED await-depth between the store minting a sequenceID and its call to
+      // `sendMessage`, so concurrent publishes reach onLive in the same order their sequenceIDs
+      // were minted. Break that ordering and the dedup doesn't just reorder frames — it silently
+      // DROPS a lower-seq frame that arrives after a higher one already raised lastServed.
+      const onLive = (message: StoredMessage): void => {
+        const frame = toReceiveFrame(message)
+        if (phase === 'draining') {
+          // Bound liveBuffer the same way pushWrite bounds the write queue: a stalled-but-still-
+          // connected reader can hang writeChain indefinitely, and buffered frames never reach
+          // pushWrite's own cap check. Without this, the drain never completes and every publish
+          // grows liveBuffer without bound. Drop the frame instead — it stays pending in the store
+          // and redelivers on reconnect (store-and-forward), same fallback pushWrite's cap uses.
+          if (liveBuffer.length >= receiveBufferLimit) {
+            finish()
+            return
+          }
+          liveBuffer.push(frame)
+        } else {
+          pushWrite(frame)
+        }
+      }
+
       try {
         // Binding evicts whatever held the lane: a reconnect means the old connection broke and the
         // server learns last, so the stale writer must give way to the live one. See
         // `HubClientRegistry.bindReceiveWriter`.
-        const { token, evicted } = registry.bindReceiveWriter(
-          clientDID,
-          (message: StoredMessage) => {
-            writer
-              .write({
-                sequenceID: message.sequenceID,
-                senderDID: message.senderDID,
-                topicID: message.topicID,
-                payload: toB64(message.payload),
-                // Spread, not plain assignment — `logPosition: undefined` becomes a present key
-                // once serialized, defeating the field's whole point (telling absent from present).
-                ...(message.logPosition != null ? { logPosition: message.logPosition } : {}),
-              })
-              .catch(() => {})
-          },
-          () => endEvicted?.(),
+        const { token, evicted } = registry.bindReceiveWriter(clientDID, onLive, () =>
+          endEvicted?.(),
         )
         receiveToken = token
-        // After the bind, so the lane is never unheld between the two — a frame arriving in that
-        // gap would have nowhere to go, and mailbox frames drop when nobody's there.
+        // After the bind, so the lane is never unheld between the two.
         evicted?.()
 
+        // Drain the backlog. Await each page so lastServed is exact before the flush.
         let cursor: string | null | undefined = after
-        while (true) {
+        while (!tornDown) {
           const result = await store.fetch({
             recipientDID: clientDID,
             after: cursor ?? undefined,
             limit: 50,
           })
           for (const msg of result.messages) {
-            await writer.write({
-              sequenceID: msg.sequenceID,
-              senderDID: msg.senderDID,
-              topicID: msg.topicID,
-              payload: toB64(msg.payload),
-              ...(msg.logPosition != null ? { logPosition: msg.logPosition } : {}),
-            })
+            pushWrite(toReceiveFrame(msg))
           }
+          await writeChain
           cursor = result.cursor
           if (!result.hasMore) break
         }
+
+        // Flush frames that arrived live during the drain, deduped against what the drain already served,
+        // then go live. The flip happens only when the buffer is observed empty in the SAME synchronous
+        // step (no await between the empty check and the assignment), so a frame that arrived via onLive
+        // during a prior write is caught on the next iteration rather than stranded.
+        while (!tornDown) {
+          if (liveBuffer.length === 0) {
+            phase = 'live'
+            break
+          }
+          const batch = liveBuffer.splice(0)
+          for (const frame of batch) {
+            if (frame.sequenceID > lastServed) pushWrite(frame)
+          }
+          await writeChain
+        }
       } catch (error) {
+        // A synchronous drain error (e.g. store.fetch threw): clean up and reject the handler.
+        tornDown = true
         if (receiveToken != null) registry.releaseReceiveWriter(clientDID, receiveToken)
         registry.unregisterIfIdle(clientDID)
         reader.cancel().catch(() => {})
         writer.abort(error).catch(() => {})
         throw error
       }
-      const token = receiveToken
 
+      // Ack loop (M1): a store.ack failure must not stop later acks; only a reader error closes.
       void (async () => {
-        try {
-          while (true) {
-            const { done, value } = await reader.read()
-            if (done) break
-            if (value?.ack != null) {
-              await store.ack({ recipientDID: clientDID, sequenceIDs: value.ack })
+        while (true) {
+          let result: { done: boolean; value?: { ack?: Array<string> } }
+          try {
+            result = await reader.read()
+          } catch {
+            break
+          }
+          if (result.done) break
+          const ack = result.value?.ack
+          if (ack != null) {
+            try {
+              await store.ack({ recipientDID: clientDID, sequenceIDs: ack })
+            } catch {
+              // Frame stays pending; the client re-acks next round. Do NOT break.
             }
           }
-        } catch {
-          // Channel closed
         }
       })()
 
-      return new Promise((resolve) => {
-        const finish = (): void => {
-          // Token-scoped, so an already-evicted channel can't unbind the one that replaced it.
-          if (token != null) registry.releaseReceiveWriter(clientDID, token)
-          registry.unregisterIfIdle(clientDID)
-          reader.cancel().catch(() => {})
-          writer.close().catch(() => {})
-          resolve(undefined as never)
-        }
-        // Evicted by a newer channel: end this one; `finish` releases only its own token, which is
-        // no longer current.
-        void evictedHere.then(finish)
-        ctx.signal.addEventListener('abort', finish, { once: true })
-      })
+      // H2: an already-aborted signal never fires 'abort', so run teardown now.
+      if (ctx.signal.aborted) {
+        finish()
+        return done
+      }
+      void evictedHere.then(finish)
+      ctx.signal.addEventListener('abort', finish, { once: true })
+      return done
     }) as ChannelHandler<HubProtocol, 'hub/v1/receive'>,
 
     'hub/v1/keypackage/upload': (async (ctx) => {

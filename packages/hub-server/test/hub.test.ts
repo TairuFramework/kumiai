@@ -306,6 +306,19 @@ describe('hub pub/sub', () => {
     await ctx.dispose()
   })
 
+  test('a malformed base64 payload is refused with HUB_INVALID_PAYLOAD', async () => {
+    const ctx = createTestHub()
+    const { client: alice } = ctx.connect()
+
+    await expect(
+      alice.request('hub/v1/publish', {
+        param: { topicID: TOPIC, payload: '!!!not base64!!!' },
+      }),
+    ).rejects.toMatchObject({ code: 'HUB_INVALID_PAYLOAD' })
+
+    await ctx.dispose()
+  })
+
   /**
    * A SECOND `hub/v1/receive` FOR THE SAME DID TAKES THE LANE, and the first one ends.
    *
@@ -359,6 +372,41 @@ describe('hub pub/sub', () => {
 
     live.close()
     await expect(live).rejects.toEqual('Close')
+    await delay(20)
+    await ctx.dispose()
+  })
+
+  test('a backlog larger than one page drains fully and in order, once each', async () => {
+    // 60 publishes exceed the default per-DID burst (50); this test exercises multi-page
+    // backlog draining, not rate limiting, so the limiter is widened out of the way.
+    const ctx = createTestHub({ rateLimits: { perDID: { rate: 1000, burst: 1000 } } })
+    const { client: alice } = ctx.connect()
+    const bobIdentity = randomIdentity()
+    const { client: bobSetup } = ctx.connect(bobIdentity)
+    await bobSetup.request('hub/v1/subscribe', { param: { topicID: TOPIC } })
+
+    // 60 queued frames (> the 50-frame fetch page) before bob connects.
+    for (let i = 0; i < 60; i++) {
+      await alice.request('hub/v1/publish', {
+        param: { topicID: TOPIC, payload: encodePayload(`m${i}`) },
+      })
+    }
+    await delay(20)
+
+    const { client: bob } = ctx.connect(bobIdentity)
+    const channel = bob.createChannel('hub/v1/receive', { param: {} })
+    const reader = channel.readable.getReader()
+
+    const seen: Array<string> = []
+    for (let i = 0; i < 60; i++) {
+      const msg = await reader.read()
+      seen.push(msg.value?.payload as string)
+    }
+    // Exactly the 60 frames, in order, no duplicates.
+    expect(seen).toEqual(Array.from({ length: 60 }, (_, i) => encodePayload(`m${i}`)))
+
+    channel.close()
+    await expect(channel).rejects.toEqual('Close')
     await delay(20)
     await ctx.dispose()
   })
