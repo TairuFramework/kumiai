@@ -1,4 +1,10 @@
-import { NotSubscribedError, RetentionExceededError } from '@kumiai/hub-protocol'
+import {
+  AuthorizationDeniedError,
+  HUB_ERROR_CODES,
+  hubErrorFromCode,
+  NotSubscribedError,
+  RetentionExceededError,
+} from '@kumiai/hub-protocol'
 import { fromUTF } from '@sozai/codec'
 import { describe, expect, test, vi } from 'vitest'
 
@@ -230,6 +236,49 @@ describe('a subscribe the hub refuses', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  test('an authorization refusal is permanent — no retry storm, latched as answered', async () => {
+    const hub = new FakeHub({ maxRetention: 100 })
+    const failures: Array<SubscribeFailure> = []
+    const mux = createHubMux({
+      hub,
+      localDID: 'bob',
+      onSubscribeFailed: (failure) => failures.push(failure),
+      subscribeRetryDelaysMs: FAST_RETRIES,
+    })
+
+    hub.refuseSubscribeWith('topic:authz', new AuthorizationDeniedError('policy says no'))
+    mux.retainTopic('topic:authz', { retention: 50 })
+    await flush()
+
+    expect(hub.subscriberCount('topic:authz')).toBe(0)
+    // Exactly one attempt: a permanent refusal is not re-driven through the retry schedule.
+    expect(hub.subscribeAttempts('topic:authz')).toBe(1)
+    expect(failures).toHaveLength(1)
+    expect(failures[0]?.permanent).toBe(true)
+    expect(failures[0]?.error).toBeInstanceOf(AuthorizationDeniedError)
+  })
+
+  test('an authorization refusal rebuilt from its wire code is still permanent (tunnel path)', async () => {
+    const hub = new FakeHub({ maxRetention: 100 })
+    const failures: Array<SubscribeFailure> = []
+    const mux = createHubMux({
+      hub,
+      localDID: 'bob',
+      onSubscribeFailed: (failure) => failures.push(failure),
+      subscribeRetryDelaysMs: FAST_RETRIES,
+    })
+
+    // A hub reached over the tunnel rebuilds the error from its wire code; instanceof alone would
+    // miss it if two hub-protocol copies were bundled. The name check must carry it.
+    const rebuilt = hubErrorFromCode(HUB_ERROR_CODES.authorizationDenied, 'policy says no')
+    hub.refuseSubscribeWith('topic:authz2', rebuilt as Error)
+    mux.retainTopic('topic:authz2', { retention: 50 })
+    await flush()
+
+    expect(hub.subscribeAttempts('topic:authz2')).toBe(1)
+    expect(failures[0]?.permanent).toBe(true)
   })
 })
 

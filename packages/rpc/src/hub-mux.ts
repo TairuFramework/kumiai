@@ -1,5 +1,9 @@
 import type { BroadcastBus } from '@kumiai/broadcast'
-import { RetentionExceededError, type StoredMessage } from '@kumiai/hub-protocol'
+import {
+  AuthorizationDeniedError,
+  RetentionExceededError,
+  type StoredMessage,
+} from '@kumiai/hub-protocol'
 import type {
   HubFetchTopicResult,
   HubReceiveSubscription,
@@ -250,7 +254,9 @@ function isPermanentSubscribeFailure(error: unknown): boolean {
   // alone — turning a permanent refusal back into a retry loop, silently.
   return (
     error instanceof RetentionExceededError ||
-    (error instanceof Error && error.name === 'RetentionExceededError')
+    error instanceof AuthorizationDeniedError ||
+    (error instanceof Error &&
+      (error.name === 'RetentionExceededError' || error.name === 'AuthorizationDeniedError'))
   )
 }
 
