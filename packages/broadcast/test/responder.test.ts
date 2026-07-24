@@ -201,6 +201,35 @@ describe('createBroadcastResponder', () => {
     await responder.dispose()
   })
 
+  test('drops a malformed control frame instead of forwarding it to events', async () => {
+    const bus = createMemoryBus()
+    const events = new EventEmitter<{ note: { data: unknown; senderDID?: string } }>()
+    const received: Array<{ data: unknown; senderDID?: string }> = []
+    events.on('note', (e) => {
+      received.push(e)
+    })
+    const responder = createBroadcastResponder({
+      transport: createBroadcastTransport({ topicID: TOPIC, bus }),
+      from: 'peer-1',
+      requestHandlers: {},
+      events,
+    })
+
+    // A control frame (`kind: 'req'`) whose `rid` is not a string fails both the
+    // 'res' and 'req' guards and must NOT fall through to the events emitter.
+    bus.publish(
+      TOPIC,
+      encodeFrame({
+        payload: { typ: 'event', prc: 'note', data: { kind: 'req', rid: 123, prm: {} } },
+      }),
+    )
+    await new Promise<void>((resolve) => setTimeout(resolve, 10))
+
+    expect(received).toHaveLength(0)
+
+    await responder.dispose()
+  })
+
   test('aborts an in-flight request handler on dispose', async () => {
     const bus = createMemoryBus()
     let capturedSignal: AbortSignal | undefined
@@ -232,6 +261,48 @@ describe('createBroadcastResponder', () => {
 
     await responder.dispose()
     expect(capturedSignal?.aborted).toBe(true)
+
+    await client.dispose()
+  })
+
+  test('does not register a stray suppress timer or write when a handler resolves on abort after dispose', async () => {
+    const bus = createMemoryBus()
+    let release: () => void = () => {}
+    const started = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const responder = createBroadcastResponder({
+      transport: createBroadcastTransport({ topicID: TOPIC, bus }),
+      from: 'peer-1',
+      requestHandlers: {
+        slow: (_prm, context) => {
+          release()
+          // Resolves ON abort, the exact pattern that resumes `handleRequest` after
+          // `dispose()` has already cleared `suppressTimers`/`inFlight`.
+          return new Promise((resolve) => {
+            context?.signal?.addEventListener('abort', () => resolve('aborted'), { once: true })
+          })
+        },
+      },
+    })
+    const client = new BroadcastClient({
+      transport: createBroadcastTransport({ topicID: TOPIC, bus }),
+    })
+
+    void client.request('slow', {}, { timeoutMs: 1000 }).catch(() => {})
+    await started
+
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
+    await responder.dispose()
+    // Flush the microtask queue so the abort-resumed `handleRequest` continuation (if any)
+    // has run before we inspect what timers it registered.
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    const registeredSuppressTimer = setTimeoutSpy.mock.calls.some(([, ms]) => ms === 30_000)
+    expect(registeredSuppressTimer).toBe(false)
+    setTimeoutSpy.mockRestore()
 
     await client.dispose()
   })

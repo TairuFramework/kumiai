@@ -110,6 +110,11 @@ export function createBroadcastResponder(params: BroadcastResponderParams): {
     } finally {
       inFlight.delete(controller)
     }
+    // Disposed while this handler was in flight (e.g. it resolved on abort): don't register a new
+    // suppress timer or write on a tearing-down transport.
+    if (!running) {
+      return
+    }
     const ttlMs = isSuppressible(handler)
       ? (handler.suppress.suppressTtlMs ?? DEFAULT_SUPPRESS_TTL_MS)
       : DEFAULT_SUPPRESS_TTL_MS
@@ -153,7 +158,12 @@ export function createBroadcastResponder(params: BroadcastResponderParams): {
         }
         continue
       }
-      // Fire-and-forget event: hand the raw data to the emitter. No listener → no-op.
+      // A control frame (kind 'req'/'res') that failed its rid check above is malformed, not an
+      // event — drop it rather than forwarding its raw {kind,rid,…} object to event listeners.
+      if (data?.kind === 'req' || data?.kind === 'res') {
+        continue
+      }
+      // Genuine fire-and-forget event: real app data carries no `kind` field.
       void events
         ?.emit(payload.prc, { data: payload.data, senderDID: msg.senderDID })
         .catch(() => {})
