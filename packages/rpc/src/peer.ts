@@ -3,6 +3,7 @@ import type { ProtocolDefinition } from '@enkaku/protocol'
 import type { ProcedureHandlers } from '@enkaku/server'
 import {
   BroadcastClient,
+  createBroadcastResponder,
   createBroadcastTransport,
   defaultJitter,
   encodeEventFrame,
@@ -18,7 +19,6 @@ import { createRuntime, type Runtime } from '@sozai/runtime'
 import type { Anchor, AnchorStore } from './anchor.js'
 import type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
 import { createAppLane } from './app-lane.js'
-import { createGroupBusServer } from './bus-server.js'
 import { classifyCommit, UNKNOWN_FRAME_VERSION } from './classify.js'
 import {
   CommitDeadlineError,
@@ -381,11 +381,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * drain outlives any one epoch's runtime (it runs mid-walk, when the app lane has been torn
    * down and not yet rebuilt).
    */
-  const appEventHandlers = new Map<string, BusHandlerMaps['eventHandlers']>()
+  const appEventHandlers = new Map<string, BusHandlerMaps['events']>()
   for (const [name, protocol] of Object.entries(protocols)) {
     appEventHandlers.set(
       name,
-      adaptBusHandlers(protocol, handlers[name] as Record<string, unknown>, suppress).eventHandlers,
+      adaptBusHandlers(protocol, handlers[name] as Record<string, unknown>, suppress).events,
     )
   }
 
@@ -586,16 +586,16 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         transport: segmentBoundTransport(name, topicID, inbound),
         ...(params.runtime != null ? { runtime: params.runtime } : {}),
       })
-      const { eventHandlers, requestHandlers } = adaptBusHandlers(
+      const { events, requestHandlers } = adaptBusHandlers(
         protocol,
         handlers[name] as Record<string, unknown>,
         suppress,
       )
-      const busServer = createGroupBusServer({
+      const busServer = createBroadcastResponder({
         transport: segmentBoundTransport(name, topicID, inbound),
         from: localDID,
-        eventHandlers,
         requestHandlers,
+        events,
       })
       const acceptor = createInboxAcceptor<ProtocolDefinition>({
         mux,

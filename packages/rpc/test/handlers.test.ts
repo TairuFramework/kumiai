@@ -1,57 +1,70 @@
-import type { ProtocolDefinition } from '@enkaku/protocol'
-import { describe, expect, test } from 'vitest'
+import { EventEmitter } from '@sozai/event'
+import { describe, expect, test, vi } from 'vitest'
 
 import { adaptBusHandlers } from '../src/handlers.js'
 
+// A minimal protocol: one request with an integer `param`, one event with an
+// object `data` requiring a string `id`.
 const protocol = {
-  'app/changed': { type: 'event' },
-  'app/echo': { type: 'request' },
-  'app/fetch': { type: 'request' },
-  'app/sub': { type: 'stream', receive: { type: 'object' } },
-} as const satisfies ProtocolDefinition
+  compute: {
+    type: 'request',
+    param: { type: 'integer' },
+    result: { type: 'integer' },
+  },
+  notify: {
+    type: 'event',
+    data: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+  },
+} as const
 
 describe('adaptBusHandlers', () => {
-  test('maps event procedures to handlers receiving data and sender at message.iss', async () => {
-    const seen: Array<{ data: unknown; iss: unknown }> = []
-    const handlers = {
-      'app/changed': (ctx: { data: unknown; message: { payload: { iss?: string } } }) =>
-        void seen.push({ data: ctx.data, iss: ctx.message.payload.iss }),
-      'app/echo': () => ({}),
-    }
-    const { eventHandlers } = adaptBusHandlers(protocol, handlers)
-    expect(Object.keys(eventHandlers)).toEqual(['app/changed'])
-    await eventHandlers['app/changed']({ v: 1 }, 'did:key:alice')
-    expect(seen).toEqual([{ data: { v: 1 }, iss: 'did:key:alice' }])
-  })
-
-  test('maps request procedures to anycast handlers with param + sender', async () => {
-    const handlers = {
-      'app/echo': (ctx: { param: unknown; message: { payload: { iss?: string } } }) => ({
-        echoed: ctx.param,
-        from: ctx.message.payload.iss,
-      }),
-      'app/fetch': (ctx: { param: unknown }) => ({ got: ctx.param }),
-    }
-    const { requestHandlers } = adaptBusHandlers(protocol, handlers)
-    expect(Object.keys(requestHandlers).sort()).toEqual(['app/echo', 'app/fetch'])
-    expect(await requestHandlers['app/echo']({ a: 1 }, { senderDID: 'did:key:bob' })).toEqual({
-      echoed: { a: 1 },
-      from: 'did:key:bob',
+  test('rejects a request whose param fails schema validation', async () => {
+    const { requestHandlers } = adaptBusHandlers(protocol as never, {
+      compute: ({ param }: { param: number }) => param + 1,
     })
+    await expect(Promise.resolve(requestHandlers.compute('not-a-number', {}))).rejects.toThrow()
   })
 
-  test('omits stream/channel and procedures without a handler', () => {
-    const handlers = { 'app/changed': () => {} }
-    const { eventHandlers, requestHandlers } = adaptBusHandlers(protocol, handlers)
-    expect(Object.keys(eventHandlers)).toEqual(['app/changed'])
-    expect(Object.keys(requestHandlers)).toEqual([])
-  })
-
-  test('request handlers are tagged suppressible', () => {
-    const handlers = { 'app/echo': () => ({}) }
-    const { requestHandlers } = adaptBusHandlers(protocol, handlers, { jitterMs: 10 })
-    expect((requestHandlers['app/echo'] as { suppress?: unknown }).suppress).toEqual({
-      jitterMs: 10,
+  test('accepts a request whose param passes validation', async () => {
+    const { requestHandlers } = adaptBusHandlers(protocol as never, {
+      compute: ({ param }: { param: number }) => param + 1,
     })
+    await expect(Promise.resolve(requestHandlers.compute(41, {}))).resolves.toBe(42)
+  })
+
+  test('drops an event whose data fails validation and never calls the handler', async () => {
+    const handler = vi.fn()
+    const { events } = adaptBusHandlers(protocol as never, { notify: handler })
+    await events.emit('notify', { data: { id: 123 }, senderDID: 'did:x' }) // id must be a string
+    expect(handler).not.toHaveBeenCalled()
+  })
+
+  test('delivers a valid event to the handler with the authenticated sender', async () => {
+    const seen: Array<unknown> = []
+    const { events } = adaptBusHandlers(protocol as never, {
+      notify: (ctx: { data?: unknown; message: { payload: { iss?: string } } }) => {
+        seen.push({ data: ctx.data, iss: ctx.message.payload.iss })
+      },
+    })
+    await events.emit('notify', { data: { id: 'abc' }, senderDID: 'did:sender' })
+    expect(seen).toEqual([{ data: { id: 'abc' }, iss: 'did:sender' }])
+  })
+
+  test('forwards the responder-supplied signal into the request handler', async () => {
+    const controller = new AbortController()
+    let seen: AbortSignal | undefined
+    const { requestHandlers } = adaptBusHandlers(protocol as never, {
+      compute: ({ signal }: { signal?: AbortSignal }) => {
+        seen = signal
+        return 0
+      },
+    })
+    await Promise.resolve(requestHandlers.compute(1, { signal: controller.signal }))
+    expect(seen).toBe(controller.signal)
+  })
+
+  test('events is an EventEmitter', () => {
+    const { events } = adaptBusHandlers(protocol as never, {})
+    expect(events).toBeInstanceOf(EventEmitter)
   })
 })
