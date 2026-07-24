@@ -70,7 +70,7 @@ describe('broadcast sender surfacing', () => {
         bus,
       }),
       from: 'bob',
-      handlers: {
+      requestHandlers: {
         ask: (_prm, context) => {
           seenSender = context?.senderDID
           return { ok: true }

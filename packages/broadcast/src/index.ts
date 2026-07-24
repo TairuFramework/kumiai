@@ -19,6 +19,8 @@ export { defineGroupProtocol, type GroupProtocolDefinition } from './protocol.js
 export {
   type BroadcastHandler,
   type BroadcastResponderParams,
+  type BusEvent,
+  type BusEvents,
   createBroadcastResponder,
   type SuppressConfig,
   type SuppressibleHandler,

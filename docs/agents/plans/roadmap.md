@@ -33,12 +33,19 @@ Unblocked at the 2026-07-23 triage.
    delivery via a buffer-then-flush state machine, a bounded write queue, ack-loop isolation, a
    pre-abort cleanup guard, and `HUB_INVALID_PAYLOAD`. Two subtle concurrency defects (drain→live
    stranding, unbounded drain-phase buffer) were caught in review and fixed.
-4. [Anycast soundness](./next/2026-07-07-anycast-soundness.md) — success-only suppression. One fast
-   *failing* responder currently suppresses every healthy one.
+4. ~~Anycast soundness~~ — **done** (2026-07-24), see
+   [completed](./completed/2026-07-24-anycast-soundness.complete.md). Suppression fires only on a
+   success reply, so a fast *failing* responder no longer silences the healthy ones. Landed with the
+   three same-path Mediums: the duplicate bus responder deleted (one `createBroadcastResponder`),
+   bus-lane input validated, and the dead `ctx.signal` wired to dispose. A follow-on wire-format fix
+   (the `kind` control discriminator sharing the app-data namespace) is filed in
+   `./milestones/pre-1.0-breaking-api.md`.
 
-Two of these sit **underneath** work that already shipped on top of them: the retention semantics in
+**Phase 1 is now complete.** All four correctness-debt items shipped 2026-07-24.
+
+Two of these sat **underneath** work that already shipped on top of them: the retention semantics in
 `5eb220a` define mailbox reclamation in terms of acks that nothing sends. That inversion is why this
-phase leads.
+phase led.
 
 ## Phase 2 — hardening and the trust boundary
 

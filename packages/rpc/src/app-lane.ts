@@ -44,7 +44,7 @@ export type AppLaneParams = {
    * the live bus server is built from, so a drained frame and a pushed one reach the host by the
    * same door.
    */
-  eventHandlers: Map<string, BusHandlerMaps['eventHandlers']>
+  eventHandlers: Map<string, BusHandlerMaps['events']>
   /** App-log retention the hub is asked to hold on every topic this lane pulls, in seconds. */
   retentionSeconds: number
   appCursorStore?: AppCursorStore | undefined
@@ -410,8 +410,8 @@ export function createAppLane(params: AppLaneParams): AppLane {
       return claim <= ceiling
     }
     for (const [name, frames] of segment) {
-      const eventHandlers = appEventHandlers.get(name)
-      if (eventHandlers == null || frames.length === 0) continue
+      const events = appEventHandlers.get(name)
+      if (events == null || frames.length === 0) continue
       for (const frame of frames) {
         const sealed = frame.sealed
         if (sealed == null) continue // done on an earlier pass, and only holding its place
@@ -447,16 +447,28 @@ export function createAppLane(params: AppLaneParams): AppLane {
         }
         const prc = message.payload?.prc
         if (message.payload?.typ !== 'event' || typeof prc !== 'string') continue
+        // Same door as the live push: a payload shaped like a control frame (kind 'req'/'res') is
+        // not an app event — the responder drops it, so the drain must too, or a frame is dropped
+        // live but delivered on replay.
+        const drainData = message.payload?.data
+        if (
+          drainData != null &&
+          typeof drainData === 'object' &&
+          ((drainData as { kind?: unknown }).kind === 'req' ||
+            (drainData as { kind?: unknown }).kind === 'res')
+        ) {
+          continue
+        }
         // A retained frame naming an EPHEMERAL procedure was published `retain: 'log'` by a member
         // whose dispatch would never do that. Retention is the protocol's word, not the frame's.
         if (retentionOf(protocols[name], prc) !== 'log') continue
-        const handler = eventHandlers[prc]
-        if (handler == null) continue
         try {
-          await handler(message.payload.data ?? {}, opened.senderDID)
+          // Same door as the live push: emit the retained frame's plaintext into the
+          // per-protocol emitter the live bus is also built from. No listener → no-op.
+          await events.emit(prc, { data: message.payload.data ?? {}, senderDID: opened.senderDID })
         } catch {
-          // A host handler that threw has been delivered to. Re-delivering it on the next pull
-          // would be the drain retrying the host's own bug at it, so the frame is consumed.
+          // A host listener that threw has been delivered to. Re-delivering on the next pull
+          // would retry the host's own bug at it, so the frame is consumed.
         }
       }
       await advanceCursor(name, frames)

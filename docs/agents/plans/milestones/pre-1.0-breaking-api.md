@@ -83,6 +83,20 @@ in the linked doc; the one real defect the check turned up is folded into the `d
 - `GroupMLS.rosterDIDs` carries no leaf identity (`rpc/src/crypto.ts:240`). **Refiled from mls
   2026-07-23** — `@kumiai/mls` has no such method; it is `@kumiai/rpc`'s consumer port, so the
   change also hits `@kumiai/mls-rpc` and the `@kumiai/rpc-conformance` contract suite.
+- **Bus control-frame `kind` discriminator shares the app-data namespace** (spans `@kumiai/broadcast`
+  + `@kumiai/rpc`). **Filed 2026-07-24** from the `fix/anycast-soundness` whole-branch review (see
+  `../completed/2026-07-24-anycast-soundness.complete.md`). On the bus, req/res
+  control messages ride as `typ:'event'` frames told apart from app events by inspecting `data.kind`
+  (`packages/broadcast/src/responder.ts`; the `ReplyData`/`RequestData` shapes in `client.ts`). An app
+  event whose `data` legitimately carries a top-level `kind` valued `'req'`/`'res'` — reachable
+  whenever the procedure's `data` schema is permissive — is dropped by the live responder as a
+  control frame, so the discriminator is an in-band signal colliding with app data. The structural
+  fix reserves it out of app reach: a distinct `typ` for control messages, or a `ctrl` envelope
+  separate from `payload.data`. That is a **wire-format break** (and touches every bus producer and
+  consumer). Interim same-door consistency — the drain drops control-shaped payloads exactly as live
+  push does — shipped on `fix/anycast-soundness` (2026-07-24); the envelope is the real fix, and it
+  makes that interim drop-classification deletable. Not a correctness bug once live and drain agree:
+  the only symptom is that an app cannot use `kind: 'req'|'res'` as an event-data key.
 
 ### Adjacent, tracked elsewhere
 

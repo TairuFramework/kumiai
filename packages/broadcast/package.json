@@ -41,6 +41,7 @@
     "@noble/hashes": "catalog:",
     "@sozai/async": "catalog:",
     "@sozai/codec": "catalog:",
+    "@sozai/event": "catalog:",
     "@sozai/runtime": "catalog:"
   },
   "devDependencies": {

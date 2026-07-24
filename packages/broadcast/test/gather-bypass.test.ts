@@ -12,7 +12,7 @@ function responder(bus: ReturnType<typeof createMemoryBus>, from: string) {
   return createBroadcastResponder({
     transport: createBroadcastTransport({ topicID: TOPIC, bus }),
     from,
-    handlers: {
+    requestHandlers: {
       // Suppressible: a plain `request` storm-collapses; a `gather` must NOT.
       census: suppressible(() => ({ from }), { jitterMs: 5, suppressTtlMs: 1000 }),
     },

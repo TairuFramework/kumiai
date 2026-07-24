@@ -395,6 +395,52 @@ describe('the drain delivers only what the live lane would', () => {
   })
 
   /**
+   * A retained frame whose decrypted payload DATA happens to be shaped like a control frame
+   * (`{ kind: 'req' | 'res', ... }`). The live-push responder classifies an inbound event frame by
+   * `data.kind` and drops anything control-shaped rather than handing it to an event listener — so
+   * the drain must refuse it too, or the same bytes are dropped live and delivered on replay,
+   * breaking the "same door" invariant the drain otherwise upholds.
+   */
+  test('a retained event frame whose data is shaped like a control frame is not delivered', async () => {
+    const hub = new DurableFakeHub()
+    const recoverySecret = new Uint8Array(32).fill(0x98)
+    const posted: Array<unknown> = []
+    const handlers = { 'chat/posted': (ctx: { data: unknown }) => void posted.push(ctx.data) }
+    const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
+    await flush()
+    await bob.peer.dispose()
+    hub.detach('bob')
+
+    // A control-shaped payload published under `chat/posted`, `retain: 'log'` — exactly what the
+    // live responder would drop rather than deliver.
+    const atOne = createFakeCrypto({ epoch: 1, localDID: 'alice' })
+    await hub.publish({
+      senderDID: 'alice',
+      topicID,
+      retain: 'log',
+      payload: await atOne.wrap(encodeEventFrame('chat/posted', { kind: 'req', rid: 'x' })),
+    })
+    await flush()
+
+    const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob, handlers })
+    hub.reattach('bob')
+    await flush()
+
+    expect(posted).toEqual([])
+
+    // Consumed rather than left to be re-offered, exactly like the ephemeral-procedure case above.
+    const frames = hub.published.filter((m) => m.topicID === topicID)
+    expect(frames).toHaveLength(1)
+    expect(bob.appCursorStore.stored(topicID)).toBe(frames[0]?.sequenceID)
+
+    await alice.peer.dispose()
+    await restarted.peer.dispose()
+  })
+
+  /**
    * A member's own frames are in the log it drains — the hub retains one copy of a topic, not one
    * per reader — and the live fan-out never echoes a publisher its own broadcast. So a pull that
    * delivered them would hand the host its own sends back, and only on the paths that pull: the
