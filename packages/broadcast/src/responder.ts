@@ -98,7 +98,9 @@ export function createBroadcastResponder(params: BroadcastResponderParams): {
     const ttlMs = isSuppressible(handler)
       ? (handler.suppress.suppressTtlMs ?? DEFAULT_SUPPRESS_TTL_MS)
       : DEFAULT_SUPPRESS_TTL_MS
-    if (!isGather) {
+    // Suppress healthy responders only on a SUCCESS. An error reply leaves the rid
+    // open so a slower, working responder still answers.
+    if (!isGather && reply.err == null) {
       markReplied(request.rid, ttlMs)
     }
     // Best-effort write: ignore rejections (e.g. transport disposed mid-flight). `senderDID`
@@ -120,7 +122,10 @@ export function createBroadcastResponder(params: BroadcastResponderParams): {
       }
       const data = payload.data as InboundData | undefined
       if (data?.kind === 'res' && typeof data.rid === 'string') {
-        markReplied(data.rid, DEFAULT_SUPPRESS_TTL_MS)
+        // Only a peer's SUCCESS suppresses us; its error frame must not.
+        if (data.err == null) {
+          markReplied(data.rid, DEFAULT_SUPPRESS_TTL_MS)
+        }
         continue
       }
       if (data?.kind !== 'req' || typeof data.rid !== 'string' || typeof payload.prc !== 'string') {
