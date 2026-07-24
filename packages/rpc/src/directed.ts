@@ -33,6 +33,8 @@ export type InboxPathParams = {
   mux: HubMux
   topicID: string
   unwrap: Unwrap
+  /** Forwarded to {@link createOpenOncePath} — see there for what it decides. */
+  retainOnFailure?: (message: StoredMessage) => boolean
 }
 
 /**
@@ -43,11 +45,12 @@ export type InboxPathParams = {
  * what stops a lying hub forging or splicing one.
  */
 export function createInboxPath(params: InboxPathParams): InboundPath {
-  const { mux, topicID, unwrap } = params
+  const { mux, topicID, unwrap, retainOnFailure } = params
   return createOpenOncePath<OpenedInbound>({
     mux,
     topicID,
     unwrap,
+    ...(retainOnFailure != null ? { retainOnFailure } : {}),
     project: (message, opened) =>
       opened.senderDID == null
         ? undefined

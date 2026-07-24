@@ -42,7 +42,6 @@ function fromBase64(text: string): Uint8Array {
 function receiveOverWire(client: HubClient): HubReceiveSubscription {
   let stopped = false
   let channel: ReturnType<HubClient['receive']> | undefined
-  const acks: Array<string> = []
 
   return {
     async *[Symbol.asyncIterator](): AsyncGenerator<StoredMessage> {
@@ -78,8 +77,10 @@ function receiveOverWire(client: HubClient): HubReceiveSubscription {
         // Already closed by dispose.
       }
     },
-    ack: (sequenceID: string) => {
-      acks.push(sequenceID)
+    ack: async (sequenceID: string) => {
+      // Ack requires the channel to exist — it is only ever called after the iterator
+      // has yielded a message, which opens it above.
+      await channel?.send({ ack: [sequenceID] })
     },
   }
 }

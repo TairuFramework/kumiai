@@ -1,7 +1,13 @@
 import type { ConformanceLogHub, ConformanceMailboxHub } from '@kumiai/hub-conformance'
 import { testMailboxHubConformance } from '@kumiai/hub-conformance'
 
-import type { LogHub, MailboxHub } from '../src/transport.js'
+import type {
+  HubReceiveOptions,
+  HubReceiveSubscription,
+  HubSubscribeOptions,
+  LogHub,
+  MailboxHub,
+} from '../src/transport.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 
 // THE COVERAGE TRIPWIRE. The suite re-declares the hub shapes structurally (it cannot import
@@ -18,6 +24,38 @@ const _mailboxIsAHub = (hub: MailboxHub): ConformanceMailboxHub => hub
 const _logIsAHub = (hub: LogHub): ConformanceLogHub => hub
 const _mailboxCoversHub = (hub: ConformanceMailboxHub): Covered<MailboxHub> => hub
 const _logCoversHub = (hub: ConformanceLogHub): Covered<LogHub> => hub
+
+// THE OPTIONAL-FIELD TRIPWIRE. The pair above is mutual assignability, and mutual assignability is
+// SILENT about a missing optional property: `{ topicID?: string }` and
+// `{ topicID?: string; extra?: string }` are mutually assignable to each other (an object missing
+// an optional key still satisfies a type that declares it optional, in both directions), so a
+// `HubReceiveOptions` that grows an optional field the conformance suite's inline `receive` option
+// type does not mirror would pass `_mailboxIsAHub`/`_mailboxCoversHub` above without a compile
+// error, and the drift would be invisible. This compares the KEY SETS instead, wrapped in tuples so
+// the union `keyof` produces is compared as one type rather than distributed member-by-member —
+// which a missing key changes even when every value type still unifies. Same blind spot, same
+// fix, for `HubSubscribeOptions` (subscribe's third parameter) and `HubReceiveSubscription` (what
+// `receive` returns) — an optional member added to either side would be just as invisible to the
+// mutual-assignability pair above.
+type KeysExact<A, B> = [keyof A] extends [keyof B]
+  ? [keyof B] extends [keyof A]
+    ? true
+    : false
+  : false
+type ConformanceReceiveOptions = NonNullable<Parameters<ConformanceMailboxHub['receive']>[1]>
+type ReceiveOptionsKeysExact =
+  KeysExact<HubReceiveOptions, ConformanceReceiveOptions> extends true ? true : never
+const _receiveOptionsKeysMatch: ReceiveOptionsKeysExact = true
+
+type ConformanceSubscribeOptions = NonNullable<Parameters<ConformanceMailboxHub['subscribe']>[2]>
+type SubscribeOptionsKeysExact =
+  KeysExact<HubSubscribeOptions, ConformanceSubscribeOptions> extends true ? true : never
+const _subscribeOptionsKeysMatch: SubscribeOptionsKeysExact = true
+
+type ConformanceReceiveSubscription = ReturnType<ConformanceMailboxHub['receive']>
+type ReceiveSubscriptionKeysExact =
+  KeysExact<HubReceiveSubscription, ConformanceReceiveSubscription> extends true ? true : never
+const _receiveSubscriptionKeysMatch: ReceiveSubscriptionKeysExact = true
 
 const MAX_RETENTION = 30 * 24 * 60 * 60
 const MAX_DEPTH = 6

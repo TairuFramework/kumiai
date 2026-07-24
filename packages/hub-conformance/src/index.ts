@@ -883,11 +883,16 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
 }
 
 export {
+  type AckConformanceParams,
   type ConformanceLogHub,
   type ConformanceMailboxHub,
   type ConformancePublishParams,
   type ConformanceReceiveSubscription,
+  type MailboxAckConformanceParams,
   type MailboxHubConformanceParams,
+  testAckConformance,
+  testLogAckConformance,
   testLogHubConformance,
+  testMailboxAckConformance,
   testMailboxHubConformance,
 } from './log-hub.js'

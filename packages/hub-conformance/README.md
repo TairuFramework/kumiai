@@ -25,6 +25,23 @@ outlives the log".
 - `testLogHubConformance({ createHub, maxRetention, maxDepth, label })` — the log seam.
 - `testMailboxHubConformance({ createHub, maxRetention, maxDepth, label })` — the mailbox subset,
   which every `LogHub` run includes.
+- `testMailboxAckConformance({ createHub, maxRetention, maxDepth, label, redeliver })` — the
+  redelivery clause a hub that declares an `ack` must answer for. Needs only
+  `subscribe`/`publish`/`receive`, so a `MailboxHub`-shaped subject with no readable log can opt in
+  directly. `redeliver` is **required**, not optional — it must trigger the hub's reconnect-backlog
+  replay for a subscriber, not merely whatever a still-open `receive` would push on its own. Opting
+  into this suite is a claim that the hub's ack suppresses a redelivery; a hub that cannot
+  demonstrate the redelivery its ack is meant to suppress cannot substantiate that claim, and every
+  "not redelivered" clause would otherwise pass against a hub that never redelivers anything, acked
+  or not.
+- `testLogAckConformance({ createHub, maxRetention, maxDepth, label })` — the log-survives-ack
+  clause, needing `fetchTopic`, so it stays `LogHub`-shaped only.
+- `testAckConformance({ createHub, maxRetention, maxDepth, label, redeliver })` — the composite of
+  the two above, for a `LogHub`-shaped double. `testMailboxAckConformance` and
+  `testLogAckConformance` are the finer-grained entry points a `MailboxHub`-shaped subject (no
+  `fetchTopic`) must use instead. All three are opt-in and separate from the two suites above:
+  `ack?` is optional on the contract, so folding these clauses into the main suite would make them
+  pass vacuously on a hub with no ack at all.
 
 ```ts
 import { testHubStoreConformance } from '@kumiai/hub-conformance'

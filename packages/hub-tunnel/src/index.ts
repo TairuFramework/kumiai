@@ -39,6 +39,7 @@ export {
   type HubFetchTopicParams,
   type HubFetchTopicResult,
   type HubPublishParams,
+  type HubReceiveOptions,
   type HubReceiveSubscription,
   type HubSubscribeOptions,
   type HubTunnelSessionID,

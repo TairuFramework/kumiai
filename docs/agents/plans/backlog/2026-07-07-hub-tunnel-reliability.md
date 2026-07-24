@@ -4,11 +4,11 @@
 **Origin:** 2026-07-02 audit (commit `bb343d9`), milestone
 `milestones/2026-07-audit-remediation.md`.
 
-> **The high-severity item moved out (2026-07-23).** The dead durable-ack contract was promoted to
-> `../next/2026-07-23-high-severity-correctness.md`, re-verified against `5eb220a` — and the stakes
-> rose: `HubPublishParams.retain`'s `'mailbox'` class (`transport.ts:52`) now defines reclamation in
-> terms of acks that never happen. Everything below stays here. Line numbers below are still
-> `bb343d9` and have drifted.
+> **The high-severity item shipped (2026-07-24).** The durable-ack finding was fixed on
+> `fix/high-severity-correctness` — see
+> [completed](../completed/2026-07-24-high-severity-correctness.complete.md). It was not a dead
+> contract but five severed relay points; the fix reconnected all of them and refcounted holders in
+> the hub mux. Everything below stays here. Line numbers below are still `bb343d9` and have drifted.
 
 > **The locally-declared hub port types are not a finding (verified 2026-07-23).**
 > `HubBase`/`MailboxHub`/`LogHub`/`HubReceiveSubscription`/`HubPublishParams` belong here: nothing

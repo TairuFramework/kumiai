@@ -74,10 +74,8 @@ describe('createGroupPeer', () => {
       'chat/double': (ctx: { param: { n: number } }) => ({ n: ctx.param.n * 2 }),
     })
     await flush()
-    const result = await alice.peer
-      .protocol('chat')
-      .to('bob')
-      .request('chat/double', { param: { n: 21 } })
+    const client = await alice.peer.protocol('chat').to('bob')
+    const result = await client.request('chat/double', { param: { n: 21 } })
     expect(result).toEqual({ n: 42 })
   })
 

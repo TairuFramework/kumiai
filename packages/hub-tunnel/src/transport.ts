@@ -22,6 +22,15 @@ export type HubReceiveSubscription = AsyncIterable<StoredMessage> & {
   ack?: (sequenceID: string) => void | Promise<void>
 }
 
+/**
+ * Scope for a receive stream. Naming the topic lets a refcounted-ack hub know which consumers will
+ * handle a frame — an unscoped stream is a candidate holder for every message on every topic.
+ * Optional, and a hub is free to ignore it: the consumer still filters what it is handed.
+ */
+export type HubReceiveOptions = {
+  topicID?: string
+}
+
 export type MailboxHubEvent =
   | { type: 'reconnecting' }
   | { type: 'connected' }
@@ -110,7 +119,7 @@ export type HubBase = {
     options?: HubSubscribeOptions,
   ) => Promise<void> | void
   unsubscribe?: (subscriberDID: string, topicID: string) => Promise<void> | void
-  receive: (subscriberDID: string) => HubReceiveSubscription
+  receive: (subscriberDID: string, options?: HubReceiveOptions) => HubReceiveSubscription
   events?: MailboxHubEvents
 }
 
@@ -206,7 +215,7 @@ export function createHubTunnelTransport<R, W>(
   // Best-effort subscribe; rejection is swallowed (the receive stream still
   // attaches, and a missing subscription simply yields no inbound frames).
   void Promise.resolve(hub.subscribe(localDID, receiveTopicID)).catch(() => {})
-  const subscription = hub.receive(localDID)
+  const subscription = hub.receive(localDID, { topicID: receiveTopicID })
   const iterator = subscription[Symbol.asyncIterator]()
 
   let abortHandler: (() => void) | undefined
@@ -301,6 +310,17 @@ export function createHubTunnelTransport<R, W>(
     lastActivity = Date.now()
   }
 
+  // A hub's ack may be synchronous and throw synchronously, before `Promise.resolve` sees it — so
+  // the rejection guard alone is not enough (same fix as `ackUpstream` in rpc/src/hub-mux.ts). An
+  // escape here would kill the pump's IIFE.
+  const ackHandled = (sequenceID: string): void => {
+    try {
+      void Promise.resolve(subscription.ack?.(sequenceID)).catch(() => {})
+    } catch {
+      // ignore
+    }
+  }
+
   const readable = new ReadableStream<R>(
     {
       start(controller) {
@@ -331,54 +351,72 @@ export function createHubTunnelTransport<R, W>(
               return
             }
             const message = result.value
-            if (message.topicID !== receiveTopicID) {
-              onEvent?.({ type: 'frame-dropped', reason: 'topic-mismatch' })
-              continue
-            }
-            let frame: HubFrame
+            // Every outcome below is HANDLED (enqueued, filtered, deduped, undecodable, session-end)
+            // except the two teardown branches — backpressure overflow and a non-FrameDecodeError
+            // decode — which flip this false: the frame never reached the consumer, so acking would
+            // report a lost frame as handled. The ack lives in the `finally` (one place, not one per
+            // `continue`) so a new drop path can't skip it.
+            let handled = true
             try {
-              frame = decodeFrame(message.payload)
-            } catch (error) {
-              if (error instanceof FrameDecodeError) continue
-              teardown(error)
-              return
-            }
-            if (lockedSessionID == null) {
-              lockedSessionID = frame.sessionID
-            } else if (frame.sessionID !== lockedSessionID) {
-              onEvent?.({ type: 'frame-dropped', reason: 'session-mismatch' })
-              continue
-            }
-            if (frame.kind === 'session-end') {
-              torndown = true
-              clearIdleTimer()
-              try {
-                controller.close()
-              } catch {
-                // already closed
+              if (message.topicID !== receiveTopicID) {
+                onEvent?.({ type: 'frame-dropped', reason: 'topic-mismatch' })
+                continue
               }
-              iterator.return?.()
-              onSessionEnd?.()
-              return
+              let frame: HubFrame
+              try {
+                frame = decodeFrame(message.payload)
+              } catch (error) {
+                if (error instanceof FrameDecodeError) continue
+                handled = false
+                teardown(error)
+                return
+              }
+              if (lockedSessionID == null) {
+                lockedSessionID = frame.sessionID
+              } else if (frame.sessionID !== lockedSessionID) {
+                onEvent?.({ type: 'frame-dropped', reason: 'session-mismatch' })
+                continue
+              }
+              if (frame.kind === 'session-end') {
+                torndown = true
+                clearIdleTimer()
+                try {
+                  controller.close()
+                } catch {
+                  // already closed
+                }
+                // Before `iterator.return?.()`: a subscription whose close abandons outstanding
+                // claims (hub-mux's mailbox facade does) can no longer honour an ack afterwards.
+                ackHandled(message.sequenceID)
+                handled = false
+                iterator.return?.()
+                onSessionEnd?.()
+                return
+              }
+              if (frame.kind !== 'message') {
+                continue
+              }
+              if (frame.seq < expectedSeq) {
+                onEvent?.({ type: 'frame-dropped', reason: 'dedup' })
+                continue
+              }
+              const desired = controller.desiredSize
+              if (desired != null && desired <= 0) {
+                const err = new BackpressureError(
+                  `Hub tunnel inbox overflow: capacity=${inboxCapacity} session=${lockedSessionID}`,
+                )
+                handled = false
+                teardown(err)
+                return
+              }
+              expectedSeq = frame.seq + 1
+              markActivity()
+              controller.enqueue(frame.body as R)
+            } finally {
+              if (handled) {
+                ackHandled(message.sequenceID)
+              }
             }
-            if (frame.kind !== 'message') {
-              continue
-            }
-            if (frame.seq < expectedSeq) {
-              onEvent?.({ type: 'frame-dropped', reason: 'dedup' })
-              continue
-            }
-            const desired = controller.desiredSize
-            if (desired != null && desired <= 0) {
-              const err = new BackpressureError(
-                `Hub tunnel inbox overflow: capacity=${inboxCapacity} session=${lockedSessionID}`,
-              )
-              teardown(err)
-              return
-            }
-            expectedSeq = frame.seq + 1
-            markActivity()
-            controller.enqueue(frame.body as R)
           }
         })()
       },

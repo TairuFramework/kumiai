@@ -255,7 +255,7 @@ export type ProtocolSurface<Protocol extends ProtocolDefinition> = {
   dispatch: (prc: string, data?: Record<string, unknown>) => Promise<void>
   request: (prc: string, prm?: unknown, options?: RequestOptions) => Promise<unknown>
   gather: (prc: string, prm?: unknown, options?: GatherOptions) => Promise<Array<GatheredReply>>
-  to: (memberDID: string) => Client<Protocol>
+  to: (memberDID: string) => Promise<Client<Protocol>>
 }
 
 export type GroupPeer<Protocols extends Record<string, ProtocolDefinition>> = {
@@ -475,6 +475,19 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   const openedFrames = new WeakMap<Uint8Array, GroupUnwrapResult>()
 
   /**
+   * Whether a frame `unwrap` just refused might still open once this handle catches up — read from
+   * its cleartext epoch, never the throw (which can't tell "not reached yet" from "never again").
+   * On the open-once failure path ({@link "open-once".OpenOncePathParams.retainOnFailure}) answering
+   * `true` withholds the ack so the frame survives a reconnect. Mailbox-class frames have no staging
+   * of their own (unlike `app-lane.ts`'s `note`/`ahead`), which is what made acking a transient
+   * refusal here a permanent loss.
+   */
+  const retainOnFailure = (message: StoredMessage): boolean => {
+    const at = crypto.frameEpoch(message.payload)
+    return at != null && at > crypto.epoch()
+  }
+
+  /**
    * The app lane's inbound path: one open per topic, fanned out as plaintext, with each frame's
    * log position noted before the open. Every consumer's own `unwrap` is then a pure lookup of the
    * opened result ({@link openedFrames}), and nothing downstream touches the handle.
@@ -486,6 +499,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       mux,
       topicID,
       unwrap: crypto.unwrap,
+      retainOnFailure,
       project: (_message, opened) => {
         const { payload, senderDID } = opened
         if (typeof senderDID !== 'string' || senderDID === '') {
@@ -552,7 +566,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     const selfInbox = inboxTopic(anchor.secret, anchor.epoch, localDID)
     inboxLane = {
       topicID: selfInbox,
-      path: createInboxPath({ mux, topicID: selfInbox, unwrap: crypto.unwrap }),
+      path: createInboxPath({ mux, topicID: selfInbox, unwrap: crypto.unwrap, retainOnFailure }),
     }
     for (const [name, protocol] of Object.entries(protocols)) {
       // The app topic is bound to the ANCHOR, not the live epoch — see {@link sealForSegment}.
@@ -662,7 +676,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       },
       request: (prc, prm, options) => runtime.client.request(prc, prm, options),
       gather: (prc, prm, options) => runtime.client.gather(prc, prm, options),
-      to: (memberDID) => {
+      to: async (memberDID) => {
         const cached = runtime.directed.get(memberDID)
         if (cached != null) return cached.client
         const lane = inboxLane
@@ -1314,6 +1328,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   }
 
   const onRendezvousMessage = (message: StoredMessage, ack: () => void): void => {
+    // Acked immediately, unlike the commit lane: rendezvous is retried request/reply (see the
+    // "a refused or failed reply" note in `handleRecoveryRequest` above), so losing this specific
+    // delivery just means the requester's retry or another responder covers it.
     ack()
     if (mls == null) return
     let frame: ReturnType<typeof decodeHandshakeFrame>
@@ -1943,7 +1960,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         dispatch: (prc, data) => withReady(() => surfaceFor(key).dispatch(prc, data)),
         request: (prc, prm, options) => withReady(() => surfaceFor(key).request(prc, prm, options)),
         gather: (prc, prm, options) => withReady(() => surfaceFor(key).gather(prc, prm, options)),
-        to: (memberDID) => surfaceFor(key).to(memberDID),
+        to: (memberDID) => withReady(() => surfaceFor(key).to(memberDID)),
       } as ProtocolSurface<Protocols[K]>
     },
     commit,
@@ -1951,7 +1968,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     recover,
     resync: async () => {
       await ready
-      await rebuildEpoch()
+      // Every other `rebuildEpoch` caller runs under the commit mutex. Unlocked, a host-called
+      // resync interleaves with an inbound-commit rebuild and runs two teardown/build cycles over
+      // one set of runtimes. Safe to wrap only because `rebuildEpoch` takes no lock itself and
+      // this is a top-level entry — `runSerial` is not reentrant.
+      await runSerial(() => rebuildEpoch())
     },
     anchorEpoch: () => anchor.epoch,
     dispose: async () => {

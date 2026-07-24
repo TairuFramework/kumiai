@@ -21,9 +21,10 @@ The oldest work in the repo. Extracted by the 2026-07-02 audit, then stalled fro
 2026-07-23 behind a sequencing instruction that gated high-severity findings on medium ones.
 Unblocked at the 2026-07-23 triage.
 
-1. [High-severity correctness](./next/2026-07-23-high-severity-correctness.md) — `to()` ungated on
-   `ready`, `resync()` outside the commit mutex, the dead durable-ack contract. All three verified
-   open against `5eb220a`.
+1. ~~High-severity correctness~~ — **done** (2026-07-24), see
+   [completed](./completed/2026-07-24-high-severity-correctness.complete.md). `to()` gated on
+   `ready`, `resync()` under the commit mutex, and the durable-ack relay reconnected across five
+   severed points.
 2. [`GroupAnchor.version` enforcement](./next/2026-07-23-group-anchor-version-enforcement.md) —
    small, and ship-before-needed: the cost of deferring grows with every release that goes out
    without it.

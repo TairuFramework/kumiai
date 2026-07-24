@@ -96,10 +96,9 @@ describe('group-rpc end-to-end (3 members over one hub)', () => {
     expect(all.map((r) => (r.value as { id: string }).id).sort()).toEqual(['bob', 'carol'])
 
     // 4) Directed stream from bob.
-    const stream = alice
-      .protocol('app')
-      .to('bob')
-      .createStream('app/feed', { param: { count: 3 } })
+    const stream = (await alice.protocol('app').to('bob')).createStream('app/feed', {
+      param: { count: 3 },
+    })
     const got: Array<number> = []
     const reader = stream.readable.getReader()
     while (true) {
@@ -110,7 +109,9 @@ describe('group-rpc end-to-end (3 members over one hub)', () => {
     expect(got).toEqual([0, 1, 2])
 
     // 5) Directed channel with bob.
-    const channel = alice.protocol('app').to('bob').createChannel('app/sync', { param: {} })
+    const channel = (await alice.protocol('app').to('bob')).createChannel('app/sync', {
+      param: {},
+    })
     await channel.send({ n: 5 })
     const back = await channel.readable.getReader().read()
     expect((back.value as { doubled: number }).doubled).toBe(10)
