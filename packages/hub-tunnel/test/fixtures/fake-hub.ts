@@ -1,7 +1,12 @@
 import { RetentionExceededError, type StoredMessage } from '@kumiai/hub-protocol'
 import { EventEmitter } from '@sozai/event'
 
-import type { HubPublishParams, HubSubscribeOptions, MailboxHubEvent } from '../../src/transport.js'
+import type {
+  HubPublishParams,
+  HubSubscribeOptions,
+  MailboxHubEvent,
+  MailboxHubEvents,
+} from '../../src/transport.js'
 
 /** 30 days in seconds — `createMemoryStore`'s own default ceiling. */
 export const DEFAULT_MAX_RETENTION = 2_592_000
@@ -46,20 +51,20 @@ export class FakeHub {
     this.#maxRetention = options.maxRetention ?? DEFAULT_MAX_RETENTION
   }
 
-  get events(): EventEmitter<{ status: MailboxHubEvent }> {
+  get events(): MailboxHubEvents {
     return this.#events
   }
 
   simulateReconnecting(): void {
-    void this.#events.emit('status', { type: 'reconnecting' })
+    void this.#events.emit('status', { type: 'reconnecting' }).catch(() => {})
   }
 
   simulateConnected(): void {
-    void this.#events.emit('status', { type: 'connected' })
+    void this.#events.emit('status', { type: 'connected' }).catch(() => {})
   }
 
   simulateDisconnected(): void {
-    void this.#events.emit('status', { type: 'disconnected' })
+    void this.#events.emit('status', { type: 'disconnected' }).catch(() => {})
   }
 
   /**
