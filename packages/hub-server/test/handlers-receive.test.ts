@@ -116,7 +116,6 @@ function drainGateStore(
   gate: Promise<void>,
 ): {
   store: HubStore
-  fetchCalls: () => number
 } {
   let call = 0
   const store = {
@@ -130,7 +129,7 @@ function drainGateStore(
       return hasMore ? { messages, cursor, hasMore: true } : { messages, cursor }
     },
   } as HubStore
-  return { store, fetchCalls: () => call }
+  return { store }
 }
 
 function frame(seq: string, topic = 'topic:1'): StoredMessage {
@@ -295,6 +294,40 @@ describe('hub/v1/receive backpressure (H3)', () => {
       new Promise((_, reject) => setTimeout(() => reject(new Error('never tore down')), 200)),
     ])
 
+    expect(registry.isWriterBound(DID)).toBe(false)
+  })
+
+  test('a stalled reader during the drain does not grow liveBuffer without bound (H3 during draining)', async () => {
+    // Backlog present; the write of the first backlog frame stalls, so the drain never leaves 'draining'.
+    const { store } = drainGateStore([[frame('000000000001')]], Promise.resolve())
+    const registry = new HubClientRegistry()
+    const handlers = createHandlers({ registry, store, receiveBufferLimit: 4 })
+
+    const controller = new AbortController()
+    const stalled = new WritableStream({
+      write() {
+        return new Promise<void>(() => {})
+      },
+    })
+    // Not awaited: per the Streams spec, aborting a stream never preempts an in-flight underlying-
+    // sink write, so the handler's own returned promise cannot settle while this write is stuck —
+    // that's inherent to a genuinely wedged transport, not something `finish()` can fix. The
+    // observable side effect under test (the registry writer release) runs synchronously inside
+    // `finish()` as soon as the cap is hit, so assert on that directly instead of on `done`.
+    void handlers['hub/v1/receive'](
+      receiveCtx({ acks: ackStream([]), signal: controller.signal, writable: stalled }),
+    )
+
+    await new Promise((resolve) => setTimeout(resolve, 10)) // drain reaches the stalled write, stays draining
+    // Push more live frames than the cap while draining; the buffer must not grow unbounded — teardown fires.
+    for (let i = 2; i <= 10; i++) {
+      registry.getClient(DID)?.sendMessage?.(frame(String(i).padStart(12, '0')))
+    }
+
+    const deadline = Date.now() + 200
+    while (registry.isWriterBound(DID) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
     expect(registry.isWriterBound(DID)).toBe(false)
   })
 })

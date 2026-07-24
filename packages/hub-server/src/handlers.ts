@@ -84,7 +84,13 @@ export const DEFAULT_KEYPACKAGE_FETCH_LIMITS: KeyPackageFetchLimits = {
   windowMs: 60_000,
 }
 
-/** Max frames queued-but-unflushed on a single receive channel before it falls back to the store. */
+/**
+ * Max frames queued-but-unflushed on a single receive channel before it falls back to the store.
+ *
+ * Should be >= the drain's 50-frame fetch page size: the drain enqueues a whole backlog page
+ * before awaiting, so a limit below 50 would trip the cap on the very first page regardless of
+ * writer health. The default of 256 is safely above it.
+ */
 export const DEFAULT_RECEIVE_BUFFER_LIMIT = 256
 
 export type CreateHandlersParams = {
@@ -93,6 +99,8 @@ export type CreateHandlersParams = {
   authorize?: AuthorizeHook
   rateLimits?: Partial<HubRateLimits>
   keyPackageFetchLimits?: Partial<KeyPackageFetchLimits>
+  /** Max frames queued-but-unflushed on a receive channel. See {@link DEFAULT_RECEIVE_BUFFER_LIMIT}
+   * for the >= 50-frame-page floor this should respect. Default: 256 */
   receiveBufferLimit?: number
 }
 
@@ -386,9 +394,23 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       }
 
       // The registry callback (publish fan-out). Buffers during the drain, writes once live.
+      // INVARIANT this and the flush's `> lastServed` dedup both depend on: the publish path must
+      // keep a FIXED await-depth between the store minting a sequenceID and its call to
+      // `sendMessage`, so concurrent publishes reach onLive in the same order their sequenceIDs
+      // were minted. Break that ordering and the dedup doesn't just reorder frames — it silently
+      // DROPS a lower-seq frame that arrives after a higher one already raised lastServed.
       const onLive = (message: StoredMessage): void => {
         const frame = toReceiveFrame(message)
         if (phase === 'draining') {
+          // Bound liveBuffer the same way pushWrite bounds the write queue: a stalled-but-still-
+          // connected reader can hang writeChain indefinitely, and buffered frames never reach
+          // pushWrite's own cap check. Without this, the drain never completes and every publish
+          // grows liveBuffer without bound. Drop the frame instead — it stays pending in the store
+          // and redelivers on reconnect (store-and-forward), same fallback pushWrite's cap uses.
+          if (liveBuffer.length >= receiveBufferLimit) {
+            finish()
+            return
+          }
           liveBuffer.push(frame)
         } else {
           pushWrite(frame)
@@ -439,6 +461,7 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         }
       } catch (error) {
         // A synchronous drain error (e.g. store.fetch threw): clean up and reject the handler.
+        tornDown = true
         if (receiveToken != null) registry.releaseReceiveWriter(clientDID, receiveToken)
         registry.unregisterIfIdle(clientDID)
         reader.cancel().catch(() => {})
