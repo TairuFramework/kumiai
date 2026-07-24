@@ -366,16 +366,23 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       const token = receiveToken
 
       void (async () => {
-        try {
-          while (true) {
-            const { done, value } = await reader.read()
-            if (done) break
-            if (value?.ack != null) {
-              await store.ack({ recipientDID: clientDID, sequenceIDs: value.ack })
+        while (true) {
+          let result: { done: boolean; value?: { ack?: Array<string> } }
+          try {
+            result = await reader.read()
+          } catch {
+            break // reader errored: the channel is closed
+          }
+          if (result.done) break
+          const ack = result.value?.ack
+          if (ack != null) {
+            try {
+              await store.ack({ recipientDID: clientDID, sequenceIDs: ack })
+            } catch {
+              // A failed ack is safe to drop: the frame stays pending and the client re-acks it on
+              // its next ack round. Do NOT break — that would silently stop all later acks.
             }
           }
-        } catch {
-          // Channel closed
         }
       })()
 
