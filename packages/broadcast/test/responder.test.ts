@@ -1,4 +1,5 @@
 import { fromUTF } from '@sozai/codec'
+import { EventEmitter } from '@sozai/event'
 import { createRuntime } from '@sozai/runtime'
 import { describe, expect, test, vi } from 'vitest'
 
@@ -15,7 +16,7 @@ describe('createBroadcastResponder', () => {
     const responder = createBroadcastResponder({
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
       from: 'peer-1',
-      handlers: { add: (prm) => (prm as { n: number }).n + 1 },
+      requestHandlers: { add: (prm) => (prm as { n: number }).n + 1 },
     })
     const client = new BroadcastClient({
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
@@ -33,7 +34,7 @@ describe('createBroadcastResponder', () => {
     const responder = createBroadcastResponder({
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
       from: 'peer-1',
-      handlers: {
+      requestHandlers: {
         boom: () => {
           throw new Error('kaboom')
         },
@@ -56,7 +57,7 @@ describe('createBroadcastResponder', () => {
     const responder = createBroadcastResponder({
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
       from: 'peer-1',
-      handlers: { ping: () => 'pong' },
+      requestHandlers: { ping: () => 'pong' },
     })
     const client = new BroadcastClient({
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
@@ -84,14 +85,14 @@ describe('createBroadcastResponder', () => {
     const fast = createBroadcastResponder({
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
       from: 'peer-1',
-      handlers: { catchup: suppressible(() => 'answer', { jitterMs: 100 }) },
+      requestHandlers: { catchup: suppressible(() => 'answer', { jitterMs: 100 }) },
       getJitterMs: () => 0,
     })
     const slowHandler = vi.fn(() => 'answer')
     const slow = createBroadcastResponder({
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
       from: 'peer-2',
-      handlers: { catchup: suppressible(slowHandler, { jitterMs: 100 }) },
+      requestHandlers: { catchup: suppressible(slowHandler, { jitterMs: 100 }) },
       getJitterMs: () => 50,
     })
     const client = new BroadcastClient({
@@ -115,7 +116,7 @@ describe('createBroadcastResponder', () => {
     const failing = createBroadcastResponder({
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
       from: 'peer-1',
-      handlers: {
+      requestHandlers: {
         ask: suppressible(
           () => {
             throw new Error('nope')
@@ -128,7 +129,7 @@ describe('createBroadcastResponder', () => {
     const healthy = createBroadcastResponder({
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
       from: 'peer-2',
-      handlers: { ask: suppressible(() => 'ok', { jitterMs: 100 }) },
+      requestHandlers: { ask: suppressible(() => 'ok', { jitterMs: 100 }) },
       getJitterMs: () => 50,
     })
     const client = new BroadcastClient({
@@ -149,7 +150,7 @@ describe('createBroadcastResponder', () => {
     const responder = createBroadcastResponder({
       transport: createBroadcastTransport({ topicID: TOPIC, bus }),
       from: 'peer-1',
-      handlers: { ping: suppressible(() => 'pong', { jitterMs: 0 }) },
+      requestHandlers: { ping: suppressible(() => 'pong', { jitterMs: 0 }) },
       getJitterMs: () => 0,
     })
     // A raw error `res` frame is injected onto the bus for the exact rid the client is
@@ -171,5 +172,67 @@ describe('createBroadcastResponder', () => {
 
     await client.dispose()
     await responder.dispose()
+  })
+
+  test('dispatches a fire-and-forget event to the events emitter', async () => {
+    const bus = createMemoryBus()
+    const events = new EventEmitter<{ note: { data: unknown; senderDID?: string } }>()
+    const received: Array<{ data: unknown; senderDID?: string }> = []
+    events.on('note', (e) => {
+      received.push(e)
+    })
+    const responder = createBroadcastResponder({
+      transport: createBroadcastTransport({ topicID: TOPIC, bus }),
+      from: 'peer-1',
+      requestHandlers: {},
+      events,
+    })
+    const client = new BroadcastClient({
+      transport: createBroadcastTransport({ topicID: TOPIC, bus }),
+    })
+
+    await client.dispatch('note', { hello: 'world' })
+    await new Promise<void>((resolve) => setTimeout(resolve, 10))
+
+    expect(received).toHaveLength(1)
+    expect(received[0]?.data).toEqual({ hello: 'world' })
+
+    await client.dispose()
+    await responder.dispose()
+  })
+
+  test('aborts an in-flight request handler on dispose', async () => {
+    const bus = createMemoryBus()
+    let capturedSignal: AbortSignal | undefined
+    let release: () => void = () => {}
+    const started = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const responder = createBroadcastResponder({
+      transport: createBroadcastTransport({ topicID: TOPIC, bus }),
+      from: 'peer-1',
+      requestHandlers: {
+        slow: (_prm, context) => {
+          capturedSignal = context?.signal
+          release()
+          // Never resolves on its own; the test disposes the responder to abort it.
+          return new Promise((resolve) => {
+            context?.signal?.addEventListener('abort', () => resolve('aborted'), { once: true })
+          })
+        },
+      },
+    })
+    const client = new BroadcastClient({
+      transport: createBroadcastTransport({ topicID: TOPIC, bus }),
+    })
+
+    void client.request('slow', {}, { timeoutMs: 1000 }).catch(() => {})
+    await started
+    expect(capturedSignal?.aborted).toBe(false)
+
+    await responder.dispose()
+    expect(capturedSignal?.aborted).toBe(true)
+
+    await client.dispose()
   })
 })

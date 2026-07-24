@@ -1,12 +1,18 @@
 import type { TransportType } from '@enkaku/transport'
+import type { EventEmitter } from '@sozai/event'
 
 import type { ReplyData, RequestData } from './client.js'
 import type { BroadcastMessage } from './transport.js'
 import { defaultJitter, defaultSleep, isSuppressible } from './utils.js'
 
+/** The payload an inbound fire-and-forget event carries to its listener. */
+export type BusEvent = { data: unknown; senderDID?: string }
+/** Event fan-out keyed by procedure name. */
+export type BusEvents = Record<string, BusEvent>
+
 export type BroadcastHandler = (
   prm: unknown,
-  context?: { senderDID?: string },
+  context?: { senderDID?: string; signal?: AbortSignal },
 ) => unknown | Promise<unknown>
 export type SuppressConfig = { jitterMs?: number; suppressTtlMs?: number }
 export type SuppressibleHandler = BroadcastHandler & { suppress: SuppressConfig }
@@ -32,7 +38,9 @@ export type BroadcastResponderParams = {
    * reaches a consumer. Self-asserted, and only ever believed where there is no one else to ask.
    */
   from: string
-  handlers: Record<string, BroadcastHandler | SuppressibleHandler>
+  requestHandlers: Record<string, BroadcastHandler | SuppressibleHandler>
+  /** Optional fan-out for fire-and-forget event frames (typ 'event', no req/res kind). */
+  events?: EventEmitter<BusEvents>
   sleep?: (ms: number) => Promise<void>
   getJitterMs?: (maxMs: number) => number
 }
@@ -48,7 +56,7 @@ type InboundData = {
 export function createBroadcastResponder(params: BroadcastResponderParams): {
   dispose: () => Promise<void>
 } {
-  const { transport, from, handlers } = params
+  const { transport, from, requestHandlers, events } = params
   const sleep = params.sleep ?? defaultSleep
   const getJitterMs = params.getJitterMs ?? defaultJitter
 
@@ -56,6 +64,9 @@ export function createBroadcastResponder(params: BroadcastResponderParams): {
   // is registered, subsequent markReplied calls for the same rid are no-ops so
   // the original (possibly longer) TTL is never shortened by the looped-back reply.
   const suppressTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  // In-flight request controllers, aborted on dispose so a torn-down epoch stops
+  // its handlers rather than orphaning them.
+  const inFlight = new Set<AbortController>()
   let running = true
 
   const markReplied = (rid: string, ttlMs: number) => {
@@ -84,9 +95,11 @@ export function createBroadcastResponder(params: BroadcastResponderParams): {
       }
     }
 
+    const controller = new AbortController()
+    inFlight.add(controller)
     let reply: ReplyData
     try {
-      const ok = await handler(request.prm, { senderDID })
+      const ok = await handler(request.prm, { senderDID, signal: controller.signal })
       reply = { kind: 'res', rid: request.rid, ok }
     } catch (error) {
       reply = {
@@ -94,6 +107,8 @@ export function createBroadcastResponder(params: BroadcastResponderParams): {
         rid: request.rid,
         err: error instanceof Error ? error.message : String(error),
       }
+    } finally {
+      inFlight.delete(controller)
     }
     const ttlMs = isSuppressible(handler)
       ? (handler.suppress.suppressTtlMs ?? DEFAULT_SUPPRESS_TTL_MS)
@@ -128,19 +143,30 @@ export function createBroadcastResponder(params: BroadcastResponderParams): {
         }
         continue
       }
-      if (data?.kind !== 'req' || typeof data.rid !== 'string' || typeof payload.prc !== 'string') {
+      if (typeof payload.prc !== 'string') {
         continue
       }
-      const handler = handlers[payload.prc]
-      if (handler != null) {
-        void handleRequest(payload.prc, data as RequestData, handler, msg.senderDID)
+      if (data?.kind === 'req' && typeof data.rid === 'string') {
+        const handler = requestHandlers[payload.prc]
+        if (handler != null) {
+          void handleRequest(payload.prc, data as RequestData, handler, msg.senderDID)
+        }
+        continue
       }
+      // Fire-and-forget event: hand the raw data to the emitter. No listener → no-op.
+      void events
+        ?.emit(payload.prc, { data: payload.data, senderDID: msg.senderDID })
+        .catch(() => {})
     }
   })().catch(() => {})
 
   return {
     dispose: async () => {
       running = false
+      for (const controller of inFlight) {
+        controller.abort()
+      }
+      inFlight.clear()
       for (const timer of suppressTimers.values()) {
         clearTimeout(timer)
       }

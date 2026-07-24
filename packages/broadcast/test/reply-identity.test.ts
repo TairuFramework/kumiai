@@ -83,7 +83,7 @@ describe('broadcast reply identity', () => {
     const bob = createBroadcastResponder({
       transport: memberTransport(bus, 'did:key:bob'),
       from: 'did:key:impostor',
-      handlers: { census: () => 'bob-answer' },
+      requestHandlers: { census: () => 'bob-answer' },
     })
     const client = new BroadcastClient({ transport: memberTransport(bus, 'did:key:alice') })
 
@@ -106,7 +106,7 @@ describe('broadcast reply identity', () => {
     const bob = createBroadcastResponder({
       transport: memberTransport(bus, 'did:key:bob'),
       from: 'did:key:bob',
-      handlers: {
+      requestHandlers: {
         census: async () => {
           await sleep(40)
           return 'real'
@@ -224,7 +224,7 @@ describe('broadcast reply identity', () => {
     const bob = createBroadcastResponder({
       transport: memberTransport(bus, 'did:key:bob'),
       from: 'did:key:bob',
-      handlers: { census: () => 'answer' },
+      requestHandlers: { census: () => 'answer' },
     })
 
     const replies = await client.gather('census', {}, { timeoutMs: 150 })
