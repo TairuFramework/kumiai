@@ -5,7 +5,7 @@ import {
   type RequestHandler,
 } from '@enkaku/server'
 import type { HubProtocol, HubStore, StoredMessage } from '@kumiai/hub-protocol'
-import { hubErrorCodeOf } from '@kumiai/hub-protocol'
+import { hubErrorCodeOf, InvalidPayloadError } from '@kumiai/hub-protocol'
 import { fromB64, toB64 } from '@sozai/codec'
 
 import { createRateLimiter, type RateLimitConfig } from './rateLimit.js'
@@ -166,7 +166,16 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       // `retain` defaults to 'mailbox' here, matching the store's own default (`memoryStore.ts`) —
       // the hook must never see an absent retain, since `AuthorizeRequest`'s `publish` variant
       // declares it required.
-      const payloadBytes = fromB64(payload)
+      let payloadBytes: Uint8Array
+      try {
+        payloadBytes = fromB64(payload)
+      } catch (error) {
+        rethrowAsHandlerError(
+          new InvalidPayloadError(
+            error instanceof Error ? error.message : 'Invalid base64 payload encoding',
+          ),
+        )
+      }
       const retain = ctx.param.retain ?? 'mailbox'
       const decision = normalizeAuthorizeDecision(
         await authorize({

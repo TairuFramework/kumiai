@@ -306,6 +306,19 @@ describe('hub pub/sub', () => {
     await ctx.dispose()
   })
 
+  test('a malformed base64 payload is refused with HUB_INVALID_PAYLOAD', async () => {
+    const ctx = createTestHub()
+    const { client: alice } = ctx.connect()
+
+    await expect(
+      alice.request('hub/v1/publish', {
+        param: { topicID: TOPIC, payload: '!!!not base64!!!' },
+      }),
+    ).rejects.toMatchObject({ code: 'HUB_INVALID_PAYLOAD' })
+
+    await ctx.dispose()
+  })
+
   /**
    * A SECOND `hub/v1/receive` FOR THE SAME DID TAKES THE LANE, and the first one ends.
    *
