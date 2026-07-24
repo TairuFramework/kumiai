@@ -56,15 +56,15 @@ export class FakeHub {
   }
 
   simulateReconnecting(): void {
-    void this.#events.emit('status', { type: 'reconnecting' }).catch(() => {})
+    this.#events.fire('status', { type: 'reconnecting' })
   }
 
   simulateConnected(): void {
-    void this.#events.emit('status', { type: 'connected' }).catch(() => {})
+    this.#events.fire('status', { type: 'connected' })
   }
 
   simulateDisconnected(): void {
-    void this.#events.emit('status', { type: 'disconnected' }).catch(() => {})
+    this.#events.fire('status', { type: 'disconnected' })
   }
 
   /**

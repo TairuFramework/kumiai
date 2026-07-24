@@ -40,8 +40,8 @@ catalogs:
       specifier: ^0.2.0
       version: 0.2.0
     '@sozai/event':
-      specifier: ^0.1.1
-      version: 0.1.1
+      specifier: ^0.1.2
+      version: 0.1.2
     '@sozai/log':
       specifier: ^0.2.0
       version: 0.2.0
@@ -49,8 +49,8 @@ catalogs:
       specifier: ^0.1.0
       version: 0.1.0
     '@sozai/runtime-expo':
-      specifier: ^0.2.1
-      version: 0.2.1
+      specifier: ^0.2.2
+      version: 0.2.2
     '@sozai/schema':
       specifier: ^0.1.1
       version: 0.1.1
@@ -109,7 +109,7 @@ importers:
         version: 0.2.0
       '@sozai/event':
         specifier: 'catalog:'
-        version: 0.1.1
+        version: 0.1.2
       '@sozai/runtime':
         specifier: 'catalog:'
         version: 0.1.0
@@ -163,7 +163,7 @@ importers:
         version: 0.20.0
       '@sozai/event':
         specifier: 'catalog:'
-        version: 0.1.1
+        version: 0.1.2
     devDependencies:
       vitest:
         specifier: 'catalog:'
@@ -188,7 +188,7 @@ importers:
         version: 0.2.0
       '@sozai/event':
         specifier: 'catalog:'
-        version: 0.1.1
+        version: 0.1.2
     devDependencies:
       '@enkaku/client':
         specifier: 'catalog:'
@@ -216,7 +216,7 @@ importers:
         version: 0.2.0
       '@sozai/event':
         specifier: 'catalog:'
-        version: 0.1.1
+        version: 0.1.2
       '@sozai/schema':
         specifier: 'catalog:'
         version: 0.1.1
@@ -317,7 +317,7 @@ importers:
         version: 0.2.0
       '@sozai/event':
         specifier: 'catalog:'
-        version: 0.1.1
+        version: 0.1.2
       '@sozai/log':
         specifier: 'catalog:'
         version: 0.2.0
@@ -360,7 +360,7 @@ importers:
         version: link:../../packages/mls
       '@sozai/runtime-expo':
         specifier: 'catalog:'
-        version: 0.2.1(expo@57.0.8)
+        version: 0.2.2(expo@57.0.8)
       expo:
         specifier: 'catalog:'
         version: 57.0.8(@babel/core@7.29.7(supports-color@8.1.1))(@expo/dom-webview@57.0.1)(react-native@0.86.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.2.17)(react@19.2.3)(supports-color@8.1.1))(react@19.2.3)(supports-color@8.1.1)(typescript@6.0.3)
@@ -1645,6 +1645,9 @@ packages:
   '@sozai/event@0.1.1':
     resolution: {integrity: sha512-kWsu7tKy9SLq5mn8ZavcGqPg7E37mwMkI3F96cstNFh1zexmYqHphMl0ya43oXY/3ONW4j8o/zziw82MYrbLnA==}
 
+  '@sozai/event@0.1.2':
+    resolution: {integrity: sha512-tMT15Zu7I7l59GcewNdQkr6grTjBrijCzoesZqzL+C4rZNmWXUPPzVlvk/zzlSpvxEfvLA8MgAb5FIBRi9eJtw==}
+
   '@sozai/execution@0.2.1':
     resolution: {integrity: sha512-vQLquTIbnD+WQBpszBsDGQlU5DBIip/gZ7aqq0uHem2C5aN/TGPCrcpqelyiYMGswBNEJ2u/CL6/EmIo4cBHRA==}
 
@@ -1657,8 +1660,8 @@ packages:
   '@sozai/result@0.2.0':
     resolution: {integrity: sha512-voMSX9KYJG6zlCvCYmiBvhMmgM1rCXQw0I/tOK+GaaXtZTDL+GXOhdN9eAs6tI/bLKub6UqZwsS/iw2JFKujTw==}
 
-  '@sozai/runtime-expo@0.2.1':
-    resolution: {integrity: sha512-QXu8lpewhRS/jOS64wZaxdpR75Rr1Ds33lmrrC/DEDl9gv1uQHrPYs/F86ALmQ6IIOdyG9gdo/1v9qFUE5pbnA==}
+  '@sozai/runtime-expo@0.2.2':
+    resolution: {integrity: sha512-dGbjx1Rk3QumXy+r92mtAS16UdqWsNL37jmzYug/OpVM8+TuoCQH9NmRtBfPRHnfvGS1AHR5SMEAluPlRCDnvA==}
 
   '@sozai/runtime@0.1.0':
     resolution: {integrity: sha512-9WpqQ/UKDOlNWfiGCDjuW3hl9+sXrXuX2lbGE80ITbrhzueagwrEdboYkQhrHN8s8I/F8/ZM9hz+Fv3j7gUk2Q==}
@@ -2454,11 +2457,6 @@ packages:
     peerDependencies:
       expo: '*'
       react-native: '*'
-
-  expo-crypto@57.0.0:
-    resolution: {integrity: sha512-vd0kdUO14h9CgPcgzcR8nmy/wgz3zSOhQmucnbDdyn/z9eAeR2IB5BKaDvPbg/lrIT+KweGAV5IlrK5PZFqUSQ==}
-    peerDependencies:
-      expo: '*'
 
   expo-crypto@57.0.1:
     resolution: {integrity: sha512-xwegXQw3ATgeL1ZuqbSNrGzOeG+zNeh6Z6DSJk825Qpa3TEQQ1kG3ioE1p3g/SNF373BAVz2iBKUTSytlIbBRA==}
@@ -4835,7 +4833,7 @@ snapshots:
       '@kokuin/capability': 0.2.1
       '@kokuin/token': 0.3.0
       '@sozai/async': 0.2.1
-      '@sozai/event': 0.1.1
+      '@sozai/event': 0.1.2
       '@sozai/log': 0.2.0
       '@sozai/otel': 0.3.0
       '@sozai/runtime': 0.1.0
@@ -4845,7 +4843,7 @@ snapshots:
   '@enkaku/transport@0.20.0':
     dependencies:
       '@sozai/async': 0.2.1
-      '@sozai/event': 0.1.1
+      '@sozai/event': 0.1.2
       '@sozai/stream': 0.2.0
 
   '@esbuild/aix-ppc64@0.28.1':
@@ -5666,6 +5664,11 @@ snapshots:
     dependencies:
       '@sozai/async': 0.2.1
 
+  '@sozai/event@0.1.2':
+    dependencies:
+      '@sozai/async': 0.2.1
+      '@sozai/log': 0.2.0
+
   '@sozai/execution@0.2.1':
     dependencies:
       '@sozai/async': 0.2.1
@@ -5685,10 +5688,10 @@ snapshots:
     dependencies:
       '@sozai/async': 0.2.1
 
-  '@sozai/runtime-expo@0.2.1(expo@57.0.8)':
+  '@sozai/runtime-expo@0.2.2(expo@57.0.8)':
     dependencies:
       '@sozai/runtime': 0.1.0
-      expo-crypto: 57.0.0(expo@57.0.8)
+      expo-crypto: 57.0.1(expo@57.0.8)
     transitivePeerDependencies:
       - expo
 
@@ -6559,10 +6562,6 @@ snapshots:
       react-native: 0.86.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.2.17)(react@19.2.3)(supports-color@8.1.1)
     transitivePeerDependencies:
       - supports-color
-
-  expo-crypto@57.0.0(expo@57.0.8):
-    dependencies:
-      expo: 57.0.8(@babel/core@7.29.7(supports-color@8.1.1))(@expo/dom-webview@57.0.1)(react-native@0.86.0(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.2.17)(react@19.2.3)(supports-color@8.1.1))(react@19.2.3)(supports-color@8.1.1)(typescript@6.0.3)
 
   expo-crypto@57.0.1(expo@57.0.8):
     dependencies:
