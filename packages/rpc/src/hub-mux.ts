@@ -261,6 +261,22 @@ function isPermanentSubscribeFailure(error: unknown): boolean {
 }
 
 /**
+ * DESIGN DECISION: `SubscriptionQuotaExceededError` (wire code `HUB_SUBSCRIPTION_QUOTA`) is
+ * deliberately NOT in the permanent set above, even though a mux subscribe can surface it.
+ *
+ * A quota refusal is a CLEARABLE resource condition — it frees the moment some other peer
+ * unsubscribes from that topic — not a settled fact about the request the way retention (a
+ * fixed policy number) or authz (a fixed policy decision) are. Latching it `permanent: true`
+ * would strand a topic the peer legitimately wants: per the comment on `TopicSubscription`
+ * above, a permanent refusal only clears on a retain asking for a *different* `retention`, so a
+ * peer that keeps asking for the same topic would never re-ask once capacity frees, even though
+ * nothing about ITS request changed. Leaving it transient costs one bounded retry schedule per
+ * hit — the existing retry path already treats "no answer, try again" as cheap — and the topic
+ * is naturally re-asked on the next retain regardless. That is the correct trade here; do not
+ * "fix" this by adding `SubscriptionQuotaExceededError` to `isPermanentSubscribeFailure`.
+ */
+
+/**
  * Multiplex a single hub `receive` drain into a BroadcastBus view, a mailbox-hub view (for
  * directed tunnels), and an onInbound hook (for lazy directed-server accept).
  *

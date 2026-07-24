@@ -33,6 +33,11 @@ export function createRateLimiter(config: RateLimitConfig): RateLimiter {
   const buckets = new Map<string, Bucket>()
   const ttlMs = config.ttlMs ?? 300_000
 
+  // The sweep is O(n) over every live bucket, but it only runs from the `buckets.size >= PRUNE_AT`
+  // branch below — i.e. only on the cold path of a key NOT yet in the map, past the size gate —
+  // so it never runs on the hot path of an existing key's tryConsume. Under a flood of distinct
+  // keys it also evicts little per call (most buckets are freshly created, not yet idle past
+  // `ttlMs`), so the map can still grow past PRUNE_AT; acknowledged, not restructured here.
   function prune(now: number): void {
     for (const [key, bucket] of buckets) {
       // Full-capacity AND idle past the TTL: carries no rate state, so dropping and re-creating it

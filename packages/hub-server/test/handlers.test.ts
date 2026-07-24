@@ -140,6 +140,79 @@ describe('rate limits on mutating operations', () => {
   })
 })
 
+describe('keypackage/fetch ordering: authorize -> per-requester -> per-target', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(0)
+  })
+  afterEach(() => vi.useRealTimers())
+
+  test('an authz-refused fetch does not charge the per-target consumption window', async () => {
+    const deniedDID = 'did:key:denied'
+    const { store, handlers } = setup({
+      keyPackageFetchLimits: { maxPerTargetConsumed: 1, maxRequests: 1000 },
+      authorize: (req) => !(req.action === 'keypackage/fetch' && req.did === deniedDID),
+    })
+    for (let i = 0; i < 5; i++) await store.storeKeyPackage(TARGET, `kp-${i}`)
+
+    await expect(
+      (handlers['hub/v1/keypackage/fetch'] as any)(
+        reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 1 }, deniedDID),
+      ),
+    ).rejects.toMatchObject({ code: HUB_ERROR_CODES.authorizationDenied })
+
+    // The per-target budget (1) is still whole: an allowed requester's fetch (count 1) still
+    // resolves. Had the denied call above charged the per-target window, this budget (1) would
+    // already be spent and the fetch below would reject with keyPackageFetchLimit instead. Its
+    // success proves the authz-refused call charged nothing to the per-target window.
+    await expect(
+      (handlers['hub/v1/keypackage/fetch'] as any)(
+        reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 1 }),
+      ),
+    ).resolves.toMatchObject({ keyPackages: ['kp-0'] })
+  })
+
+  test('a per-requester-throttled fetch does not charge the per-target consumption window', async () => {
+    const { store, handlers } = setup({
+      keyPackageFetchLimits: { maxPerTargetConsumed: 2, maxRequests: 1 },
+    })
+    for (let i = 0; i < 5; i++) await store.storeKeyPackage(TARGET, `kp-${i}`)
+
+    // r1's first fetch: within both the per-requester window (maxRequests: 1) and the per-target
+    // budget (per-requester=1, per-target=1).
+    await expect(
+      (handlers['hub/v1/keypackage/fetch'] as any)(
+        reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 1 }, 'did:key:r1'),
+      ),
+    ).resolves.toMatchObject({ keyPackages: ['kp-0'] })
+
+    // r1's second fetch: throttled by the per-requester window. This call must not charge the
+    // per-target window.
+    await expect(
+      (handlers['hub/v1/keypackage/fetch'] as any)(
+        reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 1 }, 'did:key:r1'),
+      ),
+    ).rejects.toMatchObject({ code: HUB_ERROR_CODES.keyPackageFetchLimit })
+
+    // r2's fetch: the per-target budget (2) still has room (1 -> 2), so this resolves. Had r1's
+    // throttled call above charged the per-target window, the budget (2) would already be spent
+    // and this would reject instead. Its success proves the throttled call charged nothing.
+    await expect(
+      (handlers['hub/v1/keypackage/fetch'] as any)(
+        reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 1 }, 'did:key:r2'),
+      ),
+    ).resolves.toMatchObject({ keyPackages: ['kp-1'] })
+
+    // r3's fetch: the per-target budget (2) is now spent by r1 + r2's two successful fetches,
+    // confirming the per-target cap is real and enforced.
+    await expect(
+      (handlers['hub/v1/keypackage/fetch'] as any)(
+        reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 1 }, 'did:key:r3'),
+      ),
+    ).rejects.toMatchObject({ code: HUB_ERROR_CODES.keyPackageFetchLimit })
+  })
+})
+
 describe('key-package fetch capping and unknown targets (previously untested)', () => {
   test('count is capped at maxCount', async () => {
     const { store, handlers } = setup({ keyPackageFetchLimits: { maxCount: 2 } })
