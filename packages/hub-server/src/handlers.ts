@@ -37,7 +37,7 @@ export type AuthorizeRequest =
   | { action: 'subscribe'; did: string; topicID: string; retention?: number }
   | { action: 'unsubscribe'; did: string; topicID: string }
   | { action: 'topic/fetch'; did: string; topicID: string }
-  | { action: 'keypackage/upload'; did: string; count: number }
+  | { action: 'keypackage/upload'; did: string; count: number; lastResort?: boolean }
   | { action: 'keypackage/fetch'; did: string; targetDID: string; count: number }
 
 /**
@@ -557,10 +557,30 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
     }) as ChannelHandler<HubProtocol, 'hub/v1/receive'>,
 
     'hub/v1/keypackage/upload': (async (ctx) => {
-      const { keyPackages } = ctx.param
+      const { keyPackages, lastResort } = ctx.param
       const clientDID = getClientDID(ctx)
+      // The slot holds one package, so a flagged upload carries exactly one. JSON Schema cannot
+      // express a conditional on a sibling field, so the arity is enforced here.
+      let lastResortPackage: string | null = null
+      if (lastResort === true) {
+        const [only, ...rest] = keyPackages
+        if (only == null || rest.length > 0) {
+          throw new HandlerError({
+            code: HUB_ERROR_CODES.invalidPayload,
+            message: 'A last-resort upload must carry exactly one key package',
+          })
+        }
+        lastResortPackage = only
+      }
       const decision = normalizeAuthorizeDecision(
-        await authorize({ action: 'keypackage/upload', did: clientDID, count: keyPackages.length }),
+        await authorize({
+          action: 'keypackage/upload',
+          did: clientDID,
+          count: keyPackages.length,
+          // Spread, not assignment: `lastResort: undefined` would make an ordinary upload look
+          // like one that explicitly opted out.
+          ...(lastResort === true ? { lastResort: true } : {}),
+        }),
       )
       if (!decision.allow) {
         throw new HandlerError({
@@ -576,8 +596,13 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       }
       // A batch crossing the cap partially commits (the store enforces per-call, so the cap still
       // holds) and rejects the rest with HUB_KEYPACKAGE_QUOTA; a retry finds the earlier ones stored.
+      // The last-resort path has no cap to cross: the slot is one entry, replaced in place.
       try {
-        await Promise.all(keyPackages.map((kp: string) => store.storeKeyPackage(clientDID, kp)))
+        if (lastResortPackage != null) {
+          await store.storeLastResortKeyPackage(clientDID, lastResortPackage)
+        } else {
+          await Promise.all(keyPackages.map((kp: string) => store.storeKeyPackage(clientDID, kp)))
+        }
       } catch (error) {
         rethrowAsHandlerError(error)
       }

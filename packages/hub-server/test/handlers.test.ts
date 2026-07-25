@@ -231,3 +231,59 @@ describe('key-package fetch capping and unknown targets (previously untested)', 
     expect(result.keyPackages).toEqual([])
   })
 })
+
+describe('last-resort key package upload', () => {
+  test('a last-resort upload lands in the slot, not the ordinary pool', async () => {
+    const { store, handlers } = setup()
+    const result = await (handlers['hub/v1/keypackage/upload'] as any)(
+      reqCtx('hub/v1/keypackage/upload', { keyPackages: ['kp-lr'], lastResort: true }, TARGET),
+    )
+    expect(result.stored).toBe(1)
+    expect(await store.fetchLastResortKeyPackage(TARGET)).toBe('kp-lr')
+    // Nothing leaked into the destructive pool.
+    expect(await store.fetchKeyPackages(TARGET, 1)).toEqual([])
+  })
+
+  test('an upload without the flag still goes to the ordinary pool', async () => {
+    const { store, handlers } = setup()
+    await (handlers['hub/v1/keypackage/upload'] as any)(
+      reqCtx('hub/v1/keypackage/upload', { keyPackages: ['kp-0', 'kp-1'] }, TARGET),
+    )
+    expect(await store.fetchLastResortKeyPackage(TARGET)).toBeNull()
+    expect(await store.fetchKeyPackages(TARGET, 2)).toEqual(['kp-0', 'kp-1'])
+  })
+
+  test('a last-resort upload carrying more than one package is refused', async () => {
+    const { store, handlers } = setup()
+    await expect(
+      (handlers['hub/v1/keypackage/upload'] as any)(
+        reqCtx('hub/v1/keypackage/upload', { keyPackages: ['a', 'b'], lastResort: true }, TARGET),
+      ),
+    ).rejects.toMatchObject({ code: HUB_ERROR_CODES.invalidPayload })
+    // Refused whole: neither package was stored anywhere.
+    expect(await store.fetchLastResortKeyPackage(TARGET)).toBeNull()
+    expect(await store.fetchKeyPackages(TARGET, 2)).toEqual([])
+  })
+
+  test('the authorize hook sees the flag, so a host can refuse the slot alone', async () => {
+    const seen: Array<AuthorizeRequest> = []
+    const { store, handlers } = setup({
+      authorize: (req) => {
+        seen.push(req)
+        return !(req.action === 'keypackage/upload' && req.lastResort === true)
+      },
+    })
+    await expect(
+      (handlers['hub/v1/keypackage/upload'] as any)(
+        reqCtx('hub/v1/keypackage/upload', { keyPackages: ['kp-lr'], lastResort: true }, TARGET),
+      ),
+    ).rejects.toMatchObject({ code: HUB_ERROR_CODES.authorizationDenied })
+    expect(seen[0]).toMatchObject({ action: 'keypackage/upload', lastResort: true, count: 1 })
+
+    // The same hook lets an ordinary upload through — the refusal was specific to the slot.
+    await (handlers['hub/v1/keypackage/upload'] as any)(
+      reqCtx('hub/v1/keypackage/upload', { keyPackages: ['kp-0'] }, TARGET),
+    )
+    expect(await store.fetchKeyPackages(TARGET, 1)).toEqual(['kp-0'])
+  })
+})
