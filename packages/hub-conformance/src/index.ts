@@ -899,6 +899,47 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
       expect(await store.fetchKeyPackages(ALICE, 5)).toEqual(['kp-only'])
     })
 
+    /**
+     * A LAST-RESORT PACKAGE IS THE ONE KEY PACKAGE A STORE MAY SERVE TWICE. It carries the
+     * `last_resort` extension (draft-ietf-mls-extensions), which marks it reusable by design, so
+     * the reuse the clause above forbids is here the entire point — it is the floor that keeps a
+     * member addable after an attacker has drained their ordinary pool.
+     *
+     * A store that consumed it would reintroduce the outage this exists to prevent, and, like
+     * single-use enforcement, nothing downstream is in a position to notice.
+     */
+    test('a last-resort key package is served without ever being consumed', async () => {
+      const store = await createStore()
+      await store.storeLastResortKeyPackage(ALICE, 'kp-last-resort')
+
+      expect(await store.fetchLastResortKeyPackage(ALICE)).toBe('kp-last-resort')
+      expect(await store.fetchLastResortKeyPackage(ALICE)).toBe('kp-last-resort')
+    })
+
+    test('an owner with no last-resort package reads as null, not undefined', async () => {
+      const store = await createStore()
+      expect(await store.fetchLastResortKeyPackage(BOB)).toBeNull()
+    })
+
+    test('a second last-resort upload replaces the first — the slot holds one', async () => {
+      const store = await createStore()
+      await store.storeLastResortKeyPackage(ALICE, 'kp-old')
+      await store.storeLastResortKeyPackage(ALICE, 'kp-new')
+      expect(await store.fetchLastResortKeyPackage(ALICE)).toBe('kp-new')
+    })
+
+    /** The slot must not become a back door that re-serves single-use packages. */
+    test('an occupied last-resort slot does not make ordinary packages reusable', async () => {
+      const store = await createStore()
+      await store.storeLastResortKeyPackage(ALICE, 'kp-last-resort')
+      await store.storeKeyPackage(ALICE, 'kp-ordinary')
+
+      expect(await store.fetchKeyPackages(ALICE, 1)).toEqual(['kp-ordinary'])
+      expect(await store.fetchKeyPackages(ALICE, 1)).toEqual([])
+      // The two live in separate places: draining the pool left the slot untouched.
+      expect(await store.fetchLastResortKeyPackage(ALICE)).toBe('kp-last-resort')
+    })
+
     if (maxKeyPackagesPerDID != null) {
       test('an upload past the per-DID key-package cap is rejected, not evicted', async () => {
         const store = await createStore()
@@ -912,6 +953,20 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
         expect(await store.fetchKeyPackages(ALICE, 1)).toEqual(['kp-0'])
         // The cap is per DID: a different owner is unaffected.
         await expect(store.storeKeyPackage(BOB, 'kp-bob')).resolves.toBeUndefined()
+      })
+
+      test('the last-resort slot is not charged against the per-DID cap', async () => {
+        const store = await createStore()
+        await store.storeLastResortKeyPackage(ALICE, 'kp-last-resort')
+        // A full ordinary pool alongside an occupied slot: the slot bought no headroom and cost
+        // none. A store that charged it would let a full pool block the floor.
+        for (let i = 0; i < maxKeyPackagesPerDID; i++) {
+          await store.storeKeyPackage(ALICE, `kp-${i}`)
+        }
+        await expect(store.storeKeyPackage(ALICE, 'kp-overflow')).rejects.toThrow(
+          KeyPackageQuotaExceededError,
+        )
+        expect(await store.fetchLastResortKeyPackage(ALICE)).toBe('kp-last-resort')
       })
     }
 
