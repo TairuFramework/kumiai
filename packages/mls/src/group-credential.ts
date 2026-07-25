@@ -1,6 +1,7 @@
 import { isPeer4, type OwnIdentity } from '@kokuin/token'
 import {
   type Credential,
+  type CustomExtension,
   defaultCredentialTypes,
   generateKeyPackageWithKey,
   greaseExtensions,
@@ -33,21 +34,38 @@ export function makeMLSCredential(identity: OwnIdentity): Credential {
   }
 }
 
-/** Generate a key package for joining groups. */
-export async function createKeyPackageBundle(
+/**
+ * Shared key-package construction. An invitee leaf must advertise the control extension types or
+ * ts-mls refuses to add it to an anchored group. An explicit `options.capabilities` override still
+ * wins.
+ *
+ * `extensions` is left genuinely absent (not passed as `extensions: undefined`) when the caller
+ * supplies none, so `generateKeyPackageWithKey`'s own `params.extensions ?? greaseExtensions(...)`
+ * default still applies for the ordinary path.
+ */
+async function buildBundle(
   identity: OwnIdentity,
   options?: GroupOptions,
+  extensions?: Array<CustomExtension>,
 ): Promise<KeyPackageBundle> {
   const { cipherSuite } = await resolveMlsContext(options)
   const result = await generateKeyPackageWithKey({
     credential: makeMLSCredential(identity),
     signatureKeyPair: { signKey: identity.privateKey, publicKey: identity.publicKey },
     cipherSuite,
-    // An invitee leaf must advertise the control extension types or ts-mls
-    // refuses to add it to an anchored group. An explicit override still wins.
     capabilities: options?.capabilities ?? controlCapabilities(),
+    // Omitted entirely for the ordinary path, so ts-mls applies its own default GREASE.
+    ...(extensions != null ? { extensions } : {}),
   })
   return { ...result, ownerDID: identity.id }
+}
+
+/** Generate a key package for joining groups. */
+export async function createKeyPackageBundle(
+  identity: OwnIdentity,
+  options?: GroupOptions,
+): Promise<KeyPackageBundle> {
+  return buildBundle(identity, options)
 }
 
 /**
@@ -75,24 +93,14 @@ export async function createLastResortKeyPackageBundle(
   identity: OwnIdentity,
   options?: GroupOptions,
 ): Promise<KeyPackageBundle> {
-  const { cipherSuite } = await resolveMlsContext(options)
-  const result = await generateKeyPackageWithKey({
-    credential: makeMLSCredential(identity),
-    signatureKeyPair: { signKey: identity.privateKey, publicKey: identity.publicKey },
-    cipherSuite,
-    // An invitee leaf must advertise the control extension types or ts-mls refuses to add it to an
-    // anchored group. An explicit override still wins.
-    capabilities: options?.capabilities ?? controlCapabilities(),
-    // Supplying `extensions` at all suppresses ts-mls's own default of
-    // `greaseExtensions(defaultGreaseConfig)`. `defaultGreaseConfig` is not exported, so its 0.1
-    // probability is restated here — dropping the spread would silently cost the stack its GREASE.
-    extensions: [
-      ...greaseExtensions({ probabilityPerGreaseValue: 0.1 }),
-      makeCustomExtension({
-        extensionType: LAST_RESORT_EXTENSION_TYPE,
-        extensionData: new Uint8Array(0),
-      }),
-    ],
-  })
-  return { ...result, ownerDID: identity.id }
+  // Supplying `extensions` at all suppresses ts-mls's own default of
+  // `greaseExtensions(defaultGreaseConfig)`. `defaultGreaseConfig` is not exported, so its 0.1
+  // probability is restated here — dropping the spread would silently cost the stack its GREASE.
+  return buildBundle(identity, options, [
+    ...greaseExtensions({ probabilityPerGreaseValue: 0.1 }),
+    makeCustomExtension({
+      extensionType: LAST_RESORT_EXTENSION_TYPE,
+      extensionData: new Uint8Array(0),
+    }),
+  ])
 }
