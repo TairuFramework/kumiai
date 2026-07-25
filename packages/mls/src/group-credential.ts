@@ -1,5 +1,11 @@
 import { isPeer4, type OwnIdentity } from '@kokuin/token'
-import { type Credential, defaultCredentialTypes, generateKeyPackageWithKey } from 'ts-mls'
+import {
+  type Credential,
+  defaultCredentialTypes,
+  generateKeyPackageWithKey,
+  greaseExtensions,
+  makeCustomExtension,
+} from 'ts-mls'
 
 import { controlCapabilities } from './anchor.js'
 import type { MLSCredentialIdentity } from './credential.js'
@@ -40,6 +46,53 @@ export async function createKeyPackageBundle(
     // An invitee leaf must advertise the control extension types or ts-mls
     // refuses to add it to an anchored group. An explicit override still wins.
     capabilities: options?.capabilities ?? controlCapabilities(),
+  })
+  return { ...result, ownerDID: identity.id }
+}
+
+/**
+ * The `last_resort` KeyPackage extension from draft-ietf-mls-extensions (NOT RFC 9420, which has
+ * no such extension). Its presence marks a key package as reusable by design; its data is empty.
+ *
+ * This is a KeyPackage extension, not a leaf-node one, so it needs no entry in the leaf's
+ * capabilities and `controlCapabilities()` is unaffected.
+ */
+export const LAST_RESORT_EXTENSION_TYPE = 0x000a
+
+/**
+ * Generate a reusable last-resort key package for joining groups.
+ *
+ * A hub may serve this one repeatedly without consuming it, so the owner stays addable to a group
+ * even after their ordinary single-use packages have been drained. Upload it through the hub's
+ * last-resort slot, never through the ordinary pool.
+ *
+ * **The caller must retain `privatePackage` after processing a Welcome** rather than deleting it
+ * as it would for an ordinary bundle: the same package can be handed to another inviter later.
+ * `@kumiai/mls` never owns private packages — `processWelcome` takes the bundle as a parameter —
+ * so nothing here can enforce that for you.
+ */
+export async function createLastResortKeyPackageBundle(
+  identity: OwnIdentity,
+  options?: GroupOptions,
+): Promise<KeyPackageBundle> {
+  const { cipherSuite } = await resolveMlsContext(options)
+  const result = await generateKeyPackageWithKey({
+    credential: makeMLSCredential(identity),
+    signatureKeyPair: { signKey: identity.privateKey, publicKey: identity.publicKey },
+    cipherSuite,
+    // An invitee leaf must advertise the control extension types or ts-mls refuses to add it to an
+    // anchored group. An explicit override still wins.
+    capabilities: options?.capabilities ?? controlCapabilities(),
+    // Supplying `extensions` at all suppresses ts-mls's own default of
+    // `greaseExtensions(defaultGreaseConfig)`. `defaultGreaseConfig` is not exported, so its 0.1
+    // probability is restated here — dropping the spread would silently cost the stack its GREASE.
+    extensions: [
+      ...greaseExtensions({ probabilityPerGreaseValue: 0.1 }),
+      makeCustomExtension({
+        extensionType: LAST_RESORT_EXTENSION_TYPE,
+        extensionData: new Uint8Array(0),
+      }),
+    ],
   })
   return { ...result, ownerDID: identity.id }
 }
