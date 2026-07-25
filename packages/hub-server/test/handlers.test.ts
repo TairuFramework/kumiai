@@ -253,8 +253,18 @@ describe('last-resort key package upload', () => {
     expect(await store.fetchKeyPackages(TARGET, 2)).toEqual(['kp-0', 'kp-1'])
   })
 
-  test('a last-resort upload carrying more than one package is refused', async () => {
-    const { store, handlers } = setup()
+  test('a last-resort upload carrying more than one package is refused before charging anyone', async () => {
+    const seen: Array<AuthorizeRequest> = []
+    // burst: 1 makes the per-DID budget observable: if the guard ran after tryConsume, the
+    // malformed request would spend the only token and the valid follow-up below would be
+    // refused with EK01 instead of succeeding.
+    const { store, handlers } = setup({
+      authorize: (req) => {
+        seen.push(req)
+        return true
+      },
+      rateLimits: { perDID: { rate: 0, burst: 1 } },
+    })
     await expect(
       (handlers['hub/v1/keypackage/upload'] as any)(
         reqCtx('hub/v1/keypackage/upload', { keyPackages: ['a', 'b'], lastResort: true }, TARGET),
@@ -263,6 +273,14 @@ describe('last-resort key package upload', () => {
     // Refused whole: neither package was stored anywhere.
     expect(await store.fetchLastResortKeyPackage(TARGET)).toBeNull()
     expect(await store.fetchKeyPackages(TARGET, 2)).toEqual([])
+    // Refused before authorize ran at all.
+    expect(seen).toEqual([])
+    // Refused before the rate limiter was charged: the single-token budget is still intact.
+    await expect(
+      (handlers['hub/v1/keypackage/upload'] as any)(
+        reqCtx('hub/v1/keypackage/upload', { keyPackages: ['ok'] }, TARGET),
+      ),
+    ).resolves.toMatchObject({ stored: 1 })
   })
 
   test('the authorize hook sees the flag, so a host can refuse the slot alone', async () => {
@@ -285,5 +303,28 @@ describe('last-resort key package upload', () => {
       reqCtx('hub/v1/keypackage/upload', { keyPackages: ['kp-0'] }, TARGET),
     )
     expect(await store.fetchKeyPackages(TARGET, 1)).toEqual(['kp-0'])
+    // The ordinary call's authorize request must OMIT the key entirely — not carry it as `false`
+    // or an explicit `undefined`, either of which a host policy could misread as an opt-out.
+    expect(seen[1]).not.toHaveProperty('lastResort')
+  })
+
+  test('an explicit lastResort: false behaves exactly like an absent flag', async () => {
+    const seen: Array<AuthorizeRequest> = []
+    const { store, handlers } = setup({
+      authorize: (req) => {
+        seen.push(req)
+        return true
+      },
+    })
+    await (handlers['hub/v1/keypackage/upload'] as any)(
+      reqCtx(
+        'hub/v1/keypackage/upload',
+        { keyPackages: ['kp-explicit-false'], lastResort: false },
+        TARGET,
+      ),
+    )
+    expect(await store.fetchLastResortKeyPackage(TARGET)).toBeNull()
+    expect(await store.fetchKeyPackages(TARGET, 1)).toEqual(['kp-explicit-false'])
+    expect(seen[0]).not.toHaveProperty('lastResort')
   })
 })
