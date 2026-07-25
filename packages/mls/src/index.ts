@@ -77,6 +77,7 @@ export {
   type JoinGroupExternalResult,
   joinGroupExternal,
   LAST_RESORT_EXTENSION_TYPE,
+  LAST_RESORT_LIFETIME_DAYS,
   type LedgerLogEntry,
   makeMLSCredential,
   type ProcessWelcomeOnceParams,

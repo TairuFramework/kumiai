@@ -1,6 +1,6 @@
 import { randomIdentity } from '@kokuin/token'
 import { greaseValues } from 'ts-mls'
-import { describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import {
   commitInvite,
@@ -164,5 +164,64 @@ describe('createLastResortKeyPackageBundle', () => {
 
     expect(joinedA.findMemberLeafIndex(bob.id)).not.toBeNull()
     expect(joinedB.findMemberLeafIndex(bob.id)).not.toBeNull()
+  })
+})
+
+describe('last-resort key package lifetime', () => {
+  afterEach(() => vi.useRealTimers())
+
+  /**
+   * A last-resort package is a standing availability floor, so its lifetime IS the feature's expiry
+   * date. ts-mls's `defaultLifetime()` is ~15 days ("Half month"), which would quietly turn the slot
+   * into a full-but-dead one a fortnight after upload — worse than an empty slot, because the hub
+   * keeps serving it and every Add fails at the inviter.
+   */
+  test('carries an explicit ~90-day lifetime, not ts-mls default ~15-day one', async () => {
+    const bundle = await createLastResortKeyPackageBundle(randomIdentity())
+    const { notBefore, notAfter } = bundle.publicPackage.leafNode.lifetime
+    const days = Number(notAfter - notBefore) / 86400
+    // 90 days forward, plus the one day of back-dating that absorbs clock skew between peers.
+    expect(days).toBeCloseTo(91, 1)
+  })
+
+  test('an ordinary bundle keeps the ts-mls default lifetime', async () => {
+    const bundle = await createKeyPackageBundle(randomIdentity())
+    const { notBefore, notAfter } = bundle.publicPackage.leafNode.lifetime
+    const days = Number(notAfter - notBefore) / 86400
+    // Untouched: ordinary packages are single-use and short-lived by design.
+    expect(days).toBeCloseTo(16.2, 1)
+  })
+
+  /**
+   * The lifetime is enforced by the INVITER (ts-mls checks it when `sentByClient`), so this asserts
+   * the end-to-end consequence rather than a field: the package must still be usable well past the
+   * old 15-day cliff.
+   */
+  test('is still addable 60 days after it was generated', async () => {
+    const alice = randomIdentity()
+    const bob = randomIdentity()
+    const tokens = new Map<string, string>()
+    const resolveLedgerEntries = async (ids: Array<string>) =>
+      ids.map((id) => {
+        const token = tokens.get(id)
+        if (token == null) throw new Error(`unknown ledger entry ${id}`)
+        return token
+      })
+
+    const bundle = await createLastResortKeyPackageBundle(bob)
+    const { group } = await createGroup(alice, 'group:lifetime', { resolveLedgerEntries })
+    const { invite } = await createInvite({
+      group,
+      identity: alice,
+      recipientDID: bob.id,
+      permission: 'member',
+    })
+    for (const token of invite.ledgerEntries) tokens.set(ledgerEntryDigest(token), token)
+
+    vi.useFakeTimers()
+    vi.setSystemTime(Date.now() + 60 * 86400 * 1000)
+
+    const added = await commitInvite(group, bundle.publicPackage, invite)
+    expect(added.welcomeMessage).toBeDefined()
   })
 })
