@@ -632,12 +632,35 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       // `code` of its own) to its wire code.
       try {
         assertKeyPackageFetchAllowed(requesterDID)
-        assertTargetConsumptionAllowed(targetDID, cappedCount)
       } catch (error) {
         rethrowAsHandlerError(error)
       }
-      const keyPackages = await store.fetchKeyPackages(targetDID, cappedCount)
-      return { keyPackages }
+      let targetBudgetSpent = false
+      try {
+        assertTargetConsumptionAllowed(targetDID, cappedCount)
+      } catch (error) {
+        if (!(error instanceof KeyPackageFetchLimitError)) rethrowAsHandlerError(error)
+        targetBudgetSpent = true
+      }
+      if (targetBudgetSpent) {
+        // The drain budget bounds CONSUMPTION, and serving the slot consumes nothing — so a spent
+        // budget refuses the pool while the reusable floor still answers. A target with no slot is
+        // refused exactly as before.
+        const lastResort = await store.fetchLastResortKeyPackage(targetDID)
+        if (lastResort == null) {
+          throw new HandlerError({
+            code: HUB_ERROR_CODES.keyPackageFetchLimit,
+            message: `Key package consumption limit exceeded for target ${targetDID}`,
+          })
+        }
+        return { keyPackages: [lastResort] }
+      }
+      const consumed = await store.fetchKeyPackages(targetDID, cappedCount)
+      if (consumed.length >= cappedCount) return { keyPackages: consumed }
+      const lastResort = await store.fetchLastResortKeyPackage(targetDID)
+      // Appended AT MOST ONCE, never padded out to `cappedCount`: handing one caller two copies of
+      // one init key is the reuse the whole design avoids.
+      return { keyPackages: lastResort == null ? consumed : [...consumed, lastResort] }
     }) as RequestHandler<HubProtocol, 'hub/v1/keypackage/fetch'>,
   }
 }

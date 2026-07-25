@@ -328,3 +328,107 @@ describe('last-resort key package upload', () => {
     expect(seen[0]).not.toHaveProperty('lastResort')
   })
 })
+
+describe('last-resort key package fetch', () => {
+  test('the slot tops up a short response, exactly once', async () => {
+    const { store, handlers } = setup()
+    await store.storeKeyPackage(TARGET, 'kp-0')
+    await store.storeLastResortKeyPackage(TARGET, 'kp-lr')
+
+    const result = await (handlers['hub/v1/keypackage/fetch'] as any)(
+      reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 5 }),
+    )
+    // Short of the 5 asked for, and padded by ONE copy — never to `count`. Two Adds sharing one
+    // init key in a single commit is the reuse this feature must not introduce.
+    expect(result.keyPackages).toEqual(['kp-0', 'kp-lr'])
+
+    const second = await (handlers['hub/v1/keypackage/fetch'] as any)(
+      reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 5 }),
+    )
+    expect(second.keyPackages).toEqual(['kp-lr'])
+  })
+
+  test('a response that already satisfies count is not topped up', async () => {
+    const { store, handlers } = setup()
+    await store.storeKeyPackage(TARGET, 'kp-0')
+    await store.storeLastResortKeyPackage(TARGET, 'kp-lr')
+
+    const result = await (handlers['hub/v1/keypackage/fetch'] as any)(
+      reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 1 }),
+    )
+    expect(result.keyPackages).toEqual(['kp-0'])
+  })
+
+  test('a target with no slot is unchanged: a short response stays short', async () => {
+    const { store, handlers } = setup()
+    await store.storeKeyPackage(TARGET, 'kp-0')
+    const result = await (handlers['hub/v1/keypackage/fetch'] as any)(
+      reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 5 }),
+    )
+    expect(result.keyPackages).toEqual(['kp-0'])
+  })
+
+  test('a spent per-target drain budget still yields the last-resort package', async () => {
+    const { store, handlers } = setup({
+      keyPackageFetchLimits: { maxPerTargetConsumed: 1, maxRequests: 1000 },
+    })
+    await store.storeKeyPackage(TARGET, 'kp-0')
+    await store.storeKeyPackage(TARGET, 'kp-1')
+    await store.storeLastResortKeyPackage(TARGET, 'kp-lr')
+
+    await (handlers['hub/v1/keypackage/fetch'] as any)(
+      reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 1 }),
+    )
+    // Budget spent. Serving the slot consumes nothing, so it charges nothing — this is the whole
+    // point of the feature: the drain bound must not sit on top of the availability floor.
+    const result = await (handlers['hub/v1/keypackage/fetch'] as any)(
+      reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 1 }),
+    )
+    expect(result.keyPackages).toEqual(['kp-lr'])
+    // And the quota still did its job: the second ordinary package was NOT drained.
+    expect(await store.fetchKeyPackages(TARGET, 1)).toEqual(['kp-1'])
+  })
+
+  test('a spent budget is still refused when the target has no last-resort package', async () => {
+    const { store, handlers } = setup({
+      keyPackageFetchLimits: { maxPerTargetConsumed: 1, maxRequests: 1000 },
+    })
+    await store.storeKeyPackage(TARGET, 'kp-0')
+    await store.storeKeyPackage(TARGET, 'kp-1')
+
+    await (handlers['hub/v1/keypackage/fetch'] as any)(
+      reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 1 }),
+    )
+    await expect(
+      (handlers['hub/v1/keypackage/fetch'] as any)(
+        reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 1 }),
+      ),
+    ).rejects.toMatchObject({ code: HUB_ERROR_CODES.keyPackageFetchLimit })
+  })
+
+  test('the per-requester rate limit is not bypassed by a last-resort package', async () => {
+    const { store, handlers } = setup({ keyPackageFetchLimits: { maxRequests: 1 } })
+    await store.storeLastResortKeyPackage(TARGET, 'kp-lr')
+
+    await (handlers['hub/v1/keypackage/fetch'] as any)(
+      reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 1 }),
+    )
+    // The requester's own budget is a separate bound and the slot must not be a way around it,
+    // or one requester could hammer the hub for free.
+    await expect(
+      (handlers['hub/v1/keypackage/fetch'] as any)(
+        reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 1 }),
+      ),
+    ).rejects.toMatchObject({ code: HUB_ERROR_CODES.keyPackageFetchLimit })
+  })
+
+  test('an authorize refusal is not bypassed by a last-resort package', async () => {
+    const { store, handlers } = setup({ authorize: (req) => req.action !== 'keypackage/fetch' })
+    await store.storeLastResortKeyPackage(TARGET, 'kp-lr')
+    await expect(
+      (handlers['hub/v1/keypackage/fetch'] as any)(
+        reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 1 }),
+      ),
+    ).rejects.toMatchObject({ code: HUB_ERROR_CODES.authorizationDenied })
+  })
+})
