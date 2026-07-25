@@ -97,4 +97,72 @@ describe('createLastResortKeyPackageBundle', () => {
 
     expect(joined.findMemberLeafIndex(bob.id)).not.toBeNull()
   })
+
+  /**
+   * The feature's central claim is that the SAME bundle joins a second group after the first —
+   * not just that the hub will hand it out twice, but that MLS itself accepts it a second time.
+   * Every other test here proves the hub side; this proves the bundle is actually reusable by
+   * joining two independent groups, created by two different inviters, with one bundle.
+   */
+  test('the same last-resort bundle joins two different groups', async () => {
+    const alice = randomIdentity()
+    const carol = randomIdentity()
+    const bob = randomIdentity()
+
+    const tokens = new Map<string, string>()
+    const publish = (invite: Invite) => {
+      for (const token of invite.ledgerEntries) tokens.set(ledgerEntryDigest(token), token)
+    }
+    const resolveLedgerEntries = async (ids: Array<string>) =>
+      ids.map((id) => {
+        const token = tokens.get(id)
+        if (token == null) throw new Error(`unknown ledger entry ${id}`)
+        return token
+      })
+
+    const bundle = await createLastResortKeyPackageBundle(bob)
+
+    const { group: groupA } = await createGroup(alice, 'group:last-resort-a', {
+      resolveLedgerEntries,
+    })
+    const { invite: inviteA } = await createInvite({
+      group: groupA,
+      identity: alice,
+      recipientDID: bob.id,
+      permission: 'member',
+    })
+    publish(inviteA)
+    const addedA = await commitInvite(groupA, bundle.publicPackage, inviteA)
+    const { group: joinedA } = await processWelcome({
+      identity: bob,
+      invite: inviteA,
+      welcome: addedA.welcomeMessage,
+      keyPackageBundle: bundle,
+      ratchetTree: addedA.newGroup.state.ratchetTree,
+      options: { resolveLedgerEntries },
+    })
+
+    const { group: groupB } = await createGroup(carol, 'group:last-resort-b', {
+      resolveLedgerEntries,
+    })
+    const { invite: inviteB } = await createInvite({
+      group: groupB,
+      identity: carol,
+      recipientDID: bob.id,
+      permission: 'member',
+    })
+    publish(inviteB)
+    const addedB = await commitInvite(groupB, bundle.publicPackage, inviteB)
+    const { group: joinedB } = await processWelcome({
+      identity: bob,
+      invite: inviteB,
+      welcome: addedB.welcomeMessage,
+      keyPackageBundle: bundle,
+      ratchetTree: addedB.newGroup.state.ratchetTree,
+      options: { resolveLedgerEntries },
+    })
+
+    expect(joinedA.findMemberLeafIndex(bob.id)).not.toBeNull()
+    expect(joinedB.findMemberLeafIndex(bob.id)).not.toBeNull()
+  })
 })

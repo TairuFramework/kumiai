@@ -921,6 +921,23 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
       expect(await store.fetchLastResortKeyPackage(BOB)).toBeNull()
     })
 
+    /**
+     * A plausible SQL shape puts both kinds of package in one table
+     * (`key_packages(owner, blob, is_last_resort)`) and writes the last-resort read as
+     * `SELECT blob FROM key_packages WHERE owner = ? LIMIT 1` — omitting `AND is_last_resort`. That
+     * store passes every other clause here, because the DID it is tested against always has a
+     * last-resort row. Give it a DID with an ordinary package and no last-resort slot: the null
+     * clause above uses BOB, who has nothing at all, so it does not catch this. If the read falls
+     * through to the ordinary pool, an attacker who first drains this DID's quota-fallback budget
+     * gets the same single-use package served back forever — init-key reuse on exactly the package
+     * this branch exists to keep single-use.
+     */
+    test('a last-resort read never falls through to the ordinary pool', async () => {
+      const store = await createStore()
+      await store.storeKeyPackage(ALICE, 'kp-ordinary')
+      expect(await store.fetchLastResortKeyPackage(ALICE)).toBeNull()
+    })
+
     test('a second last-resort upload replaces the first — the slot holds one', async () => {
       const store = await createStore()
       await store.storeLastResortKeyPackage(ALICE, 'kp-old')

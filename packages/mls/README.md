@@ -73,3 +73,7 @@ MLS has no cryptographic member revocation. `removeMember` evicts a leaf; it doe
 - Enforce access control outside MLS: block the removed device at the transport layer (e.g. hub auth).
 
 The follow-up revocation work will introduce a ledger entry that removes a DID's role from the roster, synced through the same GroupContext ledger-head extension the roster already rides. Once a revoked DID is no longer a roster member, the external-commit policy rejects its resync exactly as it rejects a stranger today.
+
+### ⚠️ Security: retain the last-resort bundle after Welcome
+
+`createLastResortKeyPackageBundle` produces a `KeyPackageBundle` marked with the `last_resort` extension (draft-ietf-mls-extensions) — reusable by design, so a hub may hand the same one to every future inviter once the owner's ordinary pool is drained. `@kumiai/mls` never owns private key material: `processWelcome` takes the bundle as a caller-supplied parameter and does not persist it, so retention is entirely the host's responsibility. Delete a last-resort `privatePackage` after processing a Welcome — the way a host correctly would for an ordinary, single-use bundle — and the member is silently unaddable forever, which is the exact outage this feature exists to prevent. The host must keep the last-resort bundle's private half around, distinct from ordinary bundles, for as long as it may be reused.
