@@ -123,6 +123,18 @@ export class HubClient {
     })
   }
 
+  /**
+   * Upload the caller's single reusable last-resort key package, replacing any previous one. The
+   * hub serves it without consuming it once the ordinary pool runs dry, so the caller stays
+   * addable to a group. Generate it with `createLastResortKeyPackageBundle` from `@kumiai/mls` —
+   * an ordinary package sent here would be handed out twice, which is init-key reuse.
+   */
+  uploadLastResortKeyPackage(keyPackage: string): RequestCall<{ stored: number }> {
+    return this.#client.request('hub/v1/keypackage/upload', {
+      param: { keyPackages: [keyPackage], lastResort: true },
+    })
+  }
+
   fetchKeyPackages(did: string, count?: number): RequestCall<{ keyPackages: Array<string> }> {
     return this.#client.request('hub/v1/keypackage/fetch', {
       param: { did, count },
