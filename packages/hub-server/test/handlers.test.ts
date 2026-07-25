@@ -1,5 +1,5 @@
 // biome-ignore-all lint/suspicious/noExplicitAny: handlers are dispatched through a loosely-typed map in these tests
-import { HUB_ERROR_CODES } from '@kumiai/hub-protocol'
+import { HUB_ERROR_CODES, KeyPackageQuotaExceededError } from '@kumiai/hub-protocol'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import type { AuthorizeRequest } from '../src/handlers.js'
@@ -430,5 +430,88 @@ describe('last-resort key package fetch', () => {
         reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 1 }),
       ),
     ).rejects.toMatchObject({ code: HUB_ERROR_CODES.authorizationDenied })
+  })
+})
+
+describe('store errors on the key-package fetch path keep their wire code', () => {
+  /** A store whose ordinary-pool read fails. The specific error is arbitrary — what matters is
+   * that it is one of the hub's NAMED errors, so a client can tell it from a transport failure. */
+  function storeThatFailsOn(
+    method: 'fetchKeyPackages' | 'fetchLastResortKeyPackage',
+    error: Error,
+  ) {
+    return {
+      ...createMemoryStore(),
+      [method]: async () => {
+        throw error
+      },
+    }
+  }
+
+  test('a named store error from fetchKeyPackages reaches the client coded, not bare', async () => {
+    const { handlers } = setup({
+      store: storeThatFailsOn(
+        'fetchKeyPackages',
+        new KeyPackageQuotaExceededError('store unavailable'),
+      ) as never,
+    })
+    await expect(
+      (handlers['hub/v1/keypackage/fetch'] as any)(
+        reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 1 }),
+      ),
+    ).rejects.toMatchObject({ code: HUB_ERROR_CODES.keyPackageQuota })
+  })
+
+  test('a named store error from the top-up read reaches the client coded', async () => {
+    const store = storeThatFailsOn(
+      'fetchLastResortKeyPackage',
+      new KeyPackageQuotaExceededError('store unavailable'),
+    )
+    // The ordinary pool answers short, so the handler reaches the top-up read and trips it.
+    await store.storeKeyPackage(TARGET, 'kp-0')
+    const { handlers } = setup({ store: store as never })
+    await expect(
+      (handlers['hub/v1/keypackage/fetch'] as any)(
+        reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 5 }),
+      ),
+    ).rejects.toMatchObject({ code: HUB_ERROR_CODES.keyPackageQuota })
+  })
+
+  test('an unnamed store error still passes through untouched', async () => {
+    const { handlers } = setup({
+      store: storeThatFailsOn('fetchKeyPackages', new Error('disk on fire')) as never,
+    })
+    // Not ours to classify: a bare Error must not be dressed up in a hub code it never earned.
+    await expect(
+      (handlers['hub/v1/keypackage/fetch'] as any)(
+        reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 1 }),
+      ),
+    ).rejects.toThrow('disk on fire')
+  })
+
+  /**
+   * On the fallback path the request was ALREADY being refused — the target's drain budget is
+   * spent, and the slot was the only thing that could have rescued it. So a store failure there
+   * must not replace a retryable coded refusal with an opaque error: the client's correct move is
+   * unchanged, and the store error rides along as `cause` for the operator.
+   */
+  test('a store failure on the spent-budget fallback still refuses with the quota code', async () => {
+    const store = storeThatFailsOn('fetchLastResortKeyPackage', new Error('store unavailable'))
+    await store.storeKeyPackage(TARGET, 'kp-0')
+    await store.storeKeyPackage(TARGET, 'kp-1')
+    const { handlers } = setup({
+      store: store as never,
+      keyPackageFetchLimits: { maxPerTargetConsumed: 1, maxRequests: 1000 },
+    })
+    await (handlers['hub/v1/keypackage/fetch'] as any)(
+      reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 1 }),
+    )
+    const refusal = await (handlers['hub/v1/keypackage/fetch'] as any)(
+      reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 1 }),
+    ).catch((error: unknown) => error)
+    expect(refusal).toMatchObject({ code: HUB_ERROR_CODES.keyPackageFetchLimit })
+    // Swallowing it would leave an operator blind to a broken store behind a plausible refusal.
+    expect((refusal as { cause?: unknown }).cause).toBeInstanceOf(Error)
+    expect(((refusal as { cause?: Error }).cause as Error).message).toBe('store unavailable')
   })
 })

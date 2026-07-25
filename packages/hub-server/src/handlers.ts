@@ -646,21 +646,40 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         // The drain budget bounds CONSUMPTION, and serving the slot consumes nothing — so a spent
         // budget refuses the pool while the reusable floor still answers. A target with no slot is
         // refused exactly as before.
-        const lastResort = await store.fetchLastResortKeyPackage(targetDID)
+        //
+        // A store failure HERE does not become the client's error: the request was already being
+        // refused, and the slot was the only thing that could have rescued it. Surfacing the
+        // store's error instead would turn a retryable coded refusal into an opaque one, changing
+        // what the caller does about a situation that has not changed. The store error rides along
+        // as `cause` so an operator can still see a broken store behind the refusal.
+        let lastResort: string | null = null
+        let readFailure: unknown
+        try {
+          lastResort = await store.fetchLastResortKeyPackage(targetDID)
+        } catch (error) {
+          readFailure = error
+        }
         if (lastResort == null) {
           throw new HandlerError({
             code: HUB_ERROR_CODES.keyPackageFetchLimit,
             message: `Key package consumption limit exceeded for target ${targetDID}`,
+            ...(readFailure != null ? { cause: readFailure } : {}),
           })
         }
         return { keyPackages: [lastResort] }
       }
-      const consumed = await store.fetchKeyPackages(targetDID, cappedCount)
-      if (consumed.length >= cappedCount) return { keyPackages: consumed }
-      const lastResort = await store.fetchLastResortKeyPackage(targetDID)
-      // Appended AT MOST ONCE, never padded out to `cappedCount`: handing one caller two copies of
-      // one init key is the reuse the whole design avoids.
-      return { keyPackages: lastResort == null ? consumed : [...consumed, lastResort] }
+      // On the ordinary path a store failure IS the client's error, so it keeps its wire code —
+      // a named store error has to stay tellable from an unreachable hub.
+      try {
+        const consumed = await store.fetchKeyPackages(targetDID, cappedCount)
+        if (consumed.length >= cappedCount) return { keyPackages: consumed }
+        const lastResort = await store.fetchLastResortKeyPackage(targetDID)
+        // Appended AT MOST ONCE, never padded out to `cappedCount`: handing one caller two copies
+        // of one init key is the reuse the whole design avoids.
+        return { keyPackages: lastResort == null ? consumed : [...consumed, lastResort] }
+      } catch (error) {
+        rethrowAsHandlerError(error)
+      }
     }) as RequestHandler<HubProtocol, 'hub/v1/keypackage/fetch'>,
   }
 }
