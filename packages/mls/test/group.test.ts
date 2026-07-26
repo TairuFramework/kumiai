@@ -33,6 +33,7 @@ import {
   createKeyPackageBundle,
   exportGroupInfo,
   type GroupHandle,
+  InviteRecipientMismatchError,
   joinGroupExternal,
   processWelcome,
   readMessageEpoch,
@@ -1851,7 +1852,7 @@ describe('an invite seeds the roster', () => {
     ).rejects.toThrow(/admin/)
   })
 
-  test('a Welcome whose invite names someone else is refused', async () => {
+  test('an invite naming someone else refuses the key package at commit time', async () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
     const carol = randomIdentity()
@@ -1865,11 +1866,43 @@ describe('an invite seeds the roster', () => {
       permission: 'member',
     })
     const bobKP = await createKeyPackageBundle(bob)
+
+    // The refusal is the inviter's now: the leaf that would join is not the identity the
+    // invite grants a role to, so the commit is never built.
+    await expect(commitInvite(aliceGroup, bobKP.publicPackage, carolInvite)).rejects.toThrow(
+      InviteRecipientMismatchError,
+    )
+  })
+
+  test('a joiner refuses a Welcome whose invite names someone else', async () => {
+    const alice = randomIdentity()
+    const bob = randomIdentity()
+    const carol = randomIdentity()
+    const { group: aliceGroup } = await createGroup(alice, 'wrong-invite-at-joiner')
+
+    // Bob's own, honest invite — this is the leg commitInvite's guard permits.
+    const { invite: bobInvite } = await createInvite({
+      group: aliceGroup,
+      identity: alice,
+      recipientDID: bob.id,
+      permission: 'member',
+    })
+    const bobKP = await createKeyPackageBundle(bob)
     const { welcomeMessage, newGroup } = await commitInvite(
       aliceGroup,
       bobKP.publicPackage,
-      carolInvite,
+      bobInvite,
     )
+
+    // A second, unrelated invite that never named Bob. This is the joiner-side half of
+    // the same invariant: it protects a joiner when the inviter is the malicious party,
+    // handing them a genuine Welcome alongside an invite for someone else.
+    const { invite: carolInvite } = await createInvite({
+      group: aliceGroup,
+      identity: alice,
+      recipientDID: carol.id,
+      permission: 'member',
+    })
 
     await expect(
       processWelcome({
@@ -1879,7 +1912,7 @@ describe('an invite seeds the roster', () => {
         keyPackageBundle: bobKP,
         ratchetTree: newGroup.state.ratchetTree,
       }),
-    ).rejects.toThrow(/role entry/)
+    ).rejects.toThrow(/carries no role entry naming this identity/)
   })
 })
 

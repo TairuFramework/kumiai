@@ -2,14 +2,17 @@ import { normalizeDID, type SigningIdentity } from '@kokuin/token'
 import {
   createCommit,
   type DefaultProposal,
+  defaultCredentialTypes,
   defaultProposalTypes,
   encode,
   type GroupContextExtension,
+  isDefaultCredential,
   type KeyPackage,
   mlsMessageEncoder,
 } from 'ts-mls'
 
 import { LEDGER_HEAD_EXTENSION_TYPE } from './anchor.js'
+import { parseMLSCredentialIdentity } from './credential.js'
 import { encodeControlEnvelope } from './envelope.js'
 import { foldEnvelope } from './envelope-fold.js'
 import type { FoldInput } from './fold.js'
@@ -24,6 +27,55 @@ import { ledgerEntryDigest, signLedgerEntry, verifyLedgerEntry } from './ledger.
 import { defaultCommitPolicy } from './policy.js'
 import { type GroupPermission, ROLE_ENTRY_TYPE } from './roster.js'
 import type { Invite } from './types.js'
+
+export type InviteRecipientMismatchErrorParams = {
+  groupID: string
+  expectedDID: string
+  actualDID: string
+}
+
+/**
+ * Thrown by {@link commitInvite} when the supplied key package's credential DID is not the
+ * identity the invite's enacted role entry grants a role to.
+ *
+ * Distinct from an ordinary rejection on purpose: the expected trigger is a key-package store
+ * that served the wrong owner's package, and adding the package anyway would put a different
+ * identity in the group than the one the roster grants the role to. A host should alert on this.
+ *
+ * The same error also fires for any invite whose trailing `kumiai.role` entry names someone
+ * other than the intended invitee — hand-built, tampered, or reordered — with an otherwise
+ * honest key package. A host seeing this should not assume a store compromise on that basis
+ * alone.
+ */
+export class InviteRecipientMismatchError extends Error {
+  #groupID: string
+  #expectedDID: string
+  #actualDID: string
+
+  constructor(params: InviteRecipientMismatchErrorParams) {
+    super(
+      `commitInvite: the key package presents ${params.actualDID}, but the invite grants a role to ${params.expectedDID}`,
+    )
+    this.name = 'InviteRecipientMismatchError'
+    this.#groupID = params.groupID
+    this.#expectedDID = params.expectedDID
+    this.#actualDID = params.actualDID
+  }
+
+  get groupID(): string {
+    return this.#groupID
+  }
+
+  /** DID the invite's enacted role entry grants to. */
+  get expectedDID(): string {
+    return this.#expectedDID
+  }
+
+  /** DID the supplied key package presents. */
+  get actualDID(): string {
+    return this.#actualDID
+  }
+}
 
 export type CreateInviteParams = {
   group: GroupHandle
@@ -293,6 +345,51 @@ export async function commitInvite(
     }
 
     const enacted = entriesAddedByInvite(group, invite)
+
+    // Bind the leaf that joins to the role this same commit grants. Without it the joining
+    // identity is decided by whoever supplied the key package bytes — a store that served the
+    // wrong owner's package admits that owner while the roster names someone else, and neither
+    // side can see the disagreement from its own state.
+    //
+    // The LAST role entry, because an invite may legitimately carry an unrelated promotion
+    // riding the same commit, and createInvite puts the invitee's own grant last.
+    //
+    // The `groupID` check is belt-and-braces: `foldEnvelope` already hard-rejects any
+    // cross-group entry in `enacted`, so no invite reaching this point can carry one.
+    let grantedTo: string | null = null
+    for (const token of enacted) {
+      const verified = await verifyLedgerEntry(token)
+      if (verified?.entry.type === ROLE_ENTRY_TYPE && verified.entry.groupID === group.groupID) {
+        grantedTo = verified.entry.subject
+      }
+    }
+    if (grantedTo == null) {
+      throw new Error(
+        `commitInvite: the invite enacts no ${ROLE_ENTRY_TYPE} entry for this group, so there is no recipient to bind the key package to`,
+      )
+    }
+    const expectedDID = normalizeDID(grantedTo)
+
+    // `credentialType !== basic` does not narrow on its own: CredentialCustom.credentialType is a
+    // bare `number`, so the compiler cannot rule it out. ts-mls's own guard can.
+    const credential = keyPackage.leafNode.credential
+    if (
+      !isDefaultCredential(credential) ||
+      credential.credentialType !== defaultCredentialTypes.basic
+    ) {
+      throw new Error(
+        'commitInvite: the key package carries a non-basic credential, which names no DID to bind',
+      )
+    }
+    const actualDID = normalizeDID(parseMLSCredentialIdentity(credential.identity).id)
+    if (actualDID !== expectedDID) {
+      throw new InviteRecipientMismatchError({
+        groupID: group.groupID,
+        expectedDID,
+        actualDID,
+      })
+    }
+
     const addProposal: DefaultProposal = {
       proposalType: defaultProposalTypes.add,
       add: { keyPackage },

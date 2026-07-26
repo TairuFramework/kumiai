@@ -6,6 +6,8 @@ export {
   commitInvite,
   commitLedgerEntries,
   createInvite,
+  InviteRecipientMismatchError,
+  type InviteRecipientMismatchErrorParams,
 } from './group-commit.js'
 export {
   type CreateGroupResult,
