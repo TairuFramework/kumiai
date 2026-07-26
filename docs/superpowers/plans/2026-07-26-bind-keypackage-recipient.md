@@ -8,7 +8,7 @@
 
 **Goal:** Make `commitInvite` refuse a key package whose credential DID is not the identity the invite's enacted role entry grants a role to, so the MLS membership and the roster cannot silently disagree.
 
-**Architecture:** One new guard inside `commitInvite`, placed after `entriesAddedByInvite` and before the Add proposal is built. It verifies the invite's newly-enacted ledger tokens, requires exactly one `kumiai.role` entry for this group, and compares that entry's `subject` against the DID parsed out of the key package's basic credential — both sides folded through `normalizeDID`. A mismatch throws a new exported `InviteRecipientMismatchError`; malformed shapes throw bare `Error`s. Nothing else in the package changes.
+**Architecture:** One new guard inside `commitInvite`, placed after `entriesAddedByInvite` and before the Add proposal is built. It verifies the invite's newly-enacted ledger tokens, takes the `subject` of the **last** `kumiai.role` entry for this group, and compares it against the DID parsed out of the key package's basic credential — both sides folded through `normalizeDID`. A mismatch throws a new exported `InviteRecipientMismatchError`; an invite with no role entry, and a non-basic credential, throw bare `Error`s. One existing test that asserts the old behaviour moves to the new one.
 
 **Tech Stack:** TypeScript (ES2025, strict), ts-mls, `@kokuin/token`, Vitest, Biome, pnpm + turbo.
 
@@ -18,7 +18,8 @@
 - No plan labels, task numbers, or ticket IDs in code, comments, or `describe`/`test` names.
 - Do not edit generated files (`packages/*/lib/`).
 - Do not modify `package.json` scripts, lint config, or build config.
-- Surgical changes only: `packages/mls/src/group-commit.ts`, `packages/mls/src/group.ts`, `packages/mls/src/index.ts`, and one new test file. Nothing else.
+- Surgical changes only: `packages/mls/src/group-commit.ts`, `packages/mls/src/group.ts`, `packages/mls/src/index.ts`, one new test file, and the single named test in `packages/mls/test/group.test.ts` that asserts the old behaviour. Nothing else.
+- Never assert a type with a cast where the compiler can prove it. ts-mls's `Credential` union does not narrow on `credentialType` alone — `CredentialCustom.credentialType` is a bare `number` — so compose its own `isDefaultCredential` guard rather than casting, even though `packages/mls/src/authentication.ts:35` casts. That function returns `false` on failure; this one admits a member to a group.
 - Lint must be run as `rtk proxy pnpm run lint` — a shim intercepts the plain form and reports fake results.
 - Getters on the new error are named `expectedDID`/`actualDID`, never bare `expected`/`actual`. `packages/mls/src/head.ts:41` records why: a test runner's diff formatter assigns those properties on any thrown Error, and a getter-only pair turns an unexpected throw into a `Cannot set property` TypeError that masks the real failure.
 
@@ -199,6 +200,7 @@ git commit -m "feat: add InviteRecipientMismatchError"
 **Files:**
 - Modify: `packages/mls/src/group-commit.ts` — inside `commitInvite`, after the `entriesAddedByInvite` call (currently line 295)
 - Test: `packages/mls/test/invite-recipient-binding.test.ts` (append)
+- Test: `packages/mls/test/group.test.ts:1854` — one existing test asserts the old, vulnerable behaviour and moves to the new one (Step 7)
 
 **Interfaces:**
 - Consumes: `InviteRecipientMismatchError` from Task 1.
@@ -207,7 +209,7 @@ git commit -m "feat: add InviteRecipientMismatchError"
 Background the implementer needs:
 
 - `commitInvite(group, keyPackage, invite)` lives at `packages/mls/src/group-commit.ts:285`. Its body runs inside `mutexFor(group).run(...)`; throwing from inside is fine.
-- `entriesAddedByInvite(group, invite)` returns the invite's ledger tokens beyond the ones the group already holds. For an invite built by `createInvite` that is exactly one token: the invitee's role entry.
+- `entriesAddedByInvite(group, invite)` returns the invite's ledger tokens beyond the ones the group already holds. For an invite built by `createInvite` that is one token: the invitee's role entry. A hand-assembled invite may carry more — e.g. a promotion for an existing member riding the same commit — with the invitee's own grant last.
 - `verifyLedgerEntry(token)` (`./ledger.js`, already imported by this file) returns `{ issuer, entry }` or `null` when the signature does not verify. `entry` is `{ type, groupID, subject, value, ord? }`.
 - `ROLE_ENTRY_TYPE` is `'kumiai.role'`, exported from `./roster.js` and already imported by this file.
 - `normalizeDID` (`@kokuin/token`, already imported) folds a `did:peer:4` long form to its short form and passes every other DID through unchanged. Both sides must go through it — see Task 4.
@@ -253,16 +255,20 @@ describe('commitInvite binds the key package to the invite recipient', () => {
       capabilities: controlCapabilities(),
     })
 
-    await expect(commitInvite(group, malloryBundle.publicPackage, invite)).rejects.toThrow(
-      InviteRecipientMismatchError,
-    )
+    // `.catch` returning the raw error collapses to `unknown`, so `instanceof` is a real narrow
+    // rather than an assertion — and it fails the test on the resolve path too.
+    const thrown: unknown = await commitInvite(
+      group,
+      malloryBundle.publicPackage,
+      invite,
+    ).catch((error: unknown) => error)
 
-    const error = await commitInvite(group, malloryBundle.publicPackage, invite).catch(
-      (thrown: unknown) => thrown as InviteRecipientMismatchError,
-    )
-    expect(error.groupID).toBe('g-substitution')
-    expect(error.expectedDID).toBe(bob.id)
-    expect(error.actualDID).toBe(mallory.id)
+    if (!(thrown instanceof InviteRecipientMismatchError)) {
+      throw new Error(`commitInvite resolved, or rejected with the wrong error: ${String(thrown)}`)
+    }
+    expect(thrown.groupID).toBe('g-substitution')
+    expect(thrown.expectedDID).toBe(bob.id)
+    expect(thrown.actualDID).toBe(mallory.id)
   })
 
   test('the refusal leaves the group at its pre-commit epoch', async () => {
@@ -333,6 +339,7 @@ import {
   defaultProposalTypes,
   encode,
   type GroupContextExtension,
+  isDefaultCredential,
   type KeyPackage,
   mlsMessageEncoder,
 } from 'ts-mls'
@@ -360,25 +367,30 @@ with this:
     // identity is decided by whoever supplied the key package bytes — a store that served the
     // wrong owner's package admits that owner while the roster names someone else, and neither
     // side can see the disagreement from its own state.
-    const roleSubjects: Array<string> = []
+    //
+    // The LAST role entry, because an invite may legitimately carry an unrelated promotion
+    // riding the same commit, and createInvite puts the invitee's own grant last.
+    let grantedTo: string | null = null
     for (const token of enacted) {
       const verified = await verifyLedgerEntry(token)
       if (verified?.entry.type === ROLE_ENTRY_TYPE && verified.entry.groupID === group.groupID) {
-        roleSubjects.push(verified.entry.subject)
+        grantedTo = verified.entry.subject
       }
     }
-    // Exactly one, so the binding is unambiguous by construction rather than by an ordering rule.
-    // createInvite always produces exactly one; anything else is a hand-built invite.
-    if (roleSubjects.length !== 1) {
+    if (grantedTo == null) {
       throw new Error(
-        `commitInvite: the invite must enact exactly one ${ROLE_ENTRY_TYPE} entry for this group, got ${roleSubjects.length}`,
+        `commitInvite: the invite enacts no ${ROLE_ENTRY_TYPE} entry for this group, so there is no recipient to bind the key package to`,
       )
     }
-    // biome-ignore lint/style/noNonNullAssertion: length checked directly above
-    const expectedDID = normalizeDID(roleSubjects[0]!)
+    const expectedDID = normalizeDID(grantedTo)
 
+    // `credentialType !== basic` does not narrow on its own: CredentialCustom.credentialType is a
+    // bare `number`, so the compiler cannot rule it out. ts-mls's own guard can.
     const credential = keyPackage.leafNode.credential
-    if (credential.credentialType !== defaultCredentialTypes.basic) {
+    if (
+      !isDefaultCredential(credential) ||
+      credential.credentialType !== defaultCredentialTypes.basic
+    ) {
       throw new Error(
         'commitInvite: the key package carries a non-basic credential, which names no DID to bind',
       )
@@ -409,12 +421,35 @@ Expected: the two refusal tests FAIL. If either still passes, the test is not ex
 
 Restore `if (actualDID !== expectedDID) {` and re-run. Expected: PASS, 5 tests.
 
-- [ ] **Step 7: Run the whole mls suite**
+- [ ] **Step 7: Update the one existing test that asserts the old behaviour**
+
+`packages/mls/test/group.test.ts:1854`, "a Welcome whose invite names someone else is refused", currently commits Bob's key package under Carol's invite and asserts the mismatch is caught downstream in `processWelcome`. That is this gap, written down as a passing test. Its intent survives; the refusal now happens one layer earlier, and the `processWelcome` leg is unreachable from that setup.
+
+Replace the body from `const bobKP = ...` onward with:
+
+```ts
+    const bobKP = await createKeyPackageBundle(bob)
+
+    // The refusal is the inviter's now: the leaf that would join is not the identity the
+    // invite grants a role to, so the commit is never built.
+    await expect(commitInvite(aliceGroup, bobKP.publicPackage, carolInvite)).rejects.toThrow(
+      InviteRecipientMismatchError,
+    )
+  })
+```
+
+Rename the test to `'an invite naming someone else refuses the key package at commit time'`. Add `InviteRecipientMismatchError` to that file's `../src/index.js` import (or whichever existing import block covers `commitInvite`). Remove any import the edit leaves unused **in that test only if nothing else in the file uses it** — `processWelcome` is used widely in `group.test.ts`, so it almost certainly stays.
+
+- [ ] **Step 8: Run the whole mls suite**
 
 Run: `pnpm --filter @kumiai/mls exec vitest run`
-Expected: all pass. Existing invite tests across `anchor.test.ts`, `group.test.ts`, `external-rejoin.test.ts`, `ledger-bootstrap.test.ts`, and others all go through `createInvite` with the matching bundle, so the guard should be invisible to them. If any fails, it has found a real honest path the guard rejects — report it rather than loosening the guard.
+Expected: all pass.
 
-- [ ] **Step 8: Typecheck and lint**
+Two existing tests legitimately commit an invite carrying an unrelated promotion alongside the invitee's grant — `group.test.ts:1737` ("the control: an admin committing the same Add and promotion is accepted") and `group.test.ts:2065` ("a member-signed entry smuggled into an invite is refused before it is committed"). Both build `ledgerEntries` as `[...invite.ledgerEntries.slice(0, -1), extraEntry, roleToken(invite)]`, keeping the invitee's grant last, so the last-role-entry rule reads the invitee in both and neither needs changing. `:2065` must still fail with `/cannot enact ledger entry/` from the fold, not from your guard — if it fails with your message instead, the guard is running on the wrong entry.
+
+If any other test fails, it has found an honest path the guard wrongly rejects — report it rather than loosening the guard.
+
+- [ ] **Step 9: Typecheck and lint**
 
 Run: `pnpm --filter @kumiai/mls run test:types`
 Expected: exit 0.
@@ -422,10 +457,10 @@ Expected: exit 0.
 Run: `rtk proxy pnpm run lint`
 Expected: no errors.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
-git add packages/mls/src/group-commit.ts packages/mls/test/invite-recipient-binding.test.ts
+git add packages/mls/src/group-commit.ts packages/mls/test/invite-recipient-binding.test.ts packages/mls/test/group.test.ts
 git commit -m "fix: bind the invitee's key package to the role the invite grants"
 ```
 
@@ -484,38 +519,73 @@ describe('commitInvite refuses an invite it cannot bind', () => {
     }
 
     await expect(commitInvite(group, bobBundle.publicPackage, invite)).rejects.toThrow(
-      /exactly one kumiai\.role entry for this group, got 0/,
+      /enacts no kumiai\.role entry for this group/,
     )
   })
 
-  test('refuses an invite that enacts two role entries', async () => {
+  test('an invite carrying a promotion binds to the grant that comes last, not the promotion', async () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
     const carol = randomIdentity()
 
-    const { group } = await createGroup(alice, 'g-two-roles')
+    // Bob joins first, so promoting him is a grant to an existing member.
+    const { group } = await createGroup(alice, 'g-promotion-ride')
     const bobBundle = await createKeyPackageBundle(bob, { capabilities: controlCapabilities() })
-
-    const { invite } = await createInvite({
+    const { invite: bobInvite } = await createInvite({
       group,
       identity: alice,
       recipientDID: bob.id,
       permission: 'member',
     })
-    const carolToken = await signLedgerEntry(alice, {
+    const { newGroup: withBob } = await commitInvite(group, bobBundle.publicPackage, bobInvite)
+
+    const promoteBob = await signLedgerEntry(alice, {
       type: ROLE_ENTRY_TYPE,
-      groupID: 'g-two-roles',
-      subject: carol.id,
-      value: 'member',
+      groupID: 'g-promotion-ride',
+      subject: bob.id,
+      value: 'admin',
     })
-    const twoRoles: Invite = {
-      ...invite,
-      ledgerEntries: [...invite.ledgerEntries, carolToken],
+    const { invite: carolInvite } = await createInvite({
+      group: withBob,
+      identity: alice,
+      recipientDID: carol.id,
+      permission: 'member',
+    })
+    // The promotion rides ahead of Carol's own grant, which stays last — the ordering
+    // createInvite documents and the rule the guard reads.
+    const carolRoleToken = carolInvite.ledgerEntries[carolInvite.ledgerEntries.length - 1]
+    if (carolRoleToken == null) {
+      throw new Error('createInvite produced an invite with no ledger entries')
+    }
+    const withPromotion: Invite = {
+      ...carolInvite,
+      ledgerEntries: [...carolInvite.ledgerEntries.slice(0, -1), promoteBob, carolRoleToken],
     }
 
-    await expect(commitInvite(group, bobBundle.publicPackage, twoRoles)).rejects.toThrow(
-      /exactly one kumiai\.role entry for this group, got 2/,
-    )
+    // Handed the promoted member's key package instead of Carol's, the guard refuses: being
+    // *a* role subject in the invite is not enough, it must be the one the invite ends on.
+    const bobSecondBundle = await createKeyPackageBundle(bob, {
+      capabilities: controlCapabilities(),
+    })
+    const thrown: unknown = await commitInvite(
+      withBob,
+      bobSecondBundle.publicPackage,
+      withPromotion,
+    ).catch((error: unknown) => error)
+
+    if (!(thrown instanceof InviteRecipientMismatchError)) {
+      throw new Error(`commitInvite resolved, or rejected with the wrong error: ${String(thrown)}`)
+    }
+    expect(thrown.expectedDID).toBe(carol.id)
+    expect(thrown.actualDID).toBe(bob.id)
+
+    // And handed Carol's, it commits — the promotion riding along is not itself a problem.
+    const carolBundle = await createKeyPackageBundle(carol, {
+      capabilities: controlCapabilities(),
+    })
+    const { newGroup } = await commitInvite(withBob, carolBundle.publicPackage, withPromotion)
+    expect(newGroup.roster.roles.get(bob.id)).toBe('admin')
+    expect(newGroup.roster.roles.get(carol.id)).toBe('member')
   })
 
   test('refuses a key package whose credential is not a basic credential', async () => {
@@ -553,25 +623,36 @@ describe('commitInvite refuses an invite it cannot bind', () => {
 Run: `pnpm --filter @kumiai/mls exec vitest run test/invite-recipient-binding.test.ts`
 Expected: PASS, 8 tests. These exercise branches Task 2 already wrote, so they should pass immediately.
 
-If the two-role-entries test reports `got 1` instead of `got 2`, the group's own ledger already carried the extra token — check that `entriesAddedByInvite` is slicing as expected before changing the guard.
-
 If any test fails for a reason other than the assertion text, that branch is unreachable as written and the guard needs fixing. Report what you found before editing.
 
-- [ ] **Step 3: Mutation-check the shape guard**
+- [ ] **Step 3: Mutation-check the no-role-entry guard**
 
-Temporarily change `if (roleSubjects.length !== 1) {` to `if (false) {`.
+Temporarily change `if (grantedTo == null) {` to `if (false) {`.
 
 Run: `pnpm --filter @kumiai/mls exec vitest run test/invite-recipient-binding.test.ts`
-Expected: both shape tests FAIL. Restore and re-run — PASS, 8 tests.
+Expected: the no-role-entry test FAILS. Restore and re-run — PASS, 8 tests.
 
-- [ ] **Step 4: Mutation-check the credential-type guard**
+- [ ] **Step 4: Mutation-check that the guard reads the LAST role entry**
 
-Temporarily change `if (credential.credentialType !== defaultCredentialTypes.basic) {` to `if (false) {`. TypeScript will now reject `credential.identity`; that compile error is itself the signal the branch is load-bearing, so instead run only the test:
+Temporarily change the loop body so the first role entry wins instead of the last — add `if (grantedTo == null)` around the assignment:
+
+```ts
+      if (grantedTo == null) {
+        grantedTo = verified.entry.subject
+      }
+```
+
+Run: `pnpm --filter @kumiai/mls exec vitest run test/invite-recipient-binding.test.ts -t 'comes last'`
+Expected: FAIL — with the promotion first, a first-wins guard binds to the promoted member and lets the substituted package through. Restore and re-run — PASS.
+
+- [ ] **Step 5: Mutation-check the credential-type guard**
+
+Temporarily change `!isDefaultCredential(credential) ||` to `false ||`. TypeScript will now reject `credential.identity`; that compile error is itself the signal the branch is load-bearing, so instead run only the test:
 
 Run: `pnpm --filter @kumiai/mls exec vitest run test/invite-recipient-binding.test.ts -t 'not a basic credential'`
 Expected: FAIL. Restore and re-run — PASS.
 
-- [ ] **Step 5: Typecheck and lint**
+- [ ] **Step 6: Typecheck and lint**
 
 Run: `pnpm --filter @kumiai/mls run test:types`
 Expected: exit 0.
@@ -579,11 +660,11 @@ Expected: exit 0.
 Run: `rtk proxy pnpm run lint`
 Expected: no errors.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add packages/mls/test/invite-recipient-binding.test.ts
-git commit -m "test: cover commitInvite's malformed-invite refusals"
+git commit -m "test: cover commitInvite's invite-shape refusals and last-grant binding"
 ```
 
 ---
@@ -657,14 +738,13 @@ Expected: PASS, 9 tests.
 Temporarily drop the `normalizeDID` on the expected side: change
 
 ```ts
-const expectedDID = normalizeDID(roleSubjects[0]!)
+const expectedDID = normalizeDID(grantedTo)
 ```
 
 to
 
 ```ts
-// biome-ignore lint/style/noNonNullAssertion: length checked directly above
-const expectedDID = roleSubjects[0]!
+const expectedDID = grantedTo
 ```
 
 Run: `pnpm --filter @kumiai/mls exec vitest run test/invite-recipient-binding.test.ts -t 'long form'`
@@ -711,6 +791,6 @@ git commit -m "docs: retire the key-package binding item, now implemented"
 
 - `commitInvite` refuses a substituted key package with `InviteRecipientMismatchError` carrying the right `expectedDID`/`actualDID`, and the mutation check confirms the test bites.
 - The honest path, including a `did:peer:4` recipient named by long form, still commits and the invitee joins.
-- Malformed invites (zero or two-plus role entries) and non-basic credentials are refused with bare `Error`s, each mutation-checked.
+- Invites enacting no role entry, and non-basic credentials, are refused with bare `Error`s. The guard reads the LAST role entry, and that is mutation-checked.
 - `rtk proxy pnpm run lint` clean; `pnpm exec turbo run test:types test:unit --force` green with `Cached: 0`.
 - A patch changeset for `@kumiai/mls` exists, and the `next/` item is removed.

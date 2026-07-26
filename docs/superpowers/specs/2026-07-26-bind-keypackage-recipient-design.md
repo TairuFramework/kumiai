@@ -24,7 +24,8 @@ the layer furthest from the group's own security decision.
 
 ## Scope
 
-`packages/mls` only.
+`packages/mls` only — `src/group-commit.ts`, its two re-export sites, one new test file, and one
+existing test in `test/group.test.ts` that asserts the old behaviour (see below).
 
 `joinGroupExternal` needs no analogous check: it builds its own key package from `identity`
 (`packages/mls/src/group-welcome.ts:240`), so nothing external picks the joining identity.
@@ -40,9 +41,9 @@ surface. Neither contract suite changes.
 In `commitInvite`, after `entriesAddedByInvite` and before the Add proposal is built — so a wrong
 package costs no commit:
 
-1. Verify each token in `enacted`, collecting the `subject` of every entry whose type is
+1. Verify each token in `enacted`, keeping the `subject` of the **last** entry whose type is
    `ROLE_ENTRY_TYPE` and whose `groupID` is the group's own.
-2. Refuse unless exactly one such subject was collected.
+2. Refuse when there is no such entry.
 3. Read the key package's credential (`keyPackage.leafNode.credential`). Refuse a credential that
    is not `basic`.
 4. Parse its identity with `parseMLSCredentialIdentity` and compare `normalizeDID(parsed.id)`
@@ -54,16 +55,16 @@ bytes; let it propagate rather than wrapping it.
 ```ts
 const enacted = entriesAddedByInvite(group, invite)
 
-const roleSubjects: Array<string> = []
+let grantedTo: string | null = null
 for (const token of enacted) {
   const verified = await verifyLedgerEntry(token)
   if (verified?.entry.type === ROLE_ENTRY_TYPE && verified.entry.groupID === group.groupID) {
-    roleSubjects.push(verified.entry.subject)
+    grantedTo = verified.entry.subject
   }
 }
-if (roleSubjects.length !== 1) {
+if (grantedTo == null) {
   throw new Error(
-    `commitInvite: the invite must enact exactly one ${ROLE_ENTRY_TYPE} entry for this group, got ${roleSubjects.length}`,
+    `commitInvite: the invite enacts no ${ROLE_ENTRY_TYPE} entry for this group, so there is no recipient to bind the key package to`,
   )
 }
 ```
@@ -75,8 +76,25 @@ change and no new input. An explicit field would be self-declared data that can 
 ledger it travels with, so it would need its own consistency check against the same entry to be
 worth anything.
 
-Why exactly one: `createInvite` produces exactly one role entry, always last. Requiring one makes
-the binding unambiguous by construction rather than by an ordering rule a reader has to know.
+Why the last one rather than the only one: an earlier draft of this design required `enacted` to
+carry exactly one role entry, on the premise that `createInvite` produces exactly one and anything
+else is a hand-built invite. That premise is false. `packages/mls/test/group.test.ts:1737` ("the
+control: an admin committing the same Add and promotion is accepted") and `:2065` both commit an
+invite carrying a promotion for an existing member *plus* the invitee's grant, in one commit —
+a supported, deliberately-tested pattern that an exactly-one rule would break.
+
+Both build the list as `[...invite.ledgerEntries.slice(0, -1), extraEntry, roleToken(invite)]`,
+keeping the invitee's grant last. That is not a coincidence of those tests: it is what
+`createInvite` itself does and documents ("The invitee's own role entry is last",
+`packages/mls/src/group-commit.ts:69`). Taking the last role entry therefore reads the same entry
+the exactly-one rule would have, wherever the exactly-one rule was correct, and keeps working
+where it was not.
+
+The residual cost is a false refusal for an inviter who hand-builds an invite with the invitee's
+grant somewhere other than last. That is a loud failure against a documented ordering, not a
+silent one, which is the right side to err on for a guard whose whole purpose is catching a
+silent divergence.
+
 Non-role entries may still ride along, so an invite that also carries app-domain entries stays
 possible.
 
@@ -86,6 +104,22 @@ the subject.
 A non-`basic` credential is a refusal, not a skip. kumiai only ever issues `basic`
 (`packages/mls/src/group-credential.ts:33`), so a package that is not one carries no DID to bind
 and must not be added. It throws the bare shape `Error`, not the typed one — see below.
+
+Narrow it with ts-mls's own `isDefaultCredential` guard composed with the `basic` check, not with
+a cast. `credential.credentialType !== defaultCredentialTypes.basic` does *not* narrow the union
+on its own: `CredentialCustom.credentialType` is a bare `number`, so TypeScript cannot rule it
+out. `packages/mls/src/authentication.ts:35` solves this with `as { identity: Uint8Array }`, but
+that function returns `false` on every failure path, where a wrong cast degrades to a rejection.
+This one admits a member to a group, and the compiler can prove the narrow here, so it should.
+
+### An existing test that documents the gap
+
+`packages/mls/test/group.test.ts:1854` ("a Welcome whose invite names someone else is refused")
+asserts that `commitInvite` **succeeds** when handed Bob's key package under Carol's invite, and
+that the mismatch surfaces only later, when Bob calls `processWelcome`. That is this gap, written
+down as a passing test. Its intent survives; its assertions move one layer earlier, to
+`commitInvite` refusing with `InviteRecipientMismatchError`. The `processWelcome` leg is now
+unreachable from that setup and comes out.
 
 ### Error
 
@@ -141,7 +175,7 @@ turns that into a `Cannot set property` TypeError masking the real failure.
 Two cases stay a bare `Error`, because neither is an identity substitution and hosts have no
 distinct action to take on either:
 
-- zero or two-plus role entries in `enacted` — a badly built invite;
+- no role entry for this group in `enacted` — a badly built invite;
 - a non-`basic` credential — a package that is not a kumiai one at all. Reporting it through
   `InviteRecipientMismatchError` would mean inventing a stand-in string for `actualDID`, which is
   the placeholder-value anti-pattern the conventions forbid.
@@ -155,7 +189,11 @@ In `packages/mls/test/`, against real groups (no doubles involved):
   fails, restore it.
 - Honest path still commits and the invitee joins — proves the check is not a blanket refusal.
 - `enacted` carrying no role entry for this group → the bare shape `Error`.
-- `enacted` carrying two role entries → the bare shape `Error`.
+- `enacted` carrying a promotion for an existing member followed by the invitee's grant → commits,
+  and binds to the invitee. This is the pattern `group.test.ts:1737` relies on.
+- The same invite, but handed a key package for the *promoted member* rather than the invitee →
+  `InviteRecipientMismatchError`. This is what proves "last" is load-bearing rather than
+  "any role subject will do".
 - A key package whose credential is not `basic` → the bare shape `Error`.
 - `createInvite` called with a did:peer:4 recipient's **long form** still commits. `normalizeDID`
   folds peer:4 to its short form, and `makeMLSCredential` writes the short form into the
