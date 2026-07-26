@@ -767,7 +767,7 @@ Expected: all successful.
 
 Run: `pnpm changeset`
 
-Select `@kumiai/mls`, bump **patch** (pre-1.0 hardening of an existing function; no API is removed and the new export is additive). Summary:
+Select `@kumiai/mls`, bump **minor** (the package gains two new exports and commitInvite refuses input it previously accepted; .changeset/group-anchor-version-enforcement.md sets the precedent for enforcement changes on this package). Summary:
 
 ```
 commitInvite now refuses a key package whose credential DID is not the identity the invite's enacted role entry grants a role to, throwing the new InviteRecipientMismatchError. Previously the joining identity was decided by whoever supplied the key package bytes, so a store that served the wrong owner's package would admit that owner while the roster named someone else.
@@ -795,4 +795,4 @@ git commit -m "docs: retire the key-package binding item, now implemented"
 - The honest path, including a `did:peer:4` recipient named by long form, still commits and the invitee joins.
 - Invites enacting no role entry, and non-basic credentials, are refused with bare `Error`s. The guard reads the LAST role entry, and that is mutation-checked.
 - `rtk proxy pnpm run lint` clean; `pnpm exec turbo run test:types test:unit --force` green with `Cached: 0`.
-- A patch changeset for `@kumiai/mls` exists, and the `next/` item is removed.
+- A minor changeset for `@kumiai/mls` exists, and the `next/` item is removed.

@@ -279,7 +279,7 @@ describe('commitInvite normalizes both DIDs before comparing', () => {
       permission: 'member',
     })
 
-    const { welcomeMessage } = await commitInvite(group, bobBundle.publicPackage, invite)
+    const { welcomeMessage, newGroup } = await commitInvite(group, bobBundle.publicPackage, invite)
     const { group: bobGroup } = await processWelcome({
       identity: bob,
       invite,
@@ -288,5 +288,6 @@ describe('commitInvite normalizes both DIDs before comparing', () => {
     })
 
     expect(bobGroup.groupID).toBe('g-peer4-longform')
+    expect(newGroup.roster.roles.get(normalizeDID(bob.longForm))).toBe('member')
   })
 })
