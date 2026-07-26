@@ -4,10 +4,14 @@ import {
   type KeyPackage,
   keyPackageDecoder,
   keyPackageEncoder,
+  makeKeyPackageRef,
   type PrivateKeyPackage,
   privateKeyPackageDecoder,
   privateKeyPackageEncoder,
 } from 'ts-mls'
+
+import { resolveMlsContext } from './group-context.js'
+import type { GroupOptions } from './types.js'
 
 /**
  * Serialize a key package to the string form the hub stores.
@@ -118,4 +122,21 @@ export function decodePrivateKeyPackage(encoded: string): PrivateKeyPackage | nu
   // The tuple's second element is the CONSUMED LENGTH, so this is a whole-input check.
   if (decoded == null || decoded[1] !== bytes.length) return null
   return decoded[0]
+}
+
+/**
+ * The KeyPackageRef for a key package, base64 — the value a Welcome names when it says which
+ * package a set of encrypted group secrets is for.
+ *
+ * Used as the stable identity of a stored package. It is a hash over the package's canonical
+ * encoding, so it is unchanged by a codec round trip, and it is derived under the ciphersuite's
+ * hash — a package encoded under one suite and referenced under another yields a different ref,
+ * which is why `options` is threaded through rather than defaulted here.
+ */
+export async function keyPackageRef(
+  keyPackage: KeyPackage,
+  options?: GroupOptions,
+): Promise<string> {
+  const { cipherSuite } = await resolveMlsContext(options)
+  return toB64(await makeKeyPackageRef(keyPackage, cipherSuite.hash))
 }

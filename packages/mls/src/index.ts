@@ -114,6 +114,7 @@ export {
   decodePrivateKeyPackage,
   encodeKeyPackage,
   encodePrivateKeyPackage,
+  keyPackageRef,
 } from './key-package-codec.js'
 export {
   type LedgerEntry,

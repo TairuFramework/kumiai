@@ -14,6 +14,7 @@ import {
   decodePrivateKeyPackage,
   encodeKeyPackage,
   encodePrivateKeyPackage,
+  keyPackageRef,
 } from '../src/key-package-codec.js'
 import { ledgerEntryDigest } from '../src/ledger.js'
 import type { Invite } from '../src/types.js'
@@ -171,5 +172,31 @@ describe('encodePrivateKeyPackage / decodePrivateKeyPackage', () => {
     const bundle = await createKeyPackageBundle(randomIdentity())
     const bytes = fromEncoded(encodePrivateKeyPackage(bundle.privatePackage))
     expect(decodePrivateKeyPackage(toB64(bytes.subarray(0, bytes.length - 1)))).toBeNull()
+  })
+})
+
+describe('keyPackageRef', () => {
+  test('is stable for the same package and differs between packages', async () => {
+    const bundle = await createKeyPackageBundle(randomIdentity())
+    const other = await createKeyPackageBundle(randomIdentity())
+
+    const ref = await keyPackageRef(bundle.publicPackage)
+    expect(await keyPackageRef(bundle.publicPackage)).toBe(ref)
+    expect(await keyPackageRef(other.publicPackage)).not.toBe(ref)
+  })
+
+  /** The ref must depend on the package's bytes, not on object identity or insertion order. */
+  test('survives a codec round trip', async () => {
+    const bundle = await createKeyPackageBundle(randomIdentity())
+    const decoded = decodeKeyPackage(encodeKeyPackage(bundle.publicPackage))
+    expect(decoded).not.toBeNull()
+    if (decoded == null) return
+    expect(await keyPackageRef(decoded)).toBe(await keyPackageRef(bundle.publicPackage))
+  })
+
+  test('is base64 of a 32-byte hash for the default ciphersuite', async () => {
+    const bundle = await createKeyPackageBundle(randomIdentity())
+    const ref = await keyPackageRef(bundle.publicPackage)
+    expect(fromEncoded(ref)).toHaveLength(32)
   })
 })
