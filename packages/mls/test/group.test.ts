@@ -3182,12 +3182,61 @@ describe('the committer filters the pending set before authoring a commit', () =
   })
 
   it("retains an admin's pending proposal and carries it into the commit", async () => {
+    const { alice, bob, aliceGroup, carolGroup, tokens } = await threeMemberGroup()
+    const dave = randomIdentity()
+    const daveKP = await createKeyPackageBundle(dave)
+
+    // Dave's grant lands FIRST, in its own commit. The receive-side add rule binds an Add to
+    // the roster the commit produces, so an Add absorbed by an unrelated commit — which enacts
+    // no grant of its own — can only name a DID the roster already carries.
+    const grantDave = await signLedgerEntry(alice, {
+      type: 'kumiai.role',
+      groupID: aliceGroup.groupID,
+      subject: dave.id,
+      value: 'member',
+    })
+    tokens.set(ledgerEntryDigest(grantDave), grantDave)
+    const granted = await commitLedgerEntries(aliceGroup, [grantDave])
+    await carolGroup.processMessage(granted.commitMessage)
+    const daveNorm = normalizeDID(dave.id)
+    expect(granted.newGroup.roster.roles.get(daveNorm)).toBe('member')
+    expect(carolGroup.roster.roles.get(daveNorm)).toBe('member')
+
+    // An admin's standalone add, held pending by the committer and by the receiver that must
+    // resolve the by-reference proposal the commit carries. Built from the post-grant handle:
+    // a proposal frames at its handle's epoch.
+    const aliceAdd = await createProposal({
+      context: granted.newGroup.context,
+      state: granted.newGroup.state,
+      proposal: addProposal(daveKP.publicPackage),
+    })
+    const [ref, pws] = onlyPending(aliceAdd.newState.unappliedProposals)
+    granted.newGroup.state.unappliedProposals[ref] =
+      pws as (typeof granted.newGroup.state.unappliedProposals)[string]
+    carolGroup.state.unappliedProposals[ref] =
+      pws as (typeof carolGroup.state.unappliedProposals)[string]
+
+    const bobLeaf = granted.newGroup.findMemberLeafIndex(bob.id)
+    if (bobLeaf == null) throw new Error('expected bob to be a member')
+    const removal = await removeMember(granted.newGroup, bobLeaf)
+
+    await carolGroup.processMessage(removal.commitMessage)
+
+    // Dave, added by the retained admin proposal, is present on both sides; Bob is gone.
+    expect(removal.newGroup.listMembers().some((m) => normalizeDID(m.id) === daveNorm)).toBe(true)
+    expect(carolGroup.listMembers().some((m) => normalizeDID(m.id) === daveNorm)).toBe(true)
+    expect(carolGroup.findMemberLeafIndex(bob.id)).toBeUndefined()
+    expect(carolGroup.epoch).toBe(removal.newGroup.epoch)
+  })
+
+  it("drops an admin's pending add of a DID the roster never granted", async () => {
     const { bob, aliceGroup, carolGroup } = await threeMemberGroup()
     const dave = randomIdentity()
     const daveKP = await createKeyPackageBundle(dave)
 
-    // An admin's standalone add, held pending by the committer and by the receiver that
-    // must resolve the by-reference proposal the commit carries.
+    // No grant for Dave anywhere. Before the receive-side add rule this add rode the eviction
+    // commit and Dave joined a group whose roster named him nothing; now the committer's own
+    // filter drops it, so committer and receiver still converge — on a group without him.
     const aliceAdd = await createProposal({
       context: aliceGroup.context,
       state: aliceGroup.state,
@@ -3205,10 +3254,9 @@ describe('the committer filters the pending set before authoring a commit', () =
 
     await carolGroup.processMessage(removal.commitMessage)
 
-    // Dave, added by the retained admin proposal, is present on both sides; Bob is gone.
     const daveNorm = normalizeDID(dave.id)
-    expect(removal.newGroup.listMembers().some((m) => normalizeDID(m.id) === daveNorm)).toBe(true)
-    expect(carolGroup.listMembers().some((m) => normalizeDID(m.id) === daveNorm)).toBe(true)
+    expect(removal.newGroup.listMembers().some((m) => normalizeDID(m.id) === daveNorm)).toBe(false)
+    expect(carolGroup.listMembers().some((m) => normalizeDID(m.id) === daveNorm)).toBe(false)
     expect(carolGroup.findMemberLeafIndex(bob.id)).toBeUndefined()
     expect(carolGroup.epoch).toBe(removal.newGroup.epoch)
   })
