@@ -73,6 +73,8 @@ export {
   type GroupHandleParams,
   type HeldLedgerEntry,
   type InspectGroupInfoResult,
+  InviteRecipientMismatchError,
+  type InviteRecipientMismatchErrorParams,
   inspectGroupInfo,
   type JoinGroupExternalParams,
   type JoinGroupExternalResult,

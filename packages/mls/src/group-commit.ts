@@ -25,6 +25,50 @@ import { defaultCommitPolicy } from './policy.js'
 import { type GroupPermission, ROLE_ENTRY_TYPE } from './roster.js'
 import type { Invite } from './types.js'
 
+export type InviteRecipientMismatchErrorParams = {
+  groupID: string
+  expectedDID: string
+  actualDID: string
+}
+
+/**
+ * Thrown by {@link commitInvite} when the supplied key package's credential DID is not the
+ * identity the invite's enacted role entry grants a role to.
+ *
+ * Distinct from an ordinary rejection on purpose: the reachable trigger is a key-package store
+ * that served the wrong owner's package, and adding the package anyway would put a different
+ * identity in the group than the one the roster grants the role to. A host should alert on this.
+ */
+export class InviteRecipientMismatchError extends Error {
+  #groupID: string
+  #expectedDID: string
+  #actualDID: string
+
+  constructor(params: InviteRecipientMismatchErrorParams) {
+    super(
+      `commitInvite: the key package presents ${params.actualDID}, but the invite grants a role to ${params.expectedDID}`,
+    )
+    this.name = 'InviteRecipientMismatchError'
+    this.#groupID = params.groupID
+    this.#expectedDID = params.expectedDID
+    this.#actualDID = params.actualDID
+  }
+
+  get groupID(): string {
+    return this.#groupID
+  }
+
+  /** DID the invite's enacted role entry grants to. */
+  get expectedDID(): string {
+    return this.#expectedDID
+  }
+
+  /** DID the supplied key package presents. */
+  get actualDID(): string {
+    return this.#actualDID
+  }
+}
+
 export type CreateInviteParams = {
   group: GroupHandle
   identity: SigningIdentity
