@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Stage:** executing
+**Stage:** qa
 **Mode:** tasks
 **Spec:** `docs/superpowers/specs/2026-07-26-bind-keypackage-recipient-design.md`
 
@@ -48,7 +48,7 @@
 - Consumes: nothing.
 - Produces: `InviteRecipientMismatchError` (class) and `InviteRecipientMismatchErrorParams` (type), both exported from `@kumiai/mls`. Constructor signature: `new InviteRecipientMismatchError({ groupID: string, expectedDID: string, actualDID: string })`. Getters: `groupID: string`, `expectedDID: string`, `actualDID: string`. `error.name === 'InviteRecipientMismatchError'`. Task 2 throws it.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `packages/mls/test/invite-recipient-binding.test.ts`:
 
@@ -89,12 +89,12 @@ describe('InviteRecipientMismatchError', () => {
 })
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `pnpm --filter @kumiai/mls exec vitest run test/invite-recipient-binding.test.ts`
 Expected: FAIL — `InviteRecipientMismatchError` is not exported from `../src/index.js`.
 
-- [ ] **Step 3: Add the error class**
+- [x] **Step 3: Add the error class**
 
 In `packages/mls/src/group-commit.ts`, immediately after the import block and before `export type CreateInviteParams`:
 
@@ -144,7 +144,7 @@ export class InviteRecipientMismatchError extends Error {
 }
 ```
 
-- [ ] **Step 4: Re-export from `group.ts`**
+- [x] **Step 4: Re-export from `group.ts`**
 
 In `packages/mls/src/group.ts`, add the two names to the existing `from './group-commit.js'` block, keeping the block's existing ordering (uppercase names first, then lowercase, alphabetically within each):
 
@@ -162,7 +162,7 @@ export {
 } from './group-commit.js'
 ```
 
-- [ ] **Step 5: Re-export from `index.ts`**
+- [x] **Step 5: Re-export from `index.ts`**
 
 In `packages/mls/src/index.ts`, inside the large export block that ends with `} from './group.js'`, add both names in the block's existing order — after `inspectGroupInfo` and before `type JoinGroupExternalParams`:
 
@@ -171,22 +171,22 @@ In `packages/mls/src/index.ts`, inside the large export block that ends with `} 
   type InviteRecipientMismatchErrorParams,
 ```
 
-- [ ] **Step 6: Run the test to verify it passes**
+- [x] **Step 6: Run the test to verify it passes**
 
 Run: `pnpm --filter @kumiai/mls exec vitest run test/invite-recipient-binding.test.ts`
 Expected: PASS, 2 tests.
 
-- [ ] **Step 7: Typecheck**
+- [x] **Step 7: Typecheck**
 
 Run: `pnpm --filter @kumiai/mls run test:types`
 Expected: exit 0, no output.
 
-- [ ] **Step 8: Lint**
+- [x] **Step 8: Lint**
 
 Run: `rtk proxy pnpm run lint`
 Expected: no errors. It may reformat; re-run the test after any reformat.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add packages/mls/src/group-commit.ts packages/mls/src/group.ts packages/mls/src/index.ts packages/mls/test/invite-recipient-binding.test.ts
@@ -216,7 +216,7 @@ Background the implementer needs:
 - `parseMLSCredentialIdentity` (`./credential.js`, **not yet imported by this file** — add the import) turns the credential's `identity` bytes into `{ id, longForm? }` and throws a descriptive bare `Error` on malformed bytes. Let that throw propagate; do not wrap it.
 - A key package's credential is at `keyPackage.leafNode.credential`, typed as ts-mls's `Credential` union. Narrow it with `credential.credentialType !== defaultCredentialTypes.basic` (`defaultCredentialTypes` is already imported from `ts-mls`? — it is **not**; add it to the existing `ts-mls` import). After the narrow, `credential.identity` is a `Uint8Array`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `packages/mls/test/invite-recipient-binding.test.ts`, and extend the top import block to match:
 
@@ -322,12 +322,12 @@ describe('commitInvite binds the key package to the invite recipient', () => {
 })
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `pnpm --filter @kumiai/mls exec vitest run test/invite-recipient-binding.test.ts`
 Expected: the two refusal tests FAIL (`commitInvite` resolves instead of rejecting, or rejects with some later ts-mls error rather than `InviteRecipientMismatchError`). The honest-path test PASSES already — it is the guard against a blanket refusal, and it must stay green through this task.
 
-- [ ] **Step 3: Add the imports**
+- [x] **Step 3: Add the imports**
 
 In `packages/mls/src/group-commit.ts`, add `defaultCredentialTypes` to the existing `ts-mls` import (Biome sorts the member list on lint) and add a new import of `parseMLSCredentialIdentity`:
 
@@ -349,7 +349,7 @@ import {
 import { parseMLSCredentialIdentity } from './credential.js'
 ```
 
-- [ ] **Step 4: Add the guard**
+- [x] **Step 4: Add the guard**
 
 In `commitInvite`, replace this:
 
@@ -407,12 +407,12 @@ with this:
     const addProposal: DefaultProposal = {
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `pnpm --filter @kumiai/mls exec vitest run test/invite-recipient-binding.test.ts`
 Expected: PASS, 5 tests.
 
-- [ ] **Step 6: Mutation-check the guard**
+- [x] **Step 6: Mutation-check the guard**
 
 Temporarily change the mismatch condition from `if (actualDID !== expectedDID) {` to `if (false) {`.
 
@@ -421,7 +421,7 @@ Expected: the two refusal tests FAIL. If either still passes, the test is not ex
 
 Restore `if (actualDID !== expectedDID) {` and re-run. Expected: PASS, 5 tests.
 
-- [ ] **Step 7: Update the one existing test that asserts the old behaviour**
+- [x] **Step 7: Update the one existing test that asserts the old behaviour**
 
 `packages/mls/test/group.test.ts:1854`, "a Welcome whose invite names someone else is refused", currently commits Bob's key package under Carol's invite and asserts the mismatch is caught downstream in `processWelcome`. That is this gap, written down as a passing test. Its intent survives; the refusal now happens one layer earlier, and the `processWelcome` leg is unreachable from that setup.
 
@@ -440,7 +440,7 @@ Replace the body from `const bobKP = ...` onward with:
 
 Rename the test to `'an invite naming someone else refuses the key package at commit time'`. Add `InviteRecipientMismatchError` to that file's `../src/index.js` import (or whichever existing import block covers `commitInvite`). Remove any import the edit leaves unused **in that test only if nothing else in the file uses it** — `processWelcome` is used widely in `group.test.ts`, so it almost certainly stays.
 
-- [ ] **Step 8: Run the whole mls suite**
+- [x] **Step 8: Run the whole mls suite**
 
 Run: `pnpm --filter @kumiai/mls exec vitest run`
 Expected: all pass.
@@ -449,7 +449,7 @@ Two existing tests legitimately commit an invite carrying an unrelated promotion
 
 If any other test fails, it has found an honest path the guard wrongly rejects — report it rather than loosening the guard.
 
-- [ ] **Step 9: Typecheck and lint**
+- [x] **Step 9: Typecheck and lint**
 
 Run: `pnpm --filter @kumiai/mls run test:types`
 Expected: exit 0.
@@ -457,7 +457,7 @@ Expected: exit 0.
 Run: `rtk proxy pnpm run lint`
 Expected: no errors.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add packages/mls/src/group-commit.ts packages/mls/test/invite-recipient-binding.test.ts packages/mls/test/group.test.ts
@@ -482,7 +482,7 @@ Background the implementer needs:
 - `group.ledgerTokens` is the group's own signed ledger, in order. An `Invite` is `{ groupID, inviterID, ledgerEntries }`, and `entriesAddedByInvite` requires `ledgerEntries` to *begin with* `group.ledgerTokens` — so hand-built invites must spread it first or they fail with a different error.
 - To build a key package with a non-basic credential, take a real bundle and override the leaf credential. The resulting package has an invalid signature, which is fine: the guard runs before anything validates it.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Extend the test file's imports:
 
@@ -618,21 +618,21 @@ describe('commitInvite refuses an invite it cannot bind', () => {
 })
 ```
 
-- [ ] **Step 2: Run the tests**
+- [x] **Step 2: Run the tests**
 
 Run: `pnpm --filter @kumiai/mls exec vitest run test/invite-recipient-binding.test.ts`
 Expected: PASS, 8 tests. These exercise branches Task 2 already wrote, so they should pass immediately.
 
 If any test fails for a reason other than the assertion text, that branch is unreachable as written and the guard needs fixing. Report what you found before editing.
 
-- [ ] **Step 3: Mutation-check the no-role-entry guard**
+- [x] **Step 3: Mutation-check the no-role-entry guard**
 
 Temporarily change `if (grantedTo == null) {` to `if (false) {`.
 
 Run: `pnpm --filter @kumiai/mls exec vitest run test/invite-recipient-binding.test.ts`
 Expected: the no-role-entry test FAILS. Restore and re-run — PASS, 8 tests.
 
-- [ ] **Step 4: Mutation-check that the guard reads the LAST role entry**
+- [x] **Step 4: Mutation-check that the guard reads the LAST role entry**
 
 Temporarily change the loop body so the first role entry wins instead of the last — add `if (grantedTo == null)` around the assignment:
 
@@ -645,7 +645,7 @@ Temporarily change the loop body so the first role entry wins instead of the las
 Run: `pnpm --filter @kumiai/mls exec vitest run test/invite-recipient-binding.test.ts -t 'comes last'`
 Expected: FAIL — with the promotion first, a first-wins guard binds to the promoted member and lets the substituted package through. Restore and re-run — PASS.
 
-- [ ] **Step 5: Mutation-check the credential-type guard**
+- [x] **Step 5: Mutation-check the credential-type guard**
 
 Mutate the **whole condition** — `if (!isDefaultCredential(credential) || credential.credentialType !== defaultCredentialTypes.basic) {` becomes `if (false) {`. Do not mutate the `isDefaultCredential` clause alone: it is a type-level narrowing device with no independent runtime behaviour, because every `CredentialCustom` that fails it also fails the `credentialType` clause. That is worth knowing and not worth faking a fixture for.
 
@@ -654,7 +654,7 @@ TypeScript will now reject `credential.identity`; that compile error is itself t
 Run: `pnpm --filter @kumiai/mls exec vitest run test/invite-recipient-binding.test.ts -t 'not a basic credential'`
 Expected: FAIL. Restore and re-run — PASS.
 
-- [ ] **Step 6: Typecheck and lint**
+- [x] **Step 6: Typecheck and lint**
 
 Run: `pnpm --filter @kumiai/mls run test:types`
 Expected: exit 0.
@@ -662,7 +662,7 @@ Expected: exit 0.
 Run: `rtk proxy pnpm run lint`
 Expected: no errors.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add packages/mls/test/invite-recipient-binding.test.ts
@@ -682,7 +682,7 @@ git commit -m "test: cover commitInvite's invite-shape refusals and last-grant b
 
 Why this test exists: `createInvite` signs whatever `recipientDID` the caller passes, so a caller holding a `did:peer:4` identity may pass its **long form**. `makeMLSCredential` writes `identity.id`, which for `did:peer:4` is the **short form** (`kokuin/packages/token/src/identity.ts:442`). Comparing those two strings raw fails. `normalizeDID` folds peer:4 to its short form (`kokuin/packages/token/src/did.ts:195`), which is why both sides go through it — and this test is what stops someone removing one of them.
 
-- [ ] **Step 1: Write the test**
+- [x] **Step 1: Write the test**
 
 Extend the test file's imports:
 
@@ -730,12 +730,12 @@ describe('commitInvite normalizes both DIDs before comparing', () => {
 })
 ```
 
-- [ ] **Step 2: Run the test**
+- [x] **Step 2: Run the test**
 
 Run: `pnpm --filter @kumiai/mls exec vitest run test/invite-recipient-binding.test.ts`
 Expected: PASS, 9 tests.
 
-- [ ] **Step 3: Mutation-check the normalization**
+- [x] **Step 3: Mutation-check the normalization**
 
 Temporarily drop the `normalizeDID` on the expected side: change
 
@@ -752,7 +752,7 @@ const expectedDID = grantedTo
 Run: `pnpm --filter @kumiai/mls exec vitest run test/invite-recipient-binding.test.ts -t 'long form'`
 Expected: FAIL with `InviteRecipientMismatchError`. Restore and re-run — PASS.
 
-- [ ] **Step 4: Whole-repo gate**
+- [x] **Step 4: Whole-repo gate**
 
 Run: `rtk proxy pnpm run lint`
 Expected: no errors.
@@ -763,7 +763,7 @@ Expected: all tasks successful, and the summary line must read `Cached: 0 cached
 Run: `pnpm exec turbo run build:types --force`
 Expected: all successful.
 
-- [ ] **Step 5: Add a changeset**
+- [x] **Step 5: Add a changeset**
 
 Run: `pnpm changeset`
 
@@ -773,14 +773,14 @@ Select `@kumiai/mls`, bump **minor** (the package gains two new exports and comm
 commitInvite now refuses a key package whose credential DID is not the identity the invite's enacted role entry grants a role to, throwing the new InviteRecipientMismatchError. Previously the joining identity was decided by whoever supplied the key package bytes, so a store that served the wrong owner's package would admit that owner while the roster named someone else.
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add packages/mls/test/invite-recipient-binding.test.ts .changeset
 git commit -m "test: cover did:peer:4 long-form invites, add changeset"
 ```
 
-- [ ] **Step 7: Retire the source item**
+- [x] **Step 7: Retire the source item**
 
 ```bash
 git rm docs/agents/plans/next/2026-07-26-bind-keypackage-to-invite-recipient.md
