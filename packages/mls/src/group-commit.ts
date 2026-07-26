@@ -46,6 +46,12 @@ export type InviteRecipientMismatchErrorParams = {
  * other than the intended invitee — hand-built, tampered, or reordered — with an otherwise
  * honest key package. A host seeing this should not assume a store compromise on that basis
  * alone.
+ *
+ * The receive-side add rule in {@link defaultCommitPolicy} does NOT close this residual, though it
+ * is easy to assume it would. That rule rejects an Add whose DID the candidate roster grants
+ * nothing; in the reordered case the trailing grant's subject IS granted, so the Add passes and the
+ * intended invitee is left holding a grant it never joined against. Closing it needs this binding to
+ * seek the enacted entry matching the key package's DID rather than reading the last one.
  */
 export class InviteRecipientMismatchError extends Error {
   #groupID: string
