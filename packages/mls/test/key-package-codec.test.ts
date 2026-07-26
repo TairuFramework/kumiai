@@ -2,8 +2,16 @@ import { randomIdentity } from '@kokuin/token'
 import { toB64 } from '@sozai/codec'
 import { describe, expect, test } from 'vitest'
 
-import { createKeyPackageBundle } from '../src/group.js'
+import {
+  commitInvite,
+  createGroup,
+  createInvite,
+  createKeyPackageBundle,
+  processWelcome,
+} from '../src/group.js'
 import { decodeKeyPackage, encodeKeyPackage } from '../src/key-package-codec.js'
+import { ledgerEntryDigest } from '../src/ledger.js'
+import type { Invite } from '../src/types.js'
 
 function fromEncoded(encoded: string): Uint8Array {
   return Uint8Array.from(atob(encoded), (c) => c.charCodeAt(0))
@@ -60,5 +68,56 @@ describe('encodeKeyPackage / decodeKeyPackage', () => {
     const original = await samplePackage()
     const bytes = fromEncoded(encodeKeyPackage(original))
     expect(decodeKeyPackage(toB64(bytes.subarray(0, bytes.length - 1)))).toBeNull()
+  })
+})
+
+/**
+ * The claim Task 1's tests cannot make. Structural equality proves the codec agrees with itself;
+ * it would pass just as happily for an encoding real MLS refuses. So the DECODED package — never
+ * the original — is what gets added to a group here, and the join is carried all the way through
+ * `processWelcome` so the invitee actually derives the epoch secrets.
+ */
+describe('a decoded key package against real MLS', () => {
+  test('joins a group when the round trip is the only source of the package', async () => {
+    const alice = randomIdentity()
+    const bob = randomIdentity()
+
+    const tokens = new Map<string, string>()
+    const publish = (invite: Invite) => {
+      for (const token of invite.ledgerEntries) tokens.set(ledgerEntryDigest(token), token)
+    }
+    const resolveLedgerEntries = async (ids: Array<string>) =>
+      ids.map((id) => {
+        const token = tokens.get(id)
+        if (token == null) throw new Error(`unknown ledger entry ${id}`)
+        return token
+      })
+
+    const bundle = await createKeyPackageBundle(bob)
+    const decoded = decodeKeyPackage(encodeKeyPackage(bundle.publicPackage))
+    expect(decoded).not.toBeNull()
+    if (decoded == null) return
+
+    const { group } = await createGroup(alice, 'group:codec', { resolveLedgerEntries })
+    const { invite } = await createInvite({
+      group,
+      identity: alice,
+      recipientDID: bob.id,
+      permission: 'member',
+    })
+    publish(invite)
+
+    // The decoded package, not `bundle.publicPackage`. That substitution is the whole test.
+    const added = await commitInvite(group, decoded, invite)
+    const { group: joined } = await processWelcome({
+      identity: bob,
+      invite,
+      welcome: added.welcomeMessage,
+      keyPackageBundle: bundle,
+      ratchetTree: added.newGroup.state.ratchetTree,
+      options: { resolveLedgerEntries },
+    })
+
+    expect(joined.findMemberLeafIndex(bob.id)).not.toBeNull()
   })
 })

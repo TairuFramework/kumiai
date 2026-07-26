@@ -10,6 +10,7 @@ Credential-aware MLS (RFC 9420) group lifecycle for enkaku. Wraps [`ts-mls`](htt
 - `commitLedgerEntries` — an admin promotes or demotes by committing signed `kumiai.role` entries
 - `removeMember` — an admin evicts a leaf and rotates keys
 - `restoreGroup` — rehydrate a `GroupHandle` from persisted `ClientState` and the stored ledger tokens
+- `encodeKeyPackage` + `decodeKeyPackage` — convert a key package to and from the opaque string a hub stores; decode is strict and returns `null` rather than throwing
 - `exportGroupInfo` + `joinGroupExternal` — stale-device self-rejoin (see below)
 
 ## Authority model
