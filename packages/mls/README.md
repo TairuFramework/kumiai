@@ -11,6 +11,8 @@ Credential-aware MLS (RFC 9420) group lifecycle for enkaku. Wraps [`ts-mls`](htt
 - `removeMember` — an admin evicts a leaf and rotates keys
 - `restoreGroup` — rehydrate a `GroupHandle` from persisted `ClientState` and the stored ledger tokens
 - `encodeKeyPackage` + `decodeKeyPackage` — convert a key package to and from the opaque string a hub stores; decode is strict and returns `null` rather than throwing
+- `encodePrivateKeyPackage` + `decodePrivateKeyPackage` — the canonical string form of a key package's **private** half, for a host that must persist it across restarts (a reusable last-resort package outlives the process that made it). Secret material: never publish or log it.
+- `keyPackageRef` — the base64 KeyPackageRef a Welcome names, stable across a codec round trip. Use it as the identity of a stored package.
 - `exportGroupInfo` + `joinGroupExternal` — stale-device self-rejoin (see below)
 
 ## Authority model

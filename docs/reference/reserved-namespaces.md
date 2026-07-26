@@ -1,7 +1,8 @@
 # Reserved namespaces
 
-What a host may not define. kumiai reserves two string prefixes and three MLS extension type
-numbers. Both prefixes name kumiai, so a host can tell at a glance what is not theirs.
+What a host may not define. kumiai reserves two string prefixes and three MLS extension types, and
+explains one it uses without reserving. Both prefixes name kumiai, so a host can tell at a glance
+what is not theirs.
 
 **Application entry types and topic labels must not start with either prefix.** Everything else is
 yours, including `group.` — reserved until 2026-07-20, now application space.
@@ -89,3 +90,22 @@ be opened later without a flag day: `packages/mls/src/policy.ts:99-118` admits t
 when it is not already installed, the list grew by exactly one, and its data is a zero-length
 `Uint8Array` — then strips it before the positional compare. *Populating* `0xf102` remains a policy
 change every peer must ship before any peer can commit it.
+
+## The one MLS extension type kumiai uses but does not reserve
+
+`0x000A` (`LAST_RESORT_EXTENSION_TYPE`, `packages/mls/src/group-credential.ts`) is not in the
+`0xf10x` reserved block, because kumiai did not define it: it is `last_resort_key_package` from
+draft-ietf-mls-extensions, and the number is the draft's.
+
+**The rule above does not apply to it.** A leaf must advertise a custom extension type before it can
+be installed — that is what makes the reserved GroupContext types work — but `last_resort` is a
+**KeyPackage** extension (`Message(s): KP`), and RFC 9420's capabilities rule binds leaf-node
+extensions only. ts-mls follows the RFC here, checking a peer's declared capabilities against leaf
+extensions alone. So `controlCapabilities()` does not list `0x000A`, and that is correct rather than
+an omission. Neither draft -05 nor -08 adds an advertisement requirement of its own.
+
+**Version drift to watch.** Draft -08 moved the feature out of the extension registry entirely: it
+is now MLS Component Type `0x00000004`, carried inside the `app_data_dictionary` extension. `0x000A`
+is nonetheless what deployed implementations use (OpenMLS `main`: `ExtensionType::LastResort => 10`),
+so it stays. Whoever migrates to the component form must revisit `controlCapabilities()` at the same
+time, because -08 *does* ask clients to advertise `app_data_dictionary` support in their LeafNodes.
