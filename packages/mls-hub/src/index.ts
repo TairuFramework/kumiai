@@ -18,6 +18,11 @@
  */
 
 export {
+  createLastResortProvisioner,
+  type LastResortProvisioner,
+  type LastResortProvisionerParams,
+} from './provisioner.js'
+export {
   createMemoryLastResortStore,
   type LastResortRecord,
   type LastResortStore,
