@@ -647,6 +647,12 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         // budget refuses the pool while the reusable floor still answers. A target with no slot is
         // refused exactly as before.
         //
+        // "Consumes nothing, so charges nothing" holds on THIS path only. The charge is levied on
+        // intent to consume, before either read: on the ordinary path below the target was already
+        // charged `cappedCount`, so a drained target's slot rides along on an already-charged
+        // request and does cost the shared per-target budget until the budget is spent. Harmless —
+        // the slot is served either way — but the invariant is not unconditional.
+        //
         // A store failure HERE does not become the client's error: the request was already being
         // refused, and the slot was the only thing that could have rescued it. Surfacing the
         // store's error instead would turn a retryable coded refusal into an opaque one, changing
@@ -668,18 +674,36 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         }
         return { keyPackages: [lastResort] }
       }
-      // On the ordinary path a store failure IS the client's error, so it keeps its wire code —
-      // a named store error has to stay tellable from an unreachable hub.
+      // THE TWO READS BELOW ARE SPLIT DELIBERATELY, AND MUST STAY SPLIT. `fetchKeyPackages` is
+      // destructive: once it returns, those packages are spliced out of the store for good. A
+      // failure AFTER that point which propagates to the client destroys packages nobody ever
+      // received — and the client's retry burns the next batch, and the next. The likeliest trigger
+      // is exactly the third-party store this feature targets: one that has not implemented the
+      // slot yet throws `store.fetchLastResortKeyPackage is not a function` on the second read, so
+      // every fetch against it would silently drain the target — the drain the last-resort slot
+      // exists to close, reintroduced by the top-up read itself.
+      //
+      // So the pool read's failure IS the client's error and keeps its wire code (a named store
+      // error has to stay tellable from an unreachable hub), while the top-up read may only fail
+      // the request when nothing has been consumed and there is therefore nothing to lose.
+      let consumed: Array<string>
       try {
-        const consumed = await store.fetchKeyPackages(targetDID, cappedCount)
-        if (consumed.length >= cappedCount) return { keyPackages: consumed }
-        const lastResort = await store.fetchLastResortKeyPackage(targetDID)
-        // Appended AT MOST ONCE, never padded out to `cappedCount`: handing one caller two copies
-        // of one init key is the reuse the whole design avoids.
-        return { keyPackages: lastResort == null ? consumed : [...consumed, lastResort] }
+        consumed = await store.fetchKeyPackages(targetDID, cappedCount)
       } catch (error) {
         rethrowAsHandlerError(error)
       }
+      if (consumed.length >= cappedCount) return { keyPackages: consumed }
+      let lastResort: string | null = null
+      try {
+        lastResort = await store.fetchLastResortKeyPackage(targetDID)
+      } catch (error) {
+        // Nothing consumed, so nothing is lost by surfacing it. Otherwise the top-up was a bonus
+        // the caller never paid for: hand back what the store has already given up.
+        if (consumed.length === 0) rethrowAsHandlerError(error)
+      }
+      // Appended AT MOST ONCE, never padded out to `cappedCount`: handing one caller two copies
+      // of one init key is the reuse the whole design avoids.
+      return { keyPackages: lastResort == null ? consumed : [...consumed, lastResort] }
     }) as RequestHandler<HubProtocol, 'hub/v1/keypackage/fetch'>,
   }
 }

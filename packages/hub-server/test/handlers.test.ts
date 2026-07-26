@@ -462,19 +462,53 @@ describe('store errors on the key-package fetch path keep their wire code', () =
     ).rejects.toMatchObject({ code: HUB_ERROR_CODES.keyPackageQuota })
   })
 
-  test('a named store error from the top-up read reaches the client coded', async () => {
+  test('a named store error from the top-up read reaches the client coded when nothing was consumed', async () => {
     const store = storeThatFailsOn(
       'fetchLastResortKeyPackage',
       new KeyPackageQuotaExceededError('store unavailable'),
     )
-    // The ordinary pool answers short, so the handler reaches the top-up read and trips it.
-    await store.storeKeyPackage(TARGET, 'kp-0')
+    // The pool is EMPTY, so the short answer consumed nothing and the failing top-up read is the
+    // only thing standing between the caller and an answer. Surfacing it loses nothing.
     const { handlers } = setup({ store: store as never })
     await expect(
       (handlers['hub/v1/keypackage/fetch'] as any)(
         reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 5 }),
       ),
     ).rejects.toMatchObject({ code: HUB_ERROR_CODES.keyPackageQuota })
+  })
+
+  /**
+   * `fetchKeyPackages` is DESTRUCTIVE. Once it returns, those packages are out of the store for
+   * good, and a throw from the bonus top-up read would destroy packages nobody ever received —
+   * with every retry burning the next batch. The concrete trigger is a store that has not
+   * implemented the slot yet (`fetchLastResortKeyPackage is not a function`), which would make
+   * every fetch against it silently drain the target: the exact drain this feature exists to close.
+   */
+  test('a broken slot read does not discard packages the pool already gave up', async () => {
+    const store = {
+      ...createMemoryStore(),
+      fetchLastResortKeyPackage: undefined as never,
+    }
+    await store.storeKeyPackage(TARGET, 'kp-0')
+    const { handlers } = setup({ store: store as never })
+    const result = await (handlers['hub/v1/keypackage/fetch'] as any)(
+      reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 5 }),
+    )
+    expect(result.keyPackages).toEqual(['kp-0'])
+  })
+
+  test('a named store error from the top-up read is swallowed once the pool has answered', async () => {
+    const store = storeThatFailsOn(
+      'fetchLastResortKeyPackage',
+      new KeyPackageQuotaExceededError('store unavailable'),
+    )
+    // The ordinary pool answered short, so `kp-0` is already spliced out. The client gets it.
+    await store.storeKeyPackage(TARGET, 'kp-0')
+    const { handlers } = setup({ store: store as never })
+    const result = await (handlers['hub/v1/keypackage/fetch'] as any)(
+      reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 5 }),
+    )
+    expect(result.keyPackages).toEqual(['kp-0'])
   })
 
   test('an unnamed store error still passes through untouched', async () => {
