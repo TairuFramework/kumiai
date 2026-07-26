@@ -1,4 +1,4 @@
-import { normalizeDID, randomIdentity } from '@kokuin/token'
+import { createIdentity, normalizeDID, randomIdentity } from '@kokuin/token'
 import type { KeyPackage } from 'ts-mls'
 import { defaultCredentialTypes } from 'ts-mls'
 import { describe, expect, test } from 'vitest'
@@ -252,5 +252,41 @@ describe('commitInvite refuses an invite it cannot bind', () => {
     await expect(commitInvite(group, x509Package, invite)).rejects.toThrow(
       /non-basic credential, which names no DID to bind/,
     )
+  })
+})
+
+describe('commitInvite normalizes both DIDs before comparing', () => {
+  test('a did:peer:4 recipient invited by long form still commits', async () => {
+    const alice = await createIdentity({
+      keys: [{ purpose: 'sig', alg: 'EdDSA' }],
+      didMethod: 'peer:4',
+    })
+    const bob = await createIdentity({
+      keys: [{ purpose: 'sig', alg: 'EdDSA' }],
+      didMethod: 'peer:4',
+    })
+
+    const { group } = await createGroup(alice, 'g-peer4-longform')
+    const bobBundle = await createKeyPackageBundle(bob, { capabilities: controlCapabilities() })
+
+    // The credential carries bob's short form; the invite names his long form. Both must
+    // normalize to the same DID or this honest path breaks.
+    expect(bob.longForm).not.toBe(bob.id)
+    const { invite } = await createInvite({
+      group,
+      identity: alice,
+      recipientDID: bob.longForm,
+      permission: 'member',
+    })
+
+    const { welcomeMessage } = await commitInvite(group, bobBundle.publicPackage, invite)
+    const { group: bobGroup } = await processWelcome({
+      identity: bob,
+      invite,
+      welcome: welcomeMessage,
+      keyPackageBundle: bobBundle,
+    })
+
+    expect(bobGroup.groupID).toBe('g-peer4-longform')
   })
 })
