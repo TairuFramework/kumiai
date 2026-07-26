@@ -1,4 +1,6 @@
 import { normalizeDID, randomIdentity } from '@kokuin/token'
+import type { KeyPackage } from 'ts-mls'
+import { defaultCredentialTypes } from 'ts-mls'
 import { describe, expect, test } from 'vitest'
 
 import { controlCapabilities } from '../src/anchor.js'
@@ -7,9 +9,12 @@ import {
   createGroup,
   createInvite,
   createKeyPackageBundle,
+  type Invite,
   InviteRecipientMismatchError,
   processWelcome,
 } from '../src/index.js'
+import { signLedgerEntry } from '../src/ledger.js'
+import { ROLE_ENTRY_TYPE } from '../src/roster.js'
 
 describe('InviteRecipientMismatchError', () => {
   test('carries the group and both DIDs, and names both in its message', () => {
@@ -128,5 +133,124 @@ describe('commitInvite binds the key package to the invite recipient', () => {
 
     expect(bobGroup.groupID).toBe('g-honest')
     expect(newGroup.roster.roles.get(bob.id)).toBe('member')
+  })
+})
+
+describe('commitInvite refuses an invite it cannot bind', () => {
+  test('refuses an invite that enacts no role entry for this group', async () => {
+    const alice = randomIdentity()
+    const bob = randomIdentity()
+
+    const { group } = await createGroup(alice, 'g-no-role')
+    const bobBundle = await createKeyPackageBundle(bob, { capabilities: controlCapabilities() })
+
+    const noteToken = await signLedgerEntry(alice, {
+      type: 'app.note',
+      groupID: 'g-no-role',
+      subject: bob.id,
+      value: 'not a role grant',
+    })
+    const invite: Invite = {
+      groupID: 'g-no-role',
+      inviterID: alice.id,
+      ledgerEntries: [...group.ledgerTokens, noteToken],
+    }
+
+    await expect(commitInvite(group, bobBundle.publicPackage, invite)).rejects.toThrow(
+      /enacts no kumiai\.role entry for this group/,
+    )
+  })
+
+  test('an invite carrying a promotion binds to the grant that comes last, not the promotion', async () => {
+    const alice = randomIdentity()
+    const bob = randomIdentity()
+    const carol = randomIdentity()
+
+    // Bob joins first, so promoting him is a grant to an existing member.
+    const { group } = await createGroup(alice, 'g-promotion-ride')
+    const bobBundle = await createKeyPackageBundle(bob, { capabilities: controlCapabilities() })
+    const { invite: bobInvite } = await createInvite({
+      group,
+      identity: alice,
+      recipientDID: bob.id,
+      permission: 'member',
+    })
+    const { newGroup: withBob } = await commitInvite(group, bobBundle.publicPackage, bobInvite)
+
+    const promoteBob = await signLedgerEntry(alice, {
+      type: ROLE_ENTRY_TYPE,
+      groupID: 'g-promotion-ride',
+      subject: bob.id,
+      value: 'admin',
+    })
+    const { invite: carolInvite } = await createInvite({
+      group: withBob,
+      identity: alice,
+      recipientDID: carol.id,
+      permission: 'member',
+    })
+    // The promotion rides ahead of Carol's own grant, which stays last — the ordering
+    // createInvite documents and the rule the guard reads.
+    const carolRoleToken = carolInvite.ledgerEntries[carolInvite.ledgerEntries.length - 1]
+    if (carolRoleToken == null) {
+      throw new Error('createInvite produced an invite with no ledger entries')
+    }
+    const withPromotion: Invite = {
+      ...carolInvite,
+      ledgerEntries: [...carolInvite.ledgerEntries.slice(0, -1), promoteBob, carolRoleToken],
+    }
+
+    // Handed the promoted member's key package instead of Carol's, the guard refuses: being
+    // *a* role subject in the invite is not enough, it must be the one the invite ends on.
+    const bobSecondBundle = await createKeyPackageBundle(bob, {
+      capabilities: controlCapabilities(),
+    })
+    const thrown: unknown = await commitInvite(
+      withBob,
+      bobSecondBundle.publicPackage,
+      withPromotion,
+    ).catch((error: unknown) => error)
+
+    if (!(thrown instanceof InviteRecipientMismatchError)) {
+      throw new Error(`commitInvite resolved, or rejected with the wrong error: ${String(thrown)}`)
+    }
+    expect(thrown.expectedDID).toBe(carol.id)
+    expect(thrown.actualDID).toBe(bob.id)
+
+    // And handed Carol's, it commits — the promotion riding along is not itself a problem.
+    const carolBundle = await createKeyPackageBundle(carol, {
+      capabilities: controlCapabilities(),
+    })
+    const { newGroup } = await commitInvite(withBob, carolBundle.publicPackage, withPromotion)
+    expect(newGroup.roster.roles.get(bob.id)).toBe('admin')
+    expect(newGroup.roster.roles.get(carol.id)).toBe('member')
+  })
+
+  test('refuses a key package whose credential is not a basic credential', async () => {
+    const alice = randomIdentity()
+    const bob = randomIdentity()
+
+    const { group } = await createGroup(alice, 'g-x509')
+    const bobBundle = await createKeyPackageBundle(bob, { capabilities: controlCapabilities() })
+    const { invite } = await createInvite({
+      group,
+      identity: alice,
+      recipientDID: bob.id,
+      permission: 'member',
+    })
+
+    // Signature is now invalid, which is the point: the guard must refuse before anything
+    // reaches a signature check, because a non-basic credential names no DID to bind.
+    const x509Package: KeyPackage = {
+      ...bobBundle.publicPackage,
+      leafNode: {
+        ...bobBundle.publicPackage.leafNode,
+        credential: { credentialType: defaultCredentialTypes.x509, certificates: [] },
+      },
+    }
+
+    await expect(commitInvite(group, x509Package, invite)).rejects.toThrow(
+      /non-basic credential, which names no DID to bind/,
+    )
   })
 })
