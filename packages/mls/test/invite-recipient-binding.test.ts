@@ -1,4 +1,4 @@
-import { randomIdentity } from '@kokuin/token'
+import { normalizeDID, randomIdentity } from '@kokuin/token'
 import { describe, expect, test } from 'vitest'
 
 import { controlCapabilities } from '../src/anchor.js'
@@ -61,6 +61,8 @@ describe('commitInvite binds the key package to the invite recipient', () => {
       capabilities: controlCapabilities(),
     })
 
+    // `.catch` returning the raw error collapses to `unknown`, so `instanceof` is a real narrow
+    // rather than an assertion — and it fails the test on the resolve path too.
     const thrown: unknown = await commitInvite(group, malloryBundle.publicPackage, invite).catch(
       (error: unknown) => error,
     )
@@ -73,13 +75,12 @@ describe('commitInvite binds the key package to the invite recipient', () => {
     expect(thrown.actualDID).toBe(mallory.id)
   })
 
-  test('the refusal leaves the group at its pre-commit epoch', async () => {
+  test('the refusal leaves the roster clean and the handle usable for an honest retry', async () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
     const mallory = randomIdentity()
 
     const { group } = await createGroup(alice, 'g-no-advance')
-    const epochBefore = group.epoch
     const { invite } = await createInvite({
       group,
       identity: alice,
@@ -93,7 +94,14 @@ describe('commitInvite binds the key package to the invite recipient', () => {
     await expect(commitInvite(group, malloryBundle.publicPackage, invite)).rejects.toThrow(
       InviteRecipientMismatchError,
     )
-    expect(group.epoch).toBe(epochBefore)
+
+    // The rejection left the source handle untouched: the same invite still commits
+    // honestly afterward, admitting Bob and never Mallory — proving both that no partial
+    // state from the aborted attempt survived and that the mutex released on rejection.
+    const bobBundle = await createKeyPackageBundle(bob, { capabilities: controlCapabilities() })
+    const { newGroup } = await commitInvite(group, bobBundle.publicPackage, invite)
+    expect(newGroup.roster.roles.get(normalizeDID(bob.id))).toBe('member')
+    expect(newGroup.roster.roles.get(normalizeDID(mallory.id))).toBeUndefined()
   })
 
   test('the honest path still commits and the recipient joins', async () => {

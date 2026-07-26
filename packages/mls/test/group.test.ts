@@ -1873,6 +1873,47 @@ describe('an invite seeds the roster', () => {
       InviteRecipientMismatchError,
     )
   })
+
+  test('a joiner refuses a Welcome whose invite names someone else', async () => {
+    const alice = randomIdentity()
+    const bob = randomIdentity()
+    const carol = randomIdentity()
+    const { group: aliceGroup } = await createGroup(alice, 'wrong-invite-at-joiner')
+
+    // Bob's own, honest invite — this is the leg commitInvite's guard permits.
+    const { invite: bobInvite } = await createInvite({
+      group: aliceGroup,
+      identity: alice,
+      recipientDID: bob.id,
+      permission: 'member',
+    })
+    const bobKP = await createKeyPackageBundle(bob)
+    const { welcomeMessage, newGroup } = await commitInvite(
+      aliceGroup,
+      bobKP.publicPackage,
+      bobInvite,
+    )
+
+    // A second, unrelated invite that never named Bob. This is the joiner-side half of
+    // the same invariant: it protects a joiner when the inviter is the malicious party,
+    // handing them a genuine Welcome alongside an invite for someone else.
+    const { invite: carolInvite } = await createInvite({
+      group: aliceGroup,
+      identity: alice,
+      recipientDID: carol.id,
+      permission: 'member',
+    })
+
+    await expect(
+      processWelcome({
+        identity: bob,
+        invite: carolInvite,
+        welcome: welcomeMessage,
+        keyPackageBundle: bobKP,
+        ratchetTree: newGroup.state.ratchetTree,
+      }),
+    ).rejects.toThrow(/carries no role entry naming this identity/)
+  })
 })
 
 /** A roster as a stable, comparable value. */

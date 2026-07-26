@@ -90,10 +90,15 @@ keeping the invitee's grant last. That is not a coincidence of those tests: it i
 the exactly-one rule would have, wherever the exactly-one rule was correct, and keeps working
 where it was not.
 
-The residual cost is a false refusal for an inviter who hand-builds an invite with the invitee's
-grant somewhere other than last. That is a loud failure against a documented ordering, not a
-silent one, which is the right side to err on for a guard whose whole purpose is catching a
-silent divergence.
+The residual is not merely a false refusal. When a hand-built invite puts the invitee's grant
+somewhere other than last, the guard binds to whichever role entry *is* last, and a key package
+for that subject is accepted — so the leaf that joins is not the one the inviter meant to add,
+and the intended invitee gets a roster grant without ever joining. The admitted party always
+holds a role grant enacted by the same commit, so this is not the original hole (an identity
+with no grant at all deriving the epoch secrets), but it is still a divergence between roster
+and membership. Last-position is therefore a load-bearing precondition on a hand-built invite,
+not a stylistic convention — `createInvite` satisfies it by construction, and anything that
+assembles an invite by hand must too.
 
 Non-role entries may still ride along, so an invite that also carries app-domain entries stays
 possible.
