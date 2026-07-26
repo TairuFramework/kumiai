@@ -922,6 +922,24 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
     })
 
     /**
+     * THE SLOT IS PER OWNER. The mirror of the clause below: a read written as
+     * `SELECT blob FROM key_packages WHERE is_last_resort LIMIT 1` — dropping `AND owner = ?`
+     * rather than `AND is_last_resort` — passes every other last-resort clause here, because each
+     * of them exercises a single DID.
+     *
+     * The consequence is worse than init-key reuse. `commitInvite` hands whatever key package it
+     * is given straight to the Add proposal without checking the package's credential DID against
+     * the invite's recipient, so a fetch for BOB that returns ALICE's last-resort package Welcomes
+     * ALICE into the group — she derives the epoch secrets — while the ledger entry grants the role
+     * to BOB.
+     */
+    test("one owner's last-resort package is never served for another", async () => {
+      const store = await createStore()
+      await store.storeLastResortKeyPackage(ALICE, 'kp-alice-last-resort')
+      expect(await store.fetchLastResortKeyPackage(BOB)).toBeNull()
+    })
+
+    /**
      * A plausible SQL shape puts both kinds of package in one table
      * (`key_packages(owner, blob, is_last_resort)`) and writes the last-resort read as
      * `SELECT blob FROM key_packages WHERE owner = ? LIMIT 1` — omitting `AND is_last_resort`. That
