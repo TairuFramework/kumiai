@@ -35,10 +35,13 @@ and confirm the candidate roster grants it a role.
 
 ## What this would also close
 
-`commitInvite`'s recipient binding has a documented residual: a hand-built invite whose intended
-invitee's `kumiai.role` grant is not the *last* entry binds to whichever entry is last instead (see
-the `InviteRecipientMismatchError` doc comment and the design at
-`docs/superpowers/specs/2026-07-26-bind-keypackage-recipient-design.md`). A receiver-side check
+`commitInvite`'s recipient binding has a documented residual: it reads the *last* `kumiai.role`
+entry the invite enacts, so a hand-built invite whose intended invitee's grant is not last binds to
+whichever entry is last instead, and a key package for that subject is accepted. The intended
+invitee then holds a roster grant without ever joining. `createInvite` places the invitee's grant
+last by construction, so the residual is reachable only through a hand-assembled invite — see
+`docs/agents/plans/completed/2026-07-26-bind-keypackage-recipient.complete.md` and the
+`InviteRecipientMismatchError` doc comment in `packages/mls/src/group-commit.ts`. A receiver-side check
 against `candidateRoster` does not care about entry order — it only asks whether the added DID has
 *any* grant in the roster the commit produces — so it would reject an Add for a DID the candidate
 roster does not grant, whatever order the invite's entries were in. This closes the residual from
