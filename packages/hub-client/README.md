@@ -41,6 +41,23 @@ an unconditional publish, which is the intent; a caller that means the empty-top
 A lost compare-and-set rejects with the `HeadMismatchError` wire code, which is how a caller tells it
 from an unreachable hub — see `hubErrorFromCode` in `@kumiai/hub-protocol`.
 
+## The last-resort key package is the caller's to keep alive
+
+`uploadLastResortKeyPackage` fills a single reusable slot the hub serves without consuming, so a
+drained ordinary pool can no longer strand a member. Build the package with
+`createLastResortKeyPackageBundle` from `@kumiai/mls`; sending an ordinary one here means the hub
+hands the same init key to two inviters.
+
+Two obligations sit on the host, and the hub cannot enforce either — it stores opaque bytes and
+reports success either way, so both fail silently:
+
+- **Re-upload before `LAST_RESORT_LIFETIME_DAYS` (90) elapses.** The hub cannot see the expiry, so
+  it goes on reporting the slot full while serving a dead package that every inviter refuses.
+  Uploading once at enrolment buys 90 days, not forever.
+- **Retain the bundle's `privatePackage` for as long as it may be reused.** Deleting it after a
+  Welcome — as a host correctly would for an ordinary, single-use bundle — makes the member
+  silently unaddable forever, the exact outage the slot exists to prevent.
+
 ## Reading a topic's log
 
 `fetchTopic` pulls log-class frames only, and the hub gates it on the caller's **own** subscription:
