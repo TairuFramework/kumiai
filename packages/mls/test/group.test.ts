@@ -33,6 +33,7 @@ import {
   createKeyPackageBundle,
   exportGroupInfo,
   type GroupHandle,
+  InviteRecipientMismatchError,
   joinGroupExternal,
   processWelcome,
   readMessageEpoch,
@@ -1851,7 +1852,7 @@ describe('an invite seeds the roster', () => {
     ).rejects.toThrow(/admin/)
   })
 
-  test('a Welcome whose invite names someone else is refused', async () => {
+  test('an invite naming someone else refuses the key package at commit time', async () => {
     const alice = randomIdentity()
     const bob = randomIdentity()
     const carol = randomIdentity()
@@ -1865,21 +1866,12 @@ describe('an invite seeds the roster', () => {
       permission: 'member',
     })
     const bobKP = await createKeyPackageBundle(bob)
-    const { welcomeMessage, newGroup } = await commitInvite(
-      aliceGroup,
-      bobKP.publicPackage,
-      carolInvite,
-    )
 
-    await expect(
-      processWelcome({
-        identity: bob,
-        invite: carolInvite,
-        welcome: welcomeMessage,
-        keyPackageBundle: bobKP,
-        ratchetTree: newGroup.state.ratchetTree,
-      }),
-    ).rejects.toThrow(/role entry/)
+    // The refusal is the inviter's now: the leaf that would join is not the identity the
+    // invite grants a role to, so the commit is never built.
+    await expect(commitInvite(aliceGroup, bobKP.publicPackage, carolInvite)).rejects.toThrow(
+      InviteRecipientMismatchError,
+    )
   })
 })
 
