@@ -1,4 +1,5 @@
-import { type DIDCache, decodePeer4, isPeer4 } from '@kokuin/token'
+import { type DIDCache, decodePeer4, isPeer4, normalizeDID } from '@kokuin/token'
+import { type Credential, defaultCredentialTypes, isDefaultCredential } from 'ts-mls'
 
 /**
  * Local member state (never serialized to the MLS leaf). `id` is the member's own
@@ -86,4 +87,36 @@ export async function populateCacheFromCredential(
     throw new Error('Credential longForm does not match credential.id')
   }
   await cache.set(shortForm, doc)
+}
+
+/**
+ * The normalized DID an MLS leaf credential names, or `undefined` when it names none.
+ *
+ * Total by contract. The receive-side commit policy calls this on a leaf inside an untrusted
+ * commit, and {@link defaultCommitPolicy} is pure and total — a malformed credential must read as
+ * "no DID", never throw past the policy boundary. Every rejection `parseMLSCredentialIdentity`
+ * raises collapses to `undefined` here: non-JSON bytes, a non-object value, an unsupported `v`, a
+ * non-string `id`, a non-string `longForm`.
+ *
+ * `credentialType !== basic` does not narrow on its own: `CredentialCustom.credentialType` is a
+ * bare `number`, so the compiler cannot rule it out. ts-mls's own guard can.
+ *
+ * Syntax is not validated. An identity naming an arbitrary string returns that string, which no
+ * roster grants — a lookup miss, and deliberately distinct from a credential that names nothing.
+ *
+ * Not re-exported from the package index: `policy.ts` is the only consumer today, and widening the
+ * surface is cheap to do later and impossible to undo.
+ */
+export function didFromCredential(credential: Credential): string | undefined {
+  if (
+    !isDefaultCredential(credential) ||
+    credential.credentialType !== defaultCredentialTypes.basic
+  ) {
+    return undefined
+  }
+  try {
+    return normalizeDID(parseMLSCredentialIdentity(credential.identity).id)
+  } catch {
+    return undefined
+  }
 }

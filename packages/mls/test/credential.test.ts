@@ -1,8 +1,9 @@
 import { createIdentity, createInMemoryDIDCache } from '@kokuin/token'
-import { defaultCredentialTypes } from 'ts-mls'
+import { type Credential, defaultCredentialTypes } from 'ts-mls'
 import { describe, expect, it } from 'vitest'
 
 import {
+  didFromCredential,
   type MemberCredential,
   parseMLSCredentialIdentity,
   populateCacheFromCredential,
@@ -146,3 +147,65 @@ const _typeCheck: MemberCredential = {
   groupID: 'group-1',
 }
 void _typeCheck
+
+/** A basic MLS credential carrying `identity` verbatim. */
+function basicCredential(identity: Uint8Array): Credential {
+  return { credentialType: defaultCredentialTypes.basic, identity }
+}
+
+/** A basic MLS credential whose identity is the JSON `makeMLSCredential` emits. */
+function credentialFor(id: string): Credential {
+  return basicCredential(new TextEncoder().encode(JSON.stringify({ id })))
+}
+
+describe('didFromCredential', () => {
+  it('returns the DID a basic did:key credential names', () => {
+    expect(didFromCredential(credentialFor('did:key:z6MkABC'))).toBe('did:key:z6MkABC')
+  })
+
+  it('normalizes a peer:4 long form to its short form', () => {
+    // normalizeDID truncates at the separator after the peer:4 prefix, so the roster lookup
+    // this feeds compares short forms on both sides.
+    expect(didFromCredential(credentialFor('did:peer:4zABC:eyJ'))).toBe('did:peer:4zABC')
+  })
+
+  it('reads an identity tagged v: 1', () => {
+    const bytes = new TextEncoder().encode(JSON.stringify({ v: 1, id: 'did:key:z6MkABC' }))
+    expect(didFromCredential(basicCredential(bytes))).toBe('did:key:z6MkABC')
+  })
+
+  it('returns undefined for an x509 credential, which names no DID', () => {
+    const x509: Credential = { credentialType: defaultCredentialTypes.x509, certificates: [] }
+    expect(didFromCredential(x509)).toBeUndefined()
+  })
+
+  it('returns undefined for a custom credential type', () => {
+    const custom: Credential = { credentialType: 0xbeef, data: new Uint8Array([1, 2, 3]) }
+    expect(didFromCredential(custom)).toBeUndefined()
+  })
+
+  it('returns undefined instead of throwing on non-JSON identity bytes', () => {
+    const bytes = new TextEncoder().encode('not json at all')
+    expect(() => didFromCredential(basicCredential(bytes))).not.toThrow()
+    expect(didFromCredential(basicCredential(bytes))).toBeUndefined()
+  })
+
+  it('returns undefined instead of throwing on JSON with no id', () => {
+    const bytes = new TextEncoder().encode(JSON.stringify({ longForm: 'did:peer:4zABC:eyJ' }))
+    expect(() => didFromCredential(basicCredential(bytes))).not.toThrow()
+    expect(didFromCredential(basicCredential(bytes))).toBeUndefined()
+  })
+
+  it('returns undefined instead of throwing on an unsupported identity version', () => {
+    const bytes = new TextEncoder().encode(JSON.stringify({ v: 2, id: 'did:key:z6MkABC' }))
+    expect(() => didFromCredential(basicCredential(bytes))).not.toThrow()
+    expect(didFromCredential(basicCredential(bytes))).toBeUndefined()
+  })
+
+  it('returns an arbitrary id string unchanged rather than rejecting it', () => {
+    // Not this function's job to validate DID syntax: a well-formed identity naming a string no
+    // roster ever grants is a DID the caller will fail to find, which is the correct outcome and
+    // a different one from "this credential names no DID at all".
+    expect(didFromCredential(credentialFor('banana'))).toBe('banana')
+  })
+})
