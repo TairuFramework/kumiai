@@ -1,6 +1,6 @@
 import { normalizeDID } from '@kokuin/token'
-import type { GroupContextExtension, Proposal, ProposalWithSender } from 'ts-mls'
-import { defaultProposalTypes, makeCustomExtension } from 'ts-mls'
+import type { Credential, GroupContextExtension, Proposal, ProposalWithSender } from 'ts-mls'
+import { defaultCredentialTypes, defaultProposalTypes, makeCustomExtension } from 'ts-mls'
 import { describe, expect, test } from 'vitest'
 
 import {
@@ -57,12 +57,33 @@ function context(overrides: Partial<CommitPolicyContext> = {}): CommitPolicyCont
 }
 
 /**
- * A proposal whose crypto-bearing payload the policy never inspects (add,
- * update, psk, reinit, external_init). The type tag is real; the payload is not
- * fabricated because no case depends on it.
+ * A proposal whose crypto-bearing payload the policy never inspects (update,
+ * psk, reinit, external_init). The type tag is real; the payload is not
+ * fabricated because no case depends on it. `add` is no longer in this list — the add rule
+ * reads `proposal.add.keyPackage.leafNode.credential`, so it needs `addProposal` below instead.
  */
 function taggedProposal(proposalType: number): Proposal {
   return { proposalType, payload: undefined } as unknown as Proposal
+}
+
+/**
+ * An Add whose key package presents `did` in a basic MLS credential. Only the credential is
+ * real — the add rule reads `proposal.add.keyPackage.leafNode.credential` and nothing else — so
+ * the rest of the key package stays unfabricated for the same reason `taggedProposal` fabricates
+ * no payload at all.
+ */
+function addProposal(did: string): Proposal {
+  return addProposalWithCredential({
+    credentialType: defaultCredentialTypes.basic,
+    identity: new TextEncoder().encode(JSON.stringify({ id: did })),
+  })
+}
+
+function addProposalWithCredential(credential: Credential): Proposal {
+  return {
+    proposalType: defaultProposalTypes.add,
+    add: { keyPackage: { leafNode: { credential } } },
+  } as unknown as Proposal
 }
 
 function removeProposal(removed: number): Proposal {
@@ -119,7 +140,7 @@ function commit(
 
 describe('defaultCommitPolicy', () => {
   test('add is admin-gated', () => {
-    const add = taggedProposal(defaultProposalTypes.add)
+    const add = addProposal(MEMBER_DID)
     expect(defaultCommitPolicy(commit(MEMBER_LEAF, [withSender(add, undefined)]), context())).toBe(
       'reject',
     )
@@ -360,7 +381,7 @@ describe('defaultCommitPolicy', () => {
   test('a commit that enacts entries without a group_context_extensions proposal is rejected', () => {
     // Entries would be enacted while the head stood still, so the head would stop
     // covering the ledger and an omission would become undetectable.
-    const add = taggedProposal(defaultProposalTypes.add)
+    const add = addProposal(MEMBER_DID)
     expect(
       defaultCommitPolicy(
         commit(ADMIN_LEAF, [withSender(add, undefined)]),
@@ -376,7 +397,7 @@ describe('defaultCommitPolicy', () => {
   })
 
   test('a commit enacting entries and moving the head to the expected value is accepted', () => {
-    const add = taggedProposal(defaultProposalTypes.add)
+    const add = addProposal(MEMBER_DID)
     const gce = gceProposal(controlExtensions(OTHER_HEAD_BYTES.slice()))
     expect(
       defaultCommitPolicy(
@@ -413,7 +434,7 @@ describe('defaultCommitPolicy', () => {
     const externalCommit = commit(undefined, [
       withSender(taggedProposal(defaultProposalTypes.external_init), undefined),
       withSender(removeProposal(MEMBER_LEAF), undefined),
-      withSender(taggedProposal(defaultProposalTypes.add), undefined),
+      withSender(addProposal(MEMBER_DID), undefined),
     ])
     expect(defaultCommitPolicy(externalCommit, context({ externalCommitDID: MEMBER_DID }))).toBe(
       'reject',
@@ -444,7 +465,7 @@ describe('defaultCommitPolicy', () => {
   test('a commit mixing a passing and a failing proposal is rejected', () => {
     const mixed = commit(MEMBER_LEAF, [
       withSender(taggedProposal(defaultProposalTypes.update), undefined),
-      withSender(taggedProposal(defaultProposalTypes.add), undefined),
+      withSender(addProposal(MEMBER_DID), undefined),
     ])
     expect(defaultCommitPolicy(mixed, context())).toBe('reject')
   })
@@ -485,7 +506,7 @@ describe('defaultCommitPolicy', () => {
   test('the policy never throws, even on an unresolvable sender', () => {
     expect(() =>
       defaultCommitPolicy(
-        commit(undefined, [withSender(taggedProposal(defaultProposalTypes.add), undefined)]),
+        commit(undefined, [withSender(addProposal(MEMBER_DID), undefined)]),
         context(),
       ),
     ).not.toThrow()
@@ -549,6 +570,97 @@ describe('defaultCommitPolicy', () => {
         context({ candidateRoster: roster([[ADMIN_DID, 'member']]) }),
       ),
     ).toBe('accept')
+  })
+
+  test('an add is rejected when the candidate roster grants the added DID nothing', () => {
+    // The gap this rule closes: an admin — or a modified commitInvite — adding a leaf the
+    // group's own roster never granted a role to. Honest paths always enact the grant in the
+    // same commit, so a DID absent from the candidate roster is one nothing admitted.
+    const add = addProposal(OUTSIDER_DID)
+    expect(defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(add, undefined)]), context())).toBe(
+      'reject',
+    )
+  })
+
+  test('an add is accepted when only the candidate roster grants the added DID', () => {
+    // The honest invite shape: the invitee's grant rides the same commit as the Add, so it
+    // exists in the candidate roster and not the base one. Checking baseRoster here would
+    // reject every legitimate invite.
+    const granted = roster([
+      [ADMIN_DID, 'admin'],
+      [MEMBER_DID, 'member'],
+      [OUTSIDER_DID, 'member'],
+    ])
+    const add = addProposal(OUTSIDER_DID)
+    expect(
+      defaultCommitPolicy(
+        commit(ADMIN_LEAF, [withSender(add, undefined)]),
+        context({ candidateRoster: granted }),
+      ),
+    ).toBe('accept')
+  })
+
+  test('an add of a DID already on the roster is accepted without a fresh grant', () => {
+    // A re-add — a second device, or a rejoin after removal — enacts no new entry. The rule
+    // asks whether the added DID holds a role, never whether this commit granted it.
+    const add = addProposal(MEMBER_DID)
+    expect(defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(add, undefined)]), context())).toBe(
+      'accept',
+    )
+  })
+
+  test('a non-admin add of a granted DID is still rejected', () => {
+    // The admin gate runs first and is unchanged: a granted DID does not let a member add.
+    const add = addProposal(MEMBER_DID)
+    expect(defaultCommitPolicy(commit(MEMBER_LEAF, [withSender(add, undefined)]), context())).toBe(
+      'reject',
+    )
+  })
+
+  test('an add carrying a non-basic credential is rejected', () => {
+    const add = addProposalWithCredential({
+      credentialType: defaultCredentialTypes.x509,
+      certificates: [],
+    })
+    expect(defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(add, undefined)]), context())).toBe(
+      'reject',
+    )
+  })
+
+  test('an add whose credential identity is malformed is rejected without throwing', () => {
+    // A receiver judging an untrusted commit cannot let a malformed credential throw past the
+    // policy boundary — defaultCommitPolicy is documented pure and total.
+    const add = addProposalWithCredential({
+      credentialType: defaultCredentialTypes.basic,
+      identity: new TextEncoder().encode('not json at all'),
+    })
+    const incoming = commit(ADMIN_LEAF, [withSender(add, undefined)])
+    expect(() => defaultCommitPolicy(incoming, context())).not.toThrow()
+    expect(defaultCommitPolicy(incoming, context())).toBe('reject')
+  })
+
+  test('a standalone add of an ungranted DID is rejected', () => {
+    // A standalone proposal carries no entries, so its candidate roster equals the base one and
+    // a not-yet-granted invitee has no grant to find. Grants land by commit; the Add follows.
+    const standalone = {
+      kind: 'proposal' as const,
+      proposal: withSender(addProposal(OUTSIDER_DID), ADMIN_LEAF),
+    }
+    expect(defaultCommitPolicy(standalone, context())).toBe('reject')
+  })
+
+  test('psk and reinit stay admin-gated and read no leaf', () => {
+    // They shared the add case arm before it was split out; the split must not change them.
+    // Neither carries a leaf, so `taggedProposal` remains the honest fixture for both.
+    for (const proposalType of [defaultProposalTypes.psk, defaultProposalTypes.reinit]) {
+      const proposal = taggedProposal(proposalType)
+      expect(
+        defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(proposal, undefined)]), context()),
+      ).toBe('accept')
+      expect(
+        defaultCommitPolicy(commit(MEMBER_LEAF, [withSender(proposal, undefined)]), context()),
+      ).toBe('reject')
+    }
   })
 })
 

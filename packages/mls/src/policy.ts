@@ -8,6 +8,7 @@ import type {
 import { defaultProposalTypes, isDefaultProposal } from 'ts-mls'
 
 import { LEDGER_HEAD_EXTENSION_TYPE, RESERVED_EXTENSION_TYPE } from './anchor.js'
+import { didFromCredential } from './credential.js'
 import type { RosterState } from './roster.js'
 
 /**
@@ -140,6 +141,12 @@ function evaluateGroupContextExtensions(
 /**
  * Apply one proposal's row for the given effective sender. Unknown/custom types fail closed.
  * `external_init` is judged at the commit level, never here — a standalone one rejects.
+ *
+ * An `add` is admin-gated AND bound to the roster: the added leaf's credential must name a DID
+ * the candidate roster holds a role for — was ever granted one, not necessarily by this commit.
+ * `roleReducer.apply` only ever sets a role, never clears it (see roster.ts), so this does not
+ * guarantee current membership matches the roster's intent, only that no leaf joins under a DID
+ * the roster never recognized.
  */
 function evaluateProposal(
   proposal: Proposal,
@@ -150,7 +157,32 @@ function evaluateProposal(
     return 'reject'
   }
   switch (proposal.proposalType) {
-    case defaultProposalTypes.add:
+    case defaultProposalTypes.add: {
+      if (!isAdmin(context, effectiveSender)) {
+        return 'reject'
+      }
+      // Bind the leaf that joins to the roster this commit produces, mirroring the binding
+      // `commitInvite` enforces where the commit is authored. Without it only an honest inviter
+      // refuses to admit an identity the roster never granted a role to; a receiver applies the
+      // commit and Welcomes the wrong member with no way to see the disagreement.
+      //
+      // `candidateRoster`, not `baseRoster`: an honest invite's grant for the invitee rides the
+      // same commit as the Add, so it exists only after the fold.
+      //
+      // Membership, not provenance: the question is whether the added DID holds a role, never
+      // whether this commit granted it. A re-add — a second device, a rejoin after removal —
+      // enacts no entry and must keep working.
+      //
+      // A credential that names no DID (non-`basic`, or malformed) is rejected rather than
+      // trusted. `didFromCredential` is total, so nothing here can throw past this boundary.
+      const addedDID = didFromCredential(proposal.add.keyPackage.leafNode.credential)
+      if (addedDID === undefined) {
+        return 'reject'
+      }
+      return context.candidateRoster.roles.has(addedDID) ? 'accept' : 'reject'
+    }
+    // Split from `add` above only so they stop sharing an arm that reads `proposal.add`.
+    // Neither carries a leaf, so neither has anything to bind to the roster.
     case defaultProposalTypes.psk:
     case defaultProposalTypes.reinit:
       return isAdmin(context, effectiveSender) ? 'accept' : 'reject'
