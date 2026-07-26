@@ -93,7 +93,7 @@ export async function populateCacheFromCredential(
  * The normalized DID an MLS leaf credential names, or `undefined` when it names none.
  *
  * Total by contract. The receive-side commit policy calls this on a leaf inside an untrusted
- * commit, and {@link defaultCommitPolicy} is pure and total — a malformed credential must read as
+ * commit, and `defaultCommitPolicy` is pure and total — a malformed credential must read as
  * "no DID", never throw past the policy boundary. Every rejection `parseMLSCredentialIdentity`
  * raises collapses to `undefined` here: non-JSON bytes, a non-object value, an unsupported `v`, a
  * non-string `id`, a non-string `longForm`.

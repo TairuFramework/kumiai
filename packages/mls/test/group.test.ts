@@ -1438,6 +1438,23 @@ describe('GroupHandle commit enforcement (default-on)', () => {
     expect(bobGroup.findMemberLeafIndex(carol.id)).toBeDefined()
   })
 
+  test("rejects an admin's Add of a DID the roster never granted a role to, on receipt", async () => {
+    const { aliceGroup, carolGroup } = await threeMemberGroup()
+    const dave = randomIdentity()
+    const daveKP = await createKeyPackageBundle(dave)
+
+    // Alice is admin here, so this clears the admin gate the two `CommitRejectedError` tests
+    // above (and below) stop at. Dave never appears in any roster entry, so this exercises the
+    // roster-binding rule itself — through a real receiver applying a real received commit, not
+    // a hand-fabricated proposal object.
+    const bytes = await addCommitBytes(aliceGroup, daveKP.publicPackage)
+
+    const epochBefore = carolGroup.epoch
+    await expect(carolGroup.processMessage(bytes)).rejects.toThrow(CommitRejectedError)
+    expect(carolGroup.epoch).toBe(epochBefore)
+    expect(carolGroup.findMemberLeafIndex(dave.id)).toBeUndefined()
+  })
+
   test('a role entry updates the roster on accept; a non-role entry surfaces', async () => {
     const tokens = new Map<string, string>()
     const surfaced: Array<VerifiedLedgerEntry> = []

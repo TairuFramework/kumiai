@@ -378,6 +378,12 @@ export async function commitInvite(
 
     // `credentialType !== basic` does not narrow on its own: CredentialCustom.credentialType is a
     // bare `number`, so the compiler cannot rule it out. ts-mls's own guard can.
+    //
+    // This inlines the same credential->DID chain `didFromCredential` (credential.ts) implements
+    // for the receive-side policy, kept separate deliberately: this path needs to distinguish a
+    // non-basic credential from a malformed-JSON failure for its error messages, and that helper
+    // is deliberately unexported. The two must stay in agreement — if they diverge, the committer
+    // authors a commit every receiver rejects, a liveness failure rather than a security one.
     const credential = keyPackage.leafNode.credential
     if (
       !isDefaultCredential(credential) ||

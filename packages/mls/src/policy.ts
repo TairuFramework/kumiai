@@ -143,7 +143,10 @@ function evaluateGroupContextExtensions(
  * `external_init` is judged at the commit level, never here — a standalone one rejects.
  *
  * An `add` is admin-gated AND bound to the roster: the added leaf's credential must name a DID
- * the candidate roster grants a role to, so MLS membership can never diverge from the roster.
+ * the candidate roster holds a role for — was ever granted one, not necessarily by this commit.
+ * `roleReducer.apply` only ever sets a role, never clears it (see roster.ts), so this does not
+ * guarantee current membership matches the roster's intent, only that no leaf joins under a DID
+ * the roster never recognized.
  */
 function evaluateProposal(
   proposal: Proposal,

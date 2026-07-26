@@ -57,9 +57,10 @@ function context(overrides: Partial<CommitPolicyContext> = {}): CommitPolicyCont
 }
 
 /**
- * A proposal whose crypto-bearing payload the policy never inspects (add,
- * update, psk, reinit, external_init). The type tag is real; the payload is not
- * fabricated because no case depends on it.
+ * A proposal whose crypto-bearing payload the policy never inspects (update,
+ * psk, reinit, external_init). The type tag is real; the payload is not
+ * fabricated because no case depends on it. `add` is no longer in this list — the add rule
+ * reads `proposal.add.keyPackage.leafNode.credential`, so it needs `addProposal` below instead.
  */
 function taggedProposal(proposalType: number): Proposal {
   return { proposalType, payload: undefined } as unknown as Proposal
@@ -649,8 +650,8 @@ describe('defaultCommitPolicy', () => {
   })
 
   test('psk and reinit stay admin-gated and read no leaf', () => {
-    // They share the add case arm today; splitting add out must not change them. Neither
-    // carries a leaf, so `taggedProposal` remains the honest fixture for both.
+    // They shared the add case arm before it was split out; the split must not change them.
+    // Neither carries a leaf, so `taggedProposal` remains the honest fixture for both.
     for (const proposalType of [defaultProposalTypes.psk, defaultProposalTypes.reinit]) {
       const proposal = taggedProposal(proposalType)
       expect(
