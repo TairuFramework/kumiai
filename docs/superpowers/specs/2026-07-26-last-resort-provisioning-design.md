@@ -146,7 +146,8 @@ export type LastResortStore = {
 
 export type LastResortProvisionerParams = {
   identity: OwnIdentity
-  client: HubClient
+  /** Narrowed to the one method used, so nothing else about the client is coupled. */
+  client: Pick<HubClient, 'uploadLastResortKeyPackage'>
   store: LastResortStore
   /** Passed through to createLastResortKeyPackageBundle. */
   options?: GroupOptions
@@ -231,15 +232,19 @@ which is in seconds because that is the unit MLS's own `Lifetime` uses.
    b. `put(ownerDID, { …, uploadedAt: null })`
    c. `client.uploadLastResortKeyPackage(record.keyPackage)`
    d. `put(ownerDID, { …, uploadedAt: Date.now() })`
-6. Prune: `delete` every record whose `notAfter + retainAfterExpiryDays` is in the past. **After**
-   step 5, so the store is never momentarily empty.
+6. Prune: `delete` every record whose `notAfter + retainAfterExpiryDays` is in the past, **except the
+   record this call settled on**. Runs on *every* path including the no-op of step 4 — a host calling
+   daily would otherwise never prune between rotations, which are 90 days apart — and always after
+   the upload, so the store is never momentarily empty. The keep-the-settled-record exception matters
+   on the step-3 path, where an interrupted record can itself be old enough to prune and must not be
+   deleted immediately after being uploaded.
 
 Return `{ rotated: true, ref }` for paths 3 and 5, `{ rotated: false }` for path 4. An expired
 candidate is not a special case: `notAfter - now` is negative, so step 4 falls through to a mint.
 
-`notAfter` is read from the generated bundle's leaf node. A KeyPackage's `leafNode` is a
-discriminated union in ts-mls; the `leafNodeSource === 'key_package'` member carries
-`lifetime: Lifetime`, so the read narrows on that discriminant.
+`notAfter` is read from the generated bundle's leaf node: `KeyPackage.leafNode` is typed
+`LeafNodeKeyPackage`, which always carries `lifetime`, so `publicPackage.leafNode.lifetime.notAfter`
+type-checks directly with no narrowing. It is a `bigint` and the record holds a `number`.
 
 ### Persist before upload, always
 
