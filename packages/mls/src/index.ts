@@ -2,6 +2,7 @@ export type {
   Capabilities,
   GroupContextExtension,
   IncomingMessageCallback,
+  KeyPackage,
   Proposal,
   ProposalWithSender,
 } from 'ts-mls'
@@ -64,6 +65,7 @@ export {
   createGroup,
   createInvite,
   createKeyPackageBundle,
+  createLastResortKeyPackageBundle,
   type ExportGroupInfoParams,
   type ExportGroupInfoResult,
   exportGroupInfo,
@@ -75,6 +77,8 @@ export {
   type JoinGroupExternalParams,
   type JoinGroupExternalResult,
   joinGroupExternal,
+  LAST_RESORT_EXTENSION_TYPE,
+  LAST_RESORT_LIFETIME_DAYS,
   type LedgerLogEntry,
   makeMLSCredential,
   type ProcessWelcomeOnceParams,
@@ -103,6 +107,10 @@ export {
   readLedgerHead,
   readLedgerHeadExtension,
 } from './head.js'
+export {
+  decodeKeyPackage,
+  encodeKeyPackage,
+} from './key-package-codec.js'
 export {
   type LedgerEntry,
   ledgerEntryDigest,

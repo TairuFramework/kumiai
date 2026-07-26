@@ -46,3 +46,23 @@ logger works when someone has already thought about it, which is not the failing
 - `packages/rpc/src/hub-mux.ts` — `report`, `warnSubscribeFailed`, `warnReceiveEnded`.
 - `packages/rpc/test/hub-mux-receive-ended.test.ts` — covers both ends (configured with a sink
   that matches, and not configured at all); neither covers the middle.
+
+## Also on this theme: `hub-server` has no error sink at all
+
+Found by the whole-branch review of the last-resort key-package work (2026-07-26). The key-package
+fetch handler now deliberately **swallows** a failed last-resort top-up read when the ordinary pool
+already answered — surfacing it would discard packages that were destructively consumed and
+received by nobody, which is strictly worse. The fallback path preserves its own read failure as an
+error `cause` for exactly this reason.
+
+But on the top-up path there is nowhere for the swallowed error to go: `createHandlers`
+(`packages/hub-server/src/handlers.ts`) takes no logger and no `onStoreError` hook, and the module
+contains no `logger` or `console` reference at all. So a permanently broken slot read — a store
+that never implemented `fetchLastResortKeyPackage`, a dropped column, a failing connection —
+returns 200 forever with no signal anywhere. The availability floor the last-resort feature exists
+to provide is silently absent, and the operator's only clue is that joins mysteriously fail
+downstream at the inviter.
+
+This is the same shape as the `rpc` gap above: the code correctly declines to fail the request, and
+correctly notices something is wrong, and then has nowhere to say so. Fixing it needs a sink on
+`createHandlers` first — the swallow site is already marked.

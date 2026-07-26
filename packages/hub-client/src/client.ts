@@ -123,6 +123,27 @@ export class HubClient {
     })
   }
 
+  /**
+   * Upload the caller's single reusable last-resort key package, replacing any previous one. The
+   * hub serves it without consuming it once the ordinary pool runs dry, so the caller stays
+   * addable to a group. Generate it with `createLastResortKeyPackageBundle` from `@kumiai/mls` —
+   * an ordinary package sent here would be handed out twice, which is init-key reuse.
+   *
+   * Two obligations sit on the caller, and both fail SILENTLY — the hub reports success either way:
+   *
+   * - **Re-upload before `LAST_RESORT_LIFETIME_DAYS` (90) elapses.** The hub stores opaque bytes
+   *   and cannot see the expiry, so it goes on reporting the slot full while serving a dead package
+   *   that every inviter refuses. Uploading once at enrolment buys 90 days, not forever.
+   * - **Retain the bundle's `privatePackage` for as long as it may be reused.** Deleting it after
+   *   a Welcome — as a host correctly would for an ordinary, single-use bundle — makes the member
+   *   silently unaddable forever, the exact outage this slot exists to prevent.
+   */
+  uploadLastResortKeyPackage(keyPackage: string): RequestCall<{ stored: number }> {
+    return this.#client.request('hub/v1/keypackage/upload', {
+      param: { keyPackages: [keyPackage], lastResort: true },
+    })
+  }
+
   fetchKeyPackages(did: string, count?: number): RequestCall<{ keyPackages: Array<string> }> {
     return this.#client.request('hub/v1/keypackage/fetch', {
       param: { did, count },

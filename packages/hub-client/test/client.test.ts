@@ -132,6 +132,20 @@ describe('HubClient', () => {
     await transports.dispose()
   })
 
+  test('uploadLastResortKeyPackage stores a package that outlives being fetched', async () => {
+    const testHub = createTestHub()
+    const { client, identity, transports } = createTestClient(testHub)
+
+    const result = await client.uploadLastResortKeyPackage('kp-lr')
+    expect(result.stored).toBe(1)
+
+    // The ordinary pool is empty, yet a fetch still yields a package — and again after that.
+    expect((await client.fetchKeyPackages(identity.id, 1)).keyPackages).toEqual(['kp-lr'])
+    expect((await client.fetchKeyPackages(identity.id, 1)).keyPackages).toEqual(['kp-lr'])
+
+    await transports.dispose()
+  })
+
   test('exposes rawClient', () => {
     const transports: HubTransports = new DirectTransports()
     const rawClient = new Client<HubProtocol>({

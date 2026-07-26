@@ -535,4 +535,33 @@ describe('createMemoryStore pub/sub', () => {
     expect(await store.fetchKeyPackages(ALICE, 1)).toEqual(['kp-1'])
     expect(await store.fetchKeyPackages(ALICE)).toEqual(['kp-2'])
   })
+
+  test('the last-resort slot is served without being consumed', async () => {
+    const store = createMemoryStore()
+    await store.storeLastResortKeyPackage(ALICE, 'kp-lr')
+    expect(await store.fetchLastResortKeyPackage(ALICE)).toBe('kp-lr')
+    expect(await store.fetchLastResortKeyPackage(ALICE)).toBe('kp-lr')
+  })
+
+  test('an empty last-resort slot reads as null', async () => {
+    const store = createMemoryStore()
+    expect(await store.fetchLastResortKeyPackage(ALICE)).toBeNull()
+  })
+
+  test('a second last-resort upload replaces the first', async () => {
+    const store = createMemoryStore()
+    await store.storeLastResortKeyPackage(ALICE, 'kp-old')
+    await store.storeLastResortKeyPackage(ALICE, 'kp-new')
+    expect(await store.fetchLastResortKeyPackage(ALICE)).toBe('kp-new')
+  })
+
+  test('the last-resort slot is outside the per-DID key-package cap', async () => {
+    const store = createMemoryStore({ maxKeyPackagesPerDID: 2 })
+    await store.storeLastResortKeyPackage(ALICE, 'kp-lr')
+    await store.storeKeyPackage(ALICE, 'kp-0')
+    await store.storeKeyPackage(ALICE, 'kp-1')
+    // The slot neither consumed cap headroom nor gained any from it.
+    await expect(store.storeKeyPackage(ALICE, 'kp-2')).rejects.toThrow()
+    expect(await store.fetchLastResortKeyPackage(ALICE)).toBe('kp-lr')
+  })
 })

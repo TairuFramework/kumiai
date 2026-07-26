@@ -222,4 +222,17 @@ export type HubStore = {
    * upload past its cap with `KeyPackageQuotaExceededError` (rejected, never evicted). */
   storeKeyPackage(ownerDID: string, keyPackage: string): Promise<void>
   fetchKeyPackages(ownerDID: string, count?: number): Promise<Array<string>>
+  /**
+   * Store the owner's single last-resort key package, replacing any previous one.
+   *
+   * A last-resort package is marked reusable in MLS (`last_resort`,
+   * draft-ietf-mls-extensions), which makes it the ONE key package a store may serve twice: it is
+   * the floor that keeps an owner addable to a group after their ordinary pool has been drained.
+   * One slot per owner, and it MUST NOT count against the per-owner cap `storeKeyPackage`
+   * enforces — a full pool must never be able to block the floor.
+   */
+  storeLastResortKeyPackage(ownerDID: string, keyPackage: string): Promise<void>
+  /** The owner's last-resort key package, or `null` when they have none. NEVER consumes: repeated
+   * calls return the same package. */
+  fetchLastResortKeyPackage(ownerDID: string): Promise<string | null>
 }

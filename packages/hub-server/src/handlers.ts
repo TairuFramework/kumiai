@@ -37,7 +37,7 @@ export type AuthorizeRequest =
   | { action: 'subscribe'; did: string; topicID: string; retention?: number }
   | { action: 'unsubscribe'; did: string; topicID: string }
   | { action: 'topic/fetch'; did: string; topicID: string }
-  | { action: 'keypackage/upload'; did: string; count: number }
+  | { action: 'keypackage/upload'; did: string; count: number; lastResort?: boolean }
   | { action: 'keypackage/fetch'; did: string; targetDID: string; count: number }
 
 /**
@@ -557,10 +557,30 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
     }) as ChannelHandler<HubProtocol, 'hub/v1/receive'>,
 
     'hub/v1/keypackage/upload': (async (ctx) => {
-      const { keyPackages } = ctx.param
+      const { keyPackages, lastResort } = ctx.param
       const clientDID = getClientDID(ctx)
+      // The slot holds one package, so a flagged upload carries exactly one. JSON Schema cannot
+      // express a conditional on a sibling field, so the arity is enforced here.
+      let lastResortPackage: string | null = null
+      if (lastResort === true) {
+        const [only, ...rest] = keyPackages
+        if (only == null || rest.length > 0) {
+          throw new HandlerError({
+            code: HUB_ERROR_CODES.invalidPayload,
+            message: 'A last-resort upload must carry exactly one key package',
+          })
+        }
+        lastResortPackage = only
+      }
       const decision = normalizeAuthorizeDecision(
-        await authorize({ action: 'keypackage/upload', did: clientDID, count: keyPackages.length }),
+        await authorize({
+          action: 'keypackage/upload',
+          did: clientDID,
+          count: keyPackages.length,
+          // Spread, not assignment: `lastResort: undefined` would make an ordinary upload look
+          // like one that explicitly opted out.
+          ...(lastResort === true ? { lastResort: true } : {}),
+        }),
       )
       if (!decision.allow) {
         throw new HandlerError({
@@ -576,8 +596,13 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       }
       // A batch crossing the cap partially commits (the store enforces per-call, so the cap still
       // holds) and rejects the rest with HUB_KEYPACKAGE_QUOTA; a retry finds the earlier ones stored.
+      // The last-resort path has no cap to cross: the slot is one entry, replaced in place.
       try {
-        await Promise.all(keyPackages.map((kp: string) => store.storeKeyPackage(clientDID, kp)))
+        if (lastResortPackage != null) {
+          await store.storeLastResortKeyPackage(clientDID, lastResortPackage)
+        } else {
+          await Promise.all(keyPackages.map((kp: string) => store.storeKeyPackage(clientDID, kp)))
+        }
       } catch (error) {
         rethrowAsHandlerError(error)
       }
@@ -607,12 +632,78 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       // `code` of its own) to its wire code.
       try {
         assertKeyPackageFetchAllowed(requesterDID)
-        assertTargetConsumptionAllowed(targetDID, cappedCount)
       } catch (error) {
         rethrowAsHandlerError(error)
       }
-      const keyPackages = await store.fetchKeyPackages(targetDID, cappedCount)
-      return { keyPackages }
+      let targetBudgetSpent = false
+      try {
+        assertTargetConsumptionAllowed(targetDID, cappedCount)
+      } catch (error) {
+        if (!(error instanceof KeyPackageFetchLimitError)) rethrowAsHandlerError(error)
+        targetBudgetSpent = true
+      }
+      if (targetBudgetSpent) {
+        // The drain budget bounds CONSUMPTION, and serving the slot consumes nothing — so a spent
+        // budget refuses the pool while the reusable floor still answers. A target with no slot is
+        // refused exactly as before.
+        //
+        // "Consumes nothing, so charges nothing" holds on THIS path only. The charge is levied on
+        // intent to consume, before either read: on the ordinary path below the target was already
+        // charged `cappedCount`, so a drained target's slot rides along on an already-charged
+        // request and does cost the shared per-target budget until the budget is spent. Harmless —
+        // the slot is served either way — but the invariant is not unconditional.
+        //
+        // A store failure HERE does not become the client's error: the request was already being
+        // refused, and the slot was the only thing that could have rescued it. Surfacing the
+        // store's error instead would turn a retryable coded refusal into an opaque one, changing
+        // what the caller does about a situation that has not changed. The store error rides along
+        // as `cause` so an operator can still see a broken store behind the refusal.
+        let lastResort: string | null = null
+        let readFailure: unknown
+        try {
+          lastResort = await store.fetchLastResortKeyPackage(targetDID)
+        } catch (error) {
+          readFailure = error
+        }
+        if (lastResort == null) {
+          throw new HandlerError({
+            code: HUB_ERROR_CODES.keyPackageFetchLimit,
+            message: `Key package consumption limit exceeded for target ${targetDID}`,
+            ...(readFailure != null ? { cause: readFailure } : {}),
+          })
+        }
+        return { keyPackages: [lastResort] }
+      }
+      // THE TWO READS BELOW ARE SPLIT DELIBERATELY, AND MUST STAY SPLIT. `fetchKeyPackages` is
+      // destructive: once it returns, those packages are spliced out of the store for good. A
+      // failure AFTER that point which propagates to the client destroys packages nobody ever
+      // received — and the client's retry burns the next batch, and the next. The likeliest trigger
+      // is exactly the third-party store this feature targets: one that has not implemented the
+      // slot yet throws `store.fetchLastResortKeyPackage is not a function` on the second read, so
+      // every fetch against it would silently drain the target — the drain the last-resort slot
+      // exists to close, reintroduced by the top-up read itself.
+      //
+      // So the pool read's failure IS the client's error and keeps its wire code (a named store
+      // error has to stay tellable from an unreachable hub), while the top-up read may only fail
+      // the request when nothing has been consumed and there is therefore nothing to lose.
+      let consumed: Array<string>
+      try {
+        consumed = await store.fetchKeyPackages(targetDID, cappedCount)
+      } catch (error) {
+        rethrowAsHandlerError(error)
+      }
+      if (consumed.length >= cappedCount) return { keyPackages: consumed }
+      let lastResort: string | null = null
+      try {
+        lastResort = await store.fetchLastResortKeyPackage(targetDID)
+      } catch (error) {
+        // Nothing consumed, so nothing is lost by surfacing it. Otherwise the top-up was a bonus
+        // the caller never paid for: hand back what the store has already given up.
+        if (consumed.length === 0) rethrowAsHandlerError(error)
+      }
+      // Appended AT MOST ONCE, never padded out to `cappedCount`: handing one caller two copies
+      // of one init key is the reuse the whole design avoids.
+      return { keyPackages: lastResort == null ? consumed : [...consumed, lastResort] }
     }) as RequestHandler<HubProtocol, 'hub/v1/keypackage/fetch'>,
   }
 }

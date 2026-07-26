@@ -47,7 +47,7 @@ AND retain = 'log'`) passes every single-connection test, then returns `null` th
 ages out — and a peer that reads that `null`, compare-and-sets on `expectedHead: null`, wins, and
 forks the group.
 
-Two more things a plausible store gets wrong:
+Three more things a plausible store gets wrong:
 
 - **`sequenceID` is minted by the store, inside the accepting transaction** — never by the calling
   process, which collides across two hubs on one database. It is lexicographically ordered and
@@ -59,6 +59,13 @@ Two more things a plausible store gets wrong:
   head — so a store comparing first tells the caller its commit was lost when it landed. And the
   `publishID` record is **not a log entry**: no deleter may reach it, its retention is its own
   (indefinite recommended), and it outlives the frame it names.
+- **The last-resort slot is not the ordinary pool, in either direction.** `fetchLastResortKeyPackage`
+  NEVER consumes — repeated calls return the same package, because it carries MLS's `last_resort`
+  extension and is reusable by design — and `storeLastResortKeyPackage` MUST NOT count against
+  `maxKeyPackagesPerDID`, or a full ordinary pool could block the one floor meant to survive it. The
+  easy SQL mistake runs both ways in a single `key_packages` table: a last-resort read that forgets
+  `AND is_last_resort` falls through and re-serves an ordinary, single-use package forever; a cap
+  check that counts rows regardless of the flag charges the slot anyway.
 
 ## `logPosition` is not `sequenceID`
 

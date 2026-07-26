@@ -183,6 +183,15 @@ export const hubProtocol = {
           minItems: 1,
           maxItems: 50,
         },
+        /**
+         * Route this upload to the owner's single reusable last-resort slot instead of the
+         * destructive pool. The hub stores opaque blobs and cannot tell a `last_resort`-marked
+         * package from an ordinary one, so it takes the uploader's word for it: mislabelling an
+         * ordinary package is init-key reuse, but only against the uploader's own DID.
+         *
+         * Requires `keyPackages` to hold exactly one entry — the slot holds one.
+         */
+        lastResort: { type: 'boolean' },
       },
       required: ['keyPackages'],
       additionalProperties: false,

@@ -13,7 +13,13 @@ export {
   type RestoreGroupParams,
   restoreGroup,
 } from './group-create.js'
-export { createKeyPackageBundle, makeMLSCredential } from './group-credential.js'
+export {
+  createKeyPackageBundle,
+  createLastResortKeyPackageBundle,
+  LAST_RESORT_EXTENSION_TYPE,
+  LAST_RESORT_LIFETIME_DAYS,
+  makeMLSCredential,
+} from './group-credential.js'
 export {
   CommitRejectedError,
   GroupHandle,

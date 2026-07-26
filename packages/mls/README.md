@@ -10,6 +10,7 @@ Credential-aware MLS (RFC 9420) group lifecycle for enkaku. Wraps [`ts-mls`](htt
 - `commitLedgerEntries` — an admin promotes or demotes by committing signed `kumiai.role` entries
 - `removeMember` — an admin evicts a leaf and rotates keys
 - `restoreGroup` — rehydrate a `GroupHandle` from persisted `ClientState` and the stored ledger tokens
+- `encodeKeyPackage` + `decodeKeyPackage` — convert a key package to and from the opaque string a hub stores; decode is strict and returns `null` rather than throwing
 - `exportGroupInfo` + `joinGroupExternal` — stale-device self-rejoin (see below)
 
 ## Authority model
@@ -73,3 +74,13 @@ MLS has no cryptographic member revocation. `removeMember` evicts a leaf; it doe
 - Enforce access control outside MLS: block the removed device at the transport layer (e.g. hub auth).
 
 The follow-up revocation work will introduce a ledger entry that removes a DID's role from the roster, synced through the same GroupContext ledger-head extension the roster already rides. Once a revoked DID is no longer a roster member, the external-commit policy rejects its resync exactly as it rejects a stranger today.
+
+### ⚠️ Security: retain the last-resort bundle after Welcome
+
+`createLastResortKeyPackageBundle` produces a `KeyPackageBundle` marked with the `last_resort` extension (draft-ietf-mls-extensions) — reusable by design, so a hub may hand the same one to every future inviter once the owner's ordinary pool is drained. `@kumiai/mls` never owns private key material: `processWelcome` takes the bundle as a caller-supplied parameter and does not persist it, so retention is entirely the host's responsibility. Delete a last-resort `privatePackage` after processing a Welcome — the way a host correctly would for an ordinary, single-use bundle — and the member is silently unaddable forever, which is the exact outage this feature exists to prevent. The host must keep the last-resort bundle's private half around, distinct from ordinary bundles, for as long as it may be reused. A `KeyPackageBundle` carries no marker of its own, so a host that persists bundles generically can recognize one with `bundle.publicPackage.extensions.some((e) => e.extensionType === LAST_RESORT_EXTENSION_TYPE)` — `LAST_RESORT_EXTENSION_TYPE` is exported for exactly this.
+
+### ⚠️ Security: rotate the last-resort bundle before it expires
+
+A last-resort key package carries an MLS lifetime of `LAST_RESORT_LIFETIME_DAYS` (90). The inviter validates that lifetime when building the Add, so an expired package is refused at the far end with `Current time not within Lifetime` — and refused *no matter what the hub does*, because the hub stores opaque bytes and cannot see the expiry.
+
+That makes the failure worse than an empty slot: the hub goes on reporting the slot as full and serving the dead package, so the availability floor looks healthy while every join through it fails. A host must generate and upload a fresh last-resort bundle before the window elapses, and keep the new private half. Uploading once at enrolment buys 90 days, not forever.

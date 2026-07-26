@@ -125,6 +125,10 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
   // Reverse index for an O(1) per-DID subscription count. Kept in lockstep with `subscriptions`.
   const subsByDID = new Map<string, Set<string>>()
   const keyPackages = new Map<string, Array<string>>()
+  /** One reusable package per DID, replaced on re-upload. Deliberately not in `keyPackages`: a
+   * one-entry-per-DID map cannot grow, so it needs no quota, and charging it against
+   * `maxKeyPackagesPerDID` would let a full pool block the availability floor. */
+  const lastResortKeyPackages = new Map<string, string>()
   const events = new EventEmitter<HubStoreEvents>()
 
   // The age bound for a topic: the longest retention any of its subscribers asked for, floored
@@ -493,6 +497,16 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
       if (packages == null || packages.length === 0) return []
       const n = count ?? 1
       return packages.splice(0, n)
+    },
+
+    async storeLastResortKeyPackage(ownerDID: string, keyPackage: string): Promise<void> {
+      lastResortKeyPackages.set(ownerDID, keyPackage)
+    },
+
+    async fetchLastResortKeyPackage(ownerDID: string): Promise<string | null> {
+      // No splice, ever. Reuse is the point here — this package is marked last-resort in MLS, so
+      // serving it again is by design rather than the init-key reuse `fetchKeyPackages` avoids.
+      return lastResortKeyPackages.get(ownerDID) ?? null
     },
   }
 }

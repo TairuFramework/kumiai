@@ -899,6 +899,82 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
       expect(await store.fetchKeyPackages(ALICE, 5)).toEqual(['kp-only'])
     })
 
+    /**
+     * A LAST-RESORT PACKAGE IS THE ONE KEY PACKAGE A STORE MAY SERVE TWICE. It carries the
+     * `last_resort` extension (draft-ietf-mls-extensions), which marks it reusable by design, so
+     * the reuse the clause above forbids is here the entire point — it is the floor that keeps a
+     * member addable after an attacker has drained their ordinary pool.
+     *
+     * A store that consumed it would reintroduce the outage this exists to prevent, and, like
+     * single-use enforcement, nothing downstream is in a position to notice.
+     */
+    test('a last-resort key package is served without ever being consumed', async () => {
+      const store = await createStore()
+      await store.storeLastResortKeyPackage(ALICE, 'kp-last-resort')
+
+      expect(await store.fetchLastResortKeyPackage(ALICE)).toBe('kp-last-resort')
+      expect(await store.fetchLastResortKeyPackage(ALICE)).toBe('kp-last-resort')
+    })
+
+    test('an owner with no last-resort package reads as null, not undefined', async () => {
+      const store = await createStore()
+      expect(await store.fetchLastResortKeyPackage(BOB)).toBeNull()
+    })
+
+    /**
+     * THE SLOT IS PER OWNER. The mirror of the clause below: a read written as
+     * `SELECT blob FROM key_packages WHERE is_last_resort LIMIT 1` — dropping `AND owner = ?`
+     * rather than `AND is_last_resort` — passes every other last-resort clause here, because each
+     * of them exercises a single DID.
+     *
+     * The consequence is worse than init-key reuse. `commitInvite` hands whatever key package it
+     * is given straight to the Add proposal without checking the package's credential DID against
+     * the invite's recipient, so a fetch for BOB that returns ALICE's last-resort package Welcomes
+     * ALICE into the group — she derives the epoch secrets — while the ledger entry grants the role
+     * to BOB.
+     */
+    test("one owner's last-resort package is never served for another", async () => {
+      const store = await createStore()
+      await store.storeLastResortKeyPackage(ALICE, 'kp-alice-last-resort')
+      expect(await store.fetchLastResortKeyPackage(BOB)).toBeNull()
+    })
+
+    /**
+     * A plausible SQL shape puts both kinds of package in one table
+     * (`key_packages(owner, blob, is_last_resort)`) and writes the last-resort read as
+     * `SELECT blob FROM key_packages WHERE owner = ? LIMIT 1` — omitting `AND is_last_resort`. That
+     * store passes every other clause here, because the DID it is tested against always has a
+     * last-resort row. Give it a DID with an ordinary package and no last-resort slot: the null
+     * clause above uses BOB, who has nothing at all, so it does not catch this. If the read falls
+     * through to the ordinary pool, an attacker who first drains this DID's quota-fallback budget
+     * gets the same single-use package served back forever — init-key reuse on exactly the package
+     * this branch exists to keep single-use.
+     */
+    test('a last-resort read never falls through to the ordinary pool', async () => {
+      const store = await createStore()
+      await store.storeKeyPackage(ALICE, 'kp-ordinary')
+      expect(await store.fetchLastResortKeyPackage(ALICE)).toBeNull()
+    })
+
+    test('a second last-resort upload replaces the first — the slot holds one', async () => {
+      const store = await createStore()
+      await store.storeLastResortKeyPackage(ALICE, 'kp-old')
+      await store.storeLastResortKeyPackage(ALICE, 'kp-new')
+      expect(await store.fetchLastResortKeyPackage(ALICE)).toBe('kp-new')
+    })
+
+    /** The slot must not become a back door that re-serves single-use packages. */
+    test('an occupied last-resort slot does not make ordinary packages reusable', async () => {
+      const store = await createStore()
+      await store.storeLastResortKeyPackage(ALICE, 'kp-last-resort')
+      await store.storeKeyPackage(ALICE, 'kp-ordinary')
+
+      expect(await store.fetchKeyPackages(ALICE, 1)).toEqual(['kp-ordinary'])
+      expect(await store.fetchKeyPackages(ALICE, 1)).toEqual([])
+      // The two live in separate places: draining the pool left the slot untouched.
+      expect(await store.fetchLastResortKeyPackage(ALICE)).toBe('kp-last-resort')
+    })
+
     if (maxKeyPackagesPerDID != null) {
       test('an upload past the per-DID key-package cap is rejected, not evicted', async () => {
         const store = await createStore()
@@ -912,6 +988,20 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
         expect(await store.fetchKeyPackages(ALICE, 1)).toEqual(['kp-0'])
         // The cap is per DID: a different owner is unaffected.
         await expect(store.storeKeyPackage(BOB, 'kp-bob')).resolves.toBeUndefined()
+      })
+
+      test('the last-resort slot is not charged against the per-DID cap', async () => {
+        const store = await createStore()
+        await store.storeLastResortKeyPackage(ALICE, 'kp-last-resort')
+        // A full ordinary pool alongside an occupied slot: the slot bought no headroom and cost
+        // none. A store that charged it would let a full pool block the floor.
+        for (let i = 0; i < maxKeyPackagesPerDID; i++) {
+          await store.storeKeyPackage(ALICE, `kp-${i}`)
+        }
+        await expect(store.storeKeyPackage(ALICE, 'kp-overflow')).rejects.toThrow(
+          KeyPackageQuotaExceededError,
+        )
+        expect(await store.fetchLastResortKeyPackage(ALICE)).toBe('kp-last-resort')
       })
     }
 
