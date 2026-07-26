@@ -2,6 +2,7 @@ export type {
   Capabilities,
   GroupContextExtension,
   IncomingMessageCallback,
+  KeyPackage,
   Proposal,
   ProposalWithSender,
 } from 'ts-mls'
@@ -106,6 +107,10 @@ export {
   readLedgerHead,
   readLedgerHeadExtension,
 } from './head.js'
+export {
+  decodeKeyPackage,
+  encodeKeyPackage,
+} from './key-package-codec.js'
 export {
   type LedgerEntry,
   ledgerEntryDigest,
