@@ -1,5 +1,13 @@
 import { fromB64, toB64 } from '@sozai/codec'
-import { encode, type KeyPackage, keyPackageDecoder, keyPackageEncoder } from 'ts-mls'
+import {
+  encode,
+  type KeyPackage,
+  keyPackageDecoder,
+  keyPackageEncoder,
+  type PrivateKeyPackage,
+  privateKeyPackageDecoder,
+  privateKeyPackageEncoder,
+} from 'ts-mls'
 
 /**
  * Serialize a key package to the string form the hub stores.
@@ -62,6 +70,52 @@ export function decodeKeyPackage(encoded: string): KeyPackage | null {
   }
   // The tuple's second element is the CONSUMED LENGTH (ts-mls's `mapDecoders` returns
   // `cursor - offset`), so this is a whole-input check, not an offset comparison.
+  if (decoded == null || decoded[1] !== bytes.length) return null
+  return decoded[0]
+}
+
+/**
+ * Serialize a private key package for durable storage.
+ *
+ * A last-resort key package is reusable, so its private half must OUTLIVE the process that
+ * generated it — see `@kumiai/mls-hub`. That makes the string form a persistence format two
+ * versions of one host must agree on, which is the same reason {@link encodeKeyPackage} refuses to
+ * hand bytes back and leave the base64 choice to each caller.
+ *
+ * **The result is secret key material.** It is not a public wire form: never publish it, never log
+ * it, and store it only where the host stores private keys.
+ */
+export function encodePrivateKeyPackage(privatePackage: PrivateKeyPackage): string {
+  return toB64(encode(privateKeyPackageEncoder, privatePackage))
+}
+
+/**
+ * Parse a stored private key package, or `null` if the string is not exactly one.
+ *
+ * Strict in the same three ways {@link decodeKeyPackage} is, for the same reasons: `fromB64`'s
+ * throw on a bad alphabet is absorbed; the input must be the canonical base64 of its own bytes,
+ * because a store compares strings and `fromB64` tolerates padding variation and trims whitespace;
+ * and `privateKeyPackageDecoder` is called directly rather than through ts-mls's `decode()`, whose
+ * `dec(t, 0)?.[0]` discards the consumed length and so accepts trailing garbage in silence.
+ *
+ * A successful decode proves well-formedness and nothing else — in particular it does not prove the
+ * keys match any public package.
+ */
+export function decodePrivateKeyPackage(encoded: string): PrivateKeyPackage | null {
+  let bytes: Uint8Array
+  try {
+    bytes = fromB64(encoded)
+  } catch {
+    return null
+  }
+  if (toB64(bytes) !== encoded) return null
+  let decoded: ReturnType<typeof privateKeyPackageDecoder>
+  try {
+    decoded = privateKeyPackageDecoder(bytes, 0)
+  } catch {
+    return null
+  }
+  // The tuple's second element is the CONSUMED LENGTH, so this is a whole-input check.
   if (decoded == null || decoded[1] !== bytes.length) return null
   return decoded[0]
 }

@@ -9,7 +9,12 @@ import {
   createKeyPackageBundle,
   processWelcome,
 } from '../src/group.js'
-import { decodeKeyPackage, encodeKeyPackage } from '../src/key-package-codec.js'
+import {
+  decodeKeyPackage,
+  decodePrivateKeyPackage,
+  encodeKeyPackage,
+  encodePrivateKeyPackage,
+} from '../src/key-package-codec.js'
 import { ledgerEntryDigest } from '../src/ledger.js'
 import type { Invite } from '../src/types.js'
 
@@ -119,5 +124,52 @@ describe('a decoded key package against real MLS', () => {
     })
 
     expect(joined.findMemberLeafIndex(bob.id)).not.toBeNull()
+  })
+})
+
+describe('encodePrivateKeyPackage / decodePrivateKeyPackage', () => {
+  test('a round trip reproduces the private key package structurally', async () => {
+    const bundle = await createKeyPackageBundle(randomIdentity())
+    const decoded = decodePrivateKeyPackage(encodePrivateKeyPackage(bundle.privatePackage))
+    expect(decoded).toEqual(bundle.privatePackage)
+  })
+
+  test('encoding is deterministic for the same private package', async () => {
+    const bundle = await createKeyPackageBundle(randomIdentity())
+    expect(encodePrivateKeyPackage(bundle.privatePackage)).toBe(
+      encodePrivateKeyPackage(bundle.privatePackage),
+    )
+  })
+
+  /** Same reasoning as the public codec: ts-mls's `decode()` discards the consumed length. */
+  test('trailing bytes after a valid encoding are rejected', async () => {
+    const bundle = await createKeyPackageBundle(randomIdentity())
+    const bytes = new Uint8Array([
+      ...fromEncoded(encodePrivateKeyPackage(bundle.privatePackage)),
+      0x00,
+    ])
+    expect(decodePrivateKeyPackage(toB64(bytes))).toBeNull()
+  })
+
+  /** Canonicality is a STRING property: a store compares strings, and `fromB64` trims whitespace. */
+  test('a whitespace-padded encoding is rejected', async () => {
+    const bundle = await createKeyPackageBundle(randomIdentity())
+    expect(
+      decodePrivateKeyPackage(`${encodePrivateKeyPackage(bundle.privatePackage)}\n`),
+    ).toBeNull()
+  })
+
+  test('non-base64 input returns null rather than throwing', () => {
+    expect(decodePrivateKeyPackage('not base64 !!!')).toBeNull()
+  })
+
+  test('the empty string is rejected', () => {
+    expect(decodePrivateKeyPackage('')).toBeNull()
+  })
+
+  test('truncated TLS bytes are rejected', async () => {
+    const bundle = await createKeyPackageBundle(randomIdentity())
+    const bytes = fromEncoded(encodePrivateKeyPackage(bundle.privatePackage))
+    expect(decodePrivateKeyPackage(toB64(bytes.subarray(0, bytes.length - 1)))).toBeNull()
   })
 })
