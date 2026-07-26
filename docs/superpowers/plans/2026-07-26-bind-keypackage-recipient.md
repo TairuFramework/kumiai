@@ -647,7 +647,9 @@ Expected: FAIL — with the promotion first, a first-wins guard binds to the pro
 
 - [ ] **Step 5: Mutation-check the credential-type guard**
 
-Temporarily change `!isDefaultCredential(credential) ||` to `false ||`. TypeScript will now reject `credential.identity`; that compile error is itself the signal the branch is load-bearing, so instead run only the test:
+Mutate the **whole condition** — `if (!isDefaultCredential(credential) || credential.credentialType !== defaultCredentialTypes.basic) {` becomes `if (false) {`. Do not mutate the `isDefaultCredential` clause alone: it is a type-level narrowing device with no independent runtime behaviour, because every `CredentialCustom` that fails it also fails the `credentialType` clause. That is worth knowing and not worth faking a fixture for.
+
+TypeScript will now reject `credential.identity`; that compile error is itself the signal the branch is load-bearing, so run only the test:
 
 Run: `pnpm --filter @kumiai/mls exec vitest run test/invite-recipient-binding.test.ts -t 'not a basic credential'`
 Expected: FAIL. Restore and re-run — PASS.
