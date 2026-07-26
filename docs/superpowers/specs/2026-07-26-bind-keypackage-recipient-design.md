@@ -85,8 +85,8 @@ a supported, deliberately-tested pattern that an exactly-one rule would break.
 
 Both build the list as `[...invite.ledgerEntries.slice(0, -1), extraEntry, roleToken(invite)]`,
 keeping the invitee's grant last. That is not a coincidence of those tests: it is what
-`createInvite` itself does and documents ("The invitee's own role entry is last",
-`packages/mls/src/group-commit.ts:69`). Taking the last role entry therefore reads the same entry
+`createInvite` itself does and documents ("The whole log, new role entry last",
+`packages/mls/src/group-commit.ts:110-117`). Taking the last role entry therefore reads the same entry
 the exactly-one rule would have, wherever the exactly-one rule was correct, and keeps working
 where it was not.
 

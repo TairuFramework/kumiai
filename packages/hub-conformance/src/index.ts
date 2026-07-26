@@ -927,11 +927,13 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
      * rather than `AND is_last_resort` — passes every other last-resort clause here, because each
      * of them exercises a single DID.
      *
-     * The consequence is worse than init-key reuse. `commitInvite` hands whatever key package it
-     * is given straight to the Add proposal without checking the package's credential DID against
-     * the invite's recipient, so a fetch for BOB that returns ALICE's last-resort package Welcomes
-     * ALICE into the group — she derives the epoch secrets — while the ledger entry grants the role
-     * to BOB.
+     * The consequence used to be worse than init-key reuse: `commitInvite` handed whatever key
+     * package it was given straight to the Add proposal without checking the package's credential
+     * DID against the invite's recipient, so a fetch for BOB that returned ALICE's last-resort
+     * package Welcomed ALICE into the group while the ledger entry granted the role to BOB. That
+     * path is closed now — a fetch for BOB that returns ALICE's package fails the invite outright
+     * at `commitInvite`'s recipient binding in `@kumiai/mls`, so ALICE can never be added — but the
+     * store must not produce a cross-owner read in the first place, so this clause stays required.
      */
     test("one owner's last-resort package is never served for another", async () => {
       const store = await createStore()

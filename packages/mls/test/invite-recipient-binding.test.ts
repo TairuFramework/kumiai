@@ -226,6 +226,66 @@ describe('commitInvite refuses an invite it cannot bind', () => {
     expect(newGroup.roster.roles.get(carol.id)).toBe('member')
   })
 
+  test("refuses an invite whose ledger entries exactly equal the committer's own log", async () => {
+    const alice = randomIdentity()
+    const bob = randomIdentity()
+
+    const { group } = await createGroup(alice, 'g-empty-enacted')
+    const bobBundle = await createKeyPackageBundle(bob, { capabilities: controlCapabilities() })
+
+    // Enacts nothing new — the shape that used to commit (adding bob with no role grant
+    // at all) and now hits the same "no recipient to bind to" refusal as an invite whose
+    // only new entry is off-type.
+    const invite: Invite = {
+      groupID: 'g-empty-enacted',
+      inviterID: alice.id,
+      ledgerEntries: [...group.ledgerTokens],
+    }
+
+    await expect(commitInvite(group, bobBundle.publicPackage, invite)).rejects.toThrow(
+      /enacts no kumiai\.role entry for this group/,
+    )
+  })
+
+  // This is the documented residual, not an endorsement of it: the design
+  // (docs/superpowers/specs/2026-07-26-bind-keypackage-recipient-design.md) is explicit that
+  // last-position is load-bearing on a hand-built invite, and that violating it binds to the
+  // trailing grant's subject instead of the intended invitee. Pinning it here keeps it a known
+  // behaviour rather than an undiscovered one.
+  test('an invite whose invitee grant is not last binds to the trailing grant instead', async () => {
+    const alice = randomIdentity()
+    const carol = randomIdentity()
+    const dave = randomIdentity()
+
+    const { group } = await createGroup(alice, 'g-grant-order')
+    const carolToken = await signLedgerEntry(alice, {
+      type: ROLE_ENTRY_TYPE,
+      groupID: 'g-grant-order',
+      subject: carol.id,
+      value: 'member',
+    })
+    const daveToken = await signLedgerEntry(alice, {
+      type: ROLE_ENTRY_TYPE,
+      groupID: 'g-grant-order',
+      subject: dave.id,
+      value: 'member',
+    })
+    // Carol's grant is not last, so the guard binds to Dave's — the trailing one.
+    const invite: Invite = {
+      groupID: 'g-grant-order',
+      inviterID: alice.id,
+      ledgerEntries: [...group.ledgerTokens, carolToken, daveToken],
+    }
+    const daveBundle = await createKeyPackageBundle(dave, { capabilities: controlCapabilities() })
+
+    const { newGroup } = await commitInvite(group, daveBundle.publicPackage, invite)
+
+    expect(newGroup.roster.roles.get(normalizeDID(dave.id))).toBe('member')
+    // Carol holds a roster role — the ledger entry enacted and folded — but never joined:
+    // no key package of hers rode this or any commit.
+    expect(newGroup.roster.roles.get(normalizeDID(carol.id))).toBe('member')
+  })
+
   test('refuses a key package whose credential is not a basic credential', async () => {
     const alice = randomIdentity()
     const bob = randomIdentity()

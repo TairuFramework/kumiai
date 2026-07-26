@@ -38,9 +38,14 @@ export type InviteRecipientMismatchErrorParams = {
  * Thrown by {@link commitInvite} when the supplied key package's credential DID is not the
  * identity the invite's enacted role entry grants a role to.
  *
- * Distinct from an ordinary rejection on purpose: the reachable trigger is a key-package store
+ * Distinct from an ordinary rejection on purpose: the expected trigger is a key-package store
  * that served the wrong owner's package, and adding the package anyway would put a different
  * identity in the group than the one the roster grants the role to. A host should alert on this.
+ *
+ * The same error also fires for any invite whose trailing `kumiai.role` entry names someone
+ * other than the intended invitee — hand-built, tampered, or reordered — with an otherwise
+ * honest key package. A host seeing this should not assume a store compromise on that basis
+ * alone.
  */
 export class InviteRecipientMismatchError extends Error {
   #groupID: string
@@ -348,6 +353,9 @@ export async function commitInvite(
     //
     // The LAST role entry, because an invite may legitimately carry an unrelated promotion
     // riding the same commit, and createInvite puts the invitee's own grant last.
+    //
+    // The `groupID` check is belt-and-braces: `foldEnvelope` already hard-rejects any
+    // cross-group entry in `enacted`, so no invite reaching this point can carry one.
     let grantedTo: string | null = null
     for (const token of enacted) {
       const verified = await verifyLedgerEntry(token)
