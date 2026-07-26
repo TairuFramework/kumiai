@@ -43,3 +43,19 @@ policy layer on top.
 
 `@kumiai/mls-rpc` (or a new opt-in helper), `@kumiai/hub-client`. No hub-side change expected — the
 server contract is already in place and covered by `@kumiai/hub-conformance`.
+
+## Open wire-compatibility question to settle alongside this
+
+`controlCapabilities()` (`packages/mls/src/anchor.ts`) does not advertise extension type `0x000A`.
+
+This is correct against `ts-mls`, which checks a peer's declared capabilities only against **leaf
+node** extensions — and `last_resort` is a KeyPackage extension, not a leaf one — so nothing in
+this stack rejects a last-resort package for want of the advertisement, and the branch's "leaf
+capabilities are unaffected" claim holds. Verified in `ts-mls@2.0.0-rc.13`.
+
+What is **not** verified is whether draft-ietf-mls-extensions asks a publisher to advertise the
+type anyway. That is a wire-compat question against *other* MLS implementations, not against
+`ts-mls`, and it becomes real the moment a non-`ts-mls` peer is an inviter. Read the draft and
+settle it before the stack is exposed to a foreign implementation. If the answer is yes, adding it
+to the capability set is a one-line change; the cost of guessing wrong is that a conforming peer
+refuses every last-resort package this stack publishes.
