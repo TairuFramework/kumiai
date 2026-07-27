@@ -113,8 +113,15 @@ export function createLastResortProvisioner(
     const nowSeconds = Math.floor(Date.now() / 1000)
 
     // Resume an interrupted provision rather than minting: a retry that minted would leave the
-    // orphan behind on every attempt.
-    if (candidate != null && candidate.uploadedAt == null) {
+    // orphan behind on every attempt. But only when the pending package is still worth uploading —
+    // a pending record already inside the rotation window is stale enough that finishing its upload
+    // would report success while leaving the slot holding a package no inviter will accept. That
+    // case falls through to a fresh mint instead.
+    if (
+      candidate != null &&
+      candidate.uploadedAt == null &&
+      candidate.notAfter - nowSeconds > rotateWithinDays * DAY_SECONDS
+    ) {
       await upload(candidate)
       await prune(records, candidate.ref)
       return { rotated: true, ref: candidate.ref }

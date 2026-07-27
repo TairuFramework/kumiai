@@ -79,4 +79,43 @@ describe('ensureProvisioned', () => {
 
     await hub.dispose()
   })
+
+  /**
+   * A pending record (`uploadedAt: null`) left behind by a crash is normally finished by the next
+   * call. But a pending record already inside the rotation window is stale enough that finishing
+   * its upload would report `rotated: true` — signalling the floor is in place — while leaving the
+   * slot holding a package no inviter will accept. That case must fall through to a fresh mint
+   * instead of resuming the stale one.
+   */
+  test('a stale pending record is not resumed; a fresh package is minted instead', async () => {
+    const hub = createTestHub()
+    const store = createMemoryLastResortStore()
+    const staleRef = 'stale-ref'
+    await store.put(hub.identity.id, {
+      ref: staleRef,
+      keyPackage: 'kp-stale',
+      privatePackage: 'priv-stale',
+      notAfter: Math.floor(Date.now() / 1000) + 10 * 86_400,
+      uploadedAt: null,
+    })
+    const provisioner = createLastResortProvisioner({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+    })
+
+    const result = await provisioner.ensureProvisioned()
+
+    expect(result.rotated).toBe(true)
+    expect(result.ref).not.toBe(staleRef)
+
+    const records = await store.list(hub.identity.id)
+    const fresh = records.find((record) => record.ref === result.ref)
+    expect(fresh?.uploadedAt).toBeTypeOf('number')
+
+    // The hub's slot holds the fresh package's bytes, not the stale one's.
+    expect(await hub.hubStore.fetchLastResortKeyPackage(hub.identity.id)).toBe(fresh?.keyPackage)
+
+    await hub.dispose()
+  })
 })
