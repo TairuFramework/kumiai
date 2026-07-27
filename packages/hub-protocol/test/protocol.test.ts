@@ -83,6 +83,7 @@ describe('hub/v1/keypackage/status', () => {
     expect(result.properties.count).toEqual({ type: 'integer' })
     expect(result.properties.lastResort).toEqual({ type: ['string', 'null'] })
     expect(result.required).toEqual(['count', 'lastResort'])
+    expect(result.additionalProperties).toBe(false)
   })
 })
 
@@ -91,5 +92,6 @@ describe('hub/v1/keypackage/upload', () => {
     const param = hubProtocol['hub/v1/keypackage/upload'].param
     expect(param.properties.notAfter).toEqual({ type: 'integer', minimum: 0 })
     expect(param.required).toEqual(['keyPackages'])
+    expect(param.additionalProperties).toBe(false)
   })
 })
