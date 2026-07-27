@@ -2,6 +2,8 @@ import type { OwnIdentity } from '@kokuin/token'
 import type { HubClient } from '@kumiai/hub-client'
 import {
   createLastResortKeyPackageBundle,
+  decodeKeyPackage,
+  decodePrivateKeyPackage,
   encodeKeyPackage,
   encodePrivateKeyPackage,
   type GroupOptions,
@@ -157,7 +159,25 @@ export function createLastResortProvisioner(
       return await started
     },
     async bundles(): Promise<Array<KeyPackageBundle>> {
-      throw new Error('bundles: not implemented')
+      const records = await store.list(ownerDID)
+      const ordered = [...records].sort((a, b) => {
+        if (a.notAfter !== b.notAfter) return b.notAfter - a.notAfter
+        return a.ref < b.ref ? 1 : a.ref > b.ref ? -1 : 0
+      })
+      return ordered.map((record) => {
+        const publicPackage = decodeKeyPackage(record.keyPackage)
+        const privatePackage = decodePrivateKeyPackage(record.privatePackage)
+        if (publicPackage == null || privatePackage == null) {
+          // Loud, not skipped: silently narrowing a corrupt store to "no last-resort package" is
+          // the failure mode this whole feature exists to remove. `ensureProvisioned` reads only
+          // `notAfter` and never decodes, so rotation still works past a corrupt record — only the
+          // join path stops. The message names the ref and NEVER the material.
+          throw new Error(
+            `mls-hub: stored last-resort record ${record.ref} did not decode; the store returned bytes it did not round-trip`,
+          )
+        }
+        return { publicPackage, privatePackage, ownerDID }
+      })
     },
   }
 }
