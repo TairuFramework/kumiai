@@ -555,6 +555,20 @@ describe('createMemoryStore pub/sub', () => {
     expect(await store.fetchLastResortKeyPackage(ALICE)).toBe('kp-new')
   })
 
+  test('fetchKeyPackages removes an expired entry rather than skipping it', async () => {
+    const store = createMemoryStore({ maxKeyPackagesPerDID: 2 })
+    const past = Math.floor(Date.now() / 1000) - 60
+    const future = Math.floor(Date.now() / 1000) + 3600
+    await store.storeKeyPackage('did:key:a', 'kp-dead', past)
+    await store.storeKeyPackage('did:key:a', 'kp-live', future)
+
+    expect(await store.fetchKeyPackages('did:key:a', 1)).toEqual(['kp-live'])
+    // The dead entry is gone, not lingering to charge the cap.
+    await store.storeKeyPackage('did:key:a', 'kp-new', future)
+    await store.storeKeyPackage('did:key:a', 'kp-newer', future)
+    expect(await store.countKeyPackages('did:key:a')).toBe(2)
+  })
+
   test('the last-resort slot is outside the per-DID key-package cap', async () => {
     const store = createMemoryStore({ maxKeyPackagesPerDID: 2 })
     await store.storeLastResortKeyPackage(ALICE, 'kp-lr')

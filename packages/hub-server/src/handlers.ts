@@ -10,6 +10,7 @@ import {
   hubErrorCodeOf,
   InvalidPayloadError,
   KeyPackageFetchLimitError,
+  keyPackageDigest,
 } from '@kumiai/hub-protocol'
 import { fromB64, toB64 } from '@sozai/codec'
 
@@ -39,6 +40,7 @@ export type AuthorizeRequest =
   | { action: 'topic/fetch'; did: string; topicID: string }
   | { action: 'keypackage/upload'; did: string; count: number; lastResort?: boolean }
   | { action: 'keypackage/fetch'; did: string; targetDID: string; count: number }
+  | { action: 'keypackage/status'; did: string }
 
 /**
  * A plain `boolean` is shorthand for `{ allow: boolean }`, with no reason, code, or retry hint.
@@ -557,7 +559,7 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
     }) as ChannelHandler<HubProtocol, 'hub/v1/receive'>,
 
     'hub/v1/keypackage/upload': (async (ctx) => {
-      const { keyPackages, lastResort } = ctx.param
+      const { keyPackages, lastResort, notAfter } = ctx.param
       const clientDID = getClientDID(ctx)
       // The slot holds one package, so a flagged upload carries exactly one. JSON Schema cannot
       // express a conditional on a sibling field, so the arity is enforced here.
@@ -571,6 +573,12 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
           })
         }
         lastResortPackage = only
+      }
+      if (lastResort === true && notAfter != null) {
+        throw new HandlerError({
+          code: HUB_ERROR_CODES.invalidPayload,
+          message: 'A last-resort upload carries no expiry: the slot is kept fresh by rotation',
+        })
       }
       const decision = normalizeAuthorizeDecision(
         await authorize({
@@ -601,7 +609,9 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         if (lastResortPackage != null) {
           await store.storeLastResortKeyPackage(clientDID, lastResortPackage)
         } else {
-          await Promise.all(keyPackages.map((kp: string) => store.storeKeyPackage(clientDID, kp)))
+          await Promise.all(
+            keyPackages.map((kp: string) => store.storeKeyPackage(clientDID, kp, notAfter)),
+          )
         }
       } catch (error) {
         rethrowAsHandlerError(error)
@@ -705,5 +715,36 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       // of one init key is the reuse the whole design avoids.
       return { keyPackages: lastResort == null ? consumed : [...consumed, lastResort] }
     }) as RequestHandler<HubProtocol, 'hub/v1/keypackage/fetch'>,
+
+    'hub/v1/keypackage/status': (async (ctx) => {
+      // No `did` parameter exists, so this answers only for the authenticated caller. That is the
+      // whole authorization story: a query that could name someone else would tell an attacker
+      // exactly when a drain against that DID had succeeded.
+      const clientDID = getClientDID(ctx)
+      const decision = normalizeAuthorizeDecision(
+        await authorize({ action: 'keypackage/status', did: clientDID }),
+      )
+      if (!decision.allow) {
+        throw new HandlerError({
+          code: HUB_ERROR_CODES.authorizationDenied,
+          message: decision.reason ?? 'Not authorized to read key package status',
+        })
+      }
+      if (!didLimiter.tryConsume(clientDID)) {
+        throw new HandlerError({
+          code: 'EK01',
+          message: 'Key package status rate limit exceeded for DID',
+        })
+      }
+      let count: number
+      let stored: string | null
+      try {
+        count = await store.countKeyPackages(clientDID)
+        stored = await store.fetchLastResortKeyPackage(clientDID)
+      } catch (error) {
+        rethrowAsHandlerError(error)
+      }
+      return { count, lastResort: stored == null ? null : await keyPackageDigest(stored) }
+    }) as RequestHandler<HubProtocol, 'hub/v1/keypackage/status'>,
   }
 }
