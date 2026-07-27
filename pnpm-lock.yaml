@@ -269,6 +269,9 @@ importers:
       '@kumiai/hub-client':
         specifier: workspace:^
         version: link:../hub-client
+      '@kumiai/hub-protocol':
+        specifier: workspace:^
+        version: link:../hub-protocol
       '@kumiai/mls':
         specifier: workspace:^
         version: link:../mls
@@ -282,9 +285,6 @@ importers:
       '@enkaku/transport':
         specifier: 'catalog:'
         version: 0.20.0
-      '@kumiai/hub-protocol':
-        specifier: workspace:^
-        version: link:../hub-protocol
       '@kumiai/hub-server':
         specifier: workspace:^
         version: link:../hub-server

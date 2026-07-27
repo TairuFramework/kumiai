@@ -130,6 +130,28 @@ describe('ensureProvisioned', () => {
     // The hub's slot holds the fresh package's bytes, not the stale one's.
     expect(await hub.hubStore.fetchLastResortKeyPackage(hub.identity.id)).toBe(fresh?.keyPackage)
   })
+
+  test('repairs a slot the hub lost', async () => {
+    const store = createMemoryLastResortStore()
+    const provisioner = createLastResortProvisioner({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+    })
+    const first = await provisioner.ensureProvisioned()
+    // The hub lost the slot: without a readback the provisioner trusts its own record of a successful
+    // upload and reports the floor as in place over an empty slot.
+    await hub.hubStore.storeLastResortKeyPackage(hub.identity.id, 'kp-something-else')
+
+    const second = await provisioner.ensureProvisioned()
+
+    expect(second.rotated).toBe(true)
+    expect(second.ref).toBe(first.ref)
+    const records = await store.list(hub.identity.id)
+    expect(await hub.hubStore.fetchLastResortKeyPackage(hub.identity.id)).toBe(
+      records[0]?.keyPackage,
+    )
+  })
 })
 
 describe('an interrupted provision', () => {

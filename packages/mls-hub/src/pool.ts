@@ -43,6 +43,8 @@ export type KeyPackagePool = {
   ensureStocked(): Promise<{ minted: number; depth: number }>
   /** Every retained bundle, `notAfter` descending, for `processWelcome`. */
   bundles(): Promise<Array<KeyPackageBundle>>
+  /** Drop a record once its Welcome has been processed. An ordinary package is single-use. */
+  release(ref: string): Promise<void>
 }
 
 export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePool {
@@ -140,6 +142,9 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
       // Sorting, decoding and the loud throw on a corrupt record are shared with the last-resort
       // provisioner via `./records.js`; only the label differs.
       return toBundles(await store.list(ownerDID), ownerDID, 'key package')
+    },
+    async release(ref: string): Promise<void> {
+      await store.delete(ownerDID, ref)
     },
   }
 }
