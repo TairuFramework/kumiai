@@ -899,6 +899,48 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
       expect(await store.fetchKeyPackages(ALICE, 5)).toEqual(['kp-only'])
     })
 
+    test('an expired key package is never served', async () => {
+      const store = await createStore()
+      const past = Math.floor(Date.now() / 1000) - 60
+      const future = Math.floor(Date.now() / 1000) + 3600
+      await store.storeKeyPackage(ALICE, 'kp-dead', past)
+      await store.storeKeyPackage(ALICE, 'kp-live', future)
+
+      // FIFO would hand out the dead one first, and the inviter would reject it when it built the
+      // Add — a failure the fetcher cannot diagnose and the owner cannot see.
+      expect(await store.fetchKeyPackages(ALICE, 2)).toEqual(['kp-live'])
+    })
+
+    test('a key package stored without an expiry never expires', async () => {
+      const store = await createStore()
+      await store.storeKeyPackage(ALICE, 'kp-forever')
+
+      expect(await store.countKeyPackages(ALICE)).toBe(1)
+      expect(await store.fetchKeyPackages(ALICE, 1)).toEqual(['kp-forever'])
+    })
+
+    test('countKeyPackages counts live entries only, per owner', async () => {
+      const store = await createStore()
+      const past = Math.floor(Date.now() / 1000) - 60
+      const future = Math.floor(Date.now() / 1000) + 3600
+      await store.storeKeyPackage(ALICE, 'kp-dead', past)
+      await store.storeKeyPackage(ALICE, 'kp-live', future)
+      await store.storeKeyPackage(BOB, 'kp-bob', future)
+
+      expect(await store.countKeyPackages(ALICE)).toBe(1)
+      expect(await store.countKeyPackages(BOB)).toBe(1)
+      expect(await store.countKeyPackages(CAROL)).toBe(0)
+    })
+
+    test('countKeyPackages does not consume', async () => {
+      const store = await createStore()
+      await store.storeKeyPackage(ALICE, 'kp-1')
+
+      expect(await store.countKeyPackages(ALICE)).toBe(1)
+      expect(await store.countKeyPackages(ALICE)).toBe(1)
+      expect(await store.fetchKeyPackages(ALICE, 1)).toEqual(['kp-1'])
+    })
+
     /**
      * A LAST-RESORT PACKAGE IS THE ONE KEY PACKAGE A STORE MAY SERVE TWICE. It carries the
      * `last_resort` extension (draft-ietf-mls-extensions), which marks it reusable by design, so
@@ -990,6 +1032,20 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
         expect(await store.fetchKeyPackages(ALICE, 1)).toEqual(['kp-0'])
         // The cap is per DID: a different owner is unaffected.
         await expect(store.storeKeyPackage(BOB, 'kp-bob')).resolves.toBeUndefined()
+      })
+
+      test('an expired key package does not charge the per-owner cap', async () => {
+        const store = await createStore()
+        const past = Math.floor(Date.now() / 1000) - 60
+        const future = Math.floor(Date.now() / 1000) + 3600
+        for (let index = 0; index < maxKeyPackagesPerDID; index++) {
+          await store.storeKeyPackage(ALICE, `kp-dead-${index}`, past)
+        }
+
+        // Without this, a host that tops up on a schedule fills its cap with dead entries and can
+        // never upload again — the pool is permanently wedged and the owner has no way to see it.
+        await expect(store.storeKeyPackage(ALICE, 'kp-live', future)).resolves.toBeUndefined()
+        expect(await store.countKeyPackages(ALICE)).toBe(1)
       })
 
       test('the last-resort slot is not charged against the per-DID cap', async () => {
