@@ -9,6 +9,7 @@ import {
   type Invite,
   keyPackageRef,
   ledgerEntryDigest,
+  welcomeKeyPackageRefs,
 } from '@kumiai/mls'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
@@ -28,6 +29,11 @@ beforeEach(() => {
 afterEach(async () => {
   await hub.dispose()
 })
+
+/** A base64 ref may contain `+`, `/`, `=` — all regex metacharacters. */
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
 
 type InviteAndCommit = {
   welcome: Uint8Array
@@ -161,7 +167,12 @@ describe('processWelcomeFromSources', () => {
     const { welcome, invite, ratchetTree } = await inviteAStranger()
 
     // Trying every bundle until one decrypts would turn "wrong Welcome" into a crypto error with no
-    // diagnosis; naming the refs says which package the sender expected.
+    // diagnosis; naming the refs says which package the sender expected. Pinning only the fixed
+    // wording would let the interpolated refs silently be dropped from the message, so this also
+    // requires the Welcome's own sought ref to actually appear in it.
+    const [sought] = welcomeKeyPackageRefs(welcome)
+    if (sought == null) throw new Error('test setup: the Welcome names no refs')
+
     await expect(
       processWelcomeFromSources({
         identity: hub.identity,
@@ -170,7 +181,7 @@ describe('processWelcomeFromSources', () => {
         ratchetTree,
         sources: [pool],
       }),
-    ).rejects.toThrow(/no retained key package matches/)
+    ).rejects.toThrow(new RegExp(`no retained key package matches.*${escapeRegExp(sought)}`))
   })
 
   test('a failed release surfaces on the result rather than failing the join', async () => {
@@ -203,5 +214,78 @@ describe('processWelcomeFromSources', () => {
     // problem they still need told about, so it rides a separate channel.
     expect(result.group).toBeDefined()
     expect(result.releaseError?.message).toMatch(/store offline/)
+  })
+
+  test('a release rejecting with a non-Error value is still wrapped as an Error', async () => {
+    const inner = createMemoryKeyPackagePoolStore()
+    const store = {
+      ...inner,
+      // A store implementation is free to reject with anything; the wrapper must not assume Error.
+      delete: vi.fn(async () => {
+        throw 'store offline: not an Error instance'
+      }),
+    }
+    const pool = createKeyPackagePool({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+      target: 1,
+      lowWater: 1,
+    })
+    await pool.ensureStocked()
+    const { welcome, invite, ratchetTree } = await inviteFromPool()
+
+    const result = await processWelcomeFromSources({
+      identity: hub.identity,
+      invite,
+      welcome,
+      ratchetTree,
+      sources: [pool],
+    })
+
+    expect(result.group).toBeDefined()
+    expect(result.releaseError).toBeInstanceOf(Error)
+    expect(result.releaseError?.message).toMatch(/store offline: not an Error instance/)
+  })
+
+  test('scans past a source that does not match before checking one that does', async () => {
+    const poolStore = createMemoryKeyPackagePoolStore()
+    const pool = createKeyPackagePool({
+      identity: hub.identity,
+      client: hub.client,
+      store: poolStore,
+      target: 2,
+      lowWater: 2,
+    })
+    await pool.ensureStocked()
+    const lastResortStore = createMemoryLastResortStore()
+    const provisioner = createLastResortProvisioner({
+      identity: hub.identity,
+      client: hub.client,
+      store: lastResortStore,
+    })
+    const { ref } = await provisioner.ensureProvisioned()
+    const poolRefsBefore = (await poolStore.list(hub.identity.id)).map((entry) => entry.ref)
+
+    // The Welcome names the PROVISIONER's bundle, not any of the pool's. A `[x].slice(0, 1)`-style
+    // regression that only ever checks the first source would report no match here.
+    const { welcome, invite, ratchetTree } = await inviteFromLastResortSlot()
+
+    const result = await processWelcomeFromSources({
+      identity: hub.identity,
+      invite,
+      welcome,
+      ratchetTree,
+      sources: [pool, provisioner],
+    })
+
+    expect(result.group).toBeDefined()
+    expect(result.releaseError).toBeUndefined()
+    // Retained: the match came from the provisioner, whose release is a no-op.
+    expect((await lastResortStore.list(hub.identity.id)).map((entry) => entry.ref)).toContain(ref)
+    // Untouched: the pool was scanned (and skipped) but nothing in it matched, so nothing released.
+    expect((await poolStore.list(hub.identity.id)).map((entry) => entry.ref)).toEqual(
+      poolRefsBefore,
+    )
   })
 })
