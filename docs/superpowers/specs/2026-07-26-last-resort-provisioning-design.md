@@ -223,8 +223,19 @@ which is in seconds because that is the unit MLS's own `Lifetime` uses.
 1. `records = await store.list(identity.id)`.
 2. `candidate` = the record with the greatest `notAfter`; on a tie the lexicographically greater `ref`
    wins, so the choice is deterministic. An empty list means there is no candidate and step 5 runs.
-3. If `candidate.uploadedAt == null` → **upload that record's `keyPackage`**, then `put` it with
-   `uploadedAt` set. This is the crash-retry path; it is why a retry does not mint.
+3. If `candidate.uploadedAt == null` **and it still has more than `rotateWithinDays` of life left** →
+   **upload that record's `keyPackage`**, then `put` it with `uploadedAt` set. This is the crash-retry
+   path; it is why a retry does not mint.
+
+   The lifetime half of that guard closes a hole in the recovery path. A freshly minted pending record
+   has ~90 days left, comfortably outside the 30-day window, so ordinary crash-retry still resumes —
+   but a process that stays down past the package's expiry would otherwise come back, upload a package
+   no inviter will accept, and return `rotated: true`, telling the host the floor is in place when the
+   slot is full-but-dead. That is the exact failure this feature exists to remove, so a pending record
+   too stale to be worth uploading falls through to the mint in step 5 instead, and is pruned normally
+   once past its grace. This can never discard a still-valid package: a pending record is always the
+   newest mint and so always has the greatest `notAfter`, so if it is expired, every other record is
+   too.
 4. Else if `candidate.notAfter - now > rotateWithinDays` → nothing to do. Return
    `{ rotated: false, ref: candidate.ref }`.
 5. Else mint and rotate:

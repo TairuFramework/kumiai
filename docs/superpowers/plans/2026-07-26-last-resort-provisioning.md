@@ -1133,8 +1133,15 @@ export function createLastResortProvisioner(
     const nowSeconds = Math.floor(Date.now() / 1000)
 
     // Resume an interrupted provision rather than minting: a retry that minted would leave the
-    // orphan behind on every attempt.
-    if (candidate != null && candidate.uploadedAt == null) {
+    // orphan behind on every attempt. But only while the pending record is still worth uploading —
+    // a process down past its expiry would otherwise return `rotated: true` over a full-but-dead
+    // slot, which is the failure this feature exists to remove. A fresh mint has ~90 days left, so
+    // ordinary crash-retry is unaffected; a stale one falls through to the mint below.
+    if (
+      candidate != null &&
+      candidate.uploadedAt == null &&
+      candidate.notAfter - nowSeconds > rotateWithinDays * DAY_SECONDS
+    ) {
       await upload(candidate)
       await prune(records, candidate.ref)
       return { rotated: true, ref: candidate.ref }
@@ -1352,8 +1359,9 @@ clearing is on the wrong callback.
 
 - [ ] **Step 3: Mutation-check the resume path**
 
-In `run()`, change the resume branch's guard from `candidate.uploadedAt == null` to
-`candidate.uploadedAt === 0` so pending records are never resumed.
+In `run()`, change the resume branch's `candidate.uploadedAt == null` conjunct to
+`candidate.uploadedAt === 0` so pending records are never resumed. (Leave the lifetime conjunct
+beside it alone — that one is mutation-checked by Task 5's own fix round.)
 Run: `pnpm exec turbo run test:unit --filter @kumiai/mls-hub`
 Expected: FAIL on 'is resumed by uploading the pending record, not by minting' — it mints a second
 record, so `store.list` has 2 entries.
