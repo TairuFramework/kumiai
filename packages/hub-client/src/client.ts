@@ -117,9 +117,22 @@ export class HubClient {
     })
   }
 
-  uploadKeyPackages(keyPackages: Array<string>): RequestCall<{ stored: number }> {
+  /**
+   * Upload single-use key packages to the caller's ordinary pool.
+   *
+   * `notAfter` is when every package in this batch expires, in seconds — take it from the minted
+   * package's own MLS lifetime. Omit it and the hub keeps the entries forever, which means a pool
+   * that has gone stale still holds the per-DID cap against every future upload. `@kumiai/mls-hub`'s
+   * key package pool passes it for you.
+   */
+  uploadKeyPackages(
+    keyPackages: Array<string>,
+    notAfter?: number,
+  ): RequestCall<{ stored: number }> {
     return this.#client.request('hub/v1/keypackage/upload', {
-      param: { keyPackages },
+      // An explicit `notAfter: undefined` fails the wire schema's `integer` check on some
+      // transports (unlike JSON, they don't drop `undefined` properties) — omit the key instead.
+      param: { keyPackages, ...(notAfter != null ? { notAfter } : {}) },
     })
   }
 
@@ -142,6 +155,21 @@ export class HubClient {
     return this.#client.request('hub/v1/keypackage/upload', {
       param: { keyPackages: [keyPackage], lastResort: true },
     })
+  }
+
+  /**
+   * The caller's own key-package inventory: live pool depth, and a digest of the last-resort slot
+   * (`null` when empty).
+   *
+   * Answers only for the authenticated caller — there is no way to ask about another DID, because a
+   * query that could would report exactly when a drain against that DID had succeeded.
+   *
+   * The digest is `keyPackageDigest` from `@kumiai/hub-protocol` over the stored string. Compare it
+   * against a digest of your own retained package to catch a hub that lost the slot or is holding
+   * something else.
+   */
+  keyPackageStatus(): RequestCall<{ count: number; lastResort: string | null }> {
+    return this.#client.request('hub/v1/keypackage/status', { param: {} })
   }
 
   fetchKeyPackages(did: string, count?: number): RequestCall<{ keyPackages: Array<string> }> {

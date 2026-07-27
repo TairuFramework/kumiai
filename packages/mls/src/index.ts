@@ -83,6 +83,7 @@ export {
   LAST_RESORT_LIFETIME_DAYS,
   type LedgerLogEntry,
   makeMLSCredential,
+  ORDINARY_KEY_PACKAGE_LIFETIME_DAYS,
   type ProcessWelcomeOnceParams,
   type ProcessWelcomeParams,
   type ProcessWelcomeResult,
@@ -163,3 +164,4 @@ export {
   roleReducer,
 } from './roster.js'
 export type { GroupOptions, GroupSyncScope, Invite, KeyPackageBundle } from './types.js'
+export { welcomeKeyPackageRefs } from './welcome-refs.js'

@@ -1,9 +1,8 @@
 import type { OwnIdentity } from '@kokuin/token'
 import type { HubClient } from '@kumiai/hub-client'
+import { keyPackageDigest } from '@kumiai/hub-protocol'
 import {
   createLastResortKeyPackageBundle,
-  decodeKeyPackage,
-  decodePrivateKeyPackage,
   encodeKeyPackage,
   encodePrivateKeyPackage,
   type GroupOptions,
@@ -12,6 +11,7 @@ import {
   LAST_RESORT_LIFETIME_DAYS,
 } from '@kumiai/mls'
 
+import { toBundles } from './records.js'
 import type { LastResortRecord, LastResortStore } from './store.js'
 
 const DAY_SECONDS = 86_400
@@ -21,7 +21,7 @@ const DEFAULT_RETAIN_AFTER_EXPIRY_DAYS = 7
 export type LastResortProvisionerParams = {
   /** The identity the package is minted for; also the store's owner key. */
   identity: OwnIdentity
-  client: Pick<HubClient, 'uploadLastResortKeyPackage'>
+  client: Pick<HubClient, 'uploadLastResortKeyPackage' | 'keyPackageStatus'>
   store: LastResortStore
   /** Threaded into `createLastResortKeyPackageBundle` and `keyPackageRef`. */
   options?: GroupOptions
@@ -41,6 +41,12 @@ export type LastResortProvisioner = {
   ensureProvisioned(): Promise<{ rotated: boolean; ref: string }>
   /** Every retained bundle, `notAfter` descending, for `processWelcome`. */
   bundles(): Promise<Array<KeyPackageBundle>>
+  /**
+   * A no-op, so a provisioner can stand in as a `BundleSource`. A last-resort package is reusable by
+   * design — the same one is handed to every inviter until it rotates — so a Welcome must not
+   * consume it. Deleting it here would make the owner silently unaddable forever.
+   */
+  release(ref: string): Promise<void>
 }
 
 export function createLastResortProvisioner(
@@ -150,6 +156,17 @@ export function createLastResortProvisioner(
 
     // An expired candidate needs no special case: the difference goes negative and falls through.
     if (candidate != null && candidate.notAfter - nowSeconds > rotateWithinDays * DAY_SECONDS) {
+      // The record says this package was uploaded; the hub is the only authority on whether it is
+      // still there. Without this readback a hub that lost or replaced the slot is reported as
+      // provisioned until the next rotation falls due — the floor is gone and nothing says so.
+      // Re-uploading is safe here precisely because the slot replaces in place, which is why the
+      // ordinary pool cannot do the same thing.
+      const { lastResort } = await client.keyPackageStatus()
+      if (lastResort !== (await keyPackageDigest(candidate.keyPackage))) {
+        await upload(candidate)
+        await prune(records, candidate.ref)
+        return { rotated: true, ref: candidate.ref }
+      }
       // Prune on the no-op path too, or a daily caller never prunes between 90-day rotations.
       await prune(records, candidate.ref)
       return { rotated: false, ref: candidate.ref }
@@ -174,25 +191,8 @@ export function createLastResortProvisioner(
       return await started
     },
     async bundles(): Promise<Array<KeyPackageBundle>> {
-      const records = await store.list(ownerDID)
-      const ordered = [...records].sort((a, b) => {
-        if (a.notAfter !== b.notAfter) return b.notAfter - a.notAfter
-        return a.ref < b.ref ? 1 : a.ref > b.ref ? -1 : 0
-      })
-      return ordered.map((record) => {
-        const publicPackage = decodeKeyPackage(record.keyPackage)
-        const privatePackage = decodePrivateKeyPackage(record.privatePackage)
-        if (publicPackage == null || privatePackage == null) {
-          // Loud, not skipped: narrowing a corrupt store to "no last-resort package" is the failure
-          // this feature removes. The cost is that one corrupt retired record denies every join
-          // here, accepted because a store that breaks its round-trip contract once is not trusted
-          // for the live record either. Names the ref, never the material.
-          throw new Error(
-            `mls-hub: stored last-resort record ${record.ref} did not decode; its stored form is not a round-trip of what this codec writes`,
-          )
-        }
-        return { publicPackage, privatePackage, ownerDID }
-      })
+      return toBundles(await store.list(ownerDID), ownerDID, 'last-resort')
     },
+    async release(_ref: string): Promise<void> {},
   }
 }

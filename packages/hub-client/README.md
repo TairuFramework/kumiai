@@ -6,8 +6,9 @@ procedure is a method with named parameters instead of a `request` call and a pa
 ## Exports
 
 - `HubClient` — the wrapper. `publish`, `subscribe`, `unsubscribe`, `fetchTopic`, `receive`,
-  `uploadKeyPackages`, `uploadLastResortKeyPackage`, `fetchKeyPackages`, plus `rawClient` for
-  anything not wrapped.
+  `uploadKeyPackages`, `uploadLastResortKeyPackage`, `fetchKeyPackages`, `keyPackageStatus`, plus
+  `rawClient` for anything not wrapped. `uploadKeyPackages` takes an optional `notAfter` (seconds)
+  so the hub can expire a stale batch instead of holding it against the per-DID cap forever.
 - `HubClientParams`, `PublishParams`.
 
 ```ts

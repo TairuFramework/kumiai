@@ -65,6 +65,12 @@ function formatSequenceID(counter: number): string {
   return String(counter).padStart(12, '0')
 }
 
+type StoredKeyPackage = { keyPackage: string; notAfter?: number }
+
+function isLive(entry: StoredKeyPackage, nowSeconds: number): boolean {
+  return entry.notAfter == null || entry.notAfter > nowSeconds
+}
+
 /**
  * The entry as a reader sees it, with the ONE piece of routing metadata a reader cannot recover for
  * itself: where the frame sits in its topic's log.
@@ -124,7 +130,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
   const subscriptions = new Map<string, Map<string, number>>()
   // Reverse index for an O(1) per-DID subscription count. Kept in lockstep with `subscriptions`.
   const subsByDID = new Map<string, Set<string>>()
-  const keyPackages = new Map<string, Array<string>>()
+  const keyPackages = new Map<string, Array<StoredKeyPackage>>()
   /** One reusable package per DID, replaced on re-upload. Deliberately not in `keyPackages`: a
    * one-entry-per-DID map cannot grow, so it needs no quota, and charging it against
    * `maxKeyPackagesPerDID` would let a full pool block the availability floor. */
@@ -478,25 +484,50 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
       return subscribers == null ? [] : [...subscribers.keys()]
     },
 
-    async storeKeyPackage(ownerDID: string, keyPackage: string): Promise<void> {
+    async storeKeyPackage(ownerDID: string, keyPackage: string, notAfter?: number): Promise<void> {
       let packages = keyPackages.get(ownerDID)
       if (packages == null) {
         packages = []
         keyPackages.set(ownerDID, packages)
+      }
+      // Drop the dead before charging the cap, or a pool that filled with expired entries could
+      // never be replenished: the cap rejects rather than evicts, by design, so nothing else would
+      // ever remove them.
+      const nowSeconds = Math.floor(Date.now() / 1000)
+      const live = packages.filter((entry) => isLive(entry, nowSeconds))
+      if (live.length !== packages.length) {
+        packages.length = 0
+        packages.push(...live)
       }
       if (packages.length >= maxKeyPackagesPerDID) {
         throw new KeyPackageQuotaExceededError(
           `DID ${ownerDID} exceeds the maximum of ${maxKeyPackagesPerDID} stored key packages`,
         )
       }
-      packages.push(keyPackage)
+      packages.push({ keyPackage, ...(notAfter != null ? { notAfter } : {}) })
     },
 
     async fetchKeyPackages(ownerDID: string, count?: number): Promise<Array<string>> {
       const packages = keyPackages.get(ownerDID)
       if (packages == null || packages.length === 0) return []
+      const nowSeconds = Math.floor(Date.now() / 1000)
+      const served: Array<string> = []
       const n = count ?? 1
-      return packages.splice(0, n)
+      // One pass, consuming as it goes: an expired entry is dropped rather than skipped, so FIFO
+      // stops handing out the nearest-expiry package first. Always shift index 0 — never advance a
+      // cursor — or this degenerates into the skip loop this task exists to remove.
+      while (packages.length > 0 && served.length < n) {
+        const entry = packages.shift() as StoredKeyPackage
+        if (isLive(entry, nowSeconds)) served.push(entry.keyPackage)
+      }
+      return served
+    },
+
+    async countKeyPackages(ownerDID: string): Promise<number> {
+      const packages = keyPackages.get(ownerDID)
+      if (packages == null) return 0
+      const nowSeconds = Math.floor(Date.now() / 1000)
+      return packages.filter((entry) => isLive(entry, nowSeconds)).length
     },
 
     async storeLastResortKeyPackage(ownerDID: string, keyPackage: string): Promise<void> {

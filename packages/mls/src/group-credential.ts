@@ -40,9 +40,9 @@ export function makeMLSCredential(identity: OwnIdentity): Credential {
  * ts-mls refuses to add it to an anchored group. An explicit `options.capabilities` override still
  * wins.
  *
- * `extensions` and `lifetime` are left genuinely absent (not passed as `undefined`) when the caller
- * supplies neither, so `generateKeyPackageWithKey`'s own `params.extensions ?? greaseExtensions(...)`
- * and `params.lifetime ?? defaultLifetime()` defaults still apply for the ordinary path.
+ * `extensions` is left genuinely absent (not passed as `undefined`) when the caller supplies none,
+ * so `generateKeyPackageWithKey`'s own `params.extensions ?? greaseExtensions(...)` default still
+ * applies for the ordinary path.
  */
 async function buildBundle(
   identity: OwnIdentity,
@@ -62,12 +62,31 @@ async function buildBundle(
   return { ...result, ownerDID: identity.id }
 }
 
+/**
+ * How long an ordinary, single-use key package stays valid, in days.
+ *
+ * Pinned here rather than left to ts-mls's unexported `defaultLifetime()` (~15 days): the top-up
+ * cadence `@kumiai/mls-hub`'s pool is built around is this number, and a dependency's private
+ * default can move under a patch bump. 30 sits well under the 4-month `maximumTotalLifetime` ts-mls
+ * declares, and makes a weekly top-up comfortable rather than marginal.
+ */
+export const ORDINARY_KEY_PACKAGE_LIFETIME_DAYS = 30
+
+/** Back-dated a day, as ts-mls's own default is, so peer clock skew cannot invalidate a fresh package. */
+function ordinaryLifetime(): Lifetime {
+  const nowSeconds = Math.floor(Date.now() / 1000)
+  return {
+    notBefore: BigInt(nowSeconds - 86_400),
+    notAfter: BigInt(nowSeconds + ORDINARY_KEY_PACKAGE_LIFETIME_DAYS * 86_400),
+  }
+}
+
 /** Generate a key package for joining groups. */
 export async function createKeyPackageBundle(
   identity: OwnIdentity,
   options?: GroupOptions,
 ): Promise<KeyPackageBundle> {
-  return buildBundle(identity, options)
+  return buildBundle(identity, options, { lifetime: ordinaryLifetime() })
 }
 
 /**

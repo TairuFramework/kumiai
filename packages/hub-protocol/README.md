@@ -8,13 +8,15 @@ that cross the wire. Types and schemas only — no client, no server, no storage
 
 - `hubProtocol` / `HubProtocol` — the enkaku protocol definition: `hub/v1/publish`,
   `hub/v1/subscribe`, `hub/v1/unsubscribe`, `hub/v1/topic/fetch`, `hub/v1/receive` (a channel),
-  `hub/v1/keypackage/upload`, `hub/v1/keypackage/fetch`.
+  `hub/v1/keypackage/upload`, `hub/v1/keypackage/fetch`, `hub/v1/keypackage/status`.
 - `HubStore` and its params/result types — the storage contract, verified by
   `@kumiai/hub-conformance`.
 - `HeadMismatchError`, `NotSubscribedError`, `RetentionExceededError`, `HUB_ERROR_CODES`,
   `hubErrorCodeOf`, `hubErrorFromCode` — the named errors and their wire codes, so a caller can tell
   "I lost the compare-and-set, rebase and retry" from "the hub is unreachable". A transport failure
   carries no hub code at all.
+- `keyPackageDigest` — SHA-256 hex digest of a stored key package string, used to compare a client's
+  retained last-resort record against `hub/v1/keypackage/status`'s `lastResort` field.
 
 The hub is blind: topic IDs are opaque strings it never derives or interprets, and payloads are
 base64 on the wire and `Uint8Array` in the store.

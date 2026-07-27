@@ -1,5 +1,9 @@
 // biome-ignore-all lint/suspicious/noExplicitAny: handlers are dispatched through a loosely-typed map in these tests
-import { HUB_ERROR_CODES, KeyPackageQuotaExceededError } from '@kumiai/hub-protocol'
+import {
+  HUB_ERROR_CODES,
+  KeyPackageQuotaExceededError,
+  keyPackageDigest,
+} from '@kumiai/hub-protocol'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import type { AuthorizeRequest } from '../src/handlers.js'
@@ -547,5 +551,84 @@ describe('store errors on the key-package fetch path keep their wire code', () =
     // Swallowing it would leave an operator blind to a broken store behind a plausible refusal.
     expect((refusal as { cause?: unknown }).cause).toBeInstanceOf(Error)
     expect(((refusal as { cause?: Error }).cause as Error).message).toBe('store unavailable')
+  })
+})
+
+describe('hub/v1/keypackage/status', () => {
+  test('answers for the caller, counting live packages only', async () => {
+    const { store, handlers } = setup()
+    const future = Math.floor(Date.now() / 1000) + 3600
+    const past = Math.floor(Date.now() / 1000) - 60
+    await store.storeKeyPackage(TARGET, 'kp-live', future)
+    await store.storeKeyPackage(TARGET, 'kp-dead', past)
+    await store.storeKeyPackage('did:key:someone-else', 'kp-other', future)
+
+    const result = await (handlers['hub/v1/keypackage/status'] as any)(
+      reqCtx('hub/v1/keypackage/status', {}, TARGET),
+    )
+
+    expect(result.count).toBe(1)
+    expect(result.lastResort).toBeNull()
+  })
+
+  test("reports the digest of the caller's own last-resort package", async () => {
+    const { store, handlers } = setup()
+    await store.storeLastResortKeyPackage(TARGET, 'kp-last-resort')
+
+    const result = await (handlers['hub/v1/keypackage/status'] as any)(
+      reqCtx('hub/v1/keypackage/status', {}, TARGET),
+    )
+
+    expect(result.lastResort).toBe(await keyPackageDigest('kp-last-resort'))
+  })
+
+  test('consults the authorize hook and can be refused', async () => {
+    const { handlers } = setup({ authorize: (req) => req.action !== 'keypackage/status' })
+    await expect(
+      (handlers['hub/v1/keypackage/status'] as any)(reqCtx('hub/v1/keypackage/status', {}, TARGET)),
+    ).rejects.toMatchObject({ code: HUB_ERROR_CODES.authorizationDenied })
+  })
+
+  test('a did in the param is ignored: the answer is always about the authenticated caller', async () => {
+    const { store, handlers } = setup()
+    await store.storeKeyPackage(TARGET, 'kp-target')
+    await store.storeKeyPackage(REQUESTER, 'kp-requester')
+    await store.storeKeyPackage(REQUESTER, 'kp-requester-2')
+
+    // REQUESTER is the authenticated caller (reqCtx's default `did`); a `did` field naming TARGET
+    // must not redirect the answer to TARGET's inventory — that would let a caller learn exactly
+    // when a drain against someone else's DID succeeded.
+    const result = await (handlers['hub/v1/keypackage/status'] as any)(
+      reqCtx('hub/v1/keypackage/status', { did: TARGET }),
+    )
+
+    expect(result.count).toBe(2)
+  })
+})
+
+describe('hub/v1/keypackage/upload notAfter', () => {
+  test('carries the batch expiry into the store', async () => {
+    const { store, handlers } = setup()
+    // A PAST notAfter, not a future one: an entry stored with no expiry at all also counts 1, so a
+    // future notAfter can't tell "threaded" from "dropped". Past + count 0 can, and does.
+    const past = Math.floor(Date.now() / 1000) - 60
+    await (handlers['hub/v1/keypackage/upload'] as any)(
+      reqCtx('hub/v1/keypackage/upload', { keyPackages: ['kp-a'], notAfter: past }, TARGET),
+    )
+
+    expect(await store.countKeyPackages(TARGET)).toBe(0)
+  })
+
+  test('rejects an expiry on a last-resort upload', async () => {
+    const { handlers } = setup()
+    await expect(
+      (handlers['hub/v1/keypackage/upload'] as any)(
+        reqCtx(
+          'hub/v1/keypackage/upload',
+          { keyPackages: ['kp'], lastResort: true, notAfter: 1 },
+          TARGET,
+        ),
+      ),
+    ).rejects.toThrow(/last-resort upload carries no expiry/)
   })
 })

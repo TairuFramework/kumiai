@@ -32,7 +32,7 @@ Authorization is two layers, and only the second one knows about topics: `access
 procedures (the default lets any authenticated DID call them), and the optional
 `authorize(request)` hook decides publish and subscribe per topic. It takes one discriminated
 `AuthorizeRequest` — narrow on `request.action` — and returns `AuthorizeDecision`, either a boolean
-or `{ allow, reason?, code?, retryAfterMs? }`. `AuthorizeRequest` names six actions, but only
+or `{ allow, reason?, code?, retryAfterMs? }`. `AuthorizeRequest` names seven actions, but only
 `publish` and `subscribe` are dispatched today. The default allows any authenticated DID.
 
 ## Durable subscription, ephemeral connection

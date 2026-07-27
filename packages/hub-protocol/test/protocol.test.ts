@@ -7,6 +7,7 @@ describe('hubProtocol', () => {
     expect(Object.keys(hubProtocol).sort()).toEqual(
       [
         'hub/v1/keypackage/fetch',
+        'hub/v1/keypackage/status',
         'hub/v1/keypackage/upload',
         'hub/v1/publish',
         'hub/v1/receive',
@@ -67,5 +68,30 @@ describe('hubProtocol', () => {
     expect(receive.receive.required).toEqual(['sequenceID', 'senderDID', 'topicID', 'payload'])
     expect(receive.receive.properties).not.toHaveProperty('groupID')
     expect(receive.param.properties).not.toHaveProperty('groupIDs')
+  })
+})
+
+describe('hub/v1/keypackage/status', () => {
+  test('takes no parameters, so there is no DID to authorize', () => {
+    const param = hubProtocol['hub/v1/keypackage/status'].param
+    expect(param.properties).toEqual({})
+    expect(param.additionalProperties).toBe(false)
+  })
+
+  test('reports a live count and a nullable last-resort digest', () => {
+    const result = hubProtocol['hub/v1/keypackage/status'].result
+    expect(result.properties.count).toEqual({ type: 'integer' })
+    expect(result.properties.lastResort).toEqual({ type: ['string', 'null'] })
+    expect(result.required).toEqual(['count', 'lastResort'])
+    expect(result.additionalProperties).toBe(false)
+  })
+})
+
+describe('hub/v1/keypackage/upload', () => {
+  test('accepts an optional batch expiry', () => {
+    const param = hubProtocol['hub/v1/keypackage/upload'].param
+    expect(param.properties.notAfter).toEqual({ type: 'integer', minimum: 0 })
+    expect(param.required).toEqual(['keyPackages'])
+    expect(param.additionalProperties).toBe(false)
   })
 })
