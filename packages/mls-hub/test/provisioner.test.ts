@@ -1,3 +1,4 @@
+import { LAST_RESORT_LIFETIME_DAYS } from '@kumiai/mls'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { createLastResortProvisioner } from '../src/provisioner.js'
@@ -38,6 +39,14 @@ describe('ensureProvisioned', () => {
     expect(await hub.hubStore.fetchLastResortKeyPackage(hub.identity.id)).toBe(
       records[0]?.keyPackage,
     )
+
+    // Pinned in SECONDS and at the real MLS lifetime: every rotation/retention test below
+    // overwrites `notAfter` before it matters, so nothing else would catch a unit or magnitude
+    // regression here (e.g. milliseconds instead of seconds) — the no-op branch would then be
+    // taken forever, and the package would never rotate, with every other test still green.
+    const expectedNotAfter = Math.floor(Date.now() / 1000) + LAST_RESORT_LIFETIME_DAYS * 86_400
+    expect(records[0]?.notAfter).toBeGreaterThan(expectedNotAfter - 86_400)
+    expect(records[0]?.notAfter).toBeLessThan(expectedNotAfter + 86_400)
   })
 
   test('a second call inside the validity window uploads nothing', async () => {
@@ -260,6 +269,31 @@ describe('rotation and retention', () => {
     )
   })
 
+  /**
+   * Brackets the 30-day default to within a day against the "just outside" test below: 10 days
+   * (further up) and 31 days (below) leave everything in between undetermined, and mutating the
+   * default by several days would still pass the whole suite without this.
+   */
+  test('a package one day inside the rotation window is rotated', async () => {
+    const store = createMemoryLastResortStore()
+    const provisioner = createLastResortProvisioner({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+    })
+
+    const first = await provisioner.ensureProvisioned()
+    const original = (await store.list(hub.identity.id))[0]
+    if (original == null) return
+    // 29 days left: one day inside the default 30-day window.
+    await store.put(hub.identity.id, { ...original, notAfter: secondsFromNow(29) })
+
+    const second = await provisioner.ensureProvisioned()
+
+    expect(second.rotated).toBe(true)
+    expect(second.ref).not.toBe(first.ref)
+  })
+
   test('a package just outside the rotation window is left alone', async () => {
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
@@ -324,6 +358,38 @@ describe('rotation and retention', () => {
 
     expect(result).toEqual({ rotated: false, ref: live.ref })
     expect((await store.list(hub.identity.id)).map((r) => r.ref)).toEqual([live.ref])
+  })
+
+  /**
+   * Brackets the 7-day default retention grace to within two days against the pruned test above:
+   * -8 days (pruned, above) and -3 days (kept, below) leave everything between undetermined, and a
+   * default change from 7 to 5 would still pass the whole suite without this.
+   */
+  test('a record six days past its lifetime is kept', async () => {
+    const store = createMemoryLastResortStore()
+    const provisioner = createLastResortProvisioner({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+    })
+
+    await provisioner.ensureProvisioned()
+    const live = (await store.list(hub.identity.id))[0]
+    if (live == null) return
+
+    await store.put(hub.identity.id, {
+      ...live,
+      ref: 'six-day-ref',
+      keyPackage: 'kp-six-day',
+      notAfter: secondsFromNow(-6),
+      uploadedAt: 1,
+    })
+
+    await provisioner.ensureProvisioned()
+
+    expect((await store.list(hub.identity.id)).map((r) => r.ref).sort()).toEqual(
+      [live.ref, 'six-day-ref'].sort(),
+    )
   })
 
   /** Inside the grace it stays: a Welcome from an Add built just before expiry still needs it. */
@@ -403,34 +469,62 @@ describe('rotation and retention', () => {
   })
 
   /**
-   * The `keepRef` exception in `prune` exists for the resume path: a record can be uploaded on this
-   * very call and still be past the retention grace. `rotateWithinDays` is pushed negative so the
-   * resume check ("more than `rotateWithinDays` left") accepts a candidate whose `notAfter` is
-   * already 8 days in the past, while the default 7-day retention grace still puts it past the
-   * prune cutoff — the one combination that exercises the exception rather than the ordinary
-   * "still has plenty of life left" resume case.
+   * `prune` re-reads the wall clock instead of reusing the `nowSeconds` a call already computed, so
+   * a candidate that was eligible to resume at the check can be past the retention cutoff by the
+   * time `prune` actually runs — a forward clock correction (NTP, or a process suspended across the
+   * upload's round trip) landing between the two reads. Simulated here by advancing `Date.now` by
+   * 40 days from inside the upload mock: the resume guard passes at the check (31 days left is more
+   * than the default 30-day rotation window), but by the time `prune` reads the clock the cutoff has
+   * moved to +33 days, past the record's own +31. Without the `keepRef` exception this deletes the
+   * private half of the package the call just told the hub to serve.
    */
-  test('a resumed record past the retention grace survives its own prune', async () => {
+  test('a resumed record survives its own prune when the clock advances during the upload', async () => {
     const store = createMemoryLastResortStore()
-    const provisioner = createLastResortProvisioner({
-      identity: hub.identity,
-      client: hub.client,
-      store,
-      rotateWithinDays: -20,
-    })
-
     const pendingRef = 'pending-ref'
     await store.put(hub.identity.id, {
       ref: pendingRef,
       keyPackage: 'kp-pending',
       privatePackage: 'priv-pending',
-      notAfter: secondsFromNow(-8),
+      notAfter: secondsFromNow(31),
       uploadedAt: null,
     })
 
-    const result = await provisioner.ensureProvisioned()
+    // A mutable offset on top of the real clock. NOT vi.useFakeTimers(): that interferes with the
+    // enkaku transports the hub fixture builds.
+    let offsetMs = 0
+    const realNow = Date.now.bind(Date)
+    const dateSpy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + offsetMs)
 
-    expect(result).toEqual({ rotated: true, ref: pendingRef })
-    expect((await store.list(hub.identity.id)).map((r) => r.ref)).toEqual([pendingRef])
+    const realUpload = hub.client.uploadLastResortKeyPackage.bind(hub.client)
+    const uploadSpy = vi
+      .spyOn(hub.client, 'uploadLastResortKeyPackage')
+      .mockImplementation((keyPackage: string) => {
+        const call = realUpload(keyPackage)
+        // Fire-and-forget: advances the clock once the real upload settles, before the
+        // provisioner's own `await` on this same call resumes.
+        void call.then(() => {
+          offsetMs += 40 * DAY * 1000
+        })
+        return call
+      })
+
+    try {
+      const provisioner = createLastResortProvisioner({
+        identity: hub.identity,
+        client: hub.client,
+        store,
+      })
+
+      const result = await provisioner.ensureProvisioned()
+
+      expect(result).toEqual({ rotated: true, ref: pendingRef })
+      expect((await store.list(hub.identity.id)).map((r) => r.ref)).toEqual([pendingRef])
+      // The invariant is "the store still holds the private half of what the hub is serving" —
+      // checking only the store half would be half a test.
+      expect(await hub.hubStore.fetchLastResortKeyPackage(hub.identity.id)).toBe('kp-pending')
+    } finally {
+      uploadSpy.mockRestore()
+      dateSpy.mockRestore()
+    }
   })
 })

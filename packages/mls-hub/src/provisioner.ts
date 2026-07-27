@@ -95,8 +95,11 @@ export function createLastResortProvisioner(
 
   /**
    * Drop records past their lifetime plus the retention grace, EXCEPT the one this call settled on.
-   * The exception matters on the resume path, where an interrupted record can itself be old enough
-   * to prune and must not be deleted immediately after being uploaded.
+   * `cutoff` is computed from the CURRENT clock, not the `nowSeconds` the caller already read, so a
+   * record that was eligible at the check can be past the cutoff by the time this runs — a forward
+   * clock correction (NTP, or a process suspended across the upload's round trip) landing between
+   * the two reads. The exception stops that from deleting the private half of the package this very
+   * call just told the hub to serve.
    */
   const prune = async (records: Array<LastResortRecord>, keepRef: string): Promise<void> => {
     const cutoff = Math.floor(Date.now() / 1000) - retainAfterExpiryDays * DAY_SECONDS
