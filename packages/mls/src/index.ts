@@ -164,3 +164,4 @@ export {
   roleReducer,
 } from './roster.js'
 export type { GroupOptions, GroupSyncScope, Invite, KeyPackageBundle } from './types.js'
+export { welcomeKeyPackageRefs } from './welcome-refs.js'
