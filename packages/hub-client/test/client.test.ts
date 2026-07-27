@@ -3,6 +3,7 @@ import type { AnyClientMessageOf, AnyServerMessageOf } from '@enkaku/protocol'
 import { DirectTransports } from '@enkaku/transport'
 import { randomIdentity } from '@kokuin/token'
 import type { HubProtocol } from '@kumiai/hub-protocol'
+import { keyPackageDigest } from '@kumiai/hub-protocol'
 import { createHub, createMemoryStore } from '@kumiai/hub-server'
 import { fromUTF, toB64 } from '@sozai/codec'
 import { describe, expect, test } from 'vitest'
@@ -142,6 +143,45 @@ describe('HubClient', () => {
     // The ordinary pool is empty, yet a fetch still yields a package — and again after that.
     expect((await client.fetchKeyPackages(identity.id, 1)).keyPackages).toEqual(['kp-lr'])
     expect((await client.fetchKeyPackages(identity.id, 1)).keyPackages).toEqual(['kp-lr'])
+
+    await transports.dispose()
+  })
+
+  test('keyPackageStatus reports the caller own live depth and slot digest', async () => {
+    const testHub = createTestHub()
+    const { client, transports } = createTestClient(testHub)
+
+    const future = Math.floor(Date.now() / 1000) + 3600
+    await client.uploadKeyPackages(['kp-1', 'kp-2'], future)
+    await client.uploadLastResortKeyPackage('kp-last-resort')
+
+    const status = await client.keyPackageStatus()
+
+    expect(status.count).toBe(2)
+    expect(status.lastResort).toBe(await keyPackageDigest('kp-last-resort'))
+
+    await transports.dispose()
+  })
+
+  test('an upload without an expiry stays countable', async () => {
+    const testHub = createTestHub()
+    const { client, transports } = createTestClient(testHub)
+
+    await client.uploadKeyPackages(['kp-forever'])
+
+    expect((await client.keyPackageStatus()).count).toBe(1)
+
+    await transports.dispose()
+  })
+
+  test('notAfter reaches the hub: an already-expired upload does not count', async () => {
+    const testHub = createTestHub()
+    const { client, transports } = createTestClient(testHub)
+
+    const past = Math.floor(Date.now() / 1000) - 1
+    await client.uploadKeyPackages(['kp-dead'], past)
+
+    expect((await client.keyPackageStatus()).count).toBe(0)
 
     await transports.dispose()
   })
