@@ -12,8 +12,10 @@ the hub subsystem (hub-protocol, hub-client, hub-server, hub-tunnel), and rpc. L
 while pre-1.0 (young, tightly coupled).
 
 Alongside them: **mls-rpc**, the real implementation of rpc's two consumer ports over a live MLS
-handle — until it existed nothing had ever run the ports outside fixtures — and two contract
-suites, **rpc-conformance** (`GroupCrypto`, `GroupMLS`) and **hub-conformance** (the hub store and
+handle — until it existed nothing had ever run the ports outside fixtures — **mls-hub**, which owns
+when a peer's last-resort key package is generated, uploaded, retained, and pruned (the mechanism
+shipped first and nothing decided any of it), and two contract suites, **rpc-conformance**
+(`GroupCrypto`, `GroupMLS`) and **hub-conformance** (the hub store and
 the log/mailbox hub views). Both suites run against every implementation AND every double, because
 every serious defect this stack has had came from a double answering where its real port refuses.
 
