@@ -8,6 +8,11 @@
  */
 
 export {
+  createKeyPackagePool,
+  type KeyPackagePool,
+  type KeyPackagePoolParams,
+} from './pool.js'
+export {
   createMemoryKeyPackagePoolStore,
   type KeyPackagePoolStore,
   type KeyPackageRecord,
