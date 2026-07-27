@@ -66,6 +66,7 @@ describe('ensureStocked', () => {
 
   test('the uploaded bytes are the records own, and carry the expiry', async () => {
     const store = createMemoryKeyPackagePoolStore()
+    const upload = vi.spyOn(hub.client, 'uploadKeyPackages')
     const pool = createKeyPackagePool({
       identity: hub.identity,
       client: hub.client,
@@ -80,6 +81,15 @@ describe('ensureStocked', () => {
     expect(await hub.hubStore.fetchKeyPackages(hub.identity.id, 1)).toEqual([
       records[0]?.keyPackage,
     ])
+
+    // Omitting notAfter makes the hub hold entries forever, so a stale pool charges the per-DID cap
+    // against every future upload — the wedge this branch exists to remove.
+    const uploadedNotAfter = upload.mock.calls[0]?.[1]
+    expect(uploadedNotAfter).toBe(Math.min(...records.map((record) => record.notAfter)))
+    // Pinned in SECONDS: a milliseconds regression would still equal the batch min above.
+    const expected = Math.floor(Date.now() / 1000) + ORDINARY_KEY_PACKAGE_LIFETIME_DAYS * 86_400
+    expect(uploadedNotAfter).toBeGreaterThan(expected - 86_400)
+    expect(uploadedNotAfter).toBeLessThan(expected + 86_400)
   })
 
   test('does nothing while depth is at or above lowWater', async () => {
@@ -97,6 +107,28 @@ describe('ensureStocked', () => {
     const result = await pool.ensureStocked()
 
     expect(result).toEqual({ minted: 0, depth: 4 })
+    expect(upload).not.toHaveBeenCalled()
+  })
+
+  test('does nothing while depth sits between lowWater and target', async () => {
+    const store = createMemoryKeyPackagePoolStore()
+    const pool = createKeyPackagePool({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+      target: 4,
+      lowWater: 2,
+    })
+    await pool.ensureStocked()
+    // Consume exactly one: depth 3 sits strictly between lowWater (2) and target (4).
+    await hub.hubStore.fetchKeyPackages(hub.identity.id, 1)
+    const upload = vi.spyOn(hub.client, 'uploadKeyPackages')
+
+    const result = await pool.ensureStocked()
+
+    // A one-package top-up here would drip on every call while depth is in this band, burning the
+    // hub's upload rate limit and cap for no benefit.
+    expect(result).toEqual({ minted: 0, depth: 3 })
     expect(upload).not.toHaveBeenCalled()
   })
 

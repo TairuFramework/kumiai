@@ -1,6 +1,6 @@
 /**
- * Key-package provisioning between `@kumiai/mls` and a kumiai hub: when a last-resort key package is
- * generated, uploaded, retained, and pruned.
+ * Key-package provisioning between `@kumiai/mls` and a kumiai hub: the ordinary key-package pool and
+ * the last-resort slot, each generated, uploaded, retained, and pruned.
  *
  * Does not depend on `ts-mls` — every MLS wire form it needs is reached through `@kumiai/mls`.
  *
