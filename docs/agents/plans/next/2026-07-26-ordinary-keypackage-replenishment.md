@@ -3,7 +3,7 @@
 **Priority:** medium — a host that never re-uploads still works, but forfeits forward secrecy for
 every new member.
 **Origin:** scoped out of the last-resort provisioning work landed 2026-07-26; see
-`docs/agents/plans/completed/2026-07-26-last-resort-provisioning.complete.md`.
+`docs/agents/plans/completed/2026-07-27-last-resort-provisioning.complete.md`.
 
 ## The gap
 
