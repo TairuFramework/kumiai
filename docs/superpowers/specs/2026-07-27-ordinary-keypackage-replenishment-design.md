@@ -77,12 +77,17 @@ upload does, then calls `countKeyPackages` and `fetchLastResortKeyPackage`.
 detects a hub holding a package that is not the one the provisioner believes it uploaded.
 
 `@kumiai/hub-protocol` exports `keyPackageDigest(stored: string): Promise<string>` — SHA-256 over the
-stored string's UTF-8 bytes, base64url. Computed in the handler rather than in the store, so no store
-implementation can drift from the definition and every one gets it for free.
+stored string's UTF-8 bytes, lowercase hex. Computed in the handler rather than in the store, so no
+store implementation can drift from the definition and every one gets it for free.
 
-Two things to verify during planning rather than assume: that the enkaku schema layer accepts a
-nullable result field (`type: ['string', 'null']`), and whether `@kumiai/hub-protocol` already has a
-crypto import path or gains its first Web Crypto use.
+Hex rather than base64url only so that `@kumiai/hub-protocol` need not take on `@sozai/codec` for a
+value nobody parses. Web Crypto is a global, so the package gains no dependency at all.
+
+Both open premises were checked before planning and both hold. The enkaku schema layer accepts
+`type: ['string', 'null']` — `expectedHead` already uses it (`packages/hub-protocol/src/protocol.ts:24`).
+ts-mls exports `type Welcome` with `secrets: EncryptedGroupSecrets[]` and
+`EncryptedGroupSecrets.newMember: Uint8Array` (`ts-mls/dist/src/welcome.d.ts:9`), so
+`welcomeKeyPackageRefs` needs no fallback.
 
 ### `@kumiai/mls`: two additions
 
@@ -92,10 +97,10 @@ feature is built around lives in a dependency's private default and can shift un
 sits well under ts-mls's declared 4-month `maximumTotalLifetime` and makes a weekly top-up cadence
 comfortable rather than marginal.
 
-`welcomeKeyPackageRefs(welcome): Promise<Array<string>>` — the base64 refs a Welcome's secrets name,
-pairing with the existing `keyPackageRef`. Without it, bundle selection degrades to trying every
-retained bundle until one decrypts. Reads a ts-mls Welcome's `secrets[].newMember`; the exact field is
-a planning-step verification, with try-in-order as the fallback if it is not reachable.
+`welcomeKeyPackageRefs(welcome): Array<string>` — the base64 refs a Welcome's secrets name, under the
+same `toB64` encoding `keyPackageRef` uses so the two compare directly. Without it, bundle selection
+degrades to trying every retained bundle until one decrypts. Reads a ts-mls Welcome's
+`secrets[].newMember`, and takes framed bytes or a decoded Welcome exactly as `processWelcome` does.
 
 ### `@kumiai/mls-hub`: the pool
 
