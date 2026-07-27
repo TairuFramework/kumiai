@@ -170,10 +170,14 @@ export function createLastResortProvisioner(
         if (publicPackage == null || privatePackage == null) {
           // Loud, not skipped: silently narrowing a corrupt store to "no last-resort package" is
           // the failure mode this whole feature exists to remove. `ensureProvisioned` reads only
-          // `notAfter` and never decodes, so rotation still works past a corrupt record — only the
-          // join path stops. The message names the ref and NEVER the material.
+          // `notAfter` and never decodes, so rotation still works past a corrupt record. Decoding
+          // is eager and this throw sits inside the `.map`, so a single corrupt RETIRED record —
+          // kept only for an old cached invite — denies every join here, including ones the
+          // perfectly good live record could otherwise serve. Accepted anyway: a store that
+          // violates its own round-trip contract for one record is not trustworthy for the live
+          // record either. The message names the ref and NEVER the material.
           throw new Error(
-            `mls-hub: stored last-resort record ${record.ref} did not decode; the store returned bytes it did not round-trip`,
+            `mls-hub: stored last-resort record ${record.ref} did not decode; its stored form is not a round-trip of what this codec writes`,
           )
         }
         return { publicPackage, privatePackage, ownerDID }

@@ -3,7 +3,11 @@ import {
   commitInvite,
   createGroup,
   createInvite,
+  createLastResortKeyPackageBundle,
+  encodeKeyPackage,
+  encodePrivateKeyPackage,
   type Invite,
+  keyPackageRef,
   ledgerEntryDigest,
   processWelcome,
 } from '@kumiai/mls'
@@ -62,11 +66,59 @@ describe('bundles', () => {
     expect(bundles).toHaveLength(2)
     expect(bundles.map((b) => b.ownerDID)).toEqual([hub.identity.id, hub.identity.id])
 
-    // Newest first: the rotation's package leads, the retired one follows.
-    const refs = await store.list(hub.identity.id)
-    const newest = refs.find((r) => r.ref === second.ref)
-    const retired = refs.find((r) => r.ref === first.ref)
-    expect(newest?.notAfter).toBeGreaterThan(retired?.notAfter ?? 0)
+    expect(await Promise.all(bundles.map((b) => keyPackageRef(b.publicPackage)))).toEqual([
+      second.ref, // the rotation's package leads
+      first.ref, // the retired one follows
+    ])
+  })
+
+  /**
+   * The tie-break half of the same comparator: two records sharing a `notAfter` must still resolve
+   * to one order, and it must be the SAME order `pickCandidate` uses to decide which record wins the
+   * hub's slot — otherwise `bundles()[0]` and "the package the hub is currently serving" could
+   * silently disagree. The expected leader is derived from a plain array sort over the two refs
+   * (an independent comparison from the hand-written ternaries in both `provisioner.ts` call
+   * sites), not asserted by construction.
+   */
+  test('a notAfter tie breaks on ref, agreeing with which record holds the slot', async () => {
+    const store = createMemoryLastResortStore()
+    const provisioner = createLastResortProvisioner({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+    })
+
+    await provisioner.ensureProvisioned()
+    const first = (await store.list(hub.identity.id))[0]
+    expect(first).toBeDefined()
+    if (first == null) return
+
+    // A second, genuinely distinct last-resort bundle, forced to share `first`'s `notAfter` exactly
+    // so the ref tie-break — not the notAfter ordering — is what decides.
+    const secondBundle = await createLastResortKeyPackageBundle(hub.identity)
+    const secondRecord = {
+      ref: await keyPackageRef(secondBundle.publicPackage),
+      keyPackage: encodeKeyPackage(secondBundle.publicPackage),
+      privatePackage: encodePrivateKeyPackage(secondBundle.privatePackage),
+      notAfter: first.notAfter,
+      uploadedAt: Date.now(),
+    }
+    await store.put(hub.identity.id, secondRecord)
+
+    const bundles = await provisioner.bundles()
+    expect(bundles).toHaveLength(2)
+    const [leader] = bundles
+    expect(leader).toBeDefined()
+    if (leader == null) return
+    const leaderRef = await keyPackageRef(leader.publicPackage)
+    const expectedLeader = [first.ref, secondRecord.ref].sort().at(-1)
+    expect(leaderRef).toBe(expectedLeader)
+
+    // The same ref must be the one `ensureProvisioned` reports as the slot's occupant — the sort in
+    // `bundles()` and the tie-break in `pickCandidate` must agree, not just each be internally
+    // consistent.
+    const settled = await provisioner.ensureProvisioned()
+    expect(settled.ref).toBe(expectedLeader)
   })
 
   /**
