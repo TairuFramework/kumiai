@@ -220,3 +220,217 @@ describe('an interrupted provision', () => {
     await expect(provisioner.ensureProvisioned()).resolves.toMatchObject({ rotated: true })
   })
 })
+
+const DAY = 86_400
+
+function secondsFromNow(days: number): number {
+  return Math.floor(Date.now() / 1000) + days * DAY
+}
+
+describe('rotation and retention', () => {
+  /**
+   * The rotation deadline exists because a last-resort package carries a real MLS lifetime and an
+   * inviter enforces it. An unrotated slot stops working while the hub still reports it full.
+   */
+  test('a package inside the rotation window is replaced, and the old one is kept', async () => {
+    const store = createMemoryLastResortStore()
+    const provisioner = createLastResortProvisioner({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+    })
+
+    const first = await provisioner.ensureProvisioned()
+    const original = (await store.list(hub.identity.id))[0]
+    expect(original).toBeDefined()
+    if (original == null) return
+
+    // 10 days left: inside the 30-day window.
+    await store.put(hub.identity.id, { ...original, notAfter: secondsFromNow(10) })
+
+    const second = await provisioner.ensureProvisioned()
+
+    expect(second.rotated).toBe(true)
+    expect(second.ref).not.toBe(first.ref)
+    // The retired record is RETAINED: an inviter may hold the package it names.
+    const refs = (await store.list(hub.identity.id)).map((r) => r.ref).sort()
+    expect(refs).toEqual([first.ref, second.ref].sort())
+    expect(await hub.hubStore.fetchLastResortKeyPackage(hub.identity.id)).not.toBe(
+      original.keyPackage,
+    )
+  })
+
+  test('a package just outside the rotation window is left alone', async () => {
+    const store = createMemoryLastResortStore()
+    const provisioner = createLastResortProvisioner({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+    })
+
+    const first = await provisioner.ensureProvisioned()
+    const original = (await store.list(hub.identity.id))[0]
+    if (original == null) return
+    await store.put(hub.identity.id, { ...original, notAfter: secondsFromNow(31) })
+
+    const second = await provisioner.ensureProvisioned()
+
+    expect(second).toEqual({ rotated: false, ref: first.ref })
+  })
+
+  test('rotateWithinDays is honoured when overridden', async () => {
+    const store = createMemoryLastResortStore()
+    const provisioner = createLastResortProvisioner({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+      rotateWithinDays: 5,
+    })
+
+    const first = await provisioner.ensureProvisioned()
+    const original = (await store.list(hub.identity.id))[0]
+    if (original == null) return
+    // 10 days left: inside the default 30-day window, outside the configured 5-day one.
+    await store.put(hub.identity.id, { ...original, notAfter: secondsFromNow(10) })
+
+    expect(await provisioner.ensureProvisioned()).toEqual({ rotated: false, ref: first.ref })
+  })
+
+  /**
+   * Retention is bounded: a record whose lifetime ended more than the grace ago can no longer be
+   * the target of any Add an inviter could have built, so keeping its private half is pure risk.
+   */
+  test('a record past its lifetime plus the grace is pruned', async () => {
+    const store = createMemoryLastResortStore()
+    const provisioner = createLastResortProvisioner({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+    })
+
+    await provisioner.ensureProvisioned()
+    const live = (await store.list(hub.identity.id))[0]
+    if (live == null) return
+
+    await store.put(hub.identity.id, {
+      ...live,
+      ref: 'stale-ref',
+      keyPackage: 'kp-stale',
+      notAfter: secondsFromNow(-8),
+      uploadedAt: 1,
+    })
+
+    const result = await provisioner.ensureProvisioned()
+
+    expect(result).toEqual({ rotated: false, ref: live.ref })
+    expect((await store.list(hub.identity.id)).map((r) => r.ref)).toEqual([live.ref])
+  })
+
+  /** Inside the grace it stays: a Welcome from an Add built just before expiry still needs it. */
+  test('a record inside the retention grace is kept', async () => {
+    const store = createMemoryLastResortStore()
+    const provisioner = createLastResortProvisioner({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+    })
+
+    await provisioner.ensureProvisioned()
+    const live = (await store.list(hub.identity.id))[0]
+    if (live == null) return
+
+    await store.put(hub.identity.id, {
+      ...live,
+      ref: 'recent-ref',
+      keyPackage: 'kp-recent',
+      notAfter: secondsFromNow(-3),
+      uploadedAt: 1,
+    })
+
+    await provisioner.ensureProvisioned()
+
+    expect((await store.list(hub.identity.id)).map((r) => r.ref).sort()).toEqual(
+      [live.ref, 'recent-ref'].sort(),
+    )
+  })
+
+  test('retainAfterExpiryDays is honoured when overridden', async () => {
+    const store = createMemoryLastResortStore()
+    const provisioner = createLastResortProvisioner({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+      retainAfterExpiryDays: 1,
+    })
+
+    await provisioner.ensureProvisioned()
+    const live = (await store.list(hub.identity.id))[0]
+    if (live == null) return
+    await store.put(hub.identity.id, {
+      ...live,
+      ref: 'stale-ref',
+      keyPackage: 'kp-stale',
+      notAfter: secondsFromNow(-3),
+      uploadedAt: 1,
+    })
+
+    await provisioner.ensureProvisioned()
+
+    expect((await store.list(hub.identity.id)).map((r) => r.ref)).toEqual([live.ref])
+  })
+
+  /**
+   * An expired live package is not a special case in the code, and this is the test that says so:
+   * the rotation arithmetic goes negative and falls through to a mint.
+   */
+  test('an expired package is rotated rather than reported as fine', async () => {
+    const store = createMemoryLastResortStore()
+    const provisioner = createLastResortProvisioner({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+    })
+
+    const first = await provisioner.ensureProvisioned()
+    const original = (await store.list(hub.identity.id))[0]
+    if (original == null) return
+    await store.put(hub.identity.id, { ...original, notAfter: secondsFromNow(-1) })
+
+    const second = await provisioner.ensureProvisioned()
+
+    expect(second.rotated).toBe(true)
+    expect(second.ref).not.toBe(first.ref)
+  })
+
+  /**
+   * The `keepRef` exception in `prune` exists for the resume path: a record can be uploaded on this
+   * very call and still be past the retention grace. `rotateWithinDays` is pushed negative so the
+   * resume check ("more than `rotateWithinDays` left") accepts a candidate whose `notAfter` is
+   * already 8 days in the past, while the default 7-day retention grace still puts it past the
+   * prune cutoff — the one combination that exercises the exception rather than the ordinary
+   * "still has plenty of life left" resume case.
+   */
+  test('a resumed record past the retention grace survives its own prune', async () => {
+    const store = createMemoryLastResortStore()
+    const provisioner = createLastResortProvisioner({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+      rotateWithinDays: -20,
+    })
+
+    const pendingRef = 'pending-ref'
+    await store.put(hub.identity.id, {
+      ref: pendingRef,
+      keyPackage: 'kp-pending',
+      privatePackage: 'priv-pending',
+      notAfter: secondsFromNow(-8),
+      uploadedAt: null,
+    })
+
+    const result = await provisioner.ensureProvisioned()
+
+    expect(result).toEqual({ rotated: true, ref: pendingRef })
+    expect((await store.list(hub.identity.id)).map((r) => r.ref)).toEqual([pendingRef])
+  })
+})
