@@ -20,6 +20,7 @@ describe('option validation', () => {
     ['target', { target: 0 }],
     ['target', { target: Number.NaN }],
     ['lowWater', { lowWater: -1 }],
+    ['lowWater', { lowWater: 0 }],
     ['lowWater', { lowWater: 21 }],
     ['retainAfterExpiryDays', { retainAfterExpiryDays: -1 }],
   ])('rejects an out-of-range %s', (_name, overrides) => {

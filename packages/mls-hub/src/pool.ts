@@ -26,7 +26,7 @@ export type KeyPackagePoolParams = {
   options?: GroupOptions
   /** Stock back up to this depth. Default 20, must be a finite integer greater than 0. */
   target?: number
-  /** Top up once the hub reports fewer than this many. Default 10, must be `0 <= n <= target`. */
+  /** Top up once the hub reports fewer than this many. Default 10, must be `1 <= n <= target`. */
   lowWater?: number
   /** Keep a record this many days past its `notAfter`. Default 7, must be `>= 0`. */
   retainAfterExpiryDays?: number
@@ -66,9 +66,12 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
   if (!Number.isInteger(target) || target <= 0) {
     throw new Error(`mls-hub: target must be an integer greater than 0, got ${target}`)
   }
-  if (!Number.isInteger(lowWater) || lowWater < 0 || lowWater > target) {
+  // 0 is rejected, not a legal floor: `count < 0` is never true, so the pool would silently never
+  // restock and the host would quietly fall back to reusing its last-resort init key — this
+  // feature's own defect, arriving through a config value that looks reasonable.
+  if (!Number.isInteger(lowWater) || lowWater < 1 || lowWater > target) {
     throw new Error(
-      `mls-hub: lowWater must be an integer between 0 and the target of ${target}, got ${lowWater}`,
+      `mls-hub: lowWater must be an integer between 1 and the target of ${target}, got ${lowWater}`,
     )
   }
   if (!Number.isFinite(retainAfterExpiryDays) || retainAfterExpiryDays < 0) {

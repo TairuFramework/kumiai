@@ -288,4 +288,76 @@ describe('processWelcomeFromSources', () => {
       poolRefsBefore,
     )
   })
+
+  test('a corrupt pool record does not block a join via the provisioner fallback', async () => {
+    const poolStore = createMemoryKeyPackagePoolStore()
+    // A record that fails to round-trip: `pool.bundles()` throws loudly for it, same as
+    // `pool.test.ts`'s "throws on a record that does not round-trip" case.
+    await poolStore.put(hub.identity.id, {
+      ref: 'corrupt',
+      keyPackage: 'not-a-key-package',
+      privatePackage: 'not-a-private-package',
+      notAfter: Math.floor(Date.now() / 1000) + 86_400,
+    })
+    const pool = createKeyPackagePool({
+      identity: hub.identity,
+      client: hub.client,
+      store: poolStore,
+      target: 1,
+      lowWater: 1,
+    })
+    const lastResortStore = createMemoryLastResortStore()
+    const provisioner = createLastResortProvisioner({
+      identity: hub.identity,
+      client: hub.client,
+      store: lastResortStore,
+    })
+    const { ref } = await provisioner.ensureProvisioned()
+    const { welcome, invite, ratchetTree } = await inviteFromLastResortSlot()
+
+    const result = await processWelcomeFromSources({
+      identity: hub.identity,
+      invite,
+      welcome,
+      ratchetTree,
+      sources: [pool, provisioner],
+    })
+
+    // The corrupt record aborted only the pool's own scan; the provisioner was still reached and
+    // the join went through — the whole point of isolating each source.
+    expect(result.group).toBeDefined()
+    expect(result.sourceErrors).toHaveLength(1)
+    expect(result.sourceErrors?.[0]?.message).toMatch(/did not decode/)
+    expect((await lastResortStore.list(hub.identity.id)).map((entry) => entry.ref)).toContain(ref)
+  })
+
+  test('names a source that could not be read when nothing matches at all', async () => {
+    const poolStore = createMemoryKeyPackagePoolStore()
+    await poolStore.put(hub.identity.id, {
+      ref: 'corrupt',
+      keyPackage: 'not-a-key-package',
+      privatePackage: 'not-a-private-package',
+      notAfter: Math.floor(Date.now() / 1000) + 86_400,
+    })
+    const pool = createKeyPackagePool({
+      identity: hub.identity,
+      client: hub.client,
+      store: poolStore,
+      target: 1,
+      lowWater: 1,
+    })
+    const { welcome, invite, ratchetTree } = await inviteAStranger()
+
+    // "No bundle matched" and "a store could not be read" are different problems; hiding the
+    // second would send the caller looking for a Welcome mismatch that does not exist.
+    await expect(
+      processWelcomeFromSources({
+        identity: hub.identity,
+        invite,
+        welcome,
+        ratchetTree,
+        sources: [pool],
+      }),
+    ).rejects.toThrow(/source\(s\) could not be read.*did not decode/)
+  })
 })

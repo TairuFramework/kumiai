@@ -32,6 +32,12 @@ export type ProcessWelcomeFromSourcesResult = ProcessWelcomeResult & {
    * host obligation this wrapper exists to remove.
    */
   releaseError?: Error
+  /**
+   * The join succeeded, but one or more sources could not be read. Surfaced here rather than
+   * swallowed: a source that failed is not the same problem as no bundle matching, and the caller
+   * needs told about a store it cannot reach even though the join itself went through.
+   */
+  sourceErrors?: Array<Error>
 }
 
 /**
@@ -45,25 +51,46 @@ export async function processWelcomeFromSources(
 ): Promise<ProcessWelcomeFromSourcesResult> {
   const { sources, ...welcomeParams } = params
   const wanted = new Set(welcomeKeyPackageRefs(welcomeParams.welcome))
+  const sourceErrors: Array<Error> = []
 
   for (const source of sources) {
-    for (const bundle of await source.bundles()) {
+    // Each source is isolated. `bundles()` throws loudly on a record that does not round-trip, and
+    // that rule is right WITHIN a store — one that breaks its own contract is not trusted for its
+    // live record either. It does not carry ACROSS stores: letting a corrupt ordinary-pool record
+    // abort the scan would deny the last-resort fallback the very outage the slot exists to prevent.
+    let available: Array<KeyPackageBundle>
+    try {
+      available = await source.bundles()
+    } catch (error) {
+      sourceErrors.push(error instanceof Error ? error : new Error(String(error)))
+      continue
+    }
+    for (const bundle of available) {
       const ref = await keyPackageRef(bundle.publicPackage, welcomeParams.options)
       if (!wanted.has(ref)) continue
       const result = await processWelcome({ ...welcomeParams, keyPackageBundle: bundle })
+      const errors = sourceErrors.length > 0 ? { sourceErrors } : {}
       try {
         await source.release(ref)
       } catch (error) {
         return {
           ...result,
+          ...errors,
           releaseError: error instanceof Error ? error : new Error(String(error)),
         }
       }
-      return result
+      return { ...result, ...errors }
     }
   }
 
+  // A source that failed is named here too: "no bundle matched" and "a store could not be read" are
+  // different problems, and reporting the first while hiding the second sends the caller hunting for
+  // a Welcome mismatch that does not exist.
+  const failed =
+    sourceErrors.length > 0
+      ? `; ${sourceErrors.length} source(s) could not be read: ${sourceErrors.map((error) => error.message).join('; ')}`
+      : ''
   throw new Error(
-    `mls-hub: no retained key package matches this Welcome; it names ${[...wanted].join(', ')}`,
+    `mls-hub: no retained key package matches this Welcome; it names ${[...wanted].join(', ')}${failed}`,
   )
 }
