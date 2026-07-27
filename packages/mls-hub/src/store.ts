@@ -1,3 +1,5 @@
+import { createMemoryRecordStore } from './records.js'
+
 /**
  * One retained last-resort key package.
  *
@@ -56,22 +58,5 @@ export type LastResortStore = {
  * use it is gone, leaving the owner silently unaddable. Tests and throwaway processes only.
  */
 export function createMemoryLastResortStore(): LastResortStore {
-  const byOwner = new Map<string, Map<string, LastResortRecord>>()
-  return {
-    async list(ownerDID: string): Promise<Array<LastResortRecord>> {
-      const records = byOwner.get(ownerDID)
-      return records == null ? [] : [...records.values()].map((record) => ({ ...record }))
-    },
-    async put(ownerDID: string, record: LastResortRecord): Promise<void> {
-      let records = byOwner.get(ownerDID)
-      if (records == null) {
-        records = new Map()
-        byOwner.set(ownerDID, records)
-      }
-      records.set(record.ref, { ...record })
-    },
-    async delete(ownerDID: string, ref: string): Promise<void> {
-      byOwner.get(ownerDID)?.delete(ref)
-    },
-  }
+  return createMemoryRecordStore<LastResortRecord>()
 }

@@ -8,6 +8,11 @@
  */
 
 export {
+  createMemoryKeyPackagePoolStore,
+  type KeyPackagePoolStore,
+  type KeyPackageRecord,
+} from './pool-store.js'
+export {
   createLastResortProvisioner,
   type LastResortProvisioner,
   type LastResortProvisionerParams,

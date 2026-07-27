@@ -2,8 +2,6 @@ import type { OwnIdentity } from '@kokuin/token'
 import type { HubClient } from '@kumiai/hub-client'
 import {
   createLastResortKeyPackageBundle,
-  decodeKeyPackage,
-  decodePrivateKeyPackage,
   encodeKeyPackage,
   encodePrivateKeyPackage,
   type GroupOptions,
@@ -12,6 +10,7 @@ import {
   LAST_RESORT_LIFETIME_DAYS,
 } from '@kumiai/mls'
 
+import { toBundles } from './records.js'
 import type { LastResortRecord, LastResortStore } from './store.js'
 
 const DAY_SECONDS = 86_400
@@ -174,25 +173,7 @@ export function createLastResortProvisioner(
       return await started
     },
     async bundles(): Promise<Array<KeyPackageBundle>> {
-      const records = await store.list(ownerDID)
-      const ordered = [...records].sort((a, b) => {
-        if (a.notAfter !== b.notAfter) return b.notAfter - a.notAfter
-        return a.ref < b.ref ? 1 : a.ref > b.ref ? -1 : 0
-      })
-      return ordered.map((record) => {
-        const publicPackage = decodeKeyPackage(record.keyPackage)
-        const privatePackage = decodePrivateKeyPackage(record.privatePackage)
-        if (publicPackage == null || privatePackage == null) {
-          // Loud, not skipped: narrowing a corrupt store to "no last-resort package" is the failure
-          // this feature removes. The cost is that one corrupt retired record denies every join
-          // here, accepted because a store that breaks its round-trip contract once is not trusted
-          // for the live record either. Names the ref, never the material.
-          throw new Error(
-            `mls-hub: stored last-resort record ${record.ref} did not decode; its stored form is not a round-trip of what this codec writes`,
-          )
-        }
-        return { publicPackage, privatePackage, ownerDID }
-      })
+      return toBundles(await store.list(ownerDID), ownerDID, 'last-resort')
     },
   }
 }
