@@ -1,4 +1,9 @@
-import { LAST_RESORT_LIFETIME_DAYS } from '@kumiai/mls'
+import {
+  createLastResortKeyPackageBundle,
+  decodeKeyPackage,
+  LAST_RESORT_LIFETIME_DAYS,
+  nobleCryptoProvider,
+} from '@kumiai/mls'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { createLastResortProvisioner } from '../src/provisioner.js'
@@ -262,11 +267,17 @@ describe('rotation and retention', () => {
     expect(second.rotated).toBe(true)
     expect(second.ref).not.toBe(first.ref)
     // The retired record is RETAINED: an inviter may hold the package it names.
-    const refs = (await store.list(hub.identity.id)).map((r) => r.ref).sort()
+    const records = await store.list(hub.identity.id)
+    const refs = records.map((r) => r.ref).sort()
     expect(refs).toEqual([first.ref, second.ref].sort())
-    expect(await hub.hubStore.fetchLastResortKeyPackage(hub.identity.id)).not.toBe(
-      original.keyPackage,
-    )
+
+    // Not merely "the slot changed" — `.not.toBe(original.keyPackage)` is satisfied by ANY write,
+    // including one that put some other package there. The slot must hold exactly the bytes of the
+    // record the rotation reported.
+    const rotated = records.find((r) => r.ref === second.ref)
+    expect(rotated).toBeDefined()
+    expect(await hub.hubStore.fetchLastResortKeyPackage(hub.identity.id)).toBe(rotated?.keyPackage)
+    expect(rotated?.keyPackage).not.toBe(original.keyPackage)
   })
 
   /**
@@ -284,6 +295,7 @@ describe('rotation and retention', () => {
 
     const first = await provisioner.ensureProvisioned()
     const original = (await store.list(hub.identity.id))[0]
+    expect(original).toBeDefined()
     if (original == null) return
     // 29 days left: one day inside the default 30-day window.
     await store.put(hub.identity.id, { ...original, notAfter: secondsFromNow(29) })
@@ -304,6 +316,7 @@ describe('rotation and retention', () => {
 
     const first = await provisioner.ensureProvisioned()
     const original = (await store.list(hub.identity.id))[0]
+    expect(original).toBeDefined()
     if (original == null) return
     await store.put(hub.identity.id, { ...original, notAfter: secondsFromNow(31) })
 
@@ -323,6 +336,7 @@ describe('rotation and retention', () => {
 
     const first = await provisioner.ensureProvisioned()
     const original = (await store.list(hub.identity.id))[0]
+    expect(original).toBeDefined()
     if (original == null) return
     // 10 days left: inside the default 30-day window, outside the configured 5-day one.
     await store.put(hub.identity.id, { ...original, notAfter: secondsFromNow(10) })
@@ -344,6 +358,7 @@ describe('rotation and retention', () => {
 
     await provisioner.ensureProvisioned()
     const live = (await store.list(hub.identity.id))[0]
+    expect(live).toBeDefined()
     if (live == null) return
 
     await store.put(hub.identity.id, {
@@ -375,6 +390,7 @@ describe('rotation and retention', () => {
 
     await provisioner.ensureProvisioned()
     const live = (await store.list(hub.identity.id))[0]
+    expect(live).toBeDefined()
     if (live == null) return
 
     await store.put(hub.identity.id, {
@@ -403,6 +419,7 @@ describe('rotation and retention', () => {
 
     await provisioner.ensureProvisioned()
     const live = (await store.list(hub.identity.id))[0]
+    expect(live).toBeDefined()
     if (live == null) return
 
     await store.put(hub.identity.id, {
@@ -431,6 +448,7 @@ describe('rotation and retention', () => {
 
     await provisioner.ensureProvisioned()
     const live = (await store.list(hub.identity.id))[0]
+    expect(live).toBeDefined()
     if (live == null) return
     await store.put(hub.identity.id, {
       ...live,
@@ -459,6 +477,7 @@ describe('rotation and retention', () => {
 
     const first = await provisioner.ensureProvisioned()
     const original = (await store.list(hub.identity.id))[0]
+    expect(original).toBeDefined()
     if (original == null) return
     await store.put(hub.identity.id, { ...original, notAfter: secondsFromNow(-1) })
 
@@ -526,5 +545,192 @@ describe('rotation and retention', () => {
       uploadSpy.mockRestore()
       dateSpy.mockRestore()
     }
+  })
+})
+
+/**
+ * The only non-default ciphersuite `@kumiai/mls`'s crypto provider actually implements:
+ * `MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519`, IANA id 3, against the default's id 1.
+ * `createNobleCryptoProvider` supports ids 1 and 3 and nothing else, so a suite with a different
+ * HASH (which would have made the two mutations below separable by ref length) is not reachable —
+ * both supported suites hash with SHA-256, and a ref derived under either is byte-identical.
+ */
+const NON_DEFAULT_CIPHERSUITE = 'MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519'
+/**
+ * The IANA MLS ciphersuite id for the suite above (0x0003; the default is 0x0001). A literal rather
+ * than an import, because this package must not depend on `ts-mls`; the registry value is fixed by
+ * RFC 9420 and cannot drift.
+ */
+const NON_DEFAULT_CIPHERSUITE_ID = 3
+
+/**
+ * A `CryptoProvider` that records every ciphersuite resolution and delegates to the real one. It is
+ * what makes the `keyPackageRef` half of the passthrough observable at all: the ref VALUE is the
+ * same under both supported suites, but a `keyPackageRef` call that dropped `options` would resolve
+ * its suite through the DEFAULT provider and never touch this one.
+ */
+function probeProvider(calls: Array<number>) {
+  return {
+    getCiphersuiteImpl: async (id: number) => {
+      calls.push(id)
+      return await nobleCryptoProvider.getCiphersuiteImpl(id)
+    },
+  }
+}
+
+describe('the options passthrough', () => {
+  /**
+   * Without this, `options` is threaded but never exercised: deleting it from either call site in
+   * `mint` passes the rest of the suite. The mint mutation is the serious one — a host configured
+   * for a non-default suite would silently mint packages under the default suite, unusable by its
+   * own inviters, with the hub and the store both reporting success.
+   */
+  test('mints and refs under the configured ciphersuite rather than the default', async () => {
+    // Baseline: how many suite resolutions ONE mint costs, MEASURED rather than assumed, so the
+    // assertion below pins the extra resolution `keyPackageRef` makes without also pinning
+    // @kumiai/mls internals.
+    const mintCalls: Array<number> = []
+    await createLastResortKeyPackageBundle(hub.identity, {
+      ciphersuiteName: NON_DEFAULT_CIPHERSUITE,
+      cryptoProvider: probeProvider(mintCalls),
+    })
+    expect(mintCalls.length).toBeGreaterThan(0)
+
+    const calls: Array<number> = []
+    const store = createMemoryLastResortStore()
+    const provisioner = createLastResortProvisioner({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+      options: { ciphersuiteName: NON_DEFAULT_CIPHERSUITE, cryptoProvider: probeProvider(calls) },
+    })
+
+    const result = await provisioner.ensureProvisioned()
+    const record = (await store.list(hub.identity.id))[0]
+    expect(record).toBeDefined()
+    if (record == null) return
+
+    // `options` reached `createLastResortKeyPackageBundle`: the minted package carries the
+    // configured suite rather than the default.
+    expect(decodeKeyPackage(record.keyPackage)?.cipherSuite).toBe(NON_DEFAULT_CIPHERSUITE_ID)
+
+    // `options` reached `keyPackageRef`: exactly one resolution beyond what the mint alone needs,
+    // and it asked for the configured suite.
+    expect(calls).toEqual([...mintCalls, NON_DEFAULT_CIPHERSUITE_ID])
+    expect(record.ref).toBe(result.ref)
+  })
+})
+
+/**
+ * Both options are day counts fed straight into arithmetic over clock readings, so an out-of-range
+ * value never fails loudly — it inverts a guard and the provisioner keeps reporting success. The
+ * checks belong at construction, before any key material exists.
+ */
+describe('option validation', () => {
+  test('rotateWithinDays of 0 is rejected', () => {
+    expect(() =>
+      createLastResortProvisioner({
+        identity: hub.identity,
+        client: hub.client,
+        store: createMemoryLastResortStore(),
+        rotateWithinDays: 0,
+      }),
+    ).toThrow('mls-hub: rotateWithinDays must be a finite number greater than 0, got 0')
+  })
+
+  /**
+   * The failure this closes: a negative window makes `notAfter - now > rotateWithinDays * DAY`
+   * true for an ALREADY-EXPIRED package, so the provisioner uploads a dead package and reports
+   * `rotated: true`.
+   */
+  test('a negative rotateWithinDays is rejected', () => {
+    expect(() =>
+      createLastResortProvisioner({
+        identity: hub.identity,
+        client: hub.client,
+        store: createMemoryLastResortStore(),
+        rotateWithinDays: -1,
+      }),
+    ).toThrow('mls-hub: rotateWithinDays must be a finite number greater than 0, got -1')
+  })
+
+  /** NaN makes every comparison false: mint and upload on every call, pruning permanently off. */
+  test('a NaN rotateWithinDays is rejected', () => {
+    expect(() =>
+      createLastResortProvisioner({
+        identity: hub.identity,
+        client: hub.client,
+        store: createMemoryLastResortStore(),
+        rotateWithinDays: Number.NaN,
+      }),
+    ).toThrow('mls-hub: rotateWithinDays must be a finite number greater than 0, got NaN')
+  })
+
+  /**
+   * The worst of the three: a negative grace puts `prune`'s cutoff in the FUTURE, so every retained
+   * record except the one the call settled on is deleted while still valid — destroying the private
+   * halves of packages inviters may still hold, which is the outage this feature exists to close.
+   */
+  test('a negative retainAfterExpiryDays is rejected', () => {
+    expect(() =>
+      createLastResortProvisioner({
+        identity: hub.identity,
+        client: hub.client,
+        store: createMemoryLastResortStore(),
+        retainAfterExpiryDays: -1,
+      }),
+    ).toThrow('mls-hub: retainAfterExpiryDays must be a finite number of 0 or more, got -1')
+  })
+
+  test('a NaN retainAfterExpiryDays is rejected', () => {
+    expect(() =>
+      createLastResortProvisioner({
+        identity: hub.identity,
+        client: hub.client,
+        store: createMemoryLastResortStore(),
+        retainAfterExpiryDays: Number.NaN,
+      }),
+    ).toThrow('mls-hub: retainAfterExpiryDays must be a finite number of 0 or more, got NaN')
+  })
+
+  /**
+   * Zero is NOT an error, and the boundary must land where the name says: "prune the moment the
+   * lifetime ends". A record a minute past its `notAfter` goes (the default 7-day grace would have
+   * kept it), one still inside its lifetime stays.
+   */
+  test('retainAfterExpiryDays of 0 is accepted and prunes at the lifetime boundary', async () => {
+    const store = createMemoryLastResortStore()
+    const provisioner = createLastResortProvisioner({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+      retainAfterExpiryDays: 0,
+    })
+
+    await provisioner.ensureProvisioned()
+    const live = (await store.list(hub.identity.id))[0]
+    expect(live).toBeDefined()
+    if (live == null) return
+
+    await store.put(hub.identity.id, {
+      ...live,
+      ref: 'just-expired-ref',
+      keyPackage: 'kp-just-expired',
+      notAfter: Math.floor(Date.now() / 1000) - 60,
+      uploadedAt: 1,
+    })
+    await store.put(hub.identity.id, {
+      ...live,
+      ref: 'still-valid-ref',
+      keyPackage: 'kp-still-valid',
+      notAfter: secondsFromNow(1),
+      uploadedAt: 1,
+    })
+
+    await provisioner.ensureProvisioned()
+
+    expect((await store.list(hub.identity.id)).map((r) => r.ref).sort()).toEqual(
+      [live.ref, 'still-valid-ref'].sort(),
+    )
   })
 })
