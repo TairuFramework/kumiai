@@ -124,7 +124,9 @@ has a crash window in which the hub serves a package whose private half was neve
 
 `createKeyPackagePool({ identity, client, store, options, target = 20, lowWater = 10,
 retainAfterExpiryDays = 7 })`, every numeric option range-validated at construction as the
-provisioner's are.
+provisioner's are. `lowWater` must be at least 1: `count < 0` is never true, so 0 would make the pool
+silently never stock and the host would quietly fall back to reusing its last-resort init key — this
+feature's own defect, arriving through a config value that looks reasonable.
 
 - `ensureStocked()` reads `client.keyPackageStatus()`; when `count < lowWater` it mints
   `target - count` bundles, persists each, uploads the batch in one call carrying `notAfter`, then
@@ -163,6 +165,14 @@ to restore.
 A `release` that fails does not fail the join: the group is returned with `releaseError` set. That is
 the separate-diagnostic-channel shape the last-resort work settled on — surface the failure, never
 narrow silently.
+
+**Each source is isolated from the others.** `bundles()` throws loudly on a record that does not
+round-trip, and that rule is right *within* a store: one that breaks its own contract is not trusted
+for its live record either. It does not carry *across* stores. A corrupt ordinary-pool record says
+nothing about the last-resort store, and letting it abort the scan would deny the availability floor
+the slot exists to provide. So a source that throws is recorded and skipped, and the failures ride
+back on `sourceErrors` — surfaced, never swallowed, and named in the no-match error too, because "no
+bundle matched" and "a store could not be read" send a caller looking in different places.
 
 ### The sibling gap: reading back the last-resort slot
 

@@ -1586,7 +1586,7 @@ export type KeyPackagePoolParams = {
   options?: GroupOptions
   /** Stock back up to this depth. Default 20, must be a finite integer greater than 0. */
   target?: number
-  /** Top up once the hub reports fewer than this many. Default 10, must be `0 <= n <= target`. */
+  /** Top up once the hub reports fewer than this many. Default 10, must be `1 <= n <= target`. */
   lowWater?: number
   /** Keep a record this many days past its `notAfter`. Default 7, must be `>= 0`. */
   retainAfterExpiryDays?: number
@@ -1624,9 +1624,12 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
   if (!Number.isInteger(target) || target <= 0) {
     throw new Error(`mls-hub: target must be an integer greater than 0, got ${target}`)
   }
-  if (!Number.isInteger(lowWater) || lowWater < 0 || lowWater > target) {
+  // `lowWater` of 0 is rejected rather than allowed: `count < 0` is never true, so it would make the
+  // pool silently never stock and the host would quietly fall back to reusing its last-resort init
+  // key — the defect this feature exists to remove, arriving with no error.
+  if (!Number.isInteger(lowWater) || lowWater < 1 || lowWater > target) {
     throw new Error(
-      `mls-hub: lowWater must be an integer between 0 and the target of ${target}, got ${lowWater}`,
+      `mls-hub: lowWater must be an integer between 1 and the target of ${target}, got ${lowWater}`,
     )
   }
   if (!Number.isFinite(retainAfterExpiryDays) || retainAfterExpiryDays < 0) {
@@ -1984,26 +1987,54 @@ export async function processWelcomeFromSources(
 ): Promise<ProcessWelcomeFromSourcesResult> {
   const { sources, ...welcomeParams } = params
   const wanted = new Set(welcomeKeyPackageRefs(welcomeParams.welcome))
+  const sourceErrors: Array<Error> = []
 
   for (const source of sources) {
-    for (const bundle of await source.bundles()) {
+    // Each source is isolated. `bundles()` throws loudly on a record that does not round-trip, and
+    // that rule is right WITHIN a store — one that breaks its own contract is not trusted for its
+    // live record either. It does not carry ACROSS stores: letting a corrupt ordinary-pool record
+    // abort the scan would deny the last-resort fallback the very outage the slot exists to prevent.
+    let available: Array<KeyPackageBundle>
+    try {
+      available = await source.bundles()
+    } catch (error) {
+      sourceErrors.push(error instanceof Error ? error : new Error(String(error)))
+      continue
+    }
+    for (const bundle of available) {
       const ref = await keyPackageRef(bundle.publicPackage, welcomeParams.options)
       if (!wanted.has(ref)) continue
       const result = await processWelcome({ ...welcomeParams, keyPackageBundle: bundle })
+      const errors = sourceErrors.length > 0 ? { sourceErrors } : {}
       try {
         await source.release(ref)
       } catch (error) {
-        return { ...result, releaseError: error instanceof Error ? error : new Error(String(error)) }
+        return {
+          ...result,
+          ...errors,
+          releaseError: error instanceof Error ? error : new Error(String(error)),
+        }
       }
-      return result
+      return { ...result, ...errors }
     }
   }
 
+  // A source that failed is named here too: "no bundle matched" and "a store could not be read" are
+  // different problems, and reporting the first while hiding the second sends the caller hunting for
+  // a Welcome mismatch that does not exist.
+  const failed =
+    sourceErrors.length > 0
+      ? `; ${sourceErrors.length} source(s) could not be read: ${sourceErrors.map((error) => error.message).join('; ')}`
+      : ''
   throw new Error(
-    `mls-hub: no retained key package matches this Welcome; it names ${[...wanted].join(', ')}`,
+    `mls-hub: no retained key package matches this Welcome; it names ${[...wanted].join(', ')}${failed}`,
   )
 }
 ```
+
+`ProcessWelcomeFromSourcesResult` gains `sourceErrors?: Array<Error>` beside `releaseError`, documented
+the same way: the join succeeded, and a source that could not be read is surfaced rather than
+swallowed.
 
 - [ ] **Step 4: Add `release` to both sources**
 
