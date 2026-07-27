@@ -182,7 +182,11 @@ describe('an interrupted provision', () => {
     expect(await hub.hubStore.fetchLastResortKeyPackage(hub.identity.id)).toBe(record.keyPackage)
   })
 
-  /** A host that cannot reach the hub must be told, not left believing the floor is in place. */
+  /**
+   * A host that cannot reach the hub must be told, not left believing the floor is in place. The
+   * rejection alone does not prove the failure was clean, so this also pins that nothing was
+   * marked uploaded and nothing reached the hub's slot.
+   */
   test('an upload failure propagates rather than resolving quietly', async () => {
     const store = createMemoryLastResortStore()
     vi.spyOn(hub.client, 'uploadLastResortKeyPackage').mockRejectedValue(new Error('hub refused'))
@@ -193,6 +197,9 @@ describe('an interrupted provision', () => {
     })
 
     await expect(provisioner.ensureProvisioned()).rejects.toThrow('hub refused')
+
+    expect((await store.list(hub.identity.id))[0]?.uploadedAt).toBeNull()
+    expect(await hub.hubStore.fetchLastResortKeyPackage(hub.identity.id)).toBeNull()
   })
 
   /** A failed call must not wedge the single-flight slot shut for every later caller. */
