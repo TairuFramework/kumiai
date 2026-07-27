@@ -232,6 +232,58 @@ describe('ensureStocked', () => {
     expect(refs).toContain('within-grace')
   })
 
+  /**
+   * `prune` re-reads the wall clock instead of reusing a timestamp the call already computed, so a
+   * record minted moments ago can be past the retention cutoff by the time `prune` runs — a forward
+   * clock correction (NTP, or a suspended process) landing between mint and prune. The ordinary
+   * pool's 30-day lifetime plus the default 7-day grace is 37 days; simulated here by advancing
+   * `Date.now` by 40 days from inside the upload mock, once the upload settles but before the call's
+   * own `prune` reads the clock. Mirrors `LastResortProvisioner`'s `keepRef` guard.
+   */
+  test('a just-minted record survives its own prune when the clock advances during the upload', async () => {
+    const store = createMemoryKeyPackagePoolStore()
+
+    // A mutable offset on top of the real clock. NOT vi.useFakeTimers(): that interferes with the
+    // enkaku transports the hub fixture builds.
+    let offsetMs = 0
+    const realNow = Date.now.bind(Date)
+    const dateSpy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + offsetMs)
+
+    const realUpload = hub.client.uploadKeyPackages.bind(hub.client)
+    const uploadSpy = vi
+      .spyOn(hub.client, 'uploadKeyPackages')
+      .mockImplementation((keyPackages: Array<string>, notAfter?: number) => {
+        const call = realUpload(keyPackages, notAfter)
+        // Fire-and-forget: advances the clock once the real upload settles, before the pool's own
+        // `await` on this same call resumes and reaches `prune`.
+        void call.then(() => {
+          offsetMs += 40 * 86_400 * 1000
+        })
+        return call
+      })
+
+    try {
+      const pool = createKeyPackagePool({
+        identity: hub.identity,
+        client: hub.client,
+        store,
+        target: 1,
+        lowWater: 1,
+      })
+
+      const result = await pool.ensureStocked()
+
+      expect(result.minted).toBe(1)
+      // Without the keepRefs exception this would be empty: the just-minted record's notAfter
+      // (now + 30 days, at mint time) is already past the post-jump cutoff (now + 40 - 7 days).
+      const refs = (await store.list(hub.identity.id)).map((entry) => entry.ref)
+      expect(refs).toHaveLength(1)
+    } finally {
+      uploadSpy.mockRestore()
+      dateSpy.mockRestore()
+    }
+  })
+
   test('is single-flight', async () => {
     const store = createMemoryKeyPackagePoolStore()
     const upload = vi.spyOn(hub.client, 'uploadKeyPackages')

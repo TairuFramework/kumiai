@@ -98,10 +98,23 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
     return record
   }
 
-  const prune = async (records: Array<KeyPackageRecord>): Promise<void> => {
+  /**
+   * Drop records past their lifetime plus the retention grace, except any just minted by this call.
+   *
+   * That exclusion is load-bearing: `cutoff` re-reads the clock, so a forward correction between
+   * `mint` and this read can put a just-uploaded record past the cutoff, and deleting it would
+   * strand the hub serving a package whose private half is gone. Mirrors the same guard in
+   * `LastResortProvisioner.prune`.
+   */
+  const prune = async (
+    records: Array<KeyPackageRecord>,
+    keepRefs: ReadonlySet<string>,
+  ): Promise<void> => {
     const cutoff = Math.floor(Date.now() / 1000) - retainAfterExpiryDays * DAY_SECONDS
     for (const record of records) {
-      if (record.notAfter < cutoff) await store.delete(ownerDID, record.ref)
+      if (!keepRefs.has(record.ref) && record.notAfter < cutoff) {
+        await store.delete(ownerDID, record.ref)
+      }
     }
   }
 
@@ -123,9 +136,8 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
       )
       minted = records
     }
-    // Prune on the no-op path too, or a daily caller never prunes between top-ups. Re-listing picks
-    // up the records just minted, which are nowhere near the cutoff.
-    await prune(await store.list(ownerDID))
+    // Prune on the no-op path too, or a daily caller never prunes between top-ups.
+    await prune(await store.list(ownerDID), new Set(minted.map((record) => record.ref)))
     return { minted: minted.length, depth: count + minted.length }
   }
 

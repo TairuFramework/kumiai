@@ -17,3 +17,7 @@ digest of their own last-resort slot; it takes no `did`, so it cannot report on 
 `processWelcomeFromSources`, which picks the bundle a Welcome names and drops a single-use private
 half once it is used. `LastResortProvisioner` now re-uploads when the hub's slot does not hold what
 it believes it uploaded.
+
+Two `HubStore` widenings for implementors: `storeKeyPackage` takes a new optional `notAfter`, and
+`countKeyPackages(ownerDID)` is a **new required method**, not optional — a store built against the
+prior contract needs both before it type-checks against this version.

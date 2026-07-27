@@ -18,10 +18,9 @@ import { createRateLimiter, type RateLimitConfig } from './rateLimit.js'
 import type { HubClientRegistry } from './registry.js'
 
 /**
- * A single request to authorize. All six variants ship even though only `publish` and
+ * A single request to authorize. All seven variants ship even though only `publish` and
  * `subscribe` are currently enforced: the union is the exhaustive-switch surface a host's own
- * `switch (req.action)` closes over, so adding a seventh variant later is the compatibility break
- * this type exists to avoid.
+ * `switch (req.action)` closes over.
  *
  * A host's `switch` need not handle every action today — an unrecognized action should default to
  * allow, so a hook written before a new variant shipped doesn't silently start refusing a
