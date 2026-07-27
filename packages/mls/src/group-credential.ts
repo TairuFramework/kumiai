@@ -74,25 +74,14 @@ export async function createKeyPackageBundle(
  * The `last_resort` KeyPackage extension from draft-ietf-mls-extensions (NOT RFC 9420, which has
  * no such extension). Its presence marks a key package as reusable by design; its data is empty.
  *
- * This is a KeyPackage extension, not a leaf-node one, so it needs no entry in the leaf's
- * capabilities and `controlCapabilities()` is unaffected.
+ * Needs no entry in the leaf's capabilities, so `controlCapabilities()` is unaffected: RFC 9420's
+ * capabilities rule binds leaf-node extensions and this one is KeyPackage-only, and neither draft
+ * -05 (which this value matches) nor -08 adds an advertisement clause.
  *
- * **Verified, not assumed.** Three sources were read, and none requires a publisher to advertise
- * this type:
- *
- * - draft-ietf-mls-extensions-05, which this value matches: `Value: 0x000A`,
- *   `Name: last_resort_key_package`, `Message(s): KP`, `Recommended: Y`. No advertisement clause.
- * - RFC 9420 independently: its capabilities rule binds LEAF NODE extensions, and this one is
- *   KeyPackage-only, so the rule does not reach it. This is also why ts-mls checks a peer's
- *   declared capabilities against leaf extensions alone.
- * - draft-ietf-mls-extensions-08 (current) restructured the feature: last_resort is no longer an
- *   extension type but an MLS *Component* Type, `0x00000004`, carried inside the
- *   `app_data_dictionary` extension.
- *
- * **Watch item, not a change.** `0x000A` is what deployed implementations do — OpenMLS `main`
- * ships `ExtensionType::LastResort => 10` — so it remains the interoperable choice. Anyone
- * migrating to -08's component form must revisit `controlCapabilities()` at the same time,
- * because -08 DOES tell clients to advertise `app_data_dictionary` support in their LeafNodes.
+ * Draft -08 moved the feature to MLS Component Type `0x00000004` inside `app_data_dictionary`, but
+ * `0x000A` is what deployed implementations ship (OpenMLS `main`: `ExtensionType::LastResort => 10`).
+ * Anyone migrating must revisit `controlCapabilities()`, because -08 *does* ask clients to advertise
+ * `app_data_dictionary` support. See `docs/reference/reserved-namespaces.md`.
  */
 export const LAST_RESORT_EXTENSION_TYPE = 0x000a
 

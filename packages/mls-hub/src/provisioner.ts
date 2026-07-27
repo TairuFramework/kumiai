@@ -21,23 +21,13 @@ const DEFAULT_RETAIN_AFTER_EXPIRY_DAYS = 7
 export type LastResortProvisionerParams = {
   /** The identity the package is minted for; also the store's owner key. */
   identity: OwnIdentity
-  /** Narrowed to the one method used, so nothing else about the client is coupled here. */
   client: Pick<HubClient, 'uploadLastResortKeyPackage'>
   store: LastResortStore
   /** Threaded into `createLastResortKeyPackageBundle` and `keyPackageRef`. */
   options?: GroupOptions
-  /**
-   * Rotate once the live package has fewer than this many days left. Default 30. Must be finite,
-   * greater than zero, and less than `LAST_RESORT_LIFETIME_DAYS` — a window at or beyond the
-   * package's own lifetime means every package is born already due for rotation.
-   * `createLastResortProvisioner` throws otherwise.
-   */
+  /** Rotate once the live package has fewer than this many days left. Default 30, must be `0 < n < LAST_RESORT_LIFETIME_DAYS`. */
   rotateWithinDays?: number
-  /**
-   * Keep a retired record this many days past its `notAfter`. Default 7. Must be finite and zero
-   * or more — zero means "prune the moment the lifetime ends" — and
-   * `createLastResortProvisioner` throws otherwise.
-   */
+  /** Keep a retired record this many days past its `notAfter`. Default 7, must be `>= 0`. */
   retainAfterExpiryDays?: number
 }
 
@@ -45,8 +35,7 @@ export type LastResortProvisioner = {
   /**
    * Bring the hub's last-resort slot up to date, doing nothing when it already is.
    *
-   * `rotated` means THE SLOT WAS WRITTEN BY THIS CALL — true both for a fresh mint and for
-   * completing an interrupted upload, false when the live package was good enough to leave alone.
+   * `rotated` means the slot was written by this call — a fresh mint or a resumed upload.
    * `ref` names the package this call left in the slot.
    */
   ensureProvisioned(): Promise<{ rotated: boolean; ref: string }>
@@ -66,28 +55,11 @@ export function createLastResortProvisioner(
     retainAfterExpiryDays = DEFAULT_RETAIN_AFTER_EXPIRY_DAYS,
   } = params
 
-  // VALIDATED AT CONSTRUCTION, so a misconfiguration cannot reach the crypto or the store. Both
-  // options are day counts used as raw arithmetic against clock readings, so an out-of-range value
-  // never fails loudly — it silently inverts a guard:
-  //
-  // - `rotateWithinDays` must be finite, > 0, and BELOW the package's own lifetime. At zero or
-  //   below, the "still worth keeping" test widens to cover already-expired packages, so
-  //   `ensureProvisioned` uploads a dead package and reports `rotated: true` as if the floor were
-  //   in place. At or above `LAST_RESORT_LIFETIME_DAYS` the failure is the mirror image and just as
-  //   bad: a freshly minted package carries that lifetime, so it is born already inside its own
-  //   rotation window, no package is EVER outside one, and every call mints and uploads a
-  //   replacement. Each of those is then retained until `notAfter` plus the grace — the same
-  //   unbounded accumulation of private key material as the `NaN` case below, reached from a
-  //   finite, positive value that looks entirely reasonable.
-  // - `retainAfterExpiryDays` must be finite and >= 0. Zero is legal and meaningful: prune the
-  //   moment the lifetime ends. Negative puts `prune`'s cutoff in the FUTURE, so every retained
-  //   record except the one this call settled on is deleted while still valid — destroying the
-  //   private halves of packages inviters may still hold, which is the silently-unaddable outage
-  //   this package exists to prevent, inflicted by the package itself.
-  // - `NaN` in either option makes EVERY comparison below false: a fresh mint and upload on every
-  //   call with pruning permanently disabled, accumulating secret key material without bound.
-  //
-  // The messages name the offending option and its value, and never any key material.
+  // Both options are day counts fed to raw arithmetic against clock readings, so an out-of-range
+  // value inverts a guard rather than failing: `rotateWithinDays <= 0` uploads expired packages and
+  // reports success, `>= LAST_RESORT_LIFETIME_DAYS` makes every package born due for rotation,
+  // negative `retainAfterExpiryDays` prunes still-valid records, and `NaN` in either disables
+  // pruning while minting on every call. All accumulate or destroy secret key material.
   if (
     !Number.isFinite(rotateWithinDays) ||
     rotateWithinDays <= 0 ||
@@ -130,10 +102,9 @@ export function createLastResortProvisioner(
       notAfter: Number(bundle.publicPackage.leafNode.lifetime.notAfter),
       uploadedAt: null,
     }
-    // DURABLE BEFORE THE UPLOAD, and this order is the load-bearing decision of the whole design.
-    // Upload-then-persist has a crash window in which the hub serves a package whose private half
-    // was never written down — the silent "unaddable forever" outage this slot exists to prevent.
-    // A crash here instead leaves an un-uploaded record, which the next call finishes.
+    // Durable before the upload. The reverse order has a crash window where the hub serves a
+    // package whose private half was never written down — the silent "unaddable forever" outage
+    // this slot exists to prevent. A crash here leaves a pending record the next call finishes.
     await store.put(ownerDID, record)
     return record
   }
@@ -144,12 +115,11 @@ export function createLastResortProvisioner(
   }
 
   /**
-   * Drop records past their lifetime plus the retention grace, EXCEPT the one this call settled on.
-   * `cutoff` is computed from the CURRENT clock, not the `nowSeconds` the caller already read, so a
-   * record that was eligible at the check can be past the cutoff by the time this runs — a forward
-   * clock correction (NTP, or a process suspended across the upload's round trip) landing between
-   * the two reads. The exception stops that from deleting the private half of the package this very
-   * call just told the hub to serve.
+   * Drop records past their lifetime plus the retention grace, except the one this call settled on.
+   *
+   * That exception is load-bearing: `cutoff` re-reads the clock, so a forward correction between
+   * the caller's `nowSeconds` and this read can put the just-uploaded record past the cutoff, and
+   * deleting it would strand the hub serving a package whose private half is gone.
    */
   const prune = async (records: Array<LastResortRecord>, keepRef: string): Promise<void> => {
     const cutoff = Math.floor(Date.now() / 1000) - retainAfterExpiryDays * DAY_SECONDS
@@ -165,11 +135,9 @@ export function createLastResortProvisioner(
     const candidate = pickCandidate(records)
     const nowSeconds = Math.floor(Date.now() / 1000)
 
-    // Resume an interrupted provision rather than minting: a retry that minted would leave the
-    // orphan behind on every attempt. But only when the pending package is still worth uploading —
-    // a pending record already inside the rotation window is stale enough that finishing its upload
-    // would report success while leaving the slot holding a package no inviter will accept. That
-    // case falls through to a fresh mint instead.
+    // Resume an interrupted provision rather than minting, which would orphan the pending record on
+    // every retry. Only while it is still worth uploading: one already inside the rotation window
+    // falls through to a mint, since finishing its upload would report success over a dead slot.
     if (
       candidate != null &&
       candidate.uploadedAt == null &&
@@ -182,8 +150,7 @@ export function createLastResortProvisioner(
 
     // An expired candidate needs no special case: the difference goes negative and falls through.
     if (candidate != null && candidate.notAfter - nowSeconds > rotateWithinDays * DAY_SECONDS) {
-      // Pruning runs even here. A host calling daily would otherwise never prune between
-      // rotations, which are 90 days apart.
+      // Prune on the no-op path too, or a daily caller never prunes between 90-day rotations.
       await prune(records, candidate.ref)
       return { rotated: false, ref: candidate.ref }
     }
@@ -197,8 +164,8 @@ export function createLastResortProvisioner(
   return {
     async ensureProvisioned(): Promise<{ rotated: boolean; ref: string }> {
       // Single-flight: a second caller joins the first instead of minting a competing package.
-      // Cross-PROCESS overlap is not prevented and needs no defence — the outcome is one occupied
-      // slot and two valid retained records.
+      // Cross-process overlap is undefended by design — it yields one occupied slot and two valid
+      // retained records.
       if (inFlight != null) return await inFlight
       const started = run().finally(() => {
         inFlight = null
@@ -216,14 +183,10 @@ export function createLastResortProvisioner(
         const publicPackage = decodeKeyPackage(record.keyPackage)
         const privatePackage = decodePrivateKeyPackage(record.privatePackage)
         if (publicPackage == null || privatePackage == null) {
-          // Loud, not skipped: silently narrowing a corrupt store to "no last-resort package" is
-          // the failure mode this whole feature exists to remove. `ensureProvisioned` reads only
-          // `notAfter` and never decodes, so rotation still works past a corrupt record. Decoding
-          // is eager and this throw sits inside the `.map`, so a single corrupt RETIRED record —
-          // kept only for an old cached invite — denies every join here, including ones the
-          // perfectly good live record could otherwise serve. Accepted anyway: a store that
-          // violates its own round-trip contract for one record is not trustworthy for the live
-          // record either. The message names the ref and NEVER the material.
+          // Loud, not skipped: narrowing a corrupt store to "no last-resort package" is the failure
+          // this feature removes. The cost is that one corrupt retired record denies every join
+          // here, accepted because a store that breaks its round-trip contract once is not trusted
+          // for the live record either. Names the ref, never the material.
           throw new Error(
             `mls-hub: stored last-resort record ${record.ref} did not decode; its stored form is not a round-trip of what this codec writes`,
           )

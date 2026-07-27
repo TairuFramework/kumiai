@@ -81,13 +81,12 @@ export function decodeKeyPackage(encoded: string): KeyPackage | null {
 /**
  * Serialize a private key package for durable storage.
  *
- * A last-resort key package is reusable, so its private half must OUTLIVE the process that
- * generated it — see `@kumiai/mls-hub`. That makes the string form a persistence format two
- * versions of one host must agree on, which is the same reason {@link encodeKeyPackage} refuses to
- * hand bytes back and leave the base64 choice to each caller.
+ * A reusable last-resort package must outlive the process that generated it, making this a
+ * persistence format two versions of one host must agree on — hence one canonical form here, as
+ * with {@link encodeKeyPackage}.
  *
- * **The result is secret key material.** It is not a public wire form: never publish it, never log
- * it, and store it only where the host stores private keys.
+ * **The result is secret key material.** Never publish or log it; store it where the host stores
+ * private keys.
  */
 export function encodePrivateKeyPackage(privatePackage: PrivateKeyPackage): string {
   return toB64(encode(privateKeyPackageEncoder, privatePackage))
@@ -96,11 +95,7 @@ export function encodePrivateKeyPackage(privatePackage: PrivateKeyPackage): stri
 /**
  * Parse a stored private key package, or `null` if the string is not exactly one.
  *
- * Strict in the same three ways {@link decodeKeyPackage} is, for the same reasons: `fromB64`'s
- * throw on a bad alphabet is absorbed; the input must be the canonical base64 of its own bytes,
- * because a store compares strings and `fromB64` tolerates padding variation and trims whitespace;
- * and `privateKeyPackageDecoder` is called directly rather than through ts-mls's `decode()`, whose
- * `dec(t, 0)?.[0]` discards the consumed length and so accepts trailing garbage in silence.
+ * Strict in the same three ways {@link decodeKeyPackage} is, and for the same reasons.
  *
  * A successful decode proves well-formedness and nothing else — in particular it does not prove the
  * keys match any public package.
@@ -125,13 +120,11 @@ export function decodePrivateKeyPackage(encoded: string): PrivateKeyPackage | nu
 }
 
 /**
- * The KeyPackageRef for a key package, base64 — the value a Welcome names when it says which
- * package a set of encrypted group secrets is for.
+ * The KeyPackageRef for a key package, base64 — the value a Welcome names to say which package its
+ * encrypted group secrets are for, and the stable identity of a stored package.
  *
- * Used as the stable identity of a stored package. It is a hash over the package's canonical
- * encoding, so it is unchanged by a codec round trip, and it is derived under the ciphersuite's
- * hash — a package encoded under one suite and referenced under another yields a different ref,
- * which is why `options` is threaded through rather than defaulted here.
+ * A hash over the package's canonical encoding, so a codec round trip does not change it. Derived
+ * under the ciphersuite's hash, so `options` is threaded through rather than defaulted.
  */
 export async function keyPackageRef(
   keyPackage: KeyPackage,
