@@ -83,6 +83,7 @@ export {
   LAST_RESORT_LIFETIME_DAYS,
   type LedgerLogEntry,
   makeMLSCredential,
+  ORDINARY_KEY_PACKAGE_LIFETIME_DAYS,
   type ProcessWelcomeOnceParams,
   type ProcessWelcomeParams,
   type ProcessWelcomeResult,

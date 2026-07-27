@@ -9,6 +9,7 @@ import {
   createKeyPackageBundle,
   createLastResortKeyPackageBundle,
   LAST_RESORT_EXTENSION_TYPE,
+  ORDINARY_KEY_PACKAGE_LIFETIME_DAYS,
   processWelcome,
 } from '../src/group.js'
 import { ledgerEntryDigest } from '../src/ledger.js'
@@ -184,12 +185,12 @@ describe('last-resort key package lifetime', () => {
     expect(days).toBeCloseTo(91, 1)
   })
 
-  test('an ordinary bundle keeps the ts-mls default lifetime', async () => {
+  test('an ordinary bundle carries the pinned ordinary lifetime', async () => {
     const bundle = await createKeyPackageBundle(randomIdentity())
     const { notBefore, notAfter } = bundle.publicPackage.leafNode.lifetime
     const days = Number(notAfter - notBefore) / 86400
-    // Untouched: ordinary packages are single-use and short-lived by design.
-    expect(days).toBeCloseTo(16.2, 1)
+    // ORDINARY_KEY_PACKAGE_LIFETIME_DAYS forward, plus the one day of back-dating for clock skew.
+    expect(days).toBeCloseTo(ORDINARY_KEY_PACKAGE_LIFETIME_DAYS + 1, 1)
   })
 
   /**

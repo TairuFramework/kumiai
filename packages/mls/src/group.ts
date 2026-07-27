@@ -21,6 +21,7 @@ export {
   LAST_RESORT_EXTENSION_TYPE,
   LAST_RESORT_LIFETIME_DAYS,
   makeMLSCredential,
+  ORDINARY_KEY_PACKAGE_LIFETIME_DAYS,
 } from './group-credential.js'
 export {
   CommitRejectedError,
