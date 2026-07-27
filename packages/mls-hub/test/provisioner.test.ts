@@ -1,12 +1,21 @@
-import { describe, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { createLastResortProvisioner } from '../src/provisioner.js'
 import { createMemoryLastResortStore } from '../src/store.js'
-import { createTestHub } from './fixtures/hub.js'
+import { createTestHub, type TestHub } from './fixtures/hub.js'
+
+let hub: TestHub
+
+beforeEach(() => {
+  hub = createTestHub()
+})
+
+afterEach(async () => {
+  await hub.dispose()
+})
 
 describe('ensureProvisioned', () => {
   test('an empty store mints, uploads once, and records the upload', async () => {
-    const hub = createTestHub()
     const store = createMemoryLastResortStore()
     const upload = vi.spyOn(hub.client, 'uploadLastResortKeyPackage')
     const provisioner = createLastResortProvisioner({
@@ -29,12 +38,9 @@ describe('ensureProvisioned', () => {
     expect(await hub.hubStore.fetchLastResortKeyPackage(hub.identity.id)).toBe(
       records[0]?.keyPackage,
     )
-
-    await hub.dispose()
   })
 
   test('a second call inside the validity window uploads nothing', async () => {
-    const hub = createTestHub()
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
       identity: hub.identity,
@@ -49,8 +55,6 @@ describe('ensureProvisioned', () => {
     expect(second).toEqual({ rotated: false, ref: first.ref })
     expect(upload).not.toHaveBeenCalled()
     expect(await store.list(hub.identity.id)).toHaveLength(1)
-
-    await hub.dispose()
   })
 
   /**
@@ -59,7 +63,6 @@ describe('ensureProvisioned', () => {
    * holds. The second caller joins the first instead.
    */
   test('overlapping calls produce one rotation and one upload', async () => {
-    const hub = createTestHub()
     const store = createMemoryLastResortStore()
     const upload = vi.spyOn(hub.client, 'uploadLastResortKeyPackage')
     const provisioner = createLastResortProvisioner({
@@ -76,8 +79,6 @@ describe('ensureProvisioned', () => {
     expect(a).toEqual(b)
     expect(upload).toHaveBeenCalledTimes(1)
     expect(await store.list(hub.identity.id)).toHaveLength(1)
-
-    await hub.dispose()
   })
 
   /**
@@ -88,7 +89,6 @@ describe('ensureProvisioned', () => {
    * instead of resuming the stale one.
    */
   test('a stale pending record is not resumed; a fresh package is minted instead', async () => {
-    const hub = createTestHub()
     const store = createMemoryLastResortStore()
     const staleRef = 'stale-ref'
     await store.put(hub.identity.id, {
@@ -115,7 +115,6 @@ describe('ensureProvisioned', () => {
 
     // The hub's slot holds the fresh package's bytes, not the stale one's.
     expect(await hub.hubStore.fetchLastResortKeyPackage(hub.identity.id)).toBe(fresh?.keyPackage)
-
-    await hub.dispose()
   })
 })
+
