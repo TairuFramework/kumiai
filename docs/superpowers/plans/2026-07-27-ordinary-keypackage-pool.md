@@ -980,10 +980,13 @@ git commit -m "feat(hub-client): key package status and batch expiry on upload"
 
 ---
 
-### Task 7: The pool store port
+### Task 7: Shared record mechanics, and the pool store port
 
 **Files:**
+- Create: `packages/mls-hub/src/records.ts`
 - Create: `packages/mls-hub/src/pool-store.ts`
+- Modify: `packages/mls-hub/src/store.ts`
+- Modify: `packages/mls-hub/src/provisioner.ts`
 - Modify: `packages/mls-hub/src/index.ts`
 - Test: `packages/mls-hub/test/pool-store.test.ts` (create)
 
@@ -993,12 +996,20 @@ git commit -m "feat(hub-client): key package status and batch expiry on upload"
   - `type KeyPackageRecord = { ref: string; keyPackage: string; privatePackage: string; notAfter: number }`
   - `type KeyPackagePoolStore = { list(ownerDID): Promise<Array<KeyPackageRecord>>; put(ownerDID, record): Promise<void>; delete(ownerDID, ref): Promise<void> }`
   - `createMemoryKeyPackagePoolStore(): KeyPackagePoolStore`
+  - Internal only, NOT exported from `src/index.ts`:
+    `createMemoryRecordStore<R extends StoredRecord>(): { list; put; delete }` and
+    `toBundles<R extends StoredRecord>(records: Array<R>, ownerDID: string, label: string): Array<KeyPackageBundle>`
 
-**Context:** `packages/mls-hub/src/store.ts` is the template — same three methods, same MUST language,
-same non-aliasing in-memory reference. Copy its structure; do not import from it, and do not
-generalize the shipped `LastResortStore`. The record differs by one field: **there is no
-`uploadedAt`**, because an ordinary pool upload appends rather than replaces, so a pending record can
-never be safely resumed and nothing needs to track whether it was uploaded.
+**Context:** The two ports stay separate public types — `KeyPackagePoolStore` is not a
+generalization of the shipped `LastResortStore`, and neither imports the other. Only the *mechanics*
+are shared, through an unexported `src/records.ts`: the owner-scoped non-aliasing memory map, and the
+sort-decode-or-throw that turns records into bundles. `LastResortRecord` and `KeyPackageRecord`
+differ by one field — **there is no `uploadedAt` on the pool record**, because an ordinary pool upload
+appends rather than replaces, so a pending record can never be safely resumed and nothing needs to
+track whether it was uploaded.
+
+`toBundles`'s throw message must stay byte-identical to the one `provisioner.bundles()` raises today
+for `label` `'last-resort'` — an existing test asserts on it.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1070,7 +1081,95 @@ cd packages/mls-hub && pnpm exec vitest run test/pool-store.test.ts
 
 Expected: FAIL — module not found.
 
-- [ ] **Step 3: Implement**
+- [ ] **Step 3: Extract the shared mechanics**
+
+Create `packages/mls-hub/src/records.ts` — internal, never exported from `src/index.ts`:
+
+```ts
+import {
+  decodeKeyPackage,
+  decodePrivateKeyPackage,
+  type KeyPackageBundle,
+} from '@kumiai/mls'
+
+/** What both retained-record shapes have in common. */
+export type StoredRecord = {
+  ref: string
+  keyPackage: string
+  privatePackage: string
+  notAfter: number
+}
+
+/**
+ * The owner-scoped, replace-by-`ref`, non-aliasing map both in-memory reference stores are.
+ *
+ * Shared mechanics only: `LastResortStore` and `KeyPackagePoolStore` remain separate public ports,
+ * because their records and their lifecycles differ.
+ */
+export function createMemoryRecordStore<R extends StoredRecord>(): {
+  list(ownerDID: string): Promise<Array<R>>
+  put(ownerDID: string, record: R): Promise<void>
+  delete(ownerDID: string, ref: string): Promise<void>
+} {
+  const byOwner = new Map<string, Map<string, R>>()
+  return {
+    async list(ownerDID: string): Promise<Array<R>> {
+      const records = byOwner.get(ownerDID)
+      return records == null ? [] : [...records.values()].map((record) => ({ ...record }))
+    },
+    async put(ownerDID: string, record: R): Promise<void> {
+      let records = byOwner.get(ownerDID)
+      if (records == null) {
+        records = new Map()
+        byOwner.set(ownerDID, records)
+      }
+      records.set(record.ref, { ...record })
+    },
+    async delete(ownerDID: string, ref: string): Promise<void> {
+      byOwner.get(ownerDID)?.delete(ref)
+    },
+  }
+}
+
+/**
+ * Retained records as bundles, `notAfter` descending with `ref` breaking a tie.
+ *
+ * Throws on a record that does not round-trip rather than skipping it: narrowing a corrupt store to
+ * "you appear to have fewer packages" recreates the silent failure this whole area removes. Names
+ * the ref, never the material.
+ */
+export function toBundles<R extends StoredRecord>(
+  records: Array<R>,
+  ownerDID: string,
+  label: string,
+): Array<KeyPackageBundle> {
+  const ordered = [...records].sort((a, b) => {
+    if (a.notAfter !== b.notAfter) return b.notAfter - a.notAfter
+    return a.ref < b.ref ? 1 : a.ref > b.ref ? -1 : 0
+  })
+  return ordered.map((record) => {
+    const publicPackage = decodeKeyPackage(record.keyPackage)
+    const privatePackage = decodePrivateKeyPackage(record.privatePackage)
+    if (publicPackage == null || privatePackage == null) {
+      throw new Error(
+        `mls-hub: stored ${label} record ${record.ref} did not decode; its stored form is not a round-trip of what this codec writes`,
+      )
+    }
+    return { publicPackage, privatePackage, ownerDID }
+  })
+}
+```
+
+Then rewrite the two shipped call sites to use it, changing no behaviour:
+
+- `createMemoryLastResortStore` in `packages/mls-hub/src/store.ts` becomes
+  `return createMemoryRecordStore<LastResortRecord>()`. Keep the whole doc comment — the MUST
+  language on the port and the "loses every record on restart" warning are the point of the file.
+- `bundles()` in `packages/mls-hub/src/provisioner.ts` becomes
+  `return toBundles(await store.list(ownerDID), ownerDID, 'last-resort')`. The message is unchanged
+  for that label, so `packages/mls-hub/test/bundles.test.ts` must still pass untouched.
+
+- [ ] **Step 4: Implement the pool store**
 
 Create `packages/mls-hub/src/pool-store.ts`:
 
@@ -1127,41 +1226,28 @@ export type KeyPackagePoolStore = {
  * so every Welcome built from them fails at the joiner. Tests and throwaway processes only.
  */
 export function createMemoryKeyPackagePoolStore(): KeyPackagePoolStore {
-  const byOwner = new Map<string, Map<string, KeyPackageRecord>>()
-  return {
-    async list(ownerDID: string): Promise<Array<KeyPackageRecord>> {
-      const records = byOwner.get(ownerDID)
-      return records == null ? [] : [...records.values()].map((record) => ({ ...record }))
-    },
-    async put(ownerDID: string, record: KeyPackageRecord): Promise<void> {
-      let records = byOwner.get(ownerDID)
-      if (records == null) {
-        records = new Map()
-        byOwner.set(ownerDID, records)
-      }
-      records.set(record.ref, { ...record })
-    },
-    async delete(ownerDID: string, ref: string): Promise<void> {
-      byOwner.get(ownerDID)?.delete(ref)
-    },
-  }
+  return createMemoryRecordStore<KeyPackageRecord>()
 }
 ```
 
-Export all three names from `packages/mls-hub/src/index.ts`.
+Export `createMemoryKeyPackagePoolStore`, `type KeyPackageRecord` and `type KeyPackagePoolStore` from
+`packages/mls-hub/src/index.ts`. Do NOT export anything from `records.ts` — it is internal mechanics,
+and exporting it would make a shape that exists to avoid duplication into a third public port.
 
-- [ ] **Step 4: Run the test and the type check**
+- [ ] **Step 5: Run the package's whole suite and the type check**
 
 ```bash
-cd packages/mls-hub && pnpm exec vitest run test/pool-store.test.ts && pnpm exec tsc --noEmit --skipLibCheck -p tsconfig.test.json
+cd packages/mls-hub && pnpm exec vitest run && pnpm exec tsc --noEmit --skipLibCheck -p tsconfig.test.json
 ```
 
-Expected: PASS, then no type output.
+Expected: PASS, then no type output. `test/store.test.ts` and `test/bundles.test.ts` cover the two
+refactored call sites and must pass **unmodified** — if either needs a change, the refactor altered
+behaviour and the change is wrong, not the test.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add packages/mls-hub/src/pool-store.ts packages/mls-hub/src/index.ts packages/mls-hub/test/pool-store.test.ts
+git add packages/mls-hub/src packages/mls-hub/test/pool-store.test.ts
 git commit -m "feat(mls-hub): a storage port for retained ordinary key packages"
 ```
 
@@ -1186,7 +1272,8 @@ git commit -m "feat(mls-hub): a storage port for retained ordinary key packages"
 **Context:** `packages/mls-hub/src/provisioner.ts` is the model for single-flight, option validation,
 store-before-upload and prune-on-the-no-op-path. Read it before writing. Differences: no resume
 branch, no `uploadedAt`, and the deficit comes from the hub's reported depth rather than from local
-records.
+records. Sorting and decoding for `bundles()` come from the internal `./records.js` Task 7 added —
+do not re-implement them here.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1453,7 +1540,7 @@ describe('bundles', () => {
 
     // Narrowing a corrupt store to "you appear to have fewer packages" recreates the silent failure
     // this whole feature removes. Names the ref, never the material.
-    await expect(pool.bundles()).rejects.toThrow(/corrupt/)
+    await expect(pool.bundles()).rejects.toThrow(/key package record corrupt did not decode/)
   })
 })
 ```
@@ -1475,8 +1562,6 @@ import type { OwnIdentity } from '@kokuin/token'
 import type { HubClient } from '@kumiai/hub-client'
 import {
   createKeyPackageBundle,
-  decodeKeyPackage,
-  decodePrivateKeyPackage,
   encodeKeyPackage,
   encodePrivateKeyPackage,
   type GroupOptions,
@@ -1485,6 +1570,7 @@ import {
 } from '@kumiai/mls'
 
 import type { KeyPackagePoolStore, KeyPackageRecord } from './pool-store.js'
+import { toBundles } from './records.js'
 
 const DAY_SECONDS = 86_400
 const DEFAULT_TARGET = 20
@@ -1611,23 +1697,9 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
       return await started
     },
     async bundles(): Promise<Array<KeyPackageBundle>> {
-      const records = await store.list(ownerDID)
-      const ordered = [...records].sort((a, b) => {
-        if (a.notAfter !== b.notAfter) return b.notAfter - a.notAfter
-        return a.ref < b.ref ? 1 : a.ref > b.ref ? -1 : 0
-      })
-      return ordered.map((record) => {
-        const publicPackage = decodeKeyPackage(record.keyPackage)
-        const privatePackage = decodePrivateKeyPackage(record.privatePackage)
-        if (publicPackage == null || privatePackage == null) {
-          // Loud, not skipped: narrowing a corrupt store to "you appear to have fewer packages"
-          // recreates the silent failure this feature removes. Names the ref, never the material.
-          throw new Error(
-            `mls-hub: stored key package record ${record.ref} is corrupt; its stored form is not a round-trip of what this codec writes`,
-          )
-        }
-        return { publicPackage, privatePackage, ownerDID }
-      })
+      // Sorting, decoding and the loud throw on a corrupt record are shared with the last-resort
+      // provisioner via `./records.js`; only the label differs.
+      return toBundles(await store.list(ownerDID), ownerDID, 'key package')
     },
   }
 }
