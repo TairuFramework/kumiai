@@ -513,12 +513,11 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
       const nowSeconds = Math.floor(Date.now() / 1000)
       const served: Array<string> = []
       const n = count ?? 1
-      // One pass, consuming as it goes: an expired entry is dropped rather than served, so FIFO
-      // stops handing out the nearest-expiry package first.
-      const index = 0
-      while (index < packages.length && served.length < n) {
-        const entry = packages[index] as StoredKeyPackage
-        packages.splice(index, 1)
+      // One pass, consuming as it goes: an expired entry is dropped rather than skipped, so FIFO
+      // stops handing out the nearest-expiry package first. Always shift index 0 — never advance a
+      // cursor — or this degenerates into the skip loop this task exists to remove.
+      while (packages.length > 0 && served.length < n) {
+        const entry = packages.shift() as StoredKeyPackage
         if (isLive(entry, nowSeconds)) served.push(entry.keyPackage)
       }
       return served

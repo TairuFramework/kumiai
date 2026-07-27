@@ -588,17 +588,35 @@ describe('hub/v1/keypackage/status', () => {
       (handlers['hub/v1/keypackage/status'] as any)(reqCtx('hub/v1/keypackage/status', {}, TARGET)),
     ).rejects.toMatchObject({ code: HUB_ERROR_CODES.authorizationDenied })
   })
+
+  test('a did in the param is ignored: the answer is always about the authenticated caller', async () => {
+    const { store, handlers } = setup()
+    await store.storeKeyPackage(TARGET, 'kp-target')
+    await store.storeKeyPackage(REQUESTER, 'kp-requester')
+    await store.storeKeyPackage(REQUESTER, 'kp-requester-2')
+
+    // REQUESTER is the authenticated caller (reqCtx's default `did`); a `did` field naming TARGET
+    // must not redirect the answer to TARGET's inventory — that would let a caller learn exactly
+    // when a drain against someone else's DID succeeded.
+    const result = await (handlers['hub/v1/keypackage/status'] as any)(
+      reqCtx('hub/v1/keypackage/status', { did: TARGET }),
+    )
+
+    expect(result.count).toBe(2)
+  })
 })
 
 describe('hub/v1/keypackage/upload notAfter', () => {
   test('carries the batch expiry into the store', async () => {
     const { store, handlers } = setup()
-    const future = Math.floor(Date.now() / 1000) + 3600
+    // A PAST notAfter, not a future one: an entry stored with no expiry at all also counts 1, so a
+    // future notAfter can't tell "threaded" from "dropped". Past + count 0 can, and does.
+    const past = Math.floor(Date.now() / 1000) - 60
     await (handlers['hub/v1/keypackage/upload'] as any)(
-      reqCtx('hub/v1/keypackage/upload', { keyPackages: ['kp-a'], notAfter: future }, TARGET),
+      reqCtx('hub/v1/keypackage/upload', { keyPackages: ['kp-a'], notAfter: past }, TARGET),
     )
 
-    expect(await store.countKeyPackages(TARGET)).toBe(1)
+    expect(await store.countKeyPackages(TARGET)).toBe(0)
   })
 
   test('rejects an expiry on a last-resort upload', async () => {
