@@ -192,6 +192,20 @@ export const hubProtocol = {
          * Requires `keyPackages` to hold exactly one entry — the slot holds one.
          */
         lastResort: { type: 'boolean' },
+        /**
+         * When every package in this batch expires, in seconds. Absent means "no expiry known":
+         * the entries never expire, exactly as before this field existed.
+         *
+         * The hub stores opaque blobs and cannot read an MLS lifetime, so it takes the uploader's
+         * word — the same trust `lastResort` above already asks for, and misstating it only harms
+         * the uploader's own DID: too early evicts your own live packages, too late keeps your own
+         * dead ones holding your own cap.
+         *
+         * One value for the batch, because a batch is minted together and shares a lifetime.
+         * Meaningless for `lastResort`, whose staleness is handled by rotation, so sending both is
+         * rejected.
+         */
+        notAfter: { type: 'integer', minimum: 0 },
       },
       required: ['keyPackages'],
       additionalProperties: false,
@@ -223,6 +237,28 @@ export const hubProtocol = {
         keyPackages: { type: 'array', items: { type: 'string' } },
       },
       required: ['keyPackages'],
+      additionalProperties: false,
+    },
+  },
+  'hub/v1/keypackage/status': {
+    type: 'request',
+    description: "The caller's own key-package inventory",
+    param: {
+      type: 'object',
+      properties: {},
+      additionalProperties: false,
+    },
+    result: {
+      type: 'object',
+      properties: {
+        /** Live entries in the caller's ordinary pool: expired ones are not counted. */
+        count: { type: 'integer' },
+        /** `keyPackageDigest` of the caller's stored last-resort package, or `null` for an empty
+         * slot. A digest rather than a boolean so a hub holding some OTHER package is
+         * distinguishable from one holding the right one. */
+        lastResort: { type: ['string', 'null'] },
+      },
+      required: ['count', 'lastResort'],
       additionalProperties: false,
     },
   },

@@ -218,10 +218,24 @@ export type HubStore = {
   subscribe(params: SubscribeParams): Promise<void>
   unsubscribe(subscriberDID: string, topicID: string): Promise<void>
   getSubscribers(topicID: string): Promise<Array<string>>
-  /** Store one key package for later retrieval. A store MAY cap per-owner storage and reject an
-   * upload past its cap with `KeyPackageQuotaExceededError` (rejected, never evicted). */
-  storeKeyPackage(ownerDID: string, keyPackage: string): Promise<void>
+  /**
+   * Store one key package for later retrieval.
+   *
+   * A store MAY cap per-owner storage and reject an upload past its cap with
+   * `KeyPackageQuotaExceededError` (rejected, never evicted).
+   *
+   * `notAfter` is when the package expires, in seconds. A store MUST NOT serve an entry past its
+   * `notAfter` from `fetchKeyPackages`, MUST NOT count it in `countKeyPackages`, and MUST NOT let it
+   * charge the per-owner cap. An entry stored without a `notAfter` never expires.
+   *
+   * Without that rule a pool fills with dead entries that hold the cap against every future upload,
+   * and the owner can never replenish again; FIFO consumption also serves the nearest-expiry entry
+   * first, which the inviter then rejects when it builds the Add.
+   */
+  storeKeyPackage(ownerDID: string, keyPackage: string, notAfter?: number): Promise<void>
   fetchKeyPackages(ownerDID: string, count?: number): Promise<Array<string>>
+  /** How many live key packages the owner has. Expired entries are not counted. */
+  countKeyPackages(ownerDID: string): Promise<number>
   /**
    * Store the owner's single last-resort key package, replacing any previous one.
    *

@@ -4,6 +4,7 @@
  * @module hub-protocol
  */
 
+export { keyPackageDigest } from './digest.js'
 export {
   AuthorizationDeniedError,
   HeadMismatchError,
