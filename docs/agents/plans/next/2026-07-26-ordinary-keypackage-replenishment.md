@@ -30,6 +30,13 @@ The second is the real answer. It was kept out of the last-resort work because t
 there was "no hub-side change expected", and mixing a protocol addition into a policy layer would
 have obscured both.
 
+**The same gap has a sibling: a DID cannot read back its own LAST-RESORT slot either.** `HubClient`
+exposes only `uploadLastResortKeyPackage`, so `@kumiai/mls-hub` has to treat its own record of a
+successful upload as proof the hub still holds the package. A hub that lost the slot is reported as
+provisioned until the next rotation falls due. Whatever shape a self-read status query takes, it
+should cover both the ordinary pool's depth and the last-resort slot's presence, under the same
+read-only-your-own-DID authorization.
+
 ## Scope
 
 `@kumiai/hub-protocol`, `@kumiai/hub-server`, `@kumiai/hub-conformance`, `@kumiai/hub-client`,

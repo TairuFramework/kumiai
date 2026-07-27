@@ -1401,6 +1401,13 @@ git commit -m "test(mls-hub): resume an interrupted provision and surface upload
 seam in the implementation and none is wanted — a seam only tests would use is worse than arithmetic
 the tests control.
 
+**Amended after execution:** that still holds for every rotation and retention decision, but one
+test added in the Task 7 fix round mocks the global `Date.now` (a mutable offset over the real
+clock, not `vi.useFakeTimers()`, which breaks the enkaku transports in the hub fixture). It
+simulates a forward clock correction landing between the rotation check and `prune`'s own clock
+read — the clock moving BETWEEN two reads inside one call, which seeded `notAfter` values cannot
+express. The implementation still has no seam; the test reaches around it.
+
 - [ ] **Step 1: Write the failing tests**
 
 Append to `packages/mls-hub/test/provisioner.test.ts`:
@@ -1632,9 +1639,18 @@ Expected: FAIL on 'a record past its lifetime plus the grace is pruned' or anoth
 the record the call just settled on is deleted.
 
 If NOTHING fails, the exception is untested: add a test in which the resumed record is itself past
-the grace (seed a pending record with `notAfter: secondsFromNow(-8)`, `uploadedAt: null`, then
-assert `ensureProvisioned` returns its ref AND the record survives). Then re-run this mutation and
-confirm the new test fails. Restore afterwards.
+the retention cutoff by the time `prune` runs. Then re-run this mutation and confirm the new test
+fails. Restore afterwards.
+
+**Amended after execution.** This step originally prescribed seeding a pending record with
+`notAfter: secondsFromNow(-8)`, `uploadedAt: null` and asserting `ensureProvisioned` returns its
+ref. Task 5's review fix changed the resume guard mid-execution: a pending record already inside the
+rotation window is now judged too stale to finish and falls through to a fresh mint, so such a
+record can never be returned as its own ref and the prescribed test became impossible. The Task 7
+fix round replaced it with the shipped test — a pending record with `notAfter: secondsFromNow(31)`,
+comfortably outside the rotation window at the check, plus a mocked `Date.now` that jumps forward 40
+days from inside the upload so `prune`'s later clock read puts the cutoff past the record's own
+`notAfter`. Same invariant, reachable under the amended guard.
 
 - [ ] **Step 5: Typecheck, lint, commit**
 

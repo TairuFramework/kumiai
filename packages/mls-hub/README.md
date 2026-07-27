@@ -77,3 +77,10 @@ Both used to sit on the host, and both failed silently:
 Nothing replenishes the **ordinary** key-package pool. A host that only wires this leans on the
 last-resort slot for every join: correct, but it forfeits forward secrecy for new members. Doing it
 properly needs a pool-depth query the hub protocol does not have.
+
+It also cannot detect hub-side loss of the slot. `ensureProvisioned` trusts its own record of a
+successful upload — `uploadedAt != null` is taken as proof the hub still holds the package — and
+never re-checks, because the protocol offers no way for a DID to read back its own last-resort slot.
+A hub that lost the slot is therefore reported as fine until the next rotation is due, up to
+`90 - rotateWithinDays` days. The missing self-read is the same protocol gap as the missing pool-depth
+query filed in `docs/agents/plans/next/2026-07-26-ordinary-keypackage-replenishment.md`.

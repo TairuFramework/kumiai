@@ -161,7 +161,7 @@ export type LastResortProvisioner = {
   /**
    * `rotated` means THE HUB'S SLOT WAS WRITTEN BY THIS CALL — true both for a fresh mint and for
    * completing an interrupted upload, false when the live package was already good enough to leave
-   * alone. `ref` names the package the slot holds on return.
+   * alone. `ref` names the package this call left in the slot.
    */
   ensureProvisioned(): Promise<{ rotated: boolean; ref: string }>
   /** Every retained bundle, `notAfter` descending, for processWelcome. */
@@ -333,7 +333,15 @@ Sources: draft-ietf-mls-extensions -05 and -08 (ietf.org/archive/id/), OpenMLS
 Harness follows `packages/hub-client/test/client.test.ts`: `createMemoryStore()` + `createHub()` over
 `DirectTransports`, so tests run against a real hub rather than a mock client. Rotation decisions are
 driven by seeding store records with computed `notAfter` values (`now + 60d` = no rotation,
-`now + 10d` = rotate, `now - 30d` = prune), so no clock faking is needed under real crypto.
+`now + 10d` = rotate, `now - 30d` = prune), so no clock faking is needed for any of them.
+
+One test is the exception, and it is not a rotation-decision test: the prune-exception test mocks
+the global `Date.now` (with an offset on top of the real clock, *not* `vi.useFakeTimers()`, which
+interferes with the enkaku transports the hub fixture builds) to simulate a forward clock correction
+landing between the rotation check and `prune`'s own clock read. Seeded `notAfter` values cannot
+express that, because the thing under test is the clock MOVING between two reads inside a single
+call, not the record's position relative to a fixed now. This does not contradict "the clock is not
+injectable" above: there is still no seam in the implementation, and the test reaches around it.
 
 | # | Guard |
 |---|-------|

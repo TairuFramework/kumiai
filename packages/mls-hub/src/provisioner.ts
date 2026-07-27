@@ -44,7 +44,7 @@ export type LastResortProvisioner = {
    *
    * `rotated` means THE SLOT WAS WRITTEN BY THIS CALL — true both for a fresh mint and for
    * completing an interrupted upload, false when the live package was good enough to leave alone.
-   * `ref` names the package the slot holds on return.
+   * `ref` names the package this call left in the slot.
    */
   ensureProvisioned(): Promise<{ rotated: boolean; ref: string }>
   /** Every retained bundle, `notAfter` descending, for `processWelcome`. */
