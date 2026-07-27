@@ -16,8 +16,10 @@ both, exactly as `@kumiai/mls-rpc` does for `mls` × `rpc`. This package does **
 - `createLastResortProvisioner` — `ensureProvisioned()` and `bundles()`. Takes `identity`, `client`
   (only `uploadLastResortKeyPackage` is used), `store`, and optional `rotateWithinDays` (default 30)
   and `retainAfterExpiryDays` (default 7). Both options are validated at construction and throw on
-  a non-finite value, a `rotateWithinDays` of zero or less, or a negative `retainAfterExpiryDays`;
-  `retainAfterExpiryDays: 0` is legal and means "prune the moment the lifetime ends".
+  a non-finite value, a negative `retainAfterExpiryDays`, or a `rotateWithinDays` outside
+  `0 < n < 90` — the package's own lifetime, since a window at or beyond it means every package is
+  born already due for rotation and every call mints another one. `retainAfterExpiryDays: 0` is
+  legal and means "prune the moment the lifetime ends".
 - `LastResortStore`, `LastResortRecord` — the storage port the host implements.
 - `createMemoryLastResortStore` — the strict reference implementation. In-memory; see the warning
   below.
@@ -82,5 +84,7 @@ It also cannot detect hub-side loss of the slot. `ensureProvisioned` trusts its 
 successful upload — `uploadedAt != null` is taken as proof the hub still holds the package — and
 never re-checks, because the protocol offers no way for a DID to read back its own last-resort slot.
 A hub that lost the slot is therefore reported as fine until the next rotation is due, up to
-`90 - rotateWithinDays` days. The missing self-read is the same protocol gap as the missing pool-depth
-query filed in `docs/agents/plans/next/2026-07-26-ordinary-keypackage-replenishment.md`.
+`90 - rotateWithinDays` days — strictly positive, and at most 90, because `rotateWithinDays` is
+constrained to `0 < n < 90` at construction. The missing self-read is the same protocol gap as the
+missing pool-depth query filed in
+`docs/agents/plans/next/2026-07-26-ordinary-keypackage-replenishment.md`.

@@ -635,7 +635,9 @@ describe('option validation', () => {
         store: createMemoryLastResortStore(),
         rotateWithinDays: 0,
       }),
-    ).toThrow('mls-hub: rotateWithinDays must be a finite number greater than 0, got 0')
+    ).toThrow(
+      `mls-hub: rotateWithinDays must be a finite number greater than 0 and less than the ${LAST_RESORT_LIFETIME_DAYS}-day last-resort lifetime, got 0`,
+    )
   })
 
   /**
@@ -651,7 +653,9 @@ describe('option validation', () => {
         store: createMemoryLastResortStore(),
         rotateWithinDays: -1,
       }),
-    ).toThrow('mls-hub: rotateWithinDays must be a finite number greater than 0, got -1')
+    ).toThrow(
+      `mls-hub: rotateWithinDays must be a finite number greater than 0 and less than the ${LAST_RESORT_LIFETIME_DAYS}-day last-resort lifetime, got -1`,
+    )
   })
 
   /** NaN makes every comparison false: mint and upload on every call, pruning permanently off. */
@@ -663,7 +667,65 @@ describe('option validation', () => {
         store: createMemoryLastResortStore(),
         rotateWithinDays: Number.NaN,
       }),
-    ).toThrow('mls-hub: rotateWithinDays must be a finite number greater than 0, got NaN')
+    ).toThrow(
+      `mls-hub: rotateWithinDays must be a finite number greater than 0 and less than the ${LAST_RESORT_LIFETIME_DAYS}-day last-resort lifetime, got NaN`,
+    )
+  })
+
+  /**
+   * THE BOUNDARY ITSELF, and the reason the upper bound is the lifetime rather than some round
+   * number: a freshly minted package carries exactly `LAST_RESORT_LIFETIME_DAYS`, so a window of
+   * that size makes it born already inside its own rotation window. No package is ever outside one,
+   * every call mints and uploads a replacement, and each replacement is retained until `notAfter`
+   * plus the grace — the NaN failure mode reached from a finite, positive, plausible-looking value.
+   */
+  test('a rotateWithinDays equal to the package lifetime is rejected', () => {
+    expect(() =>
+      createLastResortProvisioner({
+        identity: hub.identity,
+        client: hub.client,
+        store: createMemoryLastResortStore(),
+        rotateWithinDays: LAST_RESORT_LIFETIME_DAYS,
+      }),
+    ).toThrow(
+      `mls-hub: rotateWithinDays must be a finite number greater than 0 and less than the ${LAST_RESORT_LIFETIME_DAYS}-day last-resort lifetime, got ${LAST_RESORT_LIFETIME_DAYS}`,
+    )
+  })
+
+  test('a rotateWithinDays beyond the package lifetime is rejected', () => {
+    expect(() =>
+      createLastResortProvisioner({
+        identity: hub.identity,
+        client: hub.client,
+        store: createMemoryLastResortStore(),
+        rotateWithinDays: 100,
+      }),
+    ).toThrow(
+      `mls-hub: rotateWithinDays must be a finite number greater than 0 and less than the ${LAST_RESORT_LIFETIME_DAYS}-day last-resort lifetime, got 100`,
+    )
+  })
+
+  /**
+   * One day under the lifetime is legal, and not merely constructible: the provisioner it builds
+   * must still reach the no-op branch, which is what "the package is not born due for rotation"
+   * actually means. A bound of `>` rather than `>=` would let the boundary through and this test
+   * would not notice, which is why the rejection above exists alongside it.
+   */
+  test('a rotateWithinDays one day under the package lifetime is accepted and still no-ops', async () => {
+    const store = createMemoryLastResortStore()
+    const provisioner = createLastResortProvisioner({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+      rotateWithinDays: LAST_RESORT_LIFETIME_DAYS - 1,
+    })
+
+    const first = await provisioner.ensureProvisioned()
+    const upload = vi.spyOn(hub.client, 'uploadLastResortKeyPackage')
+
+    expect(await provisioner.ensureProvisioned()).toEqual({ rotated: false, ref: first.ref })
+    expect(upload).not.toHaveBeenCalled()
+    expect(await store.list(hub.identity.id)).toHaveLength(1)
   })
 
   /**

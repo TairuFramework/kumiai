@@ -9,6 +9,7 @@ import {
   type GroupOptions,
   type KeyPackageBundle,
   keyPackageRef,
+  LAST_RESORT_LIFETIME_DAYS,
 } from '@kumiai/mls'
 
 import type { LastResortRecord, LastResortStore } from './store.js'
@@ -26,8 +27,10 @@ export type LastResortProvisionerParams = {
   /** Threaded into `createLastResortKeyPackageBundle` and `keyPackageRef`. */
   options?: GroupOptions
   /**
-   * Rotate once the live package has fewer than this many days left. Default 30. Must be finite
-   * and greater than zero; `createLastResortProvisioner` throws otherwise.
+   * Rotate once the live package has fewer than this many days left. Default 30. Must be finite,
+   * greater than zero, and less than `LAST_RESORT_LIFETIME_DAYS` — a window at or beyond the
+   * package's own lifetime means every package is born already due for rotation.
+   * `createLastResortProvisioner` throws otherwise.
    */
   rotateWithinDays?: number
   /**
@@ -67,9 +70,15 @@ export function createLastResortProvisioner(
   // options are day counts used as raw arithmetic against clock readings, so an out-of-range value
   // never fails loudly — it silently inverts a guard:
   //
-  // - `rotateWithinDays` must be finite and > 0. At zero or below, the "still worth keeping" test
-  //   widens to cover already-expired packages, so `ensureProvisioned` uploads a dead package and
-  //   reports `rotated: true` as if the floor were in place.
+  // - `rotateWithinDays` must be finite, > 0, and BELOW the package's own lifetime. At zero or
+  //   below, the "still worth keeping" test widens to cover already-expired packages, so
+  //   `ensureProvisioned` uploads a dead package and reports `rotated: true` as if the floor were
+  //   in place. At or above `LAST_RESORT_LIFETIME_DAYS` the failure is the mirror image and just as
+  //   bad: a freshly minted package carries that lifetime, so it is born already inside its own
+  //   rotation window, no package is EVER outside one, and every call mints and uploads a
+  //   replacement. Each of those is then retained until `notAfter` plus the grace — the same
+  //   unbounded accumulation of private key material as the `NaN` case below, reached from a
+  //   finite, positive value that looks entirely reasonable.
   // - `retainAfterExpiryDays` must be finite and >= 0. Zero is legal and meaningful: prune the
   //   moment the lifetime ends. Negative puts `prune`'s cutoff in the FUTURE, so every retained
   //   record except the one this call settled on is deleted while still valid — destroying the
@@ -79,9 +88,13 @@ export function createLastResortProvisioner(
   //   call with pruning permanently disabled, accumulating secret key material without bound.
   //
   // The messages name the offending option and its value, and never any key material.
-  if (!Number.isFinite(rotateWithinDays) || rotateWithinDays <= 0) {
+  if (
+    !Number.isFinite(rotateWithinDays) ||
+    rotateWithinDays <= 0 ||
+    rotateWithinDays >= LAST_RESORT_LIFETIME_DAYS
+  ) {
     throw new Error(
-      `mls-hub: rotateWithinDays must be a finite number greater than 0, got ${rotateWithinDays}`,
+      `mls-hub: rotateWithinDays must be a finite number greater than 0 and less than the ${LAST_RESORT_LIFETIME_DAYS}-day last-resort lifetime, got ${rotateWithinDays}`,
     )
   }
   if (!Number.isFinite(retainAfterExpiryDays) || retainAfterExpiryDays < 0) {
