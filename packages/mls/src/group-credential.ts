@@ -74,8 +74,14 @@ export async function createKeyPackageBundle(
  * The `last_resort` KeyPackage extension from draft-ietf-mls-extensions (NOT RFC 9420, which has
  * no such extension). Its presence marks a key package as reusable by design; its data is empty.
  *
- * This is a KeyPackage extension, not a leaf-node one, so it needs no entry in the leaf's
- * capabilities and `controlCapabilities()` is unaffected.
+ * Needs no entry in the leaf's capabilities, so `controlCapabilities()` is unaffected: RFC 9420's
+ * capabilities rule binds leaf-node extensions and this one is KeyPackage-only, and neither draft
+ * -05 (which this value matches) nor -08 adds an advertisement clause.
+ *
+ * Draft -08 moved the feature to MLS Component Type `0x00000004` inside `app_data_dictionary`, but
+ * `0x000A` is what deployed implementations ship (OpenMLS `main`: `ExtensionType::LastResort => 10`).
+ * Anyone migrating must revisit `controlCapabilities()`, because -08 *does* ask clients to advertise
+ * `app_data_dictionary` support. See `docs/reference/reserved-namespaces.md`.
  */
 export const LAST_RESORT_EXTENSION_TYPE = 0x000a
 

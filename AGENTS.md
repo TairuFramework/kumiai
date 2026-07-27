@@ -10,7 +10,8 @@
 The MLS / group stack: `mls` (E2EE identity + membership crypto core), `broadcast`
 (generic fan-out), `hub-protocol`/`hub-client`/`hub-server`/`hub-tunnel` (the hub
 subsystem), `rpc` (group RPC), `mls-rpc` (the real implementation of rpc's consumer
-ports over `mls`), and the contract suites `rpc-conformance` and `hub-conformance`
+ports over `mls`), `mls-hub` (key-package provisioning between `mls` and a hub), and the contract
+suites `rpc-conformance` and `hub-conformance`
 (every implementation AND every double must pass them). Young and tightly coupled — pre-1.0, the
 whole group moves together.
 

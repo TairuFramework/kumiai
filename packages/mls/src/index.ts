@@ -111,7 +111,10 @@ export {
 } from './head.js'
 export {
   decodeKeyPackage,
+  decodePrivateKeyPackage,
   encodeKeyPackage,
+  encodePrivateKeyPackage,
+  keyPackageRef,
 } from './key-package-codec.js'
 export {
   type LedgerEntry,

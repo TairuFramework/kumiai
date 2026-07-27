@@ -1,5 +1,17 @@
 import { fromB64, toB64 } from '@sozai/codec'
-import { encode, type KeyPackage, keyPackageDecoder, keyPackageEncoder } from 'ts-mls'
+import {
+  encode,
+  type KeyPackage,
+  keyPackageDecoder,
+  keyPackageEncoder,
+  makeKeyPackageRef,
+  type PrivateKeyPackage,
+  privateKeyPackageDecoder,
+  privateKeyPackageEncoder,
+} from 'ts-mls'
+
+import { resolveMlsContext } from './group-context.js'
+import type { GroupOptions } from './types.js'
 
 /**
  * Serialize a key package to the string form the hub stores.
@@ -64,4 +76,60 @@ export function decodeKeyPackage(encoded: string): KeyPackage | null {
   // `cursor - offset`), so this is a whole-input check, not an offset comparison.
   if (decoded == null || decoded[1] !== bytes.length) return null
   return decoded[0]
+}
+
+/**
+ * Serialize a private key package for durable storage.
+ *
+ * A reusable last-resort package must outlive the process that generated it, making this a
+ * persistence format two versions of one host must agree on — hence one canonical form here, as
+ * with {@link encodeKeyPackage}.
+ *
+ * **The result is secret key material.** Never publish or log it; store it where the host stores
+ * private keys.
+ */
+export function encodePrivateKeyPackage(privatePackage: PrivateKeyPackage): string {
+  return toB64(encode(privateKeyPackageEncoder, privatePackage))
+}
+
+/**
+ * Parse a stored private key package, or `null` if the string is not exactly one.
+ *
+ * Strict in the same three ways {@link decodeKeyPackage} is, and for the same reasons.
+ *
+ * A successful decode proves well-formedness and nothing else — in particular it does not prove the
+ * keys match any public package.
+ */
+export function decodePrivateKeyPackage(encoded: string): PrivateKeyPackage | null {
+  let bytes: Uint8Array
+  try {
+    bytes = fromB64(encoded)
+  } catch {
+    return null
+  }
+  if (toB64(bytes) !== encoded) return null
+  let decoded: ReturnType<typeof privateKeyPackageDecoder>
+  try {
+    decoded = privateKeyPackageDecoder(bytes, 0)
+  } catch {
+    return null
+  }
+  // The tuple's second element is the CONSUMED LENGTH, so this is a whole-input check.
+  if (decoded == null || decoded[1] !== bytes.length) return null
+  return decoded[0]
+}
+
+/**
+ * The KeyPackageRef for a key package, base64 — the value a Welcome names to say which package its
+ * encrypted group secrets are for, and the stable identity of a stored package.
+ *
+ * A hash over the package's canonical encoding, so a codec round trip does not change it. Derived
+ * under the ciphersuite's hash, so `options` is threaded through rather than defaulted.
+ */
+export async function keyPackageRef(
+  keyPackage: KeyPackage,
+  options?: GroupOptions,
+): Promise<string> {
+  const { cipherSuite } = await resolveMlsContext(options)
+  return toB64(await makeKeyPackageRef(keyPackage, cipherSuite.hash))
 }
