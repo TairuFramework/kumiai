@@ -738,8 +738,11 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       let count: number
       let stored: string | null
       try {
-        count = await store.countKeyPackages(clientDID)
-        stored = await store.fetchLastResortKeyPackage(clientDID)
+        // Two independent reads for one owner: concurrent, since neither informs the other.
+        ;[count, stored] = await Promise.all([
+          store.countKeyPackages(clientDID),
+          store.fetchLastResortKeyPackage(clientDID),
+        ])
       } catch (error) {
         rethrowAsHandlerError(error)
       }

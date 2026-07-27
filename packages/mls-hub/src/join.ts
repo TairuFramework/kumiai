@@ -65,8 +65,14 @@ export async function processWelcomeFromSources(
       sourceErrors.push(error instanceof Error ? error : new Error(String(error)))
       continue
     }
-    for (const bundle of available) {
-      const ref = await keyPackageRef(bundle.publicPackage, welcomeParams.options)
+    // Refs for one source's bundles are computed concurrently, then matched in order so the first
+    // bundle still wins. Sources stay sequential: a match in an earlier one must not have already
+    // paid to read and hash a later one.
+    const refs = await Promise.all(
+      available.map((bundle) => keyPackageRef(bundle.publicPackage, welcomeParams.options)),
+    )
+    for (const [index, bundle] of available.entries()) {
+      const ref = refs[index] as string
       if (!wanted.has(ref)) continue
       const result = await processWelcome({ ...welcomeParams, keyPackageBundle: bundle })
       const errors = sourceErrors.length > 0 ? { sourceErrors } : {}

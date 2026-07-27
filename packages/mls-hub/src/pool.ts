@@ -111,11 +111,12 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
     keepRefs: ReadonlySet<string>,
   ): Promise<void> => {
     const cutoff = Math.floor(Date.now() / 1000) - retainAfterExpiryDays * DAY_SECONDS
-    for (const record of records) {
-      if (!keepRefs.has(record.ref) && record.notAfter < cutoff) {
-        await store.delete(ownerDID, record.ref)
-      }
-    }
+    // Concurrent: each delete names a distinct ref, so they neither order nor conflict.
+    await Promise.all(
+      records
+        .filter((record) => !keepRefs.has(record.ref) && record.notAfter < cutoff)
+        .map((record) => store.delete(ownerDID, record.ref)),
+    )
   }
 
   const run = async (): Promise<{ minted: number; depth: number }> => {
@@ -125,8 +126,9 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
       // Mint the whole deficit before uploading any of it, so one upload call carries the batch and
       // one `notAfter` describes it.
       const wanted = target - count
-      const records: Array<KeyPackageRecord> = []
-      for (let index = 0; index < wanted; index++) records.push(await mint())
+      // Concurrent: key generation dominates a mint, and each one writes its own ref. Store-before-
+      // upload still holds — every `put` settles before the upload below.
+      const records = await Promise.all(Array.from({ length: wanted }, () => mint()))
       // One expiry for the batch: they were minted together under one lifetime, and the smallest is
       // the only one that keeps the hub from serving a package the inviter would reject.
       const notAfter = Math.min(...records.map((record) => record.notAfter))

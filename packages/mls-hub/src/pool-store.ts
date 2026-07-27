@@ -36,6 +36,9 @@ export type KeyPackageRecord = {
  * - scope `delete` to `ownerDID`, and no-op for a `ref` that owner does not hold.
  * - treat `put` as replace-by-`ref`, never append.
  * - return records that do not alias its own state.
+ * - tolerate concurrent `put` and concurrent `delete` calls for DISTINCT refs. The pool mints and
+ *   prunes a batch concurrently, so a store that reads its whole record set, edits it, and writes it
+ *   back will lose writes here — per-`ref` writes are the contract, not a whole-collection swap.
  *
  * `list` need not order: the pool sorts what it gets.
  */
