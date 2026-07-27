@@ -25,9 +25,16 @@ export type LastResortProvisionerParams = {
   store: LastResortStore
   /** Threaded into `createLastResortKeyPackageBundle` and `keyPackageRef`. */
   options?: GroupOptions
-  /** Rotate once the live package has fewer than this many days left. Default 30. */
+  /**
+   * Rotate once the live package has fewer than this many days left. Default 30. Must be finite
+   * and greater than zero; `createLastResortProvisioner` throws otherwise.
+   */
   rotateWithinDays?: number
-  /** Keep a retired record this many days past its `notAfter`. Default 7. */
+  /**
+   * Keep a retired record this many days past its `notAfter`. Default 7. Must be finite and zero
+   * or more — zero means "prune the moment the lifetime ends" — and
+   * `createLastResortProvisioner` throws otherwise.
+   */
   retainAfterExpiryDays?: number
 }
 
@@ -55,6 +62,34 @@ export function createLastResortProvisioner(
     rotateWithinDays = DEFAULT_ROTATE_WITHIN_DAYS,
     retainAfterExpiryDays = DEFAULT_RETAIN_AFTER_EXPIRY_DAYS,
   } = params
+
+  // VALIDATED AT CONSTRUCTION, so a misconfiguration cannot reach the crypto or the store. Both
+  // options are day counts used as raw arithmetic against clock readings, so an out-of-range value
+  // never fails loudly — it silently inverts a guard:
+  //
+  // - `rotateWithinDays` must be finite and > 0. At zero or below, the "still worth keeping" test
+  //   widens to cover already-expired packages, so `ensureProvisioned` uploads a dead package and
+  //   reports `rotated: true` as if the floor were in place.
+  // - `retainAfterExpiryDays` must be finite and >= 0. Zero is legal and meaningful: prune the
+  //   moment the lifetime ends. Negative puts `prune`'s cutoff in the FUTURE, so every retained
+  //   record except the one this call settled on is deleted while still valid — destroying the
+  //   private halves of packages inviters may still hold, which is the silently-unaddable outage
+  //   this package exists to prevent, inflicted by the package itself.
+  // - `NaN` in either option makes EVERY comparison below false: a fresh mint and upload on every
+  //   call with pruning permanently disabled, accumulating secret key material without bound.
+  //
+  // The messages name the offending option and its value, and never any key material.
+  if (!Number.isFinite(rotateWithinDays) || rotateWithinDays <= 0) {
+    throw new Error(
+      `mls-hub: rotateWithinDays must be a finite number greater than 0, got ${rotateWithinDays}`,
+    )
+  }
+  if (!Number.isFinite(retainAfterExpiryDays) || retainAfterExpiryDays < 0) {
+    throw new Error(
+      `mls-hub: retainAfterExpiryDays must be a finite number of 0 or more, got ${retainAfterExpiryDays}`,
+    )
+  }
+
   const ownerDID = identity.id
   let inFlight: Promise<{ rotated: boolean; ref: string }> | null = null
 

@@ -37,16 +37,3 @@ have obscured both.
 may be dropped once its Welcome is processed — but the same store-before-upload ordering applies, and
 the same accumulate-then-prune shape, so `LastResortStore` is the template rather than a thing to
 reuse verbatim.
-
-## Small follow-up: `createLastResortProvisioner` does not validate its numeric options
-
-Not the headline item above — a separate, smaller residual from the same branch's reviews, worth
-not losing.
-
-`rotateWithinDays` and `retainAfterExpiryDays` are caller-supplied and unchecked. A negative
-`rotateWithinDays` defeats the resume branch's lifetime guard in `ensureProvisioned`: a pending
-record that should be judged too stale to finish instead reads as having comfortably more than
-"fewer than a negative number of days" left, so the provisioner uploads an already-expired package
-and reports `rotated: true` as if the rotation had succeeded. Rejecting negative values (and
-probably zero) for both options at construction is the fix — validation was deliberately deferred
-out of the provisioning work rather than designed around, and it is a small, self-contained change.

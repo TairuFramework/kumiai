@@ -15,9 +15,9 @@ both, exactly as `@kumiai/mls-rpc` does for `mls` × `rpc`. This package does **
 
 - `createLastResortProvisioner` — `ensureProvisioned()` and `bundles()`. Takes `identity`, `client`
   (only `uploadLastResortKeyPackage` is used), `store`, and optional `rotateWithinDays` (default 30)
-  and `retainAfterExpiryDays` (default 7). **Neither option is validated**: a negative
-  `rotateWithinDays` makes `ensureProvisioned` upload an already-expired package and still report
-  `rotated: true`.
+  and `retainAfterExpiryDays` (default 7). Both options are validated at construction and throw on
+  a non-finite value, a `rotateWithinDays` of zero or less, or a negative `retainAfterExpiryDays`;
+  `retainAfterExpiryDays: 0` is legal and means "prune the moment the lifetime ends".
 - `LastResortStore`, `LastResortRecord` — the storage port the host implements.
 - `createMemoryLastResortStore` — the strict reference implementation. In-memory; see the warning
   below.
