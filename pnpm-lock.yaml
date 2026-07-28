@@ -45,6 +45,9 @@ catalogs:
     '@sozai/log':
       specifier: ^0.2.0
       version: 0.2.0
+    '@sozai/result':
+      specifier: ^0.2.0
+      version: 0.2.0
     '@sozai/runtime':
       specifier: ^0.1.0
       version: 0.1.0
@@ -263,6 +266,9 @@ importers:
 
   packages/mls-hub:
     dependencies:
+      '@enkaku/protocol':
+        specifier: 'catalog:'
+        version: 0.20.0
       '@kokuin/token':
         specifier: 'catalog:'
         version: 0.3.0
@@ -275,11 +281,11 @@ importers:
       '@kumiai/mls':
         specifier: workspace:^
         version: link:../mls
+      '@sozai/result':
+        specifier: 'catalog:'
+        version: 0.2.0
     devDependencies:
       '@enkaku/client':
-        specifier: 'catalog:'
-        version: 0.20.0
-      '@enkaku/protocol':
         specifier: 'catalog:'
         version: 0.20.0
       '@enkaku/transport':

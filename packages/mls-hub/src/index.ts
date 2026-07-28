@@ -10,6 +10,11 @@
  */
 
 export {
+  type HubCallStage,
+  HubRefusedError,
+  HubRetryableError,
+} from './errors.js'
+export {
   type BundleSource,
   type ProcessWelcomeFromSourcesParams,
   type ProcessWelcomeFromSourcesResult,

@@ -24,6 +24,7 @@ catalog:
   '@sozai/codec': ^0.2.0
   '@sozai/event': ^0.1.2
   '@sozai/log': ^0.2.0
+  '@sozai/result': ^0.2.0
   '@sozai/runtime': ^0.1.0
   '@sozai/schema': ^0.1.1
   '@sozai/stream': ^0.2.0
