@@ -58,12 +58,14 @@ repo, which is the point of having them written down.
      whoever gates publish authorization on the commit topic. Plus one open question worth an
      afternoon: whether a replayed genuine external commit can steer anything once the group has
      moved on. It was never tested, and "plausible" is not a security property.
-2. [A configured logger is not one that carries these](./next/2026-07-19-logging-reaches-a-sink.md) —
-   two conditions reported into a logger a host may have routed nowhere. The `rpc` half is a `sozai`
-   or logtape decision. **The `hub-server` half is not**: `createHandlers` takes no logger and no
-   `onStoreError` hook, so a permanently broken last-resort slot read returns 200 forever with no
-   signal anywhere. The availability floor that feature exists to provide is silently absent. That
-   half is buildable here and is the most actionable thing in this phase.
+2. **Errors reach a sink** — **in flight 2026-07-28** on `feat/errors-reach-a-sink`, spec at
+   [`docs/superpowers/specs/2026-07-28-errors-reach-a-sink-design.md`](../../superpowers/specs/2026-07-28-errors-reach-a-sink-design.md).
+   Both halves of the retired `logging-reaches-a-sink` doc: rpc reports into a logger a default
+   `setup()` routes nowhere, and `hub-server` has no sink at all, so a permanently broken
+   last-resort slot read returns 200 forever. The rpc half turned out **not** to be blocked — a root
+   logger in `@sozai/log`'s `getDefaultConfig()` closes it, verified by probe, and `@sozai` is on
+   this machine. Ships in two parts across two repos; kumiai cannot land until sozai publishes
+   0.3.0.
 
 ## Phase 2 — test gaps
 
@@ -143,8 +145,11 @@ Items this repo cannot close on its own. Recorded so they stay visible, not sche
 - **Kubun's `GroupCrypto.exportSecret`.** The concrete instance behind Phase 1's first item. If Kubun
   already delegates to `@kumiai/mls-rpc`, that work is prevention; if it hand-rolls one, it is live
   and security-relevant. Kubun is not on this machine and has no owner in this repo.
-- **`['kumiai']` log records reaching a sink.** Every candidate fix is a `sozai`-level or
-  logtape-level decision. The `hub-server` half of that doc is *not* blocked — see Phase 1.
+- ~~**`['kumiai']` log records reaching a sink.**~~ **Not an external dependency after all**
+  (2026-07-28). The fix is a root logger in `@sozai/log`'s `getDefaultConfig()`, and `@sozai` is a
+  working directory on this machine. It is a cross-repo *release* dependency, not an unowned one —
+  see Phase 1. Recorded because "blocked on another repo" and "needs a release from another repo"
+  were being treated as the same thing.
 - **A stable `ts-mls` 2.0.0**, and two missing exports behind it. See the merged doc above.
 - **Release automation.** Manual `changeset publish` by decision (2026-07-23). No stack repo has a
   publish workflow — kigu offers none either — so automating it is a stack-wide change.
