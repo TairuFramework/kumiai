@@ -39,6 +39,7 @@
     "@enkaku/server": "catalog:",
     "@kokuin/token": "catalog:",
     "@kumiai/hub-protocol": "workspace:^",
+    "@sozai/log": "catalog:",
     "@sozai/codec": "catalog:",
     "@sozai/event": "catalog:"
   },
