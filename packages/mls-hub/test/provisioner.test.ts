@@ -172,7 +172,11 @@ describe('an interrupted provision', () => {
     const failing = vi
       .spyOn(hub.client, 'uploadLastResortKeyPackage')
       .mockRejectedValueOnce(new Error('offline'))
-    expect((await provisioner.ensureProvisioned()).isError()).toBe(true)
+    const failure = await provisioner.ensureProvisioned()
+    expect(failure.isError()).toBe(true)
+    expect(failure.error).toBeInstanceOf(HubRetryableError)
+    // An empty store falls through to a mint, so this is the mint branch's own upload catch.
+    expect(failure.error?.stage).toBe('upload')
 
     const pending = await store.list(hub.identity.id)
     expect(pending).toHaveLength(1)
@@ -233,7 +237,11 @@ describe('an interrupted provision', () => {
       store,
     })
 
-    expect((await provisioner.ensureProvisioned()).isError()).toBe(true)
+    const result = await provisioner.ensureProvisioned()
+    expect(result.isError()).toBe(true)
+    expect(result.error).toBeInstanceOf(HubRetryableError)
+    // An empty store falls through to a mint, so this is the mint branch's own upload catch.
+    expect(result.error?.stage).toBe('upload')
 
     expect((await store.list(hub.identity.id))[0]?.uploadedAt).toBeNull()
     expect(await hub.hubStore.fetchLastResortKeyPackage(hub.identity.id)).toBeNull()
@@ -251,7 +259,11 @@ describe('an interrupted provision', () => {
       store,
     })
 
-    expect((await provisioner.ensureProvisioned()).isError()).toBe(true)
+    const failure = await provisioner.ensureProvisioned()
+    expect(failure.isError()).toBe(true)
+    expect(failure.error).toBeInstanceOf(HubRetryableError)
+    // An empty store falls through to a mint, so this is the mint branch's own upload catch.
+    expect(failure.error?.stage).toBe('upload')
     spy.mockRestore()
 
     await expect(provisioner.ensureProvisioned().value).resolves.toMatchObject({ rotated: true })
@@ -880,6 +892,41 @@ describe('ensureProvisioned failure paths', () => {
     expect(result.error?.stage).toBe('upload')
     const records = await store.list(hub.identity.id)
     expect(records).toHaveLength(1)
+    expect(records[0]?.uploadedAt).toBeNull()
+  })
+
+  /**
+   * The resume branch (a pending candidate already exists) has its own upload catch and its own
+   * `prune(records, candidate.ref)` call, distinct from the mint branch every other upload-failure
+   * test here exercises. Nothing else in this file drives it.
+   */
+  test('a transport failure resuming a pending record returns a retryable error and leaves it resumable', async () => {
+    const store = createMemoryLastResortStore()
+    const pendingRef = 'pending-ref'
+    await store.put(hub.identity.id, {
+      ref: pendingRef,
+      keyPackage: 'kp-pending',
+      privatePackage: 'priv-pending',
+      // Comfortably outside the default 30-day rotation window, so the candidate is resumed
+      // rather than falling through to a mint.
+      notAfter: secondsFromNow(60),
+      uploadedAt: null,
+    })
+    vi.spyOn(hub.client, 'uploadLastResortKeyPackage').mockRejectedValue(new Error('socket closed'))
+    const provisioner = createLastResortProvisioner({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+    })
+
+    const result = await provisioner.ensureProvisioned()
+
+    expect(result.isError()).toBe(true)
+    expect(result.error).toBeInstanceOf(HubRetryableError)
+    expect(result.error?.stage).toBe('upload')
+    const records = await store.list(hub.identity.id)
+    expect(records).toHaveLength(1)
+    expect(records[0]?.ref).toBe(pendingRef)
     expect(records[0]?.uploadedAt).toBeNull()
   })
 
