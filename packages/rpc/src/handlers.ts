@@ -6,7 +6,7 @@ import {
   suppressible,
 } from '@kumiai/broadcast'
 import { EventEmitter } from '@sozai/event'
-import { getLogger, isSetup } from '@sozai/log'
+import { getReporter } from '@sozai/log'
 import { createValidator, type Validator } from '@sozai/schema'
 
 export type BusHandlerMaps = {
@@ -17,15 +17,7 @@ export type BusHandlerMaps = {
 }
 
 /** `['kumiai', 'rpc']` — an app routing this category sees dropped-input diagnostics. */
-const logger = getLogger(['kumiai', 'rpc'])
-
-function warnDropped(message: string): void {
-  if (isSetup()) {
-    logger.error(message)
-    return
-  }
-  console.error(`[@kumiai/rpc] ${message}`)
-}
+const warnDropped = getReporter(['kumiai', 'rpc'], '@kumiai/rpc')
 
 /** Minimal bus-path context message: authenticated sender at `payload.iss`. */
 function busMessage(senderDID?: string): { payload: { iss?: string } } {
