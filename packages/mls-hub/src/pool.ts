@@ -8,7 +8,9 @@ import {
   type KeyPackageBundle,
   keyPackageRef,
 } from '@kumiai/mls'
+import { AsyncResult, Result } from '@sozai/result'
 
+import { attempt, type HubRetryableError } from './errors.js'
 import type { KeyPackagePoolStore, KeyPackageRecord } from './pool-store.js'
 import { toBundles } from './records.js'
 
@@ -32,15 +34,22 @@ export type KeyPackagePoolParams = {
   retainAfterExpiryDays?: number
 }
 
+export type StockResult = Result<{ minted: number; depth: number }, HubRetryableError>
+
 export type KeyPackagePool = {
   /**
    * Bring the hub's ordinary pool back up to `target` when it has fallen below `lowWater`, and prune
-   * records whose lifetime plus the retention grace has passed.
+   * records whose lifetime plus the retention grace has passed. Pruning happens on every path,
+   * including the failure paths — it is local and owes nothing to the hub.
    *
    * `depth` is what this call left behind — the depth the hub reported plus `minted` — not a second
    * status read.
+   *
+   * An error `Result` means the hub could not be reached or gave an answer that clears on its own;
+   * nothing needs fixing and the next call self-corrects. A `HubRefusedError` is thrown instead,
+   * because it will never succeed until the app or the operator changes something.
    */
-  ensureStocked(): Promise<{ minted: number; depth: number }>
+  ensureStocked(): AsyncResult<{ minted: number; depth: number }, HubRetryableError>
   /** Every retained bundle, `notAfter` descending, for `processWelcome`. */
   bundles(): Promise<Array<KeyPackageBundle>>
   /** Drop a record once its Welcome has been processed. An ordinary package is single-use. */
@@ -81,7 +90,7 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
   }
 
   const ownerDID = identity.id
-  let inFlight: Promise<{ minted: number; depth: number }> | null = null
+  let inFlight: Promise<StockResult> | null = null
 
   const mint = async (): Promise<KeyPackageRecord> => {
     const bundle = await createKeyPackageBundle(identity, options)
@@ -119,8 +128,17 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
     )
   }
 
-  const run = async (): Promise<{ minted: number; depth: number }> => {
-    const { count } = await client.keyPackageStatus()
+  const run = async (): Promise<StockResult> => {
+    // Prune anyway on failure: it is local, and a caller that only ever hits transient failures
+    // would otherwise never prune at all.
+    const status = await attempt(
+      'status',
+      () => client.keyPackageStatus(),
+      async () => prune(await store.list(ownerDID), new Set()),
+    )
+    if (status.isError()) return Result.error(status.error)
+    const { count } = status.value
+
     let minted: Array<KeyPackageRecord> = []
     if (count < lowWater) {
       // Mint the whole deficit before uploading any of it, so one upload call carries the batch and
@@ -132,28 +150,45 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
       // One expiry for the batch: they were minted together under one lifetime, and the smallest is
       // the only one that keeps the hub from serving a package the inviter would reject.
       const notAfter = Math.min(...records.map((record) => record.notAfter))
-      await client.uploadKeyPackages(
-        records.map((record) => record.keyPackage),
-        notAfter,
+      const keepRefs = new Set(records.map((record) => record.ref))
+      // The records stay on failure: the upload may have landed, and deleting them would strand the
+      // hub serving packages whose private halves are gone.
+      const uploaded = await attempt(
+        'upload',
+        () =>
+          client.uploadKeyPackages(
+            records.map((record) => record.keyPackage),
+            notAfter,
+          ),
+        async () => prune(await store.list(ownerDID), keepRefs),
       )
+      if (uploaded.isError()) return Result.error(uploaded.error)
       minted = records
     }
     // Prune on the no-op path too, or a daily caller never prunes between top-ups.
     await prune(await store.list(ownerDID), new Set(minted.map((record) => record.ref)))
-    return { minted: minted.length, depth: count + minted.length }
+    return Result.ok({ minted: minted.length, depth: count + minted.length })
   }
 
   return {
-    async ensureStocked(): Promise<{ minted: number; depth: number }> {
+    ensureStocked(): AsyncResult<{ minted: number; depth: number }, HubRetryableError> {
       // Single-flight: a second caller joins the first rather than minting a competing batch against
       // the same reported depth. Cross-process overlap is undefended by design — it overshoots the
       // target, which costs cap headroom and nothing else.
-      if (inFlight != null) return await inFlight
-      const started = run().finally(() => {
-        inFlight = null
-      })
-      inFlight = started
-      return await started
+      //
+      // The shared promise holds a `Result`, not an `AsyncResult`, so every joiner sees the same
+      // settled outcome and the same error instance. A refusal rejects it, as it should.
+      if (inFlight == null) {
+        const started = run().finally(() => {
+          inFlight = null
+        })
+        inFlight = started
+        // Bookkeeping copy only: `inFlight` is never awaited by a caller, so an unattached rejection
+        // on it would surface as an unhandledRejection. The promise returned below is the one a
+        // caller awaits, and it must still reject.
+        started.catch(() => {})
+      }
+      return new AsyncResult(inFlight)
     },
     async bundles(): Promise<Array<KeyPackageBundle>> {
       // Sorting, decoding and the loud throw on a corrupt record are shared with the last-resort

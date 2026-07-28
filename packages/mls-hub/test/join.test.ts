@@ -114,7 +114,7 @@ describe('processWelcomeFromSources', () => {
       target: 2,
       lowWater: 2,
     })
-    await pool.ensureStocked()
+    await pool.ensureStocked().value
     const { welcome, invite, ratchetTree, usedRef } = await inviteFromPool()
 
     const result = await processWelcomeFromSources({
@@ -139,7 +139,7 @@ describe('processWelcomeFromSources', () => {
       client: hub.client,
       store,
     })
-    const { ref } = await provisioner.ensureProvisioned()
+    const { ref } = await provisioner.ensureProvisioned().value
     const { welcome, invite, ratchetTree } = await inviteFromLastResortSlot()
 
     await processWelcomeFromSources({
@@ -163,7 +163,7 @@ describe('processWelcomeFromSources', () => {
       target: 1,
       lowWater: 1,
     })
-    await pool.ensureStocked()
+    await pool.ensureStocked().value
     const { welcome, invite, ratchetTree } = await inviteAStranger()
 
     // Trying every bundle until one decrypts would turn "wrong Welcome" into a crypto error with no
@@ -199,7 +199,7 @@ describe('processWelcomeFromSources', () => {
       target: 1,
       lowWater: 1,
     })
-    await pool.ensureStocked()
+    await pool.ensureStocked().value
     const { welcome, invite, ratchetTree } = await inviteFromPool()
 
     const result = await processWelcomeFromSources({
@@ -232,7 +232,7 @@ describe('processWelcomeFromSources', () => {
       target: 1,
       lowWater: 1,
     })
-    await pool.ensureStocked()
+    await pool.ensureStocked().value
     const { welcome, invite, ratchetTree } = await inviteFromPool()
 
     const result = await processWelcomeFromSources({
@@ -257,14 +257,14 @@ describe('processWelcomeFromSources', () => {
       target: 2,
       lowWater: 2,
     })
-    await pool.ensureStocked()
+    await pool.ensureStocked().value
     const lastResortStore = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
       identity: hub.identity,
       client: hub.client,
       store: lastResortStore,
     })
-    const { ref } = await provisioner.ensureProvisioned()
+    const { ref } = await provisioner.ensureProvisioned().value
     const poolRefsBefore = (await poolStore.list(hub.identity.id)).map((entry) => entry.ref)
 
     // The Welcome names the PROVISIONER's bundle, not any of the pool's. A `[x].slice(0, 1)`-style
@@ -312,7 +312,7 @@ describe('processWelcomeFromSources', () => {
       client: hub.client,
       store: lastResortStore,
     })
-    const { ref } = await provisioner.ensureProvisioned()
+    const { ref } = await provisioner.ensureProvisioned().value
     const { welcome, invite, ratchetTree } = await inviteFromLastResortSlot()
 
     const result = await processWelcomeFromSources({

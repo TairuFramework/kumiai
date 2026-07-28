@@ -10,6 +10,11 @@
  */
 
 export {
+  type HubCallStage,
+  HubRefusedError,
+  HubRetryableError,
+} from './errors.js'
+export {
   type BundleSource,
   type ProcessWelcomeFromSourcesParams,
   type ProcessWelcomeFromSourcesResult,
@@ -19,6 +24,7 @@ export {
   createKeyPackagePool,
   type KeyPackagePool,
   type KeyPackagePoolParams,
+  type StockResult,
 } from './pool.js'
 export {
   createMemoryKeyPackagePoolStore,
@@ -29,6 +35,7 @@ export {
   createLastResortProvisioner,
   type LastResortProvisioner,
   type LastResortProvisionerParams,
+  type ProvisionResult,
 } from './provisioner.js'
 export {
   createMemoryLastResortStore,

@@ -14,7 +14,8 @@ nothing decided anything.
   falls below `lowWater`, minting and storing each package before uploading the batch, and prunes
   retained records past their lifetime plus the grace. A record whose upload is interrupted is
   abandoned, not resumed — the pool appends, so resuming a possibly-landed upload would risk two
-  copies of one init key both being served.
+  copies of one init key both being served. `ensureStocked()` returns an `AsyncResult` — see
+  *Retryable and refused* below. Pruning runs on every path, including the failure paths.
 - `KeyPackagePoolStore`, `KeyPackageRecord` — the storage port the host implements.
 - `createMemoryKeyPackagePoolStore` — the strict reference implementation. In-memory; see the
   warning below.
@@ -25,7 +26,9 @@ nothing decided anything.
   out of range they invert a guard rather than fail, so a bad value silently accumulates or destroys
   key material. Outside the rotation window, `ensureProvisioned()` reads back `keyPackageStatus()`
   and re-uploads if the hub's slot digest disagrees with the record it believes is live, rather than
-  trusting `uploadedAt` alone.
+  trusting `uploadedAt` alone. `ensureProvisioned()` returns an `AsyncResult` — see *Retryable and
+  refused* below. A hub it cannot reach leaves the local record untouched, so the next call redoes
+  the readback.
 - `LastResortStore`, `LastResortRecord` — the storage port the host implements.
 - `createMemoryLastResortStore` — the strict reference implementation. In-memory; see the warning
   below.
@@ -35,6 +38,7 @@ nothing decided anything.
   then releases it from whichever source it came from. One source failing to read does not abort the
   scan of the rest; both a source read failure and a release failure are reported on the result
   rather than thrown, so a storage problem never costs the caller a group it already joined.
+- `HubRetryableError`, `HubRefusedError`, `HubCallStage` — the two outcomes of a failed hub call.
 
 ```ts
 import { createKeyPackagePool, createLastResortProvisioner, processWelcomeFromSources } from '@kumiai/mls-hub'
@@ -43,8 +47,16 @@ const pool = createKeyPackagePool({ identity, client: hubClient, store: poolStor
 const lastResort = createLastResortProvisioner({ identity, client: hubClient, store: lastResortStore })
 
 // At startup and on whatever cadence the host already has. Idempotent and cheap when nothing is due.
-await pool.ensureStocked()
-await lastResort.ensureProvisioned()
+const stocked = await pool.ensureStocked()
+if (stocked.isError()) {
+  // Retryable: the hub was unreachable, or answered something that clears on its own. Nothing to
+  // fix here — the next call self-corrects. See *Retryable and refused* below.
+}
+const provisioned = await lastResort.ensureProvisioned()
+if (provisioned.isError()) {
+  // Same as above.
+}
+// Terser, if the host would rather crash than carry on: `await pool.ensureStocked().value`.
 
 // When a Welcome arrives, try the ordinary pool before the last-resort slot.
 const { group } = await processWelcomeFromSources({
@@ -61,6 +73,46 @@ rest — so one corrupt retired record blocks every join from that source. Delib
 store: one that breaks its round-trip contract once is not trusted for its live record either.
 `processWelcomeFromSources` isolates that rule per source, so a corrupt pool record cannot deny the
 last-resort fallback.
+
+## Retryable and refused
+
+Both entry points return `AsyncResult` from `@sozai/result`. The success types are unchanged —
+`{ minted, depth }` and `{ rotated, ref }` — and no field ever holds a placeholder for something the
+hub never confirmed.
+
+```ts
+const result = await pool.ensureStocked()
+if (result.isError()) {
+  // The hub could not be reached, or answered something that clears on its own. Nothing to fix:
+  // the next call re-reads the hub and self-corrects.
+}
+// Or, to let a failure propagate: `await pool.ensureStocked().value`
+```
+
+A `HubRefusedError` is **thrown** rather than returned. The split is by what the caller must do: an
+unhandled throw is surfaced, which is right for something that needs credentials or configuration
+changed; an unhandled retryable failure would surface as a crash, which is wrong for something whose
+correct response is to carry on and try later. `HubRefusedError` carries `code` and `stage`, so a
+host that disagrees can catch and downgrade deliberately.
+
+Refused today: `HUB_AUTHORIZATION_DENIED`, `HUB_INVALID_PAYLOAD`, and enkaku's `EK02`, `EK06`, and
+`EK08`. `EK08` is how an oversized batch fails — the upload schema caps `keyPackages` at 50 entries,
+so a `target` above that never succeeds. Everything else, including `HUB_KEYPACKAGE_QUOTA` and every
+transport failure, is retryable: a cap clears as packages are consumed or expire.
+
+**Call these on a cadence, not only at startup.** The self-healing depends on it. Nothing is written
+on a failure path that would suppress a later check, so a hub outage costs nothing as long as a
+later call happens — but a host that provisions once at startup and never again degrades silently,
+and the damage lands on whoever tries to invite the user next.
+
+An unreachable hub costs the user nothing while it lasts: an inviter fetches key packages through
+the same hub, so a top-up that fails during an outage denies nobody anything. That is why failing
+startup over it would be the worse trade.
+
+During a prolonged outage where `keyPackageStatus` succeeds but every upload keeps failing, each
+call strands a fresh batch of private halves in the store. That growth is expected and bounded: the
+stranded records age out at their own `notAfter` plus the retention grace, same as any other retired
+record — an operator watching store size climb during an outage is not looking at a leak.
 
 ## ⚠️ Security: the store holds private key material
 

@@ -52,7 +52,7 @@ describe('bundles', () => {
       store,
     })
 
-    const first = await provisioner.ensureProvisioned()
+    const first = await provisioner.ensureProvisioned().value
     const original = (await store.list(hub.identity.id))[0]
     expect(original).toBeDefined()
     if (original == null) return
@@ -60,7 +60,7 @@ describe('bundles', () => {
       ...original,
       notAfter: Math.floor(Date.now() / 1000) + 10 * 86_400,
     })
-    const second = await provisioner.ensureProvisioned()
+    const second = await provisioner.ensureProvisioned().value
 
     const bundles = await provisioner.bundles()
     expect(bundles).toHaveLength(2)
@@ -88,7 +88,7 @@ describe('bundles', () => {
       store,
     })
 
-    await provisioner.ensureProvisioned()
+    await provisioner.ensureProvisioned().value
     const first = (await store.list(hub.identity.id))[0]
     expect(first).toBeDefined()
     if (first == null) return
@@ -117,7 +117,7 @@ describe('bundles', () => {
     // The same ref must be the one `ensureProvisioned` reports as the slot's occupant — the sort in
     // `bundles()` and the tie-break in `pickCandidate` must agree, not just each be internally
     // consistent.
-    const settled = await provisioner.ensureProvisioned()
+    const settled = await provisioner.ensureProvisioned().value
     expect(settled.ref).toBe(expectedLeader)
   })
 
@@ -133,7 +133,7 @@ describe('bundles', () => {
       store,
     })
 
-    await provisioner.ensureProvisioned()
+    await provisioner.ensureProvisioned().value
     const record = (await store.list(hub.identity.id))[0]
     expect(record).toBeDefined()
     if (record == null) return
@@ -150,7 +150,7 @@ describe('bundles', () => {
       store,
     })
 
-    await provisioner.ensureProvisioned()
+    await provisioner.ensureProvisioned().value
     const record = (await store.list(hub.identity.id))[0]
     expect(record).toBeDefined()
     if (record == null) return
@@ -183,7 +183,7 @@ describe('a provisioned bundle against real MLS', () => {
       client: hub.client,
       store,
     })
-    await provisioner.ensureProvisioned()
+    await provisioner.ensureProvisioned().value
 
     const [bundle] = await provisioner.bundles()
     expect(bundle).toBeDefined()
@@ -227,7 +227,7 @@ describe('a provisioned bundle against real MLS', () => {
       client: hub.client,
       store,
     })
-    await provisioner.ensureProvisioned()
+    await provisioner.ensureProvisioned().value
 
     const [bundle] = await provisioner.bundles()
     expect(bundle).toBeDefined()
