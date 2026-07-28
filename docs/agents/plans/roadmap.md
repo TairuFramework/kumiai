@@ -71,10 +71,14 @@ repo, which is the point of having them written down.
 original entries had been closed by later work, two carried stale line numbers, and the low-priority
 residue moved to [backlog](./backlog/2026-07-28-test-gaps-low.md).
 
-One entry is worth its own branch. The app-lane drain's **retention guard survives deletion with the
-whole rpc suite green** — mutation-verified: replace `app-lane.ts:464` with a comment and all 374
-tests in 56 files still pass. It is the only thing standing between a hostile member and *"make every
-returning member re-fire an ephemeral handler out of the log"*.
+Its one high entry — the app-lane drain's **retention guard surviving deletion with the whole rpc
+suite green** — was **closed 2026-07-28**, and not the way it was filed. The test existed and forged
+the right frame; it was neutralised by a `createFakeCrypto` generation collision that killed the
+forged frame at `unwrap`, forty lines above the guard. One line and a comment in the fixture setup;
+the test now fails on the mutation. See the doc for the general shape, which is the part worth
+keeping: *a negative assertion behind a forged frame is only as good as the forge*.
+
+What remains in that doc is five mediums — unasserted contracts, not uncovered guards.
 
 ## Phase 3 — pre-1.0 API surface
 

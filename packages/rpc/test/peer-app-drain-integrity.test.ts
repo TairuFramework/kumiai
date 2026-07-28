@@ -370,6 +370,12 @@ describe('the drain delivers only what the live lane would', () => {
     // Alice's dispatch would never retain this one, so it is published around her peer: same
     // topic, same epoch key, same sender, `retain: 'log'` on a procedure that never declared it.
     const atOne = createFakeCrypto({ epoch: 1, localDID: 'alice' })
+    // Generation 0 is ALREADY SPENT at this epoch — alice's own peer sealed the logged frame
+    // above under `1:alice:0`, and a receiver spends a generation once. Forging at the same
+    // generation is refused by `unwrap` as a spent key, so the frame dies as unopenable and the
+    // retention check below is never reached: the assertion holds for the wrong reason and the
+    // guard it is written about can be deleted with this test still green.
+    await atOne.wrap(new Uint8Array())
     await hub.publish({
       senderDID: 'alice',
       topicID,
