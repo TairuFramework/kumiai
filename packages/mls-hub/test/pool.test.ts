@@ -378,7 +378,24 @@ describe('ensureStocked failure paths', () => {
 
   test('a transport failure at the upload stage returns a retryable error and keeps the records', async () => {
     const store = createMemoryKeyPackagePoolStore()
-    vi.spyOn(hub.client, 'uploadKeyPackages').mockRejectedValue(new Error('socket closed'))
+
+    // Same mutable-offset trick as the success-path clock-jump test: jump the clock forward past
+    // the retention cutoff (30-day lifetime + 7-day grace) from inside the rejected upload, so the
+    // records' own `notAfter` no longer explains their survival — only the catch block's `keepRefs`
+    // does. Without it this test would stay green even if `keepRefs` were dropped or swapped for an
+    // empty set at the call site.
+    let offsetMs = 0
+    const realNow = Date.now.bind(Date)
+    const dateSpy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + offsetMs)
+    vi.spyOn(hub.client, 'uploadKeyPackages').mockImplementation(() => {
+      offsetMs += 40 * 86_400 * 1000
+      // Cast: the real return type is a RequestCall, but the pool only ever awaits it, and this
+      // rejection is what the test needs it to do.
+      return Promise.reject(new Error('socket closed')) as unknown as ReturnType<
+        typeof hub.client.uploadKeyPackages
+      >
+    })
+
     const pool = createKeyPackagePool({
       identity: hub.identity,
       client: hub.client,
@@ -387,13 +404,17 @@ describe('ensureStocked failure paths', () => {
       lowWater: 2,
     })
 
-    const result = await pool.ensureStocked()
+    try {
+      const result = await pool.ensureStocked()
 
-    expect(result.isError()).toBe(true)
-    expect(result.error?.stage).toBe('upload')
-    // The upload may have landed. Deleting these would strand the hub serving packages whose
-    // private halves are gone — the outage this store exists to prevent.
-    expect(await store.list(hub.identity.id)).toHaveLength(3)
+      expect(result.isError()).toBe(true)
+      expect(result.error?.stage).toBe('upload')
+      // The upload may have landed. Deleting these would strand the hub serving packages whose
+      // private halves are gone — the outage this store exists to prevent.
+      expect(await store.list(hub.identity.id)).toHaveLength(3)
+    } finally {
+      dateSpy.mockRestore()
+    }
   })
 
   // The path a host actually hits, end to end through a real hub. The refusal arrives as an enkaku
