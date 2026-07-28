@@ -608,8 +608,9 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
           if (ack != null) {
             try {
               await store.ack({ recipientDID: clientDID, sequenceIDs: ack })
-            } catch {
+            } catch (error) {
               // Frame stays pending; the client re-acks next round. Do NOT break.
+              storeErrorReporter({ method: 'ack', did: clientDID, error })
             }
           }
         }

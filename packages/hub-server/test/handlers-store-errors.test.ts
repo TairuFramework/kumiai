@@ -1,5 +1,5 @@
 // biome-ignore-all lint/suspicious/noExplicitAny: handlers are dispatched through a loosely-typed map in these tests
-import type { HubStore } from '@kumiai/hub-protocol'
+import type { HubStore, StoredMessage } from '@kumiai/hub-protocol'
 import { getDefaultConfig, reset, setup } from '@sozai/log'
 import { describe, expect, test, vi } from 'vitest'
 
@@ -10,6 +10,7 @@ import { HubClientRegistry } from '../src/registry.js'
 
 const REQUESTER = 'did:key:requester'
 const TARGET = 'did:key:target'
+const RECEIVER = 'did:key:receiver'
 
 function reqCtx(prc: string, param: Record<string, unknown>, did = REQUESTER) {
   return {
@@ -102,5 +103,84 @@ describe('a store failure the hub declines to turn into a request failure is rep
       reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 3 }),
     )
     expect(result).toEqual({ keyPackages: ['kp-1'] })
+  })
+})
+
+describe('an ack the store refused is reported without stopping the loop', () => {
+  function receiveCtx(params: {
+    acks: ReadableStream<{ ack: Array<string> }>
+    writable: WritableStream<StoredMessage>
+    signal: AbortSignal
+  }) {
+    return {
+      message: {
+        header: {},
+        payload: { typ: 'channel', prc: 'hub/v1/receive', rid: '1', iss: RECEIVER },
+      },
+      param: {},
+      signal: params.signal,
+      writable: params.writable,
+      readable: params.acks,
+    } as never
+  }
+
+  /**
+   * The ack loop must not break on a store failure: the frame stays pending and the client re-acks
+   * next round. So a store whose ack never works redelivers every frame forever, and until this
+   * hook the only evidence was the redelivery itself.
+   */
+  test('the hook fires and the next ack is still attempted', async () => {
+    const boom = new Error('ack column is gone')
+    const store = createMemoryStore()
+    const acked: Array<Array<string>> = []
+    const failingAck: HubStore = new Proxy(store, {
+      get(target, property, receiver) {
+        if (property === 'ack') {
+          return (params: { recipientDID: string; sequenceIDs: Array<string> }) => {
+            acked.push(params.sequenceIDs)
+            return Promise.reject(boom)
+          }
+        }
+        return Reflect.get(target, property, receiver)
+      },
+    })
+    const seen: Array<HubStoreErrorEvent> = []
+    const handlers = createHandlers({
+      store: failingAck,
+      registry: new HubClientRegistry(),
+      onStoreError: (event) => void seen.push(event),
+    })
+
+    const acks = new ReadableStream<{ ack: Array<string> }>({
+      start(controller) {
+        controller.enqueue({ ack: ['seq-1'] })
+        controller.enqueue({ ack: ['seq-2'] })
+        controller.close()
+      },
+    })
+    const written: Array<unknown> = []
+    const writable = new WritableStream<StoredMessage>({
+      write(chunk) {
+        written.push(chunk)
+      },
+    })
+
+    // hub/v1/receive's returned promise only resolves on abort/eviction (store-and-forward keeps
+    // the channel open), so drive it the same way handlers-receive.test.ts does: let the drain and
+    // ack loop run, then abort to observe the result.
+    const controller = new AbortController()
+    const done = (handlers['hub/v1/receive'] as any)(
+      receiveCtx({ acks, writable, signal: controller.signal }),
+    )
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    controller.abort()
+    await done
+
+    // BOTH acks were attempted: the loop did not break on the first failure.
+    expect(acked).toEqual([['seq-1'], ['seq-2']])
+    expect(seen).toEqual([
+      { method: 'ack', did: RECEIVER, error: boom },
+      { method: 'ack', did: RECEIVER, error: boom },
+    ])
   })
 })
