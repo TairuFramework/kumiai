@@ -85,14 +85,12 @@ The filed document listed four options. Two are now closed by evidence:
 export function getDefaultConfig(options?: ConsoleSinkOptions): Config<'console', never> {
   return {
     sinks: { console: getConsoleSink(options) },
-    loggers: [
-      // Any category reaches the console at error unless an app deliberately narrows it.
-      // Without this, a package logging under its own category is dropped by the very config
-      // that made isSetup() answer true.
-      { category: [], lowestLevel: 'error', sinks: ['console'] },
-      { category: ['logtape', 'meta'], lowestLevel: 'error', sinks: ['console'] },
-      { category: ['sozai'], lowestLevel: 'error', sinks: ['console'] },
-    ],
+    // One entry, deliberately. `parentSinks` defaults to 'inherit', which UNIONS a category's own
+    // sinks with its parent's rather than overriding them, and does not de-duplicate by sink
+    // identity — a root entry beside an explicit ['sozai'] entry naming the same sink prints every
+    // sozai error twice. The root entry covers ['logtape','meta'] and ['sozai'] at the same level
+    // through the same sink, so both become redundant.
+    loggers: [{ category: [], lowestLevel: 'error', sinks: ['console'] }],
   }
 }
 ```
@@ -100,6 +98,15 @@ export function getDefaultConfig(options?: ConsoleSinkOptions): Config<'console'
 `parentSinks` already defaults to `"inherit"`, so this propagates by logtape's own resolution rather
 than around it. Probed 2026-07-28: `info` and `warn` under a non-sozai category stay dropped, and an
 app that narrows `['kumiai']` with `parentSinks: 'override'` still wins.
+
+**The two previous entries are dropped, and that is load-bearing rather than tidying.** Corrected
+2026-07-28 after the first implementation attempt reproduced the fault: logtape's
+`createSinkDispatchPlan` accumulates `[...parentPlan.sinks]` and then appends the logger's own local
+sinks, and `config.js` resolves every entry's `sinks: ['console']` to the *same* function reference.
+Keeping `['sozai']` alongside a root entry therefore doubles every `@sozai/*` error line. Dropping
+`['logtape', 'meta']` is safe for a second reason worth recording: logtape's `isLoggerConfigMeta`
+counts `category.length === 0` as configuring the meta logger (`config.js:38`), so the root entry
+suppresses the "meta logger is not configured" fallback sink the same way the explicit entry did.
 
 **A named consequence.** This is a behaviour change for every consumer of the default config, not
 only kumiai. Any dependency logging to logtape under any category now prints its errors. That is the
@@ -196,6 +203,9 @@ never a bespoke sink, per the filed document's own criterion:
 - a non-sozai category (`['kumiai', 'rpc']`) at `error` reaches the console
 - the same category at `info` and `warn` does not — bounds the blast radius
 - an app narrowing `['kumiai']` with `parentSinks: 'override'` still wins
+- a `['sozai', …]` error reaches the console exactly **once** — the inherit-unions-sinks trap above.
+  Two pre-existing tests already assert this and are what caught it; they stay, with a comment
+  saying what they now also pin.
 
 `getReporter`: configured produces a record with the right category, level `error`, and the error in
 properties; after `reset()` it calls `console.error` with the `[packageName]` prefix; with `error`

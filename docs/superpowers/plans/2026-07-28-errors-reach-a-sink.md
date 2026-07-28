@@ -42,17 +42,13 @@
 
 - [ ] **Step 1: Write the failing tests**
 
-In `packages/log/test/index.test.ts`, replace the body of the existing `describe('getDefaultConfig', ...)` block's first test and add three new ones. The existing structural test asserts the `loggers` array literally, so it must gain the root entry:
+In `packages/log/test/index.test.ts`, replace the body of the existing `describe('getDefaultConfig', ...)` block's first test and add three new ones. The existing structural test asserts the `loggers` array literally, so it must become the single root entry:
 
 ```ts
   test('routes any category to a console sink at error level', () => {
     const config = getDefaultConfig()
     expect(Object.keys(config.sinks)).toEqual(['console'])
-    expect(config.loggers).toEqual([
-      { category: [], lowestLevel: 'error', sinks: ['console'] },
-      { category: ['logtape', 'meta'], lowestLevel: 'error', sinks: ['console'] },
-      { category: ['sozai'], lowestLevel: 'error', sinks: ['console'] },
-    ])
+    expect(config.loggers).toEqual([{ category: [], lowestLevel: 'error', sinks: ['console'] }])
   })
 
   /**
@@ -103,6 +99,18 @@ In `packages/log/test/index.test.ts`, replace the body of the existing `describe
   })
 ```
 
+Then add one comment — no assertion change — to the **pre-existing** test
+`getDefaultConfig > passes the console option through to the console sink`, which already asserts
+`toHaveBeenCalledOnce()` for a `['sozai', 'test']` error and is what catches the trap in Step 3:
+
+```ts
+  /**
+   * `toHaveBeenCalledOnce` also pins single dispatch. `parentSinks` defaults to 'inherit', which
+   * UNIONS a category's own sinks with its parent's and does not de-duplicate by sink identity — so
+   * a `['sozai']` entry naming the same sink as the root entry would print every sozai error twice.
+   */
+```
+
 - [ ] **Step 2: Run the tests to verify they fail**
 
 ```bash
@@ -115,18 +123,24 @@ Expected: the structural test fails (array missing the root entry) and `carries 
 
 In `packages/log/src/index.ts`:
 
+The root entry **replaces** the two existing ones rather than joining them. That is not tidying — see
+the comment, and the spec section "The root logger":
+
 ```ts
 export function getDefaultConfig(options?: ConsoleSinkOptions): Config<'console', never> {
   return {
     sinks: { console: getConsoleSink(options) },
-    loggers: [
-      // Any category reaches the console at error unless an app deliberately narrows it. Without
-      // this, a package logging under its own category is dropped by the very config that made
-      // isSetup() answer true — the app took the documented easy path and went deaf.
-      { category: [], lowestLevel: 'error', sinks: ['console'] },
-      { category: ['logtape', 'meta'], lowestLevel: 'error', sinks: ['console'] },
-      { category: ['sozai'], lowestLevel: 'error', sinks: ['console'] },
-    ],
+    // Any category reaches the console at error unless an app deliberately narrows it. Without
+    // this, a package logging under its own category is dropped by the very config that made
+    // isSetup() answer true — the app took the documented easy path and went deaf.
+    //
+    // One entry, and the ['logtape','meta'] and ['sozai'] entries it replaces are gone on purpose.
+    // `parentSinks` defaults to 'inherit', which UNIONS a category's own sinks with its parent's
+    // rather than overriding them, and does not de-duplicate by sink identity: keeping either
+    // alongside this would print every record under it twice, through the same sink object. The
+    // root entry covers both at the same level, and logtape counts a `category: []` entry as
+    // configuring the meta logger, so its "not configured" fallback stays suppressed.
+    loggers: [{ category: [], lowestLevel: 'error', sinks: ['console'] }],
   }
 }
 ```
@@ -137,11 +151,18 @@ export function getDefaultConfig(options?: ConsoleSinkOptions): Config<'console'
 cd /Users/paul/dev/yulsi/sozai && ./node_modules/.bin/vitest run packages/log/test/index.test.ts
 ```
 
-Expected: all pass.
+Expected: all pass — including the two **pre-existing** tests that assert a `['sozai', …]` error reaches the console `toHaveBeenCalledOnce()`, `setup > notifies through the default configuration's console sink` and `getDefaultConfig > passes the console option through to the console sink`. Those two are the single-dispatch guard. **Do not loosen either to accept two calls**: a second call means the config prints every sozai error line twice, which is the trap Step 3's comment describes.
 
-- [ ] **Step 5: Mutation check — delete the root entry and confirm the right test fails**
+- [ ] **Step 5: Mutation check — delete the root entry and confirm the right tests fail**
 
-Remove the `{ category: [], ... }` line from `getDefaultConfig`, re-run, and record which tests fail. Expected: exactly the structural test and `carries a category nobody configured, at error level`. If `carries a category nobody configured` still passes, the test is not testing what it claims — stop and fix the test before restoring. Restore the line and re-run to confirm green.
+Remove the `{ category: [], ... }` entry from `getDefaultConfig`, leaving `loggers: []`, re-run, and record which tests fail. Expected, exactly these four:
+
+- `getDefaultConfig > routes any category to a console sink at error level` — structural
+- `getDefaultConfig > carries a category nobody configured, at error level` — the fix itself
+- `setup > notifies through the default configuration's console sink` — pre-existing; the root entry is now the only thing routing `['sozai']`
+- `getDefaultConfig > passes the console option through to the console sink` — pre-existing, same reason
+
+If `carries a category nobody configured` still passes, the test is not testing what it claims — stop and fix the test before restoring. Restore the entry and re-run to confirm green.
 
 - [ ] **Step 6: Typecheck and lint**
 
@@ -162,6 +183,12 @@ calling setup() with no argument configured logging that drops every other
 package's records — isSetup() answered true, the console fallback stayed out of
 the way, and the record went nowhere. A root logger closes it; parentSinks
 already defaults to inherit, so it propagates by logtape's own resolution.
+
+The root entry REPLACES those two rather than joining them: inherit unions a
+category's own sinks with its parent's without de-duplicating by identity, so
+keeping either beside it printed every record under it twice. logtape counts a
+category: [] entry as configuring the meta logger, so its fallback sink stays
+suppressed.
 
 Bounded to error, and an app that narrows a category still wins."
 ```
@@ -351,11 +378,17 @@ Create `.changeset/log-root-sink-and-reporter.md`:
 '@sozai/log': minor
 ---
 
-`getDefaultConfig()` now carries a root logger, so any category reaches the console at `error`
-unless an app deliberately narrows it. Previously its loggers covered `['logtape', 'meta']` and
-`['sozai']` only: an app calling `setup()` with no argument — the documented easy path —
+`getDefaultConfig()` now carries a single root logger, so any category reaches the console at
+`error` unless an app deliberately narrows it. Previously its loggers covered `['logtape', 'meta']`
+and `['sozai']` only: an app calling `setup()` with no argument — the documented easy path —
 configured logging that dropped every other package's records. `isSetup()` answered true, so
 consumers' console fallbacks stayed out of the way, and the record went nowhere.
+
+The root entry **replaces** those two rather than joining them. `parentSinks` defaults to
+`'inherit'`, which unions a category's own sinks with its parent's without de-duplicating by sink
+identity, so keeping either beside a root entry naming the same sink would print every record under
+it twice. Behaviour for `['sozai']` and `['logtape', 'meta']` is unchanged: same level, same sink,
+once.
 
 **This is a behaviour change for every consumer of the default config, not only the one that
 found it.** Any dependency logging to logtape under any category now prints its errors. Bounded
