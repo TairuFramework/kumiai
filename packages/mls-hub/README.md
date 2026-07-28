@@ -47,10 +47,16 @@ const pool = createKeyPackagePool({ identity, client: hubClient, store: poolStor
 const lastResort = createLastResortProvisioner({ identity, client: hubClient, store: lastResortStore })
 
 // At startup and on whatever cadence the host already has. Idempotent and cheap when nothing is due.
-// Both return an AsyncResult — awaiting `.value` re-throws a retryable failure instead of
-// silently swallowing it. See *Retryable and refused* below for the isError() alternative.
-await pool.ensureStocked().value
-await lastResort.ensureProvisioned().value
+const stocked = await pool.ensureStocked()
+if (stocked.isError()) {
+  // Retryable: the hub was unreachable, or answered something that clears on its own. Nothing to
+  // fix here — the next call self-corrects. See *Retryable and refused* below.
+}
+const provisioned = await lastResort.ensureProvisioned()
+if (provisioned.isError()) {
+  // Same as above.
+}
+// Terser, if the host would rather crash than carry on: `await pool.ensureStocked().value`.
 
 // When a Welcome arrives, try the ordinary pool before the last-resort slot.
 const { group } = await processWelcomeFromSources({

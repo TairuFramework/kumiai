@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { HubRefusedError, HubRetryableError } from '../src/errors.js'
 import { createLastResortProvisioner } from '../src/provisioner.js'
-import { createMemoryLastResortStore } from '../src/store.js'
+import { createMemoryLastResortStore, type LastResortStore } from '../src/store.js'
 import { createTestHub, type TestHub } from './fixtures/hub.js'
 
 let hub: TestHub
@@ -267,6 +267,33 @@ describe('an interrupted provision', () => {
     spy.mockRestore()
 
     await expect(provisioner.ensureProvisioned().value).resolves.toMatchObject({ rotated: true })
+  })
+})
+
+describe('a store failure on the confirming write', () => {
+  /**
+   * `uploadToHub` and `markUploaded` are split so a failing `store.put` after a landed upload is a
+   * raw store failure, never folded into the hub outcome. Pins that split: refolding the two would
+   * make this reject with a `HubRetryableError`-carrying error `Result` instead of the raw cause.
+   */
+  test('propagates the raw store error rather than resolving as a retryable Result', async () => {
+    const inner = createMemoryLastResortStore()
+    const storeError = new Error('disk full')
+    const store: LastResortStore = {
+      list: (ownerDID) => inner.list(ownerDID),
+      delete: (ownerDID, ref) => inner.delete(ownerDID, ref),
+      // The mint's put has `uploadedAt: null`; only the confirming write that follows a successful
+      // upload sets it, so this targets exactly that write.
+      put: (ownerDID, record) =>
+        record.uploadedAt == null ? inner.put(ownerDID, record) : Promise.reject(storeError),
+    }
+    const provisioner = createLastResortProvisioner({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+    })
+
+    await expect(provisioner.ensureProvisioned()).rejects.toBe(storeError)
   })
 })
 

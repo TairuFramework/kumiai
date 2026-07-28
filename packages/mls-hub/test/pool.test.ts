@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { HubRefusedError, HubRetryableError } from '../src/errors.js'
 import { createKeyPackagePool } from '../src/pool.js'
-import { createMemoryKeyPackagePoolStore } from '../src/pool-store.js'
+import { createMemoryKeyPackagePoolStore, type KeyPackagePoolStore } from '../src/pool-store.js'
 import { createTestHub, type TestHub } from './fixtures/hub.js'
 
 let hub: TestHub
@@ -350,6 +350,32 @@ describe('bundles', () => {
     // Narrowing a corrupt store to "you appear to have fewer packages" recreates the silent failure
     // this whole feature removes. Names the ref, never the material.
     await expect(pool.bundles()).rejects.toThrow(/key package record corrupt did not decode/)
+  })
+})
+
+describe('a store failure minting a record', () => {
+  /**
+   * `mint`'s durable write sits outside the upload's try/catch, so a failing `store.put` there is a
+   * raw store failure, never folded into the hub outcome. Mirrors the same contract pinned for
+   * `LastResortProvisioner.ensureProvisioned` in `test/provisioner.test.ts`.
+   */
+  test('propagates the raw store error rather than resolving as a retryable Result', async () => {
+    const inner = createMemoryKeyPackagePoolStore()
+    const storeError = new Error('disk full')
+    const store: KeyPackagePoolStore = {
+      list: (ownerDID) => inner.list(ownerDID),
+      delete: (ownerDID, ref) => inner.delete(ownerDID, ref),
+      put: () => Promise.reject(storeError),
+    }
+    const pool = createKeyPackagePool({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+      target: 1,
+      lowWater: 1,
+    })
+
+    await expect(pool.ensureStocked()).rejects.toBe(storeError)
   })
 })
 
