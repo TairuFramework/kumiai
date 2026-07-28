@@ -125,8 +125,13 @@ export function createLastResortProvisioner(
     return record
   }
 
-  const upload = async (record: LastResortRecord): Promise<void> => {
+  // Split so only the hub call sits inside a caller's try: a failing `store.put` here is a local
+  // failure, not a hub outcome, and must propagate unchanged rather than being classified.
+  const uploadToHub = async (record: LastResortRecord): Promise<void> => {
     await client.uploadLastResortKeyPackage(record.keyPackage)
+  }
+
+  const markUploaded = async (record: LastResortRecord): Promise<void> => {
     await store.put(ownerDID, { ...record, uploadedAt: Date.now() })
   }
 
@@ -160,13 +165,19 @@ export function createLastResortProvisioner(
       candidate.notAfter - nowSeconds > rotateWithinDays * DAY_SECONDS
     ) {
       try {
-        await upload(candidate)
+        await uploadToHub(candidate)
       } catch (error) {
         // Before the classifier, since a refusal throws past it.
-        await prune(records, candidate.ref)
+        try {
+          await prune(records, candidate.ref)
+        } catch {
+          // Opportunistic: the caller's actionable signal is the hub outcome below, and the next
+          // call retries this prune anyway. A store failure here must not displace it.
+        }
         const retryable = toRetryableOrThrow(error, 'upload')
         return Result.error(retryable)
       }
+      await markUploaded(candidate)
       await prune(records, candidate.ref)
       return Result.ok({ rotated: true, ref: candidate.ref })
     }
@@ -185,19 +196,30 @@ export function createLastResortProvisioner(
         // Skip the repair, write nothing that would suppress it: the record is left exactly as it
         // was, so the next successful call performs the readback instead. Before the classifier,
         // since a refusal throws past it.
-        await prune(records, candidate.ref)
+        try {
+          await prune(records, candidate.ref)
+        } catch {
+          // Opportunistic: the caller's actionable signal is the hub outcome below, and the next
+          // call retries this prune anyway. A store failure here must not displace it.
+        }
         const retryable = toRetryableOrThrow(error, 'status')
         return Result.error(retryable)
       }
       if (lastResort !== (await keyPackageDigest(candidate.keyPackage))) {
         try {
-          await upload(candidate)
+          await uploadToHub(candidate)
         } catch (error) {
           // Before the classifier, since a refusal throws past it.
-          await prune(records, candidate.ref)
+          try {
+            await prune(records, candidate.ref)
+          } catch {
+            // Opportunistic: the caller's actionable signal is the hub outcome below, and the next
+            // call retries this prune anyway. A store failure here must not displace it.
+          }
           const retryable = toRetryableOrThrow(error, 'upload')
           return Result.error(retryable)
         }
+        await markUploaded(candidate)
         await prune(records, candidate.ref)
         return Result.ok({ rotated: true, ref: candidate.ref })
       }
@@ -208,16 +230,22 @@ export function createLastResortProvisioner(
 
     const minted = await mint()
     try {
-      await upload(minted)
+      await uploadToHub(minted)
     } catch (error) {
       // `minted.ref` is kept: a forward clock correction between the mint and the prune's own clock
       // read could otherwise put the just-minted record past the cutoff and delete the private half
       // of a package the hub may already be serving. Before the classifier, since a refusal throws
       // past it.
-      await prune([...records, minted], minted.ref)
+      try {
+        await prune([...records, minted], minted.ref)
+      } catch {
+        // Opportunistic: the caller's actionable signal is the hub outcome below, and the next
+        // call retries this prune anyway. A store failure here must not displace it.
+      }
       const retryable = toRetryableOrThrow(error, 'upload')
       return Result.error(retryable)
     }
+    await markUploaded(minted)
     await prune([...records, minted], minted.ref)
     return Result.ok({ rotated: true, ref: minted.ref })
   }
@@ -235,6 +263,10 @@ export function createLastResortProvisioner(
           inFlight = null
         })
         inFlight = started
+        // Bookkeeping copy only: `inFlight` is never awaited by a caller, so an unattached rejection
+        // on it would surface as an unhandledRejection. The promise returned below is the one a
+        // caller awaits, and it must still reject.
+        started.catch(() => {})
       }
       return new AsyncResult(inFlight)
     },

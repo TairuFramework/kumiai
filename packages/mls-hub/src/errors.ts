@@ -23,7 +23,7 @@ export class HubRetryableError extends Error {
     this.#stage = stage
   }
 
-  /** The wire code when the hub answered, null for a transport failure. */
+  /** The code the error carried, if any — not proof it's a hub wire code; see `codeOf`. */
   get code(): string | null {
     return this.#code
   }

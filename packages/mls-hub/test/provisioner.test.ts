@@ -842,6 +842,7 @@ describe('ensureProvisioned failure paths', () => {
     })
     const { ref } = await provisioner.ensureProvisioned().value
     vi.spyOn(hub.client, 'keyPackageStatus').mockRejectedValue(new Error('socket closed'))
+    const upload = vi.spyOn(hub.client, 'uploadLastResortKeyPackage')
 
     const result = await provisioner.ensureProvisioned()
 
@@ -850,10 +851,50 @@ describe('ensureProvisioned failure paths', () => {
     expect(result.error?.stage).toBe('status')
     // The readback is skipped, not faked: the record stays exactly as it was, so the next
     // successful call performs it and repairs the slot if the hub disagrees.
+    expect(upload).not.toHaveBeenCalled()
     const records = await store.list(hub.identity.id)
     expect(records).toHaveLength(1)
     expect(records[0]?.ref).toBe(ref)
     expect(records[0]?.uploadedAt).not.toBeNull()
+  })
+
+  // The design promises pruning on every failure path, including the status stage reached from
+  // the readback branch (an already-uploaded candidate outside the rotation window) — distinct
+  // from the resume branch every other status-failure test above exercises.
+  test('a status failure in the readback branch still prunes an expired record', async () => {
+    const store = createMemoryLastResortStore()
+    // The live candidate: uploaded, comfortably outside the rotation window, so `run` takes the
+    // readback branch instead of resuming or minting.
+    await store.put(hub.identity.id, {
+      ref: 'live-ref',
+      keyPackage: 'kp-live',
+      privatePackage: 'priv-live',
+      notAfter: secondsFromNow(90),
+      uploadedAt: Date.now(),
+    })
+    // An expired record the prune must still remove even though the hub call failed.
+    await store.put(hub.identity.id, {
+      ref: 'dead',
+      keyPackage: 'a',
+      privatePackage: 'b',
+      notAfter: Math.floor(Date.now() / 1000) - 120 * 86_400,
+      uploadedAt: 1,
+    })
+    vi.spyOn(hub.client, 'keyPackageStatus').mockRejectedValue(new Error('socket closed'))
+    const provisioner = createLastResortProvisioner({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+    })
+
+    const result = await provisioner.ensureProvisioned()
+
+    expect(result.isError()).toBe(true)
+    expect(result.error).toBeInstanceOf(HubRetryableError)
+    expect(result.error?.stage).toBe('status')
+    // Prune is local and independent of the hub. A caller that only ever hits transient failures
+    // would otherwise never prune at all.
+    expect((await store.list(hub.identity.id)).map((r) => r.ref)).toEqual(['live-ref'])
   })
 
   test('a status failure does not suppress the readback on the next call', async () => {

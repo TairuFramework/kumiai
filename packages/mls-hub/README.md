@@ -47,8 +47,10 @@ const pool = createKeyPackagePool({ identity, client: hubClient, store: poolStor
 const lastResort = createLastResortProvisioner({ identity, client: hubClient, store: lastResortStore })
 
 // At startup and on whatever cadence the host already has. Idempotent and cheap when nothing is due.
-await pool.ensureStocked()
-await lastResort.ensureProvisioned()
+// Both return an AsyncResult — awaiting `.value` re-throws a retryable failure instead of
+// silently swallowing it. See *Retryable and refused* below for the isError() alternative.
+await pool.ensureStocked().value
+await lastResort.ensureProvisioned().value
 
 // When a Welcome arrives, try the ordinary pool before the last-resort slot.
 const { group } = await processWelcomeFromSources({
@@ -100,6 +102,11 @@ and the damage lands on whoever tries to invite the user next.
 An unreachable hub costs the user nothing while it lasts: an inviter fetches key packages through
 the same hub, so a top-up that fails during an outage denies nobody anything. That is why failing
 startup over it would be the worse trade.
+
+During a prolonged outage where `keyPackageStatus` succeeds but every upload keeps failing, each
+call strands a fresh batch of private halves in the store. That growth is expected and bounded: the
+stranded records age out at their own `notAfter` plus the retention grace, same as any other retired
+record — an operator watching store size climb during an outage is not looking at a leak.
 
 ## ⚠️ Security: the store holds private key material
 

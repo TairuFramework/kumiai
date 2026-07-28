@@ -491,7 +491,15 @@ describe('ensureStocked failure paths', () => {
       lowWater: 51,
     })
 
-    await expect(pool.ensureStocked()).rejects.toThrow(HubRefusedError)
+    try {
+      await pool.ensureStocked()
+      expect.unreachable('expected a throw')
+    } catch (error) {
+      expect(error).toBeInstanceOf(HubRefusedError)
+      // Pin the wire code: without it this test cannot distinguish EK08 from EK06 or EK02, and a
+      // future schema or limit change could silently re-route it.
+      expect((error as HubRefusedError).code).toBe('EK08')
+    }
   })
 
   test('a quota refusal from the real hub is retryable, not a throw', async () => {

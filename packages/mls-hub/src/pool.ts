@@ -135,7 +135,12 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
     } catch (error) {
       // Prune anyway: it is local, and a caller that only ever hits transient failures would
       // otherwise never prune at all. Before the classifier, since a refusal throws past it.
-      await prune(await store.list(ownerDID), new Set())
+      try {
+        await prune(await store.list(ownerDID), new Set())
+      } catch {
+        // Opportunistic: the caller's actionable signal is the hub outcome below, and the next
+        // call retries this prune anyway. A store failure here must not displace it.
+      }
       const retryable = toRetryableOrThrow(error, 'status')
       return Result.error(retryable)
     }
@@ -162,7 +167,12 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
         // serving packages whose private halves are gone. `keepRefs` guards them against a forward
         // clock correction between the mint and the prune's own clock read. Before the classifier,
         // since a refusal throws past it.
-        await prune(await store.list(ownerDID), keepRefs)
+        try {
+          await prune(await store.list(ownerDID), keepRefs)
+        } catch {
+          // Opportunistic: the caller's actionable signal is the hub outcome below, and the next
+          // call retries this prune anyway. A store failure here must not displace it.
+        }
         const retryable = toRetryableOrThrow(error, 'upload')
         return Result.error(retryable)
       }
@@ -186,6 +196,10 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
           inFlight = null
         })
         inFlight = started
+        // Bookkeeping copy only: `inFlight` is never awaited by a caller, so an unattached rejection
+        // on it would surface as an unhandledRejection. The promise returned below is the one a
+        // caller awaits, and it must still reject.
+        started.catch(() => {})
       }
       return new AsyncResult(inFlight)
     },
