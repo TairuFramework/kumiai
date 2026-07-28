@@ -103,15 +103,15 @@ export class HubRetryableError extends Error {
   override name = 'HubRetryableError'
   /** Where it failed. `'status'`: nothing was attempted. `'upload'`: attempted, outcome unknown. */
   readonly stage: 'status' | 'upload'
-  /** The hub's wire code when it answered, null for a transport failure. */
-  readonly code: HubErrorCode | null
+  /** The wire code when the hub answered, null for a transport failure. A hub code or an enkaku one. */
+  readonly code: string | null
   // `cause` carries the underlying error.
 }
 
 export class HubRefusedError extends Error {
   override name = 'HubRefusedError'
   readonly stage: 'status' | 'upload'
-  readonly code: HubErrorCode
+  readonly code: string
 }
 ```
 
