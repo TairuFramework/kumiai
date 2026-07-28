@@ -7,7 +7,9 @@ import { type HubProtocol, type HubStore, hubProtocol } from '@kumiai/hub-protoc
 import {
   type AuthorizeHook,
   createHandlers,
+  createStoreErrorReporter,
   type HubRateLimits,
+  type HubStoreErrorHook,
   type KeyPackageFetchLimits,
 } from './handlers.js'
 import { HubClientRegistry } from './registry.js'
@@ -51,6 +53,11 @@ export type CreateHubParams = {
    * {@link DEFAULT_KEYPACKAGE_FETCH_LIMITS}.
    */
   keyPackageFetchLimits?: Partial<KeyPackageFetchLimits>
+  /**
+   * Called when a `HubStore` operation fails where the hub deliberately does not fail the
+   * request. Forwarded to {@link createHandlers} and used by the purge timer. Fire-and-forget.
+   */
+  onStoreError?: HubStoreErrorHook
   /** Scheduled purge of expired stored messages. Set to `false` to disable. */
   purge?: HubPurgeOptions | false
   /**
@@ -74,6 +81,7 @@ export function createHub(params: CreateHubParams): HubInstance {
     authorize: params.authorize,
     rateLimits: params.rateLimits,
     keyPackageFetchLimits: params.keyPackageFetchLimits,
+    onStoreError: params.onStoreError,
   })
   const limits: Partial<ResourceLimits> = {
     ...params.limits,
@@ -92,9 +100,11 @@ export function createHub(params: CreateHubParams): HubInstance {
   if (params.purge !== false) {
     const interval = params.purge?.interval ?? 3_600_000
     const olderThan = params.purge?.olderThan ?? 604_800
+    const storeErrorReporter = createStoreErrorReporter(params.onStoreError)
     const purgeTimer = setInterval(() => {
-      params.store.purge({ olderThan }).catch(() => {
+      params.store.purge({ olderThan }).catch((error: unknown) => {
         // Purge failures are non-fatal; retried on the next interval
+        storeErrorReporter({ method: 'purge', error })
       })
     }, interval)
     server.disposed.then(() => clearInterval(purgeTimer))
