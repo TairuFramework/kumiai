@@ -967,6 +967,38 @@ describe('ensureProvisioned failure paths', () => {
     await expect(provisioner.ensureProvisioned()).rejects.toThrow(HubRefusedError)
   })
 
+  // The reorder this pins: prune runs before the classifier, so it still executes even though the
+  // classifier throws instead of returning for a settled refusal.
+  test('a refusal still prunes an expired record', async () => {
+    const store = createMemoryLastResortStore()
+    // An expired record the prune must still remove even though the hub call was refused. Its
+    // uploadedAt of 1 keeps it from being resumed as a pending candidate, so the run falls through
+    // to a mint, whose upload catch is the one under test.
+    await store.put(hub.identity.id, {
+      ref: 'dead',
+      keyPackage: 'a',
+      privatePackage: 'b',
+      notAfter: Math.floor(Date.now() / 1000) - 120 * 86_400,
+      uploadedAt: 1,
+    })
+    vi.spyOn(hub.client, 'uploadLastResortKeyPackage').mockRejectedValue(
+      Object.assign(new Error('denied'), { code: 'HUB_AUTHORIZATION_DENIED' }),
+    )
+    const provisioner = createLastResortProvisioner({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+    })
+
+    await expect(provisioner.ensureProvisioned()).rejects.toThrow(HubRefusedError)
+
+    // Only the freshly minted record survives; the long-dead one is gone even though the hub call
+    // was refused rather than merely failing transiently.
+    const records = await store.list(hub.identity.id)
+    expect(records).toHaveLength(1)
+    expect(records[0]?.ref).not.toBe('dead')
+  })
+
   test('an expired record is pruned on a failure path', async () => {
     const store = createMemoryLastResortStore()
     await store.put(hub.identity.id, {

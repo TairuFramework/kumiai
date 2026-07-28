@@ -162,8 +162,9 @@ export function createLastResortProvisioner(
       try {
         await upload(candidate)
       } catch (error) {
-        const retryable = toRetryableOrThrow(error, 'upload')
+        // Before the classifier, since a refusal throws past it.
         await prune(records, candidate.ref)
+        const retryable = toRetryableOrThrow(error, 'upload')
         return Result.error(retryable)
       }
       await prune(records, candidate.ref)
@@ -181,18 +182,20 @@ export function createLastResortProvisioner(
       try {
         ;({ lastResort } = await client.keyPackageStatus())
       } catch (error) {
-        const retryable = toRetryableOrThrow(error, 'status')
         // Skip the repair, write nothing that would suppress it: the record is left exactly as it
-        // was, so the next successful call performs the readback instead.
+        // was, so the next successful call performs the readback instead. Before the classifier,
+        // since a refusal throws past it.
         await prune(records, candidate.ref)
+        const retryable = toRetryableOrThrow(error, 'status')
         return Result.error(retryable)
       }
       if (lastResort !== (await keyPackageDigest(candidate.keyPackage))) {
         try {
           await upload(candidate)
         } catch (error) {
-          const retryable = toRetryableOrThrow(error, 'upload')
+          // Before the classifier, since a refusal throws past it.
           await prune(records, candidate.ref)
+          const retryable = toRetryableOrThrow(error, 'upload')
           return Result.error(retryable)
         }
         await prune(records, candidate.ref)
@@ -207,11 +210,12 @@ export function createLastResortProvisioner(
     try {
       await upload(minted)
     } catch (error) {
-      const retryable = toRetryableOrThrow(error, 'upload')
       // `minted.ref` is kept: a forward clock correction between the mint and the prune's own clock
       // read could otherwise put the just-minted record past the cutoff and delete the private half
-      // of a package the hub may already be serving.
+      // of a package the hub may already be serving. Before the classifier, since a refusal throws
+      // past it.
       await prune([...records, minted], minted.ref)
+      const retryable = toRetryableOrThrow(error, 'upload')
       return Result.error(retryable)
     }
     await prune([...records, minted], minted.ref)

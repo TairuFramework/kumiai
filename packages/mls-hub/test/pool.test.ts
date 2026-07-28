@@ -436,6 +436,27 @@ describe('ensureStocked failure paths', () => {
     }
   })
 
+  // The reorder this pins: prune runs before the classifier, so it still executes even though the
+  // classifier throws instead of returning for a settled refusal.
+  test('a refusal at the status stage still prunes an expired record', async () => {
+    const store = createMemoryKeyPackagePoolStore()
+    // An expired record the prune must still remove even though the hub call was refused.
+    await store.put(hub.identity.id, {
+      ref: 'dead',
+      keyPackage: 'a',
+      privatePackage: 'b',
+      notAfter: Math.floor(Date.now() / 1000) - 30 * 86_400,
+    })
+    vi.spyOn(hub.client, 'keyPackageStatus').mockRejectedValue(
+      Object.assign(new Error('denied'), { code: 'HUB_AUTHORIZATION_DENIED' }),
+    )
+    const pool = createKeyPackagePool({ identity: hub.identity, client: hub.client, store })
+
+    await expect(pool.ensureStocked()).rejects.toThrow(HubRefusedError)
+
+    expect(await store.list(hub.identity.id)).toHaveLength(0)
+  })
+
   test('a refused call reports its code and stage', async () => {
     const denying = createTestHub(hub.identity, (req) => req.action !== 'keypackage/status')
     try {

@@ -133,10 +133,10 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
     try {
       ;({ count } = await client.keyPackageStatus())
     } catch (error) {
-      const retryable = toRetryableOrThrow(error, 'status')
       // Prune anyway: it is local, and a caller that only ever hits transient failures would
-      // otherwise never prune at all.
+      // otherwise never prune at all. Before the classifier, since a refusal throws past it.
       await prune(await store.list(ownerDID), new Set())
+      const retryable = toRetryableOrThrow(error, 'status')
       return Result.error(retryable)
     }
 
@@ -158,11 +158,12 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
           notAfter,
         )
       } catch (error) {
-        const retryable = toRetryableOrThrow(error, 'upload')
         // The records stay: the upload may have landed, and deleting them would strand the hub
         // serving packages whose private halves are gone. `keepRefs` guards them against a forward
-        // clock correction between the mint and the prune's own clock read.
+        // clock correction between the mint and the prune's own clock read. Before the classifier,
+        // since a refusal throws past it.
         await prune(await store.list(ownerDID), keepRefs)
+        const retryable = toRetryableOrThrow(error, 'upload')
         return Result.error(retryable)
       }
       minted = records
