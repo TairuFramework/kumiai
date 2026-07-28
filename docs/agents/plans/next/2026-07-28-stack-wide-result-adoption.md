@@ -2,7 +2,7 @@
 
 **Priority:** low — a design question, not a defect. Needs brainstorming, not a patch.
 **Origin:** scoped out of `feat/provisioning-retryable-result` (2026-07-28); see
-`docs/superpowers/specs/2026-07-28-provisioning-retryable-result-design.md`.
+`docs/agents/plans/completed/2026-07-28-provisioning-retryable-result.complete.md`.
 
 `@kumiai/mls-hub` now returns `AsyncResult` from its two provisioning entry points, splitting a
 retryable hub failure from a settled refusal. It is the only package in kumiai that does. The
