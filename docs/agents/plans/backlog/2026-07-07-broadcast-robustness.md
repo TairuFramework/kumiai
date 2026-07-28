@@ -3,7 +3,7 @@
 **Priority:** backlog — ordering, backpressure, and error-path hardening in
 `@kumiai/broadcast`.
 **Origin:** 2026-07-02 audit (commit `bb343d9`), milestone
-`milestones/2026-07-audit-remediation.md`.
+`archive/2026-07-audit-remediation.md`.
 
 ## Findings
 
@@ -68,4 +68,4 @@ Folded in from `next/2026-07-20-deferred-api-findings.md` at the 2026-07-23 tria
 ## Test hooks
 
 `sender.test.ts`/`transport.test.ts` use only synchronous `unwrap`; async-unwrap ordering
-untested — see `next/2026-07-07-test-gaps.md`.
+untested — see `2026-07-28-test-gaps-low.md`.

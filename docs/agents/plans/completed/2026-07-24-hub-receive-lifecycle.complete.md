@@ -4,7 +4,7 @@
 **Date:** 2026-07-24
 **Branch:** `fix/hub-receive-lifecycle`
 **Roadmap:** Phase 1 item 3 (see `../roadmap.md`); milestone
-`../milestones/2026-07-audit-remediation.md`. Origin: the 2026-07-02 audit finding set
+`../archive/2026-07-audit-remediation.md`. Origin: the 2026-07-02 audit finding set
 (the `next/2026-07-07-hub-receive-lifecycle.md` doc, now removed — its substance is inlined below).
 
 ## Goal

@@ -4,7 +4,7 @@
 **Date:** 2026-07-25
 **Branch:** `feat/hub-keypackage-subscribe-caps`
 **Origin:** P4 audit-remediation item (June 2026 enkaku audit follow-up merged with the
-2026-07-02 kumiai audit, commit `bb343d9`, milestone `milestones/2026-07-audit-remediation.md`).
+2026-07-02 kumiai audit, commit `bb343d9`, milestone `archive/2026-07-audit-remediation.md`).
 
 ## Goal
 

@@ -4,8 +4,8 @@
 **Date:** 2026-07-24
 **Branch:** `fix/anycast-soundness` (PR #11)
 **Roadmap:** Phase 1 item 4 (see `../roadmap.md`); milestone
-`../milestones/2026-07-audit-remediation.md`. Origin: the 2026-07-02 audit (`bb343d9`), the
-`next/2026-07-07-anycast-soundness.md` doc, now removed — its substance is inlined below. The
+`../archive/2026-07-audit-remediation.md`. Origin: the 2026-07-02 audit (`bb343d9`), the
+`./2026-07-24-anycast-soundness.complete.md` doc, now removed — its substance is inlined below. The
 authenticated-reply-identity half of the original finding shipped earlier on `feat/app-lane-delivery`
 (`a85c0fa`); this work closed the rest.
 

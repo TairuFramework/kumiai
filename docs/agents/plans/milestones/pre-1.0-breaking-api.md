@@ -47,18 +47,25 @@ that package's surface for a filed reason, check this list for a neighbour worth
 ### `@kumiai/hub-*` — [hub protocol/server cleanup](../backlog/2026-07-07-hub-protocol-server-cleanup.md)
 
 - `HubStore`'s **four** positional methods — `unsubscribe`, `getSubscribers`, `storeKeyPackage`,
-  `fetchKeyPackages` (`types.ts:207`). Reshaping breaks every implementor *and* every conformance
-  double. The two key-package methods are touched by
-  [`hub-keypackage-subscribe-caps`](../next/2026-07-07-hub-keypackage-subscribe-caps.md) anyway.
+  `fetchKeyPackages`. Reshaping breaks every implementor *and* every conformance double.
+
+  **The cheap moment passed (noted 2026-07-28).** This item said to take the reshape with
+  `hub-keypackage-subscribe-caps`, which touches the two key-package methods anyway. That work
+  [shipped 2026-07-25](../completed/2026-07-25-hub-keypackage-subscribe-caps.complete.md) and did
+  not take it — `storeKeyPackage` in fact *gained* a positional `notAfter` parameter
+  (`hub-protocol/src/types.ts:235`) rather than moving to a params object. The item stands; the
+  argument for when to take it does not. The next work to open `HubStore` is the new moment.
 - `deduped` surfaced end-to-end. Three layers, and only one of them is breaking: the store computes
   `deduped` (`types.ts:77`), the wire schema drops it (`protocol.ts:31-38`), and `LogHub.publish`
   (`hub-tunnel/src/transport.ts:139`) is typed narrower than `HubStore.publish`. The **wire** half is
   additive by the repo's own rule — `protocol.ts:3-8` requires a new versioned procedure rather than
   widening a sealed schema. The **port** half is what breaks: widening the return type is fine for
   callers but forces every implementor and double to supply the field.
-- `KeyPackageFetchLimits` → `KeyPackageLimits` — take with
-  [`hub-keypackage-subscribe-caps`](../next/2026-07-07-hub-keypackage-subscribe-caps.md), which adds
-  the upload-side constraint that motivates the rename.
+- `KeyPackageFetchLimits` → `KeyPackageLimits` — **same spent rationale (noted 2026-07-28).** This
+  said to take the rename with `hub-keypackage-subscribe-caps`, the work that adds the upload-side
+  constraint motivating it. That shipped 2026-07-25 without the rename:
+  `hub-server/src/handlers.ts:78` still declares `KeyPackageFetchLimits`, now alongside upload-side
+  limits it no longer names accurately.
 - Flat `HubRateLimits` — no home for a per-action limit matching `AuthorizeRequest`'s six actions.
 - `hub-client`'s `rawClient` getter — removing it is the break.
 - `HubClient.publish`'s pre-base64 `payload: string` — accepting `Uint8Array` is the break.

@@ -114,7 +114,7 @@ doomed batch on every call forever.
   `serve()` — and `EK09` (replay detected) is correctly retryable, since a retry mints a fresh
   authenticated message. Neither is in the refused set, deliberately.
 - Whether the rest of the stack should adopt `Result` is deliberately unanswered; see
-  `docs/agents/plans/next/2026-07-28-stack-wide-result-adoption.md`.
+  `docs/agents/plans/../backlog/2026-07-28-stack-wide-result-adoption.md`.
 
 ## Verification
 

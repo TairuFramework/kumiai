@@ -1,78 +1,82 @@
 # kumiai roadmap
 
-**Created:** 2026-07-23. Synthesized from `next/`, `backlog/`, `completed/`, the three milestone
-docs, and `docs/agents/architecture.md`.
+**Created:** 2026-07-23. **Rewritten 2026-07-28** after a triage that merged eleven docs into five,
+deleted one whose premise was void, and retired the audit-remediation milestone to `archive/`.
 
 Goals and sequencing only — each phase links the docs that hold the detail.
 
 ## Where this repo is
 
 Ten packages, all `0.4.x`. The MLS group stack is functionally built: identity and membership, the
-control ledger, the commit and app lanes, the hub subsystem, group RPC, and two contract suites that
-run against every implementation *and* every double. What remains is debt, hardening, and surface.
+control ledger, the commit and app lanes, the hub subsystem, group RPC, key-package provisioning, and
+two contract suites that run against every implementation *and* every double. What remains is debt,
+hardening, and surface.
 
-**1.0 is intended but distant.** That decision shapes the whole roadmap: the pre-1.0 API milestone
-is a checklist to consult when you are already opening a package's surface, not a queue to drain.
-See "Phase 4" below.
+**1.0 is intended but distant.** That decision shapes the whole roadmap: the pre-1.0 API milestone is
+a checklist to consult when you are already opening a package's surface, not a queue to drain. See
+"Phase 3" below.
 
-## Phase 1 — correctness debt
+`next/` holds three items. That is deliberate — the 2026-07-28 triage demoted everything whose own
+header said "low", "design question", or "latent", so what is left is work with a home in this repo
+and a reason to do it now.
 
-The oldest work in the repo. Extracted by the 2026-07-02 audit, then stalled from 2026-07-07 to
-2026-07-23 behind a sequencing instruction that gated high-severity findings on medium ones.
-Unblocked at the 2026-07-23 triage.
+## What shipped since the last roadmap
 
-1. ~~High-severity correctness~~ — **done** (2026-07-24), see
-   [completed](./completed/2026-07-24-high-severity-correctness.complete.md). `to()` gated on
-   `ready`, `resync()` under the commit mutex, and the durable-ack relay reconnected across five
-   severed points.
-2. ~~`GroupAnchor.version` enforcement~~ — **done** (2026-07-24), see
-   [completed](./completed/2026-07-24-group-anchor-version-enforcement.complete.md).
-   `decodeGroupAnchor` now withholds `app` from a future-version anchor; the member still joins.
-3. ~~Hub `receive` lifecycle~~ — **done** (2026-07-24), see
-   [completed](./completed/2026-07-24-hub-receive-lifecycle.complete.md). Exactly-once/in-order
-   delivery via a buffer-then-flush state machine, a bounded write queue, ack-loop isolation, a
-   pre-abort cleanup guard, and `HUB_INVALID_PAYLOAD`. Two subtle concurrency defects (drain→live
-   stranding, unbounded drain-phase buffer) were caught in review and fixed.
-4. ~~Anycast soundness~~ — **done** (2026-07-24), see
-   [completed](./completed/2026-07-24-anycast-soundness.complete.md). Suppression fires only on a
-   success reply, so a fast *failing* responder no longer silences the healthy ones. Landed with the
-   three same-path Mediums: the duplicate bus responder deleted (one `createBroadcastResponder`),
-   bus-lane input validated, and the dead `ctx.signal` wired to dispose. A follow-on wire-format fix
-   (the `kind` control discriminator sharing the app-data namespace) is filed in
-   `./milestones/pre-1.0-breaking-api.md`.
+The 2026-07-23 roadmap's Phases 1 and 2 are **complete**, and a workstream that did not exist when it
+was written shipped alongside them.
 
-**Phase 1 is now complete.** All four correctness-debt items shipped 2026-07-24.
+- **Correctness debt (old Phase 1)** — all four items landed 2026-07-24: high-severity correctness,
+  `GroupAnchor.version` enforcement, the hub `receive` lifecycle, and anycast soundness.
+- **Hardening (old Phase 2, item 1)** — [key-package + subscribe
+  caps](./completed/2026-07-25-hub-keypackage-subscribe-caps.complete.md), 2026-07-25.
+- **Key-package provisioning** — seven completions across 2026-07-26 to 2026-07-28, none of them on
+  any roadmap: [invite recipient
+  binding](./completed/2026-07-26-bind-keypackage-recipient.complete.md), [the Add-proposal roster
+  binding](./completed/2026-07-26-add-proposal-roster-binding.complete.md), [the key-package
+  codec](./completed/2026-07-26-key-package-codec.complete.md), [last-resort key
+  packages](./completed/2026-07-26-last-resort-keypackage.complete.md) and [their automatic
+  provisioning](./completed/2026-07-27-last-resort-provisioning.complete.md), [the ordinary
+  pool](./completed/2026-07-27-ordinary-keypackage-pool.complete.md), and [retryable provisioning
+  results](./completed/2026-07-28-provisioning-retryable-result.complete.md). `@kumiai/mls-hub` is
+  now a real package with a real surface, and it is the only one in the repo returning `Result`.
 
-Two of these sat **underneath** work that already shipped on top of them: the retention semantics in
-`5eb220a` define mailbox reclamation in terms of acks that nothing sends. That inversion is why this
-phase led.
+The audit-remediation milestone that sequenced the first two groups reached 7 of 8 and was
+[retired](./archive/2026-07-audit-remediation.md). Its last open item is Phase 2's test gaps below.
 
-## Phase 2 — hardening and the trust boundary
+## Phase 1 — the trust boundary
 
-1. [Key-package + subscribe caps](./next/2026-07-07-hub-keypackage-subscribe-caps.md) — Sybil
-   key-package drain, upload quotas, rate-limit hygiene. DoS class, no confidentiality impact.
-2. [External-commit amplification](./next/2026-07-18-external-commit-amplification.md) — what the
-   committer signature check did not close.
-3. [Exporter secret surface](./next/2026-07-16-exporter-secret-surface.md) — the only item in the
-   portfolio with a **live security consequence outside this repo**. A host that hand-rolls
-   `GroupCrypto.exportSecret` lets an evicted member keep reading the rotated topic. Nothing fails
-   loudly; the group works, removals remove, the monitor stays quiet. The single symptom is that the
-   evicted member can still name and read the topic.
+The only phase with a live security consequence. Two docs, both partly unclosable from inside this
+repo, which is the point of having them written down.
 
-   The seam is watched only from inside this repo. The actionable half is making
-   `rpc-conformance` the **documented obligation** of implementing the ports, so a host writing its
-   own `GroupCrypto` is told where it is writing it that the suite is not optional. See "External
-   dependencies" for the half that is not actionable here.
+1. [Security residuals](./next/2026-07-16-security-residuals.md) — merged 2026-07-28 from the
+   exporter-secret and external-commit docs. Two sections:
+   - **A host that hand-rolls `GroupCrypto.exportSecret`** lets an evicted member keep reading the
+     rotated topic. Nothing fails loudly; the group works, removals remove, the monitor stays quiet.
+     The single symptom is that the evicted member can still name and read the topic. The actionable
+     half is making `rpc-conformance` the **documented obligation** of implementing the ports.
+   - **The commit-lane `ahead` storm**, which no signature check can close — the bound belongs to
+     whoever gates publish authorization on the commit topic. Plus one open question worth an
+     afternoon: whether a replayed genuine external commit can steer anything once the group has
+     moved on. It was never tested, and "plausible" is not a security property.
+2. [A configured logger is not one that carries these](./next/2026-07-19-logging-reaches-a-sink.md) —
+   two conditions reported into a logger a host may have routed nowhere. The `rpc` half is a `sozai`
+   or logtape decision. **The `hub-server` half is not**: `createHandlers` takes no logger and no
+   `onStoreError` hook, so a permanently broken last-resort slot read returns 200 forever with no
+   signal anywhere. The availability floor that feature exists to provide is silently absent. That
+   half is buildable here and is the most actionable thing in this phase.
 
-## Phase 3 — test gaps
+## Phase 2 — test gaps
 
-[Close test gaps](./next/2026-07-07-test-gaps.md) — persist→restore path, real-hub integration,
-concurrency tests. Deliberately after Phases 1–2 rather than alongside: most of its listed hooks
-are regression guards for defects those phases fix, so writing them first means writing them twice.
+[Close test gaps](./next/2026-07-07-test-gaps.md), re-verified against source 2026-07-28: nine of its
+original entries had been closed by later work, two carried stale line numbers, and the low-priority
+residue moved to [backlog](./backlog/2026-07-28-test-gaps-low.md).
 
-Phases 1 and 2 each carry their own test obligations regardless; this is the residue.
+One entry is worth its own branch. The app-lane drain's **retention guard survives deletion with the
+whole rpc suite green** — mutation-verified: replace `app-lane.ts:464` with a comment and all 374
+tests in 56 files still pass. It is the only thing standing between a hostile member and *"make every
+returning member re-fire an ephemeral handler out of the log"*.
 
-## Phase 4 — pre-1.0 API surface
+## Phase 3 — pre-1.0 API surface
 
 Consult, do not drain. Every item costs a `minor` while the packages are 0.x and a `major` after,
 which is the whole reason the grouping exists — none is a correctness bug, and none has a filed
@@ -86,39 +90,68 @@ milestone for a neighbour worth taking in the same `minor`. Bundling is nearly f
 later is not. One ordering constraint exists — the mls AAD parameter must land before `@kumiai/rpc`
 can bind its sealed bytes to a topic context.
 
-The non-breaking milestone has one item that does *not* wait: `GroupAnchor.version` enforcement,
-already scheduled in Phase 1.
+**A caution added 2026-07-28.** Two items on that milestone said "take this with the key-package caps
+work, which touches these anyway". That work shipped 2026-07-25 and took neither — `HubStore` stayed
+positional (and `storeKeyPackage` *gained* a positional parameter), and `KeyPackageFetchLimits` kept
+its now-inaccurate name. A "take it with the next thing that opens this file" plan only works if
+whoever opens the file reads the milestone. Treat that as evidence about the mechanism, not just
+about those two items.
 
-## Ongoing infrastructure
+## Ongoing — pick up alongside other work
 
-[Infra batch](./next/2026-07-07-infra-batch.md) and
-[infra cleanup](./backlog/2026-07-07-infra-cleanup.md) — mechanical, land opportunistically rather
-than as a phase. Nothing here blocks development. The batch's two highest-priority findings were
-retired on 2026-07-23: CI lint was never actually broken, and releases stay manual by decision.
+Not a phase. Each is real, none blocks anything, and every one is cheapest taken while you are
+already in the file.
+
+- [Infra debt](./backlog/2026-07-07-infra.md) — merged 2026-07-28 from the batch and cleanup docs.
+  Manifests, turbo graph, hooks, a missing root `LICENSE`, three kigu-side CI items.
+- [rpc directed lane](./backlog/rpc-directed-lane.md) — merged 2026-07-28; carries one decision worth
+  making before a durable hub backs that lane.
+- [Blocked on ts-mls](./backlog/ts-mls-upstream.md) — merged 2026-07-28. Three items waiting on
+  upstream exports: the stable v2 pin, the `decryptSenderData` reimplementation, and peer4 leaf
+  rotation. Check all three whenever a new ts-mls lands.
+- The per-package hardening docs from the 2026-07-02 audit: [rpc peer
+  lifecycle](./backlog/2026-07-07-rpc-peer-lifecycle-hardening.md), [rpc API
+  surface](./backlog/rpc-api-surface.md), [hub-tunnel
+  reliability](./backlog/2026-07-07-hub-tunnel-reliability.md), [broadcast
+  robustness](./backlog/2026-07-07-broadcast-robustness.md), [mls API
+  hardening](./backlog/2026-07-07-mls-api-hardening.md), [hub protocol/server
+  cleanup](./backlog/2026-07-07-hub-protocol-server-cleanup.md).
+
+## Design questions — brainstorm before code
+
+Three questions where the answer decides the code, not the other way round. None is a defect.
+
+- [Roster grants and revocation](./backlog/mls-roster-grants-and-revocation.md) — merged 2026-07-28
+  from three docs that were one subject. What an invite may grant, why revocation would split the
+  committer's Add verdict from the receiver's, and why removal today evicts a leaf but leaves the
+  grant standing. **Read all three sections before designing revocation** — the second is the reason
+  it is not a small change.
+- [Stack-wide `Result` adoption](./backlog/2026-07-28-stack-wide-result-adoption.md) — `mls-hub` set
+  the precedent; whether anything else should follow. Read what it cost before deciding.
+- [Extracting the FIFO mutex to
+  `@sozai/async`](./backlog/sozai-async-mutex-extraction.md) — cross-repo, worth doing when `@sozai`
+  is next opened for other reasons.
 
 ## External dependencies
 
 Items this repo cannot close on its own. Recorded so they stay visible, not scheduled.
 
-- **Kubun's `GroupCrypto.exportSecret`.** The concrete instance behind Phase 2's third item. If
-  Kubun already delegates to `@kumiai/mls-rpc`, that work is prevention; if it hand-rolls one, it is
-  live and security-relevant. Kubun is not on this machine and has no owner in this repo.
-- **`['kumiai']` log records reaching a sink**
-  ([logging-reaches-a-sink](./next/2026-07-19-logging-reaches-a-sink.md)). An app calling
-  `@sozai/log`'s `setup()` with no argument configures logging that routes nothing under
-  `['kumiai']`, so the console fallback stays out of the way and the record is dropped — the peer
-  goes silently deaf through the most ordinary setup an app can perform. Every candidate fix is a
-  `sozai`-level or logtape-level decision, not `hub-mux`'s.
+- **Kubun's `GroupCrypto.exportSecret`.** The concrete instance behind Phase 1's first item. If Kubun
+  already delegates to `@kumiai/mls-rpc`, that work is prevention; if it hand-rolls one, it is live
+  and security-relevant. Kubun is not on this machine and has no owner in this repo.
+- **`['kumiai']` log records reaching a sink.** Every candidate fix is a `sozai`-level or
+  logtape-level decision. The `hub-server` half of that doc is *not* blocked — see Phase 1.
+- **A stable `ts-mls` 2.0.0**, and two missing exports behind it. See the merged doc above.
 - **Release automation.** Manual `changeset publish` by decision (2026-07-23). No stack repo has a
-  publish workflow — kigu offers none either — so automating it is a stack-wide change if it is ever
-  wanted.
+  publish workflow — kigu offers none either — so automating it is a stack-wide change.
 
-## Not on this roadmap
+## Deleted at the 2026-07-28 triage
 
-`backlog/` holds fourteen items behind the four above: per-package hardening docs from the same
-2026-07-02 audit, four relocated from enkaku at the 0.18 split, and the API-surface docs Phase 4
-indexes. Promote at triage, not from here.
-
-One backlog item is recorded as **stale**: `mls-capability-revocation.md`'s premise was closed by the
-permission-enforcement work — a removed member has no leaf, so a resync is refused outright, and the
-capability layer it proposed to revoke no longer exists.
+- **`backlog/hub-group-member-expiry.md`** — void. Its premise was `hub/group/join`,
+  `addGroupMember`, and `removeGroupMember`; none of the three exists anywhere in `hub-protocol/src`
+  or `hub-server/src`. The hub is topic-based, so there is no persisted group roster to accumulate
+  ghosts in.
+- **`next/2026-07-27-ciphersuite-per-call-construction.md`** — measured rather than assumed, and the
+  measurement closed it. `resolveMlsContext` costs ~6µs; one `createKeyPackageBundle` costs 40ms, so
+  ciphersuite construction is 0.06% of a `mint()`. The doc's premise that two async constructors made
+  it non-trivial was wrong — both resolve immediately against already-loaded modules.

@@ -1,7 +1,7 @@
 # MLS permission enforcement — complete
 
 **Status:** complete.
-**Origin:** 2026-07-02 repo audit (commit `bb343d9`), milestone `../milestones/2026-07-audit-remediation.md`
+**Origin:** 2026-07-02 repo audit (commit `bb343d9`), milestone `../archive/2026-07-audit-remediation.md`
 Phase 1 item 2. Landed on `feat/mls-permission-enforcement`.
 
 ## Goal
@@ -54,7 +54,7 @@ that predated it is deleted outright.
   exist here.
 - **Removal is not revocation.** `removeMember` evicts the MLS leaf but does not erase the
   removed DID's roster grant. Eviction is nonetheless complete: rejoining requires a prior leaf
-  in the tree, which a removed member no longer has (see `../backlog/mls-capability-revocation.md`).
+  in the tree, which a removed member no longer has (see `../backlog/mls-roster-grants-and-revocation.md`).
 - **A caller-supplied commit policy *replaces* the default** rather than composing with it. This
   is the documented override contract, but it means a host that sets one for any reason silently
   disables all permission enforcement — called out on the option's type.

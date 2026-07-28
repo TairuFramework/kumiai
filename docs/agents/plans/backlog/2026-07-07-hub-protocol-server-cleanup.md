@@ -5,7 +5,7 @@ across `@kumiai/hub-protocol`, `@kumiai/hub-client`, `@kumiai/hub-server`. **Sco
 2026-07-23** to cover `@kumiai/hub-tunnel`'s schema `$id`s, and to record the verification that
 retired the "hub-tunnel re-declares the store surface" finding.
 **Origin:** 2026-07-02 audit (commit `bb343d9`), milestone
-`milestones/2026-07-audit-remediation.md`.
+`archive/2026-07-audit-remediation.md`.
 
 ## Findings
 
@@ -101,9 +101,13 @@ below is new. All are **breaking**; see `../milestones/pre-1.0-breaking-api.md`.
   ```
 
   Left inconsistent rather than reshaped, since a store-port change has no filed need behind it.
-  Reshaping later breaks every implementor *and* every conformance double — and the two key-package
-  methods are the ones `../next/2026-07-07-hub-keypackage-subscribe-caps.md` will touch anyway, so
-  that work is the cheap moment to take them.
+  Reshaping later breaks every implementor *and* every conformance double.
+
+  **Updated 2026-07-28.** This said the key-package caps work was the cheap moment, since it touches
+  the two key-package methods anyway. That work
+  [shipped 2026-07-25](../completed/2026-07-25-hub-keypackage-subscribe-caps.complete.md) without
+  taking it, and `storeKeyPackage` *gained* a positional `notAfter` parameter (`types.ts:235`)
+  instead. The next work to open `HubStore` is the new moment.
 - **`deduped`/`head` absent from the publish wire response.** `HubStore.publish` already returns
   `deduped` (`packages/hub-protocol/src/types.ts:77`, on `PublishResult` at `:66-78` — the original
   finding said `:88`, corrected 2026-07-23), but `hub/v1/publish`'s response schema carries only
@@ -134,11 +138,13 @@ below is new. All are **breaking**; see `../milestones/pre-1.0-breaking-api.md`.
   `MailboxHub.publish` (`transport.ts:126`) has the same return type, but a mailbox lane takes no
   `publishID` and so has nothing to deduplicate against — widening `LogHub` alone is likely right.
   Fix the layers together, or the fix stops at whichever one is left out.
-- **`KeyPackageLimits` naming.** `packages/hub-server/src/handlers.ts:72` names its config
-  `KeyPackageFetchLimits`, naming only the fetch side. A parallel upload-side config would want a
-  sibling name, and renaming an exported type is the break. Premature today since nothing constrains
-  uploads — but see `../next/2026-07-07-hub-keypackage-subscribe-caps.md`, which adds exactly that
-  upload-side constraint; take the rename with that work rather than separately.
+- **`KeyPackageLimits` naming.** `packages/hub-server/src/handlers.ts:78` (was `:72`) names its
+  config `KeyPackageFetchLimits`, naming only the fetch side. Renaming an exported type is the break.
+
+  **No longer premature (updated 2026-07-28).** This said the name was fine until something
+  constrained uploads, and to take the rename with the caps work. That work
+  [shipped 2026-07-25](../completed/2026-07-25-hub-keypackage-subscribe-caps.complete.md) and added
+  the upload-side constraints without renaming, so the type now sits beside limits its name excludes.
 - **`HubRateLimits` is flat.** `packages/hub-server/src/handlers.ts:62` — `{ perDID, perTopic }`. A
   future per-action or per-procedure limit (matching `AuthorizeRequest`'s six actions) has no home
   in the current shape. No filed need for finer-grained limits yet.
@@ -154,5 +160,4 @@ below is new. All are **breaking**; see `../milestones/pre-1.0-breaking-api.md`.
 
 ## Test hooks
 
-Purge scheduling in `createHub` (`hub.ts:85-94`) untested — see
-`next/2026-07-07-test-gaps.md`.
+Purge scheduling in `createHub` (`hub.ts:92`) untested — see `2026-07-28-test-gaps-low.md`.

@@ -94,7 +94,7 @@ buffer`) and returns `null` post-fix.
 
 ## Follow-on
 
-- **ts-mls stable upgrade** (`docs/agents/plans/backlog/ts-mls-v2-stable-upgrade.md`): when
+- **ts-mls stable upgrade** (`docs/agents/plans/../backlog/ts-mls-upstream.md`): when
   ts-mls stable is adopted, check whether it re-exports `decryptSenderData` (and the sender-data
   codecs); if so, delete `packages/mls/src/sender-data.ts` and delegate to ts-mls's own. The
   reimplementation exists only to route around the missing export.

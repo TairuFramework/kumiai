@@ -1,4 +1,21 @@
-# Milestone: 2026-07 audit remediation
+# Milestone: 2026-07 audit remediation — RETIRED
+
+> **Retired 2026-07-28 and moved to `archive/`.** Phase 1 is 7 of 8 done; the last item
+> ([test gaps](../next/2026-07-07-test-gaps.md)) and all of Phase 2 are now sequenced by
+> [the roadmap](../roadmap.md) instead. Kept as the audit's historical record — a dozen docs,
+> including six in `completed/`, cite it as their provenance.
+>
+> **The docs it links have since been reorganised** (2026-07-28 triage). Where a link below
+> dangles:
+>
+> | This milestone says | Now |
+> |---|---|
+> | `next/2026-07-07-infra-batch.md`, `backlog/2026-07-07-infra-cleanup.md` | merged → [`backlog/2026-07-07-infra.md`](../backlog/2026-07-07-infra.md) |
+> | `next/2026-07-07-hub-keypackage-subscribe-caps.md` | shipped → [`completed/2026-07-25-hub-keypackage-subscribe-caps.complete.md`](../completed/2026-07-25-hub-keypackage-subscribe-caps.complete.md) |
+> | `next/2026-07-07-anycast-soundness.md` | shipped → [`completed/2026-07-24-anycast-soundness.complete.md`](../completed/2026-07-24-anycast-soundness.complete.md) |
+> | `backlog/mls-capability-revocation.md` | merged → [`backlog/mls-roster-grants-and-revocation.md`](../backlog/mls-roster-grants-and-revocation.md) |
+> | `backlog/peer4-mls-leaf-rotation.md`, `backlog/ts-mls-v2-stable-upgrade.md` | merged → [`backlog/ts-mls-upstream.md`](../backlog/ts-mls-upstream.md) |
+> | `backlog/hub-group-member-expiry.md` | **deleted** — its premise (`hub/group/join`, `addGroupMember`, `removeGroupMember`) no longer exists; the hub is topic-based |
 
 **Origin:** full-repo audit performed 2026-07-02 against commit `bb343d9` (all 7 packages'
 `src/`, `tests/`, root config, CI, docs). All findings were extracted into `next/` and
@@ -51,9 +68,9 @@ promoted work rather than nominally above it.
 The 2026-07-20 API-surface audits produced a separate body of findings, indexed by change cost
 rather than by subsystem:
 
-- [pre-1.0 breaking API surface](./pre-1.0-breaking-api.md) — items whose cost is a `minor` while
+- [pre-1.0 breaking API surface](../milestones/pre-1.0-breaking-api.md) — items whose cost is a `minor` while
   every package is 0.x (verified 2026-07-23: all ten are 0.4.x) and a `major` after.
-- [non-breaking API work](./non-breaking-api.md) — the short list that can land any time, plus
+- [non-breaking API work](../milestones/non-breaking-api.md) — the short list that can land any time, plus
   `GroupAnchor.version` enforcement, which has a ship-before-needed deadline of its own.
 
 Those findings live in the same per-package backlog docs this milestone sequences; the two axes
@@ -82,12 +99,12 @@ In order:
    [completed](../completed/2026-07-24-hub-receive-lifecycle.complete.md). Buffer-then-flush delivery,
    pre-aborted-signal cleanup, bounded write queue. M2 (the `indexOf` cursor) was already fixed and
    dropped; two concurrency defects were caught in review and fixed.
-5. [Key-package + subscribe caps](../next/2026-07-07-hub-keypackage-subscribe-caps.md) —
+5. [Key-package + subscribe caps](../completed/2026-07-25-hub-keypackage-subscribe-caps.complete.md) —
    quota/DoS hardening on the hub store (promoted + extended from the pre-existing
    `hub-keypackage-quotas` backlog item).
-6. [Make anycast sound](../next/2026-07-07-anycast-soundness.md) —
+6. [Make anycast sound](../completed/2026-07-24-anycast-soundness.complete.md) —
    suppress only on success replies; attribute replies by the authenticated `senderDID`.
-7. [Infra batch](../next/2026-07-07-infra-batch.md) — mechanical, one PR: non-mutating lint in
+7. [Infra batch](../backlog/2026-07-07-infra.md) — mechanical, one PR: non-mutating lint in
    CI, changesets release workflow, declare vitest, fix the turbo task graph.
 8. [Close test gaps](../next/2026-07-07-test-gaps.md) — persist→restore path, real-hub
    integration, concurrency tests.
@@ -103,7 +120,7 @@ docs once carried were promoted on 2026-07-23 — see Status above.
 - [broadcast robustness](../backlog/2026-07-07-broadcast-robustness.md)
 - [mls API hardening](../backlog/2026-07-07-mls-api-hardening.md)
 - [hub protocol/server cleanup](../backlog/2026-07-07-hub-protocol-server-cleanup.md)
-- [infra cleanup](../backlog/2026-07-07-infra-cleanup.md)
+- [infra cleanup](../backlog/2026-07-07-infra.md)
 
 ## Related pre-existing backlog
 

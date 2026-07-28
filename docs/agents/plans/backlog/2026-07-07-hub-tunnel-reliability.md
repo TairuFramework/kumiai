@@ -2,7 +2,7 @@
 
 **Priority:** backlog — ordering, error-path, and teardown hardening in `@kumiai/hub-tunnel`.
 **Origin:** 2026-07-02 audit (commit `bb343d9`), milestone
-`milestones/2026-07-audit-remediation.md`.
+`archive/2026-07-audit-remediation.md`.
 
 > **The high-severity item shipped (2026-07-24).** The durable-ack finding was fixed on
 > `fix/high-severity-correctness` — see

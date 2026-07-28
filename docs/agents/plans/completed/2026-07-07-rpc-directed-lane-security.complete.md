@@ -66,9 +66,9 @@ caps/truncation. Directed request/stream/channel still work end-to-end through
 ## Follow-on work
 
 - **Session GC / anti-accumulation** (surfaced by the final review; pre-existed in the old
-  acceptor) — see `docs/agents/plans/backlog/rpc-directed-session-gc.md`.
+  acceptor) — see `docs/agents/plans/../backlog/rpc-directed-lane.md`.
 - **Minor cleanups + durable-hub readiness** — see
-  `docs/agents/plans/backlog/rpc-directed-lane-cleanups.md`.
+  `docs/agents/plans/../backlog/rpc-directed-lane.md`.
 - **Real-hub end-to-end** for the directed security properties is tracked in the Phase 1
   test-gaps item (`docs/agents/plans/next/2026-07-07-test-gaps.md`): the current adversary
   tests use an in-memory hub double.

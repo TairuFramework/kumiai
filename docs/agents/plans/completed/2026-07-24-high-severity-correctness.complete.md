@@ -2,7 +2,7 @@
 
 **Status:** complete
 **Completed:** 2026-07-24 on `fix/high-severity-correctness` (branched from `d96dfb1`).
-**Origin:** 2026-07-02 audit (commit `bb343d9`), milestone `milestones/2026-07-audit-remediation.md`,
+**Origin:** 2026-07-02 audit (commit `bb343d9`), milestone `archive/2026-07-audit-remediation.md`,
 Phase 1 item 1 of `roadmap.md`. Promoted out of `backlog/2026-07-07-rpc-peer-lifecycle-hardening.md`
 and `backlog/2026-07-07-hub-tunnel-reliability.md` at the 2026-07-23 triage.
 

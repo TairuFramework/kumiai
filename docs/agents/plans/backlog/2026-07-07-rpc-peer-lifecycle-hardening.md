@@ -2,7 +2,7 @@
 
 **Priority:** backlog — lifecycle, leak, and error-path hardening in `@kumiai/rpc`.
 **Origin:** 2026-07-02 audit (commit `bb343d9`), milestone
-`milestones/2026-07-audit-remediation.md`.
+`archive/2026-07-audit-remediation.md`.
 
 > **The two high-severity items shipped (2026-07-24).** `to()` gating and `resync()` serialization
 > were fixed on `fix/high-severity-correctness` — see
@@ -24,13 +24,12 @@
   `handshakeTail`; a queued inbound Commit can rebuild and re-subscribe topics after
   dispose (`hub-mux.ts:49-52` `retain` has no disposed check). Fix: `disposed` flag
   checked in tail ops; guard `retain`.
-- `packages/rpc/src/directed.ts:71-92` — acceptor tunnels are removed only on an explicit
-  `session-end` frame and no `idleTimeoutMs` is passed, so a vanished client leaks its
-  tunnel and map entry forever; a self-torn-down tunnel leaves its `sessionID` dead-ended
-  in `tunnels`. Fix: pass `idleTimeoutMs`; remove the entry via `onSessionEnd`/teardown.
-- `packages/rpc/src/peer.ts:166-178` — cached directed clients never invalidated when the
-  remote ends the session; `to(memberDID)` returns a dead client until the next epoch
-  rebuild. Fix: evict on session-end/teardown.
+- ~~`packages/rpc/src/directed.ts:71-92` — acceptor tunnels leak without an `idleTimeoutMs`~~ and
+  ~~`packages/rpc/src/peer.ts:166-178` — cached directed clients never invalidated~~ — **moved
+  2026-07-28** to [rpc directed lane](./rpc-directed-lane.md). The first was a duplicate: the same
+  finding was independently filed as `rpc-directed-session-gc.md` from the same branch review, with
+  the threat model and the candidate bounds worked out. Both now live with the rest of the directed
+  lane's items rather than split across two docs.
 - `packages/rpc/src/hub-mux.ts:52` — first-retain `hub.subscribe` rejection swallowed
   while the refcount records the topic as subscribed — delivery silently never happens.
   Fix: retry or propagate.
@@ -85,6 +84,7 @@ had to fix.
 
 ## Test hooks
 
-Peer concurrency tests (`resync()` racing an inbound Commit, `dispose()` during in-flight
-handshake, `to()` before init) and an acceptor-tunnel leak/idle-teardown test — see
-`next/2026-07-07-test-gaps.md`.
+`resync()` racing an inbound Commit and `to()` before init are **now covered**
+(`peer-resync-serial.test.ts:9`, `peer-to-ready.test.ts:15`, verified 2026-07-28). What remains:
+`dispose()` during an in-flight handshake — see `../next/2026-07-07-test-gaps.md` — and an
+acceptor-tunnel leak/idle-teardown test, see `../backlog/2026-07-28-test-gaps-low.md`.

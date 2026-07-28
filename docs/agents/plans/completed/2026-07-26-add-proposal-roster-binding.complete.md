@@ -96,9 +96,9 @@ applying an admin-authored commit that adds an ungranted DID.
 
 ## Follow-on work
 
-- `next/2026-07-26-invite-multi-grant-policy.md` — the ordering residual as a design question about
+- `../backlog/mls-roster-grants-and-revocation.md` — the ordering residual as a design question about
   what an invite may grant, with two earlier wrong claims corrected.
-- `next/2026-07-26-role-revocation-committer-receiver-split.md` — a latent hazard that only becomes
+- `../backlog/mls-roster-grants-and-revocation.md` — a latent hazard that only becomes
   live if role revocation is ever added. Inert today because roles are append-only.
 - `next/2026-07-07-test-gaps.md` gained one item: no `did:peer:4` identity flows through this rule
   end to end, since every group test uses `did:key`.

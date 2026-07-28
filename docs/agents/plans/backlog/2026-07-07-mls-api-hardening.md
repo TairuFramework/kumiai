@@ -2,7 +2,7 @@
 
 **Priority:** backlog — typing, error, and persistence-surface cleanup in `@kumiai/mls`.
 **Origin:** 2026-07-02 audit (commit `bb343d9`), milestone
-`milestones/2026-07-audit-remediation.md`.
+`archive/2026-07-audit-remediation.md`.
 
 The behavioural mls fixes have since landed (see
 `../completed/2026-07-11-mls-permission-enforcement.complete.md` and

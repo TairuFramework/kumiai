@@ -1,7 +1,7 @@
 # GroupHandle state serialization + secret hygiene — complete
 
 **Status:** complete.
-**Origin:** 2026-07-02 repo audit (commit `bb343d9`), milestone `../milestones/2026-07-audit-remediation.md`
+**Origin:** 2026-07-02 repo audit (commit `bb343d9`), milestone `../archive/2026-07-audit-remediation.md`
 Phase 1 item 3. Folded into `feat/mls-permission-enforcement` so the whole `@kumiai/mls` surface
 settled in one release — see `2026-07-11-mls-permission-enforcement.complete.md`.
 
