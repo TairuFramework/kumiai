@@ -10,7 +10,9 @@ import {
   keyPackageRef,
   LAST_RESORT_LIFETIME_DAYS,
 } from '@kumiai/mls'
+import { AsyncResult, Result } from '@sozai/result'
 
+import { type HubRetryableError, toRetryableOrThrow } from './errors.js'
 import { toBundles } from './records.js'
 import type { LastResortRecord, LastResortStore } from './store.js'
 
@@ -36,9 +38,15 @@ export type LastResortProvisioner = {
    * Bring the hub's last-resort slot up to date, doing nothing when it already is.
    *
    * `rotated` means the slot was written by this call — a fresh mint or a resumed upload.
-   * `ref` names the package this call left in the slot.
+   * `ref` names the package this call left in the slot. Pruning happens on every path, including
+   * the failure paths — it is local and owes nothing to the hub.
+   *
+   * An error `Result` means the hub could not be reached or gave an answer that clears on its own:
+   * the local record is left untouched, so the next call redoes the readback and repairs the slot
+   * if the hub disagrees. A `HubRefusedError` is thrown instead, because it will never succeed
+   * until the app or the operator changes something.
    */
-  ensureProvisioned(): Promise<{ rotated: boolean; ref: string }>
+  ensureProvisioned(): AsyncResult<{ rotated: boolean; ref: string }, HubRetryableError>
   /** Every retained bundle, `notAfter` descending, for `processWelcome`. */
   bundles(): Promise<Array<KeyPackageBundle>>
   /**
@@ -81,8 +89,10 @@ export function createLastResortProvisioner(
     )
   }
 
+  type ProvisionResult = Result<{ rotated: boolean; ref: string }, HubRetryableError>
+
   const ownerDID = identity.id
-  let inFlight: Promise<{ rotated: boolean; ref: string }> | null = null
+  let inFlight: Promise<ProvisionResult> | null = null
 
   /** The record the hub's slot should hold: newest by lifetime, `ref` breaking a tie. */
   const pickCandidate = (records: Array<LastResortRecord>): LastResortRecord | null => {
@@ -136,7 +146,7 @@ export function createLastResortProvisioner(
     }
   }
 
-  const run = async (): Promise<{ rotated: boolean; ref: string }> => {
+  const run = async (): Promise<ProvisionResult> => {
     const records = await store.list(ownerDID)
     const candidate = pickCandidate(records)
     const nowSeconds = Math.floor(Date.now() / 1000)
@@ -149,9 +159,15 @@ export function createLastResortProvisioner(
       candidate.uploadedAt == null &&
       candidate.notAfter - nowSeconds > rotateWithinDays * DAY_SECONDS
     ) {
-      await upload(candidate)
+      try {
+        await upload(candidate)
+      } catch (error) {
+        const retryable = toRetryableOrThrow(error, 'upload')
+        await prune(records, candidate.ref)
+        return Result.error(retryable)
+      }
       await prune(records, candidate.ref)
-      return { rotated: true, ref: candidate.ref }
+      return Result.ok({ rotated: true, ref: candidate.ref })
     }
 
     // An expired candidate needs no special case: the difference goes negative and falls through.
@@ -161,34 +177,62 @@ export function createLastResortProvisioner(
       // provisioned until the next rotation falls due — the floor is gone and nothing says so.
       // Re-uploading is safe here precisely because the slot replaces in place, which is why the
       // ordinary pool cannot do the same thing.
-      const { lastResort } = await client.keyPackageStatus()
-      if (lastResort !== (await keyPackageDigest(candidate.keyPackage))) {
-        await upload(candidate)
+      let lastResort: string | null
+      try {
+        ;({ lastResort } = await client.keyPackageStatus())
+      } catch (error) {
+        const retryable = toRetryableOrThrow(error, 'status')
+        // Skip the repair, write nothing that would suppress it: the record is left exactly as it
+        // was, so the next successful call performs the readback instead.
         await prune(records, candidate.ref)
-        return { rotated: true, ref: candidate.ref }
+        return Result.error(retryable)
+      }
+      if (lastResort !== (await keyPackageDigest(candidate.keyPackage))) {
+        try {
+          await upload(candidate)
+        } catch (error) {
+          const retryable = toRetryableOrThrow(error, 'upload')
+          await prune(records, candidate.ref)
+          return Result.error(retryable)
+        }
+        await prune(records, candidate.ref)
+        return Result.ok({ rotated: true, ref: candidate.ref })
       }
       // Prune on the no-op path too, or a daily caller never prunes between 90-day rotations.
       await prune(records, candidate.ref)
-      return { rotated: false, ref: candidate.ref }
+      return Result.ok({ rotated: false, ref: candidate.ref })
     }
 
     const minted = await mint()
-    await upload(minted)
+    try {
+      await upload(minted)
+    } catch (error) {
+      const retryable = toRetryableOrThrow(error, 'upload')
+      // `minted.ref` is kept: a forward clock correction between the mint and the prune's own clock
+      // read could otherwise put the just-minted record past the cutoff and delete the private half
+      // of a package the hub may already be serving.
+      await prune([...records, minted], minted.ref)
+      return Result.error(retryable)
+    }
     await prune([...records, minted], minted.ref)
-    return { rotated: true, ref: minted.ref }
+    return Result.ok({ rotated: true, ref: minted.ref })
   }
 
   return {
-    async ensureProvisioned(): Promise<{ rotated: boolean; ref: string }> {
+    ensureProvisioned(): AsyncResult<{ rotated: boolean; ref: string }, HubRetryableError> {
       // Single-flight: a second caller joins the first instead of minting a competing package.
       // Cross-process overlap is undefended by design — it yields one occupied slot and two valid
       // retained records.
-      if (inFlight != null) return await inFlight
-      const started = run().finally(() => {
-        inFlight = null
-      })
-      inFlight = started
-      return await started
+      //
+      // The shared promise holds a `Result`, so every joiner sees the same settled outcome and the
+      // same error instance. A refusal rejects it, as it should.
+      if (inFlight == null) {
+        const started = run().finally(() => {
+          inFlight = null
+        })
+        inFlight = started
+      }
+      return new AsyncResult(inFlight)
     },
     async bundles(): Promise<Array<KeyPackageBundle>> {
       return toBundles(await store.list(ownerDID), ownerDID, 'last-resort')

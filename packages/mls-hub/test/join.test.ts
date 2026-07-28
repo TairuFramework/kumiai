@@ -139,7 +139,7 @@ describe('processWelcomeFromSources', () => {
       client: hub.client,
       store,
     })
-    const { ref } = await provisioner.ensureProvisioned()
+    const { ref } = await provisioner.ensureProvisioned().value
     const { welcome, invite, ratchetTree } = await inviteFromLastResortSlot()
 
     await processWelcomeFromSources({
@@ -264,7 +264,7 @@ describe('processWelcomeFromSources', () => {
       client: hub.client,
       store: lastResortStore,
     })
-    const { ref } = await provisioner.ensureProvisioned()
+    const { ref } = await provisioner.ensureProvisioned().value
     const poolRefsBefore = (await poolStore.list(hub.identity.id)).map((entry) => entry.ref)
 
     // The Welcome names the PROVISIONER's bundle, not any of the pool's. A `[x].slice(0, 1)`-style
@@ -312,7 +312,7 @@ describe('processWelcomeFromSources', () => {
       client: hub.client,
       store: lastResortStore,
     })
-    const { ref } = await provisioner.ensureProvisioned()
+    const { ref } = await provisioner.ensureProvisioned().value
     const { welcome, invite, ratchetTree } = await inviteFromLastResortSlot()
 
     const result = await processWelcomeFromSources({

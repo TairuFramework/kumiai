@@ -6,6 +6,7 @@ import {
 } from '@kumiai/mls'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
+import { HubRefusedError, HubRetryableError } from '../src/errors.js'
 import { createLastResortProvisioner } from '../src/provisioner.js'
 import { createMemoryLastResortStore } from '../src/store.js'
 import { createTestHub, type TestHub } from './fixtures/hub.js'
@@ -30,7 +31,7 @@ describe('ensureProvisioned', () => {
       store,
     })
 
-    const result = await provisioner.ensureProvisioned()
+    const result = await provisioner.ensureProvisioned().value
 
     expect(result.rotated).toBe(true)
     expect(upload).toHaveBeenCalledTimes(1)
@@ -62,9 +63,9 @@ describe('ensureProvisioned', () => {
       store,
     })
 
-    const first = await provisioner.ensureProvisioned()
+    const first = await provisioner.ensureProvisioned().value
     const upload = vi.spyOn(hub.client, 'uploadLastResortKeyPackage')
-    const second = await provisioner.ensureProvisioned()
+    const second = await provisioner.ensureProvisioned().value
 
     expect(second).toEqual({ rotated: false, ref: first.ref })
     expect(upload).not.toHaveBeenCalled()
@@ -86,8 +87,8 @@ describe('ensureProvisioned', () => {
     })
 
     const [a, b] = await Promise.all([
-      provisioner.ensureProvisioned(),
-      provisioner.ensureProvisioned(),
+      provisioner.ensureProvisioned().value,
+      provisioner.ensureProvisioned().value,
     ])
 
     expect(a).toEqual(b)
@@ -118,7 +119,7 @@ describe('ensureProvisioned', () => {
       store,
     })
 
-    const result = await provisioner.ensureProvisioned()
+    const result = await provisioner.ensureProvisioned().value
 
     expect(result.rotated).toBe(true)
     expect(result.ref).not.toBe(staleRef)
@@ -138,12 +139,12 @@ describe('ensureProvisioned', () => {
       client: hub.client,
       store,
     })
-    const first = await provisioner.ensureProvisioned()
+    const first = await provisioner.ensureProvisioned().value
     // The hub lost the slot: without a readback the provisioner trusts its own record of a successful
     // upload and reports the floor as in place over an empty slot.
     await hub.hubStore.storeLastResortKeyPackage(hub.identity.id, 'kp-something-else')
 
-    const second = await provisioner.ensureProvisioned()
+    const second = await provisioner.ensureProvisioned().value
 
     expect(second.rotated).toBe(true)
     expect(second.ref).toBe(first.ref)
@@ -171,7 +172,7 @@ describe('an interrupted provision', () => {
     const failing = vi
       .spyOn(hub.client, 'uploadLastResortKeyPackage')
       .mockRejectedValueOnce(new Error('offline'))
-    await expect(provisioner.ensureProvisioned()).rejects.toThrow('offline')
+    expect((await provisioner.ensureProvisioned()).isError()).toBe(true)
 
     const pending = await store.list(hub.identity.id)
     expect(pending).toHaveLength(1)
@@ -180,7 +181,7 @@ describe('an interrupted provision', () => {
     expect(await hub.hubStore.fetchLastResortKeyPackage(hub.identity.id)).toBeNull()
 
     failing.mockRestore()
-    const result = await provisioner.ensureProvisioned()
+    const result = await provisioner.ensureProvisioned().value
 
     expect(result).toEqual({ rotated: true, ref: pending[0]?.ref })
     const settled = await store.list(hub.identity.id)
@@ -203,7 +204,7 @@ describe('an interrupted provision', () => {
       store,
     })
 
-    const first = await provisioner.ensureProvisioned()
+    const first = await provisioner.ensureProvisioned().value
     const record = (await store.list(hub.identity.id))[0]
     expect(record).toBeDefined()
     if (record == null) return
@@ -211,7 +212,7 @@ describe('an interrupted provision', () => {
     // Simulate the lost confirmation.
     await store.put(hub.identity.id, { ...record, uploadedAt: null })
 
-    const result = await provisioner.ensureProvisioned()
+    const result = await provisioner.ensureProvisioned().value
 
     expect(result).toEqual({ rotated: true, ref: first.ref })
     expect(await store.list(hub.identity.id)).toHaveLength(1)
@@ -220,10 +221,10 @@ describe('an interrupted provision', () => {
 
   /**
    * A host that cannot reach the hub must be told, not left believing the floor is in place. The
-   * rejection alone does not prove the failure was clean, so this also pins that nothing was
-   * marked uploaded and nothing reached the hub's slot.
+   * error alone does not prove the failure was clean, so this also pins that nothing was marked
+   * uploaded and nothing reached the hub's slot.
    */
-  test('an upload failure propagates rather than resolving quietly', async () => {
+  test('an upload failure is returned rather than resolving quietly', async () => {
     const store = createMemoryLastResortStore()
     vi.spyOn(hub.client, 'uploadLastResortKeyPackage').mockRejectedValue(new Error('hub refused'))
     const provisioner = createLastResortProvisioner({
@@ -232,7 +233,7 @@ describe('an interrupted provision', () => {
       store,
     })
 
-    await expect(provisioner.ensureProvisioned()).rejects.toThrow('hub refused')
+    expect((await provisioner.ensureProvisioned()).isError()).toBe(true)
 
     expect((await store.list(hub.identity.id))[0]?.uploadedAt).toBeNull()
     expect(await hub.hubStore.fetchLastResortKeyPackage(hub.identity.id)).toBeNull()
@@ -250,10 +251,10 @@ describe('an interrupted provision', () => {
       store,
     })
 
-    await expect(provisioner.ensureProvisioned()).rejects.toThrow('offline')
+    expect((await provisioner.ensureProvisioned()).isError()).toBe(true)
     spy.mockRestore()
 
-    await expect(provisioner.ensureProvisioned()).resolves.toMatchObject({ rotated: true })
+    await expect(provisioner.ensureProvisioned().value).resolves.toMatchObject({ rotated: true })
   })
 })
 
@@ -276,7 +277,7 @@ describe('rotation and retention', () => {
       store,
     })
 
-    const first = await provisioner.ensureProvisioned()
+    const first = await provisioner.ensureProvisioned().value
     const original = (await store.list(hub.identity.id))[0]
     expect(original).toBeDefined()
     if (original == null) return
@@ -284,7 +285,7 @@ describe('rotation and retention', () => {
     // 10 days left: inside the 30-day window.
     await store.put(hub.identity.id, { ...original, notAfter: secondsFromNow(10) })
 
-    const second = await provisioner.ensureProvisioned()
+    const second = await provisioner.ensureProvisioned().value
 
     expect(second.rotated).toBe(true)
     expect(second.ref).not.toBe(first.ref)
@@ -315,14 +316,14 @@ describe('rotation and retention', () => {
       store,
     })
 
-    const first = await provisioner.ensureProvisioned()
+    const first = await provisioner.ensureProvisioned().value
     const original = (await store.list(hub.identity.id))[0]
     expect(original).toBeDefined()
     if (original == null) return
     // 29 days left: one day inside the default 30-day window.
     await store.put(hub.identity.id, { ...original, notAfter: secondsFromNow(29) })
 
-    const second = await provisioner.ensureProvisioned()
+    const second = await provisioner.ensureProvisioned().value
 
     expect(second.rotated).toBe(true)
     expect(second.ref).not.toBe(first.ref)
@@ -336,13 +337,13 @@ describe('rotation and retention', () => {
       store,
     })
 
-    const first = await provisioner.ensureProvisioned()
+    const first = await provisioner.ensureProvisioned().value
     const original = (await store.list(hub.identity.id))[0]
     expect(original).toBeDefined()
     if (original == null) return
     await store.put(hub.identity.id, { ...original, notAfter: secondsFromNow(31) })
 
-    const second = await provisioner.ensureProvisioned()
+    const second = await provisioner.ensureProvisioned().value
 
     expect(second).toEqual({ rotated: false, ref: first.ref })
   })
@@ -356,14 +357,14 @@ describe('rotation and retention', () => {
       rotateWithinDays: 5,
     })
 
-    const first = await provisioner.ensureProvisioned()
+    const first = await provisioner.ensureProvisioned().value
     const original = (await store.list(hub.identity.id))[0]
     expect(original).toBeDefined()
     if (original == null) return
     // 10 days left: inside the default 30-day window, outside the configured 5-day one.
     await store.put(hub.identity.id, { ...original, notAfter: secondsFromNow(10) })
 
-    expect(await provisioner.ensureProvisioned()).toEqual({ rotated: false, ref: first.ref })
+    expect(await provisioner.ensureProvisioned().value).toEqual({ rotated: false, ref: first.ref })
   })
 
   /**
@@ -378,7 +379,7 @@ describe('rotation and retention', () => {
       store,
     })
 
-    await provisioner.ensureProvisioned()
+    await provisioner.ensureProvisioned().value
     const live = (await store.list(hub.identity.id))[0]
     expect(live).toBeDefined()
     if (live == null) return
@@ -391,7 +392,7 @@ describe('rotation and retention', () => {
       uploadedAt: 1,
     })
 
-    const result = await provisioner.ensureProvisioned()
+    const result = await provisioner.ensureProvisioned().value
 
     expect(result).toEqual({ rotated: false, ref: live.ref })
     expect((await store.list(hub.identity.id)).map((r) => r.ref)).toEqual([live.ref])
@@ -410,7 +411,7 @@ describe('rotation and retention', () => {
       store,
     })
 
-    await provisioner.ensureProvisioned()
+    await provisioner.ensureProvisioned().value
     const live = (await store.list(hub.identity.id))[0]
     expect(live).toBeDefined()
     if (live == null) return
@@ -423,7 +424,7 @@ describe('rotation and retention', () => {
       uploadedAt: 1,
     })
 
-    await provisioner.ensureProvisioned()
+    await provisioner.ensureProvisioned().value
 
     expect((await store.list(hub.identity.id)).map((r) => r.ref).sort()).toEqual(
       [live.ref, 'six-day-ref'].sort(),
@@ -439,7 +440,7 @@ describe('rotation and retention', () => {
       store,
     })
 
-    await provisioner.ensureProvisioned()
+    await provisioner.ensureProvisioned().value
     const live = (await store.list(hub.identity.id))[0]
     expect(live).toBeDefined()
     if (live == null) return
@@ -452,7 +453,7 @@ describe('rotation and retention', () => {
       uploadedAt: 1,
     })
 
-    await provisioner.ensureProvisioned()
+    await provisioner.ensureProvisioned().value
 
     expect((await store.list(hub.identity.id)).map((r) => r.ref).sort()).toEqual(
       [live.ref, 'recent-ref'].sort(),
@@ -468,7 +469,7 @@ describe('rotation and retention', () => {
       retainAfterExpiryDays: 1,
     })
 
-    await provisioner.ensureProvisioned()
+    await provisioner.ensureProvisioned().value
     const live = (await store.list(hub.identity.id))[0]
     expect(live).toBeDefined()
     if (live == null) return
@@ -480,7 +481,7 @@ describe('rotation and retention', () => {
       uploadedAt: 1,
     })
 
-    await provisioner.ensureProvisioned()
+    await provisioner.ensureProvisioned().value
 
     expect((await store.list(hub.identity.id)).map((r) => r.ref)).toEqual([live.ref])
   })
@@ -497,13 +498,13 @@ describe('rotation and retention', () => {
       store,
     })
 
-    const first = await provisioner.ensureProvisioned()
+    const first = await provisioner.ensureProvisioned().value
     const original = (await store.list(hub.identity.id))[0]
     expect(original).toBeDefined()
     if (original == null) return
     await store.put(hub.identity.id, { ...original, notAfter: secondsFromNow(-1) })
 
-    const second = await provisioner.ensureProvisioned()
+    const second = await provisioner.ensureProvisioned().value
 
     expect(second.rotated).toBe(true)
     expect(second.ref).not.toBe(first.ref)
@@ -556,7 +557,7 @@ describe('rotation and retention', () => {
         store,
       })
 
-      const result = await provisioner.ensureProvisioned()
+      const result = await provisioner.ensureProvisioned().value
 
       expect(result).toEqual({ rotated: true, ref: pendingRef })
       expect((await store.list(hub.identity.id)).map((r) => r.ref)).toEqual([pendingRef])
@@ -627,7 +628,7 @@ describe('the options passthrough', () => {
       options: { ciphersuiteName: NON_DEFAULT_CIPHERSUITE, cryptoProvider: probeProvider(calls) },
     })
 
-    const result = await provisioner.ensureProvisioned()
+    const result = await provisioner.ensureProvisioned().value
     const record = (await store.list(hub.identity.id))[0]
     expect(record).toBeDefined()
     if (record == null) return
@@ -742,10 +743,10 @@ describe('option validation', () => {
       rotateWithinDays: LAST_RESORT_LIFETIME_DAYS - 1,
     })
 
-    const first = await provisioner.ensureProvisioned()
+    const first = await provisioner.ensureProvisioned().value
     const upload = vi.spyOn(hub.client, 'uploadLastResortKeyPackage')
 
-    expect(await provisioner.ensureProvisioned()).toEqual({ rotated: false, ref: first.ref })
+    expect(await provisioner.ensureProvisioned().value).toEqual({ rotated: false, ref: first.ref })
     expect(upload).not.toHaveBeenCalled()
     expect(await store.list(hub.identity.id)).toHaveLength(1)
   })
@@ -791,7 +792,7 @@ describe('option validation', () => {
       retainAfterExpiryDays: 0,
     })
 
-    await provisioner.ensureProvisioned()
+    await provisioner.ensureProvisioned().value
     const live = (await store.list(hub.identity.id))[0]
     expect(live).toBeDefined()
     if (live == null) return
@@ -811,10 +812,204 @@ describe('option validation', () => {
       uploadedAt: 1,
     })
 
-    await provisioner.ensureProvisioned()
+    await provisioner.ensureProvisioned().value
 
     expect((await store.list(hub.identity.id)).map((r) => r.ref).sort()).toEqual(
       [live.ref, 'still-valid-ref'].sort(),
     )
+  })
+})
+
+describe('ensureProvisioned failure paths', () => {
+  test('a status failure leaves the local record intact and returns a retryable error', async () => {
+    const store = createMemoryLastResortStore()
+    const provisioner = createLastResortProvisioner({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+    })
+    const { ref } = await provisioner.ensureProvisioned().value
+    vi.spyOn(hub.client, 'keyPackageStatus').mockRejectedValue(new Error('socket closed'))
+
+    const result = await provisioner.ensureProvisioned()
+
+    expect(result.isError()).toBe(true)
+    expect(result.error).toBeInstanceOf(HubRetryableError)
+    expect(result.error?.stage).toBe('status')
+    // The readback is skipped, not faked: the record stays exactly as it was, so the next
+    // successful call performs it and repairs the slot if the hub disagrees.
+    const records = await store.list(hub.identity.id)
+    expect(records).toHaveLength(1)
+    expect(records[0]?.ref).toBe(ref)
+    expect(records[0]?.uploadedAt).not.toBeNull()
+  })
+
+  test('a status failure does not suppress the readback on the next call', async () => {
+    const store = createMemoryLastResortStore()
+    const provisioner = createLastResortProvisioner({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+    })
+    const { ref } = await provisioner.ensureProvisioned().value
+    // The hub loses the slot while it is unreachable.
+    await hub.hubStore.storeLastResortKeyPackage(hub.identity.id, 'something-else')
+    const status = vi
+      .spyOn(hub.client, 'keyPackageStatus')
+      .mockRejectedValueOnce(new Error('socket closed'))
+
+    expect((await provisioner.ensureProvisioned()).isError()).toBe(true)
+    const repaired = await provisioner.ensureProvisioned().value
+
+    expect(status).toHaveBeenCalledTimes(2)
+    expect(repaired).toEqual({ rotated: true, ref })
+  })
+
+  test('an upload failure returns a retryable error and leaves the record resumable', async () => {
+    const store = createMemoryLastResortStore()
+    vi.spyOn(hub.client, 'uploadLastResortKeyPackage').mockRejectedValue(new Error('socket closed'))
+    const provisioner = createLastResortProvisioner({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+    })
+
+    const result = await provisioner.ensureProvisioned()
+
+    expect(result.isError()).toBe(true)
+    expect(result.error?.stage).toBe('upload')
+    const records = await store.list(hub.identity.id)
+    expect(records).toHaveLength(1)
+    expect(records[0]?.uploadedAt).toBeNull()
+  })
+
+  test('the next call resumes the same package rather than minting', async () => {
+    const store = createMemoryLastResortStore()
+    const upload = vi
+      .spyOn(hub.client, 'uploadLastResortKeyPackage')
+      .mockRejectedValueOnce(new Error('socket closed'))
+    const provisioner = createLastResortProvisioner({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+    })
+
+    expect((await provisioner.ensureProvisioned()).isError()).toBe(true)
+    const pending = (await store.list(hub.identity.id))[0]
+
+    const second = await provisioner.ensureProvisioned().value
+
+    // Re-uploading the identical package is safe because the slot replaces in place, so it does not
+    // matter whether the first attempt landed.
+    expect(second).toEqual({ rotated: true, ref: pending?.ref })
+    expect(upload).toHaveBeenCalledTimes(2)
+    expect(await store.list(hub.identity.id)).toHaveLength(1)
+  })
+
+  test('a refusal throws instead of returning', async () => {
+    const store = createMemoryLastResortStore()
+    vi.spyOn(hub.client, 'uploadLastResortKeyPackage').mockRejectedValue(
+      Object.assign(new Error('denied'), { code: 'HUB_AUTHORIZATION_DENIED' }),
+    )
+    const provisioner = createLastResortProvisioner({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+    })
+
+    await expect(provisioner.ensureProvisioned()).rejects.toThrow(HubRefusedError)
+  })
+
+  test('an expired record is pruned on a failure path', async () => {
+    const store = createMemoryLastResortStore()
+    await store.put(hub.identity.id, {
+      ref: 'dead',
+      keyPackage: 'a',
+      privatePackage: 'b',
+      notAfter: Math.floor(Date.now() / 1000) - 120 * 86_400,
+      uploadedAt: 1,
+    })
+    vi.spyOn(hub.client, 'uploadLastResortKeyPackage').mockRejectedValue(new Error('socket closed'))
+    const provisioner = createLastResortProvisioner({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+    })
+
+    expect((await provisioner.ensureProvisioned()).isError()).toBe(true)
+
+    // Only the freshly minted record survives; the long-dead one is gone even though the hub call
+    // failed.
+    const records = await store.list(hub.identity.id)
+    expect(records).toHaveLength(1)
+    expect(records[0]?.ref).not.toBe('dead')
+  })
+
+  test('concurrent callers share one failing run and one error instance', async () => {
+    const store = createMemoryLastResortStore()
+    const upload = vi
+      .spyOn(hub.client, 'uploadLastResortKeyPackage')
+      .mockRejectedValue(new Error('socket closed'))
+    const provisioner = createLastResortProvisioner({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+    })
+
+    const [first, second] = await Promise.all([
+      provisioner.ensureProvisioned(),
+      provisioner.ensureProvisioned(),
+    ])
+
+    expect(upload).toHaveBeenCalledTimes(1)
+    expect(first.error).toBe(second.error)
+  })
+
+  /**
+   * `prune` re-reads the wall clock instead of reusing the caller's own clock read, so a forward
+   * clock correction between the mint and the prune's own read can put the just-minted record past
+   * the retention cutoff before the upload's catch block prunes. A fresh last-resort mint carries
+   * the full 90-day `LAST_RESORT_LIFETIME_DAYS`, so the jump has to clear lifetime plus the 7-day
+   * default grace (97 days) for the cutoff to actually pass the record's own `notAfter` — a smaller
+   * jump would leave the record surviving on its own lifetime, saying nothing about the keep-ref.
+   * Jumping 100 days from inside the rejected upload does that with margin. Without the
+   * `minted.ref` keep-ref exception this deletes the private half of a package the hub may already
+   * be serving. Mirrors `test/pool.test.ts`'s "a resumed record survives its own prune when the
+   * clock advances during the upload" for the mint-then-fail path.
+   */
+  test('a mint survives its own prune when the clock advances during a failed upload', async () => {
+    const store = createMemoryLastResortStore()
+
+    let offsetMs = 0
+    const realNow = Date.now.bind(Date)
+    const dateSpy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + offsetMs)
+    vi.spyOn(hub.client, 'uploadLastResortKeyPackage').mockImplementation(() => {
+      offsetMs += 100 * 86_400 * 1000
+      // Cast: the real return type is a RequestCall, but the provisioner only ever awaits it, and
+      // this rejection is what the test needs it to do.
+      return Promise.reject(new Error('socket closed')) as unknown as ReturnType<
+        typeof hub.client.uploadLastResortKeyPackage
+      >
+    })
+
+    try {
+      const provisioner = createLastResortProvisioner({
+        identity: hub.identity,
+        client: hub.client,
+        store,
+      })
+
+      const result = await provisioner.ensureProvisioned()
+
+      expect(result.isError()).toBe(true)
+      // The record survives ONLY because the failure path keeps the just-minted ref: the 100-day
+      // jump puts the cutoff (jump - 7-day grace) past the mint's own 90-day notAfter, so nothing
+      // but the keep-ref explains its survival.
+      const records = await store.list(hub.identity.id)
+      expect(records).toHaveLength(1)
+      expect(records[0]?.uploadedAt).toBeNull()
+    } finally {
+      dateSpy.mockRestore()
+    }
   })
 })
