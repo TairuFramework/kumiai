@@ -4,6 +4,7 @@ import { DirectTransports } from '@enkaku/transport'
 import { type OwnIdentity, randomIdentity } from '@kokuin/token'
 import { HubClient } from '@kumiai/hub-client'
 import type { HubProtocol } from '@kumiai/hub-protocol'
+import type { AuthorizeHook } from '@kumiai/hub-server'
 import { createHub, createMemoryStore } from '@kumiai/hub-server'
 
 type HubTransports = DirectTransports<
@@ -20,7 +21,10 @@ export type TestHub = {
 }
 
 /** A real hub over in-process transports, plus one authenticated client for `identity`. */
-export function createTestHub(identity: OwnIdentity = randomIdentity()): TestHub {
+export function createTestHub(
+  identity: OwnIdentity = randomIdentity(),
+  authorize?: AuthorizeHook,
+): TestHub {
   const hubStore = createMemoryStore()
   const hubIdentity = randomIdentity()
   const serverTransports: HubTransports = new DirectTransports()
@@ -28,6 +32,7 @@ export function createTestHub(identity: OwnIdentity = randomIdentity()): TestHub
     transport: serverTransports.server,
     store: hubStore,
     identity: hubIdentity,
+    ...(authorize == null ? {} : { authorize }),
   })
 
   const clientTransports: HubTransports = new DirectTransports()

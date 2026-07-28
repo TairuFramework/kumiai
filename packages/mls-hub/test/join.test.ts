@@ -114,7 +114,7 @@ describe('processWelcomeFromSources', () => {
       target: 2,
       lowWater: 2,
     })
-    await pool.ensureStocked()
+    await pool.ensureStocked().value
     const { welcome, invite, ratchetTree, usedRef } = await inviteFromPool()
 
     const result = await processWelcomeFromSources({
@@ -163,7 +163,7 @@ describe('processWelcomeFromSources', () => {
       target: 1,
       lowWater: 1,
     })
-    await pool.ensureStocked()
+    await pool.ensureStocked().value
     const { welcome, invite, ratchetTree } = await inviteAStranger()
 
     // Trying every bundle until one decrypts would turn "wrong Welcome" into a crypto error with no
@@ -199,7 +199,7 @@ describe('processWelcomeFromSources', () => {
       target: 1,
       lowWater: 1,
     })
-    await pool.ensureStocked()
+    await pool.ensureStocked().value
     const { welcome, invite, ratchetTree } = await inviteFromPool()
 
     const result = await processWelcomeFromSources({
@@ -232,7 +232,7 @@ describe('processWelcomeFromSources', () => {
       target: 1,
       lowWater: 1,
     })
-    await pool.ensureStocked()
+    await pool.ensureStocked().value
     const { welcome, invite, ratchetTree } = await inviteFromPool()
 
     const result = await processWelcomeFromSources({
@@ -257,7 +257,7 @@ describe('processWelcomeFromSources', () => {
       target: 2,
       lowWater: 2,
     })
-    await pool.ensureStocked()
+    await pool.ensureStocked().value
     const lastResortStore = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
       identity: hub.identity,

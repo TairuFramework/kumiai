@@ -1,6 +1,7 @@
 import { ORDINARY_KEY_PACKAGE_LIFETIME_DAYS } from '@kumiai/mls'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
+import { HubRefusedError, HubRetryableError } from '../src/errors.js'
 import { createKeyPackagePool } from '../src/pool.js'
 import { createMemoryKeyPackagePoolStore } from '../src/pool-store.js'
 import { createTestHub, type TestHub } from './fixtures/hub.js'
@@ -47,7 +48,7 @@ describe('ensureStocked', () => {
       lowWater: 2,
     })
 
-    const result = await pool.ensureStocked()
+    const result = await pool.ensureStocked().value
 
     expect(result).toEqual({ minted: 3, depth: 3 })
     expect(upload).toHaveBeenCalledTimes(1)
@@ -76,7 +77,7 @@ describe('ensureStocked', () => {
       lowWater: 1,
     })
 
-    await pool.ensureStocked()
+    await pool.ensureStocked().value
 
     const records = await store.list(hub.identity.id)
     expect(await hub.hubStore.fetchKeyPackages(hub.identity.id, 1)).toEqual([
@@ -102,10 +103,10 @@ describe('ensureStocked', () => {
       target: 4,
       lowWater: 2,
     })
-    await pool.ensureStocked()
+    await pool.ensureStocked().value
     const upload = vi.spyOn(hub.client, 'uploadKeyPackages')
 
-    const result = await pool.ensureStocked()
+    const result = await pool.ensureStocked().value
 
     expect(result).toEqual({ minted: 0, depth: 4 })
     expect(upload).not.toHaveBeenCalled()
@@ -120,12 +121,12 @@ describe('ensureStocked', () => {
       target: 4,
       lowWater: 2,
     })
-    await pool.ensureStocked()
+    await pool.ensureStocked().value
     // Consume exactly one: depth 3 sits strictly between lowWater (2) and target (4).
     await hub.hubStore.fetchKeyPackages(hub.identity.id, 1)
     const upload = vi.spyOn(hub.client, 'uploadKeyPackages')
 
-    const result = await pool.ensureStocked()
+    const result = await pool.ensureStocked().value
 
     // A one-package top-up here would drip on every call while depth is in this band, burning the
     // hub's upload rate limit and cap for no benefit.
@@ -142,11 +143,11 @@ describe('ensureStocked', () => {
       target: 4,
       lowWater: 3,
     })
-    await pool.ensureStocked()
+    await pool.ensureStocked().value
     // Someone fetched two of them.
     await hub.hubStore.fetchKeyPackages(hub.identity.id, 2)
 
-    const result = await pool.ensureStocked()
+    const result = await pool.ensureStocked().value
 
     expect(result).toEqual({ minted: 2, depth: 4 })
   })
@@ -163,7 +164,7 @@ describe('ensureStocked', () => {
       lowWater: 1,
     })
 
-    await pool.ensureStocked()
+    await pool.ensureStocked().value
 
     // Upload-then-persist has a crash window in which the hub serves a package whose private half
     // was never written down, and every Welcome built from it fails at the joiner.
@@ -189,7 +190,7 @@ describe('ensureStocked', () => {
       notAfter: Math.floor(Date.now() / 1000) + 86_400,
     })
 
-    await pool.ensureStocked()
+    await pool.ensureStocked().value
 
     // Re-uploading it would risk a second copy of one init key in the pool — both would be served.
     // Minting fresh costs one key generation; the orphan stays readable for a late Welcome and is
@@ -208,7 +209,7 @@ describe('ensureStocked', () => {
       lowWater: 1,
       retainAfterExpiryDays: 7,
     })
-    await pool.ensureStocked()
+    await pool.ensureStocked().value
     const nowSeconds = Math.floor(Date.now() / 1000)
     await store.put(hub.identity.id, {
       ref: 'stale',
@@ -225,7 +226,7 @@ describe('ensureStocked', () => {
 
     // Depth is already at target, so this takes the no-op branch — which must still prune, or a
     // daily caller never prunes between refreshes.
-    await pool.ensureStocked()
+    await pool.ensureStocked().value
 
     const refs = (await store.list(hub.identity.id)).map((entry) => entry.ref)
     expect(refs).not.toContain('stale')
@@ -271,7 +272,7 @@ describe('ensureStocked', () => {
         lowWater: 1,
       })
 
-      const result = await pool.ensureStocked()
+      const result = await pool.ensureStocked().value
 
       expect(result.minted).toBe(1)
       // Without the keepRefs exception this would be empty: the just-minted record's notAfter
@@ -295,7 +296,10 @@ describe('ensureStocked', () => {
       lowWater: 2,
     })
 
-    const [first, second] = await Promise.all([pool.ensureStocked(), pool.ensureStocked()])
+    const [first, second] = await Promise.all([
+      pool.ensureStocked().value,
+      pool.ensureStocked().value,
+    ])
 
     expect(first).toEqual(second)
     expect(upload).toHaveBeenCalledTimes(1)
@@ -312,7 +316,7 @@ describe('bundles', () => {
       target: 2,
       lowWater: 2,
     })
-    await pool.ensureStocked()
+    await pool.ensureStocked().value
 
     const bundles = await pool.bundles()
 
@@ -335,7 +339,7 @@ describe('bundles', () => {
       target: 1,
       lowWater: 1,
     })
-    await pool.ensureStocked()
+    await pool.ensureStocked().value
     await store.put(hub.identity.id, {
       ref: 'corrupt',
       keyPackage: 'not-a-key-package',
@@ -346,5 +350,171 @@ describe('bundles', () => {
     // Narrowing a corrupt store to "you appear to have fewer packages" recreates the silent failure
     // this whole feature removes. Names the ref, never the material.
     await expect(pool.bundles()).rejects.toThrow(/key package record corrupt did not decode/)
+  })
+})
+
+describe('ensureStocked failure paths', () => {
+  test('a transport failure at the status stage returns a retryable error and prunes', async () => {
+    const store = createMemoryKeyPackagePoolStore()
+    // An expired record the prune must still remove even though the hub call failed.
+    await store.put(hub.identity.id, {
+      ref: 'dead',
+      keyPackage: 'a',
+      privatePackage: 'b',
+      notAfter: Math.floor(Date.now() / 1000) - 30 * 86_400,
+    })
+    vi.spyOn(hub.client, 'keyPackageStatus').mockRejectedValue(new Error('socket closed'))
+    const pool = createKeyPackagePool({ identity: hub.identity, client: hub.client, store })
+
+    const result = await pool.ensureStocked()
+
+    expect(result.isError()).toBe(true)
+    expect(result.error).toBeInstanceOf(HubRetryableError)
+    expect(result.error?.stage).toBe('status')
+    // Prune is local and independent of the hub. A caller that only ever hits transient failures
+    // would otherwise never prune at all.
+    expect(await store.list(hub.identity.id)).toHaveLength(0)
+  })
+
+  test('a transport failure at the upload stage returns a retryable error and keeps the records', async () => {
+    const store = createMemoryKeyPackagePoolStore()
+    vi.spyOn(hub.client, 'uploadKeyPackages').mockRejectedValue(new Error('socket closed'))
+    const pool = createKeyPackagePool({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+      target: 3,
+      lowWater: 2,
+    })
+
+    const result = await pool.ensureStocked()
+
+    expect(result.isError()).toBe(true)
+    expect(result.error?.stage).toBe('upload')
+    // The upload may have landed. Deleting these would strand the hub serving packages whose
+    // private halves are gone — the outage this store exists to prevent.
+    expect(await store.list(hub.identity.id)).toHaveLength(3)
+  })
+
+  // The path a host actually hits, end to end through a real hub. The refusal arrives as an enkaku
+  // RequestError whose `code` is HUB_AUTHORIZATION_DENIED and which is not an instance of
+  // AuthorizationDeniedError — classifying by `instanceof` alone would return it as retryable and
+  // the host would retry a settled refusal forever.
+  test('a real hub refusal throws instead of returning', async () => {
+    const denying = createTestHub(hub.identity, (req) => req.action !== 'keypackage/status')
+    try {
+      const pool = createKeyPackagePool({
+        identity: denying.identity,
+        client: denying.client,
+        store: createMemoryKeyPackagePoolStore(),
+      })
+
+      await expect(pool.ensureStocked()).rejects.toThrow(HubRefusedError)
+    } finally {
+      await denying.dispose()
+    }
+  })
+
+  test('a refused call reports its code and stage', async () => {
+    const denying = createTestHub(hub.identity, (req) => req.action !== 'keypackage/status')
+    try {
+      const pool = createKeyPackagePool({
+        identity: denying.identity,
+        client: denying.client,
+        store: createMemoryKeyPackagePoolStore(),
+      })
+
+      await pool.ensureStocked()
+      expect.unreachable('expected a throw')
+    } catch (error) {
+      expect((error as HubRefusedError).code).toBe('HUB_AUTHORIZATION_DENIED')
+      expect((error as HubRefusedError).stage).toBe('status')
+    } finally {
+      await denying.dispose()
+    }
+  })
+
+  // An oversized batch cannot reach the store at all: the upload schema caps `keyPackages` at 50
+  // entries, and nothing validates `target` against it. Retrying would re-mint a doomed batch on
+  // every call, so this has to be refused rather than returned.
+  test('a batch over the wire schema limit is refused', async () => {
+    const store = createMemoryKeyPackagePoolStore()
+    // 51 is the smallest deficit that trips the schema's `maxItems: 50`. Keep it at the minimum:
+    // every extra package is real key generation.
+    const pool = createKeyPackagePool({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+      target: 51,
+      lowWater: 51,
+    })
+
+    await expect(pool.ensureStocked()).rejects.toThrow(HubRefusedError)
+  })
+
+  test('a quota refusal from the real hub is retryable, not a throw', async () => {
+    // Fill the hub to its per-DID cap of 100 through the raw client, then let the pool try.
+    await hub.client.uploadKeyPackages(Array.from({ length: 50 }, (_, index) => `a-${index}`))
+    await hub.client.uploadKeyPackages(Array.from({ length: 50 }, (_, index) => `b-${index}`))
+    const store = createMemoryKeyPackagePoolStore()
+    // The hub reports 100 live packages, so force a top-up by raising the floor above it.
+    const pool = createKeyPackagePool({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+      target: 110,
+      lowWater: 105,
+    })
+
+    const result = await pool.ensureStocked()
+
+    expect(result.isError()).toBe(true)
+    expect(result.error).toBeInstanceOf(HubRetryableError)
+    expect(result.error?.code).toBe('HUB_KEYPACKAGE_QUOTA')
+  })
+
+  test('the next call mints against the hub count rather than re-uploading a failed batch', async () => {
+    const store = createMemoryKeyPackagePoolStore()
+    const upload = vi
+      .spyOn(hub.client, 'uploadKeyPackages')
+      .mockRejectedValueOnce(new Error('socket closed'))
+    const pool = createKeyPackagePool({
+      identity: hub.identity,
+      client: hub.client,
+      store,
+      target: 3,
+      lowWater: 2,
+    })
+
+    expect((await pool.ensureStocked()).isError()).toBe(true)
+    const stranded = (await store.list(hub.identity.id)).map((record) => record.ref)
+
+    const second = await pool.ensureStocked()
+
+    expect(second.value).toEqual({ minted: 3, depth: 3 })
+    // A fresh batch, never the stranded one: the hub does not dedupe, so re-uploading a package
+    // that did land would hand one init key to two inviters.
+    const secondUpload = upload.mock.calls[1]?.[0] as Array<string>
+    const strandedPackages = new Set(
+      (await store.list(hub.identity.id))
+        .filter((record) => stranded.includes(record.ref))
+        .map((record) => record.keyPackage),
+    )
+    expect(secondUpload.some((keyPackage) => strandedPackages.has(keyPackage))).toBe(false)
+    // The stranded records survive: that upload may have landed.
+    expect(await store.list(hub.identity.id)).toHaveLength(6)
+  })
+
+  test('concurrent callers share one failing run and one error instance', async () => {
+    const store = createMemoryKeyPackagePoolStore()
+    const status = vi
+      .spyOn(hub.client, 'keyPackageStatus')
+      .mockRejectedValue(new Error('socket closed'))
+    const pool = createKeyPackagePool({ identity: hub.identity, client: hub.client, store })
+
+    const [first, second] = await Promise.all([pool.ensureStocked(), pool.ensureStocked()])
+
+    expect(status).toHaveBeenCalledTimes(1)
+    expect(first.error).toBe(second.error)
   })
 })
