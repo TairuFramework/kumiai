@@ -36,7 +36,7 @@ nowhere to go:
 - `handlers.ts:541-545` — a `store.ack` failure inside `while (true)`. Correctly does not break: the
   frame stays pending and the client re-acks. A store whose ack never works redelivers every frame
   forever, silently.
-- `hub.ts:92` — `store.purge(...).catch(() => {})` on the timer. Correctly non-fatal and retried,
+- `hub.ts:96` — `store.purge(...).catch(() => {})` on the timer. Correctly non-fatal and retried,
   and a store that can never purge grows without bound with no signal.
 
 The sibling swallow at `handlers.ts:670-684` is **not** in scope: that path already carries its read
@@ -174,7 +174,7 @@ Both types are exported from `packages/hub-server/src/index.ts`.
 |---|---|---|---|
 | `handlers.ts:707-712` | `fetchLastResortKeyPackage` | `targetDID` | still returns 200 with the short batch |
 | `handlers.ts:541-545` | `ack` | `clientDID` | still does not break; the frame stays pending |
-| `hub.ts:92` | `purge` | — | still non-fatal, still retried next interval |
+| `hub.ts:96` | `purge` | — | still non-fatal, still retried next interval |
 
 Every one of these swallows is correct and stays. The only change is that the failure has somewhere
 to go.
