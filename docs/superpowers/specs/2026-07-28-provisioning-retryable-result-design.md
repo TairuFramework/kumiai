@@ -56,22 +56,44 @@ no hub code at all."*
 
 | Error | Class | Why |
 |---|---|---|
-| Anything with no hub code (transport, socket drop, hub mid-restart, timeout) | retryable | The hub never answered. rpc's default, and its reasoning holds: retrying a real-permanent costs a bounded schedule, not retrying a real-transient costs a peer that never comes back. |
-| `KeyPackageQuotaExceededError` | retryable | A cap clears as packages are consumed or expire. rpc deliberately excludes quotas from permanent for the same reason (`hub-mux.ts:257`). |
-| `AuthorizationDeniedError` | refused | Documented as *"a settled answer, not a transient failure: the caller must not retry it as though the hub were unreachable"* (`hub-protocol/src/errors.ts:42`). |
-| `InvalidPayloadError` | refused | The hub could not decode what we sent. A bug in this package or its caller. |
+| No recognisable code (transport, socket drop, hub mid-restart) | retryable | The hub never answered. rpc's default, and its reasoning holds: retrying a real-permanent costs a bounded schedule, not retrying a real-transient costs a peer that never comes back. |
+| `HUB_KEYPACKAGE_QUOTA` | retryable | A cap clears as packages are consumed or expire. rpc deliberately excludes quotas from permanent for the same reason (`hub-mux.ts:257`). |
+| `HUB_AUTHORIZATION_DENIED` | refused | Documented as *"a settled answer, not a transient failure: the caller must not retry it as though the hub were unreachable"* (`hub-protocol/src/errors.ts:42`). |
+| `HUB_INVALID_PAYLOAD` | refused | The hub could not decode what we sent. A bug in this package or its caller. |
+| Enkaku `EK02` (access denied), `EK06` (message too large), `EK08` (invalid message) | refused | Each needs a change before the call can ever succeed — credentials, or a `target` that fits the wire schema. |
+| Enkaku `EK03`, `EK04` (server limits), `EK05` (timeout), `EK01` (handler error) | retryable | Load or an unclassified server-side failure. |
 
-Named hub errors are matched by `instanceof` **and** `error.name`. A hub reached over the tunnel
-rebuilds the error from its wire code via `hubErrorFromCode`, and a host bundling two copies of
-`hub-protocol` breaks `instanceof` alone — rpc had to defend against exactly this
-(`hub-mux.ts:251-253`), and getting it wrong here turns a refusal back into a silent retry loop.
+### How the classifier actually identifies an error
+
+Verified against a real hub over in-process transports: a hub error reaching the caller through
+`HubClient` is an enkaku `RequestError` with `constructor.name` `RequestError`, `name` `'Error'`,
+and `code` `'HUB_KEYPACKAGE_QUOTA'` — **not** an instance of `KeyPackageQuotaExceededError`.
+`hub-client` is "a wrapper and nothing more"; nothing rebuilds the class, and no production code
+calls `hubErrorFromCode`.
+
+So the code string is the primary and only reliable signal:
+
+1. `error.code`, when it is a string — the real-hub path.
+2. `hubErrorCodeOf(error)` — a locally-thrown store error, or a double that throws the real class.
+3. `error.name` against the hub error class names — a rebuilt error, or a host bundling two copies
+   of `hub-protocol`, which breaks `instanceof` alone. rpc had to defend against exactly this
+   (`hub-mux.ts:251-253`).
+
+Identifying only by `instanceof` and `name` would class **every** real hub answer as retryable,
+including `AuthorizationDenied` — the silent retry loop this whole rule exists to prevent.
+
+`EK08` is reachable today rather than theoretical: the upload schema caps `keyPackages` at
+`maxItems: 50` (`hub-protocol/src/protocol.ts:184`), and nothing validates `target` against it. A
+pool configured with `target: 200` mints a full batch, fails the schema, and would repeat forever
+if that classified as retryable.
 
 Keeping quota retryable does not cause a mint loop: if the hub is genuinely at cap, the next
 `keyPackageStatus()` reports a count at or above `lowWater` and no top-up is attempted.
 
 ## API
 
-New dependency: `@sozai/result` `^0.2.0` — a catalog entry and an `mls-hub` dep. It is already
+New dependencies: `@sozai/result` `^0.2.0` — a catalog entry and an `mls-hub` dep — and `@enkaku/protocol`
+promoted from a devDependency to a dependency, for its `ErrorCodes` constants. `@sozai/result` is already
 published and already used inside sozai (`packages/execution`). `AsyncResult` is thenable, so
 `await pool.ensureStocked()` yields a `Result`, and reading `.value` on the error branch throws — a
 host that ignores the union still cannot read a fabricated depth.
@@ -199,6 +221,12 @@ Pin, for each entry point:
 - Transport failure at the status stage returns an error `Result`, `stage: 'status'`, `code: null`.
 - `KeyPackageQuotaExceededError` at the upload stage returns an error `Result`, not a throw.
 - `AuthorizationDeniedError` throws `HubRefusedError` carrying the code and stage.
+- A refusal arriving from the **real hub** — as a `RequestError` whose `code` is
+  `HUB_AUTHORIZATION_DENIED`, matching neither the class nor the name — throws `HubRefusedError`.
+  This is the path a host actually hits; classifying it by `instanceof` alone silently retries
+  forever.
+- An oversized batch (`target` above the schema's `maxItems: 50`) throws `HubRefusedError` with
+  code `EK08`, rather than re-minting the batch on every call.
 - A hub error arriving with the right `name` but a foreign class classifies identically to the real
   class — the double-bundling guard.
 - Prune runs on every failure path, including both status and upload stages.
