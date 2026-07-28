@@ -2,8 +2,15 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Stage:** planning
+**Stage:** executing
 **Mode:** tasks
+
+**Phase 1 is complete and handed off** (2026-07-28). `sozai` `feat/errors-reach-a-sink`,
+`f7335f2..916f48c`, three commits, each reviewed clean. Phase 2 is blocked on the user merging and
+publishing `@sozai/log` 0.3.0; Task 4 Step 1 is the gate.
+
+**Correction to the Global Constraints below:** kumiai's branch is `feat/hub-server-error-sink`, not
+`feat/errors-reach-a-sink`.
 
 **Goal:** Give every silently-swallowed failure in `@kumiai/rpc` and `@kumiai/hub-server` somewhere to go, by adding a root logger and a shared reporter to `@sozai/log` and an `onStoreError` hook to the hub server.
 
