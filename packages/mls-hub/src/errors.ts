@@ -1,5 +1,6 @@
 import { ErrorCodes } from '@enkaku/protocol'
 import { HUB_ERROR_CODES, type HubErrorCode, hubErrorCodeOf } from '@kumiai/hub-protocol'
+import { Result } from '@sozai/result'
 
 /** Which hub call failed. `'status'`: nothing was attempted. `'upload'`: attempted, outcome unknown. */
 export type HubCallStage = 'status' | 'upload'
@@ -107,4 +108,31 @@ export function toRetryableOrThrow(error: unknown, stage: HubCallStage): HubRetr
     throw new HubRefusedError(stage, code, error)
   }
   return new HubRetryableError(stage, code, error)
+}
+
+/**
+ * Run a hub call and turn a failure into a `Result` instead of a throw — except a refusal, which
+ * still throws THROUGH this helper, since `toRetryableOrThrow` throws `HubRefusedError` rather than
+ * returning it.
+ *
+ * `pruneNow` runs before classification and on failure only, so a refusal still gets the local prune
+ * before it throws past everything below. Its own failure is swallowed: the caller's actionable
+ * signal is the hub outcome, and the next call retries this prune anyway, so a store failure here
+ * must not displace it.
+ */
+export const attempt = async <T>(
+  stage: HubCallStage,
+  call: () => Promise<T>,
+  pruneNow: () => Promise<void>,
+): Promise<Result<T, HubRetryableError>> => {
+  try {
+    return Result.ok(await call())
+  } catch (error) {
+    try {
+      await pruneNow()
+    } catch {
+      // See doc comment: opportunistic, must not displace the hub outcome below.
+    }
+    return Result.error(toRetryableOrThrow(error, stage))
+  }
 }

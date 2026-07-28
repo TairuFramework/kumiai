@@ -10,7 +10,7 @@ import {
 } from '@kumiai/mls'
 import { AsyncResult, Result } from '@sozai/result'
 
-import { type HubRetryableError, toRetryableOrThrow } from './errors.js'
+import { attempt, type HubRetryableError } from './errors.js'
 import type { KeyPackagePoolStore, KeyPackageRecord } from './pool-store.js'
 import { toBundles } from './records.js'
 
@@ -33,6 +33,8 @@ export type KeyPackagePoolParams = {
   /** Keep a record this many days past its `notAfter`. Default 7, must be `>= 0`. */
   retainAfterExpiryDays?: number
 }
+
+export type StockResult = Result<{ minted: number; depth: number }, HubRetryableError>
 
 export type KeyPackagePool = {
   /**
@@ -87,8 +89,6 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
     )
   }
 
-  type StockResult = Result<{ minted: number; depth: number }, HubRetryableError>
-
   const ownerDID = identity.id
   let inFlight: Promise<StockResult> | null = null
 
@@ -129,21 +129,15 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
   }
 
   const run = async (): Promise<StockResult> => {
-    let count: number
-    try {
-      ;({ count } = await client.keyPackageStatus())
-    } catch (error) {
-      // Prune anyway: it is local, and a caller that only ever hits transient failures would
-      // otherwise never prune at all. Before the classifier, since a refusal throws past it.
-      try {
-        await prune(await store.list(ownerDID), new Set())
-      } catch {
-        // Opportunistic: the caller's actionable signal is the hub outcome below, and the next
-        // call retries this prune anyway. A store failure here must not displace it.
-      }
-      const retryable = toRetryableOrThrow(error, 'status')
-      return Result.error(retryable)
-    }
+    // Prune anyway on failure: it is local, and a caller that only ever hits transient failures
+    // would otherwise never prune at all.
+    const status = await attempt(
+      'status',
+      () => client.keyPackageStatus(),
+      async () => prune(await store.list(ownerDID), new Set()),
+    )
+    if (status.isError()) return Result.error(status.error)
+    const { count } = status.value
 
     let minted: Array<KeyPackageRecord> = []
     if (count < lowWater) {
@@ -157,25 +151,18 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
       // the only one that keeps the hub from serving a package the inviter would reject.
       const notAfter = Math.min(...records.map((record) => record.notAfter))
       const keepRefs = new Set(records.map((record) => record.ref))
-      try {
-        await client.uploadKeyPackages(
-          records.map((record) => record.keyPackage),
-          notAfter,
-        )
-      } catch (error) {
-        // The records stay: the upload may have landed, and deleting them would strand the hub
-        // serving packages whose private halves are gone. `keepRefs` guards them against a forward
-        // clock correction between the mint and the prune's own clock read. Before the classifier,
-        // since a refusal throws past it.
-        try {
-          await prune(await store.list(ownerDID), keepRefs)
-        } catch {
-          // Opportunistic: the caller's actionable signal is the hub outcome below, and the next
-          // call retries this prune anyway. A store failure here must not displace it.
-        }
-        const retryable = toRetryableOrThrow(error, 'upload')
-        return Result.error(retryable)
-      }
+      // The records stay on failure: the upload may have landed, and deleting them would strand the
+      // hub serving packages whose private halves are gone.
+      const uploaded = await attempt(
+        'upload',
+        () =>
+          client.uploadKeyPackages(
+            records.map((record) => record.keyPackage),
+            notAfter,
+          ),
+        async () => prune(await store.list(ownerDID), keepRefs),
+      )
+      if (uploaded.isError()) return Result.error(uploaded.error)
       minted = records
     }
     // Prune on the no-op path too, or a daily caller never prunes between top-ups.

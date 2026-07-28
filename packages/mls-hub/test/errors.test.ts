@@ -2,7 +2,7 @@ import { ErrorCodes } from '@enkaku/protocol'
 import { AuthorizationDeniedError, KeyPackageQuotaExceededError } from '@kumiai/hub-protocol'
 import { describe, expect, test } from 'vitest'
 
-import { HubRefusedError, HubRetryableError, toRetryableOrThrow } from '../src/errors.js'
+import { attempt, HubRefusedError, HubRetryableError, toRetryableOrThrow } from '../src/errors.js'
 
 describe('toRetryableOrThrow', () => {
   test('a transport failure is retryable and carries no code', () => {
@@ -95,5 +95,19 @@ describe('toRetryableOrThrow', () => {
     const wire = Object.assign(new Error('who knows'), { code: 'SOMETHING_NEW' })
 
     expect(toRetryableOrThrow(wire, 'status').code).toBe('SOMETHING_NEW')
+  })
+})
+
+describe('attempt', () => {
+  // `toRetryableOrThrow` throws `HubRefusedError` rather than returning it, and `attempt` must let
+  // that throw pass through rather than swallowing it into an error `Result`.
+  test('a refusal throws through rather than becoming an error Result', async () => {
+    await expect(
+      attempt(
+        'upload',
+        () => Promise.reject(new AuthorizationDeniedError('denied')),
+        () => Promise.resolve(),
+      ),
+    ).rejects.toBeInstanceOf(HubRefusedError)
   })
 })

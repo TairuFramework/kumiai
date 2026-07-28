@@ -12,7 +12,7 @@ import {
 } from '@kumiai/mls'
 import { AsyncResult, Result } from '@sozai/result'
 
-import { type HubRetryableError, toRetryableOrThrow } from './errors.js'
+import { attempt, type HubRetryableError } from './errors.js'
 import { toBundles } from './records.js'
 import type { LastResortRecord, LastResortStore } from './store.js'
 
@@ -32,6 +32,8 @@ export type LastResortProvisionerParams = {
   /** Keep a retired record this many days past its `notAfter`. Default 7, must be `>= 0`. */
   retainAfterExpiryDays?: number
 }
+
+export type ProvisionResult = Result<{ rotated: boolean; ref: string }, HubRetryableError>
 
 export type LastResortProvisioner = {
   /**
@@ -88,8 +90,6 @@ export function createLastResortProvisioner(
       `mls-hub: retainAfterExpiryDays must be a finite number of 0 or more, got ${retainAfterExpiryDays}`,
     )
   }
-
-  type ProvisionResult = Result<{ rotated: boolean; ref: string }, HubRetryableError>
 
   const ownerDID = identity.id
   let inFlight: Promise<ProvisionResult> | null = null
@@ -164,19 +164,12 @@ export function createLastResortProvisioner(
       candidate.uploadedAt == null &&
       candidate.notAfter - nowSeconds > rotateWithinDays * DAY_SECONDS
     ) {
-      try {
-        await uploadToHub(candidate)
-      } catch (error) {
-        // Before the classifier, since a refusal throws past it.
-        try {
-          await prune(records, candidate.ref)
-        } catch {
-          // Opportunistic: the caller's actionable signal is the hub outcome below, and the next
-          // call retries this prune anyway. A store failure here must not displace it.
-        }
-        const retryable = toRetryableOrThrow(error, 'upload')
-        return Result.error(retryable)
-      }
+      const uploaded = await attempt(
+        'upload',
+        () => uploadToHub(candidate),
+        () => prune(records, candidate.ref),
+      )
+      if (uploaded.isError()) return Result.error(uploaded.error)
       await markUploaded(candidate)
       await prune(records, candidate.ref)
       return Result.ok({ rotated: true, ref: candidate.ref })
@@ -189,36 +182,23 @@ export function createLastResortProvisioner(
       // provisioned until the next rotation falls due — the floor is gone and nothing says so.
       // Re-uploading is safe here precisely because the slot replaces in place, which is why the
       // ordinary pool cannot do the same thing.
-      let lastResort: string | null
-      try {
-        ;({ lastResort } = await client.keyPackageStatus())
-      } catch (error) {
-        // Skip the repair, write nothing that would suppress it: the record is left exactly as it
-        // was, so the next successful call performs the readback instead. Before the classifier,
-        // since a refusal throws past it.
-        try {
-          await prune(records, candidate.ref)
-        } catch {
-          // Opportunistic: the caller's actionable signal is the hub outcome below, and the next
-          // call retries this prune anyway. A store failure here must not displace it.
-        }
-        const retryable = toRetryableOrThrow(error, 'status')
-        return Result.error(retryable)
-      }
+      //
+      // On failure, skip the repair and write nothing that would suppress it: the record is left
+      // exactly as it was, so the next successful call performs the readback instead.
+      const status = await attempt(
+        'status',
+        () => client.keyPackageStatus(),
+        () => prune(records, candidate.ref),
+      )
+      if (status.isError()) return Result.error(status.error)
+      const { lastResort } = status.value
       if (lastResort !== (await keyPackageDigest(candidate.keyPackage))) {
-        try {
-          await uploadToHub(candidate)
-        } catch (error) {
-          // Before the classifier, since a refusal throws past it.
-          try {
-            await prune(records, candidate.ref)
-          } catch {
-            // Opportunistic: the caller's actionable signal is the hub outcome below, and the next
-            // call retries this prune anyway. A store failure here must not displace it.
-          }
-          const retryable = toRetryableOrThrow(error, 'upload')
-          return Result.error(retryable)
-        }
+        const uploaded = await attempt(
+          'upload',
+          () => uploadToHub(candidate),
+          () => prune(records, candidate.ref),
+        )
+        if (uploaded.isError()) return Result.error(uploaded.error)
         await markUploaded(candidate)
         await prune(records, candidate.ref)
         return Result.ok({ rotated: true, ref: candidate.ref })
@@ -229,22 +209,15 @@ export function createLastResortProvisioner(
     }
 
     const minted = await mint()
-    try {
-      await uploadToHub(minted)
-    } catch (error) {
-      // `minted.ref` is kept: a forward clock correction between the mint and the prune's own clock
-      // read could otherwise put the just-minted record past the cutoff and delete the private half
-      // of a package the hub may already be serving. Before the classifier, since a refusal throws
-      // past it.
-      try {
-        await prune([...records, minted], minted.ref)
-      } catch {
-        // Opportunistic: the caller's actionable signal is the hub outcome below, and the next
-        // call retries this prune anyway. A store failure here must not displace it.
-      }
-      const retryable = toRetryableOrThrow(error, 'upload')
-      return Result.error(retryable)
-    }
+    // `minted.ref` is kept on failure: a forward clock correction between the mint and the prune's
+    // own clock read could otherwise put the just-minted record past the cutoff and delete the
+    // private half of a package the hub may already be serving.
+    const uploaded = await attempt(
+      'upload',
+      () => uploadToHub(minted),
+      () => prune([...records, minted], minted.ref),
+    )
+    if (uploaded.isError()) return Result.error(uploaded.error)
     await markUploaded(minted)
     await prune([...records, minted], minted.ref)
     return Result.ok({ rotated: true, ref: minted.ref })
