@@ -89,9 +89,11 @@ export type HubStoreErrorHook = (event: HubStoreErrorEvent) => void
  * What the hub did INSTEAD of failing, and what a permanent failure costs.
  *
  * Keyed by `method`, but the `fetchLastResortKeyPackage` text describes the top-up call site
- * specifically (of the three places that method is called, only that one reports). A fourth call
- * site would silently inherit this text even where it's wrong — reuse the method key only if the
- * text also holds there, otherwise a call site needs its own discriminator.
+ * specifically (of the three places that method is called, only that one reports). The trigger to
+ * watch for is not another `method` arriving — `getSubscribers` already did, and the method-keyed
+ * union discriminated it correctly — it's a SECOND reporting call site of the SAME method: the
+ * moment either of the other two `fetchLastResortKeyPackage` calls starts reporting, it inherits
+ * this text even where it's wrong, and the fix is a site discriminator alongside `method`.
  */
 const STORE_ERROR_CONSEQUENCE: Record<HubStoreErrorEvent['method'], string> = {
   fetchLastResortKeyPackage:
@@ -104,8 +106,8 @@ const STORE_ERROR_CONSEQUENCE: Record<HubStoreErrorEvent['method'], string> = {
   purge:
     'Retried on the next interval. A purge that keeps failing means the store grows without bound.',
   getSubscribers:
-    'The frame is committed and queued; only the live push to connected subscribers was skipped, ' +
-    'so each of them receives it on its next receive drain instead. A getSubscribers that keeps ' +
+    'The frame is committed and queued, but the live push to connected subscribers was skipped: ' +
+    'each of them stops receiving new frames until it reconnects. A getSubscribers that keeps ' +
     'failing means the hub has silently degraded from push to pull for every publish.',
 }
 
@@ -399,8 +401,8 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         const logPosition = ctx.param.retain === 'log' ? { logPosition: sequenceID } : {}
         // Live-deliver to currently-connected subscribers (minus the sender). A failure here must
         // not fail the request: `publish` committed the append and its delivery rows in one
-        // transaction, so every subscriber still receives the frame from its mailbox on the next
-        // receive drain. Failing would also make the miss permanent — the caller's `publishID`
+        // transaction, so the frame stays pending in the store and reaches each subscriber on its
+        // next reconnect. Failing would also make the miss permanent — the caller's `publishID`
         // retry returns `deduped`, and the block below is gated on `!deduped`.
         let subscribers: Array<string>
         try {

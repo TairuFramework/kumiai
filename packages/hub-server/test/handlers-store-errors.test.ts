@@ -272,6 +272,8 @@ describe('an ack the store refused is reported without stopping the loop', () =>
       expect(records[0]?.category).toEqual(['kumiai', 'hub-server'])
       expect(records[0]?.level).toBe('error')
       expect(records[0]?.message).toContain('redelivers every frame forever')
+      // Pins subjectOf's `ack` arm: without it, nothing here would say WHICH DID's acks are stuck.
+      expect(records[0]?.message).toContain(`for ${RECEIVER}`)
     } finally {
       reset()
     }
