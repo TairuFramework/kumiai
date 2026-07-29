@@ -58,14 +58,14 @@ repo, which is the point of having them written down.
      whoever gates publish authorization on the commit topic. Plus one open question worth an
      afternoon: whether a replayed genuine external commit can steer anything once the group has
      moved on. It was never tested, and "plausible" is not a security property.
-2. **Errors reach a sink** — **in flight 2026-07-28** on `feat/errors-reach-a-sink`, spec at
-   [`docs/superpowers/specs/2026-07-28-errors-reach-a-sink-design.md`](../../superpowers/specs/2026-07-28-errors-reach-a-sink-design.md).
-   Both halves of the retired `logging-reaches-a-sink` doc: rpc reports into a logger a default
-   `setup()` routes nowhere, and `hub-server` has no sink at all, so a permanently broken
-   last-resort slot read returns 200 forever. The rpc half turned out **not** to be blocked — a root
-   logger in `@sozai/log`'s `getDefaultConfig()` closes it, verified by probe, and `@sozai` is on
-   this machine. Ships in two parts across two repos; kumiai cannot land until sozai publishes
-   0.3.0.
+2. **Errors reach a sink** — **done 2026-07-29**, summary at
+   [`completed/2026-07-29-errors-reach-a-sink.complete.md`](./completed/2026-07-29-errors-reach-a-sink.complete.md).
+   Both halves of the retired `logging-reaches-a-sink` doc are closed: a root logger in
+   `@sozai/log`'s `getDefaultConfig()` (released as 0.3.0) means rpc's reports no longer vanish into
+   a default `setup()` that routes them nowhere, and `hub-server` gained an `onStoreError` hook at
+   the three sites where a store failure is deliberately not a request failure — including the
+   last-resort slot read that returned 200 forever. Residuals in
+   [`backlog/2026-07-29-hub-server-store-error-residuals.md`](./backlog/2026-07-29-hub-server-store-error-residuals.md).
 
 ## Phase 2 — test gaps
 
