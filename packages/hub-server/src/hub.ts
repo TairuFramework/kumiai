@@ -75,13 +75,17 @@ export type HubInstance = {
 
 export function createHub(params: CreateHubParams): HubInstance {
   const registry = new HubClientRegistry()
+  // One reporter for the whole hub. Its type IS `HubStoreErrorHook`, so `createHandlers`' own
+  // wrapper delegates to this instance rather than building a second one from the same hook —
+  // which matters the moment a reporter holds state, as the throttling the README names would.
+  const storeErrorReporter = createStoreErrorReporter(params.onStoreError)
   const handlers = createHandlers({
     registry,
     store: params.store,
     authorize: params.authorize,
     rateLimits: params.rateLimits,
     keyPackageFetchLimits: params.keyPackageFetchLimits,
-    onStoreError: params.onStoreError,
+    onStoreError: storeErrorReporter,
   })
   const limits: Partial<ResourceLimits> = {
     ...params.limits,
@@ -100,7 +104,6 @@ export function createHub(params: CreateHubParams): HubInstance {
   if (params.purge !== false) {
     const interval = params.purge?.interval ?? 3_600_000
     const olderThan = params.purge?.olderThan ?? 604_800
-    const storeErrorReporter = createStoreErrorReporter(params.onStoreError)
     const purgeTimer = setInterval(() => {
       params.store.purge({ olderThan }).catch((error: unknown) => {
         // Purge failures are non-fatal; retried on the next interval

@@ -560,9 +560,11 @@ describe('a store failure the hub declines to turn into a request failure is rep
   })
 
   /**
-   * The purge timer builds its own reporter from `params.onStoreError`, so it would pass even if
-   * `createHub` forgot to FORWARD the hook to `createHandlers`. This drives a handler-level
-   * failure through a real client to pin the forwarding.
+   * Since the reporter hoist, the purge timer and `createHandlers` both close over the one
+   * `storeErrorReporter` `createHub` builds from `params.onStoreError` — so a purge-only test can
+   * no longer tell "forwarded to `createHandlers`" apart from "not forwarded". This drives a
+   * handler-level failure through a real client to pin that the shared reporter reaches
+   * `createHandlers` too.
    */
   test('a handler-level store failure on a createHub hub reaches the hook', async () => {
     const boom = new Error('fetchLastResortKeyPackage is not a function')

@@ -70,14 +70,18 @@ function normalizeAuthorizeDecision(decision: AuthorizeDecision): {
  * A `HubStore` operation that failed at a point where the hub deliberately does NOT fail the
  * request. Each of these swallows is correct — see the call sites for why — and each was, until
  * this hook existed, completely silent.
+ *
+ * A union rather than a flat record: each variant carries the subject its own site has, so a site
+ * cannot forget one and a topic-keyed site cannot be described with a DID.
  */
-export type HubStoreErrorEvent = {
-  /** The HubStore method that threw. The operator's fix is to make this method work. */
-  method: 'fetchLastResortKeyPackage' | 'ack' | 'purge'
-  /** The DID the operation was for, where it names one. Absent for `purge`. */
-  did?: string
-  error: unknown
-}
+export type HubStoreErrorEvent =
+  | { method: 'purge'; error: unknown }
+  /** The DID whose ack the store refused. */
+  | { method: 'ack'; did: string; error: unknown }
+  /** The DID whose last-resort slot was being read. */
+  | { method: 'fetchLastResortKeyPackage'; did: string; error: unknown }
+  /** The topic whose subscriber list could not be read for live fan-out. */
+  | { method: 'getSubscribers'; topicID: string; error: unknown }
 
 export type HubStoreErrorHook = (event: HubStoreErrorEvent) => void
 
@@ -85,9 +89,11 @@ export type HubStoreErrorHook = (event: HubStoreErrorEvent) => void
  * What the hub did INSTEAD of failing, and what a permanent failure costs.
  *
  * Keyed by `method`, but the `fetchLastResortKeyPackage` text describes the top-up call site
- * specifically (of the three places that method is called, only that one reports). A fourth call
- * site would silently inherit this text even where it's wrong — reuse the method key only if the
- * text also holds there, otherwise a call site needs its own discriminator.
+ * specifically (of the three places that method is called, only that one reports). The trigger to
+ * watch for is not another `method` arriving — `getSubscribers` already did, and the method-keyed
+ * union discriminated it correctly — it's a SECOND reporting call site of the SAME method: the
+ * moment either of the other two `fetchLastResortKeyPackage` calls starts reporting, it inherits
+ * this text even where it's wrong, and the fix is a site discriminator alongside `method`.
  */
 const STORE_ERROR_CONSEQUENCE: Record<HubStoreErrorEvent['method'], string> = {
   fetchLastResortKeyPackage:
@@ -99,9 +105,27 @@ const STORE_ERROR_CONSEQUENCE: Record<HubStoreErrorEvent['method'], string> = {
     'redelivers every frame forever.',
   purge:
     'Retried on the next interval. A purge that keeps failing means the store grows without bound.',
+  getSubscribers:
+    'The frame is committed and queued, but the live push to connected subscribers was skipped: ' +
+    'each of them stops receiving new frames until it reconnects. A getSubscribers that keeps ' +
+    'failing means the hub has silently degraded from push to pull for every publish.',
 }
 
 const reportStoreError = getReporter(['kumiai', 'hub-server'], '@kumiai/hub-server')
+
+/** What the failed operation was about, for the default log line: a DID for the per-recipient
+ * methods, a topic for fan-out, nothing for a store-wide purge. */
+function subjectOf(event: HubStoreErrorEvent): string {
+  switch (event.method) {
+    case 'purge':
+      return ''
+    case 'getSubscribers':
+      return ` on topic ${event.topicID}`
+    case 'ack':
+    case 'fetchLastResortKeyPackage':
+      return ` for ${event.did}`
+  }
+}
 
 /**
  * Route a swallowed store failure to the host's hook, or to the reporter when it wired none.
@@ -116,7 +140,7 @@ export function createStoreErrorReporter(
   return (event) => {
     if (onStoreError == null) {
       reportStoreError(
-        `HubStore.${event.method} failed${event.did == null ? '' : ` for ${event.did}`}. ` +
+        `HubStore.${event.method} failed${subjectOf(event)}. ` +
           `${STORE_ERROR_CONSEQUENCE[event.method]} Wire \`onStoreError\` to handle this.`,
         event.error,
       )
@@ -375,8 +399,18 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         // store just minted it for this accepted append); a mailbox publish has none, since its
         // recipient's own delivery-queue position isn't usable as a durable log cursor.
         const logPosition = ctx.param.retain === 'log' ? { logPosition: sequenceID } : {}
-        // Live-deliver to currently-connected subscribers (minus the sender).
-        const subscribers = await store.getSubscribers(topicID)
+        // Live-deliver to currently-connected subscribers (minus the sender). A failure here must
+        // not fail the request: `publish` committed the append and its delivery rows in one
+        // transaction, so the frame stays pending in the store and reaches each subscriber on its
+        // next reconnect. Failing would also make the miss permanent — the caller's `publishID`
+        // retry returns `deduped`, and the block below is gated on `!deduped`.
+        let subscribers: Array<string>
+        try {
+          subscribers = await store.getSubscribers(topicID)
+        } catch (error) {
+          storeErrorReporter({ method: 'getSubscribers', topicID, error })
+          return { sequenceID }
+        }
         for (const recipientDID of subscribers) {
           if (recipientDID === senderDID) continue
           const client = registry.getClient(recipientDID)
@@ -455,7 +489,11 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       if (!didLimiter.tryConsume(clientDID)) {
         throw new HandlerError({ code: 'EK01', message: 'Unsubscribe rate limit exceeded for DID' })
       }
-      await store.unsubscribe(clientDID, topicID)
+      try {
+        await store.unsubscribe(clientDID, topicID)
+      } catch (error) {
+        rethrowAsHandlerError(error)
+      }
       return { unsubscribed: true }
     }) as RequestHandler<HubProtocol, 'hub/v1/unsubscribe'>,
 

@@ -1,5 +1,6 @@
 // biome-ignore-all lint/suspicious/noExplicitAny: handlers are dispatched through a loosely-typed map in these tests
 import type { HubStore, StoredMessage } from '@kumiai/hub-protocol'
+import { toB64 } from '@sozai/codec'
 import { getDefaultConfig, reset, setup } from '@sozai/log'
 import { describe, expect, test, vi } from 'vitest'
 
@@ -271,9 +272,68 @@ describe('an ack the store refused is reported without stopping the loop', () =>
       expect(records[0]?.category).toEqual(['kumiai', 'hub-server'])
       expect(records[0]?.level).toBe('error')
       expect(records[0]?.message).toContain('redelivers every frame forever')
+      // Pins subjectOf's `ack` arm: without it, nothing here would say WHICH DID's acks are stuck.
+      expect(records[0]?.message).toContain(`for ${RECEIVER}`)
     } finally {
       reset()
     }
+  })
+})
+
+describe('a publish whose fan-out cannot read its subscribers still succeeds', () => {
+  const payload = toB64(new TextEncoder().encode('hello'))
+
+  /**
+   * `getSubscribers` runs AFTER `store.publish` committed the append and its delivery rows in one
+   * transaction, so the frame is already durable for every subscriber. Failing the request would
+   * report a lie AND make the loss permanent: the caller's `publishID` retry returns
+   * `deduped: true`, which gates the whole fan-out block off.
+   */
+  test('the failure reaches the hook and the frame stays readable', async () => {
+    const boom = new Error('subscriber index is gone')
+    const store = failingStore('getSubscribers', boom)
+    const seen: Array<HubStoreErrorEvent> = []
+    const handlers = createHandlers({
+      store,
+      registry: new HubClientRegistry(),
+      onStoreError: (event) => void seen.push(event),
+    })
+
+    await (handlers['hub/v1/subscribe'] as any)(
+      reqCtx('hub/v1/subscribe', { topicID: 'topic-1' }, RECEIVER),
+    )
+    const result = await (handlers['hub/v1/publish'] as any)(
+      reqCtx('hub/v1/publish', { topicID: 'topic-1', payload: payload, retain: 'log' }),
+    )
+
+    expect(result).toMatchObject({ sequenceID: expect.any(String) })
+    expect(seen).toEqual([{ method: 'getSubscribers', topicID: 'topic-1', error: boom }])
+
+    // The point of the swallow: the frame is durable regardless of the failed live push, so the
+    // subscriber gets it by pulling. An assertion that only checked the report would pass just as
+    // well if the publish had silently dropped the frame.
+    const fetched = await (handlers['hub/v1/topic/fetch'] as any)(
+      reqCtx('hub/v1/topic/fetch', { topicID: 'topic-1' }, RECEIVER),
+    )
+    expect(fetched.messages).toHaveLength(1)
+    expect(fetched.messages[0]).toMatchObject({ senderDID: REQUESTER, payload: payload })
+  })
+
+  /** A hook is a notice, not a dependency — same rule as the other sites. */
+  test('a hook that throws does not fail the publish', async () => {
+    const store = failingStore('getSubscribers', new Error('subscriber index is gone'))
+    const handlers = createHandlers({
+      store,
+      registry: new HubClientRegistry(),
+      onStoreError: () => {
+        throw new Error('the host reporting path is itself broken')
+      },
+    })
+
+    const result = await (handlers['hub/v1/publish'] as any)(
+      reqCtx('hub/v1/publish', { topicID: 'topic-1', payload: payload, retain: 'log' }),
+    )
+    expect(result).toMatchObject({ sequenceID: expect.any(String) })
   })
 })
 
@@ -297,6 +357,31 @@ describe('the purge consequence, exercised directly against the exported reporte
       expect(records[0]?.category).toEqual(['kumiai', 'hub-server'])
       expect(records[0]?.level).toBe('error')
       expect(records[0]?.message).toContain('grows without bound')
+    } finally {
+      reset()
+    }
+  })
+})
+
+/**
+ * The fan-out variant is the first event whose subject is a topic rather than a DID, so the
+ * default log line has to name it. Exercised directly against the exported reporter for the same
+ * reason as `purge` above — the site that produces it is covered separately in the publish tests.
+ */
+describe('the publish fan-out consequence, exercised directly against the exported reporter', () => {
+  test('with no hook wired, a getSubscribers failure names the topic and the push-to-pull consequence', () => {
+    const boom = new Error('subscriber index is gone')
+    const records: Array<CapturedRecord> = []
+    setupCapture(records)
+    try {
+      const report = createStoreErrorReporter()
+      report({ method: 'getSubscribers', topicID: 'topic-1', error: boom })
+
+      expect(records).toHaveLength(1)
+      expect(records[0]?.category).toEqual(['kumiai', 'hub-server'])
+      expect(records[0]?.level).toBe('error')
+      expect(records[0]?.message).toContain('on topic topic-1')
+      expect(records[0]?.message).toContain('degraded from push to pull')
     } finally {
       reset()
     }
