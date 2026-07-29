@@ -111,13 +111,6 @@ const STORE_ERROR_CONSEQUENCE: Record<HubStoreErrorEvent['method'], string> = {
 
 const reportStoreError = getReporter(['kumiai', 'hub-server'], '@kumiai/hub-server')
 
-/**
- * Route a swallowed store failure to the host's hook, or to the reporter when it wired none.
- *
- * No throttling, deliberately: a permanently broken store emits per request, and logtape ships
- * `getThrottlingFilter`, so rate control belongs in the app's sink config where an operator can
- * tune it rather than hard-coded here.
- */
 /** What the failed operation was about, for the default log line: a DID for the per-recipient
  * methods, a topic for fan-out, nothing for a store-wide purge. */
 function subjectOf(event: HubStoreErrorEvent): string {
@@ -132,6 +125,13 @@ function subjectOf(event: HubStoreErrorEvent): string {
   }
 }
 
+/**
+ * Route a swallowed store failure to the host's hook, or to the reporter when it wired none.
+ *
+ * No throttling, deliberately: a permanently broken store emits per request, and logtape ships
+ * `getThrottlingFilter`, so rate control belongs in the app's sink config where an operator can
+ * tune it rather than hard-coded here.
+ */
 export function createStoreErrorReporter(
   onStoreError?: HubStoreErrorHook,
 ): (event: HubStoreErrorEvent) => void {
