@@ -397,8 +397,18 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         // store just minted it for this accepted append); a mailbox publish has none, since its
         // recipient's own delivery-queue position isn't usable as a durable log cursor.
         const logPosition = ctx.param.retain === 'log' ? { logPosition: sequenceID } : {}
-        // Live-deliver to currently-connected subscribers (minus the sender).
-        const subscribers = await store.getSubscribers(topicID)
+        // Live-deliver to currently-connected subscribers (minus the sender). A failure here must
+        // not fail the request: `publish` committed the append and its delivery rows in one
+        // transaction, so every subscriber still receives the frame from its mailbox on the next
+        // receive drain. Failing would also make the miss permanent — the caller's `publishID`
+        // retry returns `deduped`, and the block below is gated on `!deduped`.
+        let subscribers: Array<string>
+        try {
+          subscribers = await store.getSubscribers(topicID)
+        } catch (error) {
+          storeErrorReporter({ method: 'getSubscribers', topicID, error })
+          return { sequenceID }
+        }
         for (const recipientDID of subscribers) {
           if (recipientDID === senderDID) continue
           const client = registry.getClient(recipientDID)
