@@ -82,3 +82,34 @@ flood.
 
 Publish rate limits are per DID (20/s, burst 50) and per topic (100/s, burst 200), merged over
 `DEFAULT_RATE_LIMITS`; `hub/v1/keypackage/fetch` has its own request quota per requester DID.
+
+## A store failure that is not a request failure
+
+Three store operations are deliberately not allowed to fail the request they happen in:
+
+- the **last-resort key-package top-up**, read after `fetchKeyPackages` has already consumed
+  destructively — surfacing it would destroy packages nobody received, and the client's retry
+  would burn the next batch
+- an **ack**, where the frame simply stays pending and the client re-acks next round
+- a scheduled **purge**, retried on the next interval
+
+All three are correct, and all three were silent. `createHandlers` and `createHub` take
+`onStoreError`, called with `{ method, did?, error }` where `method` names the `HubStore` method
+that threw. Wire it to whatever an operator watches:
+
+```ts
+const { server } = createHub({
+  transport,
+  store,
+  identity,
+  onStoreError: ({ method, did, error }) => metrics.storeFailure(method, did, error),
+})
+```
+
+Fire-and-forget — a throw from the hook is swallowed rather than allowed to fail the request.
+Unwired, the failure is reported through `@sozai/log` under `['kumiai', 'hub-server']` at `error`
+rather than passing silently. Pass an empty handler to silence it deliberately.
+
+There is no throttling: a permanently broken store reports per request. logtape ships
+`getThrottlingFilter`, so rate control belongs in the app's sink configuration where an operator
+can tune it.
