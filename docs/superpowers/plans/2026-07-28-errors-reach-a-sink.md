@@ -2,12 +2,16 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Stage:** executing
+**Stage:** qa
 **Mode:** tasks
 
-**Phase 1 is complete and handed off** (2026-07-28). `sozai` `feat/errors-reach-a-sink`,
-`f7335f2..916f48c`, three commits, each reviewed clean. Phase 2 is blocked on the user merging and
-publishing `@sozai/log` 0.3.0; Task 4 Step 1 is the gate.
+**Phase 1 shipped** (2026-07-28). `sozai` `feat/errors-reach-a-sink`, `f7335f2..916f48c`, three
+commits, each reviewed clean; published as `@sozai/log` 0.3.0.
+
+**Phase 2 complete** (2026-07-29). `kumiai` `feat/hub-server-error-sink`, `72791e7..68fd562`, nine
+commits. Every task reviewed clean; the whole-branch review found two Important gaps (nothing pinned
+hub-server's reporter category, and `STORE_ERROR_CONSEQUENCE` was untested), both since fixed and
+re-reviewed. Gate: 42/42 turbo tasks with `Cached: 0`, biome clean.
 
 **Correction to the Global Constraints below:** kumiai's branch is `feat/hub-server-error-sink`, not
 `feat/errors-reach-a-sink`.
