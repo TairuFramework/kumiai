@@ -70,14 +70,18 @@ function normalizeAuthorizeDecision(decision: AuthorizeDecision): {
  * A `HubStore` operation that failed at a point where the hub deliberately does NOT fail the
  * request. Each of these swallows is correct — see the call sites for why — and each was, until
  * this hook existed, completely silent.
+ *
+ * A union rather than a flat record: each variant carries the subject its own site has, so a site
+ * cannot forget one and a topic-keyed site cannot be described with a DID.
  */
-export type HubStoreErrorEvent = {
-  /** The HubStore method that threw. The operator's fix is to make this method work. */
-  method: 'fetchLastResortKeyPackage' | 'ack' | 'purge'
-  /** The DID the operation was for, where it names one. Absent for `purge`. */
-  did?: string
-  error: unknown
-}
+export type HubStoreErrorEvent =
+  | { method: 'purge'; error: unknown }
+  /** The DID whose ack the store refused. */
+  | { method: 'ack'; did: string; error: unknown }
+  /** The DID whose last-resort slot was being read. */
+  | { method: 'fetchLastResortKeyPackage'; did: string; error: unknown }
+  /** The topic whose subscriber list could not be read for live fan-out. */
+  | { method: 'getSubscribers'; topicID: string; error: unknown }
 
 export type HubStoreErrorHook = (event: HubStoreErrorEvent) => void
 
@@ -99,6 +103,10 @@ const STORE_ERROR_CONSEQUENCE: Record<HubStoreErrorEvent['method'], string> = {
     'redelivers every frame forever.',
   purge:
     'Retried on the next interval. A purge that keeps failing means the store grows without bound.',
+  getSubscribers:
+    'The frame is committed and queued; only the live push to connected subscribers was skipped, ' +
+    'so each of them receives it on its next receive drain instead. A getSubscribers that keeps ' +
+    'failing means the hub has silently degraded from push to pull for every publish.',
 }
 
 const reportStoreError = getReporter(['kumiai', 'hub-server'], '@kumiai/hub-server')
@@ -110,13 +118,27 @@ const reportStoreError = getReporter(['kumiai', 'hub-server'], '@kumiai/hub-serv
  * `getThrottlingFilter`, so rate control belongs in the app's sink config where an operator can
  * tune it rather than hard-coded here.
  */
+/** What the failed operation was about, for the default log line: a DID for the per-recipient
+ * methods, a topic for fan-out, nothing for a store-wide purge. */
+function subjectOf(event: HubStoreErrorEvent): string {
+  switch (event.method) {
+    case 'purge':
+      return ''
+    case 'getSubscribers':
+      return ` on topic ${event.topicID}`
+    case 'ack':
+    case 'fetchLastResortKeyPackage':
+      return ` for ${event.did}`
+  }
+}
+
 export function createStoreErrorReporter(
   onStoreError?: HubStoreErrorHook,
 ): (event: HubStoreErrorEvent) => void {
   return (event) => {
     if (onStoreError == null) {
       reportStoreError(
-        `HubStore.${event.method} failed${event.did == null ? '' : ` for ${event.did}`}. ` +
+        `HubStore.${event.method} failed${subjectOf(event)}. ` +
           `${STORE_ERROR_CONSEQUENCE[event.method]} Wire \`onStoreError\` to handle this.`,
         event.error,
       )

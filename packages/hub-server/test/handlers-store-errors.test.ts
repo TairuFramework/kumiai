@@ -302,3 +302,28 @@ describe('the purge consequence, exercised directly against the exported reporte
     }
   })
 })
+
+/**
+ * The fan-out variant is the first event whose subject is a topic rather than a DID, so the
+ * default log line has to name it. Exercised directly against the exported reporter for the same
+ * reason as `purge` above — the site that produces it is covered separately in the publish tests.
+ */
+describe('the publish fan-out consequence, exercised directly against the exported reporter', () => {
+  test('with no hook wired, a getSubscribers failure names the topic and the push-to-pull consequence', () => {
+    const boom = new Error('subscriber index is gone')
+    const records: Array<CapturedRecord> = []
+    setupCapture(records)
+    try {
+      const report = createStoreErrorReporter()
+      report({ method: 'getSubscribers', topicID: 'topic-1', error: boom })
+
+      expect(records).toHaveLength(1)
+      expect(records[0]?.category).toEqual(['kumiai', 'hub-server'])
+      expect(records[0]?.level).toBe('error')
+      expect(records[0]?.message).toContain('on topic topic-1')
+      expect(records[0]?.message).toContain('degraded from push to pull')
+    } finally {
+      reset()
+    }
+  })
+})
