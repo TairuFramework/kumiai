@@ -14,6 +14,7 @@ client registry for push fan-out, and an in-memory `HubStore` for development an
 - `HubClientRegistry` — the live-connection table.
 - `createRateLimiter`, `DEFAULT_RATE_LIMITS`, `DEFAULT_KEYPACKAGE_FETCH_LIMITS`,
   `DEFAULT_HUB_ACCESS_RULES`.
+- `HubStoreErrorEvent`, `HubStoreErrorHook` — the `onStoreError` event and hook types.
 
 ```ts
 import { createHub, createMemoryStore } from '@kumiai/hub-server'

@@ -81,7 +81,14 @@ export type HubStoreErrorEvent = {
 
 export type HubStoreErrorHook = (event: HubStoreErrorEvent) => void
 
-/** What the hub did INSTEAD of failing, and what a permanent failure costs. */
+/**
+ * What the hub did INSTEAD of failing, and what a permanent failure costs.
+ *
+ * Keyed by `method`, but the `fetchLastResortKeyPackage` text describes the top-up call site
+ * specifically (of the three places that method is called, only that one reports). A fourth call
+ * site would silently inherit this text even where it's wrong — reuse the method key only if the
+ * text also holds there, otherwise a call site needs its own discriminator.
+ */
 const STORE_ERROR_CONSEQUENCE: Record<HubStoreErrorEvent['method'], string> = {
   fetchLastResortKeyPackage:
     'The fetch returned what the pool could serve, without the last-resort top-up. A read that ' +

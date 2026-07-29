@@ -1,6 +1,6 @@
 ---
 '@kumiai/hub-server': minor
-'@kumiai/rpc': patch
+'@kumiai/rpc': minor
 ---
 
 `createHandlers` and `createHub` now take `onStoreError`, called when a `HubStore` operation fails
