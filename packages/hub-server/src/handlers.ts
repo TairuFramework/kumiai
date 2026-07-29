@@ -487,7 +487,11 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       if (!didLimiter.tryConsume(clientDID)) {
         throw new HandlerError({ code: 'EK01', message: 'Unsubscribe rate limit exceeded for DID' })
       }
-      await store.unsubscribe(clientDID, topicID)
+      try {
+        await store.unsubscribe(clientDID, topicID)
+      } catch (error) {
+        rethrowAsHandlerError(error)
+      }
       return { unsubscribed: true }
     }) as RequestHandler<HubProtocol, 'hub/v1/unsubscribe'>,
 

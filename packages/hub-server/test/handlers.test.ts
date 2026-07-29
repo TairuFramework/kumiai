@@ -1,8 +1,10 @@
 // biome-ignore-all lint/suspicious/noExplicitAny: handlers are dispatched through a loosely-typed map in these tests
+import type { HubStore } from '@kumiai/hub-protocol'
 import {
   HUB_ERROR_CODES,
   KeyPackageQuotaExceededError,
   keyPackageDigest,
+  NotSubscribedError,
 } from '@kumiai/hub-protocol'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
@@ -630,5 +632,46 @@ describe('hub/v1/keypackage/upload notAfter', () => {
         ),
       ),
     ).rejects.toThrow(/last-resort upload carries no expiry/)
+  })
+})
+
+/**
+ * `unsubscribe` was the one HubStore call in the file with no try/catch, so a named store error
+ * crossed the wire uncoded — and a named store error has to stay tellable from an unreachable hub.
+ * `HubStore.unsubscribe` declares no named error today, so this is defence against a store that
+ * raises one anyway, not a port change.
+ */
+describe('a store failure during unsubscribe crosses the wire coded', () => {
+  function unsubscribeFails(error: Error): HubStore {
+    const store = createMemoryStore()
+    return new Proxy(store, {
+      get(target, property, receiver) {
+        if (property === 'unsubscribe') {
+          return () => Promise.reject(error)
+        }
+        return Reflect.get(target, property, receiver)
+      },
+    })
+  }
+
+  test('a named store error carries its hub error code', async () => {
+    const store = unsubscribeFails(new NotSubscribedError('not a subscriber of topic-1'))
+    const handlers = createHandlers({ store, registry: new HubClientRegistry() })
+
+    await expect(
+      (handlers['hub/v1/unsubscribe'] as any)(reqCtx('hub/v1/unsubscribe', { topicID: 'topic-1' })),
+    ).rejects.toMatchObject({ code: HUB_ERROR_CODES.notSubscribed })
+  })
+
+  test('anything else passes through untouched', async () => {
+    const boom = new Error('subscription table is gone')
+    const handlers = createHandlers({
+      store: unsubscribeFails(boom),
+      registry: new HubClientRegistry(),
+    })
+
+    await expect(
+      (handlers['hub/v1/unsubscribe'] as any)(reqCtx('hub/v1/unsubscribe', { topicID: 'topic-1' })),
+    ).rejects.toBe(boom)
   })
 })
