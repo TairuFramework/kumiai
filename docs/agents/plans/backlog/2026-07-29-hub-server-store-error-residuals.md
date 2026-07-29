@@ -17,6 +17,13 @@ for it, and the fix is a site discriminator alongside `method`.
 
 ## Also considered and rejected
 
+The publish handler's fan-out swallow returns `{ sequenceID }` early from inside the `if (!deduped)`
+block, duplicating the handler's trailing return. Assigning `subscribers = []` in the catch would
+give a single exit and would stay correct if a later edit ever adds work after the fan-out loop that
+the swallow path would otherwise skip silently. Left as-is on 2026-07-29 — behaviour is identical
+today and the early return reads more plainly. Revisit if post-fan-out work appears. Background:
+`docs/agents/plans/completed/2026-07-29-store-error-wire-shape.complete.md`.
+
 The ack test's `setTimeout(..., 20)` before `controller.abort()` was left as-is: it matches the
 established convention in the sibling receive test, and the work it waits for is all microtasks, so
 the margin is large. A bounded poll on the observed state would make it deterministic if it ever
