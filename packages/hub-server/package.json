@@ -40,7 +40,8 @@
     "@kokuin/token": "catalog:",
     "@kumiai/hub-protocol": "workspace:^",
     "@sozai/codec": "catalog:",
-    "@sozai/event": "catalog:"
+    "@sozai/event": "catalog:",
+    "@sozai/log": "catalog:"
   },
   "devDependencies": {
     "@enkaku/client": "catalog:",

@@ -43,8 +43,8 @@ catalogs:
       specifier: ^0.1.2
       version: 0.1.2
     '@sozai/log':
-      specifier: ^0.2.0
-      version: 0.2.0
+      specifier: ^0.3.0
+      version: 0.3.0
     '@sozai/result':
       specifier: ^0.2.0
       version: 0.2.0
@@ -192,6 +192,9 @@ importers:
       '@sozai/event':
         specifier: 'catalog:'
         version: 0.1.2
+      '@sozai/log':
+        specifier: 'catalog:'
+        version: 0.3.0
     devDependencies:
       '@enkaku/client':
         specifier: 'catalog:'
@@ -357,7 +360,7 @@ importers:
         version: 0.1.2
       '@sozai/log':
         specifier: 'catalog:'
-        version: 0.2.0
+        version: 0.3.0
       '@sozai/runtime':
         specifier: 'catalog:'
         version: 0.1.0
@@ -1691,6 +1694,9 @@ packages:
 
   '@sozai/log@0.2.0':
     resolution: {integrity: sha512-QxBBFSSC9be7Es/r2KYPs/yMWu/zGl+oV4QJE8ycaN47KP1CtoOXd7M6dPsHhHJfHYNFTOmXW4DJ9ALq3f8cyg==}
+
+  '@sozai/log@0.3.0':
+    resolution: {integrity: sha512-kHXNZ8LNBPOy/KObz9ClS+iNnjkzDhYL1u2TqkpsI47vrwia6VnCPkgmhXavNauYE9/+IIJrFjKGjTGs2rNikA==}
 
   '@sozai/otel@0.3.0':
     resolution: {integrity: sha512-NDS0yyuGid/LMDaLTiFCohEQWjet7hSvf/iznHofe2HDbEc0CoyeJrPjsXLVm6zJYyUwQLj4P06wdL5m9Wm2zQ==}
@@ -5713,6 +5719,10 @@ snapshots:
       '@sozai/result': 0.2.0
 
   '@sozai/log@0.2.0':
+    dependencies:
+      '@logtape/logtape': 2.2.4
+
+  '@sozai/log@0.3.0':
     dependencies:
       '@logtape/logtape': 2.2.4
 

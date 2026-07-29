@@ -4,6 +4,8 @@ export type {
   AuthorizeRequest,
   CreateHandlersParams,
   HubRateLimits,
+  HubStoreErrorEvent,
+  HubStoreErrorHook,
   KeyPackageFetchLimits,
 } from './handlers.js'
 export {

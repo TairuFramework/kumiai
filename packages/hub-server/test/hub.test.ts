@@ -6,7 +6,7 @@ import type { HubProtocol, HubStore } from '@kumiai/hub-protocol'
 import { fromB64, fromUTF, toB64 } from '@sozai/codec'
 import { describe, expect, test, vi } from 'vitest'
 
-import { type AuthorizeRequest, createHandlers } from '../src/handlers.js'
+import { type AuthorizeRequest, createHandlers, type HubStoreErrorEvent } from '../src/handlers.js'
 import { type CreateHubParams, createHub, type HubInstance } from '../src/hub.js'
 import { createMemoryStore } from '../src/memoryStore.js'
 import { HubClientRegistry } from '../src/registry.js'
@@ -517,6 +517,82 @@ describe('hub key packages', () => {
       param: { did: identity.id, count: 1 },
     })
     expect(fetched.keyPackages).toEqual(['kp-1'])
+    await ctx.dispose()
+  })
+})
+
+describe('a store failure the hub declines to turn into a request failure is reported', () => {
+  /**
+   * The purge timer swallows its failure because a failed purge is genuinely non-fatal and the
+   * next interval retries it. A store that can never purge therefore grows without bound, on a
+   * timer nobody is watching.
+   */
+  test('a purge failure reaches the hook and is still retried next interval', async () => {
+    vi.useFakeTimers()
+    const boom = new Error('purge is not implemented')
+    const purge = vi.fn(() => Promise.reject(boom))
+    const store = new Proxy(createMemoryStore(), {
+      get(target, property, receiver) {
+        if (property === 'purge') return purge
+        return Reflect.get(target, property, receiver)
+      },
+    })
+    const seen: Array<HubStoreErrorEvent> = []
+    const ctx = createTestHub({
+      store,
+      purge: { interval: 1000, olderThan: 60 },
+      onStoreError: (event) => void seen.push(event),
+    })
+    try {
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(purge).toHaveBeenCalledTimes(1)
+      expect(seen).toEqual([{ method: 'purge', error: boom }])
+
+      // Still on the timer: a failed purge is not a stopped purge.
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(purge).toHaveBeenCalledTimes(2)
+      expect(seen).toHaveLength(2)
+    } finally {
+      // Real timers before dispose: teardown awaits transport work that fake timers would stall.
+      vi.useRealTimers()
+      await ctx.dispose()
+    }
+  })
+
+  /**
+   * The purge timer builds its own reporter from `params.onStoreError`, so it would pass even if
+   * `createHub` forgot to FORWARD the hook to `createHandlers`. This drives a handler-level
+   * failure through a real client to pin the forwarding.
+   */
+  test('a handler-level store failure on a createHub hub reaches the hook', async () => {
+    const boom = new Error('fetchLastResortKeyPackage is not a function')
+    const store = new Proxy(createMemoryStore(), {
+      get(target, property, receiver) {
+        if (property === 'fetchLastResortKeyPackage') return () => Promise.reject(boom)
+        return Reflect.get(target, property, receiver)
+      },
+    })
+    const seen: Array<HubStoreErrorEvent> = []
+    const ctx = createTestHub({
+      store,
+      purge: false,
+      onStoreError: (event) => void seen.push(event),
+    })
+    const targetIdentity = randomIdentity()
+    const { client: target } = ctx.connect(targetIdentity)
+    const { client: requester } = ctx.connect()
+
+    await target.request('hub/v1/keypackage/upload', { param: { keyPackages: ['kp-1'] } })
+    const result = await requester.request('hub/v1/keypackage/fetch', {
+      param: { did: targetIdentity.id, count: 3 },
+    })
+
+    // Unchanged: the pool's one package is still served.
+    expect(result).toEqual({ keyPackages: ['kp-1'] })
+    expect(seen).toEqual([
+      { method: 'fetchLastResortKeyPackage', did: targetIdentity.id, error: boom },
+    ])
+
     await ctx.dispose()
   })
 })

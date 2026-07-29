@@ -1,7 +1,7 @@
 import type { StoredMessage } from '@kumiai/hub-protocol'
 import type { HubReceiveSubscription, LogHub } from '@kumiai/hub-tunnel'
-import { reset, setup } from '@sozai/log'
-import { describe, expect, test } from 'vitest'
+import { getDefaultConfig, reset, setup } from '@sozai/log'
+import { describe, expect, test, vi } from 'vitest'
 
 import { createHubMux, type ReceiveLaneEnded } from '../src/hub-mux.js'
 import { FakeHub } from './fixtures/fake-hub.js'
@@ -256,6 +256,52 @@ describe('the mux reports a push lane that ended without being asked to', () => 
       await mux.dispose()
     } finally {
       console.error = realError
+      reset()
+    }
+  })
+
+  /**
+   * THE MIDDLE CASE, and the whole reason this exists. The two tests above cover the two ends —
+   * a config that routes ['kumiai'], and no config at all. Neither is what a real app does.
+   *
+   * `isSetup()` answers "did someone call setup()", not "will this record reach anyone". An app
+   * taking the documented easy path configures logging whose loggers do not cover ['kumiai'], so
+   * the console fallback stays out of the way and the record is dropped for want of a matching
+   * logger — the peer goes silently deaf through the most ordinary setup an app can perform.
+   *
+   * Asserted against the REAL getDefaultConfig(): a test that configures its own sink proves only
+   * that logging works when someone already thought about the category, which is not the failing
+   * case.
+   */
+  test('a default setup() carries the report rather than dropping it', async () => {
+    const hub = new FakeHub()
+    const wrapped = endableHub(hub, 'done')
+    const error = vi.fn()
+    setup(getDefaultConfig({ console: { error } as unknown as Console }))
+    try {
+      let lane: { endLane: () => void } | undefined
+      const mux = createHubMux({
+        hub: {
+          ...wrapped,
+          receive: (did: string) => {
+            const subscription = wrapped.receive(did)
+            lane = subscription as unknown as { endLane: () => void }
+            return subscription
+          },
+        } as LogHub,
+        localDID: 'bob',
+      })
+      mux.onInbound('topic:x', () => {})
+      await hub.publish({ senderDID: 'alice', topicID: 'topic:x', payload: new Uint8Array([1]) })
+      await flush()
+
+      lane?.endLane()
+      await hub.publish({ senderDID: 'alice', topicID: 'topic:x', payload: new Uint8Array([2]) })
+      await flush()
+
+      expect(error).toHaveBeenCalledOnce()
+      await mux.dispose()
+    } finally {
       reset()
     }
   })

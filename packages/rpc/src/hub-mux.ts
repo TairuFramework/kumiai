@@ -11,7 +11,7 @@ import type {
   LogHub,
   MailboxHub,
 } from '@kumiai/hub-tunnel'
-import { getLogger, isSetup } from '@sozai/log'
+import { getReporter } from '@sozai/log'
 
 import { asDeliveryPosition, type DeliveryPosition } from './cursor.js'
 
@@ -55,29 +55,7 @@ export type ReceiveLaneEnded = {
   error?: unknown
 }
 
-/**
- * The logger these fall back to. `['kumiai', 'rpc']` — an app routing this category sees them
- * with everything else it collects.
- */
-const logger = getLogger(['kumiai', 'rpc'])
-
-/**
- * Fallback when a host wires no handler: both conditions leave a peer that looks healthy but
- * silently receives nothing. At ERROR level, not warn — `@sozai/log`'s default config drops `warn`.
- * Falls back to console when logging is unconfigured (logtape discards records otherwise).
- *
- * KNOWN GAP (`docs/agents/plans/next/2026-07-19-logging-reaches-a-sink.md`): `isSetup()` reports
- * whether logging is configured, not whether THIS category reaches a sink, so a `setup()` covering
- * only `['sozai']` drops these while the console fallback stays quiet.
- */
-const report = (message: string, error: unknown): void => {
-  if (isSetup()) {
-    logger.error(message, { error })
-    return
-  }
-  // Last resort: no logging configured, so the app has nowhere to collect this.
-  console.error(`[@kumiai/rpc] ${message}`, error)
-}
+const report = getReporter(['kumiai', 'rpc'], '@kumiai/rpc')
 
 const warnSubscribeFailed = (failure: SubscribeFailure): void => {
   report(

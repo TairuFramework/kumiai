@@ -13,6 +13,7 @@ import {
   keyPackageDigest,
 } from '@kumiai/hub-protocol'
 import { fromB64, toB64 } from '@sozai/codec'
+import { getReporter } from '@sozai/log'
 
 import { createRateLimiter, type RateLimitConfig } from './rateLimit.js'
 import type { HubClientRegistry } from './registry.js'
@@ -65,6 +66,71 @@ function normalizeAuthorizeDecision(decision: AuthorizeDecision): {
   return typeof decision === 'boolean' ? { allow: decision } : decision
 }
 
+/**
+ * A `HubStore` operation that failed at a point where the hub deliberately does NOT fail the
+ * request. Each of these swallows is correct — see the call sites for why — and each was, until
+ * this hook existed, completely silent.
+ */
+export type HubStoreErrorEvent = {
+  /** The HubStore method that threw. The operator's fix is to make this method work. */
+  method: 'fetchLastResortKeyPackage' | 'ack' | 'purge'
+  /** The DID the operation was for, where it names one. Absent for `purge`. */
+  did?: string
+  error: unknown
+}
+
+export type HubStoreErrorHook = (event: HubStoreErrorEvent) => void
+
+/**
+ * What the hub did INSTEAD of failing, and what a permanent failure costs.
+ *
+ * Keyed by `method`, but the `fetchLastResortKeyPackage` text describes the top-up call site
+ * specifically (of the three places that method is called, only that one reports). A fourth call
+ * site would silently inherit this text even where it's wrong — reuse the method key only if the
+ * text also holds there, otherwise a call site needs its own discriminator.
+ */
+const STORE_ERROR_CONSEQUENCE: Record<HubStoreErrorEvent['method'], string> = {
+  fetchLastResortKeyPackage:
+    'The fetch returned what the pool could serve, without the last-resort top-up. A read that ' +
+    'keeps failing means the availability floor the last-resort slot exists to provide is absent, ' +
+    'and joins fail downstream at the inviter with no signal here.',
+  ack:
+    'The frame stays pending and the client re-acks on the next round. An ack that keeps failing ' +
+    'redelivers every frame forever.',
+  purge:
+    'Retried on the next interval. A purge that keeps failing means the store grows without bound.',
+}
+
+const reportStoreError = getReporter(['kumiai', 'hub-server'], '@kumiai/hub-server')
+
+/**
+ * Route a swallowed store failure to the host's hook, or to the reporter when it wired none.
+ *
+ * No throttling, deliberately: a permanently broken store emits per request, and logtape ships
+ * `getThrottlingFilter`, so rate control belongs in the app's sink config where an operator can
+ * tune it rather than hard-coded here.
+ */
+export function createStoreErrorReporter(
+  onStoreError?: HubStoreErrorHook,
+): (event: HubStoreErrorEvent) => void {
+  return (event) => {
+    if (onStoreError == null) {
+      reportStoreError(
+        `HubStore.${event.method} failed${event.did == null ? '' : ` for ${event.did}`}. ` +
+          `${STORE_ERROR_CONSEQUENCE[event.method]} Wire \`onStoreError\` to handle this.`,
+        event.error,
+      )
+      return
+    }
+    try {
+      onStoreError(event)
+    } catch {
+      // A notice, not a dependency: a host whose own reporting throws must not fail the request
+      // that was being served correctly.
+    }
+  }
+}
+
 export type HubRateLimits = {
   perDID: RateLimitConfig
   perTopic: RateLimitConfig
@@ -112,6 +178,14 @@ export type CreateHandlersParams = {
   /** Max frames queued-but-unflushed on a receive channel. See {@link DEFAULT_RECEIVE_BUFFER_LIMIT}
    * for the >= 50-frame-page floor this should respect. Default: 256 */
   receiveBufferLimit?: number
+  /**
+   * Called when a `HubStore` operation fails at a point where the hub deliberately does not fail
+   * the request. Fire-and-forget; a throw here is swallowed.
+   *
+   * Omitted, the failure is reported through `@sozai/log` instead of passing silently. Pass an
+   * empty handler to silence it deliberately.
+   */
+  onStoreError?: HubStoreErrorHook
 }
 
 function getClientDID(ctx: { message: { payload: Record<string, unknown> } }): string {
@@ -168,6 +242,7 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
   const didLimiter = createRateLimiter(rateLimits.perDID)
   const topicLimiter = createRateLimiter(rateLimits.perTopic)
   const receiveBufferLimit = params.receiveBufferLimit ?? DEFAULT_RECEIVE_BUFFER_LIMIT
+  const storeErrorReporter = createStoreErrorReporter(params.onStoreError)
 
   const fetchLimits: KeyPackageFetchLimits = {
     ...DEFAULT_KEYPACKAGE_FETCH_LIMITS,
@@ -540,8 +615,9 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
           if (ack != null) {
             try {
               await store.ack({ recipientDID: clientDID, sequenceIDs: ack })
-            } catch {
+            } catch (error) {
               // Frame stays pending; the client re-acks next round. Do NOT break.
+              storeErrorReporter({ method: 'ack', did: clientDID, error })
             }
           }
         }
@@ -709,6 +785,7 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         // Nothing consumed, so nothing is lost by surfacing it. Otherwise the top-up was a bonus
         // the caller never paid for: hand back what the store has already given up.
         if (consumed.length === 0) rethrowAsHandlerError(error)
+        storeErrorReporter({ method: 'fetchLastResortKeyPackage', did: targetDID, error })
       }
       // Appended AT MOST ONCE, never padded out to `cappedCount`: handing one caller two copies
       // of one init key is the reuse the whole design avoids.
