@@ -86,24 +86,29 @@ Publish rate limits are per DID (20/s, burst 50) and per topic (100/s, burst 200
 
 ## A store failure that is not a request failure
 
-Three store operations are deliberately not allowed to fail the request they happen in:
+Four store operations are deliberately not allowed to fail the request they happen in:
 
 - the **last-resort key-package top-up**, read after `fetchKeyPackages` has already consumed
   destructively — surfacing it would destroy packages nobody received, and the client's retry
   would burn the next batch
 - an **ack**, where the frame simply stays pending and the client re-acks next round
 - a scheduled **purge**, retried on the next interval
+- the **subscriber read for live fan-out**, which runs after the publish committed its append and
+  delivery rows — every subscriber still receives the frame by pulling, and failing the request
+  would instead lose the live push for good, since the caller's `publishID` retry dedups and skips
+  fan-out
 
-All three are correct, and all three were silent. `createHandlers` and `createHub` take
-`onStoreError`, called with `{ method, did?, error }` where `method` names the `HubStore` method
-that threw. Wire it to whatever an operator watches:
+All four are correct, and all four were silent. `createHandlers` and `createHub` take
+`onStoreError`, called with an event discriminated on `method` — the `HubStore` method that threw —
+carrying the subject that method has: `did` for `ack` and `fetchLastResortKeyPackage`, `topicID` for
+`getSubscribers`, neither for `purge`. Wire it to whatever an operator watches:
 
 ```ts
 const { server } = createHub({
   transport,
   store,
   identity,
-  onStoreError: ({ method, did, error }) => metrics.storeFailure(method, did, error),
+  onStoreError: (event) => metrics.storeFailure(event),
 })
 ```
 
