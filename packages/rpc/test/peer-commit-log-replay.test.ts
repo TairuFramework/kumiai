@@ -347,12 +347,14 @@ describe('a genuine external commit re-published by the hub steers nothing', () 
     const rs = new Uint8Array(32).fill(0x85)
 
     // The same Commit bytes, published twice under two different sealed entry blobs. This is
-    // NOT the byte-for-byte replay above — it models a legitimate re-seal: a re-encryption of
-    // the derived blob riding the frame (a fresh nonce, a re-encoded entries list), which is
-    // legal because the blob is derived from the Commit and never signed as part of it. Only the
-    // Commit itself is authenticated; the digest this branch keys the fork check on has to track
-    // that boundary, or a re-seal that changes nothing MLS cares about would read as a different
-    // commit and fork the whole group on it.
+    // NOT the byte-for-byte replay above — it models a legitimate re-seal: the derived blob
+    // riding the frame re-encrypted from a different entries list. (The fake seal is
+    // deterministic — a keystream XOR plus a ciphertext-dependent tag, no nonce involved — so
+    // it is the entries CONTENT that makes the two blobs differ, not any freshness in the
+    // sealing itself.) A re-seal is legal because the blob is derived from the Commit and never
+    // signed as part of it. Only the Commit itself is authenticated; the digest this branch keys
+    // the fork check on has to track that boundary, or a re-seal that changes nothing MLS cares
+    // about would read as a different commit and fork the whole group on it.
     const commit = encodeMemoryCommit(1, 'bob', [], { external: true })
     const { sequenceID: original } = await publishCommit({
       hub,
@@ -376,9 +378,24 @@ describe('a genuine external commit re-published by the hub steers nothing', () 
     })
     expect(resealed > original).toBe(true)
 
-    // Level 1: identical Commit bytes digest identically despite the frames around them
-    // differing — the premise everything below leans on. A frame-wide digest would fail this
-    // assertion outright, since the sealed blobs (and so the frames) are not equal.
+    // Premise check, not yet the guard: the two published FRAMES actually differ on the wire.
+    // Without this, a future change that stopped `entries` from affecting the sealed blob would
+    // silently collapse this test into a duplicate of the byte-identical replay test above —
+    // still green, but with none of its mutation sensitivity, and nothing here would say so.
+    const originalMessage = hub.published.find((m) => m.sequenceID === original)
+    const resealedMessage = hub.published.find((m) => m.sequenceID === resealed)
+    if (originalMessage == null || resealedMessage == null) {
+      throw new Error('published frame missing')
+    }
+    expect(resealedMessage.payload).not.toEqual(originalMessage.payload)
+
+    // What this actually pins: the two published COMMITS are byte-identical, so `digestAppliedCommit`
+    // (which only ever hashes the commit half) agrees on them despite the frames around them
+    // differing, per the assertion just above. It does NOT pin the frame-wide invariant this test
+    // exists for — `publishedCommitDigest` always digests `commitFrame.commit`
+    // (`test/fixtures/commits.ts`), so a frame-wide digest inside `peer.ts` couldn't move this
+    // assertion either way. That invariant is held up only by the behavioural half below, which
+    // exercises the peer's OWN digest computation rather than the fixture's.
     expect(publishedCommitDigest(hub, original)).toBe(publishedCommitDigest(hub, resealed))
 
     // The hub withholds the LOWER-sequenceID original and shows Alice the re-sealed copy first —

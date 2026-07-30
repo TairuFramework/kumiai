@@ -22,22 +22,30 @@ reads history as history: it can miss a fork, never invent one.
 This is not a defence against a hub that reorders or withholds in general — it removes the replay
 route and fixes a classification that did not do what it said.
 
-The change is monotonically heal-reducing. Exactly two verdicts move, and both move toward fewer
-heals: a digest-equal frame at a different position, which used to read `fork`, now reads
-`history`; a digest-different frame at an EQUAL sequenceID, which used to read `history`
-unconditionally (the old code short-circuited on the sequenceID match before ever comparing
-bytes), now reads `fork`/`winning` — always `winning`, since an equal sequenceID can never be
-strictly lower than itself, and `winning` sets neither `healRequested` nor `stranded`. No path
-through the classifier can now produce a heal the old code did not, in any order the hub serves
-the log.
+The change is monotonically heal-reducing. Exactly three verdicts move, and every one moves toward
+fewer heals:
+
+1. A digest-equal frame at a different sequenceID: used to read `fork`, now reads `history`. The
+   fix this changeset is for.
+2. A digest-different frame at an EQUAL sequenceID: used to read `history` unconditionally (the
+   old code short-circuited on the sequenceID match before ever comparing bytes), now reads
+   `fork`/`winning` — always `winning`, since an equal sequenceID can never be strictly lower than
+   itself.
+3. A frame with no digest to compare (`commitDigest === null`) at a different sequenceID: used to
+   fall back to the position comparison and read `fork` (branch decided the same way as any other
+   position mismatch — so this direction alone could produce a `losing` heal), now always reads
+   `history`. Reachable only by a direct caller of the exported `classifyCommit`, never through the
+   lane, since both call sites that pass a null digest settle at `ahead` first.
+
+`winning` sets neither `healRequested` nor `stranded`, and the other two moves remove a heal
+outright, so no path through the classifier can now produce a heal the old code did not, in any
+order the hub serves the log.
 
 Breaking, for anyone calling the classifier directly: `classifyCommit` takes the frame's commit
 digest as a third argument (`digestAppliedCommit(commit)`, or `null` where the bytes were never
 extracted), and `CommitClassifierState.appliedByEpoch` is now
 `ReadonlyMap<number, AppliedCommit>`. Both `AppliedCommit` and `digestAppliedCommit` are exported.
-Two verdicts change for the same inputs, as described above: a frame at the SAME sequenceID as
-the record but a DIFFERENT digest now reads `fork`/`winning` instead of `history` — no heal
-results, but a direct caller asserting on verdicts would see it — and a frame with no digest to
-compare (`null`) now always reads `history` instead of falling back to the position comparison;
-that path is unreachable through the lane today and only affects a direct caller of the exported
-`classifyCommit`.
+Verdicts 2 and 3 above change what a direct caller sees for the same inputs: verdict 2 produces no
+heal operationally (`winning` sets neither `healRequested` nor `stranded`) but a caller asserting
+on the verdict itself would see the change; verdict 3 is unreachable through the lane today and
+only affects a direct caller of the exported `classifyCommit`.
