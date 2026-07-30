@@ -328,6 +328,36 @@ export function testLogHubConformance<Hub extends ConformanceLogHub>(
       expect(result.messages.map((message) => message.sequenceID)).toEqual([first])
     })
 
+    test('a re-published payload under a fresh publishID never lands below the original', async () => {
+      const hub = await createHub({ maxRetention, maxDepth })
+      hub.subscribe(BOB, TOPIC)
+
+      const { sequenceID: original } = await hub.publish({
+        senderDID: ALICE,
+        topicID: TOPIC,
+        payload: payload(1),
+        retain: 'log',
+        publishID: 'publish-original',
+      })
+
+      // A capture-and-replay, not a publishID replay: the same bytes re-sent by somebody who
+      // observed them, under a key the original publisher never used. No expectedHead — the
+      // replayer is not doing a compare-and-set, it is appending.
+      const { sequenceID: replayed } = await hub.publish({
+        senderDID: ALICE,
+        topicID: TOPIC,
+        payload: payload(1),
+        retain: 'log',
+        publishID: 'publish-replay',
+      })
+
+      // A floor, not "strictly greater": content-deduplication handing back the original is
+      // equally safe. `@kumiai/rpc`'s commit lane resolves two commits at one epoch by sequenceID
+      // order — lower stands, higher is stepped over — so a replay landing BELOW an applied frame
+      // would heal every peer that applied the original, once per replay.
+      expect(replayed >= original).toBe(true)
+    })
+
     test('a pushed log frame names its place in the log, and a pushed mailbox frame names none', async () => {
       const hub = await createHub({ maxRetention, maxDepth })
       hub.subscribe(ALICE, TOPIC)
