@@ -319,7 +319,10 @@ describe('a genuine external commit re-published by the hub steers nothing', () 
     for (let i = 0; i < 40 && recoveryRequests(hub, rs).length === 0; i++) await flush(25)
     expect(recoveryRequests(hub, rs).length).toBeGreaterThan(0)
 
-    // And the verdict, directly.
+    // THE VERDICT, directly — the recovery-request assertion above proves only that A heal
+    // fired, not why: anything that triggered a heal for a different reason would satisfy it
+    // just as well. This pins that the heal was specifically the `fork` row, on the LOSING
+    // branch, against the sequenceID Alice actually recorded for the commit she applied.
     expect(
       classifyCommit(
         { epoch: 1, committerDID: 'bob' },
