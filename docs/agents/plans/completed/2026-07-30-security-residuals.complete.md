@@ -65,10 +65,12 @@ app-lane topic moves after all.
 That was recorded rather than fixed, deliberately: a hub of that shape is the `ahead`-storm capability
 already carried in `backlog/2026-07-29-commit-lane-ahead-storm.md`, where the trigger is cheaper (one
 garbage byte) and the effect worse, and a hub re-serving below a reader's cursor is not fixable
-peer-side. A real fix was considered and **not** filed — keying `appliedByEpoch` on a digest of the
-applied commit bytes as well as its position, settling `history` when the digest matches, which would
-implement the fork row's actual definition and make a replay harmless regardless of hub ordering. It
-is written down here so a future reader finds the option already weighed, not so it is owed.
+peer-side. The real fix — keying `appliedByEpoch` on a digest of the applied commit's bytes as well as
+its position, settling `history` when the digest matches, which implements the fork row's actual
+definition and makes a replay inert regardless of hub ordering — is filed as
+`next/2026-07-30-applied-commit-digest.md`. It was deliberately not folded into this branch: the branch's
+job was to answer a question and pin the answer, and changing the classifier is a separate change with
+its own test.
 
 The same review corrected a false claim in the port docs: `exportSecret` is not the *only* member
 whose failure mode is silent — `sealEntries`/`openEntries` rest on the same per-epoch removal
