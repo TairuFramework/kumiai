@@ -272,4 +272,69 @@ describe('a genuine external commit re-published by the hub steers nothing', () 
 
     await alice.peer.dispose()
   })
+
+  test('two DIFFERENT commits at one epoch still fork, served in the same order', async () => {
+    const hub = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x84)
+
+    // Bob's and Yolanda's commits, both framed at epoch 1: the hub accepted two, which it can only
+    // do by breaking its own compare-and-set. Bob's lands first, so it carries the lower
+    // sequenceID and is the branch that stands.
+    const { sequenceID: loserSeq } = await publishCommit({
+      hub,
+      senderDID: 'bob',
+      recoverySecret: rs,
+      epoch: 1,
+      committerDID: 'bob',
+      external: true,
+    })
+    const { sequenceID: winnerSeq } = await publishCommit({
+      hub,
+      senderDID: 'yolanda',
+      recoverySecret: rs,
+      epoch: 1,
+      committerDID: 'yolanda',
+      external: true,
+    })
+    expect(winnerSeq > loserSeq).toBe(true)
+    // Different commits, so different digests — the premise the fork check now rests on.
+    expect(publishedCommitDigest(hub, winnerSeq)).not.toBe(publishedCommitDigest(hub, loserSeq))
+
+    // Alice is shown Yolanda's first and applies it, exactly as in the replay test.
+    hub.hideFrom('alice', loserSeq)
+    const alice = makeMLSPeer(hub, 'alice', rs, {
+      epoch: 1,
+      members: ['alice', 'bob'],
+      recovery,
+    })
+    await flush(200)
+    expect(alice.mls.epoch()).toBe(2)
+    expect(recoveryRequests(hub, rs)).toHaveLength(0)
+
+    // Bob's arrives below her cursor. Different bytes at an epoch she holds a record for: a fork,
+    // and she is on the losing side, so she heals. Polled, not slept on — a fixed wait for
+    // something that must HAPPEN is the flaky shape.
+    hub.revealTo('alice', loserSeq)
+    await wakeLane(hub, rs)
+    for (let i = 0; i < 40 && recoveryRequests(hub, rs).length === 0; i++) await flush(25)
+    expect(recoveryRequests(hub, rs).length).toBeGreaterThan(0)
+
+    // And the verdict, directly.
+    expect(
+      classifyCommit(
+        { epoch: 1, committerDID: 'bob' },
+        loserSeq,
+        publishedCommitDigest(hub, loserSeq),
+        {
+          localDID: 'alice',
+          epoch: 2,
+          appliedByEpoch: new Map([
+            [1, { sequenceID: winnerSeq, digest: publishedCommitDigest(hub, winnerSeq) }],
+          ]),
+        },
+      ),
+    ).toEqual({ row: 'fork', appliedSequenceID: winnerSeq, branch: 'losing' })
+
+    await alice.peer.dispose()
+  })
 })
