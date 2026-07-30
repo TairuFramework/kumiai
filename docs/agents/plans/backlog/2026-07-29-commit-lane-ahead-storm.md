@@ -2,7 +2,7 @@
 
 **Priority:** medium — not closable inside `@kumiai/rpc`, which is why it is backlog rather than
 next. **Carried forward 2026-07-29** from `next/2026-07-16-security-residuals.md`, whose other two
-items closed (see `completed/2026-07-29-security-residuals.complete.md`). Nothing here is new; it is
+items closed (see `completed/2026-07-30-security-residuals.complete.md`). Nothing here is new; it is
 preserved so the analysis is not buried in a completed file.
 
 ## The storm
