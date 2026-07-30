@@ -17,6 +17,10 @@ the fake's `unwrap` was a pure XOR where the real one spends a ratchet key. Ever
 package is one of those, or something found by running the two implementations against each other. A
 clause only one side can pass is a divergence, and finding one is the point.
 
+The ports are `GroupCrypto` and `GroupMLS`, both declared in `packages/rpc/src/crypto.ts`, and both
+say there that implementing them obliges running this suite. If you arrived here from those types,
+"Exports" and "Both suites take a harness" below are what you need to wire it.
+
 ## Exports
 
 - `testGroupCryptoConformance({ label, createGroup })`

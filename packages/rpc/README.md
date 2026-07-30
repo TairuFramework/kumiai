@@ -22,6 +22,13 @@ half through two ports:
 `@kumiai/mls-rpc` implements both over a live `@kumiai/mls` handle. `@kumiai/rpc-conformance` is the
 contract every implementation and every double must pass.
 
+**Taking these ports means running that suite against your implementation.** A host that uses
+`@kumiai/mls-rpc` gets both ports right by construction and inherits its conformance run. A host
+that writes its own does not, and one method makes that expensive: `exportSecret` is the only member
+of either port whose failure mode is silent. Derive its bytes from anything a removed member keeps
+and nothing breaks — the group works, removals remove, the health monitor is quiet — while an
+evicted member can still name and read the app topic, which derives from it.
+
 Three constraints a port implementation is most likely to get wrong, all of which the suite pins:
 
 - **`unwrap` throwing is ordinary control flow**, not an error: it is how a retained frame says "not

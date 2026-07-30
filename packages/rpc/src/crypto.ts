@@ -23,6 +23,11 @@ import type { ByteTransform } from '@kumiai/broadcast'
  * `unwrap` throwing is ORDINARY CONTROL FLOW on the read paths, not an error — it means "not my
  * epoch". Readers walk logs full of frames from epochs they don't hold and drop them without
  * treating them as corrupt.
+ *
+ * IMPLEMENTING THIS PORT OBLIGES RUNNING `@kumiai/rpc-conformance` AGAINST THE IMPLEMENTATION.
+ * Not a recommendation: the suite is where this port's contract actually lives, and the clauses
+ * exist because implementations got them wrong. A host that writes its own `GroupCrypto` and does
+ * not run the suite has an untested crypto boundary, whatever else it tests.
  */
 export type GroupCrypto = {
   epoch(): number
@@ -40,6 +45,14 @@ export type GroupCrypto = {
    * binds `length` into the exporter's `KDFLabel` struct (§8.5), so a same-label export at a
    * different length is an INDEPENDENT key, not a truncation or extension of the default-length
    * one.
+   *
+   * THE ONE METHOD HERE WHOSE ONLY FAILURE MODE IS SILENT. Derive these bytes from anything a
+   * removed member keeps — a lifelong recovery secret, a group id, a constant — and nothing
+   * fails: the group works, members talk, removals remove, the roster and epoch are right, the
+   * health monitor is quiet. The single symptom is that an evicted member can still name and read
+   * the app topic, because the topic derives from this. That is why the conformance clause
+   * "is PER-EPOCH: the group rotates onto a different secret and the removed member keeps the
+   * old one" is not optional for a hand-rolled implementation.
    */
   exportSecret(label: string, length?: number): Uint8Array | Promise<Uint8Array>
   wrap: ByteTransform
@@ -222,6 +235,11 @@ export type PendingRecovery = {
  * handshake lane — applying Commits to advance the epoch, re-syncing a stranded peer. group-rpc
  * owns transport + orchestration; the consumer owns MLS state and any storage/atomicity below
  * this interface.
+ *
+ * Like {@link GroupCrypto}, implementing this port obliges running `@kumiai/rpc-conformance`
+ * against the implementation. Eight of this port's members once had no clause at all, across the
+ * recovery and ledger lanes, which carry the group's whole authority state — the gap was invisible
+ * until the suite was made to cover the shape rather than a sample of it.
  */
 export type GroupMLS = {
   /**
