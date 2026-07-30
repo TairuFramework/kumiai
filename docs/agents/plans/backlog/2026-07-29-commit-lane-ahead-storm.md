@@ -20,7 +20,7 @@ forgery finding in this same doc, does nothing here because the epoch check runs
 
 **A second, cheaper trigger exists as of `feat/app-lane-delivery`.** An unreadable commit-frame
 *version* now also settles `ahead`, above every other row including the headerless one
-(`packages/rpc/src/classify.ts:235`, commit `0777b86`). That means an attacker no longer needs a
+(`packages/rpc/src/classify.ts:182`, commit `0777b86`). That means an attacker no longer needs a
 genuine commit to rewrite the epoch of at all — a single garbage byte in the frame's version field
 asks every peer to heal, with no commit bytes behind it.
 
