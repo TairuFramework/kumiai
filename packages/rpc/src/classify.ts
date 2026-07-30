@@ -28,7 +28,8 @@ import type { CommitHeader } from './crypto.js'
  * **The header carries two facts with different trust.** The epoch is cleartext and only the
  * publisher's word. The committer is MLS-authenticated but recoverable only for a commit framed
  * at this peer's OWN epoch — reading it needs that epoch's key material. So `ahead`, `history`
- * and `fork` dispatch on the EPOCH ALONE (they're about frames this peer holds no key for),
+ * and `fork` are all REACHED on the EPOCH ALONE (they're about frames this peer holds no key
+ * for) — though `fork` is then SETTLED on the commit, once two records at that epoch disagree —
  * while every row at this peer's own epoch requires the AUTHENTICATED committer and refuses to
  * fire without it. A classifier that demanded a committer before reading an epoch could never
  * classify the one frame that says a peer fell behind.
@@ -249,10 +250,14 @@ export function classifyCommit(
     // makes a peer read its OWN applied commit as the losing branch and heal the whole group
     // off it — one rejoin and one anchor rotation per replay.
     if (commitDigest != null && commitDigest === applied.digest) return { row: 'history' }
-    // No digest to compare against. Unreachable today (the only null-digest calls pass
-    // UNKNOWN_FRAME_VERSION, settled at `ahead` above); the position comparison is kept so the
-    // function stays total rather than falling through to `fork` on a frame it cannot judge.
-    if (commitDigest == null && sequenceID === applied.sequenceID) return { row: 'history' }
+    // No digest to compare against: the same kind of missing evidence as `applied == null`
+    // above, and judged the same way, for the same reason — a frame whose commit bytes were
+    // never extracted cannot be told apart from the one this peer already enacted, so it must
+    // not be told apart from it. Unreachable today (the only null-digest calls pass
+    // UNKNOWN_FRAME_VERSION, settled at `ahead` above); kept unconditional, rather than falling
+    // through to a position comparison, so a direct caller reaching this some other way still
+    // gets the safe direction: it can MISS a fork on absent evidence, but can never INVENT one.
+    if (commitDigest == null) return { row: 'history' }
     return {
       row: 'fork',
       appliedSequenceID: applied.sequenceID,

@@ -147,17 +147,24 @@ describe('the cursor table', () => {
     })
   })
 
-  test('with no digest to compare, the position decides — the classifier stays total', () => {
+  test('with no digest to compare, it is always history — miss a fork, never invent one', () => {
     // Unreachable through the lane: the only null-digest calls pass UNKNOWN_FRAME_VERSION, which
-    // settles at `ahead` before the epoch comparison. Pinned so the fallback cannot rot into
-    // "every undigested frame is a fork".
+    // settles at `ahead` before the epoch comparison. Pinned anyway, because `classifyCommit` is
+    // exported and a direct caller can reach this with a real record and a position that
+    // disagrees with it — the second assertion below.
+    //
+    // A missing digest is the same kind of absent evidence as a missing `applied` record
+    // (`applied == null`, above), and this takes the same side of it: `appliedByEpoch`'s own doc
+    // says the safe direction is to MISS a fork, never INVENT one, and the position alone cannot
+    // tell a re-seal of the recorded commit apart from a genuine second commit — the exact
+    // ambiguity a digest exists to resolve. So position is not read as a fallback here; both
+    // assertions land on `history`, matching regardless of whether the sequenceID agrees with the
+    // record.
     expect(classifyCommit({ epoch: 3, committerDID: 'alice' }, 's3', null, bob())).toEqual({
       row: 'history',
     })
     expect(classifyCommit({ epoch: 3, committerDID: 'alice' }, 's7', null, bob())).toEqual({
-      row: 'fork',
-      appliedSequenceID: 's3',
-      branch: 'winning',
+      row: 'history',
     })
   })
 
