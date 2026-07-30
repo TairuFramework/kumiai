@@ -26,8 +26,9 @@ No changes were made to Kubun.
 Both READMEs already named the suite as mandatory. The gap was narrower than the residuals doc
 implied: neither port TYPE said it, and a host writing its own `GroupCrypto` reads
 `packages/rpc/src/crypto.ts`, not a README. The obligation now sits on the `GroupCrypto` and
-`GroupMLS` doc blocks, `exportSecret` states that its only failure mode is silent, and the two
-READMEs point at each other.
+`GroupMLS` doc blocks, `exportSecret` states that its failure mode is the most consequential of
+either port's silent ones — with `sealEntries`/`openEntries` named beside it as resting on the same
+per-epoch removal boundary — and the two READMEs point at each other.
 
 ## 3. The replay question, answered
 
