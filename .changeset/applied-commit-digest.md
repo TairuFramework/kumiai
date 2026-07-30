@@ -41,10 +41,12 @@ fewer heals:
 outright, so no path through the classifier can now produce a heal the old code did not, in any
 order the hub serves the log.
 
-Breaking, for anyone calling the classifier directly: `classifyCommit` takes the frame's commit
-digest as a third argument (`digestAppliedCommit(commit)`, or `null` where the bytes were never
-extracted), and `CommitClassifierState.appliedByEpoch` is now
-`ReadonlyMap<number, AppliedCommit>`. Both `AppliedCommit` and `digestAppliedCommit` are exported.
+Breaking, for anyone calling the classifier directly: `classifyCommit` now takes a single
+`ClassifyCommitParams` object — `{ header, sequenceID, commitDigest, state }` — rather than
+positional arguments. `commitDigest` is `digestAppliedCommit(commit)`, or `null` where the bytes
+were never extracted. `CommitClassifierState.appliedByEpoch` is now
+`ReadonlyMap<number, AppliedCommit>`. `AppliedCommit`, `ClassifyCommitParams` and
+`digestAppliedCommit` are all exported.
 Verdicts 2 and 3 above change what a direct caller sees for the same inputs: verdict 2 produces no
 heal operationally (`winning` sets neither `healRequested` nor `stranded`) but a caller asserting
 on the verdict itself would see the change; verdict 3 is unreachable through the lane today and

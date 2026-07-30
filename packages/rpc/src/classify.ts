@@ -203,25 +203,43 @@ export type CommitClassifierState = {
 }
 
 /**
+ * One frame of the commit log, as much as can be known about it before anything is decrypted,
+ * plus the peer state to judge it against.
+ *
+ * A single object rather than positional arguments: three of the four are strings-or-null read off
+ * one frame, and at a call site `classifyCommit(header, position, null, state)` says nothing about
+ * which `null` that is or why. Naming them makes the digest-less calls self-explaining.
+ */
+export type ClassifyCommitParams = {
+  /**
+   * What the commit says about itself, read out of its own bytes by the MLS port: `null` for bytes
+   * that are not a commit at all, and otherwise the commit's epoch — always, it is cleartext —
+   * with `committerDID` present only where the port could MLS-authenticate one. It is
+   * {@link UNKNOWN_FRAME_VERSION} where the frame's wire version put the header itself out of reach.
+   */
+  header: CommitFrameEvidence
+  /** Where the log carries this frame — the hub's own chaining, not the commit's word. */
+  sequenceID: string
+  /**
+   * {@link digestAppliedCommit} over this frame's commit bytes, or `null` where they were never
+   * extracted — which today is only the {@link UNKNOWN_FRAME_VERSION} calls, settled at `ahead`
+   * before it is read.
+   */
+  commitDigest: string | null
+  /** What this peer knows about itself. */
+  state: CommitClassifierState
+}
+
+/**
  * Classify one frame of the commit log against this peer's state, before anything is
  * applied and before anything is decrypted.
- *
- * `header` is what the commit says about itself, read out of its own bytes by the MLS port:
- * `null` for bytes that are not a commit at all, and otherwise the commit's epoch — always, it
- * is cleartext — with `committerDID` present only where the port could MLS-authenticate one. It
- * is {@link UNKNOWN_FRAME_VERSION} where the frame's wire version put the header itself out of
- * reach.
- *
- * `commitDigest` is {@link digestAppliedCommit} over this frame's commit bytes, or `null` where
- * they were never extracted — which today is only the {@link UNKNOWN_FRAME_VERSION} calls, settled
- * at `ahead` before it is read.
  */
-export function classifyCommit(
-  header: CommitFrameEvidence,
-  sequenceID: string,
-  commitDigest: string | null,
-  state: CommitClassifierState,
-): CommitDisposition {
+export function classifyCommit({
+  header,
+  sequenceID,
+  commitDigest,
+  state,
+}: ClassifyCommitParams): CommitDisposition {
   // Settled above every other row, including the headerless one: bytes in an unknown format
   // can't be asked whether they're a commit. `ahead`, not `poison` — see UNKNOWN_FRAME_VERSION's
   // doc for why poison is uniquely dangerous here (no "next frame" to heal off of after a

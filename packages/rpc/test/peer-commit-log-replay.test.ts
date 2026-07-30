@@ -118,18 +118,18 @@ describe('a genuine external commit re-published by the hub steers nothing', () 
     // so every assertion above holds either way. This pins that Alice recognised the replay as the
     // commit she already enacted, rather than as a fork she happened to be on the winning side of.
     expect(
-      classifyCommit(
-        { epoch: 1, committerDID: 'bob' },
-        replayed,
-        publishedCommitDigest(hub, replayed),
-        {
+      classifyCommit({
+        header: { epoch: 1, committerDID: 'bob' },
+        sequenceID: replayed,
+        commitDigest: publishedCommitDigest(hub, replayed),
+        state: {
           localDID: 'alice',
           epoch: alice.mls.epoch(),
           appliedByEpoch: new Map([
             [1, { sequenceID: original, digest: publishedCommitDigest(hub, original) }],
           ]),
         },
-      ),
+      }),
     ).toEqual({ row: 'history' })
 
     // The cursor moved PAST the replay rather than parking on it — a frame re-read on every pull
@@ -185,10 +185,15 @@ describe('a genuine external commit re-published by the hub steers nothing', () 
     // lane, so this is what actually pins that Carol classified the replay as `history` rather
     // than inventing a fork she has no record to judge.
     expect(
-      classifyCommit({ epoch: 1, committerDID: 'bob' }, replayed, null, {
-        localDID: 'carol',
-        epoch: carol.mls.epoch(),
-        appliedByEpoch: new Map(),
+      classifyCommit({
+        header: { epoch: 1, committerDID: 'bob' },
+        sequenceID: replayed,
+        commitDigest: null,
+        state: {
+          localDID: 'carol',
+          epoch: carol.mls.epoch(),
+          appliedByEpoch: new Map(),
+        },
       }),
     ).toEqual({ row: 'history' })
 
@@ -257,18 +262,18 @@ describe('a genuine external commit re-published by the hub steers nothing', () 
     // reached the frame would satisfy all of them; this asks the classifier about the scenario's
     // own two frames at the positions the hub gave them.
     expect(
-      classifyCommit(
-        { epoch: 1, committerDID: 'bob' },
-        original,
-        publishedCommitDigest(hub, original),
-        {
+      classifyCommit({
+        header: { epoch: 1, committerDID: 'bob' },
+        sequenceID: original,
+        commitDigest: publishedCommitDigest(hub, original),
+        state: {
           localDID: 'alice',
           epoch: alice.mls.epoch(),
           appliedByEpoch: new Map([
             [1, { sequenceID: replayed, digest: publishedCommitDigest(hub, replayed) }],
           ]),
         },
-      ),
+      }),
     ).toEqual({ row: 'history' })
 
     await alice.peer.dispose()
@@ -325,18 +330,18 @@ describe('a genuine external commit re-published by the hub steers nothing', () 
     // just as well. This pins that the heal was specifically the `fork` row, on the LOSING
     // branch, against the sequenceID Alice actually recorded for the commit she applied.
     expect(
-      classifyCommit(
-        { epoch: 1, committerDID: 'bob' },
-        loserSeq,
-        publishedCommitDigest(hub, loserSeq),
-        {
+      classifyCommit({
+        header: { epoch: 1, committerDID: 'bob' },
+        sequenceID: loserSeq,
+        commitDigest: publishedCommitDigest(hub, loserSeq),
+        state: {
           localDID: 'alice',
           epoch: 2,
           appliedByEpoch: new Map([
             [1, { sequenceID: winnerSeq, digest: publishedCommitDigest(hub, winnerSeq) }],
           ]),
         },
-      ),
+      }),
     ).toEqual({ row: 'fork', appliedSequenceID: winnerSeq, branch: 'losing' })
 
     await alice.peer.dispose()
@@ -443,18 +448,18 @@ describe('a genuine external commit re-published by the hub steers nothing', () 
     // already enacted (under the re-seal's blob), keyed on the Commit's bytes rather than the
     // blob riding either frame.
     expect(
-      classifyCommit(
-        { epoch: 1, committerDID: 'bob' },
-        original,
-        publishedCommitDigest(hub, original),
-        {
+      classifyCommit({
+        header: { epoch: 1, committerDID: 'bob' },
+        sequenceID: original,
+        commitDigest: publishedCommitDigest(hub, original),
+        state: {
           localDID: 'alice',
           epoch: alice.mls.epoch(),
           appliedByEpoch: new Map([
             [1, { sequenceID: resealed, digest: publishedCommitDigest(hub, resealed) }],
           ]),
         },
-      ),
+      }),
     ).toEqual({ row: 'history' })
 
     await alice.peer.dispose()

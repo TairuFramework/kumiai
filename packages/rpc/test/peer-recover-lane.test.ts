@@ -341,18 +341,18 @@ describe('a hub that forked the log', () => {
     // things, and this asks it about the scenario's OWN frames at the positions the hub gave
     // them: the tiebreak has to fall this way round for Carol's silence to be a decision.
     expect(
-      classifyCommit(
-        { epoch: 1, committerDID: 'yolanda' },
-        loserSeq,
-        publishedCommitDigest(hub, loserSeq),
-        {
+      classifyCommit({
+        header: { epoch: 1, committerDID: 'yolanda' },
+        sequenceID: loserSeq,
+        commitDigest: publishedCommitDigest(hub, loserSeq),
+        state: {
           localDID: 'carol',
           epoch: 2,
           appliedByEpoch: new Map([
             [1, { sequenceID: winnerSeq, digest: publishedCommitDigest(hub, winnerSeq) }],
           ]),
         },
-      ),
+      }),
     ).toEqual({ row: 'fork', appliedSequenceID: winnerSeq, branch: 'winning' })
 
     await carol.peer.dispose()

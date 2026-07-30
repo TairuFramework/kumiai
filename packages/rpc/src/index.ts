@@ -8,6 +8,7 @@ export type { Anchor, AnchorStore } from './anchor.js'
 export type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
 export {
   type AppliedCommit,
+  type ClassifyCommitParams,
   type CommitClassifierState,
   type CommitDisposition,
   type CommitFrameEvidence,

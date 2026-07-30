@@ -1123,10 +1123,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         if (frame.version !== HANDSHAKE_VERSION) {
           // No digest: the frame's version put its commit bytes out of reach entirely. Settled at
           // `ahead` before the digest is read.
-          const unreadable = classifyCommit(UNKNOWN_FRAME_VERSION, position, null, {
-            localDID,
-            epoch: crypto.epoch(),
-            appliedByEpoch,
+          const unreadable = classifyCommit({
+            header: UNKNOWN_FRAME_VERSION,
+            sequenceID: position,
+            commitDigest: null,
+            state: { localDID, epoch: crypto.epoch(), appliedByEpoch },
           })
           reconciledHead = position
           // Do what the classifier said, not what this branch assumes: it answers `ahead` today,
@@ -1152,10 +1153,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           // version fails BEFORE the commit bytes are extracted, so there is no next frame to
           // heal from — dropping it would step over the group's whole future. To the classifier.
           if (isUnsupportedCommitFrameVersion(error)) {
-            const unreadable = classifyCommit(UNKNOWN_FRAME_VERSION, position, null, {
-              localDID,
-              epoch: crypto.epoch(),
-              appliedByEpoch,
+            const unreadable = classifyCommit({
+              header: UNKNOWN_FRAME_VERSION,
+              sequenceID: position,
+              commitDigest: null,
+              state: { localDID, epoch: crypto.epoch(), appliedByEpoch },
             })
             reconciledHead = position
             // The classifier's answer, not this branch's assumption — as above.
@@ -1180,10 +1182,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         // trusted: it could stamp every recipient's own DID onto one poison frame and make the
         // whole group heal at once.
         const header = await port.readCommitHeader(commitFrame.commit)
-        const disposition = classifyCommit(header, position, commitDigest, {
-          localDID,
-          epoch: crypto.epoch(),
-          appliedByEpoch,
+        const disposition = classifyCommit({
+          header,
+          sequenceID: position,
+          commitDigest,
+          state: { localDID, epoch: crypto.epoch(), appliedByEpoch },
         })
 
         if (disposition.row === 'own-unmerged') {
