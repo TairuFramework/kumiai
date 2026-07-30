@@ -72,6 +72,7 @@ export type MailboxHubConformanceParams<Hub extends ConformanceMailboxHub> = {
 
 const ALICE = 'did:key:alice'
 const BOB = 'did:key:bob'
+const CAROL = 'did:key:carol'
 const TOPIC = 'topic:log-hub-conformance'
 
 function payload(byte: number): Uint8Array {
@@ -341,10 +342,10 @@ export function testLogHubConformance<Hub extends ConformanceLogHub>(
       })
 
       // A capture-and-replay, not a publishID replay: the same bytes re-sent by somebody who
-      // observed them, under a key the original publisher never used. No expectedHead — the
-      // replayer is not doing a compare-and-set, it is appending.
+      // merely OBSERVED them, under a publishID the original publisher never used. No
+      // expectedHead — the replayer is not doing a compare-and-set, it is appending.
       const { sequenceID: replayed } = await hub.publish({
-        senderDID: ALICE,
+        senderDID: CAROL,
         topicID: TOPIC,
         payload: payload(1),
         retain: 'log',

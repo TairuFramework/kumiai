@@ -46,13 +46,18 @@ export type GroupCrypto = {
    * different length is an INDEPENDENT key, not a truncation or extension of the default-length
    * one.
    *
-   * THE ONE METHOD HERE WHOSE ONLY FAILURE MODE IS SILENT. Derive these bytes from anything a
-   * removed member keeps — a lifelong recovery secret, a group id, a constant — and nothing
-   * fails: the group works, members talk, removals remove, the roster and epoch are right, the
-   * health monitor is quiet. The single symptom is that an evicted member can still name and read
-   * the app topic, because the topic derives from this. That is why the conformance clause
-   * "is PER-EPOCH: the group rotates onto a different secret and the removed member keeps the
-   * old one" is not optional for a hand-rolled implementation.
+   * THE METHOD HERE WHOSE MOST CONSEQUENTIAL FAILURE MODE IS SILENT. Derive these bytes from
+   * anything a removed member keeps — a lifelong recovery secret, a group id, a constant — and
+   * nothing fails: the group works, members talk, removals remove, the roster and epoch are
+   * right, the health monitor is quiet. The single symptom is that an evicted member can still
+   * name and read the app topic, because the topic derives from this. That is why the conformance
+   * clause "is PER-EPOCH: the group rotates onto a different secret and the removed member keeps
+   * the old one" is not optional for a hand-rolled implementation.
+   *
+   * `sealEntries`/`openEntries` below rest on the same per-epoch removal boundary and fail the
+   * same silent way: key either off anything but this epoch's secret and a removed member opens
+   * the ledger-entry blobs of every commit enacted after its removal, with nothing throwing to
+   * say so.
    */
   exportSecret(label: string, length?: number): Uint8Array | Promise<Uint8Array>
   wrap: ByteTransform

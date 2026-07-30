@@ -53,6 +53,14 @@ per-epoch publish credential, would bound it. As things stand, anyone who can wr
 topic can emit an ahead-claiming frame today — including a removed member, who keeps the topic
 forever, and the untrusted hub itself, which sees every topic ID in the clear.
 
+**What a verified committer does and does not assert.** Whatever gates publish authorization, it
+bounds who may claim an epoch — it does not change what a passing signature check means. A verified
+external-commit signature says "whoever produced these bytes held the key of the leaf whose
+credential names that DID". It does **not** say the group authorized that member to rejoin, and it is
+not a membership check. Whether a rejoin should additionally be gated on the roster is a separate
+question, and was deliberately left out of scope here — carried forward with the rest of this doc
+rather than decided.
+
 ## Adjacent: one app-topic frame forces a commit-log walk
 
 Not the same finding, but the same shape, and on the other lane. The app-lane drain bounds a

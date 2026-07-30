@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest'
 
+import { classifyCommit } from '../src/classify.js'
 import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
@@ -84,19 +85,26 @@ describe('a genuine external commit re-published by the hub steers nothing', () 
     expect(alice.mls.epoch()).toBe(2)
     expect(alice.mls.commits()).toBe(1)
     const anchorAfterRejoin = alice.peer.anchorEpoch()
+    // Captured before the replay so the assertions below can pin that the port is never handed
+    // the frame a second time — `commits()` alone cannot show that: it counts only what
+    // `processCommit` APPLIED, and a mutant that routed the replay to `processCommit` anyway
+    // would return `{ advanced: false }` (epoch 1 against a handle at epoch 2) and leave
+    // `commits()` exactly where it is.
+    const seenAfterRejoin = alice.mls.seen()
 
     const replayed = await replayCommitFrame(hub, rs, original)
-    // The whole conclusion rests on this one comparison. Alice recorded `appliedByEpoch[1] =
-    // original`; the replay lands above it, so `sequenceID < applied ? 'losing' : 'winning'`
-    // settles `winning` and the lane steps over it. Pinned at the hub layer by
-    // `hub-conformance`'s clause "a re-published payload under a fresh publishID never lands
-    // below the original".
+    // A fixture precondition, not the conclusion: the hub-conformance floor guarantees the
+    // replay lands at or above the original, and this just confirms the fixture produced that
+    // shape before the assertions below lean on it. The conclusion is the classification.
     expect(replayed > original).toBe(true)
     await flush(200)
 
-    // Not applied: the epoch is unmoved and the port was never handed the commit a second time.
+    // Not applied: the epoch is unmoved, `commits()` is unmoved, and the port was never handed
+    // the frame at all — `seen()` counts every `processCommit` call, applied or not, so this is
+    // the assertion that actually pins "never handed to the port a second time".
     expect(alice.mls.epoch()).toBe(2)
     expect(alice.mls.commits()).toBe(1)
+    expect(alice.mls.seen()).toBe(seenAfterRejoin)
     expect([...(await alice.mls.rosterDIDs())].sort()).toEqual(['alice', 'bob'])
     // The steer that would have mattered. `advanceHandle` rotates the anchor on
     // `result.advanced && header.external === true`; a replay that never advances never rotates,
@@ -104,12 +112,26 @@ describe('a genuine external commit re-published by the hub steers nothing', () 
     expect(alice.peer.anchorEpoch()).toBe(anchorAfterRejoin)
     // And no heal: `winning` sets neither `healRequested` nor `stranded`.
     expect(recoveryRequests(hub, rs)).toHaveLength(0)
+    // THE VERDICT, directly — `history` and `fork`/`winning` are observationally identical from
+    // outside the lane (both step over the frame, move the head, heal nothing), so every
+    // assertion above holds just as well for a peer that never diagnosed a fork at all. This
+    // pins that Alice actually did classify it as `fork`, on the winning side, against the
+    // sequenceID she recorded for the original.
+    expect(
+      classifyCommit({ epoch: 1, committerDID: 'bob' }, replayed, {
+        localDID: 'alice',
+        epoch: alice.mls.epoch(),
+        appliedByEpoch: new Map([[1, original]]),
+      }),
+    ).toEqual({ row: 'fork', appliedSequenceID: original, branch: 'winning' })
 
     // The cursor moved PAST the replay rather than parking on it — a frame re-read on every pull
     // is the permanent heal loop the forged-rejoin fix closed, arriving by another door.
     await wakeLane(hub, rs)
+    await flush(300)
     expect(alice.mls.epoch()).toBe(2)
     expect(alice.mls.commits()).toBe(1)
+    expect(alice.mls.seen()).toBe(seenAfterRejoin)
     expect(alice.peer.anchorEpoch()).toBe(anchorAfterRejoin)
     expect(recoveryRequests(hub, rs)).toHaveLength(0)
 
@@ -129,8 +151,10 @@ describe('a genuine external commit re-published by the hub steers nothing', () 
       committerDID: 'bob',
       external: true,
     })
+    // Not load-bearing here at all — unlike the sibling test, nothing below turns on the
+    // replay's sequenceID relative to the original: Carol has no record for epoch 1 either way,
+    // so both frames read as `history` regardless of which arrived first or which is higher.
     const replayed = await replayCommitFrame(hub, rs, original)
-    expect(replayed > original).toBe(true)
 
     // Carol is already at epoch 2 — restarted, re-seeded, or a late joiner. `appliedByEpoch` is
     // in-memory BY DESIGN, so she holds no record for epoch 1: both frames are below her epoch
@@ -144,12 +168,29 @@ describe('a genuine external commit re-published by the hub steers nothing', () 
 
     expect(carol.mls.epoch()).toBe(2)
     expect(carol.mls.commits()).toBe(0)
+    // The port was never handed either frame — `history` is settled on the epoch alone, before
+    // the lane ever reaches the port. `commits()` alone would not show this (a mutant routing a
+    // `history` frame to `processCommit` still gets `{ advanced: false }` for the epoch
+    // mismatch, leaving `commits()` unmoved); `seen()` counts the `processCommit` call itself.
+    expect(carol.mls.seen()).toBe(0)
     expect(recoveryRequests(hub, rs)).toHaveLength(0)
+    // THE VERDICT, directly. `history` and a winning fork are indistinguishable from outside the
+    // lane, so this is what actually pins that Carol classified the replay as `history` rather
+    // than inventing a fork she has no record to judge.
+    expect(
+      classifyCommit({ epoch: 1, committerDID: 'bob' }, replayed, {
+        localDID: 'carol',
+        epoch: carol.mls.epoch(),
+        appliedByEpoch: new Map(),
+      }),
+    ).toEqual({ row: 'history' })
 
     // Stepped over for good, not re-read: history advances the cursor like every other row.
     await wakeLane(hub, rs)
+    await flush(300)
     expect(carol.mls.epoch()).toBe(2)
     expect(carol.mls.commits()).toBe(0)
+    expect(carol.mls.seen()).toBe(0)
     expect(recoveryRequests(hub, rs)).toHaveLength(0)
 
     await carol.peer.dispose()

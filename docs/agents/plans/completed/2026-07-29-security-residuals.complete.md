@@ -44,10 +44,35 @@ record for E (restarted, re-seeded, late joiner) reads `history`. Neither reache
 so `applied.advanced` stays false and the rejoin rotation at `peer.ts:1240` never fires: **the
 app-lane topic does not move**. That was the steer that would have mattered.
 
-It rests on one property — a replay never lands BELOW the original — which is now a clause in both
-hub-conformance suites (`a re-published payload under a fresh publishID never lands below the
-original`), so Kubun's sqlite and postgres stores inherit it. `packages/rpc/test/peer-commit-log-replay.test.ts`
-pins the rpc half, and `commit-classify.test.ts:48` already pinned both fork branches.
+This rests on two premises, not one. The first is the property already stated — a replay never
+lands BELOW the original — which is now a clause in both hub-conformance suites (`a re-published
+payload under a fresh publishID never lands below the original`), so Kubun's sqlite and postgres
+stores inherit it. `packages/rpc/test/peer-commit-log-replay.test.ts` pins the rpc half, and
+`commit-classify.test.ts:48` already pinned both fork branches.
+
+The second premise is unstated by that clause and unpinned by any test: **the reader is served the
+log in sequenceID order.** `walkCommits` processes `result.messages` in whatever order the hub
+returns them (`packages/rpc/src/peer.ts:1102-1268`) and never checks a frame's position against
+`reconciledHead` — `reconciledHead = position` is assigned unconditionally in every branch, and
+`asLogPosition` (`packages/rpc/src/cursor.ts:33`) is a bare cast that asserts nothing about order.
+`appliedByEpoch` is keyed only by sequenceID, so the `fork` row's `winning`/`losing` split proxies "a
+different commit at this epoch" by "a different sequenceID", never by delivery order. A hub that
+keeps the floor above — the replay still lands at or above the original sequenceID — but serves the
+two copies newest-first, or withholds the original and reveals it later (what `FakeHub.hideFrom` /
+`revealTo` model), makes the peer apply the replay copy first, record `appliedByEpoch[E] =
+replaySeq`, and then classify the original — arriving later, at the LOWER sequenceID — as
+`fork`/`losing`. That heals: rendezvous, rejoin, an external commit lands in the log, every peer
+rotates the anchor. **The app-lane topic DOES move, one group-wide heal per replay, under a hub of
+that shape.**
+
+That is not a new capability class, which is why it does not reopen this item. It costs the same or
+less than the `ahead` storm already filed as unclosable from inside this repo, and a hub that
+re-serves a topic's own log out of order or below a reader's cursor is exactly the untrusted-hub
+shape `FakeHub.revealTo`'s own doc already concedes no peer-side rule can survive. It belongs beside
+that item, in `docs/agents/plans/backlog/2026-07-29-commit-lane-ahead-storm.md` — recorded there, not
+fixed here.
 
 Freshness and publish-side duplicate refusal were considered and are not needed: the bound the
-residuals doc would have reached for only matters if the replay could steer, and it cannot.
+residuals doc would have reached for only matters if the replay could steer under an honestly-ordered
+hub, and it cannot. An out-of-order hub is a different threat, recorded above and carried to the
+backlog rather than bounded here.

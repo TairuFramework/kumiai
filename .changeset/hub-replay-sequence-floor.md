@@ -19,3 +19,10 @@ deduplicates on content and hands back the original sequenceID stays legal — t
 the reader the clause protects. A replay landing *below* an applied frame is the failure: every peer
 that applied the original would read it as the losing branch and rejoin, one group-wide heal per
 replay, for bytes already delivered once.
+
+This clause alone is not a complete defence. It bounds *where* a replay's sequenceID can land, not
+the order a reader is served the log in — a hub that respects the floor but serves a later frame
+before an earlier one, or withholds one and reveals it after a reader's cursor has passed it, can
+still make a reader apply the replay first and read the original as the losing side of a fork. That
+second premise — the reader is served the log in sequenceID order — is unpinned by this clause and is
+recorded separately in `docs/agents/plans/backlog/2026-07-29-commit-lane-ahead-storm.md`.

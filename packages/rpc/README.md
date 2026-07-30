@@ -24,10 +24,13 @@ contract every implementation and every double must pass.
 
 **Taking these ports means running that suite against your implementation.** A host that uses
 `@kumiai/mls-rpc` gets both ports right by construction and inherits its conformance run. A host
-that writes its own does not, and one method makes that expensive: `exportSecret` is the only member
-of either port whose failure mode is silent. Derive its bytes from anything a removed member keeps
-and nothing breaks — the group works, removals remove, the health monitor is quiet — while an
-evicted member can still name and read the app topic, which derives from it.
+that writes its own does not, and one method makes that most expensive: `exportSecret` is the member
+of either port whose MOST CONSEQUENTIAL failure mode is silent. Derive its bytes from anything a
+removed member keeps and nothing breaks — the group works, removals remove, the health monitor is
+quiet — while an evicted member can still name and read the app topic, which derives from it.
+`sealEntries`/`openEntries` rest on the same per-epoch removal boundary and fail the same way: a
+hand-rolled seal keyed off anything but the epoch secret round-trips, throws nothing, and lets a
+removed member open the ledger-entry blobs of commits enacted after its removal.
 
 Three constraints a port implementation is most likely to get wrong, all of which the suite pins:
 
