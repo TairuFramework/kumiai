@@ -501,6 +501,42 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
       expect((await store.fetch({ recipientDID: BOB })).messages).toHaveLength(0)
     })
 
+    test('a re-published payload under a fresh publishID never lands below the original', async () => {
+      const store = await createStore()
+      await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+
+      const { sequenceID: original } = await store.publish({
+        senderDID: ALICE,
+        topicID: TOPIC,
+        payload: payload(1),
+        retain: 'log',
+        publishID: 'publish-original',
+      })
+
+      // A capture-and-replay, which is a different thing from the publishID replay above: the
+      // same bytes handed back by somebody who merely OBSERVED them, under a publishID the
+      // original publisher never used. The idempotency record cannot catch it — the replayer
+      // picks the key — so the store alone decides what position the frame gets.
+      const { sequenceID: replayed } = await store.publish({
+        senderDID: CAROL,
+        topicID: TOPIC,
+        payload: payload(1),
+        retain: 'log',
+        publishID: 'publish-replay',
+      })
+
+      // A FLOOR, deliberately, not "strictly greater". A store that deduplicated on content would
+      // hand back the original sequenceID, and that is equally safe for the reader described
+      // below. What must never happen is a replay landing BELOW the original.
+      expect(replayed >= original).toBe(true)
+
+      // Why this is a security clause and not a tidiness one. `@kumiai/rpc`'s commit lane resolves
+      // two commits at one epoch by sequenceID order: the lower one stands, the higher one is
+      // stepped over. A replayed commit frame landing below the frame a peer already applied would
+      // read as the LOSING side of a fork on every peer that applied the original, and each would
+      // rejoin — a group-wide heal per replay, for bytes that were already delivered once.
+    })
+
     test('the dedup record outlives the log: a replay after a trim still returns the original sequenceID', async () => {
       const store = await createStore()
       await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
