@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Stage:** executing
+**Stage:** qa
 **Mode:** tasks
-**Execution:** subagent-driven (`superpowers:subagent-driven-development`), a fresh subagent per task with review between. Approved 2026-07-29; no task started yet — begin at Task 1.
+**Execution:** subagent-driven (`superpowers:subagent-driven-development`), a fresh subagent per task with review between. Approved 2026-07-29, executed 2026-07-30. All four tasks committed and reviewed; final whole-branch review run, its three Important findings fixed and re-reviewed. Merge and release are the repo owner's.
 
 **Goal:** Close the two actionable items in `docs/agents/plans/next/2026-07-16-security-residuals.md` — pin the answer to the external-commit replay question with tests plus the hub clause it rests on, and state the `rpc-conformance` obligation where a host writes its own port.
 
