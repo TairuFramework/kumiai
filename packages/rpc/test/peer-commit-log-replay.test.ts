@@ -3,7 +3,7 @@ import { describe, expect, test } from 'vitest'
 import { classifyCommit } from '../src/classify.js'
 import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
-import { publishCommit } from './fixtures/commits.js'
+import { publishCommit, publishedCommitDigest } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { makeMLSPeer } from './fixtures/peer.js'
 
@@ -112,18 +112,24 @@ describe('a genuine external commit re-published by the hub steers nothing', () 
     expect(alice.peer.anchorEpoch()).toBe(anchorAfterRejoin)
     // And no heal: `winning` sets neither `healRequested` nor `stranded`.
     expect(recoveryRequests(hub, rs)).toHaveLength(0)
-    // THE VERDICT, directly — `history` and `fork`/`winning` are observationally identical from
-    // outside the lane (both step over the frame, move the head, heal nothing), so every
-    // assertion above holds just as well for a peer that never diagnosed a fork at all. This
-    // pins that Alice actually did classify it as `fork`, on the winning side, against the
-    // sequenceID she recorded for the original.
+    // THE VERDICT, directly — `history` is observationally identical from outside the lane to the
+    // `fork`/`winning` this used to read (both step over the frame, move the head, heal nothing),
+    // so every assertion above holds either way. This pins that Alice recognised the replay as the
+    // commit she already enacted, rather than as a fork she happened to be on the winning side of.
     expect(
-      classifyCommit({ epoch: 1, committerDID: 'bob' }, replayed, {
-        localDID: 'alice',
-        epoch: alice.mls.epoch(),
-        appliedByEpoch: new Map([[1, original]]),
-      }),
-    ).toEqual({ row: 'fork', appliedSequenceID: original, branch: 'winning' })
+      classifyCommit(
+        { epoch: 1, committerDID: 'bob' },
+        replayed,
+        publishedCommitDigest(hub, replayed),
+        {
+          localDID: 'alice',
+          epoch: alice.mls.epoch(),
+          appliedByEpoch: new Map([
+            [1, { sequenceID: original, digest: publishedCommitDigest(hub, original) }],
+          ]),
+        },
+      ),
+    ).toEqual({ row: 'history' })
 
     // The cursor moved PAST the replay rather than parking on it — a frame re-read on every pull
     // is the permanent heal loop the forged-rejoin fix closed, arriving by another door.
@@ -178,7 +184,7 @@ describe('a genuine external commit re-published by the hub steers nothing', () 
     // lane, so this is what actually pins that Carol classified the replay as `history` rather
     // than inventing a fork she has no record to judge.
     expect(
-      classifyCommit({ epoch: 1, committerDID: 'bob' }, replayed, {
+      classifyCommit({ epoch: 1, committerDID: 'bob' }, replayed, null, {
         localDID: 'carol',
         epoch: carol.mls.epoch(),
         appliedByEpoch: new Map(),
@@ -194,5 +200,76 @@ describe('a genuine external commit re-published by the hub steers nothing', () 
     expect(recoveryRequests(hub, rs)).toHaveLength(0)
 
     await carol.peer.dispose()
+  })
+
+  test('a replay served BEFORE the original is not a fork the original loses', async () => {
+    const hub = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x83)
+
+    // Both copies land before Alice exists, so the order she is SERVED them is the hub's choice
+    // alone — which is the whole point. The hub-conformance floor bounds where a replay's
+    // sequenceID lands; it says nothing about the order a reader is handed the log.
+    const { sequenceID: original } = await publishCommit({
+      hub,
+      senderDID: 'bob',
+      recoverySecret: rs,
+      epoch: 1,
+      committerDID: 'bob',
+      external: true,
+    })
+    const replayed = await replayCommitFrame(hub, rs, original)
+    expect(replayed > original).toBe(true)
+
+    // The hub withholds the original and shows Alice the replay first.
+    hub.hideFrom('alice', original)
+    const alice = makeMLSPeer(hub, 'alice', rs, {
+      epoch: 1,
+      members: ['alice', 'bob'],
+      recovery,
+    })
+    await flush(200)
+
+    // She applied the replay — it is a genuine commit at her epoch, and nothing about it says
+    // otherwise. Her record for epoch 1 now names the replay's position, not the original's.
+    expect(alice.mls.epoch()).toBe(2)
+    expect(alice.mls.commits()).toBe(1)
+    const anchorAfterApply = alice.peer.anchorEpoch()
+    const seenAfterApply = alice.mls.seen()
+    expect(recoveryRequests(hub, rs)).toHaveLength(0)
+
+    // Now the original arrives, below her cursor and below the position she recorded.
+    hub.revealTo('alice', original)
+    await wakeLane(hub, rs)
+    await flush(300)
+
+    // The same commit she already enacted, so: history. Comparing POSITIONS instead reads
+    // `fork`/`losing` (the original carries the lower sequenceID), which heals the peer, rejoins
+    // it with an external commit, and rotates the app-lane anchor for every member — one
+    // group-wide storm per replay, for bytes the group already delivered once.
+    expect(recoveryRequests(hub, rs)).toHaveLength(0)
+    expect(alice.peer.anchorEpoch()).toBe(anchorAfterApply)
+    expect(alice.mls.epoch()).toBe(2)
+    expect(alice.mls.commits()).toBe(1)
+    expect(alice.mls.seen()).toBe(seenAfterApply)
+
+    // THE VERDICT, directly. Every assertion above is an absence, and a peer that simply never
+    // reached the frame would satisfy all of them; this asks the classifier about the scenario's
+    // own two frames at the positions the hub gave them.
+    expect(
+      classifyCommit(
+        { epoch: 1, committerDID: 'bob' },
+        original,
+        publishedCommitDigest(hub, original),
+        {
+          localDID: 'alice',
+          epoch: alice.mls.epoch(),
+          appliedByEpoch: new Map([
+            [1, { sequenceID: replayed, digest: publishedCommitDigest(hub, replayed) }],
+          ]),
+        },
+      ),
+    ).toEqual({ row: 'history' })
+
+    await alice.peer.dispose()
   })
 })

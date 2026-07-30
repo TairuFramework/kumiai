@@ -3,8 +3,14 @@ import { describe, expect, test } from 'vitest'
 import {
   type CommitClassifierState,
   classifyCommit,
+  digestAppliedCommit,
   UNKNOWN_FRAME_VERSION,
 } from '../src/classify.js'
+
+/** The two commits Bob enacted, and one he never saw — distinct bytes, so distinct digests. */
+const s3Commit = new Uint8Array([3, 3, 3])
+const s4Commit = new Uint8Array([4, 4, 4])
+const otherCommit = new Uint8Array([7, 7, 7])
 
 /** A peer at epoch 5, which enacted commit `s3` at epoch 3 and `s4` at epoch 4. */
 function bob(overrides: Partial<CommitClassifierState> = {}): CommitClassifierState {
@@ -12,8 +18,8 @@ function bob(overrides: Partial<CommitClassifierState> = {}): CommitClassifierSt
     localDID: 'bob',
     epoch: 5,
     appliedByEpoch: new Map([
-      [3, 's3'],
-      [4, 's4'],
+      [3, { sequenceID: 's3', digest: digestAppliedCommit(s3Commit) }],
+      [4, { sequenceID: 's4', digest: digestAppliedCommit(s4Commit) }],
     ]),
     ...overrides,
   }
@@ -21,7 +27,7 @@ function bob(overrides: Partial<CommitClassifierState> = {}): CommitClassifierSt
 
 describe('the cursor table', () => {
   test('a frame at this peer’s epoch, from another member, is handed to the port', () => {
-    expect(classifyCommit({ epoch: 5, committerDID: 'alice' }, 's9', bob())).toEqual({
+    expect(classifyCommit({ epoch: 5, committerDID: 'alice' }, 's9', null, bob())).toEqual({
       row: 'apply',
     })
   })
@@ -29,7 +35,7 @@ describe('the cursor table', () => {
   test('a frame from an epoch BELOW this peer’s, that it holds no record for, is history', () => {
     // Pre-join, pre-rejoin, re-seeded: every healthy peer reads some. It is neither a fork
     // nor poison, and it is never handed to the port, so its blob is never touched.
-    expect(classifyCommit({ epoch: 1, committerDID: 'alice' }, 's1', bob())).toEqual({
+    expect(classifyCommit({ epoch: 1, committerDID: 'alice' }, 's1', null, bob())).toEqual({
       row: 'history',
     })
   })
@@ -40,7 +46,7 @@ describe('the cursor table', () => {
     // means the group advanced at an epoch where this peer did not: it was trimmed out, or it
     // failed to apply a frame everybody else applied. Both are the same condition, and both
     // have the same repair.
-    expect(classifyCommit({ epoch: 6, committerDID: 'alice' }, 's9', bob())).toEqual({
+    expect(classifyCommit({ epoch: 6, committerDID: 'alice' }, 's9', null, bob())).toEqual({
       row: 'ahead',
     })
   })
@@ -48,7 +54,14 @@ describe('the cursor table', () => {
   test('a second, different commit at an epoch this peer enacted is a fork', () => {
     // The hub accepted two commits at one epoch, which it can only do by serving different
     // logs to different members.
-    expect(classifyCommit({ epoch: 3, committerDID: 'alice' }, 's7', bob())).toEqual({
+    expect(
+      classifyCommit(
+        { epoch: 3, committerDID: 'alice' },
+        's7',
+        digestAppliedCommit(otherCommit),
+        bob(),
+      ),
+    ).toEqual({
       row: 'fork',
       appliedSequenceID: 's3',
       // This peer's own branch carries the LOWER sequenceID, so it is the one that stands.
@@ -56,7 +69,14 @@ describe('the cursor table', () => {
     })
     // And the peer whose branch carries the higher one rejoins onto the other. Both sides
     // reach the same verdict from the same two frames, with nobody to arbitrate.
-    expect(classifyCommit({ epoch: 3, committerDID: 'alice' }, 's1', bob())).toEqual({
+    expect(
+      classifyCommit(
+        { epoch: 3, committerDID: 'alice' },
+        's1',
+        digestAppliedCommit(otherCommit),
+        bob(),
+      ),
+    ).toEqual({
       row: 'fork',
       appliedSequenceID: 's3',
       branch: 'losing',
@@ -64,8 +84,58 @@ describe('the cursor table', () => {
   })
 
   test('the SAME commit at an epoch this peer enacted is not a fork', () => {
-    expect(classifyCommit({ epoch: 3, committerDID: 'alice' }, 's3', bob())).toEqual({
+    expect(
+      classifyCommit(
+        { epoch: 3, committerDID: 'alice' },
+        's3',
+        digestAppliedCommit(s3Commit),
+        bob(),
+      ),
+    ).toEqual({
       row: 'history',
+    })
+  })
+
+  test('the same commit re-served at ANOTHER position is history, above or below the original', () => {
+    // A capture-and-replay: the hub re-publishes a frame verbatim under a fresh publishID, so the
+    // same bytes land at a new sequenceID. Nothing enforces the order a reader is served, so both
+    // directions have to be history — the LOWER one is the case that used to heal the group.
+    const replay = digestAppliedCommit(s3Commit)
+    expect(classifyCommit({ epoch: 3, committerDID: 'alice' }, 's7', replay, bob())).toEqual({
+      row: 'history',
+    })
+    expect(classifyCommit({ epoch: 3, committerDID: 'alice' }, 's1', replay, bob())).toEqual({
+      row: 'history',
+    })
+  })
+
+  test('a genuinely different commit still forks, at a position either side of the record', () => {
+    // The row the digest check must not delete. Different bytes at one epoch is the thing the hub
+    // can only produce by serving different logs to different members, and it still heals.
+    const other = digestAppliedCommit(otherCommit)
+    expect(classifyCommit({ epoch: 3, committerDID: 'alice' }, 's7', other, bob())).toEqual({
+      row: 'fork',
+      appliedSequenceID: 's3',
+      branch: 'winning',
+    })
+    expect(classifyCommit({ epoch: 3, committerDID: 'alice' }, 's1', other, bob())).toEqual({
+      row: 'fork',
+      appliedSequenceID: 's3',
+      branch: 'losing',
+    })
+  })
+
+  test('with no digest to compare, the position decides — the classifier stays total', () => {
+    // Unreachable through the lane: the only null-digest calls pass UNKNOWN_FRAME_VERSION, which
+    // settles at `ahead` before the epoch comparison. Pinned so the fallback cannot rot into
+    // "every undigested frame is a fork".
+    expect(classifyCommit({ epoch: 3, committerDID: 'alice' }, 's3', null, bob())).toEqual({
+      row: 'history',
+    })
+    expect(classifyCommit({ epoch: 3, committerDID: 'alice' }, 's7', null, bob())).toEqual({
+      row: 'fork',
+      appliedSequenceID: 's3',
+      branch: 'winning',
     })
   })
 
@@ -73,13 +143,13 @@ describe('the cursor table', () => {
     // The crash-window victim: the hub took its commit, the group advanced on it, and the
     // pending state died with the process. MLS merges a pending commit rather than
     // processing one, so this frame can never be applied by the member that wrote it.
-    expect(classifyCommit({ epoch: 5, committerDID: 'bob' }, 's9', bob())).toEqual({
+    expect(classifyCommit({ epoch: 5, committerDID: 'bob' }, 's9', null, bob())).toEqual({
       row: 'own-unmerged',
     })
   })
 
   test('bytes that are not a commit are poison', () => {
-    expect(classifyCommit(null, 's9', bob())).toEqual({ row: 'poison' })
+    expect(classifyCommit(null, 's9', null, bob())).toEqual({ row: 'poison' })
   })
 
   test('a frame in a wire version this build cannot read is AHEAD, and not poison', () => {
@@ -87,8 +157,8 @@ describe('the cursor table', () => {
     // commit" and is poison; this is "the group is speaking a language I do not have" and is
     // proof it moved without this peer. Filing it as poison is the silent killer — after a
     // version bump every frame lands here, so there is no readable next frame to heal from.
-    expect(classifyCommit(UNKNOWN_FRAME_VERSION, 's9', bob())).toEqual({ row: 'ahead' })
-    expect(classifyCommit(UNKNOWN_FRAME_VERSION, 's9', bob())).not.toEqual({ row: 'poison' })
+    expect(classifyCommit(UNKNOWN_FRAME_VERSION, 's9', null, bob())).toEqual({ row: 'ahead' })
+    expect(classifyCommit(UNKNOWN_FRAME_VERSION, 's9', null, bob())).not.toEqual({ row: 'poison' })
   })
 
   test('it is ahead whatever this peer’s epoch is: no epoch was readable to compare', () => {
@@ -96,7 +166,9 @@ describe('the cursor table', () => {
     // cannot be conditioned on one — and must not be, or a peer at a high epoch would file the
     // frame as poison exactly when it is furthest from the group.
     for (const epoch of [0, 1, 5, 99]) {
-      expect(classifyCommit(UNKNOWN_FRAME_VERSION, 's9', bob({ epoch }))).toEqual({ row: 'ahead' })
+      expect(classifyCommit(UNKNOWN_FRAME_VERSION, 's9', null, bob({ epoch }))).toEqual({
+        row: 'ahead',
+      })
     }
   })
 
@@ -108,24 +180,25 @@ describe('the cursor table', () => {
     // that needed a committer first would be unable to read any of them.
 
     test('a frame AHEAD is ahead on its epoch alone', () => {
-      expect(classifyCommit({ epoch: 6 }, 's9', bob())).toEqual({ row: 'ahead' })
+      expect(classifyCommit({ epoch: 6 }, 's9', null, bob())).toEqual({ row: 'ahead' })
     })
 
     test('a frame BELOW is history on its epoch alone', () => {
-      expect(classifyCommit({ epoch: 1 }, 's1', bob())).toEqual({ row: 'history' })
+      expect(classifyCommit({ epoch: 1 }, 's1', null, bob())).toEqual({ row: 'history' })
     })
 
-    test('the fork check runs on the epoch and the sequenceID, and never on the committer', () => {
+    test('the fork check runs on the epoch and the commit, and never on the committer', () => {
       // The fork detector is reached through the below-epoch branch, so it only ever sees frames
       // whose committer is unavailable — it MUST NOT need one. It settles on this peer's own
-      // applied-commit record and the hub's chaining, and a fork that required an authenticated
-      // author would be a fork detector that never fires against a real port.
-      expect(classifyCommit({ epoch: 3 }, 's7', bob())).toEqual({
+      // applied-commit record — the commit's bytes, with the hub's chaining as the tiebreak — and
+      // a fork that required an authenticated author would be a fork detector that never fires
+      // against a real port.
+      expect(classifyCommit({ epoch: 3 }, 's7', digestAppliedCommit(otherCommit), bob())).toEqual({
         row: 'fork',
         appliedSequenceID: 's3',
         branch: 'winning',
       })
-      expect(classifyCommit({ epoch: 3 }, 's1', bob())).toEqual({
+      expect(classifyCommit({ epoch: 3 }, 's1', digestAppliedCommit(otherCommit), bob())).toEqual({
         row: 'fork',
         appliedSequenceID: 's3',
         branch: 'losing',
@@ -139,7 +212,7 @@ describe('the cursor table', () => {
       // or, published once, storm the whole group. Nor may it fall through to `apply`: the port
       // would be handed a frame it cannot process, and a port that throws on it leaves the
       // cursor where it is and wedges the lane on that frame forever.
-      expect(classifyCommit({ epoch: 5 }, 's9', bob())).toEqual({ row: 'poison' })
+      expect(classifyCommit({ epoch: 5 }, 's9', null, bob())).toEqual({ row: 'poison' })
     })
 
     test('an EXTERNAL header buys no exemption: no committer at this epoch is still poison', () => {
@@ -148,24 +221,26 @@ describe('the cursor table', () => {
       // An external commit whose signature did not verify arrives here as exactly this: the epoch,
       // the flag, and no author. It is poison, on the same terms as any other authorless frame at
       // this epoch, and specifically NOT `own-unmerged`, which heals and holds the cursor.
-      expect(classifyCommit({ epoch: 5, external: true }, 's9', bob())).toEqual({ row: 'poison' })
+      expect(classifyCommit({ epoch: 5, external: true }, 's9', null, bob())).toEqual({
+        row: 'poison',
+      })
       // The flag does not reach the heal row by any route, including one naming this peer — the
       // committer is what that row reads, and an unauthenticated one never gets written there.
-      expect(classifyCommit({ epoch: 5, external: true }, 's9', bob())).not.toEqual({
+      expect(classifyCommit({ epoch: 5, external: true }, 's9', null, bob())).not.toEqual({
         row: 'own-unmerged',
       })
       // A VERIFIED external commit at this epoch is unaffected: authored elsewhere, so applicable.
       expect(
-        classifyCommit({ epoch: 5, committerDID: 'zoe', external: true }, 's9', bob()),
+        classifyCommit({ epoch: 5, committerDID: 'zoe', external: true }, 's9', null, bob()),
       ).toEqual({ row: 'apply' })
     })
 
     test('own-unmerged still requires the committer, and still only its own', () => {
       // The authenticated read, unchanged: present and equal heals, present and foreign applies.
-      expect(classifyCommit({ epoch: 5, committerDID: 'bob' }, 's9', bob())).toEqual({
+      expect(classifyCommit({ epoch: 5, committerDID: 'bob' }, 's9', null, bob())).toEqual({
         row: 'own-unmerged',
       })
-      expect(classifyCommit({ epoch: 5, committerDID: 'mallory' }, 's9', bob())).toEqual({
+      expect(classifyCommit({ epoch: 5, committerDID: 'mallory' }, 's9', null, bob())).toEqual({
         row: 'apply',
       })
     })
@@ -176,11 +251,18 @@ describe('the cursor table', () => {
       // A peer that healed and rejoined meets its own orphaned commit again, now framed at
       // an epoch behind it. Authorship matches and the epoch does not, so the heal trigger
       // stays quiet — otherwise a peer that healed once would heal forever.
-      expect(classifyCommit({ epoch: 2, committerDID: 'bob' }, 's2', bob())).toEqual({
+      expect(classifyCommit({ epoch: 2, committerDID: 'bob' }, 's2', null, bob())).toEqual({
         row: 'history',
       })
       // And its own commit at an epoch it enacted a DIFFERENT commit at is a fork, not a heal.
-      expect(classifyCommit({ epoch: 3, committerDID: 'bob' }, 's7', bob())).toEqual({
+      expect(
+        classifyCommit(
+          { epoch: 3, committerDID: 'bob' },
+          's7',
+          digestAppliedCommit(otherCommit),
+          bob(),
+        ),
+      ).toEqual({
         row: 'fork',
         appliedSequenceID: 's3',
         branch: 'winning',
@@ -199,21 +281,21 @@ describe('the cursor table', () => {
       }
       // Dave was welcomed at epoch 4 and reads the log from its oldest retained frame. Every
       // frame below his epoch is history: he was not there, and it is not his to judge.
-      expect(classifyCommit({ epoch: 0, committerDID: 'alice' }, 's1', joiner)).toEqual({
+      expect(classifyCommit({ epoch: 0, committerDID: 'alice' }, 's1', null, joiner)).toEqual({
         row: 'history',
       })
-      expect(classifyCommit({ epoch: 3, committerDID: 'alice' }, 's4', joiner)).toEqual({
+      expect(classifyCommit({ epoch: 3, committerDID: 'alice' }, 's4', null, joiner)).toEqual({
         row: 'history',
       })
       // The frame at his own epoch he applies — and applying it puts him at 5, so the frame
       // at 5 is at his epoch by the time he reaches it. The log runs in non-decreasing epoch
       // order and he rises with it, which is why nothing in his arrival is ever "ahead" of
       // him. Get this wrong and every new member heals on arrival.
-      expect(classifyCommit({ epoch: 4, committerDID: 'alice' }, 's5', joiner)).toEqual({
+      expect(classifyCommit({ epoch: 4, committerDID: 'alice' }, 's5', null, joiner)).toEqual({
         row: 'apply',
       })
       const risen: CommitClassifierState = { ...joiner, epoch: 5 }
-      expect(classifyCommit({ epoch: 5, committerDID: 'alice' }, 's6', risen)).toEqual({
+      expect(classifyCommit({ epoch: 5, committerDID: 'alice' }, 's6', null, risen)).toEqual({
         row: 'apply',
       })
     })
@@ -223,7 +305,7 @@ describe('the cursor table', () => {
       // would send every late joiner, rejoiner and re-seeded peer into recovery on its
       // first pull — the frames they walk are from epochs they never held.
       const joiner = bob({ appliedByEpoch: new Map() })
-      expect(classifyCommit({ epoch: 3, committerDID: 'alice' }, 's3', joiner)).toEqual({
+      expect(classifyCommit({ epoch: 3, committerDID: 'alice' }, 's3', null, joiner)).toEqual({
         row: 'history',
       })
     })
@@ -235,7 +317,7 @@ describe('the cursor table', () => {
       // epoch — and it would route a removed member's refused commit into a heal. This
       // classification is reached without the port being asked anything at all, so it cannot
       // depend on the answer.
-      expect(classifyCommit({ epoch: 5, committerDID: 'mallory' }, 's9', bob())).toEqual({
+      expect(classifyCommit({ epoch: 5, committerDID: 'mallory' }, 's9', null, bob())).toEqual({
         row: 'apply',
       })
     })
@@ -245,8 +327,8 @@ describe('the cursor table', () => {
       // frame's `senderDID` is the hub's word about who handed the frame over, and the hub is
       // not trusted. A hub that could name the committer could stamp each recipient's own DID
       // onto one poison frame and heal the entire group at once.
-      const own = classifyCommit({ epoch: 5, committerDID: 'bob' }, 's9', bob())
-      const foreign = classifyCommit({ epoch: 5, committerDID: 'mallory' }, 's9', bob())
+      const own = classifyCommit({ epoch: 5, committerDID: 'bob' }, 's9', null, bob())
+      const foreign = classifyCommit({ epoch: 5, committerDID: 'mallory' }, 's9', null, bob())
       expect(own).toEqual({ row: 'own-unmerged' })
       expect(foreign).toEqual({ row: 'apply' })
     })
