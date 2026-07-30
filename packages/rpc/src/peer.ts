@@ -19,7 +19,12 @@ import { createRuntime, type Runtime } from '@sozai/runtime'
 import type { Anchor, AnchorStore } from './anchor.js'
 import type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
 import { createAppLane } from './app-lane.js'
-import { classifyCommit, UNKNOWN_FRAME_VERSION } from './classify.js'
+import {
+  type AppliedCommit,
+  classifyCommit,
+  digestAppliedCommit,
+  UNKNOWN_FRAME_VERSION,
+} from './classify.js'
 import {
   CommitDeadlineError,
   type CommitJournal,
@@ -728,16 +733,17 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   let commitLogHead: LogPosition | null = null
 
   /**
-   * The sequenceID this peer ENACTED at each epoch it passed — applied from the log, or committed
-   * and adopted. The whole of the fork check: a second, different commit at an epoch this peer
-   * holds a record for is two commits at one epoch, which the hub can only produce by showing
-   * different logs to different members.
+   * The commit this peer ENACTED at each epoch it passed — applied from the log, or committed
+   * and adopted — by digest, with the sequenceID the log carried it at. The whole of the fork
+   * check: a second, DIFFERENT commit at an epoch this peer holds a record for is two commits at
+   * one epoch, which the hub can only produce by showing different logs to different members. The
+   * same commit re-served at a new position is not, however the log came to carry it twice.
    *
    * An epoch with NO record is history, not a fork — a late joiner, rejoiner or re-seeded peer all
    * walk commits from epochs they never held. In memory, deliberately: a restart drops the record,
    * so a peer with no record reads history as history — it can MISS a fork, never invent one.
    */
-  const appliedByEpoch = new Map<number, string>()
+  const appliedByEpoch = new Map<number, AppliedCommit>()
 
   /**
    * The heal trigger, RECORDED and never awaited where found: `recover()` takes the commit mutex,
@@ -1115,10 +1121,13 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         // the magic means what this build thinks under an unknown version. On the commit topic —
         // and only here — that is evidence in itself, so it goes to the classifier, not dropped.
         if (frame.version !== HANDSHAKE_VERSION) {
-          const unreadable = classifyCommit(UNKNOWN_FRAME_VERSION, position, {
-            localDID,
-            epoch: crypto.epoch(),
-            appliedByEpoch,
+          // No digest: the frame's version put its commit bytes out of reach entirely. Settled at
+          // `ahead` before the digest is read.
+          const unreadable = classifyCommit({
+            header: UNKNOWN_FRAME_VERSION,
+            sequenceID: position,
+            commitDigest: null,
+            state: { localDID, epoch: crypto.epoch(), appliedByEpoch },
           })
           reconciledHead = position
           // Do what the classifier said, not what this branch assumes: it answers `ahead` today,
@@ -1144,10 +1153,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           // version fails BEFORE the commit bytes are extracted, so there is no next frame to
           // heal from — dropping it would step over the group's whole future. To the classifier.
           if (isUnsupportedCommitFrameVersion(error)) {
-            const unreadable = classifyCommit(UNKNOWN_FRAME_VERSION, position, {
-              localDID,
-              epoch: crypto.epoch(),
-              appliedByEpoch,
+            const unreadable = classifyCommit({
+              header: UNKNOWN_FRAME_VERSION,
+              sequenceID: position,
+              commitDigest: null,
+              state: { localDID, epoch: crypto.epoch(), appliedByEpoch },
             })
             reconciledHead = position
             // The classifier's answer, not this branch's assumption — as above.
@@ -1163,15 +1173,20 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           continue
         }
 
+        // Identify the commit by its own bytes, for the fork check — the COMMIT, not the frame:
+        // the sealed blob is derived and re-sealing is legal, so a frame-wide digest would fork
+        // the group on a legitimate re-seal.
+        const commitDigest = digestAppliedCommit(commitFrame.commit)
         // The commit's OWN epoch and committer, from the commit's own bytes. Never
         // `message.senderDID` — the hub's word about who handed it over, and the hub is not
         // trusted: it could stamp every recipient's own DID onto one poison frame and make the
         // whole group heal at once.
         const header = await port.readCommitHeader(commitFrame.commit)
-        const disposition = classifyCommit(header, position, {
-          localDID,
-          epoch: crypto.epoch(),
-          appliedByEpoch,
+        const disposition = classifyCommit({
+          header,
+          sequenceID: position,
+          commitDigest,
+          state: { localDID, epoch: crypto.epoch(), appliedByEpoch },
         })
 
         if (disposition.row === 'own-unmerged') {
@@ -1191,8 +1206,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           continue
         }
         if (disposition.row === 'history') {
-          // A frame from an epoch below this peer's with no record for it. Not a fork, not
-          // poison, not the port's business — its blob is never touched.
+          // A frame from an epoch below this peer's, with no record for it or a record naming
+          // this same commit. Not a fork, not poison, not the port's business — its blob is never
+          // touched.
           reconciledHead = position
           continue
         }
@@ -1260,7 +1276,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         if (applied.advanced) {
           advancedEpoch = true
           // The fork check's record; the only place it is written from the log.
-          appliedByEpoch.set(framedEpoch, position)
+          appliedByEpoch.set(framedEpoch, { sequenceID: position, digest: commitDigest })
         }
         // `{ advanced: false }` here is the port REFUSING a well-formed commit at this peer's own
         // epoch from another member: poison on the same terms as an unresolvable one.
@@ -1428,7 +1444,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       const accepted = asLogPosition(entry.acceptedAs)
       reconciledHead = accepted
       commitLogHead = accepted
-      appliedByEpoch.set(entry.epoch, accepted)
+      appliedByEpoch.set(entry.epoch, {
+        sequenceID: accepted,
+        digest: digestAppliedCommit(entry.commit),
+      })
       // Through the seam: the adopt ratchets the handle, so this epoch's app frames are read
       // first and the anchor is taken if the journalled commit moved the roster.
       await advanceHandle(mls, () => adoptJournalled(entry.journal))
@@ -1485,7 +1504,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     const accepted = asLogPosition(sequenceID)
     reconciledHead = accepted
     commitLogHead = accepted
-    appliedByEpoch.set(entry.epoch, accepted)
+    appliedByEpoch.set(entry.epoch, {
+      sequenceID: accepted,
+      digest: digestAppliedCommit(entry.commit),
+    })
     await advanceHandle(mls, () => adoptJournalled(entry.journal))
     await journal.clear(entry.publishID)
     return true
@@ -1687,7 +1709,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         commitLogHead = accepted
         // A commit this peer made and adopted was enacted at that epoch, like an applied one —
         // without it a second commit at an epoch this peer OWNS would read as history.
-        appliedByEpoch.set(framedEpoch, accepted)
+        appliedByEpoch.set(framedEpoch, {
+          sequenceID: accepted,
+          digest: digestAppliedCommit(pending.commit),
+        })
         // The host adopts here, and adopting ratchets the handle — through the seam, exactly as
         // an applied commit does. A member never processes its own commit, so the apply site
         // never runs for the roster change this peer just made: without this, the author of a
@@ -1868,7 +1893,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         commitLogHead = accepted
         // Enacted at that epoch, like an applied commit: without the record a second commit at
         // that epoch reads as history rather than the fork it is.
-        if (rejoinedAtEpoch != null) appliedByEpoch.set(rejoinedAtEpoch, sequenceID)
+        if (rejoinedAtEpoch != null) {
+          appliedByEpoch.set(rejoinedAtEpoch, {
+            sequenceID,
+            digest: digestAppliedCommit(pending.commit),
+          })
+        }
         healRequested = false
         // The one place the commit gate is released: the rejoin landed, so this peer's leaf is
         // back in the tree and the stale-epoch fork it guards is closed. A bootstrap that still

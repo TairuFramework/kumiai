@@ -3,8 +3,9 @@ import { describe, expect, test } from 'vitest'
 import { classifyCommit } from '../src/classify.js'
 import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
-import { publishCommit } from './fixtures/commits.js'
+import { publishCommit, publishedCommitDigest } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
+import { encodeMemoryCommit } from './fixtures/memory-group-mls.js'
 import { makeMLSPeer } from './fixtures/peer.js'
 
 const flush = (ms = 60) => new Promise((r) => setTimeout(r, ms))
@@ -112,18 +113,24 @@ describe('a genuine external commit re-published by the hub steers nothing', () 
     expect(alice.peer.anchorEpoch()).toBe(anchorAfterRejoin)
     // And no heal: `winning` sets neither `healRequested` nor `stranded`.
     expect(recoveryRequests(hub, rs)).toHaveLength(0)
-    // THE VERDICT, directly — `history` and `fork`/`winning` are observationally identical from
-    // outside the lane (both step over the frame, move the head, heal nothing), so every
-    // assertion above holds just as well for a peer that never diagnosed a fork at all. This
-    // pins that Alice actually did classify it as `fork`, on the winning side, against the
-    // sequenceID she recorded for the original.
+    // THE VERDICT, directly — `history` is observationally identical from outside the lane to the
+    // `fork`/`winning` this used to read (both step over the frame, move the head, heal nothing),
+    // so every assertion above holds either way. This pins that Alice recognised the replay as the
+    // commit she already enacted, rather than as a fork she happened to be on the winning side of.
     expect(
-      classifyCommit({ epoch: 1, committerDID: 'bob' }, replayed, {
-        localDID: 'alice',
-        epoch: alice.mls.epoch(),
-        appliedByEpoch: new Map([[1, original]]),
+      classifyCommit({
+        header: { epoch: 1, committerDID: 'bob' },
+        sequenceID: replayed,
+        commitDigest: publishedCommitDigest(hub, replayed),
+        state: {
+          localDID: 'alice',
+          epoch: alice.mls.epoch(),
+          appliedByEpoch: new Map([
+            [1, { sequenceID: original, digest: publishedCommitDigest(hub, original) }],
+          ]),
+        },
       }),
-    ).toEqual({ row: 'fork', appliedSequenceID: original, branch: 'winning' })
+    ).toEqual({ row: 'history' })
 
     // The cursor moved PAST the replay rather than parking on it — a frame re-read on every pull
     // is the permanent heal loop the forged-rejoin fix closed, arriving by another door.
@@ -178,10 +185,15 @@ describe('a genuine external commit re-published by the hub steers nothing', () 
     // lane, so this is what actually pins that Carol classified the replay as `history` rather
     // than inventing a fork she has no record to judge.
     expect(
-      classifyCommit({ epoch: 1, committerDID: 'bob' }, replayed, {
-        localDID: 'carol',
-        epoch: carol.mls.epoch(),
-        appliedByEpoch: new Map(),
+      classifyCommit({
+        header: { epoch: 1, committerDID: 'bob' },
+        sequenceID: replayed,
+        commitDigest: null,
+        state: {
+          localDID: 'carol',
+          epoch: carol.mls.epoch(),
+          appliedByEpoch: new Map(),
+        },
       }),
     ).toEqual({ row: 'history' })
 
@@ -194,5 +206,262 @@ describe('a genuine external commit re-published by the hub steers nothing', () 
     expect(recoveryRequests(hub, rs)).toHaveLength(0)
 
     await carol.peer.dispose()
+  })
+
+  test('a replay served BEFORE the original is not a fork the original loses', async () => {
+    const hub = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x83)
+
+    // Both copies land before Alice exists, so the order she is SERVED them is the hub's choice
+    // alone — which is the whole point. The hub-conformance floor bounds where a replay's
+    // sequenceID lands; it says nothing about the order a reader is handed the log.
+    const { sequenceID: original } = await publishCommit({
+      hub,
+      senderDID: 'bob',
+      recoverySecret: rs,
+      epoch: 1,
+      committerDID: 'bob',
+      external: true,
+    })
+    const replayed = await replayCommitFrame(hub, rs, original)
+    expect(replayed > original).toBe(true)
+
+    // The hub withholds the original and shows Alice the replay first.
+    hub.hideFrom('alice', original)
+    const alice = makeMLSPeer(hub, 'alice', rs, {
+      epoch: 1,
+      members: ['alice', 'bob'],
+      recovery,
+    })
+    await flush(200)
+
+    // She applied the replay — it is a genuine commit at her epoch, and nothing about it says
+    // otherwise. Her record for epoch 1 now names the replay's position, not the original's.
+    expect(alice.mls.epoch()).toBe(2)
+    expect(alice.mls.commits()).toBe(1)
+    const anchorAfterApply = alice.peer.anchorEpoch()
+    const seenAfterApply = alice.mls.seen()
+    expect(recoveryRequests(hub, rs)).toHaveLength(0)
+
+    // Now the original arrives, below her cursor and below the position she recorded.
+    hub.revealTo('alice', original)
+    await wakeLane(hub, rs)
+    await flush(300)
+
+    // The same commit she already enacted, so: history. Comparing POSITIONS instead reads
+    // `fork`/`losing` (the original carries the lower sequenceID), which heals the peer, rejoins
+    // it with an external commit, and rotates the app-lane anchor for every member — one
+    // group-wide storm per replay, for bytes the group already delivered once.
+    expect(recoveryRequests(hub, rs)).toHaveLength(0)
+    expect(alice.peer.anchorEpoch()).toBe(anchorAfterApply)
+    expect(alice.mls.epoch()).toBe(2)
+    expect(alice.mls.commits()).toBe(1)
+    expect(alice.mls.seen()).toBe(seenAfterApply)
+
+    // THE VERDICT, directly. Every assertion above is an absence, and a peer that simply never
+    // reached the frame would satisfy all of them; this asks the classifier about the scenario's
+    // own two frames at the positions the hub gave them.
+    expect(
+      classifyCommit({
+        header: { epoch: 1, committerDID: 'bob' },
+        sequenceID: original,
+        commitDigest: publishedCommitDigest(hub, original),
+        state: {
+          localDID: 'alice',
+          epoch: alice.mls.epoch(),
+          appliedByEpoch: new Map([
+            [1, { sequenceID: replayed, digest: publishedCommitDigest(hub, replayed) }],
+          ]),
+        },
+      }),
+    ).toEqual({ row: 'history' })
+
+    await alice.peer.dispose()
+  })
+
+  test('two DIFFERENT commits at one epoch still fork, served in the same order', async () => {
+    const hub = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x84)
+
+    // Bob's and Yolanda's commits, both framed at epoch 1: the hub accepted two, which it can only
+    // do by breaking its own compare-and-set. Bob's lands first, so it carries the lower
+    // sequenceID and is the branch that stands.
+    const { sequenceID: loserSeq } = await publishCommit({
+      hub,
+      senderDID: 'bob',
+      recoverySecret: rs,
+      epoch: 1,
+      committerDID: 'bob',
+      external: true,
+    })
+    const { sequenceID: winnerSeq } = await publishCommit({
+      hub,
+      senderDID: 'yolanda',
+      recoverySecret: rs,
+      epoch: 1,
+      committerDID: 'yolanda',
+      external: true,
+    })
+    expect(winnerSeq > loserSeq).toBe(true)
+    // Different commits, so different digests — the premise the fork check now rests on.
+    expect(publishedCommitDigest(hub, winnerSeq)).not.toBe(publishedCommitDigest(hub, loserSeq))
+
+    // Alice is shown Yolanda's first and applies it, exactly as in the replay test.
+    hub.hideFrom('alice', loserSeq)
+    const alice = makeMLSPeer(hub, 'alice', rs, {
+      epoch: 1,
+      members: ['alice', 'bob'],
+      recovery,
+    })
+    await flush(200)
+    expect(alice.mls.epoch()).toBe(2)
+    expect(recoveryRequests(hub, rs)).toHaveLength(0)
+
+    // Bob's arrives below her cursor. Different bytes at an epoch she holds a record for: a fork,
+    // and she is on the losing side, so she heals. Polled, not slept on — a fixed wait for
+    // something that must HAPPEN is the flaky shape.
+    hub.revealTo('alice', loserSeq)
+    await wakeLane(hub, rs)
+    for (let i = 0; i < 40 && recoveryRequests(hub, rs).length === 0; i++) await flush(25)
+    expect(recoveryRequests(hub, rs).length).toBeGreaterThan(0)
+
+    // THE VERDICT, directly — the recovery-request assertion above proves only that A heal
+    // fired, not why: anything that triggered a heal for a different reason would satisfy it
+    // just as well. This pins that the heal was specifically the `fork` row, on the LOSING
+    // branch, against the sequenceID Alice actually recorded for the commit she applied.
+    expect(
+      classifyCommit({
+        header: { epoch: 1, committerDID: 'bob' },
+        sequenceID: loserSeq,
+        commitDigest: publishedCommitDigest(hub, loserSeq),
+        state: {
+          localDID: 'alice',
+          epoch: 2,
+          appliedByEpoch: new Map([
+            [1, { sequenceID: winnerSeq, digest: publishedCommitDigest(hub, winnerSeq) }],
+          ]),
+        },
+      }),
+    ).toEqual({ row: 'fork', appliedSequenceID: winnerSeq, branch: 'losing' })
+
+    await alice.peer.dispose()
+  })
+
+  test('a re-sealed copy of an applied commit is history, not a fork', async () => {
+    const hub = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x85)
+
+    // The same Commit bytes, published twice under two different sealed entry blobs. This is
+    // NOT the byte-for-byte replay above — it models a legitimate re-seal: the derived blob
+    // riding the frame re-encrypted from a different entries list. (The fake seal is
+    // deterministic — a keystream XOR plus a ciphertext-dependent tag, no nonce involved — so
+    // it is the entries CONTENT that makes the two blobs differ, not any freshness in the
+    // sealing itself.) A re-seal is legal because the blob is derived from the Commit and never
+    // signed as part of it. Only the Commit itself is authenticated; the digest this branch keys
+    // the fork check on has to track that boundary, or a re-seal that changes nothing MLS cares
+    // about would read as a different commit and fork the whole group on it.
+    const commit = encodeMemoryCommit(1, 'bob', [], { external: true })
+    const { sequenceID: original } = await publishCommit({
+      hub,
+      senderDID: 'bob',
+      recoverySecret: rs,
+      epoch: 1,
+      committerDID: 'bob',
+      external: true,
+      commit,
+      entries: ['e1'],
+    })
+    const { sequenceID: resealed } = await publishCommit({
+      hub,
+      senderDID: 'bob',
+      recoverySecret: rs,
+      epoch: 1,
+      committerDID: 'bob',
+      external: true,
+      commit,
+      entries: ['e2'],
+    })
+    expect(resealed > original).toBe(true)
+
+    // Premise check, not yet the guard: the two published FRAMES actually differ on the wire.
+    // Without this, a future change that stopped `entries` from affecting the sealed blob would
+    // silently collapse this test into a duplicate of the byte-identical replay test above —
+    // still green, but with none of its mutation sensitivity, and nothing here would say so.
+    const originalMessage = hub.published.find((m) => m.sequenceID === original)
+    const resealedMessage = hub.published.find((m) => m.sequenceID === resealed)
+    if (originalMessage == null || resealedMessage == null) {
+      throw new Error('published frame missing')
+    }
+    expect(resealedMessage.payload).not.toEqual(originalMessage.payload)
+
+    // What this actually pins: the two published COMMITS are byte-identical, so `digestAppliedCommit`
+    // (which only ever hashes the commit half) agrees on them despite the frames around them
+    // differing, per the assertion just above. It does NOT pin the frame-wide invariant this test
+    // exists for — `publishedCommitDigest` always digests `commitFrame.commit`
+    // (`test/fixtures/commits.ts`), so a frame-wide digest inside `peer.ts` couldn't move this
+    // assertion either way. That invariant is held up only by the behavioural half below, which
+    // exercises the peer's OWN digest computation rather than the fixture's.
+    expect(publishedCommitDigest(hub, original)).toBe(publishedCommitDigest(hub, resealed))
+
+    // The hub withholds the LOWER-sequenceID original and shows Alice the re-sealed copy first —
+    // the same "served out of position" shape as the replay test above, and deliberately so: a
+    // frame-wide digest recovers its old (wrong) verdict only through the position comparison it
+    // falls back to, and that fallback only fires when the later-applied record sits at a HIGHER
+    // sequenceID than the frame still to arrive. Applying the two in sequenceID order would let a
+    // frame-wide digest hide behind `branch: 'winning'`, which heals nothing and is invisible to
+    // every assertion below — exactly the blind spot this test exists to close.
+    hub.hideFrom('alice', original)
+    const alice = makeMLSPeer(hub, 'alice', rs, {
+      epoch: 1,
+      members: ['alice', 'bob'],
+      recovery,
+    })
+    await flush(200)
+
+    // She applied the re-sealed copy — it is a genuine commit at her epoch — and her record for
+    // epoch 1 now names ITS position and ITS frame, not the original's.
+    expect(alice.mls.epoch()).toBe(2)
+    expect(alice.mls.commits()).toBe(1)
+    const anchorAfterApply = alice.peer.anchorEpoch()
+    const seenAfterApply = alice.mls.seen()
+    expect(recoveryRequests(hub, rs)).toHaveLength(0)
+
+    // Now the original arrives, below her cursor and below the position she recorded — the same
+    // Commit bytes under a different sealed blob than the one she applied.
+    hub.revealTo('alice', original)
+    await wakeLane(hub, rs)
+    await flush(300)
+
+    // Not applied a second time, and no heal: the port was never handed the original a second
+    // time (`seen()` unmoved), the anchor did not rotate, and no recovery was requested. Keying
+    // the digest on the frame instead of the Commit would read this as two different commits at
+    // one epoch, with the original's LOWER sequenceID on the losing side — a heal, a rejoin, and
+    // an app-lane anchor rotation for every member, over a re-seal that changed nothing MLS cares
+    // about.
+    expect(recoveryRequests(hub, rs)).toHaveLength(0)
+    expect(alice.peer.anchorEpoch()).toBe(anchorAfterApply)
+    expect(alice.mls.epoch()).toBe(2)
+    expect(alice.mls.commits()).toBe(1)
+    expect(alice.mls.seen()).toBe(seenAfterApply)
+
+    // THE VERDICT, directly. This pins that Alice recognised the original as the commit she
+    // already enacted (under the re-seal's blob), keyed on the Commit's bytes rather than the
+    // blob riding either frame.
+    expect(
+      classifyCommit({
+        header: { epoch: 1, committerDID: 'bob' },
+        sequenceID: original,
+        commitDigest: publishedCommitDigest(hub, original),
+        state: {
+          localDID: 'alice',
+          epoch: alice.mls.epoch(),
+          appliedByEpoch: new Map([
+            [1, { sequenceID: resealed, digest: publishedCommitDigest(hub, resealed) }],
+          ]),
+        },
+      }),
+    ).toEqual({ row: 'history' })
+
+    await alice.peer.dispose()
   })
 })

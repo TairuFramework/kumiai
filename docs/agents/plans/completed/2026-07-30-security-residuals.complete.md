@@ -52,9 +52,10 @@ that item, in `backlog/2026-07-29-commit-lane-ahead-storm.md` — recorded there
 The fix that would close the replay route specifically — keying `appliedByEpoch` on a digest of the
 applied commit's bytes as well as its position, settling `history` when the digest matches, which
 implements the `fork` row's actual definition and makes a replay inert regardless of hub ordering — is
-filed as `next/2026-07-30-applied-commit-digest.md`. Deliberately not folded into this branch: the job
-here was to answer a question and pin the answer, and changing the classifier is a separate change
-with its own test.
+was filed as a follow-up and has since been done — see
+`completed/2026-07-30-applied-commit-digest.complete.md`. Deliberately not folded into this branch:
+the job here was to answer a question and pin the answer, and changing the classifier is a separate
+change with its own test.
 
 Freshness and publish-side duplicate refusal were considered and are not needed: the bound the
 residuals doc would have reached for only matters if the replay could steer under an honestly-ordered
@@ -139,8 +140,8 @@ confirmed individually. Full `turbo run test:types test:unit --force`: 42/42, ca
 
 ## 7. Follow-ups filed
 
-- `next/2026-07-30-applied-commit-digest.md` — the fork check keyed on the applied commit, not only
-  its position.
+- The fork check keyed on the applied commit, not only its position — since closed, see
+  `completed/2026-07-30-applied-commit-digest.complete.md`.
 - `backlog/2026-07-29-commit-lane-ahead-storm.md` — carried forward from the deleted `next/` item.
 - `backlog/2026-07-30-peer-test-helper-extraction.md` — test helpers duplicated across four peer test
   files.

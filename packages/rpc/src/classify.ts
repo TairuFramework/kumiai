@@ -1,3 +1,6 @@
+import { sha256 } from '@noble/hashes/sha2.js'
+import { toB64U } from '@sozai/codec'
+
 import type { CommitHeader } from './crypto.js'
 
 /**
@@ -10,11 +13,11 @@ import type { CommitHeader } from './crypto.js'
  * | A wire version this build cannot read at all | advance; heal — the group moved on to a format this build does not have |
  * | Not a commit at all (no header) | advance (poison — never retry, never heal); settled first, before any epoch question |
  * | Framed at an epoch AHEAD of this peer's | advance; heal — the group moved on without it |
- * | Below this peer's epoch, with no recorded applied-commit | advance, no fork check, no unwrap attempt |
- * | Below this peer's epoch, with a record naming a different sequenceID | advance; the fork trigger |
+ * | Below this peer's epoch, with no record — or a record naming THIS SAME commit | advance, no fork check, no unwrap attempt |
+ * | Below this peer's epoch, with a record naming a DIFFERENT commit | advance; the fork trigger |
  * | At this peer's current epoch, with no authenticated committer | advance (poison — never retry, never heal) |
  * | At this peer's current epoch, committed by THIS peer | do not advance; heal |
- * | At this peer's current epoch, committed by another — handed to the port | applied: advance and record this epoch -> sequenceID for the fork check; refused by policy or entries unresolvable: advance (poison — never retry, never heal) |
+ * | At this peer's current epoch, committed by another — handed to the port | applied: advance and record this epoch -> the applied commit (digest and position) for the fork check; refused by policy or entries unresolvable: advance (poison — never retry, never heal) |
  *
  * Seven rows are decided here, reading bytes and decrypting nothing; only the last — a frame at
  * this peer's epoch authored by someone else — is handed to the MLS port, whose answer is the
@@ -25,7 +28,8 @@ import type { CommitHeader } from './crypto.js'
  * **The header carries two facts with different trust.** The epoch is cleartext and only the
  * publisher's word. The committer is MLS-authenticated but recoverable only for a commit framed
  * at this peer's OWN epoch — reading it needs that epoch's key material. So `ahead`, `history`
- * and `fork` dispatch on the EPOCH ALONE (they're about frames this peer holds no key for),
+ * and `fork` are all REACHED on the EPOCH ALONE (they're about frames this peer holds no key
+ * for) — though `fork` is then SETTLED on the commit, once two records at that epoch disagree —
  * while every row at this peer's own epoch requires the AUTHENTICATED committer and refuses to
  * fire without it. A classifier that demanded a committer before reading an epoch could never
  * classify the one frame that says a peer fell behind.
@@ -70,12 +74,18 @@ export type CommitDisposition =
    * On the epoch alone, same as `ahead` and with far less at stake: no committer is recoverable
    * for an epoch this peer has ratcheted past either, and the frame is stepped over untouched —
    * a lie about the epoch only changes how a liar's frame gets ignored.
+   *
+   * Also the commit this peer ALREADY ENACTED at that epoch, re-served at another position. The
+   * same commit is not a fork however the log came to carry it twice, and recognising it by its
+   * bytes rather than by where it sits is what makes that true in any order the hub serves.
    */
   | { row: 'history' }
   /**
    * Two different commits at one epoch: this peer applied `appliedSequenceID`, the log now
-   * carries another. Reached on the epoch alone and settled on sequenceIDs, which are the
-   * hub's own chaining, not the commit's word — the committer is neither read nor available.
+   * carries another. Reached on the epoch alone and settled on the COMMITS: two records of the
+   * same bytes are the same commit, at any position. Only once they genuinely differ do
+   * sequenceIDs decide which side stands — the hub's own chaining, not the commit's word, and the
+   * committer is neither read nor available here.
    * The hub accepted both — only possible by serving different logs to different members.
    * Advance, and heal if on the losing branch: the branch whose commit carries the HIGHER
    * sequenceID, a tiebreak both sides evaluate alone once they see both.
@@ -142,6 +152,36 @@ export const UNKNOWN_FRAME_VERSION = 'unknown-frame-version'
  */
 export type CommitFrameEvidence = CommitHeader | null | typeof UNKNOWN_FRAME_VERSION
 
+/**
+ * What this peer enacted at one epoch: the commit itself, by digest, and where the log carried it.
+ *
+ * The digest is what the `fork` row actually asks about — "two different commits at one epoch" —
+ * and the position is only the tiebreak between two that genuinely differ. One record rather than
+ * two maps, deliberately: a position recorded without its digest re-opens the replay this closes,
+ * and a type that cannot express one without the other cannot drift.
+ */
+export type AppliedCommit = {
+  /** The sequenceID the log carried this commit at when this peer enacted it. */
+  sequenceID: string
+  /** {@link digestAppliedCommit} over the commit's own bytes. */
+  digest: string
+}
+
+/**
+ * Identify a commit by its own bytes, for {@link AppliedCommit.digest}.
+ *
+ * Over the COMMIT alone, never the frame around it: the sealed entry blob riding a commit frame is
+ * derived, and re-sealing it is legal, so a frame-wide digest would make a legitimate re-seal look
+ * like a different commit and fork the group on it.
+ *
+ * Not a security boundary. This is a peer recognising bytes it already applied, and the only way to
+ * abuse a collision is a different Commit that MLS accepts at the same epoch — a far stronger break
+ * than the hash.
+ */
+export function digestAppliedCommit(commit: Uint8Array): string {
+  return toB64U(sha256(commit))
+}
+
 /** What the classifier reads about this peer. Nothing here needs the network or a key. */
 export type CommitClassifierState = {
   /** This peer's own identity — the DID that authenticates a commit this peer authored. */
@@ -149,7 +189,9 @@ export type CommitClassifierState = {
   /** The epoch this peer's group handle is at right now. */
   epoch: number
   /**
-   * The sequenceID of the commit this peer enacted at each epoch it has passed.
+   * The commit this peer enacted at each epoch it has passed — by digest, with the sequenceID the
+   * log carried it at. The digest is the fork test; the sequenceID is only the tiebreak between two
+   * commits that genuinely differ.
    *
    * In memory, DELIBERATELY. A restarted peer holds none and reads history as history: it can
    * MISS a fork but can never invent one — the safe direction, since a missed fork is
@@ -157,24 +199,47 @@ export type CommitClassifierState = {
    * forks would turn every late joiner/rejoiner/re-seeded peer into a recovery storm on first
    * pull. Durability needs a store; not built, since fork RESOLUTION isn't built either.
    */
-  appliedByEpoch: ReadonlyMap<number, string>
+  appliedByEpoch: ReadonlyMap<number, AppliedCommit>
+}
+
+/**
+ * One frame of the commit log, as much as can be known about it before anything is decrypted,
+ * plus the peer state to judge it against.
+ *
+ * A single object rather than positional arguments: three of the four are strings-or-null read off
+ * one frame, and at a call site `classifyCommit(header, position, null, state)` says nothing about
+ * which `null` that is or why. Naming them makes the digest-less calls self-explaining.
+ */
+export type ClassifyCommitParams = {
+  /**
+   * What the commit says about itself, read out of its own bytes by the MLS port: `null` for bytes
+   * that are not a commit at all, and otherwise the commit's epoch — always, it is cleartext —
+   * with `committerDID` present only where the port could MLS-authenticate one. It is
+   * {@link UNKNOWN_FRAME_VERSION} where the frame's wire version put the header itself out of reach.
+   */
+  header: CommitFrameEvidence
+  /** Where the log carries this frame — the hub's own chaining, not the commit's word. */
+  sequenceID: string
+  /**
+   * {@link digestAppliedCommit} over this frame's commit bytes, or `null` where they were never
+   * extracted — which today is only the {@link UNKNOWN_FRAME_VERSION} calls, settled at `ahead`
+   * before it is read.
+   */
+  commitDigest: string | null
+  /** What this peer knows about itself. */
+  state: CommitClassifierState
 }
 
 /**
  * Classify one frame of the commit log against this peer's state, before anything is
  * applied and before anything is decrypted.
- *
- * `header` is what the commit says about itself, read out of its own bytes by the MLS port:
- * `null` for bytes that are not a commit at all, and otherwise the commit's epoch — always, it
- * is cleartext — with `committerDID` present only where the port could MLS-authenticate one. It
- * is {@link UNKNOWN_FRAME_VERSION} where the frame's wire version put the header itself out of
- * reach.
  */
-export function classifyCommit(
-  header: CommitFrameEvidence,
-  sequenceID: string,
-  state: CommitClassifierState,
-): CommitDisposition {
+export function classifyCommit({
+  header,
+  sequenceID,
+  commitDigest,
+  state,
+}: ClassifyCommitParams): CommitDisposition {
   // Settled above every other row, including the headerless one: bytes in an unknown format
   // can't be asked whether they're a commit. `ahead`, not `poison` — see UNKNOWN_FRAME_VERSION's
   // doc for why poison is uniquely dangerous here (no "next frame" to heal off of after a
@@ -195,11 +260,26 @@ export function classifyCommit(
     const applied = state.appliedByEpoch.get(header.epoch)
     // No record for that epoch -> history, not fork: a late joiner/rejoiner/re-seeded peer
     // walks epochs it never passed, and would falsely diagnose a fork on first pull otherwise.
-    if (applied == null || applied === sequenceID) return { row: 'history' }
+    if (applied == null) return { row: 'history' }
+    // The commit this peer already enacted here, served AGAIN. History, wherever the log now
+    // carries it. Comparing positions instead made "a different commit" mean "a different
+    // sequenceID", which a verbatim replay satisfies: nothing enforces that a reader is served
+    // the log in sequenceID order, so a hub that shows the replay first and the original after
+    // makes a peer read its OWN applied commit as the losing branch and heal the whole group
+    // off it — one rejoin and one anchor rotation per replay.
+    if (commitDigest != null && commitDigest === applied.digest) return { row: 'history' }
+    // No digest to compare against: the same kind of missing evidence as `applied == null`
+    // above, and judged the same way, for the same reason — a frame whose commit bytes were
+    // never extracted cannot be told apart from the one this peer already enacted, so it must
+    // not be told apart from it. Unreachable today (the only null-digest calls pass
+    // UNKNOWN_FRAME_VERSION, settled at `ahead` above); kept unconditional, rather than falling
+    // through to a position comparison, so a direct caller reaching this some other way still
+    // gets the safe direction: it can MISS a fork on absent evidence, but can never INVENT one.
+    if (commitDigest == null) return { row: 'history' }
     return {
       row: 'fork',
-      appliedSequenceID: applied,
-      branch: sequenceID < applied ? 'losing' : 'winning',
+      appliedSequenceID: applied.sequenceID,
+      branch: sequenceID < applied.sequenceID ? 'losing' : 'winning',
     }
   }
 

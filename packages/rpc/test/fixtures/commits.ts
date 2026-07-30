@@ -1,7 +1,8 @@
 import type { HubPublishParams } from '@kumiai/hub-tunnel'
 
-import { encodeCommitFrame } from '../../src/commit-frame.js'
-import { encodeHandshakeFrame, HANDSHAKE_KIND } from '../../src/handshake.js'
+import { digestAppliedCommit } from '../../src/classify.js'
+import { decodeCommitFrame, encodeCommitFrame } from '../../src/commit-frame.js'
+import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../../src/handshake.js'
 import { encodeLedgerEntries } from '../../src/ledger-entries.js'
 import { commitTopic } from '../../src/topic.js'
 import { createFakeCrypto } from './fake-crypto.js'
@@ -86,4 +87,21 @@ export async function publishCommit(params: PublishCommitParams): Promise<{ sequ
     retain: 'log',
     ...(params.expectedHead !== undefined ? { expectedHead: params.expectedHead } : {}),
   })
+}
+
+/**
+ * The digest a peer's applied-commit record holds a published commit by, read back off the wire.
+ *
+ * Unwraps both layers the lane unwraps — handshake frame, then commit frame — because the record is
+ * keyed on the COMMIT's bytes, not the frame's: the sealed entry blob riding a frame is derived and
+ * re-sealing it is legal.
+ */
+export function publishedCommitDigest(
+  hub: { published: Array<{ sequenceID: string; payload: Uint8Array }> },
+  sequenceID: string,
+): string {
+  const message = hub.published.find((m) => m.sequenceID === sequenceID)
+  if (message == null) throw new Error(`no published frame at ${sequenceID}`)
+  const commitFrame = decodeCommitFrame(decodeHandshakeFrame(message.payload).payload)
+  return digestAppliedCommit(commitFrame.commit)
 }
