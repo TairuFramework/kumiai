@@ -1203,8 +1203,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           continue
         }
         if (disposition.row === 'history') {
-          // A frame from an epoch below this peer's with no record for it. Not a fork, not
-          // poison, not the port's business — its blob is never touched.
+          // A frame from an epoch below this peer's, with no record for it or a record naming
+          // this same commit. Not a fork, not poison, not the port's business — its blob is never
+          // touched.
           reconciledHead = position
           continue
         }

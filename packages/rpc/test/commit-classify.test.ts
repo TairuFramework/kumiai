@@ -109,6 +109,28 @@ describe('the cursor table', () => {
     })
   })
 
+  test('the SAME position naming a DIFFERENT commit still forks — the digest is the test, not the position', () => {
+    // Pinned because the rewrite changed this verdict silently: before, `applied === sequenceID`
+    // returned `history` unconditionally, so an equal sequenceID short-circuited the digest
+    // entirely. Now the digest decides first, and an equal sequenceID with a mismatched digest
+    // falls through to `fork` — a sequenceID collision that isn't a byte collision is still two
+    // different commits at one epoch, which is exactly the row this whole task widened `history`
+    // out of. The `fork` row's doc says "at any position"; this is the position it shares with
+    // the record, which the position-only check could never have produced this way.
+    expect(
+      classifyCommit(
+        { epoch: 3, committerDID: 'alice' },
+        's3',
+        digestAppliedCommit(otherCommit),
+        bob(),
+      ),
+    ).toEqual({
+      row: 'fork',
+      appliedSequenceID: 's3',
+      branch: 'winning',
+    })
+  })
+
   test('a genuinely different commit still forks, at a position either side of the record', () => {
     // The row the digest check must not delete. Different bytes at one epoch is the thing the hub
     // can only produce by serving different logs to different members, and it still heals.
