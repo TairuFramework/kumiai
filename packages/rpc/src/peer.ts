@@ -1978,8 +1978,15 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   // un-merged commit. Its heal waits for init to finish, since every lane operation (`recover()`
   // included) waits on `ready`.
   void settled.then(() => healIfRequested())
+  let disposed = false
   const withReady = async <T>(fn: () => T | Promise<T>): Promise<T> => {
     await ready
+    // `dispose()` awaits a promise DERIVED from `ready`, so a call queued before init settles
+    // always resumes FIRST — early enough to build a directed client that teardown then disposes
+    // out from under the caller, handing back a live-looking handle over an aborted transport.
+    // Refuse instead, and refuse in the other ordering too, where a torn-down runtime map would
+    // otherwise blame a missing protocol for a gone peer.
+    if (disposed) throw new Error('Peer is disposed')
     return fn()
   }
 
@@ -2006,6 +2013,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     },
     anchorEpoch: () => anchor.epoch,
     dispose: async () => {
+      disposed = true
       // Tear down even a peer whose init failed — it still holds a hub drain.
       await settled
       commitUnsubscribe?.()
