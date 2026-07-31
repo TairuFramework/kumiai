@@ -3,11 +3,15 @@
 **Priority:** medium — untested contract on exactly the failure mode `crypto.ts` names in its own
 doc comment. Not confirmed broken; the shape that would hide it is real and reachable, and no test
 in the repo can currently catch it.
-**Origin:** surfaced 2026-07-31 during `test/close-medium-test-gaps` Task 8, investigating
+**Origin:** surfaced 2026-07-31 on `test/close-medium-test-gaps`, investigating
 `next/2026-07-07-test-gaps.md`'s "encrypt from a restored handle after an epoch change" entry. That
-entry's own shape (a restarted member only *receiving* commits) turned out unable to reach this
-risk — see `docs/agents/plans/completed/` once that branch lands, or the SDD ledger at
-`.superpowers/sdd/2026-07-31-close-medium-test-gaps/progress.md`, Task 8, for the full trail.
+entry's own shape — a restarted member that only *receives* commits — turned out unable to reach
+this risk, because `processCommit` (`packages/mls-rpc/src/mls.ts:146-171`) applies received commits
+via `group.processMessage(commit)`, mutating the handle **in place** and never calling `adopt()`.
+Restore, walk and reseal therefore share one mutable object: there is no stale reference to freeze,
+so no mutation can separate "decrypt right, seal wrong". A test for that entry was written, proven
+unable to fail, and discarded. See
+`docs/agents/plans/completed/2026-07-31-close-medium-test-gaps.complete.md`.
 
 ## The gap
 
