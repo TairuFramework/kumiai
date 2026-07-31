@@ -69,7 +69,7 @@ repo, which is the point of having them written down.
 
 ## Phase 2 — test gaps
 
-[Close test gaps](./next/2026-07-07-test-gaps.md), re-verified against source 2026-07-28: nine of its
+[Close test gaps](./completed/2026-07-07-test-gaps.complete.md), re-verified against source 2026-07-28: nine of its
 original entries had been closed by later work, two carried stale line numbers, and the low-priority
 residue moved to [backlog](./backlog/2026-07-28-test-gaps-low.md).
 
@@ -80,7 +80,19 @@ forged frame at `unwrap`, forty lines above the guard. One line and a comment in
 the test now fails on the mutation. See the doc for the general shape, which is the part worth
 keeping: *a negative assertion behind a forged frame is only as good as the forge*.
 
-What remains in that doc is five mediums — unasserted contracts, not uncovered guards.
+Its five mediums are **done 2026-07-31**, summary at
+[`completed/2026-07-31-close-medium-test-gaps.complete.md`](./completed/2026-07-31-close-medium-test-gaps.complete.md).
+They settled four ways, not one: two closed by mutation-verified tests, one voided against a test
+that had landed 2026-07-12, one closed by a test plus a shipped `@kumiai/rpc` fix (a disposed peer
+now refuses every host call instead of handing back a client over an aborted transport), and one
+settled as not-isolable with no test written. Four premises inherited from the 2026-07-02 audit were
+disproved by probes along the way — the reason the protocol runs the mutation *before* writing the
+test, not only after. Residuals in
+[`backlog/2026-07-31-close-medium-test-gaps-residuals.md`](./backlog/2026-07-31-close-medium-test-gaps-residuals.md);
+the one genuinely new gap it surfaced is
+[`backlog/2026-07-31-mls-rpc-author-path-stale-handle-reseal.md`](./backlog/2026-07-31-mls-rpc-author-path-stale-handle-reseal.md).
+
+Phase 2 is closed. Nothing remains in `next/`.
 
 ## Phase 3 — pre-1.0 API surface
 

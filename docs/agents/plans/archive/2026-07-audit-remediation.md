@@ -1,7 +1,7 @@
 # Milestone: 2026-07 audit remediation — RETIRED
 
 > **Retired 2026-07-28 and moved to `archive/`.** Phase 1 is 7 of 8 done; the last item
-> ([test gaps](../next/2026-07-07-test-gaps.md)) and all of Phase 2 are now sequenced by
+> ([test gaps](../completed/2026-07-07-test-gaps.complete.md)) and all of Phase 2 are now sequenced by
 > [the roadmap](../roadmap.md) instead. Kept as the audit's historical record — a dozen docs,
 > including six in `completed/`, cite it as their provenance.
 >
@@ -106,7 +106,7 @@ In order:
    suppress only on success replies; attribute replies by the authenticated `senderDID`.
 7. [Infra batch](../backlog/2026-07-07-infra.md) — mechanical, one PR: non-mutating lint in
    CI, changesets release workflow, declare vitest, fix the turbo task graph.
-8. [Close test gaps](../next/2026-07-07-test-gaps.md) — persist→restore path, real-hub
+8. [Close test gaps](../completed/2026-07-07-test-gaps.complete.md) — persist→restore path, real-hub
    integration, concurrency tests.
 
 ## Phase 2 — extracted backlog

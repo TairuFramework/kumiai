@@ -4,7 +4,7 @@
 doc comment. Not confirmed broken; the shape that would hide it is real and reachable, and no test
 in the repo can currently catch it.
 **Origin:** surfaced 2026-07-31 on `test/close-medium-test-gaps`, investigating
-`next/2026-07-07-test-gaps.md`'s "encrypt from a restored handle after an epoch change" entry. That
+`completed/2026-07-07-test-gaps.complete.md`'s "encrypt from a restored handle after an epoch change" entry. That
 entry's own shape — a restarted member that only *receives* commits — turned out unable to reach
 this risk, because `processCommit` (`packages/mls-rpc/src/mls.ts:146-171`) applies received commits
 via `group.processMessage(commit)`, mutating the handle **in place** and never calling `adopt()`.

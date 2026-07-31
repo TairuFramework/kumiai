@@ -5,7 +5,7 @@
 **Origin:** the whole-branch review of `test/close-medium-test-gaps`, 2026-07-31. Four items
 triaged out of scope for that branch's final fix wave. Background:
 `docs/agents/plans/completed/2026-07-31-close-medium-test-gaps.complete.md` and the retired doc
-`docs/agents/plans/next/2026-07-07-test-gaps.md`.
+`docs/agents/plans/completed/2026-07-07-test-gaps.complete.md`.
 
 ## 1. `replay` and `recover` post-dispose guards are unpinned
 

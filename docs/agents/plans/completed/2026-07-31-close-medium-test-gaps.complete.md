@@ -1,7 +1,7 @@
 # Close the medium test gaps
 
 **Status:** complete. Branch `test/close-medium-test-gaps`, 14 commits off `main` at `6c0162e`.
-**Goal:** retire the Medium section of `next/2026-07-07-test-gaps.md` — five entries from the
+**Goal:** retire the Medium section of `completed/2026-07-07-test-gaps.complete.md` — five entries from the
 2026-07-02 audit (commit `bb343d9`).
 
 ## The governing decision, and why it mattered

@@ -44,4 +44,4 @@
 ## Test hooks
 
 No test asserts the teardown contract (`session-end` frame published, `hub.unsubscribe`
-called, `onSessionEnd` firing on a peer's frame) — see `next/2026-07-07-test-gaps.md`.
+called, `onSessionEnd` firing on a peer's frame) — see `completed/2026-07-07-test-gaps.complete.md`.

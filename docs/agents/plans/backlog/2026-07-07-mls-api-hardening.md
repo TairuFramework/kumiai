@@ -57,7 +57,7 @@ findings naming either are void rather than outstanding.
 ## Test hooks
 
 Void: `validateGroupCapability` and `decrypt` no longer exist. `processMessage` fed wire-form
-application-message bytes is now covered. See `next/2026-07-07-test-gaps.md` for what remains.
+application-message bytes is now covered. See `completed/2026-07-07-test-gaps.complete.md` for what remains.
 
 ## Added 2026-07-23 — deferred forward-compatibility API findings
 
