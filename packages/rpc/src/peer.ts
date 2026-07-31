@@ -710,6 +710,26 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     await buildEpoch()
   }
 
+  /**
+   * Set as `dispose()`'s FIRST statement, and the whole of the peer's post-dispose rule: a
+   * disposed peer refuses everything.
+   *
+   * The check belongs immediately after each entry point's `await ready`, because that await is
+   * where the race lives. `dispose()` awaits a promise DERIVED from `ready`, so a call queued
+   * before init settles always resumes one microtask EARLIER than dispose's own body — early
+   * enough to run to completion against a runtime teardown is about to walk. Unguarded, each
+   * entry point fails differently and none of them says why: `to()` handed back a live-looking
+   * client over an already-aborted transport, `resync()` rebuilt a whole epoch onto a disposed
+   * mux — re-retaining topics into maps `mux.dispose()` had just cleared, which nothing will ever
+   * release — and `commit()` published to the hub from a peer that is gone. In the mirror
+   * ordering, where teardown got there first and emptied `runtimes`, a protocol call blamed
+   * `Unknown protocol` for a peer that no longer exists.
+   */
+  let disposed = false
+  const assertLive = (): void => {
+    if (disposed) throw new Error('Peer is disposed')
+  }
+
   let commitUnsubscribe: (() => void) | undefined
   let rendezvousUnsubscribe: (() => void) | undefined
   let commitTopicID: string | undefined
@@ -1604,6 +1624,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    */
   const commit = async (build: () => Promise<PendingCommit>): Promise<LaneResult> => {
     await ready
+    assertLive()
     if (mls == null || journal == null || commitTopicID == null) {
       throw new Error('commit: this peer has no MLS port, so it has no group to commit to')
     }
@@ -1736,6 +1757,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
 
   const replay = async (): Promise<LaneResult> => {
     await ready
+    assertLive()
     return runSerial(async () => {
       if (await replayJournal()) await rebuildEpoch()
       await ensureLedger(Date.now() + recoveryTimeoutMs)
@@ -1800,6 +1822,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    */
   const recover = async (): Promise<{ advanced: boolean; reenact: Array<string> }> => {
     await ready
+    assertLive()
     if (mls == null || commitTopicID == null || rendezvousTopicID == null) {
       return { advanced: false, reenact: [] }
     }
@@ -1978,15 +2001,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   // un-merged commit. Its heal waits for init to finish, since every lane operation (`recover()`
   // included) waits on `ready`.
   void settled.then(() => healIfRequested())
-  let disposed = false
   const withReady = async <T>(fn: () => T | Promise<T>): Promise<T> => {
     await ready
-    // `dispose()` awaits a promise DERIVED from `ready`, so a call queued before init settles
-    // always resumes FIRST — early enough to build a directed client that teardown then disposes
-    // out from under the caller, handing back a live-looking handle over an aborted transport.
-    // Refuse instead, and refuse in the other ordering too, where a torn-down runtime map would
-    // otherwise blame a missing protocol for a gone peer.
-    if (disposed) throw new Error('Peer is disposed')
+    assertLive()
     return fn()
   }
 
@@ -2005,6 +2022,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     recover,
     resync: async () => {
       await ready
+      // Refuse a disposed peer BEFORE `rebuildEpoch`: its `buildEpoch` half re-registers every
+      // listener and retain on a mux whose `dispose()` has already cleared `listeners` and
+      // `refcount` and stopped the drain. The rebuilt epoch lands in maps nothing walks again,
+      // and no second teardown reaches it. Invisible from the hub — the mux deliberately leaves
+      // `subscriptions` standing, so nothing re-subscribes; the whole cost is held locally.
+      assertLive()
       // Every other `rebuildEpoch` caller runs under the commit mutex. Unlocked, a host-called
       // resync interleaves with an inbound-commit rebuild and runs two teardown/build cycles over
       // one set of runtimes. Safe to wrap only because `rebuildEpoch` takes no lock itself and

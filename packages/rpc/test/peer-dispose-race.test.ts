@@ -36,4 +36,25 @@ describe('dispose against an establishing directed session', () => {
       /disposed/i,
     )
   })
+
+  test('resync() after dispose refuses rather than rebuilding onto a disposed mux', async () => {
+    const hub = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x83)
+    const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members })
+    await flush()
+    await alice.peer.dispose()
+
+    // `resync()` is the one entry point that REBUILDS. Unguarded it runs `buildEpoch` against a
+    // mux whose `dispose()` has already cleared `listeners` and `refcount`, re-registering into
+    // maps whose drain has stopped and which no second teardown will reach — the peer keeps a
+    // whole rebuilt epoch nothing will ever release.
+    //
+    // The REFUSAL is the observable, and it is the only one: recording every FakeHub method
+    // across an unguarded post-dispose `resync()` showed ZERO hub calls. No fresh `hub.subscribe`
+    // lands, because `mux.dispose()` deliberately leaves `subscriptions` standing ("Listeners go,
+    // the drain stops, SUBSCRIPTIONS STAND") so `retain` finds every topic already `held` and
+    // returns early. The leak is entirely internal to a mux this package does not let a test
+    // reach. Asserting on hub traffic here would be a decoration that never bites.
+    await expect(alice.peer.resync()).rejects.toThrow(/disposed/i)
+  })
 })
