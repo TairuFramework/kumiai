@@ -85,6 +85,15 @@ had to fix.
 ## Test hooks
 
 `resync()` racing an inbound Commit and `to()` before init are **now covered**
-(`peer-resync-serial.test.ts:9`, `peer-to-ready.test.ts:15`, verified 2026-07-28). What remains:
-`dispose()` during an in-flight handshake — see `../next/2026-07-07-test-gaps.md` — and an
-acceptor-tunnel leak/idle-teardown test, see `../backlog/2026-07-28-test-gaps-low.md`.
+(`peer-resync-serial.test.ts:9`, `peer-to-ready.test.ts:15`, verified 2026-07-28). `dispose()`
+during an in-flight handshake is **now covered too** (`rpc/test/peer-dispose-race.test.ts`,
+mutation-verified 2026-07-31) — and it found a real defect, not the leaked-mux-retain shape this
+doc originally predicted: `to()` handed back a `Client` over an already-aborted transport,
+`resync()` re-retained topics into maps `mux.dispose()` had already cleared (nothing releases
+them), `commit()` published to the hub from a peer that no longer exists, and the mirror ordering
+reported a misleading `Unknown protocol` for a peer that had already torn down. Fixed in
+`packages/rpc/src/peer.ts` — a `disposed` flag set as `dispose()`'s first statement, checked via
+`assertLive()` immediately after `await ready` at every entry point (`commit`, `replay`, `recover`,
+`resync`, `.to`, `.dispatch`/`.request`/`.gather`). See `.changeset/peer-disposed-guard.md`
+(`@kumiai/rpc` minor). What remains: an acceptor-tunnel leak/idle-teardown test, see
+`../backlog/2026-07-28-test-gaps-low.md`.
