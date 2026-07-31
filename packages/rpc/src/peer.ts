@@ -717,13 +717,15 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * The check belongs immediately after each entry point's `await ready`, because that await is
    * where the race lives. `dispose()` awaits a promise DERIVED from `ready`, so a call queued
    * before init settles always resumes one microtask EARLIER than dispose's own body — early
-   * enough to run to completion against a runtime teardown is about to walk. Unguarded, each
+   * enough to run to completion against runtimes a teardown is about to walk. Unguarded, each
    * entry point fails differently and none of them says why: `to()` handed back a live-looking
    * client over an already-aborted transport, `resync()` rebuilt a whole epoch onto a disposed
-   * mux — re-retaining topics into maps `mux.dispose()` had just cleared, which nothing will ever
-   * release — and `commit()` published to the hub from a peer that is gone. In the mirror
-   * ordering, where teardown got there first and emptied `runtimes`, a protocol call blamed
+   * mux, and `commit()` published to the hub from a peer that is gone. In the mirror ordering,
+   * where teardown got there first and emptied `runtimes`, a protocol call blamed
    * `Unknown protocol` for a peer that no longer exists.
+   *
+   * The `resync` leak is LOCAL and invisible from the hub — do not re-derive it as re-subscribing.
+   * `resync`'s own comment carries the mechanism; read it there rather than restating it here.
    */
   let disposed = false
   const assertLive = (): void => {

@@ -1,5 +1,41 @@
 # Close the medium test gaps
 
+## Superseded by execution (added 2026-07-31, after the branch completed)
+
+**Read this before the spec body.** The branch this spec designed disproved four of its premises.
+The body below is left as written — it records the design, not the outcome. Where the two
+disagree, the outcome wins. Full trail:
+`.superpowers/sdd/2026-07-31-close-medium-test-gaps/progress.md`. Retired doc:
+`docs/agents/plans/next/2026-07-07-test-gaps.md`. The plan carries the same block.
+
+- **`wrapCommitPolicy` does not combine the two policies — it selects one.** Contract 1
+  (`CommitRejectedError` payload) says both paths "converge on one seam" because the wrapped
+  callback is "the combined default-plus-caller callback".
+  `group-handle.ts:797-802` shows `combined` *selecting*:
+  `if (callerPolicy != null) return callerPolicy(incoming)`, else the default. The two paths reach
+  the capture through the same wrapper but through *different branches*, and only a mutation of
+  the dispatch selector (`group-handle.ts:801`) tells them apart. Ledger Task 2.
+- **The mutex premise was false.** Contract 5 (interleaved `encrypt`/`processMessage`) says
+  "`mutex.test.ts` covers the mutex in isolation; nothing covers the handle that depends on it."
+  `group.test.ts:3010-3080` has
+  covered the handle since 2026-07-12 (commit `b7a3545`), with a sharper assertion than this spec
+  designed. The sentence came from the 2026-07-02 audit and was never re-verified. No test was
+  written; the doc entry is void, not closed. Ledger Task 3.
+- **Mutation-target table row 3 is not one probe.** The table's "dispose vs commit tail" row treats
+  `hub-mux.ts:337,341,357` as a single mutation. The three guards are not peers: `:357` was already covered
+  (`hub-mux-subscribe-failure.test.ts:211-237`), `:337` is provably unobservable, and only `:341`
+  was a real gap. "One gap, one mutation" does not survive guards that are not peers. Ledger
+  Task 6.
+- **The source fix was sized wrong.** Contract 4 (dispose vs directed `to()`) pre-authorises "a
+  `disposed` flag checked in `withReady`" with an off-ramp deferring anything larger. It shipped as `assertLive()` at eight
+  entry points across five functions; the off-ramp was overruled deliberately, since the four lane
+  entries are one defect. Ledger Task 5 and the final review's process critique.
+
+Also, table row 4's prediction held and row 5's did not in the way expected: Task 5's probe found a
+real defect but *not* the one predicted (a leaked mux retain), and Task 8's test was written,
+proven non-isolable and discarded — the still-open gap is filed at
+`docs/agents/plans/backlog/2026-07-31-mls-rpc-author-path-stale-handle-reseal.md`.
+
 **Status:** design, approved 2026-07-31.
 **Retires:** the Medium section of `docs/agents/plans/next/2026-07-07-test-gaps.md`.
 **Origin:** 2026-07-02 audit (commit `bb343d9`), re-verified 2026-07-28, re-verified again here.

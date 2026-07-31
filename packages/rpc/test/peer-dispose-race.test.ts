@@ -4,7 +4,7 @@ import { describe, expect, test } from 'vitest'
 
 import type { SubscribeFailure } from '../src/hub-mux.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { buildRemoveCommit, makeMLSPeer } from './fixtures/peer.js'
+import { buildLedgerCommit, buildRemoveCommit, makeMLSPeer } from './fixtures/peer.js'
 
 const flush = (ms = 40) => new Promise((r) => setTimeout(r, ms))
 const members = ['alice', 'bob']
@@ -62,7 +62,7 @@ describe('dispose against an establishing directed session', () => {
   })
 })
 
-describe('dispose against a queued commit-tail rebuild', () => {
+describe('dispose against an in-flight subscribe', () => {
   test('a subscribe still in flight when dispose returns does not report to the disposed host', async () => {
     const fake = new FakeHub()
     const rs = new Uint8Array(32).fill(0x84)
@@ -113,8 +113,8 @@ describe('dispose against a queued commit-tail rebuild', () => {
       epoch: 1,
       members: threeMembers,
       // A disposed peer's caller cannot see this any other way: `resync()` and every protocol
-      // entry point refuse outright once `disposed` is set (`assertLive`, `peer.ts:729`), but the
-      // inbound-commit rebuild (`onCommitDelivery`, `peer.ts:1346-1363`) carries no such guard —
+      // entry point refuse outright once `disposed` is set (`assertLive`, `peer.ts:731`), but the
+      // inbound-commit rebuild (`onCommitDelivery`, `peer.ts:1348-1358`) carries no such guard —
       // it is queued behind `runSerial` and `dispose()` never joins that queue. This callback is
       // the only remaining way anything downstream of that rebuild can be observed post-dispose.
       onSubscribeFailed: (failure) => {
@@ -126,7 +126,10 @@ describe('dispose against a queued commit-tail rebuild', () => {
 
     // Alice evicts Carol: a real roster change. Bob applies it off the log — the inbound-Commit
     // path, not `commit()` — which queues exactly the rebuild this test is about.
-    void alice.peer.commit(buildRemoveCommit(alice, 'carol'))
+    // Owned, not floated: alice's commit is still in flight while both peers are disposed below,
+    // and an unowned rejection surfaces as a cross-file unhandled rejection rather than a failure
+    // here. Awaited at the end so a timing change fails loudly instead of escaping the test.
+    const aliceCommit = alice.peer.commit(buildRemoveCommit(alice, 'carol')).catch(() => {})
     await flush()
 
     // Bob's rebuild has, by now, asked the hub for his new chat and self-inbox topics — both
@@ -143,5 +146,67 @@ describe('dispose against a queued commit-tail rebuild', () => {
     expect(failures).toEqual([])
 
     await alice.peer.dispose()
+    await aliceCommit
+  })
+})
+
+describe('dispose against a commit made afterwards', () => {
+  test('commit() after dispose writes nothing to the hub', async () => {
+    const fake = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x85)
+
+    // Flipped only once `dispose()` has RETURNED, so the list holds post-dispose traffic and
+    // nothing else — every subscribe, publish and fetch of a live peer's init and teardown is
+    // let through unrecorded.
+    let recording = false
+    const calls: Array<string> = []
+    const record = (call: string): void => {
+      if (recording) calls.push(call)
+    }
+
+    const hub: LogHub = {
+      publish: (params) => {
+        record(`publish:${params.topicID}`)
+        return fake.publish(params)
+      },
+      subscribe: (subscriberDID, topicID, options) => {
+        record(`subscribe:${topicID}`)
+        return fake.subscribe(subscriberDID, topicID, options)
+      },
+      unsubscribe: (subscriberDID, topicID) => {
+        record(`unsubscribe:${topicID}`)
+        return fake.unsubscribe(subscriberDID, topicID)
+      },
+      receive: (subscriberDID) => {
+        record('receive')
+        return fake.receive(subscriberDID)
+      },
+      fetchTopic: (params) => {
+        record(`fetchTopic:${params.topicID}`)
+        return fake.fetchTopic(params)
+      },
+    }
+
+    const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members })
+    await flush()
+    await alice.peer.dispose()
+    recording = true
+
+    // `commit()` is the entry point with the loudest post-dispose observable, and the only one
+    // whose damage escapes the process: `assertLive` gone, it runs the whole lane — `ensureLedger`
+    // pulls the commit log and the rendezvous topic, then `mux.publish` (which carries NO disposed
+    // check of its own, `hub-mux.ts:665`) writes the commit to the hub. A disposed peer publishing
+    // a commit is a live group moved by a device its host has already torn down.
+    const op = alice.peer.commit(buildLedgerCommit(alice, ['post-dispose']))
+    // Owned immediately: the hub-traffic assertion runs BEFORE the rejection is awaited, because
+    // an unguarded `commit()` does not reject promptly — it settles on the commit deadline, long
+    // after the publish has landed. Asserting the rejection first would turn "it published" into a
+    // bare timeout that names nothing.
+    const owned = op.catch(() => {})
+    await flush()
+
+    expect(calls).toEqual([])
+    await expect(op).rejects.toThrow(/disposed/i)
+    await owned
   })
 })

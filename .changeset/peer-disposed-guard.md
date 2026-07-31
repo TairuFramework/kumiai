@@ -9,7 +9,7 @@ none of them said why.
 
 `dispose()` awaits a promise derived from the same `ready` that gates every entry point, so a call
 queued before init settles always resumes one microtask EARLIER than dispose's own body — early
-enough to run to completion against a runtime teardown is about to walk. `to()` handed back a
+enough to run to completion against runtimes a teardown is about to walk. `to()` handed back a
 live-looking `Client` over an already-aborted transport, discoverable only by using it. `resync()`
 rebuilt a whole epoch onto a disposed mux, re-registering listeners and retains into maps
 `mux.dispose()` had just cleared and no second teardown will reach. `commit()` published to the
@@ -19,4 +19,6 @@ fine for a peer that no longer exists.
 
 A `disposed` flag, set as `dispose()`'s first statement and checked immediately after each entry
 point's `await ready`, refuses all of them. A host that called a lane operation on a disposed peer
-and got silence now gets an error.
+used to get whatever that operation happened to do next — a misleading `Unknown protocol`, a
+live-looking `Client` over a dead transport, or a commit published to the hub. It now gets an
+error that names the disposal.

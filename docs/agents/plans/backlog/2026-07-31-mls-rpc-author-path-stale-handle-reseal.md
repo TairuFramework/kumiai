@@ -29,7 +29,7 @@ same object.
 ## The mechanism that makes it reachable
 
 A member that **authors** a commit takes a different path. `tests/integration/test/app-lane-e2e.ts`'s
-`build()` functions (`buildInviteCommit:298`, `buildRemoveCommit:323`, and the third at `:374`) each
+`build()` functions (`buildInviteCommit:298`, `buildRemoveCommit:323`, `buildLedgerCommit:355`) each
 compute the commit against the *current* handle, hold the *new* group state (`committed.newGroup`)
 in a closure, and only call `member.adopt(committed.newGroup)` from `onAccepted` — after the hub
 accepts the commit. `adopt` (`app-lane-e2e.ts:169`) reassigns the closed-over `handle` binding that
@@ -38,9 +38,17 @@ exactly the "handle is replaced" event the doc comment warns about, and it is a 
 reference each time — something a test can freeze a stale copy of and check against.
 
 So: a **restarted** member that goes on to **author** its own commit (rather than only catching up
-on others') is the only path in this repo that reaches `onAccepted` → `adopt()` post-restore, and
-therefore the only path that could isolate "a component captured `handle()`'s pre-adopt return and
-kept sealing against it."
+on others') reaches `onAccepted` → `adopt()` post-restore, which is what makes it able to isolate
+"a component captured `handle()`'s pre-adopt return and kept sealing against it."
+
+**It is not the only route.** `adoptJournalled` (`app-lane-e2e.ts:195-209`) is a second `adopt()`
+caller (`:201`), reassigning the same closed-over `handle` binding `getHandle` reads and producing
+a genuine new object reference via `restoreGroup(...)` — the same freezable event. It is reachable
+post-restore because `makeMember` carries `restartOf?.journal` forward (`:165`), so a restarted
+member replaying an un-merged journalled commit takes it. Whichever route is chosen, the property
+under test is the same; the author path is written up below because its trigger is explicit
+(`peer.commit(...)`) where the journal-replay path needs a commit staged in the journal and left
+un-merged before the restart. Check both before assuming the author path is cheapest.
 
 ## What would close it
 

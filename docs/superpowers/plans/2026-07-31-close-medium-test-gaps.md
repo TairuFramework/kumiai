@@ -1,5 +1,42 @@
 # Close the Medium Test Gaps — Implementation Plan
 
+## Superseded by execution (added 2026-07-31, after the branch completed)
+
+**Read this before the plan body.** Executing this plan disproved four of its own premises. The
+body below is left as written — it is the record of what was planned, not of what is true. Where
+the two disagree, the outcome wins. Full trail:
+`.superpowers/sdd/2026-07-31-close-medium-test-gaps/progress.md`. Retired doc:
+`docs/agents/plans/next/2026-07-07-test-gaps.md`.
+
+- **`wrapCommitPolicy` does not combine the two policies — it selects one.** Task 2's step text,
+  its embedded test comment and its commit message all say the wrapped
+  callback is "the COMBINED default-plus-caller" one. `group-handle.ts:797-802` shows `combined`
+  *selecting*: `if (callerPolicy != null) return callerPolicy(incoming)`, else the default. The
+  first draft of the caller-path test rested on the wrong reading and did not isolate the caller
+  branch at all; the shipped test mutates the dispatch selector (`group-handle.ts:801`) to prove
+  it does. Ledger Task 2.
+- **The mutex premise was false.** Task 3 asserts it three times — in its rationale, in the
+  embedded test's JSDoc and in its commit message — that "`mutex.test.ts` covers the mutex in
+  isolation; nothing covers the handle that depends on it." `group.test.ts:3010-3080` has
+  covered exactly that since 2026-07-12 (commit `b7a3545`), and its `:3031` test is *sharper* than
+  the one this plan specified. The sentence came from the 2026-07-02 audit and was never
+  re-verified. Task 3 wrote no test; the doc entry is void, not closed. Ledger Task 3.
+- **The three `hub-mux.ts` guards are not one probe.** Task 6's probe target and mutation step
+  treat `hub-mux.ts:337,341,357` as one. They do not stand together: `:357` was already covered
+  (`hub-mux-subscribe-failure.test.ts:211-237`), `:337` is provably unobservable (`subscriptions`
+  is mux-local and no reader distinguishes `asking` from `held`), and only `:341` was a real gap.
+  Ledger Task 6.
+- **The Task 5 source fix landed far larger than the plan sized it.** The plan pre-authorised "a
+  `disposed` check in `withReady`" with an off-ramp deferring anything bigger. It shipped as
+  `assertLive()` at eight entry points across five functions. The off-ramp was overruled
+  deliberately — the four lane entries are one defect and a half-guard would be worse — but the
+  plan's sizing is not what happened. Ledger Task 5 and the final review's process critique.
+
+Two of the seven predicted tests were correctly **not** written: Task 3 (already covered, above)
+and Task 8 (written, proven non-isolable, discarded — the still-open gap is filed at
+`docs/agents/plans/backlog/2026-07-31-mls-rpc-author-path-stale-handle-reseal.md`). The
+checkboxes below are not re-ticked and the bodies are not rewritten; this block is the correction.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Retire the Medium section of `docs/agents/plans/next/2026-07-07-test-gaps.md` — five audit entries, seven pieces of work — leaving each entry either a mutation-verified test or a recorded "already covered by X".
