@@ -86,14 +86,20 @@ had to fix.
 
 `resync()` racing an inbound Commit and `to()` before init are **now covered**
 (`peer-resync-serial.test.ts:9`, `peer-to-ready.test.ts:15`, verified 2026-07-28). `dispose()`
-during an in-flight handshake is **now covered too** (`rpc/test/peer-dispose-race.test.ts`,
-mutation-verified 2026-07-31) — and it found a real defect, not the leaked-mux-retain shape this
-doc originally predicted: `to()` handed back a `Client` over an already-aborted transport,
-`resync()` re-retained topics into maps `mux.dispose()` had already cleared (nothing releases
-them), `commit()` published to the hub from a peer that no longer exists, and the mirror ordering
-reported a misleading `Unknown protocol` for a peer that had already torn down. Fixed in
-`packages/rpc/src/peer.ts` — a `disposed` flag set as `dispose()`'s first statement, checked via
-`assertLive()` immediately after `await ready` at every entry point (`commit`, `replay`, `recover`,
-`resync`, `.to`, `.dispatch`/`.request`/`.gather`). See `.changeset/peer-disposed-guard.md`
-(`@kumiai/rpc` minor). What remains: an acceptor-tunnel leak/idle-teardown test, see
-`../backlog/2026-07-28-test-gaps-low.md`.
+during an in-flight handshake is **now covered too** (`rpc/test/peer-dispose-race.test.ts`) — and
+it found a real defect, not the leaked-mux-retain-into-the-hub shape this doc originally predicted:
+`to()` handed back a `Client` over an already-aborted transport, and the mirror ordering (teardown
+first) reported a misleading `Unknown protocol` for a peer that no longer exists — both
+mutation-verified 2026-07-31. A post-dispose `resync()` also rebuilds the epoch's clients and
+re-populates the mux's `listeners`/`refcount` — a real, mutation-verified local leak — but nothing
+reaches the hub: `mux.dispose()` deliberately leaves `subscriptions` standing, so `retain` finds
+every topic already held and never re-subscribes (`peer.ts:2025-2029`). An earlier review round
+guessed the wrong mechanism for this same leak (dispose freeing topics for `resync()` to
+re-register into live hub calls); that guess is not what shipped. `commit()`, `replay()`, and
+`recover()` are guarded the same way, and the changeset asserts `commit()` would otherwise publish
+to the hub from a gone peer, but that specific claim has no biting test of its own — mutation
+coverage of the extension is `resync`-only. Fixed in `packages/rpc/src/peer.ts` — a `disposed` flag
+set as `dispose()`'s first statement, checked via `assertLive()` immediately after `await ready` at
+every entry point (`commit`, `replay`, `recover`, `resync`, `.to`, `.dispatch`/`.request`/`.gather`).
+See `.changeset/peer-disposed-guard.md` (`@kumiai/rpc` minor). What remains: an acceptor-tunnel
+leak/idle-teardown test, see `../backlog/2026-07-28-test-gaps-low.md`.

@@ -11,7 +11,7 @@ risk — see `docs/agents/plans/completed/` once that branch lands, or the SDD l
 
 ## The gap
 
-`GroupCryptoParams.handle` (`packages/mls-rpc/src/crypto.ts:44-48`) is a function, not a value, and
+`GroupCryptoParams.handle` (`packages/mls-rpc/src/crypto.ts:45-48`) is a function, not a value, and
 the doc comment says why: "the handle is replaced when the peer adopts its own commit, and closing
 over a fixed handle would silently seal at a dead epoch." That is a real bug shape — a `wrap` call
 that captured `handle()`'s return once, before an `adopt()`, would keep sealing against the
@@ -29,7 +29,7 @@ same object.
 ## The mechanism that makes it reachable
 
 A member that **authors** a commit takes a different path. `tests/integration/test/app-lane-e2e.ts`'s
-`build()` functions (`buildInviteCommit:298`, `buildRemoveCommit:322`, and the third at `:374`) each
+`build()` functions (`buildInviteCommit:298`, `buildRemoveCommit:323`, and the third at `:374`) each
 compute the commit against the *current* handle, hold the *new* group state (`committed.newGroup`)
 in a closure, and only call `member.adopt(committed.newGroup)` from `onAccepted` — after the hub
 accepts the commit. `adopt` (`app-lane-e2e.ts:169`) reassigns the closed-over `handle` binding that
@@ -46,7 +46,7 @@ kept sealing against it."
 
 A test that:
 
-1. Restarts a member the same way `app-lane-delivery.test.ts:602` does (persist, kill, restore via
+1. Restarts a member the same way `app-lane-delivery.test.ts:604` does (persist, kill, restore via
    `restoreMemberHandle`, rebuild the peer with `restartOf`).
 2. Has the **restored** member author a commit (invite or remove) that changes the epoch, rather
    than only receiving one.
