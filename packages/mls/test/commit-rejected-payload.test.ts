@@ -101,4 +101,60 @@ describe('CommitRejectedError carries the rejected commit', () => {
       expect(rejected.senderLeafIndex).toBe(1)
     }
   })
+
+  test('a caller commit policy rejecting captures the same payload', async () => {
+    const alice = randomIdentity()
+    const bob = randomIdentity()
+    const tokens = new Map<string, string>()
+    const resolveLedgerEntries = async (ids: Array<string>) =>
+      ids.map((id) => {
+        const token = tokens.get(id)
+        if (token == null) throw new Error(`unknown ledger entry ${id}`)
+        return token
+      })
+
+    // A policy that refuses every incoming commit. It replaces nothing: `wrapCommitPolicy`
+    // wraps the COMBINED default-plus-caller callback, so this exercises the caller branch of
+    // the same capture the default path uses.
+    const commitPolicy = () => 'reject' as const
+
+    const { group: created } = await createGroup(alice, 'rejected-payload-caller', {
+      resolveLedgerEntries,
+    })
+    const { invite } = await createInvite({
+      group: created,
+      identity: alice,
+      recipientDID: bob.id,
+      permission: 'member',
+    })
+    for (const token of invite.ledgerEntries) tokens.set(ledgerEntryDigest(token), token)
+    const bundle = await createKeyPackageBundle(bob)
+    const added = await commitInvite(created, bundle.publicPackage, invite)
+    // Bob joins with the refusing policy in place, so HIS handle rejects what alice commits.
+    const { group: bobGroup } = await processWelcome({
+      identity: bob,
+      invite,
+      welcome: added.welcomeMessage,
+      keyPackageBundle: bundle,
+      ratchetTree: added.newGroup.state.ratchetTree,
+      options: { resolveLedgerEntries, commitPolicy },
+    })
+
+    const carol = randomIdentity()
+    const carolKP = await createKeyPackageBundle(carol)
+    // Alice is admin, so this commit is valid — only the caller policy stands against it.
+    const aliceCommit = await addCommitBytes(added.newGroup, carolKP.publicPackage)
+
+    expect.assertions(4)
+    try {
+      await bobGroup.processMessage(aliceCommit)
+    } catch (error) {
+      expect(error).toBeInstanceOf(CommitRejectedError)
+      const rejected = error as CommitRejectedError
+      expect(rejected.proposals).toHaveLength(1)
+      expect(rejected.proposals[0]?.proposal.proposalType).toBe(defaultProposalTypes.add)
+      // Alice is the first leaf: she created the group.
+      expect(rejected.senderLeafIndex).toBe(0)
+    }
+  })
 })
