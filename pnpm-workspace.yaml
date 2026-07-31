@@ -11,7 +11,7 @@ nodeLinker: hoisted
 catalog:
   '@noble/ciphers': ^2.1.1
   '@noble/curves': ^2.0.1
-  '@noble/hashes': ^2.0.0
+  '@noble/hashes': ^2.2.0
   'ts-mls': 2.0.0-rc.13
   'vitest': ^4.1.10
   '@enkaku/client': ^0.20.0
@@ -21,8 +21,8 @@ catalog:
   '@kokuin/capability': ^0.1.0
   '@kokuin/token': ^0.3.0
   '@sozai/async': ^0.2.1
-  '@sozai/codec': ^0.2.0
-  '@sozai/event': ^0.1.2
+  '@sozai/codec': ^0.3.0
+  '@sozai/event': ^0.1.3
   '@sozai/log': ^0.3.0
   '@sozai/result': ^0.2.0
   '@sozai/runtime': ^0.1.0
@@ -30,7 +30,7 @@ catalog:
   '@sozai/stream': ^0.2.0
   '@kokuin/expo': ^0.3.0
   '@sozai/runtime-expo': ^0.2.2
-  'expo': ^57.0.8
+  'expo': ^57.0.9
   'expo-status-bar': ^57.0.1
   'react': 19.2.3
   'react-native': ^0.86.0

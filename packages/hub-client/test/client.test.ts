@@ -158,7 +158,7 @@ describe('HubClient', () => {
     const status = await client.keyPackageStatus()
 
     expect(status.count).toBe(2)
-    expect(status.lastResort).toBe(await keyPackageDigest('kp-last-resort'))
+    expect(status.lastResort).toBe(keyPackageDigest('kp-last-resort'))
 
     await transports.dispose()
   })

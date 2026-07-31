@@ -70,5 +70,5 @@ caps/truncation. Directed request/stream/channel still work end-to-end through
 - **Minor cleanups + durable-hub readiness** — see
   `docs/agents/plans/../backlog/rpc-directed-lane.md`.
 - **Real-hub end-to-end** for the directed security properties is tracked in the Phase 1
-  test-gaps item (`docs/agents/plans/next/2026-07-07-test-gaps.md`): the current adversary
+  test-gaps item (`docs/agents/plans/completed/2026-07-07-test-gaps.complete.md`): the current adversary
   tests use an in-memory hub double.

@@ -1,112 +1,11 @@
 import { Client } from '@enkaku/client'
 import type { AnyClientMessageOf, AnyServerMessageOf, ProtocolDefinition } from '@enkaku/protocol'
 import { type ProcedureHandlers, type RequestHandler, serve } from '@enkaku/server'
-import type { StoredMessage } from '@kumiai/hub-protocol'
-import {
-  createHubTunnelTransport,
-  type HubPublishParams,
-  type HubReceiveSubscription,
-  type MailboxHub,
-} from '@kumiai/hub-tunnel'
+import { randomIdentity } from '@kokuin/token'
+import { createHubTunnelTransport } from '@kumiai/hub-tunnel'
 import { describe, expect, test } from 'vitest'
 
-// ---------------------------------------------------------------------------
-// In-memory MailboxHub double — topic pub/sub with per-subscriber delivery.
-// ---------------------------------------------------------------------------
-
-type Inbox = {
-  messages: Array<StoredMessage>
-  wakers: Array<(msg: StoredMessage) => void>
-}
-
-function createInMemoryHub(): MailboxHub {
-  const inboxes: Record<string, Inbox> = {}
-  // topicID -> set of subscriber DIDs
-  const subscriptions: Record<string, Set<string>> = {}
-  let seq = 0
-
-  function getInbox(did: string): Inbox {
-    if (inboxes[did] == null) {
-      inboxes[did] = { messages: [], wakers: [] }
-    }
-    return inboxes[did] as Inbox
-  }
-
-  function deliver(did: string, msg: StoredMessage): void {
-    const inbox = getInbox(did)
-    const waker = inbox.wakers.shift()
-    if (waker != null) {
-      waker(msg)
-    } else {
-      inbox.messages.push(msg)
-    }
-  }
-
-  async function publish(params: HubPublishParams): Promise<{ sequenceID: string }> {
-    const sequenceID = String(++seq)
-    const stored: StoredMessage = {
-      sequenceID,
-      senderDID: params.senderDID,
-      topicID: params.topicID,
-      payload: params.payload,
-    }
-    const subscribers = subscriptions[params.topicID]
-    if (subscribers != null) {
-      for (const did of subscribers) {
-        if (did !== params.senderDID) deliver(did, stored)
-      }
-    }
-    return { sequenceID }
-  }
-
-  function subscribe(subscriberDID: string, topicID: string): void {
-    if (subscriptions[topicID] == null) {
-      subscriptions[topicID] = new Set()
-    }
-    subscriptions[topicID].add(subscriberDID)
-  }
-
-  function unsubscribe(subscriberDID: string, topicID: string): void {
-    subscriptions[topicID]?.delete(subscriberDID)
-  }
-
-  function receive(subscriberDID: string): HubReceiveSubscription {
-    const inbox = getInbox(subscriberDID)
-    let done = false
-
-    return {
-      [Symbol.asyncIterator]() {
-        return {
-          next(): Promise<IteratorResult<StoredMessage>> {
-            if (done) {
-              return Promise.resolve({ value: undefined as unknown as StoredMessage, done: true })
-            }
-            const queued = inbox.messages.shift()
-            if (queued != null) {
-              return Promise.resolve({ value: queued, done: false })
-            }
-            return new Promise<IteratorResult<StoredMessage>>((resolve) => {
-              inbox.wakers.push((msg) => {
-                resolve({ value: msg, done: false })
-              })
-            })
-          },
-          return(): Promise<IteratorResult<StoredMessage>> {
-            done = true
-            // Wake any pending waker so the iterator loop can exit
-            const waker = inbox.wakers.shift()
-            if (waker != null) {
-              waker({ sequenceID: '', senderDID: '', topicID: '', payload: new Uint8Array(0) })
-            }
-            return Promise.resolve({ value: undefined as unknown as StoredMessage, done: true })
-          },
-        }
-      },
-    }
-  }
-
-  return { publish, subscribe, unsubscribe, receive }
-}
+import { createWireHub } from './log-hub-over-wire.js'
 
 // ---------------------------------------------------------------------------
 // Protocol
@@ -137,8 +36,12 @@ type Protocol = typeof protocol
 // ---------------------------------------------------------------------------
 
 describe('hub-tunnel echo', () => {
-  test('client → server round-trip via in-memory hub', async () => {
-    const hub = createInMemoryHub()
+  test('client → server round-trip via the real hub wire', async () => {
+    const hub = createWireHub()
+    const clientID = randomIdentity()
+    const serverID = randomIdentity()
+    const clientHub = hub.connect(clientID)
+    const serverHub = hub.connect(serverID)
     const clientToServer = 'tunnel:client-to-server'
     const serverToClient = 'tunnel:server-to-client'
 
@@ -146,9 +49,9 @@ describe('hub-tunnel echo', () => {
       AnyServerMessageOf<Protocol>,
       AnyClientMessageOf<Protocol>
     >({
-      hub,
+      hub: clientHub,
       sessionID: 'session-1',
-      localDID: 'client',
+      localDID: clientID.id,
       sendTopicID: clientToServer,
       receiveTopicID: serverToClient,
     })
@@ -157,9 +60,9 @@ describe('hub-tunnel echo', () => {
       AnyClientMessageOf<Protocol>,
       AnyServerMessageOf<Protocol>
     >({
-      hub,
+      hub: serverHub,
       sessionID: 'session-1',
-      localDID: 'server',
+      localDID: serverID.id,
       sendTopicID: serverToClient,
       receiveTopicID: clientToServer,
     })
@@ -167,6 +70,12 @@ describe('hub-tunnel echo', () => {
     const echoHandler: RequestHandler<Protocol, 'echo'> = async ({ param }) => param
     const handlers = { echo: echoHandler } as ProcedureHandlers<Protocol>
 
+    // No flush between construction and the request, unlike every sibling wire test — and that is
+    // an empirical fact, not a contract. `createHubTunnelTransport` fires `hub.subscribe`
+    // fire-and-forget (`transport.ts:214-215`), so over a real wire nothing guarantees a
+    // subscription lands before the first publish. It holds here because both subscribes are
+    // issued during construction, several awaits before `client.request` reaches the hub. Filed as
+    // a followup: `docs/agents/plans/backlog/2026-07-31-close-medium-test-gaps-residuals.md`.
     const server = serve<Protocol>({ handlers, requireAuth: false, transport: serverTransport })
     const client = new Client<Protocol>({ transport: clientTransport })
 
@@ -176,6 +85,7 @@ describe('hub-tunnel echo', () => {
     } finally {
       await client.dispose()
       await server.dispose()
+      await hub.dispose()
     }
   })
 })

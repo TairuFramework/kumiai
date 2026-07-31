@@ -2,7 +2,7 @@
 
 **Priority:** low — none of these guards a security property or a load-bearing contract; each is a
 branch or a wiring step nothing asserts.
-**Origin:** split out of `next/2026-07-07-test-gaps.md` on 2026-07-28, when that item was re-verified
+**Origin:** split out of `completed/2026-07-07-test-gaps.complete.md` on 2026-07-28, when that item was re-verified
 against current source. The Highs and Mediums that survived stayed there; this is the residue.
 
 Each entry below was re-checked on 2026-07-28 — what is written is the state then, not the 2026-07-02

@@ -192,7 +192,7 @@ export function createLastResortProvisioner(
       )
       if (status.isError()) return Result.error(status.error)
       const { lastResort } = status.value
-      if (lastResort !== (await keyPackageDigest(candidate.keyPackage))) {
+      if (lastResort !== keyPackageDigest(candidate.keyPackage)) {
         const uploaded = await attempt(
           'upload',
           () => uploadToHub(candidate),
