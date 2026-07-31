@@ -169,7 +169,7 @@ async function addCommitBytes(
  */
 describe('CommitRejectedError carries the rejected commit', () => {
   test('the default policy path captures proposals and the sender leaf index', async () => {
-    const { bob, aliceGroup, bobGroup } = await twoMemberGroup('rejected-payload-default')
+    const { aliceGroup, bobGroup } = await twoMemberGroup('rejected-payload-default')
     const carol = randomIdentity()
     const carolKP = await createKeyPackageBundle(carol)
     const bobCommit = await addCommitBytes(bobGroup, carolKP.publicPackage)
@@ -186,15 +186,15 @@ describe('CommitRejectedError carries the rejected commit', () => {
       // Bob is the second leaf: alice created the group, bob was added to it.
       expect(rejected.senderLeafIndex).toBe(1)
     }
-    // Silences the unused-binding lint on `bob` while asserting the fixture is what it claims.
-    expect(normalizeDID(bob.id)).toBeTypeOf('string')
   })
 })
 ```
 
 Note on `rejected.proposals[0]?.proposal.proposalType`: `ProposalWithSender` is a ts-mls type. If the shape turns out to be `proposals[0].proposalType` or the value a numeric enum rather than the string `'add'`, adjust the assertion to whatever the run reports — but assert the *specific* proposal type, never just `toBeDefined()`. A field asserted only as "present" is the regression this test exists to catch.
 
-Note on `expect.assertions(4)`: raise it to 5 to account for the trailing `normalizeDID` assertion if you keep that line; drop the line and leave it at 4 if `bob` is otherwise used. Whichever you pick, the count must match the assertions actually reached, or the guard is decorative.
+Note on `expect.assertions(4)`: the count must match the assertions actually reached, or the guard is decorative. If you change the assertion count, change this too.
+
+Drop the `normalizeDID` import if nothing else in the file uses it.
 
 - [ ] **Step 5: Run the new test and confirm it passes**
 
