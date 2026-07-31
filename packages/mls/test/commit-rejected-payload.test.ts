@@ -1,5 +1,11 @@
 import { randomIdentity } from '@kokuin/token'
-import { createCommit, defaultProposalTypes, encode, mlsMessageEncoder } from 'ts-mls'
+import {
+  createCommit,
+  defaultProposalTypes,
+  encode,
+  type IncomingMessageCallback,
+  mlsMessageEncoder,
+} from 'ts-mls'
 import { describe, expect, test } from 'vitest'
 
 import {
@@ -17,8 +23,16 @@ import type { Invite } from '../src/types.js'
  * Alice (admin) plus bob (member), sharing a ledger-entry resolver. The same shape
  * `app-message.test.ts` uses — repeated rather than shared, because a helper that grows a
  * parameter for every caller is worse than two short ones.
+ *
+ * `bobOptions` threads extra `processWelcome` options — e.g. a caller `commitPolicy` — onto
+ * bob's join alone; alice's side always runs under the anchored default. `publish` is
+ * returned so a caller can fold a LATER invite's ledger entries into the same resolver both
+ * handles already share, without duplicating the resolver/tokens setup.
  */
-async function twoMemberGroup(groupID: string) {
+async function twoMemberGroup(
+  groupID: string,
+  bobOptions?: { commitPolicy?: IncomingMessageCallback },
+) {
   const alice = randomIdentity()
   const bob = randomIdentity()
   const tokens = new Map<string, string>()
@@ -48,9 +62,9 @@ async function twoMemberGroup(groupID: string) {
     welcome: added.welcomeMessage,
     keyPackageBundle: bundle,
     ratchetTree: added.newGroup.state.ratchetTree,
-    options: { resolveLedgerEntries },
+    options: { resolveLedgerEntries, ...bobOptions },
   })
-  return { alice, bob, aliceGroup: added.newGroup, bobGroup, resolveLedgerEntries }
+  return { alice, bob, aliceGroup: added.newGroup, bobGroup, resolveLedgerEntries, publish }
 }
 
 /**
@@ -103,55 +117,44 @@ describe('CommitRejectedError carries the rejected commit', () => {
   })
 
   test('a caller commit policy rejecting captures the same payload', async () => {
-    const alice = randomIdentity()
-    const bob = randomIdentity()
-    const tokens = new Map<string, string>()
-    const resolveLedgerEntries = async (ids: Array<string>) =>
-      ids.map((id) => {
-        const token = tokens.get(id)
-        if (token == null) throw new Error(`unknown ledger entry ${id}`)
-        return token
-      })
-
-    // A policy that refuses every incoming commit. It replaces nothing: `wrapCommitPolicy`
-    // wraps the COMBINED default-plus-caller callback, so this exercises the caller branch of
-    // the same capture the default path uses.
+    // A policy that refuses every incoming commit. `GroupOptions.commitPolicy` REPLACES the
+    // anchored `defaultCommitPolicy` for the handle it's set on — it does not compose with it
+    // (see the doc on `commitPolicy` in `../src/types.js`) — so this exercises the
+    // caller-dispatch branch of `wrapCommitPolicy`'s shared capture (`group-handle.ts:801`),
+    // distinct from the default-policy branch the test above covers.
     const commitPolicy = () => 'reject' as const
-
-    const { group: created } = await createGroup(alice, 'rejected-payload-caller', {
-      resolveLedgerEntries,
-    })
-    const { invite } = await createInvite({
-      group: created,
-      identity: alice,
-      recipientDID: bob.id,
-      permission: 'member',
-    })
-    for (const token of invite.ledgerEntries) tokens.set(ledgerEntryDigest(token), token)
-    const bundle = await createKeyPackageBundle(bob)
-    const added = await commitInvite(created, bundle.publicPackage, invite)
-    // Bob joins with the refusing policy in place, so HIS handle rejects what alice commits.
-    const { group: bobGroup } = await processWelcome({
-      identity: bob,
-      invite,
-      welcome: added.welcomeMessage,
-      keyPackageBundle: bundle,
-      ratchetTree: added.newGroup.state.ratchetTree,
-      options: { resolveLedgerEntries, commitPolicy },
-    })
+    const { alice, aliceGroup, bobGroup, publish } = await twoMemberGroup(
+      'rejected-payload-caller',
+      { commitPolicy },
+    )
 
     const carol = randomIdentity()
     const carolKP = await createKeyPackageBundle(carol)
-    // Alice is admin, so this commit is valid — only the caller policy stands against it.
-    const aliceCommit = await addCommitBytes(added.newGroup, carolKP.publicPackage)
+    // A REAL invite, not `addCommitBytes`'s bare raw commit (that's Task 1's shape, for a
+    // commit `defaultCommitPolicy` also rejects — admin-valid but unrostered). Carol's role
+    // grant rides this commit and folds into `candidateRoster`, so `defaultCommitPolicy`
+    // would ACCEPT it. Only bob's caller policy stands against it, isolating that branch:
+    // a regression that always fell through to the default policy would let this commit
+    // through instead of rejecting it.
+    const { invite: carolInvite } = await createInvite({
+      group: aliceGroup,
+      identity: alice,
+      recipientDID: carol.id,
+      permission: 'member',
+    })
+    publish(carolInvite)
+    const addedCarol = await commitInvite(aliceGroup, carolKP.publicPackage, carolInvite)
 
     expect.assertions(4)
     try {
-      await bobGroup.processMessage(aliceCommit)
+      await bobGroup.processMessage(addedCarol.commitMessage)
     } catch (error) {
       expect(error).toBeInstanceOf(CommitRejectedError)
       const rejected = error as CommitRejectedError
-      expect(rejected.proposals).toHaveLength(1)
+      // Unlike Task 1's bare `addCommitBytes` commit, `commitInvite` also rides a
+      // `group_context_extensions` proposal moving the ledger head — the Add proposal
+      // (index 0; `commitWithEntries` appends the head-move proposal after it) plus that one.
+      expect(rejected.proposals).toHaveLength(2)
       expect(rejected.proposals[0]?.proposal.proposalType).toBe(defaultProposalTypes.add)
       // Alice is the first leaf: she created the group.
       expect(rejected.senderLeafIndex).toBe(0)
