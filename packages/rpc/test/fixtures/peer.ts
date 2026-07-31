@@ -2,6 +2,7 @@ import type { LogHub } from '@kumiai/hub-tunnel'
 
 import type { AppWindowPruned } from '../../src/app-cursor.js'
 import type { PendingCommit } from '../../src/commit.js'
+import type { SubscribeFailure } from '../../src/hub-mux.js'
 import { createGroupPeer, type GroupPeer } from '../../src/peer.js'
 import type { GroupProtocolDefinition } from '../../src/protocol.js'
 import { createMemoryAnchorStore, type MemoryAnchorStore } from './anchor.js'
@@ -95,6 +96,8 @@ export type MakeMLSPeerOptions = {
   appCursorStore?: MemoryAppCursorStore
   /** The host's notice that an app topic's retention floor passed this peer's read position. */
   onAppWindowPruned?: (event: AppWindowPruned) => void
+  /** The host's notice that a subscribe was refused or exhausted its retries. */
+  onSubscribeFailed?: (failure: SubscribeFailure) => void
   /**
    * The host's adoption of a journalled post-commit handle, overridden. The default adopts
    * the blob and nothing else, which is the whole of what a `ledger` commit's handle carries.
@@ -149,6 +152,7 @@ export function makeMLSPeer(
     anchorStore,
     appCursorStore,
     ...(options.onAppWindowPruned != null ? { onAppWindowPruned: options.onAppWindowPruned } : {}),
+    ...(options.onSubscribeFailed != null ? { onSubscribeFailed: options.onSubscribeFailed } : {}),
     // The restart half of onAccepted, over the same blob — and idempotent, as it must be.
     adoptJournalled: async (blob) => {
       if (options.adoptJournalled != null) {
