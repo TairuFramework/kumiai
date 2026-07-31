@@ -861,7 +861,7 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       } catch (error) {
         rethrowAsHandlerError(error)
       }
-      return { count, lastResort: stored == null ? null : await keyPackageDigest(stored) }
+      return { count, lastResort: stored == null ? null : keyPackageDigest(stored) }
     }) as RequestHandler<HubProtocol, 'hub/v1/keypackage/status'>,
   }
 }

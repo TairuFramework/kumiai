@@ -581,7 +581,7 @@ describe('hub/v1/keypackage/status', () => {
       reqCtx('hub/v1/keypackage/status', {}, TARGET),
     )
 
-    expect(result.lastResort).toBe(await keyPackageDigest('kp-last-resort'))
+    expect(result.lastResort).toBe(keyPackageDigest('kp-last-resort'))
   })
 
   test('consults the authorize hook and can be refused', async () => {

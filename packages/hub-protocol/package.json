@@ -36,6 +36,7 @@
   },
   "dependencies": {
     "@enkaku/protocol": "catalog:",
+    "@noble/hashes": "catalog:",
     "@sozai/event": "catalog:"
   },
   "devDependencies": {
