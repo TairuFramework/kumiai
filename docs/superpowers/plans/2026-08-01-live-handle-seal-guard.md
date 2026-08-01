@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Stage:** executing
+**Stage:** qa
 **Mode:** tasks
 
 **Goal:** Turn the incidental guard on `GroupCrypto.wrap` following the live handle into a deliberate one, and cover restart-then-author against real MLS, which nothing does today.
@@ -460,3 +460,21 @@ summary line reads `Cached: 0`.
 The completed record must carry section 1 of the spec — the probe table, the two incidental guards
 it found, and `peer-first-commit-crash.test.ts:168` — plus Task 2 step 5's recorded result, so the
 next reader who wonders about stale handles finds the answer instead of re-running the probes.
+
+**REQUIRED BEFORE MERGE — the final review's one unfixed finding.**
+`docs/agents/plans/roadmap.md:70,76-79` still lists the `next/` entry this branch deleted, so the
+link breaks on merge, and its summary repeats the exact premise the probes disproved ("no test in
+the repo can currently catch it"). It is deferred to this stage rather than dropped, because the
+fix needs the completed record's path. Precedent: `a1146c9` deleted a `next/` item and re-pointed
+the roadmap in the same PR.
+
+Change the heading from "three items" to "two", renumber, and move the entry into "What else
+shipped since the last roadmap" pointing at
+`docs/agents/plans/completed/2026-08-01-live-handle-seal-guard.complete.md`, with the conclusion
+corrected to: premise disproved; the incidental guard was named, and restart-then-author now runs
+against real MLS.
+
+Lower priority, same family, and defensible to leave alone (`a1146c9` did):
+`completed/2026-07-07-test-gaps.complete.md:10,126` and
+`completed/2026-07-31-close-medium-test-gaps.complete.md:62,97` also link the deleted path. Those
+are history; the roadmap is not.
