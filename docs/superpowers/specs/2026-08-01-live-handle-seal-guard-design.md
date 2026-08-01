@@ -27,8 +27,8 @@ Each mutation was applied to source, the suite run, then reverted. The tree was 
 | `peer.ts` `captureAnchor` reuses the previous anchor (`:464`) | `packages/rpc` | 49 failed / 391 |
 
 The two `mls-rpc` failures are `crypto.test.ts`'s "unwrap refuses every epoch but the handle current
-one" (`:201`) and the `frameEpoch` test (`:317`). The two integration failures are in
-`app-lane-delivery.test.ts`.
+one" (`:201`) and the `frameEpoch` test (`:303`, failing at `:317`). The two integration failures
+are in `app-lane-delivery.test.ts`.
 
 The entry's other premises all hold, and are restated here only because they were checked:
 `GroupCryptoParams.handle` is a function whose doc comment names the bug shape (`crypto.ts:45-50`);

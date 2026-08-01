@@ -231,11 +231,11 @@ Every restart-then-author test in the repo runs against the doubles
 `createGroupCrypto` and a live `GroupHandle`.
 
 **Files:**
-- Modify: `tests/integration/test/app-lane-delivery.test.ts` — one test appended inside the existing `describe('app-lane delivery across a roster rotation, end to end', ...)` block, after the mid-walk restart test that ends at `:631`
+- Modify: `tests/integration/test/app-lane-delivery.test.ts` — one test appended inside the existing `describe('app-lane delivery across a roster rotation, end to end', ...)` block, after the mid-walk restart test that ends at `:635`
 - Modify (temporarily, reverted in step 5): `packages/mls-rpc/src/crypto.ts:100`
 
 **Interfaces:**
-- Consumes, all from `./app-lane-e2e.js` and already imported at the top of the file (`:4-19`): `buildLedgerCommit(member: Member, identity: OwnIdentity, subject: string, value: string)`, `createEntryBodies()`, `createFoundingGroup(identity, groupID, entrySlot)`, `joinFromWelcome({identity, invite, welcome, bundle, ratchetTree, entrySlot})`, `makeMember({hub, identity, group, entrySlot, handlers?, restartOf?})`, `mintInvite({admin, adminIdentity, invitee, bodies})`, `newIdentity()`, `restoreMemberHandle(member, entrySlot)`, and `type Member`. `createWireHub()` comes from `./log-hub-over-wire.js`. `flush(ms = 120)` is defined at `:22`.
+- Consumes, all from `./app-lane-e2e.js` and already imported at the top of the file (`:4-19`): `buildLedgerCommit(member: Member, identity: OwnIdentity, subject: string, value: string)`, `createEntryBodies()`, `createFoundingGroup(identity, groupID, entrySlot)`, `joinFromWelcome({identity, invite, welcome, bundle, ratchetTree, entrySlot})`, `makeMember({hub, identity, group, entrySlot, handlers?, restartOf?})`, `mintInvite({admin, adminIdentity, invitee, bodies})`, `newIdentity()`, `restoreMemberHandle(member, entrySlot)`, and `type Member`. `createWireHub()` comes from `./log-hub-over-wire.js`. `flush(ms = 120)` is defined at `:19`.
 - Produces: nothing.
 
 - [ ] **Step 1: Write the test**

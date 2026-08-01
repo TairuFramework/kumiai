@@ -688,13 +688,22 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     })
 
     const seen: Array<unknown> = []
+    // Event-driven rather than a fixed sleep: the exposed wait below must cover Bob applying the
+    // commit AND opening the frame, and on slow CI a fixed sleep's failure mode is `seen` empty.
+    let deliverSeen = () => {}
+    const delivered = new Promise<void>((resolve) => {
+      deliverSeen = resolve
+    })
     const bob = makeMember({
       hub,
       identity: bobID,
       group: bobHandle,
       entrySlot: bobSlot,
       handlers: {
-        'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data),
+        'chat/posted': (ctx: { data: unknown }) => {
+          seen.push(ctx.data)
+          deliverSeen()
+        },
       },
     })
     let alice: Member = makeMember({
@@ -721,6 +730,11 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     await flush()
     expect(alice.handle().epoch).toBe(1n)
 
+    // Captured BEFORE the commit — a ledger commit does not rotate the anchor, but it does
+    // rotate the live exporter secret, so this must be read at epoch 1.
+    const anchorSecret = await alice.handle().exportSecret(APP_TOPIC_LABEL, new Uint8Array())
+    const appTopic = protocolTopic(anchorSecret, alice.peer.anchorEpoch(), 'chat')
+
     // The second process's FIRST act is to author, not to catch up.
     const result = await alice.peer.commit(
       buildLedgerCommit(alice, aliceID, 'did:key:subject-after-restart', 'member'),
@@ -729,9 +743,31 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     await flush()
     expect(alice.handle().epoch).toBe(2n)
 
-    // And it seals at the epoch it just adopted: Bob, who applied the same commit, opens it.
+    // It seals at the epoch it just adopted. Dispatch resolves only once the hub has accepted the
+    // publish (`chat/posted` is `retain: 'log'`, sent via `mux.publish`, awaited), so the frame is
+    // already durably on the wire the instant this returns — checking it does not need to wait on
+    // Bob at all, and unlike Bob's open, it does not depend on Bob's decrypt succeeding either.
     await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'authored after a restart' })
-    await flush(400)
+
+    // The test's name promises the seal landed at the epoch the commit adopted, not merely that
+    // a frame arrived: read the epoch off the frame as it sits on the wire, in the clear, from an
+    // observer that never touched the group's crypto — the anchor did not rotate (a ledger commit
+    // adds/removes no leaf), so the topic is still `appTopic`, but the live exporter secret did,
+    // and that is what the frame's cleartext epoch must show.
+    const { readMessageEpoch } = await import('@kumiai/mls')
+    const observerID = newIdentity()
+    const observer = hub.connect(observerID)
+    // `fetchTopic` requires a subscription — the store refuses a non-subscriber outright — so the
+    // observer joins first. It still reads the frame published before it joined: `fetchTopic`
+    // serves the topic's retained LOG (`chat/posted` is `retain: 'log'`, see the `chat` protocol
+    // definition in `app-lane-e2e.ts`), which subscribing does not gate.
+    await observer.subscribe(observerID.id, appTopic)
+    const observed = await observer.fetchTopic({ subscriberDID: observerID.id, topicID: appTopic })
+    expect(observed.messages.map((message) => readMessageEpoch(message.payload))).toEqual([2n])
+
+    // And Bob, who applied the same commit, actually opens it.
+    await Promise.race([delivered, flush(3000)])
+    await flush(50) // let a duplicate, if any, land before the exact toEqual
 
     expect(bob.handle().epoch).toBe(2n)
     expect(seen).toEqual([{ text: 'authored after a restart' }])
