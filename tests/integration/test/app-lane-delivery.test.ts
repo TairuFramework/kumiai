@@ -633,4 +633,111 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     await bob.peer.dispose()
     await hub.dispose()
   })
+
+  /**
+   * A RESTARTED member that AUTHORS, over real MLS: the admin dies, comes back over its persisted
+   * state, and the first thing the second process does is commit — rather than only catching up on
+   * somebody else's commits, which is every other restart test in this file.
+   *
+   * The distinction is not cosmetic. A received commit is applied by `processMessage`, which
+   * mutates the handle IN PLACE; an authored one produces a NEW handle object that the peer swaps
+   * in from `onAccepted`. Only the second path replaces the reference `createGroupCrypto` reads,
+   * which is the event `GroupCryptoParams.handle` is a function to survive. Nothing else in the
+   * repo reaches it against a real ratchet.
+   *
+   * A LEDGER commit, so the roster does not change and the app-lane anchor does not rotate: the
+   * group stays on one topic across the epoch change, and what is under test is the seal, not the
+   * topic derivation (which `peer-anchor-*` already covers).
+   */
+  test('a restarted admin authors its own commit and seals at the epoch it adopted', async () => {
+    const hub = createWireHub()
+    const bodies = createEntryBodies()
+    const { createLedgerEntrySlot } = await import('@kumiai/mls-rpc')
+    const { commitInvite } = await import('@kumiai/mls')
+
+    const aliceID = newIdentity()
+    const bobID = newIdentity()
+    const aliceSlot = createLedgerEntrySlot()
+    const bobSlot = createLedgerEntrySlot()
+    for (const slot of [aliceSlot, bobSlot]) {
+      slot.install(async (ids) =>
+        ids.map((id) => {
+          const token = bodies.get(id)
+          if (token == null) throw new Error(`unknown ledger entry ${id}`)
+          return token
+        }),
+      )
+    }
+
+    let aliceHandle = await createFoundingGroup(aliceID, 'restart-then-author-e2e', aliceSlot)
+    const material = await mintInvite({
+      admin: aliceHandle,
+      adminIdentity: aliceID,
+      invitee: bobID,
+      bodies,
+    })
+    const added = await commitInvite(aliceHandle, material.bundle.publicPackage, material.invite)
+    aliceHandle = added.newGroup
+    const bobHandle = await joinFromWelcome({
+      identity: bobID,
+      invite: material.invite,
+      welcome: added.welcomeMessage,
+      bundle: material.bundle,
+      ratchetTree: aliceHandle.state.ratchetTree,
+      entrySlot: bobSlot,
+    })
+
+    const seen: Array<unknown> = []
+    const bob = makeMember({
+      hub,
+      identity: bobID,
+      group: bobHandle,
+      entrySlot: bobSlot,
+      handlers: {
+        'chat/posted': (ctx: { data: unknown }) => void seen.push(ctx.data),
+      },
+    })
+    let alice: Member = makeMember({
+      hub,
+      identity: aliceID,
+      group: aliceHandle,
+      entrySlot: aliceSlot,
+    })
+    await flush()
+    expect(alice.handle().epoch).toBe(1n)
+
+    // The process dies: the peer stops and the socket goes with it.
+    await alice.peer.dispose()
+    await alice.disconnect()
+
+    const restoredHandle = await restoreMemberHandle(alice, aliceSlot)
+    alice = makeMember({
+      hub,
+      identity: aliceID,
+      group: restoredHandle,
+      entrySlot: aliceSlot,
+      restartOf: alice,
+    })
+    await flush()
+    expect(alice.handle().epoch).toBe(1n)
+
+    // The second process's FIRST act is to author, not to catch up.
+    const result = await alice.peer.commit(
+      buildLedgerCommit(alice, aliceID, 'did:key:subject-after-restart', 'member'),
+    )
+    expect(result.lost).toBeUndefined()
+    await flush()
+    expect(alice.handle().epoch).toBe(2n)
+
+    // And it seals at the epoch it just adopted: Bob, who applied the same commit, opens it.
+    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'authored after a restart' })
+    await flush(400)
+
+    expect(bob.handle().epoch).toBe(2n)
+    expect(seen).toEqual([{ text: 'authored after a restart' }])
+
+    await alice.peer.dispose()
+    await bob.peer.dispose()
+    await hub.dispose()
+  })
 })

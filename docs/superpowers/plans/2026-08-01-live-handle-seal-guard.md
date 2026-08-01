@@ -413,7 +413,8 @@ Write the outcome into this plan file, under this step, in one of these two form
   Kept per the spec: its value is composing the real port, the real peer and a real restart on the
   author path, which nothing else does."
 
-**Recorded result:** _(fill in during execution)_
+**Recorded result:** Mutation caught by the new test as well as the two pre-existing ones (3
+failures). The new test's failure is not evidence of anything it uniquely guards.
 
 - [ ] **Step 6: Lint and commit**
 
