@@ -8,7 +8,7 @@ promise. The domain detail lives in [`docs/reference/`](../reference/), indexed 
 ## Packages
 
 mls (E2EE identity + membership via MLS -- the crypto core), broadcast (generic fan-out),
-the hub subsystem (hub-protocol, hub-client, hub-server, hub-tunnel), and rpc. Locked group
+the hub subsystem (hub-protocol, hub-client, hub-server, hub-tunnel), and rpc. One version band
 while pre-1.0 (young, tightly coupled).
 
 Alongside them: **mls-rpc**, the real implementation of rpc's two consumer ports over a live MLS
