@@ -2,7 +2,7 @@
 // Every publishable package shares one version band: the minor while pre-1.0 (0.X), the major
 // after (X). Trailing segments diverge freely — a single package's patch release churns nobody.
 // Usage: node scripts/check-versions.mjs [packagesDir]
-import { readFileSync, readdirSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
