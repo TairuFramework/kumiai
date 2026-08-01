@@ -493,6 +493,11 @@ then `pnpm release` (band check, build, `pnpm publish -r`).
 Raising the band means the release's intents name every package at that level — see
 `.changeset/version-band-0-5.md` for the shape.
 
+One exception needs a hand. pnpm publishes a package that has never been released at the version
+written in its manifest, verbatim — no intent bumps it. So after `pnpm version -r`, set any
+first-time package's version to the band the rest of the group just landed on, and commit that with
+the bump. `pnpm run check:versions` fails if you forget, which is the point.
+
 Releases are manual. There is no publish workflow, here or anywhere else in the stack.
 ```
 
@@ -566,14 +571,25 @@ Run: `pnpm version -r`
 Expected: it reports the packages it bumped. If it errors, capture the exact message — that is the
 finding, and Tasks 3–4 need revisiting rather than the error being worked around here.
 
-- [ ] **Step 3: Assert all eleven landed at 0.5.0**
+- [ ] **Step 3: Assert ten landed at 0.5.0, and `mls-hub` did not**
 
 Run:
 ```bash
 node -e "for (const d of require('node:fs').readdirSync('packages')) { const p = require('./packages/'+d+'/package.json'); console.log(p.name, p.version) }"
 ```
-Expected: eleven lines, every version exactly `0.5.0`, `@kumiai/mls-hub` among them. A `0.1.0`
-anywhere is a failed verification — report it rather than patching around it.
+Expected: ten packages at exactly `0.5.0`, and `@kumiai/mls-hub` still at `0.4.0`. That is not a
+defect: pnpm publishes a never-published package at its manifest version verbatim, so no intent can
+bump it. A `0.1.0` anywhere, or any package other than `mls-hub` off `0.5.0`, is a failed
+verification — report it rather than patching around it.
+
+- [ ] **Step 3b: Apply the manual bump the release procedure documents, and confirm the check catches its absence**
+
+First run `node scripts/check-versions.mjs` and confirm it FAILS, naming `@kumiai/mls-hub 0.4.0`
+against ten packages on band `0.5`. That failure is the guard doing its job — it is what stops a
+forgotten bump from reaching the registry.
+
+Then set `packages/mls-hub/package.json` to `"version": "0.5.0"`, exactly as
+`docs/agents/development.md` tells a releaser to do.
 
 - [ ] **Step 4: Assert the ledger and changelogs**
 
@@ -587,7 +603,7 @@ Expected: `.changeset/` holds `ledger.yaml` and no leftover intent `.md` files (
 eleven `CHANGELOG.md` files, i.e. a newly created one for `mls-hub`; its head shows `0.5.0` and the
 band summary text.
 
-- [ ] **Step 5: Assert the band check passes on the bumped tree**
+- [ ] **Step 5: Assert the band check passes once the manual bump is in**
 
 Run: `node scripts/check-versions.mjs`
 Expected: `All 11 publishable packages on band 0.5.`
@@ -691,6 +707,7 @@ committing into someone else's in-flight work.
 - `pnpm test` runs the band check before the suite; `pnpm release` runs it before building.
 - No `@changesets/cli` dependency, no `.changeset/config.json`, no `changeset` or `version` script.
 - `@kumiai/mls-hub` is at `0.4.0` with `publishConfig.access: public`, as are the other ten.
-- A dry `pnpm version -r` in a discarded worktree landed all eleven at `0.5.0`.
+- A dry `pnpm version -r` in a discarded worktree landed ten at `0.5.0`, the band check caught
+  `mls-hub` sitting at `0.4.0`, and the documented manual bump cleared it.
 - The docs state the band rule and the pnpm procedure; no doc links the deleted `next/` file.
 - kigu carries the stack-wide follow-up.
