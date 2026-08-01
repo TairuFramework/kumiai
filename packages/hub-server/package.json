@@ -47,5 +47,8 @@
     "@enkaku/client": "catalog:",
     "@enkaku/transport": "catalog:",
     "@kumiai/hub-conformance": "workspace:^"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

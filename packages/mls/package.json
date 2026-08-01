@@ -42,5 +42,8 @@
     "@sozai/codec": "catalog:",
     "@sozai/runtime": "catalog:",
     "ts-mls": "catalog:"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
