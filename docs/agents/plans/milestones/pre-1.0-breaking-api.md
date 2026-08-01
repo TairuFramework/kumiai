@@ -115,7 +115,7 @@ the surface decision most likely to want revisiting — see
 
 No item is filed here, because none has been found: this records that the absence is an unexamined
 surface, not an examined and clean one. It stays cheap to break — `mls-hub` is 0.x like everything
-else.
+else, and unpublished besides.
 
 ### Adjacent, tracked elsewhere
 
