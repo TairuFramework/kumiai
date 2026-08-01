@@ -20,5 +20,5 @@
     "@changesets/cli": "^2.31.1",
     "@kigu/dev": "^0.2.0"
   },
-  "packageManager": "pnpm@11.17.0"
+  "packageManager": "pnpm@11.18.0"
 }
