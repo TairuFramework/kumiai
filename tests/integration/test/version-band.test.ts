@@ -82,4 +82,14 @@ describe('version band check', () => {
     const dir = fixture([{ name: '@kumiai/tests', version: '0.0.0', private: true }])
     expect(run(dir).status).toBe(1)
   })
+
+  test('fails loudly on a malformed manifest instead of skipping it', () => {
+    const dir = fixture([{ name: '@kumiai/one', version: '0.4.0' }])
+    const packageDir = join(dir, 'broken')
+    mkdirSync(packageDir)
+    writeFileSync(join(packageDir, 'package.json'), '{ not valid json')
+    const result = run(dir)
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('broken')
+  })
 })

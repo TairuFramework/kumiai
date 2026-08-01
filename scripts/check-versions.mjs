@@ -17,8 +17,11 @@ function readPackages(packagesDir) {
     let manifest
     try {
       manifest = JSON.parse(readFileSync(join(packagesDir, entry, 'package.json'), 'utf8'))
-    } catch {
-      continue
+    } catch (error) {
+      if (error.code === 'ENOENT' || error.code === 'ENOTDIR') {
+        continue
+      }
+      throw new Error(`Malformed package.json in ${entry}: ${error.message}`, { cause: error })
     }
     if (manifest.private || !manifest.version) {
       continue
