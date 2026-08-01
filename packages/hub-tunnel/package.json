@@ -49,5 +49,8 @@
     "@enkaku/server": "catalog:",
     "@kokuin/token": "catalog:",
     "@kumiai/hub-conformance": "workspace:^"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

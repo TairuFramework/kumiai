@@ -55,5 +55,8 @@
     "@kumiai/rpc-conformance": "workspace:^",
     "@noble/curves": "catalog:",
     "vitest": "catalog:"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

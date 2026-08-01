@@ -54,3 +54,11 @@ minimumReleaseAgeExclude:
   - expo-constants@57.0.2
   - expo-modules-autolinking@57.0.2
   - expo@57.0.0
+
+versioning:
+  # e2e-expo takes @kumiai/mls as a runtime dependency, so bump propagation reaches it and it
+  # shows up in every release plan. It is a private test app that is never published.
+  ignore:
+    - e2e-expo
+  changelog:
+    storage: repository

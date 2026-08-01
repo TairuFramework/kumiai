@@ -13,12 +13,10 @@ ledger, the commit and app lanes, the hub subsystem, group RPC, key-package prov
 contract suites that run against every implementation *and* every double. What remains is debt,
 hardening, and surface.
 
-Versions have drifted apart despite the docs describing a locked group — `rpc` 0.4.3, `mls-rpc`
-0.4.2, eight packages at 0.4.1, and `mls-hub` at 0.0.0, never published. **21 changesets are
-pending** and nothing has shipped since the 0.4.x line. Releases are manual by decision
-(2026-07-23), so that backlog is a choice rather than a stall — but `mls-hub`'s first published
-version gets decided by whoever runs the next one. See
-[next/2026-08-01](./next/2026-08-01-version-lock-and-mls-hub-first-release.md).
+Versions share one band — `rpc` 0.4.3, `mls-rpc` 0.4.2, eight packages at 0.4.1, and `mls-hub`
+brought onto the band at 0.4.0. **22 pending intents** and nothing has shipped since the 0.4.x line;
+the next release takes the whole group to 0.5.0, `mls-hub`'s first published version included.
+Releases are manual by decision (2026-07-23), so that backlog is a choice rather than a stall.
 
 **1.0 is intended but distant.** That decision shapes everything below: the pre-1.0 API milestone is
 a checklist to consult when you are already opening a package's surface, not a queue to drain.
@@ -79,10 +77,9 @@ reason, check the pre-1.0 milestone for a neighbour worth bundling in the same `
    shipped `@kumiai/rpc`. The `replay` and `recover` post-dispose guards were shipped unverified
    (deleting both leaves the whole suite green), and `onCommitDelivery` reaches `rebuildEpoch()`
    with no disposed check at all. Items 3 and 4 are low and ride along.
-2. [**The version lock and `mls-hub`'s first
-   release**](./next/2026-08-01-version-lock-and-mls-hub-first-release.md) — the docs claim a locked
-   group that `.changeset/config.json` does not enforce, and `mls-hub` would first publish at 0.1.0
-   beside a group going to 0.5.0. The only open item whose deadline is set by someone else's action.
+2. **The version lock and `mls-hub`'s first release** — settled on
+   `chore/pnpm-native-versioning`: the band is enforced by `pnpm run check:versions`, release
+   management moved to pnpm's own, and `mls-hub` publishes at the band version.
 
 ### The pre-1.0 API surface — consult, do not drain
 
@@ -171,7 +168,7 @@ all blocked the same way, and the difference matters:
 **Waiting on someone else's release.**
 
 - **A stable `ts-mls` 2.0.0**, and two missing exports behind it. See the merged doc above.
-- **Release automation.** Manual `changeset publish` by decision (2026-07-23). No stack repo has a
+- **Release automation.** Manual `pnpm release` by decision (2026-07-23). No stack repo has a
   publish workflow — kigu offers none either — so automating it is a stack-wide change.
 - **Three kigu-side CI items**, in the infra doc: no turbo cache persistence, and a TS-readiness
   step running `continue-on-error: true`.

@@ -45,5 +45,8 @@
     "@kumiai/rpc-conformance": "workspace:^",
     "ts-mls": "catalog:",
     "vitest": "catalog:"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

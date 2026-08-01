@@ -41,5 +41,8 @@
   },
   "devDependencies": {
     "vitest": "catalog:"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

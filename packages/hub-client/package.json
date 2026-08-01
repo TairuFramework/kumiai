@@ -44,5 +44,8 @@
     "@kumiai/hub-server": "workspace:^",
     "@kumiai/mls": "workspace:^",
     "@sozai/codec": "catalog:"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

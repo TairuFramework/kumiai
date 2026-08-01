@@ -40,5 +40,8 @@
   },
   "peerDependencies": {
     "vitest": "catalog:"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
