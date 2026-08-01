@@ -6,7 +6,7 @@ import type { MlsContext } from 'ts-mls'
  * ts-mls ships `decryptSenderData` but does not re-export it (its `exports` map exposes
  * only `.`), so this package reproduces the derivation from primitives the live
  * `CiphersuiteImpl` does expose. Frozen wire format — see the backlog note
- * `ts-mls-v2-stable-upgrade.md`: delete this module and delegate to ts-mls once stable
+ * `ts-mls-upstream.md`: delete this module and delegate to ts-mls once stable
  * re-exports its own.
  */
 

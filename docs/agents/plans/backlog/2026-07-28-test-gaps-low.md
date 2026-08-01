@@ -16,10 +16,16 @@ audit's.
   down, and `:139` checks inbound activity resets the timer. What is untested is the acceptor side
   specifically: a client that disappears mid-session, leaving the acceptor's registry entry and
   subscription to be reclaimed by idle timeout rather than by a frame.
-- **Purge scheduling in `createHub`.** `hub-server/src/hub.ts:92` installs a `setInterval` calling
-  `store.purge`, cleared on `server.disposed`. No test in `hub-server/test/` mentions purge at that
-  level — `memoryStore.test.ts` covers the store's own `purge`, not that the hub schedules it, that
-  the interval fires, or that dispose stops it.
+- **Purge scheduling in `createHub`** — **mostly closed 2026-07-29, narrowed 2026-08-01.**
+  `hub-server/src/hub.ts:104-113` installs a `setInterval` calling `store.purge`, cleared on
+  `server.disposed`. When this was filed no test reached that level. The `onStoreError` work has
+  since pinned two of its three halves: `hub-server/test/hub.test.ts:530` advances fake timers and
+  asserts the hub schedules the purge, that the interval fires, and that a rejected purge is retried
+  on the next one.
+
+  What is still untested is `server.disposed.then(() => clearInterval(purgeTimer))` — that dispose
+  stops the timer. The shape is now cheap, because that test supplies it: the same proxied store and
+  fake timers, disposing and then advancing to assert no further call.
 - **No mobile-runtime coverage of hub or rpc.** `tests/e2e-expo` depends on `@kumiai/mls` alone
   (`tests/e2e-expo/package.json:18`), so nothing exercises `@kumiai/hub-client` or `@kumiai/rpc`
   under a React Native runtime — where the crypto provider and the transport differ from Node.

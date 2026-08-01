@@ -88,7 +88,7 @@ affected either — `commitInvite` is not a port member, and neither contract su
 The invariant is still local to the inviter. `defaultCommitPolicy`'s add rule accepts any admin's
 Add without checking the added leaf's credential DID against `candidateRoster`, so a *receiver*
 still cannot notice the divergence from its own state — only an honest inviter now refuses to
-produce one. Tracked in `docs/agents/plans/next/2026-07-26-add-proposal-roster-binding.md`, which
+produce one. Tracked in `archive/2026-07-archive-summary.md` (add-proposal-roster-binding, shipped 2026-07-26), which
 would also close the ordering residual described above, from the other side.
 
 ## Verification at merge

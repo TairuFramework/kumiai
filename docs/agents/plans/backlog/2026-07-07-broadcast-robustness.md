@@ -52,6 +52,10 @@
 Folded in from `next/2026-07-20-deferred-api-findings.md` at the 2026-07-23 triage. Origin: the
 2026-07-20 API-surface audits.
 
+Indexed on `../milestones/non-breaking-api.md`, on the assumption of the rejection fix. Choosing the
+re-encoding fix instead rotates every derived topic ID and moves this item to
+`../milestones/pre-1.0-breaking-api.md` — so the choice of fix decides which milestone owns it.
+
 - **`deriveTopicID` is not injective over NUL-bearing inputs** (non-breaking, if fixed by rejection).
   `packages/broadcast/src/topic.ts:28` builds the HKDF `info` as
   `` `${TOPIC_INFO_PREFIX}${SEP}${label}${SEP}${scope}` `` with `SEP = '\0'`, so a `label` or `scope`

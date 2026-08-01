@@ -6,12 +6,14 @@ workflow and the `docs/agents/plans/` lifecycle.
 
 ## Repo-specific
 
-Ten packages, locked as a group while pre-1.0:
+Eleven packages, locked as a group while pre-1.0:
 
 - **Core** — `mls`, `broadcast`, `rpc`
 - **Hub subsystem** — `hub-protocol`, `hub-client`, `hub-server`, `hub-tunnel`
 - **Port implementation** — `mls-rpc`, the real implementation of rpc's consumer ports over a live
   MLS handle
+- **Provisioning** — `mls-hub`, which owns when a peer's key packages are generated, uploaded,
+  retained, and pruned between `mls` and a hub
 - **Contract suites** — `rpc-conformance`, `hub-conformance`. Both run against every implementation
   AND every double; changing a port means running them against both sides, not just the real one.
 

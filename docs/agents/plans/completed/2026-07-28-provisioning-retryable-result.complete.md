@@ -3,7 +3,7 @@
 **Status:** complete. Landed on `feat/provisioning-retryable-result`, 2026-07-28.
 **Scope:** `@kumiai/mls-hub` only.
 **Origin:** raised by the final whole-branch review of `feat/ordinary-keypackage-pool`; see
-`docs/agents/plans/completed/2026-07-27-ordinary-keypackage-pool.complete.md`.
+`docs/agents/plans/archive/2026-07-archive-summary.md` (ordinary-keypackage-pool).
 
 ## What this closed
 

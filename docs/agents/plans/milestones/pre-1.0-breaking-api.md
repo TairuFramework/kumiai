@@ -1,6 +1,7 @@
 # Milestone: pre-1.0 breaking API surface
 
-**Origin:** four parallel API-surface audits over all ten packages, 2026-07-20, run ahead of
+**Origin:** four parallel API-surface audits over all ten packages that existed then, 2026-07-20,
+run ahead of
 `../completed/2026-07-21-forward-compatibility.complete.md`. That work took only the items where
 deferring makes the later fix *impossible* rather than merely expensive; this milestone tracks what
 it left, filed at the 2026-07-23 triage into the per-package backlog docs.
@@ -104,6 +105,18 @@ in the linked doc; the one real defect the check turned up is folded into the `d
   push does — shipped on `fix/anycast-soundness` (2026-07-24); the envelope is the real fix, and it
   makes that interim drop-classification deletable. Not a correctness bug once live and drain agree:
   the only symptom is that an app cannot use `kind: 'req'|'res'` as an event-data key.
+
+### `@kumiai/mls-hub` — not audited, indexed nowhere
+
+**Noted 2026-08-01.** The package postdates the 2026-07-20 audits, so its surface has never been
+read for shape by either milestone. It is also the only package returning `AsyncResult`, which is
+the surface decision most likely to want revisiting — see
+[stack-wide `Result` adoption](../backlog/2026-07-28-stack-wide-result-adoption.md).
+
+No item is filed here, because none has been found: this records that the absence is an unexamined
+surface, not an examined and clean one. It stays cheap to break — `mls-hub` is 0.x like everything
+else, and unpublished besides
+([next/2026-08-01](../next/2026-08-01-version-lock-and-mls-hub-first-release.md)).
 
 ### Adjacent, tracked elsewhere
 

@@ -96,7 +96,7 @@ In order:
    [completed](../completed/2026-07-11-mls-state-serialization-secret-hygiene.complete.md). Bundled
    into the same release as item 2, since both reshape the `@kumiai/mls` surface kubun consumes.
 4. ~~Fix the hub `receive` lifecycle~~ — **done** (2026-07-24), see
-   [completed](../completed/2026-07-24-hub-receive-lifecycle.complete.md). Buffer-then-flush delivery,
+   [archived](./2026-07-archive-summary.md). Buffer-then-flush delivery,
    pre-aborted-signal cleanup, bounded write queue. M2 (the `indexOf` cursor) was already fixed and
    dropped; two concurrency defects were caught in review and fixed.
 5. [Key-package + subscribe caps](../completed/2026-07-25-hub-keypackage-subscribe-caps.complete.md) —

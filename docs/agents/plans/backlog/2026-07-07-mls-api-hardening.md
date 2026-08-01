@@ -82,7 +82,8 @@ correctness bug; each is a shape a filed consumer would force a break to fix, an
   context, the same silent-failure shape as `exportSecret`'s label — cannot be built above them.
   Only the required-`senderDID` half of that item shipped. The rpc-side blocker is tracked
   separately in `rpc-api-surface.md`; this is the change that must come first.
-- **The `0xf102` hatch opens narrower than it reads** (non-breaking — documentation). `@kumiai/mls`
+- **The `0xf102` hatch opens narrower than it reads** (non-breaking — documentation; the one item in
+  this doc indexed on `../milestones/non-breaking-api.md` rather than the pre-1.0 one). `@kumiai/mls`
   reserves and advertises the third control extension type, so a future control extension can be
   *installed* into a live group without re-admitting members — but only empty.
   `packages/mls/src/policy.ts:99-118` permits the added entry solely when it is not already
