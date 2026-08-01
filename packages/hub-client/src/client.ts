@@ -70,10 +70,6 @@ export class HubClient {
     this.#client = params.client
   }
 
-  get rawClient(): Client<HubProtocol> {
-    return this.#client
-  }
-
   publish(params: PublishParams): RequestCall<{ sequenceID: string }> {
     return this.#client.request('hub/v1/publish', {
       param: {

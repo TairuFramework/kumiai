@@ -59,11 +59,6 @@ export type GroupOptions = {
   resolver?: DIDResolver
 }
 
-export type GroupSyncScope = {
-  groupID: string
-  models: Array<{ modelID: string; filter?: Record<string, unknown> }>
-}
-
 export type Invite = {
   /** Group ID the invite is for */
   groupID: string
