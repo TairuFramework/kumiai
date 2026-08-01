@@ -31,7 +31,11 @@ Raising the band means the release's intents name every package at that level �
 
 One exception needs a hand. pnpm publishes a package that has never been released at the version
 written in its manifest, verbatim — no intent bumps it. So after `pnpm version -r`, set any
-first-time package's version to the band the rest of the group just landed on, and commit that with
-the bump. `pnpm run check:versions` fails if you forget, which is the point.
+first-time package's version to the band the rest of the group just landed on, and also fix the
+version heading `pnpm version -r` just wrote into that package's `CHANGELOG.md` — generated at the
+same run, it carries the pre-bump manifest version and is now wrong in the same way. Commit both
+edits with the bump. `pnpm run check:versions` fails if you forget the manifest, which is the
+point; it does not read the changelog, so a wrong heading there is caught by nothing but the
+releaser.
 
 Releases are manual. There is no publish workflow, here or anywhere else in the stack.
