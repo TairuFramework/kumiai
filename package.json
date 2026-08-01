@@ -8,16 +8,14 @@
     "build": "pnpm run build:types && pnpm run build:js",
     "build:js": "turbo run build:js",
     "build:types": "turbo run build:types",
-    "changeset": "changeset",
+    "check:versions": "node scripts/check-versions.mjs",
     "format": "biome format --write .",
-    "lint": "biome check --write ./packages ./tests",
+    "lint": "biome check --write ./packages ./scripts ./tests",
     "prepare": "git config core.hooksPath .githooks",
-    "release": "pnpm run build && changeset publish",
-    "test": "turbo run test:types test:unit",
-    "version": "changeset version"
+    "release": "pnpm run check:versions && pnpm run build && pnpm publish -r",
+    "test": "pnpm run check:versions && turbo run test:types test:unit"
   },
   "devDependencies": {
-    "@changesets/cli": "^2.31.1",
     "@kigu/dev": "^0.2.0"
   },
   "packageManager": "pnpm@11.18.0"

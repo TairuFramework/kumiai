@@ -54,3 +54,7 @@ minimumReleaseAgeExclude:
   - expo-constants@57.0.2
   - expo-modules-autolinking@57.0.2
   - expo@57.0.0
+
+versioning:
+  changelog:
+    storage: repository
