@@ -1,4 +1,4 @@
-import { randomIdentity } from '@kokuin/token'
+import { type OwnIdentity, randomIdentity } from '@kokuin/token'
 import {
   commitInvite,
   createGroup,
@@ -52,7 +52,39 @@ async function twoMemberGroup(groupID: string) {
     ratchetTree: added.newGroup.state.ratchetTree,
     options: { resolveLedgerEntries },
   })
-  return { alice, bob, aliceGroup: added.newGroup, bobGroup }
+  return { alice, bob, aliceGroup: added.newGroup, bobGroup, publish, resolveLedgerEntries }
+}
+
+/**
+ * Add a third member to a live group, the way {@link twoMemberGroup} adds the second. Returns
+ * both sides of the add: the admin's post-commit handle, which it must adopt, and the joiner's,
+ * which starts life AT the new epoch and holds no key material below it.
+ */
+async function addMember(params: {
+  group: GroupHandle
+  admin: OwnIdentity
+  invitee: OwnIdentity
+  publish: (invite: Invite) => void
+  resolveLedgerEntries: (ids: Array<string>) => Promise<Array<string>>
+}): Promise<{ adminGroup: GroupHandle; joinedGroup: GroupHandle }> {
+  const { invite } = await createInvite({
+    group: params.group,
+    identity: params.admin,
+    recipientDID: params.invitee.id,
+    permission: 'member',
+  })
+  params.publish(invite)
+  const bundle = await createKeyPackageBundle(params.invitee)
+  const added = await commitInvite(params.group, bundle.publicPackage, invite)
+  const { group: joinedGroup } = await processWelcome({
+    identity: params.invitee,
+    invite,
+    welcome: added.welcomeMessage,
+    keyPackageBundle: bundle,
+    ratchetTree: added.newGroup.state.ratchetTree,
+    options: { resolveLedgerEntries: params.resolveLedgerEntries },
+  })
+  return { adminGroup: added.newGroup, joinedGroup }
 }
 
 /** A crypto over a handle slot, so a test can swap the handle the way a peer does. */
@@ -136,6 +168,56 @@ describe('createGroupCrypto', () => {
     const result = await bob.crypto.unwrap(sealed)
     expect(new TextDecoder().decode(result.payload)).toBe('hello')
     expect(result.senderDID).toBe(aliceID.id)
+  })
+
+  /**
+   * `wrap` reads the handle FRESH on every call, and this is the only test that says so.
+   *
+   * The defect it excludes is the one `GroupCryptoParams.handle`'s doc comment names: a `wrap`
+   * that captured `handle()`'s return once would keep sealing against the pre-commit epoch's
+   * secrets forever, and nothing about a successful seal reveals which epoch it targeted.
+   *
+   * CAROL, not a Bob who applied the same commit, is what makes the assertion decisive. `unwrap`
+   * opens a bounded window BELOW the live epoch out of ts-mls's retained key material — this
+   * port's own documented divergence from the fake (see the header comment in `../src/crypto.ts`)
+   * — so a member who walked from 1 to 2 might still open an epoch-1 frame and let a stale seal
+   * pass. Carol starts at epoch 2 and holds nothing below it, so her open is possible only if the
+   * seal really targeted the epoch Alice adopted.
+   */
+  test('wrap seals at the LIVE handle: a member that adopted seals at the epoch it adopted', async () => {
+    const {
+      alice: aliceID,
+      aliceGroup,
+      bobGroup,
+      publish,
+      resolveLedgerEntries,
+    } = await twoMemberGroup('ports-wrap-live-handle')
+    const alice = cryptoOver(aliceGroup)
+    const bob = cryptoOver(bobGroup)
+    expect(alice.crypto.epoch()).toBe(1)
+
+    const { adminGroup, joinedGroup } = await addMember({
+      group: aliceGroup,
+      admin: aliceID,
+      invitee: randomIdentity(),
+      publish,
+      resolveLedgerEntries,
+    })
+    alice.adopt(adminGroup)
+    const carol = cryptoOver(joinedGroup)
+    expect(alice.crypto.epoch()).toBe(2)
+    expect(carol.crypto.epoch()).toBe(2)
+
+    const sealed = await alice.crypto.wrap(utf8.encode('after the adopt'))
+
+    const opened = await carol.crypto.unwrap(sealed)
+    expect(new TextDecoder().decode(opened.payload)).toBe('after the adopt')
+    expect(opened.senderDID).toBe(aliceID.id)
+
+    // And Bob, who never applied the add, is left below it — the frame is not readable by the
+    // epoch the stale handle would have sealed at either.
+    expect(bob.crypto.epoch()).toBe(1)
+    await expect(bob.crypto.unwrap(sealed)).rejects.toThrow()
   })
 
   /**
