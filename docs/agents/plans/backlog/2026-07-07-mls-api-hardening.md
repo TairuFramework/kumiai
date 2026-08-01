@@ -73,10 +73,9 @@ correctness bug; each is a shape a filed consumer would force a break to fix, an
 - **A third `GroupPermission`** (breaking). `packages/mls/src/roster.ts` — the role model is exactly
   `'admin' | 'member'`. Widening a value consumers exhaustively `switch` over is the same break class
   `AuthorizeRequest` was built to avoid taking twice. No filed use needs a third role.
-- **The dead `GroupSyncScope` export** (breaking). `packages/mls/src/types.ts:62`, re-exported from
-  `index.ts:152`, referenced nowhere else in the repo — verified 2026-07-23. Removing an exported
-  type is the same break class as everything else here and costs nothing to leave until something
-  needs the removal.
+- ~~**The dead `GroupSyncScope` export**~~ — **taken 2026-08-02**, deleted ahead of the 0.5 band
+  release. Still referenced nowhere at the time of removal. See
+  `../completed/2026-08-02-trim-dead-api-surface.complete.md`.
 - **AAD on `GroupHandle.encrypt`/`decrypt`** (breaking). `packages/mls/src/group-handle.ts:617,654`
   take no AAD parameter, so `@kumiai/rpc`'s B2 item — binding rpc's sealed bytes to a topic/segment
   context, the same silent-failure shape as `exportSecret`'s label — cannot be built above them.

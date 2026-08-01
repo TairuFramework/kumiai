@@ -40,10 +40,11 @@ that package's surface for a filed reason, check this list for a neighbour worth
 
 - A third `GroupPermission` — widening a union consumers exhaustively `switch` over
   (`packages/mls/src/roster.ts:7`, exactly `'admin' | 'member'`).
-- The dead `GroupSyncScope` export — removing an exported type (`types.ts:62`, re-exported
-  `index.ts:152`, referenced nowhere else).
 - AAD on `GroupHandle.encrypt`/`decrypt` (`group-handle.ts:617,654`, neither takes one) —
   **blocks** the rpc-side AAD binding; this is the change that must come first.
+
+*Taken 2026-08-02:* the dead `GroupSyncScope` export, deleted ahead of the 0.5 band release — see
+`../completed/2026-08-02-trim-dead-api-surface.complete.md`.
 
 ### `@kumiai/hub-*` — [hub protocol/server cleanup](../backlog/2026-07-07-hub-protocol-server-cleanup.md)
 
@@ -62,16 +63,23 @@ that package's surface for a filed reason, check this list for a neighbour worth
   additive by the repo's own rule — `protocol.ts:3-8` requires a new versioned procedure rather than
   widening a sealed schema. The **port** half is what breaks: widening the return type is fine for
   callers but forces every implementor and double to supply the field.
-- `KeyPackageFetchLimits` → `KeyPackageLimits` — **same spent rationale (noted 2026-07-28).** This
-  said to take the rename with `hub-keypackage-subscribe-caps`, the work that adds the upload-side
-  constraint motivating it. That shipped 2026-07-25 without the rename:
-  `hub-server/src/handlers.ts:78` still declares `KeyPackageFetchLimits`, now alongside upload-side
-  limits it no longer names accurately.
 - Flat `HubRateLimits` — no home for a per-action limit matching `AuthorizeRequest`'s six actions.
-- `hub-client`'s `rawClient` getter — removing it is the break.
 - `HubClient.publish`'s pre-base64 `payload: string` — accepting `Uint8Array` is the break.
 - The `urn:enkaku:` schema `$id`s — an unsettled identifier scheme that also names `enkaku` for
   types now living in kumiai.
+
+*Taken 2026-08-02:* `hub-client`'s `rawClient` getter, removed ahead of the 0.5 band release — see
+`../completed/2026-08-02-trim-dead-api-surface.complete.md`.
+
+*Dropped from this milestone 2026-08-02:* `KeyPackageFetchLimits` → `KeyPackageLimits`. **The
+premise was false.** The entry claimed the type "sits beside upload-side limits its name excludes",
+carried over from the 2026-07-28 note. It does not. All four fields are fetch-side — `maxCount`,
+`maxRequests`, `maxPerTargetConsumed`, `windowMs` (`hub-server/src/handlers.ts:168`) — and every
+read of them is on the fetch path (`handlers.ts:271-321`). The upload side is limited by three
+things none of which touch this type: the `authorize` hook, the generic per-DID limiter from
+`HubRateLimits.perDID` (`handlers.ts:712`), and the store's own per-DID cap. `KeyPackageFetchLimits`
+names exactly what it holds; `KeyPackageLimits` would name more. If upload-side limits are ever
+folded into one config type, the rename comes with that work and is motivated by it — refile then.
 
 *Dropped from this milestone 2026-07-23:* "hub port types moving out of `hub-tunnel`" was listed
 here pending a structural check. The check found the premise false — `@kumiai/hub-protocol` declares

@@ -6,9 +6,10 @@ procedure is a method with named parameters instead of a `request` call and a pa
 ## Exports
 
 - `HubClient` — the wrapper. `publish`, `subscribe`, `unsubscribe`, `fetchTopic`, `receive`,
-  `uploadKeyPackages`, `uploadLastResortKeyPackage`, `fetchKeyPackages`, `keyPackageStatus`, plus
-  `rawClient` for anything not wrapped. `uploadKeyPackages` takes an optional `notAfter` (seconds)
-  so the hub can expire a stale batch instead of holding it against the per-DID cap forever.
+  `uploadKeyPackages`, `uploadLastResortKeyPackage`, `fetchKeyPackages`, `keyPackageStatus` — one
+  per hub procedure, with nothing left over. `uploadKeyPackages` takes an optional `notAfter`
+  (seconds) so the hub can expire a stale batch instead of holding it against the per-DID cap
+  forever.
 - `HubClientParams`, `PublishParams`.
 
 ```ts
@@ -22,6 +23,10 @@ await hub.publish({ topicID: 'topic:abc', payload: toB64(bytes), retain: 'log' }
 It is a wrapper and nothing more: it holds no state, opens no connection, and retries nothing. The
 caller supplies a connected enkaku client, and every method returns that client's own call object —
 a `RequestCall`, or a `ChannelCall` for `receive`.
+
+There is no accessor for the wrapped client: the caller constructed it and already holds it, so
+reaching it back through `HubClient` bought nothing and let a caller bypass the typed surface —
+along with any authorization or retry layered onto it later.
 
 ## Payloads are base64 strings, and the caller encodes them
 

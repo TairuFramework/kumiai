@@ -138,20 +138,28 @@ below is new. All are **breaking**; see `../milestones/pre-1.0-breaking-api.md`.
   `MailboxHub.publish` (`transport.ts:126`) has the same return type, but a mailbox lane takes no
   `publishID` and so has nothing to deduplicate against — widening `LogHub` alone is likely right.
   Fix the layers together, or the fix stops at whichever one is left out.
-- **`KeyPackageLimits` naming.** `packages/hub-server/src/handlers.ts:78` (was `:72`) names its
-  config `KeyPackageFetchLimits`, naming only the fetch side. Renaming an exported type is the break.
+- ~~**`KeyPackageLimits` naming.**~~ — **dropped 2026-08-02, premise false.** The 2026-07-28 update
+  below claimed the caps work left `KeyPackageFetchLimits` sitting beside upload-side limits its name
+  excludes. Checked at removal time: it does not. All four fields are fetch-side — `maxCount`,
+  `maxRequests`, `maxPerTargetConsumed`, `windowMs` (`handlers.ts:168`) — and every read is on the
+  fetch path (`handlers.ts:271-321`). The upload side is limited by the `authorize` hook, the generic
+  per-DID limiter from `HubRateLimits.perDID` (`handlers.ts:712`), and the store's own per-DID cap —
+  none of which this type declares. The name is accurate; the rename would make it less so. Refile
+  only if upload-side limits are ever folded into one config type, motivated by that work.
 
-  **No longer premature (updated 2026-07-28).** This said the name was fine until something
-  constrained uploads, and to take the rename with the caps work. That work
-  [shipped 2026-07-25](../completed/2026-07-25-hub-keypackage-subscribe-caps.complete.md) and added
-  the upload-side constraints without renaming, so the type now sits beside limits its name excludes.
+  *Superseded — kept for the record.* **No longer premature (updated 2026-07-28).** This said the
+  name was fine until something constrained uploads, and to take the rename with the caps work. That
+  work [shipped 2026-07-25](../completed/2026-07-25-hub-keypackage-subscribe-caps.complete.md) and
+  added the upload-side constraints without renaming, so the type now sits beside limits its name
+  excludes.
 - **`HubRateLimits` is flat.** `packages/hub-server/src/handlers.ts:62` — `{ perDID, perTopic }`. A
   future per-action or per-procedure limit (matching `AuthorizeRequest`'s six actions) has no home
   in the current shape. No filed need for finer-grained limits yet.
-- **`hub-client` exposes `rawClient`.** `packages/hub-client/src/client.ts:73` returns the
-  underlying `Client<HubProtocol>` through a getter, letting a caller bypass `HubClient`'s typed
-  surface — and any authorization or retry logic later layered onto it. An encapsulation gap, not a
-  correctness bug; removing the getter is the break.
+- ~~**`hub-client` exposes `rawClient`.**~~ — **taken 2026-08-02**, removed ahead of the 0.5 band
+  release. Cheaper than filed: `HubClient` wraps all eight `HubProtocol` procedures, so the "anything
+  not wrapped" the getter existed for was empty, and `HubClientParams` takes the `Client` in — every
+  caller already holds the reference the getter handed back. See
+  `../completed/2026-08-02-trim-dead-api-surface.complete.md`.
 - **The `urn:enkaku:` schema `$id`s.** `packages/hub-tunnel/src/envelope.ts:14` and `frame.ts:56`
   carry `$id: 'urn:enkaku:hub-tunnel:envelope'` / `'…:frame'`. Whether that is the right identifier
   scheme — versioned, and collision-safe against other enkaku-based protocols outside this repo —

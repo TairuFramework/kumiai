@@ -185,13 +185,4 @@ describe('HubClient', () => {
 
     await transports.dispose()
   })
-
-  test('exposes rawClient', () => {
-    const transports: HubTransports = new DirectTransports()
-    const rawClient = new Client<HubProtocol>({
-      transport: transports.client,
-    })
-    const client = new HubClient({ client: rawClient })
-    expect(client.rawClient).toBe(rawClient)
-  })
 })
