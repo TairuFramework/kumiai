@@ -58,8 +58,9 @@ seven predicted tests were correctly never written.
   its peer's, via successful decrypt; it does not exercise the outbound path at all. But no mutation
   reachable from that test's shape can separate "decrypt right, seal wrong", because `processCommit`
   mutates the handle in place and never calls `adopt()` — restore, walk and reseal share one mutable
-  object. A test was written, proven unable to fail, and discarded. The reachable variant is filed
-  at `next/2026-07-31-mls-rpc-author-path-stale-handle-reseal.md`.
+  object. A test was written, proven unable to fail, and discarded. The reachable variant was filed,
+  then investigated and closed on 2026-08-01 — three mutations modelling it were each caught by
+  tests that already existed. See `completed/2026-08-01-live-handle-seal-guard.complete.md`.
 
 ## The one shipped change
 
@@ -94,5 +95,5 @@ not crossing the wire. No real-hub semantic differences surfaced.
 - `next/2026-07-31-close-medium-test-gaps-residuals.md` — four items, notably that `replay` and
   `recover` post-dispose guards remain unpinned (`commit`'s is pinned, because its damage reaches
   the hub) and that `onCommitDelivery` is still unguarded.
-- `next/2026-07-31-mls-rpc-author-path-stale-handle-reseal.md` — the reachable variant of the
-  restored-handle gap.
+- The reachable variant of the restored-handle gap — filed, then closed 2026-08-01 with its
+  premise disproved (`completed/2026-08-01-live-handle-seal-guard.complete.md`).

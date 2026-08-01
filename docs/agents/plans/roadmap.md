@@ -56,6 +56,12 @@ reason, check the pre-1.0 milestone for a neighbour worth bundling in the same `
 
 ## What else shipped since the last roadmap
 
+- [**The live-handle seal guard**](./completed/2026-08-01-live-handle-seal-guard.complete.md)
+  (2026-08-01) — filed as "a restarted member that *authors* a commit could seal at a pre-adopt
+  handle, and no test in the repo can catch it." **Premise disproved:** three mutations modelling
+  the defect were each caught by tests that already existed. What shipped instead is the smaller
+  true thing — the `wrap` guard, previously a side effect of two tests named for other properties,
+  now stated outright, and restart-then-author running against real MLS for the first time.
 - [**hub-server store-error wire shape**](./completed/2026-07-29-store-error-wire-shape.complete.md)
   (2026-07-29) — the `onStoreError` event became a method-keyed union rather than a site-keyed one,
   closing three of the four residuals the sink work left.
@@ -67,17 +73,13 @@ reason, check the pre-1.0 milestone for a neighbour worth bundling in the same `
 
 ## What is open
 
-### `next/` — three items
+### `next/` — two items
 
 1. [**Test-gap residuals**](./next/2026-07-31-close-medium-test-gaps-residuals.md) — two mediums in
    shipped `@kumiai/rpc`. The `replay` and `recover` post-dispose guards were shipped unverified
    (deleting both leaves the whole suite green), and `onCommitDelivery` reaches `rebuildEpoch()`
    with no disposed check at all. Items 3 and 4 are low and ride along.
-2. [**The author-path stale handle**](./next/2026-07-31-mls-rpc-author-path-stale-handle-reseal.md) —
-   a restarted member that *authors* a commit could seal at a pre-adopt handle. Not confirmed
-   broken; the shape that would hide it is real and reachable, and no test in the repo can currently
-   catch it.
-3. [**The version lock and `mls-hub`'s first
+2. [**The version lock and `mls-hub`'s first
    release**](./next/2026-08-01-version-lock-and-mls-hub-first-release.md) — the docs claim a locked
    group that `.changeset/config.json` does not enforce, and `mls-hub` would first publish at 0.1.0
    beside a group going to 0.5.0. The only open item whose deadline is set by someone else's action.
