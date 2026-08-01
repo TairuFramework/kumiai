@@ -72,6 +72,16 @@ the version heading in the freshly generated `CHANGELOG.md`, and the package's k
 manifest edit and nothing else — a wrong heading or stale ledger key is a wrong record, not a broken
 release, and is on the releaser. `docs/agents/development.md` says all of this.
 
+## Also on this branch
+
+The 21 pending change intents were consolidated into five, plus the band note — 596 lines to 228,
+with a byte-identical release plan. Not part of the plan; taken while the intents were in hand and
+the changelog they produce was about to become permanent. Grouped by theme (key-package
+provisioning, roster/identity binding, commit-lane replay, hub delivery and store errors, rpc lanes
+and lifecycle), each entry leading with its breaking changes and security consequences. What was cut
+is reasoning-in-public that git history holds; what was kept is every breaking change, every
+silently-failing host obligation, and the conformance clause an existing store may now fail.
+
 ## Verification
 
 No release was run. A real `pnpm version -r` executed in a discarded git worktree: ten packages
