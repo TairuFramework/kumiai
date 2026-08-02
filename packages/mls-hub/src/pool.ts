@@ -36,6 +36,11 @@ export type KeyPackagePoolParams = {
 
 export type StockResult = Result<{ minted: number; depth: number }, HubRetryableError>
 
+/**
+ * Satisfies `BundleSource` (`./join.js`) structurally, which is how it reaches
+ * `processWelcomeFromSources`. Narrowing `bundles` or `release` breaks that at every call site
+ * passing a pool as a source, so the relationship needs no separate declaration to be enforced.
+ */
 export type KeyPackagePool = {
   /**
    * Bring the hub's ordinary pool back up to `target` when it has fallen below `lowWater`, and prune
@@ -48,6 +53,11 @@ export type KeyPackagePool = {
    * An error `Result` means the hub could not be reached or gave an answer that clears on its own;
    * nothing needs fixing and the next call self-corrects. A `HubRefusedError` is thrown instead,
    * because it will never succeed until the app or the operator changes something.
+   *
+   * @throws {HubRefusedError} the hub answered settled — the returned type cannot carry this, since
+   * the throw is the point: a host that writes no handler still gets told. Awaiting the result
+   * rejects; `.isError()` never reports it.
+   * @throws {Error} a stored record belongs to the other port, or does not round-trip.
    */
   ensureStocked(): AsyncResult<{ minted: number; depth: number }, HubRetryableError>
   /** Every retained bundle, `notAfter` descending, for `processWelcome`. */

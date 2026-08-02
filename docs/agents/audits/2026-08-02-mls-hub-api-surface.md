@@ -97,6 +97,13 @@ other purpose.
 
 ### 2. `AsyncResult<T, HubRetryableError>` does not carry the error that actually throws — LOW/design
 
+**Settled 2026-08-02: behaviour kept, signal added.** Flipping `HubRefusedError` into the returned
+`Result` would contradict the reasoned choice this package already documents — a refusal needs a
+human, and the throw is what reaches a host that wrote no handler. TypeScript cannot express "throws
+X" in a return type, so the gap is not closable in the signature. `ensureStocked` and
+`ensureProvisioned` now carry `@throws` tags naming both `HubRefusedError` and the store-contract
+throw, which puts the warning on IDE hover at the call site instead of only in the README.
+
 `ensureStocked()` (`pool.ts:52`) and `ensureProvisioned()` (`provisioner.ts:51`) are typed
 `AsyncResult<…, HubRetryableError>`, but `HubRefusedError` throws straight through them
 (`errors.ts:105-110`). A caller who reads the type and writes only `.isError()` handling gets an
@@ -109,25 +116,38 @@ The finding is only that the *type* is silent on it, which is the sort of thing 
 the surface is free. Relevant to the open `stack-wide Result adoption` question
 (`../plans/backlog/2026-07-28-stack-wide-result-adoption.md`).
 
-### 3. The in-memory reference stores ship from the package root — LOW
+### 3. The in-memory reference stores ship from the package root — WITHDRAWN
 
-`createMemoryKeyPackagePoolStore` and `createMemoryLastResortStore` are exported from
-`src/index.ts:30,41` alongside the production API, while their own doc comments say "Tests and
-throwaway processes only" and warn that losing them leaves the hub serving packages whose private
-halves are gone (`pool-store.ts:54-56`, `store.ts:54-59`).
+**The premise was false, checked 2026-08-02.** This finding claimed "the repo's own convention puts
+doubles behind a boundary", citing `rpc-conformance` and `hub-conformance` as separate packages.
+Those are contract *suites*, not reference implementations, and they are not the analogue.
 
-The repo's own convention puts doubles behind a boundary — `rpc-conformance` and `hub-conformance`
-are separate packages. `package.json` declares `"exports": {".": "./lib/index.js"}` with no
-subpaths, so moving these behind `@kumiai/mls-hub/memory` requires an exports-map change: additive
-if done before publish, breaking after.
+The analogue is `@kumiai/hub-server`, which exports `createMemoryStore` from its package root
+(`packages/hub-server/src/index.ts:19`) — an in-memory reference implementation of a
+host-implemented port, documented the same way, shipped the same way. So `mls-hub` is following the
+repo's convention here, not deviating from it.
 
-### 4. `BundleSource` conformance is structural but undeclared — LOW
+No kumiai package has a subpath export; every one declares `{".": "./lib/index.js"}`. Introducing
+this repo's first multi-entry build to relocate two functions whose names already begin with
+`createMemory` is cost against a convention that does not exist. Withdrawn rather than deferred:
+there is nothing here to take later.
+
+### 4. `BundleSource` conformance is structural but undeclared — DOCUMENTED, half withdrawn
 
 `KeyPackagePool` (`pool.ts:39-57`) and `LastResortProvisioner` (`provisioner.ts:38-60`) both satisfy
-`BundleSource` (`join.ts:18-21`), and `provisioner.ts:54-58` says a provisioner "can stand in as a
-`BundleSource`" — but neither type declares the relationship. It works structurally. Declaring it
-would document the contract and catch a drift in either shape. Non-breaking to add later, so it
-carries no publish deadline.
+`BundleSource` (`join.ts:18-21`) without declaring it.
+
+**The finding gave two reasons, and only one survived.** "Document the contract" held: both types
+now carry a doc paragraph naming `BundleSource` and where the relationship is enforced.
+
+"Catch a drift in either shape" did not — it was already caught. Deleting `release` from
+`KeyPackagePool` produces 9 compile errors across `test/join.test.ts` (7) and `src/pool.ts` (1),
+because the existing join tests pass a pool to `processWelcomeFromSources` as a source. A dedicated
+conformance assertion was written, confirmed to fire, and then **deleted**: it re-proved what eight
+other errors already prove, which is maintenance without protection. Declaring the relationship in
+the types was likewise dropped — a `type A = B & {...}` intersection does not error on an
+incompatible member the way `interface extends` does, so it would have added the appearance of a
+check rather than a check.
 
 ## Checked and clean
 

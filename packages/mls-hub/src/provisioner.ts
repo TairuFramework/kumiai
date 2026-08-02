@@ -35,6 +35,12 @@ export type LastResortProvisionerParams = {
 
 export type ProvisionResult = Result<{ rotated: boolean; ref: string }, HubRetryableError>
 
+/**
+ * Satisfies `BundleSource` (`./join.js`) structurally, which is how it reaches
+ * `processWelcomeFromSources`. Narrowing `bundles` or `release` breaks that at every call site
+ * passing a provisioner as a source, so the relationship needs no separate declaration to be
+ * enforced.
+ */
 export type LastResortProvisioner = {
   /**
    * Bring the hub's last-resort slot up to date, doing nothing when it already is.
@@ -47,6 +53,11 @@ export type LastResortProvisioner = {
    * the local record is left untouched, so the next call redoes the readback and repairs the slot
    * if the hub disagrees. A `HubRefusedError` is thrown instead, because it will never succeed
    * until the app or the operator changes something.
+   *
+   * @throws {HubRefusedError} the hub answered settled — the returned type cannot carry this, since
+   * the throw is the point: a host that writes no handler still gets told. Awaiting the result
+   * rejects; `.isError()` never reports it.
+   * @throws {Error} a stored record belongs to the other port, or does not round-trip.
    */
   ensureProvisioned(): AsyncResult<{ rotated: boolean; ref: string }, HubRetryableError>
   /** Every retained bundle, `notAfter` descending, for `processWelcome`. */
