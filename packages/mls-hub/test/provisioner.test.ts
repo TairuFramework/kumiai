@@ -107,6 +107,7 @@ describe('ensureProvisioned', () => {
     const store = createMemoryLastResortStore()
     const staleRef = 'stale-ref'
     await store.put(hub.identity.id, {
+      kind: 'last-resort',
       ref: staleRef,
       keyPackage: 'kp-stale',
       privatePackage: 'priv-stale',
@@ -425,6 +426,7 @@ describe('rotation and retention', () => {
 
     await store.put(hub.identity.id, {
       ...live,
+      kind: 'last-resort',
       ref: 'stale-ref',
       keyPackage: 'kp-stale',
       notAfter: secondsFromNow(-8),
@@ -457,6 +459,7 @@ describe('rotation and retention', () => {
 
     await store.put(hub.identity.id, {
       ...live,
+      kind: 'last-resort',
       ref: 'six-day-ref',
       keyPackage: 'kp-six-day',
       notAfter: secondsFromNow(-6),
@@ -486,6 +489,7 @@ describe('rotation and retention', () => {
 
     await store.put(hub.identity.id, {
       ...live,
+      kind: 'last-resort',
       ref: 'recent-ref',
       keyPackage: 'kp-recent',
       notAfter: secondsFromNow(-3),
@@ -514,6 +518,7 @@ describe('rotation and retention', () => {
     if (live == null) return
     await store.put(hub.identity.id, {
       ...live,
+      kind: 'last-resort',
       ref: 'stale-ref',
       keyPackage: 'kp-stale',
       notAfter: secondsFromNow(-3),
@@ -563,6 +568,7 @@ describe('rotation and retention', () => {
     const store = createMemoryLastResortStore()
     const pendingRef = 'pending-ref'
     await store.put(hub.identity.id, {
+      kind: 'last-resort',
       ref: pendingRef,
       keyPackage: 'kp-pending',
       privatePackage: 'priv-pending',
@@ -838,6 +844,7 @@ describe('option validation', () => {
 
     await store.put(hub.identity.id, {
       ...live,
+      kind: 'last-resort',
       ref: 'just-expired-ref',
       keyPackage: 'kp-just-expired',
       notAfter: Math.floor(Date.now() / 1000) - 60,
@@ -845,6 +852,7 @@ describe('option validation', () => {
     })
     await store.put(hub.identity.id, {
       ...live,
+      kind: 'last-resort',
       ref: 'still-valid-ref',
       keyPackage: 'kp-still-valid',
       notAfter: secondsFromNow(1),
@@ -893,6 +901,7 @@ describe('ensureProvisioned failure paths', () => {
     // The live candidate: uploaded, comfortably outside the rotation window, so `run` takes the
     // readback branch instead of resuming or minting.
     await store.put(hub.identity.id, {
+      kind: 'last-resort',
       ref: 'live-ref',
       keyPackage: 'kp-live',
       privatePackage: 'priv-live',
@@ -901,6 +910,7 @@ describe('ensureProvisioned failure paths', () => {
     })
     // An expired record the prune must still remove even though the hub call failed.
     await store.put(hub.identity.id, {
+      kind: 'last-resort',
       ref: 'dead',
       keyPackage: 'a',
       privatePackage: 'b',
@@ -972,6 +982,7 @@ describe('ensureProvisioned failure paths', () => {
     const store = createMemoryLastResortStore()
     const pendingRef = 'pending-ref'
     await store.put(hub.identity.id, {
+      kind: 'last-resort',
       ref: pendingRef,
       keyPackage: 'kp-pending',
       privatePackage: 'priv-pending',
@@ -1043,6 +1054,7 @@ describe('ensureProvisioned failure paths', () => {
     // uploadedAt of 1 keeps it from being resumed as a pending candidate, so the run falls through
     // to a mint, whose upload catch is the one under test.
     await store.put(hub.identity.id, {
+      kind: 'last-resort',
       ref: 'dead',
       keyPackage: 'a',
       privatePackage: 'b',
@@ -1070,6 +1082,7 @@ describe('ensureProvisioned failure paths', () => {
   test('an expired record is pruned on a failure path', async () => {
     const store = createMemoryLastResortStore()
     await store.put(hub.identity.id, {
+      kind: 'last-resort',
       ref: 'dead',
       keyPackage: 'a',
       privatePackage: 'b',

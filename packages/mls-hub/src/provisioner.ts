@@ -13,7 +13,7 @@ import {
 import { AsyncResult, Result } from '@sozai/result'
 
 import { attempt, type HubRetryableError } from './errors.js'
-import { toBundles } from './records.js'
+import { assertKind, toBundles } from './records.js'
 import type { LastResortRecord, LastResortStore } from './store.js'
 
 const DAY_SECONDS = 86_400
@@ -35,6 +35,12 @@ export type LastResortProvisionerParams = {
 
 export type ProvisionResult = Result<{ rotated: boolean; ref: string }, HubRetryableError>
 
+/**
+ * Satisfies `BundleSource` (`./join.js`) structurally, which is how it reaches
+ * `processWelcomeFromSources`. Narrowing `bundles` or `release` breaks that at every call site
+ * passing a provisioner as a source, so the relationship needs no separate declaration to be
+ * enforced.
+ */
 export type LastResortProvisioner = {
   /**
    * Bring the hub's last-resort slot up to date, doing nothing when it already is.
@@ -47,6 +53,11 @@ export type LastResortProvisioner = {
    * the local record is left untouched, so the next call redoes the readback and repairs the slot
    * if the hub disagrees. A `HubRefusedError` is thrown instead, because it will never succeed
    * until the app or the operator changes something.
+   *
+   * @throws {HubRefusedError} the hub answered settled — the returned type cannot carry this, since
+   * the throw is the point: a host that writes no handler still gets told. Awaiting the result
+   * rejects; `.isError()` never reports it.
+   * @throws {Error} a stored record belongs to the other port, or does not round-trip.
    */
   ensureProvisioned(): AsyncResult<{ rotated: boolean; ref: string }, HubRetryableError>
   /** Every retained bundle, `notAfter` descending, for `processWelcome`. */
@@ -94,6 +105,10 @@ export function createLastResortProvisioner(
   const ownerDID = identity.id
   let inFlight: Promise<ProvisionResult> | null = null
 
+  /** Every read of the store goes through here, so an ordinary record cannot enter any path. */
+  const listRecords = async (): Promise<Array<LastResortRecord>> =>
+    assertKind(await store.list(ownerDID), 'last-resort')
+
   /** The record the hub's slot should hold: newest by lifetime, `ref` breaking a tie. */
   const pickCandidate = (records: Array<LastResortRecord>): LastResortRecord | null => {
     let best: LastResortRecord | null = null
@@ -112,6 +127,7 @@ export function createLastResortProvisioner(
   const mint = async (): Promise<LastResortRecord> => {
     const bundle = await createLastResortKeyPackageBundle(identity, options)
     const record: LastResortRecord = {
+      kind: 'last-resort',
       ref: await keyPackageRef(bundle.publicPackage, options),
       keyPackage: encodeKeyPackage(bundle.publicPackage),
       privatePackage: encodePrivateKeyPackage(bundle.privatePackage),
@@ -152,7 +168,7 @@ export function createLastResortProvisioner(
   }
 
   const run = async (): Promise<ProvisionResult> => {
-    const records = await store.list(ownerDID)
+    const records = await listRecords()
     const candidate = pickCandidate(records)
     const nowSeconds = Math.floor(Date.now() / 1000)
 
@@ -244,7 +260,7 @@ export function createLastResortProvisioner(
       return new AsyncResult(inFlight)
     },
     async bundles(): Promise<Array<KeyPackageBundle>> {
-      return toBundles(await store.list(ownerDID), ownerDID, 'last-resort')
+      return toBundles(await listRecords(), ownerDID, 'last-resort')
     },
     async release(_ref: string): Promise<void> {},
   }

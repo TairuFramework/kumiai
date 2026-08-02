@@ -6,7 +6,13 @@ const ALICE = 'did:key:alice'
 const BOB = 'did:key:bob'
 
 function record(ref: string): KeyPackageRecord {
-  return { ref, keyPackage: `kp-${ref}`, privatePackage: `priv-${ref}`, notAfter: 100 }
+  return {
+    kind: 'ordinary',
+    ref,
+    keyPackage: `kp-${ref}`,
+    privatePackage: `priv-${ref}`,
+    notAfter: 100,
+  }
 }
 
 describe('createMemoryKeyPackagePoolStore', () => {

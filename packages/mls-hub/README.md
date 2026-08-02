@@ -123,6 +123,20 @@ where the host stores private keys, never log it, and never publish it.
 hub keeps serving packages whose private halves are gone, leaving the owner silently unaddable —
 the exact outage these stores exist to prevent. Tests and throwaway processes only.
 
+### One store per port
+
+The two ports are not interchangeable, and wiring one store to both mixes secret material held
+under different lifecycles: an ordinary package is single-use and released on join, a last-resort
+package is reused by every inviter until it rotates. Each record carries a `kind` — `'ordinary'` or
+`'last-resort'` — which makes the two record types mutually unassignable, so the wrong store is a
+compile error at the wiring rather than a silent mix.
+
+A store adapter with its own columns **must persist `kind` and return it unchanged**. The compiler
+cannot see through an adapter that rebuilds records, so both callers re-check on every read and
+throw, naming the ref and both kinds. Filtering the foreign record out instead would narrow a
+misconfigured store to "you appear to have fewer packages", which is the silent failure this
+package exists to remove.
+
 ## Two obligations this package now discharges
 
 Both used to sit on the host, and both failed silently:

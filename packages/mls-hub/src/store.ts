@@ -8,6 +8,11 @@ import { createMemoryRecordStore } from './records.js'
  * legitimately matches an older record.
  */
 export type LastResortRecord = {
+  /**
+   * Marks this as a last-resort record. Persist it and return it unchanged: it is what stops a
+   * pool store being wired here, and the provisioner refuses a record carrying anything else.
+   */
+  kind: 'last-resort'
   /** `keyPackageRef` from `@kumiai/mls` — this record's ID. */
   ref: string
   /** `encodeKeyPackage` output: the exact string uploaded to the hub's slot. */
@@ -39,6 +44,9 @@ export type LastResortRecord = {
  * - scope `list` to `ownerDID`. Omitting the owner predicate leaks private key material across
  *   identities.
  * - scope `delete` to `ownerDID`, and no-op for a `ref` that owner does not hold.
+ * - persist `kind` and return it unchanged. An adapter with its own columns that reconstructs
+ *   records without it is refused on the next read, loudly — the field is what keeps this port and
+ *   `KeyPackagePoolStore` apart, and a dropped one puts single-use packages in the reusable slot.
  * - treat `put` as replace-by-`ref`, never append. The provisioner re-puts one `ref` twice per
  *   rotation, before and after uploading.
  * - return records that do not alias its own state.

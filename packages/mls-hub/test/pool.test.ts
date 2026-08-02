@@ -184,6 +184,7 @@ describe('ensureStocked', () => {
     })
     // A record written before a crash: in the store, never counted by the hub.
     await store.put(hub.identity.id, {
+      kind: 'ordinary',
       ref: 'orphan',
       keyPackage: 'kp-orphan',
       privatePackage: 'priv-orphan',
@@ -212,12 +213,14 @@ describe('ensureStocked', () => {
     await pool.ensureStocked().value
     const nowSeconds = Math.floor(Date.now() / 1000)
     await store.put(hub.identity.id, {
+      kind: 'ordinary',
       ref: 'stale',
       keyPackage: 'kp-stale',
       privatePackage: 'priv-stale',
       notAfter: nowSeconds - 8 * 86_400,
     })
     await store.put(hub.identity.id, {
+      kind: 'ordinary',
       ref: 'within-grace',
       keyPackage: 'kp-grace',
       privatePackage: 'priv-grace',
@@ -341,6 +344,7 @@ describe('bundles', () => {
     })
     await pool.ensureStocked().value
     await store.put(hub.identity.id, {
+      kind: 'ordinary',
       ref: 'corrupt',
       keyPackage: 'not-a-key-package',
       privatePackage: 'not-a-private-package',
@@ -384,6 +388,7 @@ describe('ensureStocked failure paths', () => {
     const store = createMemoryKeyPackagePoolStore()
     // An expired record the prune must still remove even though the hub call failed.
     await store.put(hub.identity.id, {
+      kind: 'ordinary',
       ref: 'dead',
       keyPackage: 'a',
       privatePackage: 'b',
@@ -468,6 +473,7 @@ describe('ensureStocked failure paths', () => {
     const store = createMemoryKeyPackagePoolStore()
     // An expired record the prune must still remove even though the hub call was refused.
     await store.put(hub.identity.id, {
+      kind: 'ordinary',
       ref: 'dead',
       keyPackage: 'a',
       privatePackage: 'b',

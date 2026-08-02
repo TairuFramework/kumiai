@@ -12,7 +12,7 @@ import { AsyncResult, Result } from '@sozai/result'
 
 import { attempt, type HubRetryableError } from './errors.js'
 import type { KeyPackagePoolStore, KeyPackageRecord } from './pool-store.js'
-import { toBundles } from './records.js'
+import { assertKind, toBundles } from './records.js'
 
 const DAY_SECONDS = 86_400
 const DEFAULT_TARGET = 20
@@ -36,6 +36,11 @@ export type KeyPackagePoolParams = {
 
 export type StockResult = Result<{ minted: number; depth: number }, HubRetryableError>
 
+/**
+ * Satisfies `BundleSource` (`./join.js`) structurally, which is how it reaches
+ * `processWelcomeFromSources`. Narrowing `bundles` or `release` breaks that at every call site
+ * passing a pool as a source, so the relationship needs no separate declaration to be enforced.
+ */
 export type KeyPackagePool = {
   /**
    * Bring the hub's ordinary pool back up to `target` when it has fallen below `lowWater`, and prune
@@ -48,6 +53,11 @@ export type KeyPackagePool = {
    * An error `Result` means the hub could not be reached or gave an answer that clears on its own;
    * nothing needs fixing and the next call self-corrects. A `HubRefusedError` is thrown instead,
    * because it will never succeed until the app or the operator changes something.
+   *
+   * @throws {HubRefusedError} the hub answered settled — the returned type cannot carry this, since
+   * the throw is the point: a host that writes no handler still gets told. Awaiting the result
+   * rejects; `.isError()` never reports it.
+   * @throws {Error} a stored record belongs to the other port, or does not round-trip.
    */
   ensureStocked(): AsyncResult<{ minted: number; depth: number }, HubRetryableError>
   /** Every retained bundle, `notAfter` descending, for `processWelcome`. */
@@ -92,9 +102,14 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
   const ownerDID = identity.id
   let inFlight: Promise<StockResult> | null = null
 
+  /** Every read of the store goes through here, so a last-resort record cannot enter any path. */
+  const listRecords = async (): Promise<Array<KeyPackageRecord>> =>
+    assertKind(await store.list(ownerDID), 'ordinary')
+
   const mint = async (): Promise<KeyPackageRecord> => {
     const bundle = await createKeyPackageBundle(identity, options)
     const record: KeyPackageRecord = {
+      kind: 'ordinary',
       ref: await keyPackageRef(bundle.publicPackage, options),
       keyPackage: encodeKeyPackage(bundle.publicPackage),
       privatePackage: encodePrivateKeyPackage(bundle.privatePackage),
@@ -134,7 +149,7 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
     const status = await attempt(
       'status',
       () => client.keyPackageStatus(),
-      async () => prune(await store.list(ownerDID), new Set()),
+      async () => prune(await listRecords(), new Set()),
     )
     if (status.isError()) return Result.error(status.error)
     const { count } = status.value
@@ -160,13 +175,13 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
             records.map((record) => record.keyPackage),
             notAfter,
           ),
-        async () => prune(await store.list(ownerDID), keepRefs),
+        async () => prune(await listRecords(), keepRefs),
       )
       if (uploaded.isError()) return Result.error(uploaded.error)
       minted = records
     }
     // Prune on the no-op path too, or a daily caller never prunes between top-ups.
-    await prune(await store.list(ownerDID), new Set(minted.map((record) => record.ref)))
+    await prune(await listRecords(), new Set(minted.map((record) => record.ref)))
     return Result.ok({ minted: minted.length, depth: count + minted.length })
   }
 
@@ -193,7 +208,7 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
     async bundles(): Promise<Array<KeyPackageBundle>> {
       // Sorting, decoding and the loud throw on a corrupt record are shared with the last-resort
       // provisioner via `./records.js`; only the label differs.
-      return toBundles(await store.list(ownerDID), ownerDID, 'key package')
+      return toBundles(await listRecords(), ownerDID, 'key package')
     },
     async release(ref: string): Promise<void> {
       await store.delete(ownerDID, ref)

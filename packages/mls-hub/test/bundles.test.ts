@@ -14,7 +14,7 @@ import {
 import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 
 import { createLastResortProvisioner } from '../src/provisioner.js'
-import { createMemoryLastResortStore } from '../src/store.js'
+import { createMemoryLastResortStore, type LastResortRecord } from '../src/store.js'
 import { createTestHub, type TestHub } from './fixtures/hub.js'
 
 /** The ledger-entry plumbing every kumiai join needs, shared by the tests below. */
@@ -96,7 +96,8 @@ describe('bundles', () => {
     // A second, genuinely distinct last-resort bundle, forced to share `first`'s `notAfter` exactly
     // so the ref tie-break — not the notAfter ordering — is what decides.
     const secondBundle = await createLastResortKeyPackageBundle(hub.identity)
-    const secondRecord = {
+    const secondRecord: LastResortRecord = {
+      kind: 'last-resort',
       ref: await keyPackageRef(secondBundle.publicPackage),
       keyPackage: encodeKeyPackage(secondBundle.publicPackage),
       privatePackage: encodePrivateKeyPackage(secondBundle.privatePackage),

@@ -1,7 +1,17 @@
 import { decodeKeyPackage, decodePrivateKeyPackage, type KeyPackageBundle } from '@kumiai/mls'
 
+/**
+ * Which of the two retained-record kinds a record is.
+ *
+ * A host persists this and returns it unchanged. It is what keeps the two storage ports apart: the
+ * records are otherwise near-identical, and without it `LastResortStore` is assignable to
+ * `KeyPackagePoolStore`, so one store wired to both draws no diagnostic on the wrong half.
+ */
+export type RecordKind = 'ordinary' | 'last-resort'
+
 /** What both retained-record shapes have in common. */
-export type StoredRecord = {
+export type StoredRecord<Kind extends RecordKind = RecordKind> = {
+  kind: Kind
   ref: string
   keyPackage: string
   privatePackage: string
@@ -37,6 +47,30 @@ export function createMemoryRecordStore<R extends StoredRecord>(): {
       byOwner.get(ownerDID)?.delete(ref)
     },
   }
+}
+
+/**
+ * Refuse a listed record belonging to the other port.
+ *
+ * The type system already rejects the wrong store at the wiring, which is where a TypeScript host
+ * meets this. This covers what the compiler cannot: a JavaScript host, and a store adapter that
+ * persists its own columns and does not write `kind` back. Throwing rather than filtering is the
+ * ruling `toBundles` already makes below — a store that breaks its contract is not quietly narrowed
+ * to "you appear to have fewer packages", because that is the silent failure this area exists to
+ * remove.
+ */
+export function assertKind<Record extends StoredRecord>(
+  records: Array<Record>,
+  kind: RecordKind,
+): Array<Record> {
+  for (const record of records) {
+    if (record.kind !== kind) {
+      throw new Error(
+        `mls-hub: stored record ${record.ref} does not belong to this store, which must hold only ${kind} records; this one is ${record.kind}. One store is wired to both ports, or an adapter is dropping the kind.`,
+      )
+    }
+  }
+  return records
 }
 
 /**

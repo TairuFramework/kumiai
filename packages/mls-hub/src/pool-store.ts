@@ -11,6 +11,11 @@ import { createMemoryRecordStore } from './records.js'
  * needs to remember whether it was uploaded.
  */
 export type KeyPackageRecord = {
+  /**
+   * Marks this as an ordinary-pool record. Persist it and return it unchanged: it is what stops a
+   * last-resort store being wired here, and the pool refuses a record carrying anything else.
+   */
+  kind: 'ordinary'
   /** `keyPackageRef` from `@kumiai/mls` — this record's ID, and what a Welcome names. */
   ref: string
   /** `encodeKeyPackage` output: the exact string uploaded to the hub. */
@@ -34,6 +39,9 @@ export type KeyPackageRecord = {
  * - scope `list` to `ownerDID`. Omitting the owner predicate leaks private key material across
  *   identities.
  * - scope `delete` to `ownerDID`, and no-op for a `ref` that owner does not hold.
+ * - persist `kind` and return it unchanged. An adapter with its own columns that reconstructs
+ *   records without it is refused on the next read, loudly — the field is what keeps this port and
+ *   `LastResortStore` apart, and a dropped one puts single-use packages where reusable ones belong.
  * - treat `put` as replace-by-`ref`, never append.
  * - return records that do not alias its own state.
  * - tolerate concurrent `put` and concurrent `delete` calls for DISTINCT refs. The pool mints and

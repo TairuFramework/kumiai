@@ -294,6 +294,7 @@ describe('processWelcomeFromSources', () => {
     // A record that fails to round-trip: `pool.bundles()` throws loudly for it, same as
     // `pool.test.ts`'s "throws on a record that does not round-trip" case.
     await poolStore.put(hub.identity.id, {
+      kind: 'ordinary',
       ref: 'corrupt',
       keyPackage: 'not-a-key-package',
       privatePackage: 'not-a-private-package',
@@ -334,6 +335,7 @@ describe('processWelcomeFromSources', () => {
   test('names a source that could not be read when nothing matches at all', async () => {
     const poolStore = createMemoryKeyPackagePoolStore()
     await poolStore.put(hub.identity.id, {
+      kind: 'ordinary',
       ref: 'corrupt',
       keyPackage: 'not-a-key-package',
       privatePackage: 'not-a-private-package',
