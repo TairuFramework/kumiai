@@ -13,7 +13,7 @@ import {
 import { AsyncResult, Result } from '@sozai/result'
 
 import { attempt, type HubRetryableError } from './errors.js'
-import { toBundles } from './records.js'
+import { assertKind, toBundles } from './records.js'
 import type { LastResortRecord, LastResortStore } from './store.js'
 
 const DAY_SECONDS = 86_400
@@ -94,6 +94,10 @@ export function createLastResortProvisioner(
   const ownerDID = identity.id
   let inFlight: Promise<ProvisionResult> | null = null
 
+  /** Every read of the store goes through here, so an ordinary record cannot enter any path. */
+  const listRecords = async (): Promise<Array<LastResortRecord>> =>
+    assertKind(await store.list(ownerDID), 'last-resort')
+
   /** The record the hub's slot should hold: newest by lifetime, `ref` breaking a tie. */
   const pickCandidate = (records: Array<LastResortRecord>): LastResortRecord | null => {
     let best: LastResortRecord | null = null
@@ -112,6 +116,7 @@ export function createLastResortProvisioner(
   const mint = async (): Promise<LastResortRecord> => {
     const bundle = await createLastResortKeyPackageBundle(identity, options)
     const record: LastResortRecord = {
+      kind: 'last-resort',
       ref: await keyPackageRef(bundle.publicPackage, options),
       keyPackage: encodeKeyPackage(bundle.publicPackage),
       privatePackage: encodePrivateKeyPackage(bundle.privatePackage),
@@ -152,7 +157,7 @@ export function createLastResortProvisioner(
   }
 
   const run = async (): Promise<ProvisionResult> => {
-    const records = await store.list(ownerDID)
+    const records = await listRecords()
     const candidate = pickCandidate(records)
     const nowSeconds = Math.floor(Date.now() / 1000)
 
@@ -244,7 +249,7 @@ export function createLastResortProvisioner(
       return new AsyncResult(inFlight)
     },
     async bundles(): Promise<Array<KeyPackageBundle>> {
-      return toBundles(await store.list(ownerDID), ownerDID, 'last-resort')
+      return toBundles(await listRecords(), ownerDID, 'last-resort')
     },
     async release(_ref: string): Promise<void> {},
   }

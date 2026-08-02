@@ -12,7 +12,7 @@ import { AsyncResult, Result } from '@sozai/result'
 
 import { attempt, type HubRetryableError } from './errors.js'
 import type { KeyPackagePoolStore, KeyPackageRecord } from './pool-store.js'
-import { toBundles } from './records.js'
+import { assertKind, toBundles } from './records.js'
 
 const DAY_SECONDS = 86_400
 const DEFAULT_TARGET = 20
@@ -92,9 +92,14 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
   const ownerDID = identity.id
   let inFlight: Promise<StockResult> | null = null
 
+  /** Every read of the store goes through here, so a last-resort record cannot enter any path. */
+  const listRecords = async (): Promise<Array<KeyPackageRecord>> =>
+    assertKind(await store.list(ownerDID), 'ordinary')
+
   const mint = async (): Promise<KeyPackageRecord> => {
     const bundle = await createKeyPackageBundle(identity, options)
     const record: KeyPackageRecord = {
+      kind: 'ordinary',
       ref: await keyPackageRef(bundle.publicPackage, options),
       keyPackage: encodeKeyPackage(bundle.publicPackage),
       privatePackage: encodePrivateKeyPackage(bundle.privatePackage),
@@ -134,7 +139,7 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
     const status = await attempt(
       'status',
       () => client.keyPackageStatus(),
-      async () => prune(await store.list(ownerDID), new Set()),
+      async () => prune(await listRecords(), new Set()),
     )
     if (status.isError()) return Result.error(status.error)
     const { count } = status.value
@@ -160,13 +165,13 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
             records.map((record) => record.keyPackage),
             notAfter,
           ),
-        async () => prune(await store.list(ownerDID), keepRefs),
+        async () => prune(await listRecords(), keepRefs),
       )
       if (uploaded.isError()) return Result.error(uploaded.error)
       minted = records
     }
     // Prune on the no-op path too, or a daily caller never prunes between top-ups.
-    await prune(await store.list(ownerDID), new Set(minted.map((record) => record.ref)))
+    await prune(await listRecords(), new Set(minted.map((record) => record.ref)))
     return Result.ok({ minted: minted.length, depth: count + minted.length })
   }
 
@@ -193,7 +198,7 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
     async bundles(): Promise<Array<KeyPackageBundle>> {
       // Sorting, decoding and the loud throw on a corrupt record are shared with the last-resort
       // provisioner via `./records.js`; only the label differs.
-      return toBundles(await store.list(ownerDID), ownerDID, 'key package')
+      return toBundles(await listRecords(), ownerDID, 'key package')
     },
     async release(ref: string): Promise<void> {
       await store.delete(ownerDID, ref)

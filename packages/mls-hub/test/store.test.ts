@@ -7,6 +7,7 @@ const BOB = 'did:key:bob'
 
 function record(ref: string, notAfter = 1_000): LastResortRecord {
   return {
+    kind: 'last-resort',
     ref,
     keyPackage: `kp-${ref}`,
     privatePackage: `priv-${ref}`,
