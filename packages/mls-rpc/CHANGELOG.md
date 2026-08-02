@@ -1,5 +1,30 @@
 # @kumiai/mls-rpc
 
+## 0.5.0
+
+### Minor Changes
+
+- The group moves to the 0.5 band. Every publishable package shares one meaningful version — the minor
+  while pre-1.0, the major after. Trailing segments still diverge freely: a package taking a patch
+  release on its own does not move anyone else.
+
+  `@kumiai/mls-hub` publishes for the first time in this release, at the band version.
+
+  **Breaking.** Two dead exports removed while the band break makes it cheap, both unreachable in
+  practice:
+
+  - `@kumiai/mls` no longer exports the `GroupSyncScope` type — referenced by nothing, here or in any
+    consumer.
+  - `HubClient` no longer exposes the `rawClient` getter. `HubClient` now has one method per
+    `HubProtocol` procedure, and a caller needing the underlying `Client<HubProtocol>` already holds
+    it — `HubClientParams` takes it in.
+
+### Patch Changes
+
+- Updated dependencies:
+  - @kumiai/mls@0.5.0
+  - @kumiai/rpc@0.5.0
+
 ## 0.4.1
 
 ### Patch Changes

@@ -1,5 +1,103 @@
 # @kumiai/mls
 
+## 0.5.0
+
+### Minor Changes
+
+- Key-package provisioning: last-resort slot, pool replenishment, and drain defence.
+
+  **Security.** An authorized attacker within quota could drain a victim's key-package pool, after
+  which the victim could not be added to any group until they re-uploaded. Closed on four fronts: a
+  per-DID last-resort slot that is never consumed and sits outside the storage cap; per-DID caps
+  (`maxKeyPackagesPerDID` 100, `maxSubscriptionsPerDID` 1000) that reject rather than evict; a
+  per-target consumption quota (`maxPerTargetConsumed`, 60/window) so minting throwaway requester DIDs
+  no longer amplifies a drain; and automatic provisioning in the new `@kumiai/mls-hub`, without which
+  no DID had a slot at all.
+
+  `@kumiai/hub-conformance` gains a clause that one owner's last-resort package is never served for
+  another. **An existing store may now fail it**: every other clause exercises a single DID, so a read
+  missing `AND owner = ?` passed them all. A fetch for BOB returning ALICE's package Welcomes ALICE,
+  who derives the epoch secrets, while the ledger grants the role to BOB.
+
+  **Breaking.**
+
+  - `HubStore.countKeyPackages(ownerDID)` is a **new required method**. `storeKeyPackage` takes an
+    optional `notAfter`; an expired entry must be neither served, counted, nor charged against the cap.
+  - `KeyPackagePool.ensureStocked()` and `LastResortProvisioner.ensureProvisioned()` return an
+    `AsyncResult` from `@sozai/result`. Read `.value`, or branch on `result.isError()` to carry on
+    through an outage. A transient condition returns `HubRetryableError`; a settled refusal throws
+    `HubRefusedError` with its wire code.
+  - `@kumiai/mls-hub`'s pool and last-resort records carry `kind: 'ordinary'` or `kind: 'last-resort'`.
+    `KeyPackagePoolStore` and `LastResortStore` were structurally assignable, so a host wiring one
+    store to both got no diagnostic on the wrong half — under which a single-use ordinary package
+    could be installed in the hub's reusable last-resort slot. The discriminant makes them mutually
+    unassignable, and both callers re-check `kind` on every read since a store adapter rebuilding
+    records from its own columns can drop the field where no compiler sees it. **A store MUST persist
+    `kind` and return it unchanged.**
+
+  **Added.** `@kumiai/mls`: `createLastResortKeyPackageBundle` (extension `0x000A`, explicit 90-day
+  lifetime — ts-mls's ~15-day default made the slot read healthy while every join through it failed),
+  `LAST_RESORT_LIFETIME_DAYS`, `encodeKeyPackage`/`decodeKeyPackage` and the private-half equivalents,
+  `keyPackageRef`. `@kumiai/mls-hub`: `createLastResortProvisioner`, `createKeyPackagePool`,
+  `processWelcomeFromSources`. `@kumiai/hub-protocol`: `hub/v1/keypackage/status` (caller's own depth
+  only, takes no `did`), a `lastResort` upload flag, and four coded errors —
+  `HUB_AUTHORIZATION_DENIED`, `HUB_KEYPACKAGE_QUOTA`, `HUB_SUBSCRIPTION_QUOTA`,
+  `HUB_KEYPACKAGE_FETCH_LIMIT`. `@kumiai/hub-client`: `uploadLastResortKeyPackage`.
+
+  **Host obligations**, silent if missed: retain a last-resort bundle's `privatePackage` across a
+  Welcome, and re-upload before its lifetime elapses. The `LastResortStore` port holds secret key
+  material and MUST scope every method by owner DID.
+
+- Bind MLS membership to the roster on both sides of an invite, and enforce `GroupAnchor.version`.
+
+  **Security.** Membership could disagree with the roster: `commitInvite` handed whatever key package
+  it was given to the Add proposal, and `defaultCommitPolicy` accepted an Add from an admin sender
+  without looking at the added leaf — so a Welcome could reach an identity the roster granted nothing
+  to, and no receiver could see the disagreement.
+
+  `commitInvite` now throws the new `InviteRecipientMismatchError` when the key package's credential
+  DID is not the identity the invite's last enacted `kumiai.role` entry grants a role to, and
+  `defaultCommitPolicy` rejects an Add whose leaf credential names a DID holding no role in the
+  commit's candidate roster.
+
+  **Narrowings** — non-breaking for callers using `createInvite`, which produces exactly the required
+  shape:
+
+  - An invite enacting no `kumiai.role` entry for the group is refused. This includes an invite whose
+    `ledgerEntries` equal the committer's own log.
+  - A key package carrying a non-`basic` credential, or a `basic` credential whose identity bytes do
+    not parse, is refused rather than accepted unread.
+  - For a hand-assembled invite the invitee's grant must be the **last** `kumiai.role` entry. That
+    ordering is now load-bearing.
+  - MLS membership implies a roster grant: an Add absorbed by a commit that enacts no grant for the
+    added DID is dropped by the committer and rejected by receivers. Commit the grant first, then let
+    a later commit absorb the Add.
+
+  Rejection is a plain `'reject'` with no new error type — `defaultCommitPolicy` returns ts-mls's
+  `IncomingMessageAction`, which carries no reason; read the Add off `CommitRejectedError.proposals`
+  to distinguish.
+
+  `decodeGroupAnchor` now withholds the opaque `app` payload when an anchor's `version` exceeds
+  `CURRENT_VERSION`, returning the structural anchor so a member still joins. Non-breaking —
+  `CURRENT_VERSION` is the only value ever written. The contract this rests on is now stated: a
+  `version` bump means `app` semantics changed and nothing else; any future control-relevant field
+  belongs in a new GroupContext extension, never in the anchor.
+
+- The group moves to the 0.5 band. Every publishable package shares one meaningful version — the minor
+  while pre-1.0, the major after. Trailing segments still diverge freely: a package taking a patch
+  release on its own does not move anyone else.
+
+  `@kumiai/mls-hub` publishes for the first time in this release, at the band version.
+
+  **Breaking.** Two dead exports removed while the band break makes it cheap, both unreachable in
+  practice:
+
+  - `@kumiai/mls` no longer exports the `GroupSyncScope` type — referenced by nothing, here or in any
+    consumer.
+  - `HubClient` no longer exposes the `rawClient` getter. `HubClient` now has one method per
+    `HubProtocol` procedure, and a caller needing the underlying `Client<HubProtocol>` already holds
+    it — `HubClientParams` takes it in.
+
 ## 0.4.0
 
 ### Minor Changes
