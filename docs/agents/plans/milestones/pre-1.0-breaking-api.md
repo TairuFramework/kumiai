@@ -114,16 +114,41 @@ in the linked doc; the one real defect the check turned up is folded into the `d
   makes that interim drop-classification deletable. Not a correctness bug once live and drain agree:
   the only symptom is that an app cannot use `kind: 'req'|'res'` as an event-data key.
 
-### `@kumiai/mls-hub` — not audited, indexed nowhere
+### `@kumiai/mls-hub` — audited 2026-08-02, nothing carried forward
 
-**Noted 2026-08-01.** The package postdates the 2026-07-20 audits, so its surface has never been
-read for shape by either milestone. It is also the only package returning `AsyncResult`, which is
-the surface decision most likely to want revisiting — see
-[stack-wide `Result` adoption](../backlog/2026-07-28-stack-wide-result-adoption.md).
+**Was** the one package no audit had read for shape, having postdated the 2026-07-20 sweep. Read in
+full ahead of its first publish, since the 0.5 band release is what makes its surface public and
+every reshape free until then. Four findings, all settled — none is open, and none is deferred to
+1.0.
 
-No item is filed here, because none has been found: this records that the absence is an unexamined
-surface, not an examined and clean one. It stays cheap to break — `mls-hub` is 0.x like everything
-else, and unpublished besides.
+- **The two storage ports were silently interchangeable.** `LastResortRecord` was `KeyPackageRecord`
+  plus `uploadedAt`, so method bivariance made `LastResortStore` assignable to
+  `KeyPackagePoolStore`: a host wiring one store to both got a diagnostic on one half and silence on
+  the other. The defaults contained the consequence by an exact tie rather than by design — an
+  ordinary package lives 30 days, the default `rotateWithinDays` is also 30, and the gate is
+  strictly greater — so any value from 1 to 29 admitted a single-use package into the reusable
+  last-resort slot. Fixed by a `kind` discriminant on both record types plus a re-check on every
+  store read, `fix/mls-hub-record-kind`. Breaking for a store adapter, which is why it had to land
+  before the first publish rather than after.
+- **`AsyncResult` does not carry the `HubRefusedError` that throws through it.** Settled as
+  deliberate, not deferred. The throw is what reaches a host that wrote no handler, and TypeScript
+  cannot express it in a return type; `@throws` tags carry the warning to the call site. This is the
+  `AsyncResult` question the entry used to flag as most likely to want revisiting — it was revisited
+  and kept. Independent of [stack-wide `Result`
+  adoption](../backlog/2026-07-28-stack-wide-result-adoption.md), which is about which packages
+  return `Result` at all, not about this split.
+- **Withdrawn:** relocating the in-memory reference stores off the package root. The premise was
+  that this repo puts doubles behind a boundary, citing the two conformance packages. Those are
+  contract suites, not reference implementations. `@kumiai/hub-server` exports `createMemoryStore`
+  from its root (`hub-server/src/index.ts:19`) — same situation, same shape. Nothing to take later.
+- **Half withdrawn:** declaring `BundleSource` conformance on `KeyPackagePool` and
+  `LastResortProvisioner`. Documented, but not declared and not separately tested: drift is already
+  caught by the join tests that pass each as a source, and a `B & {...}` intersection would not
+  error on an incompatible member the way `interface extends` does.
+
+Clean on everything else read: internals stay internal, error messages name refs and never key
+material, and the publish metadata is correct. **Coverage limit:** the package's test suite was not
+read, so nothing above is a claim about its coverage.
 
 ### Adjacent, tracked elsewhere
 

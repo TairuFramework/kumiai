@@ -6,7 +6,6 @@
 - **Conventions & development:** the kigu `conventions` and `development` skills (auto-loaded via the kigu plugin)
 - **Architecture:** [agents/architecture.md](./agents/architecture.md)
 - **Planning:** [agents/plans/](./agents/plans/) — [roadmap](./agents/plans/roadmap.md)
-- **Audits:** [agents/audits/](./agents/audits/) — [`@kumiai/mls-hub` API surface](./agents/audits/2026-08-02-mls-hub-api-surface.md), read before its first publish
 
 ## Reference
 
