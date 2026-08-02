@@ -10,10 +10,10 @@
       "outputs": ["lib/**/*.d.ts"]
     },
     "test:types": {
-      "dependsOn": ["^build:types"]
+      "dependsOn": ["^build:types", "build:types"]
     },
     "test:unit": {
-      "dependsOn": ["^build:js", "^build:types"]
+      "dependsOn": ["^build:js", "^build:types", "build:js"]
     }
   }
 }
