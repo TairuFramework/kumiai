@@ -79,6 +79,11 @@ Setup is that file's lying-responder pattern (`:59-88`): a responder whose `serv
 the last entry, so no reply ever passes the head check and the requester never bootstraps. Dispose,
 start recording, call `replay()`. Unguarded, the recording shows `publish:<rendezvous>`.
 
+Only the disposed peer gets the recording wrapper; the responder is handed the `FakeHub` directly.
+Both peers wrap one hub instance, so they still share state, but a live responder's own drain calls
+`receive` continuously — through a shared wrapper it would fill the recording with another peer's
+traffic and the assertion could never be empty.
+
 ### B. `recover()` after dispose asks the group for nothing
 
 Same wrapper. Unguarded, the recording shows the commit-topic fetch and `publish:<rendezvous>`.
@@ -89,19 +94,33 @@ No reply can reach a peer whose rendezvous subscription is gone, so it waits out
 promise immediately, await the rejection last — otherwise "it published" degrades into a bare
 timeout that names nothing.
 
-### C. A commit delivery queued behind init does not rebuild after dispose
+### C. A commit delivery queued behind a lane operation does not pull after dispose
 
-`initControlLanes` registers the commit listener (`:1407`) before `buildEpoch` runs, and `ready`
-settles only after `buildEpoch`. So: hold `buildEpoch`'s subscribe open, push a commit frame — the
-listener fires, `ack()`s, and its `runSerial` callback parks on `await ready` — then call
-`dispose()`, whose first synchronous statement sets `disposed` before it blocks on `settled`, then
-release the gate. The continuation resumes into a disposed peer.
+Queuing the delivery behind `ready` does not work, and the reason is worth recording: `retain` is
+synchronous and fires `void attemptSubscribe(...)` (`hub-mux.ts:369`), so `buildEpoch` never awaits
+a subscribe. Holding subscribes open leaves `ready` settling on schedule — which is also why the
+in-flight-subscribe test can watch a peer carry on with subscribes still pending.
 
-This is the ordering `assertLive`'s own doc comment describes, and the same one this file's
-"`to()` queued behind init" test already uses.
+Queue it behind the commit mutex instead, which is the residual doc's own scenario — "a delivery
+already queued in `runSerial` when `dispose()` awaits `settled`". `onCommitDelivery` puts its
+`await ready` *inside* the `runSerial` callback (`:1350-1351`), so a held mutex stops the callback
+from starting at all.
 
-The observable is hub traffic alone; `onCommitDelivery` has no caller to reject. Unguarded,
-`pullCommits` fetches the commit topic.
+The mutex must be held by something that does no hub work after it is released, or the holder's own
+traffic lands in the recording and the assertion needs filtering. `replay()` on a peer with an empty
+journal and a complete ledger is exactly that: `replayJournal` returns at `entry == null`,
+`ensureLedger` returns early, and nothing reaches the hub. Gate it at `journal.get()` (`:1458`) —
+`makeMLSPeer` takes a `journal`, so a wrapper spread over `createMemoryCommitJournal()` with a
+gated `get` holds the mutex without involving the hub at all.
+
+So: start `replay()`, which blocks in the gated `get`; have another member commit, so the delivery
+arrives and its callback queues behind the mutex; `await dispose()`, which returns without waiting
+on the mutex; start recording; release the gate. `replay()` finishes hub-silently, the mutex frees,
+and the queued callback runs against a peer disposed some time ago.
+
+The observable is hub traffic alone — `onCommitDelivery` has no caller to reject. Unguarded,
+`pullCommits` fetches the commit topic. Because the holder is hub-silent and the mux drain is
+stopped by then, the assertion is a bare `expect(calls).toEqual([])`.
 
 ## Verification
 
@@ -137,9 +156,12 @@ like their neighbours; the named-class decision belongs with `backlog/rpc-api-su
    the test, not a result. If it fails, stop and take the reshape/re-point/retire decision
    deliberately — do not patch it. If it passes, rewrite that comment: this branch falsifies its
    central claim.
-2. **Test C's gate.** Assumes a frame can be delivered in the window between listener registration
-   and `ready` settling. If it cannot, fall back to holding the commit mutex with a lane operation
-   blocked on a test-gated hub call, and queue the delivery behind that.
+2. **Test C's queue point.** ~~Gate `buildEpoch`'s subscribes to hold `ready` pending.~~ Disproved
+   before implementation: `retain` never awaits a subscribe (`hub-mux.ts:369`). Test C now holds the
+   commit mutex instead, per the section above. Remaining assumption: that a delivery arriving while
+   the mutex is held really does queue rather than run. `runSerial` chains every task on
+   `commitTail` (`:837-847`), so it should — but if the callback runs early, the test will show it
+   by recording traffic before dispose rather than after.
 3. **Test A's timeout.** `ensureLedger`'s gather waits out a local timer `dispose()` never clears —
    `peer-dispose-heal.test.ts:90-97` pins exactly that. The unguarded run settles slowly, so the
    recording assertions must run before the await.
