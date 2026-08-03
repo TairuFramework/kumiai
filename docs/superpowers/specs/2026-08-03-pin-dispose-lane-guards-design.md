@@ -139,9 +139,18 @@ That is what produced this work.
 
 ## Out of scope
 
-**No shared recording fixture.** Three inline `FakeHub` wrappers already exist across this package's
-tests and each records different fields; a shared recorder gaining a parameter per caller is worse.
-Adjudicated twice — ledger Task 4 and the branch's final review.
+**The recording wrapper is shared, by a ruling made on 2026-08-03 that reverses two earlier ones.**
+The residual doc and the close-medium-test-gaps final review both said not to extract one: three
+inline `FakeHub` wrappers already exist in this package, each recording different fields, and a
+shared recorder gaining a parameter per caller is worse than duplication.
+
+What changed is that all three tests here need the *same* wrapper — same five methods, same call
+format, same "start after dispose returns" discipline — so the helper takes no per-caller parameter
+and the failure mode those rulings guarded against does not arise. The cost accepted is a fourth
+wrapper shape in a package that already has three.
+
+Scope limit: the helper serves the three new tests only. The existing inline wrappers stay exactly
+as they are — they record different fields, and rewriting them is not this branch's work.
 
 **Residuals 3 and 4.** The `next/` file is trimmed to those two rather than deleted. `'Peer is
 disposed'` stays a bare `Error`, so the new tests assert `/disposed/i` against the message prose
