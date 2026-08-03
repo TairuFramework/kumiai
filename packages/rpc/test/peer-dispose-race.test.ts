@@ -3,8 +3,11 @@ import type { LogHub } from '@kumiai/hub-tunnel'
 import { describe, expect, test } from 'vitest'
 
 import type { SubscribeFailure } from '../src/hub-mux.js'
+import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
+import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, buildRemoveCommit, makeMLSPeer } from './fixtures/peer.js'
+import { createRecordingHub } from './fixtures/recording-hub.js'
 
 const flush = (ms = 40) => new Promise((r) => setTimeout(r, ms))
 const members = ['alice', 'bob']
@@ -208,5 +211,66 @@ describe('dispose against a commit made afterwards', () => {
     expect(calls).toEqual([])
     await expect(op).rejects.toThrow(/disposed/i)
     await owned
+  })
+})
+
+describe('dispose against a replay made afterwards', () => {
+  test('replay() after dispose asks the group for nothing', async () => {
+    const fake = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x86)
+    const healMembers = ['alice', 'bob', 'carol']
+
+    // Only the DISPOSED peer is wrapped; bob is handed the FakeHub directly. Both still talk to
+    // one hub, because the recorder delegates to it.
+    const recorder = createRecordingHub(fake)
+
+    // The only responder withholds the last ledger entry, so every reply alice gathers fails the
+    // head check and her bootstrap never completes. Her ledger stays incomplete for the rest of
+    // her life, which is what keeps `ensureLedger` reaching for the hub on every lane operation —
+    // including one made after she is gone.
+    const bobCrypto = createFakeCrypto({ epoch: 1, localDID: 'bob' })
+    const bobMLS = createMemoryGroupMLS({
+      recoverySecret: rs,
+      epoch: 1,
+      localDID: 'bob',
+      members: healMembers,
+      serveLedger: (ledger) => ledger.slice(0, ledger.length - 1),
+      onAdvance: (e) => bobCrypto.setEpoch(e),
+    })
+    const bob = makeMLSPeer(fake, 'bob', rs, {
+      mls: bobMLS,
+      crypto: bobCrypto,
+      members: healMembers,
+      recovery: { timeoutMs: 100, getDelayMs: () => 5, deadlineMs: 400 },
+    })
+    await flush()
+    await bob.peer.commit(buildLedgerCommit(bob, ['role:carol=admin', 'role:dave=admin']))
+    await flush()
+
+    const alice = makeMLSPeer(recorder.hub, 'alice', rs, {
+      epoch: 1,
+      members: healMembers,
+      recovery: { timeoutMs: 100, getDelayMs: () => 5, deadlineMs: 400 },
+    })
+    await flush()
+    await alice.peer.recover()
+    expect(await alice.mls.isLedgerComplete()).toBe(false)
+
+    await alice.peer.dispose()
+    recorder.start()
+
+    // Owned before the traffic assertion, exactly as the commit test does it: unguarded, `replay()`
+    // does not reject promptly — it publishes its ledgerRequest and then waits the gather window
+    // out on a timer `dispose()` never clears. Awaiting the rejection first would turn "it asked
+    // the group for the ledger" into a bare timeout that names nothing.
+    const op = alice.peer.replay()
+    const owned = op.catch(() => {})
+    await flush(150)
+
+    expect(recorder.calls()).toEqual([])
+    await expect(op).rejects.toThrow(/disposed/i)
+    await owned
+
+    await bob.peer.dispose()
   })
 })
