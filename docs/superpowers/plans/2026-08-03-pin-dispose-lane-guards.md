@@ -134,7 +134,8 @@ export function createRecordingHub(inner: LogHub): RecordingHub {
       },
       unsubscribe: (subscriberDID, topicID) => {
         record(`unsubscribe:${topicID}`)
-        return inner.unsubscribe(subscriberDID, topicID)
+        // Optional on `HubBase` (hub-tunnel/src/transport.ts:118), so optional here too.
+        return inner.unsubscribe?.(subscriberDID, topicID)
       },
       receive: (subscriberDID) => {
         record('receive')
@@ -237,7 +238,7 @@ describe('dispose against a replay made afterwards', () => {
 
 ```bash
 cd /Users/paul/dev/yulsi/kumiai/packages/rpc
-pnpm exec vitest run test/peer-dispose-race.test.ts -t 'replay() after dispose'
+pnpm exec vitest run test/peer-dispose-race.test.ts -t 'replay'
 ```
 
 Expected: PASS. This only shows the test is well-formed; it proves nothing about the guard yet.
@@ -343,7 +344,7 @@ describe('dispose against a recover made afterwards', () => {
 
 ```bash
 cd /Users/paul/dev/yulsi/kumiai/packages/rpc
-pnpm exec vitest run test/peer-dispose-race.test.ts -t 'recover() after dispose'
+pnpm exec vitest run test/peer-dispose-race.test.ts -t 'recover'
 ```
 
 Expected: PASS.
