@@ -274,3 +274,34 @@ describe('dispose against a replay made afterwards', () => {
     await bob.peer.dispose()
   })
 })
+
+describe('dispose against a recover made afterwards', () => {
+  test('recover() after dispose asks the group for nothing', async () => {
+    const fake = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x87)
+
+    const recorder = createRecordingHub(fake)
+
+    // A short rendezvous window, and the only member on the topic. Unguarded, `recover()` cannot be
+    // answered and is not refused either: it pulls, publishes its request, waits the window out and
+    // RESOLVES. The window is short so the mutation check does not sit on a timer.
+    const alice = makeMLSPeer(recorder.hub, 'alice', rs, {
+      epoch: 1,
+      members,
+      recovery: { timeoutMs: 50, getDelayMs: () => 5, deadlineMs: 200 },
+    })
+    await flush()
+    await alice.peer.dispose()
+    recorder.start()
+
+    // Owned before the traffic assertion, for the same reason as the commit test: the damage lands
+    // long before the promise settles.
+    const op = alice.peer.recover()
+    const owned = op.catch(() => {})
+    await flush(120)
+
+    expect(recorder.calls()).toEqual([])
+    await expect(op).rejects.toThrow(/disposed/i)
+    await owned
+  })
+})
