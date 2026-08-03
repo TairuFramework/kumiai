@@ -612,18 +612,27 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 ```bash
 cd /Users/paul/dev/yulsi/kumiai
-rtk proxy pnpm run test -- --filter @kumiai/rpc --force
+pnpm exec turbo run test:types test:unit --filter=@kumiai/rpc --force
 ```
 
 Expected: all tests pass, and the turbo summary reads `Cached: 0`. **Check that line.** A cached
-run reports the previous result and proves nothing. Do not use `pnpm test -- --force`, which is
-broken in this repo.
+run reports the previous result and proves nothing.
+
+Call turbo directly, as above. Routing this through a package script — `pnpm run test -- --filter
+@kumiai/rpc --force` — does NOT work: pnpm forwards both flags to each package's own vitest/tsc
+rather than to turbo, so unrelated packages die on `CACError: Unknown option --filter` and
+`tsc error TS5023`, and nothing is filtered. Same reason `pnpm test -- --force` is broken here.
 
 - [ ] **Step 2: Typecheck**
 
+Step 1 already ran `test:types` for `@kumiai/rpc`. To check it alone:
+
 ```bash
-rtk proxy pnpm run test:types
+cd packages/rpc && rtk proxy pnpm run test:types
 ```
+
+`test:types` is a per-package script — there is no root one, so running it from the repo root
+fails with `Missing script`.
 
 Expected: PASS. vitest strips types, so Step 1 passing says nothing about what typechecks — the
 recording wrappers are typed `LogHub` and the journal wrapper is typed `MemoryCommitJournal`, both
