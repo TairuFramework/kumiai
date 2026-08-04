@@ -3,8 +3,12 @@ import type { LogHub } from '@kumiai/hub-tunnel'
 import { describe, expect, test } from 'vitest'
 
 import type { SubscribeFailure } from '../src/hub-mux.js'
+import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
+import { createMemoryCommitJournal, type MemoryCommitJournal } from './fixtures/journal.js'
+import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, buildRemoveCommit, makeMLSPeer } from './fixtures/peer.js'
+import { createRecordingHub } from './fixtures/recording-hub.js'
 
 const flush = (ms = 40) => new Promise((r) => setTimeout(r, ms))
 const members = ['alice', 'bob']
@@ -112,11 +116,11 @@ describe('dispose against an in-flight subscribe', () => {
     const bob = makeMLSPeer(hub, 'bob', rs, {
       epoch: 1,
       members: threeMembers,
-      // A disposed peer's caller cannot see this any other way: `resync()` and every protocol
-      // entry point refuse outright once `disposed` is set (`assertLive`, `peer.ts:731`), but the
-      // inbound-commit rebuild (`onCommitDelivery`, `peer.ts:1348-1358`) carries no such guard —
-      // it is queued behind `runSerial` and `dispose()` never joins that queue. This callback is
-      // the only remaining way anything downstream of that rebuild can be observed post-dispose.
+      // A disposed peer's caller cannot see this any other way: `resync()` and every protocol entry
+      // point refuse outright once `disposed` is set (`assertLive`, `peer.ts:734`), and the
+      // inbound-commit rebuild is now refused too (`onCommitDelivery`). What this test watches is
+      // NOT a post-dispose rebuild — bob's rebuild runs below, while he is still live — but the
+      // subscribes it left in flight, answered only after `dispose()` returned.
       onSubscribeFailed: (failure) => {
         if (disposeReturned) failures.push(failure)
       },
@@ -208,5 +212,160 @@ describe('dispose against a commit made afterwards', () => {
     expect(calls).toEqual([])
     await expect(op).rejects.toThrow(/disposed/i)
     await owned
+  })
+})
+
+describe('dispose against a replay made afterwards', () => {
+  test('replay() after dispose asks the group for nothing', async () => {
+    const fake = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x86)
+    const healMembers = ['alice', 'bob', 'carol']
+
+    // Only the DISPOSED peer is wrapped; bob is handed the FakeHub directly. Both still talk to
+    // one hub, because the recorder delegates to it.
+    const recorder = createRecordingHub(fake)
+
+    // The only responder withholds the last ledger entry, so every reply alice gathers fails the
+    // head check and her bootstrap never completes. Her ledger stays incomplete for the rest of
+    // her life, which is what keeps `ensureLedger` reaching for the hub on every lane operation —
+    // including one made after she is gone.
+    const bobCrypto = createFakeCrypto({ epoch: 1, localDID: 'bob' })
+    const bobMLS = createMemoryGroupMLS({
+      recoverySecret: rs,
+      epoch: 1,
+      localDID: 'bob',
+      members: healMembers,
+      serveLedger: (ledger) => ledger.slice(0, ledger.length - 1),
+      onAdvance: (e) => bobCrypto.setEpoch(e),
+    })
+    const bob = makeMLSPeer(fake, 'bob', rs, {
+      mls: bobMLS,
+      crypto: bobCrypto,
+      members: healMembers,
+      recovery: { timeoutMs: 100, getDelayMs: () => 5, deadlineMs: 400 },
+    })
+    await flush()
+    await bob.peer.commit(buildLedgerCommit(bob, ['role:carol=admin', 'role:dave=admin']))
+    await flush()
+
+    const alice = makeMLSPeer(recorder.hub, 'alice', rs, {
+      epoch: 1,
+      members: healMembers,
+      recovery: { timeoutMs: 100, getDelayMs: () => 5, deadlineMs: 400 },
+    })
+    await flush()
+    await alice.peer.recover()
+    expect(await alice.mls.isLedgerComplete()).toBe(false)
+
+    await alice.peer.dispose()
+    recorder.start()
+
+    // Owned before the traffic assertion, exactly as the commit test does it: unguarded, `replay()`
+    // does not reject promptly — it publishes its ledgerRequest and then waits the gather window
+    // out on a timer `dispose()` never clears. Awaiting the rejection first would turn "it asked
+    // the group for the ledger" into a bare timeout that names nothing.
+    const op = alice.peer.replay()
+    const owned = op.catch(() => {})
+    await flush(150)
+
+    expect(recorder.calls()).toEqual([])
+    await expect(op).rejects.toThrow(/disposed/i)
+    await owned
+
+    await bob.peer.dispose()
+  })
+})
+
+describe('dispose against a recover made afterwards', () => {
+  test('recover() after dispose asks the group for nothing', async () => {
+    const fake = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x87)
+
+    const recorder = createRecordingHub(fake)
+
+    // A short rendezvous window, and the only member on the topic. Unguarded, `recover()` cannot be
+    // answered and is not refused either: it pulls, publishes its request, waits the window out and
+    // RESOLVES. The window is short so the mutation check does not sit on a timer.
+    const alice = makeMLSPeer(recorder.hub, 'alice', rs, {
+      epoch: 1,
+      members,
+      recovery: { timeoutMs: 50, getDelayMs: () => 5, deadlineMs: 200 },
+    })
+    await flush()
+    await alice.peer.dispose()
+    recorder.start()
+
+    // Owned before the traffic assertion, for the same reason as the commit test: the damage lands
+    // long before the promise settles.
+    const op = alice.peer.recover()
+    const owned = op.catch(() => {})
+    await flush(120)
+
+    expect(recorder.calls()).toEqual([])
+    await expect(op).rejects.toThrow(/disposed/i)
+    await owned
+  })
+})
+
+describe('dispose against a commit delivery queued behind a lane operation', () => {
+  test('a delivery that resumes after dispose does not pull the commit log', async () => {
+    const fake = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x88)
+
+    const recorder = createRecordingHub(fake)
+
+    // The mutex holder, and the reason it is the JOURNAL that is gated rather than a hub call:
+    // whatever holds the mutex keeps running after the gate opens, and anything it says to the hub
+    // then would land in the recording. `replay()` over an empty journal and a complete ledger says
+    // nothing at all — `replayJournal` returns at the empty slot and `ensureLedger` returns early.
+    let openGate = (): void => {}
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve
+    })
+    let gateArmed = false
+    const real = createMemoryCommitJournal()
+    const journal: MemoryCommitJournal = {
+      ...real,
+      async get() {
+        if (gateArmed) {
+          gateArmed = false
+          await gate
+        }
+        return await real.get()
+      },
+    }
+
+    const alice = makeMLSPeer(fake, 'alice', rs, { epoch: 1, members })
+    const bob = makeMLSPeer(recorder.hub, 'bob', rs, { epoch: 1, members, journal })
+    await flush()
+
+    // Armed only now: bob's init seed replays the journal too, and gating THAT would stop him ever
+    // becoming ready.
+    gateArmed = true
+    const holder = bob.peer.replay()
+    await flush()
+
+    // Alice's commit reaches bob's commit listener, which acks and hands its lane operation to
+    // `runSerial` — where it queues, because `replay()` still holds the mutex inside the gate.
+    await alice.peer.commit(buildLedgerCommit(alice, ['queued-behind-the-lane']))
+    await flush()
+
+    // Returns without waiting on the mutex: dispose awaits `settled`, and the queued delivery is
+    // not on that path. That is the hole this test is about.
+    await bob.peer.dispose()
+    recorder.start()
+
+    openGate()
+    await holder
+    await flush(80)
+
+    // The queued callback has now run, against a peer disposed several awaits ago. Unguarded it
+    // runs the whole lane operation, and `pullCommits` is the part that reaches the hub.
+    // Unlike the other tests here, this assertion has no paired rejection to keep it honest: its
+    // bite depends entirely on the delivery still queueing, and the mutation check is the only
+    // proof it does.
+    expect(recorder.calls()).toEqual([])
+
+    await alice.peer.dispose()
   })
 })

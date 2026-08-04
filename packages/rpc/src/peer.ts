@@ -711,8 +711,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   }
 
   /**
-   * Set as `dispose()`'s FIRST statement, and the whole of the peer's post-dispose rule: a
-   * disposed peer refuses everything.
+   * Set as `dispose()`'s FIRST statement. The peer's post-dispose rule has two forms and this is
+   * the host-facing one: everything a HOST asks of a disposed peer is refused, loudly. On the
+   * inbound side only the COMMIT lane is refused, silently, where a delivery has no caller to tell
+   * (`onCommitDelivery`). The rendezvous responder lane still has no check — see residual 5 in
+   * `docs/agents/plans/next/2026-07-31-close-medium-test-gaps-residuals.md`.
    *
    * The check belongs immediately after each entry point's `await ready`, because that await is
    * where the race lives. `dispose()` awaits a promise DERIVED from `ready`, so a call queued
@@ -1349,6 +1352,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     ack()
     void runSerial(async () => {
       await ready
+      // A delivery queued here when `dispose()` ran is not on the path dispose waits for: it awaits
+      // `settled`, never the mutex. Refused SILENTLY, unlike every host-facing entry point — there
+      // is no caller to tell, and the catch below would swallow a throw anyway.
+      if (disposed) return
       // A wakeup is a lane operation: step 0, the ledger invariant, then the pull. No return
       // value, so anything found is stashed for the next call that has one.
       const replayed = await replayJournal()
