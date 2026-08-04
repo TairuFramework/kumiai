@@ -712,10 +712,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
 
   /**
    * Set as `dispose()`'s FIRST statement. The peer's post-dispose rule has two forms and this is
-   * the host-facing one: everything a HOST asks of a disposed peer is refused, loudly. On the
-   * inbound side only the COMMIT lane is refused, silently, where a delivery has no caller to tell
-   * (`onCommitDelivery`). The rendezvous responder lane still has no check — see residual 5 in
-   * `docs/agents/plans/next/2026-07-31-close-medium-test-gaps-residuals.md`.
+   * the host-facing one: everything a HOST asks of a disposed peer is refused, loudly. The inbound
+   * side is refused silently, where a delivery has no caller to tell: the commit lane
+   * (`onCommitDelivery`), and the two rendezvous responders, whose reply timers can fire before
+   * dispose and would otherwise land their publish after it.
    *
    * The check belongs immediately after each entry point's `await ready`, because that await is
    * where the race lives. `dispose()` awaits a promise DERIVED from `ready`, so a call queued
@@ -889,6 +889,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           // The port verifies the request and checks the requester's leaf against its own current
           // tree. A refused request raises, and this peer stays silent.
           const groupInfo = await port.sealGroupInfo(request.request)
+          // Same window as `handleLedgerRequest`'s guard: a timer that fired before dispose is
+          // gone from `pendingReplies` by the time the clear sweep runs, and is then an await
+          // away from here. Silent, for the same reason.
+          if (disposed) return
           // Mailbox class, deliberately: a rendezvous frame must never move the commit topic's
           // head, and its reader — the requester — subscribed before it asked.
           await mux.publish({
@@ -960,6 +964,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           // The port verifies the request and checks the requester's leaf against its own current
           // tree. A refused request raises, and this peer stays silent.
           const sealed = await port.sealLedger(request.request)
+          // This timer fired before dispose()'s clear sweep, so it had already deleted itself
+          // from `pendingLedgerReplies` when the sweep walked it — too late by construction, not
+          // by race. Silent, like `onCommitDelivery`: there is no caller to tell, and the catch
+          // below would swallow a throw anyway.
+          if (disposed) return
           await mux.publish({
             topicID,
             payload: encodeHandshakeFrame(

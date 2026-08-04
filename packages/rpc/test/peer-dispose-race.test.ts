@@ -6,7 +6,7 @@ import type { SubscribeFailure } from '../src/hub-mux.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryCommitJournal, type MemoryCommitJournal } from './fixtures/journal.js'
-import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
+import { createMemoryGroupMLS, type MemoryGroupMLS } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, buildRemoveCommit, makeMLSPeer } from './fixtures/peer.js'
 import { createRecordingHub } from './fixtures/recording-hub.js'
 
@@ -366,6 +366,166 @@ describe('dispose against a commit delivery queued behind a lane operation', () 
     // proof it does.
     expect(recorder.calls()).toEqual([])
 
+    await alice.peer.dispose()
+  })
+})
+
+describe('dispose against a ledger reply whose timer already fired', () => {
+  test('the sealed ledger is not published after dispose', async () => {
+    const fake = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x89)
+
+    const recorder = createRecordingHub(fake)
+
+    // The gate goes on the SEAL, not the publish: it parks bob's reply IIFE exactly where the
+    // window is — timer fired, so it has already deleted itself from `pendingLedgerReplies` and
+    // dispose()'s clear sweep cannot reach it, but the publish has not happened yet.
+    let sealEntered = false
+    let sealResumed = false
+    let openGate = (): void => {}
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve
+    })
+
+    const bobCrypto = createFakeCrypto({ epoch: 1, localDID: 'bob' })
+    const bobInner = createMemoryGroupMLS({
+      recoverySecret: rs,
+      epoch: 1,
+      localDID: 'bob',
+      members,
+      onAdvance: (e) => bobCrypto.setEpoch(e),
+    })
+    const bobMLS: MemoryGroupMLS = {
+      ...bobInner,
+      async sealLedger(request: Uint8Array) {
+        sealEntered = true
+        await gate
+        sealResumed = true
+        return await bobInner.sealLedger(request)
+      },
+    }
+
+    const bob = makeMLSPeer(recorder.hub, 'bob', rs, {
+      mls: bobMLS,
+      crypto: bobCrypto,
+      members,
+      // Delay 0 so the reply timer fires within the test rather than under jitter.
+      recovery: { timeoutMs: 120, getDelayMs: () => 0, deadlineMs: 600 },
+    })
+    await flush()
+    // `handleLedgerRequest` checks `isLedgerComplete()` BEFORE sealing, so without an entry bob
+    // returns early and never reaches the gate.
+    await bob.peer.commit(buildLedgerCommit(bob, ['circle:x=Bob']))
+    await flush()
+
+    // Alice takes the bare hub: only the peer under test is recorded. Built plainly, exactly as
+    // `peer-dispose-heal.test.ts:79-85` builds its rejoining peer — she needs no pre-adopted
+    // commit, because it is her bootstrap and not a divergence that sends the requests.
+    const alice = makeMLSPeer(fake, 'alice', rs, {
+      epoch: 1,
+      members,
+      recovery: { timeoutMs: 120, getDelayMs: () => 0, deadlineMs: 600 },
+    })
+    await flush()
+
+    // Her rejoin publishes a recoveryRequest (bob answers it — sealGroupInfo is NOT gated), then
+    // gathers the ledger, which is the request bob parks on. It resolves once that gather times
+    // out, so by the time it returns bob's timer has long since fired.
+    await alice.peer.recover()
+
+    // The proof the window is open. Without it, a delivery that stopped arriving would leave the
+    // recording empty and this test would pass for nothing.
+    expect(sealEntered).toBe(true)
+
+    await bob.peer.dispose()
+    recorder.start()
+
+    openGate()
+    await flush(80)
+
+    // The parked IIFE resumed and reached the guard. Without this, a continuation that never ran
+    // would leave the recording empty and the assertion below would pass for nothing.
+    expect(sealResumed).toBe(true)
+
+    // Unguarded, the parked IIFE resumes and publishes the sealed ledger to the rendezvous topic
+    // from a peer its host tore down several awaits ago.
+    expect(recorder.calls()).toEqual([])
+
+    await alice.peer.dispose()
+  })
+})
+
+describe('dispose against a recovery reply whose timer already fired', () => {
+  test('the sealed group info is not published after dispose', async () => {
+    const fake = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x8a)
+
+    const recorder = createRecordingHub(fake)
+
+    // Same gate placement as the ledger reply, on this responder's own seal.
+    let sealEntered = false
+    let sealResumed = false
+    let openGate = (): void => {}
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve
+    })
+
+    const bobCrypto = createFakeCrypto({ epoch: 1, localDID: 'bob' })
+    const bobInner = createMemoryGroupMLS({
+      recoverySecret: rs,
+      epoch: 1,
+      localDID: 'bob',
+      members,
+      onAdvance: (e) => bobCrypto.setEpoch(e),
+    })
+    const bobMLS: MemoryGroupMLS = {
+      ...bobInner,
+      async sealGroupInfo(request: Uint8Array) {
+        sealEntered = true
+        await gate
+        sealResumed = true
+        return await bobInner.sealGroupInfo(request)
+      },
+    }
+
+    const bob = makeMLSPeer(recorder.hub, 'bob', rs, {
+      mls: bobMLS,
+      crypto: bobCrypto,
+      members,
+      recovery: { timeoutMs: 120, getDelayMs: () => 0, deadlineMs: 600 },
+    })
+    await flush()
+
+    // Bare hub, built plainly — same as the ledger test.
+    const alice = makeMLSPeer(fake, 'alice', rs, {
+      epoch: 1,
+      members,
+      recovery: { timeoutMs: 120, getDelayMs: () => 0, deadlineMs: 600 },
+    })
+    await flush()
+
+    // NOT awaited, unlike the ledger test: bob's groupInfo seal is the thing being held, so no
+    // reply can reach her and this settles only on her own recovery timeout. The `.catch` owns
+    // whichever way it settles — an unowned rejection fails the run somewhere else entirely.
+    const rejoin = alice.peer.recover().catch(() => {})
+    await flush(80)
+
+    expect(sealEntered).toBe(true)
+
+    await bob.peer.dispose()
+    recorder.start()
+
+    openGate()
+    await flush(80)
+
+    // The parked IIFE resumed and reached the guard. Without this, a continuation that never ran
+    // would leave the recording empty and the assertion below would pass for nothing.
+    expect(sealResumed).toBe(true)
+
+    // Unguarded, the parked IIFE publishes a sealed GroupInfo to the rendezvous topic.
+    expect(recorder.calls()).toEqual([])
+
+    await rejoin
     await alice.peer.dispose()
   })
 })

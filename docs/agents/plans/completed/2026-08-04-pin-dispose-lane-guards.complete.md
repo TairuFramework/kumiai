@@ -81,12 +81,14 @@ three pre-existing inline wrappers stay as they are — they record different fi
 
 ## Follow-on
 
-**Residual 5**, opened by this branch's own final review and filed in
+**Residual 5**, opened by this branch's own final review and briefly filed as its own section in
 `docs/agents/plans/next/2026-07-31-close-medium-test-gaps-residuals.md`: the rendezvous responder
 lane still publishes after dispose. A reply timer that has already fired deleted itself from its
 pending set before `dispose()`'s `clearTimeout` sweep walked it, and is then several MLS awaits from
 a `mux.publish` — a sealed GroupInfo or the group's whole sealed ledger, from a torn-down peer. Out
 of scope here (this branch's scope was residuals 1 and 2) and needs its own mutation-checked test.
+Closed on `fix/rendezvous-dispose-guard`, 2026-08-04; that section is now removed from the residuals
+doc.
 
 Residuals 3 and 4 remain in the same file, untouched and not renumbered.
 
