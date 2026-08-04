@@ -381,6 +381,7 @@ describe('dispose against a ledger reply whose timer already fired', () => {
     // window is — timer fired, so it has already deleted itself from `pendingLedgerReplies` and
     // dispose()'s clear sweep cannot reach it, but the publish has not happened yet.
     let sealEntered = false
+    let sealResumed = false
     let openGate = (): void => {}
     const gate = new Promise<void>((resolve) => {
       openGate = resolve
@@ -399,6 +400,7 @@ describe('dispose against a ledger reply whose timer already fired', () => {
       async sealLedger(request: Uint8Array) {
         sealEntered = true
         await gate
+        sealResumed = true
         return await bobInner.sealLedger(request)
       },
     }
@@ -441,6 +443,10 @@ describe('dispose against a ledger reply whose timer already fired', () => {
     openGate()
     await flush(80)
 
+    // The parked IIFE resumed and reached the guard. Without this, a continuation that never ran
+    // would leave the recording empty and the assertion below would pass for nothing.
+    expect(sealResumed).toBe(true)
+
     // Unguarded, the parked IIFE resumes and publishes the sealed ledger to the rendezvous topic
     // from a peer its host tore down several awaits ago.
     expect(recorder.calls()).toEqual([])
@@ -458,6 +464,7 @@ describe('dispose against a recovery reply whose timer already fired', () => {
 
     // Same gate placement as the ledger reply, on this responder's own seal.
     let sealEntered = false
+    let sealResumed = false
     let openGate = (): void => {}
     const gate = new Promise<void>((resolve) => {
       openGate = resolve
@@ -476,6 +483,7 @@ describe('dispose against a recovery reply whose timer already fired', () => {
       async sealGroupInfo(request: Uint8Array) {
         sealEntered = true
         await gate
+        sealResumed = true
         return await bobInner.sealGroupInfo(request)
       },
     }
@@ -509,6 +517,10 @@ describe('dispose against a recovery reply whose timer already fired', () => {
 
     openGate()
     await flush(80)
+
+    // The parked IIFE resumed and reached the guard. Without this, a continuation that never ran
+    // would leave the recording empty and the assertion below would pass for nothing.
+    expect(sealResumed).toBe(true)
 
     // Unguarded, the parked IIFE publishes a sealed GroupInfo to the rendezvous topic.
     expect(recorder.calls()).toEqual([])

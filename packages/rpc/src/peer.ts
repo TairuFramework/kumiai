@@ -890,8 +890,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           // tree. A refused request raises, and this peer stays silent.
           const groupInfo = await port.sealGroupInfo(request.request)
           // Same window as `handleLedgerRequest`'s guard: a timer that fired before dispose is
-          // gone from `pendingReplies` by the time the clear sweep runs, and is then several
-          // awaits from here. Silent, for the same reason.
+          // gone from `pendingReplies` by the time the clear sweep runs, and is then an await
+          // away from here. Silent, for the same reason.
           if (disposed) return
           // Mailbox class, deliberately: a rendezvous frame must never move the commit topic's
           // head, and its reader — the requester — subscribed before it asked.
@@ -964,10 +964,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           // The port verifies the request and checks the requester's leaf against its own current
           // tree. A refused request raises, and this peer stays silent.
           const sealed = await port.sealLedger(request.request)
-          // This timer fired BEFORE dispose, so it had already deleted itself from
-          // `pendingLedgerReplies` when dispose()'s clear sweep walked it — too late by
-          // construction, not by race. Silent, like `onCommitDelivery`: there is no caller to
-          // tell, and the catch below would swallow a throw anyway.
+          // This timer fired before dispose()'s clear sweep, so it had already deleted itself
+          // from `pendingLedgerReplies` when the sweep walked it — too late by construction, not
+          // by race. Silent, like `onCommitDelivery`: there is no caller to tell, and the catch
+          // below would swallow a throw anyway.
           if (disposed) return
           await mux.publish({
             topicID,
