@@ -87,6 +87,7 @@ lane still publishes after dispose. A reply timer that has already fired deleted
 pending set before `dispose()`'s `clearTimeout` sweep walked it, and is then several MLS awaits from
 a `mux.publish` — a sealed GroupInfo or the group's whole sealed ledger, from a torn-down peer. Out
 of scope here (this branch's scope was residuals 1 and 2) and needs its own mutation-checked test.
+Closed on `fix/rendezvous-dispose-guard`, 2026-08-04.
 
 Residuals 3 and 4 remain in the same file, untouched and not renumbered.
 

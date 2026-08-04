@@ -712,10 +712,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
 
   /**
    * Set as `dispose()`'s FIRST statement. The peer's post-dispose rule has two forms and this is
-   * the host-facing one: everything a HOST asks of a disposed peer is refused, loudly. On the
-   * inbound side only the COMMIT lane is refused, silently, where a delivery has no caller to tell
-   * (`onCommitDelivery`). The rendezvous responder lane still has no check — see residual 5 in
-   * `docs/agents/plans/next/2026-07-31-close-medium-test-gaps-residuals.md`.
+   * the host-facing one: everything a HOST asks of a disposed peer is refused, loudly. The inbound
+   * side is refused silently, where a delivery has no caller to tell: the commit lane
+   * (`onCommitDelivery`), and the two rendezvous responders, whose reply timers can fire before
+   * dispose and would otherwise land their publish after it.
    *
    * The check belongs immediately after each entry point's `await ready`, because that await is
    * where the race lives. `dispose()` awaits a promise DERIVED from `ready`, so a call queued

@@ -4,7 +4,8 @@
 **Origin:** the whole-branch review of `test/close-medium-test-gaps`, 2026-07-31. Four items were
 triaged out of scope for that branch's final fix wave; residuals 1 and 2 were closed on
 `test/pin-dispose-lane-guards`, 2026-08-03. Residual 5 was opened by that same branch's own final
-review, 2026-08-04, not by the 2026-07-31 review. Background:
+review, 2026-08-04, not by the 2026-07-31 review, and closed the same day by
+`fix/rendezvous-dispose-guard`, leaving only 3 and 4 open. Background:
 `docs/agents/plans/completed/2026-07-31-close-medium-test-gaps.complete.md` and the retired doc
 `docs/agents/plans/completed/2026-07-07-test-gaps.complete.md`.
 
@@ -36,21 +37,3 @@ with `docs/agents/plans/backlog/rpc-api-surface.md` rather than on its own.
 Note for whoever takes it: both dispose tests currently assert `/disposed/i` against the message
 prose (`peer-dispose-race.test.ts`), so a named class is an opportunity to make them assert on a
 type instead. Until then, the message string is load-bearing.
-
-## 5. The rendezvous responder lane has no post-dispose check
-
-`onRendezvousMessage` (`peer.ts:1375`) never checks `disposed`. Its two responders,
-`handleRecoveryRequest` (`peer.ts:879-907`) and `handleLedgerRequest` (`peer.ts:951-976`), each fire
-a `setTimeout` whose
-callback deletes itself from `pendingReplies` / `pendingLedgerReplies` as its FIRST act, then runs
-an async IIFE several real MLS awaits (`sealGroupInfo` / `sealLedger`) before `mux.publish`. A
-timer that has already fired when `dispose()` runs is gone from the set `dispose()`'s
-`clearTimeout` sweep walks — too late by construction, not by race. `mux.publish` carries no
-disposed check of its own, and `assertSubscribable` (`hub-mux.ts:391-394`) only throws on a
-`'refused'` subscription; `dispose()`'s `rendezvousUnsubscribe?.()` just drops a local refcount
-(`hub-mux.ts` `release`), so the subscription still passes. The publish reaches the hub: a sealed
-GroupInfo or the group's whole sealed ledger, published from a peer its host has already torn down.
-
-Out of scope for `test/pin-dispose-lane-guards`, whose scope was residuals 1 and 2. Closing it
-needs its own mutation-checked test, whose observable is a `mux.publish` from a fired-but-unfinished
-reply timer.
