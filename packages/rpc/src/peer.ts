@@ -889,6 +889,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           // The port verifies the request and checks the requester's leaf against its own current
           // tree. A refused request raises, and this peer stays silent.
           const groupInfo = await port.sealGroupInfo(request.request)
+          // Same window as `handleLedgerRequest`'s guard: a timer that fired before dispose is
+          // gone from `pendingReplies` by the time the clear sweep runs, and is then several
+          // awaits from here. Silent, for the same reason.
+          if (disposed) return
           // Mailbox class, deliberately: a rendezvous frame must never move the commit topic's
           // head, and its reader — the requester — subscribed before it asked.
           await mux.publish({

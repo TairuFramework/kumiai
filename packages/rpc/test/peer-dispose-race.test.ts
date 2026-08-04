@@ -448,3 +448,72 @@ describe('dispose against a ledger reply whose timer already fired', () => {
     await alice.peer.dispose()
   })
 })
+
+describe('dispose against a recovery reply whose timer already fired', () => {
+  test('the sealed group info is not published after dispose', async () => {
+    const fake = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x8a)
+
+    const recorder = createRecordingHub(fake)
+
+    // Same gate placement as the ledger reply, on this responder's own seal.
+    let sealEntered = false
+    let openGate = (): void => {}
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve
+    })
+
+    const bobCrypto = createFakeCrypto({ epoch: 1, localDID: 'bob' })
+    const bobInner = createMemoryGroupMLS({
+      recoverySecret: rs,
+      epoch: 1,
+      localDID: 'bob',
+      members,
+      onAdvance: (e) => bobCrypto.setEpoch(e),
+    })
+    const bobMLS: MemoryGroupMLS = {
+      ...bobInner,
+      async sealGroupInfo(request: Uint8Array) {
+        sealEntered = true
+        await gate
+        return await bobInner.sealGroupInfo(request)
+      },
+    }
+
+    const bob = makeMLSPeer(recorder.hub, 'bob', rs, {
+      mls: bobMLS,
+      crypto: bobCrypto,
+      members,
+      recovery: { timeoutMs: 120, getDelayMs: () => 0, deadlineMs: 600 },
+    })
+    await flush()
+
+    // Bare hub, built plainly — same as the ledger test.
+    const alice = makeMLSPeer(fake, 'alice', rs, {
+      epoch: 1,
+      members,
+      recovery: { timeoutMs: 120, getDelayMs: () => 0, deadlineMs: 600 },
+    })
+    await flush()
+
+    // NOT awaited, unlike the ledger test: bob's groupInfo seal is the thing being held, so no
+    // reply can reach her and this settles only on her own recovery timeout. The `.catch` owns
+    // whichever way it settles — an unowned rejection fails the run somewhere else entirely.
+    const rejoin = alice.peer.recover().catch(() => {})
+    await flush(80)
+
+    expect(sealEntered).toBe(true)
+
+    await bob.peer.dispose()
+    recorder.start()
+
+    openGate()
+    await flush(80)
+
+    // Unguarded, the parked IIFE publishes a sealed GroupInfo to the rendezvous topic.
+    expect(recorder.calls()).toEqual([])
+
+    await rejoin
+    await alice.peer.dispose()
+  })
+})
