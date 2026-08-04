@@ -39,8 +39,9 @@ type instead. Until then, the message string is load-bearing.
 
 ## 5. The rendezvous responder lane has no post-dispose check
 
-`onRendezvousMessage` never checks `disposed`. Its two responders, `handleRecoveryRequest`
-(`peer.ts:877-905`) and `handleLedgerRequest` (`peer.ts:949-974`), each fire a `setTimeout` whose
+`onRendezvousMessage` (`peer.ts:1375`) never checks `disposed`. Its two responders,
+`handleRecoveryRequest` (`peer.ts:879-907`) and `handleLedgerRequest` (`peer.ts:951-976`), each fire
+a `setTimeout` whose
 callback deletes itself from `pendingReplies` / `pendingLedgerReplies` as its FIRST act, then runs
 an async IIFE several real MLS awaits (`sealGroupInfo` / `sealLedger`) before `mux.publish`. A
 timer that has already fired when `dispose()` runs is gone from the set `dispose()`'s
