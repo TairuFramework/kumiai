@@ -960,6 +960,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           // The port verifies the request and checks the requester's leaf against its own current
           // tree. A refused request raises, and this peer stays silent.
           const sealed = await port.sealLedger(request.request)
+          // This timer fired BEFORE dispose, so it had already deleted itself from
+          // `pendingLedgerReplies` when dispose()'s clear sweep walked it — too late by
+          // construction, not by race. Silent, like `onCommitDelivery`: there is no caller to
+          // tell, and the catch below would swallow a throw anyway.
+          if (disposed) return
           await mux.publish({
             topicID,
             payload: encodeHandshakeFrame(
