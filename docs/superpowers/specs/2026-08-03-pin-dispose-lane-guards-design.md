@@ -80,9 +80,9 @@ the last entry, so no reply ever passes the head check and the requester never b
 start recording, call `replay()`. Unguarded, the recording shows `publish:<rendezvous>`.
 
 Only the disposed peer gets the recording wrapper; the responder is handed the `FakeHub` directly.
-Both peers wrap one hub instance, so they still share state, but a live responder's own drain calls
-`receive` continuously — through a shared wrapper it would fill the recording with another peer's
-traffic and the assertion could never be empty.
+Both peers wrap one hub instance, so they still share state, but a live responder's own `publish` /
+`fetchTopic` / `subscribe` traffic all lands in the recording — through a shared wrapper it would
+fill the recording with another peer's traffic and the assertion could never be empty.
 
 ### B. `recover()` after dispose asks the group for nothing
 

@@ -117,7 +117,7 @@ describe('dispose against an in-flight subscribe', () => {
       epoch: 1,
       members: threeMembers,
       // A disposed peer's caller cannot see this any other way: `resync()` and every protocol entry
-      // point refuse outright once `disposed` is set (`assertLive`, `peer.ts:731`), and the
+      // point refuse outright once `disposed` is set (`assertLive`, `peer.ts:734`), and the
       // inbound-commit rebuild is now refused too (`onCommitDelivery`). What this test watches is
       // NOT a post-dispose rebuild — bob's rebuild runs below, while he is still live — but the
       // subscribes it left in flight, answered only after `dispose()` returned.
@@ -361,6 +361,9 @@ describe('dispose against a commit delivery queued behind a lane operation', () 
 
     // The queued callback has now run, against a peer disposed several awaits ago. Unguarded it
     // runs the whole lane operation, and `pullCommits` is the part that reaches the hub.
+    // Unlike the other tests here, this assertion has no paired rejection to keep it honest: its
+    // bite depends entirely on the delivery still queueing, and the mutation check is the only
+    // proof it does.
     expect(recorder.calls()).toEqual([])
 
     await alice.peer.dispose()

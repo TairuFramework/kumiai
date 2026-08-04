@@ -16,8 +16,9 @@ export type RecordingHub = {
  * tests assert is that a peer talks to it NEVER — after a specific moment. Recording from
  * construction would bury that in a peer's ordinary life.
  *
- * Hand this to ONE peer. A live peer's mux drain calls `receive` on a loop, so a recorder shared
- * with a second peer can never report an empty list no matter what the peer under test does.
+ * Hand this to ONE peer. A second live peer's `publish` / `fetchTopic` / `subscribe` traffic all lands
+ * in the recording, so a recorder shared with a second peer can never report an empty list no
+ * matter what the peer under test does.
  */
 export function createRecordingHub(inner: LogHub): RecordingHub {
   let recording = false
@@ -37,18 +38,19 @@ export function createRecordingHub(inner: LogHub): RecordingHub {
       },
       unsubscribe: (subscriberDID, topicID) => {
         record(`unsubscribe:${topicID}`)
+        // Optional on `HubBase` (hub-tunnel/src/transport.ts:118), so optional here too.
         return inner.unsubscribe?.(subscriberDID, topicID)
       },
-      receive: (subscriberDID) => {
+      receive: (subscriberDID, options) => {
         record('receive')
-        return inner.receive(subscriberDID)
+        return inner.receive(subscriberDID, options)
       },
       fetchTopic: (params) => {
         record(`fetchTopic:${params.topicID}`)
         return inner.fetchTopic(params)
       },
     },
-    calls: () => calls,
+    calls: () => [...calls],
     start: () => {
       recording = true
     },
