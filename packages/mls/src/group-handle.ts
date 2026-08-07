@@ -555,6 +555,22 @@ export class GroupHandle {
   }
 
   /**
+   * The resolvable form of a member's DID — the string to hand a DID resolver or a JWE
+   * recipient — or `undefined` when the group has no such member. `undefined` carries that one
+   * meaning: every member has a long form.
+   *
+   * Accepts either form of `id`, normalizing both sides exactly as {@link findMemberLeafIndex}
+   * does, so a caller holding a long form read off another leaf need not truncate it first.
+   */
+  findMemberLongForm(id: string): string | undefined {
+    const targetNorm = normalizeDID(id)
+    for (const member of this.#iterateMembers()) {
+      if (normalizeDID(member.id) === targetNorm) return member.longForm
+    }
+    return undefined
+  }
+
+  /**
    * The group's current members from the ratchet tree, in ascending leaf-index
    * order. Leaves whose credential identity fails to parse are skipped (like
    * findMemberLeafIndex). Reflects current #state — call before and after

@@ -37,3 +37,39 @@ describe('GroupMember.longForm', () => {
     expect(member?.longForm).toBe(identity.id)
   })
 })
+
+describe('GroupHandle.findMemberLongForm', () => {
+  it('resolves a did:peer:4 member given their short form', async () => {
+    const identity = await peer4Identity()
+    const { group } = await createGroup(identity, 'lookup-short')
+
+    expect(group.findMemberLongForm(identity.id)).toBe(identity.longForm)
+  })
+
+  it('resolves the same member given their long form', async () => {
+    const identity = await peer4Identity()
+    const { group } = await createGroup(identity, 'lookup-long')
+
+    // normalizeDID truncates a peer:4 long form to its short form, so a caller holding either
+    // form finds the member. A consumer that has just read `longForm` off one member and wants
+    // another's should not have to normalize first.
+    expect(group.findMemberLongForm(identity.longForm)).toBe(identity.longForm)
+  })
+
+  it('resolves a did:key member to their id', async () => {
+    const identity = randomIdentity()
+    const { group } = await createGroup(identity, 'lookup-didkey')
+
+    expect(group.findMemberLongForm(identity.id)).toBe(identity.id)
+  })
+
+  it('returns undefined for a DID that is not a member', async () => {
+    const identity = await peer4Identity()
+    const stranger = await peer4Identity()
+    const { group } = await createGroup(identity, 'lookup-stranger')
+
+    // undefined means "no such member", and only that. It never means "this member has no
+    // long form" — every member has one.
+    expect(group.findMemberLongForm(stranger.id)).toBeUndefined()
+  })
+})
