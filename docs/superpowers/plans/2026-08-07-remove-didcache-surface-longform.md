@@ -353,7 +353,7 @@ import {
 
 (dropping `populateCacheFromCredential`).
 
-- [ ] **Step 2: Run the type check to see it go red on the source that still exists**
+- [ ] **Step 2: Run the type check to confirm the import edit is correct**
 
 ```bash
 pnpm --filter @kumiai/mls exec tsc --noEmit --skipLibCheck -p tsconfig.test.json
