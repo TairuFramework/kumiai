@@ -1,4 +1,4 @@
-import { type DIDCache, decodePeer4, isPeer4, normalizeDID } from '@kokuin/token'
+import { normalizeDID } from '@kokuin/token'
 import { type Credential, defaultCredentialTypes, isDefaultCredential } from 'ts-mls'
 
 /**
@@ -80,24 +80,6 @@ export function parseMLSCredentialIdentity(identity: Uint8Array): MLSCredentialI
     result.longForm = candidate.longForm
   }
   return result
-}
-
-/**
- * If the parsed credential carries a did:peer:4 long form, decode it and write
- * to the cache. Hash binding is enforced (decoded short form must equal `id`).
- * No-op for did:key.
- */
-export async function populateCacheFromCredential(
-  parsed: MLSCredentialIdentity,
-  cache: DIDCache,
-): Promise<void> {
-  if (parsed.longForm == null) return
-  if (!isPeer4(parsed.id)) return
-  const { shortForm, doc } = decodePeer4(parsed.longForm)
-  if (shortForm !== parsed.id) {
-    throw new Error('Credential longForm does not match credential.id')
-  }
-  await cache.set(shortForm, doc)
 }
 
 /**

@@ -32,7 +32,6 @@ export {
   type MemberCredential,
   type MLSCredentialIdentity,
   parseMLSCredentialIdentity,
-  populateCacheFromCredential,
 } from './credential.js'
 export {
   createNobleCryptoProvider,

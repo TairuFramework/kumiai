@@ -1,4 +1,4 @@
-import { type DIDCache, type DIDResolver, normalizeDID } from '@kokuin/token'
+import { normalizeDID } from '@kokuin/token'
 import {
   type ClientState,
   contentTypes,
@@ -247,8 +247,6 @@ export type GroupHandleParams = {
    *  derived from another (commitInvite/removeMember) inherits the parent's, so the
    *  roster it folds does not revert to the anchor alone. */
   ledger?: ReadonlyArray<LedgerLogEntry>
-  cache: DIDCache
-  resolver?: DIDResolver
   /** Default commit policy applied by processMessage. */
   commitPolicy?: IncomingMessageCallback
   /** Fetch control-ledger entry bodies the local ledger lacks (commit pre-pass). */
@@ -262,8 +260,6 @@ export class GroupHandle {
   #state: ClientState
   #credential: MemberCredential
   #context: MlsContext
-  #cache: DIDCache
-  #resolver?: DIDResolver
   #commitPolicy?: IncomingMessageCallback
   #resolveLedgerEntries?: (ids: Array<string>) => Promise<Array<string>>
   #onLedgerEntries?: (entries: Array<VerifiedLedgerEntry>) => void
@@ -281,8 +277,6 @@ export class GroupHandle {
     this.#state = params.state
     this.#credential = params.credential
     this.#context = params.context
-    this.#cache = params.cache
-    this.#resolver = params.resolver
     this.#commitPolicy = params.commitPolicy
     this.#resolveLedgerEntries = params.resolveLedgerEntries
     this.#onLedgerEntries = params.onLedgerEntries
@@ -323,14 +317,6 @@ export class GroupHandle {
 
   get context(): MlsContext {
     return this.#context
-  }
-
-  get cache(): DIDCache {
-    return this.#cache
-  }
-
-  get resolver(): DIDResolver | undefined {
-    return this.#resolver
   }
 
   /** The commit policy enforced by processMessage, if any. Carried onto
@@ -1076,8 +1062,6 @@ export function deriveGroup(group: GroupHandle, state: ClientState): GroupHandle
     credential: group.credential,
     context: group.context,
     ledger: group.ledger,
-    cache: group.cache,
-    resolver: group.resolver,
     commitPolicy: group.commitPolicy,
     resolveLedgerEntries: group.resolveLedgerEntries,
     onLedgerEntries: group.onLedgerEntries,

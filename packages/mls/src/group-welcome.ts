@@ -1,4 +1,4 @@
-import { createInMemoryDIDCache, normalizeDID, type OwnIdentity } from '@kokuin/token'
+import { normalizeDID, type OwnIdentity } from '@kokuin/token'
 import {
   decode,
   encode,
@@ -46,7 +46,6 @@ type JoinGroupParams = Parameters<typeof mlsJoinGroup>[0]
 
 export async function processWelcome(params: ProcessWelcomeParams): Promise<ProcessWelcomeResult> {
   const { identity, invite, welcome, keyPackageBundle, ratchetTree, options } = params
-  const cache = options?.cache ?? createInMemoryDIDCache()
   const context = await resolveMlsContext(options)
 
   // A Welcome is only this member's when the invite carries a role entry naming
@@ -98,8 +97,6 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
     state,
     credential,
     context,
-    cache,
-    resolver: options?.resolver,
     commitPolicy: options?.commitPolicy,
     resolveLedgerEntries: options?.resolveLedgerEntries,
     onLedgerEntries: options?.onLedgerEntries,
@@ -209,7 +206,6 @@ export async function joinGroupExternal(
     )
   }
 
-  const cache = options?.cache ?? createInMemoryDIDCache()
   const context = await resolveMlsContext(options)
 
   const message = decode(mlsMessageDecoder, groupInfoBytes)
@@ -264,8 +260,6 @@ export async function joinGroupExternal(
     state: newState,
     credential,
     context,
-    cache,
-    resolver: options?.resolver,
     commitPolicy: options?.commitPolicy,
     resolveLedgerEntries: options?.resolveLedgerEntries,
     onLedgerEntries: options?.onLedgerEntries,

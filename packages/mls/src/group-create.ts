@@ -1,4 +1,4 @@
-import { createInMemoryDIDCache, normalizeDID, type OwnIdentity } from '@kokuin/token'
+import { normalizeDID, type OwnIdentity } from '@kokuin/token'
 import { type ClientState, generateKeyPackageWithKey, createGroup as mlsCreateGroup } from 'ts-mls'
 
 import {
@@ -25,7 +25,6 @@ export async function createGroup(
   groupID: string,
   options?: GroupOptions,
 ): Promise<CreateGroupResult> {
-  const cache = options?.cache ?? createInMemoryDIDCache()
   const context = await resolveMlsContext(options)
 
   // Every group is anchored at creation: creator is the epoch-0 admin, ledger head
@@ -79,8 +78,6 @@ export async function createGroup(
     state,
     credential,
     context,
-    cache,
-    resolver: options?.resolver,
     commitPolicy: options?.commitPolicy,
     resolveLedgerEntries: options?.resolveLedgerEntries,
     onLedgerEntries: options?.onLedgerEntries,
@@ -98,15 +95,12 @@ export type RestoreGroupParams = {
 }
 
 export async function restoreGroup(params: RestoreGroupParams): Promise<GroupHandle> {
-  const cache = params.options?.cache ?? createInMemoryDIDCache()
   // Construction reseeds `{creator: 'admin'}` from the anchor in the restored state;
   // an anchorless state throws (the same fail-closed guard).
   const group = new GroupHandle({
     state: params.state,
     credential: params.credential,
     context: await resolveMlsContext(params.options),
-    cache,
-    resolver: params.options?.resolver,
     commitPolicy: params.options?.commitPolicy,
     resolveLedgerEntries: params.options?.resolveLedgerEntries,
     onLedgerEntries: params.options?.onLedgerEntries,

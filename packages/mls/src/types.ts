@@ -1,4 +1,3 @@
-import type { DIDCache, DIDResolver } from '@kokuin/token'
 import type {
   Capabilities,
   CryptoProvider,
@@ -53,10 +52,6 @@ export type GroupOptions = {
    * into the roster, everything else is handed to the consumer here.
    */
   onLedgerEntries?: (entries: Array<VerifiedLedgerEntry>) => void
-  /** Optional DID cache for resolving did:peer:4 issuers when verifying ledger entries. Default: in-memory. */
-  cache?: DIDCache
-  /** Optional resolver for did:peer:4 short forms not in cache. */
-  resolver?: DIDResolver
 }
 
 export type Invite = {
