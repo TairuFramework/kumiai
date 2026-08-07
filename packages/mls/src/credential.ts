@@ -35,6 +35,17 @@ export type GroupMember = {
   leafIndex: number
   /** DID parsed from the leaf's MLS credential identity. */
   id: string
+  /**
+   * The resolvable form of `id`: the leaf's `longForm` for did:peer:4, and `id` itself for
+   * did:key, where long form and short form are the same string. Never absent.
+   *
+   * This is why `@kumiai/mls` holds no DID cache. Every document a consumer can reach is
+   * already inside a signed artifact — a current member's in this leaf, which is signed and
+   * can never be rewritten, and a ledger author's in their own token, which `signLedgerEntry`
+   * gives `{ embedLongForm: true }` for exactly that reason. A cache alongside those would be
+   * an unsigned second copy of authenticated state.
+   */
+  longForm: string
 }
 
 export function parseMLSCredentialIdentity(identity: Uint8Array): MLSCredentialIdentity {
