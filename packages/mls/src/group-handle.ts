@@ -1,4 +1,4 @@
-import { type DIDCache, type DIDResolver, normalizeDID } from '@kokuin/token'
+import { normalizeDID } from '@kokuin/token'
 import {
   type ClientState,
   contentTypes,
@@ -247,8 +247,6 @@ export type GroupHandleParams = {
    *  derived from another (commitInvite/removeMember) inherits the parent's, so the
    *  roster it folds does not revert to the anchor alone. */
   ledger?: ReadonlyArray<LedgerLogEntry>
-  cache: DIDCache
-  resolver?: DIDResolver
   /** Default commit policy applied by processMessage. */
   commitPolicy?: IncomingMessageCallback
   /** Fetch control-ledger entry bodies the local ledger lacks (commit pre-pass). */
@@ -262,8 +260,6 @@ export class GroupHandle {
   #state: ClientState
   #credential: MemberCredential
   #context: MlsContext
-  #cache: DIDCache
-  #resolver?: DIDResolver
   #commitPolicy?: IncomingMessageCallback
   #resolveLedgerEntries?: (ids: Array<string>) => Promise<Array<string>>
   #onLedgerEntries?: (entries: Array<VerifiedLedgerEntry>) => void
@@ -281,8 +277,6 @@ export class GroupHandle {
     this.#state = params.state
     this.#credential = params.credential
     this.#context = params.context
-    this.#cache = params.cache
-    this.#resolver = params.resolver
     this.#commitPolicy = params.commitPolicy
     this.#resolveLedgerEntries = params.resolveLedgerEntries
     this.#onLedgerEntries = params.onLedgerEntries
@@ -323,14 +317,6 @@ export class GroupHandle {
 
   get context(): MlsContext {
     return this.#context
-  }
-
-  get cache(): DIDCache {
-    return this.#cache
-  }
-
-  get resolver(): DIDResolver | undefined {
-    return this.#resolver
   }
 
   /** The commit policy enforced by processMessage, if any. Carried onto
@@ -536,7 +522,12 @@ export class GroupHandle {
           } catch {
             continue
           }
-          yield { leafIndex: i / 2, id: parsed.id }
+          // `?? parsed.id` is the did:key case, where long form IS the id. It is unreachable
+          // for peer:4 for any leaf that entered through an add or a join: makeMLSCredential
+          // refuses to build a peer:4 identity without a long form, and validateCredential
+          // rejects any peer:4 leaf lacking one before it can enter a ratchet tree. restore
+          // trusts the host's own persisted state, so neither gate runs on that path.
+          yield { leafIndex: i / 2, id: parsed.id, longForm: parsed.longForm ?? parsed.id }
         }
       }
     }
@@ -546,6 +537,22 @@ export class GroupHandle {
     const targetNorm = normalizeDID(id)
     for (const member of this.#iterateMembers()) {
       if (normalizeDID(member.id) === targetNorm) return member.leafIndex
+    }
+    return undefined
+  }
+
+  /**
+   * The resolvable form of a member's DID — the string to hand a DID resolver or a JWE
+   * recipient — or `undefined` when the group has no such member. `undefined` carries that one
+   * meaning: every member has a long form.
+   *
+   * Accepts either form of `id`, normalizing both sides exactly as {@link findMemberLeafIndex}
+   * does, so a caller holding a long form read off another leaf need not truncate it first.
+   */
+  findMemberLongForm(id: string): string | undefined {
+    const targetNorm = normalizeDID(id)
+    for (const member of this.#iterateMembers()) {
+      if (normalizeDID(member.id) === targetNorm) return member.longForm
     }
     return undefined
   }
@@ -1056,8 +1063,6 @@ export function deriveGroup(group: GroupHandle, state: ClientState): GroupHandle
     credential: group.credential,
     context: group.context,
     ledger: group.ledger,
-    cache: group.cache,
-    resolver: group.resolver,
     commitPolicy: group.commitPolicy,
     resolveLedgerEntries: group.resolveLedgerEntries,
     onLedgerEntries: group.onLedgerEntries,

@@ -1,4 +1,4 @@
-import { createIdentity, createInMemoryDIDCache } from '@kokuin/token'
+import { createIdentity } from '@kokuin/token'
 import { type Credential, defaultCredentialTypes } from 'ts-mls'
 import { describe, expect, it } from 'vitest'
 
@@ -6,7 +6,6 @@ import {
   didFromCredential,
   type MemberCredential,
   parseMLSCredentialIdentity,
-  populateCacheFromCredential,
 } from '../src/credential.js'
 import { makeMLSCredential } from '../src/group.js'
 
@@ -61,40 +60,6 @@ describe('parseMLSCredentialIdentity', () => {
   it('rejects an identity with an unknown v', () => {
     const bytes = new TextEncoder().encode(JSON.stringify({ v: 2, id: 'did:key:z6MkABC' }))
     expect(() => parseMLSCredentialIdentity(bytes)).toThrow(/v(ersion)?/i)
-  })
-})
-
-describe('populateCacheFromCredential', () => {
-  it('writes the doc to the cache when longForm matches id', async () => {
-    const identity = await createIdentity({
-      keys: [{ purpose: 'sig', alg: 'EdDSA' }],
-      didMethod: 'peer:4',
-    })
-    const cache = createInMemoryDIDCache()
-    await populateCacheFromCredential({ id: identity.id, longForm: identity.longForm }, cache)
-    expect(await cache.get(identity.id)).toEqual(identity.doc)
-  })
-
-  it('is a no-op when longForm is absent', async () => {
-    const cache = createInMemoryDIDCache()
-    await expect(
-      populateCacheFromCredential({ id: 'did:key:z6MkSample' }, cache),
-    ).resolves.toBeUndefined()
-  })
-
-  it('rejects when longForm hash does not match id', async () => {
-    const alice = await createIdentity({
-      keys: [{ purpose: 'sig', alg: 'EdDSA' }],
-      didMethod: 'peer:4',
-    })
-    const bob = await createIdentity({
-      keys: [{ purpose: 'sig', alg: 'EdDSA' }],
-      didMethod: 'peer:4',
-    })
-    const cache = createInMemoryDIDCache()
-    await expect(
-      populateCacheFromCredential({ id: alice.id, longForm: bob.longForm }, cache),
-    ).rejects.toThrow(/does not match/i)
   })
 })
 

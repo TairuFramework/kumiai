@@ -256,13 +256,11 @@ async function exportForged(
   creator: OwnIdentity,
   groupID: string,
   context: MlsContext,
-  cache: GroupHandle['cache'],
 ): Promise<Uint8Array> {
   const handle = new GroupHandle({
     state,
     credential: { id: creator.id, groupID },
     context,
-    cache,
   })
   return (await exportGroupInfo({ group: handle })).groupInfo
 }
@@ -289,13 +287,7 @@ describe('a forged GroupInfo reply is refused', () => {
       context: carolGroup.context,
       splice: bobBundle.publicPackage,
     })
-    const forgedGroupInfo = await exportForged(
-      state,
-      mallory,
-      bobGroup.groupID,
-      carolGroup.context,
-      carolGroup.cache,
-    )
+    const forgedGroupInfo = await exportForged(state, mallory, bobGroup.groupID, carolGroup.context)
     const sealed = await sealForgedReply({
       requesterGroup: bobGroup,
       signer: mallory,
@@ -337,13 +329,7 @@ describe('a forged GroupInfo reply is refused', () => {
       context: carolGroup.context,
       splice: bobBundle.publicPackage,
     })
-    const forgedGroupInfo = await exportForged(
-      state,
-      carol,
-      bobGroup.groupID,
-      carolGroup.context,
-      carolGroup.cache,
-    )
+    const forgedGroupInfo = await exportForged(state, carol, bobGroup.groupID, carolGroup.context)
     const sealed = await sealForgedReply({
       requesterGroup: bobGroup,
       signer: carol,
@@ -399,13 +385,7 @@ describe('a forged GroupInfo reply is refused', () => {
       context: carolGroup.context,
       splice: bobBundle.publicPackage,
     })
-    const forgedGroupInfo = await exportForged(
-      state,
-      carol,
-      bobGroup.groupID,
-      carolGroup.context,
-      carolGroup.cache,
-    )
+    const forgedGroupInfo = await exportForged(state, carol, bobGroup.groupID, carolGroup.context)
     const sealed = await sealForgedReply({
       requesterGroup: bobGroup,
       signer: carol,
