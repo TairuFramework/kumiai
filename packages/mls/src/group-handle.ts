@@ -523,9 +523,10 @@ export class GroupHandle {
             continue
           }
           // `?? parsed.id` is the did:key case, where long form IS the id. It is unreachable
-          // for peer:4: makeMLSCredential refuses to build a peer:4 identity without a long
-          // form, and validateCredential rejects any peer:4 leaf lacking one before it can
-          // enter a ratchet tree.
+          // for peer:4 for any leaf that entered through an add or a join: makeMLSCredential
+          // refuses to build a peer:4 identity without a long form, and validateCredential
+          // rejects any peer:4 leaf lacking one before it can enter a ratchet tree. restore
+          // trusts the host's own persisted state, so neither gate runs on that path.
           yield { leafIndex: i / 2, id: parsed.id, longForm: parsed.longForm ?? parsed.id }
         }
       }

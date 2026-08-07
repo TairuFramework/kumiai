@@ -1,7 +1,13 @@
 import { createIdentity, randomIdentity } from '@kokuin/token'
 import { describe, expect, it } from 'vitest'
 
-import { createGroup } from '../src/group.js'
+import {
+  commitInvite,
+  createGroup,
+  createInvite,
+  createKeyPackageBundle,
+  processWelcome,
+} from '../src/group.js'
 
 /** A did:peer:4 identity carrying the signing and agreement keys a real member holds. */
 function peer4Identity() {
@@ -35,6 +41,43 @@ describe('GroupMember.longForm', () => {
     const member = group.listMembers()[0]
     expect(member?.id).toBe(identity.id)
     expect(member?.longForm).toBe(identity.id)
+  })
+
+  it('reports a peer:4 member other than self on the leaf the local device did not write', async () => {
+    const alice = await peer4Identity()
+    const bob = await peer4Identity()
+
+    const { group: aliceGroup } = await createGroup(alice, 'long-form-peer')
+
+    const { invite } = await createInvite({
+      group: aliceGroup,
+      identity: alice,
+      recipientDID: bob.id,
+      permission: 'member',
+    })
+    const bobKeyBundle = await createKeyPackageBundle(bob)
+    const { welcomeMessage, newGroup: updatedAliceGroup } = await commitInvite(
+      aliceGroup,
+      bobKeyBundle.publicPackage,
+      invite,
+    )
+
+    const { group: bobGroup } = await processWelcome({
+      identity: bob,
+      invite,
+      welcome: welcomeMessage,
+      keyPackageBundle: bobKeyBundle,
+      ratchetTree: updatedAliceGroup.state.ratchetTree,
+    })
+
+    // Bob's handle reads alice's long form off alice's signed leaf — the leaf bob did not write.
+    expect(bobGroup.findMemberLongForm(alice.id)).toBe(alice.longForm)
+    // The inviter side too: alice's post-commit handle reads bob's long form off bob's leaf.
+    expect(updatedAliceGroup.findMemberLongForm(bob.id)).toBe(bob.longForm)
+
+    const longForms = bobGroup.listMembers().map((member) => member.longForm)
+    expect(longForms).toContain(alice.longForm)
+    expect(longForms).toContain(bob.longForm)
   })
 })
 

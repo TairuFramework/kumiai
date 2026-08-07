@@ -127,6 +127,11 @@ excess-property-check spreads, so kubun will keep compiling green against a `Gro
 longer declares the field. **It must be removed in kubun deliberately — a build will not report
 it.** kubun's credential store then reads `findMemberLongForm` instead.
 
+`RestoreMLSGroupHandleParams.cache`'s doc comment
+(`kubun/packages/plugin-p2p/src/groups/mls-group-handle.ts:33-35`) also needs to go: "Omitting it
+does not disable caching — `@kumiai/mls` mints a fresh in-memory cache per handle instead, so…"
+becomes false with this change, and it will not turn up when someone greps kubun for `DIDCache`.
+
 That cleanup is kubun's own change, tracked from kubun's credential-store spec
 (`kubun/docs/superpowers/specs/2026-08-07-credential-store-design.md`). This spec covers kumiai only.
 
