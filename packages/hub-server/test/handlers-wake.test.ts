@@ -73,9 +73,35 @@ describe('hub/v1/wake/register', () => {
       }),
     ).resolves.toEqual({ registered: true })
 
-    const stored = await registry.get(clientDID)
-    expect(stored?.endpoint).toBe('https://push.example/a')
-    expect(stored?.did).toBe(clientDID)
+    // The full stored object, not a subset: a handler that swapped publicKey/authSecret or
+    // dropped a field would still pass a partial assertion. Everything the sender fed in must
+    // round-trip verbatim, and the DID must be the authenticated caller's, not a wire field.
+    expect(await registry.get(clientDID)).toEqual({
+      did: clientDID,
+      kind: 'webpush',
+      endpoint: 'https://push.example/a',
+      publicKey: 'cHVibGlj',
+      authSecret: 'YXV0aA',
+    })
+    await dispose()
+  })
+
+  test('carries expiresAt through to the stored registration', async () => {
+    const registry = createMemoryWakeRegistry()
+    const { client, clientDID, dispose } = await createTestHub({ wake: { registry } })
+    const expiresAt = Math.floor(Date.now() / 1000) + 3600
+
+    await client.request('hub/v1/wake/register', {
+      param: {
+        kind: 'webpush',
+        endpoint: 'https://push.example/a',
+        publicKey: 'cHVibGlj',
+        authSecret: 'YXV0aA',
+        expiresAt,
+      },
+    })
+
+    expect((await registry.get(clientDID))?.expiresAt).toBe(expiresAt)
     await dispose()
   })
 
@@ -118,9 +144,43 @@ describe('hub/v1/wake/register', () => {
     ).rejects.toMatchObject({ code: HUB_ERROR_CODES.wakeNotSupported })
     await dispose()
   })
+
+  test('rejects a wire-supplied did instead of silently ignoring it', async () => {
+    const registry = createMemoryWakeRegistry()
+    const { client, dispose } = await createTestHub({ wake: { registry } })
+
+    // The param schema declares no `did` property and sets `additionalProperties: false`, so a
+    // caller trying to name another DID must be rejected outright — not accepted with the extra
+    // field quietly dropped, which would leave an attacker unsure whether their attempt to
+    // redirect someone else's wakes was refused or merely ignored.
+    // `EK08` is enkaku's own schema-validation rejection ("Invalid protocol message"): the
+    // request never reaches the handler at all, because `additionalProperties: false` on the
+    // param schema is the thing actually doing the rejecting.
+    await expect(
+      client.request('hub/v1/wake/register', {
+        param: {
+          did: 'did:key:attacker',
+          kind: 'webpush',
+          endpoint: 'https://push.example/a',
+          publicKey: 'cHVibGlj',
+          authSecret: 'YXV0aA',
+        } as never,
+      }),
+    ).rejects.toMatchObject({ code: 'EK08' })
+    expect(await registry.get('did:key:attacker')).toBeNull()
+    await dispose()
+  })
 })
 
 describe('hub/v1/wake/unregister', () => {
+  test('refuses when the hub has no wake support', async () => {
+    const { client, dispose } = await createTestHub({})
+    await expect(client.request('hub/v1/wake/unregister', { param: {} })).rejects.toMatchObject({
+      code: HUB_ERROR_CODES.wakeNotSupported,
+    })
+    await dispose()
+  })
+
   test('removes the registration', async () => {
     const registry = createMemoryWakeRegistry()
     const { client, clientDID, dispose } = await createTestHub({ wake: { registry } })
