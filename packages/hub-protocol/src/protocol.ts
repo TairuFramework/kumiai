@@ -262,6 +262,56 @@ export const hubProtocol = {
       additionalProperties: false,
     },
   },
+  'hub/v1/wake/register': {
+    type: 'request',
+    description: "Register the caller's push endpoint, replacing any previous one",
+    param: {
+      type: 'object',
+      properties: {
+        /**
+         * Opaque sender tag ('webpush', 'expo', …). The SENDER switches on it; the hub never
+         * interprets it, so a new provider needs no protocol change.
+         */
+        kind: { type: 'string', minLength: 1, maxLength: 32 },
+        /** Opaque delivery address. Never parsed by the hub. */
+        endpoint: { type: 'string', minLength: 1, maxLength: 2048 },
+        /** RFC 8291 user-agent public key: raw uncompressed P-256 point, base64url. */
+        publicKey: { type: 'string', minLength: 1, maxLength: 128 },
+        /** RFC 8291 auth secret, base64url. */
+        authSecret: { type: 'string', minLength: 1, maxLength: 64 },
+        /** When the registration expires, in seconds since the epoch. */
+        expiresAt: { type: 'integer', minimum: 0 },
+      },
+      required: ['kind', 'endpoint', 'publicKey', 'authSecret'],
+      additionalProperties: false,
+    },
+    result: {
+      type: 'object',
+      properties: {
+        registered: { type: 'boolean' },
+      },
+      required: ['registered'],
+      additionalProperties: false,
+    },
+  },
+  'hub/v1/wake/unregister': {
+    type: 'request',
+    description: "Remove the caller's push endpoint",
+    param: {
+      type: 'object',
+      properties: {},
+      additionalProperties: false,
+    },
+    result: {
+      type: 'object',
+      properties: {
+        /** False when the caller had no registration — not an error. */
+        unregistered: { type: 'boolean' },
+      },
+      required: ['unregistered'],
+      additionalProperties: false,
+    },
+  },
 } as const satisfies ProtocolDefinition
 
 export type HubProtocol = typeof hubProtocol

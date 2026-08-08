@@ -863,5 +863,19 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       }
       return { count, lastResort: stored == null ? null : keyPackageDigest(stored) }
     }) as RequestHandler<HubProtocol, 'hub/v1/keypackage/status'>,
+
+    'hub/v1/wake/register': (async (_ctx) => {
+      throw new HandlerError({
+        code: 'not_implemented',
+        message: 'hub/v1/wake/register: not implemented',
+      })
+    }) as RequestHandler<HubProtocol, 'hub/v1/wake/register'>,
+
+    'hub/v1/wake/unregister': (async (_ctx) => {
+      throw new HandlerError({
+        code: 'not_implemented',
+        message: 'hub/v1/wake/unregister: not implemented',
+      })
+    }) as RequestHandler<HubProtocol, 'hub/v1/wake/unregister'>,
   }
 }
