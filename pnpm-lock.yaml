@@ -249,6 +249,22 @@ importers:
         specifier: workspace:^
         version: link:../hub-conformance
 
+  packages/hub-wake:
+    dependencies:
+      '@kumiai/hub-protocol':
+        specifier: workspace:^
+        version: link:../hub-protocol
+      '@noble/curves':
+        specifier: 'catalog:'
+        version: 2.3.0
+      '@noble/hashes':
+        specifier: 'catalog:'
+        version: 2.3.0
+    devDependencies:
+      '@kumiai/hub-conformance':
+        specifier: workspace:^
+        version: link:../hub-conformance
+
   packages/mls:
     dependencies:
       '@kokuin/token':

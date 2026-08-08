@@ -1,0 +1,49 @@
+{
+  "name": "@kumiai/hub-wake",
+  "version": "0.6.0",
+  "description": "Wake-notification registry and senders for a kumiai hub",
+  "keywords": [
+    "hub",
+    "push",
+    "notifications",
+    "webpush",
+    "kumiai"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TairuFramework/kumiai",
+    "directory": "packages/hub-wake"
+  },
+  "license": "MIT",
+  "sideEffects": false,
+  "type": "module",
+  "exports": {
+    ".": "./lib/index.js"
+  },
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "files": [
+    "lib/*"
+  ],
+  "scripts": {
+    "build": "pnpm run build:clean && pnpm run build:js && pnpm run build:types",
+    "build:clean": "del lib",
+    "build:js": "swc src -d ./lib --config-file ../../node_modules/@kigu/dev/swc.json --strip-leading-paths",
+    "build:types": "tsc --emitDeclarationOnly --skipLibCheck",
+    "prepublishOnly": "pnpm run build",
+    "test": "pnpm run test:types && pnpm run test:unit",
+    "test:types": "tsc --noEmit -p tsconfig.test.json",
+    "test:unit": "vitest run"
+  },
+  "dependencies": {
+    "@kumiai/hub-protocol": "workspace:^",
+    "@noble/curves": "catalog:",
+    "@noble/hashes": "catalog:"
+  },
+  "devDependencies": {
+    "@kumiai/hub-conformance": "workspace:^"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
