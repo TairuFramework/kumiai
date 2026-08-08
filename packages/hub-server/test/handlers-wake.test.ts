@@ -2,10 +2,11 @@ import { Client } from '@enkaku/client'
 import type { AnyClientMessageOf, AnyServerMessageOf } from '@enkaku/protocol'
 import { DirectTransports } from '@enkaku/transport'
 import { randomIdentity } from '@kokuin/token'
-import type { HubProtocol, WakeRegistry, WakeSender } from '@kumiai/hub-protocol'
+import type { HubProtocol, WakeRegistration, WakeRegistry, WakeSender } from '@kumiai/hub-protocol'
 import { HUB_ERROR_CODES } from '@kumiai/hub-protocol'
 import { createMemoryWakeRegistry } from '@kumiai/hub-wake'
-import { describe, expect, test } from 'vitest'
+import { p256 } from '@noble/curves/nist.js'
+import { describe, expect, test, vi } from 'vitest'
 
 import type { CreateHubParams } from '../src/hub.js'
 import { createHub } from '../src/hub.js'
@@ -55,6 +56,118 @@ async function createTestHub(
   }
 
   return { client, clientDID: clientIdentity.id, dispose }
+}
+
+// P-256 keypair for a recipient endpoint, as in test/wake.test.ts. Only the dispatch path cares
+// that a registration is well-formed enough to seal a hint against; nothing here opens it.
+const recipientPrivateKey = p256.utils.randomSecretKey()
+const recipientAuthSecretBytes = crypto.getRandomValues(new Uint8Array(16))
+const recipientPublicKeyB64u = Buffer.from(p256.getPublicKey(recipientPrivateKey, false)).toString(
+  'base64url',
+)
+const recipientAuthSecretB64u = Buffer.from(recipientAuthSecretBytes).toString('base64url')
+
+function createRecordingSender(): {
+  sender: WakeSender
+  sent: Array<{ registration: WakeRegistration; body: Uint8Array }>
+} {
+  const sent: Array<{ registration: WakeRegistration; body: Uint8Array }> = []
+  const sender: WakeSender = {
+    async send(params) {
+      sent.push(params)
+      return 'delivered'
+    },
+  }
+  return { sender, sent }
+}
+
+const PAIR_TOPIC = 'topic-a'
+
+type TestHubPairOptions = Omit<CreateHubParams, 'identity' | 'store' | 'transport' | 'wake'> & {
+  wake?: { registry: WakeRegistry; sender: WakeSender; debounceMs?: number }
+}
+
+type TestPublisher = {
+  publish: (param: {
+    topicID: string
+    payload: string
+    retain?: 'log' | 'mailbox'
+  }) => Promise<{ sequenceID: string }>
+}
+
+/**
+ * Two authenticated clients sharing one hub, both subscribed to `topic-a`. The second DID
+ * (`offlineDID`) has no live receive channel — and so no entry in the hub's client registry —
+ * until `bringOnline()` opens one. That lets one harness exercise both the "no live channel"
+ * wake path and its "online, no wake" counterpart.
+ */
+async function createTestHubPair(options: TestHubPairOptions): Promise<{
+  publisher: TestPublisher
+  publisherDID: string
+  offlineDID: string
+  bringOnline: () => Promise<void>
+  dispose: () => Promise<void>
+}> {
+  const { wake, ...hubOptions } = options
+  const store = createMemoryStore()
+  const hubIdentity = randomIdentity()
+  const publisherTransports: HubTransports = new DirectTransports()
+  const subscriberTransports: HubTransports = new DirectTransports()
+  const hub = createHub({
+    ...hubOptions,
+    identity: hubIdentity,
+    store,
+    transport: publisherTransports.server,
+    wake:
+      wake == null
+        ? undefined
+        : { registry: wake.registry, sender: wake.sender, debounceMs: wake.debounceMs },
+  })
+  hub.server.handle(subscriberTransports.server)
+
+  const publisherIdentity = randomIdentity()
+  const publisherClient = new Client<HubProtocol>({
+    transport: publisherTransports.client,
+    identity: publisherIdentity,
+    serverID: hubIdentity.id,
+  })
+  const subscriberIdentity = randomIdentity()
+  const subscriberClient = new Client<HubProtocol>({
+    transport: subscriberTransports.client,
+    identity: subscriberIdentity,
+    serverID: hubIdentity.id,
+  })
+
+  await publisherClient.request('hub/v1/subscribe', { param: { topicID: PAIR_TOPIC } })
+  await subscriberClient.request('hub/v1/subscribe', { param: { topicID: PAIR_TOPIC } })
+
+  let subscriberChannel: ReturnType<typeof subscriberClient.createChannel> | undefined
+
+  async function bringOnline(): Promise<void> {
+    subscriberChannel = subscriberClient.createChannel('hub/v1/receive', { param: {} })
+    subscriberChannel.readable.getReader()
+    // Let the bind (registry.bindReceiveWriter) complete server-side before the caller publishes.
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+
+  async function dispose(): Promise<void> {
+    if (subscriberChannel != null) {
+      subscriberChannel.close()
+      await subscriberChannel.catch(() => {})
+    }
+    await hub.server.dispose()
+    await Promise.all([publisherTransports.dispose(), subscriberTransports.dispose()])
+  }
+
+  return {
+    publisher: {
+      publish: (param) => publisherClient.request('hub/v1/publish', { param }),
+    },
+    publisherDID: publisherIdentity.id,
+    offlineDID: subscriberIdentity.id,
+    bringOnline,
+    dispose,
+  }
 }
 
 describe('hub/v1/wake/register', () => {
@@ -206,6 +319,119 @@ describe('hub/v1/wake/unregister', () => {
     await expect(client.request('hub/v1/wake/unregister', { param: {} })).resolves.toEqual({
       unregistered: false,
     })
+    await dispose()
+  })
+})
+
+describe('wake on publish', () => {
+  test('wakes a subscriber with no live receive channel', async () => {
+    const registry = createMemoryWakeRegistry()
+    const { sender, sent } = createRecordingSender()
+    const { publisher, offlineDID, dispose } = await createTestHubPair({
+      wake: { registry, sender },
+    })
+    await registry.put({
+      did: offlineDID,
+      kind: 'webpush',
+      endpoint: 'https://push.example/a',
+      publicKey: recipientPublicKeyB64u,
+      authSecret: recipientAuthSecretB64u,
+    })
+
+    await publisher.publish({ topicID: 'topic-a', payload: 'aGk' })
+
+    await vi.waitFor(() => expect(sent).toHaveLength(1))
+    await dispose()
+  })
+
+  test('does NOT wake a subscriber that is online', async () => {
+    // Same harness, but the second client holds an open hub/v1/receive channel.
+    const registry = createMemoryWakeRegistry()
+    const { sender, sent } = createRecordingSender()
+    const { publisher, offlineDID, bringOnline, dispose } = await createTestHubPair({
+      wake: { registry, sender },
+    })
+    await registry.put({
+      did: offlineDID,
+      kind: 'webpush',
+      endpoint: 'https://push.example/a',
+      publicKey: recipientPublicKeyB64u,
+      authSecret: recipientAuthSecretB64u,
+    })
+    await bringOnline()
+
+    await publisher.publish({ topicID: 'topic-a', payload: 'aGk' })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(sent).toHaveLength(0)
+    await dispose()
+  })
+
+  test('wakes on a log-class publish too — a commit is what a sleeping device most needs', async () => {
+    const registry = createMemoryWakeRegistry()
+    const { sender, sent } = createRecordingSender()
+    const { publisher, offlineDID, dispose } = await createTestHubPair({
+      wake: { registry, sender },
+    })
+    await registry.put({
+      did: offlineDID,
+      kind: 'webpush',
+      endpoint: 'https://push.example/a',
+      publicKey: recipientPublicKeyB64u,
+      authSecret: recipientAuthSecretB64u,
+    })
+
+    await publisher.publish({ topicID: 'topic-a', payload: 'aGk', retain: 'log' })
+
+    await vi.waitFor(() => expect(sent).toHaveLength(1))
+    await dispose()
+  })
+
+  test('never wakes the sender itself', async () => {
+    const registry = createMemoryWakeRegistry()
+    const { sender, sent } = createRecordingSender()
+    const { publisher, publisherDID, dispose } = await createTestHubPair({
+      wake: { registry, sender },
+    })
+    await registry.put({
+      did: publisherDID,
+      kind: 'webpush',
+      endpoint: 'https://push.example/a',
+      publicKey: recipientPublicKeyB64u,
+      authSecret: recipientAuthSecretB64u,
+    })
+
+    await publisher.publish({ topicID: 'topic-a', payload: 'aGk' })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(sent).toHaveLength(0)
+    await dispose()
+  })
+
+  test('reconnecting cancels the pending trailing summary', async () => {
+    // A short debounce window so the trailing summary — if not cancelled — arrives on real
+    // timers within the test's own budget.
+    const registry = createMemoryWakeRegistry()
+    const { sender, sent } = createRecordingSender()
+    const { publisher, offlineDID, bringOnline, dispose } = await createTestHubPair({
+      wake: { registry, sender, debounceMs: 30 },
+    })
+    await registry.put({
+      did: offlineDID,
+      kind: 'webpush',
+      endpoint: 'https://push.example/a',
+      publicKey: recipientPublicKeyB64u,
+      authSecret: recipientAuthSecretB64u,
+    })
+
+    // Leading edge: the first offline publish wakes immediately and opens the coalescing window.
+    await publisher.publish({ topicID: 'topic-a', payload: 'aGk' })
+    await vi.waitFor(() => expect(sent).toHaveLength(1))
+    // A second offline publish inside the window arms a trailing summary.
+    await publisher.publish({ topicID: 'topic-a', payload: 'aGk' })
+
+    // The device reconnects before the window closes: `online()` must cancel the pending timer.
+    await bringOnline()
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    expect(sent).toHaveLength(1)
     await dispose()
   })
 })

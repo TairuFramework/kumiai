@@ -435,6 +435,11 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
               payload: payloadBytes,
               ...logPosition,
             })
+          } else {
+            // No live channel: the frame is durably queued, so all that is missing is a nudge to
+            // come and get it. Both retention classes wake — a commit-lane frame is log-class, and
+            // a membership change is exactly what a sleeping device must learn.
+            params.wake?.dispatcher?.notify({ did: recipientDID, topicID, sequenceID })
           }
         }
       }
@@ -610,6 +615,8 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         receiveToken = token
         // After the bind, so the lane is never unheld between the two.
         evicted?.()
+        // The device is draining; a trailing summary would be noise it has already outrun.
+        params.wake?.dispatcher?.online(clientDID)
 
         // Drain the backlog. Await each page so lastServed is exact before the flush.
         let cursor: string | null | undefined = after
