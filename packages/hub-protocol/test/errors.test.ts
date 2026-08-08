@@ -9,6 +9,7 @@ import {
   KeyPackageFetchLimitError,
   KeyPackageQuotaExceededError,
   SubscriptionQuotaExceededError,
+  WakeNotSupportedError,
 } from '../src/errors.js'
 
 describe('InvalidPayloadError', () => {
@@ -55,5 +56,19 @@ describe('DoS-hardening hub errors round-trip through their wire codes', () => {
     expect(rebuilt).toBeInstanceOf(Error)
     expect(rebuilt?.name).toBe(name)
     expect(rebuilt?.message).toBe(error.message)
+  })
+})
+
+describe('WakeNotSupportedError', () => {
+  test('crosses the wire as HUB_WAKE_NOT_SUPPORTED', () => {
+    expect(hubErrorCodeOf(new WakeNotSupportedError('no wake'))).toBe(
+      HUB_ERROR_CODES.wakeNotSupported,
+    )
+  })
+
+  test('rebuilds from its code', () => {
+    const rebuilt = hubErrorFromCode(HUB_ERROR_CODES.wakeNotSupported, 'no wake')
+    expect(rebuilt).toBeInstanceOf(WakeNotSupportedError)
+    expect(rebuilt?.message).toBe('no wake')
   })
 })

@@ -12,6 +12,7 @@ export const HUB_ERROR_CODES = {
   keyPackageQuota: 'HUB_KEYPACKAGE_QUOTA',
   subscriptionQuota: 'HUB_SUBSCRIPTION_QUOTA',
   keyPackageFetchLimit: 'HUB_KEYPACKAGE_FETCH_LIMIT',
+  wakeNotSupported: 'HUB_WAKE_NOT_SUPPORTED',
 } as const
 
 export type HubErrorCode = (typeof HUB_ERROR_CODES)[keyof typeof HUB_ERROR_CODES]
@@ -62,6 +63,15 @@ export class KeyPackageFetchLimitError extends Error {
   override name = 'KeyPackageFetchLimitError'
 }
 
+/**
+ * A wake procedure was called on a hub configured without wake support. A settled answer, not a
+ * transient failure: accepting a registration the hub will never act on would leave the device
+ * believing it is reachable.
+ */
+export class WakeNotSupportedError extends Error {
+  override name = 'WakeNotSupportedError'
+}
+
 /** The wire code a hub error crosses as, or null if it is not one of the named hub errors. */
 export function hubErrorCodeOf(error: unknown): HubErrorCode | null {
   if (error instanceof HeadMismatchError) return HUB_ERROR_CODES.headMismatch
@@ -72,6 +82,7 @@ export function hubErrorCodeOf(error: unknown): HubErrorCode | null {
   if (error instanceof KeyPackageQuotaExceededError) return HUB_ERROR_CODES.keyPackageQuota
   if (error instanceof SubscriptionQuotaExceededError) return HUB_ERROR_CODES.subscriptionQuota
   if (error instanceof KeyPackageFetchLimitError) return HUB_ERROR_CODES.keyPackageFetchLimit
+  if (error instanceof WakeNotSupportedError) return HUB_ERROR_CODES.wakeNotSupported
   return null
 }
 
@@ -98,6 +109,8 @@ export function hubErrorFromCode(code: string, message: string): Error | null {
       return new SubscriptionQuotaExceededError(message)
     case HUB_ERROR_CODES.keyPackageFetchLimit:
       return new KeyPackageFetchLimitError(message)
+    case HUB_ERROR_CODES.wakeNotSupported:
+      return new WakeNotSupportedError(message)
     default:
       return null
   }
