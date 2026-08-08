@@ -4,20 +4,20 @@ import {
   type ProcedureHandlers,
   type RequestHandler,
 } from '@enkaku/server'
-import type { HubProtocol, HubStore, StoredMessage } from '@kumiai/hub-protocol'
+import type { HubProtocol, HubStore, StoredMessage, WakeRegistry } from '@kumiai/hub-protocol'
 import {
   HUB_ERROR_CODES,
   hubErrorCodeOf,
   InvalidPayloadError,
   KeyPackageFetchLimitError,
   keyPackageDigest,
-  WakeNotSupportedError,
 } from '@kumiai/hub-protocol'
 import { fromB64, toB64 } from '@sozai/codec'
 import { getReporter } from '@sozai/log'
 
 import { createRateLimiter, type RateLimitConfig } from './rateLimit.js'
 import type { HubClientRegistry } from './registry.js'
+import type { WakeDispatcher } from './wake.js'
 
 /**
  * A single request to authorize. All seven variants ship even though only `publish` and
@@ -83,6 +83,8 @@ export type HubStoreErrorEvent =
   | { method: 'fetchLastResortKeyPackage'; did: string; error: unknown }
   /** The topic whose subscriber list could not be read for live fan-out. */
   | { method: 'getSubscribers'; topicID: string; error: unknown }
+  /** The DID whose wake dispatch (send, or the registry read/delete around it) failed. */
+  | { method: 'wake'; did: string; error: unknown }
 
 export type HubStoreErrorHook = (event: HubStoreErrorEvent) => void
 
@@ -110,6 +112,10 @@ const STORE_ERROR_CONSEQUENCE: Record<HubStoreErrorEvent['method'], string> = {
     'The frame is committed and queued, but the live push to connected subscribers was skipped: ' +
     'each of them stops receiving new frames until it reconnects. A getSubscribers that keeps ' +
     'failing means the hub has silently degraded from push to pull for every publish.',
+  wake:
+    'The offline device was not pinged for this frame. It still redelivers on the next reconnect ' +
+    '(store-and-forward), so nothing is lost — but a wake that keeps failing means the device ' +
+    'stays asleep until something else wakes it.',
 }
 
 const reportStoreError = getReporter(['kumiai', 'hub-server'], '@kumiai/hub-server')
@@ -124,6 +130,7 @@ function subjectOf(event: HubStoreErrorEvent): string {
       return ` on topic ${event.topicID}`
     case 'ack':
     case 'fetchLastResortKeyPackage':
+    case 'wake':
       return ` for ${event.did}`
   }
 }
@@ -211,6 +218,11 @@ export type CreateHandlersParams = {
    * empty handler to silence it deliberately.
    */
   onStoreError?: HubStoreErrorHook
+  /**
+   * Wake support. Absent: both wake procedures refuse. The registry is separate from the
+   * dispatcher because the handlers only ever store and remove; sending is the dispatcher's.
+   */
+  wake?: { registry: WakeRegistry; dispatcher?: WakeDispatcher }
 }
 
 function getClientDID(ctx: { message: { payload: Record<string, unknown> } }): string {
@@ -865,12 +877,52 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       return { count, lastResort: stored == null ? null : keyPackageDigest(stored) }
     }) as RequestHandler<HubProtocol, 'hub/v1/keypackage/status'>,
 
-    'hub/v1/wake/register': (async (_ctx) => {
-      rethrowAsHandlerError(new WakeNotSupportedError('Wake is not supported on this hub'))
+    'hub/v1/wake/register': (async (ctx) => {
+      const clientDID = getClientDID(ctx)
+      const wake = params.wake
+      if (wake == null) {
+        throw new HandlerError({
+          code: HUB_ERROR_CODES.wakeNotSupported,
+          message: 'This hub does not support wake notifications',
+        })
+      }
+      if (!didLimiter.tryConsume(clientDID)) {
+        throw new HandlerError({ code: 'EK01', message: 'Wake rate limit exceeded for DID' })
+      }
+      try {
+        await wake.registry.put({
+          // The DID is the verified issuer, never a wire field — otherwise any member could
+          // redirect another member's wakes to an endpoint they control.
+          did: clientDID,
+          kind: ctx.param.kind,
+          endpoint: ctx.param.endpoint,
+          publicKey: ctx.param.publicKey,
+          authSecret: ctx.param.authSecret,
+          ...(ctx.param.expiresAt != null ? { expiresAt: ctx.param.expiresAt } : {}),
+        })
+      } catch (error) {
+        rethrowAsHandlerError(error)
+      }
+      return { registered: true }
     }) as RequestHandler<HubProtocol, 'hub/v1/wake/register'>,
 
-    'hub/v1/wake/unregister': (async (_ctx) => {
-      rethrowAsHandlerError(new WakeNotSupportedError('Wake is not supported on this hub'))
+    'hub/v1/wake/unregister': (async (ctx) => {
+      const clientDID = getClientDID(ctx)
+      const wake = params.wake
+      if (wake == null) {
+        throw new HandlerError({
+          code: HUB_ERROR_CODES.wakeNotSupported,
+          message: 'This hub does not support wake notifications',
+        })
+      }
+      let existed: boolean
+      try {
+        existed = (await wake.registry.get(clientDID)) != null
+        await wake.registry.delete(clientDID)
+      } catch (error) {
+        rethrowAsHandlerError(error)
+      }
+      return { unregistered: existed }
     }) as RequestHandler<HubProtocol, 'hub/v1/wake/unregister'>,
   }
 }
