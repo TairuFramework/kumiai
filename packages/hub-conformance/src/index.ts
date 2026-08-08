@@ -1135,3 +1135,7 @@ export {
   testMailboxAckConformance,
   testMailboxHubConformance,
 } from './log-hub.js'
+export {
+  testWakeRegistryConformance,
+  type WakeRegistryConformanceParams,
+} from './wake-registry.js'
