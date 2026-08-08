@@ -46,9 +46,17 @@ export function testWakeRegistryConformance(params: WakeRegistryConformanceParam
     test('put REPLACES a previous registration for the same DID', async () => {
       const registry = await params.createRegistry()
       await registry.put(registration({ endpoint: 'https://push.example/old' }))
+      const next = registration({ endpoint: 'https://push.example/new' })
+      await registry.put(next)
+      await expect(registry.get('did:key:alice')).resolves.toEqual(next)
+    })
+
+    test('delete after a replace leaves no registration for the DID', async () => {
+      const registry = await params.createRegistry()
+      await registry.put(registration({ endpoint: 'https://push.example/old' }))
       await registry.put(registration({ endpoint: 'https://push.example/new' }))
-      const stored = await registry.get('did:key:alice')
-      expect(stored?.endpoint).toBe('https://push.example/new')
+      await registry.delete('did:key:alice')
+      await expect(registry.get('did:key:alice')).resolves.toBeNull()
     })
 
     test('registrations are per DID', async () => {
