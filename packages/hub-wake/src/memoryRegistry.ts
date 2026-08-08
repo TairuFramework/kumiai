@@ -10,7 +10,9 @@ export function createMemoryWakeRegistry(): WakeRegistry {
 
   return {
     async put(registration: WakeRegistration): Promise<void> {
-      registrations.set(registration.did, registration)
+      // Cloned on the way in: a real backing store serialises the caller's object, disconnecting it
+      // from storage. Storing the reference would make this double more permissive than any of them.
+      registrations.set(registration.did, { ...registration })
     },
     async get(did: string): Promise<WakeRegistration | null> {
       const stored = registrations.get(did)
@@ -21,7 +23,9 @@ export function createMemoryWakeRegistry(): WakeRegistry {
         registrations.delete(did)
         return null
       }
-      return stored
+      // Cloned on the way out for the same reason: a caller mutating what it got back must not
+      // corrupt the stored entry with no `put` in between.
+      return { ...stored }
     },
     async delete(did: string): Promise<void> {
       registrations.delete(did)
