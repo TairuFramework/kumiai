@@ -3,53 +3,93 @@
   intents:
     - rpc-lanes-and-lifecycle
     - version-band-0-5
+"@kumiai/broadcast@0.6.0":
+  dir: packages/broadcast
+  intents:
+    - remove-didcache-surface-longform
 "@kumiai/hub-client@0.5.0":
   dir: packages/hub-client
   intents:
     - keypackage-provisioning
     - version-band-0-5
+"@kumiai/hub-client@0.6.0":
+  dir: packages/hub-client
+  intents:
+    - remove-didcache-surface-longform
 "@kumiai/hub-conformance@0.5.0":
   dir: packages/hub-conformance
   intents:
     - keypackage-provisioning
     - rpc-lanes-and-lifecycle
     - version-band-0-5
+"@kumiai/hub-conformance@0.6.0":
+  dir: packages/hub-conformance
+  intents:
+    - remove-didcache-surface-longform
 "@kumiai/hub-protocol@0.5.0":
   dir: packages/hub-protocol
   intents:
     - hub-delivery-and-store-errors
     - keypackage-provisioning
     - version-band-0-5
+"@kumiai/hub-protocol@0.6.0":
+  dir: packages/hub-protocol
+  intents:
+    - remove-didcache-surface-longform
 "@kumiai/hub-server@0.5.0":
   dir: packages/hub-server
   intents:
     - hub-delivery-and-store-errors
     - keypackage-provisioning
     - version-band-0-5
+"@kumiai/hub-server@0.6.0":
+  dir: packages/hub-server
+  intents:
+    - remove-didcache-surface-longform
 "@kumiai/hub-tunnel@0.5.0":
   dir: packages/hub-tunnel
   intents:
     - rpc-lanes-and-lifecycle
     - version-band-0-5
+"@kumiai/hub-tunnel@0.6.0":
+  dir: packages/hub-tunnel
+  intents:
+    - remove-didcache-surface-longform
 "@kumiai/mls-hub@0.5.0":
   dir: packages/mls-hub
   intents:
     - keypackage-provisioning
     - version-band-0-5
+"@kumiai/mls-hub@0.6.0":
+  dir: packages/mls-hub
+  intents:
+    - remove-didcache-surface-longform
 "@kumiai/mls-rpc@0.5.0":
   dir: packages/mls-rpc
   intents:
     - version-band-0-5
+"@kumiai/mls-rpc@0.6.0":
+  dir: packages/mls-rpc
+  intents:
+    - remove-didcache-surface-longform
 "@kumiai/mls@0.5.0":
   dir: packages/mls
   intents:
     - keypackage-provisioning
     - roster-identity-binding
     - version-band-0-5
+"@kumiai/mls@0.6.0":
+  dir: packages/mls
+  intents:
+    - remove-didcache-surface-longform
 "@kumiai/rpc-conformance@0.5.0":
   dir: packages/rpc-conformance
   intents:
     - version-band-0-5
+"@kumiai/rpc-conformance@0.6.0":
+  dir: packages/rpc-conformance
+  intents:
+    - remove-didcache-surface-longform
 "@kumiai/rpc@0.5.0":
   dir: packages/rpc
   intents:
@@ -57,3 +97,9 @@
     - keypackage-provisioning
     - rpc-lanes-and-lifecycle
     - version-band-0-5
+"@kumiai/rpc@0.6.0":
+  dir: packages/rpc
+  intents:
+    - dispose-lane-guards
+    - remove-didcache-surface-longform
+    - rendezvous-dispose-guard

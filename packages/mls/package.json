@@ -1,6 +1,6 @@
 {
   "name": "@kumiai/mls",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "E2EE group identity and membership for Enkaku using MLS",
   "keywords": [
     "mls",

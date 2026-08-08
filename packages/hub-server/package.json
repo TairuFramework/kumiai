@@ -1,6 +1,6 @@
 {
   "name": "@kumiai/hub-server",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Hub server for Enkaku E2EE group message routing",
   "keywords": [
     "hub",

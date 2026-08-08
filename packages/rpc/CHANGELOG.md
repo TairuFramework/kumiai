@@ -1,5 +1,39 @@
 # @kumiai/rpc
 
+## 0.6.0
+
+### Minor Changes
+
+- **Breaking (`@kumiai/mls`):** `GroupOptions.cache`, `GroupOptions.resolver`, the matching
+  `GroupHandle` params and getters, and the exported `populateCacheFromCredential` are gone. Nothing
+  in the package ever read or wrote either one, so a consumer passing a cache was getting a
+  passthrough that would report a miss for a document it had been told would be there.
+
+  `GroupMember` now carries `longForm`, the resolvable form of `id` — the leaf's long form for
+  did:peer:4, `id` itself for did:key — and `GroupHandle.findMemberLongForm(id)` looks it up by
+  either form. That is what a consumer needing a member's DID document should use: it reads the
+  signed leaf rather than an unsigned copy beside it.
+
+  The rest of the band takes the minor because all eleven packages share one pre-1.0 version band.
+
+### Patch Changes
+
+- A commit delivery queued behind the commit mutex when `dispose()` ran is now refused. `dispose()`
+  awaits `settled`, never the mutex, so such a delivery used to resume against a torn-down peer and
+  rebuild its epoch — fetching the commit topic from a peer its host had already disposed. Refused
+  silently, unlike every host-facing entry point: an inbound delivery has no caller to tell.
+
+- A rendezvous reply whose timer fired before `dispose()` no longer publishes after it. Both
+  responders — `handleRecoveryRequest` and `handleLedgerRequest` — schedule a `setTimeout` whose
+  callback removes itself from its pending set before awaiting the MLS seal, so `dispose()`'s
+  `clearTimeout` sweep could not reach one already in flight, and a sealed GroupInfo or the group's
+  whole sealed ledger could go out from a torn-down peer.
+
+- Updated dependencies:
+  - @kumiai/broadcast@0.6.0
+  - @kumiai/hub-protocol@0.6.0
+  - @kumiai/hub-tunnel@0.6.0
+
 ## 0.5.0
 
 ### Minor Changes
