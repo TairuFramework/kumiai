@@ -46,7 +46,8 @@
   "devDependencies": {
     "@enkaku/client": "catalog:",
     "@enkaku/transport": "catalog:",
-    "@kumiai/hub-conformance": "workspace:^"
+    "@kumiai/hub-conformance": "workspace:^",
+    "@kumiai/hub-wake": "workspace:^"
   },
   "publishConfig": {
     "access": "public"

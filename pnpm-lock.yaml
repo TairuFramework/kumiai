@@ -211,6 +211,9 @@ importers:
       '@kumiai/hub-conformance':
         specifier: workspace:^
         version: link:../hub-conformance
+      '@kumiai/hub-wake':
+        specifier: workspace:^
+        version: link:../hub-wake
 
   packages/hub-tunnel:
     dependencies:
