@@ -16,7 +16,7 @@
     "test": "pnpm run check:versions && turbo run test:types test:unit"
   },
   "devDependencies": {
-    "@kigu/dev": "^0.2.0"
+    "@kigu/dev": "^0.2.1"
   },
-  "packageManager": "pnpm@11.18.0"
+  "packageManager": "pnpm@11.20.0"
 }

@@ -37,7 +37,14 @@ function setupCapture(records: Array<CapturedRecord>): void {
         })
       },
     },
-    loggers: [{ category: ['kumiai'], lowestLevel: 'debug', sinks: ['capture'] }],
+    loggers: [
+      // Without an entry covering it, logtape treats the meta logger as unconfigured, attaches a
+      // console sink of its own and prints an info-level notice on every configure(). No sink
+      // named here: `records` is asserted against, and logtape's own diagnostics are not the
+      // records under test.
+      { category: ['logtape', 'meta'], lowestLevel: 'error', sinks: [] },
+      { category: ['kumiai'], lowestLevel: 'debug', sinks: ['capture'] },
+    ],
   })
 }
 
