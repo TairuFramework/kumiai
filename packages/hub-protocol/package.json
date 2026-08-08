@@ -36,6 +36,8 @@
   },
   "dependencies": {
     "@enkaku/protocol": "catalog:",
+    "@noble/ciphers": "catalog:",
+    "@noble/curves": "catalog:",
     "@noble/hashes": "catalog:",
     "@sozai/event": "catalog:"
   },

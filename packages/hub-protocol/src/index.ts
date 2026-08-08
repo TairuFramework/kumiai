@@ -44,3 +44,14 @@ export type {
   WakeSendParams,
   WakeVerdict,
 } from './wake.js'
+export {
+  decodeBase64url,
+  encodeBase64url,
+  openWakeHint,
+  sealWakeHint,
+  WAKE_HINT_VERSION,
+  WAKE_RECORD_SIZE,
+  type WakeHint,
+  type WakeOpener,
+  type WakeRecipient,
+} from './wake-envelope.js'

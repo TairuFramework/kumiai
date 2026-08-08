@@ -1,0 +1,187 @@
+import { gcm } from '@noble/ciphers/aes.js'
+import { p256 } from '@noble/curves/nist.js'
+import { expand, extract } from '@noble/hashes/hkdf.js'
+import { sha256 } from '@noble/hashes/sha2.js'
+import { randomBytes } from '@noble/hashes/utils.js'
+
+/** The hint schema version, carried INSIDE the sealed JSON as `v`. */
+export const WAKE_HINT_VERSION = 1
+
+/**
+ * The aes128gcm record size. Every sealed body is padded to it, so its length says nothing about
+ * the topic or the count. A body is 597 bytes at this size — far under Web Push's 4096 limit.
+ */
+export const WAKE_RECORD_SIZE = 512
+
+/** What the device learns from a wake, once it has opened it. */
+export type WakeHint = {
+  /** The topic the frame landed on. The device maps it to a group locally; that map never leaves. */
+  topicID: string
+  sequenceID: string
+  /** Frames seen for this device since its LAST wake ping — not its total backlog. */
+  count: number
+}
+
+export type WakeRecipient = {
+  /** Raw uncompressed P-256 point, 65 bytes. */
+  publicKey: Uint8Array
+  /** 16 bytes. */
+  authSecret: Uint8Array
+}
+
+export type WakeOpener = {
+  privateKey: Uint8Array
+  authSecret: Uint8Array
+}
+
+/** Test-only overrides, so the RFC's worked example can be reproduced. Never passed in production. */
+export type SealOverrides = {
+  senderPrivateKey?: Uint8Array
+  salt?: Uint8Array
+  recordSize?: number
+  plaintext?: Uint8Array
+}
+
+/**
+ * base64url, via `atob`/`btoa` rather than `Buffer`: this module is imported by hub-client, which
+ * runs under React Native, and by hub-protocol's own `src`, which has no Node types.
+ */
+export function encodeBase64url(bytes: Uint8Array): string {
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '')
+}
+
+export function decodeBase64url(value: string): Uint8Array {
+  const binary = atob(value.replaceAll('-', '+').replaceAll('_', '/'))
+  const out = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index++) out[index] = binary.charCodeAt(index)
+  return out
+}
+
+const KEY_INFO_PREFIX = new TextEncoder().encode('WebPush: info')
+const CEK_INFO = new TextEncoder().encode('Content-Encoding: aes128gcm\0')
+const NONCE_INFO = new TextEncoder().encode('Content-Encoding: nonce\0')
+const RECORD_DELIMITER = 2
+
+function concat(...parts: Array<Uint8Array>): Uint8Array {
+  const out = new Uint8Array(parts.reduce((total, part) => total + part.length, 0))
+  let at = 0
+  for (const part of parts) {
+    out.set(part, at)
+    at += part.length
+  }
+  return out
+}
+
+// RFC 8291 section 3.4 then RFC 8188 section 2.2: the auth secret salts the ECDH extract, and the
+// resulting IKM is what the content-encoding's own salt then extracts over.
+function deriveKeys(
+  sharedSecret: Uint8Array,
+  authSecret: Uint8Array,
+  uaPublic: Uint8Array,
+  asPublic: Uint8Array,
+  salt: Uint8Array,
+): { cek: Uint8Array; nonce: Uint8Array } {
+  const prkKey = extract(sha256, sharedSecret, authSecret)
+  const keyInfo = concat(KEY_INFO_PREFIX, new Uint8Array([0]), uaPublic, asPublic)
+  const ikm = expand(sha256, prkKey, keyInfo, 32)
+  const prk = extract(sha256, ikm, salt)
+  return {
+    cek: expand(sha256, prk, CEK_INFO, 16),
+    nonce: expand(sha256, prk, NONCE_INFO, 12),
+  }
+}
+
+/**
+ * Seal a hint for one device, RFC 8291 `aes128gcm`.
+ *
+ * The scheme is not a free choice: a browser refuses a Web Push body that does not decrypt this
+ * way, and one implementation then serves web, Expo, and any later direct-APNs path.
+ */
+export function sealWakeHint(
+  hint: WakeHint,
+  recipient: WakeRecipient,
+  overrides: SealOverrides = {},
+): Uint8Array {
+  const recordSize = overrides.recordSize ?? WAKE_RECORD_SIZE
+  // The 16 subtracted bytes are the GCM tag; one more is the record delimiter.
+  const recordLength = recordSize - 16
+
+  let record: Uint8Array
+  if (overrides.plaintext) {
+    // Test-only path: overrides.plaintext stands in for an already-complete Web Push payload (the
+    // RFC 8291 worked example), which is not padded beyond its own delimiter octet.
+    if (overrides.plaintext.length + 1 > recordLength) {
+      throw new Error(`Wake hint too large: ${overrides.plaintext.length + 1} > ${recordLength}`)
+    }
+    record = concat(overrides.plaintext, new Uint8Array([RECORD_DELIMITER]))
+  } else {
+    // Pad to a fixed length so the body's SIZE carries no information about the hint's contents.
+    const plaintext = new TextEncoder().encode(JSON.stringify({ v: WAKE_HINT_VERSION, ...hint }))
+    if (plaintext.length + 1 > recordLength) {
+      throw new Error(`Wake hint too large: ${plaintext.length + 1} > ${recordLength}`)
+    }
+    record = new Uint8Array(recordLength)
+    record.set(plaintext, 0)
+    record[plaintext.length] = RECORD_DELIMITER
+  }
+
+  const senderPrivate = overrides.senderPrivateKey ?? p256.utils.randomSecretKey()
+  const senderPublic = p256.getPublicKey(senderPrivate, false)
+  const salt = overrides.salt ?? randomBytes(16)
+  // getSharedSecret returns a point with a 1-byte prefix; RFC 8291 uses the X coordinate alone.
+  const shared = p256.getSharedSecret(senderPrivate, recipient.publicKey, false).slice(1, 33)
+  const { cek, nonce } = deriveKeys(
+    shared,
+    recipient.authSecret,
+    recipient.publicKey,
+    senderPublic,
+    salt,
+  )
+
+  const rs = new Uint8Array(4)
+  new DataView(rs.buffer).setUint32(0, recordSize)
+  const header = concat(salt, rs, new Uint8Array([senderPublic.length]), senderPublic)
+  return concat(header, gcm(cek, nonce).encrypt(record))
+}
+
+/** Open a sealed wake body. Throws on a bad key, a corrupt body, or an unknown hint version. */
+export function openWakeHint(body: Uint8Array, opener: WakeOpener): WakeHint {
+  const salt = body.subarray(0, 16)
+  const keyIDLength = body[20]
+  if (keyIDLength == null) {
+    throw new Error('Wake body truncated')
+  }
+  const senderPublic = body.subarray(21, 21 + keyIDLength)
+  const ciphertext = body.subarray(21 + keyIDLength)
+
+  const uaPublic = p256.getPublicKey(opener.privateKey, false)
+  const shared = p256.getSharedSecret(opener.privateKey, senderPublic, false).slice(1, 33)
+  const { cek, nonce } = deriveKeys(shared, opener.authSecret, uaPublic, senderPublic, salt)
+  const record = gcm(cek, nonce).decrypt(ciphertext)
+
+  let end = record.length
+  while (end > 0 && record[end - 1] === 0) end--
+  if (record[end - 1] !== RECORD_DELIMITER) {
+    throw new Error('Wake body has no record delimiter')
+  }
+  const parsed = JSON.parse(new TextDecoder().decode(record.subarray(0, end - 1))) as {
+    v?: number
+    topicID?: string
+    sequenceID?: string
+    count?: number
+  }
+  if (parsed.v !== WAKE_HINT_VERSION) {
+    // Rejected rather than best-effort parsed, following TUNNEL_ENVELOPE_VERSION's precedent.
+    throw new Error(`Unsupported wake hint version: ${String(parsed.v)}`)
+  }
+  if (
+    typeof parsed.topicID !== 'string' ||
+    typeof parsed.sequenceID !== 'string' ||
+    typeof parsed.count !== 'number'
+  ) {
+    throw new Error('Malformed wake hint')
+  }
+  return { topicID: parsed.topicID, sequenceID: parsed.sequenceID, count: parsed.count }
+}
