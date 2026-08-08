@@ -72,10 +72,19 @@ export function createWakeDispatcher(params: WakeDispatcherParams): WakeDispatch
           },
         )
         const verdict = await params.sender.send({ registration, body })
-        if (verdict === 'gone') {
-          await params.registry.delete(did)
-        } else if (verdict === 'retry') {
-          report(did, new Error('Wake send failed transiently'))
+        switch (verdict) {
+          case 'delivered':
+            break
+          case 'gone':
+            await params.registry.delete(did)
+            break
+          case 'retry':
+            report(did, new Error('Wake send failed transiently'))
+            break
+          default:
+            // Exhaustive over WakeVerdict: a future verdict must be handled explicitly here rather
+            // than silently falling through as 'delivered'.
+            verdict satisfies never
         }
       } catch (error) {
         report(did, error)
@@ -97,7 +106,11 @@ export function createWakeDispatcher(params: WakeDispatcherParams): WakeDispatch
       latest: null,
       count: 0,
     }
-    // A pending wake must never hold a process open by itself.
+    // A pending wake must never hold a process open by itself. `.unref` is a Node timer method
+    // absent from the DOM `Timeout` type; it only typechecks here because this package's
+    // tsconfig.json (unlike its siblings') sets `"types": ["node"]`. If hub-server is ever
+    // aligned to drop that, this line needs `(entry.timer as NodeJS.Timeout).unref?.()` or an
+    // equivalent cast.
     entry.timer.unref?.()
     return entry
   }

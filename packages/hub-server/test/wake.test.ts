@@ -41,7 +41,7 @@ describe('createWakeDispatcher', () => {
     const registry = createMemoryWakeRegistry()
     await registry.put(registration)
     const { sender, sent } = createRecordingSender()
-    const dispatcher = createWakeDispatcher({ registry, sender, debounceMs: 1000 })
+    const dispatcher = createWakeDispatcher({ registry, sender, debounceMs: 60_000 })
 
     dispatcher.notify({ did: 'did:key:alice', topicID: 'topic-a', sequenceID: '001' })
     await vi.waitFor(() => expect(sent).toHaveLength(1))
@@ -58,7 +58,7 @@ describe('createWakeDispatcher', () => {
     const registry = createMemoryWakeRegistry()
     await registry.put(registration)
     const { sender, sent } = createRecordingSender()
-    const dispatcher = createWakeDispatcher({ registry, sender, debounceMs: 1000 })
+    const dispatcher = createWakeDispatcher({ registry, sender, debounceMs: 60_000 })
 
     dispatcher.notify({ did: 'did:key:alice', topicID: 'topic-a', sequenceID: '001' })
     await vi.waitFor(() => expect(sent).toHaveLength(1))
@@ -67,7 +67,7 @@ describe('createWakeDispatcher', () => {
     }
     expect(sent).toHaveLength(1)
 
-    await vi.advanceTimersByTimeAsync(1000)
+    await vi.advanceTimersByTimeAsync(60_000)
     await vi.waitFor(() => expect(sent).toHaveLength(2))
     expect(openWakeHint(sent[1].body, opener)).toEqual({
       topicID: 'topic-b',
@@ -81,11 +81,11 @@ describe('createWakeDispatcher', () => {
     const registry = createMemoryWakeRegistry()
     await registry.put(registration)
     const { sender, sent } = createRecordingSender()
-    const dispatcher = createWakeDispatcher({ registry, sender, debounceMs: 1000 })
+    const dispatcher = createWakeDispatcher({ registry, sender, debounceMs: 60_000 })
 
     dispatcher.notify({ did: 'did:key:alice', topicID: 'topic-a', sequenceID: '001' })
     await vi.waitFor(() => expect(sent).toHaveLength(1))
-    await vi.advanceTimersByTimeAsync(5000)
+    await vi.advanceTimersByTimeAsync(65_000)
     expect(sent).toHaveLength(1)
     dispatcher.dispose()
   })
@@ -94,14 +94,14 @@ describe('createWakeDispatcher', () => {
     const registry = createMemoryWakeRegistry()
     await registry.put(registration)
     const { sender, sent } = createRecordingSender()
-    const dispatcher = createWakeDispatcher({ registry, sender, debounceMs: 1000 })
+    const dispatcher = createWakeDispatcher({ registry, sender, debounceMs: 60_000 })
 
     dispatcher.notify({ did: 'did:key:alice', topicID: 'topic-a', sequenceID: '001' })
     await vi.waitFor(() => expect(sent).toHaveLength(1))
     dispatcher.notify({ did: 'did:key:alice', topicID: 'topic-a', sequenceID: '002' })
     dispatcher.online('did:key:alice')
 
-    await vi.advanceTimersByTimeAsync(5000)
+    await vi.advanceTimersByTimeAsync(65_000)
     expect(sent).toHaveLength(1)
     dispatcher.dispose()
   })
@@ -109,7 +109,7 @@ describe('createWakeDispatcher', () => {
   test('sends nothing for a DID with no registration', async () => {
     const registry = createMemoryWakeRegistry()
     const { sender, sent } = createRecordingSender()
-    const dispatcher = createWakeDispatcher({ registry, sender, debounceMs: 1000 })
+    const dispatcher = createWakeDispatcher({ registry, sender, debounceMs: 60_000 })
 
     dispatcher.notify({ did: 'did:key:nobody', topicID: 'topic-a', sequenceID: '001' })
     await vi.advanceTimersByTimeAsync(2000)
@@ -121,7 +121,7 @@ describe('createWakeDispatcher', () => {
     const registry = createMemoryWakeRegistry()
     await registry.put(registration)
     const { sender } = createRecordingSender('gone')
-    const dispatcher = createWakeDispatcher({ registry, sender, debounceMs: 1000 })
+    const dispatcher = createWakeDispatcher({ registry, sender, debounceMs: 60_000 })
 
     dispatcher.notify({ did: 'did:key:alice', topicID: 'topic-a', sequenceID: '001' })
     await vi.waitFor(async () => {
@@ -133,17 +133,20 @@ describe('createWakeDispatcher', () => {
   test('a retry verdict reports and keeps the registration', async () => {
     const registry = createMemoryWakeRegistry()
     await registry.put(registration)
-    const { sender } = createRecordingSender('retry')
+    const { sender, sent } = createRecordingSender('retry')
     const errors: Array<{ did: string }> = []
     const dispatcher = createWakeDispatcher({
       registry,
       sender,
-      debounceMs: 1000,
+      debounceMs: 60_000,
       onError: (params) => errors.push({ did: params.did }),
     })
 
     dispatcher.notify({ did: 'did:key:alice', topicID: 'topic-a', sequenceID: '001' })
     await vi.waitFor(() => expect(errors).toHaveLength(1))
+    // Proves the error came out of the `retry` branch, not from an exception upstream of
+    // `sender.send` (which would also produce one error and leave the registration untouched).
+    expect(sent).toHaveLength(1)
     expect(await registry.get('did:key:alice')).not.toBeNull()
     dispatcher.dispose()
   })
@@ -159,7 +162,7 @@ describe('createWakeDispatcher', () => {
           throw new Error('provider exploded')
         },
       },
-      debounceMs: 1000,
+      debounceMs: 60_000,
       onError: (params) => errors.push(params.error),
     })
 
@@ -167,6 +170,54 @@ describe('createWakeDispatcher', () => {
       dispatcher.notify({ did: 'did:key:alice', topicID: 'topic-a', sequenceID: '001' }),
     ).not.toThrow()
     await vi.waitFor(() => expect(errors).toHaveLength(1))
+    // Identifies the error as the one the fake sender threw, not some other exception that
+    // happens to leave `errors` at length 1 (e.g. one thrown upstream of `sender.send`).
+    expect(errors[0]).toBeInstanceOf(Error)
+    expect((errors[0] as Error).message).toBe('provider exploded')
+    dispatcher.dispose()
+  })
+
+  test('dispose cancels a pending trailing ping and rejects any notify after teardown', async () => {
+    const registry = createMemoryWakeRegistry()
+    await registry.put(registration)
+    const { sender, sent } = createRecordingSender()
+    const dispatcher = createWakeDispatcher({ registry, sender, debounceMs: 60_000 })
+
+    dispatcher.notify({ did: 'did:key:alice', topicID: 'topic-a', sequenceID: '001' })
+    await vi.waitFor(() => expect(sent).toHaveLength(1))
+    // Arms a pending trailing summary before teardown, so a live `clearTimeout` loop is required
+    // to stop it.
+    dispatcher.notify({ did: 'did:key:alice', topicID: 'topic-a', sequenceID: '002' })
+    dispatcher.dispose()
+    // Must be a no-op: the `disposed` guard, not merely an emptied pending map (`pending` was
+    // cleared by dispose, so without the guard this would open a brand-new leading-edge window).
+    dispatcher.notify({ did: 'did:key:alice', topicID: 'topic-a', sequenceID: '003' })
+
+    await vi.advanceTimersByTimeAsync(65_000)
+    expect(sent).toHaveLength(1)
+  })
+
+  test('a hanging sender never delays notify, and the window still coalesces behind it', async () => {
+    const registry = createMemoryWakeRegistry()
+    await registry.put(registration)
+    const sent: Array<{ registration: WakeRegistration; body: Uint8Array }> = []
+    const sender: WakeSender = {
+      send(params) {
+        sent.push(params)
+        // Never resolves: a hanging provider must not block the caller or the coalescing window.
+        return new Promise<never>(() => {})
+      },
+    }
+    const dispatcher = createWakeDispatcher({ registry, sender, debounceMs: 60_000 })
+
+    const start = performance.now()
+    dispatcher.notify({ did: 'did:key:alice', topicID: 'topic-a', sequenceID: '001' })
+    expect(performance.now() - start).toBeLessThan(50)
+    await vi.waitFor(() => expect(sent).toHaveLength(1))
+
+    dispatcher.notify({ did: 'did:key:alice', topicID: 'topic-a', sequenceID: '002' })
+    await vi.advanceTimersByTimeAsync(60_000)
+    await vi.waitFor(() => expect(sent).toHaveLength(2))
     dispatcher.dispose()
   })
 })
