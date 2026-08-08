@@ -73,8 +73,13 @@ Plaintext is padded to a fixed record length, so ciphertext size is constant reg
 length or pending count.
 
 ```
-hint = { v: 1, topicID, sequenceID, pending }
+hint = { v: 1, topicID, sequenceID, count }
 ```
+
+`count` is the number of frames the dispatcher has observed for this device **since its last wake
+ping** — not the device's total backlog. `HubStore` exposes no pending count, and widening that
+contract (and its conformance suite, and every host store) for a cosmetic number is the wrong
+trade. The dispatcher owns the counter it can honestly produce.
 
 The device maps `topicID → group alias` from its own local state. That mapping never leaves the
 device.
@@ -113,12 +118,11 @@ membership change is precisely what a sleeping device must learn.
 
 **Leading-edge debounce:**
 
-1. First frame for an offline DID: ping immediately, sealed with that frame's `topicID` and the
-   device's pending-delivery count at dispatch — which may exceed one, since a device can go
-   offline holding a backlog.
+1. First frame for an offline DID: ping immediately, sealed with that frame's `topicID` and
+   `count: 1`.
 2. Suppress further pings for `debounceMs` (default 10 000).
 3. At the end of the window, if more frames landed, send one trailing ping carrying the **latest**
-   `topicID` and the pending count.
+   `topicID` and how many landed during the window.
 4. If the DID binds a receive writer during the window, cancel the trailing ping — the device is
    draining, and a ping would be noise.
 
@@ -173,9 +177,9 @@ repo.
 - **`hub-conformance`** — the `WakeRegistry` contract: replace on re-register, delete, expired
   entries not served, one registration per DID. Runs against the memory backend **and** every
   double, per the repo rule that a double must be stricter than its port, never more permissive.
-- **`hub-protocol`** — seal round-trip; ciphertext length identical for a 4-character and a
-  256-character `topicID`, and for `pending` 1 versus 9 999; wrong key fails; unknown version byte
-  rejected.
+- **`hub-protocol`** — the RFC 8291 §5 published test vector reproduced byte for byte; seal
+  round-trip; ciphertext length identical for a 4-character and a 256-character `topicID`, and for
+  `count` 1 versus 9 999; wrong key fails; unknown version rejected.
 - **`hub-server`** — no ping while online; ping when offline; leading edge is immediate; a burst
   coalesces to one trailing ping; a reconnect cancels the trailing ping; `gone` deletes the
   registration; `wake` absent yields `WakeNotSupportedError`; a hanging sender does not delay
