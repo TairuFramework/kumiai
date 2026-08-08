@@ -3,14 +3,18 @@ import type { AnyClientMessageOf, AnyServerMessageOf } from '@enkaku/protocol'
 import { DirectTransports } from '@enkaku/transport'
 import { randomIdentity } from '@kokuin/token'
 import type { HubProtocol, WakeRegistration, WakeRegistry, WakeSender } from '@kumiai/hub-protocol'
-import { HUB_ERROR_CODES } from '@kumiai/hub-protocol'
+import { HUB_ERROR_CODES, openWakeHint } from '@kumiai/hub-protocol'
 import { createMemoryWakeRegistry } from '@kumiai/hub-wake'
 import { p256 } from '@noble/curves/nist.js'
+import { fromUTF, toB64 } from '@sozai/codec'
 import { describe, expect, test, vi } from 'vitest'
 
+import { createHandlers } from '../src/handlers.js'
 import type { CreateHubParams } from '../src/hub.js'
 import { createHub } from '../src/hub.js'
 import { createMemoryStore } from '../src/memoryStore.js'
+import { HubClientRegistry } from '../src/registry.js'
+import type { WakeDispatcher } from '../src/wake.js'
 
 type HubTransports = DirectTransports<
   AnyServerMessageOf<HubProtocol>,
@@ -66,6 +70,9 @@ const recipientPublicKeyB64u = Buffer.from(p256.getPublicKey(recipientPrivateKey
   'base64url',
 )
 const recipientAuthSecretB64u = Buffer.from(recipientAuthSecretBytes).toString('base64url')
+// Opens what `sealWakeHint` sealed, so a test can assert the hint's actual contents rather than
+// just that something was sent.
+const recipientOpener = { privateKey: recipientPrivateKey, authSecret: recipientAuthSecretBytes }
 
 function createRecordingSender(): {
   sender: WakeSender
@@ -82,6 +89,18 @@ function createRecordingSender(): {
 }
 
 const PAIR_TOPIC = 'topic-a'
+
+// Tight real-time poll rather than a fixed sleep: resolves the instant the predicate turns true
+// instead of gambling a fixed delay is long enough (and wasting it when the event is instant).
+async function waitUntil(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
+  const start = Date.now()
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error('waitUntil: condition not met before timeout')
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1))
+  }
+}
 
 type TestHubPairOptions = Omit<CreateHubParams, 'identity' | 'store' | 'transport' | 'wake'> & {
   wake?: { registry: WakeRegistry; sender: WakeSender; debounceMs?: number }
@@ -146,8 +165,10 @@ async function createTestHubPair(options: TestHubPairOptions): Promise<{
   async function bringOnline(): Promise<void> {
     subscriberChannel = subscriberClient.createChannel('hub/v1/receive', { param: {} })
     subscriberChannel.readable.getReader()
-    // Let the bind (registry.bindReceiveWriter) complete server-side before the caller publishes.
-    await new Promise((resolve) => setTimeout(resolve, 20))
+    // Observe the bind (registry.bindReceiveWriter) directly rather than sleeping a fixed guess at
+    // how long it takes: a busy CI runner can make a fixed delay too short (flaky) or needlessly
+    // long (slow) — polling the actual registry state is exact either way.
+    await waitUntil(() => hub.registry.isWriterBound(subscriberIdentity.id))
   }
 
   async function dispose(): Promise<void> {
@@ -338,9 +359,18 @@ describe('wake on publish', () => {
       authSecret: recipientAuthSecretB64u,
     })
 
-    await publisher.publish({ topicID: 'topic-a', payload: 'aGk' })
+    const { sequenceID } = await publisher.publish({ topicID: 'topic-a', payload: 'aGk' })
 
     await vi.waitFor(() => expect(sent).toHaveLength(1))
+    // The hint's contents are what tell a woken device WHAT to fetch — assert them, not just that
+    // something was sent. `did` alone is covered by the registry lookup (a wrong DID finds no
+    // registration), but `topicID`/`sequenceID` are only ever asserted at the dispatcher level in
+    // wake.test.ts, never through this fan-out hook.
+    expect(openWakeHint(sent[0].body, recipientOpener)).toEqual({
+      topicID: 'topic-a',
+      sequenceID,
+      count: 1,
+    })
     await dispose()
   })
 
@@ -407,12 +437,14 @@ describe('wake on publish', () => {
   })
 
   test('reconnecting cancels the pending trailing summary', async () => {
-    // A short debounce window so the trailing summary — if not cancelled — arrives on real
-    // timers within the test's own budget.
+    // A short (but not knife-edge) debounce window so the trailing summary — if not cancelled —
+    // arrives on real timers within the test's own budget. 30ms was too tight: publish #2's full
+    // RPC round trip, plus createChannel, plus the server-side bind, all had to land inside 30ms of
+    // publish #1's notify, which a busy CI runner cannot promise. 300ms leaves that headroom.
     const registry = createMemoryWakeRegistry()
     const { sender, sent } = createRecordingSender()
     const { publisher, offlineDID, bringOnline, dispose } = await createTestHubPair({
-      wake: { registry, sender, debounceMs: 30 },
+      wake: { registry, sender, debounceMs: 300 },
     })
     await registry.put({
       did: offlineDID,
@@ -430,8 +462,68 @@ describe('wake on publish', () => {
 
     // The device reconnects before the window closes: `online()` must cancel the pending timer.
     await bringOnline()
-    await new Promise((resolve) => setTimeout(resolve, 60))
+    await new Promise((resolve) => setTimeout(resolve, 600))
     expect(sent).toHaveLength(1)
     await dispose()
+  })
+})
+
+describe('a throwing wake dispatcher', () => {
+  test('does not abort delivery to the remaining subscribers', async () => {
+    // Handlers exercised directly (as in handlers.test.ts), not through a hub/transport pair: the
+    // point here is the fan-out loop's own resilience to a misbehaving `dispatcher`, not wire
+    // plumbing. `createWakeDispatcher`'s own `notify` cannot throw, but `dispatcher` is
+    // caller-injectable through `CreateHandlersParams.wake.dispatcher`, so a third-party
+    // implementation can.
+    const registry = new HubClientRegistry()
+    const store = createMemoryStore()
+    const senderDID = 'did:key:sender'
+    const onlineDID = 'did:key:online'
+    const offlineDID = 'did:key:offline'
+
+    // Subscribed in this order so `getSubscribers` yields the throwing (offline) recipient FIRST:
+    // an unguarded throw during its turn would abort the loop before it ever reaches `onlineDID`.
+    await store.subscribe({ subscriberDID: offlineDID, topicID: 'topic-a' })
+    await store.subscribe({ subscriberDID: onlineDID, topicID: 'topic-a' })
+
+    const delivered: Array<unknown> = []
+    registry.register(onlineDID)
+    registry.bindReceiveWriter(
+      onlineDID,
+      (message) => delivered.push(message),
+      () => {},
+    )
+
+    let notifyCalls = 0
+    const throwingDispatcher: WakeDispatcher = {
+      notify: () => {
+        notifyCalls++
+        throw new Error('dispatcher exploded')
+      },
+      online: () => {},
+      dispose: () => {},
+    }
+    const storeErrors: Array<{ method: string; did?: string }> = []
+    const handlers = createHandlers({
+      registry,
+      store,
+      wake: { registry: createMemoryWakeRegistry(), dispatcher: throwingDispatcher },
+      onStoreError: (event) => storeErrors.push(event),
+    })
+
+    const result = await handlers['hub/v1/publish']({
+      message: {
+        header: {},
+        payload: { typ: 'request', prc: 'hub/v1/publish', rid: '1', iss: senderDID },
+      },
+      param: { topicID: 'topic-a', payload: toB64(fromUTF('hi')) },
+    } as never)
+
+    expect(result).toMatchObject({ sequenceID: expect.any(String) })
+    expect(notifyCalls).toBe(1)
+    // The live subscriber, iterated AFTER the throwing one, still got its frame.
+    expect(delivered).toHaveLength(1)
+    // The throw was reported, not swallowed silently.
+    expect(storeErrors).toEqual([{ method: 'wake', did: offlineDID, error: expect.any(Error) }])
   })
 })

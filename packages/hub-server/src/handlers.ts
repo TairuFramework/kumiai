@@ -439,7 +439,17 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
             // No live channel: the frame is durably queued, so all that is missing is a nudge to
             // come and get it. Both retention classes wake — a commit-lane frame is log-class, and
             // a membership change is exactly what a sleeping device must learn.
-            params.wake?.dispatcher?.notify({ did: recipientDID, topicID, sequenceID })
+            //
+            // Guarded even though `notify` is documented never to throw: `dispatcher` is
+            // caller-injectable (`CreateHandlersParams.wake.dispatcher`), and a misbehaving
+            // third-party implementation must not abort this loop mid-way — that would cost live
+            // delivery to every subscriber still to come, for a publish whose append already
+            // committed.
+            try {
+              params.wake?.dispatcher?.notify({ did: recipientDID, topicID, sequenceID })
+            } catch (error) {
+              storeErrorReporter({ method: 'wake', did: recipientDID, error })
+            }
           }
         }
       }
