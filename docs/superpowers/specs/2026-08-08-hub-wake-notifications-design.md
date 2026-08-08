@@ -181,6 +181,11 @@ repo.
   registration; `wake` absent yields `WakeNotSupportedError`; a hanging sender does not delay
   fan-out to online members.
 - **`hub-wake`** — VAPID header shape; status-to-verdict mapping for both senders.
+- **`tests/e2e-expo`** — the existing Expo + Maestro harness is where a device-level check belongs:
+  register from the app, publish from a second peer, assert the notification appears. Bounded by
+  what simulators do — `xcrun simctl push` injects a payload but does not exercise APNs delivery,
+  and the Android emulator needs Play Services for FCM. Real end-to-end delivery stays a manual
+  check on hardware.
 
 ## Stated residuals
 
@@ -191,5 +196,6 @@ repo.
   to.
 - A hub restart drops pending debounce windows, losing a trailing summary.
 - On iOS the notification renders from the hint alone; the drain happens on tap or foreground.
-- Nothing in this repo proves a push reaches a real handset. The RN glue and the NSE live outside a
-  TypeScript monorepo.
+- The Notification Service Extension is Swift and lives outside this repo, reached through an Expo
+  config plugin. `tests/e2e-expo` can drive the app around it, but the extension's own decrypt path
+  is only exercised on hardware.
