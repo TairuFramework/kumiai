@@ -9,7 +9,7 @@ export const WAKE_HINT_VERSION = 1
 
 /**
  * The aes128gcm record size. Every sealed body is padded to it, so its length says nothing about
- * the topic or the count. A body is 597 bytes at this size — far under Web Push's 4096 limit.
+ * the topic or the count. A body is 598 bytes at this size — far under Web Push's 4096 limit.
  */
 export const WAKE_RECORD_SIZE = 512
 
@@ -39,7 +39,6 @@ export type SealOverrides = {
   senderPrivateKey?: Uint8Array
   salt?: Uint8Array
   recordSize?: number
-  plaintext?: Uint8Array
 }
 
 /**
@@ -94,39 +93,21 @@ function deriveKeys(
 }
 
 /**
- * Seal a hint for one device, RFC 8291 `aes128gcm`.
+ * Seal an already-built RFC 8188 record — content followed by its delimiter octet, padded or not
+ * — under `recipient`'s RFC 8291 `aes128gcm` scheme: ECDH P-256, HKDF-SHA256, then AES-128-GCM.
+ * `recordSize` is carried in the header's `rs` field; it need not equal `record.length` (the RFC's
+ * own worked example declares 4096 while sealing an unpadded, much shorter record).
  *
- * The scheme is not a free choice: a browser refuses a Web Push body that does not decrypt this
- * way, and one implementation then serves web, Expo, and any later direct-APNs path.
+ * `sealWakeHint` is the only production caller. Test code reaches this directly to reproduce RFC
+ * 8291 section 5's worked example without going through wake-hint padding, and every field here
+ * is a public-key operation on caller-supplied bytes — there is no wake-specific bypass to guard.
  */
-export function sealWakeHint(
-  hint: WakeHint,
+export function sealRecord(
+  record: Uint8Array,
+  recordSize: number,
   recipient: WakeRecipient,
-  overrides: SealOverrides = {},
+  overrides: { senderPrivateKey?: Uint8Array; salt?: Uint8Array } = {},
 ): Uint8Array {
-  const recordSize = overrides.recordSize ?? WAKE_RECORD_SIZE
-  // The 16 subtracted bytes are the GCM tag; one more is the record delimiter.
-  const recordLength = recordSize - 16
-
-  let record: Uint8Array
-  if (overrides.plaintext) {
-    // Test-only path: overrides.plaintext stands in for an already-complete Web Push payload (the
-    // RFC 8291 worked example), which is not padded beyond its own delimiter octet.
-    if (overrides.plaintext.length + 1 > recordLength) {
-      throw new Error(`Wake hint too large: ${overrides.plaintext.length + 1} > ${recordLength}`)
-    }
-    record = concat(overrides.plaintext, new Uint8Array([RECORD_DELIMITER]))
-  } else {
-    // Pad to a fixed length so the body's SIZE carries no information about the hint's contents.
-    const plaintext = new TextEncoder().encode(JSON.stringify({ v: WAKE_HINT_VERSION, ...hint }))
-    if (plaintext.length + 1 > recordLength) {
-      throw new Error(`Wake hint too large: ${plaintext.length + 1} > ${recordLength}`)
-    }
-    record = new Uint8Array(recordLength)
-    record.set(plaintext, 0)
-    record[plaintext.length] = RECORD_DELIMITER
-  }
-
   const senderPrivate = overrides.senderPrivateKey ?? p256.utils.randomSecretKey()
   const senderPublic = p256.getPublicKey(senderPrivate, false)
   const salt = overrides.salt ?? randomBytes(16)
@@ -144,6 +125,33 @@ export function sealWakeHint(
   new DataView(rs.buffer).setUint32(0, recordSize)
   const header = concat(salt, rs, new Uint8Array([senderPublic.length]), senderPublic)
   return concat(header, gcm(cek, nonce).encrypt(record))
+}
+
+/**
+ * Seal a hint for one device, RFC 8291 `aes128gcm`.
+ *
+ * The scheme is not a free choice: a browser refuses a Web Push body that does not decrypt this
+ * way, and one implementation then serves web, Expo, and any later direct-APNs path.
+ */
+export function sealWakeHint(
+  hint: WakeHint,
+  recipient: WakeRecipient,
+  overrides: SealOverrides = {},
+): Uint8Array {
+  const recordSize = overrides.recordSize ?? WAKE_RECORD_SIZE
+  // The 16 subtracted bytes are the GCM tag; one more is the record delimiter.
+  const recordLength = recordSize - 16
+
+  // Pad to a fixed length so the body's SIZE carries no information about the hint's contents.
+  const plaintext = new TextEncoder().encode(JSON.stringify({ v: WAKE_HINT_VERSION, ...hint }))
+  if (plaintext.length + 1 > recordLength) {
+    throw new Error(`Wake hint too large: ${plaintext.length + 1} > ${recordLength}`)
+  }
+  const record = new Uint8Array(recordLength)
+  record.set(plaintext, 0)
+  record[plaintext.length] = RECORD_DELIMITER
+
+  return sealRecord(record, recordSize, recipient, overrides)
 }
 
 /** Open a sealed wake body. Throws on a bad key, a corrupt body, or an unknown hint version. */
