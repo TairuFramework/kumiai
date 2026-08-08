@@ -188,7 +188,13 @@ describe('createWakeDispatcher', () => {
     // Arms a pending trailing summary before teardown, so a live `clearTimeout` loop is required
     // to stop it.
     dispatcher.notify({ did: 'did:key:alice', topicID: 'topic-a', sequenceID: '002' })
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
     dispatcher.dispose()
+    // Resource fact, not a behavioural one: the timer callback already bails out once `pending`
+    // is cleared (it reads `pending.get(did)` first and finds nothing), so an uncancelled timer
+    // is inert by construction and a missing `clearTimeout` loop would not show up in `sent`.
+    // `vi.getTimerCount()` is what actually distinguishes "cancelled" from "merely made harmless".
+    expect(vi.getTimerCount()).toBe(0)
     // Must be a no-op: the `disposed` guard, not merely an emptied pending map (`pending` was
     // cleared by dispose, so without the guard this would open a brand-new leading-edge window).
     dispatcher.notify({ did: 'did:key:alice', topicID: 'topic-a', sequenceID: '003' })
@@ -201,8 +207,10 @@ describe('createWakeDispatcher', () => {
     const registry = createMemoryWakeRegistry()
     await registry.put(registration)
     const sent: Array<{ registration: WakeRegistration; body: Uint8Array }> = []
+    const order: Array<string> = []
     const sender: WakeSender = {
       send(params) {
+        order.push('sender:called')
         sent.push(params)
         // Never resolves: a hanging provider must not block the caller or the coalescing window.
         return new Promise<never>(() => {})
@@ -210,9 +218,13 @@ describe('createWakeDispatcher', () => {
     }
     const dispatcher = createWakeDispatcher({ registry, sender, debounceMs: 60_000 })
 
-    const start = performance.now()
     dispatcher.notify({ did: 'did:key:alice', topicID: 'topic-a', sequenceID: '001' })
-    expect(performance.now() - start).toBeLessThan(50)
+    order.push('notify:returned')
+    // Structural, not wall-clock: `send` runs inside the fire-and-forget async task, which only
+    // starts once the current synchronous call stack — including this `notify()` call — has
+    // unwound. If `notify` ever awaited the sender directly, `sender:called` would already be in
+    // `order` by this point.
+    expect(order).toEqual(['notify:returned'])
     await vi.waitFor(() => expect(sent).toHaveLength(1))
 
     dispatcher.notify({ did: 'did:key:alice', topicID: 'topic-a', sequenceID: '002' })
