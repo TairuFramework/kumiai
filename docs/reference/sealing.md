@@ -38,5 +38,6 @@ under RFC 8291 `aes128gcm` to a device's own P-256 key rather than to anything M
 no home in this document's distinction, because that distinction — ratchet-consuming open vs. pure
 exporter read — is a question about an MLS handle, and the wake seal has no MLS handle on either
 end. It opens outside a group entirely, in a device's push extension, against a key the group never
-sees and MLS never issues. Its version byte follows the same never-best-effort-parse precedent as
-the two above, but that is where the kinship ends.
+sees and MLS never issues. It carries no version *byte* at all: its version is a field inside the
+sealed JSON, unreadable and untamperable by the push provider, which is the point. It follows the
+same never-best-effort-parse rule as the two above, but that is where the kinship ends.

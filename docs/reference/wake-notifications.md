@@ -49,10 +49,14 @@ trade. The dispatcher owns the only counter it can honestly produce.
 
 Plaintext is padded to a fixed record length before sealing, so ciphertext size is constant
 regardless of topic length or count — a 4-character and a 256-character `topicID` seal to the same
-number of bytes.
+number of bytes. Every body is 597 bytes: an 86-byte RFC 8188 header, a 495-byte padded record, and
+the 16-byte GCM tag. The declared record size (`rs`) is 512, strictly greater than the 511-byte
+ciphertext, as RFC 8291 §4 requires — equality is what a strict user agent refuses.
 
-The version byte (`v`) follows the precedent of `TUNNEL_ENVELOPE_VERSION`: an unknown version is
-rejected outright, never best-effort parsed.
+`v` is a **field inside the sealed JSON**, not a byte on the wire. That is the stronger placement:
+the provider can neither read it nor tamper with it, because it only exists after the body is
+decrypted. It follows the precedent of `TUNNEL_ENVELOPE_VERSION` in what it does with an unknown
+value — rejected outright, never best-effort parsed — not in where it sits.
 
 ## Leading-edge debouncing
 
@@ -110,11 +114,26 @@ an optional `debounceMs`. Both are host choices:
 
 - **`registry`** — durable storage for one registration per DID. `@kumiai/hub-wake` ships an
   in-memory reference implementation; a production host wants a durable one, checked against
-  `testWakeRegistryConformance` from `@kumiai/hub-conformance`.
+  `testWakeRegistryConformance` from `@kumiai/hub-conformance`. Nothing unusable reaches it:
+  `hub/v1/wake/register` refuses a `publicKey` that is not a 65-byte uncompressed P-256 point, or
+  an `authSecret` that is not 16 bytes, with `HUB_INVALID_PAYLOAD`. Key material the hub cannot
+  seal to would otherwise register happily and fail inside every send, forever, with the device
+  believing it was reachable.
 - **`sender`** — where the sealed body actually goes. `@kumiai/hub-wake` ships a generic
   HTTP/VAPID sender for anything speaking RFC 8030 Web Push, and an Expo sender for the Expo Push
   API. Both are plain `fetch` calls behind the `WakeSender` port; a host wanting APNs or FCM
   directly writes its own.
+
+Two costs worth knowing before you wire a durable registry. Neither leaks anything; both are
+operator-relevant:
+
+- The dispatcher does a `registry.get(did)` on the **leading edge for every offline subscriber**,
+  registered or not. On a busy topic that is one durable-store read per offline DID per debounce
+  window, including for the DIDs that will never have a registration.
+- A DID whose registration a `gone` verdict already deleted keeps **chaining windows** for as long
+  as traffic flows for it: each window closes, finds a summary to send, opens a fresh one, and the
+  send finds no registration and returns. The timers are cheap and `unref`'d, but they do not stop
+  until the traffic does.
 
 With `wake` **absent**, both `hub/v1/wake/register` and `hub/v1/wake/unregister` refuse with
 `WakeNotSupportedError`. The enkaku protocol is static, so the handlers always exist on the wire —

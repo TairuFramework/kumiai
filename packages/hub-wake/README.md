@@ -8,7 +8,7 @@ Server-side, optional. See [wake notifications](../../docs/reference/wake-notifi
 
 - `createMemoryWakeRegistry()` — an in-memory `WakeRegistry`. Reference implementation and test double; a production host wants a durable one, checked against `testWakeRegistryConformance` from `@kumiai/hub-conformance`.
 - `createWebPushSender({ vapid, ttl?, jwtLifetime?, fetch? })` — a `WakeSender` for any endpoint speaking RFC 8030 Web Push: browser push services, UnifiedPush distributors, ntfy, or a self-hosted relay. POSTs the sealed body untouched, with a VAPID (RFC 8292) `Authorization` header it signs itself.
-- `createExpoSender({ accessToken?, placeholderTitle?, endpoint?, fetch? })` — a `WakeSender` for the Expo Push API. A plain `fetch` call against `https://exp.host/--/api/v2/push/send`; no `expo-server-sdk` dependency.
+- `createExpoSender({ accessToken?, placeholderTitle?, fetch? })` — a `WakeSender` for the Expo Push API. A plain `fetch` call against `https://exp.host/--/api/v2/push/send`; no `expo-server-sdk` dependency.
 
 Both senders return a `WakeVerdict` (`'delivered' | 'gone' | 'retry'`) and never throw.
 

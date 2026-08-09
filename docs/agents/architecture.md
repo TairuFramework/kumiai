@@ -76,3 +76,9 @@ Bounds this design has, on purpose, rather than hides:
 - **A wake ping tells the push provider that a device received something, and when.** The content
   is sealed and the topic never leaves the hub, but timing is inherent to waking a suspended app.
   Self-hosting the push service collapses this to the hub operator, who already saw the timing.
+- **A wake registry is a `DID → endpoint` map, and that is new linkability at the hub** — a stable
+  per-device identifier that outlives every group the device belongs to. It is the one thing wake
+  adds that the hub did not already have; the hub already saw topics, senders and timing.
+- **A hub restart drops every pending debounce window**, losing at most a trailing summary. The
+  timer map is in-process, which is exactly why the debounce is leading-edge: a trailing-only
+  scheme would lose the notification itself whenever a restart landed inside a window.
