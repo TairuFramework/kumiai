@@ -9,6 +9,10 @@ import { createMemoryWakeRegistry } from '@kumiai/hub-wake'
 import { describe, expect, test } from 'vitest'
 
 import { HubClient } from '../src/client.js'
+// Imported from the package's own public surface, not `@kumiai/hub-protocol` directly: this is
+// the re-export named in the brief's Interfaces block ("a device needs one import"), and nothing
+// else in this file exercises `../src/index.js` at all.
+import { openWakeHint as openWakeHintViaIndex } from '../src/index.js'
 import { createWakeKeys } from '../src/wake-keys.js'
 
 type HubTransports = DirectTransports<
@@ -74,7 +78,14 @@ describe('createWakeKeys', () => {
   })
 
   test('each call is a fresh keypair', () => {
-    expect(createWakeKeys().publicKey).not.toBe(createWakeKeys().publicKey)
+    const a = createWakeKeys()
+    const b = createWakeKeys()
+    expect(a.publicKey).not.toBe(b.publicKey)
+    // A constant `authSecret` across the fleet would still pass every other test here: test 1
+    // only checks its length, and test 2 seals and opens with the same object, so it round-trips
+    // happily regardless. RFC 8291 treats the auth secret as unguessable per-subscription input
+    // to the HKDF — a shared constant is a real weakening, not a cosmetic one.
+    expect(a.authSecret).not.toBe(b.authSecret)
   })
 })
 
@@ -144,6 +155,7 @@ describe('HubClient.registerWake', () => {
     })
 
     expect(calls).toHaveLength(1)
+    expect(calls[0]?.procedure).toBe('hub/v1/wake/register')
     const param = calls[0]?.param as Record<string, unknown>
     expect('expiresAt' in param).toBe(false)
   })
@@ -219,7 +231,7 @@ describe('wake registration round trip', () => {
     )
 
     expect(
-      openWakeHint(body, {
+      openWakeHintViaIndex(body, {
         privateKey: keys.privateKey,
         authSecret: decodeBase64url(keys.authSecret),
       }),
