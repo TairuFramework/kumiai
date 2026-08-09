@@ -12,7 +12,6 @@ export type ExpoSenderParams = {
   fetch?: typeof globalThis.fetch
   /** Placeholder title the Notification Service Extension REPLACES once it opens the hint. */
   placeholderTitle?: string
-  endpoint?: string
 }
 
 type ExpoTicket = { status?: string; details?: { error?: string } }
@@ -32,13 +31,12 @@ const EXPO_ENDPOINT = 'https://exp.host/--/api/v2/push/send'
  */
 export function createExpoSender(params: ExpoSenderParams = {}): WakeSender {
   const fetchImpl = params.fetch ?? globalThis.fetch
-  const endpoint = params.endpoint ?? EXPO_ENDPOINT
   const title = params.placeholderTitle ?? 'New activity'
 
   return {
     async send({ registration, body }: WakeSendParams): Promise<WakeVerdict> {
       try {
-        const response = await fetchImpl(endpoint, {
+        const response = await fetchImpl(EXPO_ENDPOINT, {
           method: 'POST',
           headers: {
             accept: 'application/json',

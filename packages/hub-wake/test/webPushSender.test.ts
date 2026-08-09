@@ -181,6 +181,19 @@ describe('createWebPushSender', () => {
     }
   })
 
+  // Pinned separately from the 429/5xx case because the failure this guards is a plausible edit,
+  // not a typo: 401/403 mean the VAPID credentials were refused, which reads like "this endpoint
+  // will never accept us again". It is not — it is one misconfigured key pair away from `gone`
+  // deleting every registration on the hub, one send at a time, while the endpoints stay perfectly
+  // alive.
+  test('401 and 403 are retry — an auth failure is ours, not the endpoint being dead', async () => {
+    for (const status of [401, 403]) {
+      const { fetchImpl } = recordingFetch(status)
+      const sender = createWebPushSender({ vapid, fetch: fetchImpl })
+      await expect(sender.send({ registration, body })).resolves.toBe('retry')
+    }
+  })
+
   test('429 and 5xx are retry', async () => {
     for (const status of [429, 500, 503]) {
       const { fetchImpl } = recordingFetch(status)
