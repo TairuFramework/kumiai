@@ -126,6 +126,12 @@ importers:
       '@kumiai/hub-protocol':
         specifier: workspace:^
         version: link:../hub-protocol
+      '@noble/curves':
+        specifier: 'catalog:'
+        version: 2.3.0
+      '@noble/hashes':
+        specifier: 'catalog:'
+        version: 2.3.0
     devDependencies:
       '@enkaku/protocol':
         specifier: 'catalog:'
@@ -139,6 +145,9 @@ importers:
       '@kumiai/hub-server':
         specifier: workspace:^
         version: link:../hub-server
+      '@kumiai/hub-wake':
+        specifier: workspace:^
+        version: link:../hub-wake
       '@kumiai/mls':
         specifier: workspace:^
         version: link:../mls

@@ -35,13 +35,16 @@
   },
   "dependencies": {
     "@enkaku/client": "catalog:",
-    "@kumiai/hub-protocol": "workspace:^"
+    "@kumiai/hub-protocol": "workspace:^",
+    "@noble/curves": "catalog:",
+    "@noble/hashes": "catalog:"
   },
   "devDependencies": {
     "@enkaku/protocol": "catalog:",
     "@enkaku/transport": "catalog:",
     "@kokuin/token": "catalog:",
     "@kumiai/hub-server": "workspace:^",
+    "@kumiai/hub-wake": "workspace:^",
     "@kumiai/mls": "workspace:^",
     "@sozai/codec": "catalog:"
   },
