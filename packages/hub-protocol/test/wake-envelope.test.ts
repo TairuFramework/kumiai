@@ -69,7 +69,7 @@ describe('sealWakeHint', () => {
 
   // The body's LENGTH is the one thing padding cannot hide by accident. A provider that could see
   // a longer body for a longer topic would be reading topic length off the wire. The exact byte
-  // count (86-byte header + 496-byte padded record + 16-byte GCM tag) makes that assertion
+  // count (86-byte header + 495-byte padded record + 16-byte GCM tag) makes that assertion
   // verifiable rather than merely self-consistent.
   test('body size does not vary with hint contents', () => {
     const recipient = createRecipient()
@@ -78,8 +78,46 @@ describe('sealWakeHint', () => {
       { topicID: 'x'.repeat(256), sequenceID: '0'.repeat(32), count: 9999 },
       recipient,
     )
-    expect(short.length).toBe(598)
-    expect(long.length).toBe(598)
+    expect(short.length).toBe(597)
+    expect(long.length).toBe(597)
+  })
+
+  // RFC 8291 section 4: "An application server MUST set the 'rs' parameter ... to a size that is
+  // greater than the sum of the lengths of the plaintext, the padding delimiter (1 octet), any
+  // padding, and the authentication tag (16 octets)." That whole sum IS the ciphertext length, so
+  // the MUST reduces to `rs > ciphertext.length` — and it must be strict. Chromium and http_ece
+  // tolerate equality; a stricter user agent refusing it would be a silent 100% delivery failure
+  // on the web target, with nothing here to say why.
+  test('the declared rs is STRICTLY greater than the ciphertext it describes (RFC 8291 section 4)', () => {
+    const recipient = createRecipient()
+    const body = sealWakeHint({ topicID: 'topic-a', sequenceID: '1', count: 1 }, recipient)
+
+    const rs = new DataView(body.buffer, body.byteOffset).getUint32(16)
+    expect(rs).toBe(WAKE_RECORD_SIZE)
+    const keyIDLength = body[20]
+    const ciphertextLength = body.length - (21 + keyIDLength)
+    expect(rs).toBeGreaterThan(ciphertextLength)
+  })
+
+  // The randomness that makes each seal unique is the sender keypair and the salt — together the
+  // AES-GCM key and nonce. Pinning either (which a caller could do while `sealWakeHint` still took
+  // overrides) reuses one key/nonce pair across every wake to every device, which forfeits GCM's
+  // integrity and confidentiality outright. Identical inputs producing identical bytes is the
+  // observable symptom.
+  test('sealing the same hint for the same recipient twice produces different bytes', () => {
+    const recipient = createRecipient()
+    const hint = { topicID: 'topic-a', sequenceID: '001', count: 1 }
+    const first = sealWakeHint(hint, recipient)
+    const second = sealWakeHint(hint, recipient)
+
+    expect(first.length).toBe(second.length)
+    expect(Array.from(first)).not.toEqual(Array.from(second))
+    // Named explicitly so a failure says WHICH input stopped varying: the salt is the first 16
+    // bytes of the header, the sender public key the 65 that follow the key-id length.
+    expect(Array.from(first.subarray(0, 16))).not.toEqual(Array.from(second.subarray(0, 16)))
+    expect(Array.from(first.subarray(21, 86))).not.toEqual(Array.from(second.subarray(21, 86)))
+    // Both still open: varying inputs must not have broken the derivation.
+    expect(openWakeHint(second, recipient)).toEqual(hint)
   })
 
   test('refuses a hint too large for the record', () => {

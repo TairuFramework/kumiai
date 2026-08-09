@@ -8,8 +8,9 @@ import { randomBytes } from '@noble/hashes/utils.js'
 export const WAKE_HINT_VERSION = 1
 
 /**
- * The aes128gcm record size. Every sealed body is padded to it, so its length says nothing about
- * the topic or the count. A body is 598 bytes at this size — far under Web Push's 4096 limit.
+ * The aes128gcm record size, carried as the header's `rs`. Every sealed body is padded to it, so
+ * its length says nothing about the topic or the count. A body is 597 bytes at this size — far
+ * under Web Push's 4096 limit.
  */
 export const WAKE_RECORD_SIZE = 512
 
@@ -32,13 +33,6 @@ export type WakeRecipient = {
 export type WakeOpener = {
   privateKey: Uint8Array
   authSecret: Uint8Array
-}
-
-/** Test-only overrides, so the RFC's worked example can be reproduced. Never passed in production. */
-export type SealOverrides = {
-  senderPrivateKey?: Uint8Array
-  salt?: Uint8Array
-  recordSize?: number
 }
 
 /**
@@ -132,15 +126,18 @@ export function sealRecord(
  *
  * The scheme is not a free choice: a browser refuses a Web Push body that does not decrypt this
  * way, and one implementation then serves web, Expo, and any later direct-APNs path.
+ *
+ * Takes no overrides ON PURPOSE. The sender keypair and the salt are the GCM key and nonce; a
+ * caller that could pin either — and an object literal contextually types against a parameter, so
+ * an unexported options type is no barrier at all — would reuse a key/nonce pair across devices,
+ * which is catastrophic for GCM. Tests that need a fixed derivation call `sealRecord`, where every
+ * input is already caller-supplied and nothing is defaulted.
  */
-export function sealWakeHint(
-  hint: WakeHint,
-  recipient: WakeRecipient,
-  overrides: SealOverrides = {},
-): Uint8Array {
-  const recordSize = overrides.recordSize ?? WAKE_RECORD_SIZE
-  // The 16 subtracted bytes are the GCM tag; one more is the record delimiter.
-  const recordLength = recordSize - 16
+export function sealWakeHint(hint: WakeHint, recipient: WakeRecipient): Uint8Array {
+  // RFC 8291 section 4: `rs` MUST be GREATER than plaintext + delimiter + padding + tag. The
+  // record IS plaintext + delimiter + padding, so subtracting the 16-byte tag alone would make
+  // them equal; the seventeenth byte is what makes the inequality strict.
+  const recordLength = WAKE_RECORD_SIZE - 17
 
   // Pad to a fixed length so the body's SIZE carries no information about the hint's contents.
   const plaintext = new TextEncoder().encode(JSON.stringify({ v: WAKE_HINT_VERSION, ...hint }))
@@ -151,7 +148,7 @@ export function sealWakeHint(
   record.set(plaintext, 0)
   record[plaintext.length] = RECORD_DELIMITER
 
-  return sealRecord(record, recordSize, recipient, overrides)
+  return sealRecord(record, WAKE_RECORD_SIZE, recipient)
 }
 
 /** Open a sealed wake body. Throws on a bad key, a corrupt body, or an unknown hint version. */

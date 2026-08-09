@@ -61,8 +61,14 @@ describe('DoS-hardening hub errors round-trip through their wire codes', () => {
 
 describe('WakeNotSupportedError', () => {
   test('crosses the wire as HUB_WAKE_NOT_SUPPORTED', () => {
-    expect(hubErrorCodeOf(new WakeNotSupportedError('no wake'))).toBe(
-      HUB_ERROR_CODES.wakeNotSupported,
+    // The literal, not the constant. Every other assertion on this code — here, in hub-server, in
+    // hub-client — goes through `HUB_ERROR_CODES.wakeNotSupported`, so all of them follow the
+    // constant wherever it moves and none of them notices a changed wire contract. This is the
+    // string a peer on an older build compares against.
+    expect(HUB_ERROR_CODES.wakeNotSupported).toBe('HUB_WAKE_NOT_SUPPORTED')
+    expect(hubErrorCodeOf(new WakeNotSupportedError('no wake'))).toBe('HUB_WAKE_NOT_SUPPORTED')
+    expect(hubErrorFromCode('HUB_WAKE_NOT_SUPPORTED', 'no wake')).toBeInstanceOf(
+      WakeNotSupportedError,
     )
   })
 
