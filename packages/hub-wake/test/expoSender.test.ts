@@ -71,7 +71,13 @@ describe('createExpoSender', () => {
   })
 
   test('a non-200 response is retry', async () => {
-    const { fetchImpl } = jsonFetch({}, 503)
+    const { fetchImpl } = jsonFetch({ data: [{ status: 'ok', id: '1' }] }, 503)
+    const sender = createExpoSender({ fetch: fetchImpl })
+    await expect(sender.send({ registration, body })).resolves.toBe('retry')
+  })
+
+  test('a malformed 2xx response (null body) is retry, not an exception', async () => {
+    const { fetchImpl } = jsonFetch(null, 200)
     const sender = createExpoSender({ fetch: fetchImpl })
     await expect(sender.send({ registration, body })).resolves.toBe('retry')
   })

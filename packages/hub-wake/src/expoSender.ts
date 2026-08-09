@@ -37,7 +37,6 @@ export function createExpoSender(params: ExpoSenderParams = {}): WakeSender {
 
   return {
     async send({ registration, body }: WakeSendParams): Promise<WakeVerdict> {
-      let payload: { data?: Array<ExpoTicket> }
       try {
         const response = await fetchImpl(endpoint, {
           method: 'POST',
@@ -57,14 +56,17 @@ export function createExpoSender(params: ExpoSenderParams = {}): WakeSender {
           }),
         })
         if (!response.ok) return 'retry'
-        payload = (await response.json()) as { data?: Array<ExpoTicket> }
+        // A 2xx response body is not guaranteed to be the shape we expect — Expo could answer
+        // with `null` or something else malformed. `?.` all the way down, and the extraction stays
+        // inside the try, keeps that a `retry` rather than a thrown exception out of `send`.
+        const payload = (await response.json()) as { data?: Array<ExpoTicket> } | null
+        const ticket = payload?.data?.[0]
+        if (ticket?.status === 'ok') return 'delivered'
+        if (ticket?.details?.error === 'DeviceNotRegistered') return 'gone'
+        return 'retry'
       } catch {
         return 'retry'
       }
-      const ticket = payload.data?.[0]
-      if (ticket?.status === 'ok') return 'delivered'
-      if (ticket?.details?.error === 'DeviceNotRegistered') return 'gone'
-      return 'retry'
     },
   }
 }

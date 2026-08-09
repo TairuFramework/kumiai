@@ -37,6 +37,8 @@ function decodeJwt(authorization: string): {
   claims: Record<string, unknown>
   signature: Uint8Array
   signingInput: string
+  /** The `k=` public key transmitted alongside the token — the key a push service actually checks against. */
+  transmittedKey: Uint8Array
 } {
   const match = authorization.match(/^vapid t=([\w-]+\.[\w-]+\.[\w-]+), k=([\w-]+)$/)
   if (match == null) throw new Error('authorization header does not match the vapid scheme')
@@ -47,6 +49,7 @@ function decodeJwt(authorization: string): {
     claims: JSON.parse(new TextDecoder().decode(decodeBase64url(claimsPart))),
     signature: decodeBase64url(signaturePart),
     signingInput: `${headerPart}.${claimsPart}`,
+    transmittedKey: decodeBase64url(match[2]),
   }
 }
 
@@ -94,7 +97,53 @@ describe('createWebPushSender', () => {
     expect(claims.sub).toBe(vapid.subject)
   })
 
-  test('the VAPID JWT signature verifies against the configured public key', async () => {
+  test('the VAPID JWT header is ES256/JWT, and exp is within the default lifetime', async () => {
+    const { calls, fetchImpl } = recordingFetch(201)
+    const sender = createWebPushSender({ vapid, fetch: fetchImpl })
+
+    const before = Math.floor(Date.now() / 1000)
+    await sender.send({ registration, body })
+    const now = Math.floor(Date.now() / 1000)
+
+    const headers = new Headers(calls[0].init.headers)
+    const authorization = headers.get('authorization')
+    if (authorization == null) throw new Error('expected an authorization header')
+    const { header, claims } = decodeJwt(authorization)
+    expect(header.alg).toBe('ES256')
+    expect(header.typ).toBe('JWT')
+    const exp = claims.exp as number
+    expect(exp).toBeGreaterThan(before)
+    expect(exp).toBeLessThanOrEqual(now + 43_200)
+  })
+
+  test('the jwtLifetime override changes the JWT exp', async () => {
+    const { calls, fetchImpl } = recordingFetch(201)
+    const sender = createWebPushSender({ vapid, fetch: fetchImpl, jwtLifetime: 300 })
+
+    const before = Math.floor(Date.now() / 1000)
+    await sender.send({ registration, body })
+    const now = Math.floor(Date.now() / 1000)
+
+    const headers = new Headers(calls[0].init.headers)
+    const authorization = headers.get('authorization')
+    if (authorization == null) throw new Error('expected an authorization header')
+    const { claims } = decodeJwt(authorization)
+    const exp = claims.exp as number
+    expect(exp).toBeGreaterThan(before)
+    expect(exp).toBeLessThanOrEqual(now + 300)
+  })
+
+  test('the ttl override changes the Ttl header', async () => {
+    const { calls, fetchImpl } = recordingFetch(201)
+    const sender = createWebPushSender({ vapid, fetch: fetchImpl, ttl: 60 })
+
+    await sender.send({ registration, body })
+
+    const headers = new Headers(calls[0].init.headers)
+    expect(headers.get('ttl')).toBe('60')
+  })
+
+  test('the VAPID JWT signature verifies against the transmitted k= public key', async () => {
     const { calls, fetchImpl } = recordingFetch(201)
     const sender = createWebPushSender({ vapid, fetch: fetchImpl })
 
@@ -103,9 +152,25 @@ describe('createWebPushSender', () => {
     const headers = new Headers(calls[0].init.headers)
     const authorization = headers.get('authorization')
     if (authorization == null) throw new Error('expected an authorization header')
-    const { signature, signingInput } = decodeJwt(authorization)
+    const { signature, signingInput, transmittedKey } = decodeJwt(authorization)
+    // Pin k= to the configured key too: a signature check alone would still pass if the sender
+    // signed correctly but transmitted a DIFFERENT (still internally-consistent) keypair's public
+    // half — which a push service would reject as a key/signature mismatch it can't attribute.
+    expect(Array.from(transmittedKey)).toEqual(Array.from(vapid.publicKey))
     const digest = sha256(new TextEncoder().encode(signingInput))
-    expect(p256.verify(signature, digest, vapid.publicKey, { prehash: false })).toBe(true)
+    expect(p256.verify(signature, digest, transmittedKey, { prehash: false })).toBe(true)
+  })
+
+  test('carries no cleartext topic or DID in the request', async () => {
+    const { calls, fetchImpl } = recordingFetch(201)
+    const sender = createWebPushSender({ vapid, fetch: fetchImpl })
+
+    await sender.send({ registration, body })
+
+    const headers = new Headers(calls[0].init.headers)
+    const serializedHeaders = JSON.stringify(Object.fromEntries(headers.entries()))
+    expect(serializedHeaders).not.toContain('did:key:alice')
+    expect(serializedHeaders.toLowerCase()).not.toContain('topic')
   })
 
   test('404 and 410 are gone', async () => {
