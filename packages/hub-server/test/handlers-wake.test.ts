@@ -201,8 +201,8 @@ describe('hub/v1/wake/register', () => {
         param: {
           kind: 'webpush',
           endpoint: 'https://push.example/a',
-          publicKey: 'cHVibGlj',
-          authSecret: 'YXV0aA',
+          publicKey: recipientPublicKeyB64u,
+          authSecret: recipientAuthSecretB64u,
         },
       }),
     ).resolves.toEqual({ registered: true })
@@ -214,8 +214,8 @@ describe('hub/v1/wake/register', () => {
       did: clientDID,
       kind: 'webpush',
       endpoint: 'https://push.example/a',
-      publicKey: 'cHVibGlj',
-      authSecret: 'YXV0aA',
+      publicKey: recipientPublicKeyB64u,
+      authSecret: recipientAuthSecretB64u,
     })
     await dispose()
   })
@@ -229,8 +229,8 @@ describe('hub/v1/wake/register', () => {
       param: {
         kind: 'webpush',
         endpoint: 'https://push.example/a',
-        publicKey: 'cHVibGlj',
-        authSecret: 'YXV0aA',
+        publicKey: recipientPublicKeyB64u,
+        authSecret: recipientAuthSecretB64u,
         expiresAt,
       },
     })
@@ -247,16 +247,16 @@ describe('hub/v1/wake/register', () => {
       param: {
         kind: 'webpush',
         endpoint: 'https://push.example/old',
-        publicKey: 'cHVibGlj',
-        authSecret: 'YXV0aA',
+        publicKey: recipientPublicKeyB64u,
+        authSecret: recipientAuthSecretB64u,
       },
     })
     await client.request('hub/v1/wake/register', {
       param: {
         kind: 'expo',
         endpoint: 'ExponentPushToken[xxx]',
-        publicKey: 'cHVibGlj',
-        authSecret: 'YXV0aA',
+        publicKey: recipientPublicKeyB64u,
+        authSecret: recipientAuthSecretB64u,
       },
     })
 
@@ -271,11 +271,71 @@ describe('hub/v1/wake/register', () => {
         param: {
           kind: 'webpush',
           endpoint: 'https://push.example/a',
-          publicKey: 'cHVibGlj',
-          authSecret: 'YXV0aA',
+          publicKey: recipientPublicKeyB64u,
+          authSecret: recipientAuthSecretB64u,
         },
       }),
     ).rejects.toMatchObject({ code: HUB_ERROR_CODES.wakeNotSupported })
+    await dispose()
+  })
+
+  // The schema asks only for `minLength: 1`, so key material the hub can NEVER use registers
+  // happily and answers `registered: true`. Every subsequent frame for that DID then fails inside
+  // `sealWakeHint` — one error per frame, forever, since a seal failure is not a `gone` verdict and
+  // nothing ever removes the entry. The device believes it is reachable and is never woken: exactly
+  // the outcome `WakeNotSupportedError` exists to prevent, arriving through another door.
+  test('refuses a publicKey that is not a 65-byte uncompressed P-256 point', async () => {
+    const registry = createMemoryWakeRegistry()
+    const { client, clientDID, dispose } = await createTestHub({ wake: { registry } })
+
+    await expect(
+      client.request('hub/v1/wake/register', {
+        param: {
+          kind: 'webpush',
+          endpoint: 'https://push.example/a',
+          publicKey: 'AAAA',
+          authSecret: recipientAuthSecretB64u,
+        },
+      }),
+    ).rejects.toMatchObject({ code: HUB_ERROR_CODES.invalidPayload })
+    // Refused, not stored-then-refused: nothing may be left behind for the dispatcher to find.
+    expect(await registry.get(clientDID)).toBeNull()
+    await dispose()
+  })
+
+  test('refuses an authSecret that is not 16 bytes', async () => {
+    const registry = createMemoryWakeRegistry()
+    const { client, clientDID, dispose } = await createTestHub({ wake: { registry } })
+
+    await expect(
+      client.request('hub/v1/wake/register', {
+        param: {
+          kind: 'webpush',
+          endpoint: 'https://push.example/a',
+          publicKey: recipientPublicKeyB64u,
+          authSecret: 'BBBB',
+        },
+      }),
+    ).rejects.toMatchObject({ code: HUB_ERROR_CODES.invalidPayload })
+    expect(await registry.get(clientDID)).toBeNull()
+    await dispose()
+  })
+
+  test('refuses key material that is not base64url at all', async () => {
+    const registry = createMemoryWakeRegistry()
+    const { client, clientDID, dispose } = await createTestHub({ wake: { registry } })
+
+    await expect(
+      client.request('hub/v1/wake/register', {
+        param: {
+          kind: 'webpush',
+          endpoint: 'https://push.example/a',
+          publicKey: '!!!not base64!!!',
+          authSecret: recipientAuthSecretB64u,
+        },
+      }),
+    ).rejects.toMatchObject({ code: HUB_ERROR_CODES.invalidPayload })
+    expect(await registry.get(clientDID)).toBeNull()
     await dispose()
   })
 
@@ -296,8 +356,8 @@ describe('hub/v1/wake/register', () => {
           did: 'did:key:attacker',
           kind: 'webpush',
           endpoint: 'https://push.example/a',
-          publicKey: 'cHVibGlj',
-          authSecret: 'YXV0aA',
+          publicKey: recipientPublicKeyB64u,
+          authSecret: recipientAuthSecretB64u,
         } as never,
       }),
     ).rejects.toMatchObject({ code: 'EK08' })
@@ -323,14 +383,33 @@ describe('hub/v1/wake/unregister', () => {
       param: {
         kind: 'webpush',
         endpoint: 'https://push.example/a',
-        publicKey: 'cHVibGlj',
-        authSecret: 'YXV0aA',
+        publicKey: recipientPublicKeyB64u,
+        authSecret: recipientAuthSecretB64u,
       },
     })
     await expect(client.request('hub/v1/wake/unregister', { param: {} })).resolves.toEqual({
       unregistered: true,
     })
     expect(await registry.get(clientDID)).toBeNull()
+    await dispose()
+  })
+
+  // `register` consumed a token and `unregister` did not, so the pair was asymmetric in exactly
+  // the direction that matters: the uncounted half is the one an abusive caller uses, and here it
+  // is the half that writes to a durable registry. subscribe/unsubscribe already charge both.
+  test('consumes the per-DID rate limit, like register and unsubscribe', async () => {
+    const registry = createMemoryWakeRegistry()
+    const { client, dispose } = await createTestHub({
+      wake: { registry },
+      rateLimits: { perDID: { rate: 0, burst: 1 } },
+    })
+
+    await expect(client.request('hub/v1/wake/unregister', { param: {} })).resolves.toEqual({
+      unregistered: false,
+    })
+    await expect(client.request('hub/v1/wake/unregister', { param: {} })).rejects.toMatchObject({
+      code: 'EK01',
+    })
     await dispose()
   })
 
@@ -465,6 +544,97 @@ describe('wake on publish', () => {
     await new Promise((resolve) => setTimeout(resolve, 600))
     expect(sent).toHaveLength(1)
     await dispose()
+  })
+
+  // The positive control for the test above, which without it passes for the wrong reason: with a
+  // `debounceMs` that never reached the dispatcher, the default is 10 s and the trailing ping could
+  // not have fired inside a 600 ms wait whether `online()` cancelled it or not. This is the same
+  // window with no reconnect, so the summary MUST arrive — which is also the only thing pinning
+  // `debounceMs` end to end, through `createHub`'s pass-through and into the dispatcher.
+  test('with no reconnect, the trailing summary DOES arrive inside the configured window', async () => {
+    const registry = createMemoryWakeRegistry()
+    const { sender, sent } = createRecordingSender()
+    const { publisher, offlineDID, dispose } = await createTestHubPair({
+      wake: { registry, sender, debounceMs: 300 },
+    })
+    await registry.put({
+      did: offlineDID,
+      kind: 'webpush',
+      endpoint: 'https://push.example/a',
+      publicKey: recipientPublicKeyB64u,
+      authSecret: recipientAuthSecretB64u,
+    })
+
+    await publisher.publish({ topicID: 'topic-a', payload: 'aGk' })
+    await vi.waitFor(() => expect(sent).toHaveLength(1))
+    const { sequenceID } = await publisher.publish({ topicID: 'topic-a', payload: 'aGk' })
+
+    await vi.waitFor(() => expect(sent).toHaveLength(2), { timeout: 2000 })
+    // The summary, not a second leading edge: it names the LATEST frame and counts the window.
+    expect(openWakeHint(sent[1].body, recipientOpener)).toEqual({
+      topicID: 'topic-a',
+      sequenceID,
+      count: 1,
+    })
+    await dispose()
+  })
+})
+
+describe('createHub wake wiring', () => {
+  // The `wake` variant of HubStoreErrorEvent and its STORE_ERROR_CONSEQUENCE text are reachable
+  // ONLY through the `onError` callback createHub hands the dispatcher. The throwing-dispatcher
+  // test above asserts a `{ method: 'wake' }` event too, but that one comes out of the fan-out
+  // loop's own catch — it would still pass with the dispatcher's reporter unwired, and then an
+  // operator with `onStoreError` configured would see every retry verdict and every sender throw
+  // vanish silently.
+  test('a retry verdict reaches the host onStoreError hook', async () => {
+    const registry = createMemoryWakeRegistry()
+    const events: Array<{ method: string; did?: string; error?: unknown }> = []
+    const { publisher, offlineDID, dispose } = await createTestHubPair({
+      onStoreError: (event) => events.push(event),
+      wake: { registry, sender: { send: async () => 'retry' } },
+    })
+    await registry.put({
+      did: offlineDID,
+      kind: 'webpush',
+      endpoint: 'https://push.example/a',
+      publicKey: recipientPublicKeyB64u,
+      authSecret: recipientAuthSecretB64u,
+    })
+
+    await publisher.publish({ topicID: 'topic-a', payload: 'aGk' })
+
+    await vi.waitFor(() => expect(events).toHaveLength(1))
+    expect(events[0]).toEqual({ method: 'wake', did: offlineDID, error: expect.any(Error) })
+    await dispose()
+  })
+
+  // Timers are `unref`'d, so a dispatcher that outlives its hub hangs nothing and shows up in no
+  // other assertion — it just keeps a live coalescing window, and its trailing ping, per disposed
+  // hub. A host that creates and disposes hubs accumulates them.
+  test('disposing the server disposes the dispatcher, cancelling its pending window', async () => {
+    const registry = createMemoryWakeRegistry()
+    const { sender, sent } = createRecordingSender()
+    const { publisher, offlineDID, dispose } = await createTestHubPair({
+      wake: { registry, sender, debounceMs: 500 },
+    })
+    await registry.put({
+      did: offlineDID,
+      kind: 'webpush',
+      endpoint: 'https://push.example/a',
+      publicKey: recipientPublicKeyB64u,
+      authSecret: recipientAuthSecretB64u,
+    })
+
+    await publisher.publish({ topicID: 'topic-a', payload: 'aGk' })
+    await vi.waitFor(() => expect(sent).toHaveLength(1))
+    // Arms a trailing summary, then tears the hub down before the window closes.
+    await publisher.publish({ topicID: 'topic-a', payload: 'aGk' })
+    await dispose()
+
+    // Well past the window: the summary must never fire, because dispose cleared its timer.
+    await new Promise((resolve) => setTimeout(resolve, 1000))
+    expect(sent).toHaveLength(1)
   })
 })
 

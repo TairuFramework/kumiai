@@ -6,6 +6,7 @@ import {
 } from '@enkaku/server'
 import type { HubProtocol, HubStore, StoredMessage, WakeRegistry } from '@kumiai/hub-protocol'
 import {
+  decodeBase64url,
   HUB_ERROR_CODES,
   hubErrorCodeOf,
   InvalidPayloadError,
@@ -906,6 +907,35 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       if (!didLimiter.tryConsume(clientDID)) {
         throw new HandlerError({ code: 'EK01', message: 'Wake rate limit exceeded for DID' })
       }
+      // The param schema asks only for `minLength: 1`, which accepts key material the hub can
+      // never seal to. Storing it answers `registered: true` and then fails inside every single
+      // seal — one error per frame, forever, since a seal failure is not a `gone` verdict and
+      // nothing removes the entry. The device believes it is reachable and is never woken.
+      // Sizes are the port's own (`WakeRegistration`): RFC 8291's uncompressed P-256 point and
+      // 16-octet auth secret.
+      let publicKeyBytes: Uint8Array
+      let authSecretBytes: Uint8Array
+      try {
+        publicKeyBytes = decodeBase64url(ctx.param.publicKey)
+        authSecretBytes = decodeBase64url(ctx.param.authSecret)
+      } catch (cause) {
+        throw HandlerError.from(cause, {
+          code: HUB_ERROR_CODES.invalidPayload,
+          message: 'Wake publicKey and authSecret must be base64url',
+        })
+      }
+      if (publicKeyBytes.length !== 65) {
+        throw new HandlerError({
+          code: HUB_ERROR_CODES.invalidPayload,
+          message: 'Wake publicKey must be a 65-byte uncompressed P-256 point',
+        })
+      }
+      if (authSecretBytes.length !== 16) {
+        throw new HandlerError({
+          code: HUB_ERROR_CODES.invalidPayload,
+          message: 'Wake authSecret must be 16 bytes',
+        })
+      }
       try {
         await wake.registry.put({
           // The DID is the verified issuer, never a wire field — otherwise any member could
@@ -931,6 +961,11 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
           code: HUB_ERROR_CODES.wakeNotSupported,
           message: 'This hub does not support wake notifications',
         })
+      }
+      // Matches `register` above and the subscribe/unsubscribe pair: both halves of a pair cost
+      // the same, or the uncounted half is the one an abusive caller uses.
+      if (!didLimiter.tryConsume(clientDID)) {
+        throw new HandlerError({ code: 'EK01', message: 'Wake rate limit exceeded for DID' })
       }
       let existed: boolean
       try {

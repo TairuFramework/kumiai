@@ -24,6 +24,11 @@ type HubTransports = DirectTransports<
 // enough to satisfy `CreateHubParams.wake`'s requirement of one.
 const NOOP_WAKE_SENDER: WakeSender = { send: async () => 'delivered' }
 
+// Real RFC 8291 key material: `hub/v1/wake/register` refuses anything that is not a 65-byte
+// uncompressed P-256 point and a 16-byte auth secret, since key material the hub cannot seal to
+// would register happily and then fail inside every send.
+const deviceKeys = createWakeKeys()
+
 function createTestHub(options: { wake?: { registry: WakeRegistry } } = {}) {
   const store = createMemoryStore()
   const hubIdentity = randomIdentity()
@@ -98,8 +103,8 @@ describe('HubClient.registerWake', () => {
     await client.registerWake({
       kind: 'webpush',
       endpoint: 'https://push.example/a',
-      publicKey: 'cHVibGlj',
-      authSecret: 'YXV0aA',
+      publicKey: deviceKeys.publicKey,
+      authSecret: deviceKeys.authSecret,
     })
 
     const stored = await registry.get(identity.id)
@@ -107,8 +112,8 @@ describe('HubClient.registerWake', () => {
     // authSecret would still pass a same-shape comparison if the test itself mixed them up.
     expect(stored?.kind).toBe('webpush')
     expect(stored?.endpoint).toBe('https://push.example/a')
-    expect(stored?.publicKey).toBe('cHVibGlj')
-    expect(stored?.authSecret).toBe('YXV0aA')
+    expect(stored?.publicKey).toBe(deviceKeys.publicKey)
+    expect(stored?.authSecret).toBe(deviceKeys.authSecret)
 
     await transports.dispose()
   })
@@ -122,8 +127,8 @@ describe('HubClient.registerWake', () => {
     await client.registerWake({
       kind: 'webpush',
       endpoint: 'https://push.example/a',
-      publicKey: 'cHVibGlj',
-      authSecret: 'YXV0aA',
+      publicKey: deviceKeys.publicKey,
+      authSecret: deviceKeys.authSecret,
       expiresAt,
     })
 
@@ -150,8 +155,8 @@ describe('HubClient.registerWake', () => {
     await client.registerWake({
       kind: 'webpush',
       endpoint: 'https://push.example/a',
-      publicKey: 'cHVibGlj',
-      authSecret: 'YXV0aA',
+      publicKey: deviceKeys.publicKey,
+      authSecret: deviceKeys.authSecret,
     })
 
     expect(calls).toHaveLength(1)
@@ -168,8 +173,8 @@ describe('HubClient.registerWake', () => {
       client.registerWake({
         kind: 'webpush',
         endpoint: 'https://push.example/a',
-        publicKey: 'cHVibGlj',
-        authSecret: 'YXV0aA',
+        publicKey: deviceKeys.publicKey,
+        authSecret: deviceKeys.authSecret,
       }),
     ).rejects.toMatchObject({ code: HUB_ERROR_CODES.wakeNotSupported })
 
@@ -189,8 +194,8 @@ describe('HubClient.unregisterWake', () => {
     await client.registerWake({
       kind: 'webpush',
       endpoint: 'https://push.example/a',
-      publicKey: 'cHVibGlj',
-      authSecret: 'YXV0aA',
+      publicKey: deviceKeys.publicKey,
+      authSecret: deviceKeys.authSecret,
     })
     const after = await client.unregisterWake()
     expect(after.unregistered).toBe(true)

@@ -106,6 +106,66 @@ describe('createWakeDispatcher', () => {
     dispatcher.dispose()
   })
 
+  // `sent` staying at 1 above is satisfied just as well by an `online` that cancelled the timer but
+  // LEFT the entry in `pending`. That stale entry is silent and permanent: every later `notify`
+  // takes the "window already open" branch and increments a counter behind a dead timer, so the
+  // device is never woken again for the life of the process. Only a fresh leading edge afterwards
+  // distinguishes the two.
+  test('online clears the entry, so the next frame is a fresh leading edge', async () => {
+    const registry = createMemoryWakeRegistry()
+    await registry.put(registration)
+    const { sender, sent } = createRecordingSender()
+    const dispatcher = createWakeDispatcher({ registry, sender, debounceMs: 60_000 })
+
+    dispatcher.notify({ did: 'did:key:alice', topicID: 'topic-a', sequenceID: '001' })
+    await vi.waitFor(() => expect(sent).toHaveLength(1))
+    dispatcher.notify({ did: 'did:key:alice', topicID: 'topic-a', sequenceID: '002' })
+    dispatcher.online('did:key:alice')
+
+    // The device went back to sleep and a new frame landed. It must ping IMMEDIATELY, with a
+    // `count` restarted at 1 — not be folded into the window `online` was supposed to have closed.
+    dispatcher.notify({ did: 'did:key:alice', topicID: 'topic-c', sequenceID: '003' })
+    await vi.waitFor(() => expect(sent).toHaveLength(2))
+    expect(openWakeHint(sent[1].body, opener)).toEqual({
+      topicID: 'topic-c',
+      sequenceID: '003',
+      count: 1,
+    })
+    dispatcher.dispose()
+  })
+
+  // The re-arm behind a trailing summary. Without it, the summary leaves no window, so the very
+  // next frame pings immediately and the coalescing the debounce exists for is undone — roughly
+  // double the ping rate under sustained traffic, which no other assertion here would notice.
+  test('a fresh window opens behind the trailing summary, so traffic stays coalesced', async () => {
+    const registry = createMemoryWakeRegistry()
+    await registry.put(registration)
+    const { sender, sent } = createRecordingSender()
+    const dispatcher = createWakeDispatcher({ registry, sender, debounceMs: 60_000 })
+
+    dispatcher.notify({ did: 'did:key:alice', topicID: 'topic-a', sequenceID: '001' })
+    await vi.waitFor(() => expect(sent).toHaveLength(1))
+    dispatcher.notify({ did: 'did:key:alice', topicID: 'topic-a', sequenceID: '002' })
+    await vi.advanceTimersByTimeAsync(60_000)
+    await vi.waitFor(() => expect(sent).toHaveLength(2))
+
+    // Traffic is still flowing. This frame must be SUPPRESSED into the window the summary re-armed,
+    // not treated as a fresh leading edge.
+    dispatcher.notify({ did: 'did:key:alice', topicID: 'topic-a', sequenceID: '003' })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(sent).toHaveLength(2)
+
+    // …and collected by that window's own summary when it closes.
+    await vi.advanceTimersByTimeAsync(60_000)
+    await vi.waitFor(() => expect(sent).toHaveLength(3))
+    expect(openWakeHint(sent[2].body, opener)).toEqual({
+      topicID: 'topic-a',
+      sequenceID: '003',
+      count: 1,
+    })
+    dispatcher.dispose()
+  })
+
   test('sends nothing for a DID with no registration', async () => {
     const registry = createMemoryWakeRegistry()
     const { sender, sent } = createRecordingSender()
