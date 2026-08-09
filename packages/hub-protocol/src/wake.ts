@@ -15,14 +15,20 @@ export type WakeRegistration = {
   authSecret: string
   /**
    * When this registration expires, in seconds since the epoch. A registry MUST NOT return an
-   * entry past its `expiresAt` — an expired entry that still answers is one that fails silently,
-   * the same rule key packages already carry. Absent means it never expires.
+   * entry once the clock has REACHED its `expiresAt` — the boundary is inclusive, so `expiresAt`
+   * names the first second at which the entry is gone. An expired entry that still answers is one
+   * that fails silently, the same rule key packages already carry. Absent means it never expires.
    */
   expiresAt?: number
 }
 
 /**
  * Durable storage for wake registrations: one per DID, since a DID names one device.
+ *
+ * Storage is by VALUE. `put` MUST store a copy and `get` MUST return one, so neither the caller's
+ * object nor the returned object stays connected to what the registry serves. A durable backend
+ * gets this from serialisation; an in-process one has to copy on purpose, and one that does not
+ * lets any caller rewrite a stored endpoint with no `put` in between.
  *
  * Verified by `testWakeRegistryConformance` in `@kumiai/hub-conformance`.
  */
@@ -31,6 +37,7 @@ export type WakeRegistry = {
   put(registration: WakeRegistration): Promise<void>
   /** The DID's registration, or null when there is none or it has expired. */
   get(did: string): Promise<WakeRegistration | null>
+  /** Remove this DID's registration, and ONLY this DID's. */
   delete(did: string): Promise<void>
 }
 
