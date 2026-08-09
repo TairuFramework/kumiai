@@ -7,7 +7,7 @@ Server-side, optional. See [wake notifications](../../docs/reference/wake-notifi
 ## Surface
 
 - `createMemoryWakeRegistry()` — an in-memory `WakeRegistry`. Reference implementation and test double; a production host wants a durable one, checked against `testWakeRegistryConformance` from `@kumiai/hub-conformance`.
-- `createWebPushSender({ vapid, ttl?, jwtLifetime?, fetch? })` — a `WakeSender` for any endpoint speaking RFC 8030 Web Push: browser push services, UnifiedPush distributors, ntfy, or a self-hosted relay. POSTs the sealed body untouched, with a VAPID (RFC 8292) `Authorization` header it signs itself.
+- `createWebPushSender({ vapid, ttl?, jwtLifetime?, allowEndpoint?, fetch? })` — a `WakeSender` for any endpoint speaking RFC 8030 Web Push: browser push services, UnifiedPush distributors, ntfy, or a self-hosted relay. POSTs the sealed body untouched, with a VAPID (RFC 8292) `Authorization` header it signs itself. **`allowEndpoint` defaults to `https:` only**: an endpoint is an opaque string the hub never parses, so without it an authenticated DID could aim the hub at an internal host. Widen it for a self-hosted relay on plain HTTP, or narrow it to an allowlist of origins. A rejected endpoint resolves to `retry`, never `gone` — a policy refusal is a fact about your configuration, and `gone` would delete the registration.
 - `createExpoSender({ accessToken?, placeholderTitle?, fetch? })` — a `WakeSender` for the Expo Push API. A plain `fetch` call against `https://exp.host/--/api/v2/push/send`; no `expo-server-sdk` dependency.
 
 Both senders return a `WakeVerdict` (`'delivered' | 'gone' | 'retry'`) and never throw.

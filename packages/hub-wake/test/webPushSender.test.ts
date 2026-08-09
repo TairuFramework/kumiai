@@ -202,6 +202,87 @@ describe('createWebPushSender', () => {
     }
   })
 
+  // An endpoint is an opaque string the hub never parses, so an authenticated DID can register
+  // anything and have the hub issue requests to it — an internal host, a loopback admin port — and
+  // then read the outcome back through `unregisterWake()`, since only `gone` deletes. The default
+  // predicate is what stops the request being made at all.
+  test('by default a non-https endpoint is rejected without any fetch', async () => {
+    for (const endpoint of [
+      'http://push.example.com/send/abc',
+      'http://127.0.0.1:8080/admin',
+      'file:///etc/passwd',
+    ]) {
+      const { calls, fetchImpl } = recordingFetch(201)
+      const sender = createWebPushSender({ vapid, fetch: fetchImpl })
+
+      // `retry`, not `gone`: a policy refusal is a fact about the hub's configuration, which a
+      // redeploy can reverse, and `gone` would delete the registration unrecoverably.
+      await expect(
+        sender.send({ registration: { ...registration, endpoint }, body }),
+      ).resolves.toBe('retry')
+      // The point of the check — the request never left.
+      expect(calls).toHaveLength(0)
+    }
+  })
+
+  test('https is allowed by default', async () => {
+    const { calls, fetchImpl } = recordingFetch(201)
+    const sender = createWebPushSender({ vapid, fetch: fetchImpl })
+
+    await expect(sender.send({ registration, body })).resolves.toBe('delivered')
+    expect(calls).toHaveLength(1)
+  })
+
+  test('a widened allowEndpoint lets a self-hosted http relay through', async () => {
+    const { calls, fetchImpl } = recordingFetch(201)
+    const seen: Array<string> = []
+    const sender = createWebPushSender({
+      vapid,
+      fetch: fetchImpl,
+      allowEndpoint: (url) => {
+        seen.push(url.origin)
+        return url.origin === 'http://relay.internal:8080'
+      },
+    })
+
+    await expect(
+      sender.send({
+        registration: { ...registration, endpoint: 'http://relay.internal:8080/send/abc' },
+        body,
+      }),
+    ).resolves.toBe('delivered')
+    expect(calls).toHaveLength(1)
+    // The predicate is handed a parsed URL, not the raw string — so a host writes an origin check
+    // rather than a substring match it can get wrong.
+    expect(seen).toEqual(['http://relay.internal:8080'])
+  })
+
+  test('a narrowed allowEndpoint rejects an https endpoint off its allowlist', async () => {
+    const { calls, fetchImpl } = recordingFetch(201)
+    const sender = createWebPushSender({
+      vapid,
+      fetch: fetchImpl,
+      allowEndpoint: (url) => url.origin === 'https://allowed.example',
+    })
+
+    await expect(sender.send({ registration, body })).resolves.toBe('retry')
+    expect(calls).toHaveLength(0)
+  })
+
+  test('a throwing allowEndpoint is a rejection, not an exception out of send', async () => {
+    const { calls, fetchImpl } = recordingFetch(201)
+    const sender = createWebPushSender({
+      vapid,
+      fetch: fetchImpl,
+      allowEndpoint: () => {
+        throw new Error('host policy lookup failed')
+      },
+    })
+
+    await expect(sender.send({ registration, body })).resolves.toBe('retry')
+    expect(calls).toHaveLength(0)
+  })
+
   test('a thrown network error is retry, not an exception', async () => {
     const sender = createWebPushSender({
       vapid,

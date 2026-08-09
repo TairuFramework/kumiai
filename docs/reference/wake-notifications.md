@@ -122,7 +122,15 @@ an optional `debounceMs`. Both are host choices:
 - **`sender`** — where the sealed body actually goes. `@kumiai/hub-wake` ships a generic
   HTTP/VAPID sender for anything speaking RFC 8030 Web Push, and an Expo sender for the Expo Push
   API. Both are plain `fetch` calls behind the `WakeSender` port; a host wanting APNs or FCM
-  directly writes its own.
+  directly writes its own. The Web Push sender takes an optional `allowEndpoint(url)` predicate,
+  **defaulting to `https:` only**. That check belongs in the sender, not at registration: the hub
+  never parses an endpoint, and the sender is where provider knowledge already lives. Without it an
+  authenticated DID can register any string and have the hub issue requests to it — an internal
+  host, a loopback admin port — then read the outcome back through `unregisterWake()`, since only a
+  `gone` verdict deletes. A rejected endpoint resolves to **`retry`**, never `gone`: a policy
+  refusal is a fact about the hub's configuration, which a redeploy can reverse, whereas `gone`
+  would delete the registration unrecoverably. A host running a self-hosted push service over plain
+  HTTP widens the predicate; one that knows its push origins narrows it to an allowlist.
 
 Two costs worth knowing before you wire a durable registry. Neither leaks anything; both are
 operator-relevant:

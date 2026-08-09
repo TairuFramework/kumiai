@@ -24,6 +24,27 @@ export type WebPushSenderParams = {
   fetch?: typeof globalThis.fetch
   /** Seconds the VAPID JWT stays valid. Default: 43 200 (RFC 8292's 12-hour ceiling). */
   jwtLifetime?: number
+  /**
+   * Whether this endpoint may be POSTed to. Default: `https:` only.
+   *
+   * The check lives here, not at registration: the hub's rule is that it never parses an endpoint,
+   * and the sender is where provider knowledge already sits. Without it an authenticated DID can
+   * register any string and have the hub issue requests to it — an internal host, a loopback
+   * admin port, a `file:` URL — and then read the outcome back through `unregisterWake()`, since a
+   * `gone` verdict deletes the registration and any other verdict does not.
+   *
+   * Widen it to run a self-hosted push service over plain HTTP, or narrow it to an allowlist of
+   * origins. A predicate that throws is treated as a rejection.
+   */
+  allowEndpoint?: (url: URL) => boolean
+}
+
+/**
+ * RFC 8030 endpoints are HTTPS. Anything else is either a misconfiguration or an attempt to aim
+ * the hub at something that is not a push service.
+ */
+function isHttpsEndpoint(url: URL): boolean {
+  return url.protocol === 'https:'
 }
 
 function vapidToken(vapid: VapidParams, audience: string, lifetime: number): string {
@@ -55,12 +76,22 @@ export function createWebPushSender(params: WebPushSenderParams): WakeSender {
   const fetchImpl = params.fetch ?? globalThis.fetch
   const ttl = params.ttl ?? 86_400
   const jwtLifetime = params.jwtLifetime ?? 43_200
+  const allowEndpoint = params.allowEndpoint ?? isHttpsEndpoint
 
   return {
     async send({ registration, body }: WakeSendParams): Promise<WakeVerdict> {
       let response: Response
       try {
         const url = new URL(registration.endpoint)
+        // `retry`, not `gone`, and the distinction is not cosmetic. `gone` DELETES the
+        // registration, and it means the endpoint is dead — a fact about the endpoint. A policy
+        // refusal is a fact about this hub's configuration, which a redeploy can reverse: under
+        // `gone`, widening `allowEndpoint` after a misconfiguration would find every device that
+        // published in the meantime already unsubscribed, silently and unrecoverably. `retry`
+        // keeps the registration and reports through `onStoreError`, so the operator sees the
+        // misconfiguration instead of losing the registry to it. The cost is a rejected endpoint
+        // re-failing on every frame — local, never a network call, and loud.
+        if (!allowEndpoint(url)) return 'retry'
         response = await fetchImpl(registration.endpoint, {
           method: 'POST',
           headers: {
