@@ -102,6 +102,25 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 2000): Promise<vo
   }
 }
 
+/**
+ * The negative counterpart of `waitUntil`: asserts `read()` STAYS at `value` for `forMs`.
+ *
+ * A "nothing happened" claim cannot be polled to a conclusion, but it can be polled to a failure.
+ * Sleeping the span and asserting once at the end is the worse shape twice over: on a slow runner
+ * the span can expire before the thing it was meant to outlast, which is a FALSE PASS, and when a
+ * regression does fire it still burns the whole span before reporting. Checking continuously means
+ * a break is caught at the instant it happens, and `forMs` can be set generously — several times
+ * the window under test — without costing anything on a green run.
+ */
+async function expectStaysAt(read: () => number, value: number, forMs: number): Promise<void> {
+  const deadline = Date.now() + forMs
+  while (Date.now() < deadline) {
+    expect(read()).toBe(value)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  expect(read()).toBe(value)
+}
+
 type TestHubPairOptions = Omit<CreateHubParams, 'identity' | 'store' | 'transport' | 'wake'> & {
   wake?: { registry: WakeRegistry; sender: WakeSender; debounceMs?: number }
 }
@@ -609,8 +628,9 @@ describe('wake on publish', () => {
     await bringOnline()
 
     await publisher.publish({ topicID: 'topic-a', payload: 'aGk' })
-    await new Promise((resolve) => setTimeout(resolve, 50))
-    expect(sent).toHaveLength(0)
+    // Same shape as the cancellation tests: a fixed sleep here could end before the fan-out's
+    // fire-and-forget dispatch even got a turn, and pass without having observed anything.
+    await expectStaysAt(() => sent.length, 0, 300)
     await dispose()
   })
 
@@ -649,8 +669,9 @@ describe('wake on publish', () => {
     })
 
     await publisher.publish({ topicID: 'topic-a', payload: 'aGk' })
-    await new Promise((resolve) => setTimeout(resolve, 50))
-    expect(sent).toHaveLength(0)
+    // Same shape as the cancellation tests: a fixed sleep here could end before the fan-out's
+    // fire-and-forget dispatch even got a turn, and pass without having observed anything.
+    await expectStaysAt(() => sent.length, 0, 300)
     await dispose()
   })
 
@@ -680,8 +701,9 @@ describe('wake on publish', () => {
 
     // The device reconnects before the window closes: `online()` must cancel the pending timer.
     await bringOnline()
-    await new Promise((resolve) => setTimeout(resolve, 600))
-    expect(sent).toHaveLength(1)
+    // Held for several windows and checked continuously, so an uncancelled timer trips it the
+    // moment it fires instead of racing a fixed sleep. Its positive control is the next test.
+    await expectStaysAt(() => sent.length, 1, 1500)
     await dispose()
   })
 
@@ -771,9 +793,10 @@ describe('createHub wake wiring', () => {
     await publisher.publish({ topicID: 'topic-a', payload: 'aGk' })
     await dispose()
 
-    // Well past the window: the summary must never fire, because dispose cleared its timer.
-    await new Promise((resolve) => setTimeout(resolve, 1000))
-    expect(sent).toHaveLength(1)
+    // Four times the window, checked continuously: the summary must never fire, because dispose
+    // cleared its timer. A surviving timer trips this at the instant it fires rather than at the
+    // end of a sleep, and a slow runner cannot make the span expire early and pass by accident.
+    await expectStaysAt(() => sent.length, 1, 2000)
   })
 })
 
