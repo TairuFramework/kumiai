@@ -21,9 +21,9 @@ import type { HubClientRegistry } from './registry.js'
 import type { WakeDispatcher } from './wake.js'
 
 /**
- * A single request to authorize. All seven variants ship even though only `publish` and
- * `subscribe` are currently enforced: the union is the exhaustive-switch surface a host's own
- * `switch (req.action)` closes over.
+ * A single request to authorize. All nine variants ship even though `unsubscribe` is not yet
+ * dispatched: the union is the exhaustive-switch surface a host's own `switch (req.action)` closes
+ * over, and widening it after a release is a break for every host that closed over it.
  *
  * A host's `switch` need not handle every action today — an unrecognized action should default to
  * allow, so a hook written before a new variant shipped doesn't silently start refusing a
@@ -43,6 +43,17 @@ export type AuthorizeRequest =
   | { action: 'keypackage/upload'; did: string; count: number; lastResort?: boolean }
   | { action: 'keypackage/fetch'; did: string; targetDID: string; count: number }
   | { action: 'keypackage/status'; did: string }
+  /**
+   * A device registering a push endpoint. `kind` is the opaque sender tag and is the only detail
+   * a host can usefully gate on — `endpoint`, `publicKey` and `authSecret` are deliberately absent,
+   * since a hook that saw them would be a second place the endpoint gets read, and the hub's rule
+   * is that it never interprets one.
+   *
+   * This is the durable cross-group per-device identifier wake introduces, so it is the one a host
+   * is most likely to want a say over.
+   */
+  | { action: 'wake/register'; did: string; kind: string }
+  | { action: 'wake/unregister'; did: string }
 
 /**
  * A plain `boolean` is shorthand for `{ allow: boolean }`, with no reason, code, or retry hint.
@@ -904,6 +915,18 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
           message: 'This hub does not support wake notifications',
         })
       }
+      // After the not-supported refusal, before the rate limit — the order every enforced variant
+      // uses. Configuration is answered first because a hub with no wake support has nothing for a
+      // host to have an opinion about.
+      const decision = normalizeAuthorizeDecision(
+        await authorize({ action: 'wake/register', did: clientDID, kind: ctx.param.kind }),
+      )
+      if (!decision.allow) {
+        throw new HandlerError({
+          code: HUB_ERROR_CODES.authorizationDenied,
+          message: decision.reason ?? 'Not authorized to register a wake endpoint',
+        })
+      }
       if (!didLimiter.tryConsume(clientDID)) {
         throw new HandlerError({ code: 'EK01', message: 'Wake rate limit exceeded for DID' })
       }
@@ -947,6 +970,15 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         throw new HandlerError({
           code: HUB_ERROR_CODES.wakeNotSupported,
           message: 'This hub does not support wake notifications',
+        })
+      }
+      const decision = normalizeAuthorizeDecision(
+        await authorize({ action: 'wake/unregister', did: clientDID }),
+      )
+      if (!decision.allow) {
+        throw new HandlerError({
+          code: HUB_ERROR_CODES.authorizationDenied,
+          message: decision.reason ?? 'Not authorized to unregister a wake endpoint',
         })
       }
       // Matches `register` above and the subscribe/unsubscribe pair: both halves of a pair cost

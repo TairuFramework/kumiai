@@ -31,10 +31,13 @@ another sender. The `identity` param is required for that reason.
 
 Authorization is two layers, and only the second one knows about topics: `accessRules` gate the
 procedures (the default lets any authenticated DID call them), and the optional
-`authorize(request)` hook decides publish and subscribe per topic. It takes one discriminated
-`AuthorizeRequest` — narrow on `request.action` — and returns `AuthorizeDecision`, either a boolean
-or `{ allow, reason?, code?, retryAfterMs? }`. `AuthorizeRequest` names seven actions, but only
-`publish` and `subscribe` are dispatched today. The default allows any authenticated DID.
+`authorize(request)` hook decides the rest. It takes one discriminated `AuthorizeRequest` — narrow
+on `request.action` — and returns `AuthorizeDecision`, either a boolean or
+`{ allow, reason?, code?, retryAfterMs? }`. `AuthorizeRequest` names nine actions, of which only
+`unsubscribe` is not dispatched today; the two `wake/*` actions gate push registration, which is the
+one durable per-device identifier the hub stores. The default allows any authenticated DID, and a
+hook should allow any action it does not recognise, so that a hook written before a variant shipped
+does not start refusing a procedure that used to be ungated.
 
 ## Durable subscription, ephemeral connection
 

@@ -389,6 +389,122 @@ describe('hub/v1/wake/register', () => {
   })
 })
 
+// A wake registration is the one durable cross-group per-device identifier the design introduces,
+// so it is the procedure a host is most likely to want a say over — and `AuthorizeRequest` is a
+// union hosts close over exhaustively, so a variant added after release is a break for them.
+describe('the authorize hook gates both wake procedures', () => {
+  test('a refused wake/register is denied and stores nothing', async () => {
+    const registry = createMemoryWakeRegistry()
+    const seen: Array<{ action: string; did?: string; kind?: string }> = []
+    const { client, clientDID, dispose } = await createTestHub({
+      wake: { registry },
+      authorize: (req) => {
+        seen.push(req)
+        return req.action === 'wake/register' ? { allow: false, reason: 'no wake here' } : true
+      },
+    })
+
+    await expect(
+      client.request('hub/v1/wake/register', {
+        param: {
+          kind: 'webpush',
+          endpoint: 'https://push.example/a',
+          publicKey: recipientPublicKeyB64u,
+          authSecret: recipientAuthSecretB64u,
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: HUB_ERROR_CODES.authorizationDenied,
+      message: 'no wake here',
+    })
+
+    expect(await registry.get(clientDID)).toBeNull()
+    // The hook is handed the authenticated caller and the sender tag, and nothing more: the
+    // endpoint and the key material stay out of it, because the hub never interprets an endpoint
+    // and a hook that saw one would be a second place it gets read.
+    expect(seen).toEqual([{ action: 'wake/register', did: clientDID, kind: 'webpush' }])
+    await dispose()
+  })
+
+  test('a refused wake/unregister is denied and removes nothing', async () => {
+    const registry = createMemoryWakeRegistry()
+    let allowUnregister = true
+    const seen: Array<{ action: string; did?: string }> = []
+    const { client, clientDID, dispose } = await createTestHub({
+      wake: { registry },
+      authorize: (req) => {
+        seen.push(req)
+        return req.action === 'wake/unregister' ? allowUnregister : true
+      },
+    })
+
+    await client.request('hub/v1/wake/register', {
+      param: {
+        kind: 'webpush',
+        endpoint: 'https://push.example/a',
+        publicKey: recipientPublicKeyB64u,
+        authSecret: recipientAuthSecretB64u,
+      },
+    })
+    allowUnregister = false
+
+    await expect(client.request('hub/v1/wake/unregister', { param: {} })).rejects.toMatchObject({
+      code: HUB_ERROR_CODES.authorizationDenied,
+    })
+    // Still registered: the refusal must happen before the delete, not be reported after it.
+    expect(await registry.get(clientDID)).not.toBeNull()
+    expect(seen.map((req) => req.action)).toEqual(['wake/register', 'wake/unregister'])
+    await dispose()
+  })
+
+  test('allowing both leaves the procedures working', async () => {
+    const registry = createMemoryWakeRegistry()
+    const { client, clientDID, dispose } = await createTestHub({
+      wake: { registry },
+      authorize: () => true,
+    })
+
+    await expect(
+      client.request('hub/v1/wake/register', {
+        param: {
+          kind: 'webpush',
+          endpoint: 'https://push.example/a',
+          publicKey: recipientPublicKeyB64u,
+          authSecret: recipientAuthSecretB64u,
+        },
+      }),
+    ).resolves.toEqual({ registered: true })
+    expect(await registry.get(clientDID)).not.toBeNull()
+    await expect(client.request('hub/v1/wake/unregister', { param: {} })).resolves.toEqual({
+      unregistered: true,
+    })
+    await dispose()
+  })
+
+  // A hook written before these variants existed must not start refusing them. The union's own
+  // doc states that contract; this pins it for the two procedures that just joined.
+  test('a hook that only knows the older actions still allows both', async () => {
+    const registry = createMemoryWakeRegistry()
+    const { client, clientDID, dispose } = await createTestHub({
+      wake: { registry },
+      authorize: (req) => req.action !== 'publish',
+    })
+
+    await expect(
+      client.request('hub/v1/wake/register', {
+        param: {
+          kind: 'webpush',
+          endpoint: 'https://push.example/a',
+          publicKey: recipientPublicKeyB64u,
+          authSecret: recipientAuthSecretB64u,
+        },
+      }),
+    ).resolves.toEqual({ registered: true })
+    expect(await registry.get(clientDID)).not.toBeNull()
+    await dispose()
+  })
+})
+
 describe('hub/v1/wake/unregister', () => {
   test('refuses when the hub has no wake support', async () => {
     const { client, dispose } = await createTestHub({})

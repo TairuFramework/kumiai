@@ -135,6 +135,13 @@ operator-relevant:
   send finds no registration and returns. The timers are cheap and `unref`'d, but they do not stop
   until the traffic does.
 
+Both procedures also pass through `createHub`'s `authorize` hook, as
+`{ action: 'wake/register', did, kind }` and `{ action: 'wake/unregister', did }`. The hook sees the
+caller and the opaque sender tag and nothing else — no endpoint, no key material, since the hub does
+not interpret an endpoint and a hook that saw one would be a second place it gets read. A wake
+registration is the one durable cross-group per-device identifier the hub stores, so it is the
+procedure a host is most likely to want a say over.
+
 With `wake` **absent**, both `hub/v1/wake/register` and `hub/v1/wake/unregister` refuse with
 `WakeNotSupportedError`. The enkaku protocol is static, so the handlers always exist on the wire —
 refusing is the only honest answer, since accepting a registration the hub will never act on would
