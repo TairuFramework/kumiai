@@ -6,12 +6,12 @@ import {
 } from '@enkaku/server'
 import type { HubProtocol, HubStore, StoredMessage, WakeRegistry } from '@kumiai/hub-protocol'
 import {
-  decodeBase64url,
   HUB_ERROR_CODES,
   hubErrorCodeOf,
   InvalidPayloadError,
   KeyPackageFetchLimitError,
   keyPackageDigest,
+  wakeRecipientKeyProblem,
 } from '@kumiai/hub-protocol'
 import { fromB64, toB64 } from '@sozai/codec'
 import { getReporter } from '@sozai/log'
@@ -911,29 +911,16 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       // never seal to. Storing it answers `registered: true` and then fails inside every single
       // seal — one error per frame, forever, since a seal failure is not a `gone` verdict and
       // nothing removes the entry. The device believes it is reachable and is never woken.
-      // Sizes are the port's own (`WakeRegistration`): RFC 8291's uncompressed P-256 point and
-      // 16-octet auth secret.
-      let publicKeyBytes: Uint8Array
-      let authSecretBytes: Uint8Array
-      try {
-        publicKeyBytes = decodeBase64url(ctx.param.publicKey)
-        authSecretBytes = decodeBase64url(ctx.param.authSecret)
-      } catch (cause) {
-        throw HandlerError.from(cause, {
-          code: HUB_ERROR_CODES.invalidPayload,
-          message: 'Wake publicKey and authSecret must be base64url',
-        })
-      }
-      if (publicKeyBytes.length !== 65) {
+      // The rule itself lives in hub-protocol next to RFC 8291, so the hub needs no curve of its
+      // own to know that a 65-byte value off the curve fails exactly as a 33-byte one does.
+      const keyProblem = wakeRecipientKeyProblem({
+        publicKey: ctx.param.publicKey,
+        authSecret: ctx.param.authSecret,
+      })
+      if (keyProblem != null) {
         throw new HandlerError({
           code: HUB_ERROR_CODES.invalidPayload,
-          message: 'Wake publicKey must be a 65-byte uncompressed P-256 point',
-        })
-      }
-      if (authSecretBytes.length !== 16) {
-        throw new HandlerError({
-          code: HUB_ERROR_CODES.invalidPayload,
-          message: 'Wake authSecret must be 16 bytes',
+          message: `Wake ${keyProblem}`,
         })
       }
       try {

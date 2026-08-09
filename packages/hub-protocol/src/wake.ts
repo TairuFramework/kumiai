@@ -9,7 +9,11 @@ export type WakeRegistration = {
   kind: string
   /** Opaque delivery address. Never parsed by the hub. */
   endpoint: string
-  /** RFC 8291 user-agent public key: raw uncompressed P-256 point, 65 bytes, base64url. */
+  /**
+   * RFC 8291 user-agent public key: raw uncompressed P-256 point, 65 bytes, base64url.
+   * `wakeRecipientKeyProblem` checks this and `authSecret` together, on the curve and not merely
+   * by length.
+   */
   publicKey: string
   /** RFC 8291 auth secret: 16 bytes, base64url. */
   authSecret: string

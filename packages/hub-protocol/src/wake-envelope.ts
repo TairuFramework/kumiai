@@ -52,6 +52,47 @@ export function decodeBase64url(value: string): Uint8Array {
   return out
 }
 
+/**
+ * Why a device's registered RFC 8291 key material cannot be sealed to, or `null` when it can.
+ *
+ * Lives here rather than in the hub, for two reasons: the sizes and the curve are RFC 8291's, next
+ * to the code that uses them; and a caller gets the whole rule without taking a curve dependency
+ * of its own.
+ *
+ * The bytes are checked all the way onto the curve, not merely counted. A 65-byte value that is
+ * not a P-256 point fails inside `sealWakeHint` exactly as a 33-byte compressed one does — and
+ * that failure is silent in the worst way, since a seal that cannot happen is not a dead endpoint:
+ * nothing deletes the registration, so the device believes it is reachable and is never woken.
+ *
+ * Returns a message rather than throwing, so one call covers every way the material can be wrong
+ * and the caller decides what a refusal looks like on its own wire.
+ */
+export function wakeRecipientKeyProblem(keys: {
+  publicKey: string
+  authSecret: string
+}): string | null {
+  let publicKey: Uint8Array
+  let authSecret: Uint8Array
+  try {
+    publicKey = decodeBase64url(keys.publicKey)
+    authSecret = decodeBase64url(keys.authSecret)
+  } catch {
+    return 'publicKey and authSecret must be base64url'
+  }
+  if (publicKey.length !== 65) {
+    return 'publicKey must be a 65-byte uncompressed P-256 point'
+  }
+  try {
+    p256.Point.fromBytes(publicKey)
+  } catch {
+    return 'publicKey is not a point on P-256'
+  }
+  if (authSecret.length !== 16) {
+    return 'authSecret must be 16 bytes'
+  }
+  return null
+}
+
 const KEY_INFO_PREFIX = new TextEncoder().encode('WebPush: info')
 const CEK_INFO = new TextEncoder().encode('Content-Encoding: aes128gcm\0')
 const NONCE_INFO = new TextEncoder().encode('Content-Encoding: nonce\0')

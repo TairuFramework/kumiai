@@ -54,4 +54,5 @@ export {
   type WakeHint,
   type WakeOpener,
   type WakeRecipient,
+  wakeRecipientKeyProblem,
 } from './wake-envelope.js'

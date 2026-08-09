@@ -321,6 +321,29 @@ describe('hub/v1/wake/register', () => {
     await dispose()
   })
 
+  // The case a length check cannot see: 65 bytes, correct 0x04 prefix, not on P-256. It breaks
+  // every seal exactly as a short key does, and just as silently — nothing here is a `gone`
+  // verdict, so the entry lives forever and the device is never woken.
+  test('refuses a 65-byte publicKey that is not a point on P-256', async () => {
+    const registry = createMemoryWakeRegistry()
+    const { client, clientDID, dispose } = await createTestHub({ wake: { registry } })
+    const offCurve = new Uint8Array(65).fill(7)
+    offCurve[0] = 4
+
+    await expect(
+      client.request('hub/v1/wake/register', {
+        param: {
+          kind: 'webpush',
+          endpoint: 'https://push.example/a',
+          publicKey: Buffer.from(offCurve).toString('base64url'),
+          authSecret: recipientAuthSecretB64u,
+        },
+      }),
+    ).rejects.toMatchObject({ code: HUB_ERROR_CODES.invalidPayload })
+    expect(await registry.get(clientDID)).toBeNull()
+    await dispose()
+  })
+
   test('refuses key material that is not base64url at all', async () => {
     const registry = createMemoryWakeRegistry()
     const { client, clientDID, dispose } = await createTestHub({ wake: { registry } })
