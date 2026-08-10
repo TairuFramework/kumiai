@@ -1,5 +1,8 @@
 # Two seals, and they are not interchangeable
 
+These are the two seals **inside a group's own MLS traffic** — see the scope note below for the
+third seal in this repo, which sits entirely outside it.
+
 App traffic is sealed with `wrap`/`unwrap` — MLS application messages, which **consume** a
 per-message ratchet key and mutate the handle. A Commit's **ledger-entry blob** is not: it is sealed
 with `sealEntries`/`openEntries` under a key derived from the epoch's MLS exporter secret
@@ -27,3 +30,14 @@ group moved past it, so it would sit at a dead epoch forever, silently.
 [reserved namespaces](./reserved-namespaces.md#exporter-labels). `@kumiai/mls-rpc`'s `exportSecret`
 refuses the ledger-entry label outright, since a caller passing it would otherwise be handed the
 ledger-entry key.
+
+## Scope: a third seal exists, outside MLS
+
+[Wake notifications](./wake-notifications.md) add a third seal to this repo: the wake hint, sealed
+under RFC 8291 `aes128gcm` to a device's own P-256 key rather than to anything MLS derives. It has
+no home in this document's distinction, because that distinction — ratchet-consuming open vs. pure
+exporter read — is a question about an MLS handle, and the wake seal has no MLS handle on either
+end. It opens outside a group entirely, in a device's push extension, against a key the group never
+sees and MLS never issues. It carries no version *byte* at all: its version is a field inside the
+sealed JSON, unreadable and untamperable by the push provider, which is the point. It follows the
+same never-best-effort-parse rule as the two above, but that is where the kinship ends.

@@ -2,7 +2,8 @@ import type { ServerTransportOf } from '@enkaku/protocol'
 import type { AccessRules, ResourceLimits, Server } from '@enkaku/server'
 import { serve } from '@enkaku/server'
 import type { Identity } from '@kokuin/token'
-import { type HubProtocol, type HubStore, hubProtocol } from '@kumiai/hub-protocol'
+import type { HubProtocol, HubStore, WakeRegistry, WakeSender } from '@kumiai/hub-protocol'
+import { hubProtocol } from '@kumiai/hub-protocol'
 
 import {
   type AuthorizeHook,
@@ -13,6 +14,7 @@ import {
   type KeyPackageFetchLimits,
 } from './handlers.js'
 import { HubClientRegistry } from './registry.js'
+import { createWakeDispatcher } from './wake.js'
 
 /**
  * Default access rules: any authenticated DID may call hub procedures.
@@ -66,6 +68,17 @@ export type CreateHubParams = {
    * `controllerTimeoutMs` and from the `maxConcurrentHandlers` cap.
    */
   limits?: Partial<ResourceLimits>
+  /**
+   * Wake notifications. Absent: `hub/v1/wake/*` refuse with `WakeNotSupportedError` — refusing is
+   * the only honest answer, since accepting a registration the hub will never act on leaves the
+   * device believing it is reachable.
+   */
+  wake?: {
+    registry: WakeRegistry
+    sender: WakeSender
+    /** Coalescing window in milliseconds. Default: 10 000. */
+    debounceMs?: number
+  }
 }
 
 export type HubInstance = {
@@ -79,6 +92,15 @@ export function createHub(params: CreateHubParams): HubInstance {
   // wrapper delegates to this instance rather than building a second one from the same hook —
   // which matters the moment a reporter holds state, as the throttling the README names would.
   const storeErrorReporter = createStoreErrorReporter(params.onStoreError)
+  const wakeDispatcher =
+    params.wake == null
+      ? undefined
+      : createWakeDispatcher({
+          registry: params.wake.registry,
+          sender: params.wake.sender,
+          debounceMs: params.wake.debounceMs,
+          onError: ({ did, error }) => storeErrorReporter({ method: 'wake', did, error }),
+        })
   const handlers = createHandlers({
     registry,
     store: params.store,
@@ -86,6 +108,10 @@ export function createHub(params: CreateHubParams): HubInstance {
     rateLimits: params.rateLimits,
     keyPackageFetchLimits: params.keyPackageFetchLimits,
     onStoreError: storeErrorReporter,
+    wake:
+      params.wake == null
+        ? undefined
+        : { registry: params.wake.registry, dispatcher: wakeDispatcher },
   })
   const limits: Partial<ResourceLimits> = {
     ...params.limits,
@@ -111,6 +137,9 @@ export function createHub(params: CreateHubParams): HubInstance {
       })
     }, interval)
     server.disposed.then(() => clearInterval(purgeTimer))
+  }
+  if (wakeDispatcher != null) {
+    server.disposed.then(() => wakeDispatcher.dispose())
   }
   return { registry, server }
 }

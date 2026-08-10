@@ -20,3 +20,9 @@ export { createMemoryStore, type MemoryStoreOptions } from './memoryStore.js'
 export { createRateLimiter, type RateLimitConfig, type RateLimiter } from './rateLimit.js'
 export type { ClientEntry } from './registry.js'
 export { HubClientRegistry } from './registry.js'
+export {
+  createWakeDispatcher,
+  type WakeDispatcher,
+  type WakeDispatcherParams,
+  type WakeNotifyParams,
+} from './wake.js'

@@ -8,11 +8,11 @@
 ## What this repo is
 
 The MLS / group stack: `mls` (E2EE identity + membership crypto core), `broadcast`
-(generic fan-out), `hub-protocol`/`hub-client`/`hub-server`/`hub-tunnel` (the hub
+(generic fan-out), `hub-protocol`/`hub-client`/`hub-server`/`hub-tunnel`/`hub-wake` (the hub
 subsystem), `rpc` (group RPC), `mls-rpc` (the real implementation of rpc's consumer
 ports over `mls`), `mls-hub` (key-package provisioning between `mls` and a hub), and the contract
 suites `rpc-conformance` and `hub-conformance`
-(every implementation AND every double must pass them). Young and tightly coupled — eleven
+(every implementation AND every double must pass them). Young and tightly coupled — twelve
 packages share one version band (same minor pre-1.0, same major from 1.0); raising it is a group
 act, but a patch release within the band is not.
 

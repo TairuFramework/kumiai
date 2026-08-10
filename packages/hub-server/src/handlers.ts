@@ -4,24 +4,26 @@ import {
   type ProcedureHandlers,
   type RequestHandler,
 } from '@enkaku/server'
-import type { HubProtocol, HubStore, StoredMessage } from '@kumiai/hub-protocol'
+import type { HubProtocol, HubStore, StoredMessage, WakeRegistry } from '@kumiai/hub-protocol'
 import {
   HUB_ERROR_CODES,
   hubErrorCodeOf,
   InvalidPayloadError,
   KeyPackageFetchLimitError,
   keyPackageDigest,
+  wakeRecipientKeyProblem,
 } from '@kumiai/hub-protocol'
 import { fromB64, toB64 } from '@sozai/codec'
 import { getReporter } from '@sozai/log'
 
 import { createRateLimiter, type RateLimitConfig } from './rateLimit.js'
 import type { HubClientRegistry } from './registry.js'
+import type { WakeDispatcher } from './wake.js'
 
 /**
- * A single request to authorize. All seven variants ship even though only `publish` and
- * `subscribe` are currently enforced: the union is the exhaustive-switch surface a host's own
- * `switch (req.action)` closes over.
+ * A single request to authorize. All nine variants ship even though `unsubscribe` is not yet
+ * dispatched: the union is the exhaustive-switch surface a host's own `switch (req.action)` closes
+ * over, and widening it after a release is a break for every host that closed over it.
  *
  * A host's `switch` need not handle every action today — an unrecognized action should default to
  * allow, so a hook written before a new variant shipped doesn't silently start refusing a
@@ -41,6 +43,18 @@ export type AuthorizeRequest =
   | { action: 'keypackage/upload'; did: string; count: number; lastResort?: boolean }
   | { action: 'keypackage/fetch'; did: string; targetDID: string; count: number }
   | { action: 'keypackage/status'; did: string }
+  /**
+   * A device registering a push endpoint. `kind` (the opaque sender tag) and `expiresAt` (the
+   * caller-supplied registration lifetime cap, when given) are the only details a host can usefully
+   * gate on — `endpoint`, `publicKey` and `authSecret` are deliberately absent, since a hook that
+   * saw them would be a second place the endpoint gets read, and the hub's rule is that it never
+   * interprets one.
+   *
+   * This is the durable cross-group per-device identifier wake introduces, so it is the one a host
+   * is most likely to want a say over.
+   */
+  | { action: 'wake/register'; did: string; kind: string; expiresAt?: number }
+  | { action: 'wake/unregister'; did: string }
 
 /**
  * A plain `boolean` is shorthand for `{ allow: boolean }`, with no reason, code, or retry hint.
@@ -82,6 +96,8 @@ export type HubStoreErrorEvent =
   | { method: 'fetchLastResortKeyPackage'; did: string; error: unknown }
   /** The topic whose subscriber list could not be read for live fan-out. */
   | { method: 'getSubscribers'; topicID: string; error: unknown }
+  /** The DID whose wake dispatch (send, or the registry read/delete around it) failed. */
+  | { method: 'wake'; did: string; error: unknown }
 
 export type HubStoreErrorHook = (event: HubStoreErrorEvent) => void
 
@@ -109,6 +125,10 @@ const STORE_ERROR_CONSEQUENCE: Record<HubStoreErrorEvent['method'], string> = {
     'The frame is committed and queued, but the live push to connected subscribers was skipped: ' +
     'each of them stops receiving new frames until it reconnects. A getSubscribers that keeps ' +
     'failing means the hub has silently degraded from push to pull for every publish.',
+  wake:
+    'The offline device was not pinged for this frame. It still redelivers on the next reconnect ' +
+    '(store-and-forward), so nothing is lost — but a wake that keeps failing means the device ' +
+    'stays asleep until something else wakes it.',
 }
 
 const reportStoreError = getReporter(['kumiai', 'hub-server'], '@kumiai/hub-server')
@@ -123,6 +143,7 @@ function subjectOf(event: HubStoreErrorEvent): string {
       return ` on topic ${event.topicID}`
     case 'ack':
     case 'fetchLastResortKeyPackage':
+    case 'wake':
       return ` for ${event.did}`
   }
 }
@@ -210,6 +231,11 @@ export type CreateHandlersParams = {
    * empty handler to silence it deliberately.
    */
   onStoreError?: HubStoreErrorHook
+  /**
+   * Wake support. Absent: both wake procedures refuse. The registry is separate from the
+   * dispatcher because the handlers only ever store and remove; sending is the dispatcher's.
+   */
+  wake?: { registry: WakeRegistry; dispatcher?: WakeDispatcher }
 }
 
 function getClientDID(ctx: { message: { payload: Record<string, unknown> } }): string {
@@ -422,6 +448,21 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
               payload: payloadBytes,
               ...logPosition,
             })
+          } else {
+            // No live channel: the frame is durably queued, so all that is missing is a nudge to
+            // come and get it. Both retention classes wake — a commit-lane frame is log-class, and
+            // a membership change is exactly what a sleeping device must learn.
+            //
+            // Guarded even though `notify` is documented never to throw: `dispatcher` is
+            // caller-injectable (`CreateHandlersParams.wake.dispatcher`), and a misbehaving
+            // third-party implementation must not abort this loop mid-way — that would cost live
+            // delivery to every subscriber still to come, for a publish whose append already
+            // committed.
+            try {
+              params.wake?.dispatcher?.notify({ did: recipientDID, topicID, sequenceID })
+            } catch (error) {
+              storeErrorReporter({ method: 'wake', did: recipientDID, error })
+            }
           }
         }
       }
@@ -597,6 +638,8 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         receiveToken = token
         // After the bind, so the lane is never unheld between the two.
         evicted?.()
+        // The device is draining; a trailing summary would be noise it has already outrun.
+        params.wake?.dispatcher?.online(clientDID)
 
         // Drain the backlog. Await each page so lastServed is exact before the flush.
         let cursor: string | null | undefined = after
@@ -863,5 +906,101 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       }
       return { count, lastResort: stored == null ? null : keyPackageDigest(stored) }
     }) as RequestHandler<HubProtocol, 'hub/v1/keypackage/status'>,
+
+    'hub/v1/wake/register': (async (ctx) => {
+      const clientDID = getClientDID(ctx)
+      const wake = params.wake
+      if (wake == null) {
+        throw new HandlerError({
+          code: HUB_ERROR_CODES.wakeNotSupported,
+          message: 'This hub does not support wake notifications',
+        })
+      }
+      // After the not-supported refusal, before the rate limit — the order every enforced variant
+      // uses. Configuration is answered first because a hub with no wake support has nothing for a
+      // host to have an opinion about.
+      const decision = normalizeAuthorizeDecision(
+        await authorize({
+          action: 'wake/register',
+          did: clientDID,
+          kind: ctx.param.kind,
+          expiresAt: ctx.param.expiresAt,
+        }),
+      )
+      if (!decision.allow) {
+        throw new HandlerError({
+          code: HUB_ERROR_CODES.authorizationDenied,
+          message: decision.reason ?? 'Not authorized to register a wake endpoint',
+        })
+      }
+      if (!didLimiter.tryConsume(clientDID)) {
+        throw new HandlerError({ code: 'EK01', message: 'Wake rate limit exceeded for DID' })
+      }
+      // The param schema bounds the length (`minLength: 1`, `maxLength: 128`/`64`) but not the
+      // shape, which accepts key material the hub can never seal to. Storing it answers
+      // `registered: true` and then fails inside every single seal — one error per frame, forever,
+      // since a seal failure is not a `gone` verdict and nothing removes the entry. The device
+      // believes it is reachable and is never woken.
+      // The rule itself lives in hub-protocol next to RFC 8291, so the hub needs no curve of its
+      // own to know that a 65-byte value off the curve fails exactly as a 33-byte one does.
+      const keyProblem = wakeRecipientKeyProblem({
+        publicKey: ctx.param.publicKey,
+        authSecret: ctx.param.authSecret,
+      })
+      if (keyProblem != null) {
+        throw new HandlerError({
+          code: HUB_ERROR_CODES.invalidPayload,
+          message: `Wake ${keyProblem}`,
+        })
+      }
+      try {
+        await wake.registry.put({
+          // The DID is the verified issuer, never a wire field — otherwise any member could
+          // redirect another member's wakes to an endpoint they control.
+          did: clientDID,
+          kind: ctx.param.kind,
+          endpoint: ctx.param.endpoint,
+          publicKey: ctx.param.publicKey,
+          authSecret: ctx.param.authSecret,
+          ...(ctx.param.expiresAt != null ? { expiresAt: ctx.param.expiresAt } : {}),
+        })
+      } catch (error) {
+        rethrowAsHandlerError(error)
+      }
+      return { registered: true }
+    }) as RequestHandler<HubProtocol, 'hub/v1/wake/register'>,
+
+    'hub/v1/wake/unregister': (async (ctx) => {
+      const clientDID = getClientDID(ctx)
+      const wake = params.wake
+      if (wake == null) {
+        throw new HandlerError({
+          code: HUB_ERROR_CODES.wakeNotSupported,
+          message: 'This hub does not support wake notifications',
+        })
+      }
+      const decision = normalizeAuthorizeDecision(
+        await authorize({ action: 'wake/unregister', did: clientDID }),
+      )
+      if (!decision.allow) {
+        throw new HandlerError({
+          code: HUB_ERROR_CODES.authorizationDenied,
+          message: decision.reason ?? 'Not authorized to unregister a wake endpoint',
+        })
+      }
+      // Matches `register` above and the subscribe/unsubscribe pair: both halves of a pair cost
+      // the same, or the uncounted half is the one an abusive caller uses.
+      if (!didLimiter.tryConsume(clientDID)) {
+        throw new HandlerError({ code: 'EK01', message: 'Wake rate limit exceeded for DID' })
+      }
+      let existed: boolean
+      try {
+        existed = (await wake.registry.get(clientDID)) != null
+        await wake.registry.delete(clientDID)
+      } catch (error) {
+        rethrowAsHandlerError(error)
+      }
+      return { unregistered: existed }
+    }) as RequestHandler<HubProtocol, 'hub/v1/wake/unregister'>,
   }
 }

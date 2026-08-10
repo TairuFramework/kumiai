@@ -8,8 +8,8 @@ promise. The domain detail lives in [`docs/reference/`](../reference/), indexed 
 ## Packages
 
 mls (E2EE identity + membership via MLS -- the crypto core), broadcast (generic fan-out),
-the hub subsystem (hub-protocol, hub-client, hub-server, hub-tunnel), and rpc. One version band
-while pre-1.0 (young, tightly coupled).
+the hub subsystem (hub-protocol, hub-client, hub-server, hub-tunnel, hub-wake), and rpc. One
+version band while pre-1.0 (young, tightly coupled).
 
 Alongside them: **mls-rpc**, the real implementation of rpc's two consumer ports over a live MLS
 handle — until it existed nothing had ever run the ports outside fixtures — **mls-hub**, which owns
@@ -33,6 +33,7 @@ overview: https://github.com/TairuFramework/kigu/blob/main/docs/stack.md
 | [The app lane](../reference/app-lane.md) | The anchor and why it is per-epoch, segments, the returning-member drain, the cursor and `frameEpoch`. |
 | [Defining a group protocol](../reference/group-protocols.md) | Procedure kind × retention, and why only events may be `log`. |
 | [Two seals](../reference/sealing.md) | `wrap`/`unwrap` vs `sealEntries`/`openEntries`, and where the version byte sits. |
+| [Wake notifications](../reference/wake-notifications.md) | The push doorbell: the sealed hint, leading-edge debouncing, sender verdicts, and the iOS limits. |
 
 ## What a host wires
 
@@ -72,3 +73,17 @@ Bounds this design has, on purpose, rather than hides:
   design: forward secrecy.
 - **The drain is at-least-once against the live path.** The cursor tracks the drain, so a restart can
   re-deliver frames that arrived live and sit after it.
+- **A wake ping tells the push provider that a device received something, and when.** The content
+  is sealed and the topic never leaves the hub, but timing is inherent to waking a suspended app.
+  Self-hosting the push service collapses this to the hub operator, who already saw the timing.
+- **A wake registry is a `DID → endpoint` map, and that is new linkability at the hub** — a stable
+  per-device identifier that outlives every group the device belongs to. It is the one thing wake
+  adds that the hub did not already have; the hub already saw topics, senders and timing.
+- **A hub restart drops every pending debounce window**, losing at most a trailing summary. The
+  timer map is in-process, which is exactly why the debounce is leading-edge: a trailing-only
+  scheme would lose the notification itself whenever a restart landed inside a window.
+- **The hub issues authenticated POSTs to caller-chosen HTTPS origins.** `allowEndpoint`'s default
+  only blocks non-HTTPS schemes; an internal HTTPS service (a loopback admin port, a metadata
+  endpoint) is still reachable and its 404/410-vs-anything-else outcome is still readable back
+  through `unregisterWake()`. A host on a network with internal HTTPS services must narrow
+  `allowEndpoint` to an origin allowlist rather than rely on the default.

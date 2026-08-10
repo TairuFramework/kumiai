@@ -1,5 +1,6 @@
 import { x25519 } from '@noble/curves/ed25519.js'
 import { sha256 } from '@noble/hashes/sha2.js'
+import { concatBytes } from '@noble/hashes/utils.js'
 import { fromB64U, fromUTF, toB64U, toUTF } from '@sozai/codec'
 
 import type { CommitContext, CommitHeader, GroupMLS, PendingRecovery } from '../../src/crypto.js'
@@ -268,23 +269,11 @@ const SEAL_DOMAIN = {
 /** enc(32) + tag(16): the shortest well-formed sealed reply. */
 const MIN_SEALED_LENGTH = 32 + 16
 
-function concatBytes(parts: Array<Uint8Array>): Uint8Array {
-  let length = 0
-  for (const part of parts) length += part.length
-  const out = new Uint8Array(length)
-  let offset = 0
-  for (const part of parts) {
-    out.set(part, offset)
-    offset += part.length
-  }
-  return out
-}
-
 /** SHA-256 in counter mode: enough keystream for a payload of any length. */
 function keystream(seed: Uint8Array, length: number): Uint8Array {
   const out = new Uint8Array(length)
   for (let offset = 0, counter = 0; offset < length; offset += 32, counter++) {
-    const block = sha256(concatBytes([seed, fromUTF(`/${counter}`)]))
+    const block = sha256(concatBytes(seed, fromUTF(`/${counter}`)))
     out.set(block.subarray(0, Math.min(32, length - offset)), offset)
   }
   return out
@@ -321,9 +310,9 @@ function sealToKey(publicKey: Uint8Array, context: Uint8Array, payload: Uint8Arr
   const secretKey = x25519.utils.randomSecretKey()
   const enc = x25519.getPublicKey(secretKey)
   const shared = x25519.getSharedSecret(secretKey, publicKey)
-  const ct = xorWith(payload, keystream(concatBytes([shared, enc, context]), payload.length))
-  const tag = sha256(concatBytes([shared, context, ct])).subarray(0, 16)
-  return concatBytes([enc, tag, ct])
+  const ct = xorWith(payload, keystream(concatBytes(shared, enc, context), payload.length))
+  const tag = sha256(concatBytes(shared, context, ct)).subarray(0, 16)
+  return concatBytes(enc, tag, ct)
 }
 
 /** Open a sealed reply, or `null` for bytes this key and context do not open. */
@@ -342,11 +331,11 @@ function openWithKey(
   } catch {
     return null // hub-injected bytes: not a reply at all
   }
-  const expected = sha256(concatBytes([shared, context, ct])).subarray(0, 16)
+  const expected = sha256(concatBytes(shared, context, ct)).subarray(0, 16)
   for (let i = 0; i < 16; i++) {
     if (tag[i] !== expected[i]) return null
   }
-  return xorWith(ct, keystream(concatBytes([shared, enc, context]), ct.length))
+  return xorWith(ct, keystream(concatBytes(shared, enc, context), ct.length))
 }
 
 /**

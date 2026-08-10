@@ -46,6 +46,19 @@ export type ReceiveOptions = {
   after?: string
 }
 
+export type RegisterWakeParams = {
+  /** Opaque sender tag matching the hub's configured sender, e.g. 'webpush' or 'expo'. */
+  kind: string
+  /** The push endpoint. Opaque to the hub. */
+  endpoint: string
+  /** base64url, from `createWakeKeys`. */
+  publicKey: string
+  /** base64url, from `createWakeKeys`. */
+  authSecret: string
+  /** When this registration expires, in seconds since the epoch. */
+  expiresAt?: number
+}
+
 type ReceiveMessage = {
   sequenceID: string
   senderDID: string
@@ -172,5 +185,31 @@ export class HubClient {
     return this.#client.request('hub/v1/keypackage/fetch', {
       param: { did, count },
     })
+  }
+
+  /**
+   * Register this device's push endpoint, replacing any previous one.
+   *
+   * The hub seals every wake to `publicKey`, so re-registering with fresh keys is what rotation
+   * means. A hub configured without wake support refuses with the `WakeNotSupportedError` wire
+   * code rather than accepting a registration it would never act on.
+   */
+  registerWake(params: RegisterWakeParams): RequestCall<{ registered: boolean }> {
+    return this.#client.request('hub/v1/wake/register', {
+      param: {
+        kind: params.kind,
+        endpoint: params.endpoint,
+        publicKey: params.publicKey,
+        authSecret: params.authSecret,
+        // An explicit `undefined` fails the wire schema's `integer` check on transports that do
+        // not drop undefined properties — omit the key instead.
+        ...(params.expiresAt != null ? { expiresAt: params.expiresAt } : {}),
+      },
+    })
+  }
+
+  /** Remove this device's push endpoint. `unregistered: false` means there was nothing stored. */
+  unregisterWake(): RequestCall<{ unregistered: boolean }> {
+    return this.#client.request('hub/v1/wake/unregister', { param: {} })
   }
 }

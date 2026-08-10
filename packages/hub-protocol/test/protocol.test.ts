@@ -14,6 +14,8 @@ describe('hubProtocol', () => {
         'hub/v1/subscribe',
         'hub/v1/topic/fetch',
         'hub/v1/unsubscribe',
+        'hub/v1/wake/register',
+        'hub/v1/wake/unregister',
       ].sort(),
     )
   })
@@ -93,5 +95,27 @@ describe('hub/v1/keypackage/upload', () => {
     expect(param.properties.notAfter).toEqual({ type: 'integer', minimum: 0 })
     expect(param.required).toEqual(['keyPackages'])
     expect(param.additionalProperties).toBe(false)
+  })
+})
+
+describe('hub/v1/wake/register', () => {
+  test('is a sealed request procedure', () => {
+    const definition = hubProtocol['hub/v1/wake/register']
+    expect(definition.type).toBe('request')
+    expect(definition.param.additionalProperties).toBe(false)
+    expect(definition.param.required).toEqual(['kind', 'endpoint', 'publicKey', 'authSecret'])
+  })
+
+  test('has no did field — the hub uses the authenticated caller', () => {
+    expect(hubProtocol['hub/v1/wake/register'].param.properties).not.toHaveProperty('did')
+  })
+})
+
+describe('hub/v1/wake/unregister', () => {
+  test('takes no parameters', () => {
+    const definition = hubProtocol['hub/v1/wake/unregister']
+    expect(definition.type).toBe('request')
+    expect(definition.param.additionalProperties).toBe(false)
+    expect(Object.keys(definition.param.properties ?? {})).toEqual([])
   })
 })

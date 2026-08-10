@@ -18,6 +18,7 @@ export {
   NotSubscribedError,
   RetentionExceededError,
   SubscriptionQuotaExceededError,
+  WakeNotSupportedError,
 } from './errors.js'
 export type { HubProtocol } from './protocol.js'
 export { hubProtocol } from './protocol.js'
@@ -36,3 +37,20 @@ export type {
   SubscribeParams,
   TrimParams,
 } from './types.js'
+export type {
+  WakeRegistration,
+  WakeRegistry,
+  WakeSender,
+  WakeSendParams,
+  WakeVerdict,
+} from './wake.js'
+export {
+  openWakeHint,
+  sealWakeHint,
+  WAKE_HINT_VERSION,
+  WAKE_RECORD_SIZE,
+  type WakeHint,
+  type WakeOpener,
+  type WakeRecipient,
+  wakeRecipientKeyProblem,
+} from './wake-envelope.js'
