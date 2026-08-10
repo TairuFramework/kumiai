@@ -109,8 +109,9 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 2000): Promise<vo
  * Sleeping the span and asserting once at the end is the worse shape twice over: on a slow runner
  * the span can expire before the thing it was meant to outlast, which is a FALSE PASS, and when a
  * regression does fire it still burns the whole span before reporting. Checking continuously means
- * a break is caught at the instant it happens, and `forMs` can be set generously — several times
- * the window under test — without costing anything on a green run.
+ * a break is caught at the instant it happens — but a negative assertion can never conclude early,
+ * so every green run pays the full `forMs` regardless of how generous it is. Keep `forMs` a small,
+ * deliberate multiple of the window under test, not a "why not" round number.
  */
 async function expectStaysAt(read: () => number, value: number, forMs: number): Promise<void> {
   const deadline = Date.now() + forMs
@@ -830,10 +831,10 @@ describe('createHub wake wiring', () => {
     await publisher.publish({ topicID: 'topic-a', payload: 'aGk' })
     await dispose()
 
-    // Four times the window, checked continuously: the summary must never fire, because dispose
+    // Three times the window, checked continuously: the summary must never fire, because dispose
     // cleared its timer. A surviving timer trips this at the instant it fires rather than at the
     // end of a sleep, and a slow runner cannot make the span expire early and pass by accident.
-    await expectStaysAt(() => sent.length, 1, 2000)
+    await expectStaysAt(() => sent.length, 1, 1500)
   })
 })
 
