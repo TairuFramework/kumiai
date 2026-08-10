@@ -153,11 +153,15 @@ describe('sealWakeHint', () => {
   })
 
   // A REAL limit, recorded rather than hidden: `maxLength` counts characters, but the record holds
-  // JSON bytes, and JSON escaping is what turns one into many. A character that serialises as a
-  // six-byte \u escape drops the true ceiling to 72 characters; `"`, `\` and `\n` cost 2 and cap it
-  // at 216; CJK costs 3 and caps it at 144. A topicID of 256 such characters is legal by the
-  // schema and CANNOT be sealed — the hint throws inside the dispatcher's fire-and-forget task,
-  // surfaces as an `onError` report, and that device is never woken for that topic.
+  // JSON bytes, and byte cost per character is what turns one into many. `"`, `\` and `\n` cost 2
+  // (JSON escape) and cap it at 216; a raw CJK character costs 3 (UTF-8) and caps it at 144; a
+  // control character with no short escape serialises as a six-byte `\uXXXX` and caps it at 72; a
+  // non-BMP character (an emoji, a surrogate pair) costs 4 (UTF-8) and caps it at 108 — the case
+  // where the schema's `maxLength` (code points) and the byte cost diverge most sharply: 256 such
+  // code points cost 1024 record bytes against a 494-byte budget. A topicID of 256 characters at
+  // any of these costs is legal by the schema and CANNOT be sealed — the hint throws inside the
+  // dispatcher's fire-and-forget task, surfaces as an `onError` report, and that device is never
+  // woken for that topic. All four ceilings are pinned below so none of them can drift silently.
   //
   // Not reachable today: topicIDs are derived from MLS exporter output and are base64url. The fix
   // if it ever becomes reachable is a `pattern` on the protocol's topicID schema, not a bigger
@@ -172,6 +176,41 @@ describe('sealWakeHint', () => {
     expect(() => sealWakeHint({ ...hint, topicID: '"'.repeat(217) }, recipient)).toThrow(
       /too large/,
     )
+  })
+
+  test('a raw CJK topicID (3-byte UTF-8) seals at 144 and refuses 145', () => {
+    const recipient = createRecipient()
+    const at = (length: number) => ({
+      topicID: '龍'.repeat(length),
+      sequenceID: '000000000042',
+      count: 9999,
+    })
+    expect(() => sealWakeHint(at(144), recipient)).not.toThrow()
+    expect(() => sealWakeHint(at(145), recipient)).toThrow(/too large/)
+  })
+
+  test('a control character with no short JSON escape (six-byte \\u) seals at 72 and refuses 73', () => {
+    const recipient = createRecipient()
+    const at = (length: number) => ({
+      topicID: String.fromCharCode(1).repeat(length),
+      sequenceID: '000000000042',
+      count: 9999,
+    })
+    expect(() => sealWakeHint(at(72), recipient)).not.toThrow()
+    expect(() => sealWakeHint(at(73), recipient)).toThrow(/too large/)
+  })
+
+  // The case where the schema's `maxLength` (code points) and the byte cost diverge most sharply:
+  // a non-BMP character costs 4 UTF-8 bytes but is 1 code point, well under the 256-code-point cap.
+  test('a non-BMP topicID (4-byte UTF-8 surrogate pair) seals at 108 and refuses 109', () => {
+    const recipient = createRecipient()
+    const at = (length: number) => ({
+      topicID: '\u{1F600}'.repeat(length),
+      sequenceID: '000000000042',
+      count: 9999,
+    })
+    expect(() => sealWakeHint(at(108), recipient)).not.toThrow()
+    expect(() => sealWakeHint(at(109), recipient)).toThrow(/too large/)
   })
 })
 
