@@ -82,3 +82,8 @@ Bounds this design has, on purpose, rather than hides:
 - **A hub restart drops every pending debounce window**, losing at most a trailing summary. The
   timer map is in-process, which is exactly why the debounce is leading-edge: a trailing-only
   scheme would lose the notification itself whenever a restart landed inside a window.
+- **The hub issues authenticated POSTs to caller-chosen HTTPS origins.** `allowEndpoint`'s default
+  only blocks non-HTTPS schemes; an internal HTTPS service (a loopback admin port, a metadata
+  endpoint) is still reachable and its 404/410-vs-anything-else outcome is still readable back
+  through `unregisterWake()`. A host on a network with internal HTTPS services must narrow
+  `allowEndpoint` to an origin allowlist rather than rely on the default.

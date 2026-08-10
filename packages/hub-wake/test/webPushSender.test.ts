@@ -205,7 +205,10 @@ describe('createWebPushSender', () => {
   // An endpoint is an opaque string the hub never parses, so an authenticated DID can register
   // anything and have the hub issue requests to it — an internal host, a loopback admin port — and
   // then read the outcome back through `unregisterWake()`, since only `gone` deletes. The default
-  // predicate is what stops the request being made at all.
+  // predicate blocks every non-HTTPS scheme, which is what these vectors exercise; an HTTPS
+  // endpoint on an internal origin (`https://127.0.0.1:8443/admin`, `https://10.0.0.5/`) still
+  // passes the default and reaches `fetch` — narrowing `allowEndpoint` to an origin allowlist is
+  // what closes that.
   test('by default a non-https endpoint is rejected without any fetch', async () => {
     for (const endpoint of [
       'http://push.example.com/send/abc',
