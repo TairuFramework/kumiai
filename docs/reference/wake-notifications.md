@@ -142,9 +142,15 @@ operator-relevant:
   as traffic flows for it: each window closes, finds a summary to send, opens a fresh one, and the
   send finds no registration and returns. The timers are cheap and `unref`'d, but they do not stop
   until the traffic does.
+- A registration the sender resolves to **`retry` forever is never cleaned up**: `retry` is the
+  right verdict for a transient failure, but it is also what a permanently misconfigured or
+  refused endpoint gets, and nothing distinguishes the two. The `DID → endpoint` entry stays in the
+  registry indefinitely, and every debounce window for that DID reports one `onStoreError`
+  (bounded by the window, identical in shape to any transient failure) rather than settling once
+  the endpoint is known-dead.
 
 Both procedures also pass through `createHub`'s `authorize` hook, as
-`{ action: 'wake/register', did, kind }` and `{ action: 'wake/unregister', did }`. The hook sees the
+`{ action: 'wake/register', did, kind, expiresAt? }` and `{ action: 'wake/unregister', did }`. The hook sees the
 caller and the opaque sender tag and nothing else — no endpoint, no key material, since the hub does
 not interpret an endpoint and a hook that saw one would be a second place it gets read. A wake
 registration is the one durable cross-group per-device identifier the hub stores, so it is the
