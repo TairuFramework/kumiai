@@ -3,9 +3,11 @@ import type { AnyClientMessageOf, AnyServerMessageOf } from '@enkaku/protocol'
 import { DirectTransports } from '@enkaku/transport'
 import { randomIdentity } from '@kokuin/token'
 import type { HubProtocol, WakeRegistry, WakeSender } from '@kumiai/hub-protocol'
-import { decodeBase64url, HUB_ERROR_CODES, openWakeHint, sealWakeHint } from '@kumiai/hub-protocol'
+import { HUB_ERROR_CODES, openWakeHint, sealWakeHint } from '@kumiai/hub-protocol'
 import { createHub, createMemoryStore } from '@kumiai/hub-server'
 import { createMemoryWakeRegistry } from '@kumiai/hub-wake'
+import { fromB64U } from '@sozai/codec'
+import { createRuntime } from '@sozai/runtime'
 import { describe, expect, test } from 'vitest'
 
 import { HubClient } from '../src/client.js'
@@ -91,6 +93,32 @@ describe('createWakeKeys', () => {
     // happily regardless. RFC 8291 treats the auth secret as unguessable per-subscription input
     // to the HKDF — a shared constant is a real weakening, not a cosmetic one.
     expect(a.authSecret).not.toBe(b.authSecret)
+  })
+
+  test('takes ALL its randomness from the injected runtime', () => {
+    // React Native has no usable global `crypto`, so a device that cannot inject its own source
+    // cannot make keys at all. Both draws are checked: noble's `randomSecretKey` reaches for
+    // `globalThis.crypto` on its own unless it is handed a seed, so the private key is the half
+    // that silently ignores the runtime if the seeding is dropped.
+    const draws: Array<number> = []
+    const fill7 = <T extends ArrayBufferView>(array: T): T => {
+      new Uint8Array(array.buffer, array.byteOffset, array.byteLength).fill(7)
+      return array
+    }
+    const keys = createWakeKeys({
+      runtime: createRuntime({
+        getRandomValues: <T extends ArrayBufferView>(array: T): T => {
+          draws.push(array.byteLength)
+          return fill7(array)
+        },
+      }),
+    })
+
+    expect(draws).toEqual([48, 16])
+    // Filled with a constant, so the outputs are deterministic: a real `crypto` draw could not
+    // produce these bytes twice.
+    expect(fromB64U(keys.authSecret)).toEqual(new Uint8Array(16).fill(7))
+    expect(createWakeKeys({ runtime: createRuntime({ getRandomValues: fill7 }) })).toEqual(keys)
   })
 })
 
@@ -230,15 +258,15 @@ describe('wake registration round trip', () => {
     const body = sealWakeHint(
       { topicID: 'topic-a', sequenceID: '007', count: 2 },
       {
-        publicKey: decodeBase64url(stored.publicKey),
-        authSecret: decodeBase64url(stored.authSecret),
+        publicKey: fromB64U(stored.publicKey),
+        authSecret: fromB64U(stored.authSecret),
       },
     )
 
     expect(
       openWakeHintViaIndex(body, {
         privateKey: keys.privateKey,
-        authSecret: decodeBase64url(keys.authSecret),
+        authSecret: fromB64U(keys.authSecret),
       }),
     ).toEqual({ topicID: 'topic-a', sequenceID: '007', count: 2 })
 

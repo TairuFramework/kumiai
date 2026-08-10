@@ -1,9 +1,5 @@
-import {
-  decodeBase64url,
-  sealWakeHint,
-  type WakeRegistry,
-  type WakeSender,
-} from '@kumiai/hub-protocol'
+import { sealWakeHint, type WakeRegistry, type WakeSender } from '@kumiai/hub-protocol'
+import { fromB64U } from '@sozai/codec'
 
 export type WakeDispatcherParams = {
   registry: WakeRegistry
@@ -67,8 +63,8 @@ export function createWakeDispatcher(params: WakeDispatcherParams): WakeDispatch
         const body = sealWakeHint(
           { topicID, sequenceID, count },
           {
-            publicKey: decodeBase64url(registration.publicKey),
-            authSecret: decodeBase64url(registration.authSecret),
+            publicKey: fromB64U(registration.publicKey),
+            authSecret: fromB64U(registration.authSecret),
           },
         )
         const verdict = await params.sender.send({ registration, body })

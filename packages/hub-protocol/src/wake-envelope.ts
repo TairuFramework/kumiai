@@ -2,7 +2,8 @@ import { gcm } from '@noble/ciphers/aes.js'
 import { p256 } from '@noble/curves/nist.js'
 import { expand, extract } from '@noble/hashes/hkdf.js'
 import { sha256 } from '@noble/hashes/sha2.js'
-import { randomBytes } from '@noble/hashes/utils.js'
+import { concatBytes, randomBytes } from '@noble/hashes/utils.js'
+import { fromB64U } from '@sozai/codec'
 
 /** The hint schema version, carried INSIDE the sealed JSON as `v`. */
 export const WAKE_HINT_VERSION = 1
@@ -40,23 +41,6 @@ export type WakeOpener = {
 }
 
 /**
- * base64url, via `atob`/`btoa` rather than `Buffer`: this module is imported by hub-client, which
- * runs under React Native, and by hub-protocol's own `src`, which has no Node types.
- */
-export function encodeBase64url(bytes: Uint8Array): string {
-  let binary = ''
-  for (const byte of bytes) binary += String.fromCharCode(byte)
-  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '')
-}
-
-export function decodeBase64url(value: string): Uint8Array {
-  const binary = atob(value.replaceAll('-', '+').replaceAll('_', '/'))
-  const out = new Uint8Array(binary.length)
-  for (let index = 0; index < binary.length; index++) out[index] = binary.charCodeAt(index)
-  return out
-}
-
-/**
  * Why a device's registered RFC 8291 key material cannot be sealed to, or `null` when it can.
  *
  * Lives here rather than in the hub, for two reasons: the sizes and the curve are RFC 8291's, next
@@ -80,8 +64,8 @@ export function wakeRecipientKeyProblem(keys: {
   let publicKey: Uint8Array
   let authSecret: Uint8Array
   try {
-    publicKey = decodeBase64url(keys.publicKey)
-    authSecret = decodeBase64url(keys.authSecret)
+    publicKey = fromB64U(keys.publicKey)
+    authSecret = fromB64U(keys.authSecret)
   } catch {
     return 'publicKey and authSecret must be base64url'
   }
@@ -104,16 +88,6 @@ const CEK_INFO = new TextEncoder().encode('Content-Encoding: aes128gcm\0')
 const NONCE_INFO = new TextEncoder().encode('Content-Encoding: nonce\0')
 const RECORD_DELIMITER = 2
 
-function concat(...parts: Array<Uint8Array>): Uint8Array {
-  const out = new Uint8Array(parts.reduce((total, part) => total + part.length, 0))
-  let at = 0
-  for (const part of parts) {
-    out.set(part, at)
-    at += part.length
-  }
-  return out
-}
-
 // RFC 8291 section 3.4 then RFC 8188 section 2.2: the auth secret salts the ECDH extract, and the
 // resulting IKM is what the content-encoding's own salt then extracts over.
 function deriveKeys(
@@ -124,7 +98,7 @@ function deriveKeys(
   salt: Uint8Array,
 ): { cek: Uint8Array; nonce: Uint8Array } {
   const prkKey = extract(sha256, sharedSecret, authSecret)
-  const keyInfo = concat(KEY_INFO_PREFIX, new Uint8Array([0]), uaPublic, asPublic)
+  const keyInfo = concatBytes(KEY_INFO_PREFIX, new Uint8Array([0]), uaPublic, asPublic)
   const ikm = expand(sha256, prkKey, keyInfo, 32)
   const prk = extract(sha256, ikm, salt)
   return {
@@ -164,8 +138,8 @@ export function sealRecord(
 
   const rs = new Uint8Array(4)
   new DataView(rs.buffer).setUint32(0, recordSize)
-  const header = concat(salt, rs, new Uint8Array([senderPublic.length]), senderPublic)
-  return concat(header, gcm(cek, nonce).encrypt(record))
+  const header = concatBytes(salt, rs, new Uint8Array([senderPublic.length]), senderPublic)
+  return concatBytes(header, gcm(cek, nonce).encrypt(record))
 }
 
 /**

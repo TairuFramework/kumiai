@@ -39,6 +39,7 @@
     "@noble/ciphers": "catalog:",
     "@noble/curves": "catalog:",
     "@noble/hashes": "catalog:",
+    "@sozai/codec": "catalog:",
     "@sozai/event": "catalog:"
   },
   "devDependencies": {

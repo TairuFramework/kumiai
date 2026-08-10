@@ -297,6 +297,10 @@ export const hubProtocol = {
   'hub/v1/wake/unregister': {
     type: 'request',
     description: "Remove the caller's push endpoint",
+    // The DID comes from the authenticated caller, so there is nothing left to take. Sealed as an
+    // empty object rather than omitted — enkaku makes `param` optional, but omitting it validates
+    // nothing, letting a client attach a payload the hub silently ignores. Same shape as
+    // `hub/v1/keypackage/status`, the other procedure whose only input is who is asking.
     param: {
       type: 'object',
       properties: {},

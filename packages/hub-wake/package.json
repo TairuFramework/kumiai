@@ -38,7 +38,9 @@
   "dependencies": {
     "@kumiai/hub-protocol": "workspace:^",
     "@noble/curves": "catalog:",
-    "@noble/hashes": "catalog:"
+    "@noble/hashes": "catalog:",
+    "@sozai/codec": "catalog:",
+    "@sozai/runtime": "catalog:"
   },
   "devDependencies": {
     "@kumiai/hub-conformance": "workspace:^"

@@ -1,11 +1,8 @@
-import {
-  encodeBase64url,
-  type WakeSender,
-  type WakeSendParams,
-  type WakeVerdict,
-} from '@kumiai/hub-protocol'
+import type { WakeSender, WakeSendParams, WakeVerdict } from '@kumiai/hub-protocol'
 import { p256 } from '@noble/curves/nist.js'
 import { sha256 } from '@noble/hashes/sha2.js'
+import { toB64U } from '@sozai/codec'
+import { createRuntime, type Runtime } from '@sozai/runtime'
 
 export type VapidParams = {
   /** `mailto:` or `https:` contact the push service can reach you at. RFC 8292 requires one. */
@@ -20,8 +17,8 @@ export type WebPushSenderParams = {
   vapid: VapidParams
   /** Seconds the push service may hold the message. Default: 86 400. */
   ttl?: number
-  /** Injected for tests. Default: global `fetch`. */
-  fetch?: typeof globalThis.fetch
+  /** Platform primitives — `fetch` is the only one used. Default: `createRuntime()`. */
+  runtime?: Runtime
   /** Seconds the VAPID JWT stays valid. Default: 43 200 (RFC 8292's 12-hour ceiling). */
   jwtLifetime?: number
   /**
@@ -48,10 +45,8 @@ function isHttpsEndpoint(url: URL): boolean {
 }
 
 function vapidToken(vapid: VapidParams, audience: string, lifetime: number): string {
-  const header = encodeBase64url(
-    new TextEncoder().encode(JSON.stringify({ typ: 'JWT', alg: 'ES256' })),
-  )
-  const claims = encodeBase64url(
+  const header = toB64U(new TextEncoder().encode(JSON.stringify({ typ: 'JWT', alg: 'ES256' })))
+  const claims = toB64U(
     new TextEncoder().encode(
       JSON.stringify({
         aud: audience,
@@ -64,7 +59,7 @@ function vapidToken(vapid: VapidParams, audience: string, lifetime: number): str
   const digest = sha256(new TextEncoder().encode(signingInput))
   // ES256 wants the raw 64-byte r||s pair, which is exactly what noble v2's sign returns.
   const signature = p256.sign(digest, vapid.privateKey, { prehash: false })
-  return `${signingInput}.${encodeBase64url(signature)}`
+  return `${signingInput}.${toB64U(signature)}`
 }
 
 /**
@@ -73,7 +68,7 @@ function vapidToken(vapid: VapidParams, audience: string, lifetime: number): str
  * already happened in `sealWakeHint`, and this layer never sees inside it.
  */
 export function createWebPushSender(params: WebPushSenderParams): WakeSender {
-  const fetchImpl = params.fetch ?? globalThis.fetch
+  const { fetch: fetchImpl } = params.runtime ?? createRuntime()
   const ttl = params.ttl ?? 86_400
   const jwtLifetime = params.jwtLifetime ?? 43_200
   const allowEndpoint = params.allowEndpoint ?? isHttpsEndpoint
@@ -95,7 +90,7 @@ export function createWebPushSender(params: WebPushSenderParams): WakeSender {
         response = await fetchImpl(registration.endpoint, {
           method: 'POST',
           headers: {
-            authorization: `vapid t=${vapidToken(params.vapid, url.origin, jwtLifetime)}, k=${encodeBase64url(params.vapid.publicKey)}`,
+            authorization: `vapid t=${vapidToken(params.vapid, url.origin, jwtLifetime)}, k=${toB64U(params.vapid.publicKey)}`,
             'content-encoding': 'aes128gcm',
             'content-type': 'application/octet-stream',
             ttl: String(ttl),

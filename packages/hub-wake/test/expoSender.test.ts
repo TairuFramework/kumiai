@@ -1,4 +1,5 @@
 import type { WakeRegistration } from '@kumiai/hub-protocol'
+import { createRuntime } from '@sozai/runtime'
 import { describe, expect, test } from 'vitest'
 
 import { createExpoSender } from '../src/expoSender.js'
@@ -32,7 +33,7 @@ function jsonFetch(payload: unknown, status = 200) {
 describe('createExpoSender', () => {
   test('posts the sealed body base64url in the data field', async () => {
     const { calls, fetchImpl } = jsonFetch({ data: [{ status: 'ok', id: '1' }] })
-    const sender = createExpoSender({ fetch: fetchImpl })
+    const sender = createExpoSender({ runtime: createRuntime({ fetch: fetchImpl }) })
 
     await expect(sender.send({ registration, body })).resolves.toBe('delivered')
 
@@ -56,7 +57,7 @@ describe('createExpoSender', () => {
   // ciphertext. Anything added here has to be added here first.
   test('sends exactly these five fields and nothing else', async () => {
     const { calls, fetchImpl } = jsonFetch({ data: [{ status: 'ok', id: '1' }] })
-    const sender = createExpoSender({ fetch: fetchImpl })
+    const sender = createExpoSender({ runtime: createRuntime({ fetch: fetchImpl }) })
 
     await sender.send({ registration, body })
 
@@ -73,7 +74,7 @@ describe('createExpoSender', () => {
 
   test('the default placeholder title is a construction-time constant', async () => {
     const { calls, fetchImpl } = jsonFetch({ data: [{ status: 'ok', id: '1' }] })
-    const sender = createExpoSender({ fetch: fetchImpl })
+    const sender = createExpoSender({ runtime: createRuntime({ fetch: fetchImpl }) })
 
     await sender.send({ registration, body })
 
@@ -82,7 +83,10 @@ describe('createExpoSender', () => {
 
   test('the placeholderTitle override replaces it', async () => {
     const { calls, fetchImpl } = jsonFetch({ data: [{ status: 'ok', id: '1' }] })
-    const sender = createExpoSender({ fetch: fetchImpl, placeholderTitle: 'Nudge' })
+    const sender = createExpoSender({
+      runtime: createRuntime({ fetch: fetchImpl }),
+      placeholderTitle: 'Nudge',
+    })
 
     await sender.send({ registration, body })
 
@@ -91,7 +95,7 @@ describe('createExpoSender', () => {
 
   test('carries no cleartext topic, DID or count', async () => {
     const { calls, fetchImpl } = jsonFetch({ data: [{ status: 'ok', id: '1' }] })
-    const sender = createExpoSender({ fetch: fetchImpl })
+    const sender = createExpoSender({ runtime: createRuntime({ fetch: fetchImpl }) })
     await sender.send({ registration, body })
     const serialized = JSON.stringify(calls[0].body)
     expect(serialized).not.toContain('did:key:alice')
@@ -102,7 +106,7 @@ describe('createExpoSender', () => {
     const { fetchImpl } = jsonFetch({
       data: [{ status: 'error', details: { error: 'DeviceNotRegistered' } }],
     })
-    const sender = createExpoSender({ fetch: fetchImpl })
+    const sender = createExpoSender({ runtime: createRuntime({ fetch: fetchImpl }) })
     await expect(sender.send({ registration, body })).resolves.toBe('gone')
   })
 
@@ -110,19 +114,19 @@ describe('createExpoSender', () => {
     const { fetchImpl } = jsonFetch({
       data: [{ status: 'error', details: { error: 'MessageRateExceeded' } }],
     })
-    const sender = createExpoSender({ fetch: fetchImpl })
+    const sender = createExpoSender({ runtime: createRuntime({ fetch: fetchImpl }) })
     await expect(sender.send({ registration, body })).resolves.toBe('retry')
   })
 
   test('a non-200 response is retry', async () => {
     const { fetchImpl } = jsonFetch({ data: [{ status: 'ok', id: '1' }] }, 503)
-    const sender = createExpoSender({ fetch: fetchImpl })
+    const sender = createExpoSender({ runtime: createRuntime({ fetch: fetchImpl }) })
     await expect(sender.send({ registration, body })).resolves.toBe('retry')
   })
 
   test('a malformed 2xx response (null body) is retry, not an exception', async () => {
     const { fetchImpl } = jsonFetch(null, 200)
-    const sender = createExpoSender({ fetch: fetchImpl })
+    const sender = createExpoSender({ runtime: createRuntime({ fetch: fetchImpl }) })
     await expect(sender.send({ registration, body })).resolves.toBe('retry')
   })
 
@@ -132,16 +136,18 @@ describe('createExpoSender', () => {
   // sender has had this test since it was written; this one had none.
   test('a thrown network error is retry, not gone and not an exception', async () => {
     const sender = createExpoSender({
-      fetch: async () => {
-        throw new Error('ECONNRESET')
-      },
+      runtime: createRuntime({
+        fetch: async () => {
+          throw new Error('ECONNRESET')
+        },
+      }),
     })
     await expect(sender.send({ registration, body })).resolves.toBe('retry')
   })
 
   test('no accessToken means no authorization header', async () => {
     const { calls, fetchImpl } = jsonFetch({ data: [{ status: 'ok', id: '1' }] })
-    const sender = createExpoSender({ fetch: fetchImpl })
+    const sender = createExpoSender({ runtime: createRuntime({ fetch: fetchImpl }) })
 
     await sender.send({ registration, body })
 
@@ -150,7 +156,10 @@ describe('createExpoSender', () => {
 
   test('an accessToken is sent as a Bearer token', async () => {
     const { calls, fetchImpl } = jsonFetch({ data: [{ status: 'ok', id: '1' }] })
-    const sender = createExpoSender({ fetch: fetchImpl, accessToken: 'secret-token' })
+    const sender = createExpoSender({
+      runtime: createRuntime({ fetch: fetchImpl }),
+      accessToken: 'secret-token',
+    })
 
     await sender.send({ registration, body })
 

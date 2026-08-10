@@ -1,15 +1,12 @@
-import {
-  encodeBase64url,
-  type WakeSender,
-  type WakeSendParams,
-  type WakeVerdict,
-} from '@kumiai/hub-protocol'
+import type { WakeSender, WakeSendParams, WakeVerdict } from '@kumiai/hub-protocol'
+import { toB64U } from '@sozai/codec'
+import { createRuntime, type Runtime } from '@sozai/runtime'
 
 export type ExpoSenderParams = {
   /** Expo access token, when the project enforces one. */
   accessToken?: string
-  /** Injected for tests. Default: global `fetch`. */
-  fetch?: typeof globalThis.fetch
+  /** Platform primitives — `fetch` is the only one used. Default: `createRuntime()`. */
+  runtime?: Runtime
   /** Placeholder title the Notification Service Extension REPLACES once it opens the hint. */
   placeholderTitle?: string
 }
@@ -30,7 +27,7 @@ const EXPO_ENDPOINT = 'https://exp.host/--/api/v2/push/send'
  * placeholder alert, not the background pass, is what the user is guaranteed to see.
  */
 export function createExpoSender(params: ExpoSenderParams = {}): WakeSender {
-  const fetchImpl = params.fetch ?? globalThis.fetch
+  const { fetch: fetchImpl } = params.runtime ?? createRuntime()
   const title = params.placeholderTitle ?? 'New activity'
 
   return {
@@ -50,7 +47,7 @@ export function createExpoSender(params: ExpoSenderParams = {}): WakeSender {
             title,
             mutableContent: true,
             contentAvailable: true,
-            data: { w: encodeBase64url(body) },
+            data: { w: toB64U(body) },
           }),
         })
         if (!response.ok) return 'retry'

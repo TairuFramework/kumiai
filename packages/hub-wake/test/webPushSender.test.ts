@@ -1,7 +1,8 @@
 import type { WakeRegistration } from '@kumiai/hub-protocol'
-import { decodeBase64url } from '@kumiai/hub-protocol'
 import { p256 } from '@noble/curves/nist.js'
 import { sha256 } from '@noble/hashes/sha2.js'
+import { fromB64U } from '@sozai/codec'
+import { createRuntime } from '@sozai/runtime'
 import { describe, expect, test } from 'vitest'
 
 import { createWebPushSender } from '../src/webPushSender.js'
@@ -45,18 +46,18 @@ function decodeJwt(authorization: string): {
   const token = match[1]
   const [headerPart, claimsPart, signaturePart] = token.split('.')
   return {
-    header: JSON.parse(new TextDecoder().decode(decodeBase64url(headerPart))),
-    claims: JSON.parse(new TextDecoder().decode(decodeBase64url(claimsPart))),
-    signature: decodeBase64url(signaturePart),
+    header: JSON.parse(new TextDecoder().decode(fromB64U(headerPart))),
+    claims: JSON.parse(new TextDecoder().decode(fromB64U(claimsPart))),
+    signature: fromB64U(signaturePart),
     signingInput: `${headerPart}.${claimsPart}`,
-    transmittedKey: decodeBase64url(match[2]),
+    transmittedKey: fromB64U(match[2]),
   }
 }
 
 describe('createWebPushSender', () => {
   test('POSTs the body to the endpoint with the aes128gcm headers', async () => {
     const { calls, fetchImpl } = recordingFetch(201)
-    const sender = createWebPushSender({ vapid, fetch: fetchImpl })
+    const sender = createWebPushSender({ vapid, runtime: createRuntime({ fetch: fetchImpl }) })
 
     await expect(sender.send({ registration, body })).resolves.toBe('delivered')
 
@@ -72,7 +73,7 @@ describe('createWebPushSender', () => {
 
   test('POSTs exactly the sealed body bytes, unmodified', async () => {
     const { calls, fetchImpl } = recordingFetch(201)
-    const sender = createWebPushSender({ vapid, fetch: fetchImpl })
+    const sender = createWebPushSender({ vapid, runtime: createRuntime({ fetch: fetchImpl }) })
 
     await sender.send({ registration, body })
 
@@ -85,7 +86,7 @@ describe('createWebPushSender', () => {
 
   test('the VAPID JWT aud is the endpoint origin, and sub is the configured subject', async () => {
     const { calls, fetchImpl } = recordingFetch(201)
-    const sender = createWebPushSender({ vapid, fetch: fetchImpl })
+    const sender = createWebPushSender({ vapid, runtime: createRuntime({ fetch: fetchImpl }) })
 
     await sender.send({ registration, body })
 
@@ -99,7 +100,7 @@ describe('createWebPushSender', () => {
 
   test('the VAPID JWT header is ES256/JWT, and exp is within the default lifetime', async () => {
     const { calls, fetchImpl } = recordingFetch(201)
-    const sender = createWebPushSender({ vapid, fetch: fetchImpl })
+    const sender = createWebPushSender({ vapid, runtime: createRuntime({ fetch: fetchImpl }) })
 
     const before = Math.floor(Date.now() / 1000)
     await sender.send({ registration, body })
@@ -118,7 +119,11 @@ describe('createWebPushSender', () => {
 
   test('the jwtLifetime override changes the JWT exp', async () => {
     const { calls, fetchImpl } = recordingFetch(201)
-    const sender = createWebPushSender({ vapid, fetch: fetchImpl, jwtLifetime: 300 })
+    const sender = createWebPushSender({
+      vapid,
+      runtime: createRuntime({ fetch: fetchImpl }),
+      jwtLifetime: 300,
+    })
 
     const before = Math.floor(Date.now() / 1000)
     await sender.send({ registration, body })
@@ -135,7 +140,11 @@ describe('createWebPushSender', () => {
 
   test('the ttl override changes the Ttl header', async () => {
     const { calls, fetchImpl } = recordingFetch(201)
-    const sender = createWebPushSender({ vapid, fetch: fetchImpl, ttl: 60 })
+    const sender = createWebPushSender({
+      vapid,
+      runtime: createRuntime({ fetch: fetchImpl }),
+      ttl: 60,
+    })
 
     await sender.send({ registration, body })
 
@@ -145,7 +154,7 @@ describe('createWebPushSender', () => {
 
   test('the VAPID JWT signature verifies against the transmitted k= public key', async () => {
     const { calls, fetchImpl } = recordingFetch(201)
-    const sender = createWebPushSender({ vapid, fetch: fetchImpl })
+    const sender = createWebPushSender({ vapid, runtime: createRuntime({ fetch: fetchImpl }) })
 
     await sender.send({ registration, body })
 
@@ -163,7 +172,7 @@ describe('createWebPushSender', () => {
 
   test('carries no cleartext topic or DID in the request', async () => {
     const { calls, fetchImpl } = recordingFetch(201)
-    const sender = createWebPushSender({ vapid, fetch: fetchImpl })
+    const sender = createWebPushSender({ vapid, runtime: createRuntime({ fetch: fetchImpl }) })
 
     await sender.send({ registration, body })
 
@@ -176,7 +185,7 @@ describe('createWebPushSender', () => {
   test('404 and 410 are gone', async () => {
     for (const status of [404, 410]) {
       const { fetchImpl } = recordingFetch(status)
-      const sender = createWebPushSender({ vapid, fetch: fetchImpl })
+      const sender = createWebPushSender({ vapid, runtime: createRuntime({ fetch: fetchImpl }) })
       await expect(sender.send({ registration, body })).resolves.toBe('gone')
     }
   })
@@ -189,7 +198,7 @@ describe('createWebPushSender', () => {
   test('401 and 403 are retry — an auth failure is ours, not the endpoint being dead', async () => {
     for (const status of [401, 403]) {
       const { fetchImpl } = recordingFetch(status)
-      const sender = createWebPushSender({ vapid, fetch: fetchImpl })
+      const sender = createWebPushSender({ vapid, runtime: createRuntime({ fetch: fetchImpl }) })
       await expect(sender.send({ registration, body })).resolves.toBe('retry')
     }
   })
@@ -197,7 +206,7 @@ describe('createWebPushSender', () => {
   test('429 and 5xx are retry', async () => {
     for (const status of [429, 500, 503]) {
       const { fetchImpl } = recordingFetch(status)
-      const sender = createWebPushSender({ vapid, fetch: fetchImpl })
+      const sender = createWebPushSender({ vapid, runtime: createRuntime({ fetch: fetchImpl }) })
       await expect(sender.send({ registration, body })).resolves.toBe('retry')
     }
   })
@@ -216,7 +225,7 @@ describe('createWebPushSender', () => {
       'file:///etc/passwd',
     ]) {
       const { calls, fetchImpl } = recordingFetch(201)
-      const sender = createWebPushSender({ vapid, fetch: fetchImpl })
+      const sender = createWebPushSender({ vapid, runtime: createRuntime({ fetch: fetchImpl }) })
 
       // `retry`, not `gone`: a policy refusal is a fact about the hub's configuration, which a
       // redeploy can reverse, and `gone` would delete the registration unrecoverably.
@@ -230,7 +239,7 @@ describe('createWebPushSender', () => {
 
   test('https is allowed by default', async () => {
     const { calls, fetchImpl } = recordingFetch(201)
-    const sender = createWebPushSender({ vapid, fetch: fetchImpl })
+    const sender = createWebPushSender({ vapid, runtime: createRuntime({ fetch: fetchImpl }) })
 
     await expect(sender.send({ registration, body })).resolves.toBe('delivered')
     expect(calls).toHaveLength(1)
@@ -241,7 +250,7 @@ describe('createWebPushSender', () => {
     const seen: Array<string> = []
     const sender = createWebPushSender({
       vapid,
-      fetch: fetchImpl,
+      runtime: createRuntime({ fetch: fetchImpl }),
       allowEndpoint: (url) => {
         seen.push(url.origin)
         return url.origin === 'http://relay.internal:8080'
@@ -264,7 +273,7 @@ describe('createWebPushSender', () => {
     const { calls, fetchImpl } = recordingFetch(201)
     const sender = createWebPushSender({
       vapid,
-      fetch: fetchImpl,
+      runtime: createRuntime({ fetch: fetchImpl }),
       allowEndpoint: (url) => url.origin === 'https://allowed.example',
     })
 
@@ -276,7 +285,7 @@ describe('createWebPushSender', () => {
     const { calls, fetchImpl } = recordingFetch(201)
     const sender = createWebPushSender({
       vapid,
-      fetch: fetchImpl,
+      runtime: createRuntime({ fetch: fetchImpl }),
       allowEndpoint: () => {
         throw new Error('host policy lookup failed')
       },
@@ -289,9 +298,11 @@ describe('createWebPushSender', () => {
   test('a thrown network error is retry, not an exception', async () => {
     const sender = createWebPushSender({
       vapid,
-      fetch: async () => {
-        throw new Error('ECONNRESET')
-      },
+      runtime: createRuntime({
+        fetch: async () => {
+          throw new Error('ECONNRESET')
+        },
+      }),
     })
     await expect(sender.send({ registration, body })).resolves.toBe('retry')
   })

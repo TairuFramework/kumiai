@@ -45,8 +45,6 @@ export type {
   WakeVerdict,
 } from './wake.js'
 export {
-  decodeBase64url,
-  encodeBase64url,
   openWakeHint,
   sealWakeHint,
   WAKE_HINT_VERSION,

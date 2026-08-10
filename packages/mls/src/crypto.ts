@@ -15,6 +15,7 @@ import { ed25519, x25519 } from '@noble/curves/ed25519.js'
 import { expand as hkdfExpand, extract as hkdfExtract } from '@noble/hashes/hkdf.js'
 import { hmac } from '@noble/hashes/hmac.js'
 import { sha256, sha384, sha512 } from '@noble/hashes/sha2.js'
+import { concatBytes } from '@noble/hashes/utils.js'
 import { createRuntime, type Runtime } from '@sozai/runtime'
 import type { CiphersuiteImpl, CryptoProvider, Hash, Hpke, Kdf, Rng, Signature } from 'ts-mls'
 
@@ -30,18 +31,6 @@ function constantTimeEqual(a: Uint8Array, b: Uint8Array): boolean {
     diff |= a[i]! ^ b[i]!
   }
   return diff === 0
-}
-
-function concatBytes(...arrays: Array<Uint8Array>): Uint8Array {
-  let totalLen = 0
-  for (const a of arrays) totalLen += a.length
-  const result = new Uint8Array(totalLen)
-  let offset = 0
-  for (const a of arrays) {
-    result.set(a, offset)
-    offset += a.length
-  }
-  return result
 }
 
 function i2osp(value: number, w: number): Uint8Array {
