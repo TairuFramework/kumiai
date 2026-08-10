@@ -936,10 +936,11 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       if (!didLimiter.tryConsume(clientDID)) {
         throw new HandlerError({ code: 'EK01', message: 'Wake rate limit exceeded for DID' })
       }
-      // The param schema asks only for `minLength: 1`, which accepts key material the hub can
-      // never seal to. Storing it answers `registered: true` and then fails inside every single
-      // seal — one error per frame, forever, since a seal failure is not a `gone` verdict and
-      // nothing removes the entry. The device believes it is reachable and is never woken.
+      // The param schema bounds the length (`minLength: 1`, `maxLength: 128`/`64`) but not the
+      // shape, which accepts key material the hub can never seal to. Storing it answers
+      // `registered: true` and then fails inside every single seal — one error per frame, forever,
+      // since a seal failure is not a `gone` verdict and nothing removes the entry. The device
+      // believes it is reachable and is never woken.
       // The rule itself lives in hub-protocol next to RFC 8291, so the hub needs no curve of its
       // own to know that a 65-byte value off the curve fails exactly as a 33-byte one does.
       const keyProblem = wakeRecipientKeyProblem({

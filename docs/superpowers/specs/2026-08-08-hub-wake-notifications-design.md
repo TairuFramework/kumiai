@@ -51,7 +51,7 @@ concern; the hub stays blind to it and this design does not anticipate it.
 
 | Where | What |
 | --- | --- |
-| `hub-protocol` | `hub/v1/wake/register` and `hub/v1/wake/unregister`; the `WakeRegistry` and `WakeSender` types; `wake-envelope.ts` (seal/unseal, version byte). No vendor dependencies. |
+| `hub-protocol` | `hub/v1/wake/register` and `hub/v1/wake/unregister`; the `WakeRegistry` and `WakeSender` types; `wake-envelope.ts` (seal/unseal, version field). No vendor dependencies. |
 | `hub-server` | Optional `wake: { registry, sender, debounceMs }` on `createHub`; the two handlers; the debounce dispatcher. |
 | `hub-client` | `registerWake()`, `unregisterWake()`, `unsealWakeHint()`. |
 | `hub-wake` (new) | In-memory `WakeRegistry`; the generic HTTP/VAPID sender; the Expo sender. Server-side, optional. |
@@ -84,7 +84,7 @@ trade. The dispatcher owns the counter it can honestly produce.
 The device maps `topicID → group alias` from its own local state. That mapping never leaves the
 device.
 
-The version byte follows the precedent of `TUNNEL_ENVELOPE_VERSION`: an unknown version is rejected,
+The version field follows the precedent of `TUNNEL_ENVELOPE_VERSION`: an unknown version is rejected,
 never best-effort parsed.
 
 ## Wire surface

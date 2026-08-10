@@ -11,6 +11,10 @@ export const WAKE_HINT_VERSION = 1
  * The aes128gcm record size, carried as the header's `rs`. Every sealed body is padded to it, so
  * its length says nothing about the topic or the count. A body is 597 bytes at this size — far
  * under Web Push's 4096 limit.
+ *
+ * Not the plaintext capacity: that is `WAKE_RECORD_SIZE - 17` (16-byte GCM tag, 1-byte record
+ * delimiter — see `sealWakeHint`), unexported since nothing outside this module needs to size a
+ * buffer from it.
  */
 export const WAKE_RECORD_SIZE = 512
 
@@ -64,8 +68,10 @@ export function decodeBase64url(value: string): Uint8Array {
  * that failure is silent in the worst way, since a seal that cannot happen is not a dead endpoint:
  * nothing deletes the registration, so the device believes it is reachable and is never woken.
  *
- * Returns a message rather than throwing, so one call covers every way the material can be wrong
- * and the caller decides what a refusal looks like on its own wire.
+ * Returns a message rather than throwing, so one call covers every way the material can be wrong —
+ * detection, not reporting: checks run in a fixed order and this returns the first failure found,
+ * so material wrong in more than one way (e.g. an off-curve publicKey with a short authSecret)
+ * reports only the first. The caller decides what a refusal looks like on its own wire.
  */
 export function wakeRecipientKeyProblem(keys: {
   publicKey: string
