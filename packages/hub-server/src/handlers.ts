@@ -44,15 +44,16 @@ export type AuthorizeRequest =
   | { action: 'keypackage/fetch'; did: string; targetDID: string; count: number }
   | { action: 'keypackage/status'; did: string }
   /**
-   * A device registering a push endpoint. `kind` is the opaque sender tag and is the only detail
-   * a host can usefully gate on — `endpoint`, `publicKey` and `authSecret` are deliberately absent,
-   * since a hook that saw them would be a second place the endpoint gets read, and the hub's rule
-   * is that it never interprets one.
+   * A device registering a push endpoint. `kind` (the opaque sender tag) and `expiresAt` (the
+   * caller-supplied registration lifetime cap, when given) are the only details a host can usefully
+   * gate on — `endpoint`, `publicKey` and `authSecret` are deliberately absent, since a hook that
+   * saw them would be a second place the endpoint gets read, and the hub's rule is that it never
+   * interprets one.
    *
    * This is the durable cross-group per-device identifier wake introduces, so it is the one a host
    * is most likely to want a say over.
    */
-  | { action: 'wake/register'; did: string; kind: string }
+  | { action: 'wake/register'; did: string; kind: string; expiresAt?: number }
   | { action: 'wake/unregister'; did: string }
 
 /**
@@ -919,7 +920,12 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       // uses. Configuration is answered first because a hub with no wake support has nothing for a
       // host to have an opinion about.
       const decision = normalizeAuthorizeDecision(
-        await authorize({ action: 'wake/register', did: clientDID, kind: ctx.param.kind }),
+        await authorize({
+          action: 'wake/register',
+          did: clientDID,
+          kind: ctx.param.kind,
+          expiresAt: ctx.param.expiresAt,
+        }),
       )
       if (!decision.allow) {
         throw new HandlerError({

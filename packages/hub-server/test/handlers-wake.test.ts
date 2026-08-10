@@ -445,6 +445,43 @@ describe('the authorize hook gates both wake procedures', () => {
     await dispose()
   })
 
+  test('the hook sees expiresAt when supplied, and omits it when the caller does not', async () => {
+    const registry = createMemoryWakeRegistry()
+    const seen: Array<{ action: string; did?: string; kind?: string; expiresAt?: number }> = []
+    const { client, dispose } = await createTestHub({
+      wake: { registry },
+      authorize: (req) => {
+        seen.push(req)
+        return true
+      },
+    })
+    const expiresAt = Math.floor(Date.now() / 1000) + 3600
+
+    await client.request('hub/v1/wake/register', {
+      param: {
+        kind: 'webpush',
+        endpoint: 'https://push.example/a',
+        publicKey: recipientPublicKeyB64u,
+        authSecret: recipientAuthSecretB64u,
+        expiresAt,
+      },
+    })
+    await client.request('hub/v1/wake/register', {
+      param: {
+        kind: 'webpush',
+        endpoint: 'https://push.example/b',
+        publicKey: recipientPublicKeyB64u,
+        authSecret: recipientAuthSecretB64u,
+      },
+    })
+
+    expect(seen).toEqual([
+      { action: 'wake/register', did: expect.any(String), kind: 'webpush', expiresAt },
+      { action: 'wake/register', did: expect.any(String), kind: 'webpush' },
+    ])
+    await dispose()
+  })
+
   test('a refused wake/unregister is denied and removes nothing', async () => {
     const registry = createMemoryWakeRegistry()
     let allowUnregister = true
