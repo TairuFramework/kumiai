@@ -3,6 +3,7 @@ import { describe, expect, test } from 'vitest'
 
 import { foldEnvelope } from '../src/envelope-fold.js'
 import type { FoldInput } from '../src/fold.js'
+import { authority as _authority, DEVICE_ENTRY_TYPE, registrySeed } from '../src/registry.js'
 import { type GroupPermission, ROLE_ENTRY_TYPE, type RosterState } from '../src/roster.js'
 
 const GROUP_ID = 'group-1'
@@ -15,6 +16,8 @@ const MEMBER_DID = 'did:key:zMember'
 function roster(entries: Array<[string, GroupPermission]>): RosterState {
   return { roles: new Map(entries.map(([did, permission]) => [normalizeDID(did), permission])) }
 }
+
+const EMPTY_REGISTRY = registrySeed()
 
 type EntryParams = {
   issuer: string
@@ -49,7 +52,7 @@ describe('foldEnvelope', () => {
       entryID: 'e1',
     })
 
-    const result = foldEnvelope(base, [appEntry], GROUP_ID)
+    const result = foldEnvelope(base, EMPTY_REGISTRY, [appEntry], GROUP_ID)
 
     expect(result.ok).toBe(true)
     if (result.ok) {
@@ -70,7 +73,7 @@ describe('foldEnvelope', () => {
       entryID: 'bad',
     })
 
-    const result = foldEnvelope(base, [memberEntry], GROUP_ID)
+    const result = foldEnvelope(base, EMPTY_REGISTRY, [memberEntry], GROUP_ID)
 
     expect(result.ok).toBe(false)
     if (!result.ok) {
@@ -95,7 +98,7 @@ describe('foldEnvelope', () => {
       entryID: 'bob-app',
     })
 
-    const result = foldEnvelope(base, [promoteBob, bobEntry], GROUP_ID)
+    const result = foldEnvelope(base, EMPTY_REGISTRY, [promoteBob, bobEntry], GROUP_ID)
 
     expect(result.ok).toBe(true)
     if (result.ok) {
@@ -120,7 +123,7 @@ describe('foldEnvelope', () => {
       entryID: 'bob-app',
     })
 
-    const result = foldEnvelope(base, [bobEntry, promoteBob], GROUP_ID)
+    const result = foldEnvelope(base, EMPTY_REGISTRY, [bobEntry, promoteBob], GROUP_ID)
 
     expect(result.ok).toBe(false)
     if (!result.ok) {
@@ -137,7 +140,7 @@ describe('foldEnvelope', () => {
       entryID: 'm1',
     })
 
-    const result = foldEnvelope(base, [mystery], GROUP_ID)
+    const result = foldEnvelope(base, EMPTY_REGISTRY, [mystery], GROUP_ID)
 
     expect(result.ok).toBe(false)
     if (!result.ok) {
@@ -155,7 +158,7 @@ describe('foldEnvelope', () => {
       entryID: 'h1',
     })
 
-    const result = foldEnvelope(base, [hostEntry], GROUP_ID)
+    const result = foldEnvelope(base, EMPTY_REGISTRY, [hostEntry], GROUP_ID)
 
     expect(result.ok).toBe(true)
     if (result.ok) {
@@ -173,7 +176,7 @@ describe('foldEnvelope', () => {
       entryID: 'a1',
     })
 
-    const result = foldEnvelope(base, [arbitrary], GROUP_ID)
+    const result = foldEnvelope(base, EMPTY_REGISTRY, [arbitrary], GROUP_ID)
 
     expect(result.ok).toBe(true)
     if (result.ok) {
@@ -192,7 +195,7 @@ describe('foldEnvelope', () => {
       entryID: 'x1',
     })
 
-    const result = foldEnvelope(base, [crossGroup], GROUP_ID)
+    const result = foldEnvelope(base, EMPTY_REGISTRY, [crossGroup], GROUP_ID)
 
     expect(result.ok).toBe(false)
     if (!result.ok) {
@@ -211,7 +214,7 @@ describe('foldEnvelope', () => {
       entryID: 'd1',
     })
 
-    const result = foldEnvelope(base, [selfDemote], GROUP_ID)
+    const result = foldEnvelope(base, EMPTY_REGISTRY, [selfDemote], GROUP_ID)
 
     expect(result.ok).toBe(false)
     if (!result.ok) {
@@ -237,7 +240,7 @@ describe('foldEnvelope', () => {
       entryID: 'demote',
     })
 
-    const result = foldEnvelope(base, [promoteBob, selfDemote], GROUP_ID)
+    const result = foldEnvelope(base, EMPTY_REGISTRY, [promoteBob, selfDemote], GROUP_ID)
 
     expect(result.ok).toBe(true)
     if (result.ok) {
@@ -256,7 +259,7 @@ describe('foldEnvelope', () => {
       entryID: 'r1',
     })
 
-    const result = foldEnvelope(base, [bogus], GROUP_ID)
+    const result = foldEnvelope(base, EMPTY_REGISTRY, [bogus], GROUP_ID)
 
     expect(result.ok).toBe(false)
     if (!result.ok) {
@@ -268,7 +271,7 @@ describe('foldEnvelope', () => {
   test('an empty envelope changes no roster and surfaces nothing', () => {
     const base = roster([[CREATOR_DID, 'admin']])
 
-    const result = foldEnvelope(base, [], GROUP_ID)
+    const result = foldEnvelope(base, EMPTY_REGISTRY, [], GROUP_ID)
 
     expect(result.ok).toBe(true)
     if (result.ok) {
@@ -295,7 +298,7 @@ describe('foldEnvelope', () => {
       entryID: 'relayed',
     })
 
-    const result = foldEnvelope(base, [colluderEntry, relayed], GROUP_ID)
+    const result = foldEnvelope(base, EMPTY_REGISTRY, [colluderEntry, relayed], GROUP_ID)
 
     expect(result.ok).toBe(false)
     if (!result.ok) {
@@ -326,7 +329,73 @@ describe('foldEnvelope', () => {
       [input({ issuer: CREATOR_DID, type: 'x', value: null, groupID: OTHER_GROUP, entryID: 'c5' })],
     ]
     for (const entries of cases) {
-      expect(() => foldEnvelope(base, entries, GROUP_ID)).not.toThrow()
+      expect(() => foldEnvelope(base, EMPTY_REGISTRY, entries, GROUP_ID)).not.toThrow()
     }
+  })
+})
+
+describe('foldEnvelope — kumiai.device branch', () => {
+  const profile = 'did:kokuin:profileP'
+  const dev = 'did:key:zDev'
+
+  test('a device entry bypasses the admin invariant and folds into the registry', () => {
+    const base = roster([[CREATOR_DID, 'admin']])
+    // The issuer is a plain device DID, NOT an admin. A role/app entry from it would reject;
+    // a device entry is authorized by the pipeline, so the fold applies it structurally.
+    const register = input({
+      issuer: dev,
+      type: DEVICE_ENTRY_TYPE,
+      subject: dev,
+      value: { op: 'register', controller: profile },
+      entryID: 'd1',
+    })
+    const result = foldEnvelope(base, EMPTY_REGISTRY, [register], GROUP_ID)
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(_authority(result.registry, dev)).toBe(normalizeDID(profile))
+      expect(result.surfaced).toEqual([]) // kumiai.* is consumed, never surfaced
+    }
+  })
+
+  test('a malformed device value rejects the whole fold', () => {
+    const base = roster([[CREATOR_DID, 'admin']])
+    const bad = input({
+      issuer: dev,
+      type: DEVICE_ENTRY_TYPE,
+      subject: dev,
+      value: { op: 'nope' },
+      entryID: 'd-bad',
+    })
+    const result = foldEnvelope(base, EMPTY_REGISTRY, [bad], GROUP_ID)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.entryID).toBe('d-bad')
+  })
+
+  test('admin-as-controller: a device of an admin profile authors a role entry in the same envelope', () => {
+    const base = roster([[normalizeDID(profile), 'admin']])
+    const register = input({
+      issuer: dev,
+      type: DEVICE_ENTRY_TYPE,
+      subject: dev,
+      value: { op: 'register', controller: profile },
+      entryID: 'd1',
+    })
+    const grant = input({
+      issuer: dev,
+      type: ROLE_ENTRY_TYPE,
+      subject: 'did:key:zNew',
+      value: 'member',
+      entryID: 'r1',
+    })
+    const result = foldEnvelope(base, EMPTY_REGISTRY, [register, grant], GROUP_ID)
+    expect(result.ok).toBe(true)
+    if (result.ok) expect(result.roster.roles.get(normalizeDID('did:key:zNew'))).toBe('member')
+  })
+
+  test('an unknown kumiai.* type still fails closed', () => {
+    const base = roster([[CREATOR_DID, 'admin']])
+    const mystery = input({ issuer: CREATOR_DID, type: 'kumiai.mystery', value: {}, entryID: 'm1' })
+    const result = foldEnvelope(base, EMPTY_REGISTRY, [mystery], GROUP_ID)
+    expect(result.ok).toBe(false)
   })
 })

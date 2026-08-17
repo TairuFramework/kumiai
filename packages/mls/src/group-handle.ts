@@ -45,6 +45,7 @@ import {
   defaultCommitPolicy,
   MissingLedgerEntriesError,
 } from './policy.js'
+import { registrySeed } from './registry.js'
 import { foldRoster, type RoleValue, type RosterState } from './roster.js'
 import { type PrivateCommitFrame, readSenderLeafIndex } from './sender-data.js'
 
@@ -787,7 +788,9 @@ export class GroupHandle {
             return input
           })
 
-          const foldResult = foldEnvelope(this.#roster, ordered, this.groupID)
+          // TODO(Task 3): pass this.#registry once the field lands; registrySeed() here keeps
+          // behavior identical to today (empty registry ⇒ authority(id) === id).
+          const foldResult = foldEnvelope(this.#roster, registrySeed(), ordered, this.groupID)
           if (!foldResult.ok) {
             precomputedReject = true
           } else {
