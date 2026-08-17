@@ -78,7 +78,7 @@ Wire shape, baked into the signed MLS leaf (`MLSCredentialIdentity` in `credenti
 
 ```
 MLSCredentialIdentity = {
-  v?,                       // 1 or absent = floating; 2 = bound
+  v?,                       // 1 or absent, as today — bound status is signalled by `controller`, not `v`
   id,                       // device DID — always
   longForm?,                // did:peer:4 device, as today
   controller?: {            // present ⟺ bound leaf
@@ -101,14 +101,15 @@ GroupMember = { leafIndex, id /* device */, controller?: string /* profile DID *
 Only the authenticated `controller.id` is retained; `prefix` and `capability` are verification
 inputs, discarded after validation — exactly how `longForm` is a wire-only input today.
 
-### Versioning — bound leaves are `v: 2`, fail-closed
+### Versioning — bound leaves stay `v: 1` (breaking change, coordinated)
 
-`parseMLSCredentialIdentity` currently throws on `v !== 1`, and absent `v` reads as `1` permanently
-(MLS leaves are signed and immutable). A bound leaf is therefore tagged `v: 2`, which every current
-peer **rejects** — fail closed, rather than silently ignoring `controller` and accepting the device
-key as a floating identity (which would drop the profile attribution and let mixed-version peers
-disagree on membership identity). Bound leaves thus cannot appear until peers understand `v: 2`,
-which is the Slice 2 version gate. Floating leaves stay `v: 1`/absent; nothing about them changes.
+Bound leaves are not version-gated. The `controller` field's *presence* alone signals a bound leaf;
+`v` stays `1`/absent as today. This is a breaking change: a peer that predates this work would parse
+a bound leaf's `controller` as an unknown field and treat the leaf as floating (device key as its own
+identity, no profile attribution). That downgrade is accepted — all peers ship the new parse together,
+so no such old reader exists in a live group. There is no in-band version negotiation for the
+credential shape. (The Slice 2 fold relaxation is a separate coordination concern with its own gate;
+it does not ride on the credential `v`.)
 
 ## Validation
 
@@ -126,7 +127,7 @@ if (parsed.controller != null) return await validateBoundLeaf(parsed, signatureP
 `validateBoundLeaf` — explicit checks (deliberately not `checkCapability`, whose invocation
 semantics assume a signed invocation token; here the MLS leaf key is the proof of possession):
 
-1. **`v === 2`** and `controller.id` starts with `did:kokuin:` — else reject.
+1. `controller.id` starts with `did:kokuin:` — else reject.
 2. **The device self-authenticates against its own leaf key, exactly as a floating leaf would.**
    A bound leaf is a floating leaf *plus* a controller attribution, never a replacement:
    `did:key` → `id === did:key(signaturePublicKey)`; `did:peer:4` → `signaturePublicKey` is in the
@@ -142,8 +143,16 @@ semantics assume a signed invocation token; here the MLS leaf key is the proof o
 6. `normalizeDID(verified.payload.aud) === normalizeDID(parsed.id)` — the capability's audience is
    *this* device.
 7. `hasPermission({ act: MLS_LEAF_ACT, res: MLS_LEAF_RES }, verified.payload)` — grants device /
-   mls-leaf use (group-independent).
-8. `assertNonExpired` / `assertValidIssuedAt` on the capability payload — time claims.
+   mls-leaf use (group-independent). The requested permission is fixed by kumiai as
+   `MLS_LEAF_ACT = 'authenticate'`, `MLS_LEAF_RES = 'kumiai/mls-leaf'` (reads "this device may
+   authenticate as a kumiai MLS leaf"). The minting side may grant exactly this or broader (e.g.
+   `res: 'kumiai/*'`); a grant more specific than the request does not authorize it. The `kumiai/`
+   namespace keeps an MLS-leaf grant distinct from any other capability the profile issues (e.g.
+   kokuin's device→connector or management `revoke/*`), and leaves room to extend to
+   `kumiai/mls-leaf/<group>` later without breaking this check.
+8. `assertValidIssuedAt` on the capability payload, and `assertDeviceCapabilityPolicy` — a device
+   capability must set a bounded `exp` (present, and lifetime ≤ the policy max); this subsumes the
+   `assertNonExpired` check.
 9. `id ∉ denySet` — the deny seam (empty in Slice 1).
 10. `cnf.kid` decodes to a key equal to `signaturePublicKey` — belt-and-suspenders proof of
     possession alongside step 2.
@@ -179,7 +188,7 @@ not a rewrite.
 
 ## APIs used
 
-- `@kokuin/capability`: `assertCapabilityToken`, `hasPermission`, `assertNonExpired`,
+- `@kokuin/capability`: `assertCapabilityToken`, `hasPermission`, `assertDeviceCapabilityPolicy`,
   `assertValidIssuedAt`, `now`.
 - `@kokuin/token`: `verifyToken`, `normalizeDID`, types `DIDMethodResolver`, `MethodRegistry`.
 - `@kokuin/controller`: `createControllerResolver`, `tryDecodeKey`, type `SignedEvent`.
@@ -223,14 +232,13 @@ Accept / reject matrix (each reject is a single-field mutation of a valid leaf):
 | R4 | `capability.aud` ≠ leaf `id` | reject | 6 |
 | R5 | permission lacks mls-leaf grant | reject | 7 |
 | R6 | expired / future-`iat` capability | reject | 8 |
-| R7 | `cnf.kid` ≠ leaf key / `cnf` absent | reject | 10 |
-| R8 | leaf key ≠ `id`'s implied key (floating check fails) | reject | 2 |
-| R9 | prefix contains a cap-authorised revoke (`foldLog` fails closed) | reject | 4 / authority-only |
-| R10 | `controller` present but `v` ≠ 2 | reject | 1 |
-| R11 | `v: 2` but `controller` absent | reject | versioning |
-| R12 | deny provider contains the device `id` | reject | 9 (the seam) |
+| R7 | capability with no `exp`, or `exp` beyond the device-policy max | reject | 8 |
+| R8 | `cnf.kid` ≠ leaf key / `cnf` absent | reject | 10 |
+| R9 | leaf key ≠ `id`'s implied key (floating check fails) | reject | 2 |
+| R10 | prefix contains a cap-authorised revoke (`foldLog` fails closed) | reject | 4 / authority-only |
+| R11 | deny provider contains the device `id` | reject | 9 (the seam) |
 
-R12 injects a non-empty `deviceDenySet` provider to prove the seam works before Slice 2 exists.
+R11 injects a non-empty `deviceDenySet` provider to prove the seam works before Slice 2 exists.
 
 Mutation discipline: every reject case is confirmed by removing the corresponding check and seeing
 the test flip to accept — a reject test that passes against a no-op validator proves nothing. A
@@ -242,14 +250,14 @@ port lands in Slice 3). Standard `test:types` + `test:unit` for `@kumiai/mls`.
 
 ## Risks and sequencing
 
-- **Mixed-version groups.** A group containing peers that predate `v: 2` cannot admit bound leaves —
-  old peers reject them. This is intended (fail closed) and is exactly why bound leaves are gated
-  behind Slice 2's version floor. Slice 1 defines the shape and the rejection; it does not yet
-  advertise or negotiate support.
-- **`MLS_LEAF_ACT` / `MLS_LEAF_RES` vocabulary.** The permission a device capability must carry is
-  defined here and must match what Slice 3's minting side issues. Naming it in Slice 1 keeps fixtures
-  and later minting in agreement; getting it wrong is a coordinated change, so it is called out
-  explicitly rather than left implicit.
+- **Breaking change, no negotiation.** Bound leaves stay `v: 1`; a peer predating this work would
+  misread a bound leaf's `controller` as an unknown field and treat it as floating (device key as its
+  own identity). The mitigation is coordination, not a gate: all peers ship the new parse together.
+  There is no in-band credential-shape negotiation.
+- **`MLS_LEAF_ACT` / `MLS_LEAF_RES` vocabulary.** Fixed here as `authenticate` / `kumiai/mls-leaf`
+  (see validation step 7). Slice 3's minting side must grant this or a broader permission that
+  covers it; the constants live in `@kumiai/mls` so fixtures and later minting share one source.
+  Changing the vocabulary later is a coordinated change across mint and verify, so it is pinned now.
 - **Authority-only prefix.** The embedded prefix must contain no capability-authorised revoke, or the
   sync `foldLog` fails closed and the leaf is rejected. This is a real constraint on what a minting
   side may embed (Slice 3), enforced here as reject case R9.
