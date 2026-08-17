@@ -167,7 +167,11 @@ export function createDIDAuthenticationService(
       }
 
       if (parsed.controller != null) {
-        return await validateBoundLeaf(parsed, signaturePublicKey, deviceDenySet)
+        try {
+          return await validateBoundLeaf(parsed, signaturePublicKey, deviceDenySet)
+        } catch {
+          return false
+        }
       }
       return matchesLeafKey(parsed, signaturePublicKey)
     },

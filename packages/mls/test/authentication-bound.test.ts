@@ -125,6 +125,14 @@ describe('validateCredential — bound did:kokuin leaf', () => {
     expect(await validate(leaf.identity, leaf.deviceKey, denySet)).toBe(false)
   })
 
+  test('R12: a throwing deviceDenySet provider fails closed (never throws past the boundary)', async () => {
+    const leaf = await buildBoundLeaf()
+    const throwingDenySet = () => {
+      throw new Error('deny provider exploded')
+    }
+    await expect(validate(leaf.identity, leaf.deviceKey, throwingDenySet)).resolves.toBe(false)
+  })
+
   test('R10: rejects a prefix the sync fold cannot fold (authority-only violated)', async () => {
     const leaf = await buildBoundLeaf({
       mutate: (id, b) => ({
