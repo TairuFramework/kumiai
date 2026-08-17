@@ -25,7 +25,6 @@ import {
 import { buildLedgerHeadExtension, extendHead, readLedgerHead } from './head.js'
 import { ledgerEntryDigest, signLedgerEntry, verifyLedgerEntry } from './ledger.js'
 import { defaultCommitPolicy } from './policy.js'
-import { registrySeed } from './registry.js'
 import { type GroupPermission, ROLE_ENTRY_TYPE } from './roster.js'
 import type { Invite } from './types.js'
 
@@ -199,9 +198,7 @@ export async function commitWithEntries(
     }
     inputs.push({ verified, entryID: ledgerEntryDigest(token) })
   }
-  // TODO(Task 3): pass group.registry once the field lands; registrySeed() here keeps
-  // behavior identical to today (empty registry ⇒ authority(id) === id).
-  const fold = foldEnvelope(group.roster, registrySeed(), inputs, group.groupID)
+  const fold = foldEnvelope(group.roster, group.registry, inputs, group.groupID)
   if (!fold.ok) {
     throw new Error(`cannot enact ledger entry ${fold.entryID}: ${fold.reason}`)
   }

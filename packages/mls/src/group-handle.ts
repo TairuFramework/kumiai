@@ -45,8 +45,8 @@ import {
   defaultCommitPolicy,
   MissingLedgerEntriesError,
 } from './policy.js'
-import { registrySeed } from './registry.js'
-import { foldRoster, type RoleValue, type RosterState } from './roster.js'
+import { type DeviceRegistry, denySetOf, foldControl } from './registry.js'
+import type { RosterState } from './roster.js'
 import { type PrivateCommitFrame, readSenderLeafIndex } from './sender-data.js'
 
 /** One serializer per live handle, so its state-mutating operations run one at a
@@ -225,19 +225,17 @@ export type HeldLedgerEntry = {
 export type LedgerLogEntry = HeldLedgerEntry & { entryID: string }
 
 /**
- * Project a held ledger into the roster. foldRoster drops every non-`kumiai.role`
- * entry by type, so the mixed-type log is fed in whole. Replayed in order, repeats
- * and all: a claim re-enacted at a later position must undo what came between.
+ * Project a held ledger into BOTH the roster and the device registry in one ordered pass
+ * (see {@link foldControl}), so a role entry's authority resolves against the registry-so-far.
+ * The mixed-type log is fed in whole; foldControl drops every unrelated entry by type.
  */
-function foldLedgerRoster(
+function foldLedgerControl(
   ledger: ReadonlyArray<LedgerLogEntry>,
   anchor: GroupAnchor,
   groupID: string,
-): RosterState {
-  const entries = ledger.map(
-    ({ verified, entryID }) => ({ verified, entryID }) as FoldInput<RoleValue>,
-  )
-  return foldRoster(entries, anchor, groupID)
+): { roster: RosterState; registry: DeviceRegistry } {
+  const entries = ledger.map(({ verified, entryID }) => ({ verified, entryID }) as FoldInput)
+  return foldControl(entries, anchor, groupID)
 }
 
 export type GroupHandleParams = {
@@ -273,6 +271,7 @@ export class GroupHandle {
    *  the same wherever it appears in the log, so this store is keyed. */
   #entryBodies: Map<string, HeldLedgerEntry>
   #roster: RosterState
+  #registry: DeviceRegistry
 
   constructor(params: GroupHandleParams) {
     this.#state = params.state
@@ -293,7 +292,9 @@ export class GroupHandle {
     this.#entryBodies = new Map(
       this.#ledger.map(({ entryID, token, verified }) => [entryID, { token, verified }]),
     )
-    this.#roster = foldLedgerRoster(this.#ledger, anchor, this.groupID)
+    const folded = foldLedgerControl(this.#ledger, anchor, this.groupID)
+    this.#roster = folded.roster
+    this.#registry = folded.registry
   }
 
   get groupID(): string {
@@ -361,6 +362,20 @@ export class GroupHandle {
     return this.#roster
   }
 
+  /** The device registry folded from the anchor and every applied ledger entry. */
+  get registry(): DeviceRegistry {
+    return this.#registry
+  }
+
+  /**
+   * The device deny set the auth service consumes: the DIDs revoked in the CURRENTLY folded
+   * registry (pre-commit). Matched, never enumerated by consumers. A revoke takes deny-effect from
+   * the next epoch, so a commit never denies the leaves it is itself validating.
+   */
+  currentDenySet(): ReadonlySet<string> {
+    return denySetOf(this.#registry)
+  }
+
   /**
    * Verify signed ledger tokens, append the valid ones in the order given, and
    * refold the roster. Tokens that fail verification or whose groupID mismatches are
@@ -383,7 +398,9 @@ export class GroupHandle {
         this.#ledger.push({ entryID, token, verified })
         this.#entryBodies.set(entryID, { token, verified })
       }
-      this.#roster = foldLedgerRoster(this.#ledger, this.#anchor, this.groupID)
+      const folded = foldLedgerControl(this.#ledger, this.#anchor, this.groupID)
+      this.#roster = folded.roster
+      this.#registry = folded.registry
     })
   }
 
@@ -490,7 +507,9 @@ export class GroupHandle {
       this.#entryBodies = new Map(
         log.map(({ entryID, token, verified }) => [entryID, { token, verified }]),
       )
-      this.#roster = foldLedgerRoster(log, this.#anchor, this.groupID)
+      const folded = foldLedgerControl(log, this.#anchor, this.groupID)
+      this.#roster = folded.roster
+      this.#registry = folded.registry
 
       // SURFACED HERE TOO, not only on the commit path. A heal is how a peer that missed commits
       // catches up — it rejoins, gathers the whole ledger, and lands here — so a bootstrap that
@@ -736,6 +755,7 @@ export class GroupHandle {
 
     let precomputedReject = false
     let candidateRoster: RosterState = this.#roster
+    let candidateRegistry: DeviceRegistry = this.#registry
     let surfaced: Array<VerifiedLedgerEntry> = []
     let acceptedEntries: Array<LedgerLogEntry> = []
     let envelopeIDs: Array<string> = []
@@ -788,13 +808,12 @@ export class GroupHandle {
             return input
           })
 
-          // TODO(Task 3): pass this.#registry once the field lands; registrySeed() here keeps
-          // behavior identical to today (empty registry ⇒ authority(id) === id).
-          const foldResult = foldEnvelope(this.#roster, registrySeed(), ordered, this.groupID)
+          const foldResult = foldEnvelope(this.#roster, this.#registry, ordered, this.groupID)
           if (!foldResult.ok) {
             precomputedReject = true
           } else {
             candidateRoster = foldResult.roster
+            candidateRegistry = foldResult.registry
             surfaced = foldResult.surfaced
             acceptedEntries = ordered
           }
@@ -825,6 +844,7 @@ export class GroupHandle {
         this.#entryBodies.set(entryID, { token, verified })
       }
       this.#roster = candidateRoster
+      this.#registry = candidateRegistry
       if (surfaced.length > 0) this.#onLedgerEntries?.(surfaced)
     }
 
