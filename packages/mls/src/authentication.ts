@@ -114,7 +114,12 @@ async function validateBoundLeaf(
   try {
     // The fold inside requires the prefix's inception to hash to controller.id (anchor) and checks
     // the controller's signature over the capability. `historic` so a rotated issuer still verifies.
-    verified = await verifyToken(controller.capability, { methods: [resolver], historic: true })
+    // `allowUnsigned: false` is explicit — a bound leaf's whole authority rests on this signature.
+    verified = await verifyToken(controller.capability, {
+      methods: [resolver],
+      historic: true,
+      allowUnsigned: false,
+    })
   } catch {
     return false
   }
@@ -129,6 +134,8 @@ async function validateBoundLeaf(
     return false
   }
 
+  // Deny-seam contract: entries must be normalized DIDs — this check normalizes `parsed.id`, but the
+  // set itself is not normalized here, so a caller populating it owns that invariant.
   if (deviceDenySet().has(normalizeDID(parsed.id))) return false
 
   const kid = verified.payload.cnf?.kid

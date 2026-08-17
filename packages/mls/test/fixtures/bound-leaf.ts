@@ -1,6 +1,6 @@
 import { audienceConfirmation, createCapability, now } from '@kokuin/capability'
 import { createControllerIdentity, createInception, didFromInception } from '@kokuin/controller'
-import { createSigningIdentity, stringifyToken } from '@kokuin/token'
+import { createIdentity, createSigningIdentity, stringifyToken } from '@kokuin/token'
 
 import type { ControllerBinding, MLSCredentialIdentity } from '../../src/credential.js'
 
@@ -9,7 +9,7 @@ export type BoundLeaf = {
   identity: Uint8Array
   /** The device's signing public key = the MLS leaf key to pass as signaturePublicKey. */
   deviceKey: Uint8Array
-  /** The device DID (did:key). */
+  /** The device DID (did:key, or did:peer:4 short form when deviceMethod is 'peer:4'). */
   deviceID: string
   /** The controller (profile) DID. */
   controllerID: string
@@ -19,10 +19,30 @@ export type BuildBoundLeafOptions = {
   controllerSeed?: Uint8Array
   deviceSeed?: Uint8Array
   profile?: number
+  /** 'key' (default) builds a did:key device; 'peer:4' builds a did:peer:4 device with longForm. */
+  deviceMethod?: 'key' | 'peer:4'
   /** Override the assembled MLSCredentialIdentity before encoding — used to craft reject cases. */
   mutate?: (identity: MLSCredentialIdentity, binding: ControllerBinding) => MLSCredentialIdentity
   /** Override the capability payload before signing — used to craft reject cases. */
   capabilityOverrides?: Record<string, unknown>
+}
+
+type DeviceIdentity = { id: string; longForm?: string; publicKey: Uint8Array }
+
+/** did:key (default) or did:peer:4 (longForm carries the doc) — mirrors the floating peer4 fixtures. */
+async function buildDevice(
+  deviceSeed: Uint8Array,
+  method: 'key' | 'peer:4',
+): Promise<DeviceIdentity> {
+  if (method === 'key') {
+    const signing = createSigningIdentity(deviceSeed)
+    return { id: signing.id, publicKey: signing.publicKey }
+  }
+  const identity = await createIdentity({
+    keys: [{ purpose: 'sig', alg: 'EdDSA', privateKey: deviceSeed }],
+    didMethod: 'peer:4',
+  })
+  return { id: identity.id, longForm: identity.longForm, publicKey: identity.publicKey }
 }
 
 /**
@@ -37,7 +57,7 @@ export async function buildBoundLeaf(options: BuildBoundLeafOptions = {}): Promi
   const inception = createInception(controllerSeed, profile)
   const controllerID = didFromInception(inception.event)
   const controller = createControllerIdentity({ seed: controllerSeed, profile, log: [inception] })
-  const device = createSigningIdentity(deviceSeed)
+  const device = await buildDevice(deviceSeed, options.deviceMethod ?? 'key')
 
   const capabilityToken = await createCapability(controller, {
     sub: controllerID,
@@ -54,7 +74,11 @@ export async function buildBoundLeaf(options: BuildBoundLeafOptions = {}): Promi
     prefix: [inception],
     capability: stringifyToken(capabilityToken),
   }
-  let identity: MLSCredentialIdentity = { id: device.id, controller: binding }
+  let identity: MLSCredentialIdentity = {
+    id: device.id,
+    ...(device.longForm != null ? { longForm: device.longForm } : {}),
+    controller: binding,
+  }
   if (options.mutate) identity = options.mutate(identity, binding)
 
   return {
