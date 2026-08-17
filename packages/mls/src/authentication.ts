@@ -3,8 +3,9 @@ import {
   assertDeviceCapabilityPolicy,
   assertValidIssuedAt,
   hasPermission,
+  type Permission,
 } from '@kokuin/capability'
-import { tryDecodeKey } from '@kokuin/controller'
+import { type SignedEvent, tryDecodeKey } from '@kokuin/controller'
 import {
   decodeMultibase,
   decodePeer4,
@@ -24,6 +25,11 @@ import { createEmbeddedControllerResolver } from './embedded-resolver.js'
 export const MLS_LEAF_ACT = 'authenticate'
 /** The resource half of that grant — kumiai-namespaced, group-independent. */
 export const MLS_LEAF_RES = 'kumiai/mls-leaf'
+
+/** The action a management capability must grant to mutate a profile's device registry. */
+export const MLS_DEVICES_ACT = 'manage'
+/** The resource half — kumiai-namespaced, group-independent, per the kokuin management tier. */
+export const MLS_DEVICES_RES = 'kumiai/devices'
 
 const EMPTY_DENY: ReadonlySet<string> = new Set()
 
@@ -88,6 +94,56 @@ function matchesLeafKey(parsed: MLSCredentialIdentity, signaturePublicKey: Uint8
 }
 
 /**
+ * The shared capability-verification core: verify a `cnf`-pinned, `exp`-bounded @kokuin/capability
+ * grant against a controller's EMBEDDED log prefix (no external I/O), asserting it grants
+ * `permission` to `audience` and pins `leafKey`. Returns false on any failure. Optionally pins the
+ * issuer (`requireIssuer`) — the embedded resolver already answers only for `controllerID`, so the
+ * issuer is pinned there too; the explicit check is belt-and-braces for the manage path.
+ */
+async function verifyPinnedCapability(params: {
+  capability: string
+  prefix: Array<SignedEvent>
+  controllerID: string
+  audience: string
+  permission: Permission
+  leafKey: Uint8Array
+  requireIssuer?: string
+}): Promise<boolean> {
+  const resolver = createEmbeddedControllerResolver({
+    controllerID: params.controllerID,
+    prefix: params.prefix,
+  })
+  let verified: Awaited<ReturnType<typeof verifyToken>>
+  try {
+    verified = await verifyToken(params.capability, {
+      methods: [resolver],
+      historic: true,
+      allowUnsigned: false,
+    })
+  } catch {
+    return false
+  }
+  try {
+    assertCapabilityToken(verified)
+    if (
+      params.requireIssuer != null &&
+      normalizeDID(verified.payload.iss) !== normalizeDID(params.requireIssuer)
+    )
+      return false
+    if (normalizeDID(verified.payload.aud) !== normalizeDID(params.audience)) return false
+    if (!hasPermission(params.permission, verified.payload)) return false
+    assertValidIssuedAt(verified.payload)
+    assertDeviceCapabilityPolicy(verified.payload)
+  } catch {
+    return false
+  }
+  const kid = verified.payload.cnf?.kid
+  if (typeof kid !== 'string') return false
+  const pinned = tryDecodeKey(kid)
+  return pinned != null && constantTimeEqual(pinned.publicKey, params.leafKey)
+}
+
+/**
  * Validate a bound leaf: the device authenticates against its own leaf key (floating check), and the
  * embedded controller proof shows the profile authorised THIS device with THIS key. All sync — the
  * prefix is folded through the embedded resolver, never fetched. Returns false on any failure.
@@ -100,50 +156,45 @@ async function validateBoundLeaf(
   const controller = parsed.controller
   if (controller == null) return false
   if (!controller.id.startsWith('did:kokuin:')) return false
-
-  // A bound leaf is a floating leaf plus a controller attribution — the device still authenticates
-  // against its own key.
   if (!matchesLeafKey(parsed, signaturePublicKey)) return false
 
-  const resolver = createEmbeddedControllerResolver({
-    controllerID: controller.id,
-    prefix: controller.prefix,
-  })
-
-  let verified: Awaited<ReturnType<typeof verifyToken>>
-  try {
-    // The fold inside requires the prefix's inception to hash to controller.id (anchor) and checks
-    // the controller's signature over the capability. `historic` so a rotated issuer still verifies.
-    // `allowUnsigned: false` is explicit — a bound leaf's whole authority rests on this signature.
-    verified = await verifyToken(controller.capability, {
-      methods: [resolver],
-      historic: true,
-      allowUnsigned: false,
-    })
-  } catch {
-    return false
-  }
-
-  try {
-    assertCapabilityToken(verified)
-    if (normalizeDID(verified.payload.aud) !== normalizeDID(parsed.id)) return false
-    if (!hasPermission({ act: MLS_LEAF_ACT, res: MLS_LEAF_RES }, verified.payload)) return false
-    assertValidIssuedAt(verified.payload)
-    assertDeviceCapabilityPolicy(verified.payload)
-  } catch {
-    return false
-  }
-
-  // Deny-seam contract: entries must be normalized DIDs — this check normalizes `parsed.id`, but the
-  // set itself is not normalized here, so a caller populating it owns that invariant.
+  // Deny governs the capability-mediated (bound) leaf; checked before the capability verify so a
+  // revoked device is rejected regardless of an otherwise-valid grant.
   if (deviceDenySet().has(normalizeDID(parsed.id))) return false
 
-  const kid = verified.payload.cnf?.kid
-  if (typeof kid !== 'string') return false
-  const pinned = tryDecodeKey(kid)
-  if (pinned == null || !constantTimeEqual(pinned.publicKey, signaturePublicKey)) return false
+  return await verifyPinnedCapability({
+    capability: controller.capability,
+    prefix: controller.prefix,
+    controllerID: controller.id,
+    audience: parsed.id,
+    permission: { act: MLS_LEAF_ACT, res: MLS_LEAF_RES },
+    leafKey: signaturePublicKey,
+  })
+}
 
-  return true
+/**
+ * Verify a management capability presented by a manage-op's issuer device: the authorized profile
+ * (`controllerID`) issued a `kumiai/devices` grant to that device (`audience`), `cnf`-pinned to the
+ * device's leaf key and `exp`-bounded. Verified against the profile's log prefix (embedded in the
+ * issuer's own bound leaf), never fetched. Returns false on any failure.
+ */
+export async function verifyManagementCapability(params: {
+  capability?: string
+  prefix: Array<SignedEvent>
+  controllerID: string
+  audience: string
+  leafKey: Uint8Array
+}): Promise<boolean> {
+  if (params.capability == null) return false
+  return await verifyPinnedCapability({
+    capability: params.capability,
+    prefix: params.prefix,
+    controllerID: params.controllerID,
+    audience: params.audience,
+    permission: { act: MLS_DEVICES_ACT, res: MLS_DEVICES_RES },
+    leafKey: params.leafKey,
+    requireIssuer: params.controllerID,
+  })
 }
 
 export function createDIDAuthenticationService(
