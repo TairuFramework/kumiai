@@ -100,6 +100,8 @@ LedgerEntry = {
     op: 'register' | 'add' | 'revoke' | 'label',
     controller?: string,   // register / add: the profile the device binds to
     label?: string,        // label
+    capability?: string,   // manage ops: the embedded management capability the acceptance gate
+                           //   verifies; the pure fold never reads it (recorded-once trust)
   },
 }
 issuer (from the signed token's `iss`) = <the signing device DID>
@@ -162,7 +164,10 @@ entry's proof is an **acceptance-pipeline gate**, not part of the pure fold. Thr
      leaf (`verifyToken` with `historic: true` through an embedded-prefix resolver, `assertCapabilityToken`,
      `assertDeviceCapabilityPolicy`). The authorized profile is `value.controller` for a
      register/add (the subject is not yet in the registry) and `controllerOf(subject)` for a
-     revoke/label (the registry already binds it).
+     revoke/label (the registry already binds it). The profile's log prefix used to verify the
+     capability comes from the **issuer's own bound leaf** (the only in-group source of the profile's
+     keys, embedded per Slice 1) — so a manage-op issuer must itself be a bound device of the
+     authorized profile.
 2. **`envelope-fold`** — stays pure and synchronous. It keeps the admin invariant for non-device
    entries, and for `kumiai.device` it applies the registry op and enforces the structural / `ord` /
    `groupID` rules (as it already does for role entries), but **delegates authorization to the
