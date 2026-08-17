@@ -18,7 +18,7 @@ catalog:
   '@enkaku/protocol': ^0.21.0
   '@enkaku/server': ^0.21.1
   '@enkaku/transport': ^0.21.0
-  '@kokuin/capability': ^0.1.0
+  '@kokuin/capability': ^0.3.0
   '@kokuin/controller': ^0.1.0
   '@kokuin/token': ^0.5.0
   '@sozai/async': ^0.2.1

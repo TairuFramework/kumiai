@@ -1,14 +1,31 @@
 import {
+  assertCapabilityToken,
+  assertDeviceCapabilityPolicy,
+  assertValidIssuedAt,
+  hasPermission,
+} from '@kokuin/capability'
+import { tryDecodeKey } from '@kokuin/controller'
+import {
   decodeMultibase,
   decodePeer4,
   getAlgorithmAndPublicKey,
   getSignatureInfo,
   isPeer4,
+  normalizeDID,
+  verifyToken,
 } from '@kokuin/token'
 import type { AuthenticationService, Credential } from 'ts-mls'
 import { defaultCredentialTypes } from 'ts-mls'
 
 import { type MLSCredentialIdentity, parseMLSCredentialIdentity } from './credential.js'
+import { createEmbeddedControllerResolver } from './embedded-resolver.js'
+
+/** The action a device capability must grant for a leaf to authenticate as a kumiai MLS leaf. */
+export const MLS_LEAF_ACT = 'authenticate'
+/** The resource half of that grant — kumiai-namespaced, group-independent. */
+export const MLS_LEAF_RES = 'kumiai/mls-leaf'
+
+const EMPTY_DENY: ReadonlySet<string> = new Set()
 
 function constantTimeEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) return false
@@ -70,7 +87,62 @@ function matchesLeafKey(parsed: MLSCredentialIdentity, signaturePublicKey: Uint8
   }
 }
 
-export function createDIDAuthenticationService(): AuthenticationService {
+/**
+ * Validate a bound leaf: the device authenticates against its own leaf key (floating check), and the
+ * embedded controller proof shows the profile authorised THIS device with THIS key. All sync — the
+ * prefix is folded through the embedded resolver, never fetched. Returns false on any failure.
+ */
+async function validateBoundLeaf(
+  parsed: MLSCredentialIdentity,
+  signaturePublicKey: Uint8Array,
+  deviceDenySet: () => ReadonlySet<string>,
+): Promise<boolean> {
+  const controller = parsed.controller
+  if (controller == null) return false
+  if (!controller.id.startsWith('did:kokuin:')) return false
+
+  // A bound leaf is a floating leaf plus a controller attribution — the device still authenticates
+  // against its own key.
+  if (!matchesLeafKey(parsed, signaturePublicKey)) return false
+
+  const resolver = createEmbeddedControllerResolver({
+    controllerID: controller.id,
+    prefix: controller.prefix,
+  })
+
+  let verified: Awaited<ReturnType<typeof verifyToken>>
+  try {
+    // The fold inside requires the prefix's inception to hash to controller.id (anchor) and checks
+    // the controller's signature over the capability. `historic` so a rotated issuer still verifies.
+    verified = await verifyToken(controller.capability, { methods: [resolver], historic: true })
+  } catch {
+    return false
+  }
+
+  try {
+    assertCapabilityToken(verified)
+    if (normalizeDID(verified.payload.aud) !== normalizeDID(parsed.id)) return false
+    if (!hasPermission({ act: MLS_LEAF_ACT, res: MLS_LEAF_RES }, verified.payload)) return false
+    assertValidIssuedAt(verified.payload)
+    assertDeviceCapabilityPolicy(verified.payload)
+  } catch {
+    return false
+  }
+
+  if (deviceDenySet().has(normalizeDID(parsed.id))) return false
+
+  const kid = verified.payload.cnf?.kid
+  if (typeof kid !== 'string') return false
+  const pinned = tryDecodeKey(kid)
+  if (pinned == null || !constantTimeEqual(pinned.publicKey, signaturePublicKey)) return false
+
+  return true
+}
+
+export function createDIDAuthenticationService(
+  deps: { deviceDenySet?: () => ReadonlySet<string> } = {},
+): AuthenticationService {
+  const deviceDenySet = deps.deviceDenySet ?? (() => EMPTY_DENY)
   return {
     async validateCredential(
       credential: Credential,
@@ -87,6 +159,9 @@ export function createDIDAuthenticationService(): AuthenticationService {
         return false
       }
 
+      if (parsed.controller != null) {
+        return await validateBoundLeaf(parsed, signaturePublicKey, deviceDenySet)
+      }
       return matchesLeafKey(parsed, signaturePublicKey)
     },
   }

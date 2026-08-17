@@ -19,8 +19,8 @@ catalogs:
       specifier: ^0.21.0
       version: 0.21.0
     '@kokuin/capability':
-      specifier: ^0.1.0
-      version: 0.1.0
+      specifier: ^0.3.0
+      version: 0.3.0
     '@kokuin/controller':
       specifier: ^0.1.0
       version: 0.1.0
@@ -299,7 +299,7 @@ importers:
     dependencies:
       '@kokuin/capability':
         specifier: 'catalog:'
-        version: 0.1.0
+        version: 0.3.0(@logtape/logtape@2.3.0)
       '@kokuin/controller':
         specifier: 'catalog:'
         version: 0.1.0(@logtape/logtape@2.3.0)
@@ -1331,9 +1331,6 @@ packages:
     resolution: {integrity: sha512-L1FSMZlgHHqiqvXlwdlvfRDnYUSWYuGzJ+20ouuitvWX8+wIExmc4p2XMsqKVyqEbB1pOZFxGx8+A52n0ehVhQ==}
     hasBin: true
 
-  '@kokuin/capability@0.1.0':
-    resolution: {integrity: sha512-LFLn4ZpMqOeAi1P0D6QvIdZ44I+lo5jXgYMj6VwMLP3KhznVk6emYx40xXQXYlrN0hxVFnQbFq2MysmDUgPdsA==}
-
   '@kokuin/capability@0.3.0':
     resolution: {integrity: sha512-4ZqASd70op8aSnfIp+uras/avdIJaGcTZpzEeOsiyrWyeRTcTyE+2UqN/Ll8EBFvQGQ+4PR56VNEXHpF4DnLRg==}
 
@@ -1343,14 +1340,8 @@ packages:
   '@kokuin/expo@0.3.2':
     resolution: {integrity: sha512-EQ3Pf/ZW7AUfLWc+inYQpthxB3VX4tPZLXV7PsBO7FSCXnnRmwrE8I56EaLFQy6RUBtGCIzDZ9qx148p+kQF0g==}
 
-  '@kokuin/otel@0.1.0':
-    resolution: {integrity: sha512-eRN3SdICQZAMNilprC4szHXQUGUVdD3zM5d+qcJVi0Df59dyAF9Ca6urxAMYQyvPHIpUk98k+jn8Tgm73k5RYw==}
-
   '@kokuin/otel@0.3.0':
     resolution: {integrity: sha512-XwnBYkrglkV0aVcPx/ajDL6DNAZgFeZ7cNyzAHMW6ex4/RyY9xJ7htNYzl/sCFlYMNQ8M/lPayrzYf3hdN4dUQ==}
-
-  '@kokuin/token@0.1.1':
-    resolution: {integrity: sha512-tGXzhjX4mKRAkpJiBbwrgcN2IPCzI8tM53/6Scj7gtykfIB4/5JKkSmp2Zegdh76f/MVv6w3IR9iee+qcXo2bQ==}
 
   '@kokuin/token@0.4.0':
     resolution: {integrity: sha512-bLUYY6jV60EQ+GM6D9F225/cCquoQDWjbWoimZLDAUttPCtTQ/u3qWKo6q6ttsPT6cTruG8qzge9HqkVCKxibg==}
@@ -1518,10 +1509,6 @@ packages:
   '@nodelib/fs.walk@1.2.8':
     resolution: {integrity: sha512-oGB+UxlgWcgQkgwo8GcEGwemoTFt3FIO9ababBmaGwXIoBKZ+GTy0pP185beGg7Llih/NSHSV2XAs1lnznocSg==}
     engines: {node: '>= 8'}
-
-  '@opentelemetry/api-logs@0.219.0':
-    resolution: {integrity: sha512-FFx7YnaYJlIjqWW/AG/yAZ0L/NEY724PipXXXQLdtZPbLwBGbUMTGL1i/esI56TWfTUXxhLfpgrnWJCG8aUJyg==}
-    engines: {node: '>=8.0.0'}
 
   '@opentelemetry/api-logs@0.221.0':
     resolution: {integrity: sha512-OlanaW1vv7ufTqQ3/fPLI4arGt5ZoM+P8abOMki6uEYnpRazepSWDwDnnw+la7kE26SHVC18//SMccrDvLKOXQ==}
@@ -1743,9 +1730,6 @@ packages:
   '@sozai/async@0.2.1':
     resolution: {integrity: sha512-pWJtDAlWSAUpRmqFQluyYKHuoQFOLmdy9/WT0EBWvqWTTe6s/Vy8+e2BxS2YMOK6vwsPuwSSEOlf6PvdF597+A==}
 
-  '@sozai/codec@0.1.0':
-    resolution: {integrity: sha512-J5D0yQuBdlTjzhVewR6E9EjcOyBBqpUUSOnFVPD+zv0M86jRT3RUDrqnQ5bNm+OMtfo42u6KP046VAAaZgUj+w==}
-
   '@sozai/codec@0.4.0':
     resolution: {integrity: sha512-ENz2qf7FIn4DpjvYXjjRFszFXAoS7saYLcza0ZJGJwzWW0UoQWkU6qEIj58iQNfyHirMiiBVdENCcU5YaUSJRw==}
 
@@ -1758,9 +1742,6 @@ packages:
   '@sozai/json@0.1.1':
     resolution: {integrity: sha512-5ftTPdDYVeFj14VZWBKi4jV5Xu0XC2yioNEWXgSfrdw9QkCY+R6nNwkukHaVwyFAnz8qLnKHYNjg+42gxAOo4Q==}
 
-  '@sozai/log@0.1.1':
-    resolution: {integrity: sha512-LoKzEz6qWWAV4KeAsyn35YD7ooCoFPyEgrCWwpSaKk3xuvEP2b1ejwFz90GvA/y8cCnfZqtXK4FnPz/VnfmlwQ==}
-
   '@sozai/log@0.3.0':
     resolution: {integrity: sha512-kHXNZ8LNBPOy/KObz9ClS+iNnjkzDhYL1u2TqkpsI47vrwia6VnCPkgmhXavNauYE9/+IIJrFjKGjTGs2rNikA==}
 
@@ -1768,9 +1749,6 @@ packages:
     resolution: {integrity: sha512-IblWrhbUOd6KCkG+Dzr9ZS+Dgyhqr5W3Zb1CbZUN5r2ybBAN5WL9GTn7L45bLuQOSp0RzjDeqB7OH39InMm0yg==}
     peerDependencies:
       '@logtape/logtape': ^2.3.0
-
-  '@sozai/otel@0.2.0':
-    resolution: {integrity: sha512-QA6VNAabL9D36nALM92fTtvTO2V9wI3P72rvQFFj9dRNZyZ9s4l9PK5RXKEMNN1KFgYUKus+7KBMiqRo6kYrTw==}
 
   '@sozai/otel@0.3.2':
     resolution: {integrity: sha512-GLflQwFbRI7JeXa2Fnyte7LxJtJUwAwYe0hAtOHcrrwUCgLBoTbnLyptmhC/0LYEQQKEzCkYEg1TygWk4SyMjg==}
@@ -2281,11 +2259,6 @@ packages:
 
   caniuse-lite@1.0.30001809:
     resolution: {integrity: sha512-xxWVywk6a6Arlk+hymeycyn/VgqEfLDxupvhH/xiY5SJ/18kmi9o6MiO320DCUzypORHLtvh0I4i04tUhCNHNQ==}
-
-  canonicalize@3.0.0:
-    resolution: {integrity: sha512-yYLfHyDMIXRyRqsKBRLX023riFLpXY2YOfdtqKXZRZy9qsfOJ9U+4F9YZL7MEzL5+ziN2x2nlBvY/Voi3EBljA==}
-    engines: {node: '>=18'}
-    hasBin: true
 
   chai@6.2.2:
     resolution: {integrity: sha512-NUPRluOfOiTKBKvWPtSD4PhFvWCqOi0BGStNWs57X9js7XGTprSmFoz5F0tWhR4WPjNeR9jXqdC7/UpSJTnlRg==}
@@ -5215,10 +5188,6 @@ snapshots:
       - supports-color
       - vite
 
-  '@kokuin/capability@0.1.0':
-    dependencies:
-      '@kokuin/token': 0.1.1
-
   '@kokuin/capability@0.3.0(@logtape/logtape@2.3.0)':
     dependencies:
       '@kokuin/token': 0.5.0(@logtape/logtape@2.3.0)
@@ -5249,28 +5218,12 @@ snapshots:
       - '@logtape/logtape'
       - expo
 
-  '@kokuin/otel@0.1.0':
-    dependencies:
-      '@opentelemetry/api': 1.9.1
-      '@sozai/otel': 0.2.0
-
   '@kokuin/otel@0.3.0(@logtape/logtape@2.3.0)':
     dependencies:
       '@opentelemetry/api': 1.9.1
       '@sozai/otel': 0.3.2(@logtape/logtape@2.3.0)
     transitivePeerDependencies:
       - '@logtape/logtape'
-
-  '@kokuin/token@0.1.1':
-    dependencies:
-      '@kokuin/otel': 0.1.0
-      '@noble/ciphers': 2.3.0
-      '@noble/curves': 2.3.0
-      '@noble/hashes': 2.3.0
-      '@scure/base': 2.3.0
-      '@sozai/codec': 0.1.0
-      '@sozai/otel': 0.2.0
-      '@sozai/schema': 0.1.1
 
   '@kokuin/token@0.4.0(@logtape/logtape@2.3.0)':
     dependencies:
@@ -5409,10 +5362,6 @@ snapshots:
     dependencies:
       '@nodelib/fs.scandir': 2.1.5
       fastq: 1.20.1
-
-  '@opentelemetry/api-logs@0.219.0':
-    dependencies:
-      '@opentelemetry/api': 1.9.1
 
   '@opentelemetry/api-logs@0.221.0':
     dependencies:
@@ -5610,10 +5559,6 @@ snapshots:
 
   '@sozai/async@0.2.1': {}
 
-  '@sozai/codec@0.1.0':
-    dependencies:
-      canonicalize: 3.0.0
-
   '@sozai/codec@0.4.0':
     dependencies:
       '@sozai/json': 0.1.1
@@ -5630,10 +5575,6 @@ snapshots:
 
   '@sozai/json@0.1.1': {}
 
-  '@sozai/log@0.1.1':
-    dependencies:
-      '@logtape/logtape': 2.3.0
-
   '@sozai/log@0.3.0':
     dependencies:
       '@logtape/logtape': 2.2.4
@@ -5641,12 +5582,6 @@ snapshots:
   '@sozai/log@0.3.1(@logtape/logtape@2.3.0)':
     dependencies:
       '@logtape/logtape': 2.3.0
-
-  '@sozai/otel@0.2.0':
-    dependencies:
-      '@opentelemetry/api': 1.9.1
-      '@opentelemetry/api-logs': 0.219.0
-      '@sozai/log': 0.1.1
 
   '@sozai/otel@0.3.2(@logtape/logtape@2.3.0)':
     dependencies:
@@ -6231,8 +6166,6 @@ snapshots:
   camelcase@6.3.0: {}
 
   caniuse-lite@1.0.30001809: {}
-
-  canonicalize@3.0.0: {}
 
   chai@6.2.2: {}
 
