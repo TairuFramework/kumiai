@@ -18,6 +18,12 @@ catalogs:
     '@enkaku/transport':
       specifier: ^0.21.0
       version: 0.21.0
+    '@kokuin/capability':
+      specifier: ^0.1.0
+      version: 0.1.0
+    '@kokuin/controller':
+      specifier: ^0.1.0
+      version: 0.1.0
     '@kokuin/expo':
       specifier: ^0.3.2
       version: 0.3.2
@@ -291,6 +297,12 @@ importers:
 
   packages/mls:
     dependencies:
+      '@kokuin/capability':
+        specifier: 'catalog:'
+        version: 0.1.0
+      '@kokuin/controller':
+        specifier: 'catalog:'
+        version: 0.1.0(@logtape/logtape@2.3.0)
       '@kokuin/token':
         specifier: 'catalog:'
         version: 0.5.0(@logtape/logtape@2.3.0)
@@ -1319,14 +1331,26 @@ packages:
     resolution: {integrity: sha512-L1FSMZlgHHqiqvXlwdlvfRDnYUSWYuGzJ+20ouuitvWX8+wIExmc4p2XMsqKVyqEbB1pOZFxGx8+A52n0ehVhQ==}
     hasBin: true
 
+  '@kokuin/capability@0.1.0':
+    resolution: {integrity: sha512-LFLn4ZpMqOeAi1P0D6QvIdZ44I+lo5jXgYMj6VwMLP3KhznVk6emYx40xXQXYlrN0hxVFnQbFq2MysmDUgPdsA==}
+
   '@kokuin/capability@0.3.0':
     resolution: {integrity: sha512-4ZqASd70op8aSnfIp+uras/avdIJaGcTZpzEeOsiyrWyeRTcTyE+2UqN/Ll8EBFvQGQ+4PR56VNEXHpF4DnLRg==}
+
+  '@kokuin/controller@0.1.0':
+    resolution: {integrity: sha512-AgC97EW1F2oJYrdjXf4Ei4afM9NUP4em0Orr1Hr3W6QZRCJjGDZ6pctF5d4gA01uA9xbuzYw3UomhzaWlKy/EQ==}
 
   '@kokuin/expo@0.3.2':
     resolution: {integrity: sha512-EQ3Pf/ZW7AUfLWc+inYQpthxB3VX4tPZLXV7PsBO7FSCXnnRmwrE8I56EaLFQy6RUBtGCIzDZ9qx148p+kQF0g==}
 
+  '@kokuin/otel@0.1.0':
+    resolution: {integrity: sha512-eRN3SdICQZAMNilprC4szHXQUGUVdD3zM5d+qcJVi0Df59dyAF9Ca6urxAMYQyvPHIpUk98k+jn8Tgm73k5RYw==}
+
   '@kokuin/otel@0.3.0':
     resolution: {integrity: sha512-XwnBYkrglkV0aVcPx/ajDL6DNAZgFeZ7cNyzAHMW6ex4/RyY9xJ7htNYzl/sCFlYMNQ8M/lPayrzYf3hdN4dUQ==}
+
+  '@kokuin/token@0.1.1':
+    resolution: {integrity: sha512-tGXzhjX4mKRAkpJiBbwrgcN2IPCzI8tM53/6Scj7gtykfIB4/5JKkSmp2Zegdh76f/MVv6w3IR9iee+qcXo2bQ==}
 
   '@kokuin/token@0.4.0':
     resolution: {integrity: sha512-bLUYY6jV60EQ+GM6D9F225/cCquoQDWjbWoimZLDAUttPCtTQ/u3qWKo6q6ttsPT6cTruG8qzge9HqkVCKxibg==}
@@ -1494,6 +1518,10 @@ packages:
   '@nodelib/fs.walk@1.2.8':
     resolution: {integrity: sha512-oGB+UxlgWcgQkgwo8GcEGwemoTFt3FIO9ababBmaGwXIoBKZ+GTy0pP185beGg7Llih/NSHSV2XAs1lnznocSg==}
     engines: {node: '>= 8'}
+
+  '@opentelemetry/api-logs@0.219.0':
+    resolution: {integrity: sha512-FFx7YnaYJlIjqWW/AG/yAZ0L/NEY724PipXXXQLdtZPbLwBGbUMTGL1i/esI56TWfTUXxhLfpgrnWJCG8aUJyg==}
+    engines: {node: '>=8.0.0'}
 
   '@opentelemetry/api-logs@0.221.0':
     resolution: {integrity: sha512-OlanaW1vv7ufTqQ3/fPLI4arGt5ZoM+P8abOMki6uEYnpRazepSWDwDnnw+la7kE26SHVC18//SMccrDvLKOXQ==}
@@ -1715,6 +1743,9 @@ packages:
   '@sozai/async@0.2.1':
     resolution: {integrity: sha512-pWJtDAlWSAUpRmqFQluyYKHuoQFOLmdy9/WT0EBWvqWTTe6s/Vy8+e2BxS2YMOK6vwsPuwSSEOlf6PvdF597+A==}
 
+  '@sozai/codec@0.1.0':
+    resolution: {integrity: sha512-J5D0yQuBdlTjzhVewR6E9EjcOyBBqpUUSOnFVPD+zv0M86jRT3RUDrqnQ5bNm+OMtfo42u6KP046VAAaZgUj+w==}
+
   '@sozai/codec@0.4.0':
     resolution: {integrity: sha512-ENz2qf7FIn4DpjvYXjjRFszFXAoS7saYLcza0ZJGJwzWW0UoQWkU6qEIj58iQNfyHirMiiBVdENCcU5YaUSJRw==}
 
@@ -1727,6 +1758,9 @@ packages:
   '@sozai/json@0.1.1':
     resolution: {integrity: sha512-5ftTPdDYVeFj14VZWBKi4jV5Xu0XC2yioNEWXgSfrdw9QkCY+R6nNwkukHaVwyFAnz8qLnKHYNjg+42gxAOo4Q==}
 
+  '@sozai/log@0.1.1':
+    resolution: {integrity: sha512-LoKzEz6qWWAV4KeAsyn35YD7ooCoFPyEgrCWwpSaKk3xuvEP2b1ejwFz90GvA/y8cCnfZqtXK4FnPz/VnfmlwQ==}
+
   '@sozai/log@0.3.0':
     resolution: {integrity: sha512-kHXNZ8LNBPOy/KObz9ClS+iNnjkzDhYL1u2TqkpsI47vrwia6VnCPkgmhXavNauYE9/+IIJrFjKGjTGs2rNikA==}
 
@@ -1734,6 +1768,9 @@ packages:
     resolution: {integrity: sha512-IblWrhbUOd6KCkG+Dzr9ZS+Dgyhqr5W3Zb1CbZUN5r2ybBAN5WL9GTn7L45bLuQOSp0RzjDeqB7OH39InMm0yg==}
     peerDependencies:
       '@logtape/logtape': ^2.3.0
+
+  '@sozai/otel@0.2.0':
+    resolution: {integrity: sha512-QA6VNAabL9D36nALM92fTtvTO2V9wI3P72rvQFFj9dRNZyZ9s4l9PK5RXKEMNN1KFgYUKus+7KBMiqRo6kYrTw==}
 
   '@sozai/otel@0.3.2':
     resolution: {integrity: sha512-GLflQwFbRI7JeXa2Fnyte7LxJtJUwAwYe0hAtOHcrrwUCgLBoTbnLyptmhC/0LYEQQKEzCkYEg1TygWk4SyMjg==}
@@ -2169,11 +2206,6 @@ packages:
   base64-js@1.5.1:
     resolution: {integrity: sha512-AKpaYlHn8t4SVbOHCy+b5+KKgvR4vrsD8vbvrbiQJps7fKDTkjkDry6ji0rUJjC0kzbNePLwzxq8iypo41qeWA==}
 
-  baseline-browser-mapping@2.11.1:
-    resolution: {integrity: sha512-HYXq73DDpCtNzOmrFsm9eSwCvWCql0RzqjpDzXN9EadiLJ4DNat0nsZ/Bzmy+Ud12mb4/zKDY0cQ805ZzN+i0A==}
-    engines: {node: '>=6.0.0'}
-    hasBin: true
-
   baseline-browser-mapping@2.11.14:
     resolution: {integrity: sha512-JyJ954WzuIR8/FFzX0o5krdSTrBAkcCSRfWSleRsIHSWV+cZe2FI1PKggVkFke1hBldRs+LRxUczzE9iPmgZww==}
     engines: {node: '>=6.0.0'}
@@ -2213,11 +2245,6 @@ packages:
     resolution: {integrity: sha512-yQbXgO/OSZVD2IsiLlro+7Hf6Q18EJrKSEsdoMzKePKXct3gvD8oLcOQdIzGupr5Fj+EDe8gO/lxc1BzfMpxvA==}
     engines: {node: '>=8'}
 
-  browserslist@4.28.7:
-    resolution: {integrity: sha512-JxV13hNrFxqjOc8alRbq9dK1MM79NEXYpma2B2J4wAtpWS5zIEIKqWPGCl7N4o7Uc7B7itylh7SuDujATRyyTw==}
-    engines: {node: ^6 || ^7 || ^8 || ^9 || ^10 || ^11 || ^12 || >=13.7}
-    hasBin: true
-
   browserslist@4.28.8:
     resolution: {integrity: sha512-V2NpofLblG64mfOtSgDhOJESZEGogzDMBv/q+W6oc4LXWP/q75eOXoOaaOu1EOadB9U4Bwx/e0yzbvwKH8zalA==}
     engines: {node: ^6 || ^7 || ^8 || ^9 || ^10 || ^11 || ^12 || >=13.7}
@@ -2252,11 +2279,13 @@ packages:
     resolution: {integrity: sha512-Gmy6FhYlCY7uOElZUSbxo2UCDH8owEk996gkbrpsgGtrJLM3J7jGxl9Ic7Qwwj4ivOE5AWZWRMecDdF7hqGjFA==}
     engines: {node: '>=10'}
 
-  caniuse-lite@1.0.30001806:
-    resolution: {integrity: sha512-72Cuvd95zbSYPKq6Fhg8eDJRlzgWDf7/mtoZv6Qe/DYNCEBdNxoA3+rZAU2ZhGCpZlns3EssFavaZomckT5Uuw==}
-
   caniuse-lite@1.0.30001809:
     resolution: {integrity: sha512-xxWVywk6a6Arlk+hymeycyn/VgqEfLDxupvhH/xiY5SJ/18kmi9o6MiO320DCUzypORHLtvh0I4i04tUhCNHNQ==}
+
+  canonicalize@3.0.0:
+    resolution: {integrity: sha512-yYLfHyDMIXRyRqsKBRLX023riFLpXY2YOfdtqKXZRZy9qsfOJ9U+4F9YZL7MEzL5+ziN2x2nlBvY/Voi3EBljA==}
+    engines: {node: '>=18'}
+    hasBin: true
 
   chai@6.2.2:
     resolution: {integrity: sha512-NUPRluOfOiTKBKvWPtSD4PhFvWCqOi0BGStNWs57X9js7XGTprSmFoz5F0tWhR4WPjNeR9jXqdC7/UpSJTnlRg==}
@@ -2429,9 +2458,6 @@ packages:
 
   ee-first@1.1.1:
     resolution: {integrity: sha512-WMwm9LhRUo+WUaRN+vRuETqG89IgZphVSNkdFgeb6sS/E4OrDIN7t48CAewSHXc6C8lefD8KKfr5vY61brQlow==}
-
-  electron-to-chromium@1.5.395:
-    resolution: {integrity: sha512-7zt9Aw+SrmxLWLN0zhaTWZQiCdryLVrYTq5R7iZakLvi2UQPYMMsROYV/2qVCzMeCiSXHwKOU+sZ4zOVVlrtKA==}
 
   electron-to-chromium@1.5.407:
     resolution: {integrity: sha512-4R8XgQOdfxexCd/u63lRm6wCHjECwI45MV9wxAs2ggtfWe2hwlo1ql97jKsju2IcJ+jFSTwBssyYoiWhh7mauQ==}
@@ -3148,6 +3174,14 @@ packages:
     engines: {node: ^20.19.4 || ^22.13.0 || ^24.3.0 || >= 25.0.0}
     hasBin: true
 
+  micro-key-producer@0.10.0:
+    resolution: {integrity: sha512-qlx+gTP4IWgWBsWAmTp04iF/ovYWjUtr+ZeDRL25N5G4hOvr/aCWO78uW9QOlck2AizPE6RwrFt32u6fvFF0CQ==}
+    hasBin: true
+
+  micro-packed@0.11.0:
+    resolution: {integrity: sha512-rq9RzPpmlgt3YaW2RrtCG9Q2iydX2+KZnL/Vhik8KKdsKwR5FvLXJzqp5IhXqD67XjYeZEMCrG6B28Mq9uC8Tw==}
+    engines: {node: '>= 20.19.0'}
+
   micromatch@4.0.8:
     resolution: {integrity: sha512-PXwfBhYu0hBCPw8Dn0E+WDYb7af3dSLVWKi3HGv84IdF4TyFoC0ysxFd0Goxw7nSv4T/PzEJQxsYsEiFCKo2BA==}
     engines: {node: '>=8.6'}
@@ -3238,10 +3272,6 @@ packages:
 
   node-int64@0.4.0:
     resolution: {integrity: sha512-O5lz91xSOeoXP6DulyHfllpq+Eg00MWitZIbtPfoSEvqIHdl5gfcY6hYzDWnj0qD5tz52PI08u9qUvSVeUBeHw==}
-
-  node-releases@2.0.51:
-    resolution: {integrity: sha512-wRNIrw4DmVLKQlbgOMdkMx27Wrpzes2hh5Jtbi2bjPd+4wJstWIqP5A+lscnqbm0xxmT5Bpg8Lec5ItEBwx6BQ==}
-    engines: {node: '>=18'}
 
   node-releases@2.0.53:
     resolution: {integrity: sha512-D9UOmYG3UH1V+ENW56t5QXBwJw1YEY18ruVeus89Rw+SyIgjPkCO84bRzO3uNIYosJbNwiabWVn48o3uJLjxFQ==}
@@ -3874,12 +3904,6 @@ packages:
     resolution: {integrity: sha512-pjy2bYhSsufwWlKwPc+l3cN7+wuJlK6uz0YdJEOlQDbl6jo/YlPi4mb8agUkVC8BF7V8NuzeyPNqRksA3hztKQ==}
     engines: {node: '>= 0.8'}
 
-  update-browserslist-db@1.2.3:
-    resolution: {integrity: sha512-Js0m9cx+qOgDxo0eMiFGEueWztz+d4+M3rGlmKPT+T4IS/jP4ylw3Nwpu6cpTTP8R1MAC1kF4VbdLt3ARf209w==}
-    hasBin: true
-    peerDependencies:
-      browserslist: '>= 4.21.0'
-
   update-browserslist-db@1.3.1:
     resolution: {integrity: sha512-ZZ61DsRsOnakl74HAmp3oSN4aXUmEWXf+i/yv0h7tIBfICc3VdrFErQKUUKPgu3AMsTUMbcongALEN4l6GSUrQ==}
     hasBin: true
@@ -4156,7 +4180,7 @@ snapshots:
     dependencies:
       '@babel/compat-data': 7.29.7
       '@babel/helper-validator-option': 7.29.7
-      browserslist: 4.28.7
+      browserslist: 4.28.8
       lru-cache: 5.1.1
       semver: 6.3.1
 
@@ -5191,9 +5215,24 @@ snapshots:
       - supports-color
       - vite
 
+  '@kokuin/capability@0.1.0':
+    dependencies:
+      '@kokuin/token': 0.1.1
+
   '@kokuin/capability@0.3.0(@logtape/logtape@2.3.0)':
     dependencies:
       '@kokuin/token': 0.5.0(@logtape/logtape@2.3.0)
+    transitivePeerDependencies:
+      - '@logtape/logtape'
+
+  '@kokuin/controller@0.1.0(@logtape/logtape@2.3.0)':
+    dependencies:
+      '@kokuin/token': 0.5.0(@logtape/logtape@2.3.0)
+      '@noble/curves': 2.3.0
+      '@noble/hashes': 2.3.0
+      '@scure/base': 2.3.0
+      '@sozai/json': 0.1.1
+      micro-key-producer: 0.10.0
     transitivePeerDependencies:
       - '@logtape/logtape'
 
@@ -5210,12 +5249,28 @@ snapshots:
       - '@logtape/logtape'
       - expo
 
+  '@kokuin/otel@0.1.0':
+    dependencies:
+      '@opentelemetry/api': 1.9.1
+      '@sozai/otel': 0.2.0
+
   '@kokuin/otel@0.3.0(@logtape/logtape@2.3.0)':
     dependencies:
       '@opentelemetry/api': 1.9.1
       '@sozai/otel': 0.3.2(@logtape/logtape@2.3.0)
     transitivePeerDependencies:
       - '@logtape/logtape'
+
+  '@kokuin/token@0.1.1':
+    dependencies:
+      '@kokuin/otel': 0.1.0
+      '@noble/ciphers': 2.3.0
+      '@noble/curves': 2.3.0
+      '@noble/hashes': 2.3.0
+      '@scure/base': 2.3.0
+      '@sozai/codec': 0.1.0
+      '@sozai/otel': 0.2.0
+      '@sozai/schema': 0.1.1
 
   '@kokuin/token@0.4.0(@logtape/logtape@2.3.0)':
     dependencies:
@@ -5354,6 +5409,10 @@ snapshots:
     dependencies:
       '@nodelib/fs.scandir': 2.1.5
       fastq: 1.20.1
+
+  '@opentelemetry/api-logs@0.219.0':
+    dependencies:
+      '@opentelemetry/api': 1.9.1
 
   '@opentelemetry/api-logs@0.221.0':
     dependencies:
@@ -5551,6 +5610,10 @@ snapshots:
 
   '@sozai/async@0.2.1': {}
 
+  '@sozai/codec@0.1.0':
+    dependencies:
+      canonicalize: 3.0.0
+
   '@sozai/codec@0.4.0':
     dependencies:
       '@sozai/json': 0.1.1
@@ -5567,6 +5630,10 @@ snapshots:
 
   '@sozai/json@0.1.1': {}
 
+  '@sozai/log@0.1.1':
+    dependencies:
+      '@logtape/logtape': 2.3.0
+
   '@sozai/log@0.3.0':
     dependencies:
       '@logtape/logtape': 2.2.4
@@ -5574,6 +5641,12 @@ snapshots:
   '@sozai/log@0.3.1(@logtape/logtape@2.3.0)':
     dependencies:
       '@logtape/logtape': 2.3.0
+
+  '@sozai/otel@0.2.0':
+    dependencies:
+      '@opentelemetry/api': 1.9.1
+      '@opentelemetry/api-logs': 0.219.0
+      '@sozai/log': 0.1.1
 
   '@sozai/otel@0.3.2(@logtape/logtape@2.3.0)':
     dependencies:
@@ -6081,8 +6154,6 @@ snapshots:
 
   base64-js@1.5.1: {}
 
-  baseline-browser-mapping@2.11.1: {}
-
   baseline-browser-mapping@2.11.14: {}
 
   big-integer@1.6.52: {}
@@ -6122,14 +6193,6 @@ snapshots:
     dependencies:
       fill-range: 7.1.1
 
-  browserslist@4.28.7:
-    dependencies:
-      baseline-browser-mapping: 2.11.1
-      caniuse-lite: 1.0.30001806
-      electron-to-chromium: 1.5.395
-      node-releases: 2.0.51
-      update-browserslist-db: 1.2.3(browserslist@4.28.7)
-
   browserslist@4.28.8:
     dependencies:
       baseline-browser-mapping: 2.11.14
@@ -6167,9 +6230,9 @@ snapshots:
 
   camelcase@6.3.0: {}
 
-  caniuse-lite@1.0.30001806: {}
-
   caniuse-lite@1.0.30001809: {}
+
+  canonicalize@3.0.0: {}
 
   chai@6.2.2: {}
 
@@ -6339,8 +6402,6 @@ snapshots:
   dnssd-advertise@1.1.6: {}
 
   ee-first@1.1.1: {}
-
-  electron-to-chromium@1.5.395: {}
 
   electron-to-chromium@1.5.407: {}
 
@@ -7152,6 +7213,18 @@ snapshots:
       - supports-color
       - utf-8-validate
 
+  micro-key-producer@0.10.0:
+    dependencies:
+      '@noble/ciphers': 2.3.0
+      '@noble/curves': 2.3.0
+      '@noble/hashes': 2.3.0
+      '@scure/base': 2.3.0
+      micro-packed: 0.11.0
+
+  micro-packed@0.11.0:
+    dependencies:
+      '@scure/base': 2.3.0
+
   micromatch@4.0.8:
     dependencies:
       braces: 3.0.3
@@ -7208,8 +7281,6 @@ snapshots:
   node-forge@1.4.0: {}
 
   node-int64@0.4.0: {}
-
-  node-releases@2.0.51: {}
 
   node-releases@2.0.53: {}
 
@@ -7818,12 +7889,6 @@ snapshots:
   unicorn-magic@0.3.0: {}
 
   unpipe@1.0.0: {}
-
-  update-browserslist-db@1.2.3(browserslist@4.28.7):
-    dependencies:
-      browserslist: 4.28.7
-      escalade: 3.2.0
-      picocolors: 1.1.1
 
   update-browserslist-db@1.3.1(browserslist@4.28.8):
     dependencies:
