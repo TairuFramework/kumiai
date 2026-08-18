@@ -142,6 +142,68 @@ describe('verifyDeviceEntry — manage ops (management capability)', () => {
   })
 })
 
+describe('verifyDeviceEntry — cross-profile rebind guard (Fix 1)', () => {
+  const victim = 'did:key:zVictimDevice'
+  const profileQ = normalizeDID('did:kokuin:profileQ')
+
+  async function managerCtx(
+    controllerOf: DeviceProofContext['controllerOf'],
+  ): Promise<DeviceProofContext> {
+    return ctx({
+      bindings: {
+        [manager.id]: { controller: PROFILE, prefix: PREFIX, leafKey: manager.publicKey },
+      },
+      controllerOf,
+    })
+  }
+
+  test('rejects a co-device register whose subject is already bound to a DIFFERENT controller', async () => {
+    const cap = await buildManagementCapability({
+      managerDID: manager.id,
+      managerKey: manager.publicKey,
+      controllerSeed: CONTROLLER_SEED,
+    })
+    const c = await managerCtx((did) => (did === normalizeDID(victim) ? profileQ : undefined))
+    const value: DeviceValue = { op: 'register', controller: PROFILE, capability: cap.capability }
+    expect(await verifyDeviceEntry(entry(manager.id, victim, value), c)).toBe(false)
+  })
+
+  test('rejects a co-device add over a subject already bound to a DIFFERENT controller', async () => {
+    const cap = await buildManagementCapability({
+      managerDID: manager.id,
+      managerKey: manager.publicKey,
+      controllerSeed: CONTROLLER_SEED,
+    })
+    const c = await managerCtx((did) => (did === normalizeDID(victim) ? profileQ : undefined))
+    const value: DeviceValue = { op: 'add', controller: PROFILE, capability: cap.capability }
+    expect(await verifyDeviceEntry(entry(manager.id, victim, value), c)).toBe(false)
+  })
+
+  test('accepts a co-device register re-binding the subject to the SAME controller', async () => {
+    const cap = await buildManagementCapability({
+      managerDID: manager.id,
+      managerKey: manager.publicKey,
+      controllerSeed: CONTROLLER_SEED,
+    })
+    const c = await managerCtx((did) =>
+      did === normalizeDID(victim) ? normalizeDID(PROFILE) : undefined,
+    )
+    const value: DeviceValue = { op: 'register', controller: PROFILE, capability: cap.capability }
+    expect(await verifyDeviceEntry(entry(manager.id, victim, value), c)).toBe(true)
+  })
+
+  test('accepts a co-device register over a brand-new (unbound) subject', async () => {
+    const cap = await buildManagementCapability({
+      managerDID: manager.id,
+      managerKey: manager.publicKey,
+      controllerSeed: CONTROLLER_SEED,
+    })
+    const c = await managerCtx(() => undefined)
+    const value: DeviceValue = { op: 'register', controller: PROFILE, capability: cap.capability }
+    expect(await verifyDeviceEntry(entry(manager.id, victim, value), c)).toBe(true)
+  })
+})
+
 describe('verifyDeviceEntry — beacon (self-scoped, no capability)', () => {
   const otherProfile = normalizeDID('did:kokuin:profileOther')
 

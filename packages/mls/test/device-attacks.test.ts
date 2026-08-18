@@ -191,6 +191,28 @@ describe('attack: beacon for a controller the issuer is not a device of', () => 
   })
 })
 
+describe('attack: cross-profile device rebind (Fix 1)', () => {
+  // The load-bearing rejection coverage for the cross-profile hijack lives in device-proof.test.ts
+  // ('cross-profile rebind guard'), which drives the exact verifyDeviceEntry gate the write path
+  // (commitWithEntries) runs. A genuine second profile Q with its own bound device folded into the
+  // SAME group would require multi-member cross-group MLS choreography the single-profile harness
+  // does not provide; the fold-level unit test is the honest, load-bearing coverage. This e2e pins
+  // the no-false-positive half through the REAL write API: a manager re-registering a device to its
+  // OWN existing controller must NOT be blocked by the new guard.
+  test('re-registering a device to its OWN existing controller through the real write path is accepted', async () => {
+    const { managerGroup, managerIdentity, controllerID, targetDeviceID, capability } =
+      await twoDeviceProfileGroup()
+    // targetDeviceID is already bound to controllerID (P) via addDevice — same-controller re-register.
+    await expect(
+      registerDevice(managerGroup, managerIdentity, {
+        device: targetDeviceID,
+        controller: controllerID,
+        capability,
+      }),
+    ).resolves.toBeDefined()
+  })
+})
+
 describe('attack: unsigned management capability', () => {
   test('an alg:none capability is rejected even with an otherwise-valid payload', async () => {
     const { managerGroup, managerIdentity, controllerID, targetDeviceID } =

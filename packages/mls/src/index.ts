@@ -24,6 +24,8 @@ export {
   createDIDAuthenticationService,
   MLS_DEVICES_ACT,
   MLS_DEVICES_RES,
+  MLS_LEAF_ACT,
+  MLS_LEAF_RES,
   verifyManagementCapability,
 } from './authentication.js'
 export {
@@ -33,6 +35,7 @@ export {
   sanitizeRatchetTree,
 } from './codec.js'
 export {
+  type ControllerBinding,
   type GroupMember,
   type MemberCredential,
   type MLSCredentialIdentity,
@@ -167,6 +170,7 @@ export {
 } from './recovery.js'
 export {
   authority,
+  beaconOf,
   type ControllerBeacon,
   controllerOf,
   DEVICE_ENTRY_TYPE,

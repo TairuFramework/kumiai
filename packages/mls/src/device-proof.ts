@@ -67,6 +67,16 @@ export async function verifyDeviceEntry(
       : ctx.controllerOf(subject) // revoke / label — the registry already binds the subject
   if (authorizedProfile == null) return false
 
+  // Cross-profile rebind guard: a register/add must never overwrite a subject already bound to a
+  // DIFFERENT controller. Without this, a manager of profile P could re-bind another profile Q's
+  // active device to P (flipping its authority), then revoke it — evicting Q's device in two
+  // commits. Self-register (subject === issuer) returned earlier; a brand-new subject
+  // (controllerOf undefined) and a same-controller re-register both stay allowed.
+  if (value.op === 'register' || value.op === 'add') {
+    const existingController = ctx.controllerOf(subject)
+    if (existingController != null && existingController !== authorizedProfile) return false
+  }
+
   const binding = ctx.bindingOfDID(issuer)
   if (binding?.controller == null || binding.prefix == null) return false
   if (normalizeDID(binding.controller) !== authorizedProfile) return false

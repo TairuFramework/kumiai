@@ -9,8 +9,12 @@ import {
   revokeDevice,
 } from '../src/group-device.js'
 import {
+  beaconOf as _barrelBeaconOf,
   type ControllerBeacon as _CB,
+  type ControllerBinding as _CBind,
   type GroupHandleEvents as _GHE,
+  MLS_LEAF_ACT as _LEAF_ACT,
+  MLS_LEAF_RES as _LEAF_RES,
   announceControllerBeacon as _pub,
 } from '../src/index.js'
 import { beaconOf } from '../src/registry.js'
@@ -21,6 +25,12 @@ import { publishTokens, twoDeviceProfileGroup } from './fixtures/device-harness.
 void (_pub satisfies typeof announceControllerBeacon)
 type _ReachabilityCheck = _CB extends { logLength: number; headDigest: string } ? true : false
 type _ReachabilityCheck2 = _GHE extends { deviceRevoked: unknown } ? true : false
+
+// Fix 4: prove the previously-omitted names resolve from the public entry point.
+void (_barrelBeaconOf satisfies typeof beaconOf)
+type _ReachabilityBinding = _CBind extends { id: string; capability: string } ? true : false
+void (_LEAF_ACT satisfies string)
+void (_LEAF_RES satisfies string)
 
 /**
  * The EventEmitter surface (Task 4): revokedDevices() as a folded-state accessor, and

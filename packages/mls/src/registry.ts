@@ -167,10 +167,18 @@ export function denySetOf(registry: DeviceRegistry): ReadonlySet<string> {
   return denied
 }
 
-/** The universal rule: `authority(issuer) = controllerOf(issuer) ?? issuer`, both normalized. */
+/**
+ * The universal rule: an ACTIVE binding resolves the issuer to its controller; anything else
+ * resolves to the issuer itself. A revoked binding confers no authority — terminal revocation only
+ * ever subtracts — so a revoked device re-entering as a floating leaf, or a role entry it signed
+ * before revocation but enacted after, must not resolve to its former controller. (Note the split:
+ * {@link controllerOf} is the RAW lookup, deliberately status-blind, since the deviceRevoked event
+ * emission and the revoke/label gate read the surviving binding of a just-revoked device.)
+ */
 export function authority(registry: DeviceRegistry, issuer: string): string {
   const norm = normalizeDID(issuer)
-  return controllerOf(registry, norm) ?? norm
+  const record = registry.devices.get(norm)
+  return record != null && record.status === 'active' ? record.controller : norm
 }
 
 /**

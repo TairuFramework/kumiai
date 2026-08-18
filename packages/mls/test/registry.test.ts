@@ -201,6 +201,39 @@ describe('authority', () => {
   test('falls back to the issuer when unbound', () => {
     expect(authority(registrySeed(), DEV_A)).toBe(normalizeDID(DEV_A))
   })
+
+  test('a revoked device confers no authority, though its raw binding and deny-set membership persist', () => {
+    let r = registryApply(
+      {
+        issuer: normalizeDID(DEV_A),
+        entry: {
+          type: DEVICE_ENTRY_TYPE,
+          groupID: GROUP,
+          subject: DEV_A,
+          value: { op: 'register', controller: PROFILE },
+        },
+      },
+      registrySeed(),
+    )
+    r = registryApply(
+      {
+        issuer: normalizeDID(PROFILE),
+        entry: {
+          type: DEVICE_ENTRY_TYPE,
+          groupID: GROUP,
+          subject: DEV_A,
+          value: { op: 'revoke' },
+        },
+      },
+      r,
+    )
+    // authority drops to the device's own DID: a revoked binding confers no authority.
+    expect(authority(r, DEV_A)).toBe(normalizeDID(DEV_A))
+    // but the raw binding is deliberately preserved (deviceRevoked emission + revoke gate read it)…
+    expect(controllerOf(r, DEV_A)).toBe(normalizeDID(PROFILE))
+    // …and the device stays in the deny set.
+    expect(denySetOf(r).has(normalizeDID(DEV_A))).toBe(true)
+  })
 })
 
 describe('foldControl', () => {
