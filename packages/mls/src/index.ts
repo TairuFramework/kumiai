@@ -20,7 +20,12 @@ export {
   readGroupAnchor,
   readGroupAnchorExtension,
 } from './anchor.js'
-export { createDIDAuthenticationService } from './authentication.js'
+export {
+  createDIDAuthenticationService,
+  MLS_DEVICES_ACT,
+  MLS_DEVICES_RES,
+  verifyManagementCapability,
+} from './authentication.js'
 export {
   type ClientState,
   decodeClientState,
@@ -153,6 +158,18 @@ export {
   sealLedger,
   type VerifiedRecoveryRequest,
 } from './recovery.js'
+export {
+  authority,
+  controllerOf,
+  DEVICE_ENTRY_TYPE,
+  type DeviceOp,
+  type DeviceRecord,
+  type DeviceRegistry,
+  type DeviceValue,
+  denySetOf,
+  foldControl,
+  registrySeed,
+} from './registry.js'
 export {
   adminCount,
   foldRoster,

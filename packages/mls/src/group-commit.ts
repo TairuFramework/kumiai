@@ -31,7 +31,7 @@ import {
   verifyLedgerEntry,
 } from './ledger.js'
 import { defaultCommitPolicy } from './policy.js'
-import { controllerOf, DEVICE_ENTRY_TYPE, type DeviceValue } from './registry.js'
+import { authority, controllerOf, DEVICE_ENTRY_TYPE, type DeviceValue } from './registry.js'
 import { type GroupPermission, ROLE_ENTRY_TYPE } from './roster.js'
 import type { Invite } from './types.js'
 
@@ -111,7 +111,7 @@ export type CreateInviteResult = {
  */
 export async function createInvite(params: CreateInviteParams): Promise<CreateInviteResult> {
   const { group, identity, recipientDID, permission } = params
-  if (group.roster.roles.get(normalizeDID(identity.id)) !== 'admin') {
+  if (group.roster.roles.get(authority(group.registry, identity.id)) !== 'admin') {
     throw new Error('createInvite: the inviter must be an admin in the group roster')
   }
 
@@ -184,10 +184,17 @@ export async function commitWithEntries(
   extraProposals: Array<DefaultProposal>,
   enacted: Array<string>,
   ratchetTreeExtension = false,
+  options: { requireAdmin?: boolean } = {},
 ): Promise<Awaited<ReturnType<typeof createCommit>>> {
+  const requireAdmin = options.requireAdmin ?? true
   // Same reason createInvite guards the inviter: a non-admin's commit is rejected by
   // every receiver, so fail here rather than emitting a commit nobody will apply.
-  if (group.roster.roles.get(normalizeDID(group.credential.id)) !== 'admin') {
+  // Authority-aware: a device of an admin profile commits as that profile. Device-only commits
+  // (register/add/revoke/label) are authorized by proofs, not a role, so they pass requireAdmin:false.
+  if (
+    requireAdmin &&
+    group.roster.roles.get(authority(group.registry, group.credential.id)) !== 'admin'
+  ) {
     throw new Error('the committer must be an admin in the group roster')
   }
 
