@@ -318,6 +318,9 @@ importers:
       '@sozai/codec':
         specifier: 'catalog:'
         version: 0.4.0
+      '@sozai/event':
+        specifier: 'catalog:'
+        version: 0.1.3
       '@sozai/runtime':
         specifier: 'catalog:'
         version: 0.1.0

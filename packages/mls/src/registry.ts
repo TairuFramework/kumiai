@@ -14,8 +14,8 @@ import {
 /** The reserved control type carrying a device-registry mutation. One branch, one namespace slot. */
 export const DEVICE_ENTRY_TYPE = 'kumiai.device'
 
-/** The four device lifecycle operations. */
-export type DeviceOp = 'register' | 'add' | 'revoke' | 'label'
+/** The device lifecycle operations plus the advisory controller-log beacon. */
+export type DeviceOp = 'register' | 'add' | 'revoke' | 'label' | 'beacon'
 
 /**
  * A `kumiai.device` entry's `value`. `controller` names the profile a register/add binds to;
@@ -27,31 +27,55 @@ export type DeviceValue = {
   controller?: string
   label?: string
   capability?: string
+  /** Beacon only: the length of the controller's FULL log at announcement time. */
+  logLength?: number
+  /** Beacon only: the head digest of the controller's FULL log at announcement time. */
+  headDigest?: string
 }
 
 /** A folded device binding. `controller` is the profile DID; `status` gates the deny set. */
 export type DeviceRecord = { controller: string; status: 'active' | 'revoked'; label?: string }
 
+/** An advisory pointer to a controller's FULL log head. Never a validation input. */
+export type ControllerBeacon = { logLength: number; headDigest: string }
+
 /**
  * The group-folded device registry: `device DID -> record`, keyed by normalized DID. A pure
  * function of the accepted `kumiai.device` entries, folded beside {@link RosterState}. Two views
- * derive from it and are never stored: {@link controllerOf} and {@link denySetOf}.
+ * derive from `devices` and are never stored: {@link controllerOf} and {@link denySetOf}.
+ * `controllers` is a second, independent per-controller projection fed by the `beacon` op.
  */
-export type DeviceRegistry = { devices: ReadonlyMap<string, DeviceRecord> }
+export type DeviceRegistry = {
+  devices: ReadonlyMap<string, DeviceRecord>
+  controllers: ReadonlyMap<string, ControllerBeacon>
+}
 
 export function registrySeed(): DeviceRegistry {
-  return { devices: new Map() }
+  return { devices: new Map(), controllers: new Map() }
 }
 
 /** Structural guard: a value carrying a known `op` (and, for register/add, a string controller). */
 export function isDeviceValue(value: unknown): value is DeviceValue {
   if (value == null || typeof value !== 'object') return false
   const v = value as Record<string, unknown>
-  if (v.op !== 'register' && v.op !== 'add' && v.op !== 'revoke' && v.op !== 'label') return false
+  if (
+    v.op !== 'register' &&
+    v.op !== 'add' &&
+    v.op !== 'revoke' &&
+    v.op !== 'label' &&
+    v.op !== 'beacon'
+  ) {
+    return false
+  }
   if ((v.op === 'register' || v.op === 'add') && typeof v.controller !== 'string') return false
+  if (v.op === 'beacon' && (typeof v.logLength !== 'number' || typeof v.headDigest !== 'string')) {
+    return false
+  }
   if (v.label !== undefined && typeof v.label !== 'string') return false
   if (v.controller !== undefined && typeof v.controller !== 'string') return false
   if (v.capability !== undefined && typeof v.capability !== 'string') return false
+  if (v.logLength !== undefined && typeof v.logLength !== 'number') return false
+  if (v.headDigest !== undefined && typeof v.headDigest !== 'string') return false
   return true
 }
 
@@ -68,6 +92,7 @@ export function registryApply(
   const subject = normalizeDID(verified.entry.subject)
   const value = verified.entry.value
   const devices = new Map(state.devices)
+  const controllers = new Map(state.controllers)
   const existing = devices.get(subject)
   switch (value.op) {
     case 'register':
@@ -77,7 +102,7 @@ export function registryApply(
       // The record is left frozen at 'revoked' (the acceptance gate still verified the entry, but the
       // fold does not resurrect a revoked binding). Keeps determinism: every member applies this rule.
       if (existing?.status === 'revoked') {
-        return { devices }
+        return { devices, controllers }
       }
       // `controller` is structurally guaranteed present for register/add by isDeviceValue.
       const controller = normalizeDID(value.controller as string)
@@ -90,20 +115,29 @@ export function registryApply(
             ? { label: existing.label }
             : {}),
       })
-      return { devices }
+      return { devices, controllers }
     }
     case 'revoke': {
-      if (existing == null) return { devices }
+      if (existing == null) return { devices, controllers }
       devices.set(subject, { ...existing, status: 'revoked' })
-      return { devices }
+      return { devices, controllers }
     }
     case 'label': {
-      if (existing == null) return { devices }
+      if (existing == null) return { devices, controllers }
       devices.set(subject, {
         ...existing,
         ...(value.label !== undefined ? { label: value.label } : {}),
       })
-      return { devices }
+      return { devices, controllers }
+    }
+    case 'beacon': {
+      // Advisory, self-scoped: `subject` is the CONTROLLER DID. Last-write-wins; never touches
+      // `devices` or the deny set, never gates validation. Guarded present by isDeviceValue.
+      controllers.set(subject, {
+        logLength: value.logLength as number,
+        headDigest: value.headDigest as string,
+      })
+      return { devices, controllers }
     }
   }
 }
@@ -111,6 +145,14 @@ export function registryApply(
 /** The profile a device is bound to in the folded registry, or undefined — the authority input. */
 export function controllerOf(registry: DeviceRegistry, deviceDID: string): string | undefined {
   return registry.devices.get(normalizeDID(deviceDID))?.controller
+}
+
+/** The advisory beacon a controller last announced, or undefined. Never a validation input. */
+export function beaconOf(
+  registry: DeviceRegistry,
+  controllerDID: string,
+): ControllerBeacon | undefined {
+  return registry.controllers.get(normalizeDID(controllerDID))
 }
 
 /**

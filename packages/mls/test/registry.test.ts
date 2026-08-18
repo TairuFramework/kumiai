@@ -5,11 +5,14 @@ import type { GroupAnchor } from '../src/anchor.js'
 import type { FoldInput } from '../src/fold.js'
 import {
   authority,
+  beaconOf,
+  type ControllerBeacon,
   controllerOf,
   DEVICE_ENTRY_TYPE,
   type DeviceValue,
   denySetOf,
   foldControl,
+  isDeviceValue,
   registryApply,
   registrySeed,
 } from '../src/registry.js'
@@ -262,5 +265,99 @@ describe('foldControl', () => {
     )
     expect(registry.devices.size).toBe(0)
     expect(roster.roles.get(normalizeDID(CREATOR))).toBe('admin')
+  })
+})
+
+describe('beacon', () => {
+  test('a beacon op records the controller log head in the controllers projection', () => {
+    const r = registryApply(
+      {
+        issuer: normalizeDID(DEV_A),
+        entry: {
+          type: DEVICE_ENTRY_TYPE,
+          groupID: GROUP,
+          subject: PROFILE, // subject is the CONTROLLER, not a device
+          value: { op: 'beacon', logLength: 7, headDigest: 'zHead1' },
+        },
+      },
+      registrySeed(),
+    )
+    const expected: ControllerBeacon = { logLength: 7, headDigest: 'zHead1' }
+    expect(beaconOf(r, PROFILE)).toEqual(expected)
+    // A beacon touches only the controllers projection, never devices or the deny set.
+    expect(r.devices.size).toBe(0)
+    expect(denySetOf(r).size).toBe(0)
+  })
+
+  test('a later beacon overwrites the earlier one (last-write-wins)', () => {
+    let r = registryApply(
+      {
+        issuer: normalizeDID(DEV_A),
+        entry: {
+          type: DEVICE_ENTRY_TYPE,
+          groupID: GROUP,
+          subject: PROFILE,
+          value: { op: 'beacon', logLength: 3, headDigest: 'zOld' },
+        },
+      },
+      registrySeed(),
+    )
+    r = registryApply(
+      {
+        issuer: normalizeDID(DEV_A),
+        entry: {
+          type: DEVICE_ENTRY_TYPE,
+          groupID: GROUP,
+          subject: PROFILE,
+          value: { op: 'beacon', logLength: 9, headDigest: 'zNew' },
+        },
+      },
+      r,
+    )
+    expect(beaconOf(r, PROFILE)).toEqual({ logLength: 9, headDigest: 'zNew' })
+  })
+
+  test('a device register/revoke leaves the controllers projection untouched', () => {
+    let r = registryApply(
+      {
+        issuer: normalizeDID(DEV_A),
+        entry: {
+          type: DEVICE_ENTRY_TYPE,
+          groupID: GROUP,
+          subject: DEV_A,
+          value: { op: 'register', controller: PROFILE },
+        },
+      },
+      registrySeed(),
+    )
+    r = registryApply(
+      {
+        issuer: normalizeDID(DEV_A),
+        entry: {
+          type: DEVICE_ENTRY_TYPE,
+          groupID: GROUP,
+          subject: PROFILE,
+          value: { op: 'beacon', logLength: 2, headDigest: 'zH' },
+        },
+      },
+      r,
+    )
+    r = registryApply(
+      {
+        issuer: normalizeDID(PROFILE),
+        entry: { type: DEVICE_ENTRY_TYPE, groupID: GROUP, subject: DEV_A, value: { op: 'revoke' } },
+      },
+      r,
+    )
+    // The revoke changed device status but not the controller beacon.
+    expect(beaconOf(r, PROFILE)).toEqual({ logLength: 2, headDigest: 'zH' })
+    expect(r.devices.get(normalizeDID(DEV_A))?.status).toBe('revoked')
+  })
+
+  test('isDeviceValue accepts a well-formed beacon and rejects a malformed one', () => {
+    expect(isDeviceValue({ op: 'beacon', logLength: 1, headDigest: 'z' })).toBe(true)
+    expect(isDeviceValue({ op: 'beacon', logLength: 1 })).toBe(false) // missing headDigest
+    expect(isDeviceValue({ op: 'beacon', headDigest: 'z' })).toBe(false) // missing logLength
+    expect(isDeviceValue({ op: 'beacon', logLength: '1', headDigest: 'z' })).toBe(false) // wrong type
   })
 })
