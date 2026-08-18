@@ -10,7 +10,12 @@ import { describe, expect, test } from 'vitest'
 import { MLS_DEVICES_ACT, MLS_DEVICES_RES } from '../src/authentication.js'
 import { parseMLSCredentialIdentity } from '../src/credential.js'
 import { commitLedgerEntries } from '../src/group-commit.js'
-import { addDevice, registerDevice, revokeDevice } from '../src/group-device.js'
+import {
+  addDevice,
+  announceControllerBeacon,
+  registerDevice,
+  revokeDevice,
+} from '../src/group-device.js'
 import { signLedgerEntry } from '../src/ledger.js'
 import { ROLE_ENTRY_TYPE } from '../src/roster.js'
 import { buildBoundLeaf } from './fixtures/bound-leaf.js'
@@ -156,6 +161,33 @@ describe('attack: admin-as-controller', () => {
       value: 'admin',
     })
     await expect(commitLedgerEntries(selfReg.newGroup, [grantToken])).rejects.toThrow(/admin/)
+  })
+})
+
+describe('attack: beacon for a controller the issuer is not a device of', () => {
+  test('a bound device of controller P is rejected announcing a beacon for a different controller Q', async () => {
+    const g = await twoDeviceProfileGroup()
+    // managerIdentity is a bound device of g.controllerID (P); announce a beacon naming an
+    // unrelated controller DID (Q). The device-proof gate's beacon branch (verifyDeviceEntry,
+    // device-proof.ts) requires normalizeDID(binding.controller) === subject, where subject is
+    // the announced controller — P !== Q, so the entry is unauthorized.
+    await expect(
+      announceControllerBeacon(g.managerGroup, g.managerIdentity, {
+        controller: 'did:kokuin:someoneElse',
+        logLength: 1,
+        headDigest: 'zX',
+      }),
+    ).rejects.toThrow(/proof verification failed/)
+
+    // No receive-path variant: commitWithEntries (group-commit.ts) runs the SAME
+    // verifyDeviceEntry gate on the AUTHORING side, against the author's OWN group state,
+    // before a commit is ever produced — every real write API that could enact a
+    // kumiai.device beacon entry (announceControllerBeacon, or a hand-signed token through
+    // commitLedgerEntries) routes through it. There is no honest way to get a signed commit
+    // carrying a mismatched-controller beacon out of this codebase for a receiver to reject;
+    // the authoring throw above IS the whole-commit rejection, one step earlier. The pure
+    // fold-level case (a receiver's foldEnvelope/verifyDeviceEntry pipeline given a
+    // hand-crafted VerifiedLedgerEntry) is pinned directly in device-proof.test.ts (Task 3).
   })
 })
 

@@ -5,7 +5,7 @@ import type { GroupAnchor } from '../src/anchor.js'
 import type { FoldInput } from '../src/fold.js'
 import { createGroup, type GroupHandle, removeMember, restoreGroup } from '../src/group.js'
 import { commitLedgerEntries } from '../src/group-commit.js'
-import { registerDevice, revokeDevice } from '../src/group-device.js'
+import { announceControllerBeacon, registerDevice, revokeDevice } from '../src/group-device.js'
 import { signLedgerEntry } from '../src/ledger.js'
 import {
   controllerOf,
@@ -189,5 +189,35 @@ describe('determinism: incremental fold vs bootstrap re-fold', () => {
     // its co-device's revoke both persist in the re-folded registry/deny set.
     expect(bootstrapped.registry.devices.size).toBeGreaterThan(0)
     expect(bootstrapped.currentDenySet().size).toBeGreaterThan(0)
+  })
+
+  test('incremental fold equals bootstrap re-fold for the controllers projection, after a beacon and a revoke', async () => {
+    const { managerGroup, managerIdentity, controllerID, targetDeviceID, capability } =
+      await twoDeviceProfileGroup()
+
+    const revoke = await revokeDevice(managerGroup, managerIdentity, {
+      device: targetDeviceID,
+      capability,
+    })
+    const beacon = await announceControllerBeacon(revoke.newGroup, managerIdentity, {
+      controller: controllerID,
+      logLength: 7,
+      headDigest: 'zDet7',
+    })
+    const live = beacon.newGroup
+    const tokens = await live.getLedger()
+
+    const bootstrapped = await restoreGroup({ state: live.state, credential: live.credential })
+    await bootstrapped.bootstrapLedger(tokens)
+
+    expect([...bootstrapped.registry.controllers.entries()]).toEqual([
+      ...live.registry.controllers.entries(),
+    ])
+    expect(bootstrapped.revokedDevices()).toEqual(live.revokedDevices())
+
+    // Non-vacuous: the beacon projection and the deny set both carry real content, not two
+    // empty maps agreeing vacuously.
+    expect(bootstrapped.registry.controllers.size).toBeGreaterThan(0)
+    expect(bootstrapped.revokedDevices().length).toBeGreaterThan(0)
   })
 })

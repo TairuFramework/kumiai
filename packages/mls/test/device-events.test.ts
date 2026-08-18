@@ -1,7 +1,13 @@
 import { normalizeDID } from '@kokuin/token'
 import { describe, expect, test } from 'vitest'
 
-import { announceControllerBeacon, labelDevice, revokeDevice } from '../src/group-device.js'
+import { restoreGroup } from '../src/group.js'
+import {
+  announceControllerBeacon,
+  labelDevice,
+  registerDevice,
+  revokeDevice,
+} from '../src/group-device.js'
 import {
   type ControllerBeacon as _CB,
   type GroupHandleEvents as _GHE,
@@ -70,6 +76,68 @@ describe('device events', () => {
     await g.creatorGroup.processMessage(res.commitMessage)
 
     expect(seen.length).toBe(0)
+  })
+
+  test('a receiver processing a self-register commit fires no deviceRevoked', async () => {
+    // Distinct from the label-op guard above: op-filter mutation coverage for 'register'
+    // specifically (emitControlEvents' revoke branch keys on `value.op === 'revoke'` alone).
+    const g = await twoDeviceProfileGroup()
+    const seen: Array<Array<{ device: string; controller: string }>> = []
+    g.creatorGroup.events.on('deviceRevoked', (batch) => {
+      seen.push(batch)
+    })
+
+    const res = await registerDevice(g.managerGroup, g.managerIdentity, {
+      device: g.managerIdentity.id,
+      controller: g.controllerID,
+    })
+    publishTokens(g.tokens, res.newGroup)
+    await g.creatorGroup.processMessage(res.commitMessage)
+
+    expect(seen.length).toBe(0)
+  })
+
+  test('a fresh fold of prior history is silent — no replayed events, but the state is visible', async () => {
+    // There is no fresh-join helper in the Slice 2 harness (see device-harness.ts), so this
+    // drives the SAME silent path a fresh join actually takes: `processWelcome` folds a
+    // joiner's starting ledger via `applyLedgerEntries` (group-welcome.ts), and that method
+    // never calls emitControlEvents — only the commit path, bootstrapLedger, and the local
+    // write APIs do (see GroupHandle.emitControlEvents's doc comment). So a brand-new handle,
+    // seeded from a live member's MLS state but with an EMPTY ledger, that then folds the
+    // group's whole ledger (including a revoke and a beacon) via one applyLedgerEntries call is
+    // exactly what a joiner's welcome-fold does, and is honest about exercising that path.
+    const g = await twoDeviceProfileGroup()
+    const r1 = await revokeDevice(g.managerGroup, g.managerIdentity, {
+      device: g.targetDeviceID,
+      capability: g.capability,
+    })
+    const r2 = await announceControllerBeacon(r1.newGroup, g.managerIdentity, {
+      controller: g.controllerID,
+      logLength: 5,
+      headDigest: 'zH5',
+    })
+
+    // A fresh handle: same MLS state/credential as an existing member, but constructed with
+    // no ledger tokens, so its registry starts empty — it has not folded the revoke or beacon.
+    const fresh = await restoreGroup({
+      state: g.creatorGroup.state,
+      credential: g.creatorGroup.credential,
+    })
+    let fired = 0
+    fresh.events.on('deviceRevoked', () => {
+      fired++
+    })
+    fresh.events.on('controllerBeaconChanged', () => {
+      fired++
+    })
+
+    // Fold the WHOLE ledger (genesis through the revoke and beacon above) in one
+    // applyLedgerEntries call — the same shape processWelcome's bulk fold takes.
+    await fresh.applyLedgerEntries(r2.newGroup.ledgerTokens)
+
+    expect(fired).toBe(0)
+    expect(fresh.revokedDevices().map((r) => r.device)).toContain(normalizeDID(g.targetDeviceID))
+    expect(beaconOf(fresh.registry, g.controllerID)).toEqual({ logLength: 5, headDigest: 'zH5' })
   })
 })
 
