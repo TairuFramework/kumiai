@@ -24,6 +24,7 @@ import {
   type MemberCredential,
   parseMLSCredentialIdentity,
 } from './credential.js'
+import { type LeafBinding, verifyDeviceEntry } from './device-proof.js'
 import { decodeControlEnvelope } from './envelope.js'
 import { foldEnvelope, GROUP_TYPE_PREFIX } from './envelope-fold.js'
 import type { FoldInput } from './fold.js'
@@ -45,7 +46,14 @@ import {
   defaultCommitPolicy,
   MissingLedgerEntriesError,
 } from './policy.js'
-import { type DeviceRegistry, denySetOf, foldControl } from './registry.js'
+import {
+  controllerOf,
+  DEVICE_ENTRY_TYPE,
+  type DeviceRegistry,
+  type DeviceValue,
+  denySetOf,
+  foldControl,
+} from './registry.js'
 import type { RosterState } from './roster.js'
 import { type PrivateCommitFrame, readSenderLeafIndex } from './sender-data.js'
 
@@ -816,6 +824,22 @@ export class GroupHandle {
             candidateRegistry = foldResult.registry
             surfaced = foldResult.surfaced
             acceptedEntries = ordered
+
+            const proofCtx = {
+              bindingOfDID: (d: string) => this.bindingOfDID(d),
+              controllerOf: (d: string) => controllerOf(this.#registry, d),
+            }
+            for (const { verified } of acceptedEntries) {
+              if (verified.entry.type !== DEVICE_ENTRY_TYPE) continue
+              const ok = await verifyDeviceEntry(
+                verified as VerifiedLedgerEntry<DeviceValue>,
+                proofCtx,
+              )
+              if (!ok) {
+                precomputedReject = true
+                break
+              }
+            }
           }
         }
       }
@@ -902,6 +926,35 @@ export class GroupHandle {
   #didOfLeaf(leafIndex: number): string | undefined {
     for (const member of this.#iterateMembers()) {
       if (member.leafIndex === leafIndex) return member.id
+    }
+    return undefined
+  }
+
+  /**
+   * The device-proof binding at the leaf naming `did`: its bound controller (if any), the embedded
+   * controller-log prefix (if bound), and the leaf signature key. Reads the CURRENT ratchet tree —
+   * the pre-commit tree in the acceptance pipeline. Undefined when no leaf names the DID.
+   */
+  bindingOfDID(did: string): LeafBinding | undefined {
+    const target = normalizeDID(did)
+    const tree = this.#state.ratchetTree
+    for (const node of tree) {
+      if (node == null || node.nodeType !== nodeTypes.leaf) continue
+      const credential = node.leaf.credential
+      if (!('identity' in credential)) continue
+      let parsed: ReturnType<typeof parseMLSCredentialIdentity>
+      try {
+        parsed = parseMLSCredentialIdentity(credential.identity)
+      } catch {
+        continue
+      }
+      if (normalizeDID(parsed.id) !== target) continue
+      return {
+        leafKey: node.leaf.signaturePublicKey,
+        ...(parsed.controller != null
+          ? { controller: parsed.controller.id, prefix: parsed.controller.prefix }
+          : {}),
+      }
     }
     return undefined
   }

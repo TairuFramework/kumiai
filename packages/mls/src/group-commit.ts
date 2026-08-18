@@ -13,6 +13,7 @@ import {
 
 import { LEDGER_HEAD_EXTENSION_TYPE } from './anchor.js'
 import { parseMLSCredentialIdentity } from './credential.js'
+import { verifyDeviceEntry } from './device-proof.js'
 import { encodeControlEnvelope } from './envelope.js'
 import { foldEnvelope } from './envelope-fold.js'
 import type { FoldInput } from './fold.js'
@@ -23,8 +24,14 @@ import {
   mutexFor,
 } from './group-handle.js'
 import { buildLedgerHeadExtension, extendHead, readLedgerHead } from './head.js'
-import { ledgerEntryDigest, signLedgerEntry, verifyLedgerEntry } from './ledger.js'
+import {
+  ledgerEntryDigest,
+  signLedgerEntry,
+  type VerifiedLedgerEntry,
+  verifyLedgerEntry,
+} from './ledger.js'
 import { defaultCommitPolicy } from './policy.js'
+import { controllerOf, DEVICE_ENTRY_TYPE, type DeviceValue } from './registry.js'
 import { type GroupPermission, ROLE_ENTRY_TYPE } from './roster.js'
 import type { Invite } from './types.js'
 
@@ -201,6 +208,20 @@ export async function commitWithEntries(
   const fold = foldEnvelope(group.roster, group.registry, inputs, group.groupID)
   if (!fold.ok) {
     throw new Error(`cannot enact ledger entry ${fold.entryID}: ${fold.reason}`)
+  }
+
+  // Same reason as the fold guard above: verify device entries against THIS group's tree and
+  // registry so the committer never authors a commit every receiver's own gate will reject.
+  const proofCtx = {
+    bindingOfDID: (d: string) => group.bindingOfDID(d),
+    controllerOf: (d: string) => controllerOf(group.registry, d),
+  }
+  for (const input of inputs) {
+    if (input.verified.entry.type !== DEVICE_ENTRY_TYPE) continue
+    const ok = await verifyDeviceEntry(input.verified as VerifiedLedgerEntry<DeviceValue>, proofCtx)
+    if (!ok) {
+      throw new Error(`cannot enact device entry ${input.entryID}: proof verification failed`)
+    }
   }
 
   const entryIDs = enacted.map(ledgerEntryDigest)
