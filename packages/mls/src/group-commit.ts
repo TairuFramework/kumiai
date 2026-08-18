@@ -238,10 +238,17 @@ export async function commitWithEntries(
   // ride it and every peer would reject the whole thing — one member could stall the
   // group. Judge each against the same defaultCommitPolicy and context receivers build,
   // dropping any the group would reject.
+  const enactedDeviceEntries = inputs
+    .filter((i) => i.verified.entry.type === DEVICE_ENTRY_TYPE)
+    .map((i) => ({
+      subject: normalizeDID(i.verified.entry.subject),
+      op: (i.verified.entry.value as DeviceValue).op,
+    }))
   const filterContext = buildCommitPolicyContext(group, {
     baseRoster: group.roster,
     candidateRoster: fold.roster,
     entryIDs,
+    enactedDeviceEntries,
   })
   const keptPending: typeof group.state.unappliedProposals = {}
   for (const [ref, pws] of Object.entries(group.state.unappliedProposals)) {

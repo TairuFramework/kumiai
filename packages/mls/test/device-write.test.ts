@@ -5,11 +5,19 @@ import {
   type OwnIdentity,
   randomIdentity,
 } from '@kokuin/token'
-import { defaultCredentialTypes, generateKeyPackageWithKey } from 'ts-mls'
+import {
+  createCommit,
+  defaultCredentialTypes,
+  defaultProposalTypes,
+  encode,
+  generateKeyPackageWithKey,
+  mlsMessageEncoder,
+} from 'ts-mls'
 import { describe, expect, test } from 'vitest'
 
 import { controlCapabilities } from '../src/anchor.js'
 import {
+  CommitRejectedError,
   commitInvite,
   createGroup,
   createInvite,
@@ -19,13 +27,28 @@ import {
 } from '../src/group.js'
 import { resolveMlsContext } from '../src/group-context.js'
 import { addDevice, registerDevice, revokeDevice } from '../src/group-device.js'
-import { signLedgerEntry } from '../src/ledger.js'
+import { ledgerEntryDigest, signLedgerEntry } from '../src/ledger.js'
 import { controllerOf, DEVICE_ENTRY_TYPE } from '../src/registry.js'
-import type { KeyPackageBundle } from '../src/types.js'
+import type { GroupOptions, KeyPackageBundle } from '../src/types.js'
 import { buildBoundLeaf } from './fixtures/bound-leaf.js'
 import { buildManagementCapability } from './fixtures/management-capability.js'
 
 const GROUP = 'device-write-group'
+
+/** A resolver backed by a mutable token map, filled as writes are published (see
+ *  `publishTokens`) — lets a second existing member's `processMessage` resolve ledger entries
+ *  named by a commit's envelope that it never saw directly. */
+function mapResolver(tokens: Map<string, string>): GroupOptions['resolveLedgerEntries'] {
+  return async (ids) => ids.map((id) => tokens.get(id)).filter((t): t is string => t != null)
+}
+
+/** Publish every ledger token `group` currently holds into the shared resolver map. Call after a
+ *  write's sender-side `newGroup` has applied its token, before a receiver processes the commit. */
+function publishTokens(tokens: Map<string, string>, group: GroupHandle): void {
+  for (const token of group.ledgerTokens) {
+    tokens.set(ledgerEntryDigest(token), token)
+  }
+}
 
 /**
  * Assembles a real group in which a bound device D (of profile P) is a member: the creator
@@ -40,9 +63,18 @@ async function joinBoundDevice(): Promise<{
   deviceIdentity: OwnIdentity
   deviceID: string
   controllerID: string
+  /** The creator's own group handle, post-invite-commit — a SECOND existing member distinct
+   *  from the device leaf, used to exercise the real receive path (`processMessage`). */
+  creatorGroup: GroupHandle
+  /** The resolver map backing `creatorGroup`'s `resolveLedgerEntries` — publish a write's token
+   *  into it (via `publishTokens`) before having `creatorGroup` process that write's commit. */
+  tokens: Map<string, string>
 }> {
+  const tokens = new Map<string, string>()
   const creator = randomIdentity()
-  const { group: creatorGroup } = await createGroup(creator, GROUP)
+  const { group: creatorGroup } = await createGroup(creator, GROUP, {
+    resolveLedgerEntries: mapResolver(tokens),
+  })
 
   const deviceSeed = new Uint8Array(32).fill(41)
   const leaf = await buildBoundLeaf({ deviceSeed })
@@ -78,7 +110,14 @@ async function joinBoundDevice(): Promise<{
     ratchetTree: updatedCreatorGroup.state.ratchetTree,
   })
 
-  return { deviceGroup, deviceIdentity, deviceID: leaf.deviceID, controllerID: leaf.controllerID }
+  return {
+    deviceGroup,
+    deviceIdentity,
+    deviceID: leaf.deviceID,
+    controllerID: leaf.controllerID,
+    creatorGroup: updatedCreatorGroup,
+    tokens,
+  }
 }
 
 /**
@@ -98,8 +137,18 @@ async function twoDeviceProfileGroup(): Promise<{
   controllerID: string
   targetDeviceID: string
   capability: string
+  /** The creator's group handle, already advanced past the addDevice commit below (processed via
+   *  the real receive path) — a second existing member ready to receive a further write's commit,
+   *  e.g. revokeDevice's. */
+  creatorGroup: GroupHandle
+  /** The raw addDevice commit bytes that brought the target device in, for receive-path tests. */
+  addCommitMessage: Uint8Array
+  /** The resolver map backing `creatorGroup`'s `resolveLedgerEntries` — publish a further write's
+   *  token into it (via `publishTokens`) before having `creatorGroup` process that write's commit. */
+  tokens: Map<string, string>
 }> {
-  const { deviceGroup, deviceIdentity, deviceID, controllerID } = await joinBoundDevice()
+  const { deviceGroup, deviceIdentity, deviceID, controllerID, creatorGroup, tokens } =
+    await joinBoundDevice()
   const { capability } = await buildManagementCapability({
     managerDID: deviceID,
     managerKey: deviceIdentity.publicKey,
@@ -112,12 +161,21 @@ async function twoDeviceProfileGroup(): Promise<{
   }
   const targetKeyPackageBundle = await createKeyPackageBundle(targetIdentity)
 
-  const { newGroup: managerGroup } = await addDevice(deviceGroup, deviceIdentity, {
-    keyPackage: targetKeyPackageBundle.publicPackage,
-    device: targetIdentity.id,
-    controller: controllerID,
-    capability,
-  })
+  const { newGroup: managerGroup, commitMessage: addCommitMessage } = await addDevice(
+    deviceGroup,
+    deviceIdentity,
+    {
+      keyPackage: targetKeyPackageBundle.publicPackage,
+      device: targetIdentity.id,
+      controller: controllerID,
+      capability,
+    },
+  )
+
+  // Advance the creator's own group past the add via the real receive path, so it is a member
+  // in good standing ready to receive the next write's commit (e.g. revokeDevice's) too.
+  publishTokens(tokens, managerGroup)
+  await creatorGroup.processMessage(addCommitMessage)
 
   return {
     managerGroup,
@@ -125,6 +183,9 @@ async function twoDeviceProfileGroup(): Promise<{
     controllerID,
     targetDeviceID: targetIdentity.id,
     capability,
+    creatorGroup,
+    addCommitMessage,
+    tokens,
   }
 }
 
@@ -202,5 +263,98 @@ describe('deny seam', () => {
     // handcrafted registry via foldControl instead — see Task 10 for the full gated write flow.
     expect(registerToken).toBeTypeOf('string')
     expect(group.currentDenySet().size).toBe(0)
+  })
+})
+
+/**
+ * The load-bearing coverage the committer-side tests above cannot give: every write's commit
+ * must be ACCEPTED by a second existing member's real receive path (`processMessage`), not just
+ * self-consistent on the authoring side. `defaultCommitPolicy` is an independent receive-side
+ * gate — see the symmetric device carve-out in policy.ts (`evaluateProposal`'s `add`, `remove`,
+ * and `group_context_extensions` cases).
+ */
+describe('receive-path acceptance (the symmetric device carve-out)', () => {
+  test("registerDevice's commit is accepted by a second existing member", async () => {
+    const { deviceGroup, deviceIdentity, deviceID, controllerID, creatorGroup, tokens } =
+      await joinBoundDevice()
+    const { commitMessage, newGroup } = await registerDevice(deviceGroup, deviceIdentity, {
+      device: deviceID,
+      controller: controllerID,
+    })
+
+    publishTokens(tokens, newGroup)
+    await creatorGroup.processMessage(commitMessage)
+
+    expect(controllerOf(creatorGroup.registry, deviceID)).toBe(normalizeDID(controllerID))
+  })
+
+  test("addDevice's commit is accepted by a second existing member", async () => {
+    const { deviceGroup, deviceIdentity, deviceID, controllerID, creatorGroup, tokens } =
+      await joinBoundDevice()
+    const { capability } = await buildManagementCapability({
+      managerDID: deviceID,
+      managerKey: deviceIdentity.publicKey,
+    })
+
+    const targetSeed = new Uint8Array(32).fill(43)
+    const targetIdentity: OwnIdentity = {
+      ...createFullIdentity(targetSeed),
+      privateKey: targetSeed,
+    }
+    const targetKeyPackageBundle = await createKeyPackageBundle(targetIdentity)
+
+    const { commitMessage, newGroup } = await addDevice(deviceGroup, deviceIdentity, {
+      keyPackage: targetKeyPackageBundle.publicPackage,
+      device: targetIdentity.id,
+      controller: controllerID,
+      capability,
+    })
+
+    publishTokens(tokens, newGroup)
+    await creatorGroup.processMessage(commitMessage)
+
+    expect(creatorGroup.findMemberLeafIndex(targetIdentity.id)).toBeTypeOf('number')
+    expect(controllerOf(creatorGroup.registry, targetIdentity.id)).toBe(normalizeDID(controllerID))
+  })
+
+  test("revokeDevice's commit is accepted by a second existing member", async () => {
+    const { managerGroup, managerIdentity, targetDeviceID, capability, creatorGroup, tokens } =
+      await twoDeviceProfileGroup()
+
+    const { commitMessage, newGroup } = await revokeDevice(managerGroup, managerIdentity, {
+      device: targetDeviceID,
+      capability,
+    })
+
+    publishTokens(tokens, newGroup)
+    await creatorGroup.processMessage(commitMessage)
+
+    expect(creatorGroup.findMemberLeafIndex(targetDeviceID)).toBeUndefined()
+    expect(creatorGroup.currentDenySet().has(normalizeDID(targetDeviceID))).toBe(true)
+  })
+
+  test('a non-device, non-admin commit is still rejected on receive', async () => {
+    // Negative guard: the carve-out must not loosen the general admin rule. The manager device is
+    // a plain (non-admin) member; removing the target leaf with NO kumiai.device entry at all —
+    // no envelope, nothing for verifyDeviceEntry to have authorized upstream — must still reject.
+    // This proves the carve-out fires only on a matching enacted device entry, never structurally
+    // for any commit a non-admin device happens to author.
+    const { managerGroup, targetDeviceID, creatorGroup } = await twoDeviceProfileGroup()
+    const targetLeaf = managerGroup.findMemberLeafIndex(targetDeviceID)
+    expect(targetLeaf).toBeTypeOf('number')
+
+    const result = await createCommit({
+      context: managerGroup.context,
+      state: managerGroup.state,
+      extraProposals: [
+        { proposalType: defaultProposalTypes.remove, remove: { removed: targetLeaf as number } },
+      ],
+    })
+    const bareRemoveCommit = encode(mlsMessageEncoder, result.commit)
+
+    const epochBefore = creatorGroup.epoch
+    await expect(creatorGroup.processMessage(bareRemoveCommit)).rejects.toThrow(CommitRejectedError)
+    expect(creatorGroup.epoch).toBe(epochBefore)
+    expect(creatorGroup.findMemberLeafIndex(targetDeviceID)).toBeTypeOf('number')
   })
 })

@@ -50,6 +50,7 @@ import {
 import {
   controllerOf,
   DEVICE_ENTRY_TYPE,
+  type DeviceOp,
   type DeviceRegistry,
   type DeviceValue,
   denySetOf,
@@ -851,10 +852,17 @@ export class GroupHandle {
       }
     }
 
+    const enactedDeviceEntries = acceptedEntries
+      .filter(({ verified }) => verified.entry.type === DEVICE_ENTRY_TYPE)
+      .map(({ verified }) => ({
+        subject: normalizeDID(verified.entry.subject),
+        op: (verified.entry.value as DeviceValue).op,
+      }))
     const context = buildCommitPolicyContext(this, {
       baseRoster: this.#roster,
       candidateRoster,
       entryIDs: envelopeIDs,
+      enactedDeviceEntries,
       ...(externalCommitDID !== undefined && { externalCommitDID }),
     })
 
@@ -1118,6 +1126,7 @@ export function buildCommitPolicyContext(
     baseRoster: RosterState
     candidateRoster: RosterState
     entryIDs: Array<string>
+    enactedDeviceEntries: Array<{ subject: string; op: DeviceOp }>
     externalCommitDID?: string
   },
 ): CommitPolicyContext {
@@ -1140,6 +1149,9 @@ export function buildCommitPolicyContext(
     currentExtensions: handle.state.groupContext.extensions,
     expectedHeadExtensionData,
     commitEnactsEntries: args.entryIDs.length > 0,
+    enactedDeviceEntries: args.enactedDeviceEntries,
+    enactsOnlyDeviceEntries:
+      args.entryIDs.length > 0 && args.enactedDeviceEntries.length === args.entryIDs.length,
     ...(args.externalCommitDID !== undefined && { externalCommitDID: args.externalCommitDID }),
   }
 }
