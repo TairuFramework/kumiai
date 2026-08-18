@@ -1,6 +1,15 @@
-import type { SigningIdentity } from '@kokuin/token'
-import { encode, mlsMessageEncoder } from 'ts-mls'
+import { normalizeDID, type SigningIdentity } from '@kokuin/token'
+import {
+  type DefaultProposal,
+  defaultCredentialTypes,
+  defaultProposalTypes,
+  encode,
+  isDefaultCredential,
+  type KeyPackage,
+  mlsMessageEncoder,
+} from 'ts-mls'
 
+import { parseMLSCredentialIdentity } from './credential.js'
 import { commitWithEntries } from './group-commit.js'
 import { deriveGroup, type GroupHandle, mutexFor } from './group-handle.js'
 import { signLedgerEntry } from './ledger.js'
@@ -64,6 +73,100 @@ export async function labelDevice(
       value: { op: 'label', label: params.label, capability: params.capability },
     })
     const result = await commitWithEntries(group, [], [token], false, { requireAdmin: false })
+    const newGroup = deriveGroup(group, result.newState)
+    await newGroup.applyLedgerEntries([token])
+    return {
+      commitMessage: encode(mlsMessageEncoder, result.commit),
+      newGroup,
+      epoch: newGroup.epoch,
+    }
+  })
+}
+
+/**
+ * Bring a co-device into the group WITHOUT a group admin: an MLS Add of the new device's key
+ * package plus a `kumiai.device` `add` entry, both authorized by the profile's management
+ * capability. Binds the added leaf to `device`/`controller` (the key package must present `device`).
+ * Returns the Commit + Welcome bytes.
+ */
+export async function addDevice(
+  group: GroupHandle,
+  identity: SigningIdentity,
+  params: { keyPackage: KeyPackage; device: string; controller: string; capability: string },
+): Promise<DeviceWriteResult & { welcomeMessage: Uint8Array }> {
+  return mutexFor(group).run(async () => {
+    // Bind the added leaf to the entry's subject — the key package must present `device`.
+    const credential = params.keyPackage.leafNode.credential
+    if (
+      !isDefaultCredential(credential) ||
+      credential.credentialType !== defaultCredentialTypes.basic
+    ) {
+      throw new Error(
+        'addDevice: the key package carries a non-basic credential, which names no device DID',
+      )
+    }
+    const presentedDID = normalizeDID(parseMLSCredentialIdentity(credential.identity).id)
+    if (presentedDID !== normalizeDID(params.device)) {
+      throw new Error(
+        `addDevice: the key package presents ${presentedDID}, not the device ${normalizeDID(params.device)}`,
+      )
+    }
+
+    const token = await signLedgerEntry(identity, {
+      type: DEVICE_ENTRY_TYPE,
+      groupID: group.groupID,
+      subject: params.device,
+      value: { op: 'add', controller: params.controller, capability: params.capability },
+    })
+    const addProposal: DefaultProposal = {
+      proposalType: defaultProposalTypes.add,
+      add: { keyPackage: params.keyPackage },
+    }
+    const result = await commitWithEntries(group, [addProposal], [token], true, {
+      requireAdmin: false,
+    })
+    if (result.welcome == null) {
+      throw new Error('addDevice: expected a Welcome message for the add proposal')
+    }
+    const newGroup = deriveGroup(group, result.newState)
+    await newGroup.applyLedgerEntries([token])
+    return {
+      commitMessage: encode(mlsMessageEncoder, result.commit),
+      welcomeMessage: encode(mlsMessageEncoder, result.welcome),
+      newGroup,
+      epoch: newGroup.epoch,
+    }
+  })
+}
+
+/**
+ * Revoke a device: ONE commit, TWO effects, matching the two surfaces the kokuin security doc
+ * sanctions. (1) a `kumiai.device` `revoke` entry — folds the subject to `revoked`, so the derived
+ * deny set gains it (closing Slice 1's external-rejoin path, which the deny set governs). (2) if the
+ * subject currently holds a leaf, an MLS Remove of it in the SAME commit (the deny set alone leaves a
+ * stale leaf; the Remove alone lets it rejoin on its still-valid bound-leaf capability). Both are
+ * required. Authorized by the profile's management capability; no admin role.
+ */
+export async function revokeDevice(
+  group: GroupHandle,
+  identity: SigningIdentity,
+  params: { device: string; capability: string },
+): Promise<DeviceWriteResult> {
+  return mutexFor(group).run(async () => {
+    const token = await signLedgerEntry(identity, {
+      type: DEVICE_ENTRY_TYPE,
+      groupID: group.groupID,
+      subject: params.device,
+      value: { op: 'revoke', capability: params.capability },
+    })
+    const leafIndex = group.findMemberLeafIndex(params.device)
+    const proposals: Array<DefaultProposal> =
+      leafIndex === undefined
+        ? []
+        : [{ proposalType: defaultProposalTypes.remove, remove: { removed: leafIndex } }]
+    const result = await commitWithEntries(group, proposals, [token], false, {
+      requireAdmin: false,
+    })
     const newGroup = deriveGroup(group, result.newState)
     await newGroup.applyLedgerEntries([token])
     return {

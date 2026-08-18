@@ -23,7 +23,13 @@ export {
   makeMLSCredential,
   ORDINARY_KEY_PACKAGE_LIFETIME_DAYS,
 } from './group-credential.js'
-export { type DeviceWriteResult, labelDevice, registerDevice } from './group-device.js'
+export {
+  addDevice,
+  type DeviceWriteResult,
+  labelDevice,
+  registerDevice,
+  revokeDevice,
+} from './group-device.js'
 export {
   CommitRejectedError,
   GroupHandle,

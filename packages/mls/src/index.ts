@@ -58,6 +58,7 @@ export {
   type LedgerReducer,
 } from './fold.js'
 export {
+  addDevice,
   type CommitInviteResult,
   type CommitLedgerEntriesResult,
   CommitRejectedError,
@@ -101,6 +102,7 @@ export {
   registerDevice,
   removeMember,
   restoreGroup,
+  revokeDevice,
 } from './group.js'
 export {
   assertHeadMatches,
