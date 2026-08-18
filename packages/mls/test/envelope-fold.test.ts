@@ -3,8 +3,18 @@ import { describe, expect, test } from 'vitest'
 
 import { foldEnvelope } from '../src/envelope-fold.js'
 import type { FoldInput } from '../src/fold.js'
-import { authority as _authority, DEVICE_ENTRY_TYPE, registrySeed } from '../src/registry.js'
-import { type GroupPermission, ROLE_ENTRY_TYPE, type RosterState } from '../src/roster.js'
+import {
+  authority as _authority,
+  beaconOf,
+  DEVICE_ENTRY_TYPE,
+  registrySeed,
+} from '../src/registry.js'
+import {
+  type GroupPermission,
+  ROLE_ENTRY_TYPE,
+  type RosterState,
+  roleReducer,
+} from '../src/roster.js'
 
 const GROUP_ID = 'group-1'
 const OTHER_GROUP = 'group-2'
@@ -397,5 +407,53 @@ describe('foldEnvelope — kumiai.device branch', () => {
     const mystery = input({ issuer: CREATOR_DID, type: 'kumiai.mystery', value: {}, entryID: 'm1' })
     const result = foldEnvelope(base, EMPTY_REGISTRY, [mystery], GROUP_ID)
     expect(result.ok).toBe(false)
+  })
+})
+
+describe('foldEnvelope beacon', () => {
+  const profile = 'did:kokuin:profileP'
+  const devA = 'did:key:zDeviceA'
+  const baseRoster = roleReducer.seed({ creatorDID: CREATOR_DID, version: 1 })
+
+  test('a beacon entry folds into the candidate registry controllers projection', () => {
+    const beacon = input({
+      issuer: devA,
+      type: DEVICE_ENTRY_TYPE,
+      subject: profile,
+      value: { op: 'beacon', logLength: 5, headDigest: 'zH' },
+      entryID: 'e1',
+    })
+
+    const result = foldEnvelope(baseRoster, registrySeed(), [beacon], GROUP_ID)
+
+    expect(result.ok).toBe(true)
+    if (result.ok)
+      expect(beaconOf(result.registry, profile)).toEqual({ logLength: 5, headDigest: 'zH' })
+  })
+
+  test('a base registry beacon survives folding an unrelated device entry', () => {
+    const seedBeacon = input({
+      issuer: devA,
+      type: DEVICE_ENTRY_TYPE,
+      subject: profile,
+      value: { op: 'beacon', logLength: 2, headDigest: 'zOld' },
+      entryID: 'b0',
+    })
+    const seeded = foldEnvelope(baseRoster, registrySeed(), [seedBeacon], GROUP_ID)
+    expect(seeded.ok).toBe(true)
+    if (!seeded.ok) return
+
+    const registerDevice = input({
+      issuer: devA,
+      type: DEVICE_ENTRY_TYPE,
+      subject: devA,
+      value: { op: 'register', controller: profile },
+      entryID: 'r1',
+    })
+    const next = foldEnvelope(baseRoster, seeded.registry, [registerDevice], GROUP_ID)
+
+    expect(next.ok).toBe(true)
+    if (next.ok)
+      expect(beaconOf(next.registry, profile)).toEqual({ logLength: 2, headDigest: 'zOld' })
   })
 })

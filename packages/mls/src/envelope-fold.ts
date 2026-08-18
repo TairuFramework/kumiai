@@ -62,7 +62,10 @@ export function foldEnvelope(
   groupID: string,
 ): EnvelopeFoldResult {
   let workingRoster: RosterState = { roles: new Map(baseRoster.roles) }
-  let workingRegistry: DeviceRegistry = { devices: new Map(baseRegistry.devices) }
+  let workingRegistry: DeviceRegistry = {
+    devices: new Map(baseRegistry.devices),
+    controllers: new Map(baseRegistry.controllers),
+  }
   const surfaced: Array<VerifiedLedgerEntry> = []
 
   for (const { verified, entryID } of entries) {
