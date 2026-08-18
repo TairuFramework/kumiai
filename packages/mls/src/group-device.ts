@@ -45,7 +45,7 @@ export async function registerDevice(
         ...(params.capability != null ? { capability: params.capability } : {}),
       },
     })
-    const result = await commitWithEntries(group, [], [token], false, { requireAdmin: false })
+    const result = await commitWithEntries(group, [], [token], { requireAdmin: false })
     const newGroup = deriveGroup(group, result.newState)
     await newGroup.applyLedgerEntries([token])
     return {
@@ -72,7 +72,7 @@ export async function labelDevice(
       subject: params.device,
       value: { op: 'label', label: params.label, capability: params.capability },
     })
-    const result = await commitWithEntries(group, [], [token], false, { requireAdmin: false })
+    const result = await commitWithEntries(group, [], [token], { requireAdmin: false })
     const newGroup = deriveGroup(group, result.newState)
     await newGroup.applyLedgerEntries([token])
     return {
@@ -122,7 +122,8 @@ export async function addDevice(
       proposalType: defaultProposalTypes.add,
       add: { keyPackage: params.keyPackage },
     }
-    const result = await commitWithEntries(group, [addProposal], [token], true, {
+    const result = await commitWithEntries(group, [addProposal], [token], {
+      ratchetTreeExtension: true,
       requireAdmin: false,
     })
     if (result.welcome == null) {
@@ -164,7 +165,7 @@ export async function revokeDevice(
       leafIndex === undefined
         ? []
         : [{ proposalType: defaultProposalTypes.remove, remove: { removed: leafIndex } }]
-    const result = await commitWithEntries(group, proposals, [token], false, {
+    const result = await commitWithEntries(group, proposals, [token], {
       requireAdmin: false,
     })
     const newGroup = deriveGroup(group, result.newState)
@@ -196,7 +197,7 @@ export async function announceControllerBeacon(
       subject: params.controller,
       value: { op: 'beacon', logLength: params.logLength, headDigest: params.headDigest },
     })
-    const result = await commitWithEntries(group, [], [token], false, { requireAdmin: false })
+    const result = await commitWithEntries(group, [], [token], { requireAdmin: false })
     const newGroup = deriveGroup(group, result.newState)
     const enacted = await newGroup.applyLedgerEntries([token])
     newGroup.emitControlEvents(enacted)

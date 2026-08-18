@@ -183,9 +183,9 @@ export async function commitWithEntries(
   group: GroupHandle,
   extraProposals: Array<DefaultProposal>,
   enacted: Array<string>,
-  ratchetTreeExtension = false,
-  options: { requireAdmin?: boolean } = {},
+  options: { ratchetTreeExtension?: boolean; requireAdmin?: boolean } = {},
 ): Promise<Awaited<ReturnType<typeof createCommit>>> {
+  const ratchetTreeExtension = options.ratchetTreeExtension ?? false
   const requireAdmin = options.requireAdmin ?? true
   // Same reason createInvite guards the inviter: a non-admin's commit is rejected by
   // every receiver, so fail here rather than emitting a commit nobody will apply.
@@ -441,7 +441,9 @@ export async function commitInvite(
       proposalType: defaultProposalTypes.add,
       add: { keyPackage },
     }
-    const result = await commitWithEntries(group, [addProposal], enacted, true)
+    const result = await commitWithEntries(group, [addProposal], enacted, {
+      ratchetTreeExtension: true,
+    })
 
     const newGroup = deriveGroup(group, result.newState)
 
