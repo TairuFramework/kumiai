@@ -59,6 +59,7 @@ export {
 } from './fold.js'
 export {
   addDevice,
+  announceControllerBeacon,
   type CommitInviteResult,
   type CommitLedgerEntriesResult,
   CommitRejectedError,
@@ -76,6 +77,7 @@ export {
   type ExportGroupInfoResult,
   exportGroupInfo,
   GroupHandle,
+  type GroupHandleEvents,
   type GroupHandleParams,
   type HeldLedgerEntry,
   type InspectGroupInfoResult,
@@ -165,6 +167,7 @@ export {
 } from './recovery.js'
 export {
   authority,
+  type ControllerBeacon,
   controllerOf,
   DEVICE_ENTRY_TYPE,
   type DeviceOp,

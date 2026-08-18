@@ -2,6 +2,8 @@ import type { SignedEvent } from '@kokuin/controller'
 import { normalizeDID } from '@kokuin/token'
 import { type Credential, defaultCredentialTypes, isDefaultCredential } from 'ts-mls'
 
+import type { ControllerBeacon } from './registry.js'
+
 /**
  * Local member state (never serialized to the MLS leaf). `id` is the member's own
  * DID; `groupID` names the group the handle belongs to.
@@ -62,6 +64,8 @@ export type GroupMember = {
   longForm: string
   /** For a bound leaf: the authenticated `did:kokuin:` controller (profile) DID. Absent for floating leaves. */
   controller?: string
+  /** For a bound leaf: the controller's advisory folded log beacon, when one has been announced. */
+  controllerBeacon?: ControllerBeacon
 }
 
 export function parseMLSCredentialIdentity(identity: Uint8Array): MLSCredentialIdentity {

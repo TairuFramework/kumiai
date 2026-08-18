@@ -25,6 +25,7 @@ export {
 } from './group-credential.js'
 export {
   addDevice,
+  announceControllerBeacon,
   type DeviceWriteResult,
   labelDevice,
   registerDevice,
@@ -33,6 +34,7 @@ export {
 export {
   CommitRejectedError,
   GroupHandle,
+  type GroupHandleEvents,
   type GroupHandleParams,
   type HeldLedgerEntry,
   type LedgerLogEntry,

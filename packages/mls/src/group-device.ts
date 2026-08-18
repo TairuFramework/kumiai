@@ -168,7 +168,38 @@ export async function revokeDevice(
       requireAdmin: false,
     })
     const newGroup = deriveGroup(group, result.newState)
-    await newGroup.applyLedgerEntries([token])
+    const enacted = await newGroup.applyLedgerEntries([token])
+    newGroup.emitControlEvents(enacted)
+    return {
+      commitMessage: encode(mlsMessageEncoder, result.commit),
+      newGroup,
+      epoch: newGroup.epoch,
+    }
+  })
+}
+
+/**
+ * Announce the controller's FULL log head into the group as folded, cross-peer-consistent state.
+ * Advisory only — it gates nothing. Authored by any bound device of `controller` (self-scoped, no
+ * management capability). Publish only-on-change and only when the log meaningfully advances: each
+ * call is a permanent ledger entry (replayed at every welcome, no compaction).
+ */
+export async function announceControllerBeacon(
+  group: GroupHandle,
+  identity: SigningIdentity,
+  params: { controller: string; logLength: number; headDigest: string },
+): Promise<DeviceWriteResult> {
+  return mutexFor(group).run(async () => {
+    const token = await signLedgerEntry(identity, {
+      type: DEVICE_ENTRY_TYPE,
+      groupID: group.groupID,
+      subject: params.controller,
+      value: { op: 'beacon', logLength: params.logLength, headDigest: params.headDigest },
+    })
+    const result = await commitWithEntries(group, [], [token], false, { requireAdmin: false })
+    const newGroup = deriveGroup(group, result.newState)
+    const enacted = await newGroup.applyLedgerEntries([token])
+    newGroup.emitControlEvents(enacted)
     return {
       commitMessage: encode(mlsMessageEncoder, result.commit),
       newGroup,

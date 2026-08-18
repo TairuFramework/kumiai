@@ -49,6 +49,7 @@ import {
   MissingLedgerEntriesError,
 } from './policy.js'
 import {
+  beaconOf,
   controllerOf,
   DEVICE_ENTRY_TYPE,
   type DeviceOp,
@@ -651,11 +652,14 @@ export class GroupHandle {
           // refuses to build a peer:4 identity without a long form, and validateCredential
           // rejects any peer:4 leaf lacking one before it can enter a ratchet tree. restore
           // trusts the host's own persisted state, so neither gate runs on that path.
+          const controller = parsed.controller ? parsed.controller.id : undefined
+          const beacon = controller != null ? beaconOf(this.#registry, controller) : undefined
           yield {
             leafIndex: i / 2,
             id: parsed.id,
             longForm: parsed.longForm ?? parsed.id,
-            ...(parsed.controller ? { controller: parsed.controller.id } : {}),
+            ...(controller ? { controller } : {}),
+            ...(beacon ? { controllerBeacon: beacon } : {}),
           }
         }
       }
