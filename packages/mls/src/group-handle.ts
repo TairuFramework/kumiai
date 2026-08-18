@@ -91,7 +91,8 @@ const EMITTERS = new WeakMap<GroupHandle, EventEmitter<GroupHandleEvents>>()
 /** The full emitter for a handle — module-internal, for deriveGroup to share it onward. */
 export function emitterOf(group: GroupHandle): EventEmitter<GroupHandleEvents> {
   const emitter = EMITTERS.get(group)
-  if (emitter == null) throw new Error('GroupHandle has no event emitter')
+  if (emitter == null)
+    throw new Error('unreachable: every GroupHandle sets its emitter in the constructor')
   return emitter
 }
 
@@ -441,11 +442,12 @@ export class GroupHandle {
   }
 
   /**
-   * Fire notification events for the device entries just enacted in one operation. Called from the
-   * commit path, from bootstrapLedger, and from the local write APIs — NEVER from the constructor
-   * or a fresh-join applyLedgerEntries, so a joiner is not replayed the whole history as live events
-   * (it reads revokedDevices()/beaconOf for current state instead). Uses `fire`: a throwing
-   * listener is swallowed and cannot break the fold. Reads controllerOf on the POST-fold registry.
+   * @internal Fire notification events for the device entries just enacted in one operation.
+   * Called from the commit path, from bootstrapLedger, and from the local write APIs — NEVER from
+   * the constructor or a fresh-join applyLedgerEntries, so a joiner is not replayed the whole
+   * history as live events (it reads revokedDevices()/beaconOf for current state instead). Uses
+   * `fire`: a throwing listener is swallowed and cannot break the fold. Reads controllerOf on the
+   * POST-fold registry.
    */
   emitControlEvents(enacted: ReadonlyArray<VerifiedLedgerEntry>): void {
     const emitter = emitterOf(this)

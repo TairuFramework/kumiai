@@ -1186,7 +1186,8 @@ describe('GroupHandle control state', () => {
       value: 'admin',
     })
 
-    await group.applyLedgerEntries([crossGroup, memberSigned])
+    const appended = await group.applyLedgerEntries([crossGroup, memberSigned])
+    expect(appended).toHaveLength(1)
     expect([...group.roster.roles.entries()]).toEqual([[normalizeDID(alice.id), 'admin']])
   })
 
