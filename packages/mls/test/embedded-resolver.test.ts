@@ -34,4 +34,16 @@ describe('createEmbeddedControllerResolver', () => {
     const resolver = createEmbeddedControllerResolver({ controllerID: did, prefix: [inception] })
     await expect(resolver.resolve('did:kokuin:someoneElse', {})).rejects.toThrow(/Unknown DID/)
   })
+
+  // Slice 1 regression guard: the embedded resolver spreads the base controller resolver and
+  // overrides ONLY resolveDenySet — resolveHistoric must still be forwarded verbatim, or a
+  // `historic: true` verifyToken call (management-capability verification) would silently start
+  // asking the wrong question.
+  test('still forwards resolveHistoric from the base controller resolver', async () => {
+    const resolver = createEmbeddedControllerResolver({ controllerID: did, prefix: [inception] })
+    expect(typeof resolver.resolveHistoric).toBe('function')
+    const resolved = await resolver.resolveHistoric?.(did, {})
+    expect(resolved?.alg).toBe('EdDSA')
+    expect(resolved?.publicKey).toBeInstanceOf(Uint8Array)
+  })
 })

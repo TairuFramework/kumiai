@@ -1,193 +1,28 @@
-import {
-  createFullIdentity,
-  createIdentity,
-  normalizeDID,
-  type OwnIdentity,
-  randomIdentity,
-} from '@kokuin/token'
+import { createFullIdentity, createIdentity, normalizeDID, type OwnIdentity } from '@kokuin/token'
 import {
   createCommit,
   defaultCredentialTypes,
   defaultProposalTypes,
   encode,
-  generateKeyPackageWithKey,
   mlsMessageEncoder,
 } from 'ts-mls'
 import { describe, expect, test } from 'vitest'
 
-import { controlCapabilities } from '../src/anchor.js'
-import {
-  CommitRejectedError,
-  commitInvite,
-  createGroup,
-  createInvite,
-  createKeyPackageBundle,
-  type GroupHandle,
-  processWelcome,
-} from '../src/group.js'
-import { resolveMlsContext } from '../src/group-context.js'
+import type { MLSCredentialIdentity } from '../src/credential.js'
+import { CommitRejectedError, createGroup, createKeyPackageBundle } from '../src/group.js'
 import { addDevice, registerDevice, revokeDevice } from '../src/group-device.js'
-import { ledgerEntryDigest, signLedgerEntry } from '../src/ledger.js'
+import { signLedgerEntry } from '../src/ledger.js'
 import { controllerOf, DEVICE_ENTRY_TYPE } from '../src/registry.js'
-import type { GroupOptions, KeyPackageBundle } from '../src/types.js'
 import { buildBoundLeaf } from './fixtures/bound-leaf.js'
+import {
+  buildBoundKeyPackageBundle,
+  joinBoundDevice,
+  publishTokens,
+  twoDeviceProfileGroup,
+} from './fixtures/device-harness.js'
 import { buildManagementCapability } from './fixtures/management-capability.js'
 
 const GROUP = 'device-write-group'
-
-/** A resolver backed by a mutable token map, filled as writes are published (see
- *  `publishTokens`) — lets a second existing member's `processMessage` resolve ledger entries
- *  named by a commit's envelope that it never saw directly. */
-function mapResolver(tokens: Map<string, string>): GroupOptions['resolveLedgerEntries'] {
-  return async (ids) => ids.map((id) => tokens.get(id)).filter((t): t is string => t != null)
-}
-
-/** Publish every ledger token `group` currently holds into the shared resolver map. Call after a
- *  write's sender-side `newGroup` has applied its token, before a receiver processes the commit. */
-function publishTokens(tokens: Map<string, string>, group: GroupHandle): void {
-  for (const token of group.ledgerTokens) {
-    tokens.set(ledgerEntryDigest(token), token)
-  }
-}
-
-/**
- * Assembles a real group in which a bound device D (of profile P) is a member: the creator
- * makes the group, invites D by its own device DID, D's key package carries the bound-leaf
- * credential (controller = P), and D processes the resulting Welcome. Mirrors the
- * createGroup + createInvite + commitInvite/processWelcome shape used throughout group.test.ts,
- * with a hand-built key package (via `buildBoundLeaf` + `generateKeyPackageWithKey`) in place of
- * `createKeyPackageBundle`, since that helper only ever mints an unbound (id-only) credential.
- */
-async function joinBoundDevice(): Promise<{
-  deviceGroup: GroupHandle
-  deviceIdentity: OwnIdentity
-  deviceID: string
-  controllerID: string
-  /** The creator's own group handle, post-invite-commit — a SECOND existing member distinct
-   *  from the device leaf, used to exercise the real receive path (`processMessage`). */
-  creatorGroup: GroupHandle
-  /** The resolver map backing `creatorGroup`'s `resolveLedgerEntries` — publish a write's token
-   *  into it (via `publishTokens`) before having `creatorGroup` process that write's commit. */
-  tokens: Map<string, string>
-}> {
-  const tokens = new Map<string, string>()
-  const creator = randomIdentity()
-  const { group: creatorGroup } = await createGroup(creator, GROUP, {
-    resolveLedgerEntries: mapResolver(tokens),
-  })
-
-  const deviceSeed = new Uint8Array(32).fill(41)
-  const leaf = await buildBoundLeaf({ deviceSeed })
-  const deviceIdentity: OwnIdentity = { ...createFullIdentity(deviceSeed), privateKey: deviceSeed }
-
-  const { invite } = await createInvite({
-    group: creatorGroup,
-    identity: creator,
-    recipientDID: leaf.deviceID,
-    permission: 'member',
-  })
-
-  const context = await resolveMlsContext()
-  const keyPackage = await generateKeyPackageWithKey({
-    credential: { credentialType: defaultCredentialTypes.basic, identity: leaf.identity },
-    signatureKeyPair: { signKey: deviceSeed, publicKey: leaf.deviceKey },
-    cipherSuite: context.cipherSuite,
-    capabilities: controlCapabilities(),
-  })
-  const keyPackageBundle: KeyPackageBundle = { ...keyPackage, ownerDID: leaf.deviceID }
-
-  const { welcomeMessage, newGroup: updatedCreatorGroup } = await commitInvite(
-    creatorGroup,
-    keyPackageBundle.publicPackage,
-    invite,
-  )
-
-  const { group: deviceGroup } = await processWelcome({
-    identity: deviceIdentity,
-    invite,
-    welcome: welcomeMessage,
-    keyPackageBundle,
-    ratchetTree: updatedCreatorGroup.state.ratchetTree,
-  })
-
-  return {
-    deviceGroup,
-    deviceIdentity,
-    deviceID: leaf.deviceID,
-    controllerID: leaf.controllerID,
-    creatorGroup: updatedCreatorGroup,
-    tokens,
-  }
-}
-
-/**
- * Assembles a group with TWO devices of the same profile P: a MANAGER device (bound, per
- * `joinBoundDevice`, holding P's management capability with `aud` = the manager) and a TARGET
- * device of the same profile, brought in via `addDevice` itself. Using `addDevice` (rather than a
- * plain invite) is load-bearing: `addDevice` folds a `kumiai.device` `add` entry that records
- * `target -> P` in the registry, so `controllerOf(target)` resolves for `revokeDevice`'s gate
- * (Task 5's `verifyDeviceEntry`, revoke branch reads the folded registry, never the leaf's own
- * credential binding). A target that merely joined as a bound member leaf, without ever being
- * recorded by a device entry, would have `controllerOf(target) === undefined` and revoke would be
- * rejected.
- */
-async function twoDeviceProfileGroup(): Promise<{
-  managerGroup: GroupHandle
-  managerIdentity: OwnIdentity
-  controllerID: string
-  targetDeviceID: string
-  capability: string
-  /** The creator's group handle, already advanced past the addDevice commit below (processed via
-   *  the real receive path) — a second existing member ready to receive a further write's commit,
-   *  e.g. revokeDevice's. */
-  creatorGroup: GroupHandle
-  /** The raw addDevice commit bytes that brought the target device in, for receive-path tests. */
-  addCommitMessage: Uint8Array
-  /** The resolver map backing `creatorGroup`'s `resolveLedgerEntries` — publish a further write's
-   *  token into it (via `publishTokens`) before having `creatorGroup` process that write's commit. */
-  tokens: Map<string, string>
-}> {
-  const { deviceGroup, deviceIdentity, deviceID, controllerID, creatorGroup, tokens } =
-    await joinBoundDevice()
-  const { capability } = await buildManagementCapability({
-    managerDID: deviceID,
-    managerKey: deviceIdentity.publicKey,
-  })
-
-  const targetSeed = new Uint8Array(32).fill(43)
-  const targetIdentity: OwnIdentity = {
-    ...createFullIdentity(targetSeed),
-    privateKey: targetSeed,
-  }
-  const targetKeyPackageBundle = await createKeyPackageBundle(targetIdentity)
-
-  const { newGroup: managerGroup, commitMessage: addCommitMessage } = await addDevice(
-    deviceGroup,
-    deviceIdentity,
-    {
-      keyPackage: targetKeyPackageBundle.publicPackage,
-      device: targetIdentity.id,
-      controller: controllerID,
-      capability,
-    },
-  )
-
-  // Advance the creator's own group past the add via the real receive path, so it is a member
-  // in good standing ready to receive the next write's commit (e.g. revokeDevice's) too.
-  publishTokens(tokens, managerGroup)
-  await creatorGroup.processMessage(addCommitMessage)
-
-  return {
-    managerGroup,
-    managerIdentity: deviceIdentity,
-    controllerID,
-    targetDeviceID: targetIdentity.id,
-    capability,
-    creatorGroup,
-    addCommitMessage,
-    tokens,
-  }
-}
 
 describe('addDevice / revokeDevice', () => {
   test('addDevice brings a bound co-device into the group without an admin', async () => {
@@ -263,6 +98,56 @@ describe('deny seam', () => {
     // handcrafted registry via foldControl instead — see Task 10 for the full gated write flow.
     expect(registerToken).toBeTypeOf('string')
     expect(group.currentDenySet().size).toBe(0)
+  })
+
+  test('a revoked device cannot re-authenticate on the bound path; a floating leaf is unaffected', async () => {
+    // A second BOUND device of P (not the floating target twoDeviceProfileGroup builds), added
+    // and then revoked, so the deny check inside validateBoundLeaf actually has something to bite:
+    // a floating credential of the SAME DID never reaches that check at all (no `.controller`).
+    const { deviceGroup, deviceIdentity, controllerID, creatorGroup, tokens } =
+      await joinBoundDevice()
+    const { capability } = await buildManagementCapability({
+      managerDID: deviceIdentity.id,
+      managerKey: deviceIdentity.publicKey,
+    })
+
+    const targetSeed = new Uint8Array(32).fill(53)
+    const targetLeaf = await buildBoundLeaf({ deviceSeed: targetSeed })
+    const targetBundle = await buildBoundKeyPackageBundle(targetLeaf, targetSeed)
+
+    const { newGroup: added, commitMessage: addCommit } = await addDevice(
+      deviceGroup,
+      deviceIdentity,
+      {
+        keyPackage: targetBundle.publicPackage,
+        device: targetLeaf.deviceID,
+        controller: controllerID,
+        capability,
+      },
+    )
+    publishTokens(tokens, added)
+    await creatorGroup.processMessage(addCommit)
+
+    const { newGroup: revoked } = await revokeDevice(added, deviceIdentity, {
+      device: targetLeaf.deviceID,
+      capability,
+    })
+
+    const authService = revoked.context.authService
+    const boundCredential = {
+      credentialType: defaultCredentialTypes.basic,
+      identity: targetLeaf.identity,
+    }
+    const floatingIdentity: MLSCredentialIdentity = { id: targetLeaf.deviceID }
+    const floatingCredential = {
+      credentialType: defaultCredentialTypes.basic,
+      identity: new TextEncoder().encode(JSON.stringify(floatingIdentity)),
+    }
+
+    expect(await authService.validateCredential(boundCredential, targetLeaf.deviceKey)).toBe(false)
+    expect(await authService.validateCredential(floatingCredential, targetLeaf.deviceKey)).toBe(
+      true,
+    )
   })
 })
 

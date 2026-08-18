@@ -3,7 +3,10 @@ import { describe, expect, test } from 'vitest'
 
 import type { GroupAnchor } from '../src/anchor.js'
 import type { FoldInput } from '../src/fold.js'
-import { createGroup } from '../src/group.js'
+import { createGroup, type GroupHandle, removeMember, restoreGroup } from '../src/group.js'
+import { commitLedgerEntries } from '../src/group-commit.js'
+import { registerDevice, revokeDevice } from '../src/group-device.js'
+import { signLedgerEntry } from '../src/ledger.js'
 import {
   controllerOf,
   DEVICE_ENTRY_TYPE,
@@ -11,8 +14,71 @@ import {
   denySetOf,
   foldControl,
 } from '../src/registry.js'
+import { ROLE_ENTRY_TYPE } from '../src/roster.js'
+import { publishTokens, twoDeviceProfileGroup } from './fixtures/device-harness.js'
 
 const GROUP = 'device-authority-group'
+
+/**
+ * Enacts a real sequence of `kumiai.device` + `kumiai.role` entries through the write API — D
+ * (bound device of profile P) self-registers, the creator grants P admin, D revokes its
+ * co-device (giving the deny set real content) — then has D, the AUTHOR of the register/add/
+ * revoke entries above, leave the group outright (a plain admin `removeMember`, not a revoke:
+ * D's own registry record must survive as a live, non-denied binding). Returns the creator's
+ * handle — the only member still standing — as `live`.
+ */
+async function enactDeviceHistoryThenAuthorLeaves(): Promise<{ live: GroupHandle }> {
+  const {
+    managerGroup,
+    managerIdentity,
+    controllerID,
+    targetDeviceID,
+    capability,
+    creatorIdentity,
+    creatorGroup: creatorGroup0,
+    tokens,
+  } = await twoDeviceProfileGroup()
+  let creatorGroup = creatorGroup0
+  let deviceGroup = managerGroup
+
+  // D self-registers: its OWN registry record, distinct from the leaf-embedded binding.
+  const selfReg = await registerDevice(deviceGroup, managerIdentity, {
+    device: managerIdentity.id,
+    controller: controllerID,
+  })
+  deviceGroup = selfReg.newGroup
+  publishTokens(tokens, deviceGroup)
+  await creatorGroup.processMessage(selfReg.commitMessage)
+
+  // The creator grants the PROFILE (not the device) admin — a kumiai.role entry.
+  const roleToken = await signLedgerEntry(creatorIdentity, {
+    type: ROLE_ENTRY_TYPE,
+    groupID: creatorGroup.groupID,
+    subject: controllerID,
+    value: 'admin',
+  })
+  const roleGrant = await commitLedgerEntries(creatorGroup, [roleToken])
+  creatorGroup = roleGrant.newGroup
+  publishTokens(tokens, creatorGroup)
+  await deviceGroup.processMessage(roleGrant.commitMessage)
+
+  // D revokes its co-device (target) — the deny set gains a real, non-author member.
+  const revoke = await revokeDevice(deviceGroup, managerIdentity, {
+    device: targetDeviceID,
+    capability,
+  })
+  deviceGroup = revoke.newGroup
+  publishTokens(tokens, deviceGroup)
+  await creatorGroup.processMessage(revoke.commitMessage)
+
+  // D — the author of every kumiai.device entry above — leaves the group outright.
+  const dLeaf = creatorGroup.findMemberLeafIndex(managerIdentity.id)
+  if (dLeaf === undefined) throw new Error('test setup: D has no leaf to remove')
+  const leave = await removeMember(creatorGroup, dLeaf)
+  creatorGroup = leave.newGroup
+
+  return { live: creatorGroup }
+}
 
 describe('GroupHandle device registry', () => {
   test('currentDenySet is empty on a fresh group', async () => {
@@ -52,5 +118,76 @@ describe('GroupHandle device registry', () => {
     // unchanged, so the controller reads back exactly as registered.
     expect(controllerOf(registry, 'did:key:zDeviceX')).toBe('did:kokuin:profileP')
     expect(denySetOf(registry).size).toBe(0)
+  })
+
+  test('denySetOf answers `has` correctly for both a revoked and an active device (matched, never enumerated)', () => {
+    const anchor: GroupAnchor = { creatorDID: 'did:key:zCreator', version: 1 }
+    const entries: Array<FoldInput<DeviceValue>> = [
+      {
+        verified: {
+          issuer: 'did:key:zDeviceX',
+          entry: {
+            type: DEVICE_ENTRY_TYPE,
+            groupID: GROUP,
+            subject: 'did:key:zDeviceX',
+            value: { op: 'register', controller: 'did:kokuin:profileP' },
+          },
+        },
+        entryID: 'e1',
+      },
+      {
+        verified: {
+          issuer: 'did:key:zDeviceX',
+          entry: {
+            type: DEVICE_ENTRY_TYPE,
+            groupID: GROUP,
+            subject: 'did:key:zDeviceY',
+            value: { op: 'register', controller: 'did:kokuin:profileP' },
+          },
+        },
+        entryID: 'e2',
+      },
+      {
+        verified: {
+          issuer: 'did:key:zDeviceX',
+          entry: {
+            type: DEVICE_ENTRY_TYPE,
+            groupID: GROUP,
+            subject: 'did:key:zDeviceY',
+            value: { op: 'revoke' },
+          },
+        },
+        entryID: 'e3',
+      },
+    ]
+    const { registry } = foldControl(entries, anchor, GROUP)
+    const deny = denySetOf(registry)
+    expect(deny.has('did:key:zDeviceY')).toBe(true)
+    expect(deny.has('did:key:zDeviceX')).toBe(false)
+  })
+})
+
+describe('determinism: incremental fold vs bootstrap re-fold', () => {
+  test('incremental fold equals bootstrap re-fold, even after the author left', async () => {
+    const { live } = await enactDeviceHistoryThenAuthorLeaves()
+    const tokens = await live.getLedger()
+
+    // Reconstruct a fresh handle purely from the ledger tokens: an empty-ledger restoreGroup
+    // (seeding roster/registry from the anchor alone) over the SAME post-removal state, then
+    // bootstrapLedger over the raw tokens — the head-verified re-fold path, not a shortcut
+    // through foldControl directly.
+    const bootstrapped = await restoreGroup({ state: live.state, credential: live.credential })
+    await bootstrapped.bootstrapLedger(tokens)
+
+    expect([...bootstrapped.registry.devices.entries()]).toEqual([
+      ...live.registry.devices.entries(),
+    ])
+    expect([...bootstrapped.currentDenySet()]).toEqual([...live.currentDenySet()])
+    expect([...bootstrapped.roster.roles.entries()]).toEqual([...live.roster.roles.entries()])
+
+    // Non-vacuous: the author (D) is gone from the tree, yet its own self-register binding and
+    // its co-device's revoke both persist in the re-folded registry/deny set.
+    expect(bootstrapped.registry.devices.size).toBeGreaterThan(0)
+    expect(bootstrapped.currentDenySet().size).toBeGreaterThan(0)
   })
 })
