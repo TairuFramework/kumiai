@@ -1136,6 +1136,7 @@ export function buildCommitPolicyContext(
     baseRoster: args.baseRoster,
     candidateRoster: args.candidateRoster,
     didOfLeaf: (leafIndex: number) => leafToDID.get(leafIndex),
+    controllerOf: (did: string) => controllerOf(handle.registry, did),
     currentExtensions: handle.state.groupContext.extensions,
     expectedHeadExtensionData,
     commitEnactsEntries: args.entryIDs.length > 0,

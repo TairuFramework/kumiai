@@ -26,6 +26,9 @@ export type CommitPolicyContext = {
    *  target: a Remove of a leaf still `admin` here carried no demotion and is rejected. */
   candidateRoster: RosterState
   didOfLeaf: (leafIndex: number) => string | undefined
+  /** Resolve a device DID to its controller (profile) via the pre-commit folded registry, or
+   *  undefined. `isAdmin` reads this to apply authority = controller ?? id. */
+  controllerOf: (did: string) => string | undefined
   /** The pre-commit GroupContext extension list. A group_context_extensions commit may change
    *  nothing in it but the ledger_head entry. */
   currentExtensions: Array<GroupContextExtension>
@@ -58,6 +61,16 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
 /**
  * Fail-closed admin check: no DID, a DID absent from the roster, or any role but `admin`, is
  * not admin. An undefined leaf (external commit with no committer) is never admin.
+ *
+ * Authority resolves through the device registry: `authority(did) = controllerOf(did) ?? did`.
+ * A device leaf of an admin profile is admin, because the profile — not the device — is what
+ * the roster actually grants a role to. This resolution is deliberately applied only here, to
+ * the *acting* sender, and NOT to the Remove-target admin check (`evaluateProposal`'s `remove`
+ * case) or the external-commit DID match (`evaluateExternalCommit`): those compare an actual
+ * device leaf (the leaf being removed, the leaf a resynced external commit proves control of),
+ * not the authority that acts. Resolving authority there too would mean removing one device of
+ * an admin profile requires demoting the whole profile first — which is not the rule this
+ * policy enforces.
  */
 function isAdmin(context: CommitPolicyContext, leafIndex: number | undefined): boolean {
   if (leafIndex === undefined) {
@@ -67,7 +80,9 @@ function isAdmin(context: CommitPolicyContext, leafIndex: number | undefined): b
   if (did === undefined) {
     return false
   }
-  return context.baseRoster.roles.get(normalizeDID(did)) === 'admin'
+  const normalized = normalizeDID(did)
+  const authority = context.controllerOf(normalized) ?? normalized
+  return context.baseRoster.roles.get(authority) === 'admin'
 }
 
 /**

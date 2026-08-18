@@ -52,6 +52,7 @@ function context(overrides: Partial<CommitPolicyContext> = {}): CommitPolicyCont
     currentExtensions: controlExtensions(HEAD_BYTES.slice()),
     expectedHeadExtensionData: HEAD_BYTES,
     commitEnactsEntries: false,
+    controllerOf: () => undefined,
     ...overrides,
   }
 }
@@ -661,6 +662,36 @@ describe('defaultCommitPolicy', () => {
         defaultCommitPolicy(commit(MEMBER_LEAF, [withSender(proposal, undefined)]), context()),
       ).toBe('reject')
     }
+  })
+
+  test('admin-as-controller: a device of an admin profile is admin for the commit policy', () => {
+    const deviceDID = 'did:key:zDeviceA'
+    const profileDID = 'did:kokuin:profileP'
+    const psk = taggedProposal(defaultProposalTypes.psk)
+    const ctx = context({
+      baseRoster: roster([[profileDID, 'admin']]),
+      didOfLeaf: (leafIndex) => (leafIndex === ADMIN_LEAF ? deviceDID : undefined),
+      controllerOf: (did) => (did === normalizeDID(deviceDID) ? profileDID : undefined),
+    })
+    // An admin-gated proposal from the device leaf is accepted because
+    // authority(deviceDID) === profileDID === admin.
+    expect(defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(psk, undefined)]), ctx)).toBe(
+      'accept',
+    )
+  })
+
+  test('a device of a NON-admin profile is not admin', () => {
+    const deviceDID = 'did:key:zDeviceB'
+    const nonAdminProfileDID = 'did:kokuin:someoneElse'
+    const psk = taggedProposal(defaultProposalTypes.psk)
+    const ctx = context({
+      baseRoster: roster([[nonAdminProfileDID, 'member']]),
+      didOfLeaf: (leafIndex) => (leafIndex === ADMIN_LEAF ? deviceDID : undefined),
+      controllerOf: (did) => (did === normalizeDID(deviceDID) ? nonAdminProfileDID : undefined),
+    })
+    expect(defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(psk, undefined)]), ctx)).toBe(
+      'reject',
+    )
   })
 })
 
