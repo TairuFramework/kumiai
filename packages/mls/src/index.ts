@@ -1,3 +1,4 @@
+export type { EventsSource } from '@sozai/event'
 export type {
   Capabilities,
   GroupContextExtension,
@@ -46,6 +47,7 @@ export {
   type NobleCryptoProviderOptions,
   nobleCryptoProvider,
 } from './crypto.js'
+export type { LeafBinding } from './device-proof.js'
 export {
   CONTROL_ENVELOPE_VERSION,
   type ControlEnvelope,

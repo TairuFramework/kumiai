@@ -1,36 +1,25 @@
+import { normalizeDID } from '@kokuin/token'
 import { describe, expect, test } from 'vitest'
 
-import { parseMLSCredentialIdentity } from '../src/credential.js'
+import { twoDeviceProfileGroup } from './fixtures/device-harness.js'
 
-// The member projection maps a parsed identity to GroupMember. This unit test asserts the mapping
-// rule directly (the group-handle generator applies it per leaf): a bound identity surfaces its
-// controller DID; a floating one surfaces none.
-function projectMember(identityBytes: Uint8Array, leafIndex: number) {
-  const parsed = parseMLSCredentialIdentity(identityBytes)
-  return {
-    leafIndex,
-    id: parsed.id,
-    longForm: parsed.longForm ?? parsed.id,
-    ...(parsed.controller ? { controller: parsed.controller.id } : {}),
-  }
-}
-
-const enc = (obj: unknown) => new TextEncoder().encode(JSON.stringify(obj))
-
+// The member projection maps each leaf's parsed identity to GroupMember. Assert it against a REAL
+// handle's listMembers() (the production #iterateMembers generator), not a local reimplementation:
+// a bound leaf surfaces its controller DID, a floating (id-only) leaf surfaces none. The harness
+// gives both in one group — the manager joined with a bound-leaf credential (controller = P),
+// the target joined via an id-only key package (no controller binding on its leaf).
 describe('GroupMember controller surfacing', () => {
-  test('bound leaf surfaces the controller DID', () => {
-    const identity = enc({
-      id: 'did:key:zDevice',
-      controller: {
-        id: 'did:kokuin:profile',
-        prefix: [{ event: { v: 1, t: 'icp' }, sigs: ['s'] }],
-        capability: 't',
-      },
-    })
-    expect(projectMember(identity, 0).controller).toBe('did:kokuin:profile')
-  })
+  test('a bound leaf surfaces the controller DID; a floating leaf surfaces none', async () => {
+    const g = await twoDeviceProfileGroup()
+    const members = g.managerGroup.listMembers()
 
-  test('floating leaf surfaces no controller', () => {
-    expect(projectMember(enc({ id: 'did:key:zDevice' }), 0)).not.toHaveProperty('controller')
+    const manager = members.find((m) => normalizeDID(m.id) === normalizeDID(g.managerIdentity.id))
+    // The generator surfaces the controller DID as embedded in the leaf (raw); compare normalized.
+    expect(manager?.controller).toBeDefined()
+    expect(normalizeDID(manager?.controller as string)).toBe(normalizeDID(g.controllerID))
+
+    const target = members.find((m) => normalizeDID(m.id) === normalizeDID(g.targetDeviceID))
+    expect(target).toBeDefined()
+    expect(target).not.toHaveProperty('controller')
   })
 })

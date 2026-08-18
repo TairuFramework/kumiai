@@ -290,6 +290,22 @@ describe('foldControl', () => {
     expect(roster.roles.get(normalizeDID(DEV_B))).toBeUndefined()
   })
 
+  test('a role entry that would empty the admin set is dropped; the last admin survives', () => {
+    // Creator is the only admin. An admin may author role entries, so creator demoting itself
+    // to member passes the authority gate — but adminCount(next) === 0 trips the floor, so the
+    // entry is dropped (never thrown) and creator stays admin. This is the invariant guarding
+    // against a group locking itself out of all membership authority.
+    const drops: Array<{ entryID: string }> = []
+    const { roster } = foldControl(
+      [roleInput(CREATOR, CREATOR, 'member', 'e1')],
+      anchor,
+      GROUP,
+      (d) => drops.push(d),
+    )
+    expect(roster.roles.get(normalizeDID(CREATOR))).toBe('admin')
+    expect(drops.map((d) => d.entryID)).toContain('e1')
+  })
+
   test('a cross-group entry is dropped by both projections', () => {
     const { roster, registry } = foldControl(
       [deviceInput(DEV_A, DEV_A, { op: 'register', controller: PROFILE }, 'e1', 'other-group')],
