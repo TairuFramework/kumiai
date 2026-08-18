@@ -147,6 +147,47 @@ the acceptance pipeline (below), not a roster role:
 *roster* authority decision. A `register` bootstraps a binding; later entries resolve authority
 against the registry that binding is part of.
 
+### The receiving commit policy gains the symmetric exception
+
+The typed exception above lives in `envelope-fold.ts`, but that is not the only receive-side gate. A
+commit reaching a member runs through **two** independent gates in `#prepareCommitPipeline`'s
+`combined` callback (`group-handle.ts`): first the acceptance-pipeline proof gate (which sets
+`precomputedReject` and short-circuits to `reject`), then — only if the proof gate passed —
+`defaultCommitPolicy` (`policy.ts`). **Both must accept.** `defaultCommitPolicy` is the roster-authority
+gate, and as written it rejects every device-write commit regardless of the proof gate's verdict:
+
+- a commit that enacts any entry must carry a `group_context_extensions` head-move
+  (`policy.ts` — `commitEnactsEntries`), and that proposal is unconditionally `isAdmin(sender)`-gated;
+  since `isAdmin` reads the *pre-commit* registry, a self-`register` can never bootstrap;
+- an `add` proposal requires the added DID to already hold a roster role, but a device `add` mutates
+  only the registry, never the roster.
+
+So the fold's typed exception must be **mirrored in the receiving policy**, or the write path is
+dead on arrival at every honest receiver (the `processMessage` path kubun's broadcast fan-out uses).
+The policy is pure and synchronous and cannot re-verify a capability — but it does not need to: the
+proof gate provably ran first, so any `kumiai.device` entry the commit enacts is already authorized by
+the time the policy runs. The policy therefore accepts device-scoped proposals **structurally**,
+deferring their authorization to the gate that already passed. It never grants device authority on its
+own.
+
+**Scope — device-only commits.** The carve-out applies only to a commit that is *entirely*
+device-scoped: every enacted entry is a `kumiai.device` entry, and every `add` / `remove` corresponds
+to one. Any role entry or unrelated proposal drops the whole commit back to the admin rules unchanged.
+This keeps the new trust surface minimal; the Slice 2 write API only ever authors device-only commits.
+
+| Gate today | Device carve-out (device-only commits) |
+| --- | --- |
+| head-move requires `isAdmin(sender)` | accept when `isAdmin(sender)` **or** every enacted entry is a `kumiai.device` entry |
+| `add` requires the added DID to hold a roster role | accept when the added DID is the `subject` of an enacted device `add` entry |
+| `remove` requires admin sender / self-remove | accept when the removed leaf's DID is the `subject` of an enacted device `revoke` entry |
+
+`CommitPolicyContext` gains the commit's enacted device entries (`{ subject, op }`, normalized), which
+`buildCommitPolicyContext` already has at both call sites (the accepted entries on receive, the input
+tokens on send). The carve-out documents the load-bearing invariant at its site: it accepts these
+proposals structurally **only because** the acceptance-pipeline proof gate authorized the corresponding
+entries earlier in the same pipeline, and that gate provably precedes policy evaluation for every
+entry-enacting commit.
+
 ## Proof verification — the acceptance-gate / pure-fold split
 
 This is the move that keeps the pure fold synchronous and deterministic. Verification of a device
@@ -310,6 +351,11 @@ standard `test:types` + unit for `@kumiai/mls`. Confirm this at plan time.
   Slice 2. Cross-group propagation of a controller reset / superseding recovery is Slice 3.
 - **Coordinated breaking change.** No version negotiation; a mixed-version group is unsupported until a
   gate is added (deferred).
+- **Orphaned admin presence — deferred, not guarded.** `revokeDevice` can remove a device leaf whose
+  controller-profile holds an admin role. Removing a profile's *last* device leaf leaves it admin in
+  the roster with no presence in the group. The profile retains its authority; the loss of in-group
+  presence is a separate governance concern, and guarding it would need per-profile device-leaf
+  tracking in the commit-policy context. Named as a follow-up, not addressed in Slice 2.
 
 ## Non-goals (Slice 2)
 
