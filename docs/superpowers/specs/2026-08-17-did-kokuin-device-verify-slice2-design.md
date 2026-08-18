@@ -84,6 +84,13 @@ Two views are derived from it, never stored separately:
   *now* (current folded state), and **matched, never enumerated** (per the kokuin deny-set rule; the
   set kumiai exposes holds device DIDs only).
 
+**Revocation is terminal.** Once a subject reaches `status: 'revoked'`, the fold never returns it to
+`'active'`: a later `register`/`add` naming a revoked subject is a no-op in `registryApply` (the record
+stays frozen at `'revoked'`), even though the acceptance gate verified the entry. This is the concrete
+form of "honouring a revocation only ever subtracts authority" — to re-authorize a device after
+revocation, a fresh device DID is minted, never the revoked one resurrected. The rule is applied
+identically by every member, so it preserves determinism.
+
 ### The `kumiai.device` entry family
 
 One reserved control type — `kumiai.device` — recognized by a second `kumiai.*` branch in

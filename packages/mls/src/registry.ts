@@ -72,6 +72,17 @@ export function registryApply(
   switch (value.op) {
     case 'register':
     case 'add': {
+      // Terminal revocation: once a subject is revoked, no later register/add re-activates it. The
+      // fold only ever subtracts authority — to re-authorize a device, a fresh device DID is minted.
+      // The record is left frozen at 'revoked' (the acceptance gate still verified the entry, but the
+      // fold does not resurrect a revoked binding). Keeps determinism: every member applies this rule.
+      // Terminal revocation: once a subject is revoked, no later register/add re-activates it. The
+      // fold only ever subtracts authority — to re-authorize a device, a fresh device DID is minted.
+      // The record is left frozen at 'revoked' (the acceptance gate still verified the entry, but the
+      // fold does not resurrect a revoked binding). Keeps determinism: every member applies this rule.
+      if (existing?.status === 'revoked') {
+        return { devices }
+      }
       // `controller` is structurally guaranteed present for register/add by isDeviceValue.
       const controller = normalizeDID(value.controller as string)
       devices.set(subject, {

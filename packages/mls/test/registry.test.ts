@@ -96,6 +96,58 @@ describe('registryApply', () => {
     expect(denySetOf(r).has(normalizeDID(DEV_A))).toBe(true)
   })
 
+  test('revocation is terminal: a later register/add does not re-activate a revoked subject', () => {
+    let r = registryApply(
+      {
+        issuer: normalizeDID(PROFILE),
+        entry: {
+          type: DEVICE_ENTRY_TYPE,
+          groupID: GROUP,
+          subject: DEV_A,
+          value: { op: 'register', controller: PROFILE },
+        },
+      },
+      registrySeed(),
+    )
+    r = registryApply(
+      {
+        issuer: normalizeDID(PROFILE),
+        entry: { type: DEVICE_ENTRY_TYPE, groupID: GROUP, subject: DEV_A, value: { op: 'revoke' } },
+      },
+      r,
+    )
+    // A second register of the revoked subject must NOT clear its revoked status or deny-set bit.
+    r = registryApply(
+      {
+        issuer: normalizeDID(PROFILE),
+        entry: {
+          type: DEVICE_ENTRY_TYPE,
+          groupID: GROUP,
+          subject: DEV_A,
+          value: { op: 'register', controller: PROFILE },
+        },
+      },
+      r,
+    )
+    expect(r.devices.get(normalizeDID(DEV_A))?.status).toBe('revoked')
+    expect(denySetOf(r).has(normalizeDID(DEV_A))).toBe(true)
+    // An `add` of the revoked subject is likewise a no-op against the revoked status.
+    r = registryApply(
+      {
+        issuer: normalizeDID(PROFILE),
+        entry: {
+          type: DEVICE_ENTRY_TYPE,
+          groupID: GROUP,
+          subject: DEV_A,
+          value: { op: 'add', controller: PROFILE },
+        },
+      },
+      r,
+    )
+    expect(r.devices.get(normalizeDID(DEV_A))?.status).toBe('revoked')
+    expect(denySetOf(r).has(normalizeDID(DEV_A))).toBe(true)
+  })
+
   test('label sets a label without changing binding or status', () => {
     let r = registryApply(
       {
