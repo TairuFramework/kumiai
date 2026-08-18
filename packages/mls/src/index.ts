@@ -70,6 +70,7 @@ export {
   createInvite,
   createKeyPackageBundle,
   createLastResortKeyPackageBundle,
+  type DeviceWriteResult,
   type ExportGroupInfoParams,
   type ExportGroupInfoResult,
   exportGroupInfo,
@@ -86,6 +87,7 @@ export {
   LAST_RESORT_EXTENSION_TYPE,
   LAST_RESORT_LIFETIME_DAYS,
   type LedgerLogEntry,
+  labelDevice,
   makeMLSCredential,
   ORDINARY_KEY_PACKAGE_LIFETIME_DAYS,
   type ProcessWelcomeOnceParams,
@@ -96,6 +98,7 @@ export {
   type RemoveMemberResult,
   type RestoreGroupParams,
   readMessageEpoch,
+  registerDevice,
   removeMember,
   restoreGroup,
 } from './group.js'
