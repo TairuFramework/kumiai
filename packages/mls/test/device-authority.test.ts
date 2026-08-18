@@ -6,6 +6,7 @@ import type { FoldInput } from '../src/fold.js'
 import { createGroup, type GroupHandle, removeMember, restoreGroup } from '../src/group.js'
 import { commitLedgerEntries } from '../src/group-commit.js'
 import { announceControllerBeacon, registerDevice, revokeDevice } from '../src/group-device.js'
+import { buildCommitPolicyContext } from '../src/group-handle.js'
 import { signLedgerEntry } from '../src/ledger.js'
 import {
   controllerOf,
@@ -219,5 +220,40 @@ describe('determinism: incremental fold vs bootstrap re-fold', () => {
     // empty maps agreeing vacuously.
     expect(bootstrapped.registry.controllers.size).toBeGreaterThan(0)
     expect(bootstrapped.revokedDevices().length).toBeGreaterThan(0)
+  })
+})
+
+describe('commit-policy admin resolution honors revoked status (Fix 2 residual)', () => {
+  // Drives the REAL exported buildCommitPolicyContext provider on a REAL handle: an active device
+  // of an admin profile resolves to its controller (admin), a revoked device resolves to undefined
+  // (isAdmin's `controllerOf ?? id` then falls back to the device's own DID — not admin), while the
+  // shared raw controllerOf still returns the controller for the revoked device.
+  function ctxArgs(handle: GroupHandle) {
+    return {
+      baseRoster: handle.roster,
+      candidateRoster: handle.roster,
+      entryIDs: [] as Array<string>,
+      enactedDeviceEntries: [] as Array<{ subject: string; op: DeviceValue['op'] }>,
+    }
+  }
+
+  test('active device → controller; revoked device → undefined (raw controllerOf unchanged)', async () => {
+    const { managerGroup, managerIdentity, controllerID, targetDeviceID, capability } =
+      await twoDeviceProfileGroup()
+
+    // Active: the target device is bound to controllerID (P) via addDevice.
+    const activeCtx = buildCommitPolicyContext(managerGroup, ctxArgs(managerGroup))
+    expect(activeCtx.controllerOf(targetDeviceID)).toBe(controllerID)
+
+    // Revoke the target, then resolve again on the post-revoke handle.
+    const { newGroup: afterRevoke } = await revokeDevice(managerGroup, managerIdentity, {
+      device: targetDeviceID,
+      capability,
+    })
+    const revokedCtx = buildCommitPolicyContext(afterRevoke, ctxArgs(afterRevoke))
+    // The policy provider drops a revoked device to undefined → not admin.
+    expect(revokedCtx.controllerOf(targetDeviceID)).toBeUndefined()
+    // The shared raw controllerOf still returns the controller (emission + revoke gate rely on it).
+    expect(controllerOf(afterRevoke.registry, targetDeviceID)).toBe(controllerID)
   })
 })

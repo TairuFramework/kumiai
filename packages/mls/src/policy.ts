@@ -28,7 +28,9 @@ export type CommitPolicyContext = {
   candidateRoster: RosterState
   didOfLeaf: (leafIndex: number) => string | undefined
   /** Resolve a device DID to its controller (profile) via the pre-commit folded registry, or
-   *  undefined. `isAdmin` reads this to apply authority = controller ?? id. */
+   *  undefined. ACTIVE bindings only — a revoked device resolves to undefined here, so its
+   *  authority falls back to its own DID (parity with `authority()`; a revoked device confers no
+   *  controller authority). `isAdmin` reads this to apply authority = controller ?? id. */
   controllerOf: (did: string) => string | undefined
   /** The pre-commit GroupContext extension list. A group_context_extensions commit may change
    *  nothing in it but the ledger_head entry. */
@@ -74,7 +76,8 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
  * Fail-closed admin check: no DID, a DID absent from the roster, or any role but `admin`, is
  * not admin. An undefined leaf (external commit with no committer) is never admin.
  *
- * Authority resolves through the device registry: `authority(did) = controllerOf(did) ?? did`.
+ * Authority resolves through the device registry: `authority(did) = controllerOf(did) ?? did`,
+ * where `controllerOf` resolves ACTIVE bindings only (a revoked device resolves to its own DID).
  * A device leaf of an admin profile is admin, because the profile — not the device — is what
  * the roster actually grants a role to. This resolution is deliberately applied only here, to
  * the *acting* sender, and NOT to the Remove-target admin check (`evaluateProposal`'s `remove`

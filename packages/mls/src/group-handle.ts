@@ -1245,7 +1245,15 @@ export function buildCommitPolicyContext(
     baseRoster: args.baseRoster,
     candidateRoster: args.candidateRoster,
     didOfLeaf: (leafIndex: number) => leafToDID.get(leafIndex),
-    controllerOf: (did: string) => controllerOf(handle.registry, did),
+    // Status-aware, in parity with authority(): only an ACTIVE binding confers its controller's
+    // authority. A revoked device resolves to undefined here, so isAdmin's `controllerOf ?? id`
+    // falls back to the device's own DID — a revoked admin device re-entering as a floating leaf
+    // (which the deny set skips) cannot author membership commits as its former admin profile. The
+    // shared registry controllerOf stays raw (deviceRevoked emission + revoke/label gate need it).
+    controllerOf: (did: string) => {
+      const record = handle.registry.devices.get(normalizeDID(did))
+      return record != null && record.status === 'active' ? record.controller : undefined
+    },
     currentExtensions: handle.state.groupContext.extensions,
     expectedHeadExtensionData,
     commitEnactsEntries: args.entryIDs.length > 0,
