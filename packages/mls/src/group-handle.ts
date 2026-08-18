@@ -28,6 +28,7 @@ import { type LeafBinding, verifyDeviceEntry } from './device-proof.js'
 import { decodeControlEnvelope } from './envelope.js'
 import { foldEnvelope, GROUP_TYPE_PREFIX } from './envelope-fold.js'
 import type { FoldInput } from './fold.js'
+import { deviceDenyHolderFor } from './group-context.js'
 import { readMessageEpoch } from './group-info.js'
 import {
   assertHeadMatches,
@@ -303,6 +304,11 @@ export class GroupHandle {
     const folded = foldLedgerControl(this.#ledger, anchor, this.groupID)
     this.#roster = folded.roster
     this.#registry = folded.registry
+    // Point this context's deny holder at THIS handle. deriveGroup shares the context object, so a
+    // derived (post-commit) handle re-points it to itself — always the newest, live registry. A
+    // context not built by resolveMlsContext (none in the codebase) simply has no holder.
+    const denyHolder = deviceDenyHolderFor(this.#context)
+    if (denyHolder != null) denyHolder.provider = () => this.currentDenySet()
   }
 
   get groupID(): string {
