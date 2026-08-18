@@ -1,5 +1,8 @@
+import type { SignedEvent } from '@kokuin/controller'
 import { normalizeDID } from '@kokuin/token'
 import { type Credential, defaultCredentialTypes, isDefaultCredential } from 'ts-mls'
+
+import type { ControllerBeacon } from './registry.js'
 
 /**
  * Local member state (never serialized to the MLS leaf). `id` is the member's own
@@ -24,10 +27,23 @@ export type MemberCredential = {
  * That tolerance is not a courtesy owed to a transition; there is no version of this code that
  * can stop honoring it without refusing leaves nothing is wrong with.
  */
+/**
+ * Opt-in binding that makes an MLS leaf a *device of a `did:kokuin:` controller*. Present ⟺ bound.
+ * `id` names the profile DID; `prefix` is the authority-only controller-log prefix folded (sync) to
+ * verify the delegation; `capability` is the delegation token binding this device under the profile.
+ * All three are verification inputs — only the profile `id` is surfaced into `GroupMember`.
+ */
+export type ControllerBinding = {
+  id: string
+  prefix: Array<SignedEvent>
+  capability: string
+}
+
 export type MLSCredentialIdentity = {
   v?: 1
   id: string
   longForm?: string
+  controller?: ControllerBinding
 }
 
 export type GroupMember = {
@@ -46,6 +62,10 @@ export type GroupMember = {
    * an unsigned second copy of authenticated state.
    */
   longForm: string
+  /** For a bound leaf: the authenticated `did:kokuin:` controller (profile) DID. Absent for floating leaves. */
+  controller?: string
+  /** For a bound leaf: the controller's advisory folded log beacon, when one has been announced. */
+  controllerBeacon?: ControllerBeacon
 }
 
 export function parseMLSCredentialIdentity(identity: Uint8Array): MLSCredentialIdentity {
@@ -78,6 +98,29 @@ export function parseMLSCredentialIdentity(identity: Uint8Array): MLSCredentialI
   const result: MLSCredentialIdentity = { id: candidate.id }
   if (typeof candidate.longForm === 'string') {
     result.longForm = candidate.longForm
+  }
+  if ('controller' in candidate) {
+    const c = candidate.controller
+    if (c == null || typeof c !== 'object') {
+      throw new Error('Invalid MLS credential: controller must be an object when present')
+    }
+    const cc = c as Record<string, unknown>
+    if (typeof cc.id !== 'string') {
+      throw new Error('Invalid MLS credential: controller.id must be a string')
+    }
+    if (typeof cc.capability !== 'string') {
+      throw new Error('Invalid MLS credential: controller.capability must be a string')
+    }
+    if (!Array.isArray(cc.prefix)) {
+      throw new Error('Invalid MLS credential: controller.prefix must be an array')
+    }
+    // Structural only — the prefix events are validated cryptographically by the fold in
+    // validateCredential, never here (parse stays pure/structural, like longForm).
+    result.controller = {
+      id: cc.id,
+      prefix: cc.prefix as Array<SignedEvent>,
+      capability: cc.capability,
+    }
   }
   return result
 }

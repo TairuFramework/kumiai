@@ -13,6 +13,7 @@ import {
 
 import { LEDGER_HEAD_EXTENSION_TYPE } from './anchor.js'
 import { parseMLSCredentialIdentity } from './credential.js'
+import { verifyDeviceEntry } from './device-proof.js'
 import { encodeControlEnvelope } from './envelope.js'
 import { foldEnvelope } from './envelope-fold.js'
 import type { FoldInput } from './fold.js'
@@ -23,8 +24,14 @@ import {
   mutexFor,
 } from './group-handle.js'
 import { buildLedgerHeadExtension, extendHead, readLedgerHead } from './head.js'
-import { ledgerEntryDigest, signLedgerEntry, verifyLedgerEntry } from './ledger.js'
+import {
+  ledgerEntryDigest,
+  signLedgerEntry,
+  type VerifiedLedgerEntry,
+  verifyLedgerEntry,
+} from './ledger.js'
 import { defaultCommitPolicy } from './policy.js'
+import { authority, controllerOf, DEVICE_ENTRY_TYPE, type DeviceValue } from './registry.js'
 import { type GroupPermission, ROLE_ENTRY_TYPE } from './roster.js'
 import type { Invite } from './types.js'
 
@@ -104,7 +111,7 @@ export type CreateInviteResult = {
  */
 export async function createInvite(params: CreateInviteParams): Promise<CreateInviteResult> {
   const { group, identity, recipientDID, permission } = params
-  if (group.roster.roles.get(normalizeDID(identity.id)) !== 'admin') {
+  if (group.roster.roles.get(authority(group.registry, identity.id)) !== 'admin') {
     throw new Error('createInvite: the inviter must be an admin in the group roster')
   }
 
@@ -176,11 +183,18 @@ export async function commitWithEntries(
   group: GroupHandle,
   extraProposals: Array<DefaultProposal>,
   enacted: Array<string>,
-  ratchetTreeExtension = false,
+  options: { ratchetTreeExtension?: boolean; requireAdmin?: boolean } = {},
 ): Promise<Awaited<ReturnType<typeof createCommit>>> {
+  const ratchetTreeExtension = options.ratchetTreeExtension ?? false
+  const requireAdmin = options.requireAdmin ?? true
   // Same reason createInvite guards the inviter: a non-admin's commit is rejected by
   // every receiver, so fail here rather than emitting a commit nobody will apply.
-  if (group.roster.roles.get(normalizeDID(group.credential.id)) !== 'admin') {
+  // Authority-aware: a device of an admin profile commits as that profile. Device-only commits
+  // (register/add/revoke/label) are authorized by proofs, not a role, so they pass requireAdmin:false.
+  if (
+    requireAdmin &&
+    group.roster.roles.get(authority(group.registry, group.credential.id)) !== 'admin'
+  ) {
     throw new Error('the committer must be an admin in the group roster')
   }
 
@@ -198,9 +212,23 @@ export async function commitWithEntries(
     }
     inputs.push({ verified, entryID: ledgerEntryDigest(token) })
   }
-  const fold = foldEnvelope(group.roster, inputs, group.groupID)
+  const fold = foldEnvelope(group.roster, group.registry, inputs, group.groupID)
   if (!fold.ok) {
     throw new Error(`cannot enact ledger entry ${fold.entryID}: ${fold.reason}`)
+  }
+
+  // Same reason as the fold guard above: verify device entries against THIS group's tree and
+  // registry so the committer never authors a commit every receiver's own gate will reject.
+  const proofCtx = {
+    bindingOfDID: (d: string) => group.bindingOfDID(d),
+    controllerOf: (d: string) => controllerOf(group.registry, d),
+  }
+  for (const input of inputs) {
+    if (input.verified.entry.type !== DEVICE_ENTRY_TYPE) continue
+    const ok = await verifyDeviceEntry(input.verified as VerifiedLedgerEntry<DeviceValue>, proofCtx)
+    if (!ok) {
+      throw new Error(`cannot enact device entry ${input.entryID}: proof verification failed`)
+    }
   }
 
   const entryIDs = enacted.map(ledgerEntryDigest)
@@ -210,10 +238,17 @@ export async function commitWithEntries(
   // ride it and every peer would reject the whole thing — one member could stall the
   // group. Judge each against the same defaultCommitPolicy and context receivers build,
   // dropping any the group would reject.
+  const enactedDeviceEntries = inputs
+    .filter((i) => i.verified.entry.type === DEVICE_ENTRY_TYPE)
+    .map((i) => ({
+      subject: normalizeDID(i.verified.entry.subject),
+      op: (i.verified.entry.value as DeviceValue).op,
+    }))
   const filterContext = buildCommitPolicyContext(group, {
     baseRoster: group.roster,
     candidateRoster: fold.roster,
     entryIDs,
+    enactedDeviceEntries,
   })
   const keptPending: typeof group.state.unappliedProposals = {}
   for (const [ref, pws] of Object.entries(group.state.unappliedProposals)) {
@@ -406,7 +441,9 @@ export async function commitInvite(
       proposalType: defaultProposalTypes.add,
       add: { keyPackage },
     }
-    const result = await commitWithEntries(group, [addProposal], enacted, true)
+    const result = await commitWithEntries(group, [addProposal], enacted, {
+      ratchetTreeExtension: true,
+    })
 
     const newGroup = deriveGroup(group, result.newState)
 

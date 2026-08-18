@@ -35,11 +35,14 @@
     "test:unit": "vitest run"
   },
   "dependencies": {
+    "@kokuin/capability": "catalog:",
+    "@kokuin/controller": "catalog:",
     "@kokuin/token": "catalog:",
     "@noble/ciphers": "catalog:",
     "@noble/curves": "catalog:",
     "@noble/hashes": "catalog:",
     "@sozai/codec": "catalog:",
+    "@sozai/event": "catalog:",
     "@sozai/runtime": "catalog:",
     "ts-mls": "catalog:"
   },

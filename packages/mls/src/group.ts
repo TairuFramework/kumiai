@@ -24,8 +24,17 @@ export {
   ORDINARY_KEY_PACKAGE_LIFETIME_DAYS,
 } from './group-credential.js'
 export {
+  addDevice,
+  announceControllerBeacon,
+  type DeviceWriteResult,
+  labelDevice,
+  registerDevice,
+  revokeDevice,
+} from './group-device.js'
+export {
   CommitRejectedError,
   GroupHandle,
+  type GroupHandleEvents,
   type GroupHandleParams,
   type HeldLedgerEntry,
   type LedgerLogEntry,

@@ -1,3 +1,4 @@
+export type { EventsSource } from '@sozai/event'
 export type {
   Capabilities,
   GroupContextExtension,
@@ -20,7 +21,14 @@ export {
   readGroupAnchor,
   readGroupAnchorExtension,
 } from './anchor.js'
-export { createDIDAuthenticationService } from './authentication.js'
+export {
+  createDIDAuthenticationService,
+  MLS_DEVICES_ACT,
+  MLS_DEVICES_RES,
+  MLS_LEAF_ACT,
+  MLS_LEAF_RES,
+  verifyManagementCapability,
+} from './authentication.js'
 export {
   type ClientState,
   decodeClientState,
@@ -28,6 +36,7 @@ export {
   sanitizeRatchetTree,
 } from './codec.js'
 export {
+  type ControllerBinding,
   type GroupMember,
   type MemberCredential,
   type MLSCredentialIdentity,
@@ -38,6 +47,7 @@ export {
   type NobleCryptoProviderOptions,
   nobleCryptoProvider,
 } from './crypto.js'
+export type { LeafBinding } from './device-proof.js'
 export {
   CONTROL_ENVELOPE_VERSION,
   type ControlEnvelope,
@@ -53,6 +63,8 @@ export {
   type LedgerReducer,
 } from './fold.js'
 export {
+  addDevice,
+  announceControllerBeacon,
   type CommitInviteResult,
   type CommitLedgerEntriesResult,
   CommitRejectedError,
@@ -65,10 +77,12 @@ export {
   createInvite,
   createKeyPackageBundle,
   createLastResortKeyPackageBundle,
+  type DeviceWriteResult,
   type ExportGroupInfoParams,
   type ExportGroupInfoResult,
   exportGroupInfo,
   GroupHandle,
+  type GroupHandleEvents,
   type GroupHandleParams,
   type HeldLedgerEntry,
   type InspectGroupInfoResult,
@@ -81,6 +95,7 @@ export {
   LAST_RESORT_EXTENSION_TYPE,
   LAST_RESORT_LIFETIME_DAYS,
   type LedgerLogEntry,
+  labelDevice,
   makeMLSCredential,
   ORDINARY_KEY_PACKAGE_LIFETIME_DAYS,
   type ProcessWelcomeOnceParams,
@@ -91,8 +106,10 @@ export {
   type RemoveMemberResult,
   type RestoreGroupParams,
   readMessageEpoch,
+  registerDevice,
   removeMember,
   restoreGroup,
+  revokeDevice,
 } from './group.js'
 export {
   assertHeadMatches,
@@ -153,6 +170,20 @@ export {
   sealLedger,
   type VerifiedRecoveryRequest,
 } from './recovery.js'
+export {
+  authority,
+  beaconOf,
+  type ControllerBeacon,
+  controllerOf,
+  DEVICE_ENTRY_TYPE,
+  type DeviceOp,
+  type DeviceRecord,
+  type DeviceRegistry,
+  type DeviceValue,
+  denySetOf,
+  foldControl,
+  registrySeed,
+} from './registry.js'
 export {
   adminCount,
   foldRoster,

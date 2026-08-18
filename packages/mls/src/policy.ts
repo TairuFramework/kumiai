@@ -9,6 +9,7 @@ import { defaultProposalTypes, isDefaultProposal } from 'ts-mls'
 
 import { LEDGER_HEAD_EXTENSION_TYPE, RESERVED_EXTENSION_TYPE } from './anchor.js'
 import { didFromCredential } from './credential.js'
+import type { DeviceOp } from './registry.js'
 import type { RosterState } from './roster.js'
 
 /**
@@ -26,6 +27,11 @@ export type CommitPolicyContext = {
    *  target: a Remove of a leaf still `admin` here carried no demotion and is rejected. */
   candidateRoster: RosterState
   didOfLeaf: (leafIndex: number) => string | undefined
+  /** Resolve a device DID to its controller (profile) via the pre-commit folded registry, or
+   *  undefined. ACTIVE bindings only — a revoked device resolves to undefined here, so its
+   *  authority falls back to its own DID (parity with `authority()`; a revoked device confers no
+   *  controller authority). `isAdmin` reads this to apply authority = controller ?? id. */
+  controllerOf: (did: string) => string | undefined
   /** The pre-commit GroupContext extension list. A group_context_extensions commit may change
    *  nothing in it but the ledger_head entry. */
   currentExtensions: Array<GroupContextExtension>
@@ -35,6 +41,17 @@ export type CommitPolicyContext = {
   expectedHeadExtensionData: Uint8Array
   /** Whether the commit's envelope names any entries. */
   commitEnactsEntries: boolean
+  /** The kumiai.device entries this commit enacts — subjects normalized, in envelope order; empty for
+   *  a non-device commit. The device carve-out reads these to accept device-scoped proposals
+   *  STRUCTURALLY. Load-bearing invariant: this is safe only because the acceptance-pipeline proof gate
+   *  (verifyDeviceEntry) authorized these entries earlier in the same pipeline, before this policy runs
+   *  — see group-handle.ts #prepareCommitPipeline, where precomputedReject short-circuits ahead of
+   *  defaultCommitPolicy. The policy never grants device authority on its own. */
+  enactedDeviceEntries: ReadonlyArray<{ subject: string; op: DeviceOp }>
+  /** True iff the commit enacts at least one entry AND every enacted entry is a kumiai.device entry —
+   *  the device-only precondition for the head-move carve-out. A commit mixing a role entry has this
+   *  false, so its mandatory head-move falls back to the admin rule. */
+  enactsOnlyDeviceEntries: boolean
   externalCommitDID?: string
 }
 
@@ -58,6 +75,17 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
 /**
  * Fail-closed admin check: no DID, a DID absent from the roster, or any role but `admin`, is
  * not admin. An undefined leaf (external commit with no committer) is never admin.
+ *
+ * Authority resolves through the device registry: `authority(did) = controllerOf(did) ?? did`,
+ * where `controllerOf` resolves ACTIVE bindings only (a revoked device resolves to its own DID).
+ * A device leaf of an admin profile is admin, because the profile — not the device — is what
+ * the roster actually grants a role to. This resolution is deliberately applied only here, to
+ * the *acting* sender, and NOT to the Remove-target admin check (`evaluateProposal`'s `remove`
+ * case) or the external-commit DID match (`evaluateExternalCommit`): those compare an actual
+ * device leaf (the leaf being removed, the leaf a resynced external commit proves control of),
+ * not the authority that acts. Resolving authority there too would mean removing one device of
+ * an admin profile requires demoting the whole profile first — which is not the rule this
+ * policy enforces.
  */
 function isAdmin(context: CommitPolicyContext, leafIndex: number | undefined): boolean {
   if (leafIndex === undefined) {
@@ -67,7 +95,9 @@ function isAdmin(context: CommitPolicyContext, leafIndex: number | undefined): b
   if (did === undefined) {
     return false
   }
-  return context.baseRoster.roles.get(normalizeDID(did)) === 'admin'
+  const normalized = normalizeDID(did)
+  const authority = context.controllerOf(normalized) ?? normalized
+  return context.baseRoster.roles.get(authority) === 'admin'
 }
 
 /**
@@ -158,7 +188,10 @@ function evaluateProposal(
   }
   switch (proposal.proposalType) {
     case defaultProposalTypes.add: {
-      if (!isAdmin(context, effectiveSender)) {
+      // A credential that names no DID (non-`basic`, or malformed) is rejected rather than
+      // trusted. `didFromCredential` is total, so nothing here can throw past this boundary.
+      const addedDID = didFromCredential(proposal.add.keyPackage.leafNode.credential)
+      if (addedDID === undefined) {
         return 'reject'
       }
       // Bind the leaf that joins to the roster this commit produces, mirroring the binding
@@ -172,14 +205,16 @@ function evaluateProposal(
       // Membership, not provenance: the question is whether the added DID holds a role, never
       // whether this commit granted it. A re-add — a second device, a rejoin after removal —
       // enacts no entry and must keep working.
-      //
-      // A credential that names no DID (non-`basic`, or malformed) is rejected rather than
-      // trusted. `didFromCredential` is total, so nothing here can throw past this boundary.
-      const addedDID = didFromCredential(proposal.add.keyPackage.leafNode.credential)
-      if (addedDID === undefined) {
-        return 'reject'
+      if (isAdmin(context, effectiveSender) && context.candidateRoster.roles.has(addedDID)) {
+        return 'accept'
       }
-      return context.candidateRoster.roles.has(addedDID) ? 'accept' : 'reject'
+      // Device carve-out: an Add whose added DID is the subject of an enacted device `add` entry is
+      // authorized by that entry's proof (already verified upstream), not by a roster role — no
+      // admin sender required.
+      const addedNorm = normalizeDID(addedDID)
+      return context.enactedDeviceEntries.some((e) => e.op === 'add' && e.subject === addedNorm)
+        ? 'accept'
+        : 'reject'
     }
     // Split from `add` above only so they stop sharing an arm that reads `proposal.add`.
     // Neither carries a leaf, so neither has anything to bind to the roster.
@@ -200,14 +235,22 @@ function evaluateProposal(
       if (isAdmin(context, effectiveSender)) {
         return 'accept'
       }
-      return effectiveSender !== undefined && proposal.remove.removed === effectiveSender
+      if (effectiveSender !== undefined && proposal.remove.removed === effectiveSender) {
+        return 'accept'
+      }
+      // Device carve-out: a Remove whose target is the subject of an enacted device `revoke` entry is
+      // authorized by that entry's proof. The anti-demotion check above still guards an admin leaf.
+      return removedDID !== undefined &&
+        context.enactedDeviceEntries.some(
+          (e) => e.op === 'revoke' && e.subject === normalizeDID(removedDID),
+        )
         ? 'accept'
         : 'reject'
     }
     case defaultProposalTypes.update:
       return 'accept'
     case defaultProposalTypes.group_context_extensions:
-      return isAdmin(context, effectiveSender)
+      return isAdmin(context, effectiveSender) || context.enactsOnlyDeviceEntries
         ? evaluateGroupContextExtensions(proposal.groupContextExtensions.extensions, context)
         : 'reject'
     default:

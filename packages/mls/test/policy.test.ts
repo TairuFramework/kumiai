@@ -52,6 +52,9 @@ function context(overrides: Partial<CommitPolicyContext> = {}): CommitPolicyCont
     currentExtensions: controlExtensions(HEAD_BYTES.slice()),
     expectedHeadExtensionData: HEAD_BYTES,
     commitEnactsEntries: false,
+    enactedDeviceEntries: [],
+    enactsOnlyDeviceEntries: false,
+    controllerOf: () => undefined,
     ...overrides,
   }
 }
@@ -661,6 +664,117 @@ describe('defaultCommitPolicy', () => {
         defaultCommitPolicy(commit(MEMBER_LEAF, [withSender(proposal, undefined)]), context()),
       ).toBe('reject')
     }
+  })
+
+  test('admin-as-controller: a device of an admin profile is admin for the commit policy', () => {
+    const deviceDID = 'did:key:zDeviceA'
+    const profileDID = 'did:kokuin:profileP'
+    const psk = taggedProposal(defaultProposalTypes.psk)
+    const ctx = context({
+      baseRoster: roster([[profileDID, 'admin']]),
+      didOfLeaf: (leafIndex) => (leafIndex === ADMIN_LEAF ? deviceDID : undefined),
+      controllerOf: (did) => (did === normalizeDID(deviceDID) ? profileDID : undefined),
+    })
+    // An admin-gated proposal from the device leaf is accepted because
+    // authority(deviceDID) === profileDID === admin.
+    expect(defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(psk, undefined)]), ctx)).toBe(
+      'accept',
+    )
+  })
+
+  test('a device of a NON-admin profile is not admin', () => {
+    const deviceDID = 'did:key:zDeviceB'
+    const nonAdminProfileDID = 'did:kokuin:someoneElse'
+    const psk = taggedProposal(defaultProposalTypes.psk)
+    const ctx = context({
+      baseRoster: roster([[nonAdminProfileDID, 'member']]),
+      didOfLeaf: (leafIndex) => (leafIndex === ADMIN_LEAF ? deviceDID : undefined),
+      controllerOf: (did) => (did === normalizeDID(deviceDID) ? nonAdminProfileDID : undefined),
+    })
+    expect(defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(psk, undefined)]), ctx)).toBe(
+      'reject',
+    )
+  })
+
+  test('a device-only commit head-move by a non-admin sender is accepted', () => {
+    // registerDevice's shape: a non-admin device leaf moving the head with no other
+    // proposal, authorized structurally because enactsOnlyDeviceEntries is true.
+    const gce = gceProposal(controlExtensions(HEAD_BYTES.slice()))
+    expect(
+      defaultCommitPolicy(
+        commit(MEMBER_LEAF, [withSender(gce, undefined)]),
+        context({ enactsOnlyDeviceEntries: true }),
+      ),
+    ).toBe('accept')
+  })
+
+  test('a head-move by a non-admin sender is rejected when the commit is not device-only', () => {
+    // Same proposal shape as the accepted case above, but enactsOnlyDeviceEntries stays false
+    // (the default) — a mixed or non-device commit falls back to the plain admin rule.
+    const gce = gceProposal(controlExtensions(HEAD_BYTES.slice()))
+    expect(defaultCommitPolicy(commit(MEMBER_LEAF, [withSender(gce, undefined)]), context())).toBe(
+      'reject',
+    )
+  })
+
+  test('an add matching an enacted device add entry is accepted for a non-admin sender', () => {
+    const add = addProposal(OUTSIDER_DID)
+    const ctx = context({
+      enactedDeviceEntries: [{ subject: normalizeDID(OUTSIDER_DID), op: 'add' }],
+    })
+    expect(defaultCommitPolicy(commit(MEMBER_LEAF, [withSender(add, undefined)]), ctx)).toBe(
+      'accept',
+    )
+  })
+
+  test('an add with no matching enacted device add entry is rejected for a non-admin sender', () => {
+    const add = addProposal(OUTSIDER_DID)
+    const ctx = context({
+      // Wrong op: a revoke entry for the same subject does not authorize an Add.
+      enactedDeviceEntries: [{ subject: normalizeDID(OUTSIDER_DID), op: 'revoke' }],
+    })
+    expect(defaultCommitPolicy(commit(MEMBER_LEAF, [withSender(add, undefined)]), ctx)).toBe(
+      'reject',
+    )
+  })
+
+  test('a remove matching an enacted device revoke entry is accepted for a non-admin sender', () => {
+    const remove = removeProposal(THIRD_LEAF)
+    const ctx = context({
+      enactedDeviceEntries: [{ subject: normalizeDID(THIRD_DID), op: 'revoke' }],
+    })
+    expect(defaultCommitPolicy(commit(MEMBER_LEAF, [withSender(remove, undefined)]), ctx)).toBe(
+      'accept',
+    )
+  })
+
+  test('a remove with no matching enacted device revoke entry is rejected for a non-admin sender', () => {
+    const remove = removeProposal(THIRD_LEAF)
+    const ctx = context({
+      // Matches a different subject entirely.
+      enactedDeviceEntries: [{ subject: normalizeDID(OUTSIDER_DID), op: 'revoke' }],
+    })
+    expect(defaultCommitPolicy(commit(MEMBER_LEAF, [withSender(remove, undefined)]), ctx)).toBe(
+      'reject',
+    )
+  })
+
+  test('the anti-demotion guard still rejects a remove of an admin leaf even with a matching revoke entry', () => {
+    // Safety preserved: the device carve-out never reaches an admin leaf, because the
+    // anti-demotion check runs first and unconditionally.
+    const roles = roster([
+      [ADMIN_DID, 'admin'],
+      [THIRD_DID, 'admin'],
+    ])
+    const remove = removeProposal(THIRD_LEAF)
+    const ctx = context({
+      baseRoster: roles,
+      candidateRoster: roles,
+      enactedDeviceEntries: [{ subject: normalizeDID(THIRD_DID), op: 'revoke' }],
+    })
+    expect(defaultCommitPolicy(commit(MEMBER_LEAF, [withSender(remove, undefined)]), ctx)).toBe(
+      'reject',
+    )
   })
 })
 

@@ -1,6 +1,14 @@
 import type { FoldInput } from './fold.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
 import {
+  authority,
+  DEVICE_ENTRY_TYPE,
+  type DeviceRegistry,
+  type DeviceValue,
+  isDeviceValue,
+  registryApply,
+} from './registry.js'
+import {
   adminCount,
   type GroupPermission,
   ROLE_ENTRY_TYPE,
@@ -11,12 +19,18 @@ import {
 
 /**
  * The outcome of folding an envelope's control entries. On accept: the candidate
- * roster (base ∪ this envelope's kumiai.role entries) and the non-group entries to
- * surface to the consumer, in envelope order. On reject: a reason and the offending
- * entry id. A rejection is a value — the caller turns it into a commit rejection.
+ * roster (base ∪ this envelope's kumiai.role entries), the candidate registry (base ∪
+ * this envelope's kumiai.device entries), and the non-group entries to surface to the
+ * consumer, in envelope order. On reject: a reason and the offending entry id. A
+ * rejection is a value — the caller turns it into a commit rejection.
  */
 export type EnvelopeFoldResult =
-  | { ok: true; roster: RosterState; surfaced: Array<VerifiedLedgerEntry> }
+  | {
+      ok: true
+      roster: RosterState
+      registry: DeviceRegistry
+      surfaced: Array<VerifiedLedgerEntry>
+    }
   | { ok: false; reason: string; entryID: string }
 
 export const GROUP_TYPE_PREFIX = 'kumiai.'
@@ -43,10 +57,15 @@ function isRoleValue(value: unknown): value is GroupPermission {
  */
 export function foldEnvelope(
   baseRoster: RosterState,
+  baseRegistry: DeviceRegistry,
   entries: Array<FoldInput>,
   groupID: string,
 ): EnvelopeFoldResult {
   let workingRoster: RosterState = { roles: new Map(baseRoster.roles) }
+  let workingRegistry: DeviceRegistry = {
+    devices: new Map(baseRegistry.devices),
+    controllers: new Map(baseRegistry.controllers),
+  }
   const surfaced: Array<VerifiedLedgerEntry> = []
 
   for (const { verified, entryID } of entries) {
@@ -57,8 +76,21 @@ export function foldEnvelope(
       return { ok: false, reason: 'cross-group entry', entryID }
     }
 
-    // The universal invariant: the issuer must be an admin in state-so-far.
-    if (workingRoster.roles.get(issuer) !== 'admin') {
+    // The typed exception to the admin invariant: a device entry is authorized by a proof in the
+    // acceptance pipeline, not a roster role. The fold applies it structurally and threads the
+    // registry that later authority checks read.
+    if (entry.type === DEVICE_ENTRY_TYPE) {
+      if (!isDeviceValue(entry.value)) {
+        return { ok: false, reason: 'malformed kumiai.device value', entryID }
+      }
+      const value: DeviceValue = entry.value
+      workingRegistry = registryApply({ issuer, entry: { ...entry, value } }, workingRegistry)
+      continue
+    }
+
+    // The universal invariant, now authority-aware: the issuer's AUTHORITY (controller ?? id,
+    // read off the registry-so-far) must be an admin in state-so-far.
+    if (workingRoster.roles.get(authority(workingRegistry, issuer)) !== 'admin') {
       return { ok: false, reason: `non-admin issuer '${issuer}'`, entryID }
     }
 
@@ -87,5 +119,5 @@ export function foldEnvelope(
     surfaced.push(verified)
   }
 
-  return { ok: true, roster: workingRoster, surfaced }
+  return { ok: true, roster: workingRoster, registry: workingRegistry, surfaced }
 }
