@@ -1,4 +1,5 @@
 import { normalizeDID } from '@kokuin/token'
+import { EventEmitter, type EventsSource } from '@sozai/event'
 import {
   type ClientState,
   contentTypes,
@@ -55,6 +56,7 @@ import {
   type DeviceValue,
   denySetOf,
   foldControl,
+  isDeviceValue,
 } from './registry.js'
 import type { RosterState } from './roster.js'
 import { type PrivateCommitFrame, readSenderLeafIndex } from './sender-data.js'
@@ -71,6 +73,25 @@ export function mutexFor(handle: GroupHandle): Mutex {
     MUTEXES.set(handle, mutex)
   }
   return mutex
+}
+
+/** Events a GroupHandle emits. Advisory notifications derived from the folded ledger; never
+ *  a protocol input. Delivered via `fire` (a throwing listener never breaks a fold). */
+export type GroupHandleEvents = {
+  deviceRevoked: Array<{ device: string; controller: string }>
+  controllerBeaconChanged: { controller: string; logLength: number; headDigest: string }
+}
+
+/** One event emitter per live handle, shared across every handle derived from it (deriveGroup),
+ *  so a subscription on an early handle keeps receiving events fired on its post-commit successors.
+ *  Keyed weakly, mirroring MUTEXES. */
+const EMITTERS = new WeakMap<GroupHandle, EventEmitter<GroupHandleEvents>>()
+
+/** The full emitter for a handle — module-internal, for deriveGroup to share it onward. */
+export function emitterOf(group: GroupHandle): EventEmitter<GroupHandleEvents> {
+  const emitter = EMITTERS.get(group)
+  if (emitter == null) throw new Error('GroupHandle has no event emitter')
+  return emitter
 }
 
 /** Overwrite retired secret buffers ts-mls hands back as `consumed`, so key
@@ -262,6 +283,8 @@ export type GroupHandleParams = {
   resolveLedgerEntries?: (ids: Array<string>) => Promise<Array<string>>
   /** Surface an accepted commit's notarized non-`kumiai.role` entries to the consumer. */
   onLedgerEntries?: (entries: Array<VerifiedLedgerEntry>) => void
+  /** Shared event emitter; a derived handle inherits its parent's so subscriptions persist. */
+  events?: EventEmitter<GroupHandleEvents>
 }
 
 /** Mutable wrapper around MLS group state + Enkaku credential. */
@@ -310,6 +333,7 @@ export class GroupHandle {
     // context not built by resolveMlsContext (none in the codebase) simply has no holder.
     const denyHolder = deviceDenyHolderFor(this.#context)
     if (denyHolder != null) denyHolder.provider = () => this.currentDenySet()
+    EMITTERS.set(this, params.events ?? new EventEmitter<GroupHandleEvents>())
   }
 
   get groupID(): string {
@@ -391,6 +415,58 @@ export class GroupHandle {
     return denySetOf(this.#registry)
   }
 
+  /** Listen-only view of this group's events. Consumers subscribe; they cannot emit. */
+  get events(): EventsSource<GroupHandleEvents> {
+    return emitterOf(this)
+  }
+
+  /**
+   * The device bindings currently at `status: 'revoked'` — an enumerable notification/tracking
+   * surface for consumers deciding where else to revoke. Distinct from currentDenySet(), the
+   * opaque matched-never-enumerated validation deny set; this is never a gating input.
+   */
+  revokedDevices(): ReadonlyArray<{ device: string; controller: string; label?: string }> {
+    const out: Array<{ device: string; controller: string; label?: string }> = []
+    for (const [device, record] of this.#registry.devices) {
+      if (record.status === 'revoked') {
+        out.push({
+          device,
+          controller: record.controller,
+          ...(record.label !== undefined ? { label: record.label } : {}),
+        })
+      }
+    }
+    return out
+  }
+
+  /**
+   * Fire notification events for the device entries just enacted in one operation. Called from the
+   * commit path, from bootstrapLedger, and from the local write APIs — NEVER from the constructor
+   * or a fresh-join applyLedgerEntries, so a joiner is not replayed the whole history as live events
+   * (it reads revokedDevices()/beaconOf for current state instead). Uses `fire`: a throwing
+   * listener is swallowed and cannot break the fold. Reads controllerOf on the POST-fold registry.
+   */
+  emitControlEvents(enacted: ReadonlyArray<VerifiedLedgerEntry>): void {
+    const emitter = emitterOf(this)
+    const revoked: Array<{ device: string; controller: string }> = []
+    for (const { entry } of enacted) {
+      if (entry.type !== DEVICE_ENTRY_TYPE || !isDeviceValue(entry.value)) continue
+      const value: DeviceValue = entry.value
+      const subject = normalizeDID(entry.subject)
+      if (value.op === 'revoke') {
+        const controller = controllerOf(this.#registry, subject)
+        if (controller != null) revoked.push({ device: subject, controller })
+      } else if (value.op === 'beacon' && value.logLength != null && value.headDigest != null) {
+        emitter.fire('controllerBeaconChanged', {
+          controller: subject,
+          logLength: value.logLength,
+          headDigest: value.headDigest,
+        })
+      }
+    }
+    if (revoked.length > 0) emitter.fire('deviceRevoked', revoked)
+  }
+
   /**
    * Verify signed ledger tokens, append the valid ones in the order given, and
    * refold the roster. Tokens that fail verification or whose groupID mismatches are
@@ -404,18 +480,21 @@ export class GroupHandle {
    * it (MLS applies each once, restoreGroup replays a token list once, processWelcome
    * folds an invite once). Serialized on the handle's mutex.
    */
-  async applyLedgerEntries(tokens: Array<string>): Promise<void> {
+  async applyLedgerEntries(tokens: Array<string>): Promise<Array<VerifiedLedgerEntry>> {
     return mutexFor(this).run(async () => {
+      const appended: Array<VerifiedLedgerEntry> = []
       for (const token of tokens) {
         const verified = await verifyLedgerEntry(token)
         if (verified == null || verified.entry.groupID !== this.groupID) continue
         const entryID = ledgerEntryDigest(token)
         this.#ledger.push({ entryID, token, verified })
         this.#entryBodies.set(entryID, { token, verified })
+        appended.push(verified)
       }
       const folded = foldLedgerControl(this.#ledger, this.#anchor, this.groupID)
       this.#roster = folded.roster
       this.#registry = folded.registry
+      return appended
     })
   }
 
@@ -518,6 +597,15 @@ export class GroupHandle {
         )
         .map(({ verified }) => verified)
 
+      // Same dedupe as `surfaced`, narrowed to device entries — feeds emitControlEvents below so a
+      // heal fires deviceRevoked for entries this bootstrap actually adds, not ones already held.
+      const enactedDevice = log
+        .filter(
+          ({ entryID, verified }) =>
+            !this.#entryBodies.has(entryID) && verified.entry.type === DEVICE_ENTRY_TYPE,
+        )
+        .map(({ verified }) => verified)
+
       this.#ledger = log
       this.#entryBodies = new Map(
         log.map(({ entryID, token, verified }) => [entryID, { token, verified }]),
@@ -535,6 +623,7 @@ export class GroupHandle {
       // Deduped against what this handle already held, so a peer bootstrapping over a partial
       // ledger is not re-notified of entries it has already seen.
       if (surfaced.length > 0) this.#onLedgerEntries?.(surfaced)
+      this.emitControlEvents(enactedDevice)
     })
   }
 
@@ -884,6 +973,11 @@ export class GroupHandle {
       this.#roster = candidateRoster
       this.#registry = candidateRegistry
       if (surfaced.length > 0) this.#onLedgerEntries?.(surfaced)
+      this.emitControlEvents(
+        acceptedEntries
+          .filter(({ verified }) => verified.entry.type === DEVICE_ENTRY_TYPE)
+          .map(({ verified }) => verified),
+      )
     }
 
     return { callback: wrapCommitPolicy(combined, capture), capture, applyOnAccept }
@@ -1166,5 +1260,6 @@ export function deriveGroup(group: GroupHandle, state: ClientState): GroupHandle
     commitPolicy: group.commitPolicy,
     resolveLedgerEntries: group.resolveLedgerEntries,
     onLedgerEntries: group.onLedgerEntries,
+    events: emitterOf(group),
   })
 }

@@ -1186,7 +1186,7 @@ describe('GroupHandle control state', () => {
       value: 'admin',
     })
 
-    await expect(group.applyLedgerEntries([crossGroup, memberSigned])).resolves.toBeUndefined()
+    await group.applyLedgerEntries([crossGroup, memberSigned])
     expect([...group.roster.roles.entries()]).toEqual([[normalizeDID(alice.id), 'admin']])
   })
 
