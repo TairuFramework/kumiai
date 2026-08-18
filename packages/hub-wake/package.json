@@ -1,6 +1,6 @@
 {
   "name": "@kumiai/hub-wake",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Wake-notification registry and senders for a kumiai hub",
   "keywords": [
     "hub",

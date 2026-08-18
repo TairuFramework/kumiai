@@ -1,5 +1,18 @@
 # @kumiai/rpc
 
+## 0.7.0
+
+### Minor Changes
+
+- Align the shared pre-1.0 version band to 0.7.0. The twelve packages move as one minor band (AGENTS.md); the did:kokuin (`@kumiai/mls`) and wake (`hub-*`) features raise the band, so the remaining packages take a no-op minor to keep every package on the same minor. No functional change in these packages.
+
+### Patch Changes
+
+- Updated dependencies:
+  - @kumiai/broadcast@0.7.0
+  - @kumiai/hub-protocol@0.7.0
+  - @kumiai/hub-tunnel@0.7.0
+
 ## 0.6.0
 
 ### Minor Changes
