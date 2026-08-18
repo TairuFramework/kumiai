@@ -1,5 +1,5 @@
 import { createInception, didFromInception, type SignedEvent } from '@kokuin/controller'
-import { createSigningIdentity } from '@kokuin/token'
+import { createSigningIdentity, normalizeDID } from '@kokuin/token'
 import { describe, expect, test } from 'vitest'
 
 import type { DeviceProofContext, LeafBinding } from '../src/device-proof.js'
@@ -139,5 +139,35 @@ describe('verifyDeviceEntry — manage ops (management capability)', () => {
     })
     const value: DeviceValue = { op: 'revoke', capability: cap.capability }
     expect(await verifyDeviceEntry(entry(other.id, 'did:key:zTarget', value), c)).toBe(false)
+  })
+})
+
+describe('verifyDeviceEntry — beacon (self-scoped, no capability)', () => {
+  const otherProfile = normalizeDID('did:kokuin:profileOther')
+
+  test('accepts a beacon authored by a bound device of the subject controller — no capability', async () => {
+    const c = ctx({
+      bindings: {
+        [manager.id]: { controller: PROFILE, prefix: PREFIX, leafKey: manager.publicKey },
+      },
+    })
+    const value: DeviceValue = { op: 'beacon', logLength: 4, headDigest: 'zH' }
+    expect(await verifyDeviceEntry(entry(manager.id, PROFILE, value), c)).toBe(true)
+  })
+
+  test('rejects a beacon whose issuer is bound to a DIFFERENT controller', async () => {
+    const c = ctx({
+      bindings: {
+        [manager.id]: { controller: PROFILE, prefix: PREFIX, leafKey: manager.publicKey },
+      },
+    })
+    const value: DeviceValue = { op: 'beacon', logLength: 4, headDigest: 'zH' }
+    expect(await verifyDeviceEntry(entry(manager.id, otherProfile, value), c)).toBe(false)
+  })
+
+  test('rejects a beacon whose issuer holds no bound leaf', async () => {
+    const c = ctx({ bindings: {} })
+    const value: DeviceValue = { op: 'beacon', logLength: 4, headDigest: 'zH' }
+    expect(await verifyDeviceEntry(entry('did:key:zFloating', PROFILE, value), c)).toBe(false)
   })
 })

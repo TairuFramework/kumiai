@@ -25,6 +25,8 @@ export type DeviceProofContext = {
  * The acceptance-pipeline gate for one `kumiai.device` entry. Returns whether the entry is
  * authorized; the caller rejects the WHOLE commit on any false.
  *
+ * - beacon (`op: 'beacon'`): the issuer must be a bound device of the controller named as
+ *   `subject`. Advisory and self-scoped — no capability.
  * - self-register (`op: 'register'`, `subject === issuer`): the issuer's own leaf must be bound to
  *   `value.controller`. Leaf-attested — no capability.
  * - manage ops (co-device register, add, revoke, label): the issuer must be a bound device of the
@@ -41,6 +43,15 @@ export async function verifyDeviceEntry(
   const issuer = normalizeDID(verified.issuer)
   const subject = normalizeDID(verified.entry.subject)
   const value = verified.entry.value
+
+  if (value.op === 'beacon') {
+    // Self-scoped, low-stakes: the issuer must be a bound device of the controller named as
+    // `subject`. Advisory state that gates nothing, so NO management capability is required —
+    // unlike revoke/label, which manage another device's binding.
+    const binding = ctx.bindingOfDID(issuer)
+    if (binding?.controller == null) return false
+    return normalizeDID(binding.controller) === subject
+  }
 
   if (value.op === 'register' && subject === issuer) {
     const binding = ctx.bindingOfDID(issuer)
