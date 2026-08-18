@@ -219,9 +219,8 @@ emission).
 ## Follow-on work
 
 - `docs/agents/plans/backlog/2026-08-18-did-kokuin-deferred-hardening.md` — the future kumiai-side
-  concerns named across the slices: profile authority-key compromise recovery, the orphaned-admin
-  presence guard, and the mixed-version negotiation gate.
-
-The pre-existing backlog item `docs/agents/plans/backlog/2026-08-07-did-registry-ledger-entries.md`
-(the origin of this work) is now substantially **superseded** by this completed adoption; left in
-place for the maintainer to retire.
+  concerns named across the slices: profile authority-key rotation + compromise recovery (nested
+  rotation entries, `didRegistryReducer`, superseding recovery), the cross-group duplicity floor, the
+  orphaned-admin presence guard, and the mixed-version negotiation gate. It absorbed and replaced the
+  earlier `2026-08-07-did-registry-ledger-entries.md` origin item, whose device-onboarding half this
+  adoption shipped on the capability path.
