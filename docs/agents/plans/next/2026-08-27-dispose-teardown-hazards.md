@@ -1,13 +1,10 @@
 # Dispose-teardown hazards
 
 **Priority:** low.
-**Origin:** the Codex review of `docs/superpowers/specs/2026-08-27-dispose-ordering-residuals-design.md`,
-2026-08-27. Three teardown hazards were surfaced while designing that spec's four dispose/ordering
-fixes (residuals #3, #4, #6, #7 from
-`docs/agents/plans/next/2026-07-31-close-medium-test-gaps-residuals.md`, closed on this branch).
-The three below are unrelated to those four fixes and were deliberately kept out of that branch's
-scope. Background: `docs/superpowers/specs/2026-08-27-dispose-ordering-residuals-design.md`,
-"Out of scope" section.
+**Origin:** surfaced during the 2026-08-27 dispose/ordering-residuals work (residuals #3, #4, #6, #7 —
+see `docs/agents/plans/completed/2026-08-27-dispose-ordering-residuals.complete.md`). The three
+teardown hazards below came up while designing those four fixes but are unrelated to them, and were
+deliberately kept out of that branch's scope.
 
 ## 1. `teardownEpoch()`'s `AggregateError` on a child-disposal failure skips `mux.dispose()`
 
@@ -37,8 +34,8 @@ should wait for resource teardown or just signal it.
 
 `inboxLane` (`packages/rpc/src/peer.ts:381,573`) closes over the mux, and `teardownEpoch()` never
 clears it, so a disposed peer retains a reference to an obsolete path. The post-dispose publish
-guards land by this branch (Slice 3 of the spec above) block anything the lane would actually do
-with that reference, but the reference itself is still held.
+guards that landed with residual #7 block anything the lane would actually do with that reference,
+but the reference itself is still held.
 
 Deferred: unrelated to the four residuals this branch closed, and the guards this branch added
 already close the practical hazard (nothing the lane does post-dispose can reach the wire); clearing
