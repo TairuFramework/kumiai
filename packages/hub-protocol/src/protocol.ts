@@ -2,8 +2,9 @@ import type { ProtocolDefinition } from '@enkaku/protocol'
 
 /**
  * Every topicID is `toB64U(32 bytes)` — the group's epoch secret run through HKDF/SHA-256 by
- * `@kumiai/rpc`'s `deriveTopicID` (and `discoveryTopic`'s `toB64U(sha256(...))`), always exactly
- * 43 unpadded base64url characters. The pattern pins that shape at every site so no schema-legal
+ * `@kumiai/broadcast`'s `deriveTopicID` (called by `@kumiai/rpc`'s topic helpers), and
+ * `@kumiai/rpc`'s `discoveryTopic` via `toB64U(sha256(...))` — always exactly 43 unpadded
+ * base64url characters. The pattern pins that shape at every site so no schema-legal
  * value can overflow the fixed-size RFC 8291 wake-hint seal record: a JSON-escape-heavy 256-code-
  * point string is minLength/maxLength-legal but unsealable. Exact `{43}` rather than a lenient
  * length is deliberate — the seal record is a fixed size, and this protocol seals its schemas

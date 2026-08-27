@@ -2,7 +2,7 @@ import { describe, expect, test } from 'vitest'
 
 import { hubProtocol } from '../src/protocol.js'
 
-// Every topicID is `toB64U(32 bytes)` from the group's epoch secret (see @kumiai/rpc's
+// Every topicID is `toB64U(32 bytes)` from the group's epoch secret (see @kumiai/broadcast's
 // deriveTopicID): exactly 43 unpadded base64url characters. The pattern pins that shape so no
 // schema-legal value can overflow the fixed-size wake-hint seal record.
 const TOPIC_ID_PATTERN = '^[A-Za-z0-9_-]{43}$'

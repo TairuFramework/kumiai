@@ -73,6 +73,9 @@ export type MailboxHubConformanceParams<Hub extends ConformanceMailboxHub> = {
 const ALICE = 'did:key:alice'
 const BOB = 'did:key:bob'
 const CAROL = 'did:key:carol'
+// Readable rather than a minted 43-char base64url topicID: this suite drives the hub store
+// directly, below the RPC boundary, so the `topicID` schema pattern (hub-protocol) never runs
+// against it. If a `validator` is ever wired into `serve()`, these fixtures must move first.
 const TOPIC = 'topic:log-hub-conformance'
 
 function payload(byte: number): Uint8Array {
