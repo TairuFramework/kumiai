@@ -18,7 +18,8 @@ type HubTransports = DirectTransports<
 
 // A schema-valid topicID: 43-char base64url, the shape the hub's enkaku server enforces — it
 // validates params against the protocol, which pins topicID to `^[A-Za-z0-9_-]{43}$`. Derived from
-// a readable label so distinct labels stay distinct on the wire.
+// a readable label, truncated to 32 bytes — keep labels short and distinct where a test needs
+// distinct topics; the ones here are.
 const fixtureTopic = (label: string): string => {
   const bytes = new Uint8Array(32)
   bytes.set(fromUTF(label).subarray(0, 32))
