@@ -1610,13 +1610,16 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       const timer = setTimeout(() => finish(false), Math.max(0, deadline - Date.now()))
       ledgerWaiters.set(requestID, (sealed) => {
         void (async () => {
-          if (settled) return
+          if (settled || disposed) return
           try {
             // Bytes this peer cannot open: another member's reply to another request, or a
             // hub-injected forgery. Dropped, gather waits — the per-request key is NOT consumed
             // here, since the next responder's reply is sealed to the same key.
             const tokens = await port.openSealedLedger(sealed, requestID)
             if (tokens == null) return
+            // Re-check: `disposed` can flip during the openSealedLedger await, and bootstrapLedger
+            // REPLACES the host-owned ledger — it must not run against a torn-down handle.
+            if (disposed) return
             await port.bootstrapLedger(tokens)
             finish(true)
           } catch {

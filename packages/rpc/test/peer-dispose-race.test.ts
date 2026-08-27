@@ -530,3 +530,88 @@ describe('dispose against a recovery reply whose timer already fired', () => {
     await alice.peer.dispose()
   })
 })
+
+describe('dispose against a requester ledger reply already in its IIFE', () => {
+  test('bootstrapLedger is not called after dispose', async () => {
+    const fake = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x8b)
+
+    // The gate goes on ALICE's own `openSealedLedger` — the requester side of `ensureLedger`'s
+    // waiter, which runs OUTSIDE the commit mutex and writes into the host handle via
+    // `bootstrapLedger`. Distinct from the two tests above, which gate a RESPONDER's seal and
+    // assert nothing is published: this is a host WRITE with no publish, so only a spy on the
+    // requester's own port can see it.
+    let openEntered = false
+    let openResumed = false
+    let bootstrapCalls = 0
+    let openGate = (): void => {}
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve
+    })
+
+    const aliceCrypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
+    const aliceInner = createMemoryGroupMLS({
+      recoverySecret: rs,
+      epoch: 1,
+      localDID: 'alice',
+      members,
+      onAdvance: (e) => aliceCrypto.setEpoch(e),
+    })
+    const aliceMLS: MemoryGroupMLS = {
+      ...aliceInner,
+      async openSealedLedger(sealed: Uint8Array, requestID: string) {
+        openEntered = true
+        await gate
+        openResumed = true
+        return await aliceInner.openSealedLedger(sealed, requestID)
+      },
+      async bootstrapLedger(tokens: Array<string>) {
+        bootstrapCalls++
+        return await aliceInner.bootstrapLedger(tokens)
+      },
+    }
+
+    // Bob serves a COMPLETE ledger so alice's `requestLedger` waiter reaches `openSealedLedger`.
+    const bob = makeMLSPeer(fake, 'bob', rs, {
+      epoch: 1,
+      members,
+      recovery: { timeoutMs: 120, getDelayMs: () => 0, deadlineMs: 600 },
+    })
+    await flush()
+    await bob.peer.commit(buildLedgerCommit(bob, ['circle:x=Bob']))
+    await flush()
+
+    const alice = makeMLSPeer(fake, 'alice', rs, {
+      mls: aliceMLS,
+      crypto: aliceCrypto,
+      members,
+      recovery: { timeoutMs: 120, getDelayMs: () => 0, deadlineMs: 600 },
+    })
+    await flush()
+
+    // Not awaited: alice's own gather is the thing being held, so `recover()` settles only once
+    // its local ledger-gather timeout fires. The `.catch` owns whichever way it settles — an
+    // unowned rejection fails the run somewhere else entirely.
+    const rejoin = alice.peer.recover().catch(() => {})
+    await flush(80)
+
+    // The proof the window is open. Without it, a gather that never reached `openSealedLedger`
+    // would leave `bootstrapCalls` at 0 for nothing.
+    expect(openEntered).toBe(true)
+
+    await alice.peer.dispose()
+    openGate()
+    await flush(80)
+
+    // The parked IIFE resumed and reached the guard. Without this, a continuation that never ran
+    // would leave `bootstrapCalls` at 0 for nothing.
+    expect(openResumed).toBe(true)
+
+    // Unguarded, the parked IIFE resumes and writes the opened tokens into the host-owned MLS
+    // handle via `bootstrapLedger`, several awaits after this peer's host tore it down.
+    expect(bootstrapCalls).toBe(0)
+
+    await rejoin
+    await bob.peer.dispose()
+  })
+})
