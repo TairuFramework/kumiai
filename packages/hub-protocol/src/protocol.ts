@@ -10,6 +10,11 @@ import type { ProtocolDefinition } from '@enkaku/protocol'
  * length is deliberate — the seal record is a fixed size, and this protocol seals its schemas
  * (see below), so a future topic shape ships as a new versioned procedure, never a widened field.
  * The length makes `minLength`/`maxLength` redundant, so neither is carried alongside it.
+ *
+ * It is a safe syntactic superset, not the exact emitted set: base64url of 32 bytes always ends in
+ * one of `[AEIMQUYcgkosw048]` (the final char carries only 4 bits), but the pattern allows any
+ * base64url char there. Pinning the final-char subset buys nothing for seal safety and is brittle,
+ * so it is deliberately left open — the 43-char length and base64url alphabet are what matter.
  */
 const topicIDSchema = { type: 'string', pattern: '^[A-Za-z0-9_-]{43}$' } as const
 

@@ -48,8 +48,10 @@ contract (and its conformance suite, and every host store) for a cosmetic number
 trade. The dispatcher owns the only counter it can honestly produce.
 
 Plaintext is padded to a fixed record length before sealing, so ciphertext size is constant
-regardless of topic length or count — a 4-character and a 256-character `topicID` seal to the same
-number of bytes. Every body is 597 bytes: an 86-byte RFC 8188 header, a 495-byte padded record, and
+regardless of topic length or count — at the seal function's raw level a 4-character and a
+256-character `topicID` seal to the same number of bytes. (On the wire a `topicID` is now fixed at
+43 base64url characters — the protocol's `topicID` pattern — so the extremes here describe the seal
+record's headroom, not values that reach it.) Every body is 597 bytes: an 86-byte RFC 8188 header, a 495-byte padded record, and
 the 16-byte GCM tag. The declared record size (`rs`) is 512, strictly greater than the 511-byte
 ciphertext, as RFC 8291 §4 requires — equality is what a strict user agent refuses.
 

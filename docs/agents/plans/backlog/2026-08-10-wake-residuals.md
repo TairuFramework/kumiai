@@ -2,7 +2,8 @@
 
 Left over from `feat/hub-wake-notifications` (see
 `docs/agents/plans/completed/2026-08-10-hub-wake-notifications.complete.md`). The schema-`pattern`
-item is higher priority and lives in `docs/agents/plans/next/2026-08-10-wake-topicid-pattern.md`.
+item was resolved on `feat/topicid-pattern` — see
+`docs/agents/plans/completed/2026-08-27-wake-topicid-pattern.complete.md`.
 
 ## Platform pieces, out of scope by design
 

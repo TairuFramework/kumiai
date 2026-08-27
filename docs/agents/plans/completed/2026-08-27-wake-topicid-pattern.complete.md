@@ -36,7 +36,9 @@ seal record's raw byte headroom rather than a live hazard.
   topicID from any producer in the tree.
 - **Exact `{43}`, not a lenient alphabet-or-length pattern.** The seal record is a fixed size, and
   this protocol seals its schemas — a future topic shape ships as a new versioned procedure, never
-  a widened field. Exact length also makes min/max redundant.
+  a widened field. Exact length also makes min/max redundant. (The pattern is a safe syntactic
+  superset of the true emitted set: base64url of 32 bytes always ends in `[AEIMQUYcgkosw048]`, but
+  pinning that final-char subset is brittle and buys nothing for seal safety, so it is left open.)
 - **The pattern is runtime-enforced at the hub server boundary.** enkaku's `serve` auto-derives a
   validator from the `protocol` it is given — `createValidator(createClientMessageSchema(protocol))`
   (`@enkaku/server` `server.ts`) — and `hub-server/src/hub.ts` passes `protocol: hubProtocol`, so

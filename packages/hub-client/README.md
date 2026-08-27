@@ -16,8 +16,12 @@ procedure is a method with named parameters instead of a `request` call and a pa
 import { HubClient } from '@kumiai/hub-client'
 
 const hub = new HubClient({ client })
-await hub.subscribe('topic:abc', { retention: 86400 })
-await hub.publish({ topicID: 'topic:abc', payload: toB64(bytes), retain: 'log' })
+// `topicID` is opaque to this wrapper, but the hub validates it against the protocol schema: it
+// must be a 43-character base64url string — the shape `@kumiai/rpc`'s topic helpers mint over
+// `@kumiai/broadcast`'s `deriveTopicID`. A readable literal like 'topic:abc' is rejected at the
+// server with EK08 ("Invalid protocol message").
+await hub.subscribe(topicID, { retention: 86400 })
+await hub.publish({ topicID, payload: toB64(bytes), retain: 'log' })
 ```
 
 It is a wrapper and nothing more: it holds no state, opens no connection, and retries nothing. The

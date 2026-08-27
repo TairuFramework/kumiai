@@ -94,6 +94,59 @@ function createTestHub(options: TestHubOptions = {}): TestHub {
   return { hub, store, connect, dispose }
 }
 
+describe('topicID schema is enforced at the wire boundary', () => {
+  // The protocol pins topicID to `^[A-Za-z0-9_-]{43}$`, and enkaku's `serve` auto-derives a
+  // validator from the protocol, so an off-pattern topicID is rejected at the boundary — before any
+  // store or handler runs — with the schema-validation error, not a handler-level one. This is the
+  // runtime behavior every `fixtureTopic` in these suites exists to satisfy; pin it directly so a
+  // future change that drops the validator or loosens the pattern fails here.
+  const badTopic = 'topic:not-base64url' // colon + wrong length: fails the pattern
+
+  test('publish with an off-pattern topicID is refused before the store', async () => {
+    const store = createMemoryStore()
+    const publishSpy = vi.spyOn(store, 'publish')
+    const ctx = createTestHub({ store })
+    const { client: alice } = ctx.connect()
+
+    await expect(
+      alice.request('hub/v1/publish', {
+        param: { topicID: badTopic, payload: encodePayload('x') },
+      }),
+    ).rejects.toThrow('Invalid protocol message')
+    expect(publishSpy).not.toHaveBeenCalled()
+
+    await ctx.dispose()
+  })
+
+  test('subscribe, unsubscribe and topic/fetch all refuse an off-pattern topicID', async () => {
+    const ctx = createTestHub()
+    const { client: alice } = ctx.connect()
+
+    await expect(
+      alice.request('hub/v1/subscribe', { param: { topicID: badTopic } }),
+    ).rejects.toThrow('Invalid protocol message')
+    await expect(
+      alice.request('hub/v1/unsubscribe', { param: { topicID: badTopic } }),
+    ).rejects.toThrow('Invalid protocol message')
+    await expect(
+      alice.request('hub/v1/topic/fetch', { param: { topicID: badTopic } }),
+    ).rejects.toThrow('Invalid protocol message')
+
+    await ctx.dispose()
+  })
+
+  test('a schema-valid 43-char topicID is accepted at the same boundary', async () => {
+    const ctx = createTestHub()
+    const { client: alice } = ctx.connect()
+
+    await expect(
+      alice.request('hub/v1/subscribe', { param: { topicID: TOPIC } }),
+    ).resolves.toMatchObject({ subscribed: true })
+
+    await ctx.dispose()
+  })
+})
+
 describe('hub authentication', () => {
   test('rejects unsigned client messages', async () => {
     const ctx = createTestHub()
