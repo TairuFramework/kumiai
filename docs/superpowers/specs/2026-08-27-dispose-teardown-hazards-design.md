@@ -81,25 +81,51 @@ The authoritative *async* disposal boundary is enkaku's `Transport.dispose()`, w
 `await this.#events.emit('disposed', …)` (`enkaku/packages/transport/src/index.ts:80`), and
 `@sozai/event`'s `emit` awaits its listeners via `await Promise.allSettled(listeners.map(fn => fn(data)))`
 (`sozai/packages/event/src/index.ts:146`). So a listener that returns a promise **is awaited** by
-`transport.dispose()`. The fix threads the receive-close promise through that one listener:
+`transport.dispose()`. The fix threads the receive-close promise through that one listener.
 
-- In `teardown`, capture the return promise instead of dropping it:
-  ```ts
-  // module-scoped: let receiveClosed: Promise<unknown> | undefined
-  receiveClosed = iterator.return?.() ?? undefined
-  ```
-- Make the `'disposed'` listener (`transport.ts:485`) async and await it after teardown:
-  ```ts
-  transport.events.on('disposed', async () => {
-    teardown()
-    await receiveClosed
-  })
-  ```
+**There are TWO `iterator.return?.()` sites, not one** (found on review): `teardown` (`transport.ts:298`)
+AND the inbound peer-`session-end` path inside the readable pull loop (`transport.ts:402`), which does
+its own inline teardown (`torndown = true`, `controller.close()`, ack, `iterator.return?.()`,
+`onSessionEnd?.()`) and bypasses `teardown()` entirely. A fix that captures the return promise only in
+`teardown` misses this path: if a remote `session-end` arrives first, `torndown` is already true, so a
+later voluntary `dispose()` → `teardown()` hits its `torndown` early-return and never records that
+path's close. The `'disposed'` listener would then await nothing while the real close is the one from
+`:402`.
 
-This gives `transport.dispose()` — the voluntary, awaitable disposal — the "receive closed" guarantee,
-while the involuntary teardown paths (abort/idle/error) stay synchronous and best-effort, unchanged.
-`teardown`'s existing `torndown` idempotency guard means a teardown already run by another path has
-already set `receiveClosed`; the listener still awaits whatever is there.
+So capture into a shared `receiveClosed` at **both** return sites:
+
+```ts
+// module-scoped: let receiveClosed: Promise<unknown> | undefined
+// at transport.ts:298 (in teardown) AND transport.ts:402 (session-end path), replace
+//   iterator.return?.()
+// with
+receiveClosed = iterator.return?.() ?? undefined
+```
+
+Make the `'disposed'` listener (`transport.ts:485`) async and await it:
+
+```ts
+transport.events.on('disposed', async () => {
+  teardown()
+  await receiveClosed
+})
+```
+
+This gives `transport.dispose()` — the voluntary, awaitable disposal — the "receive closed" guarantee
+regardless of which path closed the iterator, while the involuntary paths (abort / idle / error /
+remote session-end) stay synchronous and best-effort, unchanged. `teardown`'s existing `torndown`
+idempotency guard means a teardown already run by another path has already set `receiveClosed`; the
+listener still awaits whatever is there. Calling `iterator.return()` a second time (both a `:402`
+close and a later `teardown`) is a no-op on an already-returned async iterator — the second call
+returns an immediately-settled result, so recording it over the first is harmless.
+
+**Bounded-`return()` — what the iterator actually is.** Both `subscription`s come from `hub.receive(...)`;
+for the real hub (`HubClient`) that is an enkaku RPC channel (`hub-client/src/client.ts:119-123`,
+`createChannel('hub/v1/receive', …)`), whose `.return()` closes the channel — local teardown plus at
+most a fire-and-forget wire close, not a fresh blocking round trip. This is the bounded-ness the await
+relies on. A hub whose `receive` iterator made `.return()` block on unbounded I/O would turn this await
+into a slow `dispose()`; that is the accepted boundary (a new residual if it ever arises), the same
+shape as the residuals branch's documented boundaries.
 
 ## Slice 3 — clear the stale `inboxLane` reference on dispose
 
@@ -126,7 +152,12 @@ rotation. On `dispose()` there is no rebuild, so the reference is simply dropped
 - **Slice 2:** a receive-drain double whose `iterator.return()` resolves on a delayed tick. For hub-mux,
   assert `mux.dispose()` does not resolve until `return()` has resolved. For the transport, assert
   `transport.dispose()` does not resolve until the drain's `return()` has resolved (drive it through
-  enkaku `dispose()` → `'disposed'`). Confirm the involuntary paths (abort/idle) are unaffected.
+  enkaku `dispose()` → `'disposed'`). Cover **both** return sites: (a) the ordinary path where
+  `dispose()` triggers `teardown` (`:298`), and (b) the case where a remote `session-end` frame closes
+  the iterator first (`:402`) and a `dispose()` follows — assert the `'disposed'` listener still awaits
+  the real close from `:402` (a delayed `:402` return must delay `dispose()` resolution). Confirm the
+  involuntary paths (abort / idle / remote session-end with no following dispose) are unaffected and
+  stay synchronous.
 - **Slice 3:** after `peer.dispose()`, the stale `inboxLane` is gone. As it is a private closure var
   with no getter, assert it indirectly: the practical guarantee is already covered by the #7 guards, so
   this slice's test is light — confirm dispose still completes cleanly and `.to()` after dispose is
