@@ -17,6 +17,8 @@ import {
 import { createHub, createMemoryStore } from '@kumiai/hub-server'
 import { describe, expect, test } from 'vitest'
 
+import { fixtureTopic } from './fixture-topic.js'
+
 type HubTransports = DirectTransports<
   AnyServerMessageOf<HubProtocol>,
   AnyClientMessageOf<HubProtocol>
@@ -90,7 +92,7 @@ function createTestHub(store: HubStore) {
   return { connect, dispose }
 }
 
-const TOPIC = 'topic:log-lane'
+const TOPIC = fixtureTopic('log-lane')
 
 function payloadOf(text: string): string {
   return btoa(text)
@@ -256,14 +258,14 @@ describe('Topic log over the wire', () => {
     expect(subscribes[0].retention).toBe(MAX_RETENTION)
 
     const rejected = await bob
-      .subscribe('topic:greedy', { retention: MAX_RETENTION + 1 })
+      .subscribe(fixtureTopic('greedy'), { retention: MAX_RETENTION + 1 })
       .catch((error: unknown) => error)
     const error = rejected as { code?: string; message?: string }
     expect(error.code).toBe(HUB_ERROR_CODES.retentionExceeded)
     expect(hubErrorFromCode(error.code as string, error.message ?? '')).toBeInstanceOf(
       RetentionExceededError,
     )
-    expect(await store.getSubscribers('topic:greedy')).toEqual([])
+    expect(await store.getSubscribers(fixtureTopic('greedy'))).toEqual([])
 
     await ctx.dispose()
   })

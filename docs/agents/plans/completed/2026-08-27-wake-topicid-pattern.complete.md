@@ -45,19 +45,31 @@ seal record's raw byte headroom rather than a live hazard.
   seal-time throw is a second, deeper backstop. (An early read of `hub.ts` alone suggested "no
   validator wired" because none is passed *explicitly*; the auto-derivation from `protocol` was
   missed, and a stale `lib/` build let a scoped test run pass before `--force` rebuilt it. The final
-  full `turbo … --force` caught it.) Consequence: production callers are unaffected (they mint
-  43-char base64url topics), but hub-server and hub-client test fixtures that published fake topics
-  (`'topic:1'`, `'topic-a'`, `'topic:chat'`) through the client/server had to move to schema-valid
-  43-char values, via a small `fixtureTopic(label)` helper. The hub-conformance suites were the
+  full `turbo … --force` caught it, and a second code review then caught the integration gap below.)
+  Consequence: production callers are unaffected (they mint 43-char base64url topics), but every
+  test fixture that publishes a fake topic THROUGH the enkaku client/server had to move to a
+  schema-valid 43-char value, via a small `fixtureTopic(label)` helper. That reached three
+  `hub-server`/`hub-client` files first (`'topic:1'`, `'topic-a'`, `'topic:chat'`) and then the
+  `tests/integration` wire suites (`wire-hub-smoke`, `hub-log-lane`, `hub-relay`, `hub-tunnel-echo`,
+  `mls-permissions` — 19 tests, including the `group/<id>` and `inbox:<did>` topic helpers), which
+  the first pass over the unit gate missed because that gate does not run the integration package
+  (see Verification). The hub-conformance suites and the store-direct integration tests were the
   exception and kept their readable topicIDs: they exercise the store directly, never crossing the
   enkaku client/server boundary, so the validator never sees them — a note at each `TOPIC` constant
   records that.
 
 ## Verification
 
-- TDD red→green on the protocol tests. 50 hub-protocol tests + 703 hub/rpc runtime tests pass.
-- Lint clean (biome). Typecheck clean across hub-protocol and all dependents; full-band
-  `build:types` passed in the pre-commit hook.
+- TDD red→green on the protocol tests. Unit gate green and uncached:
+  `turbo run test:types test:unit --force` → 48/48 tasks (hub-protocol 50, hub-server 208,
+  hub-client 18, and the rest).
+- **The integration suite is NOT in the `test:unit` gate** (`tests/integration` defines `test` and
+  `test:types`, no `test:unit`), by design — it runs separately after the unit gate in CI. That is
+  exactly why the first forced gate run showed green while 19 wire tests were still broken. A
+  protocol/schema change MUST also run `pnpm exec vitest run --root tests/integration` — now green,
+  43/43. (Standing lesson, already in the `kumiai-test-verification` memory.)
+- Lint clean (biome). Typecheck clean across hub-protocol and all dependents plus the integration
+  package; full-band `build:types` passed in the pre-commit hook.
 - Doubles: the only topicID *schema* in the repo is this one; `HubStore` types topicID as bare
   `string` (a shape-agnostic key-value boundary, not the RPC port), so no double is more permissive
   than its port.

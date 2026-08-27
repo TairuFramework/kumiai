@@ -7,6 +7,8 @@ import type { HubProtocol, HubStore } from '@kumiai/hub-protocol'
 import { type AuthorizeHook, createHub, createMemoryStore } from '@kumiai/hub-server'
 import { describe, expect, test } from 'vitest'
 
+import { fixtureTopic } from './fixture-topic.js'
+
 type HubTransports = DirectTransports<
   AnyServerMessageOf<HubProtocol>,
   AnyClientMessageOf<HubProtocol>
@@ -66,7 +68,7 @@ describe('Hub relay: multi-device delivery', () => {
     const testHub = createTestHub()
     const { client: phone } = testHub.connect()
     const { client: laptop, identity: laptopID } = testHub.connect()
-    const inbox = `inbox:${laptopID.id}`
+    const inbox = fixtureTopic(`inbox:${laptopID.id}`)
 
     await laptop.subscribe(inbox)
     const channel = laptop.receive()
@@ -91,7 +93,7 @@ describe('Hub relay: multi-device delivery', () => {
     const testHub = createTestHub()
     const { client: phone } = testHub.connect()
     const laptopID = randomIdentity()
-    const inbox = `inbox:${laptopID.id}`
+    const inbox = fixtureTopic(`inbox:${laptopID.id}`)
 
     // Laptop subscribes once, then goes offline (no open receive channel).
     const { client: laptopSetup } = testHub.connect(laptopID)
@@ -201,7 +203,7 @@ describe('Hub groups: authorized-DID pub/sub', () => {
   // The hub gates a group topic on an authorized-DID set fed to its authorize hook.
   // The set is the group's known members; this test drives the hook and fan-out.
   function groupTopic(groupID: string): string {
-    return `group/${groupID}`
+    return fixtureTopic(`group/${groupID}`)
   }
 
   function setupGroupHub(groupID: string, memberDIDs: Array<string>) {
