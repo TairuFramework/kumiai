@@ -665,8 +665,8 @@ describe('dispose against a lane op already inside the commit mutex', () => {
   })
 })
 
-describe('dispose against a lane op already inside the bus-publish funnel', () => {
-  test('an in-flight broadcast is refused, not written to the hub', async () => {
+describe('dispose against a lane op parked before the mux bus-publish route', () => {
+  test('an in-flight broadcast parked on wrap before dispose is refused after dispose, not written to the hub', async () => {
     const fake = new FakeHub()
     const rs = new Uint8Array(32).fill(0x8d)
     const recorder = createRecordingHub(fake)
@@ -720,8 +720,8 @@ describe('dispose against a lane op already inside the bus-publish funnel', () =
   })
 })
 
-describe('dispose against a lane op already inside the mailbox-publish funnel', () => {
-  test('an in-flight directed publish is refused, not written to the hub', async () => {
+describe('dispose against a lane op parked before the mux mailbox-publish route', () => {
+  test('an in-flight directed publish parked on wrap before dispose is refused after dispose, not written to the hub', async () => {
     const fake = new FakeHub()
     const rs = new Uint8Array(32).fill(0x8e)
     const recorder = createRecordingHub(fake)

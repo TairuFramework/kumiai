@@ -185,9 +185,9 @@ const DEFAULT_INBOX_CAPACITY = 1024
  * - `hub.subscribe(localDID, receiveTopicID)` and `hub.receive(localDID)` are each called
  *   **exactly once** during construction. `hub.subscribe` is invoked synchronously (before
  *   `hub.receive`); its completion is captured, not awaited, so construction never blocks on it.
- * - The first `write` (and any write still in flight when the subscribe is) gates on that
- *   subscribe completing before it publishes, so a caller that constructs a transport and
- *   immediately writes does not lose an inbound reply that lands before the subscribe has.
+ * - The first `write` (and any write still in flight when the subscribe is still in flight) gates
+ *   on that subscribe completing before it publishes, so a caller that constructs a transport and
+ *   immediately writes does not lose an inbound reply that lands before the subscribe has landed.
  * - On any teardown path (signal abort, idle timeout, encrypt failure, peer-side `session-end`,
  *   manual `transport.dispose()`), it publishes a best-effort `session-end` frame to `sendTopicID`
  *   and best-effort `hub.unsubscribe?.(localDID, receiveTopicID)`, the latter ordered **after**

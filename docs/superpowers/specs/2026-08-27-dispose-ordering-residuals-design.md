@@ -191,6 +191,20 @@ mux begins after dispose," not "no publish completes after dispose." An op caugh
 is an accepted, documented boundary (a new residual could track in-flight publishes, but the await it
 would need is why this is not attempted here).
 
+**Known consequence: no `session-end` to an active directed peer.** `peer.ts`'s `dispose` calls
+`mux.suspendPublishing()` before `teardownEpoch()`, which disposes each entry in `runtime.directed`
+(`peer.ts:626`). A directed client's `dispose()` tears down its `createHubTunnelTransport`, whose
+`teardown()` sends a best-effort `session-end` frame (`hub-tunnel/src/transport.ts`'s
+`sendSessionEnd`) through the `MailboxHub` adapter built in `createDirectedClient`
+(`rpc/src/directed.ts:93-100`), which routes it to `mux.mailbox.publish` — now guarded by
+`publishSuspended`. So disposing a peer with an established directed session no longer sends that
+frame to the active directed peer: the publish throws `PeerDisposedError`, caught by
+`sendSessionEnd`'s own `.catch(() => {})` (`hub-tunnel/src/transport.ts:268-270`), so the throw never
+surfaces. This is safe because the frame was always best-effort — the peer on the other end falls
+back to its own idle-timeout cleanup (`idleTimeoutMs` in `createHubTunnelTransport`) when no
+`session-end` arrives. Protocol-visible (the remote peer's session now always ages out instead of
+sometimes closing immediately), not a correctness gap.
+
 **Test.** Mutation-checked, new coverage. Park a `commit()` op mid-lane — gate the host's `build()`
 callback on a Promise so the op sits between its passed `assertLive` and `mux.publish`. Fire
 `dispose()`, then open the gate. Assert (a) the op rejects with `PeerDisposedError`, and (b) no
