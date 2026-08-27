@@ -363,7 +363,7 @@ await settled
 Run: `pnpm --filter @kumiai/rpc test peer-dispose-race`
 Expected: PASS — the op rejects with `PeerDisposedError` and no publish reaches the hub.
 
-- [ ] **Step 7: Cover a bus/mailbox path + mutation-check.** Add a second, lighter test: park an app (`bus`) or directed (`mailbox`) publish in wrapping/encryption before dispose (gate the encrypt step), fire `dispose()`, release, and assert it rejects with `PeerDisposedError` and the recorder is empty — proving the guard covers all three routes, not just the commit lane. Then mutation-check: temporarily remove the guard line from `mux.publish` (and separately from `bus.publish`/`mailbox.publish`); re-run; confirm the matching test FAILS (publish leaks); restore; confirm PASS.
+- [ ] **Step 7: Cover all three routes separately + mutation-check each.** The commit-lane test (Steps 1-6) covers primary `publish`. Add a `bus.publish` test (park an app broadcast before dispose — gate the encrypt/wrap step, fire `dispose()`, release) and a `mailbox.publish` test (same, for a directed publish); each asserts `PeerDisposedError` and an empty recorder. Three separate assertions are required — testing primary plus just one of bus/mailbox leaves the third guard deletable with no test failing. Then mutation-check **each guard independently**: remove the guard line from `publish`, re-run, confirm only the primary test fails; restore. Repeat for `bus.publish` and `mailbox.publish`.
 
 Note in the test file (comment) the documented boundary: the guard stops publishes that have **not yet entered** the mux; a publish already awaiting `hub.publish` is on the wire and is out of scope (closing it would need the rejected unbounded drain).
 

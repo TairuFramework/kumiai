@@ -107,11 +107,15 @@ Update the contract doc block: the first send is now gated on the subscribe comp
 unsubscribe is ordered after it.
 
 **Test.** A real-wire double whose `subscribe` resolves on an artificially delayed tick (the existing
-`transport-ordering.test.ts` uses the synchronous `FakeHub` and has no such case). Two cases:
+`transport-ordering.test.ts` uses the synchronous `FakeHub` and has no such case). Three cases:
 1. Construct a transport, publish a request immediately, assert the reply is delivered (fails today —
    reply lost; passes after the send gate).
 2. A double whose `subscribe` resolves *after* `unsubscribe` would otherwise run; tear down before
    the subscribe settles; assert no live subscription remains (guards the teardown coordination).
+3. Start a `write` while `subscribe` is delayed so it parks on `await subscribed`; tear down before
+   the subscribe settles; then settle it. Assert the write rejects (`/torn down/i`) and no publish
+   reached the hub — this is the case that bites the second `torndown` re-check (deleting the
+   re-check must fail this test and only this test).
 
 ## Slice 2 — ledger-waiter post-dispose write (residual #6)
 
@@ -191,9 +195,11 @@ would need is why this is not attempted here).
 callback on a Promise so the op sits between its passed `assertLive` and `mux.publish`. Fire
 `dispose()`, then open the gate. Assert (a) the op rejects with `PeerDisposedError`, and (b) no
 publish reached the hub (recording-hub `calls()` empty). Then remove the `publish` guard and confirm
-the publish leaks before restoring. Add a second, lighter case exercising a `bus`/`mailbox` path
-(an app or directed publish parked in wrapping/encryption before dispose) to prove the guard covers
-all three routes, not just the commit lane.
+the publish leaks before restoring. Cover **each of the three routes with its own assertion** —
+primary `publish` (the commit-lane case above), `bus.publish` (an app publish parked before dispose),
+and `mailbox.publish` (a directed publish parked before dispose) — and mutation-check each guard
+independently: deleting the guard on any one route must fail that route's test and only it. Testing
+primary plus just one of bus/mailbox would leave the third guard deletable with no test failing.
 
 ## Out of scope
 
