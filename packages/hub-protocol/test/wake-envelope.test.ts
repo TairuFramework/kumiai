@@ -128,19 +128,22 @@ describe('sealWakeHint', () => {
     ).toThrow(/too large/)
   })
 
-  // The protocol schema caps `topicID` at 256 characters, so this is the largest hint the wire can
-  // actually present — measured, not estimated. A hub-derived topicID is base64url, and the record
-  // has 177 characters of slack beyond the cap at that alphabet.
-  test('seals a hint at the schema maximum topicID (256 ASCII characters)', () => {
+  // The schema now caps `topicID` at 43 base64url characters (`topicIDSchema` in protocol.ts), so
+  // no wire value reaches this size. Pinned anyway as headroom: the seal record holds far more than
+  // the schema admits, and 256 ASCII characters — roughly six times the cap — still seals with room
+  // to spare.
+  test('seals a 256-ASCII-character topicID: raw record headroom above the 43-char schema cap', () => {
     const recipient = createRecipient()
     const hint = { topicID: 'x'.repeat(256), sequenceID: '000000000042', count: 9999 }
     expect(() => sealWakeHint(hint, recipient)).not.toThrow()
     expect(openWakeHint(sealWakeHint(hint, recipient), recipient)).toEqual(hint)
   })
 
-  // The ceiling itself, pinned so it cannot drift silently. 433 is derived from this hint's fixed
-  // 12-character `sequenceID` and 4-digit `count`; a longer sequenceID from a host store spends
-  // the slack one byte for one byte. If this number ever moves, the hint's shape moved with it.
+  // The record's raw ASCII ceiling, pinned so it cannot drift silently. 433 is derived from this
+  // hint's fixed 12-character `sequenceID` and 4-digit `count`; a longer sequenceID from a host
+  // store spends the slack one byte for one byte. The schema caps `topicID` at 43 base64url
+  // characters, so this ceiling is now headroom the wire never approaches — but if this number ever
+  // moves, the hint's shape moved with it.
   test('the record holds a 433-character ASCII topicID, and refuses 434', () => {
     const recipient = createRecipient()
     const at = (length: number) => ({
@@ -152,21 +155,17 @@ describe('sealWakeHint', () => {
     expect(() => sealWakeHint(at(434), recipient)).toThrow(/too large/)
   })
 
-  // A REAL limit, recorded rather than hidden: `maxLength` counts characters, but the record holds
-  // JSON bytes, and byte cost per character is what turns one into many. `"`, `\` and `\n` cost 2
-  // (JSON escape) and cap it at 216; a raw CJK character costs 3 (UTF-8) and caps it at 144; a
-  // control character with no short escape serialises as a six-byte `\uXXXX` and caps it at 72; a
-  // non-BMP character (an emoji, a surrogate pair) costs 4 (UTF-8) and caps it at 108 — the case
-  // where the schema's `maxLength` (code points) and the byte cost diverge most sharply: 256 such
-  // code points cost 1024 record bytes against a 494-byte budget. A topicID of 256 characters at
-  // any of these costs is legal by the schema and CANNOT be sealed — the hint throws inside the
-  // dispatcher's fire-and-forget task, surfaces as an `onError` report, and that device is never
-  // woken for that topic. All four ceilings are pinned below so none of them can drift silently.
-  //
-  // Not reachable today: topicIDs are derived from MLS exporter output and are base64url. The fix
-  // if it ever becomes reachable is a `pattern` on the protocol's topicID schema, not a bigger
-  // record — inflating every body to ~1700 bytes for a case that never happens would trade the
-  // constant, small ciphertext this design is built on for nothing.
+  // The record holds JSON bytes, and byte cost per character is what turns one into many. `"`, `\`
+  // and `\n` cost 2 (JSON escape) and cap the record at 216; a raw CJK character costs 3 (UTF-8)
+  // and caps it at 144; a control character with no short escape serialises as a six-byte `\uXXXX`
+  // and caps it at 72; a non-BMP character (an emoji, a surrogate pair) costs 4 (UTF-8) and caps it
+  // at 108. None of these characters is schema-legal in a topicID any more — `topicIDSchema`'s
+  // `pattern` admits only base64url — so no such value can reach the record over the wire. They are
+  // pinned as the seal function's own last-line byte guard, below the 43-character cap: the fix
+  // that closed the hazard was that pattern, not a bigger record, since inflating every body to
+  // ~1700 bytes for a case the schema now forbids would trade the constant, small ciphertext this
+  // design is built on for nothing. All four ceilings are pinned below so none of them can drift
+  // silently.
   test('a 256-character topicID of JSON-escaping characters does NOT fit', () => {
     const recipient = createRecipient()
     const hint = { topicID: '"'.repeat(256), sequenceID: '000000000042', count: 9999 }
@@ -200,8 +199,9 @@ describe('sealWakeHint', () => {
     expect(() => sealWakeHint(at(73), recipient)).toThrow(/too large/)
   })
 
-  // The case where the schema's `maxLength` (code points) and the byte cost diverge most sharply:
-  // a non-BMP character costs 4 UTF-8 bytes but is 1 code point, well under the 256-code-point cap.
+  // The character class whose byte cost diverges most sharply from its code-point count: a non-BMP
+  // character costs 4 UTF-8 bytes but is 1 code point. No longer schema-legal (the pattern admits
+  // only base64url); pinned as the record's own byte guard.
   test('a non-BMP topicID (4-byte UTF-8 surrogate pair) seals at 108 and refuses 109', () => {
     const recipient = createRecipient()
     const at = (length: number) => ({

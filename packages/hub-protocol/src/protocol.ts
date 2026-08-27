@@ -1,6 +1,18 @@
 import type { ProtocolDefinition } from '@enkaku/protocol'
 
 /**
+ * Every topicID is `toB64U(32 bytes)` — the group's epoch secret run through HKDF/SHA-256 by
+ * `@kumiai/rpc`'s `deriveTopicID` (and `discoveryTopic`'s `toB64U(sha256(...))`), always exactly
+ * 43 unpadded base64url characters. The pattern pins that shape at every site so no schema-legal
+ * value can overflow the fixed-size RFC 8291 wake-hint seal record: a JSON-escape-heavy 256-code-
+ * point string is minLength/maxLength-legal but unsealable. Exact `{43}` rather than a lenient
+ * length is deliberate — the seal record is a fixed size, and this protocol seals its schemas
+ * (see below), so a future topic shape ships as a new versioned procedure, never a widened field.
+ * The length makes `minLength`/`maxLength` redundant, so neither is carried alongside it.
+ */
+const topicIDSchema = { type: 'string', pattern: '^[A-Za-z0-9_-]{43}$' } as const
+
+/**
  * Namespaced `hub/v1/*` so the series stays regular: a future shape change ships as a new
  * versioned procedure (`hub/v2/publish`, say) — additive in an enkaku protocol — never by
  * widening an existing schema. Every `additionalProperties: false` below stays sealed; if a
@@ -13,7 +25,7 @@ export const hubProtocol = {
     param: {
       type: 'object',
       properties: {
-        topicID: { type: 'string', minLength: 1, maxLength: 256 },
+        topicID: topicIDSchema,
         payload: { type: 'string', contentEncoding: 'base64', maxLength: 1048576 },
         /** Retention class. Absent: 'mailbox'. */
         retain: { type: 'string', enum: ['log', 'mailbox'] },
@@ -43,7 +55,7 @@ export const hubProtocol = {
     param: {
       type: 'object',
       properties: {
-        topicID: { type: 'string', minLength: 1, maxLength: 256 },
+        topicID: topicIDSchema,
         /**
          * Requested retention in seconds. Above the hub's maximum the subscribe is refused, never
          * clamped. Absent: the hub's default.
@@ -68,7 +80,7 @@ export const hubProtocol = {
     param: {
       type: 'object',
       properties: {
-        topicID: { type: 'string', minLength: 1, maxLength: 256 },
+        topicID: topicIDSchema,
       },
       required: ['topicID'],
       additionalProperties: false,
@@ -89,7 +101,7 @@ export const hubProtocol = {
     param: {
       type: 'object',
       properties: {
-        topicID: { type: 'string', minLength: 1, maxLength: 256 },
+        topicID: topicIDSchema,
         /** Exclusive cursor: entries after this sequenceID. Absent: from the oldest retained. */
         after: { type: 'string', maxLength: 64 },
         limit: { type: 'integer', minimum: 1, maximum: 500 },
@@ -107,7 +119,7 @@ export const hubProtocol = {
             properties: {
               sequenceID: { type: 'string' },
               senderDID: { type: 'string' },
-              topicID: { type: 'string' },
+              topicID: topicIDSchema,
               payload: { type: 'string', contentEncoding: 'base64' },
             },
             required: ['sequenceID', 'senderDID', 'topicID', 'payload'],
@@ -151,7 +163,7 @@ export const hubProtocol = {
       properties: {
         sequenceID: { type: 'string' },
         senderDID: { type: 'string' },
-        topicID: { type: 'string' },
+        topicID: topicIDSchema,
         payload: { type: 'string', contentEncoding: 'base64' },
         /**
          * Where the frame sits in its topic's log — the position `hub/v1/topic/fetch` serves it at.
