@@ -154,8 +154,10 @@ async host port (`crypto.ts:404`) the peer cannot interrupt. This is the same ac
 Slice 3's in-flight `hub.publish` — the only close would be having `dispose()` *await* the in-flight
 write, i.e. the same unbounded/deadlock-prone drain rejected there (a caller-supplied host port with
 no bound, and a host that disposes from inside its own port call would self-deadlock). The impact is
-bounded: a single ledger replacement on an already-disposed peer, no worse than the state the peer
-already held. Documented, not closed.
+bounded to ledger replacements the peer had already accepted before dispose: the waiter stays
+registered until `finish(true)` runs (after `bootstrapLedger` resolves), so if several replies were
+already in flight, more than one `openSealedLedger`/`bootstrapLedger` can be mid-call — each writing
+state the peer had already gathered, no worse than what it already held. Documented, not closed.
 
 ## Slice 3 — guard the mux publish paths against post-dispose lanes (residual #7)
 
