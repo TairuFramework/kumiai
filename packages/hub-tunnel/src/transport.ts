@@ -183,10 +183,16 @@ const DEFAULT_INBOX_CAPACITY = 1024
  *
  * **Contract (relied on by callers):**
  * - `hub.subscribe(localDID, receiveTopicID)` and `hub.receive(localDID)` are each called
- *   **exactly once** during construction.
+ *   **exactly once** during construction. `hub.subscribe` is invoked synchronously (before
+ *   `hub.receive`); its completion is captured, not awaited, so construction never blocks on it.
+ * - The first `write` (and any write still in flight when the subscribe is) gates on that
+ *   subscribe completing before it publishes, so a caller that constructs a transport and
+ *   immediately writes does not lose an inbound reply that lands before the subscribe has.
  * - On any teardown path (signal abort, idle timeout, encrypt failure, peer-side `session-end`,
  *   manual `transport.dispose()`), it publishes a best-effort `session-end` frame to `sendTopicID`
- *   and best-effort `hub.unsubscribe?.(localDID, receiveTopicID)`.
+ *   and best-effort `hub.unsubscribe?.(localDID, receiveTopicID)`, the latter ordered **after**
+ *   the subscribe completes (never before it) so a subscribe that is still in flight at teardown
+ *   cannot land after — and resurrect — the unsubscribe.
  */
 export function createHubTunnelTransport<R, W>(
   params: HubTunnelTransportParams,
@@ -209,9 +215,17 @@ export function createHubTunnelTransport<R, W>(
 
   let outboundSeq = 0
   let expectedSeq = 0
-  // Best-effort subscribe; rejection is swallowed (the receive stream still
-  // attaches, and a missing subscription simply yields no inbound frames).
-  void Promise.resolve(hub.subscribe(localDID, receiveTopicID)).catch(() => {})
+  // Async IIFE, not Promise.resolve(hub.subscribe(...)) (a sync throw would escape construction)
+  // and not .then(() => hub.subscribe(...)) (would defer the call, reversing subscribe-before-
+  // receive). `write` gates its first send on `subscribed`; a failed subscribe yields no inbound
+  // frames but still lets sends proceed.
+  const subscribed = (async () => {
+    try {
+      await hub.subscribe(localDID, receiveTopicID)
+    } catch {
+      // A failed subscribe yields no inbound frames; the send gate still proceeds.
+    }
+  })()
   const subscription = hub.receive(localDID, { topicID: receiveTopicID })
   const iterator = subscription[Symbol.asyncIterator]()
 
@@ -270,11 +284,10 @@ export function createHubTunnelTransport<R, W>(
       abortHandler = undefined
     }
     sendSessionEnd()
-    try {
-      void Promise.resolve(hub.unsubscribe?.(localDID, receiveTopicID)).catch(() => {})
-    } catch {
-      // ignore
-    }
+    // Ordered after `subscribed`: unsubscribing before an in-flight subscribe lands would have
+    // the subscribe's later mutation resurrect a subscription this transport no longer wants.
+    // `teardown` itself stays synchronous — only the unsubscribe is deferred.
+    void subscribed.then(() => hub.unsubscribe?.(localDID, receiveTopicID)).catch(() => {})
     if (error !== undefined && readableController != null) {
       try {
         readableController.error(error)
@@ -433,6 +446,10 @@ export function createHubTunnelTransport<R, W>(
         throw new SessionNotEstablishedError(
           'hub-tunnel: cannot send before session is established',
         )
+      }
+      await subscribed
+      if (torndown) {
+        throw new Error('Hub tunnel transport torn down')
       }
       const frame: HubFrame = {
         v: 1,
