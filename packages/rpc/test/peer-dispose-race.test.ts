@@ -4,7 +4,7 @@ import { describe, expect, test } from 'vitest'
 
 import type { SubscribeFailure } from '../src/hub-mux.js'
 import { PeerDisposedError } from '../src/index.js'
-import { createFakeCrypto } from './fixtures/fake-crypto.js'
+import { createFakeCrypto, type FakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryCommitJournal, type MemoryCommitJournal } from './fixtures/journal.js'
 import { createMemoryGroupMLS, type MemoryGroupMLS } from './fixtures/memory-group-mls.js'
@@ -613,5 +613,165 @@ describe('dispose against a requester ledger reply already in its IIFE', () => {
 
     await rejoin
     await bob.peer.dispose()
+  })
+})
+
+// residual #7: `peer.dispose()` awaits `settled` but never the commit mutex, so an op that
+// already passed `assertLive` keeps running inside `runSerial` and can still reach `mux.publish`
+// (or `bus.publish` / `mailbox.publish`) after `dispose()` has returned. The three tests below
+// each park an op mid-flight on a different one of the mux's three routes to the wire, dispose,
+// then release it.
+//
+// BOUNDARY, documented once here for all three: the guard stops a publish that has NOT YET
+// entered the mux. A publish already awaiting `hub.publish` is on the wire and is out of scope —
+// closing that window would need draining the commit mutex in `dispose()`, which Task 4's brief
+// rejects as unsafe (`build()`/`onAccepted()` are host-supplied and unbounded; draining can hang
+// dispose or self-deadlock a host that calls dispose from its own callback).
+describe('dispose against a lane op already inside the commit mutex', () => {
+  test('an in-flight publish is refused, not written to the hub', async () => {
+    const fake = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x8c)
+    const recorder = createRecordingHub(fake)
+
+    let buildEntered = false
+    let releaseBuild = (): void => {}
+    const buildGate = new Promise<void>((resolve) => {
+      releaseBuild = resolve
+    })
+
+    const alice = makeMLSPeer(recorder.hub, 'alice', rs, { epoch: 1, members })
+    await flush()
+
+    const op = alice.peer.commit(
+      buildLedgerCommit(alice, ['post-dispose'], {
+        onBuild: async () => {
+          buildEntered = true
+          await buildGate // park the op AFTER assertLive, BEFORE mux.publish
+        },
+      }),
+    )
+    const owned = op.catch(() => {})
+    await flush()
+    expect(buildEntered).toBe(true)
+
+    const disposing = alice.peer.dispose()
+    recorder.start()
+    releaseBuild()
+
+    await expect(op).rejects.toBeInstanceOf(PeerDisposedError)
+    await disposing
+    await owned
+    expect(recorder.calls()).toEqual([]) // no publish reached the hub
+  })
+})
+
+describe('dispose against a lane op already inside the bus-publish funnel', () => {
+  test('an in-flight broadcast is refused, not written to the hub', async () => {
+    const fake = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x8d)
+    const recorder = createRecordingHub(fake)
+
+    // Gated on the SEAL, not on `mux.bus.publish` itself: `segmentBoundTransport`'s `wrap`
+    // (peer.ts) calls `crypto.wrap` before ever reaching the mux, which is where a real host's
+    // encrypt/wrap step would park an op mid-flight too.
+    let wrapEntered = false
+    let releaseWrap = (): void => {}
+    const wrapGate = new Promise<void>((resolve) => {
+      releaseWrap = resolve
+    })
+    let gateArmed = false
+
+    const aliceCrypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
+    const gatedCrypto: FakeCrypto = {
+      ...aliceCrypto,
+      wrap: async (bytes) => {
+        if (gateArmed) {
+          gateArmed = false
+          wrapEntered = true
+          await wrapGate // park the op AFTER the seal starts, BEFORE bus.publish
+        }
+        return aliceCrypto.wrap(bytes)
+      },
+    }
+
+    const alice = makeMLSPeer(recorder.hub, 'alice', rs, {
+      crypto: gatedCrypto,
+      epoch: 1,
+      members,
+    })
+    await flush()
+
+    // Armed only now: peer init and the acceptor's own construction call `crypto.wrap` for
+    // nothing, but gating from the start would be fragile against that changing.
+    gateArmed = true
+    const op = alice.peer.protocol('chat').dispatch('chat/changed', { text: 'post-dispose' })
+    const owned = op.catch(() => {})
+    await flush()
+    expect(wrapEntered).toBe(true)
+
+    const disposing = alice.peer.dispose()
+    recorder.start()
+    releaseWrap()
+
+    await expect(op).rejects.toBeInstanceOf(PeerDisposedError)
+    await disposing
+    await owned
+    expect(recorder.calls()).toEqual([]) // no publish reached the hub
+  })
+})
+
+describe('dispose against a lane op already inside the mailbox-publish funnel', () => {
+  test('an in-flight directed publish is refused, not written to the hub', async () => {
+    const fake = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x8e)
+    const recorder = createRecordingHub(fake)
+
+    // Same placement as the bus test: gated on the directed client's own seal
+    // (`createDirectedClient`'s `hub.publish`, directed.ts), which runs `wrap` before it ever
+    // reaches `mux.mailbox.publish`.
+    let wrapEntered = false
+    let releaseWrap = (): void => {}
+    const wrapGate = new Promise<void>((resolve) => {
+      releaseWrap = resolve
+    })
+    let gateArmed = false
+
+    const aliceCrypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
+    const gatedCrypto: FakeCrypto = {
+      ...aliceCrypto,
+      wrap: async (bytes) => {
+        if (gateArmed) {
+          gateArmed = false
+          wrapEntered = true
+          await wrapGate // park the op AFTER the seal starts, BEFORE mailbox.publish
+        }
+        return aliceCrypto.wrap(bytes)
+      },
+    }
+
+    const alice = makeMLSPeer(recorder.hub, 'alice', rs, {
+      crypto: gatedCrypto,
+      epoch: 1,
+      members,
+    })
+    await flush()
+
+    // `to('bob')` only derives topic names and builds the client — it calls `crypto.wrap`
+    // nothing, so it is safe to build before arming the gate.
+    const client = await alice.peer.protocol('chat').to('bob')
+    gateArmed = true
+    const op = client.sendEvent('chat/changed', { data: {} })
+    const owned = op.catch(() => {})
+    await flush()
+    expect(wrapEntered).toBe(true)
+
+    const disposing = alice.peer.dispose()
+    recorder.start()
+    releaseWrap()
+
+    await expect(op).rejects.toBeInstanceOf(PeerDisposedError)
+    await disposing
+    await owned
+    expect(recorder.calls()).toEqual([]) // no publish reached the hub
   })
 })

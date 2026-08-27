@@ -2059,6 +2059,13 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     anchorEpoch: () => anchor.epoch,
     dispose: async () => {
       disposed = true
+      // Synchronous and FIRST, before anything is awaited: a lane op that already passed its own
+      // `assertLive` can be running inside `runSerial`, past the point this `dispose()` can reach
+      // it — awaiting the commit mutex here is unsafe (`build()`/`onAccepted()` are host-supplied
+      // and unbounded, and a host calling `dispose()` from inside one would self-deadlock). This
+      // closes the mux's three routes to the wire immediately, so whatever the op does next, it
+      // cannot land a write. `mux.dispose()` — the full teardown — stays LAST, unchanged.
+      mux.suspendPublishing()
       // Tear down even a peer whose init failed — it still holds a hub drain.
       await settled
       commitUnsubscribe?.()
