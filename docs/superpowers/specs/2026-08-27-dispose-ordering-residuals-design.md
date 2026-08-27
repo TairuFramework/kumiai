@@ -66,21 +66,36 @@ Set mutation; against a real wire it is an RPC round trip, so there is no contra
 subscription lands before the first publish on the same transport. A caller that constructs a
 transport and immediately publishes a request can lose the first inbound reply.
 
-**Fix — capture and defer.** Two corrections over the naive version:
+**Fix — capture, absorb sync throw, gate, re-check.** Corrections over the naive version:
 
 ```ts
-// Deferred call: `hub.subscribe` runs inside the .then, so a SYNCHRONOUS throw becomes a
-// rejection the .catch absorbs — `Promise.resolve(hub.subscribe(...))` would let a sync throw
-// escape construction, because the call is evaluated before Promise.resolve wraps it.
-const subscribed = Promise.resolve()
-  .then(() => hub.subscribe(localDID, receiveTopicID))
-  .catch(() => {})
+// Async IIFE, not `Promise.resolve(hub.subscribe(...))`: the IIFE invokes `hub.subscribe`
+// SYNCHRONOUSLY (preserving today's subscribe-before-receive order — `hub.receive` is still
+// called synchronously right after) while the try/catch absorbs a synchronous throw. A bare
+// `Promise.resolve(hub.subscribe(...))` would let a sync throw escape construction (the call is
+// evaluated before Promise.resolve wraps it); a `.then(() => hub.subscribe(...))` would fix the
+// throw but defer the call to a later microtask, reversing the call order.
+const subscribed = (async () => {
+  try {
+    await hub.subscribe(localDID, receiveTopicID)
+  } catch {
+    // A failed subscribe yields no inbound frames; the send gate below still proceeds.
+  }
+})()
 ```
 
-- **Gate the send path.** In the writable's `write` (`transport.ts:428`), `await subscribed` before
-  `hub.publish` (`:444`). The promise is cached, so after it first resolves the await is a microtask.
-  A failed subscribe still resolves (`.catch`), preserving the contract that a missing subscription
-  simply yields no inbound frames rather than throwing.
+- **Gate the send path, then re-check teardown.** In the writable's `write` (`transport.ts:428`),
+  after the existing `torndown` / `lockedSessionID` guards, `await subscribed`, **then re-check
+  `torndown`** before building/publishing the frame:
+
+  ```ts
+  await subscribed
+  if (torndown) throw new Error('Hub tunnel transport torn down')
+  ```
+
+  Without the re-check, a write can pass the entry guard, park on a delayed subscribe, have teardown
+  flip `torndown` and schedule unsubscribe, then resume and publish *before* the unsubscribe runs.
+  The `subscribed` promise is cached, so after it first resolves the await is a microtask.
 - **Coordinate teardown (missed hazard, same code).** `teardown` sends `session-end` and calls
   `hub.unsubscribe?.(...)` immediately (`transport.ts:272-274`). If the construction `subscribe` is
   still in flight, `unsubscribe` can run first and the later-landing `subscribe` resurrects
@@ -126,10 +141,10 @@ responder's seal, wrap the *requester's* (alice's) `mls` port so `openSealedLedg
 fire `dispose()`; open the gate; assert `bootstrapLedger` was never called (spy on alice's
 `bootstrapLedger`). Then break each guard and confirm the test fails before restoring.
 
-## Slice 3 — guard `mux.publish` against post-dispose lanes (residual #7)
+## Slice 3 — guard the mux publish paths against post-dispose lanes (residual #7)
 
-**Files:** `packages/rpc/src/hub-mux.ts` (publish ~665, interface, dispose ~708),
-`packages/rpc/src/peer.ts` (dispose ~2056).
+**Files:** `packages/rpc/src/hub-mux.ts` (`publish` ~665, `bus.publish` ~587, `mailbox.publish` ~596,
+interface, dispose ~708), `packages/rpc/src/peer.ts` (dispose ~2056).
 
 `dispose()` awaits `settled` but never the commit mutex. An operation that has already passed its
 entry guard — `onCommitDelivery`'s `if (disposed) return` (`peer.ts:1360`), or `commit()` /
@@ -146,26 +161,39 @@ caller-supplied `build()`, so the drain can hang `dispose()` indefinitely; and b
 self-deadlocks. Guarding `mux.publish` awaits nothing, so it cannot hang or deadlock, and an
 in-flight op then rejects — matching the established "disposed op rejects `/disposed/i`" idiom.
 
-`mux.publish` must reject from the moment `peer.dispose()` begins, but the mux's full `dispose()`
-(which sets its own `disposed` and tears everything down) runs *last* in `peer.dispose()` — too late.
-So separate the "reject new publishes" signal from the "cleanup done" guard:
+The guard must reject from the moment `peer.dispose()` begins, but the mux's full `dispose()` (which
+sets its own `disposed` and tears everything down) runs *last* in `peer.dispose()` — too late. So
+separate the "reject new publishes" signal from the "cleanup done" guard:
 
-- **`hub-mux.ts`:** add `let publishSuspended = false`. In `publish` (`:665`), before
-  `assertSubscribable`: `if (publishSuspended) throw new PeerDisposedError('mux: publish after dispose')`.
-  Expose `suspendPublishing: () => { publishSuspended = true }` on the mux interface. `dispose()`
-  also sets `publishSuspended = true` (belt-and-suspenders); its idempotency guard stays on its own
-  `disposed` flag, unchanged.
+- **`hub-mux.ts`:** add `let publishSuspended = false`. Guard **all three publish paths** — the
+  primary `publish` (`:665`), `bus.publish` (`:587`) and `mailbox.publish` (`:596`) — each with
+  `if (publishSuspended) throw new PeerDisposedError('mux: publish after dispose')` before it reaches
+  `hub.publish`. These are the mux's three independent routes to the wire (`publish` for the commit
+  lane, `bus` for broadcast/app traffic, `mailbox` for directed tunnels), so guarding only the first
+  would leave an app or directed publish able to land post-dispose. Expose
+  `suspendPublishing: () => { publishSuspended = true }` on the mux interface. `dispose()` also sets
+  `publishSuspended = true` (belt-and-suspenders); its idempotency guard stays on its own `disposed`
+  flag, unchanged.
 - **`peer.ts` `dispose`:** call `mux.suspendPublishing()` immediately after `disposed = true`
   (`:2057`), before `await settled`. Full `mux.dispose()` stays where it is (last).
 
-Only `publish` is guarded, not `fetchTopic`: a post-dispose fetch is a read that moves no group
-state, and the residual is specifically about publishing.
+Not `fetchTopic`: a post-dispose fetch is a read that moves no group state.
 
-**Test.** Mutation-checked, new coverage. Park a `commit()` op mid-mutex — gate the host's `build()`
+**Guarantee and its boundary.** This prevents any publish that has **not yet entered** a mux publish
+path from starting. It cannot recall a publish already awaiting `hub.publish` — that frame is on the
+wire, and stopping it would require `dispose` to *await* the in-flight publish, i.e. the same
+unbounded/deadlocking drain rejected above. So the guarantee is "no publish that had not entered the
+mux begins after dispose," not "no publish completes after dispose." An op caught mid-`hub.publish`
+is an accepted, documented boundary (a new residual could track in-flight publishes, but the await it
+would need is why this is not attempted here).
+
+**Test.** Mutation-checked, new coverage. Park a `commit()` op mid-lane — gate the host's `build()`
 callback on a Promise so the op sits between its passed `assertLive` and `mux.publish`. Fire
 `dispose()`, then open the gate. Assert (a) the op rejects with `PeerDisposedError`, and (b) no
-publish reached the hub (recording-hub `calls()` empty). Then remove the `mux.publish` guard and
-confirm the publish leaks before restoring.
+publish reached the hub (recording-hub `calls()` empty). Then remove the `publish` guard and confirm
+the publish leaks before restoring. Add a second, lighter case exercising a `bus`/`mailbox` path
+(an app or directed publish parked in wrapping/encryption before dispose) to prove the guard covers
+all three routes, not just the commit lane.
 
 ## Out of scope
 

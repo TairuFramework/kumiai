@@ -117,31 +117,50 @@ test('first send waits for the subscription to land', async () => {
 Run: `pnpm --filter @kumiai/hub-tunnel test transport-ordering`
 Expected: FAIL — the publish races ahead of the delayed subscribe, the reply is not routed, `readFirstInbound` times out or yields the wrong frame.
 
-- [ ] **Step 3: Capture and defer the subscribe** — `transport.ts:214`, replace the fire-and-forget line:
+- [ ] **Step 3: Capture the subscribe via an async IIFE** — `transport.ts:214`, replace the fire-and-forget line. The IIFE invokes `hub.subscribe` synchronously (preserving today's subscribe-before-`receive` call order at `:215`) while the try/catch absorbs a synchronous throw:
 
 ```ts
-// Deferred call: `hub.subscribe` runs inside the .then, so a SYNCHRONOUS throw becomes a rejection
-// the .catch absorbs. `Promise.resolve(hub.subscribe(...))` would let a sync throw escape
-// construction, because the call is evaluated before Promise.resolve wraps it.
-const subscribed = Promise.resolve()
-  .then(() => hub.subscribe(localDID, receiveTopicID))
-  .catch(() => {})
+// Async IIFE, not Promise.resolve(hub.subscribe(...)) (a sync throw would escape construction)
+// and not .then(() => hub.subscribe(...)) (would defer the call, reversing subscribe-before-receive).
+const subscribed = (async () => {
+  try {
+    await hub.subscribe(localDID, receiveTopicID)
+  } catch {
+    // A failed subscribe yields no inbound frames; the send gate still proceeds.
+  }
+})()
 ```
 
-- [ ] **Step 4: Gate the send path** — in the writable `write` (`transport.ts:428`), before `await hub.publish(...)` at `:444`, add `await subscribed`. Place it after the `torndown` / `lockedSessionID` guards so a torn-down transport still throws promptly.
+- [ ] **Step 4: Gate the send path and re-check teardown** — in the writable `write` (`transport.ts:428`), after the existing `torndown` / `lockedSessionID` guards and before building the frame, add:
+
+```ts
+await subscribed
+if (torndown) {
+  throw new Error('Hub tunnel transport torn down')
+}
+```
+
+The re-check is required: without it a write can pass the entry `torndown` guard, park on a delayed subscribe, have teardown flip `torndown`, then resume and publish before the unsubscribe runs.
 
 - [ ] **Step 5: Run the first-send test to verify it passes**
 
 Run: `pnpm --filter @kumiai/hub-tunnel test transport-ordering`
 Expected: PASS.
 
-- [ ] **Step 6: Write the failing test — teardown ordering.** Add a double whose `subscribe` resolves *after* a synchronous `unsubscribe` would run, and that records subscribe/unsubscribe order. Construct a transport, tear it down (abort signal or `transport dispose`) before the subscribe settles, flush, and assert no live subscription remains (unsubscribe observed *after* subscribe, net state unsubscribed):
+- [ ] **Step 6: Write the failing tests — teardown ordering + parked-write.** Add a double whose `subscribe` resolves *after* a synchronous `unsubscribe` would run, recording subscribe/unsubscribe/publish order. Two assertions:
 
 ```ts
 test('teardown unsubscribe is ordered after an in-flight subscribe', async () => {
   // ...construct, tear down before subscribe settles, flush...
   expect(hub.liveSubscriptions()).toEqual([])
   expect(hub.order).toEqual(['subscribe', 'unsubscribe'])
+})
+
+test('a write parked on a delayed subscribe does not publish after teardown', async () => {
+  // ...construct; start write() while subscribe is delayed (it parks on `await subscribed`);
+  //    tear down before subscribe settles; then settle subscribe and flush...
+  await expect(pendingWrite).rejects.toThrow(/torn down/i)
+  expect(hub.publishCalls()).toEqual([])   // the re-check stopped the parked write
 })
 ```
 
@@ -267,16 +286,16 @@ git commit -m "fix(rpc): guard ledger waiter against post-dispose host write (re
 
 ---
 
-### Task 4: guard `mux.publish` against post-dispose lanes (residual #7)
+### Task 4: guard the mux publish paths against post-dispose lanes (residual #7)
 
 **Files:**
-- Modify: `packages/rpc/src/hub-mux.ts` (state ~290, `publish` ~665, interface `MuxType`/returned object ~150 & ~698-728)
+- Modify: `packages/rpc/src/hub-mux.ts` (state ~290, `bus.publish` ~587, `mailbox.publish` ~596, `publish` ~665, interface `MuxType`/returned object ~150 & ~698-728)
 - Modify: `packages/rpc/src/peer.ts` (`dispose` ~2056-2080)
 - Test: `packages/rpc/test/peer-dispose-race.test.ts` (new describe block)
 
 **Interfaces:**
 - Consumes: `PeerDisposedError` from Task 1 (`import { PeerDisposedError } from './errors.js'` in `hub-mux.ts`).
-- Produces: `suspendPublishing(): void` on the mux object; `mux.publish` now throws `PeerDisposedError` once suspended.
+- Produces: `suspendPublishing(): void` on the mux object; all three mux publish paths (`publish`, `bus.publish`, `mailbox.publish`) throw `PeerDisposedError` once suspended.
 
 - [ ] **Step 1: Write the failing test.** Park a `commit()` op mid-mutex by gating the host `build()` callback, then dispose. Build alice against a recording hub:
 
@@ -314,17 +333,13 @@ describe('dispose against a lane op already inside the commit mutex', () => {
 Run: `pnpm --filter @kumiai/rpc test peer-dispose-race`
 Expected: FAIL — the op runs past `build()` and `mux.publish` writes the commit to the hub; `recorder.calls()` is non-empty and the op does not reject with `PeerDisposedError`.
 
-- [ ] **Step 3: Add the suspend flag + publish guard to the mux** — `hub-mux.ts`. Add the import (`import { PeerDisposedError } from './errors.js'`). Beside `let disposed = false` (~290) add `let publishSuspended = false`. In `publish` (~665), before `assertSubscribable`:
+- [ ] **Step 3: Add the suspend flag + guard all three publish paths** — `hub-mux.ts`. Add the import (`import { PeerDisposedError } from './errors.js'`). Beside `let disposed = false` (~290) add `let publishSuspended = false`. Add the same guard as the first line of each of the three routes to `hub.publish` — `publish` (~665, before `assertSubscribable`), `bus.publish` (~587), and `mailbox.publish` (~596):
 
 ```ts
-const publish = async (params: MuxPublishParams): Promise<{ sequenceID: string }> => {
-  if (publishSuspended) throw new PeerDisposedError('mux: publish after dispose')
-  assertSubscribable(params.topicID)
-  // ...unchanged...
-}
+if (publishSuspended) throw new PeerDisposedError('mux: publish after dispose')
 ```
 
-In `dispose` (~708), after `disposed = true`, also set `publishSuspended = true` (belt-and-suspenders; idempotency guard stays on `disposed`).
+`bus`/`mailbox` are the broadcast and directed-tunnel routes; guarding only `publish` would leave an app or directed publish able to land post-dispose. In `dispose` (~708), after `disposed = true`, also set `publishSuspended = true` (belt-and-suspenders; idempotency guard stays on `disposed`).
 
 - [ ] **Step 4: Expose `suspendPublishing` on the mux** — add to the returned object (~698-728) and to the mux's TypeScript interface (`MuxType`, ~150):
 
@@ -348,7 +363,9 @@ await settled
 Run: `pnpm --filter @kumiai/rpc test peer-dispose-race`
 Expected: PASS — the op rejects with `PeerDisposedError` and no publish reaches the hub.
 
-- [ ] **Step 7: Mutation-check the guard.** Temporarily remove the `if (publishSuspended) throw ...` line in `mux.publish`; re-run; confirm the test FAILS (publish leaks, `recorder.calls()` non-empty). Restore; confirm PASS.
+- [ ] **Step 7: Cover a bus/mailbox path + mutation-check.** Add a second, lighter test: park an app (`bus`) or directed (`mailbox`) publish in wrapping/encryption before dispose (gate the encrypt step), fire `dispose()`, release, and assert it rejects with `PeerDisposedError` and the recorder is empty — proving the guard covers all three routes, not just the commit lane. Then mutation-check: temporarily remove the guard line from `mux.publish` (and separately from `bus.publish`/`mailbox.publish`); re-run; confirm the matching test FAILS (publish leaks); restore; confirm PASS.
+
+Note in the test file (comment) the documented boundary: the guard stops publishes that have **not yet entered** the mux; a publish already awaiting `hub.publish` is on the wire and is out of scope (closing it would need the rejected unbounded drain).
 
 - [ ] **Step 8: Full rpc suite + lint + commit**
 
