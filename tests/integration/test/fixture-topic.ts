@@ -1,3 +1,5 @@
+import { fromUTF, toB64U } from '@sozai/codec'
+
 /**
  * A schema-valid topicID: 43-char base64url, the shape the hub's enkaku server enforces — `serve`
  * auto-validates params against the protocol, which pins `topicID` to `^[A-Za-z0-9_-]{43}$`. These
@@ -9,6 +11,6 @@
  */
 export function fixtureTopic(label: string): string {
   const bytes = new Uint8Array(32)
-  bytes.set(new TextEncoder().encode(label).subarray(0, 32))
-  return Buffer.from(bytes).toString('base64url')
+  bytes.set(fromUTF(label).subarray(0, 32))
+  return toB64U(bytes)
 }
