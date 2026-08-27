@@ -3,6 +3,7 @@ import type { LogHub } from '@kumiai/hub-tunnel'
 import { describe, expect, test } from 'vitest'
 
 import type { SubscribeFailure } from '../src/hub-mux.js'
+import { PeerDisposedError } from '../src/index.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryCommitJournal, type MemoryCommitJournal } from './fixtures/journal.js'
@@ -27,7 +28,7 @@ describe('dispose against an establishing directed session', () => {
     const pending = alice.peer.protocol('chat').to('bob')
     await alice.peer.dispose()
 
-    await expect(pending).rejects.toThrow(/disposed/i)
+    await expect(pending).rejects.toBeInstanceOf(PeerDisposedError)
   })
 
   test('a call made after dispose names the disposal, not a missing protocol', async () => {
@@ -39,8 +40,8 @@ describe('dispose against an establishing directed session', () => {
 
     // The other ordering, where teardown has already emptied `runtimes`: without the disposed
     // check this reports `Unknown protocol: chat` — the protocol is fine, the peer is gone.
-    await expect(alice.peer.protocol('chat').dispatch('chat/changed', {})).rejects.toThrow(
-      /disposed/i,
+    await expect(alice.peer.protocol('chat').dispatch('chat/changed', {})).rejects.toBeInstanceOf(
+      PeerDisposedError,
     )
   })
 
@@ -62,7 +63,7 @@ describe('dispose against an establishing directed session', () => {
     // the drain stops, SUBSCRIPTIONS STAND") so `retain` finds every topic already `held` and
     // returns early. The leak is entirely internal to a mux this package does not let a test
     // reach. Asserting on hub traffic here would be a decoration that never bites.
-    await expect(alice.peer.resync()).rejects.toThrow(/disposed/i)
+    await expect(alice.peer.resync()).rejects.toBeInstanceOf(PeerDisposedError)
   })
 })
 
@@ -210,7 +211,7 @@ describe('dispose against a commit made afterwards', () => {
     await flush()
 
     expect(calls).toEqual([])
-    await expect(op).rejects.toThrow(/disposed/i)
+    await expect(op).rejects.toBeInstanceOf(PeerDisposedError)
     await owned
   })
 })
@@ -269,7 +270,7 @@ describe('dispose against a replay made afterwards', () => {
     await flush(150)
 
     expect(recorder.calls()).toEqual([])
-    await expect(op).rejects.toThrow(/disposed/i)
+    await expect(op).rejects.toBeInstanceOf(PeerDisposedError)
     await owned
 
     await bob.peer.dispose()
@@ -302,7 +303,7 @@ describe('dispose against a recover made afterwards', () => {
     await flush(120)
 
     expect(recorder.calls()).toEqual([])
-    await expect(op).rejects.toThrow(/disposed/i)
+    await expect(op).rejects.toBeInstanceOf(PeerDisposedError)
     await owned
   })
 })

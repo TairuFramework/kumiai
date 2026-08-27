@@ -54,6 +54,7 @@ import {
   createInboxPath,
   type InboundPath,
 } from './directed.js'
+import { PeerDisposedError } from './errors.js'
 import { adaptBusHandlers, type BusHandlerMaps } from './handlers.js'
 import {
   decodeHandshakeFrame,
@@ -732,7 +733,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    */
   let disposed = false
   const assertLive = (): void => {
-    if (disposed) throw new Error('Peer is disposed')
+    if (disposed) throw new PeerDisposedError('Peer is disposed')
   }
 
   let commitUnsubscribe: (() => void) | undefined
