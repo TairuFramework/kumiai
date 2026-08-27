@@ -3,7 +3,7 @@ import type { AnyClientMessageOf, AnyServerMessageOf } from '@enkaku/protocol'
 import { DirectTransports } from '@enkaku/transport'
 import { type OwnIdentity, randomIdentity } from '@kokuin/token'
 import type { HubProtocol, HubStore } from '@kumiai/hub-protocol'
-import { fromB64, fromUTF, toB64 } from '@sozai/codec'
+import { fromB64, fromUTF, toB64, toB64U } from '@sozai/codec'
 import { describe, expect, test, vi } from 'vitest'
 
 import { type AuthorizeRequest, createHandlers, type HubStoreErrorEvent } from '../src/handlers.js'
@@ -16,7 +16,18 @@ type HubTransports = DirectTransports<
   AnyClientMessageOf<HubProtocol>
 >
 
-const TOPIC = 'topic:1'
+// A schema-valid topicID: 43-char base64url, the shape the hub's enkaku server enforces — it
+// validates params against the protocol, which pins topicID to `^[A-Za-z0-9_-]{43}$`. Derived from
+// a readable label so distinct labels stay distinct on the wire.
+const fixtureTopic = (label: string): string => {
+  const bytes = new Uint8Array(32)
+  bytes.set(fromUTF(label).subarray(0, 32))
+  return toB64U(bytes)
+}
+
+const TOPIC = fixtureTopic('topic-1')
+const TOPIC_A = fixtureTopic('topic-A')
+const TOPIC_B = fixtureTopic('topic-B')
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -250,7 +261,7 @@ describe('hub pub/sub', () => {
     const bobIdentity = randomIdentity()
     const { client: bob } = ctx.connect(bobIdentity)
 
-    await bob.request('hub/v1/subscribe', { param: { topicID: 'topic:A' } })
+    await bob.request('hub/v1/subscribe', { param: { topicID: TOPIC_A } })
     const channel = bob.createChannel('hub/v1/receive', { param: {} })
     const reader = channel.readable.getReader()
     let delivered = false
@@ -266,7 +277,7 @@ describe('hub pub/sub', () => {
     await delay(20)
 
     await alice.request('hub/v1/publish', {
-      param: { topicID: 'topic:B', payload: encodePayload('other') },
+      param: { topicID: TOPIC_B, payload: encodePayload('other') },
     })
     await delay(20)
 
@@ -277,7 +288,7 @@ describe('hub pub/sub', () => {
     // delivered NOTHING, ever, passes every assertion so far. A frame on the topic bob really is
     // subscribed to has to arrive, or the silence about `topic:B` means nothing.
     await alice.request('hub/v1/publish', {
-      param: { topicID: 'topic:A', payload: encodePayload('subscribed') },
+      param: { topicID: TOPIC_A, payload: encodePayload('subscribed') },
     })
     await delay(20)
     expect(delivered).toBe(true)

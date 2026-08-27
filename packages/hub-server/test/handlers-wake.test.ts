@@ -6,7 +6,7 @@ import type { HubProtocol, WakeRegistration, WakeRegistry, WakeSender } from '@k
 import { HUB_ERROR_CODES, openWakeHint } from '@kumiai/hub-protocol'
 import { createMemoryWakeRegistry } from '@kumiai/hub-wake'
 import { p256 } from '@noble/curves/nist.js'
-import { fromUTF, toB64 } from '@sozai/codec'
+import { fromUTF, toB64, toB64U } from '@sozai/codec'
 import { describe, expect, test, vi } from 'vitest'
 
 import { createHandlers } from '../src/handlers.js'
@@ -88,7 +88,13 @@ function createRecordingSender(): {
   return { sender, sent }
 }
 
-const PAIR_TOPIC = 'topic-a'
+// A schema-valid topicID: 43-char base64url, the shape the hub's enkaku server enforces — it
+// validates params against the protocol, which pins topicID to `^[A-Za-z0-9_-]{43}$`.
+const PAIR_TOPIC = ((): string => {
+  const bytes = new Uint8Array(32)
+  bytes.set(fromUTF('pair-topic').subarray(0, 32))
+  return toB64U(bytes)
+})()
 
 // Tight real-time poll rather than a fixed sleep: resolves the instant the predicate turns true
 // instead of gambling a fixed delay is long enough (and wasting it when the event is instant).
@@ -634,7 +640,7 @@ describe('wake on publish', () => {
       authSecret: recipientAuthSecretB64u,
     })
 
-    const { sequenceID } = await publisher.publish({ topicID: 'topic-a', payload: 'aGk' })
+    const { sequenceID } = await publisher.publish({ topicID: PAIR_TOPIC, payload: 'aGk' })
 
     await vi.waitFor(() => expect(sent).toHaveLength(1))
     // The hint's contents are what tell a woken device WHAT to fetch — assert them, not just that
@@ -642,7 +648,7 @@ describe('wake on publish', () => {
     // registration), but `topicID`/`sequenceID` are only ever asserted at the dispatcher level in
     // wake.test.ts, never through this fan-out hook.
     expect(openWakeHint(sent[0].body, recipientOpener)).toEqual({
-      topicID: 'topic-a',
+      topicID: PAIR_TOPIC,
       sequenceID,
       count: 1,
     })
@@ -665,7 +671,7 @@ describe('wake on publish', () => {
     })
     await bringOnline()
 
-    await publisher.publish({ topicID: 'topic-a', payload: 'aGk' })
+    await publisher.publish({ topicID: PAIR_TOPIC, payload: 'aGk' })
     // Same shape as the cancellation tests: a fixed sleep here could end before the fan-out's
     // fire-and-forget dispatch even got a turn, and pass without having observed anything.
     await expectStaysAt(() => sent.length, 0, 300)
@@ -686,7 +692,7 @@ describe('wake on publish', () => {
       authSecret: recipientAuthSecretB64u,
     })
 
-    await publisher.publish({ topicID: 'topic-a', payload: 'aGk', retain: 'log' })
+    await publisher.publish({ topicID: PAIR_TOPIC, payload: 'aGk', retain: 'log' })
 
     await vi.waitFor(() => expect(sent).toHaveLength(1))
     await dispose()
@@ -706,7 +712,7 @@ describe('wake on publish', () => {
       authSecret: recipientAuthSecretB64u,
     })
 
-    await publisher.publish({ topicID: 'topic-a', payload: 'aGk' })
+    await publisher.publish({ topicID: PAIR_TOPIC, payload: 'aGk' })
     // Same shape as the cancellation tests: a fixed sleep here could end before the fan-out's
     // fire-and-forget dispatch even got a turn, and pass without having observed anything.
     await expectStaysAt(() => sent.length, 0, 300)
@@ -732,10 +738,10 @@ describe('wake on publish', () => {
     })
 
     // Leading edge: the first offline publish wakes immediately and opens the coalescing window.
-    await publisher.publish({ topicID: 'topic-a', payload: 'aGk' })
+    await publisher.publish({ topicID: PAIR_TOPIC, payload: 'aGk' })
     await vi.waitFor(() => expect(sent).toHaveLength(1))
     // A second offline publish inside the window arms a trailing summary.
-    await publisher.publish({ topicID: 'topic-a', payload: 'aGk' })
+    await publisher.publish({ topicID: PAIR_TOPIC, payload: 'aGk' })
 
     // The device reconnects before the window closes: `online()` must cancel the pending timer.
     await bringOnline()
@@ -764,14 +770,14 @@ describe('wake on publish', () => {
       authSecret: recipientAuthSecretB64u,
     })
 
-    await publisher.publish({ topicID: 'topic-a', payload: 'aGk' })
+    await publisher.publish({ topicID: PAIR_TOPIC, payload: 'aGk' })
     await vi.waitFor(() => expect(sent).toHaveLength(1))
-    const { sequenceID } = await publisher.publish({ topicID: 'topic-a', payload: 'aGk' })
+    const { sequenceID } = await publisher.publish({ topicID: PAIR_TOPIC, payload: 'aGk' })
 
     await vi.waitFor(() => expect(sent).toHaveLength(2), { timeout: 2000 })
     // The summary, not a second leading edge: it names the LATEST frame and counts the window.
     expect(openWakeHint(sent[1].body, recipientOpener)).toEqual({
-      topicID: 'topic-a',
+      topicID: PAIR_TOPIC,
       sequenceID,
       count: 1,
     })
@@ -801,7 +807,7 @@ describe('createHub wake wiring', () => {
       authSecret: recipientAuthSecretB64u,
     })
 
-    await publisher.publish({ topicID: 'topic-a', payload: 'aGk' })
+    await publisher.publish({ topicID: PAIR_TOPIC, payload: 'aGk' })
 
     await vi.waitFor(() => expect(events).toHaveLength(1))
     expect(events[0]).toEqual({ method: 'wake', did: offlineDID, error: expect.any(Error) })
@@ -825,10 +831,10 @@ describe('createHub wake wiring', () => {
       authSecret: recipientAuthSecretB64u,
     })
 
-    await publisher.publish({ topicID: 'topic-a', payload: 'aGk' })
+    await publisher.publish({ topicID: PAIR_TOPIC, payload: 'aGk' })
     await vi.waitFor(() => expect(sent).toHaveLength(1))
     // Arms a trailing summary, then tears the hub down before the window closes.
-    await publisher.publish({ topicID: 'topic-a', payload: 'aGk' })
+    await publisher.publish({ topicID: PAIR_TOPIC, payload: 'aGk' })
     await dispose()
 
     // Three times the window, checked continuously: the summary must never fire, because dispose
@@ -853,8 +859,8 @@ describe('a throwing wake dispatcher', () => {
 
     // Subscribed in this order so `getSubscribers` yields the throwing (offline) recipient FIRST:
     // an unguarded throw during its turn would abort the loop before it ever reaches `onlineDID`.
-    await store.subscribe({ subscriberDID: offlineDID, topicID: 'topic-a' })
-    await store.subscribe({ subscriberDID: onlineDID, topicID: 'topic-a' })
+    await store.subscribe({ subscriberDID: offlineDID, topicID: PAIR_TOPIC })
+    await store.subscribe({ subscriberDID: onlineDID, topicID: PAIR_TOPIC })
 
     const delivered: Array<unknown> = []
     registry.register(onlineDID)
@@ -886,7 +892,7 @@ describe('a throwing wake dispatcher', () => {
         header: {},
         payload: { typ: 'request', prc: 'hub/v1/publish', rid: '1', iss: senderDID },
       },
-      param: { topicID: 'topic-a', payload: toB64(fromUTF('hi')) },
+      param: { topicID: PAIR_TOPIC, payload: toB64(fromUTF('hi')) },
     } as never)
 
     expect(result).toMatchObject({ sequenceID: expect.any(String) })

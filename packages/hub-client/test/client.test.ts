@@ -5,7 +5,7 @@ import { randomIdentity } from '@kokuin/token'
 import type { HubProtocol } from '@kumiai/hub-protocol'
 import { keyPackageDigest } from '@kumiai/hub-protocol'
 import { createHub, createMemoryStore } from '@kumiai/hub-server'
-import { fromUTF, toB64 } from '@sozai/codec'
+import { fromUTF, toB64, toB64U } from '@sozai/codec'
 import { describe, expect, test } from 'vitest'
 
 import { HubClient } from '../src/client.js'
@@ -15,7 +15,16 @@ type HubTransports = DirectTransports<
   AnyClientMessageOf<HubProtocol>
 >
 
-const TOPIC = 'topic:chat'
+// A schema-valid topicID: 43-char base64url, the shape the hub's enkaku server enforces — it
+// validates params against the protocol, which pins topicID to `^[A-Za-z0-9_-]{43}$`.
+const fixtureTopic = (label: string): string => {
+  const bytes = new Uint8Array(32)
+  bytes.set(fromUTF(label).subarray(0, 32))
+  return toB64U(bytes)
+}
+
+const TOPIC = fixtureTopic('chat')
+const TOPIC_WORK = fixtureTopic('work')
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -79,20 +88,20 @@ describe('HubClient', () => {
     const { client: alice, transports: aliceT } = createTestClient(testHub)
     const { client: bob, transports: bobT } = createTestClient(testHub)
 
-    await bob.subscribe('topic:chat')
-    await bob.subscribe('topic:work')
+    await bob.subscribe(TOPIC)
+    await bob.subscribe(TOPIC_WORK)
     const channel = bob.receive()
     const reader = channel.readable.getReader()
     await delay(50)
 
-    await alice.publish({ topicID: 'topic:chat', payload: encodePayload('chat-msg') })
+    await alice.publish({ topicID: TOPIC, payload: encodePayload('chat-msg') })
     const msg1 = await reader.read()
-    expect(msg1.value?.topicID).toBe('topic:chat')
+    expect(msg1.value?.topicID).toBe(TOPIC)
     expect(msg1.value?.payload).toBe(encodePayload('chat-msg'))
 
-    await alice.publish({ topicID: 'topic:work', payload: encodePayload('work-msg') })
+    await alice.publish({ topicID: TOPIC_WORK, payload: encodePayload('work-msg') })
     const msg2 = await reader.read()
-    expect(msg2.value?.topicID).toBe('topic:work')
+    expect(msg2.value?.topicID).toBe(TOPIC_WORK)
     expect(msg2.value?.payload).toBe(encodePayload('work-msg'))
 
     channel.close()

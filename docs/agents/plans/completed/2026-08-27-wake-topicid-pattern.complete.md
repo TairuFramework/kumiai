@@ -37,14 +37,21 @@ seal record's raw byte headroom rather than a live hazard.
 - **Exact `{43}`, not a lenient alphabet-or-length pattern.** The seal record is a fixed size, and
   this protocol seals its schemas — a future topic shape ships as a new versioned procedure, never
   a widened field. Exact length also makes min/max redundant.
-- **The pattern is a contract/type-level narrowing today, not a runtime guard.** `serve()` in
-  `hub-server/src/hub.ts` is called with no `validator` (enkaku's `serve` takes `validator?`
-  optionally), and there is no client-side validation; the hub-conformance suites drive the store
-  directly, below the RPC boundary. So nothing runs the schema against a value at runtime, and the
-  seal-time throw remains the runtime backstop. This is why existing readable test/conformance
-  fixtures (`'topic:conformance'`, `'topic-a'`) did not break. Notes were left at the conformance
-  `TOPIC` constants: if a `validator` is ever wired into `serve()`, those fixtures must move to real
-  base64url values first.
+- **The pattern is runtime-enforced at the hub server boundary.** enkaku's `serve` auto-derives a
+  validator from the `protocol` it is given — `createValidator(createClientMessageSchema(protocol))`
+  (`@enkaku/server` `server.ts`) — and `hub-server/src/hub.ts` passes `protocol: hubProtocol`, so
+  every inbound client message is validated against the schema. A topicID outside the pattern is
+  rejected with enkaku error `EK08` ("Invalid protocol message") before any handler runs; the
+  seal-time throw is a second, deeper backstop. (An early read of `hub.ts` alone suggested "no
+  validator wired" because none is passed *explicitly*; the auto-derivation from `protocol` was
+  missed, and a stale `lib/` build let a scoped test run pass before `--force` rebuilt it. The final
+  full `turbo … --force` caught it.) Consequence: production callers are unaffected (they mint
+  43-char base64url topics), but hub-server and hub-client test fixtures that published fake topics
+  (`'topic:1'`, `'topic-a'`, `'topic:chat'`) through the client/server had to move to schema-valid
+  43-char values, via a small `fixtureTopic(label)` helper. The hub-conformance suites were the
+  exception and kept their readable topicIDs: they exercise the store directly, never crossing the
+  enkaku client/server boundary, so the validator never sees them — a note at each `TOPIC` constant
+  records that.
 
 ## Verification
 
