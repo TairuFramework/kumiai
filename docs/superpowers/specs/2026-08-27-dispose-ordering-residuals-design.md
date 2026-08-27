@@ -145,6 +145,18 @@ responder's seal, wrap the *requester's* (alice's) `mls` port so `openSealedLedg
 fire `dispose()`; open the gate; assert `bootstrapLedger` was never called (spy on alice's
 `bootstrapLedger`). Then break each guard and confirm the test fails before restoring.
 
+**Guarantee and its boundary (in-flight ledger write).** The two guards stop a waiter that has **not
+yet entered** the host port — an early-out before `openSealedLedger`, and the decisive re-check
+before `bootstrapLedger`. They cannot recall an `openSealedLedger`/`bootstrapLedger` call already in
+flight: once the IIFE has passed the second guard and entered `bootstrapLedger`, that host-ledger
+write can complete after `dispose()` returns, because `GroupMLS.bootstrapLedger` is an unconstrained
+async host port (`crypto.ts:404`) the peer cannot interrupt. This is the same accepted boundary as
+Slice 3's in-flight `hub.publish` — the only close would be having `dispose()` *await* the in-flight
+write, i.e. the same unbounded/deadlock-prone drain rejected there (a caller-supplied host port with
+no bound, and a host that disposes from inside its own port call would self-deadlock). The impact is
+bounded: a single ledger replacement on an already-disposed peer, no worse than the state the peer
+already held. Documented, not closed.
+
 ## Slice 3 — guard the mux publish paths against post-dispose lanes (residual #7)
 
 **Files:** `packages/rpc/src/hub-mux.ts` (`publish` ~665, `bus.publish` ~587, `mailbox.publish` ~596,

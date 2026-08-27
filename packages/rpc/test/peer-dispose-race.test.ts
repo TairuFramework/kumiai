@@ -1,7 +1,8 @@
-import { AuthorizationDeniedError } from '@kumiai/hub-protocol'
-import type { LogHub } from '@kumiai/hub-tunnel'
+import { AuthorizationDeniedError, type StoredMessage } from '@kumiai/hub-protocol'
+import type { HubReceiveSubscription, LogHub } from '@kumiai/hub-tunnel'
 import { describe, expect, test } from 'vitest'
 
+import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import type { SubscribeFailure } from '../src/hub-mux.js'
 import { PeerDisposedError } from '../src/index.js'
 import { createFakeCrypto, type FakeCrypto } from './fixtures/fake-crypto.js'
@@ -610,6 +611,208 @@ describe('dispose against a requester ledger reply already in its IIFE', () => {
     // Unguarded, the parked IIFE resumes and writes the opened tokens into the host-owned MLS
     // handle via `bootstrapLedger`, several awaits after this peer's host tore it down.
     expect(bootstrapCalls).toBe(0)
+
+    await rejoin
+    await bob.peer.dispose()
+  })
+})
+
+// Wraps a hub's `receive` so the FIRST ledgerReply frame is intercepted and HELD instead of
+// delivered, then re-emitted on demand by `deliverHeld()`. The re-emit resolves the drain's parked
+// `next()` DIRECTLY (one microtask), which is what lets the test land the delivery inside dispose's
+// own window — after `disposed = true`, before `ledgerWaiters.clear()`.
+type HeldReceive = {
+  hub: LogHub
+  /** Resolves once a ledgerReply has been intercepted and is being held. */
+  whenHeld: Promise<void>
+  /** Synchronously push the held ledgerReply into the drain's parked `next()`. */
+  deliverHeld: () => void
+}
+
+const hubHoldingLedgerReply = (fake: FakeHub, holderDID: string): HeldReceive => {
+  let resolveHeld: () => void = () => {}
+  const whenHeld = new Promise<void>((r) => {
+    resolveHeld = r
+  })
+  let deliverHeld: () => void = () => {}
+
+  const wrap = (inner: HubReceiveSubscription): HubReceiveSubscription => {
+    const innerIter = inner[Symbol.asyncIterator]()
+    const queue: Array<StoredMessage> = []
+    let resolveNext: ((r: IteratorResult<StoredMessage>) => void) | undefined
+    let closed = false
+    let held: StoredMessage | undefined
+
+    const emit = (message: StoredMessage): void => {
+      if (resolveNext != null) {
+        const resolve = resolveNext
+        resolveNext = undefined
+        resolve({ value: message, done: false })
+      } else {
+        queue.push(message)
+      }
+    }
+    const end = (): void => {
+      closed = true
+      if (resolveNext != null) {
+        const resolve = resolveNext
+        resolveNext = undefined
+        resolve({ value: undefined as unknown as StoredMessage, done: true })
+      }
+    }
+    const isLedgerReply = (message: StoredMessage): boolean => {
+      try {
+        return decodeHandshakeFrame(message.payload).kind === HANDSHAKE_KIND.ledgerReply
+      } catch {
+        return false
+      }
+    }
+
+    void (async () => {
+      while (true) {
+        let result: IteratorResult<StoredMessage>
+        try {
+          result = await innerIter.next()
+        } catch {
+          end()
+          return
+        }
+        if (result.done) {
+          end()
+          return
+        }
+        // Hold the FIRST ledgerReply and nothing else: the recoveryReply that precedes it must pass
+        // through, or alice's `recover()` never reaches `ensureLedger` to register the waiter.
+        if (held == null && isLedgerReply(result.value)) {
+          held = result.value
+          resolveHeld()
+          continue
+        }
+        emit(result.value)
+      }
+    })()
+
+    deliverHeld = (): void => {
+      if (held == null) return
+      const message = held
+      held = undefined
+      emit(message)
+    }
+
+    const iterator: AsyncIterator<StoredMessage> = {
+      next: () => {
+        if (queue.length > 0) {
+          return Promise.resolve({ value: queue.shift() as StoredMessage, done: false })
+        }
+        if (closed)
+          return Promise.resolve({ value: undefined as unknown as StoredMessage, done: true })
+        return new Promise((resolve) => {
+          resolveNext = resolve
+        })
+      },
+      return: () => {
+        inner.return?.()
+        return Promise.resolve({ value: undefined as unknown as StoredMessage, done: true })
+      },
+    }
+    return {
+      [Symbol.asyncIterator]: () => iterator,
+      return: () => inner.return?.(),
+      ack: inner.ack?.bind(inner),
+    }
+  }
+
+  const hub: LogHub = {
+    publish: (params) => fake.publish(params),
+    subscribe: (subscriberDID, topicID, options) => fake.subscribe(subscriberDID, topicID, options),
+    unsubscribe: (subscriberDID, topicID) => fake.unsubscribe(subscriberDID, topicID),
+    receive: (subscriberDID) => {
+      const inner = fake.receive(subscriberDID)
+      return subscriberDID === holderDID ? wrap(inner) : inner
+    },
+    fetchTopic: (params) => fake.fetchTopic(params),
+  }
+
+  return { hub, whenHeld, deliverHeld: () => deliverHeld() }
+}
+
+// residual #6, EARLY guard: the ledger-waiter IIFE's early-out `if (settled || disposed) return`
+// runs BEFORE `openSealedLedger`. The existing test above parks INSIDE `openSealedLedger`, so it
+// only exercises the SECOND guard; removing the `disposed` term from the early-out leaves that test
+// green. This one fires the waiter in the one window where the early `disposed` term is the only
+// thing standing between the reply and a wasted decrypt: after `dispose()` set `disposed = true`
+// but before it reached `ledgerWaiters.clear()`. The reply is held at alice's receive and delivered
+// synchronously one statement before `dispose()`, so its drain microtask runs before dispose's
+// post-`await settled` continuation (the unsubscribe + clear). The waiter then fires with
+// `disposed === true` and the gather's own `settled === false`, and the early guard must return
+// without entering `openSealedLedger`.
+describe('dispose against a ledger reply delivered inside the dispose window', () => {
+  test('the early guard drops the reply before openSealedLedger', async () => {
+    const fake = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x8f)
+    const held = hubHoldingLedgerReply(fake, 'alice')
+
+    let openEntered = false
+
+    const aliceCrypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
+    const aliceInner = createMemoryGroupMLS({
+      recoverySecret: rs,
+      epoch: 1,
+      localDID: 'alice',
+      members,
+      onAdvance: (e) => aliceCrypto.setEpoch(e),
+    })
+    const aliceMLS: MemoryGroupMLS = {
+      ...aliceInner,
+      async openSealedLedger(sealed: Uint8Array, requestID: string) {
+        // Flipped BEFORE the first await: if the early guard returns, this is never reached and the
+        // flag stays false. Removing the early `disposed` term flips it true — the mutation bite.
+        openEntered = true
+        return await aliceInner.openSealedLedger(sealed, requestID)
+      },
+    }
+
+    // Bob serves a COMPLETE ledger so alice's `ensureLedger` waiter has a real reply to receive.
+    const bob = makeMLSPeer(fake, 'bob', rs, {
+      epoch: 1,
+      members,
+      recovery: { timeoutMs: 120, getDelayMs: () => 0, deadlineMs: 600 },
+    })
+    await flush()
+    await bob.peer.commit(buildLedgerCommit(bob, ['circle:x=Bob']))
+    await flush()
+
+    const alice = makeMLSPeer(held.hub, 'alice', rs, {
+      mls: aliceMLS,
+      crypto: aliceCrypto,
+      members,
+      recovery: { timeoutMs: 120, getDelayMs: () => 0, deadlineMs: 600 },
+    })
+    await flush()
+
+    // Not awaited: her recover registers the ledger waiter and publishes the request, then parks —
+    // bob's reply is intercepted and HELD by the wrapper, so her gather never settles here.
+    const rejoin = alice.peer.recover().catch(() => {})
+
+    // The reply reached alice and is being held: the waiter is registered and the gather is pending.
+    await held.whenHeld
+    await flush()
+    expect(openEntered).toBe(false)
+
+    // The window, opened deliberately. `deliverHeld()` resolves the drain's parked `next()` — its
+    // delivery microtask is now queued. `dispose()`, called synchronously right after, sets
+    // `disposed = true` and queues its own continuation (unsubscribe + `ledgerWaiters.clear()`)
+    // AFTER that delivery. So the waiter fires — disposed, gather not yet settled — and the early
+    // guard is the only thing between the reply and `openSealedLedger`.
+    held.deliverHeld()
+    const disposing = alice.peer.dispose()
+    await disposing
+    await flush(40)
+
+    // The early guard returned: the reply was dropped before the decrypt. Under the mutation that
+    // removes the `disposed` term from the early-out, this flips true (the second guard, still
+    // intact, would then stop the write — but the wasted decrypt has already happened).
+    expect(openEntered).toBe(false)
 
     await rejoin
     await bob.peer.dispose()
