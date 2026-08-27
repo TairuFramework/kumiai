@@ -3,7 +3,7 @@ import type { AnyClientMessageOf, AnyServerMessageOf } from '@enkaku/protocol'
 import { DirectTransports } from '@enkaku/transport'
 import { type OwnIdentity, randomIdentity } from '@kokuin/token'
 import type { HubProtocol, HubStore } from '@kumiai/hub-protocol'
-import { fromB64, fromUTF, toB64 } from '@sozai/codec'
+import { fromB64, fromUTF, toB64, toB64U } from '@sozai/codec'
 import { describe, expect, test, vi } from 'vitest'
 
 import { type AuthorizeRequest, createHandlers, type HubStoreErrorEvent } from '../src/handlers.js'
@@ -16,7 +16,19 @@ type HubTransports = DirectTransports<
   AnyClientMessageOf<HubProtocol>
 >
 
-const TOPIC = 'topic:1'
+// A schema-valid topicID: 43-char base64url, the shape the hub's enkaku server enforces — it
+// validates params against the protocol, which pins topicID to `^[A-Za-z0-9_-]{43}$`. Derived from
+// a readable label, truncated to 32 bytes — keep labels short and distinct where a test needs
+// distinct topics; the ones here are.
+const fixtureTopic = (label: string): string => {
+  const bytes = new Uint8Array(32)
+  bytes.set(fromUTF(label).subarray(0, 32))
+  return toB64U(bytes)
+}
+
+const TOPIC = fixtureTopic('topic-1')
+const TOPIC_A = fixtureTopic('topic-A')
+const TOPIC_B = fixtureTopic('topic-B')
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -81,6 +93,59 @@ function createTestHub(options: TestHubOptions = {}): TestHub {
 
   return { hub, store, connect, dispose }
 }
+
+describe('topicID schema is enforced at the wire boundary', () => {
+  // The protocol pins topicID to `^[A-Za-z0-9_-]{43}$`, and enkaku's `serve` auto-derives a
+  // validator from the protocol, so an off-pattern topicID is rejected at the boundary — before any
+  // store or handler runs — with the schema-validation error, not a handler-level one. This is the
+  // runtime behavior every `fixtureTopic` in these suites exists to satisfy; pin it directly so a
+  // future change that drops the validator or loosens the pattern fails here.
+  const badTopic = 'topic:not-base64url' // colon + wrong length: fails the pattern
+
+  test('publish with an off-pattern topicID is refused before the store', async () => {
+    const store = createMemoryStore()
+    const publishSpy = vi.spyOn(store, 'publish')
+    const ctx = createTestHub({ store })
+    const { client: alice } = ctx.connect()
+
+    await expect(
+      alice.request('hub/v1/publish', {
+        param: { topicID: badTopic, payload: encodePayload('x') },
+      }),
+    ).rejects.toThrow('Invalid protocol message')
+    expect(publishSpy).not.toHaveBeenCalled()
+
+    await ctx.dispose()
+  })
+
+  test('subscribe, unsubscribe and topic/fetch all refuse an off-pattern topicID', async () => {
+    const ctx = createTestHub()
+    const { client: alice } = ctx.connect()
+
+    await expect(
+      alice.request('hub/v1/subscribe', { param: { topicID: badTopic } }),
+    ).rejects.toThrow('Invalid protocol message')
+    await expect(
+      alice.request('hub/v1/unsubscribe', { param: { topicID: badTopic } }),
+    ).rejects.toThrow('Invalid protocol message')
+    await expect(
+      alice.request('hub/v1/topic/fetch', { param: { topicID: badTopic } }),
+    ).rejects.toThrow('Invalid protocol message')
+
+    await ctx.dispose()
+  })
+
+  test('a schema-valid 43-char topicID is accepted at the same boundary', async () => {
+    const ctx = createTestHub()
+    const { client: alice } = ctx.connect()
+
+    await expect(
+      alice.request('hub/v1/subscribe', { param: { topicID: TOPIC } }),
+    ).resolves.toMatchObject({ subscribed: true })
+
+    await ctx.dispose()
+  })
+})
 
 describe('hub authentication', () => {
   test('rejects unsigned client messages', async () => {
@@ -250,7 +315,7 @@ describe('hub pub/sub', () => {
     const bobIdentity = randomIdentity()
     const { client: bob } = ctx.connect(bobIdentity)
 
-    await bob.request('hub/v1/subscribe', { param: { topicID: 'topic:A' } })
+    await bob.request('hub/v1/subscribe', { param: { topicID: TOPIC_A } })
     const channel = bob.createChannel('hub/v1/receive', { param: {} })
     const reader = channel.readable.getReader()
     let delivered = false
@@ -266,7 +331,7 @@ describe('hub pub/sub', () => {
     await delay(20)
 
     await alice.request('hub/v1/publish', {
-      param: { topicID: 'topic:B', payload: encodePayload('other') },
+      param: { topicID: TOPIC_B, payload: encodePayload('other') },
     })
     await delay(20)
 
@@ -277,7 +342,7 @@ describe('hub pub/sub', () => {
     // delivered NOTHING, ever, passes every assertion so far. A frame on the topic bob really is
     // subscribed to has to arrive, or the silence about `topic:B` means nothing.
     await alice.request('hub/v1/publish', {
-      param: { topicID: 'topic:A', payload: encodePayload('subscribed') },
+      param: { topicID: TOPIC_A, payload: encodePayload('subscribed') },
     })
     await delay(20)
     expect(delivered).toBe(true)

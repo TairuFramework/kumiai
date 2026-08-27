@@ -109,8 +109,9 @@ and the final pass returned zero findings.
 
 ## Follow-on work
 
-- `docs/agents/plans/next/2026-08-10-wake-topicid-pattern.md` — the protocol's `topicID` has no
-  `pattern`, so an escape-heavy 256-character value is schema-legal and too large to seal.
+- ~~the protocol's `topicID` has no `pattern`, so an escape-heavy 256-character value is
+  schema-legal and too large to seal~~ — RESOLVED on `feat/topicid-pattern`, see
+  `docs/agents/plans/completed/2026-08-27-wake-topicid-pattern.complete.md`.
 - `docs/agents/plans/backlog/2026-08-10-wake-residuals.md` — the platform pieces deliberately left
   out (iOS NSE, durable registry, APNs/FCM senders, device-level e2e) and the deferred minors.
 

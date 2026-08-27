@@ -2,6 +2,11 @@ import { describe, expect, test } from 'vitest'
 
 import { hubProtocol } from '../src/protocol.js'
 
+// Every topicID is `toB64U(32 bytes)` from the group's epoch secret (see @kumiai/broadcast's
+// deriveTopicID): exactly 43 unpadded base64url characters. The pattern pins that shape so no
+// schema-legal value can overflow the fixed-size wake-hint seal record.
+const TOPIC_ID_PATTERN = '^[A-Za-z0-9_-]{43}$'
+
 describe('hubProtocol', () => {
   test('defines the pub/sub + bootstrap procedures', () => {
     expect(Object.keys(hubProtocol).sort()).toEqual(
@@ -70,6 +75,42 @@ describe('hubProtocol', () => {
     expect(receive.receive.required).toEqual(['sequenceID', 'senderDID', 'topicID', 'payload'])
     expect(receive.receive.properties).not.toHaveProperty('groupID')
     expect(receive.param.properties).not.toHaveProperty('groupIDs')
+  })
+})
+
+describe('topicID pattern', () => {
+  // base64url of 32 zero bytes: 43 'A' characters. A real, legal topicID.
+  const legal = 'A'.repeat(43)
+
+  const sites: Array<[string, { pattern?: string }]> = [
+    ['publish param', hubProtocol['hub/v1/publish'].param.properties.topicID],
+    ['subscribe param', hubProtocol['hub/v1/subscribe'].param.properties.topicID],
+    ['unsubscribe param', hubProtocol['hub/v1/unsubscribe'].param.properties.topicID],
+    ['topic/fetch param', hubProtocol['hub/v1/topic/fetch'].param.properties.topicID],
+    [
+      'topic/fetch result frame',
+      hubProtocol['hub/v1/topic/fetch'].result.properties.messages.items.properties.topicID,
+    ],
+    ['receive frame', hubProtocol['hub/v1/receive'].receive.properties.topicID],
+  ]
+
+  test.each(sites)('%s carries the topicID pattern', (_name, field) => {
+    expect(field.pattern).toBe(TOPIC_ID_PATTERN)
+  })
+
+  test('the pattern accepts a real 43-char base64url topicID and rejects overflow shapes', () => {
+    // Drive the regex from the schema itself, not the literal above, so this fails if the shipped
+    // pattern ever drifts from what a topicID can actually be.
+    const shipped = hubProtocol['hub/v1/publish'].param.properties.topicID.pattern
+    expect(shipped).toBeDefined()
+    const re = new RegExp(shipped as string)
+    expect(re.test(legal)).toBe(true)
+    // Human-readable and escape-heavy values that are minLength/maxLength-legal but not minted.
+    expect(re.test('topic-a')).toBe(false)
+    expect(re.test('topic:conformance')).toBe(false)
+    expect(re.test('x'.repeat(256))).toBe(false)
+    expect(re.test(`${legal}A`)).toBe(false)
+    expect(re.test(legal.slice(0, 42))).toBe(false)
   })
 })
 

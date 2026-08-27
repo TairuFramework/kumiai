@@ -1,6 +1,7 @@
 import { randomIdentity } from '@kokuin/token'
 import { describe, expect, test } from 'vitest'
 
+import { fixtureTopic } from './fixture-topic.js'
 import { createWireHub } from './log-hub-over-wire.js'
 
 const utf8 = new TextEncoder()
@@ -25,12 +26,12 @@ describe('LogHub over the real hub-server wire', () => {
       }
     })()
     await flush()
-    await bob.subscribe(bobID.id, 'topic:smoke')
+    await bob.subscribe(bobID.id, fixtureTopic('smoke'))
     await flush()
 
     await alice.publish({
       senderDID: aliceID.id,
-      topicID: 'topic:smoke',
+      topicID: fixtureTopic('smoke'),
       payload: utf8.encode('pushed'),
       retain: 'log',
     })
@@ -38,7 +39,10 @@ describe('LogHub over the real hub-server wire', () => {
 
     expect(received).toEqual(['pushed'])
 
-    const fetched = await bob.fetchTopic({ subscriberDID: bobID.id, topicID: 'topic:smoke' })
+    const fetched = await bob.fetchTopic({
+      subscriberDID: bobID.id,
+      topicID: fixtureTopic('smoke'),
+    })
     expect(fetched.messages.map((m) => new TextDecoder().decode(m.payload))).toEqual(['pushed'])
     expect(fetched.head).not.toBeNull()
 
@@ -61,7 +65,7 @@ describe('Durable ack over the wire', () => {
     const bobID = randomIdentity()
     const alice = hub.connect(aliceID)
     let bob = hub.connect(bobID)
-    const topicID = 'topic:ack-reclaim'
+    const topicID = fixtureTopic('ack-reclaim')
 
     await bob.subscribe(bobID.id, topicID)
     const firstSub = bob.receive(bobID.id)
@@ -102,7 +106,7 @@ describe('Durable ack over the wire', () => {
     const bobID = randomIdentity()
     const alice = hub.connect(aliceID)
     let bob = hub.connect(bobID)
-    const topicID = 'topic:ack-redeliver'
+    const topicID = fixtureTopic('ack-redeliver')
 
     await bob.subscribe(bobID.id, topicID)
     const firstSub = bob.receive(bobID.id)
@@ -139,7 +143,7 @@ describe('Durable ack over the wire', () => {
     const bobID = randomIdentity()
     const alice = hub.connect(aliceID)
     let bob = hub.connect(bobID)
-    const topicID = 'topic:ack-log-survives'
+    const topicID = fixtureTopic('ack-log-survives')
 
     await bob.subscribe(bobID.id, topicID)
     const subscription = bob.receive(bobID.id)

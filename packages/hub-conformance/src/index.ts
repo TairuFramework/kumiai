@@ -73,6 +73,11 @@ export type HubStoreConformanceParams = {
 const ALICE = 'did:key:alice'
 const BOB = 'did:key:bob'
 const CAROL = 'did:key:carol'
+// Readable rather than a minted 43-char base64url topicID: this suite drives the hub store
+// directly and never crosses the enkaku client/server boundary, where `serve` auto-validates
+// params against the protocol (which pins `topicID` to `^[A-Za-z0-9_-]{43}$`). So the pattern
+// never runs against these fixtures. A suite that DID publish through a real client/server would
+// have to mint valid base64url topicIDs — see hub-server's `fixtureTopic` helper.
 const TOPIC = 'topic:conformance'
 
 function payload(byte: number): Uint8Array {

@@ -24,6 +24,8 @@ import {
 } from '@kumiai/mls'
 import { describe, expect, test } from 'vitest'
 
+import { fixtureTopic } from './fixture-topic.js'
+
 const b64 = (bytes: Uint8Array): string => Buffer.from(bytes).toString('base64')
 const unb64 = (s: string): Uint8Array => new Uint8Array(Buffer.from(s, 'base64'))
 
@@ -32,7 +34,7 @@ function delay(ms: number): Promise<void> {
 }
 
 function groupTopic(groupID: string): string {
-  return `group/${groupID}`
+  return fixtureTopic(`group/${groupID}`)
 }
 
 type HubTransports = DirectTransports<

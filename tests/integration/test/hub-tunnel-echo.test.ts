@@ -5,6 +5,7 @@ import { randomIdentity } from '@kokuin/token'
 import { createHubTunnelTransport } from '@kumiai/hub-tunnel'
 import { describe, expect, test } from 'vitest'
 
+import { fixtureTopic } from './fixture-topic.js'
 import { createWireHub } from './log-hub-over-wire.js'
 
 // ---------------------------------------------------------------------------
@@ -42,8 +43,8 @@ describe('hub-tunnel echo', () => {
     const serverID = randomIdentity()
     const clientHub = hub.connect(clientID)
     const serverHub = hub.connect(serverID)
-    const clientToServer = 'tunnel:client-to-server'
-    const serverToClient = 'tunnel:server-to-client'
+    const clientToServer = fixtureTopic('tunnel-c2s')
+    const serverToClient = fixtureTopic('tunnel-s2c')
 
     const clientTransport = createHubTunnelTransport<
       AnyServerMessageOf<Protocol>,
