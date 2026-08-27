@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Stage:** executing
+**Stage:** qa
 **Mode:** tasks
 
 **Goal:** Close residuals #3, #4, #6, #7 from the close-medium-test-gaps triage — hub-tunnel subscribe ordering, a named disposed error, a post-dispose ledger-write guard, and a post-dispose publish guard.
