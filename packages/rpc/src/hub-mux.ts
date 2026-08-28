@@ -298,6 +298,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
   const subscriptions = new Map<string, TopicSubscription>()
   const sinks = new Set<Sink>()
   let disposed = false
+  let disposePromise: Promise<void> | undefined
   /**
    * A separate flag from `disposed`, set FIRST — before `peer.dispose()` awaits anything — by
    * `suspendPublishing`. An op already inside a host's commit mutex when `dispose()` runs has
@@ -738,29 +739,32 @@ export function createHubMux(params: HubMuxParams): HubMux {
     suspendPublishing: (): void => {
       publishSuspended = true
     },
-    dispose: async () => {
-      if (disposed) return
+    dispose: () => {
+      if (disposePromise != null) return disposePromise
       disposed = true
       // Belt-and-suspenders: `peer.dispose()` already calls `suspendPublishing()` before this
       // runs, but a caller of THIS `dispose()` directly (every test file that builds a mux
       // standalone) gets the same guarantee. Idempotency stays keyed on `disposed`, not this flag.
       publishSuspended = true
-      // Before anything else: a retry sleeping out its backoff is work already abandoned, and
-      // every path it could wake into checks `disposed` and returns.
-      for (const wake of [...sleeping]) wake()
-      // Cleared without acking (the same abandon as `abandonSink`/`sweepPending`), before closing
-      // sinks so their per-sink scans have nothing left to find.
-      pending.clear()
-      for (const sink of [...sinks]) {
-        sink.close()
-        sinks.delete(sink)
-      }
-      // Listeners go, the drain stops, SUBSCRIPTIONS STAND. Disposing means "stopped reading",
-      // not "read everything, discard the rest". On mobile this is what backgrounding calls;
-      // unsubscribing here would delete the user's unread mail on every app switch.
-      refcount.clear()
-      listeners.clear()
-      iterator.return?.()
+      disposePromise = (async () => {
+        // Before anything else: a retry sleeping out its backoff is work already abandoned, and
+        // every path it could wake into checks `disposed` and returns.
+        for (const wake of [...sleeping]) wake()
+        // Cleared without acking (the same abandon as `abandonSink`/`sweepPending`), before closing
+        // sinks so their per-sink scans have nothing left to find.
+        pending.clear()
+        for (const sink of [...sinks]) {
+          sink.close()
+          sinks.delete(sink)
+        }
+        // Listeners go, the drain stops, SUBSCRIPTIONS STAND. Disposing means "stopped reading",
+        // not "read everything, discard the rest". On mobile this is what backgrounding calls;
+        // unsubscribing here would delete the user's unread mail on every app switch.
+        refcount.clear()
+        listeners.clear()
+        await iterator.return?.()
+      })()
+      return disposePromise
     },
   }
 }
