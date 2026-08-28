@@ -14,6 +14,7 @@ import type {
 import { getReporter } from '@sozai/log'
 
 import { asDeliveryPosition, type DeliveryPosition } from './cursor.js'
+import { PeerDisposedError } from './errors.js'
 
 /**
  * A subscribe the hub refused for good — either a permanent refusal (it has answered, and the
@@ -173,6 +174,15 @@ export type HubMux = {
    * and the hub keeps holding its mail.
    */
   dispose: () => Promise<void>
+  /**
+   * Refuse every publish from now on, WITHOUT awaiting anything — the belt to `dispose`'s
+   * suspenders. A lane op that already passed its own `assertLive` can still be running inside a
+   * host's commit mutex when the host calls `dispose()`; `dispose()` cannot safely wait for that
+   * mutex to drain (see {@link createHubMux}'s note on `publishSuspended`), so it calls this FIRST
+   * — synchronously, before awaiting anything else — closing the window an op could otherwise run
+   * through and land a write on the wire after the host believes the peer is gone.
+   */
+  suspendPublishing: () => void
 }
 
 type Sink = {
@@ -288,6 +298,20 @@ export function createHubMux(params: HubMuxParams): HubMux {
   const subscriptions = new Map<string, TopicSubscription>()
   const sinks = new Set<Sink>()
   let disposed = false
+  let disposePromise: Promise<void> | undefined
+  /**
+   * A separate flag from `disposed`, set FIRST — before `peer.dispose()` awaits anything — by
+   * `suspendPublishing`. An op already inside a host's commit mutex when `dispose()` runs has
+   * already passed its own entry guard and keeps running; `dispose()` cannot safely await that
+   * mutex draining (host-supplied `build()`/`onAccepted()` are unbounded, and a host that calls
+   * `dispose()` from inside one of them would self-deadlock). Guarding the publish funnel instead
+   * awaits nothing, so it closes the window regardless of how long the op runs before it gets
+   * here.
+   *
+   * BOUNDARY: this stops a publish that has not yet entered the mux. A publish already awaiting
+   * `hub.publish` is on the wire and out of scope — see the three publish routes below.
+   */
+  let publishSuspended = false
 
   /**
    * Retry backoffs currently sleeping, each as the function that ends its sleep early.
@@ -585,6 +609,9 @@ export function createHubMux(params: HubMuxParams): HubMux {
 
   const bus: BroadcastBus = {
     publish: async (topicID, payload) => {
+      // A publish not yet reached: see `publishSuspended`'s note above for why this awaits
+      // nothing and what it does NOT cover.
+      if (publishSuspended) throw new PeerDisposedError('mux: publish after dispose')
       assertSubscribable(topicID)
       await hub.publish({ senderDID: localDID, topicID, payload })
     },
@@ -594,6 +621,8 @@ export function createHubMux(params: HubMuxParams): HubMux {
 
   const mailbox: MailboxHub = {
     publish: async (publishParams) => {
+      // See `publishSuspended`'s note above.
+      if (publishSuspended) throw new PeerDisposedError('mux: publish after dispose')
       assertSubscribable(publishParams.topicID)
       return await hub.publish(publishParams)
     },
@@ -663,6 +692,8 @@ export function createHubMux(params: HubMuxParams): HubMux {
   }
 
   const publish = async (params: MuxPublishParams): Promise<{ sequenceID: string }> => {
+    // See `publishSuspended`'s note above. This is the commit lane's own route to the wire.
+    if (publishSuspended) throw new PeerDisposedError('mux: publish after dispose')
     assertSubscribable(params.topicID)
     return await Promise.resolve(
       hub.publish({
@@ -705,25 +736,41 @@ export function createHubMux(params: HubMuxParams): HubMux {
     },
     fetchTopic,
     onInbound,
-    dispose: async () => {
-      if (disposed) return
+    suspendPublishing: (): void => {
+      publishSuspended = true
+    },
+    dispose: () => {
+      if (disposePromise != null) return disposePromise
       disposed = true
-      // Before anything else: a retry sleeping out its backoff is work already abandoned, and
-      // every path it could wake into checks `disposed` and returns.
-      for (const wake of [...sleeping]) wake()
-      // Cleared without acking (the same abandon as `abandonSink`/`sweepPending`), before closing
-      // sinks so their per-sink scans have nothing left to find.
-      pending.clear()
-      for (const sink of [...sinks]) {
-        sink.close()
-        sinks.delete(sink)
-      }
-      // Listeners go, the drain stops, SUBSCRIPTIONS STAND. Disposing means "stopped reading",
-      // not "read everything, discard the rest". On mobile this is what backgrounding calls;
-      // unsubscribing here would delete the user's unread mail on every app switch.
-      refcount.clear()
-      listeners.clear()
-      iterator.return?.()
+      // Belt-and-suspenders: `peer.dispose()` already calls `suspendPublishing()` before this
+      // runs, but a caller of THIS `dispose()` directly (every test file that builds a mux
+      // standalone) gets the same guarantee. Idempotency stays keyed on `disposePromise` (the
+      // guard above), not this flag.
+      publishSuspended = true
+      disposePromise = (async () => {
+        // Before anything else: a retry sleeping out its backoff is work already abandoned, and
+        // every path it could wake into checks `disposed` and returns.
+        for (const wake of [...sleeping]) wake()
+        // Cleared without acking (the same abandon as `abandonSink`/`sweepPending`), before closing
+        // sinks so their per-sink scans have nothing left to find.
+        pending.clear()
+        for (const sink of [...sinks]) {
+          sink.close()
+          sinks.delete(sink)
+        }
+        // Listeners go, the drain stops, SUBSCRIPTIONS STAND. Disposing means "stopped reading",
+        // not "read everything, discard the rest". On mobile this is what backgrounding calls;
+        // unsubscribing here would delete the user's unread mail on every app switch.
+        refcount.clear()
+        listeners.clear()
+        // Fire-and-forget: awaiting `return()` deadlocks on the real wire hub, where it waits behind
+        // the drain loop's in-flight `next()` that never settles during teardown. Post-dispose writes
+        // are already blocked by the `publishSuspended` guards, so the close need not be awaited.
+        // No-op catch keeps a late rejection off the unhandled-rejection path.
+        const closed = iterator.return?.()
+        if (closed != null) void Promise.resolve(closed).catch(() => {})
+      })()
+      return disposePromise
     },
   }
 }

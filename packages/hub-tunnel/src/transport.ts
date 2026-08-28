@@ -183,10 +183,16 @@ const DEFAULT_INBOX_CAPACITY = 1024
  *
  * **Contract (relied on by callers):**
  * - `hub.subscribe(localDID, receiveTopicID)` and `hub.receive(localDID)` are each called
- *   **exactly once** during construction.
+ *   **exactly once** during construction. `hub.subscribe` is invoked synchronously (before
+ *   `hub.receive`); its completion is captured, not awaited, so construction never blocks on it.
+ * - The first `write` (and any write still in flight when the subscribe is still in flight) gates
+ *   on that subscribe completing before it publishes, so a caller that constructs a transport and
+ *   immediately writes does not lose an inbound reply that lands before the subscribe has landed.
  * - On any teardown path (signal abort, idle timeout, encrypt failure, peer-side `session-end`,
  *   manual `transport.dispose()`), it publishes a best-effort `session-end` frame to `sendTopicID`
- *   and best-effort `hub.unsubscribe?.(localDID, receiveTopicID)`.
+ *   and best-effort `hub.unsubscribe?.(localDID, receiveTopicID)`, the latter ordered **after**
+ *   the subscribe completes (never before it) so a subscribe that is still in flight at teardown
+ *   cannot land after — and resurrect — the unsubscribe.
  */
 export function createHubTunnelTransport<R, W>(
   params: HubTunnelTransportParams,
@@ -209,9 +215,17 @@ export function createHubTunnelTransport<R, W>(
 
   let outboundSeq = 0
   let expectedSeq = 0
-  // Best-effort subscribe; rejection is swallowed (the receive stream still
-  // attaches, and a missing subscription simply yields no inbound frames).
-  void Promise.resolve(hub.subscribe(localDID, receiveTopicID)).catch(() => {})
+  // Async IIFE, not Promise.resolve(hub.subscribe(...)) (a sync throw would escape construction)
+  // and not .then(() => hub.subscribe(...)) (would defer the call, reversing subscribe-before-
+  // receive). `write` gates its first send on `subscribed`; a failed subscribe yields no inbound
+  // frames but still lets sends proceed.
+  const subscribed = (async () => {
+    try {
+      await hub.subscribe(localDID, receiveTopicID)
+    } catch {
+      // A failed subscribe yields no inbound frames; the send gate still proceeds.
+    }
+  })()
   const subscription = hub.receive(localDID, { topicID: receiveTopicID })
   const iterator = subscription[Symbol.asyncIterator]()
 
@@ -256,33 +270,53 @@ export function createHubTunnelTransport<R, W>(
       })
   }
 
-  const teardown = (error?: unknown): void => {
+  // Holds every teardown effect EXCEPT the voluntary-path extras (session-end frame, controller
+  // error) — every teardown path (voluntary dispose, idle, abort, readable-pull error,
+  // `result.done`, remote session-end) routes through this, not just `teardown`, so none of them
+  // can bypass it and leak the reconnect timer / hub-status listener / abort listener / unsubscribe.
+  const releaseResources = (): void => {
     if (torndown) return
     torndown = true
     clearIdleTimer()
     clearReconnectTimer()
     if (unsubscribeEvents != null) {
-      unsubscribeEvents()
+      try {
+        unsubscribeEvents()
+      } catch {
+        // ignore
+      }
       unsubscribeEvents = undefined
     }
     if (abortHandler != null && signal != null) {
       signal.removeEventListener('abort', abortHandler)
       abortHandler = undefined
     }
-    sendSessionEnd()
+    // Ordered after `subscribed`: unsubscribing before an in-flight subscribe lands would have
+    // the subscribe's later mutation resurrect a subscription this transport no longer wants.
+    // `releaseResources` itself stays synchronous — only the unsubscribe is deferred.
+    void subscribed.then(() => hub.unsubscribe?.(localDID, receiveTopicID)).catch(() => {})
     try {
-      void Promise.resolve(hub.unsubscribe?.(localDID, receiveTopicID)).catch(() => {})
+      // Fire-and-forget: awaiting `return()` deadlocks on the real wire hub, where it waits behind
+      // the drain loop's in-flight `next()` that never settles during teardown. No-op catch keeps a
+      // late rejection off the unhandled-rejection path.
+      const rawClose = iterator.return?.()
+      if (rawClose != null) void Promise.resolve(rawClose).catch(() => {})
     } catch {
-      // ignore
+      // synchronous throw from `return()` — nothing more to release
     }
+  }
+
+  const teardown = (error?: unknown): void => {
+    if (torndown) return
+    releaseResources()
+    sendSessionEnd()
     if (error !== undefined && readableController != null) {
       try {
         readableController.error(error)
       } catch {
-        // controller may already be closed
+        // already closed
       }
     }
-    iterator.return?.()
   }
 
   const scheduleIdleTimer = (): void => {
@@ -334,16 +368,14 @@ export function createHubTunnelTransport<R, W>(
               result = await iterator.next()
             } catch (error) {
               if (!torndown) {
-                torndown = true
-                clearIdleTimer()
+                releaseResources()
                 controller.error(error)
               }
               return
             }
             if (torndown) return
             if (result.done) {
-              torndown = true
-              clearIdleTimer()
+              releaseResources()
               controller.close()
               return
             }
@@ -375,18 +407,17 @@ export function createHubTunnelTransport<R, W>(
                 continue
               }
               if (frame.kind === 'session-end') {
-                torndown = true
-                clearIdleTimer()
+                // Before `releaseResources()` (which closes the iterator): a subscription whose
+                // close abandons outstanding claims (hub-mux's mailbox facade does) can no longer
+                // honour an ack afterwards.
+                ackHandled(message.sequenceID)
                 try {
                   controller.close()
                 } catch {
                   // already closed
                 }
-                // Before `iterator.return?.()`: a subscription whose close abandons outstanding
-                // claims (hub-mux's mailbox facade does) can no longer honour an ack afterwards.
-                ackHandled(message.sequenceID)
+                releaseResources()
                 handled = false
-                iterator.return?.()
                 onSessionEnd?.()
                 return
               }
@@ -434,6 +465,10 @@ export function createHubTunnelTransport<R, W>(
           'hub-tunnel: cannot send before session is established',
         )
       }
+      await subscribed
+      if (torndown) {
+        throw new Error('Hub tunnel transport torn down')
+      }
       const frame: HubFrame = {
         v: 1,
         sessionID: lockedSessionID,
@@ -469,7 +504,7 @@ export function createHubTunnelTransport<R, W>(
     teardown()
   })
 
-  if (reconnectTimeoutMs != null && hub.events != null) {
+  if (!torndown && reconnectTimeoutMs != null && hub.events != null) {
     const armReconnectTimer = (): void => {
       if (torndown || reconnectTimer != null) return
       reconnectTimer = setTimeout(() => {

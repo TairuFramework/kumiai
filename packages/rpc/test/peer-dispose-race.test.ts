@@ -1,9 +1,12 @@
-import { AuthorizationDeniedError } from '@kumiai/hub-protocol'
-import type { LogHub } from '@kumiai/hub-tunnel'
-import { describe, expect, test } from 'vitest'
+import { BroadcastClient } from '@kumiai/broadcast'
+import { AuthorizationDeniedError, type StoredMessage } from '@kumiai/hub-protocol'
+import type { HubReceiveSubscription, LogHub } from '@kumiai/hub-tunnel'
+import { describe, expect, test, vi } from 'vitest'
 
+import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import type { SubscribeFailure } from '../src/hub-mux.js'
-import { createFakeCrypto } from './fixtures/fake-crypto.js'
+import { PeerDisposedError } from '../src/index.js'
+import { createFakeCrypto, type FakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryCommitJournal, type MemoryCommitJournal } from './fixtures/journal.js'
 import { createMemoryGroupMLS, type MemoryGroupMLS } from './fixtures/memory-group-mls.js'
@@ -27,7 +30,7 @@ describe('dispose against an establishing directed session', () => {
     const pending = alice.peer.protocol('chat').to('bob')
     await alice.peer.dispose()
 
-    await expect(pending).rejects.toThrow(/disposed/i)
+    await expect(pending).rejects.toBeInstanceOf(PeerDisposedError)
   })
 
   test('a call made after dispose names the disposal, not a missing protocol', async () => {
@@ -39,8 +42,8 @@ describe('dispose against an establishing directed session', () => {
 
     // The other ordering, where teardown has already emptied `runtimes`: without the disposed
     // check this reports `Unknown protocol: chat` — the protocol is fine, the peer is gone.
-    await expect(alice.peer.protocol('chat').dispatch('chat/changed', {})).rejects.toThrow(
-      /disposed/i,
+    await expect(alice.peer.protocol('chat').dispatch('chat/changed', {})).rejects.toBeInstanceOf(
+      PeerDisposedError,
     )
   })
 
@@ -62,7 +65,7 @@ describe('dispose against an establishing directed session', () => {
     // the drain stops, SUBSCRIPTIONS STAND") so `retain` finds every topic already `held` and
     // returns early. The leak is entirely internal to a mux this package does not let a test
     // reach. Asserting on hub traffic here would be a decoration that never bites.
-    await expect(alice.peer.resync()).rejects.toThrow(/disposed/i)
+    await expect(alice.peer.resync()).rejects.toBeInstanceOf(PeerDisposedError)
   })
 })
 
@@ -210,7 +213,7 @@ describe('dispose against a commit made afterwards', () => {
     await flush()
 
     expect(calls).toEqual([])
-    await expect(op).rejects.toThrow(/disposed/i)
+    await expect(op).rejects.toBeInstanceOf(PeerDisposedError)
     await owned
   })
 })
@@ -269,7 +272,7 @@ describe('dispose against a replay made afterwards', () => {
     await flush(150)
 
     expect(recorder.calls()).toEqual([])
-    await expect(op).rejects.toThrow(/disposed/i)
+    await expect(op).rejects.toBeInstanceOf(PeerDisposedError)
     await owned
 
     await bob.peer.dispose()
@@ -302,7 +305,7 @@ describe('dispose against a recover made afterwards', () => {
     await flush(120)
 
     expect(recorder.calls()).toEqual([])
-    await expect(op).rejects.toThrow(/disposed/i)
+    await expect(op).rejects.toBeInstanceOf(PeerDisposedError)
     await owned
   })
 })
@@ -527,5 +530,627 @@ describe('dispose against a recovery reply whose timer already fired', () => {
 
     await rejoin
     await alice.peer.dispose()
+  })
+})
+
+describe('dispose against a requester ledger reply already in its IIFE', () => {
+  test('bootstrapLedger is not called after dispose', async () => {
+    const fake = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x8b)
+
+    // The gate goes on ALICE's own `openSealedLedger` — the requester side of `ensureLedger`'s
+    // waiter, which runs OUTSIDE the commit mutex and writes into the host handle via
+    // `bootstrapLedger`. Distinct from the two tests above, which gate a RESPONDER's seal and
+    // assert nothing is published: this is a host WRITE with no publish, so only a spy on the
+    // requester's own port can see it.
+    let openEntered = false
+    let openResumed = false
+    let bootstrapCalls = 0
+    let openGate = (): void => {}
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve
+    })
+
+    const aliceCrypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
+    const aliceInner = createMemoryGroupMLS({
+      recoverySecret: rs,
+      epoch: 1,
+      localDID: 'alice',
+      members,
+      onAdvance: (e) => aliceCrypto.setEpoch(e),
+    })
+    const aliceMLS: MemoryGroupMLS = {
+      ...aliceInner,
+      async openSealedLedger(sealed: Uint8Array, requestID: string) {
+        openEntered = true
+        await gate
+        openResumed = true
+        return await aliceInner.openSealedLedger(sealed, requestID)
+      },
+      async bootstrapLedger(tokens: Array<string>) {
+        bootstrapCalls++
+        return await aliceInner.bootstrapLedger(tokens)
+      },
+    }
+
+    // Bob serves a COMPLETE ledger so alice's `requestLedger` waiter reaches `openSealedLedger`.
+    const bob = makeMLSPeer(fake, 'bob', rs, {
+      epoch: 1,
+      members,
+      recovery: { timeoutMs: 120, getDelayMs: () => 0, deadlineMs: 600 },
+    })
+    await flush()
+    await bob.peer.commit(buildLedgerCommit(bob, ['circle:x=Bob']))
+    await flush()
+
+    const alice = makeMLSPeer(fake, 'alice', rs, {
+      mls: aliceMLS,
+      crypto: aliceCrypto,
+      members,
+      recovery: { timeoutMs: 120, getDelayMs: () => 0, deadlineMs: 600 },
+    })
+    await flush()
+
+    // Not awaited: alice's own gather is the thing being held, so `recover()` settles only once
+    // its local ledger-gather timeout fires. The `.catch` owns whichever way it settles — an
+    // unowned rejection fails the run somewhere else entirely.
+    const rejoin = alice.peer.recover().catch(() => {})
+
+    // The proof the window is open. Poll rather than wait a fixed delay: on a slow CI host the
+    // gather's round-trip to Bob and back can exceed any fixed budget, leaving `openEntered` false
+    // for timing reasons alone. Without reaching here, a gather that never entered
+    // `openSealedLedger` would leave `bootstrapCalls` at 0 for nothing.
+    await vi.waitFor(() => expect(openEntered).toBe(true), { timeout: 2000, interval: 10 })
+
+    await alice.peer.dispose()
+    openGate()
+    // Await the recovery flow's own settlement rather than a fixed delay — deterministic, and it
+    // guarantees the parked IIFE resumed AND reached its post-open bootstrap decision before the
+    // assertions below.
+    await rejoin
+
+    // The parked IIFE resumed and reached the guard. Without this, a continuation that never ran
+    // would leave `bootstrapCalls` at 0 for nothing.
+    expect(openResumed).toBe(true)
+
+    // Unguarded, the parked IIFE resumes and writes the opened tokens into the host-owned MLS
+    // handle via `bootstrapLedger`, several awaits after this peer's host tore it down.
+    expect(bootstrapCalls).toBe(0)
+
+    await rejoin
+    await bob.peer.dispose()
+  })
+})
+
+// Wraps a hub's `receive` so the FIRST ledgerReply frame is intercepted and HELD instead of
+// delivered, then re-emitted on demand by `deliverHeld()`. The re-emit resolves the drain's parked
+// `next()` DIRECTLY (one microtask), which is what lets the test land the delivery inside dispose's
+// own window — after `disposed = true`, before `ledgerWaiters.clear()`.
+type HeldReceive = {
+  hub: LogHub
+  /** Resolves once a ledgerReply has been intercepted and is being held. */
+  whenHeld: Promise<void>
+  /** Synchronously push the held ledgerReply into the drain's parked `next()`. */
+  deliverHeld: () => void
+}
+
+const hubHoldingLedgerReply = (fake: FakeHub, holderDID: string): HeldReceive => {
+  let resolveHeld: () => void = () => {}
+  const whenHeld = new Promise<void>((r) => {
+    resolveHeld = r
+  })
+  let deliverHeld: () => void = () => {}
+
+  const wrap = (inner: HubReceiveSubscription): HubReceiveSubscription => {
+    const innerIter = inner[Symbol.asyncIterator]()
+    const queue: Array<StoredMessage> = []
+    let resolveNext: ((r: IteratorResult<StoredMessage>) => void) | undefined
+    let closed = false
+    let held: StoredMessage | undefined
+
+    const emit = (message: StoredMessage): void => {
+      if (resolveNext != null) {
+        const resolve = resolveNext
+        resolveNext = undefined
+        resolve({ value: message, done: false })
+      } else {
+        queue.push(message)
+      }
+    }
+    const end = (): void => {
+      closed = true
+      if (resolveNext != null) {
+        const resolve = resolveNext
+        resolveNext = undefined
+        resolve({ value: undefined as unknown as StoredMessage, done: true })
+      }
+    }
+    const isLedgerReply = (message: StoredMessage): boolean => {
+      try {
+        return decodeHandshakeFrame(message.payload).kind === HANDSHAKE_KIND.ledgerReply
+      } catch {
+        return false
+      }
+    }
+
+    void (async () => {
+      while (true) {
+        let result: IteratorResult<StoredMessage>
+        try {
+          result = await innerIter.next()
+        } catch {
+          end()
+          return
+        }
+        if (result.done) {
+          end()
+          return
+        }
+        // Hold the FIRST ledgerReply and nothing else: the recoveryReply that precedes it must pass
+        // through, or alice's `recover()` never reaches `ensureLedger` to register the waiter.
+        if (held == null && isLedgerReply(result.value)) {
+          held = result.value
+          resolveHeld()
+          continue
+        }
+        emit(result.value)
+      }
+    })()
+
+    deliverHeld = (): void => {
+      if (held == null) return
+      const message = held
+      held = undefined
+      emit(message)
+    }
+
+    const iterator: AsyncIterator<StoredMessage> = {
+      next: () => {
+        if (queue.length > 0) {
+          return Promise.resolve({ value: queue.shift() as StoredMessage, done: false })
+        }
+        if (closed)
+          return Promise.resolve({ value: undefined as unknown as StoredMessage, done: true })
+        return new Promise((resolve) => {
+          resolveNext = resolve
+        })
+      },
+      return: () => {
+        inner.return?.()
+        return Promise.resolve({ value: undefined as unknown as StoredMessage, done: true })
+      },
+    }
+    return {
+      [Symbol.asyncIterator]: () => iterator,
+      return: () => inner.return?.(),
+      ack: inner.ack?.bind(inner),
+    }
+  }
+
+  const hub: LogHub = {
+    publish: (params) => fake.publish(params),
+    subscribe: (subscriberDID, topicID, options) => fake.subscribe(subscriberDID, topicID, options),
+    unsubscribe: (subscriberDID, topicID) => fake.unsubscribe(subscriberDID, topicID),
+    receive: (subscriberDID) => {
+      const inner = fake.receive(subscriberDID)
+      return subscriberDID === holderDID ? wrap(inner) : inner
+    },
+    fetchTopic: (params) => fake.fetchTopic(params),
+  }
+
+  return { hub, whenHeld, deliverHeld: () => deliverHeld() }
+}
+
+// residual #6, EARLY guard: the ledger-waiter IIFE's early-out `if (settled || disposed) return`
+// runs BEFORE `openSealedLedger`. The existing test above parks INSIDE `openSealedLedger`, so it
+// only exercises the SECOND guard; removing the `disposed` term from the early-out leaves that test
+// green. This one fires the waiter in the one window where the early `disposed` term is the only
+// thing standing between the reply and a wasted decrypt: after `dispose()` set `disposed = true`
+// but before it reached `ledgerWaiters.clear()`. The reply is held at alice's receive and delivered
+// synchronously one statement before `dispose()`, so its drain microtask runs before dispose's
+// post-`await settled` continuation (the unsubscribe + clear). The waiter then fires with
+// `disposed === true` and the gather's own `settled === false`, and the early guard must return
+// without entering `openSealedLedger`.
+describe('dispose against a ledger reply delivered inside the dispose window', () => {
+  test('the early guard drops the reply before openSealedLedger', async () => {
+    const fake = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x8f)
+    const held = hubHoldingLedgerReply(fake, 'alice')
+
+    let openEntered = false
+
+    const aliceCrypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
+    const aliceInner = createMemoryGroupMLS({
+      recoverySecret: rs,
+      epoch: 1,
+      localDID: 'alice',
+      members,
+      onAdvance: (e) => aliceCrypto.setEpoch(e),
+    })
+    const aliceMLS: MemoryGroupMLS = {
+      ...aliceInner,
+      async openSealedLedger(sealed: Uint8Array, requestID: string) {
+        // Flipped BEFORE the first await: if the early guard returns, this is never reached and the
+        // flag stays false. Removing the early `disposed` term flips it true — the mutation bite.
+        openEntered = true
+        return await aliceInner.openSealedLedger(sealed, requestID)
+      },
+    }
+
+    // Bob serves a COMPLETE ledger so alice's `ensureLedger` waiter has a real reply to receive.
+    const bob = makeMLSPeer(fake, 'bob', rs, {
+      epoch: 1,
+      members,
+      recovery: { timeoutMs: 120, getDelayMs: () => 0, deadlineMs: 600 },
+    })
+    await flush()
+    await bob.peer.commit(buildLedgerCommit(bob, ['circle:x=Bob']))
+    await flush()
+
+    const alice = makeMLSPeer(held.hub, 'alice', rs, {
+      mls: aliceMLS,
+      crypto: aliceCrypto,
+      members,
+      recovery: { timeoutMs: 120, getDelayMs: () => 0, deadlineMs: 600 },
+    })
+    await flush()
+
+    // Not awaited: her recover registers the ledger waiter and publishes the request, then parks —
+    // bob's reply is intercepted and HELD by the wrapper, so her gather never settles here.
+    const rejoin = alice.peer.recover().catch(() => {})
+
+    // The reply reached alice and is being held: the waiter is registered and the gather is pending.
+    await held.whenHeld
+    await flush()
+    expect(openEntered).toBe(false)
+
+    // The window, opened deliberately. `deliverHeld()` resolves the drain's parked `next()` — its
+    // delivery microtask is now queued. `dispose()`, called synchronously right after, sets
+    // `disposed = true` and queues its own continuation (unsubscribe + `ledgerWaiters.clear()`)
+    // AFTER that delivery. So the waiter fires — disposed, gather not yet settled — and the early
+    // guard is the only thing between the reply and `openSealedLedger`.
+    held.deliverHeld()
+    const disposing = alice.peer.dispose()
+    await disposing
+    await flush(40)
+
+    // The early guard returned: the reply was dropped before the decrypt. Under the mutation that
+    // removes the `disposed` term from the early-out, this flips true (the second guard, still
+    // intact, would then stop the write — but the wasted decrypt has already happened).
+    expect(openEntered).toBe(false)
+
+    await rejoin
+    await bob.peer.dispose()
+  })
+})
+
+// residual #7: `peer.dispose()` awaits `settled` but never the commit mutex, so an op that
+// already passed `assertLive` keeps running inside `runSerial` and can still reach `mux.publish`
+// (or `bus.publish` / `mailbox.publish`) after `dispose()` has returned. The three tests below
+// each park an op mid-flight on a different one of the mux's three routes to the wire, dispose,
+// then release it.
+//
+// BOUNDARY, documented once here for all three: the guard stops a publish that has NOT YET
+// entered the mux. A publish already awaiting `hub.publish` is on the wire and is out of scope —
+// closing that window would need draining the commit mutex in `dispose()`, which Task 4's brief
+// rejects as unsafe (`build()`/`onAccepted()` are host-supplied and unbounded; draining can hang
+// dispose or self-deadlock a host that calls dispose from its own callback).
+describe('dispose against a lane op already inside the commit mutex', () => {
+  test('an in-flight publish is refused, not written to the hub', async () => {
+    const fake = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x8c)
+    const recorder = createRecordingHub(fake)
+
+    let buildEntered = false
+    let releaseBuild = (): void => {}
+    const buildGate = new Promise<void>((resolve) => {
+      releaseBuild = resolve
+    })
+
+    const alice = makeMLSPeer(recorder.hub, 'alice', rs, { epoch: 1, members })
+    await flush()
+
+    const op = alice.peer.commit(
+      buildLedgerCommit(alice, ['post-dispose'], {
+        onBuild: async () => {
+          buildEntered = true
+          await buildGate // park the op AFTER assertLive, BEFORE mux.publish
+        },
+      }),
+    )
+    const owned = op.catch(() => {})
+    await flush()
+    expect(buildEntered).toBe(true)
+
+    const disposing = alice.peer.dispose()
+    recorder.start()
+    releaseBuild()
+
+    await expect(op).rejects.toBeInstanceOf(PeerDisposedError)
+    await disposing
+    await owned
+    expect(recorder.calls()).toEqual([]) // no publish reached the hub
+  })
+})
+
+describe('dispose against a lane op parked before the mux bus-publish route', () => {
+  test('an in-flight broadcast parked on wrap before dispose is refused after dispose, not written to the hub', async () => {
+    const fake = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x8d)
+    const recorder = createRecordingHub(fake)
+
+    // Gated on the SEAL, not on `mux.bus.publish` itself: `segmentBoundTransport`'s `wrap`
+    // (peer.ts) calls `crypto.wrap` before ever reaching the mux, which is where a real host's
+    // encrypt/wrap step would park an op mid-flight too.
+    let wrapEntered = false
+    let releaseWrap = (): void => {}
+    const wrapGate = new Promise<void>((resolve) => {
+      releaseWrap = resolve
+    })
+    let gateArmed = false
+
+    const aliceCrypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
+    const gatedCrypto: FakeCrypto = {
+      ...aliceCrypto,
+      wrap: async (bytes) => {
+        if (gateArmed) {
+          gateArmed = false
+          wrapEntered = true
+          await wrapGate // park the op AFTER the seal starts, BEFORE bus.publish
+        }
+        return aliceCrypto.wrap(bytes)
+      },
+    }
+
+    const alice = makeMLSPeer(recorder.hub, 'alice', rs, {
+      crypto: gatedCrypto,
+      epoch: 1,
+      members,
+    })
+    await flush()
+
+    // Armed only now: peer init and the acceptor's own construction call `crypto.wrap` for
+    // nothing, but gating from the start would be fragile against that changing.
+    gateArmed = true
+    const op = alice.peer.protocol('chat').dispatch('chat/changed', { text: 'post-dispose' })
+    const owned = op.catch(() => {})
+    await flush()
+    expect(wrapEntered).toBe(true)
+
+    const disposing = alice.peer.dispose()
+    recorder.start()
+    releaseWrap()
+
+    await expect(op).rejects.toBeInstanceOf(PeerDisposedError)
+    await disposing
+    await owned
+    expect(recorder.calls()).toEqual([]) // no publish reached the hub
+  })
+})
+
+describe('dispose against a lane op parked before the mux mailbox-publish route', () => {
+  test('an in-flight directed publish parked on wrap before dispose is refused after dispose, not written to the hub', async () => {
+    const fake = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x8e)
+    const recorder = createRecordingHub(fake)
+
+    // Same placement as the bus test: gated on the directed client's own seal
+    // (`createDirectedClient`'s `hub.publish`, directed.ts), which runs `wrap` before it ever
+    // reaches `mux.mailbox.publish`.
+    let wrapEntered = false
+    let releaseWrap = (): void => {}
+    const wrapGate = new Promise<void>((resolve) => {
+      releaseWrap = resolve
+    })
+    let gateArmed = false
+
+    const aliceCrypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
+    const gatedCrypto: FakeCrypto = {
+      ...aliceCrypto,
+      wrap: async (bytes) => {
+        if (gateArmed) {
+          gateArmed = false
+          wrapEntered = true
+          await wrapGate // park the op AFTER the seal starts, BEFORE mailbox.publish
+        }
+        return aliceCrypto.wrap(bytes)
+      },
+    }
+
+    const alice = makeMLSPeer(recorder.hub, 'alice', rs, {
+      crypto: gatedCrypto,
+      epoch: 1,
+      members,
+    })
+    await flush()
+
+    // `to('bob')` only derives topic names and builds the client — it calls `crypto.wrap`
+    // nothing, so it is safe to build before arming the gate.
+    const client = await alice.peer.protocol('chat').to('bob')
+    gateArmed = true
+    const op = client.sendEvent('chat/changed', { data: {} })
+    const owned = op.catch(() => {})
+    await flush()
+    expect(wrapEntered).toBe(true)
+
+    const disposing = alice.peer.dispose()
+    recorder.start()
+    releaseWrap()
+
+    await expect(op).rejects.toBeInstanceOf(PeerDisposedError)
+    await disposing
+    await owned
+    expect(recorder.calls()).toEqual([]) // no publish reached the hub
+  })
+})
+
+// Delegates to `FakeHub` for everything except `receive`, whose async-iterator `return()` is
+// counted and — via `gate` — can be made to reject. Mirrors Task 1's `controllableReceiveHub`
+// (`hub-mux-dispose.test.ts`): `mux.dispose()`'s LAST act is this iterator's `return()`, so
+// counting it is the only external signal that the mux teardown actually ran.
+function controllableReceiveHub(
+  gate: Promise<unknown> = Promise.resolve(),
+  returnThrows?: unknown,
+): {
+  hub: LogHub
+  returnCalls: () => number
+} {
+  gate.catch(() => {})
+  const fake = new FakeHub()
+  let returnCalls = 0
+  const hub: LogHub = {
+    subscribe: (subscriberDID, topicID, options) => fake.subscribe(subscriberDID, topicID, options),
+    unsubscribe: (subscriberDID, topicID) => fake.unsubscribe(subscriberDID, topicID),
+    publish: (params) => fake.publish(params),
+    fetchTopic: (params) => fake.fetchTopic(params),
+    receive: (subscriberDID) => {
+      const inner = fake.receive(subscriberDID)
+      const iterator = inner[Symbol.asyncIterator]()
+      return {
+        [Symbol.asyncIterator]: () => ({
+          next: () => iterator.next(),
+          // `mux.dispose()` runs the `return()` call un-try/caught but no longer awaits its result,
+          // so only a synchronously-throwing `return()` makes it reject; the async `gate` path just
+          // counts the call.
+          return: () => {
+            returnCalls++
+            if (returnThrows !== undefined) throw returnThrows
+            return (async () => {
+              await gate
+              return iterator.return ? iterator.return() : { done: true as const, value: undefined }
+            })()
+          },
+        }),
+        ack: inner.ack?.bind(inner),
+      }
+    },
+  }
+  return { hub, returnCalls: () => returnCalls }
+}
+
+// The seam for "one child `teardownEpoch()` disposes rejects": every one of the four disposal
+// categories it pushes (`directed` clients, the bus server, the acceptor, the outbound client)
+// bottoms out either in an enkaku `Disposer`-based `dispose()` (`Client`, `Server`, `Transport`,
+// and `BroadcastClient` itself) — which, by `@sozai/async`'s own design, NEVER rejects; a failing
+// teardown callback is swallowed into a resolved `disposed` — or in a synchronous refcount-only
+// unsubscribe that cannot throw. No hub or MLS double reaches either path, so the one seam left is
+// the shared `BroadcastClient.prototype.dispose` (peer.ts's `runtime.client`, imported straight
+// from `@kumiai/broadcast`, a direct dependency here): mocked for exactly one call, it stands in
+// for a child whose real teardown failed, without touching peer.ts or the fixtures.
+function rejectNextClientDispose(error: Error): () => void {
+  const spy = vi
+    .spyOn(BroadcastClient.prototype, 'dispose')
+    .mockImplementationOnce(() => Promise.reject(error))
+  return () => spy.mockRestore()
+}
+
+// Counts real `BroadcastClient.dispose()` calls while still running the original — the
+// "children disposed" half of test 4's "ran once" observable.
+function countClientDisposes(): { count: () => number; restore: () => void } {
+  const original = BroadcastClient.prototype.dispose
+  let calls = 0
+  const spy = vi.spyOn(BroadcastClient.prototype, 'dispose').mockImplementation(function (
+    this: BroadcastClient,
+    ...args: Parameters<typeof original>
+  ) {
+    calls++
+    return original.apply(this, args)
+  })
+  return { count: () => calls, restore: () => spy.mockRestore() }
+}
+
+describe('dispose reaches mux teardown and is idempotent', () => {
+  test('a child dispose failure still reaches mux teardown (Slice 1)', async () => {
+    const { hub, returnCalls } = controllableReceiveHub()
+    const rs = new Uint8Array(32).fill(0x90)
+    const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members })
+    await flush()
+
+    const childError = new Error('client dispose failed')
+    const restore = rejectNextClientDispose(childError)
+    let caught: unknown
+    try {
+      await alice.peer.dispose()
+    } catch (error) {
+      caught = error
+    } finally {
+      restore()
+    }
+
+    // Unwrapped: a LONE teardown failure rethrows `teardownEpoch()`'s own AggregateError rather
+    // than wrapping it a second time in `peer.dispose()`'s own.
+    expect(caught).toBeInstanceOf(AggregateError)
+    const aggregate = caught as AggregateError
+    expect(aggregate.message).toBe('Group epoch teardown failed')
+    expect(aggregate.errors).toEqual([childError])
+
+    // The mux teardown ran anyway — the observable a sequential `await teardownEpoch(); await
+    // mux.dispose()` cannot produce, since it never reaches `mux.dispose()` on a rejection above.
+    expect(returnCalls()).toBe(1)
+  })
+
+  test('both teardownEpoch and mux dispose failing surfaces an AggregateError of both (Slice 1)', async () => {
+    const muxError = new Error('mux dispose failed')
+    // A synchronously-throwing `return()` makes `mux.dispose()` reject (the only way it still does),
+    // driving peer.dispose's two-failure aggregation.
+    const { hub, returnCalls } = controllableReceiveHub(Promise.resolve(), muxError)
+    const rs = new Uint8Array(32).fill(0x91)
+    const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members })
+    await flush()
+
+    const childError = new Error('client dispose failed')
+    const restore = rejectNextClientDispose(childError)
+    let caught: unknown
+    try {
+      await alice.peer.dispose()
+    } catch (error) {
+      caught = error
+    } finally {
+      restore()
+    }
+
+    expect(caught).toBeInstanceOf(AggregateError)
+    const aggregate = caught as AggregateError
+    expect(aggregate.message).toBe('Peer dispose failed')
+    expect(aggregate.errors).toHaveLength(2)
+
+    expect(returnCalls()).toBe(1)
+  })
+
+  test('dispose completes cleanly on a started peer and clears inboxLane (Slice 3)', async () => {
+    const hub = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x92)
+    const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members })
+    await flush()
+
+    await expect(alice.peer.dispose()).resolves.toBeUndefined()
+
+    // No getter on the private `inboxLane` closure var, so this is the indirect assertion the
+    // spec calls for: `to()` is refused post-dispose — already covered elsewhere via `assertLive`
+    // — with the light addition above that dispose itself completes cleanly.
+    await expect(alice.peer.protocol('chat').to('bob')).rejects.toBeInstanceOf(PeerDisposedError)
+  })
+
+  test('concurrent dispose calls share one promise and run the body once (Slice 4/C)', async () => {
+    const { hub, returnCalls } = controllableReceiveHub()
+    const rs = new Uint8Array(32).fill(0x93)
+    const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members })
+    await flush()
+
+    const { count, restore } = countClientDisposes()
+    let first: Promise<void>
+    let second: Promise<void>
+    try {
+      first = alice.peer.dispose()
+      second = alice.peer.dispose()
+      // The decisive check: a shared promise, not two that merely settle alike.
+      expect(second).toBe(first)
+      await Promise.all([first, second])
+    } finally {
+      restore()
+    }
+
+    expect(returnCalls()).toBe(1)
+    expect(count()).toBe(1)
   })
 })

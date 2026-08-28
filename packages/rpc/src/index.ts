@@ -51,6 +51,7 @@ export {
   type DeliveryPosition,
   type LogPosition,
 } from './cursor.js'
+export { PeerDisposedError } from './errors.js'
 export {
   decodeHandshakeFrame,
   encodeHandshakeFrame,
