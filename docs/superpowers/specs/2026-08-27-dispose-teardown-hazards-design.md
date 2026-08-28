@@ -12,9 +12,16 @@ mechanism that Slice 2's transport fix relies on was verified in the cross-repo 
 
 Three teardown hazards surfaced during the dispose/ordering-residuals work but were kept out of that
 branch's scope because two of them needed design decisions rather than a local guard. All three are
-about `dispose()` not fully finishing what it starts. Spec review surfaced a fourth, closely related
-leak — transport teardown paths that set `torndown` inline and skip the real cleanup — folded into
-Slice 2 since it lives in the same code the drain-await fix touches.
+about `dispose()` not fully finishing what it starts. Two rounds of external spec review surfaced
+further, closely related defects in the same disposal paths — all folded here:
+
+- **Slice 2** absorbed three transport-teardown gaps: inline `torndown` paths that skip the real cleanup
+  (reconnect timer, listeners, `hub.unsubscribe`); a construction-race that registers the hub-status
+  listener *after* a pre-aborted teardown already ran (Finding A); and exception-safety in the extracted
+  `releaseResources()` (Finding E).
+- **Slice 4** (new) makes both `mux.dispose()` and `peer.dispose()` idempotent under concurrent callers
+  via a shared in-flight promise (Findings B + C) — Slice 1's and Slice 2's new awaits make the old
+  boolean/no-op idempotency observably wrong.
 
 ## Slice 1 — `dispose()` must always reach `mux.dispose()` even if `teardownEpoch()` throws
 
@@ -37,7 +44,9 @@ from the `try` block. And `mux.dispose()` *can* now throw — Slice 2 makes it `
 so a rejecting drain-close would swallow `teardownEpoch()`'s `AggregateError` entirely. Both failures
 must be collected, not sequenced through `finally`.
 
-**Fix.** Run both unconditionally, collect whatever each throws, then surface it:
+**Fix.** Run both unconditionally, collect whatever each throws, then surface it. This block is the tail
+of `dispose()`'s awaited body — Slice 4 wraps that body in a memoized in-flight promise, so the snippet
+below is shown flat here and appears in its final memoized position in Slice 4:
 
 ```ts
 const disposeErrors: unknown[] = []
@@ -86,13 +95,16 @@ subscription's async iterator runs local cleanup, not a fresh unbounded network 
 future hub implementation made `return()` do unbounded I/O, this await would need revisiting — noted
 as the boundary here, consistent with how the residuals branch documented its accepted boundaries.
 
-**hub-mux (`dispose` is already async).** One-liner:
+**hub-mux (`dispose` is already async).** Await the close as the last statement of the disposal body,
+replacing the un-awaited call:
 
 ```ts
 await iterator.return?.()
 ```
 
-as the last statement of `dispose()`, replacing the un-awaited call.
+Slice 4 moves this body into a memoized in-flight promise (so a concurrent second `dispose()` awaits the
+same close rather than resolving early); the awaited `iterator.return?.()` shown here is that body's last
+statement in its final form there.
 
 **hub-tunnel transport (`teardown` is deliberately synchronous).** `teardown` is fired from ~8
 synchronous sites (idle timer, signal abort, readable-pull error paths, writable `close`/`abort`,
@@ -137,16 +149,32 @@ const releaseResources = (): void => {
   torndown = true
   clearIdleTimer()
   clearReconnectTimer()
-  if (unsubscribeEvents != null) { unsubscribeEvents(); unsubscribeEvents = undefined }
+  // unsubscribeEvents and iterator.return() are unrestricted callbacks — a synchronous throw from
+  // either must not abort the remaining cleanup (torndown is already set, so no path could retry).
+  // Same defensive shape as ackHandled (transport.ts:326-331).
+  if (unsubscribeEvents != null) {
+    try { unsubscribeEvents() } catch { /* ignore */ }
+    unsubscribeEvents = undefined
+  }
   if (abortHandler != null && signal != null) {
     signal.removeEventListener('abort', abortHandler)
     abortHandler = undefined
   }
   // Ordered after `subscribed` (unchanged rationale, transport.ts:287-289):
   void subscribed.then(() => hub.unsubscribe?.(localDID, receiveTopicID)).catch(() => {})
-  receiveClosed = iterator.return?.() ?? undefined
+  try {
+    receiveClosed = iterator.return?.() ?? undefined
+  } catch {
+    receiveClosed = undefined
+  }
 }
 ```
+
+**Finding E (exception-safety, found on re-review).** `releaseResources()` sets `torndown = true`
+first, so if a later unrestricted call threw synchronously the guard would block any retry and the rest
+of the cleanup would be skipped. The two unrestricted calls — `unsubscribeEvents()` and
+`iterator.return()` — are each wrapped so one throwing cannot strand the reconnect timer, the abort
+listener, or the subscription. This matches the existing `ackHandled` guard (`transport.ts:326-331`).
 
 `teardown` keeps only its voluntary-path extras (the `session-end` frame it sends, and the optional
 `controller.error`):
@@ -192,6 +220,38 @@ a path that already released, `teardown()`'s `torndown` early-return skips the r
 runs at most once per iterator now (each path routes through the single `releaseResources` guard), so
 the earlier double-`return` concern no longer arises.
 
+**"Closed" means settled, not resolved (Finding D, found on re-review).** `@sozai/event`'s `emit`
+awaits listeners with `Promise.allSettled` (`sozai/packages/event/src/index.ts:146`), so
+`transport.dispose()` waits for `receiveClosed` to **settle** but a `return()` *rejection* is swallowed
+by `allSettled` rather than propagated out of `dispose()`. That is the intended guarantee: dispose does
+not resolve until the drain close has finished one way or the other; a best-effort `return()` that
+rejects is not an error the caller must handle (the same best-effort stance the involuntary paths take).
+The Slice 2 guarantee is "dispose waits for the drain to finish closing," not "dispose rejects if the
+close failed."
+
+**Construction-race: teardown before the hub-status listener exists (Finding A, found on re-review).**
+The hub-status listener is registered *after* the transport is built —
+`unsubscribeEvents = hub.events.on('status', …)` at `transport.ts:498`, below `new Transport(...)` at
+`transport.ts:476`. But the readable's `start()` runs synchronously *during* that construction, and when
+the transport is built with an **already-aborted** signal it calls `teardown()` right there
+(`transport.ts:338-340`). So `releaseResources()` runs while `unsubscribeEvents` is still `undefined`,
+sets `torndown = true`, and then execution continues to `transport.ts:489-509` and registers the
+listener anyway — the `:489` block has no `torndown` guard (unlike the abort-handler block at
+`transport.ts:478`, which is correctly skipped when the signal is pre-aborted). The listener then leaks:
+nothing will ever call `unsubscribeEvents`. This is pre-existing, but it is exactly the
+"full cleanup on every path" property this slice claims, so it is fixed here. **Fix:** guard the
+registration block so a transport already torn down never registers the listener:
+
+```ts
+if (!torndown && reconnectTimeoutMs != null && hub.events != null) {
+  // …existing armReconnectTimer + hub.events.on('status', …) …
+}
+```
+
+With the guard, a pre-aborted construction tears down and registers nothing; a normal construction
+registers as before (torndown is false at that point) and later teardown paths remove it through
+`releaseResources()`.
+
 **Bounded-`return()` — what the iterator actually is.** Both `subscription`s come from `hub.receive(...)`;
 for the real hub (`HubClient`) that is an enkaku RPC channel (`hub-client/src/client.ts:119-123`,
 `createChannel('hub/v1/receive', …)`), whose `.return()` closes the channel — local teardown plus at
@@ -218,6 +278,76 @@ rotation path is untouched: `rebuildEpoch()` relies on `buildEpoch()` re-setting
 is no reason to clear-then-rebuild it on every rotation. On `dispose()` there is no rebuild, so the
 reference is simply dropped.
 
+## Slice 4 — concurrent `dispose()` must share one in-flight disposal (Findings B + C, found on re-review)
+
+**Files:** `packages/rpc/src/hub-mux.ts` (`dispose`, ~741), `packages/rpc/src/peer.ts` (`dispose`, ~2060).
+
+Both `dispose()` methods are now *awaitable work* (Slice 2 makes the mux await `iterator.return()`;
+Slice 1 makes the peer collect errors across two awaited steps). Their idempotency has not kept up:
+
+- **mux (`hub-mux.ts:742`)** guards on a bare boolean — `if (disposed) return; disposed = true`. A
+  second `dispose()` arriving while the first is still awaiting `iterator.return()` returns an
+  immediately-resolved promise: it reports "disposed" before the drain is actually closed, and never
+  sees a `return()` rejection the first call will observe.
+- **peer (`peer.ts:2060`)** has *no* idempotency return at all — a concurrent second `dispose()` re-runs
+  the whole body, calling `teardownEpoch()` a second time on already-cleared `runtimes` and awaiting
+  `settled`/`mux.dispose()` again.
+
+**Fix: a shared in-flight promise, memoized on first call.** Each `dispose()` becomes a synchronous
+function that, on first call, runs the eager prologue that must stay synchronous, starts the async body
+once, memoizes its promise, and returns that same promise to every later caller — so all callers await
+the same completion and observe the same outcome (resolution or rejection).
+
+mux:
+
+```ts
+let disposePromise: Promise<void> | undefined
+dispose: () => {
+  if (disposePromise != null) return disposePromise
+  disposed = true          // synchronous-first: other guards read `disposed` immediately
+  publishSuspended = true
+  disposePromise = (async () => {
+    for (const wake of [...sleeping]) wake()
+    pending.clear()
+    for (const sink of [...sinks]) { sink.close(); sinks.delete(sink) }
+    refcount.clear()
+    listeners.clear()
+    await iterator.return?.()   // Slice 2's await lives here
+  })()
+  return disposePromise
+}
+```
+
+peer:
+
+```ts
+let disposePromise: Promise<void> | undefined
+dispose: () => {
+  if (disposePromise != null) return disposePromise
+  disposed = true              // synchronous-first (residual #7 invariant)
+  mux.suspendPublishing()      // synchronous-first, before any await (residual #7 invariant)
+  disposePromise = (async () => {
+    await settled
+    // …existing unsubscribe / recovery-drain / timer-and-waiter clears, unchanged…
+    const disposeErrors: unknown[] = []
+    try { await teardownEpoch() } catch (error) { disposeErrors.push(error) }
+    try { await mux.dispose() } catch (error) { disposeErrors.push(error) }
+    inboxLane = undefined                     // Slice 3, unconditional
+    if (disposeErrors.length === 1) throw disposeErrors[0]
+    if (disposeErrors.length > 1) throw new AggregateError(disposeErrors, 'Peer dispose failed')
+  })()
+  return disposePromise
+}
+```
+
+- The eager prologue (`disposed = true`, `mux.suspendPublishing()` / `publishSuspended = true`) still
+  runs synchronously on the first call, before the returned promise's body is scheduled — preserving the
+  residual #7 ordering invariant (suspend publishing before anything is awaited). A concurrent second
+  caller skips the prologue and receives the memoized promise.
+- The method's external type is unchanged: it still returns `Promise<void>`; the `async` keyword just
+  moves from the method to the inner IIFE.
+- Peer's `dispose()` calls `mux.dispose()`, which is itself now memoized — consistent: whichever call
+  first reaches the mux starts its single disposal; the other awaits the same promise.
 ## Testing
 
 - **Slice 1 (correctness — the load-bearing one):** a peer whose child disposal rejects. Build a peer,
@@ -247,6 +377,22 @@ reference is simply dropped.
   cleanup (only `clearIdleTimer`) instead of routing through `releaseResources()` must fail these
   assertions. Also assert the `session-end` ack ordering is preserved: `ackHandled` is observed before
   the iterator's `return()` resolves.
+- **Slice 2 construction-race (Finding A):** build a transport with an **already-aborted** signal so
+  `start()` tears down synchronously during construction, then assert the hub-status listener was never
+  left registered — e.g. a subsequent `hub.events` `'status'` emission arms no reconnect timer, and the
+  transport holds no `unsubscribeEvents`. Mutation-check: removing the `!torndown` guard on the
+  `:489` registration block must fail this (the listener registers post-teardown and leaks).
+- **Slice 2 exception-safety (Finding E):** a transport whose `unsubscribeEvents` (or `iterator.return`)
+  throws synchronously; assert `releaseResources()` still completes the rest of the cleanup (reconnect
+  timer cleared, abort listener removed, `hub.unsubscribe` scheduled). Mutation-check: dropping the
+  try/catch around the unrestricted call must strand the later cleanup.
+- **Slice 4 (concurrent dispose):** call `dispose()` twice without awaiting the first, against a mux/peer
+  whose `iterator.return()` (mux) or child disposal (peer) resolves on a delayed tick. Assert both
+  returned promises settle together (the second does not resolve early) and both observe the same outcome
+  — including the same rejection when disposal rejects. Assert the disposal body ran once (e.g.
+  `teardownEpoch` / `iterator.return` invoked a single time). Mutation-checks: reverting mux to
+  `if (disposed) return` must let the second call resolve before `return()` settles; removing peer's
+  memo must re-invoke `teardownEpoch()` on the second call.
 - **Slice 3:** after `peer.dispose()`, the stale `inboxLane` is gone. As it is a private closure var
   with no getter, assert it indirectly: the practical guarantee is already covered by the #7 guards, so
   this slice's test is light — confirm dispose still completes cleanly and `.to()` after dispose is
@@ -264,8 +410,11 @@ conflict at the `dispose()` tail.
 
 ## Out of scope
 
-All three originally-filed hazards are addressed, plus the teardown-cleanup-bypass leak surfaced during
-spec review (folded into Slice 2 — the inline `torndown` paths that skipped `clearReconnectTimer`,
-listener removal, and `hub.unsubscribe`). Should Slice 2's bounded-`return()` assumption ever break (a
-hub whose `iterator.return()` does unbounded I/O), that would be a new residual, not a change to this
-design.
+All three originally-filed hazards are addressed, plus everything spec review surfaced in the same
+disposal paths: the teardown-cleanup-bypass leak, the construction-race listener leak, and
+`releaseResources()` exception-safety (all Slice 2), and concurrent-dispose idempotency (Slice 4). Should
+Slice 2's bounded-`return()` assumption ever break (a hub whose `iterator.return()` does unbounded I/O),
+that would be a new residual, not a change to this design. Likewise, propagating a `return()` *rejection*
+out of `transport.dispose()` (rather than letting `allSettled` swallow it — Finding D) is deliberately
+out of scope: the drain-close is best-effort, and dispose guarantees only that it waited for the close to
+settle.
