@@ -102,12 +102,14 @@ cannot exhibit it and the `@kumiai/integration-tests` suite was never actually r
 (turbo had it cached green on `main`). Any change to a `dispose()`/teardown path against a hub must run
 that integration suite **uncached** as a gate; a green unit suite over fake hubs is not evidence.
 
-One architectural finding surfaced and is deferred to backlog (see
-`2026-08-28-teardownepoch-aggregate-unreachable.md`): because all four children `teardownEpoch()`
-disposes are `Disposer`-based and `Disposer` never rejects, `teardownEpoch()`'s `AggregateError` is
-currently unreachable in production. Slice 1's aggregation is correct defensive code — and its second
-arm (`mux.dispose()`, which rejects on a synchronous `return()` throw) is load-bearing — but the first
-arm guards a path only a future non-`Disposer` child could trigger. Documented, not a blocker.
+One architectural finding surfaced and is documented in code (a comment on `teardownEpoch()` and on
+`peer.dispose()`'s aggregation in `peer.ts`): because all four children `teardownEpoch()` disposes are
+`Disposer`-based and `Disposer` never rejects, `teardownEpoch()`'s `AggregateError` is currently
+unreachable in production. Slice 1's aggregation is correct defensive code — and its second arm
+(`mux.dispose()`, which rejects on a synchronous `return()` throw) is load-bearing — but the first arm
+guards a path only a future non-`Disposer` child could trigger. The rotation path (which shares
+`teardownEpoch()`) and a `BroadcastClient.prototype.dispose` test spy still exercise it. No hardening
+was warranted, so no follow-on was filed.
 
 ## Verification
 
