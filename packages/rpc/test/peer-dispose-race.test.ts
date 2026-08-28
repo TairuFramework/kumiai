@@ -595,15 +595,19 @@ describe('dispose against a requester ledger reply already in its IIFE', () => {
     // its local ledger-gather timeout fires. The `.catch` owns whichever way it settles — an
     // unowned rejection fails the run somewhere else entirely.
     const rejoin = alice.peer.recover().catch(() => {})
-    await flush(80)
 
-    // The proof the window is open. Without it, a gather that never reached `openSealedLedger`
-    // would leave `bootstrapCalls` at 0 for nothing.
-    expect(openEntered).toBe(true)
+    // The proof the window is open. Poll rather than wait a fixed delay: on a slow CI host the
+    // gather's round-trip to Bob and back can exceed any fixed budget, leaving `openEntered` false
+    // for timing reasons alone. Without reaching here, a gather that never entered
+    // `openSealedLedger` would leave `bootstrapCalls` at 0 for nothing.
+    await vi.waitFor(() => expect(openEntered).toBe(true), { timeout: 2000, interval: 10 })
 
     await alice.peer.dispose()
     openGate()
-    await flush(80)
+    // Await the recovery flow's own settlement rather than a fixed delay — deterministic, and it
+    // guarantees the parked IIFE resumed AND reached its post-open bootstrap decision before the
+    // assertions below.
+    await rejoin
 
     // The parked IIFE resumed and reached the guard. Without this, a continuation that never ran
     // would leave `bootstrapCalls` at 0 for nothing.
