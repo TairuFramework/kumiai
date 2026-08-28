@@ -236,6 +236,9 @@ export function createHubTunnelTransport<R, W>(
   let idleTimer: ReturnType<typeof setTimeout> | undefined
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined
   let unsubscribeEvents: (() => void) | undefined
+  // Set by `releaseResources()` to the receive iterator's `return()` promise (if any), so the
+  // voluntary `'disposed'` listener can await drain completion and surface a rejection.
+  let receiveClosed: Promise<unknown> | undefined
 
   const clearIdleTimer = (): void => {
     if (idleTimer != null) {
@@ -270,32 +273,56 @@ export function createHubTunnelTransport<R, W>(
       })
   }
 
-  const teardown = (error?: unknown): void => {
+  // Holds every teardown effect EXCEPT the voluntary-path extras (session-end frame, controller
+  // error) — every teardown path (voluntary dispose, idle, abort, readable-pull error,
+  // `result.done`, remote session-end) routes through this, not just `teardown`, so none of them
+  // can bypass it and leak the reconnect timer / hub-status listener / abort listener / unsubscribe.
+  const releaseResources = (): void => {
     if (torndown) return
     torndown = true
     clearIdleTimer()
     clearReconnectTimer()
     if (unsubscribeEvents != null) {
-      unsubscribeEvents()
+      try {
+        unsubscribeEvents()
+      } catch {
+        // ignore
+      }
       unsubscribeEvents = undefined
     }
     if (abortHandler != null && signal != null) {
       signal.removeEventListener('abort', abortHandler)
       abortHandler = undefined
     }
-    sendSessionEnd()
     // Ordered after `subscribed`: unsubscribing before an in-flight subscribe lands would have
     // the subscribe's later mutation resurrect a subscription this transport no longer wants.
-    // `teardown` itself stays synchronous — only the unsubscribe is deferred.
+    // `releaseResources` itself stays synchronous — only the unsubscribe is deferred.
     void subscribed.then(() => hub.unsubscribe?.(localDID, receiveTopicID)).catch(() => {})
+    try {
+      const rawClose = iterator.return?.()
+      receiveClosed = rawClose ?? undefined
+      // Marks `rawClose` handled WITHOUT preventing a later `await receiveClosed` (voluntary
+      // dispose path) from still seeing the rejection: multiple consumers of the same promise
+      // each get its settlement. On an involuntary path (idle/abort/error/completion/remote
+      // session-end with no following dispose) nobody else awaits `receiveClosed`, so without
+      // this no-op catch a rejecting `return()` would be a genuinely unhandled rejection.
+      if (rawClose != null) void Promise.resolve(rawClose).catch(() => {})
+    } catch {
+      receiveClosed = undefined
+    }
+  }
+
+  const teardown = (error?: unknown): void => {
+    if (torndown) return
+    releaseResources()
+    sendSessionEnd()
     if (error !== undefined && readableController != null) {
       try {
         readableController.error(error)
       } catch {
-        // controller may already be closed
+        // already closed
       }
     }
-    iterator.return?.()
   }
 
   const scheduleIdleTimer = (): void => {
@@ -347,16 +374,14 @@ export function createHubTunnelTransport<R, W>(
               result = await iterator.next()
             } catch (error) {
               if (!torndown) {
-                torndown = true
-                clearIdleTimer()
+                releaseResources()
                 controller.error(error)
               }
               return
             }
             if (torndown) return
             if (result.done) {
-              torndown = true
-              clearIdleTimer()
+              releaseResources()
               controller.close()
               return
             }
@@ -388,18 +413,17 @@ export function createHubTunnelTransport<R, W>(
                 continue
               }
               if (frame.kind === 'session-end') {
-                torndown = true
-                clearIdleTimer()
+                // Before `releaseResources()` (which closes the iterator): a subscription whose
+                // close abandons outstanding claims (hub-mux's mailbox facade does) can no longer
+                // honour an ack afterwards.
+                ackHandled(message.sequenceID)
                 try {
                   controller.close()
                 } catch {
                   // already closed
                 }
-                // Before `iterator.return?.()`: a subscription whose close abandons outstanding
-                // claims (hub-mux's mailbox facade does) can no longer honour an ack afterwards.
-                ackHandled(message.sequenceID)
+                releaseResources()
                 handled = false
-                iterator.return?.()
                 onSessionEnd?.()
                 return
               }
@@ -482,8 +506,9 @@ export function createHubTunnelTransport<R, W>(
     signal.addEventListener('abort', abortHandler, { once: true })
   }
 
-  transport.events.on('disposed', () => {
+  transport.events.on('disposed', async () => {
     teardown()
+    await receiveClosed
   })
 
   if (reconnectTimeoutMs != null && hub.events != null) {
