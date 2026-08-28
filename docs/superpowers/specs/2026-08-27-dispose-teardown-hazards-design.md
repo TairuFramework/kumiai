@@ -15,10 +15,12 @@ branch's scope because two of them needed design decisions rather than a local g
 about `dispose()` not fully finishing what it starts. Two rounds of external spec review surfaced
 further, closely related defects in the same disposal paths — all folded here:
 
-- **Slice 2** absorbed three transport-teardown gaps: inline `torndown` paths that skip the real cleanup
-  (reconnect timer, listeners, `hub.unsubscribe`); a construction-race that registers the hub-status
-  listener *after* a pre-aborted teardown already ran (Finding A); and exception-safety in the extracted
-  `releaseResources()` (Finding E).
+- **Slice 2** absorbed several transport-teardown gaps: inline `torndown` paths that skip the real
+  cleanup (reconnect timer, listeners, `hub.unsubscribe`); a construction-race that registers the
+  hub-status listener *after* a pre-aborted teardown already ran (Finding A); exception-safety in the
+  extracted `releaseResources()` (Finding E); and correct handling of an async `return()` rejection —
+  surfaced on the voluntary `dispose()` path, guarded against unhandled rejection on the involuntary
+  ones (Finding D — `@sozai/event`'s `emit` rethrows rather than swallowing).
 - **Slice 4** (new) makes both `mux.dispose()` and `peer.dispose()` idempotent under concurrent callers
   via a shared in-flight promise (Findings B + C) — Slice 1's and Slice 2's new awaits make the old
   boolean/no-op idempotency observably wrong.
@@ -113,9 +115,11 @@ those callers have no promise to await (an abort or idle timeout is best-effort 
 
 The authoritative *async* disposal boundary is enkaku's `Transport.dispose()`, which does
 `await this.#events.emit('disposed', …)` (`enkaku/packages/transport/src/index.ts:80`), and
-`@sozai/event`'s `emit` awaits its listeners via `await Promise.allSettled(listeners.map(fn => fn(data)))`
-(`sozai/packages/event/src/index.ts:146`). So a listener that returns a promise **is awaited** by
-`transport.dispose()`. The fix threads the receive-close promise through that one listener.
+`@sozai/event`'s `emit` awaits its listeners and **rethrows** their failures: it collects results with
+`Promise.allSettled`, then throws — a single rejection as-is, several as an `AggregateError`
+(`sozai/packages/event/src/index.ts:146-159`). So a listener that returns a promise is both **awaited
+and error-propagating** through `transport.dispose()`. The fix threads the receive-close promise through
+that one listener (see Finding D below for the propagation consequence).
 
 **There are FOUR teardown paths, and only one runs the full cleanup (found on review).** `teardown`
 (`transport.ts:273`) is the complete teardown: it sets `torndown`, clears the idle timer AND the
@@ -163,8 +167,15 @@ const releaseResources = (): void => {
   // Ordered after `subscribed` (unchanged rationale, transport.ts:287-289):
   void subscribed.then(() => hub.unsubscribe?.(localDID, receiveTopicID)).catch(() => {})
   try {
-    receiveClosed = iterator.return?.() ?? undefined
+    const rawClose = iterator.return?.()
+    receiveClosed = rawClose ?? undefined
+    // Guard against an *async* return() rejection becoming an unhandled rejection on an involuntary
+    // path (idle / abort / error / remote session-end with no following dispose), where nothing awaits
+    // receiveClosed. Attaching a no-op catch marks the rejection handled; the voluntary 'disposed'
+    // listener still awaits the raw `receiveClosed` and so still surfaces the failure (Finding D).
+    if (rawClose != null) void Promise.resolve(rawClose).catch(() => {})
   } catch {
+    // synchronous throw from iterator.return() (Finding E)
     receiveClosed = undefined
   }
 }
@@ -220,14 +231,23 @@ a path that already released, `teardown()`'s `torndown` early-return skips the r
 runs at most once per iterator now (each path routes through the single `releaseResources` guard), so
 the earlier double-`return` concern no longer arises.
 
-**"Closed" means settled, not resolved (Finding D, found on re-review).** `@sozai/event`'s `emit`
-awaits listeners with `Promise.allSettled` (`sozai/packages/event/src/index.ts:146`), so
-`transport.dispose()` waits for `receiveClosed` to **settle** but a `return()` *rejection* is swallowed
-by `allSettled` rather than propagated out of `dispose()`. That is the intended guarantee: dispose does
-not resolve until the drain close has finished one way or the other; a best-effort `return()` that
-rejects is not an error the caller must handle (the same best-effort stance the involuntary paths take).
-The Slice 2 guarantee is "dispose waits for the drain to finish closing," not "dispose rejects if the
-close failed."
+**Finding D — `transport.dispose()` *does* surface a drain-close rejection (corrected on third review).**
+An earlier draft claimed `@sozai/event`'s `emit` swallowed a listener rejection via `Promise.allSettled`.
+That was wrong: `emit` collects with `allSettled` and then **rethrows** — a single rejection as-is,
+several as an `AggregateError` (`sozai/packages/event/src/index.ts:146-159`). So when the async
+`'disposed'` listener's `await receiveClosed` rejects, that rejection propagates out through `emit` and
+out of `transport.dispose()`. This is the **intended** contract and is consistent with the other two
+disposal paths in this branch — `mux.dispose()` (`await iterator.return?.()`, uncaught) and
+`peer.dispose()` (aggregates teardown errors) both surface a teardown failure to the caller. The Slice 2
+guarantee is therefore the stronger one: `transport.dispose()` does not resolve until the drain close
+has finished, *and* it rejects if that close failed.
+
+The one hazard this introduces is on the **involuntary** paths (idle / abort / error / completion /
+remote session-end with no following `dispose()`): they record `receiveClosed` but nobody awaits it, so
+an async `return()` rejection there would be an unhandled rejection (a latent issue in the current
+un-awaited `iterator.return?.()` at `transport.ts:298` as well). `releaseResources()` closes that by
+attaching a no-op `catch` to the stored promise, which marks the rejection handled without preventing
+the voluntary listener's separate `await` from still surfacing it.
 
 **Construction-race: teardown before the hub-status listener exists (Finding A, found on re-review).**
 The hub-status listener is registered *after* the transport is built —
@@ -369,6 +389,12 @@ dispose: () => {
   iterator first (`:390-404`) and a `dispose()` follows — assert the `'disposed'` listener still awaits
   the real close the session-end path recorded (a delayed return there must delay `dispose()`
   resolution).
+- **Slice 2 rejection propagation + unhandled-safety (Finding D):** (a) a drain double whose
+  `iterator.return()` *rejects*; assert `transport.dispose()` rejects with that error (it propagates
+  through `emit`'s rethrow). (b) An involuntary path (idle timeout or abort) whose `iterator.return()`
+  rejects with **no** following `dispose()`; assert no unhandled rejection surfaces (the no-op `catch`
+  in `releaseResources()` handles it). Mutation-check: dropping that `void Promise.resolve(rawClose).catch(…)`
+  guard must trip an unhandled-rejection detector in the involuntary case.
 - **Slice 2 cleanup-bypass (new — the leak fix):** after each inline `torndown` path runs
   (`iterator.next()` rejection, `result.done` completion, remote `session-end`), a following
   `transport.dispose()` must still run the full cleanup. Assert that the reconnect timer is cleared, the
@@ -414,7 +440,7 @@ All three originally-filed hazards are addressed, plus everything spec review su
 disposal paths: the teardown-cleanup-bypass leak, the construction-race listener leak, and
 `releaseResources()` exception-safety (all Slice 2), and concurrent-dispose idempotency (Slice 4). Should
 Slice 2's bounded-`return()` assumption ever break (a hub whose `iterator.return()` does unbounded I/O),
-that would be a new residual, not a change to this design. Likewise, propagating a `return()` *rejection*
-out of `transport.dispose()` (rather than letting `allSettled` swallow it — Finding D) is deliberately
-out of scope: the drain-close is best-effort, and dispose guarantees only that it waited for the close to
-settle.
+that would be a new residual, not a change to this design. A `return()` *rejection* on the voluntary
+`transport.dispose()` path is surfaced to the caller (Finding D — `@sozai/event`'s `emit` rethrows), in
+line with `mux.dispose()`/`peer.dispose()`; the involuntary paths guard the same rejection against
+becoming unhandled but do not surface it (no caller to surface it to).
