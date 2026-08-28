@@ -732,6 +732,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * `resync`'s own comment carries the mechanism; read it there rather than restating it here.
    */
   let disposed = false
+  let disposePromise: Promise<void> | undefined
   const assertLive = (): void => {
     if (disposed) throw new PeerDisposedError('Peer is disposed')
   }
@@ -2057,7 +2058,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       await runSerial(() => rebuildEpoch())
     },
     anchorEpoch: () => anchor.epoch,
-    dispose: async () => {
+    dispose: () => {
+      if (disposePromise != null) return disposePromise
       disposed = true
       // Synchronous and FIRST, before anything is awaited: a lane op that already passed its own
       // `assertLive` can be running inside `runSerial`, past the point this `dispose()` can reach
@@ -2066,28 +2068,47 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       // closes the mux's three routes to the wire immediately, so whatever the op does next, it
       // cannot land a write. `mux.dispose()` — the full teardown — stays LAST, unchanged.
       mux.suspendPublishing()
-      // Tear down even a peer whose init failed — it still holds a hub drain.
-      await settled
-      commitUnsubscribe?.()
-      rendezvousUnsubscribe?.()
-      // Resolve any in-flight recovery rendezvous FIRST, before clearing its timers: a
-      // `recover()` blocked in `requestGroupInfo` is settled by exactly two things — a reply or
-      // its timeout — and dispose is about to clear that timeout. Skipping this drain would hang
-      // the heal, `commitTail`, and every lane operation queued behind it. Resolve, then clear, so
-      // a fired timer cannot race a half-drained map. (The ledger gather needs no such drain: its
-      // timeout is a local held in none of these maps.)
-      for (const waiter of recoveryWaiters.values()) waiter(null)
-      recoveryWaiters.clear()
-      for (const timer of recoveryTimers.values()) clearTimeout(timer)
-      for (const timer of pendingReplies.values()) clearTimeout(timer)
-      for (const timer of pendingLedgerReplies) clearTimeout(timer)
-      recoveryTimers.clear()
-      pendingReplies.clear()
-      pendingLedgerReplies.clear()
-      ledgerWaiters.clear()
-      suppressedRequests.clear()
-      await teardownEpoch()
-      await mux.dispose()
+      disposePromise = (async () => {
+        // Tear down even a peer whose init failed — it still holds a hub drain.
+        await settled
+        commitUnsubscribe?.()
+        rendezvousUnsubscribe?.()
+        // Resolve any in-flight recovery rendezvous FIRST, before clearing its timers: a
+        // `recover()` blocked in `requestGroupInfo` is settled by exactly two things — a reply or
+        // its timeout — and dispose is about to clear that timeout. Skipping this drain would hang
+        // the heal, `commitTail`, and every lane operation queued behind it. Resolve, then clear,
+        // so a fired timer cannot race a half-drained map. (The ledger gather needs no such drain:
+        // its timeout is a local held in none of these maps.)
+        for (const waiter of recoveryWaiters.values()) waiter(null)
+        recoveryWaiters.clear()
+        for (const timer of recoveryTimers.values()) clearTimeout(timer)
+        for (const timer of pendingReplies.values()) clearTimeout(timer)
+        for (const timer of pendingLedgerReplies) clearTimeout(timer)
+        recoveryTimers.clear()
+        pendingReplies.clear()
+        pendingLedgerReplies.clear()
+        ledgerWaiters.clear()
+        suppressedRequests.clear()
+        // Independent failures, both surfaced: a teardown that failed must not stop the mux from
+        // closing its hub drain, and a mux that failed must not hide a teardown failure that
+        // happened first. `inboxLane` is cleared unconditionally after both, whichever way they
+        // settled — `to()` has no lane left to build a directed client against either way.
+        const disposeErrors: Array<unknown> = []
+        try {
+          await teardownEpoch()
+        } catch (error) {
+          disposeErrors.push(error)
+        }
+        try {
+          await mux.dispose()
+        } catch (error) {
+          disposeErrors.push(error)
+        }
+        inboxLane = undefined
+        if (disposeErrors.length === 1) throw disposeErrors[0]
+        if (disposeErrors.length > 1) throw new AggregateError(disposeErrors, 'Peer dispose failed')
+      })()
+      return disposePromise
     },
   }
 }

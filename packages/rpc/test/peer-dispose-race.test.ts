@@ -1,6 +1,7 @@
+import { BroadcastClient } from '@kumiai/broadcast'
 import { AuthorizationDeniedError, type StoredMessage } from '@kumiai/hub-protocol'
 import type { HubReceiveSubscription, LogHub } from '@kumiai/hub-tunnel'
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import type { SubscribeFailure } from '../src/hub-mux.js'
@@ -976,5 +977,166 @@ describe('dispose against a lane op parked before the mux mailbox-publish route'
     await disposing
     await owned
     expect(recorder.calls()).toEqual([]) // no publish reached the hub
+  })
+})
+
+// Delegates to `FakeHub` for everything except `receive`, whose async-iterator `return()` is
+// counted and — via `gate` — can be made to reject. Mirrors Task 1's `controllableReceiveHub`
+// (`hub-mux-dispose.test.ts`): `mux.dispose()`'s LAST act is this iterator's `return()`, so
+// counting it is the only external signal that the mux teardown actually ran.
+function controllableReceiveHub(gate: Promise<unknown> = Promise.resolve()): {
+  hub: LogHub
+  returnCalls: () => number
+} {
+  gate.catch(() => {})
+  const fake = new FakeHub()
+  let returnCalls = 0
+  const hub: LogHub = {
+    subscribe: (subscriberDID, topicID, options) => fake.subscribe(subscriberDID, topicID, options),
+    unsubscribe: (subscriberDID, topicID) => fake.unsubscribe(subscriberDID, topicID),
+    publish: (params) => fake.publish(params),
+    fetchTopic: (params) => fake.fetchTopic(params),
+    receive: (subscriberDID) => {
+      const inner = fake.receive(subscriberDID)
+      const iterator = inner[Symbol.asyncIterator]()
+      return {
+        [Symbol.asyncIterator]: () => ({
+          next: () => iterator.next(),
+          return: async () => {
+            returnCalls++
+            await gate
+            return iterator.return ? iterator.return() : { done: true as const, value: undefined }
+          },
+        }),
+        ack: inner.ack?.bind(inner),
+      }
+    },
+  }
+  return { hub, returnCalls: () => returnCalls }
+}
+
+// The seam for "one child `teardownEpoch()` disposes rejects": every one of the four disposal
+// categories it pushes (`directed` clients, the bus server, the acceptor, the outbound client)
+// bottoms out either in an enkaku `Disposer`-based `dispose()` (`Client`, `Server`, `Transport`,
+// and `BroadcastClient` itself) — which, by `@sozai/async`'s own design, NEVER rejects; a failing
+// teardown callback is swallowed into a resolved `disposed` — or in a synchronous refcount-only
+// unsubscribe that cannot throw. No hub or MLS double reaches either path, so the one seam left is
+// the shared `BroadcastClient.prototype.dispose` (peer.ts's `runtime.client`, imported straight
+// from `@kumiai/broadcast`, a direct dependency here): mocked for exactly one call, it stands in
+// for a child whose real teardown failed, without touching peer.ts or the fixtures.
+function rejectNextClientDispose(error: Error): () => void {
+  const spy = vi
+    .spyOn(BroadcastClient.prototype, 'dispose')
+    .mockImplementationOnce(() => Promise.reject(error))
+  return () => spy.mockRestore()
+}
+
+// Counts real `BroadcastClient.dispose()` calls while still running the original — the
+// "children disposed" half of test 4's "ran once" observable.
+function countClientDisposes(): { count: () => number; restore: () => void } {
+  const original = BroadcastClient.prototype.dispose
+  let calls = 0
+  const spy = vi.spyOn(BroadcastClient.prototype, 'dispose').mockImplementation(function (
+    this: BroadcastClient,
+    ...args: Parameters<typeof original>
+  ) {
+    calls++
+    return original.apply(this, args)
+  })
+  return { count: () => calls, restore: () => spy.mockRestore() }
+}
+
+describe('dispose reaches mux teardown and is idempotent', () => {
+  test('a child dispose failure still reaches mux teardown (Slice 1)', async () => {
+    const { hub, returnCalls } = controllableReceiveHub()
+    const rs = new Uint8Array(32).fill(0x90)
+    const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members })
+    await flush()
+
+    const childError = new Error('client dispose failed')
+    const restore = rejectNextClientDispose(childError)
+    let caught: unknown
+    try {
+      await alice.peer.dispose()
+    } catch (error) {
+      caught = error
+    } finally {
+      restore()
+    }
+
+    // Unwrapped: a LONE teardown failure rethrows `teardownEpoch()`'s own AggregateError rather
+    // than wrapping it a second time in `peer.dispose()`'s own.
+    expect(caught).toBeInstanceOf(AggregateError)
+    const aggregate = caught as AggregateError
+    expect(aggregate.message).toBe('Group epoch teardown failed')
+    expect(aggregate.errors).toEqual([childError])
+
+    // The mux teardown ran anyway — the observable a sequential `await teardownEpoch(); await
+    // mux.dispose()` cannot produce, since it never reaches `mux.dispose()` on a rejection above.
+    expect(returnCalls()).toBe(1)
+  })
+
+  test('both teardownEpoch and mux dispose failing surfaces an AggregateError of both (Slice 1)', async () => {
+    const muxError = new Error('mux dispose failed')
+    // Task 1 makes this reachable: a rejecting receive-`return()` makes `mux.dispose()` reject.
+    const { hub, returnCalls } = controllableReceiveHub(Promise.reject(muxError))
+    const rs = new Uint8Array(32).fill(0x91)
+    const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members })
+    await flush()
+
+    const childError = new Error('client dispose failed')
+    const restore = rejectNextClientDispose(childError)
+    let caught: unknown
+    try {
+      await alice.peer.dispose()
+    } catch (error) {
+      caught = error
+    } finally {
+      restore()
+    }
+
+    expect(caught).toBeInstanceOf(AggregateError)
+    const aggregate = caught as AggregateError
+    expect(aggregate.message).toBe('Peer dispose failed')
+    expect(aggregate.errors).toHaveLength(2)
+
+    expect(returnCalls()).toBe(1)
+  })
+
+  test('dispose completes cleanly on a started peer and clears inboxLane (Slice 3)', async () => {
+    const hub = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x92)
+    const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members })
+    await flush()
+
+    await expect(alice.peer.dispose()).resolves.toBeUndefined()
+
+    // No getter on the private `inboxLane` closure var, so this is the indirect assertion the
+    // spec calls for: `to()` is refused post-dispose — already covered elsewhere via `assertLive`
+    // — with the light addition above that dispose itself completes cleanly.
+    await expect(alice.peer.protocol('chat').to('bob')).rejects.toBeInstanceOf(PeerDisposedError)
+  })
+
+  test('concurrent dispose calls share one promise and run the body once (Slice 4/C)', async () => {
+    const { hub, returnCalls } = controllableReceiveHub()
+    const rs = new Uint8Array(32).fill(0x93)
+    const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members })
+    await flush()
+
+    const { count, restore } = countClientDisposes()
+    let first: Promise<void>
+    let second: Promise<void>
+    try {
+      first = alice.peer.dispose()
+      second = alice.peer.dispose()
+      // The decisive check: a shared promise, not two that merely settle alike.
+      expect(second).toBe(first)
+      await Promise.all([first, second])
+    } finally {
+      restore()
+    }
+
+    expect(returnCalls()).toBe(1)
+    expect(count()).toBe(1)
   })
 })
