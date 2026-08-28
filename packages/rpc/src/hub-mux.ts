@@ -744,7 +744,8 @@ export function createHubMux(params: HubMuxParams): HubMux {
       disposed = true
       // Belt-and-suspenders: `peer.dispose()` already calls `suspendPublishing()` before this
       // runs, but a caller of THIS `dispose()` directly (every test file that builds a mux
-      // standalone) gets the same guarantee. Idempotency stays keyed on `disposed`, not this flag.
+      // standalone) gets the same guarantee. Idempotency stays keyed on `disposePromise` (the
+      // guard above), not this flag.
       publishSuspended = true
       disposePromise = (async () => {
         // Before anything else: a retry sleeping out its backoff is work already abandoned, and

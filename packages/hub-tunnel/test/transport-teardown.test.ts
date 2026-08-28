@@ -48,6 +48,7 @@ type ReturnBehavior =
   | { kind: 'delegate' }
   | { kind: 'delay'; ms: number }
   | { kind: 'reject'; error: unknown }
+  | { kind: 'throw'; error: unknown }
 
 type ControllableRecorder = {
   hub: MailboxHub
@@ -114,6 +115,13 @@ function controllableHub(): ControllableRecorder {
             case 'reject': {
               const { error } = returnBehavior
               return Promise.reject(error)
+            }
+            case 'throw': {
+              // Genuinely SYNCHRONOUS — thrown before any Promise is even constructed, unlike
+              // 'reject' above (an async rejection). Exercises the `iterator.return?.()` call-site
+              // guard in `releaseResources()`, which a rejecting promise never reaches.
+              const { error } = returnBehavior
+              throw error
             }
           }
         },
@@ -338,6 +346,105 @@ describe('createHubTunnelTransport teardown', () => {
       fake.simulateReconnecting()
       await flush(60)
       expect(unsubscribed.length).toBe(1)
+    })
+  })
+
+  describe('exception-safety (Slice 2, Finding E)', () => {
+    test('unsubscribeEvents() throws synchronously: releaseResources() still completes the rest of cleanup', async () => {
+      const { hub, fake, unsubscribed, published } = controllableHub()
+      // `hub.events.on('status', …)` is real (so a later status event still exercises real
+      // arm/clear logic), but the "off" function it hands back to the transport — what
+      // `unsubscribeEvents` becomes — throws SYNCHRONOUSLY when called. This is the sync-throw
+      // half of Finding E; the existing rejecting-`return()` doubles are async and never reach
+      // the `unsubscribeEvents()` try/catch at transport.ts (~lines 285-292).
+      const originalOn = fake.events.on.bind(fake.events)
+      vi.spyOn(fake.events, 'on').mockImplementation((name, listener, options) => {
+        originalOn(name, listener, options)
+        return () => {
+          throw new Error('unsubscribeEvents boom')
+        }
+      })
+
+      const controller = new AbortController()
+      const removeSpy = vi.spyOn(controller.signal, 'removeEventListener')
+
+      const transport = createHubTunnelTransport({
+        hub,
+        sessionID: 'teardown-unsub-events-throw',
+        localDID: 'did:key:local',
+        sendTopicID: 'topic:out',
+        receiveTopicID: 'topic:in',
+        reconnectTimeoutMs: 30,
+        signal: controller.signal,
+      })
+      await flush()
+
+      // Dispose must still resolve (Disposer's own contract warns and resolves rather than
+      // rethrowing — see the Finding D test above), and everything AFTER the throwing
+      // `unsubscribeEvents()` call in `releaseResources()` must still have run.
+      await transport.dispose().catch(() => {})
+      await flush()
+
+      // Abort listener removed (comes right after the guarded call).
+      expect(removeSpy).toHaveBeenCalledWith('abort', expect.any(Function))
+      // hub.unsubscribe scheduled (comes after that).
+      expect(unsubscribed).toContainEqual(['did:key:local', 'topic:in'])
+      // sendSessionEnd() — teardown()'s caller-side step after releaseResources() returns —
+      // still ran too.
+      const endFrames = published
+        .filter((params) => params.topicID === 'topic:out')
+        .map((params) => decodeFrame(params.payload) as HubFrame)
+        .filter((frame) => frame.kind === 'session-end')
+      expect(endFrames).toHaveLength(1)
+
+      // Reconnect timer cleared: a later 'reconnecting' emission (the real listener is still
+      // technically registered, since our throwing "off" never actually unsubscribed it) arms
+      // no new teardown-triggered work — `torndown` guards it, and no leaked timer resurrects
+      // a second teardown pass.
+      fake.simulateReconnecting()
+      await flush(60)
+      expect(unsubscribed.length).toBe(1)
+      expect(
+        published
+          .filter((params) => params.topicID === 'topic:out')
+          .map((params) => decodeFrame(params.payload) as HubFrame)
+          .filter((frame) => frame.kind === 'session-end'),
+      ).toHaveLength(1)
+    })
+
+    test('iterator.return() throws synchronously: releaseResources() still completes the rest of cleanup', async () => {
+      const { hub, unsubscribed, published, setReturnBehavior } = controllableHub()
+      const returnError = new Error('sync return boom')
+      // A genuinely synchronous throw from `return()` itself — not a rejecting promise (already
+      // covered by the Finding D tests below) — which is what the `iterator.return?.()` call-site
+      // try/catch in `releaseResources()` (~lines 301-312) exists to guard.
+      setReturnBehavior({ kind: 'throw', error: returnError })
+
+      const transport = createHubTunnelTransport({
+        hub,
+        sessionID: 'teardown-return-throw',
+        localDID: 'did:key:local',
+        sendTopicID: 'topic:out',
+        receiveTopicID: 'topic:in',
+      })
+      await flush()
+
+      await transport.dispose().catch(() => {})
+      await flush()
+
+      // hub.unsubscribe scheduling precedes the throwing `iterator.return()` call in
+      // `releaseResources()`'s own ordering, so it is unaffected either way — asserted here for
+      // completeness (Finding E's own list of "the rest of cleanup").
+      expect(unsubscribed).toContainEqual(['did:key:local', 'topic:in'])
+
+      // What THIS guard actually protects: `releaseResources()` returning normally at all, so
+      // `teardown()`'s next step — `sendSessionEnd()` — still runs. An unguarded synchronous
+      // throw here propagates out of `releaseResources()` and strands that publish.
+      const endFrames = published
+        .filter((params) => params.topicID === 'topic:out')
+        .map((params) => decodeFrame(params.payload) as HubFrame)
+        .filter((frame) => frame.kind === 'session-end')
+      expect(endFrames).toHaveLength(1)
     })
   })
 
