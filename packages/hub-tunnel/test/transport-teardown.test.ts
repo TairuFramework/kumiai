@@ -595,7 +595,8 @@ describe('createHubTunnelTransport teardown', () => {
     } finally {
       process.off('unhandledRejection', onUnhandledRejection)
       await transport.dispose().catch(() => {
-        // dispose() itself may reject with the same error once it awaits receiveClosed — not
+        // transport.dispose() resolves rather than rejects here (enkaku's Disposer base swallows a
+        // rejecting dispose callback into console.warn), so this catch is belt-and-suspenders — not
         // what this test is about; only the process-level unhandledRejection matters here.
       })
     }
