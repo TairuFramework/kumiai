@@ -632,14 +632,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     runtimes = new Map()
     const results = await Promise.allSettled(disposals)
     const reasons = results.flatMap((r) => (r.status === 'rejected' ? [r.reason] : []))
-    // Defensive, and currently untriggerable in production: all four child categories bottom out
-    // either in an enkaku `Disposer`-based `dispose()` (the directed `Client`s, the bus `Server`,
-    // the acceptor, and the outbound `BroadcastClient`), which by `@sozai/async`'s own design NEVER
-    // rejects — a failing teardown callback is swallowed to `console.warn` and the `disposed`
-    // promise still resolves — or in a synchronous refcount decrement that cannot throw. So no child
-    // disposal rejects today; this aggregation guards a path only a future non-`Disposer` child
-    // could reach. It is still exercised: this method is also the epoch-ROTATION teardown, where a
-    // failure should surface, and a test spies `BroadcastClient.prototype.dispose` to force it.
+    // Defensive: no child rejects today — all are enkaku `Disposer`-based (a failing dispose is
+    // swallowed to `console.warn`, the promise still resolves) or a refcount decrement that cannot
+    // throw — so this guards a future non-`Disposer` child. Kept live because rotation shares this
+    // path, and a `BroadcastClient.prototype.dispose` spy forces it in test.
     if (reasons.length > 0) {
       throw new AggregateError(reasons, 'Group epoch teardown failed')
     }
@@ -2101,11 +2097,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         // closing its hub drain, and a mux that failed must not hide a teardown failure that
         // happened first. `inboxLane` is cleared unconditionally after both, whichever way they
         // settled — `to()` has no lane left to build a directed client against either way.
-        // Reachability today: `teardownEpoch()`'s arm is defensive-only (its children are all
-        // `Disposer`-based and never reject — see its own comment); the `mux.dispose()` arm rejects
-        // only if the receive iterator's `return()` throws SYNCHRONOUSLY (the mux runs that close
-        // call un-`try/caught`; its async settlement is fire-and-forget). So the two-failure
-        // `AggregateError('Peer dispose failed')` is likewise reachable only via that mux path today.
+        // Only `mux.dispose()` rejects in practice, and only on a synchronous `return()` throw (its
+        // async close is fire-and-forget); `teardownEpoch()`'s arm is defensive (see its comment).
+        // So the two-failure `AggregateError` is reachable only via the mux path today.
         const disposeErrors: Array<unknown> = []
         try {
           await teardownEpoch()

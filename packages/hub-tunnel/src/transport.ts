@@ -296,12 +296,9 @@ export function createHubTunnelTransport<R, W>(
     // `releaseResources` itself stays synchronous — only the unsubscribe is deferred.
     void subscribed.then(() => hub.unsubscribe?.(localDID, receiveTopicID)).catch(() => {})
     try {
-      // Close our own drain fire-and-forget, NOT `await`ed anywhere. On the real wire hub the
-      // drain loop is parked at `await iterator.next()`, and the async iterator's `return()` waits
-      // behind that in-flight `next()` — which never settles during teardown — so awaiting it
-      // deadlocks (fake hubs resolve `return()` instantly, masking it in unit tests). The no-op
-      // catch keeps a late-rejecting `return()` off the unhandled-rejection path; a close failure
-      // surfaces via that rejection being swallowed, same as every other involuntary teardown path.
+      // Fire-and-forget: awaiting `return()` deadlocks on the real wire hub, where it waits behind
+      // the drain loop's in-flight `next()` that never settles during teardown. No-op catch keeps a
+      // late rejection off the unhandled-rejection path.
       const rawClose = iterator.return?.()
       if (rawClose != null) void Promise.resolve(rawClose).catch(() => {})
     } catch {

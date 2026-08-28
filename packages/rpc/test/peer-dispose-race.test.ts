@@ -1009,10 +1009,9 @@ function controllableReceiveHub(
       return {
         [Symbol.asyncIterator]: () => ({
           next: () => iterator.next(),
-          // `mux.dispose()` fires this close-and-forget (it no longer `await`s the async settlement,
-          // which deadlocked on the real wire hub), but runs the `return()` CALL un-try/caught. So a
-          // synchronously-throwing `return()` is the close-failure that still makes `mux.dispose()`
-          // reject; the async `gate` path only counts the call.
+          // `mux.dispose()` runs the `return()` call un-try/caught but no longer awaits its result,
+          // so only a synchronously-throwing `return()` makes it reject; the async `gate` path just
+          // counts the call.
           return: () => {
             returnCalls++
             if (returnThrows !== undefined) throw returnThrows
@@ -1092,9 +1091,8 @@ describe('dispose reaches mux teardown and is idempotent', () => {
 
   test('both teardownEpoch and mux dispose failing surfaces an AggregateError of both (Slice 1)', async () => {
     const muxError = new Error('mux dispose failed')
-    // A synchronously-throwing receive-`return()` is the close-failure `mux.dispose()` still
-    // surfaces (the async settlement is fire-and-forget; awaiting it deadlocked on the real wire
-    // hub). It makes `mux.dispose()` reject, driving peer.dispose's two-failure aggregation.
+    // A synchronously-throwing `return()` makes `mux.dispose()` reject (the only way it still does),
+    // driving peer.dispose's two-failure aggregation.
     const { hub, returnCalls } = controllableReceiveHub(Promise.resolve(), muxError)
     const rs = new Uint8Array(32).fill(0x91)
     const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members })

@@ -7,12 +7,10 @@ import { FakeHub } from './fixtures/fake-hub.js'
 const tick = (ms = 10) => new Promise((r) => setTimeout(r, ms))
 
 /**
- * A hub that delegates to `FakeHub` for everything except `receive`, whose async-iterator
- * `return()` is controllable: it counts calls and its returned promise settles on `gate`. When
- * `returnThrows` is set, `return()` instead throws SYNCHRONOUSLY — the one close-failure shape
- * `mux.dispose()` still surfaces, since the mux fires the close-and-forget but runs the `return()`
- * call itself un-try/caught. A never-settling `gate` models the real wire hub, whose `return()`
- * parks behind the in-flight `next()` during teardown — `dispose()` must not await it.
+ * Delegates to `FakeHub` except for `receive`, whose iterator `return()` is controllable: it counts
+ * calls and its promise settles on `gate` (a never-settling `gate` models the real wire hub, which
+ * `dispose()` must not await). With `returnThrows`, `return()` throws SYNCHRONOUSLY — the one
+ * close-failure `mux.dispose()` still rejects on, since it runs the `return()` call un-try/caught.
  */
 function controllableReceiveHub(
   gate: Promise<unknown> = Promise.resolve(),
@@ -53,9 +51,8 @@ function controllableReceiveHub(
 
 describe('createHubMux dispose', () => {
   test('resolves without awaiting the receive-iterator close (never deadlocks on a parked return)', async () => {
-    // A receive `return()` whose promise never settles — the shape the real wire hub takes during
-    // teardown, where `return()` parks behind the in-flight `next()`. The old `await
-    // iterator.return()` deadlocked here; the fire-and-forget close must let `dispose()` resolve.
+    // A never-settling `return()` (the real wire hub's teardown shape). The old awaited close
+    // deadlocked here.
     const neverSettles = new Promise<void>(() => {})
     const { hub, returnCalls } = controllableReceiveHub(neverSettles)
     const mux = createHubMux({ hub, localDID: 'bob' })
@@ -66,11 +63,9 @@ describe('createHubMux dispose', () => {
     })
 
     await tick()
-    // Resolved despite the close still parked — the drain is closed fire-and-forget, not awaited.
-    expect(settled).toBe(true)
+    expect(settled).toBe(true) // resolved despite the parked close
     await disposal
-    // The close was still initiated exactly once (fire-and-forget ≠ never-called).
-    expect(returnCalls()).toBe(1)
+    expect(returnCalls()).toBe(1) // close still initiated once
   })
 
   test('concurrent callers share one disposal', async () => {
@@ -89,9 +84,8 @@ describe('createHubMux dispose', () => {
 
   test('concurrent callers observe the same rejection', async () => {
     const error = new Error('drain close failed')
-    // A `return()` that throws SYNCHRONOUSLY — the close-failure shape `mux.dispose()` still
-    // surfaces (the async settlement is fire-and-forget and no longer awaited). The memoized
-    // disposal promise hands that same rejection to every caller.
+    // A synchronously-throwing `return()` — the only close-failure `mux.dispose()` still rejects on.
+    // The memoized promise hands that rejection to every caller.
     const { hub } = controllableReceiveHub(Promise.resolve(), error)
     const mux = createHubMux({ hub, localDID: 'bob' })
 

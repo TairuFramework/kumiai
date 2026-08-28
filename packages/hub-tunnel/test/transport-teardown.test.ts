@@ -114,9 +114,8 @@ function controllableHub(): ControllableRecorder {
               })
             }
             case 'hang': {
-              // Never settles, and — unlike 'delay' — arms no timer, so it leaves no open handle.
-              // Models the real wire hub during teardown, where return() parks behind the in-flight
-              // next(). dispose() must NOT await this, or it would deadlock.
+              // Never settles, no timer (unlike 'delay'), so no open handle. Models the real wire
+              // hub during teardown, where return() parks behind the in-flight next().
               return new Promise<never>(() => {})
             }
             case 'reject': {
@@ -483,11 +482,11 @@ describe('createHubTunnelTransport teardown', () => {
     await transport.dispose().catch(() => {})
   })
 
-  describe('drain close is fire-and-forget, never awaited (Slice 2 / Option 1)', () => {
+  describe('drain close is fire-and-forget, never awaited (Slice 2)', () => {
     test('ordinary dispose(): resolves without awaiting the drain close', async () => {
       const { hub, setReturnBehavior, returnCallCount } = controllableHub()
-      // return() never settles — the real wire hub's shape during teardown (parked behind the
-      // in-flight next()). The old `await receiveClosed` deadlocked here; dispose() must resolve.
+      // A never-settling return() (the real wire hub's teardown shape). The old awaited close
+      // deadlocked here.
       setReturnBehavior({ kind: 'hang' })
 
       const transport = createHubTunnelTransport({
@@ -529,7 +528,7 @@ describe('createHubTunnelTransport teardown', () => {
     })
   })
 
-  test('voluntary dispose (Finding D / Option 1): a rejecting return() is swallowed fire-and-forget, not warned or unhandled', async () => {
+  test('voluntary dispose (Finding D): a rejecting return() is swallowed fire-and-forget, not warned or unhandled', async () => {
     const { hub, setReturnBehavior } = controllableHub()
     const returnError = new Error('return boom')
     setReturnBehavior({ kind: 'reject', error: returnError })
@@ -549,12 +548,9 @@ describe('createHubTunnelTransport teardown', () => {
     })
     await flush()
 
-    // Under Option 1 the drain close is fire-and-forget on EVERY path: `releaseResources()` attaches
-    // a no-op catch to the `return()` promise and nothing awaits it. So a rejecting `return()` on the
-    // voluntary dispose path behaves exactly like the involuntary path below — the rejection is
-    // swallowed by that catch, never reaching Disposer's warn channel and never becoming an
-    // unhandled rejection. (Pre-Option-1 the voluntary path awaited it, so Disposer warned; awaiting
-    // deadlocked on the real wire hub, so the await was dropped.)
+    // The drain close is fire-and-forget on every path — `releaseResources()`'s no-op catch swallows
+    // a rejecting `return()`, and nothing awaits it. So the voluntary path matches the involuntary
+    // one below: no unhandled rejection, and no Disposer warn (which an awaited close would produce).
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
       await expect(transport.dispose()).resolves.toBeUndefined()

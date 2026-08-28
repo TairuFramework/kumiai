@@ -763,13 +763,10 @@ export function createHubMux(params: HubMuxParams): HubMux {
         // unsubscribing here would delete the user's unread mail on every app switch.
         refcount.clear()
         listeners.clear()
-        // Close our own drain fire-and-forget, NOT `await`ed. On the real wire hub the drain loop
-        // is parked at `await iterator.next()`, and the async iterator's `return()` waits behind
-        // that in-flight `next()` — which never settles during teardown — so awaiting it deadlocks
-        // (fake hubs resolve `return()` instantly, which masked this in unit tests). The residual-#7
-        // publish guards (`publishSuspended`) already block every post-dispose write independently,
-        // so the close need not be awaited for correctness. The no-op catch keeps a late-rejecting
-        // `return()` from being an unhandled rejection.
+        // Fire-and-forget: awaiting `return()` deadlocks on the real wire hub, where it waits behind
+        // the drain loop's in-flight `next()` that never settles during teardown. Post-dispose writes
+        // are already blocked by the `publishSuspended` guards, so the close need not be awaited.
+        // No-op catch keeps a late rejection off the unhandled-rejection path.
         const closed = iterator.return?.()
         if (closed != null) void Promise.resolve(closed).catch(() => {})
       })()
