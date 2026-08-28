@@ -47,6 +47,7 @@ function recordingHub(): Recorder {
 type ReturnBehavior =
   | { kind: 'delegate' }
   | { kind: 'delay'; ms: number }
+  | { kind: 'hang' }
   | { kind: 'reject'; error: unknown }
   | { kind: 'throw'; error: unknown }
 
@@ -111,6 +112,12 @@ function controllableHub(): ControllableRecorder {
                   resolve({ value: undefined, done: true })
                 }, ms)
               })
+            }
+            case 'hang': {
+              // Never settles, and — unlike 'delay' — arms no timer, so it leaves no open handle.
+              // Models the real wire hub during teardown, where return() parks behind the in-flight
+              // next(). dispose() must NOT await this, or it would deadlock.
+              return new Promise<never>(() => {})
             }
             case 'reject': {
               const { error } = returnBehavior
@@ -476,10 +483,12 @@ describe('createHubTunnelTransport teardown', () => {
     await transport.dispose().catch(() => {})
   })
 
-  describe('drain-await ordering (Slice 2)', () => {
-    test('ordinary dispose(): does not resolve until return() settles', async () => {
-      const { hub, setReturnBehavior } = controllableHub()
-      setReturnBehavior({ kind: 'delay', ms: 80 })
+  describe('drain close is fire-and-forget, never awaited (Slice 2 / Option 1)', () => {
+    test('ordinary dispose(): resolves without awaiting the drain close', async () => {
+      const { hub, setReturnBehavior, returnCallCount } = controllableHub()
+      // return() never settles — the real wire hub's shape during teardown (parked behind the
+      // in-flight next()). The old `await receiveClosed` deadlocked here; dispose() must resolve.
+      setReturnBehavior({ kind: 'hang' })
 
       const transport = createHubTunnelTransport({
         hub,
@@ -490,23 +499,15 @@ describe('createHubTunnelTransport teardown', () => {
       })
       await flush()
 
-      let disposed = false
-      const disposePromise = transport.dispose().then(() => {
-        disposed = true
-      })
-
-      await flush(20)
-      expect(disposed).toBe(false)
-
-      await flush(90)
-      expect(disposed).toBe(true)
-
-      await disposePromise
+      // Would time out (deadlock) if dispose() awaited the parked close.
+      await expect(transport.dispose()).resolves.toBeUndefined()
+      // The close was still initiated once (fire-and-forget ≠ never-called).
+      expect(returnCallCount()).toBe(1)
     })
 
-    test('remote session-end then dispose(): dispose() waits for the delayed return()', async () => {
-      const { hub, setReturnBehavior } = controllableHub()
-      setReturnBehavior({ kind: 'delay', ms: 80 })
+    test('remote session-end then dispose(): dispose() resolves without awaiting the drain close', async () => {
+      const { hub, setReturnBehavior, returnCallCount } = controllableHub()
+      setReturnBehavior({ kind: 'hang' })
 
       const transport = createHubTunnelTransport({
         hub,
@@ -517,28 +518,27 @@ describe('createHubTunnelTransport teardown', () => {
       })
       await flush()
 
+      // The remote session-end already tears down (and fires the hung close) once.
       await publishSessionEnd(hub, 'teardown-drain-session-end', 'did:key:remote', 'topic:in')
       await flush(10)
+      expect(returnCallCount()).toBe(1)
 
-      let disposed = false
-      const disposePromise = transport.dispose().then(() => {
-        disposed = true
-      })
-
-      await flush(30)
-      expect(disposed).toBe(false)
-
-      await flush(90)
-      expect(disposed).toBe(true)
-
-      await disposePromise
+      // A following dispose() still resolves — it neither awaits the hung close nor re-closes.
+      await expect(transport.dispose()).resolves.toBeUndefined()
+      expect(returnCallCount()).toBe(1)
     })
   })
 
-  test('rejection propagation (Finding D): a rejecting return() surfaces, not silently lost', async () => {
+  test('voluntary dispose (Finding D / Option 1): a rejecting return() is swallowed fire-and-forget, not warned or unhandled', async () => {
     const { hub, setReturnBehavior } = controllableHub()
     const returnError = new Error('return boom')
     setReturnBehavior({ kind: 'reject', error: returnError })
+
+    const caught: Array<unknown> = []
+    const onUnhandledRejection = (reason: unknown): void => {
+      caught.push(reason)
+    }
+    process.on('unhandledRejection', onUnhandledRejection)
 
     const transport = createHubTunnelTransport({
       hub,
@@ -549,21 +549,22 @@ describe('createHubTunnelTransport teardown', () => {
     })
     await flush()
 
-    // `@enkaku/transport`'s `Transport` is a `@sozai/async` `Disposer`: by THAT class's own
-    // contract (`disposer.js` — `params.dispose(...).then(resolve, (error) => { warn(); resolve() })`),
-    // its `dispose()` promise always resolves, even when the dispose callback rejects — a
-    // rejection is warned, never rethrown to the caller. So the async `'disposed'` listener's
-    // `await receiveClosed` rejection cannot propagate past that boundary (unlike hand-rolled
-    // `dispose()` in rpc's `hub-mux.ts`, which has no such swallowing layer). What IS verifiable,
-    // and is the reachable half of Finding D for this base class, is that the rejection is
-    // surfaced through Disposer's own warning channel with the exact error — not silently lost
-    // the way an unawaited `iterator.return?.()` was before this fix.
+    // Under Option 1 the drain close is fire-and-forget on EVERY path: `releaseResources()` attaches
+    // a no-op catch to the `return()` promise and nothing awaits it. So a rejecting `return()` on the
+    // voluntary dispose path behaves exactly like the involuntary path below — the rejection is
+    // swallowed by that catch, never reaching Disposer's warn channel and never becoming an
+    // unhandled rejection. (Pre-Option-1 the voluntary path awaited it, so Disposer warned; awaiting
+    // deadlocked on the real wire hub, so the await was dropped.)
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
       await expect(transport.dispose()).resolves.toBeUndefined()
-      expect(warnSpy).toHaveBeenCalledWith('Disposer dispose callback rejected', returnError)
+      // Give the rejected return() promise a full turn to surface as unhandled if it were unguarded.
+      await flush(60)
+      expect(caught).toHaveLength(0)
+      expect(warnSpy).not.toHaveBeenCalledWith('Disposer dispose callback rejected', returnError)
     } finally {
       warnSpy.mockRestore()
+      process.off('unhandledRejection', onUnhandledRejection)
     }
   })
 

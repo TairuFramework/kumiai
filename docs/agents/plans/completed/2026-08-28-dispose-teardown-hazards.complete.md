@@ -10,7 +10,7 @@ surfaced several closely-related defects in the same disposal paths; all were fo
 ## Goal
 
 Make `dispose()` fully finish what it starts across the three packages: always reach `mux.dispose()`,
-wait for the receive drain to close, run the full cleanup on every teardown path, and stay correct
+close the receive drain on every teardown path, run the full cleanup on every path, and stay correct
 under concurrent callers. The stakes are correctness, not hygiene: the `mls: GroupMLS` handle is
 host-passed, so a post-dispose write through a leaked drain or stale lane can corrupt host-shared state.
 
@@ -28,19 +28,32 @@ Four interacting slices settled onto one branch (five code/test commits plus the
   must be collected rather than sequenced. `teardownEpoch()`'s own throw is left intact because it is
   also called from the epoch-rotation path, where a child-disposal failure *should* surface.
 
-- **Slice 2 — `dispose()` resolves only after the receive drain is closed, and every teardown path runs
-  the full cleanup.** Both the mux and the transport drain a hub subscription through an async iterator
-  and previously closed it with a fire-and-forget `iterator.return?.()`, so `dispose()` could resolve
-  before the receive resource actually closed. The mux now `await`s the close. In the transport, the
-  timer/listener/subscription/iterator teardown was extracted into one `releaseResources()` that every
-  path calls — fixing a wider pre-existing leak where three inline teardown paths (readable-pull
-  `next()` rejection, `result.done`, remote `session-end`) cleared only the idle timer and skipped the
-  reconnect timer, the hub-status listener, the abort listener, and `hub.unsubscribe`. The `'disposed'`
-  listener became async and awaits the captured receive-close promise. Folded findings: a construction
-  race that registered the hub-status listener *after* a pre-aborted teardown already ran, now guarded
-  with `!torndown` (Finding A); exception-safety wrappers so a synchronous throw from an unrestricted
-  call (`unsubscribeEvents()` or `iterator.return()`) cannot strand the rest of the cleanup (Finding E);
-  and correct handling of an async `return()` rejection (Finding D, below).
+- **Slice 2 — every teardown path runs the full cleanup, and the receive drain is closed fire-and-forget
+  on every path.** Both the mux and the transport drain a hub subscription through an async iterator.
+  In the transport, the timer/listener/subscription/iterator teardown was extracted into one
+  `releaseResources()` that every path calls — fixing a wider pre-existing leak where three inline
+  teardown paths (readable-pull `next()` rejection, `result.done`, remote `session-end`) cleared only
+  the idle timer and skipped the reconnect timer, the hub-status listener, the abort listener, and
+  `hub.unsubscribe`. Folded findings: a construction race that registered the hub-status listener
+  *after* a pre-aborted teardown already ran, now guarded with `!torndown` (Finding A); exception-safety
+  wrappers so a synchronous throw from an unrestricted call (`unsubscribeEvents()` or `iterator.return()`)
+  cannot strand the rest of the cleanup (Finding E); and the drain-close decision below (Finding D).
+
+  **Drain-close decision — fire-and-forget, corrected during CI.** An intermediate version of this
+  branch made `dispose()` *await* the drain close (`await iterator.return?.()` in the mux; the
+  transport's `'disposed'` listener `await`ing a captured close promise), so `dispose()` would resolve
+  only after the receive resource actually closed. That version passed every unit test and three review
+  passes but **deadlocked the `@kumiai/integration-tests` suite against the real wire hub**: the drain
+  loop is parked at `await iterator.next()`, and on the real enkaku channel the async iterator's
+  `return()` waits behind that in-flight `next()`, which never settles during teardown — so awaiting
+  `return()` blocks forever. Fake hubs resolve `return()` instantly, which masked it in unit tests, and
+  turbo had cached the integration suite green, which masked it in CI. The fix reverts to closing the
+  drain **fire-and-forget** on every path (a no-op `.catch()` keeps a late rejection off the
+  unhandled-rejection path). This is not merely a rollback: the residual-#7 `publishSuspended` guards
+  already block every post-dispose write independently of whether the drain has closed, so awaiting the
+  close bought no correctness — it was belt-and-suspenders that only ever held against fake hubs. The
+  mux still *rejects* if `return()` throws **synchronously** (it runs that call un-`try/caught` as its
+  last act), so Slice 1's aggregation second arm stays reachable.
 
 - **Slice 3 — clear the stale `inboxLane` reference on dispose.** `inboxLane` closes over the mux and was
   never cleared by `teardownEpoch()`, so a disposed peer retained a reference to an obsolete inbound
@@ -51,53 +64,56 @@ Four interacting slices settled onto one branch (five code/test commits plus the
 
 - **Slice 4 — concurrent `dispose()` shares one in-flight disposal.** Slices 1 and 2 turned both
   `dispose()` methods into genuine awaitable work, so the old boolean/no-op idempotency became observably
-  wrong (a second caller could resolve before the drain closed, or re-run the whole body). Each method is
-  now a synchronous function that runs its eager prologue, starts the async body once, memoizes the
-  promise, and returns that same promise to every later caller. The eager prologue (`disposed = true`,
-  then `suspendPublishing()` / `publishSuspended = true`) still runs synchronously on the first call
-  before anything is awaited — preserving the residual-#7 ordering invariant (suspend the publish funnel
-  before any await). External type stays `(): Promise<void>`; the `async` moved to the inner IIFE.
+  wrong (a second caller could re-run the whole body). Each method is now a synchronous function that
+  runs its eager prologue, starts the async body once, memoizes the promise, and returns that same
+  promise to every later caller. The eager prologue (`disposed = true`, then `suspendPublishing()` /
+  `publishSuspended = true`) still runs synchronously on the first call before anything is awaited —
+  preserving the residual-#7 ordering invariant (suspend the publish funnel before any await). External
+  type stays `(): Promise<void>`; the `async` moved to the inner IIFE.
 
-## Key design decision corrected during implementation (Finding D)
+## Finding D and the drain-close asymmetry
 
 The spec asserted that `transport.dispose()` *rejects* if the drain close fails, "like `mux.dispose()`
-and `peer.dispose()`." **That premise is wrong and was corrected in the implementation.** enkaku's
-`Transport` extends `@sozai/async`'s `Disposer`, and its dispose callback `await`s
-`events.emit('disposed', …)`. `@sozai/event`'s `emit` does rethrow a rejecting listener — but
-`Disposer.dispose()` catches that rejection, routes it to `console.warn('Disposer dispose callback
-rejected', …)`, and **always resolves**. So the true behavior is:
+and `peer.dispose()`." **That premise was wrong.** enkaku's `Transport` extends `@sozai/async`'s
+`Disposer`, whose `dispose()` catches a rejecting dispose callback, routes it to `console.warn`, and
+**always resolves** — it never rejects, unlike the hand-rolled `mux.dispose()` / `peer.dispose()` which
+have no Disposer layer. (`@sozai/event`'s `emit` *does* rethrow a rejecting listener, but the `Disposer`
+one layer up still swallows it — a lesson captured in agent memory.)
 
-- **Ordering holds:** `transport.dispose()` does not *resolve* until the receive-close promise settles
-  (the Disposer awaits its callback, which awaits the emit, which awaits the async `'disposed'`
-  listener's `await receiveClosed`).
-- **Rejection is swallowed:** a close failure surfaces via `console.warn`, not by rejecting
-  `transport.dispose()`. This is unlike the hand-rolled `mux.dispose()` / `peer.dispose()`, which have
-  no Disposer layer and genuinely reject.
+With the drain close now **fire-and-forget on every path** (the corrected Slice 2 decision above), the
+rejection question collapses: `releaseResources()` attaches a no-op `.catch()` to the `return()`
+promise and nothing awaits it, so a rejecting async `return()` is swallowed on both the voluntary
+dispose path and the involuntary (idle/abort/error/completion/remote-session-end) paths alike — it
+reaches neither the caller, nor the `console.warn` channel, nor the unhandled-rejection handler. The
+only close failure that still *rejects* a `dispose()` is a **synchronous** throw from `return()` on the
+hand-rolled `mux.dispose()` / `peer.dispose()`, which run that call un-`try/caught`; the transport wraps
+it, so it never rejects there.
 
-The production code matches this true behavior; only the involuntary paths additionally attach a no-op
-`catch` to the stored close promise so a rejection there is never an unhandled rejection while the
-voluntary listener's separate `await` still observes it. Reviewers verified this against source four
-independent times. The lesson — a rethrowing `emit` can still be swallowed by a `Disposer` one layer up
-— is captured in agent memory.
+## Boundary and follow-on
 
-## Verified boundary and follow-on
+The drain close is not awaited, so there is no teardown-duration boundary to defend: `dispose()`
+resolves in bounded local work (synchronous clears plus initiating a fire-and-forget close) regardless
+of what the hub's `return()` does. This is the same conclusion the dispose-ordering-residuals work
+reached when it rejected draining a subscription inside `dispose()`.
 
-`iterator.return()` closes *our own* drain at the very end of teardown — no mutex held, no host callback
-inside it — so awaiting it is bounded (local cleanup plus at most a fire-and-forget wire close for the
-real `HubClient` channel), not the unbounded/deadlocking drain that the dispose-ordering-residuals work
-rejected. If a future hub made `return()` do unbounded I/O this await would need revisiting — the
-accepted boundary, same shape as that branch's documented boundaries.
+**Process lesson (the real one).** The await-drain deadlock shipped through brainstorming, a written
+spec, three review passes, and an external Codex pass — all green — because the fake-hub unit tests
+cannot exhibit it and the `@kumiai/integration-tests` suite was never actually run during development
+(turbo had it cached green on `main`). Any change to a `dispose()`/teardown path against a hub must run
+that integration suite **uncached** as a gate; a green unit suite over fake hubs is not evidence.
 
 One architectural finding surfaced and is deferred to backlog (see
 `2026-08-28-teardownepoch-aggregate-unreachable.md`): because all four children `teardownEpoch()`
 disposes are `Disposer`-based and `Disposer` never rejects, `teardownEpoch()`'s `AggregateError` is
 currently unreachable in production. Slice 1's aggregation is correct defensive code — and its second
-arm (`mux.dispose()`, which genuinely rejects) is load-bearing — but the first arm guards a path only a
-future non-`Disposer` child could trigger. Documented, not a blocker.
+arm (`mux.dispose()`, which rejects on a synchronous `return()` throw) is load-bearing — but the first
+arm guards a path only a future non-`Disposer` child could trigger. Documented, not a blocker.
 
 ## Verification
 
-`@kumiai/rpc` 408/408 and `@kumiai/hub-tunnel` 94/94 (forced, real runs). Every task followed
+`@kumiai/rpc` 408/408 and `@kumiai/hub-tunnel` 94/94 (forced, real runs), plus the
+`@kumiai/integration-tests` suite 43/43 run **uncached** against the real wire hub — the gate that
+catches the drain-close deadlock a green unit suite hides. Every task followed
 red→green→mutation-check discipline. Two whole-branch code reviews plus an independent Codex pass — the
 second review caught that Finding E's exception-safety had no committed test (its original mutation-check
 used a temporary test deleted before commit), now closed with two permanent synchronous-throw tests that
@@ -105,5 +121,4 @@ bite. No port-contract changed, so the `rpc-conformance` / `hub-conformance` sui
 
 ## Branch note
 
-Stacked on the dispose-ordering-residuals branch (it edits the same `dispose()` tail): target the new
-PR at that branch, or rebase onto `main` once it merges.
+Folded into PR #35 (single PR onto `main`).

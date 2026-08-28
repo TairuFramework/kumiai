@@ -988,7 +988,10 @@ describe('dispose against a lane op parked before the mux mailbox-publish route'
 // counted and — via `gate` — can be made to reject. Mirrors Task 1's `controllableReceiveHub`
 // (`hub-mux-dispose.test.ts`): `mux.dispose()`'s LAST act is this iterator's `return()`, so
 // counting it is the only external signal that the mux teardown actually ran.
-function controllableReceiveHub(gate: Promise<unknown> = Promise.resolve()): {
+function controllableReceiveHub(
+  gate: Promise<unknown> = Promise.resolve(),
+  returnThrows?: unknown,
+): {
   hub: LogHub
   returnCalls: () => number
 } {
@@ -1006,10 +1009,17 @@ function controllableReceiveHub(gate: Promise<unknown> = Promise.resolve()): {
       return {
         [Symbol.asyncIterator]: () => ({
           next: () => iterator.next(),
-          return: async () => {
+          // `mux.dispose()` fires this close-and-forget (it no longer `await`s the async settlement,
+          // which deadlocked on the real wire hub), but runs the `return()` CALL un-try/caught. So a
+          // synchronously-throwing `return()` is the close-failure that still makes `mux.dispose()`
+          // reject; the async `gate` path only counts the call.
+          return: () => {
             returnCalls++
-            await gate
-            return iterator.return ? iterator.return() : { done: true as const, value: undefined }
+            if (returnThrows !== undefined) throw returnThrows
+            return (async () => {
+              await gate
+              return iterator.return ? iterator.return() : { done: true as const, value: undefined }
+            })()
           },
         }),
         ack: inner.ack?.bind(inner),
@@ -1082,8 +1092,10 @@ describe('dispose reaches mux teardown and is idempotent', () => {
 
   test('both teardownEpoch and mux dispose failing surfaces an AggregateError of both (Slice 1)', async () => {
     const muxError = new Error('mux dispose failed')
-    // Task 1 makes this reachable: a rejecting receive-`return()` makes `mux.dispose()` reject.
-    const { hub, returnCalls } = controllableReceiveHub(Promise.reject(muxError))
+    // A synchronously-throwing receive-`return()` is the close-failure `mux.dispose()` still
+    // surfaces (the async settlement is fire-and-forget; awaiting it deadlocked on the real wire
+    // hub). It makes `mux.dispose()` reject, driving peer.dispose's two-failure aggregation.
+    const { hub, returnCalls } = controllableReceiveHub(Promise.resolve(), muxError)
     const rs = new Uint8Array(32).fill(0x91)
     const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members })
     await flush()

@@ -19,8 +19,10 @@ inbox acceptor) resolve to a synchronous refcount decrement that cannot throw.
 
 Consequence: with the current implementations, no child disposal can reject, so `teardownEpoch()`'s
 `AggregateError` is unreachable in production today. Slice 1's aggregation is still correct defensive
-code, and its second arm — `mux.dispose()`, which is hand-rolled and genuinely rejects — is load-bearing
-and reachable. Only the first arm (around `teardownEpoch()`) currently guards a path nothing can trigger.
+code, and its second arm — `mux.dispose()`, which is hand-rolled and rejects if the receive iterator's
+`return()` throws *synchronously* (the mux runs that close call un-`try/caught` as its last act; the
+async settlement is fire-and-forget and no longer awaited) — is load-bearing and reachable. Only the
+first arm (around `teardownEpoch()`) currently guards a path nothing can trigger.
 
 The implementation's test for this arm forces the path with a scoped `vi.spyOn(BroadcastClient.prototype,
 'dispose')` seam, which exercises the real `teardownEpoch()` rejection path even though no fixture double

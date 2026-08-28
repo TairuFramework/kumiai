@@ -236,9 +236,6 @@ export function createHubTunnelTransport<R, W>(
   let idleTimer: ReturnType<typeof setTimeout> | undefined
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined
   let unsubscribeEvents: (() => void) | undefined
-  // Set by `releaseResources()` to the receive iterator's `return()` promise (if any), so the
-  // voluntary `'disposed'` listener can await drain completion and surface a rejection.
-  let receiveClosed: Promise<unknown> | undefined
 
   const clearIdleTimer = (): void => {
     if (idleTimer != null) {
@@ -299,16 +296,16 @@ export function createHubTunnelTransport<R, W>(
     // `releaseResources` itself stays synchronous — only the unsubscribe is deferred.
     void subscribed.then(() => hub.unsubscribe?.(localDID, receiveTopicID)).catch(() => {})
     try {
+      // Close our own drain fire-and-forget, NOT `await`ed anywhere. On the real wire hub the
+      // drain loop is parked at `await iterator.next()`, and the async iterator's `return()` waits
+      // behind that in-flight `next()` — which never settles during teardown — so awaiting it
+      // deadlocks (fake hubs resolve `return()` instantly, masking it in unit tests). The no-op
+      // catch keeps a late-rejecting `return()` off the unhandled-rejection path; a close failure
+      // surfaces via that rejection being swallowed, same as every other involuntary teardown path.
       const rawClose = iterator.return?.()
-      receiveClosed = rawClose ?? undefined
-      // Marks `rawClose` handled WITHOUT preventing a later `await receiveClosed` (voluntary
-      // dispose path) from still seeing the rejection: multiple consumers of the same promise
-      // each get its settlement. On an involuntary path (idle/abort/error/completion/remote
-      // session-end with no following dispose) nobody else awaits `receiveClosed`, so without
-      // this no-op catch a rejecting `return()` would be a genuinely unhandled rejection.
       if (rawClose != null) void Promise.resolve(rawClose).catch(() => {})
     } catch {
-      receiveClosed = undefined
+      // synchronous throw from `return()` — nothing more to release
     }
   }
 
@@ -506,9 +503,8 @@ export function createHubTunnelTransport<R, W>(
     signal.addEventListener('abort', abortHandler, { once: true })
   }
 
-  transport.events.on('disposed', async () => {
+  transport.events.on('disposed', () => {
     teardown()
-    await receiveClosed
   })
 
   if (!torndown && reconnectTimeoutMs != null && hub.events != null) {
