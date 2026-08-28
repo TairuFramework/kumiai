@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Stage:** planning
+**Stage:** executing
 **Mode:** tasks
 
 **Goal:** Make `dispose()` fully finish what it starts across `@kumiai/rpc` (`peer.ts`, `hub-mux.ts`) and `@kumiai/hub-tunnel` (`transport.ts`) — always reach `mux.dispose()`, wait for the receive drain to close, run the full cleanup on every teardown path, and stay correct under concurrent callers.
