@@ -226,6 +226,37 @@ describe('createHubTunnelTransport teardown', () => {
     ).toHaveLength(1)
   })
 
+  test('pre-aborted signal: hub-status listener is never left registered (Slice 2, Finding A)', async () => {
+    const { hub, fake, unsubscribed } = controllableHub()
+    const onSpy = vi.spyOn(fake.events, 'on')
+
+    const c = new AbortController()
+    c.abort(new Error('pre-aborted'))
+
+    createHubTunnelTransport({
+      hub,
+      sessionID: 'teardown-pre-aborted',
+      localDID: 'did:key:local',
+      sendTopicID: 'topic:out',
+      receiveTopicID: 'topic:in',
+      reconnectTimeoutMs: 30,
+      signal: c.signal,
+    })
+    await flush()
+
+    // `start()` sees the already-aborted signal and tears down synchronously DURING
+    // construction — before the hub-status registration block below it runs. Nothing ever
+    // clears a listener registered after that point, so the guard must skip it entirely.
+    expect(onSpy).not.toHaveBeenCalled()
+    expect(unsubscribed).toHaveLength(1)
+
+    // Defense in depth: even a later 'reconnecting' emission (were a listener somehow still
+    // registered) triggers no further teardown work.
+    fake.simulateReconnecting()
+    await flush(60)
+    expect(unsubscribed).toHaveLength(1)
+  })
+
   describe('cleanup-bypass (Slice 2)', () => {
     test('next() rejection path: dispose() after still runs full cleanup', async () => {
       const { hub, unsubscribed, rejectNextOnce, fake } = controllableHub()

@@ -511,7 +511,7 @@ export function createHubTunnelTransport<R, W>(
     await receiveClosed
   })
 
-  if (reconnectTimeoutMs != null && hub.events != null) {
+  if (!torndown && reconnectTimeoutMs != null && hub.events != null) {
     const armReconnectTimer = (): void => {
       if (torndown || reconnectTimer != null) return
       reconnectTimer = setTimeout(() => {
