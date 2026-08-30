@@ -578,6 +578,9 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       registry.register(clientDID)
 
       // Per-(did, topicID) delivery-authorization cache, local to this channel (torn down with it).
+      // Both allow AND deny are cached for the TTL, so re-grant is not immediate: a topic that was
+      // just re-authorized keeps being denied for up to `receiveAuthCacheTTL` ms, and a frame denied
+      // in-session redelivers on the recipient's next connect.
       const authCache = new Map<string, { allow: boolean; expiresAt: number }>()
       const gate = async (topicID: string): Promise<boolean> => {
         const key = `${clientDID} ${topicID}`

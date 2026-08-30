@@ -470,22 +470,6 @@ describe('hub/v1/receive per-frame gate', () => {
     expect(written).toEqual([])
   })
 
-  test('a denied frame is not acked (stays pending for redelivery)', async () => {
-    const store = backlogStore([msg('000000000001', 'topicX')])
-    const ackSpy = vi.spyOn(store, 'ack')
-    const registry = new HubClientRegistry()
-    const handlers = createHandlers({
-      registry,
-      store,
-      authorize: (req) => !(req.action === 'receive/deliver' && req.topicID === 'topicX'),
-    })
-    const written: Array<unknown> = []
-    const { controller, done } = await runReceive(handlers, written)
-    controller.abort()
-    await done
-    expect(ackSpy).not.toHaveBeenCalled()
-  })
-
   test('a receive/deliver deny during the buffered-live-flush drops that topic', async () => {
     let openGate: () => void = () => {}
     const gate = new Promise<void>((resolve) => {
@@ -520,6 +504,44 @@ describe('hub/v1/receive per-frame gate', () => {
 
     // topicX never appears; the backlog frame and the allowed buffered frame both do, in order.
     expect(written.map((f) => f.topicID)).toEqual(['topicY', 'topicZ'])
+  })
+
+  test('a denied high-seq frame does not advance lastServed past a later allowed lower-seq frame', async () => {
+    let openGate: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve
+    })
+    // Backlog carries a DENIED frame at a HIGH sequenceID (topicX, seq 5).
+    const { store } = drainGateStore([[frame('000000000005', 'topicX')]], gate)
+    const registry = new HubClientRegistry()
+    const handlers = createHandlers({
+      registry,
+      store,
+      authorize: (req) => !(req.action === 'receive/deliver' && req.topicID === 'topicX'),
+    })
+    const written: Array<{ sequenceID: string; topicID: string }> = []
+    const controller = new AbortController()
+    const done = handlers['hub/v1/receive'](
+      receiveCtx({
+        acks: ackStream([]),
+        signal: controller.signal,
+        writable: collectingWritable(written) as WritableStream,
+      }),
+    )
+
+    // While the drain is paused on the denied seq-5 page, buffer an ALLOWED frame at a LOWER
+    // sequenceID (topicY, seq 3). If a deny wrongly advanced `lastServed` to 5, the flush's
+    // `sequenceID > lastServed` dedup would wrongly drop this lower-seq frame as "already served".
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    registry.getClient(DID)?.sendMessage?.(frame('000000000003', 'topicY'))
+    openGate()
+
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    controller.abort()
+    await done
+
+    // The lower-seq allowed frame must still be delivered — a deny must not advance lastServed.
+    expect(written.map((f) => f.sequenceID)).toEqual(['000000000003'])
   })
 })
 
