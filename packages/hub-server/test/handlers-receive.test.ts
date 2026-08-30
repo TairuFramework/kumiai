@@ -1,9 +1,14 @@
 import type { FetchParams, FetchResult, HubStore, StoredMessage } from '@kumiai/hub-protocol'
+import { HUB_ERROR_CODES } from '@kumiai/hub-protocol'
 import { describe, expect, test, vi } from 'vitest'
 
 import { createHandlers } from '../src/handlers.js'
 import { createMemoryStore } from '../src/memoryStore.js'
 import { HubClientRegistry } from '../src/registry.js'
+
+type AuthorizeRequestAction = Parameters<
+  NonNullable<Parameters<typeof createHandlers>[0]['authorize']>
+>[0]['action']
 
 const DID = 'did:key:receiver'
 
@@ -44,6 +49,57 @@ function ackStream(acks: Array<{ ack: Array<string> }>): ReadableStream<{ ack: A
     },
   })
 }
+
+describe('hub/v1/receive connect gate', () => {
+  test('a receive deny rejects the channel and registers no state', async () => {
+    const store = createMemoryStore()
+    const registry = new HubClientRegistry()
+    const handlers = createHandlers({
+      registry,
+      store,
+      authorize: (req) => req.action !== 'receive',
+    })
+
+    const written: Array<unknown> = []
+    await expect(
+      handlers['hub/v1/receive'](
+        receiveCtx({ acks: ackStream([]), writable: collectingWritable(written) }),
+      ),
+    ).rejects.toMatchObject({ code: HUB_ERROR_CODES.authorizationDenied })
+
+    expect(registry.isWriterBound(DID)).toBe(false)
+    expect(registry.getClient(DID)).toBeUndefined()
+    expect(written).toEqual([])
+  })
+
+  test('a receive allow lets the channel open (empty backlog drains clean)', async () => {
+    const store = createMemoryStore()
+    const registry = new HubClientRegistry()
+    const seen: Array<AuthorizeRequestAction> = []
+    const handlers = createHandlers({
+      registry,
+      store,
+      authorize: (req) => {
+        seen.push(req.action)
+        return true
+      },
+    })
+
+    const controller = new AbortController()
+    const done = handlers['hub/v1/receive'](
+      receiveCtx({
+        acks: ackStream([]),
+        signal: controller.signal,
+        writable: collectingWritable([]),
+      }),
+    )
+    await new Promise((r) => setTimeout(r, 20))
+    controller.abort()
+    await done
+
+    expect(seen).toContain('receive')
+  })
+})
 
 describe('hub/v1/receive ack loop', () => {
   test('a store.ack failure does not stop later acks from being applied', async () => {

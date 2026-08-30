@@ -55,6 +55,7 @@ export type AuthorizeRequest =
    */
   | { action: 'wake/register'; did: string; kind: string; expiresAt?: number }
   | { action: 'wake/unregister'; did: string }
+  | { action: 'receive'; did: string }
 
 /**
  * A plain `boolean` is shorthand for `{ allow: boolean }`, with no reason, code, or retry hint.
@@ -541,6 +542,16 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
     'hub/v1/receive': (async (ctx) => {
       const clientDID = getClientDID(ctx)
       const { after } = ctx.param ?? {}
+
+      const connectDecision = normalizeAuthorizeDecision(
+        await authorize({ action: 'receive', did: clientDID }),
+      )
+      if (!connectDecision.allow) {
+        throw new HandlerError({
+          code: HUB_ERROR_CODES.authorizationDenied,
+          message: connectDecision.reason ?? 'Not authorized to receive',
+        })
+      }
 
       registry.register(clientDID)
 
