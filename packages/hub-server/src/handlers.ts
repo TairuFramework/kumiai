@@ -591,7 +591,10 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
           await authorize({ action: 'receive/deliver', did: clientDID, topicID }),
         )
         if (receiveAuthCacheTTL > 0) {
-          authCache.set(key, { allow: decision.allow, expiresAt: now + receiveAuthCacheTTL })
+          // Expiry is measured from when the decision is stored, AFTER the hook resolves — so the
+          // reuse window excludes the hook's own execution time. Re-read the clock here rather than
+          // reusing `now` (captured before the await).
+          authCache.set(key, { allow: decision.allow, expiresAt: Date.now() + receiveAuthCacheTTL })
         }
         return decision.allow
       }
