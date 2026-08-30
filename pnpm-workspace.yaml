@@ -9,8 +9,8 @@ allowBuilds:
 nodeLinker: hoisted
 
 catalog:
-  '@noble/ciphers': ^2.3.0
-  '@noble/curves': ^2.3.0
+  '@noble/ciphers': ^2.4.0
+  '@noble/curves': ^2.4.0
   '@noble/hashes': ^2.4.0
   'ts-mls': 2.0.0-rc.13
   'vitest': ^4.1.11
@@ -27,11 +27,11 @@ catalog:
   '@sozai/log': ^0.3.1
   '@sozai/result': ^0.2.0
   '@sozai/runtime': ^0.1.0
-  '@sozai/schema': ^0.1.1
+  '@sozai/schema': ^0.1.2
   '@sozai/stream': ^0.2.0
   '@kokuin/expo': ^0.3.2
   '@sozai/runtime-expo': ^0.2.2
-  'expo': ^57.0.17
+  'expo': ^57.0.18
   'expo-status-bar': ^57.0.1
   'react': 19.2.3
   'react-native': ^0.86.0
