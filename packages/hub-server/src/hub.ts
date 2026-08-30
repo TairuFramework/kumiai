@@ -46,7 +46,12 @@ export type CreateHubParams = {
   identity: Identity
   /** Access rules enforced by the server. Defaults to {@link DEFAULT_HUB_ACCESS_RULES}. */
   accessRules?: AccessRules
-  /** Per-procedure publish/subscribe authorization. Defaults to allow-any-authed. */
+  /**
+   * Per-action authorization hook. Consulted for publish, subscribe, topic/fetch, keypackage/*,
+   * wake/*, and receive — the coarse `receive` gate at channel open plus a per-frame
+   * `receive/deliver` gate by topic (see {@link CreateHubParams.receiveAuthCacheTTL}). Defaults to
+   * allow-any-authed.
+   */
   authorize?: AuthorizeHook
   /** Publish rate limits. Merged over {@link DEFAULT_RATE_LIMITS}. */
   rateLimits?: Partial<HubRateLimits>
