@@ -233,6 +233,12 @@ export type CreateHandlersParams = {
    * for the >= 50-frame-page floor this should respect. Default: 256 */
   receiveBufferLimit?: number
   /**
+   * TTL (ms) for the per-(did, topicID) receive delivery-authorization cache. `0` disables reuse
+   * (the hook is consulted for every frame). Non-finite or negative values fall back to
+   * {@link DEFAULT_RECEIVE_AUTH_CACHE_TTL}. Default: 5000.
+   */
+  receiveAuthCacheTTL?: number
+  /**
    * Called when a `HubStore` operation fails at a point where the hub deliberately does not fail
    * the request. Fire-and-forget; a throw here is swallowed.
    *
@@ -271,6 +277,13 @@ function rethrowAsHandlerError(error: unknown): never {
   throw error
 }
 
+function resolveReceiveAuthCacheTTL(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value) || value < 0) {
+    return DEFAULT_RECEIVE_AUTH_CACHE_TTL
+  }
+  return value // 0 allowed: no reuse
+}
+
 type ReceiveFrame = {
   sequenceID: string
   senderDID: string
@@ -301,6 +314,7 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
   const didLimiter = createRateLimiter(rateLimits.perDID)
   const topicLimiter = createRateLimiter(rateLimits.perTopic)
   const receiveBufferLimit = params.receiveBufferLimit ?? DEFAULT_RECEIVE_BUFFER_LIMIT
+  const receiveAuthCacheTTL = resolveReceiveAuthCacheTTL(params.receiveAuthCacheTTL)
   const storeErrorReporter = createStoreErrorReporter(params.onStoreError)
 
   const fetchLimits: KeyPackageFetchLimits = {
@@ -565,7 +579,6 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
 
       // Per-(did, topicID) delivery-authorization cache, local to this channel (torn down with it).
       const authCache = new Map<string, { allow: boolean; expiresAt: number }>()
-      const receiveAuthCacheTTL = DEFAULT_RECEIVE_AUTH_CACHE_TTL // Task 3: resolve from params
       const gate = async (topicID: string): Promise<boolean> => {
         const key = `${clientDID} ${topicID}`
         const now = Date.now()

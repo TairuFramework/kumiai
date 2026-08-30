@@ -549,6 +549,43 @@ describe('hub authorization', () => {
 
     await ctx.dispose()
   })
+
+  test('receiveAuthCacheTTL reaches the handler: 0 consults the hook for every frame', async () => {
+    let deliverCalls = 0
+    const ctx = createTestHub({
+      receiveAuthCacheTTL: 0,
+      authorize: (req: AuthorizeRequest) => {
+        if (req.action === 'receive/deliver') deliverCalls++
+        return true
+      },
+    })
+    const { client: alice } = ctx.connect()
+    const bobIdentity = randomIdentity()
+    const { client: bob } = ctx.connect(bobIdentity)
+
+    await bob.request('hub/v1/subscribe', { param: { topicID: TOPIC } })
+    const channel = bob.createChannel('hub/v1/receive', { param: {} })
+    const reader = channel.readable.getReader()
+    await delay(20)
+
+    await alice.request('hub/v1/publish', {
+      param: { topicID: TOPIC, payload: encodePayload('one') },
+    })
+    await reader.read()
+    await alice.request('hub/v1/publish', {
+      param: { topicID: TOPIC, payload: encodePayload('two') },
+    })
+    await reader.read()
+
+    // With the default TTL, the second same-topic frame would hit the cache (one hook call).
+    // TTL 0 disables reuse, so both frames consult the hook.
+    expect(deliverCalls).toBe(2)
+
+    channel.close()
+    await expect(channel).rejects.toEqual('Close')
+    await delay(20)
+    await ctx.dispose()
+  })
 })
 
 describe('hub rate limiting', () => {

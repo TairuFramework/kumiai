@@ -522,3 +522,98 @@ describe('hub/v1/receive per-frame gate', () => {
     expect(written.map((f) => f.topicID)).toEqual(['topicY', 'topicZ'])
   })
 })
+
+describe('receiveAuthCacheTTL', () => {
+  test('within the TTL, repeated same-topic frames consult the hook once', async () => {
+    const store = backlogStore([])
+    const registry = new HubClientRegistry()
+    let deliverCalls = 0
+    const handlers = createHandlers({
+      registry,
+      store,
+      receiveAuthCacheTTL: 5000,
+      authorize: (req) => {
+        if (req.action === 'receive/deliver') deliverCalls++
+        return true
+      },
+    })
+    const written: Array<unknown> = []
+    const { controller, done } = await runReceive(handlers, written)
+    registry.getClient(DID)?.sendMessage?.(msg('000000000001', 'topicX') as never)
+    registry.getClient(DID)?.sendMessage?.(msg('000000000002', 'topicX') as never)
+    await new Promise((r) => setTimeout(r, 20))
+    controller.abort()
+    await done
+    expect(written.length).toBe(2)
+    expect(deliverCalls).toBe(1) // second frame hit the cache
+  })
+
+  test('TTL 0 disables reuse: every frame consults the hook', async () => {
+    const store = backlogStore([])
+    const registry = new HubClientRegistry()
+    let deliverCalls = 0
+    const handlers = createHandlers({
+      registry,
+      store,
+      receiveAuthCacheTTL: 0,
+      authorize: (req) => {
+        if (req.action === 'receive/deliver') deliverCalls++
+        return true
+      },
+    })
+    const written: Array<unknown> = []
+    const { controller, done } = await runReceive(handlers, written)
+    registry.getClient(DID)?.sendMessage?.(msg('000000000001', 'topicX') as never)
+    registry.getClient(DID)?.sendMessage?.(msg('000000000002', 'topicX') as never)
+    await new Promise((r) => setTimeout(r, 20))
+    controller.abort()
+    await done
+    expect(deliverCalls).toBe(2)
+  })
+
+  test('a negative TTL falls back to the default (caches, does not disable reuse)', async () => {
+    const store = backlogStore([])
+    const registry = new HubClientRegistry()
+    let deliverCalls = 0
+    const handlers = createHandlers({
+      registry,
+      store,
+      receiveAuthCacheTTL: -1,
+      authorize: (req) => {
+        if (req.action === 'receive/deliver') deliverCalls++
+        return true
+      },
+    })
+    const written: Array<unknown> = []
+    const { controller, done } = await runReceive(handlers, written)
+    registry.getClient(DID)?.sendMessage?.(msg('000000000001', 'topicX') as never)
+    registry.getClient(DID)?.sendMessage?.(msg('000000000002', 'topicX') as never)
+    await new Promise((r) => setTimeout(r, 20))
+    controller.abort()
+    await done
+    expect(deliverCalls).toBe(1)
+  })
+
+  test('Number.POSITIVE_INFINITY falls back to the default, not a permanent allow', async () => {
+    const store = backlogStore([])
+    const registry = new HubClientRegistry()
+    let deliverCalls = 0
+    const handlers = createHandlers({
+      registry,
+      store,
+      receiveAuthCacheTTL: Number.POSITIVE_INFINITY,
+      authorize: (req) => {
+        if (req.action === 'receive/deliver') deliverCalls++
+        return true
+      },
+    })
+    const written: Array<unknown> = []
+    const { controller, done } = await runReceive(handlers, written)
+    registry.getClient(DID)?.sendMessage?.(msg('000000000001', 'topicX') as never)
+    registry.getClient(DID)?.sendMessage?.(msg('000000000002', 'topicX') as never)
+    await new Promise((r) => setTimeout(r, 20))
+    controller.abort()
+    await done
+    expect(deliverCalls).toBe(1)
+  })
+})

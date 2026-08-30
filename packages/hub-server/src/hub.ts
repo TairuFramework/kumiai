@@ -56,6 +56,11 @@ export type CreateHubParams = {
    */
   keyPackageFetchLimits?: Partial<KeyPackageFetchLimits>
   /**
+   * TTL (ms) for the per-(did, topicID) receive delivery-authorization cache. `0` consults the
+   * hook for every frame. Forwarded to {@link createHandlers}. Default: 5000.
+   */
+  receiveAuthCacheTTL?: number
+  /**
    * Called when a `HubStore` operation fails where the hub deliberately does not fail the
    * request. Forwarded to {@link createHandlers} and used by the purge timer. Fire-and-forget.
    */
@@ -107,6 +112,7 @@ export function createHub(params: CreateHubParams): HubInstance {
     authorize: params.authorize,
     rateLimits: params.rateLimits,
     keyPackageFetchLimits: params.keyPackageFetchLimits,
+    receiveAuthCacheTTL: params.receiveAuthCacheTTL,
     onStoreError: storeErrorReporter,
     wake:
       params.wake == null
