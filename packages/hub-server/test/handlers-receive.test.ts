@@ -387,3 +387,138 @@ describe('hub/v1/receive backpressure (H3)', () => {
     expect(registry.isWriterBound(DID)).toBe(false)
   })
 })
+
+function backlogStore(messages: Array<StoredMessage>): HubStore {
+  let done = false
+  return {
+    ...createMemoryStore(),
+    async fetch(): Promise<FetchResult> {
+      if (done) return { messages: [], cursor: null }
+      done = true
+      const cursor = messages.length > 0 ? messages[messages.length - 1].sequenceID : null
+      return { messages, cursor } // no hasMore -> single page
+    },
+  } as HubStore
+}
+
+function msg(seq: string, topicID: string): StoredMessage {
+  return { sequenceID: seq, senderDID: 'did:key:sender', topicID, payload: new Uint8Array([1]) }
+}
+
+async function runReceive(handlers: ReturnType<typeof createHandlers>, written: Array<unknown>) {
+  const controller = new AbortController()
+  const done = handlers['hub/v1/receive'](
+    receiveCtx({
+      acks: ackStream([]),
+      signal: controller.signal,
+      writable: collectingWritable(written),
+    }),
+  )
+  await new Promise((r) => setTimeout(r, 20))
+  return { controller, done }
+}
+
+describe('hub/v1/receive per-frame gate', () => {
+  test('a receive/deliver deny drops that topic from the backlog drain', async () => {
+    const store = backlogStore([msg('000000000001', 'topicX'), msg('000000000002', 'topicY')])
+    const registry = new HubClientRegistry()
+    const handlers = createHandlers({
+      registry,
+      store,
+      authorize: (req) => !(req.action === 'receive/deliver' && req.topicID === 'topicX'),
+    })
+    const written: Array<{ topicID: string }> = []
+    const { controller, done } = await runReceive(handlers, written)
+    controller.abort()
+    await done
+    expect(written.map((f) => f.topicID)).toEqual(['topicY'])
+  })
+
+  test('topic isolation on a live stream: denied topic dropped, allowed topic delivered', async () => {
+    const store = backlogStore([])
+    const registry = new HubClientRegistry()
+    const handlers = createHandlers({
+      registry,
+      store,
+      authorize: (req) => !(req.action === 'receive/deliver' && req.topicID === 'topicX'),
+    })
+    const written: Array<{ topicID: string }> = []
+    const { controller, done } = await runReceive(handlers, written) // drains empty -> phase live
+    registry.getClient(DID)?.sendMessage?.(msg('000000000003', 'topicX') as never)
+    registry.getClient(DID)?.sendMessage?.(msg('000000000004', 'topicY') as never)
+    await new Promise((r) => setTimeout(r, 20))
+    controller.abort()
+    await done
+    expect(written.map((f) => f.topicID)).toEqual(['topicY'])
+  })
+
+  test('a hook that rejects mid-stream fails closed and tears the channel down', async () => {
+    const store = backlogStore([msg('000000000001', 'topicX')])
+    const registry = new HubClientRegistry()
+    const handlers = createHandlers({
+      registry,
+      store,
+      authorize: (req) => {
+        if (req.action === 'receive/deliver') throw new Error('hook exploded')
+        return true
+      },
+    })
+    const written: Array<unknown> = []
+    const { done } = await runReceive(handlers, written)
+    await done // resolves via finish(), does not hang
+    expect(registry.isWriterBound(DID)).toBe(false)
+    expect(written).toEqual([])
+  })
+
+  test('a denied frame is not acked (stays pending for redelivery)', async () => {
+    const store = backlogStore([msg('000000000001', 'topicX')])
+    const ackSpy = vi.spyOn(store, 'ack')
+    const registry = new HubClientRegistry()
+    const handlers = createHandlers({
+      registry,
+      store,
+      authorize: (req) => !(req.action === 'receive/deliver' && req.topicID === 'topicX'),
+    })
+    const written: Array<unknown> = []
+    const { controller, done } = await runReceive(handlers, written)
+    controller.abort()
+    await done
+    expect(ackSpy).not.toHaveBeenCalled()
+  })
+
+  test('a receive/deliver deny during the buffered-live-flush drops that topic', async () => {
+    let openGate: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve
+    })
+    const { store } = drainGateStore([[frame('000000000001', 'topicY')]], gate)
+    const registry = new HubClientRegistry()
+    const handlers = createHandlers({
+      registry,
+      store,
+      authorize: (req) => !(req.action === 'receive/deliver' && req.topicID === 'topicX'),
+    })
+    const written: Array<{ topicID: string }> = []
+    const controller = new AbortController()
+    const done = handlers['hub/v1/receive'](
+      receiveCtx({
+        acks: ackStream([]),
+        signal: controller.signal,
+        writable: collectingWritable(written) as WritableStream,
+      }),
+    )
+
+    // While the drain is paused on the first page, buffer a denied and an allowed live frame.
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    registry.getClient(DID)?.sendMessage?.(frame('000000000002', 'topicX'))
+    registry.getClient(DID)?.sendMessage?.(frame('000000000003', 'topicZ'))
+    openGate()
+
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    controller.abort()
+    await done
+
+    // topicX never appears; the backlog frame and the allowed buffered frame both do, in order.
+    expect(written.map((f) => f.topicID)).toEqual(['topicY', 'topicZ'])
+  })
+})

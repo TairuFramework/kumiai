@@ -56,6 +56,7 @@ export type AuthorizeRequest =
   | { action: 'wake/register'; did: string; kind: string; expiresAt?: number }
   | { action: 'wake/unregister'; did: string }
   | { action: 'receive'; did: string }
+  | { action: 'receive/deliver'; did: string; topicID: string }
 
 /**
  * A plain `boolean` is shorthand for `{ allow: boolean }`, with no reason, code, or retry hint.
@@ -214,6 +215,13 @@ export const DEFAULT_KEYPACKAGE_FETCH_LIMITS: KeyPackageFetchLimits = {
  * writer health. The default of 256 is safely above it.
  */
 export const DEFAULT_RECEIVE_BUFFER_LIMIT = 256
+
+/**
+ * Default TTL (ms) for a receive channel's per-(did, topicID) delivery-authorization decision.
+ * Bounds how long an already-resolved allow is reused before the hook is re-consulted — i.e. the
+ * maximum window a removed member can keep draining a topic. See the receive handler's `gate`.
+ */
+export const DEFAULT_RECEIVE_AUTH_CACHE_TTL = 5000
 
 export type CreateHandlersParams = {
   registry: HubClientRegistry
@@ -555,6 +563,23 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
 
       registry.register(clientDID)
 
+      // Per-(did, topicID) delivery-authorization cache, local to this channel (torn down with it).
+      const authCache = new Map<string, { allow: boolean; expiresAt: number }>()
+      const receiveAuthCacheTTL = DEFAULT_RECEIVE_AUTH_CACHE_TTL // Task 3: resolve from params
+      const gate = async (topicID: string): Promise<boolean> => {
+        const key = `${clientDID} ${topicID}`
+        const now = Date.now()
+        const cached = authCache.get(key)
+        if (cached != null && cached.expiresAt > now) return cached.allow
+        const decision = normalizeAuthorizeDecision(
+          await authorize({ action: 'receive/deliver', did: clientDID, topicID }),
+        )
+        if (receiveAuthCacheTTL > 0) {
+          authCache.set(key, { allow: decision.allow, expiresAt: now + receiveAuthCacheTTL })
+        }
+        return decision.allow
+      }
+
       const writer = ctx.writable.getWriter()
       const reader = ctx.readable.getReader()
 
@@ -604,6 +629,7 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         writeChain = writeChain.then(async () => {
           if (tornDown) return
           try {
+            if (!(await gate(frame.topicID))) return // denied: skip, leave pending, no ack
             await writer.ready
             await writer.write(frame)
             if (frame.sequenceID > lastServed) lastServed = frame.sequenceID
