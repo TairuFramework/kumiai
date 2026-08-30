@@ -1,9 +1,14 @@
 import type { FetchParams, FetchResult, HubStore, StoredMessage } from '@kumiai/hub-protocol'
+import { HUB_ERROR_CODES } from '@kumiai/hub-protocol'
 import { describe, expect, test, vi } from 'vitest'
 
 import { createHandlers } from '../src/handlers.js'
 import { createMemoryStore } from '../src/memoryStore.js'
 import { HubClientRegistry } from '../src/registry.js'
+
+type AuthorizeRequestAction = Parameters<
+  NonNullable<Parameters<typeof createHandlers>[0]['authorize']>
+>[0]['action']
 
 const DID = 'did:key:receiver'
 
@@ -44,6 +49,57 @@ function ackStream(acks: Array<{ ack: Array<string> }>): ReadableStream<{ ack: A
     },
   })
 }
+
+describe('hub/v1/receive connect gate', () => {
+  test('a receive deny rejects the channel and registers no state', async () => {
+    const store = createMemoryStore()
+    const registry = new HubClientRegistry()
+    const handlers = createHandlers({
+      registry,
+      store,
+      authorize: (req) => req.action !== 'receive',
+    })
+
+    const written: Array<unknown> = []
+    await expect(
+      handlers['hub/v1/receive'](
+        receiveCtx({ acks: ackStream([]), writable: collectingWritable(written) }),
+      ),
+    ).rejects.toMatchObject({ code: HUB_ERROR_CODES.authorizationDenied })
+
+    expect(registry.isWriterBound(DID)).toBe(false)
+    expect(registry.getClient(DID)).toBeUndefined()
+    expect(written).toEqual([])
+  })
+
+  test('a receive allow lets the channel open (empty backlog drains clean)', async () => {
+    const store = createMemoryStore()
+    const registry = new HubClientRegistry()
+    const seen: Array<AuthorizeRequestAction> = []
+    const handlers = createHandlers({
+      registry,
+      store,
+      authorize: (req) => {
+        seen.push(req.action)
+        return true
+      },
+    })
+
+    const controller = new AbortController()
+    const done = handlers['hub/v1/receive'](
+      receiveCtx({
+        acks: ackStream([]),
+        signal: controller.signal,
+        writable: collectingWritable([]),
+      }),
+    )
+    await new Promise((r) => setTimeout(r, 20))
+    controller.abort()
+    await done
+
+    expect(seen).toContain('receive')
+  })
+})
 
 describe('hub/v1/receive ack loop', () => {
   test('a store.ack failure does not stop later acks from being applied', async () => {
@@ -329,5 +385,257 @@ describe('hub/v1/receive backpressure (H3)', () => {
       await new Promise((resolve) => setTimeout(resolve, 5))
     }
     expect(registry.isWriterBound(DID)).toBe(false)
+  })
+})
+
+function backlogStore(messages: Array<StoredMessage>): HubStore {
+  let done = false
+  return {
+    ...createMemoryStore(),
+    async fetch(): Promise<FetchResult> {
+      if (done) return { messages: [], cursor: null }
+      done = true
+      const cursor = messages.length > 0 ? messages[messages.length - 1].sequenceID : null
+      return { messages, cursor } // no hasMore -> single page
+    },
+  } as HubStore
+}
+
+function msg(seq: string, topicID: string): StoredMessage {
+  return { sequenceID: seq, senderDID: 'did:key:sender', topicID, payload: new Uint8Array([1]) }
+}
+
+async function runReceive(handlers: ReturnType<typeof createHandlers>, written: Array<unknown>) {
+  const controller = new AbortController()
+  const done = handlers['hub/v1/receive'](
+    receiveCtx({
+      acks: ackStream([]),
+      signal: controller.signal,
+      writable: collectingWritable(written),
+    }),
+  )
+  await new Promise((r) => setTimeout(r, 20))
+  return { controller, done }
+}
+
+describe('hub/v1/receive per-frame gate', () => {
+  test('a receive/deliver deny drops that topic from the backlog drain', async () => {
+    const store = backlogStore([msg('000000000001', 'topicX'), msg('000000000002', 'topicY')])
+    const registry = new HubClientRegistry()
+    const handlers = createHandlers({
+      registry,
+      store,
+      authorize: (req) => !(req.action === 'receive/deliver' && req.topicID === 'topicX'),
+    })
+    const written: Array<{ topicID: string }> = []
+    const { controller, done } = await runReceive(handlers, written)
+    controller.abort()
+    await done
+    expect(written.map((f) => f.topicID)).toEqual(['topicY'])
+  })
+
+  test('topic isolation on a live stream: denied topic dropped, allowed topic delivered', async () => {
+    const store = backlogStore([])
+    const registry = new HubClientRegistry()
+    const handlers = createHandlers({
+      registry,
+      store,
+      authorize: (req) => !(req.action === 'receive/deliver' && req.topicID === 'topicX'),
+    })
+    const written: Array<{ topicID: string }> = []
+    const { controller, done } = await runReceive(handlers, written) // drains empty -> phase live
+    registry.getClient(DID)?.sendMessage?.(msg('000000000003', 'topicX') as never)
+    registry.getClient(DID)?.sendMessage?.(msg('000000000004', 'topicY') as never)
+    await new Promise((r) => setTimeout(r, 20))
+    controller.abort()
+    await done
+    expect(written.map((f) => f.topicID)).toEqual(['topicY'])
+  })
+
+  test('a hook that rejects mid-stream fails closed and tears the channel down', async () => {
+    const store = backlogStore([msg('000000000001', 'topicX')])
+    const registry = new HubClientRegistry()
+    const handlers = createHandlers({
+      registry,
+      store,
+      authorize: (req) => {
+        if (req.action === 'receive/deliver') throw new Error('hook exploded')
+        return true
+      },
+    })
+    const written: Array<unknown> = []
+    const { done } = await runReceive(handlers, written)
+    await done // resolves via finish(), does not hang
+    expect(registry.isWriterBound(DID)).toBe(false)
+    expect(written).toEqual([])
+  })
+
+  test('a receive/deliver deny during the buffered-live-flush drops that topic', async () => {
+    let openGate: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve
+    })
+    const { store } = drainGateStore([[frame('000000000001', 'topicY')]], gate)
+    const registry = new HubClientRegistry()
+    const handlers = createHandlers({
+      registry,
+      store,
+      authorize: (req) => !(req.action === 'receive/deliver' && req.topicID === 'topicX'),
+    })
+    const written: Array<{ topicID: string }> = []
+    const controller = new AbortController()
+    const done = handlers['hub/v1/receive'](
+      receiveCtx({
+        acks: ackStream([]),
+        signal: controller.signal,
+        writable: collectingWritable(written) as WritableStream,
+      }),
+    )
+
+    // While the drain is paused on the first page, buffer a denied and an allowed live frame.
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    registry.getClient(DID)?.sendMessage?.(frame('000000000002', 'topicX'))
+    registry.getClient(DID)?.sendMessage?.(frame('000000000003', 'topicZ'))
+    openGate()
+
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    controller.abort()
+    await done
+
+    // topicX never appears; the backlog frame and the allowed buffered frame both do, in order.
+    expect(written.map((f) => f.topicID)).toEqual(['topicY', 'topicZ'])
+  })
+
+  test('a denied high-seq frame does not advance lastServed past a later allowed lower-seq frame', async () => {
+    let openGate: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve
+    })
+    // Backlog carries a DENIED frame at a HIGH sequenceID (topicX, seq 5).
+    const { store } = drainGateStore([[frame('000000000005', 'topicX')]], gate)
+    const registry = new HubClientRegistry()
+    const handlers = createHandlers({
+      registry,
+      store,
+      authorize: (req) => !(req.action === 'receive/deliver' && req.topicID === 'topicX'),
+    })
+    const written: Array<{ sequenceID: string; topicID: string }> = []
+    const controller = new AbortController()
+    const done = handlers['hub/v1/receive'](
+      receiveCtx({
+        acks: ackStream([]),
+        signal: controller.signal,
+        writable: collectingWritable(written) as WritableStream,
+      }),
+    )
+
+    // While the drain is paused on the denied seq-5 page, buffer an ALLOWED frame at a LOWER
+    // sequenceID (topicY, seq 3). If a deny wrongly advanced `lastServed` to 5, the flush's
+    // `sequenceID > lastServed` dedup would wrongly drop this lower-seq frame as "already served".
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    registry.getClient(DID)?.sendMessage?.(frame('000000000003', 'topicY'))
+    openGate()
+
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    controller.abort()
+    await done
+
+    // The lower-seq allowed frame must still be delivered — a deny must not advance lastServed.
+    expect(written.map((f) => f.sequenceID)).toEqual(['000000000003'])
+  })
+})
+
+describe('receiveAuthCacheTTL', () => {
+  test('within the TTL, repeated same-topic frames consult the hook once', async () => {
+    const store = backlogStore([])
+    const registry = new HubClientRegistry()
+    let deliverCalls = 0
+    const handlers = createHandlers({
+      registry,
+      store,
+      receiveAuthCacheTTL: 5000,
+      authorize: (req) => {
+        if (req.action === 'receive/deliver') deliverCalls++
+        return true
+      },
+    })
+    const written: Array<unknown> = []
+    const { controller, done } = await runReceive(handlers, written)
+    registry.getClient(DID)?.sendMessage?.(msg('000000000001', 'topicX') as never)
+    registry.getClient(DID)?.sendMessage?.(msg('000000000002', 'topicX') as never)
+    await new Promise((r) => setTimeout(r, 20))
+    controller.abort()
+    await done
+    expect(written.length).toBe(2)
+    expect(deliverCalls).toBe(1) // second frame hit the cache
+  })
+
+  test('TTL 0 disables reuse: every frame consults the hook', async () => {
+    const store = backlogStore([])
+    const registry = new HubClientRegistry()
+    let deliverCalls = 0
+    const handlers = createHandlers({
+      registry,
+      store,
+      receiveAuthCacheTTL: 0,
+      authorize: (req) => {
+        if (req.action === 'receive/deliver') deliverCalls++
+        return true
+      },
+    })
+    const written: Array<unknown> = []
+    const { controller, done } = await runReceive(handlers, written)
+    registry.getClient(DID)?.sendMessage?.(msg('000000000001', 'topicX') as never)
+    registry.getClient(DID)?.sendMessage?.(msg('000000000002', 'topicX') as never)
+    await new Promise((r) => setTimeout(r, 20))
+    controller.abort()
+    await done
+    expect(deliverCalls).toBe(2)
+  })
+
+  test('a negative TTL falls back to the default (caches, does not disable reuse)', async () => {
+    const store = backlogStore([])
+    const registry = new HubClientRegistry()
+    let deliverCalls = 0
+    const handlers = createHandlers({
+      registry,
+      store,
+      receiveAuthCacheTTL: -1,
+      authorize: (req) => {
+        if (req.action === 'receive/deliver') deliverCalls++
+        return true
+      },
+    })
+    const written: Array<unknown> = []
+    const { controller, done } = await runReceive(handlers, written)
+    registry.getClient(DID)?.sendMessage?.(msg('000000000001', 'topicX') as never)
+    registry.getClient(DID)?.sendMessage?.(msg('000000000002', 'topicX') as never)
+    await new Promise((r) => setTimeout(r, 20))
+    controller.abort()
+    await done
+    expect(deliverCalls).toBe(1)
+  })
+
+  test('Number.POSITIVE_INFINITY falls back to the default, not a permanent allow', async () => {
+    const store = backlogStore([])
+    const registry = new HubClientRegistry()
+    let deliverCalls = 0
+    const handlers = createHandlers({
+      registry,
+      store,
+      receiveAuthCacheTTL: Number.POSITIVE_INFINITY,
+      authorize: (req) => {
+        if (req.action === 'receive/deliver') deliverCalls++
+        return true
+      },
+    })
+    const written: Array<unknown> = []
+    const { controller, done } = await runReceive(handlers, written)
+    registry.getClient(DID)?.sendMessage?.(msg('000000000001', 'topicX') as never)
+    registry.getClient(DID)?.sendMessage?.(msg('000000000002', 'topicX') as never)
+    await new Promise((r) => setTimeout(r, 20))
+    controller.abort()
+    await done
+    expect(deliverCalls).toBe(1)
   })
 })

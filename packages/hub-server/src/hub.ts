@@ -46,7 +46,12 @@ export type CreateHubParams = {
   identity: Identity
   /** Access rules enforced by the server. Defaults to {@link DEFAULT_HUB_ACCESS_RULES}. */
   accessRules?: AccessRules
-  /** Per-procedure publish/subscribe authorization. Defaults to allow-any-authed. */
+  /**
+   * Per-action authorization hook. Consulted for publish, subscribe, topic/fetch, keypackage/*,
+   * wake/*, and receive — the coarse `receive` gate at channel open plus a per-frame
+   * `receive/deliver` gate by topic (see {@link CreateHubParams.receiveAuthCacheTTL}). Defaults to
+   * allow-any-authed.
+   */
   authorize?: AuthorizeHook
   /** Publish rate limits. Merged over {@link DEFAULT_RATE_LIMITS}. */
   rateLimits?: Partial<HubRateLimits>
@@ -55,6 +60,11 @@ export type CreateHubParams = {
    * {@link DEFAULT_KEYPACKAGE_FETCH_LIMITS}.
    */
   keyPackageFetchLimits?: Partial<KeyPackageFetchLimits>
+  /**
+   * TTL (ms) for the per-(did, topicID) receive delivery-authorization cache. `0` consults the
+   * hook for every frame. Forwarded to {@link createHandlers}. Default: 5000.
+   */
+  receiveAuthCacheTTL?: number
   /**
    * Called when a `HubStore` operation fails where the hub deliberately does not fail the
    * request. Forwarded to {@link createHandlers} and used by the purge timer. Fire-and-forget.
@@ -107,6 +117,7 @@ export function createHub(params: CreateHubParams): HubInstance {
     authorize: params.authorize,
     rateLimits: params.rateLimits,
     keyPackageFetchLimits: params.keyPackageFetchLimits,
+    receiveAuthCacheTTL: params.receiveAuthCacheTTL,
     onStoreError: storeErrorReporter,
     wake:
       params.wake == null

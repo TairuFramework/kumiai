@@ -2,7 +2,6 @@
 "@kumiai/broadcast": minor
 "@kumiai/hub-client": minor
 "@kumiai/hub-conformance": minor
-"@kumiai/hub-server": minor
 "@kumiai/hub-tunnel": minor
 "@kumiai/hub-wake": minor
 "@kumiai/mls": minor

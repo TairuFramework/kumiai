@@ -55,6 +55,8 @@ export type AuthorizeRequest =
    */
   | { action: 'wake/register'; did: string; kind: string; expiresAt?: number }
   | { action: 'wake/unregister'; did: string }
+  | { action: 'receive'; did: string }
+  | { action: 'receive/deliver'; did: string; topicID: string }
 
 /**
  * A plain `boolean` is shorthand for `{ allow: boolean }`, with no reason, code, or retry hint.
@@ -214,6 +216,13 @@ export const DEFAULT_KEYPACKAGE_FETCH_LIMITS: KeyPackageFetchLimits = {
  */
 export const DEFAULT_RECEIVE_BUFFER_LIMIT = 256
 
+/**
+ * Default TTL (ms) for a receive channel's per-(did, topicID) delivery-authorization decision.
+ * Bounds how long an already-resolved allow is reused before the hook is re-consulted — i.e. the
+ * maximum window a removed member can keep draining a topic. See the receive handler's `gate`.
+ */
+export const DEFAULT_RECEIVE_AUTH_CACHE_TTL = 5000
+
 export type CreateHandlersParams = {
   registry: HubClientRegistry
   store: HubStore
@@ -223,6 +232,12 @@ export type CreateHandlersParams = {
   /** Max frames queued-but-unflushed on a receive channel. See {@link DEFAULT_RECEIVE_BUFFER_LIMIT}
    * for the >= 50-frame-page floor this should respect. Default: 256 */
   receiveBufferLimit?: number
+  /**
+   * TTL (ms) for the per-(did, topicID) receive delivery-authorization cache. `0` disables reuse
+   * (the hook is consulted for every frame). Non-finite or negative values fall back to
+   * {@link DEFAULT_RECEIVE_AUTH_CACHE_TTL}. Default: 5000.
+   */
+  receiveAuthCacheTTL?: number
   /**
    * Called when a `HubStore` operation fails at a point where the hub deliberately does not fail
    * the request. Fire-and-forget; a throw here is swallowed.
@@ -262,6 +277,13 @@ function rethrowAsHandlerError(error: unknown): never {
   throw error
 }
 
+function resolveReceiveAuthCacheTTL(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value) || value < 0) {
+    return DEFAULT_RECEIVE_AUTH_CACHE_TTL
+  }
+  return value // 0 allowed: no reuse
+}
+
 type ReceiveFrame = {
   sequenceID: string
   senderDID: string
@@ -292,6 +314,7 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
   const didLimiter = createRateLimiter(rateLimits.perDID)
   const topicLimiter = createRateLimiter(rateLimits.perTopic)
   const receiveBufferLimit = params.receiveBufferLimit ?? DEFAULT_RECEIVE_BUFFER_LIMIT
+  const receiveAuthCacheTTL = resolveReceiveAuthCacheTTL(params.receiveAuthCacheTTL)
   const storeErrorReporter = createStoreErrorReporter(params.onStoreError)
 
   const fetchLimits: KeyPackageFetchLimits = {
@@ -542,7 +565,39 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       const clientDID = getClientDID(ctx)
       const { after } = ctx.param ?? {}
 
+      const connectDecision = normalizeAuthorizeDecision(
+        await authorize({ action: 'receive', did: clientDID }),
+      )
+      if (!connectDecision.allow) {
+        throw new HandlerError({
+          code: HUB_ERROR_CODES.authorizationDenied,
+          message: connectDecision.reason ?? 'Not authorized to receive',
+        })
+      }
+
       registry.register(clientDID)
+
+      // Per-(did, topicID) delivery-authorization cache, local to this channel (torn down with it).
+      // Both allow AND deny are cached for the TTL, so re-grant is not immediate: a topic that was
+      // just re-authorized keeps being denied for up to `receiveAuthCacheTTL` ms, and a frame denied
+      // in-session redelivers on the recipient's next connect.
+      const authCache = new Map<string, { allow: boolean; expiresAt: number }>()
+      const gate = async (topicID: string): Promise<boolean> => {
+        const key = `${clientDID} ${topicID}`
+        const now = Date.now()
+        const cached = authCache.get(key)
+        if (cached != null && cached.expiresAt > now) return cached.allow
+        const decision = normalizeAuthorizeDecision(
+          await authorize({ action: 'receive/deliver', did: clientDID, topicID }),
+        )
+        if (receiveAuthCacheTTL > 0) {
+          // Expiry is measured from when the decision is stored, AFTER the hook resolves — so the
+          // reuse window excludes the hook's own execution time. Re-read the clock here rather than
+          // reusing `now` (captured before the await).
+          authCache.set(key, { allow: decision.allow, expiresAt: Date.now() + receiveAuthCacheTTL })
+        }
+        return decision.allow
+      }
 
       const writer = ctx.writable.getWriter()
       const reader = ctx.readable.getReader()
@@ -593,6 +648,7 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         writeChain = writeChain.then(async () => {
           if (tornDown) return
           try {
+            if (!(await gate(frame.topicID))) return // denied: skip, leave pending, no ack
             await writer.ready
             await writer.write(frame)
             if (frame.sequenceID > lastServed) lastServed = frame.sequenceID
