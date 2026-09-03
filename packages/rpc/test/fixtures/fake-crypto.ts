@@ -32,8 +32,28 @@ const GENERATION_BYTES = 4
 const FRAMED_HEADER_BYTES = GENERATION_BYTES + 2
 /** Bytes of the carried-AAD length, sitting after the header and before the did. */
 const AAD_LEN_BYTES = 4
+/** Bytes of the keyed tag appended to a sealed app frame's body, authenticating the whole frame. */
+const TAG_BYTES = 8
 /** Bytes of the keyed tag over an entry's ciphertext. */
 const ENTRY_TAG_BYTES = 8
+
+/**
+ * A keyed, non-linear tag over `body` (the WHOLE framed plaintext, AAD included): a SHA-256 of
+ * `secret`, `key` and `body` concatenated, truncated to {@link TAG_BYTES}. This is what makes
+ * `wrap`/`unwrap` non-malleable — the XOR keystream alone is not: it is linear, so an attacker who
+ * knows any stretch of plaintext (the AAD is often guessable) can flip the matching ciphertext
+ * bytes to any value of their choosing and the frame still de-XORs "cleanly", with nothing to
+ * detect the change. A hash breaks that: flipping any body byte — AAD, sender, generation, or
+ * payload — changes every tag bit unpredictably, and reproducing the tag without `key`/`secret`
+ * is what this stands in for an AEAD tag to prevent.
+ */
+function frameTag(body: Uint8Array, key: number, secret: Uint8Array): Uint8Array {
+  const material = new Uint8Array(secret.length + 1 + body.length)
+  material.set(secret, 0)
+  material[secret.length] = key & 0xff
+  material.set(body, secret.length + 1)
+  return sha256(material).subarray(0, TAG_BYTES)
+}
 
 /**
  * The label entry seals are keyed under — never {@link APP_TOPIC_LABEL} or whatever label a caller
@@ -96,13 +116,17 @@ export function fakeEpochSecret(
 
 /**
  * Deterministic GroupCrypto for tests. `wrap` seals under the CURRENT epoch's key:
- * `[epoch(2)][ xor( [generation(4)][didLen(2)][aadLen(4)][localDID][AAD][payload], key ^ epoch ) ]`;
- * `unwrap` reverses it and returns the recovered `localDID` as `senderDID` — modelling MLS
- * authenticating the sender from the ciphertext. The XOR keystream over the whole framed body
- * stands in for the AEAD tag, so it covers the carried AAD too: a tampered AAD, or one opened at
- * the wrong epoch, de-XORs to garbage exactly as a real tag would fail. `unwrap` compares
- * `expectedAAD` against the recovered AAD BEFORE spending the generation, mirroring the real
- * handle's pre-open compare — a wrong-topic frame must not burn a ratchet key.
+ * `[epoch(2)][ xor( [generation(4)][didLen(2)][aadLen(4)][localDID][AAD][payload][tag(TAG_BYTES)],
+ * key ^ epoch ) ]`; `unwrap` reverses it and returns the recovered `localDID` as `senderDID` —
+ * modelling MLS authenticating the sender from the ciphertext. The XOR keystream alone would NOT
+ * stand in for the AEAD tag — it is linear, so a known-plaintext byte lets an attacker flip the
+ * matching ciphertext byte to anything and the frame still de-XORs cleanly, AAD and sender
+ * included. {@link frameTag} is what actually does that job: a keyed, non-linear tag over the
+ * whole framed body, appended before the XOR is applied, so tampering with ANY byte — including
+ * one opened at the wrong epoch — is caught on `unwrap` rather than silently accepted. `unwrap`
+ * verifies the tag, then compares `expectedAAD` against the recovered AAD, BEFORE spending the
+ * generation, mirroring the real handle's pre-open compare — a tampered or wrong-topic frame must
+ * not burn a ratchet key.
  *
  * The GENERATION and the spend of it below are the ratchet, modelled. Real MLS derives one
  * message key per sender per generation and DELETES it as it opens: a frame opens exactly once,
@@ -178,9 +202,14 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
     framed.set(aad, at)
     at += aad.length
     framed.set(bytes, at)
-    const sealed = new Uint8Array(2 + framed.length)
+    // The tag is over `framed` (the whole plaintext body) and is appended BEFORE the XOR, so it
+    // is covered by the same keystream as everything else and carries no cleartext signal.
+    const tagged = new Uint8Array(framed.length + TAG_BYTES)
+    tagged.set(framed, 0)
+    tagged.set(frameTag(framed, key, secret), framed.length)
+    const sealed = new Uint8Array(2 + tagged.length)
     new DataView(sealed.buffer).setUint16(0, epoch, true)
-    sealed.set(xor(framed, epoch), 2)
+    sealed.set(xor(tagged, epoch), 2)
     return sealed
   }
 
@@ -200,9 +229,9 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
    * for. Bytes that are neither shape: `null`.
    *
    * STRUCTURE IS CHECKED, not just length. A sealed frame is `[epoch(2)][ xor([generation(4)]
-   * [didLen(2)][aadLen(4)][did][AAD][payload]) ]`, so its own length holds the sender AND the
-   * AAD it declares — a check every member can make, because the epoch and the XOR key are in
-   * the clear.
+   * [didLen(2)][aadLen(4)][did][AAD][payload][tag(TAG_BYTES)]) ]`, so its own length holds the
+   * sender, the AAD it declares, AND the trailing tag — a check every member can make, because
+   * the epoch and the XOR key are in the clear.
    * Without it any two bytes are an epoch, and garbage whose leading bytes read as a number the
    * commit log justifies is indistinguishable from a frame sealed ahead of the walk: the reader
    * keeps its place and the cursor rests behind it. The port's word for bytes that are not a
@@ -212,9 +241,9 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
   const frameEpoch: GroupCrypto['frameEpoch'] = (bytes) => {
     const commit = decodeMemoryCommit(bytes)
     if (commit != null) return commit.epoch
-    // Bound to the aadLen field too, so a short frame is `null` rather than an out-of-bounds
-    // DataView read — this must never throw.
-    if (bytes.length < 2 + FRAMED_HEADER_BYTES + AAD_LEN_BYTES) return null
+    // Bound to the aadLen field AND the trailing tag, so a short frame is `null` rather than an
+    // out-of-bounds DataView read — this must never throw.
+    if (bytes.length < 2 + FRAMED_HEADER_BYTES + AAD_LEN_BYTES + TAG_BYTES) return null
     const sealedAt = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint16(
       0,
       true,
@@ -222,11 +251,13 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
     const framed = xor(bytes.subarray(2), sealedAt)
     const didLen = new DataView(framed.buffer).getUint16(GENERATION_BYTES, true)
     const aadLen = new DataView(framed.buffer).getUint32(FRAMED_HEADER_BYTES, true)
-    return FRAMED_HEADER_BYTES + AAD_LEN_BYTES + didLen + aadLen <= framed.length ? sealedAt : null
+    return FRAMED_HEADER_BYTES + AAD_LEN_BYTES + didLen + aadLen + TAG_BYTES <= framed.length
+      ? sealedAt
+      : null
   }
 
   const unwrap: GroupCrypto['unwrap'] = (bytes, opts) => {
-    if (bytes.length < 2 + FRAMED_HEADER_BYTES + AAD_LEN_BYTES) {
+    if (bytes.length < 2 + FRAMED_HEADER_BYTES + AAD_LEN_BYTES + TAG_BYTES) {
       throw new Error('cannot open: not sealed bytes')
     }
     const sealedAt = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint16(
@@ -243,8 +274,17 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
     const didLen = framedView.getUint16(GENERATION_BYTES, true)
     const aadLen = framedView.getUint32(FRAMED_HEADER_BYTES, true)
     const headerEnd = FRAMED_HEADER_BYTES + AAD_LEN_BYTES
-    if (headerEnd + didLen + aadLen > framed.length) {
+    // Structure-check first: the declared did/aad lengths, AND the trailing tag, must fit.
+    if (headerEnd + didLen + aadLen + TAG_BYTES > framed.length) {
       throw new Error('cannot open: not a well-formed sealed frame')
+    }
+    // Tag-verify BEFORE the expectedAAD compare and BEFORE spending the generation: a tampered or
+    // forged frame — including one an attacker rewrote by exploiting the XOR's linearity — must
+    // not consume the legitimate reader's ratchet key as a side effect of being rejected.
+    const body = framed.subarray(0, framed.length - TAG_BYTES)
+    const tag = framed.subarray(framed.length - TAG_BYTES)
+    if (!bytesEqual(tag, frameTag(body, key, secret))) {
+      throw new Error('cannot open: frame authentication tag does not match')
     }
     const senderDID = toUTF(framed.subarray(headerEnd, headerEnd + didLen))
     const aad = framed.subarray(headerEnd + didLen, headerEnd + didLen + aadLen)
@@ -257,14 +297,14 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
     // The ratchet key, spent. A real handle deletes the message key as it opens, so the second
     // open of a frame fails with the key GONE — not with anything wrong with the frame — and a
     // lane that gave two consumers an `unwrap` each has them race for one key. See the class doc.
-    const key = `${sealedAt}:${senderDID}:${sealedGeneration}`
-    if (spent.has(key)) {
+    const spentKey = `${sealedAt}:${senderDID}:${sealedGeneration}`
+    if (spent.has(spentKey)) {
       throw new Error(
         `cannot open: the message key for generation ${sealedGeneration} from ${senderDID} at epoch ${sealedAt} is spent`,
       )
     }
-    spent.add(key)
-    const payload = framed.subarray(headerEnd + didLen + aadLen)
+    spent.add(spentKey)
+    const payload = framed.subarray(headerEnd + didLen + aadLen, framed.length - TAG_BYTES)
     return { payload, senderDID }
   }
 

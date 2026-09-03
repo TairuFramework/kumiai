@@ -378,6 +378,31 @@ export function testGroupCryptoConformance(params: GroupCryptoConformanceParams)
           expect(text((await opened(bob.crypto, sealed)).payload)).toBe('hi')
         })
       })
+
+      /**
+       * IMPL-AGNOSTIC, deliberately: no byte offset here is specific to either implementation.
+       * Flipping the LAST byte of a sealed frame hits the AEAD tag in real MLS and the appended tag
+       * in the fake, so both refuse. A keystream cipher with no tag would not: an attacker who
+       * knows the AAD can flip the matching ciphertext bytes to rewrite the AAD (or the sender, or
+       * the generation) without invalidating the frame — defeating the `expectedAAD` compare and
+       * the replay guard alike, entirely without the key. Refusing the tamper is only half the
+       * property: the rejected attempt must not have consumed anything the legitimate open needs,
+       * so the ORIGINAL bytes must still open afterwards.
+       */
+      test('a tampered frame is refused and does not consume the original', async () => {
+        await withGroup(2, 'aad-tamper', async ({ members }) => {
+          const alice = memberAt(members, 0)
+          const bob = memberAt(members, 1)
+          // biome-ignore lint/style/useNamingConvention: AAD is the port's own acronym, capitalized to match
+          const AAD = utf8.encode('topic-x')
+          const sealed = await alice.crypto.wrap(utf8.encode('hi'), { AAD })
+          const tampered = Uint8Array.from(sealed)
+          tampered[tampered.length - 1] = ((tampered[tampered.length - 1] as number) ^ 0xff) & 0xff
+          await refuses(() => bob.crypto.unwrap(tampered, { expectedAAD: AAD }))
+          const out = await bob.crypto.unwrap(sealed, { expectedAAD: AAD })
+          expect(text(out.payload)).toBe('hi')
+        })
+      })
     })
 
     describe('frameEpoch', () => {

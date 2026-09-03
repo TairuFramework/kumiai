@@ -11,7 +11,10 @@ describe('fake crypto', () => {
     const crypto = createFakeCrypto({ localDID: 'did:key:alice' })
     const plain = fromUTF('hello group')
     const wrapped = await crypto.wrap(plain)
-    expect(toUTF(wrapped)).not.toContain('hello group')
+    // Lenient decode (never throws): the sealed frame now carries a keyed tag, which is
+    // high-entropy bytes and not guaranteed to be valid UTF-8 — `toUTF`'s strict decode would
+    // throw on it. What this asserts is unchanged: the sealed bytes are not readable plaintext.
+    expect(new TextDecoder('utf-8', { fatal: false }).decode(wrapped)).not.toContain('hello group')
     // `unwrap` returns `GroupUnwrapResult` directly — `senderDID` is REQUIRED, so no
     // Uint8Array-shortcut normalization is needed here anymore.
     const out = await crypto.unwrap(wrapped)
