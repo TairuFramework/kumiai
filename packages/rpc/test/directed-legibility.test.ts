@@ -1,4 +1,4 @@
-import { RequestError } from '@enkaku/client'
+import { RequestError, RequestTimeoutError } from '@enkaku/client'
 import type { ProtocolDefinition } from '@enkaku/protocol'
 import { encodeFrame } from '@kumiai/hub-tunnel'
 import { describe, expect, test, vi } from 'vitest'
@@ -168,11 +168,20 @@ describe('the default request timeout is the unary backstop', () => {
     })
 
     const started = Date.now()
-    await expect(client.request('ping', { param: {} })).rejects.toThrow()
+    let rejected: unknown
+    try {
+      await client.request('ping', { param: {} })
+      throw new Error('expected the request to reject')
+    } catch (error) {
+      rejected = error
+    }
     const elapsed = Date.now() - started
     // Honoured the override: well under the 30s default, and not instant.
     expect(elapsed).toBeGreaterThanOrEqual(100)
     expect(elapsed).toBeLessThan(2_000)
+    // Pin the rejection to the timeout, not merely "something rejected".
+    expect(rejected).toBeInstanceOf(RequestTimeoutError)
+    expect((rejected as RequestTimeoutError).name).toBe('RequestTimeoutError')
 
     await dispose()
   })

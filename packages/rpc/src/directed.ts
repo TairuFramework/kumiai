@@ -466,7 +466,7 @@ export function createUnroutedTagResponder(params: UnroutedTagResponderParams): 
         aad: fromUTF(topicID),
       })
       await mux.mailbox.publish({ senderDID: localDID, topicID, payload: sealed })
-    })()
+    })().catch(() => {})
   })
   return { dispose: unsubscribe }
 }

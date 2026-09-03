@@ -6,7 +6,7 @@ import {
   decodeDirectedPayload,
   encodeDirectedPayload,
   isLegacyDirectedPayload,
-} from './directed-tag.js'
+} from '../src/directed-tag.js'
 
 describe('directed-tag codec', () => {
   test('round-trips protocol and frame', () => {

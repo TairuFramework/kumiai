@@ -1,13 +1,14 @@
-import { describe, expect, test, vi } from 'vitest'
 import { fromUTF } from '@sozai/codec'
+import { describe, expect, test, vi } from 'vitest'
 
-import { createInboxPath, type OpenedInbound } from './directed.js'
-import { encodeDirectedPayload } from './directed-tag.js'
+import { createInboxPath, type OpenedInbound } from '../src/directed.js'
+import { encodeDirectedPayload } from '../src/directed-tag.js'
+import type { HubMux, InboundListener } from '../src/hub-mux.js'
 
 function fakeMux() {
-  let handler: ((message: any, ack: () => void) => void) | undefined
+  let handler: InboundListener | undefined
   return {
-    onInbound(_topicID: string, cb: (message: any, ack: () => void) => void) {
+    onInbound(_topicID: string, cb: InboundListener) {
       handler = cb
       return () => {
         handler = undefined
@@ -23,7 +24,7 @@ describe('createInboxPath tag decoding', () => {
   test('surfaces the protocol and strips the tag', async () => {
     const mux = fakeMux()
     const path = createInboxPath({
-      mux: mux as any,
+      mux: mux as unknown as HubMux,
       topicID: 't',
       unwrap: async (b: Uint8Array) => ({ payload: b, senderDID: 'did:key:alice' }),
     })
@@ -39,7 +40,7 @@ describe('createInboxPath tag decoding', () => {
   test('drops a legacy untagged frame', async () => {
     const mux = fakeMux()
     const path = createInboxPath({
-      mux: mux as any,
+      mux: mux as unknown as HubMux,
       topicID: 't',
       unwrap: async (b: Uint8Array) => ({ payload: b, senderDID: 'did:key:alice' }),
     })
