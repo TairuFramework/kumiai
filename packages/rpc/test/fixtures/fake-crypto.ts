@@ -38,20 +38,29 @@ const TAG_BYTES = 8
 const ENTRY_TAG_BYTES = 8
 
 /**
- * A keyed, non-linear tag over `body` (the WHOLE framed plaintext, AAD included): a SHA-256 of
- * `secret`, `key` and `body` concatenated, truncated to {@link TAG_BYTES}. This is what makes
- * `wrap`/`unwrap` non-malleable — the XOR keystream alone is not: it is linear, so an attacker who
- * knows any stretch of plaintext (the AAD is often guessable) can flip the matching ciphertext
- * bytes to any value of their choosing and the frame still de-XORs "cleanly", with nothing to
- * detect the change. A hash breaks that: flipping any body byte — AAD, sender, generation, or
- * payload — changes every tag bit unpredictably, and reproducing the tag without `key`/`secret`
- * is what this stands in for an AEAD tag to prevent.
+ * A keyed, non-linear tag over `epoch` AND `body` (the WHOLE framed plaintext, AAD included): a
+ * SHA-256 of `secret`, `key`, the epoch's 2-byte little-endian encoding, and `body` concatenated,
+ * truncated to {@link TAG_BYTES}. This is what makes `wrap`/`unwrap` non-malleable — the XOR
+ * keystream alone is not: it is linear, so an attacker who knows any stretch of plaintext (the AAD
+ * is often guessable) can flip the matching ciphertext bytes to any value of their choosing and the
+ * frame still de-XORs "cleanly", with nothing to detect the change. A hash breaks that: flipping
+ * any body byte — AAD, sender, generation, or payload — changes every tag bit unpredictably, and
+ * reproducing the tag without `key`/`secret` is what this stands in for an AEAD tag to prevent.
+ *
+ * `epoch` MUST be covered, not just `body`: the epoch is carried in the sealed prefix's own
+ * cleartext (`wrap` below), and `K_epoch = key ^ epoch` (low byte) means `K_E XOR K_E2 = E XOR E2`
+ * — so a tag over `body` alone lets an attacker holding one valid frame rewrite the cleartext
+ * epoch prefix to a victim's epoch, XOR the remainder by the epoch delta, and hand the victim back
+ * its ORIGINAL body and ORIGINAL tag, both still valid, entirely without the key. Mixing the same
+ * epoch encoding into the tag input makes that translated frame recompute a DIFFERENT tag, so it
+ * is refused rather than silently re-opened at the wrong epoch.
  */
-function frameTag(body: Uint8Array, key: number, secret: Uint8Array): Uint8Array {
-  const material = new Uint8Array(secret.length + 1 + body.length)
+function frameTag(epoch: number, body: Uint8Array, key: number, secret: Uint8Array): Uint8Array {
+  const material = new Uint8Array(secret.length + 1 + 2 + body.length)
   material.set(secret, 0)
   material[secret.length] = key & 0xff
-  material.set(body, secret.length + 1)
+  new DataView(material.buffer).setUint16(secret.length + 1, epoch, true)
+  material.set(body, secret.length + 1 + 2)
   return sha256(material).subarray(0, TAG_BYTES)
 }
 
@@ -121,12 +130,15 @@ export function fakeEpochSecret(
  * modelling MLS authenticating the sender from the ciphertext. The XOR keystream alone would NOT
  * stand in for the AEAD tag — it is linear, so a known-plaintext byte lets an attacker flip the
  * matching ciphertext byte to anything and the frame still de-XORs cleanly, AAD and sender
- * included. {@link frameTag} is what actually does that job: a keyed, non-linear tag over the
- * whole framed body, appended before the XOR is applied, so tampering with ANY byte — including
- * one opened at the wrong epoch — is caught on `unwrap` rather than silently accepted. `unwrap`
- * verifies the tag, then compares `expectedAAD` against the recovered AAD, BEFORE spending the
- * generation, mirroring the real handle's pre-open compare — a tampered or wrong-topic frame must
- * not burn a ratchet key.
+ * included; worse, `K_epoch = key ^ epoch` (low byte) is itself linear in the epoch, so a tag over
+ * the body alone would leave a SECOND lever: rewrite the cleartext epoch prefix and shift the
+ * ciphertext by the epoch delta, and a frame sealed at one epoch reopens, byte-for-byte, at
+ * another. {@link frameTag} closes both: a keyed, non-linear tag over the epoch AND the whole
+ * framed body, appended before the XOR is applied, so tampering with ANY byte — including the
+ * epoch prefix and everyone opened at the wrong epoch — is caught on `unwrap` rather than silently
+ * accepted. `unwrap` verifies the tag, then compares `expectedAAD` against the recovered AAD,
+ * BEFORE spending the generation, mirroring the real handle's pre-open compare — a tampered,
+ * cross-epoch-translated, or wrong-topic frame must not burn a ratchet key.
  *
  * The GENERATION and the spend of it below are the ratchet, modelled. Real MLS derives one
  * message key per sender per generation and DELETES it as it opens: a frame opens exactly once,
@@ -206,7 +218,7 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
     // is covered by the same keystream as everything else and carries no cleartext signal.
     const tagged = new Uint8Array(framed.length + TAG_BYTES)
     tagged.set(framed, 0)
-    tagged.set(frameTag(framed, key, secret), framed.length)
+    tagged.set(frameTag(epoch, framed, key, secret), framed.length)
     const sealed = new Uint8Array(2 + tagged.length)
     new DataView(sealed.buffer).setUint16(0, epoch, true)
     sealed.set(xor(tagged, epoch), 2)
@@ -283,7 +295,7 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
     // not consume the legitimate reader's ratchet key as a side effect of being rejected.
     const body = framed.subarray(0, framed.length - TAG_BYTES)
     const tag = framed.subarray(framed.length - TAG_BYTES)
-    if (!bytesEqual(tag, frameTag(body, key, secret))) {
+    if (!bytesEqual(tag, frameTag(sealedAt, body, key, secret))) {
       throw new Error('cannot open: frame authentication tag does not match')
     }
     const senderDID = toUTF(framed.subarray(headerEnd, headerEnd + didLen))
