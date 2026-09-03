@@ -410,9 +410,16 @@ export type UnroutedTagResponderParams = {
   inbound: InboundPath
   /** Whether this peer serves the tag's protocol; a tag outside it is unrouted. */
   isRegistered: (protocol: string) => boolean
-  /** The topic to reply on for an authenticated sender — the sender's own inbox. */
-  resolveSendTopic: (senderDID: string) => string
-  wrap: GroupCrypto['wrap']
+  /**
+   * Seal an already-tagged NACK for a recipient's inbox under ONE anchor snapshot, returning the
+   * topic that agrees with the seal. Topic and seal must come from the same anchor: reading the
+   * topic and sealing as two steps lets a mid-flight rotation address an old inbox with new-epoch
+   * ciphertext, lost onto a topic the recipient no longer reads.
+   */
+  sealReply: (
+    recipientDID: string,
+    taggedPayload: Uint8Array,
+  ) => Promise<{ topicID: string; payload: Uint8Array }>
 }
 
 /**
@@ -433,10 +440,18 @@ export type UnroutedTagResponderParams = {
 export function createUnroutedTagResponder(params: UnroutedTagResponderParams): {
   dispose: () => void
 } {
-  const { mux, localDID, inbound, isRegistered, resolveSendTopic, wrap } = params
+  const { mux, localDID, inbound, isRegistered, sealReply } = params
   // Monotonic across every session this responder answers: a caller's virgin tunnel expects seq 0,
   // and any seq >= its expected value is accepted, so one NACK per caller session is always fresh.
+  // `seq` is assigned INSIDE the chained task below, immediately before the frame is built, so
+  // seq-assignment order always equals publish order (see the tail chain).
   let seq = 0
+  // Seal+publish is best-effort and async, but must run in enqueue order: two unrouted frames from
+  // one caller tunnel get consecutive seq, and if the later one published first the caller's tunnel
+  // would advance `expectedSeq` past the earlier NACK and drop it as stale. Chaining through a
+  // single tail promise serialises them (one seal in flight at a time) and pins publish order to
+  // enqueue order; a failed link is swallowed so it never stalls the chain.
+  let tail: Promise<void> = Promise.resolve()
   const unsubscribe = inbound((message) => {
     if (isRegistered(message.protocol)) return
     let frame: ReturnType<typeof decodeFrame>
@@ -453,20 +468,22 @@ export function createUnroutedTagResponder(params: UnroutedTagResponderParams): 
       code: ErrorCodes.INVALID_MESSAGE,
       message: `No handler registered for protocol "${message.protocol}"`,
     }).toPayload(rid)
-    const nack = encodeFrame({
-      v: 1,
-      sessionID: frame.sessionID,
-      seq: seq++,
-      kind: 'message',
-      body: { header: {}, payload: errorPayload },
-    })
-    void (async () => {
-      const topicID = resolveSendTopic(message.senderDID)
-      const sealed = await wrap(encodeDirectedPayload(message.protocol, nack), {
-        aad: fromUTF(topicID),
+    const protocol = message.protocol
+    const senderDID = message.senderDID
+    tail = tail
+      .then(async () => {
+        const nack = encodeFrame({
+          v: 1,
+          sessionID: frame.sessionID,
+          seq: seq++,
+          kind: 'message',
+          body: { header: {}, payload: errorPayload },
+        })
+        const tagged = encodeDirectedPayload(protocol, nack)
+        const { topicID, payload: sealed } = await sealReply(senderDID, tagged)
+        await mux.mailbox.publish({ senderDID: localDID, topicID, payload: sealed })
       })
-      await mux.mailbox.publish({ senderDID: localDID, topicID, payload: sealed })
-    })().catch(() => {})
+      .catch(() => {})
   })
   return { dispose: unsubscribe }
 }

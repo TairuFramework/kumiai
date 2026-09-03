@@ -1,6 +1,6 @@
 import { RequestError, RequestTimeoutError } from '@enkaku/client'
 import type { ProtocolDefinition } from '@enkaku/protocol'
-import { encodeFrame } from '@kumiai/hub-tunnel'
+import { decodeFrame, encodeFrame } from '@kumiai/hub-tunnel'
 import { describe, expect, test, vi } from 'vitest'
 
 import {
@@ -10,6 +10,7 @@ import {
   type InboundPath,
   type OpenedInbound,
 } from '../src/directed.js'
+import { decodeDirectedPayload } from '../src/directed-tag.js'
 import type { HubMux } from '../src/hub-mux.js'
 import { createGroupPeer } from '../src/peer.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
@@ -125,8 +126,7 @@ describe('the responder answers only what it should', () => {
       localDID: 'me',
       inbound,
       isRegistered: (name) => name === 'alpha',
-      resolveSendTopic: (did) => `inbox:${did}`,
-      wrap: async (bytes) => bytes,
+      sealReply: async (did, tagged) => ({ topicID: `inbox:${did}`, payload: tagged }),
     })
 
     // Reply-typed frames on an unregistered tag: each carries an rid, none is a request to answer.
@@ -143,6 +143,59 @@ describe('the responder answers only what it should', () => {
     deliver?.(openedFrame('beta', 'caller', 'request', 'rid-3'))
     await flush()
     expect(publish).toHaveBeenCalledTimes(1)
+
+    responder.dispose()
+  })
+
+  test('serialised NACKs publish in enqueue order even when the seal reorders, so neither is stale-dropped', async () => {
+    // Decode each published NACK's outgoing seq from its sealed-and-tagged payload.
+    const publishedSeqs: Array<number> = []
+    const publish = vi.fn(async ({ payload }: { payload: Uint8Array }) => {
+      publishedSeqs.push(decodeFrame(decodeDirectedPayload(payload).frame).seq)
+      return { sequenceID: String(publishedSeqs.length) }
+    })
+    const mux = { mailbox: { publish } } as unknown as HubMux
+    let deliver: ((m: OpenedInbound) => void) | undefined
+    const inbound: InboundPath = (onOpened) => {
+      deliver = onOpened
+      return () => {}
+    }
+
+    // A seal whose FIRST call is parked until released, resolving AFTER the second would. The old
+    // fire-and-forget path launched each seal+publish independently, so the second NACK would
+    // publish first, advance the caller tunnel's expectedSeq past seq 0, and drop it as stale. The
+    // serialised tail must instead hold the second behind the first and publish seq 0 then seq 1.
+    let firstSeen = false
+    let releaseFirst: (() => void) | undefined
+    const sealReply = async (did: string, tagged: Uint8Array) => {
+      if (!firstSeen) {
+        firstSeen = true
+        await new Promise<void>((r) => {
+          releaseFirst = r
+        })
+      }
+      return { topicID: `inbox:${did}`, payload: tagged }
+    }
+
+    const responder = createUnroutedTagResponder({
+      mux,
+      localDID: 'me',
+      inbound,
+      isRegistered: (name) => name === 'alpha',
+      sealReply,
+    })
+
+    // Two unrouted requests on the SAME caller tunnel, back to back.
+    deliver?.(openedFrame('beta', 'caller', 'request', 'rid-0'))
+    deliver?.(openedFrame('beta', 'caller', 'request', 'rid-1'))
+    await flush()
+    // Serialised: the second seal cannot start while the first is parked, so nothing has published.
+    expect(publishedSeqs).toEqual([])
+
+    releaseFirst?.()
+    await flush()
+    // Both NACKs land, and in enqueue order: seq 0 before seq 1, so neither is a stale drop.
+    expect(publishedSeqs).toEqual([0, 1])
 
     responder.dispose()
   })

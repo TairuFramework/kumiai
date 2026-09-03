@@ -603,8 +603,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       localDID,
       inbound: inboxLane.path,
       isRegistered: (name) => Object.hasOwn(protocols, name),
-      resolveSendTopic: (senderDID) => inboxTopic(anchor.secret, anchor.epoch, senderDID),
-      wrap: crypto.wrap,
+      sealReply: sealDirectedReply,
     })
     for (const [name, protocol] of Object.entries(protocols)) {
       // The app topic is bound to the ANCHOR, not the live epoch — see {@link sealForSegment}.
@@ -702,6 +701,26 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       const at = anchor
       const topicID = protocolTopic(at.secret, at.epoch, name)
       const payload = await crypto.wrap(bytes, { aad: fromUTF(topicID) })
+      if (anchor === at) return { topicID, payload }
+    }
+  }
+
+  /**
+   * Seal a directed reply (the unrouted-tag NACK) to a recipient's inbox under ONE anchor snapshot.
+   * The reply topic and the seal must agree on the epoch: were the topic read from the live anchor
+   * and the seal taken as a separate step, a rotation landing between them would address an
+   * old-epoch inbox with new-epoch ciphertext, published onto a topic the recipient no longer reads
+   * and silently lost. Re-read the anchor after the seal and re-seal if it moved — same identity
+   * (not epoch-equality) guard as {@link sealForSegment}.
+   */
+  const sealDirectedReply = async (
+    recipientDID: string,
+    tagged: Uint8Array,
+  ): Promise<{ topicID: string; payload: Uint8Array }> => {
+    while (true) {
+      const at = anchor
+      const topicID = inboxTopic(at.secret, at.epoch, recipientDID)
+      const payload = await crypto.wrap(tagged, { aad: fromUTF(topicID) })
       if (anchor === at) return { topicID, payload }
     }
   }
