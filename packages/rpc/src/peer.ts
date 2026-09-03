@@ -1,6 +1,7 @@
 import type { Client } from '@enkaku/client'
 import type { ProtocolDefinition } from '@enkaku/protocol'
 import type { ProcedureHandlers } from '@enkaku/server'
+import { normalizeDID } from '@kokuin/token'
 import {
   BroadcastClient,
   createBroadcastResponder,
@@ -348,11 +349,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     adoptJournalled,
     anchorStore,
     appCursorStore,
-    localDID,
     protocols,
     handlers,
     suppress,
   } = params
+  // Normalized ONCE, here, at the one ingress every downstream `localDID` use reads from —
+  // equivalent DID forms must compare and derive topics identically (`@kokuin/token`
+  // canonicalizes, it does not validate).
+  const localDID = normalizeDID(params.localDID)
   const onAppWindowPruned = params.onAppWindowPruned
   // Destructured rather than held as `runtime`: that name is taken in this scope by
   // {@link ProtocolRuntime}, which is a different thing entirely.
@@ -525,7 +529,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           // shared open-once signature's wider `UnwrapResult`.
           return undefined
         }
-        openedFrames.set(payload, { payload, senderDID })
+        // Normalized at the open, before it is keyed: every consumer of `openedFrames` (the
+        // acceptor, `gather`'s quorum) must see one canonical sender regardless of which DID form
+        // MLS recovered this frame under.
+        openedFrames.set(payload, { payload, senderDID: normalizeDID(senderDID) })
         return payload
       },
       note: (message) => appLane.note(name, topicID, message),
@@ -718,15 +725,20 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       request: (prc, prm, options) => runtime.client.request(prc, prm, options),
       gather: (prc, prm, options) => runtime.client.gather(prc, prm, options),
       to: async (memberDID) => {
-        const cached = runtime.directed.get(memberDID)
+        // Normalized ONCE, at the ingress: the cache key, the topic derivation and the
+        // directed client's own filter (`senderDID !== memberDID`) must all see one canonical
+        // form, or a long-form caller never converges onto the short form MLS actually replies
+        // under.
+        const member = normalizeDID(memberDID)
+        const cached = runtime.directed.get(member)
         if (cached != null) return cached.client
         const lane = inboxLane
         if (lane == null) throw new Error('Peer is not started')
         const created = createDirectedClient<ProtocolDefinition>({
           mux,
           localDID,
-          memberDID,
-          sendTopicID: inboxTopic(anchor.secret, anchor.epoch, memberDID),
+          memberDID: member,
+          sendTopicID: inboxTopic(anchor.secret, anchor.epoch, member),
           // The epoch's own inbox topic and its one open path: reading replies through a path
           // built for a topic this client does not receive on would spend keys opening frames for
           // a lane nobody listens to.
@@ -736,7 +748,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           protocol: name,
           ...(params.runtime != null ? { runtime: params.runtime } : {}),
         })
-        runtime.directed.set(memberDID, created)
+        runtime.directed.set(member, created)
         return created.client
       },
     }
@@ -1112,7 +1124,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     // it. Per frame-epoch, not per rotation: a segment spanning five epochs is dispensed five
     // times off the one pull.
     await appLane.deliver()
-    const rosterBefore = await port.rosterDIDs()
+    // Normalized at this ingress so an MLS-recovered form flip between the two reads (never a
+    // real membership change) does not read as one — see {@link detectRosterChange}.
+    const rosterBefore = (await port.rosterDIDs()).map(normalizeDID)
     const epochBefore = crypto.epoch()
     const advanced = await advance()
     // GATED ON THE HANDLE ACTUALLY RATCHETING: a roster diff alone is not evidence that it did. A
@@ -1130,7 +1144,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     const ratcheted = crypto.epoch() !== epochBefore
     if (
       ratcheted &&
-      (detectRosterChange(rosterBefore, await port.rosterDIDs()) || rotatesAnyway(advanced))
+      (detectRosterChange(rosterBefore, (await port.rosterDIDs()).map(normalizeDID)) ||
+        rotatesAnyway(advanced))
     ) {
       await captureAnchor()
     }
@@ -1253,7 +1268,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         // `message.senderDID` — the hub's word about who handed it over, and the hub is not
         // trusted: it could stamp every recipient's own DID onto one poison frame and make the
         // whole group heal at once.
-        const header = await port.readCommitHeader(commitFrame.commit)
+        const readHeader = await port.readCommitHeader(commitFrame.commit)
+        // Normalized before `classifyCommit` compares it against `state.localDID` (also
+        // normalized, at construction) — an own-unmerged commit authenticated under a different
+        // form of this member's own DID must still be recognized as its own.
+        const header =
+          readHeader?.committerDID != null
+            ? { ...readHeader, committerDID: normalizeDID(readHeader.committerDID) }
+            : readHeader
         const disposition = classifyCommit({
           header,
           sequenceID: position,

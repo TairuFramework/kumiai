@@ -6,6 +6,7 @@ import {
   type ServerTransportOf,
 } from '@enkaku/protocol'
 import { HandlerError, type ProcedureHandlers, Server } from '@enkaku/server'
+import { normalizeDID } from '@kokuin/token'
 import type { Unwrap } from '@kumiai/broadcast'
 import type { StoredMessage } from '@kumiai/hub-protocol'
 import {
@@ -84,7 +85,10 @@ export function createInboxPath(params: InboxPathParams): InboundPath {
       }
       return {
         sequenceID: message.sequenceID,
-        senderDID: opened.senderDID,
+        // Normalized at the open: every consumer keyed on this (the directed client's own
+        // `senderDID` filter, the acceptor's session binding) must see one canonical sender
+        // regardless of which DID form MLS recovered the frame under.
+        senderDID: normalizeDID(opened.senderDID),
         topicID: message.topicID,
         protocol: decoded.protocol,
         payload: decoded.frame,
