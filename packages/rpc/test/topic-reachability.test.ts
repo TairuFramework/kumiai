@@ -72,4 +72,10 @@ describe('the topic guards sit on the paths a host actually reaches', () => {
     await expect(peer.protocol('room').to('did:key:z\uD800')).rejects.toThrow()
     await peer.dispose()
   })
+
+  test('.to() rejects a NUL-bearing target DID', async () => {
+    const peer = await startPeerWithLocalDID('did:key:zalice')
+    await expect(peer.protocol('room').to('did:key:z\0evil')).rejects.toThrow()
+    await peer.dispose()
+  })
 })

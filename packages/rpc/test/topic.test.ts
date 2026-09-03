@@ -40,6 +40,10 @@ describe('topic derivation', () => {
     expect(inboxTopic(SECRET, 1, 'did:key:zABC')).not.toBe(inboxTopic(SECRET, 2, 'did:key:zABC'))
   })
 
+  test('commitTopic is pinned (no rotation)', () => {
+    expect(commitTopic(RECOVERY_SECRET)).toBe('JfMPD9Vr90P3vhj0kKSAIn8e087CnhB0QjM8IZQDNXI')
+  })
+
   test('the commit and rendezvous lanes are separate topics', () => {
     // They want opposite things from the hub: the commit topic is a log whose head every
     // commit moves; a rendezvous frame must never move that head.
