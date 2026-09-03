@@ -1,4 +1,5 @@
 import type { ProtocolDefinition } from '@enkaku/protocol'
+import { normalizeDID } from '@kokuin/token'
 import type { StoredMessage } from '@kumiai/hub-protocol'
 import { fromUTF, toUTF } from '@sozai/codec'
 
@@ -442,7 +443,12 @@ export function createAppLane(params: AppLaneParams): AppLane {
         // Opened, so it is done whatever the payload turns out to be — every path below either
         // delivers it or drops it exactly as the live transport would.
         frame.sealed = null
-        if (opened.senderDID === localDID) continue // its own echo, as the live path would not
+        // This `unwrap` is its own ingress — not fed by `peer.ts`'s normalized inbound path — so
+        // the recovered sender is normalized HERE, once, before either use below: `localDID` (the
+        // param above) is already normalized at peer construction, and the two must compare on
+        // the same canonical form for the self-echo check to hold across DID forms.
+        const senderDID = normalizeDID(opened.senderDID)
+        if (senderDID === localDID) continue // its own echo, as the live path would not
         let message: { payload?: { typ?: string; prc?: unknown; data?: unknown } }
         try {
           message = JSON.parse(toUTF(opened.payload))
@@ -469,7 +475,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
         try {
           // Same door as the live push: emit the retained frame's plaintext into the
           // per-protocol emitter the live bus is also built from. No listener → no-op.
-          await events.emit(prc, { data: message.payload.data ?? {}, senderDID: opened.senderDID })
+          await events.emit(prc, { data: message.payload.data ?? {}, senderDID })
         } catch {
           // A host listener that threw has been delivered to. Re-delivering on the next pull
           // would retry the host's own bug at it, so the frame is consumed.

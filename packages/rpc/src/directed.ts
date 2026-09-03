@@ -1,13 +1,29 @@
 import { Client } from '@enkaku/client'
-import type { ClientTransportOf, ProtocolDefinition, ServerTransportOf } from '@enkaku/protocol'
-import { type ProcedureHandlers, Server } from '@enkaku/server'
+import {
+  type ClientTransportOf,
+  ErrorCodes,
+  type ProtocolDefinition,
+  type ServerTransportOf,
+} from '@enkaku/protocol'
+import { HandlerError, type ProcedureHandlers, Server } from '@enkaku/server'
+import { normalizeDID } from '@kokuin/token'
 import type { Unwrap } from '@kumiai/broadcast'
 import type { StoredMessage } from '@kumiai/hub-protocol'
-import { createHubTunnelTransport, decodeFrame, type MailboxHub } from '@kumiai/hub-tunnel'
+import {
+  createHubTunnelTransport,
+  decodeFrame,
+  encodeFrame,
+  type MailboxHub,
+} from '@kumiai/hub-tunnel'
 import { fromUTF } from '@sozai/codec'
 import { createRuntime, type Runtime } from '@sozai/runtime'
 
 import type { GroupCrypto } from './crypto.js'
+import {
+  decodeDirectedPayload,
+  encodeDirectedPayload,
+  isLegacyDirectedPayload,
+} from './directed-tag.js'
 import type { HubMux } from './hub-mux.js'
 import { createOpenOncePath } from './open-once.js'
 
@@ -25,6 +41,9 @@ export type OpenedInbound = {
   /** Recovered from the ciphertext by the open, never the hub-asserted one. */
   senderDID: string
   topicID: string
+  /** The protocol this frame is tagged for, decoded from the sealed in-frame discriminator. */
+  protocol: string
+  /** The inner hub-tunnel frame, with the protocol tag stripped. */
   payload: Uint8Array
 }
 
@@ -53,17 +72,39 @@ export function createInboxPath(params: InboxPathParams): InboundPath {
     topicID,
     unwrap,
     ...(retainOnFailure != null ? { retainOnFailure } : {}),
-    project: (message, opened) =>
-      opened.senderDID == null
-        ? undefined
-        : {
-            sequenceID: message.sequenceID,
-            senderDID: opened.senderDID,
-            topicID: message.topicID,
-            payload: opened.payload,
-          },
+    project: (message, opened) => {
+      if (opened.senderDID == null) return undefined
+      // The tag is inside the seal, so it is authenticated to the recovered sender. A legacy or
+      // malformed payload is dropped HERE — the open already spent the ratchet key.
+      if (isLegacyDirectedPayload(opened.payload)) return undefined
+      let decoded: { protocol: string; frame: Uint8Array }
+      try {
+        decoded = decodeDirectedPayload(opened.payload)
+      } catch {
+        return undefined
+      }
+      return {
+        sequenceID: message.sequenceID,
+        // Normalized at the open: every consumer keyed on this (the directed client's own
+        // `senderDID` filter, the acceptor's session binding) must see one canonical sender
+        // regardless of which DID form MLS recovered the frame under.
+        senderDID: normalizeDID(opened.senderDID),
+        topicID: message.topicID,
+        protocol: decoded.protocol,
+        payload: decoded.frame,
+      }
+    },
   })
 }
+
+/**
+ * Default `requestTimeoutMs` a directed client aborts a unary request after. The unary-only
+ * backstop for a request the recipient never answers: enkaku applies it to `request`, not to
+ * stream/channel creation, so those lean on the unrouted-tag NACK ({@link createUnroutedTagResponder})
+ * instead. 30s is a deliberate ceiling — a call the peer means to answer answers well inside it,
+ * so its expiry is evidence the call was dropped.
+ */
+export const DEFAULT_DIRECTED_REQUEST_TIMEOUT_MS = 30_000
 
 export type DirectedClientParams = {
   mux: HubMux
@@ -76,6 +117,14 @@ export type DirectedClientParams = {
   wrap: GroupCrypto['wrap']
   /** Runtime providing platform primitives. Defaults to `createRuntime()`. */
   runtime?: Runtime
+  /** The protocol name outbound frames are tagged with, and inbound frames filtered on. */
+  protocol: string
+  /**
+   * How long a unary request waits before aborting. Defaults to
+   * {@link DEFAULT_DIRECTED_REQUEST_TIMEOUT_MS}. Unary only — enkaku does not apply it to
+   * stream/channel creation.
+   */
+  requestTimeoutMs?: number
 }
 
 /**
@@ -89,15 +138,17 @@ export type DirectedClientParams = {
 export function createDirectedClient<Protocol extends ProtocolDefinition>(
   params: DirectedClientParams,
 ): { client: Client<Protocol>; dispose: () => Promise<void> } {
-  const { mux, localDID, memberDID, sendTopicID, receiveTopicID, inbound, wrap } = params
+  const { mux, localDID, memberDID, sendTopicID, receiveTopicID, inbound, wrap, protocol } = params
+  const requestTimeoutMs = params.requestTimeoutMs ?? DEFAULT_DIRECTED_REQUEST_TIMEOUT_MS
   const { getRandomID } = params.runtime ?? createRuntime()
   let unsubscribe: (() => void) | undefined
   const hub: MailboxHub = {
     async publish(publishParams) {
+      const tagged = encodeDirectedPayload(protocol, publishParams.payload)
       return mux.mailbox.publish({
         senderDID: publishParams.senderDID,
         topicID: publishParams.topicID,
-        payload: await wrap(publishParams.payload, { aad: fromUTF(publishParams.topicID) }),
+        payload: await wrap(tagged, { aad: fromUTF(publishParams.topicID) }),
       })
     },
     subscribe() {},
@@ -117,7 +168,13 @@ export function createDirectedClient<Protocol extends ProtocolDefinition>(
         }
       }
       unsubscribe = inbound((message) => {
-        if (closed || message.topicID !== receiveTopicID || message.senderDID !== memberDID) return
+        if (
+          closed ||
+          message.topicID !== receiveTopicID ||
+          message.protocol !== protocol ||
+          message.senderDID !== memberDID
+        )
+          return
         if (resolveNext != null) {
           const resolve = resolveNext
           resolveNext = undefined
@@ -156,7 +213,7 @@ export function createDirectedClient<Protocol extends ProtocolDefinition>(
     sendTopicID,
     receiveTopicID,
   }) as ClientTransportOf<Protocol>
-  const client = new Client<Protocol>({ transport, serverID: memberDID })
+  const client = new Client<Protocol>({ transport, serverID: memberDID, requestTimeoutMs })
   return {
     client,
     dispose: async () => {
@@ -176,6 +233,8 @@ export type InboxAcceptorParams<Protocol extends ProtocolDefinition> = {
   /** Map an authenticated senderDID to the topic we send replies on (their inbox). */
   resolveSendTopic: (senderDID: string) => string
   protocol: Protocol
+  /** The tag's string NAME — distinct from `protocol` above, which is the definition object. */
+  protocolName: string
   handlers: ProcedureHandlers<Protocol>
   wrap: GroupCrypto['wrap']
 }
@@ -196,8 +255,17 @@ type ServerSession = {
 export function createInboxAcceptor<Protocol extends ProtocolDefinition>(
   params: InboxAcceptorParams<Protocol>,
 ): { dispose: () => Promise<void> } {
-  const { mux, localDID, selfInboxTopic, inbound, resolveSendTopic, protocol, handlers, wrap } =
-    params
+  const {
+    mux,
+    localDID,
+    selfInboxTopic,
+    inbound,
+    resolveSendTopic,
+    protocol,
+    protocolName,
+    handlers,
+    wrap,
+  } = params
   const server = new Server<Protocol>({ protocol, handlers, requireAuth: false })
   const sessions = new Map<string, ServerSession>()
 
@@ -207,7 +275,8 @@ export function createInboxAcceptor<Protocol extends ProtocolDefinition>(
     let closed = false
     const sessionHub: MailboxHub = {
       async publish(publishParams) {
-        const sealed = await wrap(publishParams.payload, { aad: fromUTF(publishParams.topicID) })
+        const tagged = encodeDirectedPayload(protocolName, publishParams.payload)
+        const sealed = await wrap(tagged, { aad: fromUTF(publishParams.topicID) })
         return mux.mailbox.publish({
           senderDID: publishParams.senderDID,
           topicID: publishParams.topicID,
@@ -294,7 +363,7 @@ export function createInboxAcceptor<Protocol extends ProtocolDefinition>(
   // guarantee: it opens one frame at a time, so a session is never double-created and a tunnel is
   // never fed out of wire order (which drops as a stale seq).
   const unsubscribe = inbound((message) => {
-    if (message.topicID !== selfInboxTopic) return
+    if (message.topicID !== selfInboxTopic || message.protocol !== protocolName) return
     const senderDID = message.senderDID
     let frame: ReturnType<typeof decodeFrame>
     try {
@@ -329,4 +398,92 @@ export function createInboxAcceptor<Protocol extends ProtocolDefinition>(
       await server.dispose()
     },
   }
+}
+
+/** Frame payload types that carry a NEW request a peer must answer — the only ones worth NACKing. */
+const REQUEST_LIKE = new Set(['request', 'stream', 'channel', 'send'])
+
+export type UnroutedTagResponderParams = {
+  mux: HubMux
+  localDID: string
+  /** The self-inbox topic's one open-once path, shared with every acceptor. */
+  inbound: InboundPath
+  /** Whether this peer serves the tag's protocol; a tag outside it is unrouted. */
+  isRegistered: (protocol: string) => boolean
+  /**
+   * Seal an already-tagged NACK for a recipient's inbox under ONE anchor snapshot, returning the
+   * topic that agrees with the seal. Topic and seal must come from the same anchor: reading the
+   * topic and sealing as two steps lets a mid-flight rotation address an old inbox with new-epoch
+   * ciphertext, lost onto a topic the recipient no longer reads.
+   */
+  sealReply: (
+    recipientDID: string,
+    taggedPayload: Uint8Array,
+  ) => Promise<{ topicID: string; payload: Uint8Array }>
+}
+
+/**
+ * Restores failure legibility for a frame tagged for a protocol this peer does not serve. Every
+ * acceptor filters on its own protocol, so a frame tagged for none is fed to no acceptor and would
+ * be silently dropped; this single peer-level consumer of the shared inbound path NACKs it, so a
+ * caller's unary request rejects with `INVALID_MESSAGE` (and a stream/channel creation, which the
+ * client timeout cannot abort, rejects at all) instead of hanging.
+ *
+ * Three constraints, each of which if broken makes this worse than nothing:
+ * - The NACK is tagged with the OFFENDING protocol, not one of ours, or the caller's own protocol
+ *   filter drops it.
+ * - Only REQUEST-like frames are answered: a `result`/`error`/`receive` reply carries an `rid` too,
+ *   and NACKing one lets two peers that both lack the tag volley error frames forever.
+ * - The reply reuses the offending frame's `sessionID` (the caller's tunnel locks to it) and a
+ *   fresh, monotonic `seq` (the tunnel drops `seq` below what it has already seen).
+ */
+export function createUnroutedTagResponder(params: UnroutedTagResponderParams): {
+  dispose: () => void
+} {
+  const { mux, localDID, inbound, isRegistered, sealReply } = params
+  // Monotonic across every session this responder answers: a caller's virgin tunnel expects seq 0,
+  // and any seq >= its expected value is accepted, so one NACK per caller session is always fresh.
+  // `seq` is assigned INSIDE the chained task below, immediately before the frame is built, so
+  // seq-assignment order always equals publish order (see the tail chain).
+  let seq = 0
+  // Seal+publish is best-effort and async, but must run in enqueue order: two unrouted frames from
+  // one caller tunnel get consecutive seq, and if the later one published first the caller's tunnel
+  // would advance `expectedSeq` past the earlier NACK and drop it as stale. Chaining through a
+  // single tail promise serialises them (one seal in flight at a time) and pins publish order to
+  // enqueue order; a failed link is swallowed so it never stalls the chain.
+  let tail: Promise<void> = Promise.resolve()
+  const unsubscribe = inbound((message) => {
+    if (isRegistered(message.protocol)) return
+    let frame: ReturnType<typeof decodeFrame>
+    try {
+      frame = decodeFrame(message.payload)
+    } catch {
+      return
+    }
+    if (frame.kind !== 'message') return
+    const payload = frame.body.payload
+    const rid = payload.rid
+    if (typeof rid !== 'string' || !REQUEST_LIKE.has(payload.typ)) return
+    const errorPayload = new HandlerError({
+      code: ErrorCodes.INVALID_MESSAGE,
+      message: `No handler registered for protocol "${message.protocol}"`,
+    }).toPayload(rid)
+    const protocol = message.protocol
+    const senderDID = message.senderDID
+    tail = tail
+      .then(async () => {
+        const nack = encodeFrame({
+          v: 1,
+          sessionID: frame.sessionID,
+          seq: seq++,
+          kind: 'message',
+          body: { header: {}, payload: errorPayload },
+        })
+        const tagged = encodeDirectedPayload(protocol, nack)
+        const { topicID, payload: sealed } = await sealReply(senderDID, tagged)
+        await mux.mailbox.publish({ senderDID: localDID, topicID, payload: sealed })
+      })
+      .catch(() => {})
+  })
+  return { dispose: unsubscribe }
 }
