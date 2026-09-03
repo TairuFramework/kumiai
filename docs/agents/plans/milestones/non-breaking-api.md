@@ -28,14 +28,13 @@ filler alongside unrelated work, and because one of them has a deadline of a dif
 
 ### Ordinary debt — no deadline
 
-- **[`deriveTopicID` NUL-injectivity](../backlog/2026-07-07-broadcast-robustness.md)** — non-breaking
-  *if fixed by rejection*. Rejecting NUL in `label`/`scope` closes the hole and preserves every
-  already-derived topic ID, because no current caller passes one. Re-encoding the HKDF `info` is the
-  more principled fix and rotates every existing topic ID — a data break. The choice of fix is what
-  decides which milestone this belongs to; it is filed here on the assumption of rejection.
-
-  Unreachable today regardless: every caller passes a fixed, code-controlled label and scope. It
-  stays unreachable only while no caller derives a topic from untrusted input.
+- ~~**[`deriveTopicID` NUL-injectivity](../backlog/2026-07-07-broadcast-robustness.md)** — non-breaking
+  *if fixed by rejection*.~~
+  *Taken 2026-09-03:* fixed by rejection, as assumed. `deriveTopicID` now validates components
+  (NUL-free + well-formed UTF-16) and epoch (non-negative safe integer), and `protocolTopic` reserves
+  the `kumiai/` label namespace against host protocols — closing a cross-kind collision the original
+  code only asserted against in a comment. No topic ID rotated. See
+  [../completed/2026-09-03-derivetopicid-injectivity.complete.md](../completed/2026-09-03-derivetopicid-injectivity.complete.md).
 
 - **[The `0xf102` hatch reads wider than it opens](../backlog/2026-07-07-mls-api-hardening.md)** —
   a documentation correction, no code change required. The reserved third control extension type can

@@ -1,6 +1,6 @@
 # Spec C — per-protocol inbox topics + protocol isolation
 
-**Filed:** 2026-09-02, split out of the mls-encrypt-aad work. **Depends on [Spec B](./2026-09-02-derivetopicid-injectivity.md)** — it needs an injective `deriveTopicID`.
+**Filed:** 2026-09-02, split out of the mls-encrypt-aad work. **Depends on [Spec B](../completed/2026-09-03-derivetopicid-injectivity.complete.md)** — it needs an injective `deriveTopicID`, now shipped.
 
 ## The defect
 
@@ -8,7 +8,7 @@ The peer builds one recipient-scoped inbox topic (`peer.ts:572`) and attaches on
 
 ## The fix and its riders
 
-Give each protocol its **own** inbox topic (`inboxTopic` folds in the protocol, over Spec B's injective primitive, as a params-object call). Then each protocol has its own open-once path (no double-open), cross-protocol delivery is structurally impossible, and — with Spec B — the topicID carries protocol identity so Spec A's AAD separates protocols for free.
+Give each protocol its **own** inbox topic (`inboxTopic` folds in the protocol, over Spec B's now-shipped injective primitive, as a params-object call). Then each protocol has its own open-once path (no double-open), cross-protocol delivery is structurally impossible, and — with Spec B — the topicID carries protocol identity so Spec A's AAD separates protocols for free.
 
 Riders a review found, each of which the spec must handle:
 
