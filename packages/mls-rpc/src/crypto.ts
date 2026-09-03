@@ -97,7 +97,7 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
       return handle().exportSecret(label, EXPORT_CONTEXT, length)
     },
 
-    wrap: (bytes) => handle().encrypt(bytes),
+    wrap: (bytes, opts) => handle().encrypt(bytes, opts),
 
     sealEntries: async (bytes) => {
       const key = await handle().exportSecret(entryLabel, EXPORT_CONTEXT, SECRET_LENGTH)
@@ -128,15 +128,8 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
       )
     },
 
-    unwrap: async (bytes) => {
-      // Throws for any epoch but this handle's — ordinary control flow; the caller drops it.
-      const { payload, senderDID } = await handle().decrypt(bytes)
-      // `unwrap` requires a sender; `GroupHandle.decrypt` doesn't guarantee one — it can come
-      // back absent if the sender-data AEAD open fails or is malformed, no member is found at
-      // the authenticated leaf index, or the leaf's credential fails to parse
-      // (`group-handle.ts:677,867-872,536-537`, `sender-data.ts:120,123`). `@kumiai/mls` treats
-      // all three as "cannot name the author", never "no author" — a shape this port has no case
-      // for, so it's refused here rather than passed up with the field missing.
+    unwrap: async (bytes, opts) => {
+      const { payload, senderDID } = await handle().decrypt(bytes, opts)
       if (senderDID == null) {
         throw new Error('unwrap: opened frame has no authenticated sender')
       }

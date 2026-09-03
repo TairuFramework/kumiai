@@ -1,4 +1,5 @@
 import { encodeEventFrame } from '@kumiai/broadcast'
+import { fromUTF } from '@sozai/codec'
 import { describe, expect, test } from 'vitest'
 
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
@@ -191,7 +192,9 @@ describe('a peer that adopts a journalled roster change reads its backlog and ro
       senderDID: 'alice',
       topicID: chatTopic(1),
       retain: 'log',
-      payload: await alice.wrap(encodeEventFrame('chat/posted', { text: 'while he was gone' })),
+      payload: await alice.wrap(encodeEventFrame('chat/posted', { text: 'while he was gone' }), {
+        aad: fromUTF(chatTopic(1)),
+      }),
     })
 
     const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob, handlers })

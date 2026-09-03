@@ -11,7 +11,10 @@ describe('fake crypto', () => {
     const crypto = createFakeCrypto({ localDID: 'did:key:alice' })
     const plain = fromUTF('hello group')
     const wrapped = await crypto.wrap(plain)
-    expect(toUTF(wrapped)).not.toContain('hello group')
+    // Lenient decode (never throws): the sealed frame now carries a keyed tag, which is
+    // high-entropy bytes and not guaranteed to be valid UTF-8 — `toUTF`'s strict decode would
+    // throw on it. What this asserts is unchanged: the sealed bytes are not readable plaintext.
+    expect(new TextDecoder('utf-8', { fatal: false }).decode(wrapped)).not.toContain('hello group')
     // `unwrap` returns `GroupUnwrapResult` directly — `senderDID` is REQUIRED, so no
     // Uint8Array-shortcut normalization is needed here anymore.
     const out = await crypto.unwrap(wrapped)
@@ -48,6 +51,44 @@ describe('fake crypto', () => {
     const appSecret = await crypto.exportSecret(APP_TOPIC_LABEL)
     const otherSecret = await crypto.exportSecret('kumiai/fixtures-test/other-label')
     expect(otherSecret).not.toEqual(appSecret)
+  })
+
+  /**
+   * FAKE-SPECIFIC, not impl-agnostic: the transform below exploits the XOR keystream's own
+   * algebra (`K_E XOR K_E2 = E XOR E2`, low byte), so it has no analogue against a real AEAD and
+   * cannot be a `rpc-conformance` clause. It targets the axis the shared last-byte tamper clause
+   * does not reach: the tag must bind the EPOCH, not just the body. Before it did, an attacker
+   * holding one valid frame could rewrite its cleartext epoch prefix to a victim's epoch and XOR
+   * the remainder by the epoch delta, and the frame re-opened for the victim with its ORIGINAL
+   * body and ORIGINAL — still-valid — tag: a keyless cross-epoch replay that consumes the
+   * victim's ratchet generation for a frame nobody sealed at that epoch.
+   */
+  test('a frame translated from one epoch to another is refused by tag, not opened, and consumes no generation', async () => {
+    const epochAtSeal = 4
+    const epochAtVictim = 9
+    // Same default key/secret (members share both by default), different epochs.
+    const sealer = createFakeCrypto({ epoch: epochAtSeal, localDID: 'did:key:alice' })
+    const victim = createFakeCrypto({ epoch: epochAtVictim })
+    const sealed = await sealer.wrap(fromUTF('hello group'))
+    // The attacker's transform: rewrite the cleartext epoch prefix to the victim's epoch, then
+    // XOR every byte AFTER it by the epoch delta — undoing exactly the keystream shift between
+    // the two epochs' XOR keys, so the body and its (unbound) tag would de-XOR unchanged.
+    const translated = Uint8Array.from(sealed)
+    new DataView(translated.buffer).setUint16(0, epochAtVictim, true)
+    const delta = (epochAtSeal ^ epochAtVictim) & 0xff
+    for (let i = 2; i < translated.length; i++) {
+      translated[i] = ((translated[i] as number) ^ delta) & 0xff
+    }
+    // Refused by the tag — NOT by the epoch-mismatch branch, which the rewritten prefix already
+    // satisfies (`sealedAt === victim.epoch()`), so reaching this throw proves the tag is what
+    // caught it. `unwrap` throws synchronously here, so this is `.toThrow`, not `.rejects`.
+    expect(() => victim.unwrap(translated)).toThrow(/authentication tag/)
+    // And the refusal must not have cost the victim's ratchet: a frame genuinely sealed at the
+    // victim's own epoch, same sender, same generation, still opens afterwards.
+    const legitAtVictim = createFakeCrypto({ epoch: epochAtVictim, localDID: 'did:key:alice' })
+    const legit = await legitAtVictim.wrap(fromUTF('hello group'))
+    const out = await victim.unwrap(legit)
+    expect(out.senderDID).toBe('did:key:alice')
   })
 })
 

@@ -1627,6 +1627,46 @@ describe('GroupHandle commit enforcement (default-on)', () => {
   })
 })
 
+describe('encrypt/decrypt AAD', () => {
+  test('round-trips AAD and returns it on decrypt', async () => {
+    const { aliceGroup, bobGroup } = await twoMemberGroup()
+    const aad = new TextEncoder().encode('topic-x')
+    const sealed = await aliceGroup.encrypt(new TextEncoder().encode('hi'), { aad })
+    const opened = await bobGroup.decrypt(sealed, { expectedAAD: aad })
+    expect(new TextDecoder().decode(opened.payload)).toBe('hi')
+    expect(opened.aad).toEqual(aad)
+  })
+
+  test('decrypt throws on expectedAAD mismatch, distinct from not-my-epoch', async () => {
+    const { aliceGroup, bobGroup } = await twoMemberGroup()
+    const sealed = await aliceGroup.encrypt(new TextEncoder().encode('hi'), {
+      aad: new TextEncoder().encode('topic-a'),
+    })
+    await expect(
+      bobGroup.decrypt(sealed, { expectedAAD: new TextEncoder().encode('topic-b') }),
+    ).rejects.toThrow(/authenticated data|expected AAD/i)
+  })
+
+  test('pre-open compare preserves the ratchet: same ciphertext opens after a rejected wrong-AAD attempt', async () => {
+    const { aliceGroup, bobGroup } = await twoMemberGroup()
+    const aad = new TextEncoder().encode('topic-x')
+    const sealed = await aliceGroup.encrypt(new TextEncoder().encode('hi'), { aad })
+    await expect(
+      bobGroup.decrypt(sealed, { expectedAAD: new TextEncoder().encode('wrong') }),
+    ).rejects.toThrow()
+    const opened = await bobGroup.decrypt(sealed, { expectedAAD: aad })
+    expect(new TextDecoder().decode(opened.payload)).toBe('hi')
+  })
+
+  test('no-AAD default round-trips (empty AAD)', async () => {
+    const { aliceGroup, bobGroup } = await twoMemberGroup()
+    const sealed = await aliceGroup.encrypt(new TextEncoder().encode('hi'))
+    const opened = await bobGroup.decrypt(sealed)
+    expect(new TextDecoder().decode(opened.payload)).toBe('hi')
+    expect(opened.aad).toEqual(new Uint8Array())
+  })
+})
+
 describe('GroupHandle commit enforcement (caller policy override)', () => {
   test("a reject-all caller policy refuses an admin's valid commit", async () => {
     const tokens = new Map<string, string>()

@@ -1,4 +1,5 @@
 import { encodeEventFrame } from '@kumiai/broadcast'
+import { fromUTF } from '@sozai/codec'
 import { describe, expect, test } from 'vitest'
 
 import type { AppWindowPruned } from '../src/app-cursor.js'
@@ -132,7 +133,9 @@ describe('the app-lane drain reads from a durable position and reports what aged
         senderDID: 'alice',
         topicID,
         retain: 'log',
-        payload: await crypto.wrap(encodeEventFrame('chat/posted', { text })),
+        payload: await crypto.wrap(encodeEventFrame('chat/posted', { text }), {
+          aad: fromUTF(topicID),
+        }),
       })
     }
     const posted = hub.published.filter((m) => m.topicID === topicID)

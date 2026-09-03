@@ -17,6 +17,7 @@ export type PrivateCommitFrame = {
   contentType: number
   encryptedSenderData: Uint8Array
   ciphertext: Uint8Array
+  authenticatedData: Uint8Array
 }
 
 const LABEL_PREFIX = new TextEncoder().encode('MLS 1.0 ')
