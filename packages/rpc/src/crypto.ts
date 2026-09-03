@@ -14,6 +14,10 @@ import type { ByteTransform } from '@kumiai/broadcast'
  * `wrap`/`unwrap` close over the live group and always use current epoch state. `unwrap` returns
  * the authenticated sender (`senderDID`), REQUIRED — see {@link GroupUnwrapResult}.
  *
+ * `wrap` takes an optional second argument (AAD), so fixed-topic lanes adapt it to a `ByteTransform`
+ * closure, whilst directed lanes call the two-arg form directly. `unwrap`'s optional `expectedAAD`
+ * is compared PRE-OPEN, so a wrong-topic frame costs no ratchet generation.
+ *
  * `unwrap` MUST open bytes sealed at the handle's CURRENT epoch — that is the whole requirement.
  * A real MLS handle also opens a few epochs behind (ts-mls keeps four; evicting the fifth zeroes
  * their keys), but group-rpc must NOT depend on that window: it is spent by epoch TRANSITIONS
@@ -60,13 +64,19 @@ export type GroupCrypto = {
    * say so.
    */
   exportSecret(label: string, length?: number): Uint8Array | Promise<Uint8Array>
-  wrap: ByteTransform
+  wrap(bytes: Uint8Array, opts?: { AAD?: Uint8Array }): Uint8Array | Promise<Uint8Array>
   /**
    * Open a sealed app frame and recover who sent it. Returns {@link GroupUnwrapResult}, whose
    * `senderDID` is REQUIRED: an implementation that cannot name the sender must throw, not return
    * the field missing. See {@link GroupUnwrapResult} for why.
+   *
+   * `expectedAAD` is compared PRE-OPEN: authenticating without opening defends against wrong-topic
+   * frames that would otherwise burn a ratchet generation (DoS).
    */
-  unwrap(bytes: Uint8Array): GroupUnwrapResult | Promise<GroupUnwrapResult>
+  unwrap(
+    bytes: Uint8Array,
+    opts?: { expectedAAD?: Uint8Array },
+  ): GroupUnwrapResult | Promise<GroupUnwrapResult>
   /**
    * The epoch a sealed frame was sealed at, read from its own CLEARTEXT without opening it —
    * structural and pre-open, like {@link GroupMLS.readCommitHeader} is pre-apply. `null` for
