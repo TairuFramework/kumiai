@@ -1,9 +1,19 @@
 import { Client } from '@enkaku/client'
-import type { ClientTransportOf, ProtocolDefinition, ServerTransportOf } from '@enkaku/protocol'
-import { type ProcedureHandlers, Server } from '@enkaku/server'
+import {
+  type ClientTransportOf,
+  ErrorCodes,
+  type ProtocolDefinition,
+  type ServerTransportOf,
+} from '@enkaku/protocol'
+import { HandlerError, type ProcedureHandlers, Server } from '@enkaku/server'
 import type { Unwrap } from '@kumiai/broadcast'
 import type { StoredMessage } from '@kumiai/hub-protocol'
-import { createHubTunnelTransport, decodeFrame, type MailboxHub } from '@kumiai/hub-tunnel'
+import {
+  createHubTunnelTransport,
+  decodeFrame,
+  encodeFrame,
+  type MailboxHub,
+} from '@kumiai/hub-tunnel'
 import { fromUTF } from '@sozai/codec'
 import { createRuntime, type Runtime } from '@sozai/runtime'
 
@@ -83,6 +93,15 @@ export function createInboxPath(params: InboxPathParams): InboundPath {
   })
 }
 
+/**
+ * Default `requestTimeoutMs` a directed client aborts a unary request after. The unary-only
+ * backstop for a request the recipient never answers: enkaku applies it to `request`, not to
+ * stream/channel creation, so those lean on the unrouted-tag NACK ({@link createUnroutedTagResponder})
+ * instead. 30s is a deliberate ceiling — a call the peer means to answer answers well inside it,
+ * so its expiry is evidence the call was dropped.
+ */
+export const DEFAULT_DIRECTED_REQUEST_TIMEOUT_MS = 30_000
+
 export type DirectedClientParams = {
   mux: HubMux
   localDID: string
@@ -96,6 +115,12 @@ export type DirectedClientParams = {
   runtime?: Runtime
   /** The protocol name outbound frames are tagged with, and inbound frames filtered on. */
   protocol: string
+  /**
+   * How long a unary request waits before aborting. Defaults to
+   * {@link DEFAULT_DIRECTED_REQUEST_TIMEOUT_MS}. Unary only — enkaku does not apply it to
+   * stream/channel creation.
+   */
+  requestTimeoutMs?: number
 }
 
 /**
@@ -110,6 +135,7 @@ export function createDirectedClient<Protocol extends ProtocolDefinition>(
   params: DirectedClientParams,
 ): { client: Client<Protocol>; dispose: () => Promise<void> } {
   const { mux, localDID, memberDID, sendTopicID, receiveTopicID, inbound, wrap, protocol } = params
+  const requestTimeoutMs = params.requestTimeoutMs ?? DEFAULT_DIRECTED_REQUEST_TIMEOUT_MS
   const { getRandomID } = params.runtime ?? createRuntime()
   let unsubscribe: (() => void) | undefined
   const hub: MailboxHub = {
@@ -183,7 +209,7 @@ export function createDirectedClient<Protocol extends ProtocolDefinition>(
     sendTopicID,
     receiveTopicID,
   }) as ClientTransportOf<Protocol>
-  const client = new Client<Protocol>({ transport, serverID: memberDID })
+  const client = new Client<Protocol>({ transport, serverID: memberDID, requestTimeoutMs })
   return {
     client,
     dispose: async () => {
@@ -368,4 +394,75 @@ export function createInboxAcceptor<Protocol extends ProtocolDefinition>(
       await server.dispose()
     },
   }
+}
+
+/** Frame payload types that carry a NEW request a peer must answer — the only ones worth NACKing. */
+const REQUEST_LIKE = new Set(['request', 'stream', 'channel', 'send'])
+
+export type UnroutedTagResponderParams = {
+  mux: HubMux
+  localDID: string
+  /** The self-inbox topic's one open-once path, shared with every acceptor. */
+  inbound: InboundPath
+  /** Whether this peer serves the tag's protocol; a tag outside it is unrouted. */
+  isRegistered: (protocol: string) => boolean
+  /** The topic to reply on for an authenticated sender — the sender's own inbox. */
+  resolveSendTopic: (senderDID: string) => string
+  wrap: GroupCrypto['wrap']
+}
+
+/**
+ * Restores failure legibility for a frame tagged for a protocol this peer does not serve. Every
+ * acceptor filters on its own protocol, so a frame tagged for none is fed to no acceptor and would
+ * be silently dropped; this single peer-level consumer of the shared inbound path NACKs it, so a
+ * caller's unary request rejects with `INVALID_MESSAGE` (and a stream/channel creation, which the
+ * client timeout cannot abort, rejects at all) instead of hanging.
+ *
+ * Three constraints, each of which if broken makes this worse than nothing:
+ * - The NACK is tagged with the OFFENDING protocol, not one of ours, or the caller's own protocol
+ *   filter drops it.
+ * - Only REQUEST-like frames are answered: a `result`/`error`/`receive` reply carries an `rid` too,
+ *   and NACKing one lets two peers that both lack the tag volley error frames forever.
+ * - The reply reuses the offending frame's `sessionID` (the caller's tunnel locks to it) and a
+ *   fresh, monotonic `seq` (the tunnel drops `seq` below what it has already seen).
+ */
+export function createUnroutedTagResponder(params: UnroutedTagResponderParams): {
+  dispose: () => void
+} {
+  const { mux, localDID, inbound, isRegistered, resolveSendTopic, wrap } = params
+  // Monotonic across every session this responder answers: a caller's virgin tunnel expects seq 0,
+  // and any seq >= its expected value is accepted, so one NACK per caller session is always fresh.
+  let seq = 0
+  const unsubscribe = inbound((message) => {
+    if (isRegistered(message.protocol)) return
+    let frame: ReturnType<typeof decodeFrame>
+    try {
+      frame = decodeFrame(message.payload)
+    } catch {
+      return
+    }
+    if (frame.kind !== 'message') return
+    const payload = frame.body.payload
+    const rid = payload.rid
+    if (typeof rid !== 'string' || !REQUEST_LIKE.has(payload.typ)) return
+    const errorPayload = new HandlerError({
+      code: ErrorCodes.INVALID_MESSAGE,
+      message: `No handler registered for protocol "${message.protocol}"`,
+    }).toPayload(rid)
+    const nack = encodeFrame({
+      v: 1,
+      sessionID: frame.sessionID,
+      seq: seq++,
+      kind: 'message',
+      body: { header: {}, payload: errorPayload },
+    })
+    void (async () => {
+      const topicID = resolveSendTopic(message.senderDID)
+      const sealed = await wrap(encodeDirectedPayload(message.protocol, nack), {
+        aad: fromUTF(topicID),
+      })
+      await mux.mailbox.publish({ senderDID: localDID, topicID, payload: sealed })
+    })()
+  })
+  return { dispose: unsubscribe }
 }

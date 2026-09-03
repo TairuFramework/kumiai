@@ -53,6 +53,7 @@ import {
   createDirectedClient,
   createInboxAcceptor,
   createInboxPath,
+  createUnroutedTagResponder,
   type InboundPath,
 } from './directed.js'
 import { PeerDisposedError } from './errors.js'
@@ -382,6 +383,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   let inboxLane: { topicID: string; path: InboundPath } | undefined
 
   /**
+   * The one peer-level consumer of the shared inbox path that NACKs a frame tagged for a protocol
+   * no acceptor here serves — every acceptor filters on its own tag, so such a frame would
+   * otherwise be dropped silently. Rebuilt with the epoch, since it replies on the anchor-bound
+   * inbox topics the rotation moves.
+   */
+  let unroutedTagResponder: { dispose: () => void } | undefined
+
+  /**
    * The host's app event handlers, per protocol, as the drain calls them — the same adaptation
    * the live bus server is built from, so a drained frame and a pushed one reach the host by the
    * same door. Built once: the handlers a host passed at construction do not change, and the
@@ -580,6 +589,16 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         retainOnFailure,
       }),
     }
+    // ONE responder for the whole peer, on the shared path: it NACKs any frame whose tag names a
+    // protocol not in `protocols`, restoring the legible reply an acceptor's own filter drops.
+    unroutedTagResponder = createUnroutedTagResponder({
+      mux,
+      localDID,
+      inbound: inboxLane.path,
+      isRegistered: (name) => Object.hasOwn(protocols, name),
+      resolveSendTopic: (senderDID) => inboxTopic(anchor.secret, anchor.epoch, senderDID),
+      wrap: crypto.wrap,
+    })
     for (const [name, protocol] of Object.entries(protocols)) {
       // The app topic is bound to the ANCHOR, not the live epoch — see {@link sealForSegment}.
       // Content stays sealed under the live epoch crypto below; only the topic ID is anchor-bound.
@@ -629,6 +648,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     // Disposal order is independent, so tear everything down concurrently and surface every
     // failure rather than dying on the first.
     const disposals: Array<Promise<unknown>> = []
+    // A bare unsubscribe of the shared path — synchronous, cannot reject — dropped alongside the
+    // acceptor consumers of that same path.
+    unroutedTagResponder?.dispose()
+    unroutedTagResponder = undefined
     for (const runtime of runtimes.values()) {
       for (const directed of runtime.directed.values()) disposals.push(directed.dispose())
       runtime.directed.clear()
