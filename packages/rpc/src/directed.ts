@@ -94,6 +94,8 @@ export type DirectedClientParams = {
   wrap: GroupCrypto['wrap']
   /** Runtime providing platform primitives. Defaults to `createRuntime()`. */
   runtime?: Runtime
+  /** The protocol name outbound frames are tagged with, and inbound frames filtered on. */
+  protocol: string
 }
 
 /**
@@ -107,12 +109,12 @@ export type DirectedClientParams = {
 export function createDirectedClient<Protocol extends ProtocolDefinition>(
   params: DirectedClientParams,
 ): { client: Client<Protocol>; dispose: () => Promise<void> } {
-  const { mux, localDID, memberDID, sendTopicID, receiveTopicID, inbound, wrap } = params
+  const { mux, localDID, memberDID, sendTopicID, receiveTopicID, inbound, wrap, protocol } = params
   const { getRandomID } = params.runtime ?? createRuntime()
   let unsubscribe: (() => void) | undefined
   const hub: MailboxHub = {
     async publish(publishParams) {
-      const tagged = encodeDirectedPayload('rpc', publishParams.payload)
+      const tagged = encodeDirectedPayload(protocol, publishParams.payload)
       return mux.mailbox.publish({
         senderDID: publishParams.senderDID,
         topicID: publishParams.topicID,
@@ -136,7 +138,13 @@ export function createDirectedClient<Protocol extends ProtocolDefinition>(
         }
       }
       unsubscribe = inbound((message) => {
-        if (closed || message.topicID !== receiveTopicID || message.senderDID !== memberDID) return
+        if (
+          closed ||
+          message.topicID !== receiveTopicID ||
+          message.protocol !== protocol ||
+          message.senderDID !== memberDID
+        )
+          return
         if (resolveNext != null) {
           const resolve = resolveNext
           resolveNext = undefined
@@ -195,6 +203,8 @@ export type InboxAcceptorParams<Protocol extends ProtocolDefinition> = {
   /** Map an authenticated senderDID to the topic we send replies on (their inbox). */
   resolveSendTopic: (senderDID: string) => string
   protocol: Protocol
+  /** The tag's string NAME — distinct from `protocol` above, which is the definition object. */
+  protocolName: string
   handlers: ProcedureHandlers<Protocol>
   wrap: GroupCrypto['wrap']
 }
@@ -215,8 +225,17 @@ type ServerSession = {
 export function createInboxAcceptor<Protocol extends ProtocolDefinition>(
   params: InboxAcceptorParams<Protocol>,
 ): { dispose: () => Promise<void> } {
-  const { mux, localDID, selfInboxTopic, inbound, resolveSendTopic, protocol, handlers, wrap } =
-    params
+  const {
+    mux,
+    localDID,
+    selfInboxTopic,
+    inbound,
+    resolveSendTopic,
+    protocol,
+    protocolName,
+    handlers,
+    wrap,
+  } = params
   const server = new Server<Protocol>({ protocol, handlers, requireAuth: false })
   const sessions = new Map<string, ServerSession>()
 
@@ -226,7 +245,7 @@ export function createInboxAcceptor<Protocol extends ProtocolDefinition>(
     let closed = false
     const sessionHub: MailboxHub = {
       async publish(publishParams) {
-        const tagged = encodeDirectedPayload('rpc', publishParams.payload)
+        const tagged = encodeDirectedPayload(protocolName, publishParams.payload)
         const sealed = await wrap(tagged, { aad: fromUTF(publishParams.topicID) })
         return mux.mailbox.publish({
           senderDID: publishParams.senderDID,
@@ -314,7 +333,7 @@ export function createInboxAcceptor<Protocol extends ProtocolDefinition>(
   // guarantee: it opens one frame at a time, so a session is never double-created and a tunnel is
   // never fed out of wire order (which drops as a stale seq).
   const unsubscribe = inbound((message) => {
-    if (message.topicID !== selfInboxTopic) return
+    if (message.topicID !== selfInboxTopic || message.protocol !== protocolName) return
     const senderDID = message.senderDID
     let frame: ReturnType<typeof decodeFrame>
     try {

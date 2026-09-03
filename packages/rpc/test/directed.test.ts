@@ -40,6 +40,7 @@ function member(
     inbound: createInboxPath({ mux, topicID, unwrap: unwrap ?? crypto.unwrap }),
     resolveSendTopic: (senderDID) => inboxTopic(SECRET, EPOCH, senderDID),
     protocol,
+    protocolName: 'rpc',
     handlers: handlers as Handlers,
     wrap: (bytes, opts) => {
       onWrapAAD?.(opts?.aad)
@@ -72,6 +73,7 @@ function caller(
     receiveTopicID,
     inbound: createInboxPath({ mux, topicID: receiveTopicID, unwrap: crypto.unwrap }),
     runtime: createRuntime({ getRandomID: () => sessionID }),
+    protocol: 'rpc',
     wrap: (bytes, opts) => {
       onWrapAAD?.(opts?.aad)
       return crypto.wrap(bytes, opts)
@@ -319,6 +321,7 @@ describe('directed RPC security', () => {
       inbound: createInboxPath({ mux: bobMux, topicID: bobTopic, unwrap: delayedUnwrap }),
       resolveSendTopic: (senderDID) => inboxTopic(SECRET, EPOCH, senderDID),
       protocol,
+      protocolName: 'rpc',
       handlers: {
         'rpc/double': (ctx: { param: { n: number } }) => {
           calls.push(ctx.param.n)

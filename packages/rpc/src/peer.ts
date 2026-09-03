@@ -616,6 +616,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         inbound: inboxLane.path,
         resolveSendTopic: (senderDID) => inboxTopic(anchor.secret, anchor.epoch, senderDID),
         protocol: protocol as ProtocolDefinition,
+        protocolName: name,
         handlers: handlers[name] as unknown as ProcedureHandlers<ProtocolDefinition>,
         wrap: crypto.wrap,
       })
@@ -709,6 +710,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           receiveTopicID: lane.topicID,
           inbound: lane.path,
           wrap: crypto.wrap,
+          protocol: name,
           ...(params.runtime != null ? { runtime: params.runtime } : {}),
         })
         runtime.directed.set(memberDID, created)
