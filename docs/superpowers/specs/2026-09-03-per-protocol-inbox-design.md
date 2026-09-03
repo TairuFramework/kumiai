@@ -38,14 +38,21 @@ consequences are worse than a name-collision edge case:
 
 - **Double execution.** Each acceptor feeds its own `Server<Protocol>`. If two protocols define a
   procedure of the same name, both handlers run.
-- **Spurious error replies (already broken today).** An enkaku `Server` fed a frame for a procedure it
-  does not define **sends an error response** so the client rejects rather than hangs
-  (`node_modules/@enkaku/server/lib/server.js:317-327`). With P protocols on the shared inbox, one
-  directed request produces one real reply and up to P−1 error replies racing back — an error reply can
-  even win, so multi-protocol directed RPC is already flaky, not merely on name collision.
-- **Reply cross-delivery.** A directed client filters inbound frames only by authenticated `senderDID`
-  and topic (`directed.ts:120`). Two protocols talking to the **same** member both match that member's
-  reply, so both clients receive it.
+- **Spurious error replies (already broken today).** An enkaku `Server` fed a request-like frame for a
+  procedure not in its protocol fails the message validator and writes an `INVALID_MESSAGE` response
+  carrying the original request ID (`node_modules/@enkaku/server/lib/server.js:227,253`). The
+  originating client locates its controller by that request ID and rejects on the error response
+  (`client.js:260`). With P protocols on the shared inbox, one directed request produces one real reply
+  and up to P−1 error replies on the same request ID racing back — an error reply can win, so
+  multi-protocol directed RPC is already flaky, not merely on name collision.
+- **Wasted reply fan-out.** A directed client filters inbound frames at the outer fan-out only by
+  authenticated `senderDID` and topic (`directed.ts:119`), so two protocols talking to the **same**
+  member both receive that member's reply at the fan-out. This is not by itself a correctness failure —
+  each client tunnel has a random session ID and drops a mismatched session before enkaku sees it
+  (`hub-tunnel/transport.ts:403`), and enkaku settles a reply only against a request ID present in that
+  client's controller map (`node_modules/@enkaku/client/lib/client.js:261`), so ordinary cross-settlement
+  needs both a session-ID and a request-ID collision (random, effectively never). The tag removes the
+  wasted delivery and adds domain separation, but the standing correctness bugs are the two above.
 
 Spec A's AAD does not separate them, because all protocols share the identical inbox topic and epoch,
 hence the identical AAD.
@@ -68,21 +75,31 @@ its own protocol.
 an ambiguous join):
 
 ```
-directedPayload = VERSION(1 byte) ‖ varuint(len(protocolUTF8)) ‖ protocolUTF8 ‖ frameBytes
+directedPayload = VERSION(1 byte) ‖ len(protocolUTF8) as fixed-width uint16 BE ‖ protocolUTF8 ‖ frameBytes
 ```
 
-`VERSION` is a format marker so a peer can distinguish a tagged frame from a legacy untagged one and
-reject the legacy frame cleanly, rather than misparsing its bytes as a bogus tag length. The
-length-prefixed protocol name makes the `protocol ∥ frame` split injective regardless of the name's
-content.
+- **Fixed-width length, not a varuint.** `@sozai/codec` exposes only UTF-8 and base64 helpers
+  (`node_modules/@sozai/codec/lib/index.d.ts`), no varuint or length-prefix primitive; the repo's own
+  binary formats use fixed-width lengths (e.g. `packages/rpc/src/commit-frame.ts:38`). Follow that. A
+  uint16 caps a protocol name at 65535 bytes, far above any real name; the decoder rejects a truncated
+  header, a length that overruns the buffer, or a protocol name that is not well-formed UTF-8.
+- **`VERSION` is a reserved byte that is not a legal JSON leading byte.** Legacy directed frames are
+  `JSON.stringify` output (`packages/hub-tunnel/src/frame.ts:90`), so they begin with `{` (or JSON
+  leading whitespace). Choosing `VERSION` outside that set (a high control byte such as `0x00` is not
+  valid JSON input) lets a decoder distinguish a tagged frame from a legacy one by the first byte alone,
+  with no risk of misparsing legacy bytes as a bogus tag. Assign the concrete value in the plan.
+- The fixed-width length makes the `protocol ∥ frame` split injective regardless of the name's content;
+  the protocol name is additionally NUL-free and well-formed because it also flows through topic
+  derivation, which rejects both (`packages/broadcast/src/topic.ts:15`).
 
 **Why inside the seal.** If the tag were outside the seal (plaintext beside the ciphertext), a lying
 hub could flip it and misroute a frame onto the shared inbox key — B's acceptor would open A's frame
 (same epoch key) and run it. Inside the seal, the tag is covered by the AEAD, so neither the hub nor a
-non-member can alter or forge it. A group member can only tag their **own** frames, and only for a
-protocol they are already entitled to call, so there is no privilege boundary to cross — the tag is an
-accidental-cross-delivery and reply-routing fix, over an authenticated channel, not an authorization
-mechanism.
+non-member can alter or forge it. A group member can tag only their **own** frames (the tag proves what
+the authenticated sender selected, bound to that sender's MLS identity), and may select any protocol —
+but since every group member may already call every protocol on the shared inbox, there is no privilege
+boundary to cross. The tag is an accidental-cross-delivery and reply-routing fix over an authenticated
+channel, not an authorization mechanism (`Server` is built `requireAuth: false`, `directed.ts:201`).
 
 **Receive routing.** `createInboxPath`'s projection strips the header and surfaces the decoded
 `protocol` on `OpenedInbound`. Then:
@@ -96,8 +113,26 @@ mechanism.
 **Send.** Both publish sites (`directed.ts:100` client, `:210` acceptor session) prepend the header for
 the protocol the client or acceptor belongs to. The protocol name is known where each is created.
 
-No topic derivation changes; AAD stays `fromUTF(topicID)`. Capacity, rotation, and the app-topic
-lifecycle are untouched.
+The isolation fix changes no topic derivation; AAD stays `fromUTF(topicID)`; capacity, rotation, and the
+app-topic lifecycle are untouched. (Rider 2's DID normalization is the one thing that can move an inbox
+topic — see its own section.)
+
+**Failure legibility.** `createOpenOncePath` swallows a projection/parse/listener exception and
+acknowledges the frame in `finally` (`open-once.ts:68,76`), and the directed client creates its enkaku
+`Client` with no timeout, which enkaku treats as disabled (`directed.ts:152`,
+`node_modules/@enkaku/client/lib/client.js:41,499`). So any dropped inbound frame — a mixed-version
+mismatch, or a frame correctly tagged for a protocol this peer has not registered — currently leaves the
+caller's request pending forever, silently. Tagging would even *regress* this for the unregistered-
+protocol case: today an unknown procedure draws an `INVALID_MESSAGE` reply, whereas a tag no acceptor
+claims is silently dropped. This design therefore requires two things so directed RPC fails legibly:
+
+1. **A default directed-client request timeout.** Give the directed `Client` a sensible default timeout
+   so a dropped or unrouteable request rejects with a timeout rather than hanging. A caller may still
+   override it.
+2. **An unrouted-tag NACK.** When an opened inbox frame carries a valid tag for a protocol not
+   registered on this peer, emit an `INVALID_MESSAGE`-class error reply on the sender's inbox for that
+   request ID, so a mis-targeted call rejects promptly instead of waiting out the timeout. (This restores
+   the legibility the tag would otherwise remove.)
 
 ## Rider — DID normalization at ingress (kept, independent correctness fix)
 
@@ -127,20 +162,43 @@ and hardens rpc against conforming doubles or alternate implementations that do 
 strings. Add `@kokuin/token` to `@kumiai/rpc`'s catalog dependencies (currently absent,
 `rpc/package.json:39-51`).
 
+**`normalizeDID` canonicalizes, it does not validate.** It returns a non-peer4 string unchanged and
+shortens anything passing a `did:peer:4z` prefix check, truncating at the next colon
+(`node_modules/@kokuin/token/lib/did.js:320`, `peer4.js:109,114`). So an empty or arbitrary non-DID
+string survives, and malformed peer4-looking variants can collapse together. The claim here is only that
+equivalent *valid* peer4 forms converge — not DID validation. Validation is not this rider's job.
+
+**Topic convergence (not rotation).** Because `inboxTopic` derives from the DID as its scope
+(`topic.ts:63`), normalizing the DID *before* derivation makes a long-form peer4 input derive the **same**
+inbox topic as its short form. Where short-form credential IDs are already universal (the real MLS path),
+this is a no-op and no live topic moves; where a caller supplied a long form, it converges that caller
+onto the canonical topic — the desired identity semantics, not a rotation of existing short-form topics.
+The consequence for a straddled upgrade is folded into "Mixed-version deployment" below.
+
+**One ingress deliberately left raw.** The hub-asserted `message.senderDID` surfaced in commit context
+(`peer.ts:1282`) is documented as auxiliary, never an MLS authorization input, so it is intentionally not
+normalized; MLS-authenticated DIDs are the ones that must be canonical.
+
 ## Mixed-version deployment
 
 The directed payload format changes (the `VERSION` header). Group peers on independently-upgrading
-devices can therefore straddle versions during a rollout: an upgraded peer receiving a legacy untagged
-frame rejects it via the version marker, and a legacy peer receiving a tagged frame fails to decode it.
-Either way the affected directed request is dropped, and because the inbox is mailbox class a dropped
-frame is not redelivered.
+devices can therefore straddle versions during a rollout, and there are two straddle failures:
+
+- **Wire-format mismatch.** An upgraded peer receiving a legacy `{`-leading frame detects it by the
+  version byte; a legacy peer receiving a tagged frame fails its JSON decode. Either way the frame is
+  dropped, and because the inbox is mailbox class it is not redelivered. The `VERSION` byte guarantees
+  the tagged frame is never *misrouted* onto the shared key — the failure is always a drop, never a
+  wrong-protocol execution.
+- **Topic mismatch (long-form DIDs only).** If a peer's DID is used in long form on one side and Rider 2
+  normalizes it on the other, the two sides derive different inbox topics and never meet on the hub at
+  all. Where short-form credential IDs are universal this cannot arise.
 
 Stance: **hard cutover**, consistent with Spec A's pre-1.0 deliberate invalidation of retained history
-and the coupled version band. All group peers must reach this version together; a straddled window
-drops cross-version directed RPC. The `VERSION` marker guarantees the failure is a clean drop with a
-legible cause, never a silent misroute onto the shared key. This is documented as a pre-1.0 upgrade
-requirement, not smoothed over with a dual-format transition, because a dual-format path would reopen
-the very cross-delivery this change closes for the duration of the window.
+and the coupled version band. All group peers must reach this version together. A dropped frame is *not*
+self-announcing — `createOpenOncePath` swallows and acks it (`open-once.ts:68,76`) — so legibility comes
+from the default directed-client timeout required under "Failure legibility": a straddled call rejects on
+timeout rather than hanging. A dual-format transition is rejected because it would reopen the very
+cross-delivery this change closes for the duration of the window.
 
 ## Non-goals
 
@@ -154,6 +212,12 @@ the very cross-delivery this change closes for the duration of the window.
   unsubscribing an app/log topic drops unread messages for everyone) is out of scope. This design does
   not touch it, worsen it, or depend on it. It is noted here so a future capacity/hub-lifecycle spec can
   pick it up.
+- **Session-end stranding on full peer disposal.** A cleanly disposed peer suspends mux publishing before
+  `teardownEpoch` (`peer.ts:2081`), so the session-end frames its directed transports try to send are
+  rejected and swallowed (`hub-mux.ts:623`, `hub-tunnel/transport.ts:268`), leaving the remote acceptor's
+  server sessions retained until it disposes (`directed.ts:305,323`). Pre-existing, not introduced by
+  tagging, and not fixed here; noted for the future capacity work (an idle session timeout would close
+  it).
 
 ## Testing
 
@@ -167,9 +231,13 @@ the very cross-delivery this change closes for the duration of the window.
 - **Encoding:** the `VERSION ‖ len ‖ protocol ‖ frame` header round-trips; a protocol name containing
   arbitrary characters (including `/`) is recovered exactly; a legacy untagged frame is rejected by the
   version marker, not misparsed.
+- **Failure legibility:** a directed call to a protocol not registered on the recipient rejects (via the
+  unrouted-tag NACK, and via the default timeout if the NACK is absent) rather than hanging; a call whose
+  frame is dropped rejects on the default timeout; the default timeout is overridable.
 - **Rider 2:** a peer given a member DID in long form both addresses it and matches its replies when MLS
   returns the short credential form; `detectRosterChange` does not fire on an equivalent-form flip;
-  self-echo suppression holds across DID forms.
+  self-echo suppression holds across DID forms; a short-form DID's inbox topic is byte-identical to today
+  (golden pin).
 
 TDD throughout; every vitest step paired with `test:types`. The rpc-conformance suite runs against the
 real implementation **and** the double, since the change is on the directed-inbox port surface. Confirm
@@ -180,8 +248,9 @@ real implementation **and** the double, since the change is on the directed-inbo
 - Whole-branch review on the most capable model.
 - At least one blind adversarial Codex review, briefed with the isolation and authentication questions,
   never the expected answers.
-- Confirm no topic ID rotated (no derivation changed) — the app broadcast, commit, and rendezvous
-  topics are byte-identical.
+- Confirm the isolation fix rotates nothing: app broadcast, commit, rendezvous, and short-form inbox
+  topics are byte-identical. The only permitted movement is Rider 2 converging a long-form DID's inbox
+  topic onto its short form; a golden test pins that a short-form DID's inbox topic is unchanged.
 
 ## Rejected alternatives
 
