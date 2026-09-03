@@ -1,10 +1,11 @@
 # Protocol isolation on the directed inbox via an authenticated in-frame discriminator — design
 
 **Date:** 2026-09-03
-**Packages (minor bump, coupled band):** `@kumiai/rpc` (directed frame tagging + routing,
-`normalizeDID` at ingress) and `@kumiai/rpc-conformance` (isolation clauses). Adds `@kokuin/token` to
-`@kumiai/rpc`'s catalog deps. `@kumiai/broadcast`, `@kumiai/mls-rpc`, and the hub packages do **not**
-change.
+**Packages (minor bump, coupled band):** `@kumiai/rpc` (directed frame tagging + routing, the
+unrouted-tag NACK, the default directed timeout, `normalizeDID` at ingress) and its peer-level tests.
+Adds `@kokuin/token` to `@kumiai/rpc`'s catalog deps. `@kumiai/broadcast`, `@kumiai/mls-rpc`,
+`@kumiai/rpc-conformance`, and the hub packages do **not** change — this is peer/integration behavior,
+not a `GroupCrypto`/`GroupMLS` port-contract change, so the port conformance suites are untouched.
 **Depends on:** Spec A ([AAD binding](../../agents/plans/completed/2026-09-02-mls-encrypt-aad.complete.md)) —
 the directed frame is already MLS-sealed with AAD bound to the topic, which is what makes an in-payload
 tag authenticated. Spec B ([`deriveTopicID` injectivity](../../agents/plans/completed/2026-09-03-derivetopicid-injectivity.complete.md))
@@ -30,8 +31,9 @@ The peer builds **one** recipient-scoped directed-inbox topic
 (`selfInbox = inboxTopic(anchor.secret, anchor.epoch, localDID)`, `packages/rpc/src/peer.ts:573`) and
 attaches one acceptor **per protocol** to that single inbound path (`peer.ts:612`, all sharing
 `inboxLane.path`). `createInboxPath` opens each frame once and fans the plaintext to every registered
-consumer (`open-once.ts`, `directed.ts:49`). The inbound frame carries only a `sessionID` and a `kind`
-(`decodeFrame`, `directed.ts:301`) — **no protocol identifier**.
+consumer (`open-once.ts`, `directed.ts:49`). `decodeFrame` exposes the enkaku hub-tunnel envelope —
+`sessionID`, `seq`, and the body including `payload.rid` (`hub-tunnel/frame.ts:60,67`) — but **no
+protocol identifier**.
 
 So every protocol's acceptor, and every directed client, receives every opened frame on the inbox. The
 consequences are worse than a name-collision edge case:
@@ -82,7 +84,10 @@ directedPayload = VERSION(1 byte) ‖ len(protocolUTF8) as fixed-width uint16 BE
   (`node_modules/@sozai/codec/lib/index.d.ts`), no varuint or length-prefix primitive; the repo's own
   binary formats use fixed-width lengths (e.g. `packages/rpc/src/commit-frame.ts:38`). Follow that. A
   uint16 caps a protocol name at 65535 bytes, far above any real name; the decoder rejects a truncated
-  header, a length that overruns the buffer, or a protocol name that is not well-formed UTF-8.
+  header, a length that overruns the buffer, or a protocol name that is not well-formed UTF-8. Protocol
+  registration imposes no byte-length bound today (`topic.ts:43` rejects only NUL, ill-formed UTF-16, and
+  the reserved prefix), so the **encoder must reject** a name whose UTF-8 exceeds the uint16 cap rather
+  than truncating modulo 65536.
 - **`VERSION` is a reserved byte that is not a legal JSON leading byte.** Legacy directed frames are
   `JSON.stringify` output (`packages/hub-tunnel/src/frame.ts:90`), so they begin with `{` (or JSON
   leading whitespace). Choosing `VERSION` outside that set (a high control byte such as `0x00` is not
@@ -110,8 +115,10 @@ channel, not an authorization mechanism (`Server` is built `requireAuth: false`,
   `opened.protocol === X` **and** the authenticated sender is `M`. So replies route to exactly the one
   client that issued the request, even when several protocols talk to the same member.
 
-**Send.** Both publish sites (`directed.ts:100` client, `:210` acceptor session) prepend the header for
-the protocol the client or acceptor belongs to. The protocol name is known where each is created.
+**Send.** The directed send paths prepend the header for the protocol the client or acceptor belongs to,
+at the client publish (`directed.ts:100`) and the acceptor session publish (`directed.ts:210`). The
+unrouted-tag NACK below is a **third** send path, and it echoes the caller's tag rather than owning a
+protocol of its own. The protocol name is known where each is created.
 
 The isolation fix changes no topic derivation; AAD stays `fromUTF(topicID)`; capacity, rotation, and the
 app-topic lifecycle are untouched. (Rider 2's DID normalization is the one thing that can move an inbox
@@ -124,15 +131,34 @@ acknowledges the frame in `finally` (`open-once.ts:68,76`), and the directed cli
 mismatch, or a frame correctly tagged for a protocol this peer has not registered — currently leaves the
 caller's request pending forever, silently. Tagging would even *regress* this for the unregistered-
 protocol case: today an unknown procedure draws an `INVALID_MESSAGE` reply, whereas a tag no acceptor
-claims is silently dropped. This design therefore requires two things so directed RPC fails legibly:
+claims is silently dropped. This design therefore requires two mechanisms, each with a bounded reach that
+must be stated honestly rather than as a blanket "calls reject":
 
-1. **A default directed-client request timeout.** Give the directed `Client` a sensible default timeout
-   so a dropped or unrouteable request rejects with a timeout rather than hanging. A caller may still
-   override it.
-2. **An unrouted-tag NACK.** When an opened inbox frame carries a valid tag for a protocol not
-   registered on this peer, emit an `INVALID_MESSAGE`-class error reply on the sender's inbox for that
-   request ID, so a mis-targeted call rejects promptly instead of waiting out the timeout. (This restores
-   the legibility the tag would otherwise remove.)
+1. **A default directed-client request timeout.** Give the directed `Client` a sensible default
+   `requestTimeoutMs` (`node_modules/@enkaku/client/lib/client.d.ts:71`, applied at `client.js:499`) so a
+   dropped or unrouteable **unary request** rejects rather than hanging; a caller may override it. Reach:
+   enkaku applies `requestTimeoutMs` to unary requests only — stream and channel APIs do not accept a
+   timeout (`client.d.ts:122`, `client.js:517`), which is correct (a long-lived call must not be aborted)
+   but means a dropped stream/channel *creation* still hangs unless the caller supplies its own signal.
+   And a **legacy** caller, pre-upgrade, has no such default at all, so a legacy→upgraded straddled call
+   can still hang — an accepted consequence of the hard cutover, documented below, not a legibility this
+   design can deliver to a peer it has not upgraded.
+2. **An unrouted-tag NACK** (restores legibility for the unregistered-protocol case, and covers
+   stream/channel where the timeout cannot). When an opened inbox frame's tag names a protocol not
+   registered on this peer, publish an `INVALID_MESSAGE`-class error reply. It is constructible without
+   running a `Server`: `decodeFrame` yields `sessionID`, `seq`, and `body.payload.rid`
+   (`hub-tunnel/frame.ts:60,67`). It must obey three constraints or it is worse than nothing:
+   - **Echo the caller's tag.** Tag the NACK with the *unrouted* protocol from the offending frame, not a
+     protocol of ours — else the originating client's own protocol filter discards it.
+   - **Only NACK request-like frames.** Restrict to `body.payload.typ ∈ {request, stream, channel, send}`,
+     exactly as enkaku's own invalid-message path does (`server.js:253`). A `result`/`error`/`receive`
+     reply also carries an `rid` (`@enkaku/protocol/lib/schemas/server.js`); NACKing those would let two
+     peers that both lack the tag volley error frames forever.
+   - **Use a fresh, non-stale session sequence,** because the tunnel drops a stale `seq`
+     (`hub-tunnel/transport.ts:427`).
+
+   The NACK does not reach a legacy caller (it is a tagged frame the legacy peer cannot decode), so legacy
+   straddle hangs remain under the hard-cutover stance regardless.
 
 ## Rider — DID normalization at ingress (kept, independent correctness fix)
 
@@ -195,10 +221,12 @@ devices can therefore straddle versions during a rollout, and there are two stra
 
 Stance: **hard cutover**, consistent with Spec A's pre-1.0 deliberate invalidation of retained history
 and the coupled version band. All group peers must reach this version together. A dropped frame is *not*
-self-announcing — `createOpenOncePath` swallows and acks it (`open-once.ts:68,76`) — so legibility comes
-from the default directed-client timeout required under "Failure legibility": a straddled call rejects on
-timeout rather than hanging. A dual-format transition is rejected because it would reopen the very
-cross-delivery this change closes for the duration of the window.
+self-announcing — `createOpenOncePath` swallows and acks it (`open-once.ts:68,76`). An **upgraded**
+caller's unary straddled call rejects on the default `requestTimeoutMs`; a legacy caller has no such
+default and its stream/channel calls have no timeout, so those straddled calls hang until the peer
+upgrades. That residual hang is the accepted cost of the hard cutover — a dual-format transition is
+rejected because it would reopen the very cross-delivery this change closes for the duration of the
+window.
 
 ## Non-goals
 
@@ -221,26 +249,32 @@ cross-delivery this change closes for the duration of the window.
 
 ## Testing
 
-- **Isolation (rpc-conformance), against the real implementation and the double:**
+- **Isolation (peer-level integration harness, driving two protocols through `createGroupPeer`):**
   - Two protocols defining a same-named procedure: a directed call to A runs A's handler and **not**
     B's.
   - The caller of A receives A's single reply and **no** spurious error reply from B's server.
   - Two protocols to the same member: each protocol's client receives only its own reply.
+
+  These are peer/integration behaviors, not `GroupCrypto`/`GroupMLS` port contracts, so they are new
+  peer-level tests, not clauses in `rpc-conformance`. Routing is independent of the crypto
+  implementation, so the fake crypto double is sufficient to drive them.
 - **Tag authenticity:** a frame tagged for protocol A is never routed to protocol B; a corrupted or
   flipped header does not cause cross-routing (it fails the AEAD open or the version check).
 - **Encoding:** the `VERSION ‖ len ‖ protocol ‖ frame` header round-trips; a protocol name containing
   arbitrary characters (including `/`) is recovered exactly; a legacy untagged frame is rejected by the
   version marker, not misparsed.
-- **Failure legibility:** a directed call to a protocol not registered on the recipient rejects (via the
-  unrouted-tag NACK, and via the default timeout if the NACK is absent) rather than hanging; a call whose
-  frame is dropped rejects on the default timeout; the default timeout is overridable.
+- **Failure legibility:** a directed unary call to a protocol not registered on the recipient rejects
+  (via the unrouted-tag NACK, and via the default timeout as a backstop) rather than hanging; the NACK
+  carries the caller's protocol tag so the caller's filter accepts it; the NACK fires only on request-like
+  frames, never on a reply/error (no NACK ping-pong between two peers lacking the tag); the encoder
+  rejects a protocol name exceeding the uint16 length; the default timeout is overridable.
 - **Rider 2:** a peer given a member DID in long form both addresses it and matches its replies when MLS
   returns the short credential form; `detectRosterChange` does not fire on an equivalent-form flip;
   self-echo suppression holds across DID forms; a short-form DID's inbox topic is byte-identical to today
   (golden pin).
 
-TDD throughout; every vitest step paired with `test:types`. The rpc-conformance suite runs against the
-real implementation **and** the double, since the change is on the directed-inbox port surface. Confirm
+TDD throughout; every vitest step paired with `test:types`. The port conformance suites do not change
+(no port contract changed); the new coverage is peer-level in `@kumiai/rpc`'s own tests. Confirm
 `Cached: 0` on the forced test run.
 
 ## Verification plan
