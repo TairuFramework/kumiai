@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Stage:** planning
+**Stage:** executing
 **Mode:** tasks
 
 **Goal:** Route each directed-inbox frame to exactly one protocol using an authenticated in-frame protocol discriminator, keeping the single shared inbox topic unchanged.
