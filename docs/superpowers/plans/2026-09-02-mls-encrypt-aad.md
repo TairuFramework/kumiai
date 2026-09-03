@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Stage:** planning
+**Stage:** executing
 **Mode:** tasks
 
 **Goal:** Thread MLS `authenticated_data` (AAD) through `GroupHandle.encrypt`/`decrypt` and the `@kumiai/rpc` `GroupCrypto` `wrap`/`unwrap` port, and bind every app frame to the topicID it is published on, so a frame sealed for one topic cannot be opened on another.
