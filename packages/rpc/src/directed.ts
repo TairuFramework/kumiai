@@ -1,11 +1,13 @@
 import { Client } from '@enkaku/client'
 import type { ClientTransportOf, ProtocolDefinition, ServerTransportOf } from '@enkaku/protocol'
 import { type ProcedureHandlers, Server } from '@enkaku/server'
-import type { ByteTransform, Unwrap } from '@kumiai/broadcast'
+import type { Unwrap } from '@kumiai/broadcast'
 import type { StoredMessage } from '@kumiai/hub-protocol'
 import { createHubTunnelTransport, decodeFrame, type MailboxHub } from '@kumiai/hub-tunnel'
+import { fromUTF } from '@sozai/codec'
 import { createRuntime, type Runtime } from '@sozai/runtime'
 
+import type { GroupCrypto } from './crypto.js'
 import type { HubMux } from './hub-mux.js'
 import { createOpenOncePath } from './open-once.js'
 
@@ -71,7 +73,7 @@ export type DirectedClientParams = {
   receiveTopicID: string
   /** The self-inbox topic's one open-once path, shared with the acceptor. */
   inbound: InboundPath
-  wrap: ByteTransform
+  wrap: GroupCrypto['wrap']
   /** Runtime providing platform primitives. Defaults to `createRuntime()`. */
   runtime?: Runtime
 }
@@ -95,7 +97,7 @@ export function createDirectedClient<Protocol extends ProtocolDefinition>(
       return mux.mailbox.publish({
         senderDID: publishParams.senderDID,
         topicID: publishParams.topicID,
-        payload: await wrap(publishParams.payload),
+        payload: await wrap(publishParams.payload, { AAD: fromUTF(publishParams.topicID) }),
       })
     },
     subscribe() {},
@@ -175,7 +177,7 @@ export type InboxAcceptorParams<Protocol extends ProtocolDefinition> = {
   resolveSendTopic: (senderDID: string) => string
   protocol: Protocol
   handlers: ProcedureHandlers<Protocol>
-  wrap: ByteTransform
+  wrap: GroupCrypto['wrap']
 }
 
 type ServerSession = {
@@ -205,7 +207,7 @@ export function createInboxAcceptor<Protocol extends ProtocolDefinition>(
     let closed = false
     const sessionHub: MailboxHub = {
       async publish(publishParams) {
-        const sealed = await wrap(publishParams.payload)
+        const sealed = await wrap(publishParams.payload, { AAD: fromUTF(publishParams.topicID) })
         return mux.mailbox.publish({
           senderDID: publishParams.senderDID,
           topicID: publishParams.topicID,

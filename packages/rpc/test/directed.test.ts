@@ -2,6 +2,7 @@ import type { Client } from '@enkaku/client'
 import type { ProtocolDefinition } from '@enkaku/protocol'
 import type { ProcedureHandlers } from '@enkaku/server'
 import type { Unwrap } from '@kumiai/broadcast'
+import { toUTF } from '@sozai/codec'
 import { createRuntime } from '@sozai/runtime'
 import { describe, expect, test } from 'vitest'
 
@@ -26,6 +27,8 @@ function member(
   localDID: string,
   handlers: Record<string, unknown>,
   unwrap?: Unwrap,
+  /** Called with the AAD every `wrap` seals with, for tests that inspect what got bound. */
+  onWrapAAD?: (aad: Uint8Array | undefined) => void,
 ) {
   const crypto = createFakeCrypto({ localDID })
   const mux = createHubMux({ hub, localDID })
@@ -38,7 +41,10 @@ function member(
     resolveSendTopic: (senderDID) => inboxTopic(SECRET, EPOCH, senderDID),
     protocol,
     handlers: handlers as Handlers,
-    wrap: crypto.wrap,
+    wrap: (bytes, opts) => {
+      onWrapAAD?.(opts?.AAD)
+      return crypto.wrap(bytes, opts)
+    },
   })
   return { mux, acceptor }
 }
@@ -47,7 +53,14 @@ function member(
  * A caller's own inbox path, shared by every directed client it builds — the same sharing the
  * peer does, because the reply topic is the caller's one inbox whoever it is talking to.
  */
-function caller(hub: FakeHub, localDID: string, memberDID: string, sessionID: string) {
+function caller(
+  hub: FakeHub,
+  localDID: string,
+  memberDID: string,
+  sessionID: string,
+  /** Called with the AAD every `wrap` seals with, for tests that inspect what got bound. */
+  onWrapAAD?: (aad: Uint8Array | undefined) => void,
+) {
   const crypto = createFakeCrypto({ localDID })
   const mux = createHubMux({ hub, localDID })
   const receiveTopicID = inboxTopic(SECRET, EPOCH, localDID)
@@ -59,7 +72,10 @@ function caller(hub: FakeHub, localDID: string, memberDID: string, sessionID: st
     receiveTopicID,
     inbound: createInboxPath({ mux, topicID: receiveTopicID, unwrap: crypto.unwrap }),
     runtime: createRuntime({ getRandomID: () => sessionID }),
-    wrap: crypto.wrap,
+    wrap: (bytes, opts) => {
+      onWrapAAD?.(opts?.AAD)
+      return crypto.wrap(bytes, opts)
+    },
   })
   return { ...created, mux, crypto }
 }
@@ -74,6 +90,50 @@ describe('directed RPC', () => {
 
     const result = await client.request('rpc/double', { param: { n: 21 } })
     expect(result).toEqual({ n: 42 })
+
+    await dispose()
+    await aliceMux.dispose()
+    await bob.acceptor.dispose()
+    await bob.mux.dispose()
+  })
+
+  test('directed frame binds its destination topic as AAD', async () => {
+    const hub = new FakeHub()
+    const bobAAD: Array<Uint8Array | undefined> = []
+    const bob = member(
+      hub,
+      'bob',
+      { 'rpc/double': (ctx: { param: { n: number } }) => ({ n: ctx.param.n * 2 }) },
+      undefined,
+      (aad) => bobAAD.push(aad),
+    )
+    const aliceAAD: Array<Uint8Array | undefined> = []
+    const {
+      client,
+      dispose,
+      mux: aliceMux,
+    } = caller(hub, 'alice', 'bob', 'session-a-b', (aad) => aliceAAD.push(aad))
+
+    // The round trip must still work: binding AAD on send with no matching `expectedAAD` on
+    // receive (that's Task 7) must not break routing.
+    const result = await client.request('rpc/double', { param: { n: 21 } })
+    expect(result).toEqual({ n: 42 })
+
+    // Alice's request publish bound the AAD to bob's inbox topic — where it was sent.
+    const bobTopicID = inboxTopic(SECRET, EPOCH, 'bob')
+    expect(aliceAAD.length).toBeGreaterThan(0)
+    for (const aad of aliceAAD) {
+      expect(aad).toBeInstanceOf(Uint8Array)
+      expect(toUTF(aad as Uint8Array)).toBe(bobTopicID)
+    }
+
+    // Bob's reply publish bound the AAD to alice's inbox topic — where the reply was sent.
+    const aliceTopicID = inboxTopic(SECRET, EPOCH, 'alice')
+    expect(bobAAD.length).toBeGreaterThan(0)
+    for (const aad of bobAAD) {
+      expect(aad).toBeInstanceOf(Uint8Array)
+      expect(toUTF(aad as Uint8Array)).toBe(aliceTopicID)
+    }
 
     await dispose()
     await aliceMux.dispose()
