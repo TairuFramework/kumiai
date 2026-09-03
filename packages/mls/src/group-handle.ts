@@ -102,6 +102,13 @@ function zeroAll(buffers: Array<Uint8Array>): void {
   for (const buffer of buffers) buffer.fill(0)
 }
 
+/** AAD is not secret, so a length/byte compare is enough — no constant-time need. */
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+  return true
+}
+
 /** Thrown by GroupHandle.processMessage when the commit policy rejects an incoming
  *  commit. The handle is left at its pre-commit epoch. */
 export class CommitRejectedError extends Error {
@@ -186,6 +193,7 @@ function readPrivateFrame(decoded: unknown, contentType: number): PrivateCommitF
         contentType?: unknown
         encryptedSenderData?: unknown
         ciphertext?: unknown
+        authenticatedData?: unknown
       }
     | undefined
   if (pm == null || pm.contentType !== contentType) return undefined
@@ -193,7 +201,8 @@ function readPrivateFrame(decoded: unknown, contentType: number): PrivateCommitF
     !(pm.groupId instanceof Uint8Array) ||
     typeof pm.epoch !== 'bigint' ||
     !(pm.encryptedSenderData instanceof Uint8Array) ||
-    !(pm.ciphertext instanceof Uint8Array)
+    !(pm.ciphertext instanceof Uint8Array) ||
+    !(pm.authenticatedData instanceof Uint8Array)
   ) {
     return undefined
   }
@@ -203,6 +212,7 @@ function readPrivateFrame(decoded: unknown, contentType: number): PrivateCommitF
     contentType: pm.contentType,
     encryptedSenderData: pm.encryptedSenderData,
     ciphertext: pm.ciphertext,
+    authenticatedData: pm.authenticatedData,
   }
 }
 
@@ -755,13 +765,18 @@ export class GroupHandle {
    * {@link commitInvite}, {@link removeMember}, {@link commitLedgerEntries}) must not
    * be reused to send — it silently emits at the now-stale epoch. Adopt the commit's
    * `newGroup` and encrypt on that.
+   *
+   * `opts.AAD` becomes the frame's MLS `authenticated_data` — bound into the AEAD but
+   * carried in the clear, so a caller reading it back (or comparing via `decrypt`'s
+   * `expectedAAD`) needs no key. Defaults to empty.
    */
-  async encrypt(plaintext: Uint8Array): Promise<Uint8Array> {
+  async encrypt(plaintext: Uint8Array, opts?: { AAD?: Uint8Array }): Promise<Uint8Array> {
     return mutexFor(this).run(async () => {
       const { newState, message, consumed } = await createApplicationMessage({
         context: this.#context,
         state: this.#state,
         message: plaintext,
+        authenticatedData: opts?.AAD ?? new Uint8Array(),
       })
       this.#state = newState
       zeroAll(consumed)
@@ -792,13 +807,26 @@ export class GroupHandle {
    *
    * ts-mls's own `processMessage` returns an application message's plaintext WITHOUT any
    * sender, which is why this exists rather than delegating.
+   *
+   * `opts.expectedAAD`, when given, is compared against the frame's CLEARTEXT
+   * `authenticatedData` BEFORE `mlsProcessMessage` runs — a mismatch throws having consumed
+   * no ratchet generation, so a wrong-topic frame costs nothing to reject. The frame's AAD
+   * is always returned, whether or not `expectedAAD` was given.
    */
-  async decrypt(message: Uint8Array): Promise<{ payload: Uint8Array; senderDID?: string }> {
+  async decrypt(
+    message: Uint8Array,
+    opts?: { expectedAAD?: Uint8Array },
+  ): Promise<{ payload: Uint8Array; senderDID?: string; AAD: Uint8Array }> {
     const decoded = decode(mlsMessageDecoder, message)
     if (decoded == null) throw new Error('decrypt: failed to decode MLSMessage')
     return mutexFor(this).run(async () => {
       const pm = readPrivateFrame(decoded, contentTypes.application)
       if (pm == null) throw new Error('decrypt: not a PrivateMessage application frame')
+      // Pre-open: reject a wrong-topic frame from its CLEARTEXT authenticatedData before
+      // mlsProcessMessage consumes a ratchet generation. Same lane as the sender-leaf read below.
+      if (opts?.expectedAAD != null && !bytesEqual(pm.authenticatedData, opts.expectedAAD)) {
+        throw new Error('decrypt: frame authenticated data does not match expected AAD')
+      }
       // Read the sender BEFORE opening: the sender-data secret is epoch-level and this
       // consumes no ratchet key, so a frame that then fails to open has cost nothing.
       const leafIndex = await readSenderLeafIndex(
@@ -817,7 +845,7 @@ export class GroupHandle {
         throw new Error('decrypt: frame was not an application message')
       }
       const senderDID = leafIndex == null ? undefined : this.#didOfLeaf(leafIndex)
-      return { payload: result.message, ...(senderDID != null && { senderDID }) }
+      return { payload: result.message, AAD: result.aad, ...(senderDID != null && { senderDID }) }
     })
   }
 
