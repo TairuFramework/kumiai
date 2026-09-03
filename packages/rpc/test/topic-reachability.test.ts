@@ -58,24 +58,24 @@ async function startPeerWithLocalDID(localDID: string) {
 
 describe('the topic guards sit on the paths a host actually reaches', () => {
   test('createGroupPeer rejects a NUL-bearing localDID at init', async () => {
-    await expect(startPeerWithLocalDID('did:key:z\0evil')).rejects.toThrow()
+    await expect(startPeerWithLocalDID('did:key:z\0evil')).rejects.toThrow(/scope/)
   })
 
   test('createGroupPeer rejects a lone-surrogate localDID at init', async () => {
-    await expect(startPeerWithLocalDID('did:key:z\uD800')).rejects.toThrow()
+    await expect(startPeerWithLocalDID('did:key:z\uD800')).rejects.toThrow(/scope/)
   })
 
   test('.to() rejects a lone-surrogate target DID', async () => {
     const peer = await startPeerWithLocalDID('did:key:zalice')
     // `to` is declared `async`, so even a synchronous throw inside it (from `inboxTopic`) reaches
     // the caller as a rejected promise, never a synchronous throw.
-    await expect(peer.protocol('room').to('did:key:z\uD800')).rejects.toThrow()
+    await expect(peer.protocol('room').to('did:key:z\uD800')).rejects.toThrow(/scope/)
     await peer.dispose()
   })
 
   test('.to() rejects a NUL-bearing target DID', async () => {
     const peer = await startPeerWithLocalDID('did:key:zalice')
-    await expect(peer.protocol('room').to('did:key:z\0evil')).rejects.toThrow()
+    await expect(peer.protocol('room').to('did:key:z\0evil')).rejects.toThrow(/scope/)
     await peer.dispose()
   })
 })
