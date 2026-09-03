@@ -32,6 +32,9 @@ export const RENDEZVOUS_LABEL = 'kumiai/rendezvous/v1'
 const DISCOVERY_PREFIX = 'kumiai/discovery/v1'
 const SEP = '\0'
 
+/** Framework label namespace. Host protocols may not derive topics under it — see {@link protocolTopic}. */
+const RESERVED_LABEL_PREFIX = 'kumiai/'
+
 /**
  * Group-scoped broadcast/multicast topic for an application protocol. Opaque to
  * the hub; derivable only by members holding the epoch secret. `scope`
@@ -43,13 +46,19 @@ export function protocolTopic(
   protocol: string,
   scope = '',
 ): string {
+  if (protocol.startsWith(RESERVED_LABEL_PREFIX)) {
+    throw new Error(
+      `protocolTopic: protocol must not use the reserved "${RESERVED_LABEL_PREFIX}" namespace`,
+    )
+  }
   return deriveTopicID(secret, epoch, protocol, scope)
 }
 
 /**
  * Group-scoped personal inbox topic for unicast/directed RPC to `memberDID`.
- * Opaque; derivable only by fellow members. Uses the reserved {@link INBOX_LABEL}
- * so it never collides with an application protocol of the same name.
+ * Opaque; derivable only by fellow members. Uses the reserved {@link INBOX_LABEL};
+ * {@link protocolTopic} enforces the separation from application protocols by
+ * rejecting the `kumiai/` namespace.
  */
 export function inboxTopic(secret: Uint8Array, epoch: number, memberDID: string): string {
   return deriveTopicID(secret, epoch, INBOX_LABEL, memberDID)
@@ -84,5 +93,8 @@ export function rendezvousTopic(recoverySecret: Uint8Array): string {
  * nothing-up-my-sleeve.
  */
 export function discoveryTopic(memberDID: string): string {
+  if (!memberDID.isWellFormed()) {
+    throw new Error('discoveryTopic: memberDID must be well-formed UTF-16 (no lone surrogates)')
+  }
   return toB64U(sha256(fromUTF(`${DISCOVERY_PREFIX}${SEP}${memberDID}`)))
 }

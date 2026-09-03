@@ -7,8 +7,9 @@
 [pre-1.0 breaking API surface](../milestones/pre-1.0-breaking-api.md) — the change that had to come
 first before any rpc-side AAD binding.
 
-This was Spec A of three. Spec B ([`deriveTopicID` injectivity](../next/2026-09-02-derivetopicid-injectivity.md))
-and Spec C ([per-protocol inbox](../next/2026-09-02-per-protocol-inbox.md)) remain filed in `next/`.
+This was Spec A of three. Spec B ([`deriveTopicID` injectivity](./2026-09-03-derivetopicid-injectivity.complete.md))
+shipped 2026-09-03. Spec C ([per-protocol inbox](../next/2026-09-02-per-protocol-inbox.md)) remains
+filed in `next/`.
 
 ## Goal
 

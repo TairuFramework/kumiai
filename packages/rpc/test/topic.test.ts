@@ -40,6 +40,10 @@ describe('topic derivation', () => {
     expect(inboxTopic(SECRET, 1, 'did:key:zABC')).not.toBe(inboxTopic(SECRET, 2, 'did:key:zABC'))
   })
 
+  test('commitTopic is pinned (no rotation)', () => {
+    expect(commitTopic(RECOVERY_SECRET)).toBe('JfMPD9Vr90P3vhj0kKSAIn8e087CnhB0QjM8IZQDNXI')
+  })
+
   test('the commit and rendezvous lanes are separate topics', () => {
     // They want opposite things from the hub: the commit topic is a log whose head every
     // commit moves; a rendezvous frame must never move that head.
@@ -62,5 +66,40 @@ describe('topic derivation', () => {
     expect(t).not.toBe(discoveryTopic('did:key:zXYZ'))
     expect(typeof t).toBe('string')
     expect(t.length).toBeGreaterThan(0)
+  })
+
+  test('protocolTopic rejects the reserved kumiai/ namespace', () => {
+    expect(() => protocolTopic(SECRET, 1, 'kumiai/inbox/v1', 'did:key:zABC')).toThrow(/reserved/)
+    expect(() => protocolTopic(SECRET, 0, 'kumiai/commit/v1')).toThrow(/reserved/)
+    expect(() => protocolTopic(SECRET, 0, 'kumiai/rendezvous/v1')).toThrow(/reserved/)
+    expect(() => protocolTopic(SECRET, 1, 'kumiai/anything')).toThrow(/reserved/)
+  })
+
+  test('protocolTopic still accepts ordinary host protocols unchanged', () => {
+    expect(protocolTopic(SECRET, 1, 'chat')).toBe(deriveTopicID(SECRET, 1, 'chat'))
+    expect(protocolTopic(SECRET, 1, 'sync', 'roomA')).toBe(
+      deriveTopicID(SECRET, 1, 'sync', 'roomA'),
+    )
+  })
+
+  test('inboxTopic rejects a NUL-bearing or lone-surrogate DID (via deriveTopicID)', () => {
+    expect(() => inboxTopic(SECRET, 1, 'did:key:z\0evil')).toThrow(/scope/)
+    expect(() => inboxTopic(SECRET, 1, 'did:key:z\uD800')).toThrow(/scope/)
+  })
+
+  test('discoveryTopic rejects a lone-surrogate DID but accepts a NUL', () => {
+    expect(() => discoveryTopic('did:key:z\uD800')).toThrow(/memberDID/)
+    // Single-component prefix is injective regardless of NUL, so a NUL DID is accepted.
+    const t = discoveryTopic('did:key:z\0x')
+    expect(typeof t).toBe('string')
+    expect(t).not.toBe(discoveryTopic('did:key:zx'))
+  })
+
+  test('deriveTopicID can intentionally reproduce a reserved rpc tuple (layering boundary)', () => {
+    // The reservation lives in protocolTopic, not the label-agnostic primitive: the helpers, not
+    // deriveTopicID, carry domain separation. This documents that boundary; it is not a guard.
+    expect(deriveTopicID(SECRET, 1, INBOX_LABEL, 'did:key:zABC')).toBe(
+      inboxTopic(SECRET, 1, 'did:key:zABC'),
+    )
   })
 })
