@@ -30,8 +30,11 @@ export type ConformanceUnwrapResult = { payload: Uint8Array; senderDID: string }
 export type ConformanceGroupCrypto = {
   epoch: () => number
   exportSecret: (label: string, length?: number) => Uint8Array | Promise<Uint8Array>
-  wrap: (bytes: Uint8Array) => Uint8Array | Promise<Uint8Array>
-  unwrap: (bytes: Uint8Array) => ConformanceUnwrapResult | Promise<ConformanceUnwrapResult>
+  wrap: (bytes: Uint8Array, opts?: { AAD?: Uint8Array }) => Uint8Array | Promise<Uint8Array>
+  unwrap: (
+    bytes: Uint8Array,
+    opts?: { expectedAAD?: Uint8Array },
+  ) => ConformanceUnwrapResult | Promise<ConformanceUnwrapResult>
   frameEpoch: (bytes: Uint8Array) => number | null
   sealEntries: (bytes: Uint8Array) => Uint8Array | Promise<Uint8Array>
   openEntries: (sealed: Uint8Array) => Uint8Array | Promise<Uint8Array>
@@ -320,6 +323,59 @@ export function testGroupCryptoConformance(params: GroupCryptoConformanceParams)
           for (let step = 0; step < 6; step++) await group.advance()
           expect(bob.crypto.epoch()).toBe(from + 6)
           await refuses(() => bob.crypto.unwrap(stale))
+        })
+      })
+    })
+
+    describe('wrap / unwrap AAD', () => {
+      test('round-trips AAD: wrap with AAD, unwrap with matching expectedAAD', async () => {
+        await withGroup(2, 'aad-roundtrip', async ({ members }) => {
+          const alice = memberAt(members, 0)
+          const bob = memberAt(members, 1)
+          // biome-ignore lint/style/useNamingConvention: AAD is the port's own acronym, capitalized to match
+          const AAD = utf8.encode('topic-x')
+          const sealed = await alice.crypto.wrap(utf8.encode('hi'), { AAD })
+          const out = await bob.crypto.unwrap(sealed, { expectedAAD: AAD })
+          expect(text(out.payload)).toBe('hi')
+          expect(out.senderDID).toBe(alice.did)
+        })
+      })
+
+      test('unwrap throws when expectedAAD does not match the frame', async () => {
+        await withGroup(2, 'aad-mismatch', async ({ members }) => {
+          const alice = memberAt(members, 0)
+          const bob = memberAt(members, 1)
+          const sealed = await alice.crypto.wrap(utf8.encode('hi'), { AAD: utf8.encode('topic-a') })
+          await refuses(() => bob.crypto.unwrap(sealed, { expectedAAD: utf8.encode('topic-b') }))
+        })
+      })
+
+      /**
+       * PRE-OPEN: the rejected mismatch must not have spent the frame's ratchet key. If the wrong
+       * `expectedAAD` opened the frame first and only then compared, the same bytes would refuse
+       * on this second call too — for having already been consumed — indistinguishable from a
+       * genuine post-open compare. Re-opening with the CORRECT `expectedAAD` on the same sealed
+       * bytes is what tells the two apart.
+       */
+      test('mismatch is PRE-OPEN: the same bytes still open with the correct expectedAAD', async () => {
+        await withGroup(2, 'aad-preopen', async ({ members }) => {
+          const alice = memberAt(members, 0)
+          const bob = memberAt(members, 1)
+          // biome-ignore lint/style/useNamingConvention: AAD is the port's own acronym, capitalized to match
+          const AAD = utf8.encode('topic-x')
+          const sealed = await alice.crypto.wrap(utf8.encode('hi'), { AAD })
+          await refuses(() => bob.crypto.unwrap(sealed, { expectedAAD: utf8.encode('wrong') }))
+          const out = await bob.crypto.unwrap(sealed, { expectedAAD: AAD })
+          expect(text(out.payload)).toBe('hi')
+        })
+      })
+
+      test('no-AAD round-trips (empty default) both ways', async () => {
+        await withGroup(2, 'aad-none', async ({ members }) => {
+          const alice = memberAt(members, 0)
+          const bob = memberAt(members, 1)
+          const sealed = await alice.crypto.wrap(utf8.encode('hi'))
+          expect(text((await opened(bob.crypto, sealed)).payload)).toBe('hi')
         })
       })
     })
