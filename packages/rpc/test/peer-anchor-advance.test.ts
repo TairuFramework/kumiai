@@ -193,7 +193,7 @@ describe('a peer that adopts a journalled roster change reads its backlog and ro
       topicID: chatTopic(1),
       retain: 'log',
       payload: await alice.wrap(encodeEventFrame('chat/posted', { text: 'while he was gone' }), {
-        AAD: fromUTF(chatTopic(1)),
+        aad: fromUTF(chatTopic(1)),
       }),
     })
 

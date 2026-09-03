@@ -43,7 +43,7 @@ describe('the retained drain binds expectedAAD to the cursor topic', () => {
       topicID,
       retain: 'log',
       payload: await forged.wrap(encodeEventFrame('chat/posted', { text: 'wrong topic' }), {
-        AAD: fromUTF(otherTopicID),
+        aad: fromUTF(otherTopicID),
       }),
     })
     await flush()

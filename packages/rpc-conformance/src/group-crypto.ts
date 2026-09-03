@@ -30,7 +30,7 @@ export type ConformanceUnwrapResult = { payload: Uint8Array; senderDID: string }
 export type ConformanceGroupCrypto = {
   epoch: () => number
   exportSecret: (label: string, length?: number) => Uint8Array | Promise<Uint8Array>
-  wrap: (bytes: Uint8Array, opts?: { AAD?: Uint8Array }) => Uint8Array | Promise<Uint8Array>
+  wrap: (bytes: Uint8Array, opts?: { aad?: Uint8Array }) => Uint8Array | Promise<Uint8Array>
   unwrap: (
     bytes: Uint8Array,
     opts?: { expectedAAD?: Uint8Array },
@@ -332,10 +332,9 @@ export function testGroupCryptoConformance(params: GroupCryptoConformanceParams)
         await withGroup(2, 'aad-roundtrip', async ({ members }) => {
           const alice = memberAt(members, 0)
           const bob = memberAt(members, 1)
-          // biome-ignore lint/style/useNamingConvention: AAD is the port's own acronym, capitalized to match
-          const AAD = utf8.encode('topic-x')
-          const sealed = await alice.crypto.wrap(utf8.encode('hi'), { AAD })
-          const out = await bob.crypto.unwrap(sealed, { expectedAAD: AAD })
+          const aad = utf8.encode('topic-x')
+          const sealed = await alice.crypto.wrap(utf8.encode('hi'), { aad })
+          const out = await bob.crypto.unwrap(sealed, { expectedAAD: aad })
           expect(text(out.payload)).toBe('hi')
           expect(out.senderDID).toBe(alice.did)
         })
@@ -345,7 +344,7 @@ export function testGroupCryptoConformance(params: GroupCryptoConformanceParams)
         await withGroup(2, 'aad-mismatch', async ({ members }) => {
           const alice = memberAt(members, 0)
           const bob = memberAt(members, 1)
-          const sealed = await alice.crypto.wrap(utf8.encode('hi'), { AAD: utf8.encode('topic-a') })
+          const sealed = await alice.crypto.wrap(utf8.encode('hi'), { aad: utf8.encode('topic-a') })
           await refuses(() => bob.crypto.unwrap(sealed, { expectedAAD: utf8.encode('topic-b') }))
         })
       })
@@ -361,11 +360,10 @@ export function testGroupCryptoConformance(params: GroupCryptoConformanceParams)
         await withGroup(2, 'aad-preopen', async ({ members }) => {
           const alice = memberAt(members, 0)
           const bob = memberAt(members, 1)
-          // biome-ignore lint/style/useNamingConvention: AAD is the port's own acronym, capitalized to match
-          const AAD = utf8.encode('topic-x')
-          const sealed = await alice.crypto.wrap(utf8.encode('hi'), { AAD })
+          const aad = utf8.encode('topic-x')
+          const sealed = await alice.crypto.wrap(utf8.encode('hi'), { aad })
           await refuses(() => bob.crypto.unwrap(sealed, { expectedAAD: utf8.encode('wrong') }))
-          const out = await bob.crypto.unwrap(sealed, { expectedAAD: AAD })
+          const out = await bob.crypto.unwrap(sealed, { expectedAAD: aad })
           expect(text(out.payload)).toBe('hi')
         })
       })
@@ -393,13 +391,12 @@ export function testGroupCryptoConformance(params: GroupCryptoConformanceParams)
         await withGroup(2, 'aad-tamper', async ({ members }) => {
           const alice = memberAt(members, 0)
           const bob = memberAt(members, 1)
-          // biome-ignore lint/style/useNamingConvention: AAD is the port's own acronym, capitalized to match
-          const AAD = utf8.encode('topic-x')
-          const sealed = await alice.crypto.wrap(utf8.encode('hi'), { AAD })
+          const aad = utf8.encode('topic-x')
+          const sealed = await alice.crypto.wrap(utf8.encode('hi'), { aad })
           const tampered = Uint8Array.from(sealed)
           tampered[tampered.length - 1] = ((tampered[tampered.length - 1] as number) ^ 0xff) & 0xff
-          await refuses(() => bob.crypto.unwrap(tampered, { expectedAAD: AAD }))
-          const out = await bob.crypto.unwrap(sealed, { expectedAAD: AAD })
+          await refuses(() => bob.crypto.unwrap(tampered, { expectedAAD: aad }))
+          const out = await bob.crypto.unwrap(sealed, { expectedAAD: aad })
           expect(text(out.payload)).toBe('hi')
         })
       })

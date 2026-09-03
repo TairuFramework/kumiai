@@ -60,8 +60,8 @@ frame carried no cryptographic binding to where it belonged.
 
 ## What was built
 
-- `@kumiai/mls` — `GroupHandle.encrypt(plaintext, { AAD? })` and
-  `decrypt(message, { expectedAAD? })` returning `{ payload, senderDID?, AAD }`, with the pre-open
+- `@kumiai/mls` — `GroupHandle.encrypt(plaintext, { aad? })` and
+  `decrypt(message, { expectedAAD? })` returning `{ payload, senderDID?, aad }`, with the pre-open
   compare; `PrivateCommitFrame` and `readPrivateFrame` surface `authenticatedData`.
 - `@kumiai/rpc` — `GroupCrypto` `wrap`/`unwrap` gain AAD; directed lanes, the app live lane, inbox
   receive, and the app retained drain each bind their topicID.

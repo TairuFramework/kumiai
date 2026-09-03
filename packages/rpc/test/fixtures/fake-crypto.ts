@@ -200,7 +200,7 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
 
   const wrap: GroupCrypto['wrap'] = (bytes, opts) => {
     const did = fromUTF(localDID)
-    const aad = opts?.AAD ?? new Uint8Array()
+    const aad = opts?.aad ?? new Uint8Array()
     const framed = new Uint8Array(
       FRAMED_HEADER_BYTES + AAD_LEN_BYTES + did.length + aad.length + bytes.length,
     )

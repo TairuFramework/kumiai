@@ -313,7 +313,7 @@ describe('the drain bounds what a frame may claim, and passes no epoch it failed
           topicID,
           retain: 'log',
           payload: await atTwo.wrap(encodeEventFrame('chat/posted', { text: 'mid-walk, at two' }), {
-            AAD: fromUTF(topicID),
+            aad: fromUTF(topicID),
           }),
         })
         hub.reattach('bob')

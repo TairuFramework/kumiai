@@ -766,17 +766,17 @@ export class GroupHandle {
    * be reused to send — it silently emits at the now-stale epoch. Adopt the commit's
    * `newGroup` and encrypt on that.
    *
-   * `opts.AAD` becomes the frame's MLS `authenticated_data` — bound into the AEAD but
+   * `opts.aad` becomes the frame's MLS `authenticated_data` — bound into the AEAD but
    * carried in the clear, so a caller reading it back (or comparing via `decrypt`'s
    * `expectedAAD`) needs no key. Defaults to empty.
    */
-  async encrypt(plaintext: Uint8Array, opts?: { AAD?: Uint8Array }): Promise<Uint8Array> {
+  async encrypt(plaintext: Uint8Array, opts?: { aad?: Uint8Array }): Promise<Uint8Array> {
     return mutexFor(this).run(async () => {
       const { newState, message, consumed } = await createApplicationMessage({
         context: this.#context,
         state: this.#state,
         message: plaintext,
-        authenticatedData: opts?.AAD ?? new Uint8Array(),
+        authenticatedData: opts?.aad ?? new Uint8Array(),
       })
       this.#state = newState
       zeroAll(consumed)
@@ -816,7 +816,7 @@ export class GroupHandle {
   async decrypt(
     message: Uint8Array,
     opts?: { expectedAAD?: Uint8Array },
-  ): Promise<{ payload: Uint8Array; senderDID?: string; AAD: Uint8Array }> {
+  ): Promise<{ payload: Uint8Array; senderDID?: string; aad: Uint8Array }> {
     const decoded = decode(mlsMessageDecoder, message)
     if (decoded == null) throw new Error('decrypt: failed to decode MLSMessage')
     return mutexFor(this).run(async () => {
@@ -845,7 +845,7 @@ export class GroupHandle {
         throw new Error('decrypt: frame was not an application message')
       }
       const senderDID = leafIndex == null ? undefined : this.#didOfLeaf(leafIndex)
-      return { payload: result.message, AAD: result.aad, ...(senderDID != null && { senderDID }) }
+      return { payload: result.message, aad: result.aad, ...(senderDID != null && { senderDID }) }
     })
   }
 

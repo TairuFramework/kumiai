@@ -1630,17 +1630,17 @@ describe('GroupHandle commit enforcement (default-on)', () => {
 describe('encrypt/decrypt AAD', () => {
   test('round-trips AAD and returns it on decrypt', async () => {
     const { aliceGroup, bobGroup } = await twoMemberGroup()
-    const Aad = new TextEncoder().encode('topic-x')
-    const sealed = await aliceGroup.encrypt(new TextEncoder().encode('hi'), { AAD: Aad })
-    const opened = await bobGroup.decrypt(sealed, { expectedAAD: Aad })
+    const aad = new TextEncoder().encode('topic-x')
+    const sealed = await aliceGroup.encrypt(new TextEncoder().encode('hi'), { aad })
+    const opened = await bobGroup.decrypt(sealed, { expectedAAD: aad })
     expect(new TextDecoder().decode(opened.payload)).toBe('hi')
-    expect(opened.AAD).toEqual(Aad)
+    expect(opened.aad).toEqual(aad)
   })
 
   test('decrypt throws on expectedAAD mismatch, distinct from not-my-epoch', async () => {
     const { aliceGroup, bobGroup } = await twoMemberGroup()
     const sealed = await aliceGroup.encrypt(new TextEncoder().encode('hi'), {
-      AAD: new TextEncoder().encode('topic-a'),
+      aad: new TextEncoder().encode('topic-a'),
     })
     await expect(
       bobGroup.decrypt(sealed, { expectedAAD: new TextEncoder().encode('topic-b') }),
@@ -1649,12 +1649,12 @@ describe('encrypt/decrypt AAD', () => {
 
   test('pre-open compare preserves the ratchet: same ciphertext opens after a rejected wrong-AAD attempt', async () => {
     const { aliceGroup, bobGroup } = await twoMemberGroup()
-    const Aad = new TextEncoder().encode('topic-x')
-    const sealed = await aliceGroup.encrypt(new TextEncoder().encode('hi'), { AAD: Aad })
+    const aad = new TextEncoder().encode('topic-x')
+    const sealed = await aliceGroup.encrypt(new TextEncoder().encode('hi'), { aad })
     await expect(
       bobGroup.decrypt(sealed, { expectedAAD: new TextEncoder().encode('wrong') }),
     ).rejects.toThrow()
-    const opened = await bobGroup.decrypt(sealed, { expectedAAD: Aad })
+    const opened = await bobGroup.decrypt(sealed, { expectedAAD: aad })
     expect(new TextDecoder().decode(opened.payload)).toBe('hi')
   })
 
@@ -1663,7 +1663,7 @@ describe('encrypt/decrypt AAD', () => {
     const sealed = await aliceGroup.encrypt(new TextEncoder().encode('hi'))
     const opened = await bobGroup.decrypt(sealed)
     expect(new TextDecoder().decode(opened.payload)).toBe('hi')
-    expect(opened.AAD).toEqual(new Uint8Array())
+    expect(opened.aad).toEqual(new Uint8Array())
   })
 })
 

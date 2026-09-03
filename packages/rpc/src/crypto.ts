@@ -62,7 +62,7 @@ export type GroupCrypto = {
    * say so.
    */
   exportSecret(label: string, length?: number): Uint8Array | Promise<Uint8Array>
-  wrap(bytes: Uint8Array, opts?: { AAD?: Uint8Array }): Uint8Array | Promise<Uint8Array>
+  wrap(bytes: Uint8Array, opts?: { aad?: Uint8Array }): Uint8Array | Promise<Uint8Array>
   /**
    * Open a sealed app frame and recover who sent it. Returns {@link GroupUnwrapResult}, whose
    * `senderDID` is REQUIRED: an implementation that cannot name the sender must throw, not return

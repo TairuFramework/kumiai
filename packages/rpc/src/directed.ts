@@ -97,7 +97,7 @@ export function createDirectedClient<Protocol extends ProtocolDefinition>(
       return mux.mailbox.publish({
         senderDID: publishParams.senderDID,
         topicID: publishParams.topicID,
-        payload: await wrap(publishParams.payload, { AAD: fromUTF(publishParams.topicID) }),
+        payload: await wrap(publishParams.payload, { aad: fromUTF(publishParams.topicID) }),
       })
     },
     subscribe() {},
@@ -207,7 +207,7 @@ export function createInboxAcceptor<Protocol extends ProtocolDefinition>(
     let closed = false
     const sessionHub: MailboxHub = {
       async publish(publishParams) {
-        const sealed = await wrap(publishParams.payload, { AAD: fromUTF(publishParams.topicID) })
+        const sealed = await wrap(publishParams.payload, { aad: fromUTF(publishParams.topicID) })
         return mux.mailbox.publish({
           senderDID: publishParams.senderDID,
           topicID: publishParams.topicID,

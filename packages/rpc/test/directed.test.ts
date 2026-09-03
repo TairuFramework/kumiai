@@ -42,7 +42,7 @@ function member(
     protocol,
     handlers: handlers as Handlers,
     wrap: (bytes, opts) => {
-      onWrapAAD?.(opts?.AAD)
+      onWrapAAD?.(opts?.aad)
       return crypto.wrap(bytes, opts)
     },
   })
@@ -73,7 +73,7 @@ function caller(
     inbound: createInboxPath({ mux, topicID: receiveTopicID, unwrap: crypto.unwrap }),
     runtime: createRuntime({ getRandomID: () => sessionID }),
     wrap: (bytes, opts) => {
-      onWrapAAD?.(opts?.AAD)
+      onWrapAAD?.(opts?.aad)
       return crypto.wrap(bytes, opts)
     },
   })

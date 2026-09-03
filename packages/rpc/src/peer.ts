@@ -670,7 +670,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     while (true) {
       const at = anchor
       const topicID = protocolTopic(at.secret, at.epoch, name)
-      const payload = await crypto.wrap(bytes, { AAD: fromUTF(topicID) })
+      const payload = await crypto.wrap(bytes, { aad: fromUTF(topicID) })
       if (anchor === at) return { topicID, payload }
     }
   }

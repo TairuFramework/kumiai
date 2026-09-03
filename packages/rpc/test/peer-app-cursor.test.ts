@@ -134,7 +134,7 @@ describe('the app-lane drain reads from a durable position and reports what aged
         topicID,
         retain: 'log',
         payload: await crypto.wrap(encodeEventFrame('chat/posted', { text }), {
-          AAD: fromUTF(topicID),
+          aad: fromUTF(topicID),
         }),
       })
     }
