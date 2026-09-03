@@ -1,6 +1,6 @@
 import type { ProtocolDefinition } from '@enkaku/protocol'
 import type { StoredMessage } from '@kumiai/hub-protocol'
-import { toUTF } from '@sozai/codec'
+import { fromUTF, toUTF } from '@sozai/codec'
 
 import type { Anchor } from './anchor.js'
 import type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
@@ -411,7 +411,8 @@ export function createAppLane(params: AppLaneParams): AppLane {
     }
     for (const [name, frames] of segment) {
       const events = appEventHandlers.get(name)
-      if (events == null || frames.length === 0) continue
+      const cursor = cursors.get(name)
+      if (events == null || cursor == null || frames.length === 0) continue
       for (const frame of frames) {
         const sealed = frame.sealed
         if (sealed == null) continue // done on an earlier pass, and only holding its place
@@ -427,11 +428,14 @@ export function createAppLane(params: AppLaneParams): AppLane {
         let opened: GroupUnwrapResult
         try {
           // `crypto.unwrap` always returns the full result — `senderDID` is REQUIRED — so there is
-          // no bare-`Uint8Array` shortcut left to normalize away here.
-          opened = await crypto.unwrap(sealed)
+          // no bare-`Uint8Array` shortcut left to normalize away here. `expectedAAD` is bound to
+          // the cursor's own topic, the authoritative answer to "what lane is this drain reading".
+          opened = await crypto.unwrap(sealed, { expectedAAD: fromUTF(cursor.topicID) })
         } catch {
-          // It claimed this epoch and the handle refused it. Only `unwrap` is authoritative, and
-          // the handle never comes back to this epoch, so nothing will ever open these bytes: dead.
+          // Claimed this epoch and the handle refused it — OR its AAD did not match this topic (a
+          // wrong-topic frame, or a pre-upgrade empty-AAD frame). Either way, dead: the handle
+          // never returns to this epoch and the topic binding never changes. Retained history from
+          // before this bind existed is DELIBERATELY invalidated, not silently re-offered.
           frame.sealed = null
           continue
         }

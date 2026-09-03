@@ -1,5 +1,6 @@
 import { encodeEventFrame } from '@kumiai/broadcast'
 import type { HubFetchTopicParams, HubFetchTopicResult } from '@kumiai/hub-tunnel'
+import { fromUTF } from '@sozai/codec'
 import { describe, expect, test } from 'vitest'
 
 import type { AppWindowPruned } from '../src/app-cursor.js'
@@ -311,7 +312,9 @@ describe('the drain bounds what a frame may claim, and passes no epoch it failed
           senderDID: 'alice',
           topicID,
           retain: 'log',
-          payload: await atTwo.wrap(encodeEventFrame('chat/posted', { text: 'mid-walk, at two' })),
+          payload: await atTwo.wrap(encodeEventFrame('chat/posted', { text: 'mid-walk, at two' }), {
+            AAD: fromUTF(topicID),
+          }),
         })
         hub.reattach('bob')
       },
