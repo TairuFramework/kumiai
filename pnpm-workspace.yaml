@@ -14,8 +14,8 @@ catalog:
   '@noble/hashes': ^2.4.0
   'ts-mls': 2.0.0-rc.13
   'vitest': ^4.1.11
-  '@enkaku/client': ^0.21.1
-  '@enkaku/protocol': ^0.21.0
+  '@enkaku/client': ^0.21.2
+  '@enkaku/protocol': ^0.21.1
   '@enkaku/server': ^0.21.2
   '@enkaku/transport': ^0.21.0
   '@kokuin/capability': ^0.3.0
@@ -31,7 +31,7 @@ catalog:
   '@sozai/stream': ^0.2.0
   '@kokuin/expo': ^0.3.2
   '@sozai/runtime-expo': ^0.2.2
-  'expo': ^57.0.18
+  'expo': ^57.0.19
   'expo-status-bar': ^57.0.1
   'react': 19.2.3
   'react-native': ^0.86.0
