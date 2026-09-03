@@ -14,6 +14,7 @@ import {
 } from '@kumiai/broadcast'
 import type { StoredMessage } from '@kumiai/hub-protocol'
 import type { LogHub } from '@kumiai/hub-tunnel'
+import { fromUTF } from '@sozai/codec'
 import { createRuntime, type Runtime } from '@sozai/runtime'
 
 import type { Anchor, AnchorStore } from './anchor.js'
@@ -504,7 +505,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     return createOpenOncePath<Uint8Array>({
       mux,
       topicID,
-      unwrap: crypto.unwrap,
+      unwrap: (b) => crypto.unwrap(b, { expectedAAD: fromUTF(topicID) }),
       retainOnFailure,
       project: (_message, opened) => {
         const { payload, senderDID } = opened
@@ -572,7 +573,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     const selfInbox = inboxTopic(anchor.secret, anchor.epoch, localDID)
     inboxLane = {
       topicID: selfInbox,
-      path: createInboxPath({ mux, topicID: selfInbox, unwrap: crypto.unwrap, retainOnFailure }),
+      path: createInboxPath({
+        mux,
+        topicID: selfInbox,
+        unwrap: (b) => crypto.unwrap(b, { expectedAAD: fromUTF(selfInbox) }),
+        retainOnFailure,
+      }),
     }
     for (const [name, protocol] of Object.entries(protocols)) {
       // The app topic is bound to the ANCHOR, not the live epoch — see {@link sealForSegment}.
@@ -663,8 +669,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   ): Promise<{ topicID: string; payload: Uint8Array }> => {
     while (true) {
       const at = anchor
-      const payload = await crypto.wrap(bytes)
-      if (anchor === at) return { topicID: protocolTopic(at.secret, at.epoch, name), payload }
+      const topicID = protocolTopic(at.secret, at.epoch, name)
+      const payload = await crypto.wrap(bytes, { AAD: fromUTF(topicID) })
+      if (anchor === at) return { topicID, payload }
     }
   }
 
