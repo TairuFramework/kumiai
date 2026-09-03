@@ -8,6 +8,11 @@ import { fromUTF } from '@sozai/codec'
 import { createRuntime, type Runtime } from '@sozai/runtime'
 
 import type { GroupCrypto } from './crypto.js'
+import {
+  decodeDirectedPayload,
+  encodeDirectedPayload,
+  isLegacyDirectedPayload,
+} from './directed-tag.js'
 import type { HubMux } from './hub-mux.js'
 import { createOpenOncePath } from './open-once.js'
 
@@ -25,6 +30,9 @@ export type OpenedInbound = {
   /** Recovered from the ciphertext by the open, never the hub-asserted one. */
   senderDID: string
   topicID: string
+  /** The protocol this frame is tagged for, decoded from the sealed in-frame discriminator. */
+  protocol: string
+  /** The inner hub-tunnel frame, with the protocol tag stripped. */
   payload: Uint8Array
 }
 
@@ -53,15 +61,25 @@ export function createInboxPath(params: InboxPathParams): InboundPath {
     topicID,
     unwrap,
     ...(retainOnFailure != null ? { retainOnFailure } : {}),
-    project: (message, opened) =>
-      opened.senderDID == null
-        ? undefined
-        : {
-            sequenceID: message.sequenceID,
-            senderDID: opened.senderDID,
-            topicID: message.topicID,
-            payload: opened.payload,
-          },
+    project: (message, opened) => {
+      if (opened.senderDID == null) return undefined
+      // The tag is inside the seal, so it is authenticated to the recovered sender. A legacy or
+      // malformed payload is dropped HERE — the open already spent the ratchet key.
+      if (isLegacyDirectedPayload(opened.payload)) return undefined
+      let decoded: { protocol: string; frame: Uint8Array }
+      try {
+        decoded = decodeDirectedPayload(opened.payload)
+      } catch {
+        return undefined
+      }
+      return {
+        sequenceID: message.sequenceID,
+        senderDID: opened.senderDID,
+        topicID: message.topicID,
+        protocol: decoded.protocol,
+        payload: decoded.frame,
+      }
+    },
   })
 }
 
@@ -94,10 +112,11 @@ export function createDirectedClient<Protocol extends ProtocolDefinition>(
   let unsubscribe: (() => void) | undefined
   const hub: MailboxHub = {
     async publish(publishParams) {
+      const tagged = encodeDirectedPayload('rpc', publishParams.payload)
       return mux.mailbox.publish({
         senderDID: publishParams.senderDID,
         topicID: publishParams.topicID,
-        payload: await wrap(publishParams.payload, { aad: fromUTF(publishParams.topicID) }),
+        payload: await wrap(tagged, { aad: fromUTF(publishParams.topicID) }),
       })
     },
     subscribe() {},
@@ -207,7 +226,8 @@ export function createInboxAcceptor<Protocol extends ProtocolDefinition>(
     let closed = false
     const sessionHub: MailboxHub = {
       async publish(publishParams) {
-        const sealed = await wrap(publishParams.payload, { aad: fromUTF(publishParams.topicID) })
+        const tagged = encodeDirectedPayload('rpc', publishParams.payload)
+        const sealed = await wrap(tagged, { aad: fromUTF(publishParams.topicID) })
         return mux.mailbox.publish({
           senderDID: publishParams.senderDID,
           topicID: publishParams.topicID,
