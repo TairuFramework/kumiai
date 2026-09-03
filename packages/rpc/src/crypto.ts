@@ -1,5 +1,3 @@
-import type { ByteTransform } from '@kumiai/broadcast'
-
 /**
  * Consumer-supplied MLS crypto port: epoch number, epoch-bound domain-separated exported secrets
  * (`exportSecret`), byte-level encrypt/decrypt (`wrap`/`unwrap`), and the ledger-entry seal
