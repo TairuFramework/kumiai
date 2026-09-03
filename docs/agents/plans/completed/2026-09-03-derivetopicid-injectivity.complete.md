@@ -8,8 +8,8 @@
 was filed against.
 
 This was Spec B of three. Spec A ([AAD on group app-message crypto](./2026-09-02-mls-encrypt-aad.complete.md))
-shipped 2026-09-03. Spec C ([per-protocol inbox](../next/2026-09-02-per-protocol-inbox.md)) remains
-in `next/` and is now unblocked — it needs the injective primitive this work delivers.
+shipped 2026-09-03. Spec C ([directed-inbox protocol isolation](./2026-09-03-per-protocol-inbox.complete.md))
+shipped 2026-09-03, using the injective primitive this work delivers.
 
 ## Goal
 
