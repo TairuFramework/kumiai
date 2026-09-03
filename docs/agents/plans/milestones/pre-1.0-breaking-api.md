@@ -40,8 +40,10 @@ that package's surface for a filed reason, check this list for a neighbour worth
 
 - A third `GroupPermission` — widening a union consumers exhaustively `switch` over
   (`packages/mls/src/roster.ts:7`, exactly `'admin' | 'member'`).
-- AAD on `GroupHandle.encrypt`/`decrypt` (`group-handle.ts:617,654`, neither takes one) —
-  **blocks** the rpc-side AAD binding; this is the change that must come first.
+- ~~AAD on `GroupHandle.encrypt`/`decrypt` — **blocks** the rpc-side AAD binding; this is the change
+  that must come first.~~ *Taken 2026-09-03:* AAD threaded through `encrypt`/`decrypt` and the rpc
+  `GroupCrypto` port, each app frame bound to its topicID, in the same `minor` — see
+  `../completed/2026-09-02-mls-encrypt-aad.complete.md`.
 
 *Taken 2026-08-02:* the dead `GroupSyncScope` export, deleted ahead of the 0.5 band release — see
 `../completed/2026-08-02-trim-dead-api-surface.complete.md`.
