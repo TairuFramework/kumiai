@@ -105,7 +105,7 @@ in the linked doc; the one real defect the check turned up is folded into the `d
 - `GroupMLS.rosterDIDs` carries no leaf identity (`rpc/src/crypto.ts:240`). **Refiled from mls
   2026-07-23** — `@kumiai/mls` has no such method; it is `@kumiai/rpc`'s consumer port, so the
   change also hits `@kumiai/mls-rpc` and the `@kumiai/rpc-conformance` contract suite.
-- **Bus control-frame `kind` discriminator shares the app-data namespace** (spans `@kumiai/broadcast`
+- ~~**Bus control-frame `kind` discriminator shares the app-data namespace** (spans `@kumiai/broadcast`
   + `@kumiai/rpc`). **Filed 2026-07-24** from the `fix/anycast-soundness` whole-branch review (see
   `../completed/2026-07-24-anycast-soundness.complete.md`). On the bus, req/res
   control messages ride as `typ:'event'` frames told apart from app events by inspecting `data.kind`
@@ -118,7 +118,15 @@ in the linked doc; the one real defect the check turned up is folded into the `d
   consumer). Interim same-door consistency — the drain drops control-shaped payloads exactly as live
   push does — shipped on `fix/anycast-soundness` (2026-07-24); the envelope is the real fix, and it
   makes that interim drop-classification deletable. Not a correctness bug once live and drain agree:
-  the only symptom is that an app cannot use `kind: 'req'|'res'` as an event-data key.
+  the only symptom is that an app cannot use `kind: 'req'|'res'` as an event-data key.~~ *Taken
+  2026-09-04:* control frames now ride a distinct `typ:'ctrl'` (`BROADCAST_VERSION` 1→2), freeing
+  `data.kind` for application use — the responder and client classifiers key on `payload.typ`, never
+  on shape-sniffing `data`. Both interim drop-classifications (the live responder's and the rpc
+  app-lane drain's) are deleted; a stale v1-encoded frame is refused by `decodeFrame` rather than
+  silently misread. See the plan
+  [../../../superpowers/plans/2026-09-04-bus-control-typ.md](../../../superpowers/plans/2026-09-04-bus-control-typ.md)
+  and the spec
+  [../../../superpowers/specs/2026-09-04-bus-control-typ-design.md](../../../superpowers/specs/2026-09-04-bus-control-typ-design.md).
 
 ### `@kumiai/mls-hub` — audited 2026-08-02, nothing carried forward
 
