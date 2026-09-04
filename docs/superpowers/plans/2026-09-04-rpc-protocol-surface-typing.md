@@ -5,10 +5,17 @@
 **Stage:** qa
 **Mode:** tasks
 
-**Deferred minors** (from per-task + final whole-branch review; none block merge — triage at completing/finishing):
-- `test/protocol-surface-types.test.ts` cast-drift guard compares against a hand-copied local `InternalSurface` literal (unexported), not the real type — can rot silently; real internal drift is caught at `surfaceFor`'s return annotation + the `protocolMethod: GroupPeer<Protocols>['protocol']` typing. Consider exporting `InternalSurface` or co-locating the assertion in `peer.ts`.
-- No-data / no-param surface branches (`T['Data'] extends never` / `T['Param'] extends never`) unexercised — `chat` fixture has no zero-payload procedure; 3 spec "Testing" cases uncovered (config-optional call, options-only config, `param?: never` rejection).
-- `createGroupPeer`'s bound left at `Record<string, ProtocolDefinition>` (per Step 5); the tightened `GroupPeer`/`GroupPeerParams` bound is leaky at the primary entry point because optional `retain?` makes `ProtocolDefinition` bidirectionally assignable to `GroupProtocolDefinition`. Changeset wording already avoids the overstated "fails to compile" claim.
+**Codex review + hardening** (commit `da1cd39`, reviewed clean): closed four Codex findings —
+sealed the forgeable `Events`/`Requests` generic params behind a one-arg public `ProtocolSurface`
+(delegates to non-exported `ProtocolSurfaceOf`); exported `InternalSurface` and bound the cast-drift
+test to the real type incl. `to()`; added wrong-type + absent-schema type assertions. The `to`
+protocol-identity check is empirically vacuous (Client covariance) — comment states this honestly
+rather than overclaiming.
+
+**Deferred minors** (remaining; none block merge — triage at completing/finishing):
+- ~~cast-drift guard used a hand-copied `InternalSurface` literal~~ **closed by `da1cd39`** (bound to the real exported type).
+- ~~No-data / no-param surface branches unexercised~~ **closed by `da1cd39`** (fixture now carries `chat/ping` no-data, `chat/noop` no-param/no-result; wrong-type + options-only + `param?: never` cases asserted).
+- `createGroupPeer`'s bound left at `Record<string, ProtocolDefinition>` (per Step 5); the tightened `GroupPeer`/`GroupPeerParams` bound is leaky at the primary entry point because optional `retain?` makes `ProtocolDefinition` bidirectionally assignable to `GroupProtocolDefinition`. Changeset wording already avoids the overstated "fails to compile" claim. (Informational — not fixed.)
 - Completing stage: strip the literal placeholder "(completed-doc path added at completing stage)" from `pre-1.0-breaking-api.md` and `rpc-api-surface.md`; replace with the real `../completed/<file>.complete.md` reference.
 - Spec doc nuance: `design.md` "GroupProtocolDefinition is narrower" is imprecise for assignability; `directed-legibility.test.ts:65` cited as a dispatch migration but that file uses only `.to()`. Informational.
 
