@@ -3,7 +3,7 @@ import { fromUTF } from '@sozai/codec'
 import { describe, expect, test } from 'vitest'
 
 import { createMemoryBus } from '../src/bus.js'
-import { type BroadcastMessage, createBroadcastTransport } from '../src/transport.js'
+import { type BroadcastMessage, createBroadcastTransport, decodeFrame } from '../src/transport.js'
 
 function makeMessage(prc: string, data: Record<string, unknown>): BroadcastMessage {
   return { payload: { typ: 'event', prc, data } }
@@ -134,5 +134,24 @@ describe('createBroadcastTransport', () => {
 
     await sender.dispose()
     await receiver.dispose()
+  })
+
+  test('write() accepts a ctrl payload', async () => {
+    const bus = createMemoryBus()
+    const transport = createBroadcastTransport({ topicID: 'topic-x', bus })
+
+    await expect(
+      transport.write({
+        payload: { typ: 'ctrl', prc: 'x', data: { kind: 'req', rid: 'r', prm: {} } },
+      }),
+    ).resolves.toBeUndefined()
+
+    await transport.dispose()
+  })
+
+  test('decodeFrame refuses a frame from an older wire version', () => {
+    // A hand-built v1 frame: the version stamp this build no longer speaks.
+    const v1 = fromUTF(JSON.stringify({ payload: { typ: 'event', prc: 'x', data: {} }, v: 1 }))
+    expect(() => decodeFrame(v1)).toThrow(/version/i)
   })
 })
