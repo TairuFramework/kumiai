@@ -41,7 +41,7 @@ describe('app frames outlive the commits that leave their epoch', () => {
     // the hub still holds his subscriptions and still keeps his frames for him.
     hub.detach('bob')
 
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'before lunch' })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'before lunch' } })
     for (let i = 0; i < 10; i++) {
       await alice.peer.commit(buildLedgerCommit(alice, []))
     }
@@ -87,7 +87,9 @@ describe('app frames outlive the commits that leave their epoch', () => {
       await alice.peer.commit(buildLedgerCommit(alice, []))
     }
     expect(alice.mls.epoch()).toBe(3)
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'sent at epoch three' })
+    await alice.peer
+      .protocol('chat')
+      .dispatch('chat/posted', { data: { text: 'sent at epoch three' } })
     for (let i = 0; i < 3; i++) {
       await alice.peer.commit(buildLedgerCommit(alice, []))
     }
@@ -140,7 +142,9 @@ describe('app frames outlive the commits that leave their epoch', () => {
     expect(alice.mls.epoch()).toBe(1)
 
     // So she posts at epoch 1, and the frame enters the log behind the commit that left epoch 1.
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'raced the commit' })
+    await alice.peer
+      .protocol('chat')
+      .dispatch('chat/posted', { data: { text: 'raced the commit' } })
 
     const commits = hub.published.filter((m) => m.topicID === commitTopic(recoverySecret))
     const posted = hub.published.filter(
@@ -191,8 +195,12 @@ describe('app frames outlive the commits that leave their epoch', () => {
     hub.detach('bob')
 
     // One ephemeral event and one logged one, dispatched at the same epoch onto the same topic.
-    await alice.peer.protocol('chat').dispatch('chat/changed', { text: 'alice is typing' })
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'alice said something' })
+    await alice.peer
+      .protocol('chat')
+      .dispatch('chat/changed', { data: { text: 'alice is typing' } })
+    await alice.peer
+      .protocol('chat')
+      .dispatch('chat/posted', { data: { text: 'alice said something' } })
     await alice.peer.commit(buildLedgerCommit(alice, []))
     await flush()
     expect(posted).toEqual([])

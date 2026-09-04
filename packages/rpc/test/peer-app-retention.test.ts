@@ -50,8 +50,8 @@ describe('per-procedure retention for app events', () => {
 
     // Both procedures share the one `room` topic. The logged one is dispatched to the log lane,
     // the ephemeral one to the live mailbox lane.
-    await alice.peer.protocol('room').dispatch('room/posted', { text: 'kept' })
-    await alice.peer.protocol('room').dispatch('room/typing', { text: 'gone' })
+    await alice.peer.protocol('room').dispatch('room/posted', { data: { text: 'kept' } })
+    await alice.peer.protocol('room').dispatch('room/typing', { data: { text: 'gone' } })
     await flush()
 
     // Both reach the online subscriber's handler live — the logged event is not diverted off the

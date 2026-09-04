@@ -112,7 +112,7 @@ describe('the app topic is stable within a roster-change-bounded segment', () =>
     expect(alice.peer.anchorEpoch()).toBe(1)
     expect(roomTopic(alice.peer.anchorEpoch())).toBe(genesisTopic)
 
-    await alice.peer.protocol('room').dispatch('room/posted', { n: 1 })
+    await alice.peer.protocol('room').dispatch('room/posted', { data: { n: 1 } })
     await flush()
     expect(bobSaw).toEqual([{ n: 1 }])
 
@@ -122,7 +122,7 @@ describe('the app topic is stable within a roster-change-bounded segment', () =>
     expect(alice.mls.epoch()).toBe(2)
     expect(bob.mls.epoch()).toBe(2)
 
-    await bob.peer.protocol('room').dispatch('room/posted', { n: 2 })
+    await bob.peer.protocol('room').dispatch('room/posted', { data: { n: 2 } })
     await flush()
     expect(aliceSaw).toEqual([{ n: 2 }])
 
@@ -138,7 +138,7 @@ describe('the app topic is stable within a roster-change-bounded segment', () =>
     expect(alice.mls.epoch()).toBe(3)
     expect(bob.mls.epoch()).toBe(3)
 
-    await alice.peer.protocol('room').dispatch('room/posted', { n: 3 })
+    await alice.peer.protocol('room').dispatch('room/posted', { data: { n: 3 } })
     await flush()
     expect(bobSaw).toEqual([{ n: 1 }, { n: 3 }])
 
@@ -178,7 +178,7 @@ describe('the app topic is stable within a roster-change-bounded segment', () =>
 
     const beforeTopic = roomTopic(alice.peer.anchorEpoch())
 
-    await alice.peer.protocol('room').dispatch('room/posted', { n: 'before' })
+    await alice.peer.protocol('room').dispatch('room/posted', { data: { n: 'before' } })
     await flush()
     expect(bobSaw).toEqual([{ n: 'before' }])
 
@@ -203,11 +203,11 @@ describe('the app topic is stable within a roster-change-bounded segment', () =>
     expect(afterTopic).not.toBe(beforeTopic)
 
     // Delivery continues across the rotation, both ways.
-    await alice.peer.protocol('room').dispatch('room/posted', { n: 'after' })
+    await alice.peer.protocol('room').dispatch('room/posted', { data: { n: 'after' } })
     await flush()
     expect(bobSaw).toEqual([{ n: 'before' }, { n: 'after' }])
 
-    await bob.peer.protocol('room').dispatch('room/posted', { n: 'reply' })
+    await bob.peer.protocol('room').dispatch('room/posted', { data: { n: 'reply' } })
     await flush()
     expect(aliceSaw).toEqual([{ n: 'reply' }])
 
@@ -238,7 +238,7 @@ describe('the app topic is stable within a roster-change-bounded segment', () =>
 
     const beforeTopic = roomTopic(alice.peer.anchorEpoch())
 
-    await alice.peer.protocol('room').dispatch('room/posted', { n: 'before' })
+    await alice.peer.protocol('room').dispatch('room/posted', { data: { n: 'before' } })
     await flush()
     expect(bobSaw).toEqual([{ n: 'before' }])
 
@@ -258,11 +258,11 @@ describe('the app topic is stable within a roster-change-bounded segment', () =>
     const afterTopic = roomTopic(alice.peer.anchorEpoch())
     expect(afterTopic).not.toBe(beforeTopic)
 
-    await alice.peer.protocol('room').dispatch('room/posted', { n: 'after' })
+    await alice.peer.protocol('room').dispatch('room/posted', { data: { n: 'after' } })
     await flush()
     expect(bobSaw).toEqual([{ n: 'before' }, { n: 'after' }])
 
-    await bob.peer.protocol('room').dispatch('room/posted', { n: 'reply' })
+    await bob.peer.protocol('room').dispatch('room/posted', { data: { n: 'reply' } })
     await flush()
     expect(aliceSaw).toEqual([{ n: 'reply' }])
 
@@ -353,11 +353,11 @@ describe('every member agrees on the anchor, including one that boots after it',
     expect(daveTopic).toBe(aliceTopic)
 
     // And the wire agrees with the derivation, in both directions.
-    await alice.peer.protocol('room').dispatch('room/posted', { n: 'to-dave' })
+    await alice.peer.protocol('room').dispatch('room/posted', { data: { n: 'to-dave' } })
     await flush()
     expect(daveSaw).toEqual([{ n: 'to-dave' }])
 
-    await dave.peer.protocol('room').dispatch('room/posted', { n: 'from-dave' })
+    await dave.peer.protocol('room').dispatch('room/posted', { data: { n: 'from-dave' } })
     await flush()
     expect(aliceSaw).toEqual([{ n: 'from-dave' }])
 
@@ -457,11 +457,11 @@ describe('a rejoining member and the group agree on one app topic', () => {
     expect(aliceTopic).not.toBe(anchoredTopic) // and it is not where either of them started
 
     // And the wire agrees with the derivation, both ways.
-    await alice.peer.protocol('room').dispatch('room/posted', { n: 'to-eve' })
+    await alice.peer.protocol('room').dispatch('room/posted', { data: { n: 'to-eve' } })
     await flush()
     expect(eveSaw).toEqual([{ n: 'to-eve' }])
 
-    await eve.peer.protocol('room').dispatch('room/posted', { n: 'from-eve' })
+    await eve.peer.protocol('room').dispatch('room/posted', { data: { n: 'from-eve' } })
     await flush()
     expect(aliceSaw).toEqual([{ n: 'from-eve' }])
 

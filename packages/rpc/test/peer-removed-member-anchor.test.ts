@@ -55,7 +55,7 @@ describe('a member removed by a commit it applies keeps its anchor', () => {
     // A message bob has not read, waiting in the log, and then the commit that removes him.
     await bob.peer.dispose()
     hub.detach('bob')
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'owed to bob' })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'owed to bob' } })
     await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1, removes: ['bob'] })
     await flush()
 

@@ -33,7 +33,9 @@ describe('gather coexists with suppress config (footgun removed)', () => {
     makePeer(hub, 'carol', { 'chat/census': () => ({ from: 'carol' }) })
     await flush()
 
-    const replies = await alice.protocol('chat').gather('chat/census', {}, { timeoutMs: 300 })
+    const replies = await alice
+      .protocol('chat')
+      .gather('chat/census', { param: {}, timeoutMs: 300 })
     const froms = replies.map((r) => (r.value as { from: string }).from).sort()
     expect(froms).toEqual(['bob', 'carol'])
 

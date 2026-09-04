@@ -38,7 +38,7 @@ describe('createGroupPeer', () => {
     })
     await flush()
 
-    await alice.peer.protocol('chat').dispatch('chat/changed', { text: 'hi' })
+    await alice.peer.protocol('chat').dispatch('chat/changed', { data: { text: 'hi' } })
     await flush()
     expect(seen).toEqual([{ data: { text: 'hi' }, from: 'alice' }])
   })
@@ -52,7 +52,7 @@ describe('createGroupPeer', () => {
     await flush()
     const reply = await alice.peer
       .protocol('chat')
-      .request('chat/echo', { x: 1 }, { timeoutMs: 500 })
+      .request('chat/echo', { param: { x: 1 }, timeoutMs: 500 })
     expect(reply).toEqual({ from: 'bob', echoed: { x: 1 } })
   })
 
@@ -62,7 +62,9 @@ describe('createGroupPeer', () => {
     makePeer(hub, 'bob', { 'chat/echo': () => ({ from: 'bob' }) })
     makePeer(hub, 'carol', { 'chat/echo': () => ({ from: 'carol' }) })
     await flush()
-    const replies = await alice.peer.protocol('chat').gather('chat/echo', {}, { timeoutMs: 300 })
+    const replies = await alice.peer
+      .protocol('chat')
+      .gather('chat/echo', { param: {}, timeoutMs: 300 })
     const froms = replies.map((r) => (r.value as { from: string }).from).sort()
     expect(froms).toEqual(['bob', 'carol'])
   })
@@ -94,7 +96,7 @@ describe('createGroupPeer', () => {
     await bob.peer.resync()
     await flush()
 
-    await alice.peer.protocol('chat').dispatch('chat/changed', { e: 2 })
+    await alice.peer.protocol('chat').dispatch('chat/changed', { data: { e: 2 } })
     await flush()
     expect(seen).toEqual([{ e: 2 }])
 

@@ -317,9 +317,9 @@ describe('a peer whose app-topic subscribe is refused', () => {
 
     // And a host that wired no callback still cannot mistake this peer for a working one: the
     // lane it cannot receive on is a lane it cannot transmit on either.
-    await expect(peer.protocol('room').dispatch('room/typing', { text: 'hi' })).rejects.toThrow(
-      RetentionExceededError,
-    )
+    await expect(
+      peer.protocol('room').dispatch('room/typing', { data: { text: 'hi' } }),
+    ).rejects.toThrow(RetentionExceededError)
 
     await peer.dispose()
   })

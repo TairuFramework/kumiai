@@ -44,13 +44,13 @@ describe('a returning peer reads the retained app frames of every epoch it walks
 
     // Alice posts at epoch 1, commits (nothing touches a leaf, so the anchor stays put), posts at
     // epoch 2, commits, posts at epoch 3. Three frames, three different sealing epochs, one topic.
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'at one' })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at one' } })
     await alice.peer.commit(buildLedgerCommit(alice, []))
     await flush()
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'at two' })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at two' } })
     await alice.peer.commit(buildLedgerCommit(alice, []))
     await flush()
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'at three' })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at three' } })
     await flush()
 
     expect(alice.mls.epoch()).toBe(3)
@@ -96,10 +96,14 @@ describe('a returning peer reads the retained app frames of every epoch it walks
 
     // SEGMENT ONE, anchored at epoch 1. Alice posts at epoch 1, then a no-op commit runs the epoch
     // to 2 without moving the anchor, and she posts again at epoch 2 — still the same topic.
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'first segment, epoch 1' })
+    await alice.peer
+      .protocol('chat')
+      .dispatch('chat/posted', { data: { text: 'first segment, epoch 1' } })
     await alice.peer.commit(buildLedgerCommit(alice, []))
     await flush()
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'first segment, epoch 2' })
+    await alice.peer
+      .protocol('chat')
+      .dispatch('chat/posted', { data: { text: 'first segment, epoch 2' } })
     await flush()
     expect(alice.mls.epoch()).toBe(2)
     expect(alice.peer.anchorEpoch()).toBe(1)
@@ -118,10 +122,14 @@ describe('a returning peer reads the retained app frames of every epoch it walks
     expect(alice.peer.anchorEpoch()).toBe(3)
 
     // SEGMENT TWO, anchored at epoch 3, on a topic the first segment's frames are not on.
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'second segment, epoch 3' })
+    await alice.peer
+      .protocol('chat')
+      .dispatch('chat/posted', { data: { text: 'second segment, epoch 3' } })
     await alice.peer.commit(buildLedgerCommit(alice, []))
     await flush()
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'second segment, epoch 4' })
+    await alice.peer
+      .protocol('chat')
+      .dispatch('chat/posted', { data: { text: 'second segment, epoch 4' } })
     await flush()
     expect(alice.mls.epoch()).toBe(4)
     expect(alice.peer.anchorEpoch()).toBe(3)

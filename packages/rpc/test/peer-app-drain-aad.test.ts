@@ -33,7 +33,7 @@ describe('the retained drain binds expectedAAD to the cursor topic', () => {
     await bob.peer.dispose()
     hub.detach('bob')
 
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'genuine' })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'genuine' } })
 
     // A DIFFERENT sender DID than alice's, so this forged frame's ratchet generation cannot
     // collide with any of alice's own on bob's receiving side.
@@ -78,7 +78,7 @@ describe('the retained drain binds expectedAAD to the cursor topic', () => {
     await bob.peer.dispose()
     hub.detach('bob')
 
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'genuine' })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'genuine' } })
 
     // A pre-upgrade frame: sealed with NO AAD at all, as every retained frame was before this
     // binding existed. `wrap` with no `opts` carries an empty AAD, exactly that legacy shape.

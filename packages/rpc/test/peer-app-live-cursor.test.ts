@@ -61,7 +61,7 @@ describe('the live lane and the drain share one read position', () => {
           if (bobAppPulls === 1) {
             await alice.peer
               .protocol('chat')
-              .dispatch('chat/posted', { text: 'published mid-walk' })
+              .dispatch('chat/posted', { data: { text: 'published mid-walk' } })
           }
         }
         return result
@@ -102,7 +102,7 @@ describe('the live lane and the drain share one read position', () => {
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, handlers })
     await flush()
 
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'read live' })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'read live' } })
     await flush()
 
     // The live lane delivered it, and nothing else could have: no commit has been walked, so no

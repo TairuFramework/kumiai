@@ -43,7 +43,7 @@ describe('the app lane opens each live frame once', () => {
     })
     await flush()
 
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'once' })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'once' } })
     await flush()
 
     // Delivered, and the count is what the assertion is about.
