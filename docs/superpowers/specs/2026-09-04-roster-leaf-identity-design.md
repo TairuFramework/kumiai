@@ -121,7 +121,7 @@ async rosterEntries(): Promise<Array<RosterEntry>> {
 
 `listMembers()` returns `GroupMember` (`packages/mls/src/group-handle.ts:725`), which already
 carries `id`, `leafIndex`, and `longForm` — `longForm` is sourced as `parsed.longForm ?? parsed.id`
-(`group-handle.ts:669`), so `m.longForm` is always a string and the mapping type-checks. It is
+(`group-handle.ts:672`), so `m.longForm` is always a string and the mapping type-checks. It is
 mechanical. The existing doc note at
 `mls.ts:105` ("`rosterDIDs` reads the ratchet tree, so a leaf with an unparsable credential is
 simply absent") is retitled for `rosterEntries` and still holds: an unparsable leaf is absent from
@@ -146,13 +146,22 @@ stable — so it would accept index-reshuffling behavior the real port never exh
 slots with lowest-free-index reuse keep the double no more permissive than the port, and make
 `leafIndex` stable and reused exactly as real MLS does.
 
-**Every roster-mutating path must preserve holes,** not only the accessor — the conversion touches
-each of: removal, addition, external-rejoin, self-removal, and recovery-adoption at `:448`, `:460`,
-`:521`, `:595`, `:738`. A path that rebuilt the compact array would silently reintroduce
-position-indices.
+**Every roster-mutating path must preserve holes,** not only the accessor. The current double
+mutates a compact array with `splice` (which shifts positions) and `push` (which appends), so all
+**six** distinct roster operations convert to blank-in-place / fill-lowest-free-slot:
+
+1. ordinary remove — `splice` at `:451`
+2. ordinary add — `push` at `:457` (must become fill-lowest-free-slot, not append)
+3. external-rejoin — `splice` `:465` + `push` `:467`
+4. direct `evict` — `splice` at `:523`
+5. self-removal — `splice` at `:597`
+6. recovery adoption — `splice` `:739` + `push` `:741`
+
+A path left on `splice`/`push` would reintroduce position-indices and break the stability the
+conformance clause asserts.
 
 **Scope decision — duplicate-DID removal is out of scope (deliberate).** The double addresses
-removal by DID (`removes?: Array<string>`, `:176`) and blanks *every* slot matching that DID. Real
+removal by DID (`removes?: Array<string>`, `:177`) and blanks *every* slot matching that DID. Real
 MLS removal is leaf-index-addressed, so it can remove *one* of two leaves a single DID holds — the
 exact case `leafIndex` exists to disambiguate. The double is **not** being made faithful to that
 case: doing so would rewrite its commit representation to leaf-index-addressed removal and raise the
@@ -212,9 +221,13 @@ it is simply not a conformance clause.
 ## Sequencing and release
 
 One PR, one package band `minor` bump (the twelve packages share a version band). No dependency on
-any other milestone item. After merge, mark the `rosterDIDs` finding taken in
-`docs/agents/plans/backlog/rpc-api-surface.md` and in the milestone index, linking a completion doc
-under `docs/agents/plans/completed/`.
+any other milestone item.
+
+The two tracking docs that still name `rosterDIDs` — `docs/agents/plans/backlog/rpc-api-surface.md:51`
+and `docs/agents/plans/milestones/pre-1.0-breaking-api.md:118` — are handled at **completion**, not
+renamed as part of the change: they are struck through / marked *taken* with a link to a completion
+doc under `docs/agents/plans/completed/`. This is distinct from `docs/agents/architecture.md:46`,
+which is a live API reference and is renamed to `rosterEntries` in the change itself.
 
 ## Out of scope
 
