@@ -365,7 +365,29 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   /** Entry bodies by content id — what this member can serve, and what it can enact. */
   const bodies = new Map<string, string>()
   for (const token of options.bodies ?? []) bodies.set(memoryEntryID(token), token)
-  const leaves: Array<string> = [...(options.members ?? (localDID != null ? [localDID] : []))]
+  // Hole-preserving leaf-slot model, keyed by ratchet-tree leaf index. Real ts-mls blanks a
+  // removed leaf and fills the leftmost blank on add; a compact array cannot, and would hand out
+  // position-indices the real port never does (more permissive — forbidden for a double).
+  const slots = new Map<number, string>()
+  ;(options.members ?? (localDID != null ? [localDID] : [])).forEach((did, i) => {
+    slots.set(i, did)
+  })
+
+  const lowestFreeSlot = (): number => {
+    let i = 0
+    while (slots.has(i)) i++
+    return i
+  }
+  const slotAdd = (did: string): void => {
+    // The double never adds a DID it already holds (matches how buildCommit models adds).
+    if (![...slots.values()].includes(did)) slots.set(lowestFreeSlot(), did)
+  }
+  const slotRemoveDID = (did: string): void => {
+    for (const [i, d] of slots) if (d === did) slots.delete(i)
+  }
+  const slotHas = (did: string): boolean => [...slots.values()].includes(did)
+  const occupiedDIDs = (): Array<string> =>
+    [...slots.keys()].sort((a, b) => a - b).map((i) => slots.get(i) as string)
   /**
    * Ephemeral PRIVATE keys, keyed by requestID: minted with the request, retained by the port
    * until the reply is opened, and never on the wire. It is the whole of what makes a reply
@@ -402,7 +424,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     ) {
       throw new Error(`${label}: the request is malformed`)
     }
-    if (!leaves.includes(parsed.requesterDID)) {
+    if (!slotHas(parsed.requesterDID)) {
       throw new Error(`${label}: ${parsed.requesterDID} has no leaf in the current tree`)
     }
     return parsed
@@ -446,25 +468,17 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     // leaves the roster changed in both directions — the case a roster diff must catch and a
     // leaf count cannot.
     if (parsed.removes != null) {
-      for (const did of parsed.removes) {
-        for (let i = leaves.length - 1; i >= 0; i--) {
-          if (leaves[i] === did) leaves.splice(i, 1)
-        }
-      }
+      for (const did of parsed.removes) slotRemoveDID(did)
     }
     if (parsed.adds != null) {
-      for (const did of parsed.adds) {
-        if (!leaves.includes(did)) leaves.push(did)
-      }
+      for (const did of parsed.adds) slotAdd(did)
     }
     if (parsed.external) {
       // `resync: true`: the rejoining member's prior leaf is atomically removed, so a peer
       // that rejoined twice — an orphaned external commit, then a fresh one — leaves one leaf
       // behind and not two.
-      for (let i = leaves.length - 1; i >= 0; i--) {
-        if (leaves[i] === parsed.committerDID) leaves.splice(i, 1)
-      }
-      leaves.push(parsed.committerDID)
+      slotRemoveDID(parsed.committerDID)
+      slotAdd(parsed.committerDID)
     }
     advance(epoch + 1)
   }
@@ -481,9 +495,9 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     seen: () => seen,
     lastSender: () => lastSender,
     ledgerIDs: () => [...ledger],
-    leaves: () => [...leaves],
+    leaves: () => occupiedDIDs(),
     async rosterDIDs() {
-      return [...leaves]
+      return occupiedDIDs()
     },
     fold: () => {
       const folded = new Map<string, string>()
@@ -519,9 +533,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       enact(parsed)
     },
     evict(did: string) {
-      for (let i = leaves.length - 1; i >= 0; i--) {
-        if (leaves[i] === did) leaves.splice(i, 1)
-      }
+      slotRemoveDID(did)
     },
     async readCommitHeader(commit: Uint8Array): Promise<CommitHeader | null> {
       // Two facts, two availabilities — the whole point of the port's contract, modelled exactly.
@@ -593,9 +605,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       // A double that kept the stale roster was the more permissive one, and it hid a peer that
       // re-anchored off that diff.
       if (localDID != null && parsed.removes?.includes(localDID)) {
-        for (let i = leaves.length - 1; i >= 0; i--) {
-          if (leaves[i] === localDID) leaves.splice(i, 1)
-        }
+        slotRemoveDID(localDID)
         return { advanced: false }
       }
       // A member can never apply the frame that is its OWN commit: MLS merges a pending
@@ -735,10 +745,10 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
           // stands until the ledger is bootstrapped.
           ledger = []
           ledgerHead = info.head
-          for (let i = leaves.length - 1; i >= 0; i--) {
-            if (leaves[i] === localDID) leaves.splice(i, 1)
+          if (localDID != null) {
+            slotRemoveDID(localDID)
+            slotAdd(localDID)
           }
-          if (localDID != null) leaves.push(localDID)
           advance(info.epoch + 1)
         },
       }
