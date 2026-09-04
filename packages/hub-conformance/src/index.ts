@@ -760,7 +760,7 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
       // remove) standing. A host that implements unsubscribe as "drop this subscriber's deliveries
       // then GC any frame with no deliveries left" destroys the commit log the first time a group's
       // last member unsubscribes.
-      await store.unsubscribe(BOB, TOPIC)
+      await store.unsubscribe({ subscriberDID: BOB, topicID: TOPIC })
       await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
 
       // The mailbox frame is gone: its only reader left...
@@ -895,14 +895,16 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
      */
     test('getSubscribers reflects the subscriptions, and unsubscribing removes one', async () => {
       const store = await createStore()
-      expect(await store.getSubscribers(TOPIC)).toEqual([])
+      expect(await store.getSubscribers({ topicID: TOPIC })).toEqual([])
 
       await store.subscribe({ subscriberDID: ALICE, topicID: TOPIC })
       await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
-      expect([...(await store.getSubscribers(TOPIC))].sort()).toEqual([ALICE, BOB].sort())
+      expect([...(await store.getSubscribers({ topicID: TOPIC }))].sort()).toEqual(
+        [ALICE, BOB].sort(),
+      )
 
-      await store.unsubscribe(BOB, TOPIC)
-      expect(await store.getSubscribers(TOPIC)).toEqual([ALICE])
+      await store.unsubscribe({ subscriberDID: BOB, topicID: TOPIC })
+      expect(await store.getSubscribers({ topicID: TOPIC })).toEqual([ALICE])
     })
 
     /**
@@ -917,69 +919,69 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
      */
     test('a fetched key package is consumed, and is never served twice', async () => {
       const store = await createStore()
-      await store.storeKeyPackage(ALICE, 'kp-1')
-      await store.storeKeyPackage(ALICE, 'kp-2')
+      await store.storeKeyPackage({ ownerDID: ALICE, keyPackage: 'kp-1' })
+      await store.storeKeyPackage({ ownerDID: ALICE, keyPackage: 'kp-2' })
 
-      const first = await store.fetchKeyPackages(ALICE, 1)
+      const first = await store.fetchKeyPackages({ ownerDID: ALICE, count: 1 })
       expect(first).toHaveLength(1)
-      const second = await store.fetchKeyPackages(ALICE, 1)
+      const second = await store.fetchKeyPackages({ ownerDID: ALICE, count: 1 })
       expect(second).toHaveLength(1)
       expect(second).not.toEqual(first)
 
       // The shelf is empty, and an empty shelf is an empty answer rather than an error: an
       // inviter that cannot get a package has to be told, not thrown at.
-      expect(await store.fetchKeyPackages(ALICE, 1)).toEqual([])
+      expect(await store.fetchKeyPackages({ ownerDID: ALICE, count: 1 })).toEqual([])
     })
 
     test('fetchKeyPackages returns what it has when asked for more, and nothing for a stranger', async () => {
       const store = await createStore()
-      await store.storeKeyPackage(ALICE, 'kp-only')
+      await store.storeKeyPackage({ ownerDID: ALICE, keyPackage: 'kp-only' })
 
-      expect(await store.fetchKeyPackages(BOB, 1)).toEqual([])
+      expect(await store.fetchKeyPackages({ ownerDID: BOB, count: 1 })).toEqual([])
       // Fewer than asked for, rather than a throw or a padded list.
-      expect(await store.fetchKeyPackages(ALICE, 5)).toEqual(['kp-only'])
+      expect(await store.fetchKeyPackages({ ownerDID: ALICE, count: 5 })).toEqual(['kp-only'])
     })
 
     test('an expired key package is never served', async () => {
       const store = await createStore()
       const past = Math.floor(Date.now() / 1000) - 60
       const future = Math.floor(Date.now() / 1000) + 3600
-      await store.storeKeyPackage(ALICE, 'kp-dead', past)
-      await store.storeKeyPackage(ALICE, 'kp-live', future)
+      await store.storeKeyPackage({ ownerDID: ALICE, keyPackage: 'kp-dead', notAfter: past })
+      await store.storeKeyPackage({ ownerDID: ALICE, keyPackage: 'kp-live', notAfter: future })
 
       // FIFO would hand out the dead one first, and the inviter would reject it when it built the
       // Add — a failure the fetcher cannot diagnose and the owner cannot see.
-      expect(await store.fetchKeyPackages(ALICE, 2)).toEqual(['kp-live'])
+      expect(await store.fetchKeyPackages({ ownerDID: ALICE, count: 2 })).toEqual(['kp-live'])
     })
 
     test('a key package stored without an expiry never expires', async () => {
       const store = await createStore()
-      await store.storeKeyPackage(ALICE, 'kp-forever')
+      await store.storeKeyPackage({ ownerDID: ALICE, keyPackage: 'kp-forever' })
 
-      expect(await store.countKeyPackages(ALICE)).toBe(1)
-      expect(await store.fetchKeyPackages(ALICE, 1)).toEqual(['kp-forever'])
+      expect(await store.countKeyPackages({ ownerDID: ALICE })).toBe(1)
+      expect(await store.fetchKeyPackages({ ownerDID: ALICE, count: 1 })).toEqual(['kp-forever'])
     })
 
     test('countKeyPackages counts live entries only, per owner', async () => {
       const store = await createStore()
       const past = Math.floor(Date.now() / 1000) - 60
       const future = Math.floor(Date.now() / 1000) + 3600
-      await store.storeKeyPackage(ALICE, 'kp-dead', past)
-      await store.storeKeyPackage(ALICE, 'kp-live', future)
-      await store.storeKeyPackage(BOB, 'kp-bob', future)
+      await store.storeKeyPackage({ ownerDID: ALICE, keyPackage: 'kp-dead', notAfter: past })
+      await store.storeKeyPackage({ ownerDID: ALICE, keyPackage: 'kp-live', notAfter: future })
+      await store.storeKeyPackage({ ownerDID: BOB, keyPackage: 'kp-bob', notAfter: future })
 
-      expect(await store.countKeyPackages(ALICE)).toBe(1)
-      expect(await store.countKeyPackages(BOB)).toBe(1)
-      expect(await store.countKeyPackages(CAROL)).toBe(0)
+      expect(await store.countKeyPackages({ ownerDID: ALICE })).toBe(1)
+      expect(await store.countKeyPackages({ ownerDID: BOB })).toBe(1)
+      expect(await store.countKeyPackages({ ownerDID: CAROL })).toBe(0)
     })
 
     test('countKeyPackages does not consume', async () => {
       const store = await createStore()
-      await store.storeKeyPackage(ALICE, 'kp-1')
+      await store.storeKeyPackage({ ownerDID: ALICE, keyPackage: 'kp-1' })
 
-      expect(await store.countKeyPackages(ALICE)).toBe(1)
-      expect(await store.countKeyPackages(ALICE)).toBe(1)
-      expect(await store.fetchKeyPackages(ALICE, 1)).toEqual(['kp-1'])
+      expect(await store.countKeyPackages({ ownerDID: ALICE })).toBe(1)
+      expect(await store.countKeyPackages({ ownerDID: ALICE })).toBe(1)
+      expect(await store.fetchKeyPackages({ ownerDID: ALICE, count: 1 })).toEqual(['kp-1'])
     })
 
     /**
@@ -993,15 +995,15 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
      */
     test('a last-resort key package is served without ever being consumed', async () => {
       const store = await createStore()
-      await store.storeLastResortKeyPackage(ALICE, 'kp-last-resort')
+      await store.storeLastResortKeyPackage({ ownerDID: ALICE, keyPackage: 'kp-last-resort' })
 
-      expect(await store.fetchLastResortKeyPackage(ALICE)).toBe('kp-last-resort')
-      expect(await store.fetchLastResortKeyPackage(ALICE)).toBe('kp-last-resort')
+      expect(await store.fetchLastResortKeyPackage({ ownerDID: ALICE })).toBe('kp-last-resort')
+      expect(await store.fetchLastResortKeyPackage({ ownerDID: ALICE })).toBe('kp-last-resort')
     })
 
     test('an owner with no last-resort package reads as null, not undefined', async () => {
       const store = await createStore()
-      expect(await store.fetchLastResortKeyPackage(BOB)).toBeNull()
+      expect(await store.fetchLastResortKeyPackage({ ownerDID: BOB })).toBeNull()
     })
 
     /**
@@ -1020,8 +1022,8 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
      */
     test("one owner's last-resort package is never served for another", async () => {
       const store = await createStore()
-      await store.storeLastResortKeyPackage(ALICE, 'kp-alice-last-resort')
-      expect(await store.fetchLastResortKeyPackage(BOB)).toBeNull()
+      await store.storeLastResortKeyPackage({ ownerDID: ALICE, keyPackage: 'kp-alice-last-resort' })
+      expect(await store.fetchLastResortKeyPackage({ ownerDID: BOB })).toBeNull()
     })
 
     /**
@@ -1037,42 +1039,44 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
      */
     test('a last-resort read never falls through to the ordinary pool', async () => {
       const store = await createStore()
-      await store.storeKeyPackage(ALICE, 'kp-ordinary')
-      expect(await store.fetchLastResortKeyPackage(ALICE)).toBeNull()
+      await store.storeKeyPackage({ ownerDID: ALICE, keyPackage: 'kp-ordinary' })
+      expect(await store.fetchLastResortKeyPackage({ ownerDID: ALICE })).toBeNull()
     })
 
     test('a second last-resort upload replaces the first — the slot holds one', async () => {
       const store = await createStore()
-      await store.storeLastResortKeyPackage(ALICE, 'kp-old')
-      await store.storeLastResortKeyPackage(ALICE, 'kp-new')
-      expect(await store.fetchLastResortKeyPackage(ALICE)).toBe('kp-new')
+      await store.storeLastResortKeyPackage({ ownerDID: ALICE, keyPackage: 'kp-old' })
+      await store.storeLastResortKeyPackage({ ownerDID: ALICE, keyPackage: 'kp-new' })
+      expect(await store.fetchLastResortKeyPackage({ ownerDID: ALICE })).toBe('kp-new')
     })
 
     /** The slot must not become a back door that re-serves single-use packages. */
     test('an occupied last-resort slot does not make ordinary packages reusable', async () => {
       const store = await createStore()
-      await store.storeLastResortKeyPackage(ALICE, 'kp-last-resort')
-      await store.storeKeyPackage(ALICE, 'kp-ordinary')
+      await store.storeLastResortKeyPackage({ ownerDID: ALICE, keyPackage: 'kp-last-resort' })
+      await store.storeKeyPackage({ ownerDID: ALICE, keyPackage: 'kp-ordinary' })
 
-      expect(await store.fetchKeyPackages(ALICE, 1)).toEqual(['kp-ordinary'])
-      expect(await store.fetchKeyPackages(ALICE, 1)).toEqual([])
+      expect(await store.fetchKeyPackages({ ownerDID: ALICE, count: 1 })).toEqual(['kp-ordinary'])
+      expect(await store.fetchKeyPackages({ ownerDID: ALICE, count: 1 })).toEqual([])
       // The two live in separate places: draining the pool left the slot untouched.
-      expect(await store.fetchLastResortKeyPackage(ALICE)).toBe('kp-last-resort')
+      expect(await store.fetchLastResortKeyPackage({ ownerDID: ALICE })).toBe('kp-last-resort')
     })
 
     if (maxKeyPackagesPerDID != null) {
       test('an upload past the per-DID key-package cap is rejected, not evicted', async () => {
         const store = await createStore()
         for (let i = 0; i < maxKeyPackagesPerDID; i++) {
-          await store.storeKeyPackage(ALICE, `kp-${i}`)
+          await store.storeKeyPackage({ ownerDID: ALICE, keyPackage: `kp-${i}` })
         }
-        await expect(store.storeKeyPackage(ALICE, 'kp-overflow')).rejects.toThrow(
-          KeyPackageQuotaExceededError,
-        )
+        await expect(
+          store.storeKeyPackage({ ownerDID: ALICE, keyPackage: 'kp-overflow' }),
+        ).rejects.toThrow(KeyPackageQuotaExceededError)
         // Reject, not evict: the earliest package is still there to be consumed.
-        expect(await store.fetchKeyPackages(ALICE, 1)).toEqual(['kp-0'])
+        expect(await store.fetchKeyPackages({ ownerDID: ALICE, count: 1 })).toEqual(['kp-0'])
         // The cap is per DID: a different owner is unaffected.
-        await expect(store.storeKeyPackage(BOB, 'kp-bob')).resolves.toBeUndefined()
+        await expect(
+          store.storeKeyPackage({ ownerDID: BOB, keyPackage: 'kp-bob' }),
+        ).resolves.toBeUndefined()
       })
 
       test('an expired key package does not charge the per-owner cap', async () => {
@@ -1080,27 +1084,33 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
         const past = Math.floor(Date.now() / 1000) - 60
         const future = Math.floor(Date.now() / 1000) + 3600
         for (let index = 0; index < maxKeyPackagesPerDID; index++) {
-          await store.storeKeyPackage(ALICE, `kp-dead-${index}`, past)
+          await store.storeKeyPackage({
+            ownerDID: ALICE,
+            keyPackage: `kp-dead-${index}`,
+            notAfter: past,
+          })
         }
 
         // Without this, a host that tops up on a schedule fills its cap with dead entries and can
         // never upload again — the pool is permanently wedged and the owner has no way to see it.
-        await expect(store.storeKeyPackage(ALICE, 'kp-live', future)).resolves.toBeUndefined()
-        expect(await store.countKeyPackages(ALICE)).toBe(1)
+        await expect(
+          store.storeKeyPackage({ ownerDID: ALICE, keyPackage: 'kp-live', notAfter: future }),
+        ).resolves.toBeUndefined()
+        expect(await store.countKeyPackages({ ownerDID: ALICE })).toBe(1)
       })
 
       test('the last-resort slot is not charged against the per-DID cap', async () => {
         const store = await createStore()
-        await store.storeLastResortKeyPackage(ALICE, 'kp-last-resort')
+        await store.storeLastResortKeyPackage({ ownerDID: ALICE, keyPackage: 'kp-last-resort' })
         // A full ordinary pool alongside an occupied slot: the slot bought no headroom and cost
         // none. A store that charged it would let a full pool block the floor.
         for (let i = 0; i < maxKeyPackagesPerDID; i++) {
-          await store.storeKeyPackage(ALICE, `kp-${i}`)
+          await store.storeKeyPackage({ ownerDID: ALICE, keyPackage: `kp-${i}` })
         }
-        await expect(store.storeKeyPackage(ALICE, 'kp-overflow')).rejects.toThrow(
-          KeyPackageQuotaExceededError,
-        )
-        expect(await store.fetchLastResortKeyPackage(ALICE)).toBe('kp-last-resort')
+        await expect(
+          store.storeKeyPackage({ ownerDID: ALICE, keyPackage: 'kp-overflow' }),
+        ).rejects.toThrow(KeyPackageQuotaExceededError)
+        expect(await store.fetchLastResortKeyPackage({ ownerDID: ALICE })).toBe('kp-last-resort')
       })
     }
 

@@ -215,7 +215,7 @@ describe('hub pub/sub', () => {
     })
     await delay(20)
 
-    expect(await store.getSubscribers(TOPIC)).toEqual([])
+    expect(await store.getSubscribers({ topicID: TOPIC })).toEqual([])
     expect((await store.fetch({ recipientDID: 'did:key:nobody' })).messages).toHaveLength(0)
     await ctx.dispose()
   })
@@ -362,7 +362,7 @@ describe('hub pub/sub', () => {
     await bob.request('hub/v1/subscribe', { param: { topicID: TOPIC } })
     await bob.request('hub/v1/unsubscribe', { param: { topicID: TOPIC } })
 
-    expect(await ctx.store.getSubscribers(TOPIC)).toEqual([])
+    expect(await ctx.store.getSubscribers({ topicID: TOPIC })).toEqual([])
     await alice.request('hub/v1/publish', {
       param: { topicID: TOPIC, payload: encodePayload('gone') },
     })

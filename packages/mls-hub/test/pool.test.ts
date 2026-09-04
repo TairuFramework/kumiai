@@ -52,7 +52,7 @@ describe('ensureStocked', () => {
 
     expect(result).toEqual({ minted: 3, depth: 3 })
     expect(upload).toHaveBeenCalledTimes(1)
-    expect(await hub.hubStore.countKeyPackages(hub.identity.id)).toBe(3)
+    expect(await hub.hubStore.countKeyPackages({ ownerDID: hub.identity.id })).toBe(3)
 
     const records = await store.list(hub.identity.id)
     expect(records).toHaveLength(3)
@@ -80,7 +80,7 @@ describe('ensureStocked', () => {
     await pool.ensureStocked().value
 
     const records = await store.list(hub.identity.id)
-    expect(await hub.hubStore.fetchKeyPackages(hub.identity.id, 1)).toEqual([
+    expect(await hub.hubStore.fetchKeyPackages({ ownerDID: hub.identity.id, count: 1 })).toEqual([
       records[0]?.keyPackage,
     ])
 
@@ -123,7 +123,7 @@ describe('ensureStocked', () => {
     })
     await pool.ensureStocked().value
     // Consume exactly one: depth 3 sits strictly between lowWater (2) and target (4).
-    await hub.hubStore.fetchKeyPackages(hub.identity.id, 1)
+    await hub.hubStore.fetchKeyPackages({ ownerDID: hub.identity.id, count: 1 })
     const upload = vi.spyOn(hub.client, 'uploadKeyPackages')
 
     const result = await pool.ensureStocked().value
@@ -145,7 +145,7 @@ describe('ensureStocked', () => {
     })
     await pool.ensureStocked().value
     // Someone fetched two of them.
-    await hub.hubStore.fetchKeyPackages(hub.identity.id, 2)
+    await hub.hubStore.fetchKeyPackages({ ownerDID: hub.identity.id, count: 2 })
 
     const result = await pool.ensureStocked().value
 
@@ -196,7 +196,9 @@ describe('ensureStocked', () => {
     // Re-uploading it would risk a second copy of one init key in the pool — both would be served.
     // Minting fresh costs one key generation; the orphan stays readable for a late Welcome and is
     // pruned at expiry.
-    expect(await hub.hubStore.fetchKeyPackages(hub.identity.id, 5)).not.toContain('kp-orphan')
+    expect(
+      await hub.hubStore.fetchKeyPackages({ ownerDID: hub.identity.id, count: 5 }),
+    ).not.toContain('kp-orphan')
     expect((await store.list(hub.identity.id)).map((entry) => entry.ref)).toContain('orphan')
   })
 

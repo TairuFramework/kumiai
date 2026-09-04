@@ -82,7 +82,8 @@ describe('per-target-DID key-package consumption quota', () => {
     const { store, handlers } = setup({
       keyPackageFetchLimits: { maxPerTargetConsumed: 4, maxRequests: 1000 },
     })
-    for (let i = 0; i < 20; i++) await store.storeKeyPackage(TARGET, `kp-${i}`)
+    for (let i = 0; i < 20; i++)
+      await store.storeKeyPackage({ ownerDID: TARGET, keyPackage: `kp-${i}` })
 
     // Four distinct requester DIDs each consume 1 — total 4, exactly the budget.
     for (let i = 0; i < 4; i++) {
@@ -102,8 +103,8 @@ describe('per-target-DID key-package consumption quota', () => {
     const { store, handlers } = setup({
       keyPackageFetchLimits: { maxPerTargetConsumed: 1, maxRequests: 1000, windowMs: 1000 },
     })
-    await store.storeKeyPackage(TARGET, 'kp-0')
-    await store.storeKeyPackage(TARGET, 'kp-1')
+    await store.storeKeyPackage({ ownerDID: TARGET, keyPackage: 'kp-0' })
+    await store.storeKeyPackage({ ownerDID: TARGET, keyPackage: 'kp-1' })
     await (handlers['hub/v1/keypackage/fetch'] as any)(
       reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 1 }),
     )
@@ -159,7 +160,8 @@ describe('keypackage/fetch ordering: authorize -> per-requester -> per-target', 
       keyPackageFetchLimits: { maxPerTargetConsumed: 1, maxRequests: 1000 },
       authorize: (req) => !(req.action === 'keypackage/fetch' && req.did === deniedDID),
     })
-    for (let i = 0; i < 5; i++) await store.storeKeyPackage(TARGET, `kp-${i}`)
+    for (let i = 0; i < 5; i++)
+      await store.storeKeyPackage({ ownerDID: TARGET, keyPackage: `kp-${i}` })
 
     await expect(
       (handlers['hub/v1/keypackage/fetch'] as any)(
@@ -182,7 +184,8 @@ describe('keypackage/fetch ordering: authorize -> per-requester -> per-target', 
     const { store, handlers } = setup({
       keyPackageFetchLimits: { maxPerTargetConsumed: 2, maxRequests: 1 },
     })
-    for (let i = 0; i < 5; i++) await store.storeKeyPackage(TARGET, `kp-${i}`)
+    for (let i = 0; i < 5; i++)
+      await store.storeKeyPackage({ ownerDID: TARGET, keyPackage: `kp-${i}` })
 
     // r1's first fetch: within both the per-requester window (maxRequests: 1) and the per-target
     // budget (per-requester=1, per-target=1).
@@ -222,7 +225,8 @@ describe('keypackage/fetch ordering: authorize -> per-requester -> per-target', 
 describe('key-package fetch capping and unknown targets (previously untested)', () => {
   test('count is capped at maxCount', async () => {
     const { store, handlers } = setup({ keyPackageFetchLimits: { maxCount: 2 } })
-    for (let i = 0; i < 5; i++) await store.storeKeyPackage(TARGET, `kp-${i}`)
+    for (let i = 0; i < 5; i++)
+      await store.storeKeyPackage({ ownerDID: TARGET, keyPackage: `kp-${i}` })
     const result = await (handlers['hub/v1/keypackage/fetch'] as any)(
       reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 5 }),
     )
@@ -245,9 +249,9 @@ describe('last-resort key package upload', () => {
       reqCtx('hub/v1/keypackage/upload', { keyPackages: ['kp-lr'], lastResort: true }, TARGET),
     )
     expect(result.stored).toBe(1)
-    expect(await store.fetchLastResortKeyPackage(TARGET)).toBe('kp-lr')
+    expect(await store.fetchLastResortKeyPackage({ ownerDID: TARGET })).toBe('kp-lr')
     // Nothing leaked into the destructive pool.
-    expect(await store.fetchKeyPackages(TARGET, 1)).toEqual([])
+    expect(await store.fetchKeyPackages({ ownerDID: TARGET, count: 1 })).toEqual([])
   })
 
   test('an upload without the flag still goes to the ordinary pool', async () => {
@@ -255,8 +259,8 @@ describe('last-resort key package upload', () => {
     await (handlers['hub/v1/keypackage/upload'] as any)(
       reqCtx('hub/v1/keypackage/upload', { keyPackages: ['kp-0', 'kp-1'] }, TARGET),
     )
-    expect(await store.fetchLastResortKeyPackage(TARGET)).toBeNull()
-    expect(await store.fetchKeyPackages(TARGET, 2)).toEqual(['kp-0', 'kp-1'])
+    expect(await store.fetchLastResortKeyPackage({ ownerDID: TARGET })).toBeNull()
+    expect(await store.fetchKeyPackages({ ownerDID: TARGET, count: 2 })).toEqual(['kp-0', 'kp-1'])
   })
 
   test('a last-resort upload carrying more than one package is refused before charging anyone', async () => {
@@ -277,8 +281,8 @@ describe('last-resort key package upload', () => {
       ),
     ).rejects.toMatchObject({ code: HUB_ERROR_CODES.invalidPayload })
     // Refused whole: neither package was stored anywhere.
-    expect(await store.fetchLastResortKeyPackage(TARGET)).toBeNull()
-    expect(await store.fetchKeyPackages(TARGET, 2)).toEqual([])
+    expect(await store.fetchLastResortKeyPackage({ ownerDID: TARGET })).toBeNull()
+    expect(await store.fetchKeyPackages({ ownerDID: TARGET, count: 2 })).toEqual([])
     // Refused before authorize ran at all.
     expect(seen).toEqual([])
     // Refused before the rate limiter was charged: the single-token budget is still intact.
@@ -308,7 +312,7 @@ describe('last-resort key package upload', () => {
     await (handlers['hub/v1/keypackage/upload'] as any)(
       reqCtx('hub/v1/keypackage/upload', { keyPackages: ['kp-0'] }, TARGET),
     )
-    expect(await store.fetchKeyPackages(TARGET, 1)).toEqual(['kp-0'])
+    expect(await store.fetchKeyPackages({ ownerDID: TARGET, count: 1 })).toEqual(['kp-0'])
     // The ordinary call's authorize request must OMIT the key entirely — not carry it as `false`
     // or an explicit `undefined`, either of which a host policy could misread as an opt-out.
     expect(seen[1]).not.toHaveProperty('lastResort')
@@ -329,8 +333,10 @@ describe('last-resort key package upload', () => {
         TARGET,
       ),
     )
-    expect(await store.fetchLastResortKeyPackage(TARGET)).toBeNull()
-    expect(await store.fetchKeyPackages(TARGET, 1)).toEqual(['kp-explicit-false'])
+    expect(await store.fetchLastResortKeyPackage({ ownerDID: TARGET })).toBeNull()
+    expect(await store.fetchKeyPackages({ ownerDID: TARGET, count: 1 })).toEqual([
+      'kp-explicit-false',
+    ])
     expect(seen[0]).not.toHaveProperty('lastResort')
   })
 })
@@ -338,8 +344,8 @@ describe('last-resort key package upload', () => {
 describe('last-resort key package fetch', () => {
   test('the slot tops up a short response, exactly once', async () => {
     const { store, handlers } = setup()
-    await store.storeKeyPackage(TARGET, 'kp-0')
-    await store.storeLastResortKeyPackage(TARGET, 'kp-lr')
+    await store.storeKeyPackage({ ownerDID: TARGET, keyPackage: 'kp-0' })
+    await store.storeLastResortKeyPackage({ ownerDID: TARGET, keyPackage: 'kp-lr' })
 
     const result = await (handlers['hub/v1/keypackage/fetch'] as any)(
       reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 5 }),
@@ -356,8 +362,8 @@ describe('last-resort key package fetch', () => {
 
   test('a response that already satisfies count is not topped up', async () => {
     const { store, handlers } = setup()
-    await store.storeKeyPackage(TARGET, 'kp-0')
-    await store.storeLastResortKeyPackage(TARGET, 'kp-lr')
+    await store.storeKeyPackage({ ownerDID: TARGET, keyPackage: 'kp-0' })
+    await store.storeLastResortKeyPackage({ ownerDID: TARGET, keyPackage: 'kp-lr' })
 
     const result = await (handlers['hub/v1/keypackage/fetch'] as any)(
       reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 1 }),
@@ -367,7 +373,7 @@ describe('last-resort key package fetch', () => {
 
   test('a target with no slot is unchanged: a short response stays short', async () => {
     const { store, handlers } = setup()
-    await store.storeKeyPackage(TARGET, 'kp-0')
+    await store.storeKeyPackage({ ownerDID: TARGET, keyPackage: 'kp-0' })
     const result = await (handlers['hub/v1/keypackage/fetch'] as any)(
       reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 5 }),
     )
@@ -378,9 +384,9 @@ describe('last-resort key package fetch', () => {
     const { store, handlers } = setup({
       keyPackageFetchLimits: { maxPerTargetConsumed: 1, maxRequests: 1000 },
     })
-    await store.storeKeyPackage(TARGET, 'kp-0')
-    await store.storeKeyPackage(TARGET, 'kp-1')
-    await store.storeLastResortKeyPackage(TARGET, 'kp-lr')
+    await store.storeKeyPackage({ ownerDID: TARGET, keyPackage: 'kp-0' })
+    await store.storeKeyPackage({ ownerDID: TARGET, keyPackage: 'kp-1' })
+    await store.storeLastResortKeyPackage({ ownerDID: TARGET, keyPackage: 'kp-lr' })
 
     await (handlers['hub/v1/keypackage/fetch'] as any)(
       reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 1 }),
@@ -392,15 +398,15 @@ describe('last-resort key package fetch', () => {
     )
     expect(result.keyPackages).toEqual(['kp-lr'])
     // And the quota still did its job: the second ordinary package was NOT drained.
-    expect(await store.fetchKeyPackages(TARGET, 1)).toEqual(['kp-1'])
+    expect(await store.fetchKeyPackages({ ownerDID: TARGET, count: 1 })).toEqual(['kp-1'])
   })
 
   test('a spent budget is still refused when the target has no last-resort package', async () => {
     const { store, handlers } = setup({
       keyPackageFetchLimits: { maxPerTargetConsumed: 1, maxRequests: 1000 },
     })
-    await store.storeKeyPackage(TARGET, 'kp-0')
-    await store.storeKeyPackage(TARGET, 'kp-1')
+    await store.storeKeyPackage({ ownerDID: TARGET, keyPackage: 'kp-0' })
+    await store.storeKeyPackage({ ownerDID: TARGET, keyPackage: 'kp-1' })
 
     await (handlers['hub/v1/keypackage/fetch'] as any)(
       reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 1 }),
@@ -414,7 +420,7 @@ describe('last-resort key package fetch', () => {
 
   test('the per-requester rate limit is not bypassed by a last-resort package', async () => {
     const { store, handlers } = setup({ keyPackageFetchLimits: { maxRequests: 1 } })
-    await store.storeLastResortKeyPackage(TARGET, 'kp-lr')
+    await store.storeLastResortKeyPackage({ ownerDID: TARGET, keyPackage: 'kp-lr' })
 
     await (handlers['hub/v1/keypackage/fetch'] as any)(
       reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 1 }),
@@ -430,7 +436,7 @@ describe('last-resort key package fetch', () => {
 
   test('an authorize refusal is not bypassed by a last-resort package', async () => {
     const { store, handlers } = setup({ authorize: (req) => req.action !== 'keypackage/fetch' })
-    await store.storeLastResortKeyPackage(TARGET, 'kp-lr')
+    await store.storeLastResortKeyPackage({ ownerDID: TARGET, keyPackage: 'kp-lr' })
     await expect(
       (handlers['hub/v1/keypackage/fetch'] as any)(
         reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 1 }),
@@ -495,7 +501,7 @@ describe('store errors on the key-package fetch path keep their wire code', () =
       ...createMemoryStore(),
       fetchLastResortKeyPackage: undefined as never,
     }
-    await store.storeKeyPackage(TARGET, 'kp-0')
+    await store.storeKeyPackage({ ownerDID: TARGET, keyPackage: 'kp-0' })
     const { handlers } = setup({ store: store as never })
     const result = await (handlers['hub/v1/keypackage/fetch'] as any)(
       reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 5 }),
@@ -509,7 +515,7 @@ describe('store errors on the key-package fetch path keep their wire code', () =
       new KeyPackageQuotaExceededError('store unavailable'),
     )
     // The ordinary pool answered short, so `kp-0` is already spliced out. The client gets it.
-    await store.storeKeyPackage(TARGET, 'kp-0')
+    await store.storeKeyPackage({ ownerDID: TARGET, keyPackage: 'kp-0' })
     const { handlers } = setup({ store: store as never })
     const result = await (handlers['hub/v1/keypackage/fetch'] as any)(
       reqCtx('hub/v1/keypackage/fetch', { did: TARGET, count: 5 }),
@@ -537,8 +543,8 @@ describe('store errors on the key-package fetch path keep their wire code', () =
    */
   test('a store failure on the spent-budget fallback still refuses with the quota code', async () => {
     const store = storeThatFailsOn('fetchLastResortKeyPackage', new Error('store unavailable'))
-    await store.storeKeyPackage(TARGET, 'kp-0')
-    await store.storeKeyPackage(TARGET, 'kp-1')
+    await store.storeKeyPackage({ ownerDID: TARGET, keyPackage: 'kp-0' })
+    await store.storeKeyPackage({ ownerDID: TARGET, keyPackage: 'kp-1' })
     const { handlers } = setup({
       store: store as never,
       keyPackageFetchLimits: { maxPerTargetConsumed: 1, maxRequests: 1000 },
@@ -561,9 +567,13 @@ describe('hub/v1/keypackage/status', () => {
     const { store, handlers } = setup()
     const future = Math.floor(Date.now() / 1000) + 3600
     const past = Math.floor(Date.now() / 1000) - 60
-    await store.storeKeyPackage(TARGET, 'kp-live', future)
-    await store.storeKeyPackage(TARGET, 'kp-dead', past)
-    await store.storeKeyPackage('did:key:someone-else', 'kp-other', future)
+    await store.storeKeyPackage({ ownerDID: TARGET, keyPackage: 'kp-live', notAfter: future })
+    await store.storeKeyPackage({ ownerDID: TARGET, keyPackage: 'kp-dead', notAfter: past })
+    await store.storeKeyPackage({
+      ownerDID: 'did:key:someone-else',
+      keyPackage: 'kp-other',
+      notAfter: future,
+    })
 
     const result = await (handlers['hub/v1/keypackage/status'] as any)(
       reqCtx('hub/v1/keypackage/status', {}, TARGET),
@@ -575,7 +585,7 @@ describe('hub/v1/keypackage/status', () => {
 
   test("reports the digest of the caller's own last-resort package", async () => {
     const { store, handlers } = setup()
-    await store.storeLastResortKeyPackage(TARGET, 'kp-last-resort')
+    await store.storeLastResortKeyPackage({ ownerDID: TARGET, keyPackage: 'kp-last-resort' })
 
     const result = await (handlers['hub/v1/keypackage/status'] as any)(
       reqCtx('hub/v1/keypackage/status', {}, TARGET),
@@ -593,9 +603,9 @@ describe('hub/v1/keypackage/status', () => {
 
   test('a did in the param is ignored: the answer is always about the authenticated caller', async () => {
     const { store, handlers } = setup()
-    await store.storeKeyPackage(TARGET, 'kp-target')
-    await store.storeKeyPackage(REQUESTER, 'kp-requester')
-    await store.storeKeyPackage(REQUESTER, 'kp-requester-2')
+    await store.storeKeyPackage({ ownerDID: TARGET, keyPackage: 'kp-target' })
+    await store.storeKeyPackage({ ownerDID: REQUESTER, keyPackage: 'kp-requester' })
+    await store.storeKeyPackage({ ownerDID: REQUESTER, keyPackage: 'kp-requester-2' })
 
     // REQUESTER is the authenticated caller (reqCtx's default `did`); a `did` field naming TARGET
     // must not redirect the answer to TARGET's inventory — that would let a caller learn exactly
@@ -618,7 +628,7 @@ describe('hub/v1/keypackage/upload notAfter', () => {
       reqCtx('hub/v1/keypackage/upload', { keyPackages: ['kp-a'], notAfter: past }, TARGET),
     )
 
-    expect(await store.countKeyPackages(TARGET)).toBe(0)
+    expect(await store.countKeyPackages({ ownerDID: TARGET })).toBe(0)
   })
 
   test('rejects an expiry on a last-resort upload', async () => {

@@ -151,6 +151,39 @@ export type AckParams = {
   sequenceIDs: Array<string>
 }
 
+export type UnsubscribeParams = {
+  subscriberDID: string
+  topicID: string
+}
+
+export type GetSubscribersParams = {
+  topicID: string
+}
+
+export type StoreKeyPackageParams = {
+  ownerDID: string
+  keyPackage: string
+  notAfter?: number
+}
+
+export type FetchKeyPackagesParams = {
+  ownerDID: string
+  count?: number
+}
+
+export type CountKeyPackagesParams = {
+  ownerDID: string
+}
+
+export type StoreLastResortKeyPackageParams = {
+  ownerDID: string
+  keyPackage: string
+}
+
+export type FetchLastResortKeyPackageParams = {
+  ownerDID: string
+}
+
 export type PurgeParams = {
   /** The hub's default retention in seconds: the age bound for a topic no subscriber asked to keep longer. */
   olderThan: number
@@ -216,8 +249,8 @@ export type HubStore = {
    * reject a subscribe past its cap with `SubscriptionQuotaExceededError`. A re-subscribe to a
    * topic the DID already holds never counts against the cap. */
   subscribe(params: SubscribeParams): Promise<void>
-  unsubscribe(subscriberDID: string, topicID: string): Promise<void>
-  getSubscribers(topicID: string): Promise<Array<string>>
+  unsubscribe(params: UnsubscribeParams): Promise<void>
+  getSubscribers(params: GetSubscribersParams): Promise<Array<string>>
   /**
    * Store one key package for later retrieval.
    *
@@ -232,10 +265,10 @@ export type HubStore = {
    * and the owner can never replenish again; FIFO consumption also serves the nearest-expiry entry
    * first, which the inviter then rejects when it builds the Add.
    */
-  storeKeyPackage(ownerDID: string, keyPackage: string, notAfter?: number): Promise<void>
-  fetchKeyPackages(ownerDID: string, count?: number): Promise<Array<string>>
+  storeKeyPackage(params: StoreKeyPackageParams): Promise<void>
+  fetchKeyPackages(params: FetchKeyPackagesParams): Promise<Array<string>>
   /** How many live key packages the owner has. Expired entries are not counted. */
-  countKeyPackages(ownerDID: string): Promise<number>
+  countKeyPackages(params: CountKeyPackagesParams): Promise<number>
   /**
    * Store the owner's single last-resort key package, replacing any previous one.
    *
@@ -245,8 +278,8 @@ export type HubStore = {
    * One slot per owner, and it MUST NOT count against the per-owner cap `storeKeyPackage`
    * enforces — a full pool must never be able to block the floor.
    */
-  storeLastResortKeyPackage(ownerDID: string, keyPackage: string): Promise<void>
+  storeLastResortKeyPackage(params: StoreLastResortKeyPackageParams): Promise<void>
   /** The owner's last-resort key package, or `null` when they have none. NEVER consumes: repeated
    * calls return the same package. */
-  fetchLastResortKeyPackage(ownerDID: string): Promise<string | null>
+  fetchLastResortKeyPackage(params: FetchLastResortKeyPackageParams): Promise<string | null>
 }

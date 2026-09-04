@@ -24,18 +24,25 @@ export type { HubProtocol } from './protocol.js'
 export { hubProtocol } from './protocol.js'
 export type {
   AckParams,
+  CountKeyPackagesParams,
+  FetchKeyPackagesParams,
+  FetchLastResortKeyPackageParams,
   FetchParams,
   FetchResult,
   FetchTopicParams,
   FetchTopicResult,
+  GetSubscribersParams,
   HubStore,
   HubStoreEvents,
   PublishParams,
   PublishResult,
   PurgeParams,
   StoredMessage,
+  StoreKeyPackageParams,
+  StoreLastResortKeyPackageParams,
   SubscribeParams,
   TrimParams,
+  UnsubscribeParams,
 } from './types.js'
 export type {
   WakeRegistration,

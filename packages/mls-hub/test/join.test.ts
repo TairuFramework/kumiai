@@ -80,7 +80,7 @@ async function inviteWith(recipientDID: string, keyPackage: string): Promise<Inv
 /** An inviter fetches an ordinary package for `hub.identity` from the hub's own store, as a real
  *  inviter would through the fetch endpoint, and commits an invite with it. */
 async function inviteFromPool(): Promise<InviteAndCommit & { usedRef: string }> {
-  const [keyPackage] = await hub.hubStore.fetchKeyPackages(hub.identity.id, 1)
+  const [keyPackage] = await hub.hubStore.fetchKeyPackages({ ownerDID: hub.identity.id, count: 1 })
   if (keyPackage == null) throw new Error('test setup: the pool has nothing to fetch')
   const publicPackage = decodeKeyPackage(keyPackage)
   if (publicPackage == null) throw new Error('test setup: fetched key package did not decode')
@@ -92,7 +92,7 @@ async function inviteFromPool(): Promise<InviteAndCommit & { usedRef: string }> 
 
 /** Same, but from the hub's last-resort slot, which a fetch does not consume. */
 async function inviteFromLastResortSlot(): Promise<InviteAndCommit> {
-  const keyPackage = await hub.hubStore.fetchLastResortKeyPackage(hub.identity.id)
+  const keyPackage = await hub.hubStore.fetchLastResortKeyPackage({ ownerDID: hub.identity.id })
   if (keyPackage == null) throw new Error('test setup: the last-resort slot is empty')
   return await inviteWith(hub.identity.id, keyPackage)
 }
