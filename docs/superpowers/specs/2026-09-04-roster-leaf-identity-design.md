@@ -25,11 +25,15 @@ second break.
 Changing this port method touches three packages (plus their tests):
 
 - **`@kumiai/rpc`** — the port declaration (`crypto.ts:271`), its re-export (`index.ts:40`), the
-  sole consumer (`peer.ts:1211`, `:1229`), and doc comments that reference it (`crypto.ts:186`,
-  `:258-270`).
+  sole consumer (`peer.ts:1211`, `:1229`), doc comments that reference it (`crypto.ts:186`,
+  `:258-270`), and prose references to the old name in a test comment
+  (`test/did-normalization.test.ts:61`).
+- **Docs** — `docs/agents/architecture.md:46` names `rosterDIDs` in prose; update to `rosterEntries`.
+  (Historical `completed/` docs keep the old name as-is — they record what was true then.)
 - **`@kumiai/mls-rpc`** — the real implementation (`mls.ts:130`).
 - **`@kumiai/rpc-conformance`** — the contract suite every implementation *and* every double must
-  pass (`group-mls.ts:47` type row, `:313` describe block, assertions at `:223/:230/:261/:336/:454`).
+  pass (`group-mls.ts:47` type row, `:313` describe block, roster assertions at
+  `:223/:230/:261/:327/:329/:333/:336/:339/:454`).
 
 Per `AGENTS.md`, a port change obliges running **both** contract suites against the real
 implementation and the doubles.
@@ -52,10 +56,18 @@ export type RosterEntry = {
 ```
 
 Rationale for an object now: an object return is open, so a later per-leaf field (credential
-metadata, capability) is an **additive** change — a new optional property forces nothing on
-implementors and gives consumers more. That is the whole reason to spend the break here rather than
-carry `Array<string>` to 1.0. `longForm` is populated now because `GroupMember` already carries it
-(`packages/mls/src/credential.ts:49-56`), so it is free real data rather than a speculative field.
+metadata, capability) is an **additive** change **only if the new field is optional** — a new
+optional property forces nothing on implementors and gives consumers more; a new *required* field
+would still be a break. That is the whole reason to spend the break here rather than carry
+`Array<string>` to 1.0. `longForm` is populated now because `GroupMember` already carries it as a
+required field (`packages/mls/src/credential.ts:64`; the type is `GroupMember` at `:49-64`), so it
+is free real data rather than a speculative field.
+
+Caveat on `longForm`: it is **never absent** (the type is `string`, and `listMembers` fills it —
+see the real-impl section), but it is not *guaranteed resolvable* in one edge case: restored
+persisted state can bypass the did:peer:4 validation (`group-handle.ts:662`), so a malformed legacy
+leaf may carry the short form here. "Never absent" holds; "always a resolvable long form" does not.
+No current consumer reads `longForm`, so this is a documented property, not a live risk.
 
 ### Port — `@kumiai/rpc`
 
@@ -108,28 +120,48 @@ async rosterEntries(): Promise<Array<RosterEntry>> {
 ```
 
 `listMembers()` returns `GroupMember` (`packages/mls/src/group-handle.ts:725`), which already
-carries `id`, `leafIndex`, and `longForm` — the mapping is mechanical. The existing doc note at
+carries `id`, `leafIndex`, and `longForm` — `longForm` is sourced as `parsed.longForm ?? parsed.id`
+(`group-handle.ts:669`), so `m.longForm` is always a string and the mapping type-checks. It is
+mechanical. The existing doc note at
 `mls.ts:105` ("`rosterDIDs` reads the ratchet tree, so a leaf with an unparsable credential is
 simply absent") is retitled for `rosterEntries` and still holds: an unparsable leaf is absent from
 `listMembers`, so it is absent from the entries.
 
 ### Double — `@kumiai/rpc` fixtures
 
-`packages/rpc/test/fixtures/memory-group-mls.ts` currently tracks membership as a `Set<string>` of
-DIDs (`leaves`, returned by `rosterDIDs` at `:485` and by the `leaves()` accessor). To yield real
-leaf indices it becomes a **leaf-slot model**:
+`packages/rpc/test/fixtures/memory-group-mls.ts` currently tracks membership as a compact
+`Array<string>` of DIDs (`leaves`, `:368`), returned by `rosterDIDs` (`:485`) and the `leaves()`
+accessor. To yield leaf indices it becomes a **hole-preserving leaf-slot model**:
 
-- an index → DID map (or sparse array) of occupied leaves;
+- a sparse array (or index → DID map) of occupied leaves — **holes are preserved, never compacted**;
 - **add** fills the lowest free index;
 - **remove** blanks the index (so it is reused by the next add), matching ts-mls;
-- `rosterEntries()` returns one `RosterEntry` per occupied slot, `longForm` = the DID string (the
-  memory double's DIDs are self-resolving).
+- `rosterEntries()` returns one `RosterEntry` per occupied slot, `leafIndex` = the slot index,
+  `longForm` = the DID string (the memory double's DIDs are self-resolving).
 
-This is the one non-mechanical piece. It is required rather than optional because of the
-test-double strictness rule: **a double may be stricter than its port, never more permissive.** A
-double that synthesized insertion-order indices and never reused a slot would accept behavior the
-real ts-mls-backed port does not exhibit, and could mask a real implementation that reuses indices.
-Modeling lowest-free-index assignment keeps the double no more permissive than the port.
+Hole preservation is required, not optional, because of the test-double strictness rule: **a double
+may be stricter than its port, never more permissive.** A compact array with `leafIndex` = array
+position would shift every later member's index on a removal — indices the real ts-mls port keeps
+stable — so it would accept index-reshuffling behavior the real port never exhibits. Hole-preserving
+slots with lowest-free-index reuse keep the double no more permissive than the port, and make
+`leafIndex` stable and reused exactly as real MLS does.
+
+**Every roster-mutating path must preserve holes,** not only the accessor — the conversion touches
+each of: removal, addition, external-rejoin, self-removal, and recovery-adoption at `:448`, `:460`,
+`:521`, `:595`, `:738`. A path that rebuilt the compact array would silently reintroduce
+position-indices.
+
+**Scope decision — duplicate-DID removal is out of scope (deliberate).** The double addresses
+removal by DID (`removes?: Array<string>`, `:176`) and blanks *every* slot matching that DID. Real
+MLS removal is leaf-index-addressed, so it can remove *one* of two leaves a single DID holds — the
+exact case `leafIndex` exists to disambiguate. The double is **not** being made faithful to that
+case: doing so would rewrite its commit representation to leaf-index-addressed removal and raise the
+conformance bar for every external double, for a semantic **no consumer uses today**. Justification
+matches the milestone's own logic (no filed consumer), and nothing in the decision changes the port
+shape or what any consumer receives — `RosterEntry` carries both `did` and `leafIndex` regardless,
+and the real `mls-rpc` impl is already faithful via ts-mls. This is recorded as a **known
+double-coverage gap**, to be closed (double + conformance, additive to test infra, non-breaking to
+the API) when a consumer first needs duplicate-DID leaf disambiguation.
 
 Any other fixture accessor that exposed the old string roster (`leaves()`) stays available for
 tests that only care about DIDs; it reads the slot model's occupied DIDs.
@@ -140,9 +172,10 @@ tests that only care about DIDs; it reads the slot model's occupied DIDs.
 
 - The port type row (`:47`) changes `rosterDIDs: () => Promise<Array<string>>` →
   `rosterEntries: () => Promise<Array<RosterEntry>>`.
-- Existing membership assertions (`:223`, `:230`, `:261`, `:336`, `:454`) rekey from
-  `.toContain(carol.did)` / `new Set(...)` over strings to the entry `.did`. A small local helper
-  `const dids = (r: Array<RosterEntry>) => r.map((e) => e.did)` keeps them readable.
+- Existing membership assertions — `.toContain(carol.did)` at `:223/:230/:261/:336/:454` and the
+  `new Set(...)`-over-strings comparisons at `:327/:329/:333/:339` — rekey to the entry `.did`. A
+  small local helper `const dids = (r: Array<RosterEntry>) => r.map((e) => e.did)` keeps them
+  readable.
 - The `describe('rosterDIDs')` block (`:313`) is renamed to `rosterEntries`. Its existing test
   ("reflects an APPLIED roster change, and only an applied one") is preserved, rekeyed to `.did`.
 - **New clause** in that block asserting leaf identity: for a live roster, every entry has an
@@ -150,10 +183,15 @@ tests that only care about DIDs; it reads the slot model's occupied DIDs.
   is stable across a commit that does not touch that member, and every entry has a non-empty
   `longForm`.
 
-Not asserted: reuse-after-remove of a blanked leaf index. It is a real ts-mls property, but no
-consumer depends on it (the lane rotates on `CommitHeader.external`, not on leaf reuse), so testing
-it is out of scope for this change. The double implements lowest-free-index assignment anyway, so
-the property holds; it is simply not a conformance clause.
+Not asserted: (a) reuse-after-remove of a blanked leaf index, and (b) that `leafIndex` identifies
+the *correct* leaf through a remove/reuse cycle or when one DID holds two leaves. These are real
+ts-mls properties, but no consumer depends on them (the lane rotates on `CommitHeader.external`, not
+on leaf identity or reuse), and the double is deliberately not made faithful to duplicate-DID
+removal (see the double section). So the suite guarantees `leafIndex` is present, unique, and stable
+— not that it is the semantically correct leaf under duplicate-DID membership. That is the **known
+coverage gap** the scope decision records; closing it (double + a conformance clause) is additive
+and waits on a consumer. The double's lowest-free-index reuse means property (a) holds in practice;
+it is simply not a conformance clause.
 
 ## Testing
 
