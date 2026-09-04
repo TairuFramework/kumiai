@@ -387,13 +387,22 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           for (const e of entries) expect(e.longForm.length).toBeGreaterThan(0)
 
           // Stability: removing an unrelated member does not move alice's own leafIndex.
-          const alice0 = entries.find((e) => e.did === alice.did)?.leafIndex
+          const aliceEntry = entries.find((e) => e.did === alice.did)
+          // Narrowed rather than optional-chained: an optional-chained read compared against
+          // another optional-chained read below would degrade to `undefined === undefined` and
+          // pass vacuously if alice were ever missing from her own roster.
+          if (aliceEntry == null) throw new Error('the harness reported no leaf for alice')
+          const alice0 = aliceEntry.leafIndex
           const carol = memberAt(group.members, 2)
           expect(dids(entries)).toContain(carol.did)
           const removal = await group.buildCommit({ removes: 2 })
           await alice.mls.processCommit(removal.commit, removal.context)
           const after = await alice.mls.rosterEntries()
-          expect(after.find((e) => e.did === alice.did)?.leafIndex).toBe(alice0)
+          const aliceAfter = after.find((e) => e.did === alice.did)
+          if (aliceAfter == null) {
+            throw new Error('alice lost her leaf after an unrelated member was removed')
+          }
+          expect(aliceAfter.leafIndex).toBe(alice0)
         })
       })
 
@@ -402,35 +411,53 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
        * `buildCommit({ adds: true })` is the harness's own primitive for that (see its doc in
        * `ConformanceMLSGroup`), not a helper invented for this test.
        *
-       * The freed leaf is read off `rosterEntries()` BY DID, not assumed to equal the removed
-       * member's position in `group.members`: the committer occupies a leaf of its own in both
-       * harnesses (see the previous test's note), so `group.members[1]`'s leaf is NOT
-       * necessarily leaf index `1` — the two are only related through the roster this port
-       * actually reports.
+       * TWO holes, not one, and non-adjacent: bob's leaf and dave's leaf are freed with carol's
+       * leaf left occupied between them, so "leftmost freed" and "most-recently-freed" name two
+       * different indices — a single-hole version cannot tell an implementation that always fills
+       * the most-recently-vacated slot from one that correctly fills the leftmost blank.
+       *
+       * The freed leaves are read off `rosterEntries()` BY DID, not assumed to equal the removed
+       * members' positions in `group.members`: the committer occupies a leaf of its own in both
+       * harnesses (see the earlier test's note), so `group.members[1]`'s leaf is NOT necessarily
+       * leaf index `1` — the two are only related through the roster this port actually reports.
+       *
+       * The newcomer match also excludes every DID the PRE-removal roster held, not just alice and
+       * the freed DIDs: an implementation that "filled" the hole by relocating an existing,
+       * untouched member (carol) rather than seating the genuine newcomer there would otherwise
+       * still satisfy a same-leafIndex, different-freed-DID check.
        */
-      test('an add after a removal reuses the freed leaf index (leftmost blank, different DID)', async () => {
-        await withGroup(3, 'roster-leaf-reuse', async (group) => {
+      test('an add after two removals reuses the LEFTMOST freed leaf index, never a relocated existing member', async () => {
+        await withGroup(4, 'roster-leaf-reuse', async (group) => {
           const alice = memberAt(group.members, 0)
           const bob = memberAt(group.members, 1)
+          const dave = memberAt(group.members, 3)
 
           const before = await alice.mls.rosterEntries()
+          const beforeDIDs = dids(before)
           const bobEntry = before.find((e) => e.did === bob.did)
           // Narrowed rather than optional-chained: `expect` does not narrow.
           if (bobEntry == null) throw new Error('the harness reported no leaf for bob')
-          const freedIndex = bobEntry.leafIndex
-          const freedDID = bobEntry.did
+          const daveEntry = before.find((e) => e.did === dave.did)
+          if (daveEntry == null) throw new Error('the harness reported no leaf for dave')
+          const leftFreed = Math.min(bobEntry.leafIndex, daveEntry.leafIndex)
+          const rightFreed = Math.max(bobEntry.leafIndex, daveEntry.leafIndex)
 
-          const removal = await group.buildCommit({ removes: 1 })
-          await alice.mls.processCommit(removal.commit, removal.context)
+          const removeBob = await group.buildCommit({ removes: 1 })
+          await alice.mls.processCommit(removeBob.commit, removeBob.context)
+          const removeDave = await group.buildCommit({ removes: 3 })
+          await alice.mls.processCommit(removeDave.commit, removeDave.context)
           const add = await group.buildCommit({ adds: true })
           await alice.mls.processCommit(add.commit, add.context)
 
           const entries = await alice.mls.rosterEntries()
           const newcomer = entries.find(
-            (e) => e.did !== alice.did && e.did !== freedDID && e.leafIndex === freedIndex,
+            (e) => e.leafIndex === leftFreed && !beforeDIDs.includes(e.did),
           )
-          // The newcomer occupies the freed leaf (leftmost blank), not a fresh one past the end.
+          // The newcomer occupies the LEFTMOST freed leaf and is genuinely new — not an existing
+          // member relocated into the hole.
           expect(newcomer).toBeDefined()
+          // The rightmost (more-recently-freed) hole stays blank: nothing fills it out of order.
+          expect(entries.find((e) => e.leafIndex === rightFreed)).toBeUndefined()
         })
       })
     })

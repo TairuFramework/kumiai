@@ -205,10 +205,11 @@ export type CommitHeader = {
    * itself rather than from a leaf it already held — a rejoin.
    *
    * The app-lane anchor rotates on it and CANNOT be told any other way: a rejoin by a member the
-   * roster still holds changes no DID ({@link rosterEntries} reads the same `did` set before and after)
-   * and no occupied leaf index (the resync blanks the member's old leaf and the new one lands on
-   * that same blank). Nothing a before/after diff can see moves, yet the rejoiner's fresh handle
-   * would anchor where it booted while the group stayed put — so the commit has to say so itself.
+   * roster still holds changes no DID ({@link rosterEntries} reads the same `did` set before and
+   * after) but MAY move that member's `leafIndex` (leftmost-blank, not necessarily the just-
+   * vacated slot — RFC 9420 §12.4.3.2). A `did`-set diff can't see the rejoin either way, yet the
+   * rejoiner's fresh handle would anchor where it booted while the group stayed put — so the
+   * commit has to say so itself.
    *
    * Structural and pre-apply, like its neighbours: an external commit is a public message from a
    * non-member, readable from the frame without advancing state, carrying its committer's DID in
