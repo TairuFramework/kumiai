@@ -12,6 +12,14 @@ test to the real type incl. `to()`; added wrong-type + absent-schema type assert
 protocol-identity check is empirically vacuous (Client covariance) — comment states this honestly
 rather than overclaiming.
 
+**QA fix** (commit `3d717d5`): Task 2's migration gate was per-package (`--filter @kumiai/rpc
+test:types`), so the separate `@kumiai/integration-tests` package escaped — 14 un-migrated positional
+`dispatch` sites in `app-lane-delivery.test.ts` / `directed-lane.test.ts` surfaced only under repo-root
+`pnpm test`. Migrated to `{ data: ... }`; confirmed repo-wide `turbo run test:types` fresh (`Cached: 0`)
+across rpc + mls-rpc + integration-tests. Lesson recorded in memory (breaking-api-gate-must-be-repo-wide).
+Pre-existing gap noted for follow-up: `tests/integration/package.json` has no `test:unit` script, so its
+vitest does not run in the root `turbo run test:types test:unit` gate.
+
 **Deferred minors** (remaining; none block merge — triage at completing/finishing):
 - ~~cast-drift guard used a hand-copied `InternalSurface` literal~~ **closed by `da1cd39`** (bound to the real exported type).
 - ~~No-data / no-param surface branches unexercised~~ **closed by `da1cd39`** (fixture now carries `chat/ping` no-data, `chat/noop` no-param/no-result; wrong-type + options-only + `param?: never` cases asserted).
