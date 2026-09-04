@@ -123,10 +123,8 @@ in the linked doc; the one real defect the check turned up is folded into the `d
   `data.kind` for application use — the responder and client classifiers key on `payload.typ`, never
   on shape-sniffing `data`. Both interim drop-classifications (the live responder's and the rpc
   app-lane drain's) are deleted; a stale v1-encoded frame is refused by `decodeFrame` rather than
-  silently misread. See the plan
-  [../../../superpowers/plans/2026-09-04-bus-control-typ.md](../../../superpowers/plans/2026-09-04-bus-control-typ.md)
-  and the spec
-  [../../../superpowers/specs/2026-09-04-bus-control-typ-design.md](../../../superpowers/specs/2026-09-04-bus-control-typ-design.md).
+  silently misread. See
+  [../completed/2026-09-04-bus-control-typ.complete.md](../completed/2026-09-04-bus-control-typ.complete.md).
 
 ### `@kumiai/mls-hub` — audited 2026-08-02, nothing carried forward
 

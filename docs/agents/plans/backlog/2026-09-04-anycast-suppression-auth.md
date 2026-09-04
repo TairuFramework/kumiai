@@ -1,9 +1,9 @@
 # Anycast suppression observe-path is unauthenticated
 
 **Priority:** backlog — a pre-existing anycast soundness concern, surfaced (not introduced) by the
-final whole-branch review of `feat/bus-control-typ`
-(`../../plans/../superpowers/plans/2026-09-04-bus-control-typ.md`), 2026-09-04. No fix on that branch;
-it left the observe path exactly as it found it.
+final whole-branch review of `feat/bus-control-typ` (see
+`../completed/2026-09-04-bus-control-typ.complete.md`), 2026-09-04. No fix on that branch; it left the
+observe path exactly as it found it.
 
 ## The concern
 
