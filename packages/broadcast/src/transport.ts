@@ -12,8 +12,11 @@ import type { BroadcastBus } from './bus.js'
  * authenticating `unwrap`. A v0 frame reaching a v1 reader would present a self-asserted name
  * where the reader now expects an authenticated one, so an unrecognised version is REFUSED, not
  * best-effort.
+ *
+ * v2 reinterprets `typ`: control frames move to a distinct `typ: 'ctrl'`, leaving `typ: 'event'`
+ * for app events. This removes `data.kind` from the app-data namespace.
  */
-export const BROADCAST_VERSION = 1
+export const BROADCAST_VERSION = 2
 
 /** Message shape carried on a broadcast topic. */
 export type BroadcastMessage = {
@@ -182,9 +185,9 @@ export function createBroadcastTransport<R = BroadcastMessage, W = BroadcastMess
   const writable = new WritableStream<W>({
     async write(value) {
       const typ = (value as BroadcastMessage | undefined)?.payload?.typ
-      if (typ !== 'event') {
+      if (typ !== 'event' && typ !== 'ctrl') {
         throw new Error(
-          `Broadcast transport only carries 'event' payloads; got '${typ ?? 'undefined'}'`,
+          `Broadcast transport only carries 'event' and 'ctrl' payloads; got '${typ ?? 'undefined'}'`,
         )
       }
       const bytes = await wrap(encodeFrame(value as BroadcastMessage))

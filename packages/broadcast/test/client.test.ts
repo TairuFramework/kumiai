@@ -18,11 +18,11 @@ function startResponder(
     for await (const msg of transport as AsyncIterable<BroadcastMessage>) {
       if (!running) break
       const data = msg.payload.data as { kind?: string; rid?: string; prm?: unknown } | undefined
-      if (msg.payload.typ !== 'event' || data?.kind !== 'req') continue
+      if (msg.payload.typ !== 'ctrl' || data?.kind !== 'req') continue
       const out = reply(data.prm)
       await transport.write({
         payload: {
-          typ: 'event',
+          typ: 'ctrl',
           prc: msg.payload.prc,
           data: { kind: 'res', rid: data.rid, ...out },
         },
