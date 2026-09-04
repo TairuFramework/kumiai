@@ -67,15 +67,15 @@ Procedure-kind → surface method:
 export type ProtocolSurface<Protocol extends GroupProtocolDefinition> = {
   dispatch: <P extends EventNames<Protocol>>(
     prc: P,
-    ...args: DispatchArgs<Protocol[P]>
+    ...args: DispatchArgs<Protocol[P]>   // [config?: { data }] — config object, see below
   ) => Promise<void>
   request: <P extends RequestNames<Protocol>>(
     prc: P,
-    ...args: RequestArgs<Protocol[P]>   // [prm?, options?] — see argument encoding below
+    ...args: RequestArgs<Protocol[P]>    // [config?: { param, errorThreshold?, timeoutMs? }]
   ) => Promise<ReturnOf<Protocol[P]['result']>>
   gather: <P extends RequestNames<Protocol>>(
     prc: P,
-    ...args: GatherArgs<Protocol[P]>
+    ...args: GatherArgs<Protocol[P]>     // [config?: { param, quorum?, timeoutMs? }]
   ) => Promise<Array<GatheredReply<ReturnOf<Protocol[P]['result']>>>>
   to: (memberDID: string) => Promise<Client<Protocol>>
 }
@@ -91,23 +91,45 @@ export type ProtocolSurface<Protocol extends GroupProtocolDefinition> = {
   sets **collapse to `never`**. This is why the internal surface cannot be a wide instance of the
   filtered type (see "Internal bridge" below).
 
-### Argument encoding (finding 4)
+### Argument encoding — single config object, enkaku-style (finding 4)
 
-Kumiai's surface is **positional** — `request(prc, prm?, options?)` — not enkaku's single config
-object. The plan pins one tuple and tests it:
+The surface moves from today's positional `(prc, prm?, options?)` to **one optional config object per
+method**, folding the payload and the options together the way `@enkaku/client` does. This is a
+wider break than the retype alone — every call site's *call form* changes, not just its inferred
+types — taken in the same `minor` because the surface is already breaking and the config shape is
+the ergonomic the team wants to carry to 1.0.
 
 ```ts
+type DispatchArgs<P> =
+  DataOf<P['data']> extends never
+    ? [config?: { data?: never }]
+    : [config: { data: DataOf<P['data']> }]
+
 type RequestArgs<P> =
   DataOf<P['param']> extends never
-    ? [prm?: undefined, options?: RequestOptions]   // no-param: request(name) | request(name, undefined, opts)
-    : [prm: DataOf<P['param']>, options?: RequestOptions]
+    ? [config?: { param?: never; errorThreshold?: number; timeoutMs?: number }]
+    : [config: { param: DataOf<P['param']>; errorThreshold?: number; timeoutMs?: number }]
+
+type GatherArgs<P> =
+  DataOf<P['param']> extends never
+    ? [config?: { param?: never; quorum?: number; timeoutMs?: number }]
+    : [config: { param: DataOf<P['param']>; quorum?: number; timeoutMs?: number }]
 ```
 
-`GatherArgs` mirrors it with `GatherOptions`; `DispatchArgs` mirrors it for the event `data` schema
-with no options member. "Mirror enkaku" describes the *filtering* machinery only — the call
-ergonomics stay the current positional shape, and the no-param-with-options form
-(`request(name, undefined, opts)`) is a named type-test case (see Testing) so it cannot silently
-regress.
+- Options (`RequestOptions = { errorThreshold?, timeoutMs? }`,
+  `GatherOptions = { quorum?, timeoutMs? }`, `broadcast/src/client.ts:17-18`) fold **into the same
+  config** as `param`, so `request(name, { param, timeoutMs })` is one object — the enkaku shape.
+  The config members can be spelled as `{ param } & RequestOptions` to avoid restating the option
+  fields.
+- A no-param / no-data procedure makes the config **fully optional**: `dispatch(name)`,
+  `request(name)`, `request(name, { timeoutMs })` all type-check; supplying `param`/`data` is a
+  type error (`?: never`).
+- The change is confined to `ProtocolSurface`. `BroadcastClient` keeps its positional
+  `(prc, prm, options)` API (untyped substrate, out of scope); `surfaceFor` destructures the config
+  and calls the positional client — `request: (prc, config) => runtime.client.request(prc,
+  config?.param, { errorThreshold: config?.errorThreshold, timeoutMs: config?.timeoutMs })`, and the
+  same for `dispatch`/`gather`. This is the one real body change to `surfaceFor` beyond the internal
+  type.
 
 ### Constraint — tighten the whole chain (findings 1+2)
 
@@ -131,11 +153,11 @@ bounds and the internal-bridge cast is a finding to re-surface, not to absorb si
 `surfaceFor` (`peer.ts:728`) currently types itself `ProtocolSurface<ProtocolDefinition>`. It cannot
 become `ProtocolSurface<GroupProtocolDefinition>` — that instance's methods accept *no* procedure
 name (the `never` collapse above). Instead `surfaceFor` builds against a **dedicated untyped
-internal shape** — the current wide `(prc: string, data?/prm?: unknown, options?) => Promise<...>`
-signatures, named as its own type rather than an instantiation of the public surface — and
-`GroupPeer.protocol` casts that to `ProtocolSurface<Protocols[K]>` at the return boundary. The impl
-body (delegation to the untyped `BroadcastClient`) is unchanged; only the internal type and the
-one cast at `protocol()` are new.
+internal shape** — a `(prc: string, config?: { …unknown }) => Promise<…>` config-object signature,
+named as its own type rather than an instantiation of the public surface — and `GroupPeer.protocol`
+casts that to `ProtocolSurface<Protocols[K]>` at the return boundary. The impl gains only the
+config destructure that bridges to the positional `BroadcastClient` (see argument encoding); the
+routing and delegation are otherwise unchanged.
 
 ## `GatheredReply<Result>` — `@kumiai/broadcast`
 
@@ -154,10 +176,11 @@ rpc-local duplicate. Same version band, so it ships in the same `minor`.
 
 - `packages/rpc/src/peer.ts` — the `ProtocolSurface` type, the two cascaded bounds (`GroupPeer`
   `peer.ts:270`, `GroupPeerParams` `peer.ts:188`), and the `surfaceFor` impl (`peer.ts:728-772`).
-  Impl **body unchanged**; `surfaceFor` types itself against a dedicated untyped internal shape and
-  `GroupPeer.protocol` casts to `ProtocolSurface<Protocols[K]>` at the return boundary (see
-  "Internal bridge"). Verify the `handlers[name]` typing (`peer.ts:645`) survives the tighter
-  `Protocols` bound.
+  `surfaceFor` types itself against a dedicated untyped config-object internal shape, destructures
+  the config into the positional `BroadcastClient` call, and `GroupPeer.protocol` casts to
+  `ProtocolSurface<Protocols[K]>` at the return boundary (see "Internal bridge" / "Argument
+  encoding"). Verify the `handlers[name]` typing (`peer.ts:645`) survives the tighter `Protocols`
+  bound.
 - `packages/broadcast/src/client.ts` — `GatheredReply<T = unknown>`.
 - Possibly `packages/rpc/src/index.ts` re-exports — no surface addition expected beyond the retyped
   `ProtocolSurface` already exported.
@@ -172,18 +195,21 @@ Compile-time only — the backlog doc's "Test hooks" section calls for exactly t
 - `request` result **infers** to the declared `ReturnOf<result>`;
 - `gather` result **infers** to `Array<GatheredReply<ReturnOf<result>>>`;
 - `dispatch` on a **request procedure** (and vice versa) fails to compile;
-- a no-param procedure accepts the **no-arg** call `request(name)`;
-- a no-param procedure accepts the **options-only** call `request(name, undefined, options)` (the
-  finding-4 case) — and, if the chosen tuple forbids it, that is caught here rather than by a
-  consumer.
+- a no-param procedure accepts the config-optional call `request(name)`;
+- a no-param procedure accepts the **options-only config** `request(name, { timeoutMs })`, and
+  passing `param` to it is a type error (`param?: never`);
+- passing `data`/`param` at the top level (the old positional form) fails to compile — the config
+  wrapper is mandatory.
 
 vitest strips types, so a green vitest run proves nothing about these assertions. Every step pairs
 with `pnpm --filter @kumiai/rpc test:types` (or the repo's typecheck), which is the real gate.
 
-Runtime tests are expected to stay green untouched (no runtime change). The existing surface call
-sites in `test/` (e.g. `test/peer-app-drain.test.ts:44`,
-`test/directed-legibility.test.ts:65`) exercise real protocols; if their inferred types now require
-adjustment that is the intended break and gets fixed in place.
+Runtime behavior is unchanged, but the **call form is not**: every `dispatch`/`request`/`gather`
+call site in `test/` (e.g. `test/peer-app-drain.test.ts:44`
+`dispatch('chat/posted', { text })` → `dispatch('chat/posted', { data: { text } })`,
+`test/directed-legibility.test.ts:65`) migrates to the config object. That migration is part of this
+work; runtime suites must stay green *after* it. `surfaceFor`'s config destructure is the only new
+runtime line, so any runtime-test failure signals a mistranslation, not a design gap.
 
 ## Blast radius / breaking classification
 
@@ -193,7 +219,11 @@ adjustment that is the intended break and gets fixed in place.
   `ProtocolDefinition` to `GroupProtocolDefinition` (findings 1+2). A consumer whose `Protocols` map
   holds a non-group `ProtocolDefinition` (a retained non-event procedure) now fails to compile —
   intended, since `defineGroupProtocol` already rejects that at runtime. Same `minor`.
-- **No runtime change** — the break is compile-time; runtime suites stay green.
+- **Also breaking — call form**: `dispatch`/`request`/`gather` move to the enkaku-style single
+  config object (`{ data }` / `{ param, …options }`). Every call site rewrites, not just its types.
+  Widest of the three breaks; taken in the same `minor` for a 1.0-stable ergonomic.
+- **Runtime behavior unchanged** — the only new runtime line is `surfaceFor`'s config destructure;
+  runtime suites stay green once call sites are migrated.
 - **Conformance suites** (`@kumiai/rpc-conformance`, `@kumiai/hub-conformance`) type against
   `GroupMLS` and the hub ports, not `ProtocolSurface`; no contract-suite churn expected. Confirm by
   running both suites against the real implementation and the doubles per AGENTS.md.
