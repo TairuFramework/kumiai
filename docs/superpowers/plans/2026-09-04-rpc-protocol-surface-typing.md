@@ -2,8 +2,15 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Stage:** executing
+**Stage:** qa
 **Mode:** tasks
+
+**Deferred minors** (from per-task + final whole-branch review; none block merge — triage at completing/finishing):
+- `test/protocol-surface-types.test.ts` cast-drift guard compares against a hand-copied local `InternalSurface` literal (unexported), not the real type — can rot silently; real internal drift is caught at `surfaceFor`'s return annotation + the `protocolMethod: GroupPeer<Protocols>['protocol']` typing. Consider exporting `InternalSurface` or co-locating the assertion in `peer.ts`.
+- No-data / no-param surface branches (`T['Data'] extends never` / `T['Param'] extends never`) unexercised — `chat` fixture has no zero-payload procedure; 3 spec "Testing" cases uncovered (config-optional call, options-only config, `param?: never` rejection).
+- `createGroupPeer`'s bound left at `Record<string, ProtocolDefinition>` (per Step 5); the tightened `GroupPeer`/`GroupPeerParams` bound is leaky at the primary entry point because optional `retain?` makes `ProtocolDefinition` bidirectionally assignable to `GroupProtocolDefinition`. Changeset wording already avoids the overstated "fails to compile" claim.
+- Completing stage: strip the literal placeholder "(completed-doc path added at completing stage)" from `pre-1.0-breaking-api.md` and `rpc-api-surface.md`; replace with the real `../completed/<file>.complete.md` reference.
+- Spec doc nuance: `design.md` "GroupProtocolDefinition is narrower" is imprecise for assignability; `directed-legibility.test.ts:65` cited as a dispatch migration but that file uses only `.to()`. Informational.
 
 **Goal:** Key `@kumiai/rpc`'s `ProtocolSurface` off the protocol's procedure map so
 `dispatch`/`request`/`gather` are typed against the concrete protocol, closing the phantom type
