@@ -20,7 +20,7 @@ export type GatherOptions = { quorum?: number; timeoutMs?: number }
  * One gathered reply, attributed to the AUTHENTICATED sender the transport established — never a
  * self-asserted `from` in the reply body.
  */
-export type GatheredReply = { senderDID: string; value: unknown }
+export type GatheredReply<T = unknown> = { senderDID: string; value: T }
 
 export type BroadcastClientParams = {
   transport: TransportType<BroadcastMessage, BroadcastMessage>
