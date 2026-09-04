@@ -405,12 +405,12 @@ describe('the drain delivers only what the live lane would', () => {
 
   /**
    * A retained frame whose decrypted payload DATA happens to be shaped like a control frame
-   * (`{ kind: 'req' | 'res', ... }`). The live-push responder classifies an inbound event frame by
-   * `data.kind` and drops anything control-shaped rather than handing it to an event listener — so
-   * the drain must refuse it too, or the same bytes are dropped live and delivered on replay,
-   * breaking the "same door" invariant the drain otherwise upholds.
+   * (`{ kind: 'req' | 'res', ... }`). Control frames now ride typ:'ctrl'; a typ:'event' frame is an
+   * app event whatever its data contains. The live-push responder delivers it to the event
+   * listener, so the drain must deliver it too — the "same door" invariant, at the polarity the
+   * typ discriminator establishes.
    */
-  test('a retained event frame whose data is shaped like a control frame is not delivered', async () => {
+  test('a retained event frame whose data is shaped like a control frame is delivered', async () => {
     const hub = new DurableFakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x98)
     const posted: Array<unknown> = []
@@ -423,14 +423,16 @@ describe('the drain delivers only what the live lane would', () => {
     await bob.peer.dispose()
     hub.detach('bob')
 
-    // A control-shaped payload published under `chat/posted`, `retain: 'log'` — exactly what the
-    // live responder would drop rather than deliver.
+    // An app payload under `chat/posted` (schema `{type:'object'}`, permissive) that happens to
+    // carry a top-level `kind: 'req'` — legitimate app data, delivered like any other event.
     const atOne = createFakeCrypto({ epoch: 1, localDID: 'alice' })
     await hub.publish({
       senderDID: 'alice',
       topicID,
       retain: 'log',
-      payload: await atOne.wrap(encodeEventFrame('chat/posted', { kind: 'req', rid: 'x' })),
+      payload: await atOne.wrap(encodeEventFrame('chat/posted', { kind: 'req', rid: 'x' }), {
+        aad: fromUTF(topicID),
+      }),
     })
     await flush()
 
@@ -438,9 +440,9 @@ describe('the drain delivers only what the live lane would', () => {
     hub.reattach('bob')
     await flush()
 
-    expect(posted).toEqual([])
+    expect(posted).toEqual([{ kind: 'req', rid: 'x' }])
 
-    // Consumed rather than left to be re-offered, exactly like the ephemeral-procedure case above.
+    // Consumed rather than left to be re-offered.
     const frames = hub.published.filter((m) => m.topicID === topicID)
     expect(frames).toHaveLength(1)
     expect(bob.appCursorStore.stored(topicID)).toBe(frames[0]?.sequenceID)
