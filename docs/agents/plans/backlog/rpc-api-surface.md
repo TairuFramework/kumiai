@@ -32,8 +32,8 @@ the deadline. Line numbers are as of `5eb220a`.
   `dispatch`/`request`/`gather` take an enkaku-style config object with typed `data`/`param`/
   `result`, and `gather` returns `Array<GatheredReply<Result>>`. Breaking: the config-object call
   form, and the `GroupPeer`/`GroupPeerParams` `Protocols` bound tightening from
-  `Record<string, ProtocolDefinition>` to `Record<string, GroupProtocolDefinition>` (completed-doc
-  path added at completing stage).
+  `Record<string, ProtocolDefinition>` to `Record<string, GroupProtocolDefinition>`. See
+  [../completed/2026-09-04-rpc-protocol-surface-typing.complete.md](../completed/2026-09-04-rpc-protocol-surface-typing.complete.md).
 
 - **`open-once` and `directed` still type against the optional-sender `UnwrapResult`.** Task 6 of
   the forward-compatibility plan closed the *runtime* hole in `packages/rpc/src/peer.ts` —

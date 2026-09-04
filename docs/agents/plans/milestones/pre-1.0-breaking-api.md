@@ -97,7 +97,8 @@ in the linked doc; the one real defect the check turned up is folded into the `d
   doable after 1.0.~~ *Taken 2026-09-04:* `ProtocolSurface` is now typed against the protocol's
   procedure map — `dispatch`/`request`/`gather` take an enkaku-style config object keyed off the
   concrete protocol, and the `GroupPeer`/`GroupPeerParams` `Protocols` bound tightens to
-  `GroupProtocolDefinition` (completed-doc path added at completing stage).
+  `GroupProtocolDefinition`. See
+  [../completed/2026-09-04-rpc-protocol-surface-typing.complete.md](../completed/2026-09-04-rpc-protocol-surface-typing.complete.md).
 - `open-once`/`directed` still typed against the optional-sender `UnwrapResult`
   (`open-once.ts:15`, `directed.ts:35`) — has a runtime guard under it already, so it is
   type-safety debt rather than a live gap.
