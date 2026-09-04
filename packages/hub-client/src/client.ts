@@ -1,5 +1,6 @@
 import type { ChannelCall, Client, RequestCall } from '@enkaku/client'
 import type { HubProtocol } from '@kumiai/hub-protocol'
+import { toB64 } from '@sozai/codec'
 
 export type HubClientParams = {
   client: Client<HubProtocol>
@@ -7,7 +8,7 @@ export type HubClientParams = {
 
 export type PublishParams = {
   topicID: string
-  payload: string
+  payload: Uint8Array
   /** Retention class. Absent: 'mailbox' — the frame dies with its last ack. */
   retain?: 'log' | 'mailbox'
   /**
@@ -19,10 +20,15 @@ export type PublishParams = {
   publishID?: string
 }
 
-export type SubscribeOptions = {
+export type SubscribeParams = {
+  topicID: string
   /** Requested retention in seconds. Above the hub's maximum the subscribe is refused. */
   retention?: number
 }
+export type UnsubscribeParams = { topicID: string }
+export type UploadKeyPackagesParams = { keyPackages: Array<string>; notAfter?: number }
+export type UploadLastResortKeyPackageParams = { keyPackage: string }
+export type FetchKeyPackagesParams = { did: string; count?: number }
 
 export type FetchTopicParams = {
   topicID: string
@@ -87,7 +93,9 @@ export class HubClient {
     return this.#client.request('hub/v1/publish', {
       param: {
         topicID: params.topicID,
-        payload: params.payload,
+        // Standard Base64 — the wire schema declares contentEncoding 'base64' and the server
+        // decodes with fromB64; toB64U's -/_ alphabet would fail that decode.
+        payload: toB64(params.payload),
         retain: params.retain,
         // Absent and null are different requests — null is the empty-topic sentinel — so the key
         // is only sent when the caller actually set it.
@@ -97,9 +105,9 @@ export class HubClient {
     })
   }
 
-  subscribe(topicID: string, options?: SubscribeOptions): RequestCall<{ subscribed: boolean }> {
+  subscribe(params: SubscribeParams): RequestCall<{ subscribed: boolean }> {
     return this.#client.request('hub/v1/subscribe', {
-      param: { topicID, retention: options?.retention },
+      param: { topicID: params.topicID, retention: params.retention },
     })
   }
 
@@ -110,9 +118,9 @@ export class HubClient {
     })
   }
 
-  unsubscribe(topicID: string): RequestCall<{ unsubscribed: boolean }> {
+  unsubscribe(params: UnsubscribeParams): RequestCall<{ unsubscribed: boolean }> {
     return this.#client.request('hub/v1/unsubscribe', {
-      param: { topicID },
+      param: { topicID: params.topicID },
     })
   }
 
@@ -134,14 +142,14 @@ export class HubClient {
    * that has gone stale still holds the per-DID cap against every future upload. `@kumiai/mls-hub`'s
    * key package pool passes it for you.
    */
-  uploadKeyPackages(
-    keyPackages: Array<string>,
-    notAfter?: number,
-  ): RequestCall<{ stored: number }> {
+  uploadKeyPackages(params: UploadKeyPackagesParams): RequestCall<{ stored: number }> {
     return this.#client.request('hub/v1/keypackage/upload', {
       // An explicit `notAfter: undefined` fails the wire schema's `integer` check on some
       // transports (unlike JSON, they don't drop `undefined` properties) — omit the key instead.
-      param: { keyPackages, ...(notAfter != null ? { notAfter } : {}) },
+      param: {
+        keyPackages: params.keyPackages,
+        ...(params.notAfter != null ? { notAfter: params.notAfter } : {}),
+      },
     })
   }
 
@@ -160,9 +168,11 @@ export class HubClient {
    *   a Welcome — as a host correctly would for an ordinary, single-use bundle — makes the member
    *   silently unaddable forever, the exact outage this slot exists to prevent.
    */
-  uploadLastResortKeyPackage(keyPackage: string): RequestCall<{ stored: number }> {
+  uploadLastResortKeyPackage(
+    params: UploadLastResortKeyPackageParams,
+  ): RequestCall<{ stored: number }> {
     return this.#client.request('hub/v1/keypackage/upload', {
-      param: { keyPackages: [keyPackage], lastResort: true },
+      param: { keyPackages: [params.keyPackage], lastResort: true },
     })
   }
 
@@ -181,9 +191,9 @@ export class HubClient {
     return this.#client.request('hub/v1/keypackage/status', { param: {} })
   }
 
-  fetchKeyPackages(did: string, count?: number): RequestCall<{ keyPackages: Array<string> }> {
+  fetchKeyPackages(params: FetchKeyPackagesParams): RequestCall<{ keyPackages: Array<string> }> {
     return this.#client.request('hub/v1/keypackage/fetch', {
-      param: { did, count },
+      param: { did: params.did, count: params.count },
     })
   }
 

@@ -94,8 +94,8 @@ function createTestHub(store: HubStore) {
 
 const TOPIC = fixtureTopic('log-lane')
 
-function payloadOf(text: string): string {
-  return btoa(text)
+function payloadOf(text: string): Uint8Array {
+  return new TextEncoder().encode(text)
 }
 
 describe('Topic log over the wire', () => {
@@ -118,7 +118,7 @@ describe('Topic log over the wire', () => {
     })
 
     const { client: bob } = ctx.connect()
-    await bob.subscribe(TOPIC)
+    await bob.subscribe({ topicID: TOPIC })
 
     const result = await bob.fetchTopic({ topicID: TOPIC })
     expect(result.messages.map((message) => message.sequenceID)).toEqual([
@@ -148,7 +148,7 @@ describe('Topic log over the wire', () => {
     const { client: alice, identity: aliceIdentity } = ctx.connect()
     const { client: bob, identity: bobIdentity } = ctx.connect()
 
-    await bob.subscribe(TOPIC)
+    await bob.subscribe({ topicID: TOPIC })
     const mailbox = await alice.publish({ topicID: TOPIC, payload: payloadOf('chat') })
     const logged = await alice.publish({
       topicID: TOPIC,
@@ -179,7 +179,7 @@ describe('Topic log over the wire', () => {
     const ctx = createTestHub(store)
     const { client: alice } = ctx.connect()
     const { client: bob } = ctx.connect()
-    await bob.subscribe(TOPIC)
+    await bob.subscribe({ topicID: TOPIC })
 
     const first = await alice.publish({
       topicID: TOPIC,
@@ -222,7 +222,7 @@ describe('Topic log over the wire', () => {
     const ctx = createTestHub(store)
     const { client: alice } = ctx.connect()
     const { client: bob } = ctx.connect()
-    await bob.subscribe(TOPIC)
+    await bob.subscribe({ topicID: TOPIC })
 
     const original = await alice.publish({
       topicID: TOPIC,
@@ -254,18 +254,18 @@ describe('Topic log over the wire', () => {
     const ctx = createTestHub(store)
     const { client: bob } = ctx.connect()
 
-    await bob.subscribe(TOPIC, { retention: MAX_RETENTION })
+    await bob.subscribe({ topicID: TOPIC, retention: MAX_RETENTION })
     expect(subscribes[0].retention).toBe(MAX_RETENTION)
 
     const rejected = await bob
-      .subscribe(fixtureTopic('greedy'), { retention: MAX_RETENTION + 1 })
+      .subscribe({ topicID: fixtureTopic('greedy'), retention: MAX_RETENTION + 1 })
       .catch((error: unknown) => error)
     const error = rejected as { code?: string; message?: string }
     expect(error.code).toBe(HUB_ERROR_CODES.retentionExceeded)
     expect(hubErrorFromCode(error.code as string, error.message ?? '')).toBeInstanceOf(
       RetentionExceededError,
     )
-    expect(await store.getSubscribers(fixtureTopic('greedy'))).toEqual([])
+    expect(await store.getSubscribers({ topicID: fixtureTopic('greedy') })).toEqual([])
 
     await ctx.dispose()
   })

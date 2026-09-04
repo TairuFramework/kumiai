@@ -64,12 +64,12 @@ describe('HubClient', () => {
     const { client: alice, transports: aliceT } = createTestClient(testHub)
     const { client: bob, transports: bobT } = createTestClient(testHub)
 
-    await bob.subscribe(TOPIC)
+    await bob.subscribe({ topicID: TOPIC })
     const channel = bob.receive()
     const reader = channel.readable.getReader()
     await delay(50)
 
-    await alice.publish({ topicID: TOPIC, payload: encodePayload('hello') })
+    await alice.publish({ topicID: TOPIC, payload: fromUTF('hello') })
 
     const msg = await reader.read()
     expect(msg.done).toBe(false)
@@ -88,18 +88,18 @@ describe('HubClient', () => {
     const { client: alice, transports: aliceT } = createTestClient(testHub)
     const { client: bob, transports: bobT } = createTestClient(testHub)
 
-    await bob.subscribe(TOPIC)
-    await bob.subscribe(TOPIC_WORK)
+    await bob.subscribe({ topicID: TOPIC })
+    await bob.subscribe({ topicID: TOPIC_WORK })
     const channel = bob.receive()
     const reader = channel.readable.getReader()
     await delay(50)
 
-    await alice.publish({ topicID: TOPIC, payload: encodePayload('chat-msg') })
+    await alice.publish({ topicID: TOPIC, payload: fromUTF('chat-msg') })
     const msg1 = await reader.read()
     expect(msg1.value?.topicID).toBe(TOPIC)
     expect(msg1.value?.payload).toBe(encodePayload('chat-msg'))
 
-    await alice.publish({ topicID: TOPIC_WORK, payload: encodePayload('work-msg') })
+    await alice.publish({ topicID: TOPIC_WORK, payload: fromUTF('work-msg') })
     const msg2 = await reader.read()
     expect(msg2.value?.topicID).toBe(TOPIC_WORK)
     expect(msg2.value?.payload).toBe(encodePayload('work-msg'))
@@ -116,12 +116,12 @@ describe('HubClient', () => {
     const { client: alice, transports: aliceT } = createTestClient(testHub)
     const { client: bob, identity: bobIdentity, transports: bobT } = createTestClient(testHub)
 
-    const sub = await bob.subscribe(TOPIC)
+    const sub = await bob.subscribe({ topicID: TOPIC })
     expect(sub.subscribed).toBe(true)
-    const unsub = await bob.unsubscribe(TOPIC)
+    const unsub = await bob.unsubscribe({ topicID: TOPIC })
     expect(unsub.unsubscribed).toBe(true)
 
-    await alice.publish({ topicID: TOPIC, payload: encodePayload('gone') })
+    await alice.publish({ topicID: TOPIC, payload: fromUTF('gone') })
     await delay(50)
     expect((await testHub.store.fetch({ recipientDID: bobIdentity.id })).messages).toHaveLength(0)
 
@@ -133,10 +133,10 @@ describe('HubClient', () => {
     const testHub = createTestHub()
     const { client, identity, transports } = createTestClient(testHub)
 
-    const result = await client.uploadKeyPackages(['kp-1', 'kp-2'])
+    const result = await client.uploadKeyPackages({ keyPackages: ['kp-1', 'kp-2'] })
     expect(result.stored).toBe(2)
 
-    const fetched = await client.fetchKeyPackages(identity.id, 1)
+    const fetched = await client.fetchKeyPackages({ did: identity.id, count: 1 })
     expect(fetched.keyPackages).toHaveLength(1)
 
     await transports.dispose()
@@ -146,12 +146,16 @@ describe('HubClient', () => {
     const testHub = createTestHub()
     const { client, identity, transports } = createTestClient(testHub)
 
-    const result = await client.uploadLastResortKeyPackage('kp-lr')
+    const result = await client.uploadLastResortKeyPackage({ keyPackage: 'kp-lr' })
     expect(result.stored).toBe(1)
 
     // The ordinary pool is empty, yet a fetch still yields a package — and again after that.
-    expect((await client.fetchKeyPackages(identity.id, 1)).keyPackages).toEqual(['kp-lr'])
-    expect((await client.fetchKeyPackages(identity.id, 1)).keyPackages).toEqual(['kp-lr'])
+    expect((await client.fetchKeyPackages({ did: identity.id, count: 1 })).keyPackages).toEqual([
+      'kp-lr',
+    ])
+    expect((await client.fetchKeyPackages({ did: identity.id, count: 1 })).keyPackages).toEqual([
+      'kp-lr',
+    ])
 
     await transports.dispose()
   })
@@ -161,8 +165,8 @@ describe('HubClient', () => {
     const { client, transports } = createTestClient(testHub)
 
     const future = Math.floor(Date.now() / 1000) + 3600
-    await client.uploadKeyPackages(['kp-1', 'kp-2'], future)
-    await client.uploadLastResortKeyPackage('kp-last-resort')
+    await client.uploadKeyPackages({ keyPackages: ['kp-1', 'kp-2'], notAfter: future })
+    await client.uploadLastResortKeyPackage({ keyPackage: 'kp-last-resort' })
 
     const status = await client.keyPackageStatus()
 
@@ -176,7 +180,7 @@ describe('HubClient', () => {
     const testHub = createTestHub()
     const { client, transports } = createTestClient(testHub)
 
-    await client.uploadKeyPackages(['kp-forever'])
+    await client.uploadKeyPackages({ keyPackages: ['kp-forever'] })
 
     expect((await client.keyPackageStatus()).count).toBe(1)
 
@@ -188,7 +192,7 @@ describe('HubClient', () => {
     const { client, transports } = createTestClient(testHub)
 
     const past = Math.floor(Date.now() / 1000) - 1
-    await client.uploadKeyPackages(['kp-dead'], past)
+    await client.uploadKeyPackages({ keyPackages: ['kp-dead'], notAfter: past })
 
     expect((await client.keyPackageStatus()).count).toBe(0)
 

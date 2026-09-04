@@ -7,10 +7,11 @@ procedure is a method with named parameters instead of a `request` call and a pa
 
 - `HubClient` — the wrapper. `publish`, `subscribe`, `unsubscribe`, `fetchTopic`, `receive`,
   `uploadKeyPackages`, `uploadLastResortKeyPackage`, `fetchKeyPackages`, `keyPackageStatus` — one
-  per hub procedure, with nothing left over. `uploadKeyPackages` takes an optional `notAfter`
-  (seconds) so the hub can expire a stale batch instead of holding it against the per-DID cap
-  forever.
-- `HubClientParams`, `PublishParams`.
+  per hub procedure, with nothing left over. Each method takes a single named-parameters object
+  rather than positional arguments. `uploadKeyPackages` takes an optional `notAfter` (seconds) so
+  the hub can expire a stale batch instead of holding it against the per-DID cap forever.
+- `HubClientParams`, `PublishParams` — `PublishParams.payload` is `Uint8Array`; `publish` encodes
+  it to base64 before sending, so callers never handle the wire encoding themselves.
 
 ```ts
 import { HubClient } from '@kumiai/hub-client'
@@ -20,8 +21,8 @@ const hub = new HubClient({ client })
 // must be a 43-character base64url string — the shape `@kumiai/rpc`'s topic helpers mint over
 // `@kumiai/broadcast`'s `deriveTopicID`. A readable literal like 'topic:abc' is rejected at the
 // server with EK08 ("Invalid protocol message").
-await hub.subscribe(topicID, { retention: 86400 })
-await hub.publish({ topicID, payload: toB64(bytes), retain: 'log' })
+await hub.subscribe({ topicID, retention: 86400 })
+await hub.publish({ topicID, payload: bytes, retain: 'log' })
 ```
 
 It is a wrapper and nothing more: it holds no state, opens no connection, and retries nothing. The
@@ -32,12 +33,12 @@ There is no accessor for the wrapped client: the caller constructed it and alrea
 reaching it back through `HubClient` bought nothing and let a caller bypass the typed surface —
 along with any authorization or retry layered onto it later.
 
-## Payloads are base64 strings, and the caller encodes them
+## Payloads are bytes; the client encodes them
 
-`payload` is `string` at this layer, not `Uint8Array`. The wire schema declares it
-`contentEncoding: 'base64'`, and `HubClient` passes it through untouched — encoding and decoding are
-the caller's (`toB64` / `fromB64` from `@sozai/codec`). Handing it raw bytes or unencoded text is a
-schema failure at the server, not a conversion.
+`payload` is `Uint8Array`. The wire schema declares it `contentEncoding: 'base64'`, and
+`HubClient.publish` encodes with standard Base64 (`toB64` from `@sozai/codec`) before sending —
+the caller hands over raw bytes. On the read side, `receive`/`fetchTopic` still surface the wire's
+base64 `payload` string; decode those with `fromB64`.
 
 ## Absent and `null` are different requests
 

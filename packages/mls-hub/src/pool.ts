@@ -171,10 +171,10 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
       const uploaded = await attempt(
         'upload',
         () =>
-          client.uploadKeyPackages(
-            records.map((record) => record.keyPackage),
+          client.uploadKeyPackages({
+            keyPackages: records.map((record) => record.keyPackage),
             notAfter,
-          ),
+          }),
         async () => prune(await listRecords(), keepRefs),
       )
       if (uploaded.isError()) return Result.error(uploaded.error)

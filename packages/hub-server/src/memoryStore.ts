@@ -1,17 +1,24 @@
 import type {
   AckParams,
+  CountKeyPackagesParams,
+  FetchKeyPackagesParams,
+  FetchLastResortKeyPackageParams,
   FetchParams,
   FetchResult,
   FetchTopicParams,
   FetchTopicResult,
+  GetSubscribersParams,
   HubStore,
   HubStoreEvents,
   PublishParams,
   PublishResult,
   PurgeParams,
   StoredMessage,
+  StoreKeyPackageParams,
+  StoreLastResortKeyPackageParams,
   SubscribeParams,
   TrimParams,
+  UnsubscribeParams,
 } from '@kumiai/hub-protocol'
 import {
   HeadMismatchError,
@@ -454,7 +461,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
       ownTopics.add(params.topicID)
     },
 
-    async unsubscribe(subscriberDID: string, topicID: string): Promise<void> {
+    async unsubscribe({ subscriberDID, topicID }: UnsubscribeParams): Promise<void> {
       const subscribers = subscriptions.get(topicID)
       if (subscribers != null) {
         subscribers.delete(subscriberDID)
@@ -479,12 +486,16 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
       }
     },
 
-    async getSubscribers(topicID: string): Promise<Array<string>> {
+    async getSubscribers({ topicID }: GetSubscribersParams): Promise<Array<string>> {
       const subscribers = subscriptions.get(topicID)
       return subscribers == null ? [] : [...subscribers.keys()]
     },
 
-    async storeKeyPackage(ownerDID: string, keyPackage: string, notAfter?: number): Promise<void> {
+    async storeKeyPackage({
+      ownerDID,
+      keyPackage,
+      notAfter,
+    }: StoreKeyPackageParams): Promise<void> {
       let packages = keyPackages.get(ownerDID)
       if (packages == null) {
         packages = []
@@ -507,7 +518,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
       packages.push({ keyPackage, ...(notAfter != null ? { notAfter } : {}) })
     },
 
-    async fetchKeyPackages(ownerDID: string, count?: number): Promise<Array<string>> {
+    async fetchKeyPackages({ ownerDID, count }: FetchKeyPackagesParams): Promise<Array<string>> {
       const packages = keyPackages.get(ownerDID)
       if (packages == null || packages.length === 0) return []
       const nowSeconds = Math.floor(Date.now() / 1000)
@@ -523,18 +534,23 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
       return served
     },
 
-    async countKeyPackages(ownerDID: string): Promise<number> {
+    async countKeyPackages({ ownerDID }: CountKeyPackagesParams): Promise<number> {
       const packages = keyPackages.get(ownerDID)
       if (packages == null) return 0
       const nowSeconds = Math.floor(Date.now() / 1000)
       return packages.filter((entry) => isLive(entry, nowSeconds)).length
     },
 
-    async storeLastResortKeyPackage(ownerDID: string, keyPackage: string): Promise<void> {
+    async storeLastResortKeyPackage({
+      ownerDID,
+      keyPackage,
+    }: StoreLastResortKeyPackageParams): Promise<void> {
       lastResortKeyPackages.set(ownerDID, keyPackage)
     },
 
-    async fetchLastResortKeyPackage(ownerDID: string): Promise<string | null> {
+    async fetchLastResortKeyPackage({
+      ownerDID,
+    }: FetchLastResortKeyPackageParams): Promise<string | null> {
       // No splice, ever. Reuse is the point here — this package is marked last-resort in MLS, so
       // serving it again is by design rather than the init-key reuse `fetchKeyPackages` avoids.
       return lastResortKeyPackages.get(ownerDID) ?? null

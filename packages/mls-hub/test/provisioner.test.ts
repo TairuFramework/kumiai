@@ -1,3 +1,4 @@
+import type { UploadLastResortKeyPackageParams } from '@kumiai/hub-client'
 import {
   createLastResortKeyPackageBundle,
   decodeKeyPackage,
@@ -42,7 +43,7 @@ describe('ensureProvisioned', () => {
     expect(records[0]?.uploadedAt).toBeTypeOf('number')
 
     // The bytes in the hub's slot are the record's, not some re-encoding of them.
-    expect(await hub.hubStore.fetchLastResortKeyPackage(hub.identity.id)).toBe(
+    expect(await hub.hubStore.fetchLastResortKeyPackage({ ownerDID: hub.identity.id })).toBe(
       records[0]?.keyPackage,
     )
 
@@ -130,7 +131,9 @@ describe('ensureProvisioned', () => {
     expect(fresh?.uploadedAt).toBeTypeOf('number')
 
     // The hub's slot holds the fresh package's bytes, not the stale one's.
-    expect(await hub.hubStore.fetchLastResortKeyPackage(hub.identity.id)).toBe(fresh?.keyPackage)
+    expect(await hub.hubStore.fetchLastResortKeyPackage({ ownerDID: hub.identity.id })).toBe(
+      fresh?.keyPackage,
+    )
   })
 
   test('repairs a slot the hub lost', async () => {
@@ -143,14 +146,17 @@ describe('ensureProvisioned', () => {
     const first = await provisioner.ensureProvisioned().value
     // The hub lost the slot: without a readback the provisioner trusts its own record of a successful
     // upload and reports the floor as in place over an empty slot.
-    await hub.hubStore.storeLastResortKeyPackage(hub.identity.id, 'kp-something-else')
+    await hub.hubStore.storeLastResortKeyPackage({
+      ownerDID: hub.identity.id,
+      keyPackage: 'kp-something-else',
+    })
 
     const second = await provisioner.ensureProvisioned().value
 
     expect(second.rotated).toBe(true)
     expect(second.ref).toBe(first.ref)
     const records = await store.list(hub.identity.id)
-    expect(await hub.hubStore.fetchLastResortKeyPackage(hub.identity.id)).toBe(
+    expect(await hub.hubStore.fetchLastResortKeyPackage({ ownerDID: hub.identity.id })).toBe(
       records[0]?.keyPackage,
     )
   })
@@ -183,7 +189,7 @@ describe('an interrupted provision', () => {
     expect(pending).toHaveLength(1)
     expect(pending[0]?.uploadedAt).toBeNull()
     // Nothing reached the hub, which is the point of persisting first.
-    expect(await hub.hubStore.fetchLastResortKeyPackage(hub.identity.id)).toBeNull()
+    expect(await hub.hubStore.fetchLastResortKeyPackage({ ownerDID: hub.identity.id })).toBeNull()
 
     failing.mockRestore()
     const result = await provisioner.ensureProvisioned().value
@@ -192,7 +198,7 @@ describe('an interrupted provision', () => {
     const settled = await store.list(hub.identity.id)
     expect(settled).toHaveLength(1)
     expect(settled[0]?.uploadedAt).toBeTypeOf('number')
-    expect(await hub.hubStore.fetchLastResortKeyPackage(hub.identity.id)).toBe(
+    expect(await hub.hubStore.fetchLastResortKeyPackage({ ownerDID: hub.identity.id })).toBe(
       pending[0]?.keyPackage,
     )
   })
@@ -221,7 +227,9 @@ describe('an interrupted provision', () => {
 
     expect(result).toEqual({ rotated: true, ref: first.ref })
     expect(await store.list(hub.identity.id)).toHaveLength(1)
-    expect(await hub.hubStore.fetchLastResortKeyPackage(hub.identity.id)).toBe(record.keyPackage)
+    expect(await hub.hubStore.fetchLastResortKeyPackage({ ownerDID: hub.identity.id })).toBe(
+      record.keyPackage,
+    )
   })
 
   /**
@@ -245,7 +253,7 @@ describe('an interrupted provision', () => {
     expect(result.error?.stage).toBe('upload')
 
     expect((await store.list(hub.identity.id))[0]?.uploadedAt).toBeNull()
-    expect(await hub.hubStore.fetchLastResortKeyPackage(hub.identity.id)).toBeNull()
+    expect(await hub.hubStore.fetchLastResortKeyPackage({ ownerDID: hub.identity.id })).toBeNull()
   })
 
   /** A failed call must not wedge the single-flight slot shut for every later caller. */
@@ -339,7 +347,9 @@ describe('rotation and retention', () => {
     // record the rotation reported.
     const rotated = records.find((r) => r.ref === second.ref)
     expect(rotated).toBeDefined()
-    expect(await hub.hubStore.fetchLastResortKeyPackage(hub.identity.id)).toBe(rotated?.keyPackage)
+    expect(await hub.hubStore.fetchLastResortKeyPackage({ ownerDID: hub.identity.id })).toBe(
+      rotated?.keyPackage,
+    )
     expect(rotated?.keyPackage).not.toBe(original.keyPackage)
   })
 
@@ -585,8 +595,8 @@ describe('rotation and retention', () => {
     const realUpload = hub.client.uploadLastResortKeyPackage.bind(hub.client)
     const uploadSpy = vi
       .spyOn(hub.client, 'uploadLastResortKeyPackage')
-      .mockImplementation((keyPackage: string) => {
-        const call = realUpload(keyPackage)
+      .mockImplementation((params: UploadLastResortKeyPackageParams) => {
+        const call = realUpload(params)
         // Fire-and-forget: advances the clock once the real upload settles, before the
         // provisioner's own `await` on this same call resumes.
         void call.then(() => {
@@ -608,7 +618,9 @@ describe('rotation and retention', () => {
       expect((await store.list(hub.identity.id)).map((r) => r.ref)).toEqual([pendingRef])
       // The invariant is "the store still holds the private half of what the hub is serving" —
       // checking only the store half would be half a test.
-      expect(await hub.hubStore.fetchLastResortKeyPackage(hub.identity.id)).toBe('kp-pending')
+      expect(await hub.hubStore.fetchLastResortKeyPackage({ ownerDID: hub.identity.id })).toBe(
+        'kp-pending',
+      )
     } finally {
       uploadSpy.mockRestore()
       dateSpy.mockRestore()
@@ -943,7 +955,10 @@ describe('ensureProvisioned failure paths', () => {
     })
     const { ref } = await provisioner.ensureProvisioned().value
     // The hub loses the slot while it is unreachable.
-    await hub.hubStore.storeLastResortKeyPackage(hub.identity.id, 'something-else')
+    await hub.hubStore.storeLastResortKeyPackage({
+      ownerDID: hub.identity.id,
+      keyPackage: 'something-else',
+    })
     const status = vi
       .spyOn(hub.client, 'keyPackageStatus')
       .mockRejectedValueOnce(new Error('socket closed'))

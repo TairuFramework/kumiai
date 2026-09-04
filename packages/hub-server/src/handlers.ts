@@ -455,7 +455,7 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         // retry returns `deduped`, and the block below is gated on `!deduped`.
         let subscribers: Array<string>
         try {
-          subscribers = await store.getSubscribers(topicID)
+          subscribers = await store.getSubscribers({ topicID })
         } catch (error) {
           storeErrorReporter({ method: 'getSubscribers', topicID, error })
           return { sequenceID }
@@ -554,7 +554,7 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         throw new HandlerError({ code: 'EK01', message: 'Unsubscribe rate limit exceeded for DID' })
       }
       try {
-        await store.unsubscribe(clientDID, topicID)
+        await store.unsubscribe({ subscriberDID: clientDID, topicID })
       } catch (error) {
         rethrowAsHandlerError(error)
       }
@@ -819,10 +819,15 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       // The last-resort path has no cap to cross: the slot is one entry, replaced in place.
       try {
         if (lastResortPackage != null) {
-          await store.storeLastResortKeyPackage(clientDID, lastResortPackage)
+          await store.storeLastResortKeyPackage({
+            ownerDID: clientDID,
+            keyPackage: lastResortPackage,
+          })
         } else {
           await Promise.all(
-            keyPackages.map((kp: string) => store.storeKeyPackage(clientDID, kp, notAfter)),
+            keyPackages.map((kp: string) =>
+              store.storeKeyPackage({ ownerDID: clientDID, keyPackage: kp, notAfter }),
+            ),
           )
         }
       } catch (error) {
@@ -883,7 +888,7 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
         let lastResort: string | null = null
         let readFailure: unknown
         try {
-          lastResort = await store.fetchLastResortKeyPackage(targetDID)
+          lastResort = await store.fetchLastResortKeyPackage({ ownerDID: targetDID })
         } catch (error) {
           readFailure = error
         }
@@ -910,14 +915,14 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       // the request when nothing has been consumed and there is therefore nothing to lose.
       let consumed: Array<string>
       try {
-        consumed = await store.fetchKeyPackages(targetDID, cappedCount)
+        consumed = await store.fetchKeyPackages({ ownerDID: targetDID, count: cappedCount })
       } catch (error) {
         rethrowAsHandlerError(error)
       }
       if (consumed.length >= cappedCount) return { keyPackages: consumed }
       let lastResort: string | null = null
       try {
-        lastResort = await store.fetchLastResortKeyPackage(targetDID)
+        lastResort = await store.fetchLastResortKeyPackage({ ownerDID: targetDID })
       } catch (error) {
         // Nothing consumed, so nothing is lost by surfacing it. Otherwise the top-up was a bonus
         // the caller never paid for: hand back what the store has already given up.
@@ -954,8 +959,8 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
       try {
         // Two independent reads for one owner: concurrent, since neither informs the other.
         ;[count, stored] = await Promise.all([
-          store.countKeyPackages(clientDID),
-          store.fetchLastResortKeyPackage(clientDID),
+          store.countKeyPackages({ ownerDID: clientDID }),
+          store.fetchLastResortKeyPackage({ ownerDID: clientDID }),
         ])
       } catch (error) {
         rethrowAsHandlerError(error)

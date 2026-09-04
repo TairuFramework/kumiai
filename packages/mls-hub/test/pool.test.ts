@@ -1,3 +1,4 @@
+import type { UploadKeyPackagesParams } from '@kumiai/hub-client'
 import { ORDINARY_KEY_PACKAGE_LIFETIME_DAYS } from '@kumiai/mls'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
@@ -52,7 +53,7 @@ describe('ensureStocked', () => {
 
     expect(result).toEqual({ minted: 3, depth: 3 })
     expect(upload).toHaveBeenCalledTimes(1)
-    expect(await hub.hubStore.countKeyPackages(hub.identity.id)).toBe(3)
+    expect(await hub.hubStore.countKeyPackages({ ownerDID: hub.identity.id })).toBe(3)
 
     const records = await store.list(hub.identity.id)
     expect(records).toHaveLength(3)
@@ -80,13 +81,13 @@ describe('ensureStocked', () => {
     await pool.ensureStocked().value
 
     const records = await store.list(hub.identity.id)
-    expect(await hub.hubStore.fetchKeyPackages(hub.identity.id, 1)).toEqual([
+    expect(await hub.hubStore.fetchKeyPackages({ ownerDID: hub.identity.id, count: 1 })).toEqual([
       records[0]?.keyPackage,
     ])
 
     // Omitting notAfter makes the hub hold entries forever, so a stale pool charges the per-DID cap
     // against every future upload — the wedge this branch exists to remove.
-    const uploadedNotAfter = upload.mock.calls[0]?.[1]
+    const uploadedNotAfter = upload.mock.calls[0]?.[0]?.notAfter
     expect(uploadedNotAfter).toBe(Math.min(...records.map((record) => record.notAfter)))
     // Pinned in SECONDS: a milliseconds regression would still equal the batch min above.
     const expected = Math.floor(Date.now() / 1000) + ORDINARY_KEY_PACKAGE_LIFETIME_DAYS * 86_400
@@ -123,7 +124,7 @@ describe('ensureStocked', () => {
     })
     await pool.ensureStocked().value
     // Consume exactly one: depth 3 sits strictly between lowWater (2) and target (4).
-    await hub.hubStore.fetchKeyPackages(hub.identity.id, 1)
+    await hub.hubStore.fetchKeyPackages({ ownerDID: hub.identity.id, count: 1 })
     const upload = vi.spyOn(hub.client, 'uploadKeyPackages')
 
     const result = await pool.ensureStocked().value
@@ -145,7 +146,7 @@ describe('ensureStocked', () => {
     })
     await pool.ensureStocked().value
     // Someone fetched two of them.
-    await hub.hubStore.fetchKeyPackages(hub.identity.id, 2)
+    await hub.hubStore.fetchKeyPackages({ ownerDID: hub.identity.id, count: 2 })
 
     const result = await pool.ensureStocked().value
 
@@ -196,7 +197,9 @@ describe('ensureStocked', () => {
     // Re-uploading it would risk a second copy of one init key in the pool — both would be served.
     // Minting fresh costs one key generation; the orphan stays readable for a late Welcome and is
     // pruned at expiry.
-    expect(await hub.hubStore.fetchKeyPackages(hub.identity.id, 5)).not.toContain('kp-orphan')
+    expect(
+      await hub.hubStore.fetchKeyPackages({ ownerDID: hub.identity.id, count: 5 }),
+    ).not.toContain('kp-orphan')
     expect((await store.list(hub.identity.id)).map((entry) => entry.ref)).toContain('orphan')
   })
 
@@ -256,8 +259,8 @@ describe('ensureStocked', () => {
     const realUpload = hub.client.uploadKeyPackages.bind(hub.client)
     const uploadSpy = vi
       .spyOn(hub.client, 'uploadKeyPackages')
-      .mockImplementation((keyPackages: Array<string>, notAfter?: number) => {
-        const call = realUpload(keyPackages, notAfter)
+      .mockImplementation((params: UploadKeyPackagesParams) => {
+        const call = realUpload(params)
         // Fire-and-forget: advances the clock once the real upload settles, before the pool's own
         // `await` on this same call resumes and reaches `prune`.
         void call.then(() => {
@@ -536,8 +539,12 @@ describe('ensureStocked failure paths', () => {
 
   test('a quota refusal from the real hub is retryable, not a throw', async () => {
     // Fill the hub to its per-DID cap of 100 through the raw client, then let the pool try.
-    await hub.client.uploadKeyPackages(Array.from({ length: 50 }, (_, index) => `a-${index}`))
-    await hub.client.uploadKeyPackages(Array.from({ length: 50 }, (_, index) => `b-${index}`))
+    await hub.client.uploadKeyPackages({
+      keyPackages: Array.from({ length: 50 }, (_, index) => `a-${index}`),
+    })
+    await hub.client.uploadKeyPackages({
+      keyPackages: Array.from({ length: 50 }, (_, index) => `b-${index}`),
+    })
     const store = createMemoryKeyPackagePoolStore()
     // The hub reports 100 live packages, so force a top-up by raising the floor above it.
     const pool = createKeyPackagePool({
@@ -576,7 +583,8 @@ describe('ensureStocked failure paths', () => {
     expect(second.value).toEqual({ minted: 3, depth: 3 })
     // A fresh batch, never the stranded one: the hub does not dedupe, so re-uploading a package
     // that did land would hand one init key to two inviters.
-    const secondUpload = upload.mock.calls[1]?.[0] as Array<string>
+    const secondUploadParams = upload.mock.calls[1]?.[0] as UploadKeyPackagesParams
+    const secondUpload = secondUploadParams.keyPackages
     const strandedPackages = new Set(
       (await store.list(hub.identity.id))
         .filter((record) => stranded.includes(record.ref))

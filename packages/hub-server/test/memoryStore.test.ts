@@ -66,12 +66,12 @@ describe('createMemoryStore pub/sub', () => {
 
   test('getSubscribers reflects subscribe / unsubscribe', async () => {
     const store = createMemoryStore()
-    expect(await store.getSubscribers(TOPIC)).toEqual([])
+    expect(await store.getSubscribers({ topicID: TOPIC })).toEqual([])
     await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
     await store.subscribe({ subscriberDID: BOB, topicID: TOPIC }) // idempotent
-    expect(await store.getSubscribers(TOPIC)).toEqual([BOB])
-    await store.unsubscribe(BOB, TOPIC)
-    expect(await store.getSubscribers(TOPIC)).toEqual([])
+    expect(await store.getSubscribers({ topicID: TOPIC })).toEqual([BOB])
+    await store.unsubscribe({ subscriberDID: BOB, topicID: TOPIC })
+    expect(await store.getSubscribers({ topicID: TOPIC })).toEqual([])
   })
 
   test('unsubscribe clears the subscriber pending deliveries for that topic', async () => {
@@ -80,7 +80,7 @@ describe('createMemoryStore pub/sub', () => {
     await store.subscribe({ subscriberDID: CAROL, topicID: TOPIC })
     await store.publish({ senderDID: ALICE, topicID: TOPIC, payload: new Uint8Array([1]) })
 
-    await store.unsubscribe(BOB, TOPIC)
+    await store.unsubscribe({ subscriberDID: BOB, topicID: TOPIC })
     expect((await store.fetch({ recipientDID: BOB })).messages).toHaveLength(0)
     // Carol still has hers.
     expect((await store.fetch({ recipientDID: CAROL })).messages).toHaveLength(1)
@@ -96,7 +96,7 @@ describe('createMemoryStore pub/sub', () => {
       payload: new Uint8Array([2]),
       retain: 'log',
     })
-    await store.unsubscribe(BOB, TOPIC)
+    await store.unsubscribe({ subscriberDID: BOB, topicID: TOPIC })
 
     // Re-subscribe: neither frame is pending any more.
     await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
@@ -374,7 +374,7 @@ describe('createMemoryStore pub/sub', () => {
     await expect(
       store.subscribe({ subscriberDID: BOB, topicID: TOPIC, retention: 61 }),
     ).rejects.toThrow(RetentionExceededError)
-    expect(await store.getSubscribers(TOPIC)).toEqual([])
+    expect(await store.getSubscribers({ topicID: TOPIC })).toEqual([])
     await expect(store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })).rejects.toThrow(
       NotSubscribedError,
     )
@@ -388,7 +388,7 @@ describe('createMemoryStore pub/sub', () => {
     await expect(
       store.subscribe({ subscriberDID: BOB, topicID: TOPIC, retention: 2 ** 31 }),
     ).rejects.toThrow(RetentionExceededError)
-    expect(await store.getSubscribers(TOPIC)).toEqual([])
+    expect(await store.getSubscribers({ topicID: TOPIC })).toEqual([])
   })
 
   test('a topic keeps its frames for the longest retention any subscriber asked for', async () => {
@@ -408,7 +408,7 @@ describe('createMemoryStore pub/sub', () => {
     expect(log.messages.map((m) => m.sequenceID)).toEqual([id])
 
     // With Carol gone, so is the request that was keeping the frame.
-    await store.unsubscribe(CAROL, TOPIC)
+    await store.unsubscribe({ subscriberDID: CAROL, topicID: TOPIC })
     expect(await store.purge({ olderThan: 0 })).toEqual([id])
   })
 
@@ -530,52 +530,52 @@ describe('createMemoryStore pub/sub', () => {
 
   test('key package store and fetch', async () => {
     const store = createMemoryStore()
-    await store.storeKeyPackage(ALICE, 'kp-1')
-    await store.storeKeyPackage(ALICE, 'kp-2')
-    expect(await store.fetchKeyPackages(ALICE, 1)).toEqual(['kp-1'])
-    expect(await store.fetchKeyPackages(ALICE)).toEqual(['kp-2'])
+    await store.storeKeyPackage({ ownerDID: ALICE, keyPackage: 'kp-1' })
+    await store.storeKeyPackage({ ownerDID: ALICE, keyPackage: 'kp-2' })
+    expect(await store.fetchKeyPackages({ ownerDID: ALICE, count: 1 })).toEqual(['kp-1'])
+    expect(await store.fetchKeyPackages({ ownerDID: ALICE })).toEqual(['kp-2'])
   })
 
   test('the last-resort slot is served without being consumed', async () => {
     const store = createMemoryStore()
-    await store.storeLastResortKeyPackage(ALICE, 'kp-lr')
-    expect(await store.fetchLastResortKeyPackage(ALICE)).toBe('kp-lr')
-    expect(await store.fetchLastResortKeyPackage(ALICE)).toBe('kp-lr')
+    await store.storeLastResortKeyPackage({ ownerDID: ALICE, keyPackage: 'kp-lr' })
+    expect(await store.fetchLastResortKeyPackage({ ownerDID: ALICE })).toBe('kp-lr')
+    expect(await store.fetchLastResortKeyPackage({ ownerDID: ALICE })).toBe('kp-lr')
   })
 
   test('an empty last-resort slot reads as null', async () => {
     const store = createMemoryStore()
-    expect(await store.fetchLastResortKeyPackage(ALICE)).toBeNull()
+    expect(await store.fetchLastResortKeyPackage({ ownerDID: ALICE })).toBeNull()
   })
 
   test('a second last-resort upload replaces the first', async () => {
     const store = createMemoryStore()
-    await store.storeLastResortKeyPackage(ALICE, 'kp-old')
-    await store.storeLastResortKeyPackage(ALICE, 'kp-new')
-    expect(await store.fetchLastResortKeyPackage(ALICE)).toBe('kp-new')
+    await store.storeLastResortKeyPackage({ ownerDID: ALICE, keyPackage: 'kp-old' })
+    await store.storeLastResortKeyPackage({ ownerDID: ALICE, keyPackage: 'kp-new' })
+    expect(await store.fetchLastResortKeyPackage({ ownerDID: ALICE })).toBe('kp-new')
   })
 
   test('fetchKeyPackages removes an expired entry rather than skipping it', async () => {
     const store = createMemoryStore({ maxKeyPackagesPerDID: 2 })
     const past = Math.floor(Date.now() / 1000) - 60
     const future = Math.floor(Date.now() / 1000) + 3600
-    await store.storeKeyPackage('did:key:a', 'kp-dead', past)
-    await store.storeKeyPackage('did:key:a', 'kp-live', future)
+    await store.storeKeyPackage({ ownerDID: 'did:key:a', keyPackage: 'kp-dead', notAfter: past })
+    await store.storeKeyPackage({ ownerDID: 'did:key:a', keyPackage: 'kp-live', notAfter: future })
 
-    expect(await store.fetchKeyPackages('did:key:a', 1)).toEqual(['kp-live'])
+    expect(await store.fetchKeyPackages({ ownerDID: 'did:key:a', count: 1 })).toEqual(['kp-live'])
     // The dead entry is gone, not lingering to charge the cap.
-    await store.storeKeyPackage('did:key:a', 'kp-new', future)
-    await store.storeKeyPackage('did:key:a', 'kp-newer', future)
-    expect(await store.countKeyPackages('did:key:a')).toBe(2)
+    await store.storeKeyPackage({ ownerDID: 'did:key:a', keyPackage: 'kp-new', notAfter: future })
+    await store.storeKeyPackage({ ownerDID: 'did:key:a', keyPackage: 'kp-newer', notAfter: future })
+    expect(await store.countKeyPackages({ ownerDID: 'did:key:a' })).toBe(2)
   })
 
   test('the last-resort slot is outside the per-DID key-package cap', async () => {
     const store = createMemoryStore({ maxKeyPackagesPerDID: 2 })
-    await store.storeLastResortKeyPackage(ALICE, 'kp-lr')
-    await store.storeKeyPackage(ALICE, 'kp-0')
-    await store.storeKeyPackage(ALICE, 'kp-1')
+    await store.storeLastResortKeyPackage({ ownerDID: ALICE, keyPackage: 'kp-lr' })
+    await store.storeKeyPackage({ ownerDID: ALICE, keyPackage: 'kp-0' })
+    await store.storeKeyPackage({ ownerDID: ALICE, keyPackage: 'kp-1' })
     // The slot neither consumed cap headroom nor gained any from it.
-    await expect(store.storeKeyPackage(ALICE, 'kp-2')).rejects.toThrow()
-    expect(await store.fetchLastResortKeyPackage(ALICE)).toBe('kp-lr')
+    await expect(store.storeKeyPackage({ ownerDID: ALICE, keyPackage: 'kp-2' })).rejects.toThrow()
+    expect(await store.fetchLastResortKeyPackage({ ownerDID: ALICE })).toBe('kp-lr')
   })
 })
