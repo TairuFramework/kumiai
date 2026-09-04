@@ -207,10 +207,9 @@ describe('GroupHandle.readCommitHeader — external commit and non-commit', () =
     expect(header?.committerDID).toBe(bob.id)
     // External commit's header epoch is the pre-commit (sending) epoch.
     expect(header?.epoch).toBe(aliceAfterBob.epoch)
-    // The rejoin says so itself, because nothing else can say it for it: Bob keeps his id and
-    // — the resync blanking his leaf and the new one taking the leftmost blank — his leaf
-    // index, so no before/after diff of the roster moves. A reader that must know membership
-    // shifted has only this flag.
+    // The rejoin says so itself, because nothing else can say it for it: Bob keeps his id, so no
+    // before/after diff of the roster moves. A reader that must know membership shifted has
+    // only this flag.
     expect(header?.external).toBe(true)
     expect(aliceAfterBob.findMemberLeafIndex(bob.id)).toBeDefined()
   })
