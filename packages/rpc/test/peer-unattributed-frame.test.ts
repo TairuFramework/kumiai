@@ -66,7 +66,7 @@ describe('app lane refuses a frame it cannot attribute', () => {
     const bob = makePeer(hub, 'bob', {})
     await flush()
 
-    await bob.protocol('chat').dispatch('chat/changed', { text: 'hi' })
+    await bob.protocol('chat').dispatch('chat/changed', { data: { text: 'hi' } })
     await flush()
 
     // Dropped at the lane, not handed to the handler with nobody attached to it.
@@ -87,7 +87,7 @@ describe('app lane refuses a frame it cannot attribute', () => {
     const bob = makePeer(hub, 'bob', {})
     await flush()
 
-    await bob.protocol('chat').dispatch('chat/changed', { text: 'hi' })
+    await bob.protocol('chat').dispatch('chat/changed', { data: { text: 'hi' } })
     await flush()
 
     expect(seen).toEqual([{ text: 'hi' }])

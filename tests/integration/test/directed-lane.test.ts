@@ -215,7 +215,7 @@ describe('a member that reconnects while its old connection is still up', () => 
     })
     await flush()
 
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'before' })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'before' } })
     await flush()
     expect(first).toEqual([{ text: 'before' }])
 
@@ -234,7 +234,7 @@ describe('a member that reconnects while its old connection is still up', () => 
     })
     await flush()
 
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'after' })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'after' } })
     await flush()
 
     // The new connection has the lane, and the stale one is not holding anything back.

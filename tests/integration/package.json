@@ -4,8 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "pnpm run test:types && vitest run",
-    "test:types": "tsc --noEmit --skipLibCheck"
+    "test": "pnpm run test:types && pnpm run test:unit",
+    "test:types": "tsc --noEmit --skipLibCheck",
+    "test:unit": "vitest run"
   },
   "devDependencies": {
     "@enkaku/client": "catalog:",

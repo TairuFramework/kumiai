@@ -43,8 +43,8 @@ describe('the app-lane drain reads from a durable position and reports what aged
     // subscription back-fills nothing — so the drain is the only thing that can deliver them.
     await bob.peer.dispose()
     hub.detach('bob')
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'one' })
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'two' })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'one' } })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'two' } })
     await flush()
     expect(seen).toEqual([])
 
@@ -196,7 +196,9 @@ describe('the app-lane drain reads from a durable position and reports what aged
 
     await bob.peer.dispose()
     hub.detach('bob')
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'read before the gap' })
+    await alice.peer
+      .protocol('chat')
+      .dispatch('chat/posted', { data: { text: 'read before the gap' } })
     await flush()
 
     // Bob reads that one and records where he got to. The gap below is measured from here.
@@ -209,8 +211,8 @@ describe('the app-lane drain reads from a durable position and reports what aged
 
     // He is away long enough for the group to talk and for the hub's window to close over part of
     // it: the frame he read, and one he never did, both age out. The survivor is still his.
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'aged out unread' })
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'still retained' })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'aged out unread' } })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'still retained' } })
     await flush()
     const posted = hub.published.filter((m) => m.topicID === topicID)
     expect(posted).toHaveLength(3)

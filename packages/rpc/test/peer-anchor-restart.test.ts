@@ -141,11 +141,11 @@ describe('the app-lane anchor survives a restart', () => {
     expect(restarted.peer.anchorEpoch()).toBe(1)
 
     // Both ways, on the wire, with a member that never restarted.
-    await alice.peer.protocol('room').dispatch('room/posted', { from: 'alice' })
+    await alice.peer.protocol('room').dispatch('room/posted', { data: { from: 'alice' } })
     await flush()
     expect(bobSaw).toEqual([{ from: 'alice' }])
 
-    await restarted.peer.protocol('room').dispatch('room/posted', { from: 'bob' })
+    await restarted.peer.protocol('room').dispatch('room/posted', { data: { from: 'bob' } })
     await flush()
     expect(aliceSaw).toEqual([{ from: 'bob' }])
 

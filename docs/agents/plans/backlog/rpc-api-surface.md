@@ -15,7 +15,7 @@ the deadline. Line numbers are as of `5eb220a`.
 
 ## Findings
 
-- **`ProtocolSurface` ignores its own type parameter.** `packages/rpc/src/peer.ts:254-258` declares
+- ~~**`ProtocolSurface` ignores its own type parameter.** `packages/rpc/src/peer.ts:254-258` declares
   `ProtocolSurface<Protocol extends ProtocolDefinition>`, but every member is untyped against it:
   `dispatch(prc: string, data?: Record<string, unknown>)`, `request(prc: string, prm?: unknown)`,
   `gather(prc: string, prm?: unknown)` — returning `Promise<unknown>` and
@@ -26,7 +26,14 @@ the deadline. Line numbers are as of `5eb220a`.
   Keying the surface off the protocol's own procedure map is possible — enkaku's client does it —
   but it is a materially larger change than any single signature the forward-compatibility plan
   took, and it breaks every existing call site's inferred types at once. Worth doing before 1.0
-  precisely because it cannot be done cheaply after.
+  precisely because it cannot be done cheaply after.~~
+
+  *Taken 2026-09-04:* `ProtocolSurface` is now keyed off the protocol's procedure map —
+  `dispatch`/`request`/`gather` take an enkaku-style config object with typed `data`/`param`/
+  `result`, and `gather` returns `Array<GatheredReply<Result>>`. Breaking: the config-object call
+  form, and the `GroupPeer`/`GroupPeerParams` `Protocols` bound tightening from
+  `Record<string, ProtocolDefinition>` to `Record<string, GroupProtocolDefinition>`. See
+  [../completed/2026-09-04-rpc-protocol-surface-typing.complete.md](../completed/2026-09-04-rpc-protocol-surface-typing.complete.md).
 
 - **`open-once` and `directed` still type against the optional-sender `UnwrapResult`.** Task 6 of
   the forward-compatibility plan closed the *runtime* hole in `packages/rpc/src/peer.ts` —
@@ -58,13 +65,12 @@ the deadline. Line numbers are as of `5eb220a`.
 ## Related, blocked elsewhere
 
 - **The AAD/context half of `wrap`/`unwrap`** (`packages/rpc/src/crypto.ts`) — binding rpc's sealed
-  bytes to a topic/segment context, the same silent-failure shape as `exportSecret`'s label. Only
-  the required-`senderDID` half shipped. Investigated and dropped for two independent reasons:
-  `@kumiai/mls`'s `GroupHandle.encrypt`/`decrypt` (`packages/mls/src/group-handle.ts:617,654`) take
-  no AAD parameter at all, so real binding needs a change *in that package first* (tracked in
-  `2026-07-07-mls-api-hardening.md`); and a 2-argument `unwrap` is not assignable to
-  `@kumiai/broadcast`'s 1-argument `Unwrap` type, a structural arity mismatch needing its own
-  reshape independent of the AAD question.
+  bytes to a topic/segment context, the same silent-failure shape as `exportSecret`'s label.
+  *Cleared 2026-09-03:* `@kumiai/mls`'s `GroupHandle.encrypt`/`decrypt` now take an AAD parameter,
+  and the `@kumiai/rpc` `GroupCrypto` port's `wrap()`/`unwrap()` accept AAD and `expectedAAD`,
+  binding each application message and directed frame to its topicID — see
+  `../completed/2026-09-02-mls-encrypt-aad.complete.md` and commit `85979c9` / the
+  `aad-app-message-binding` changeset.
 
   An earlier version of this finding also argued the app lane's resync/replay drain could not
   determine its own context. That argument did not survive a second reading of `app-lane.ts`'s

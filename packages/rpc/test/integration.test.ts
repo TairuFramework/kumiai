@@ -83,16 +83,16 @@ describe('group-rpc end-to-end (3 members over one hub)', () => {
     await flush()
 
     // 1) Bus event reaches bob + carol.
-    await alice.protocol('app').dispatch('app/ping', { seq: 1 })
+    await alice.protocol('app').dispatch('app/ping', { data: { seq: 1 } })
     await flush()
     expect(pings).toHaveLength(2)
 
     // 2) Anycast request: exactly one answer.
-    const who = await alice.protocol('app').request('app/who', {}, { timeoutMs: 500 })
+    const who = await alice.protocol('app').request('app/who', { param: {}, timeoutMs: 500 })
     expect((who as { id: string }).id).toMatch(/bob|carol/)
 
     // 3) Gather: both answer.
-    const all = await alice.protocol('app').gather('app/who', {}, { timeoutMs: 300 })
+    const all = await alice.protocol('app').gather('app/who', { param: {}, timeoutMs: 300 })
     expect(all.map((r) => (r.value as { id: string }).id).sort()).toEqual(['bob', 'carol'])
 
     // 4) Directed stream from bob.

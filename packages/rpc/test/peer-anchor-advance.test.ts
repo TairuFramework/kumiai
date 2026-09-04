@@ -77,11 +77,11 @@ describe('the member that authors a roster change rotates with the members that 
     // On the wire, both ways: an author left behind at the old anchor still holds the roster Bob
     // holds and still sits at his epoch, and every assertion above this line passes while the two
     // of them talk into different topics forever.
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'after' })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'after' } })
     await flush()
     expect(bobSaw).toEqual([{ text: 'after' }])
 
-    await bob.peer.protocol('chat').dispatch('chat/posted', { text: 'reply' })
+    await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'reply' } })
     await flush()
     expect(aliceSaw).toEqual([{ text: 'reply' }])
 
@@ -131,11 +131,11 @@ describe('the member that authors a roster change rotates with the members that 
     expect(alice.peer.anchorEpoch()).toBe(2)
     expect(alice.anchorStore.stored()?.epoch).toBe(2)
 
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'after' })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'after' } })
     await flush()
     expect(bobSaw).toEqual([{ text: 'after' }])
 
-    await bob.peer.protocol('chat').dispatch('chat/posted', { text: 'reply' })
+    await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'reply' } })
     await flush()
     expect(aliceSaw).toEqual([{ text: 'reply' }])
 
@@ -254,7 +254,7 @@ describe('an ephemeral dispatch lands on the segment that contains its seal epoc
     // The anchor store's write is the window: the anchor and the handle are already at epoch 2 and
     // the lane Alice still holds was built for the segment anchored at 1.
     raceTheRotation = async () => {
-      await alice.peer.protocol('chat').dispatch('chat/changed', { text: 'mid-rotation' })
+      await alice.peer.protocol('chat').dispatch('chat/changed', { data: { text: 'mid-rotation' } })
     }
     await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, removes: ['carol'] })
     await flush()
@@ -326,7 +326,7 @@ describe('a logged dispatch lands on the segment that contains its seal epoch', 
     // Alice dispatches from inside her own rotation: her handle and her anchor are at epoch 2, and
     // the lane she still holds was built for the segment anchored at 1.
     raceTheRotation = async () => {
-      await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'mid-rotation' })
+      await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'mid-rotation' } })
     }
     await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, removes: ['carol'] })
     await flush()

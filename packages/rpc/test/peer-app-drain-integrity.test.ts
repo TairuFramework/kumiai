@@ -67,7 +67,7 @@ describe('the drain bounds what a frame may claim, and passes no epoch it failed
     await bob.peer.dispose()
     hub.detach('bob')
 
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'at epoch one' })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at epoch one' } })
     // The injected frame. Its bytes claim epoch 65535 while the group's commit log holds no
     // commit at all — nothing anywhere says the group ever left epoch 1.
     const forged = createFakeCrypto({ epoch: 65535, localDID: 'mallory' })
@@ -126,14 +126,14 @@ describe('the drain bounds what a frame may claim, and passes no epoch it failed
 
     // One frame at epoch 1, then two commits carrying the group to epoch 3 — no roster change, so
     // one anchor and one topic throughout — and a frame sealed at 3. Bob is still at 1.
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'at epoch one' })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at epoch one' } })
     await alice.peer.commit(buildLedgerCommit(alice, []))
     await flush()
     await alice.peer.commit(buildLedgerCommit(alice, []))
     await flush()
     expect(alice.mls.epoch()).toBe(3)
     expect(alice.peer.anchorEpoch()).toBe(1)
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'at epoch three' })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at epoch three' } })
     await flush()
 
     const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob, handlers })
@@ -182,7 +182,7 @@ describe('the drain bounds what a frame may claim, and passes no epoch it failed
     await bob.peer.dispose()
     hub.detach('bob')
 
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'at epoch one' })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at epoch one' } })
     // `03 00` little-endian is epoch 3, and the two commits below carry the group there — so the
     // log justifies the number, and only the shape of the rest can refuse it.
     await hub.publish({
@@ -236,10 +236,10 @@ describe('the drain bounds what a frame may claim, and passes no epoch it failed
     await bob.peer.dispose()
     hub.detach('bob')
 
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'at epoch one' })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at epoch one' } })
     await alice.peer.commit(buildLedgerCommit(alice, []))
     await flush()
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'at epoch two' })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at epoch two' } })
     await flush()
     expect(alice.mls.epoch()).toBe(2)
 
@@ -292,7 +292,7 @@ describe('the drain bounds what a frame may claim, and passes no epoch it failed
     await bob.peer.dispose()
     hub.detach('bob')
 
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'at epoch one' })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at epoch one' } })
     await alice.peer.commit(buildLedgerCommit(alice, []))
     await flush()
     expect(alice.mls.epoch()).toBe(2)
@@ -369,7 +369,7 @@ describe('the drain delivers only what the live lane would', () => {
     await bob.peer.dispose()
     hub.detach('bob')
 
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'a logged event' })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'a logged event' } })
     // Alice's dispatch would never retain this one, so it is published around her peer: same
     // topic, same epoch key, same sender, `retain: 'log'` on a procedure that never declared it.
     const atOne = createFakeCrypto({ epoch: 1, localDID: 'alice' })
@@ -471,14 +471,14 @@ describe('the drain delivers only what the live lane would', () => {
 
     // Bob publishes, and his own peer never sees it come back: the hub does not push a frame at
     // the member that sent it. Nothing has moved his read position past it.
-    await bob.peer.protocol('chat').dispatch('chat/posted', { text: 'bob said this' })
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'alice said this' })
+    await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'bob said this' } })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'alice said this' } })
     await flush()
     expect(seen).toEqual([{ text: 'alice said this' }])
 
     await bob.peer.dispose()
     hub.detach('bob')
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'alice said more' })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'alice said more' } })
     await flush()
 
     // The restart drains the whole topic from the cursor — his own frame included, because the

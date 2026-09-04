@@ -1,5 +1,11 @@
 import type { Client } from '@enkaku/client'
-import type { ProtocolDefinition } from '@enkaku/protocol'
+import type {
+  DataOf,
+  EventProcedureDefinition,
+  ProtocolDefinition,
+  RequestProcedureDefinition,
+  ReturnOf,
+} from '@enkaku/protocol'
 import type { ProcedureHandlers } from '@enkaku/server'
 import { normalizeDID } from '@kokuin/token'
 import {
@@ -73,7 +79,7 @@ import {
 } from './hub-mux.js'
 import { createLedgerEntryResolver, encodeLedgerEntries } from './ledger-entries.js'
 import { createOpenOncePath } from './open-once.js'
-import { retentionOf } from './protocol.js'
+import { type GroupProtocolDefinition, retentionOf } from './protocol.js'
 import {
   decodeLedgerReply,
   decodeLedgerRequest,
@@ -185,7 +191,7 @@ export type GroupPeerMLSParams = {
   adoptJournalled: (journal: Uint8Array) => Promise<void>
 }
 
-export type GroupPeerParams<Protocols extends Record<string, ProtocolDefinition>> = {
+export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefinition>> = {
   hub: LogHub
   crypto: GroupCrypto
   localDID: string
@@ -260,14 +266,62 @@ export type GroupPeerParams<Protocols extends Record<string, ProtocolDefinition>
     }
 )
 
-export type ProtocolSurface<Protocol extends ProtocolDefinition> = {
-  dispatch: (prc: string, data?: Record<string, unknown>) => Promise<void>
-  request: (prc: string, prm?: unknown, options?: RequestOptions) => Promise<unknown>
-  gather: (prc: string, prm?: unknown, options?: GatherOptions) => Promise<Array<GatheredReply>>
+type FilterNever<T> = { [K in keyof T as T[K] extends never ? never : K]: T[K] }
+
+type GroupEventDefs<Protocol extends GroupProtocolDefinition> = FilterNever<{
+  [P in keyof Protocol & string]: Protocol[P] extends EventProcedureDefinition
+    ? { Data: DataOf<Protocol[P]['data']> }
+    : never
+}>
+type GroupRequestDefs<Protocol extends GroupProtocolDefinition> = FilterNever<{
+  [P in keyof Protocol & string]: Protocol[P] extends RequestProcedureDefinition
+    ? { Param: DataOf<Protocol[P]['param']>; Result: ReturnOf<Protocol[P]['result']> }
+    : never
+}>
+
+// One public type argument only. The `Events`/`Requests` helper params — present solely to avoid
+// recomputing the defs maps in each member — live on the non-exported `ProtocolSurfaceOf` this
+// delegates to, so a caller cannot write `ProtocolSurface<X, ForgedEvents, ForgedRequests>` to
+// inject names/payloads/results the protocol never declared.
+export type ProtocolSurface<Protocol extends GroupProtocolDefinition> = ProtocolSurfaceOf<Protocol>
+
+type ProtocolSurfaceOf<
+  Protocol extends GroupProtocolDefinition,
+  Events extends GroupEventDefs<Protocol> = GroupEventDefs<Protocol>,
+  Requests extends GroupRequestDefs<Protocol> = GroupRequestDefs<Protocol>,
+> = {
+  dispatch: <P extends keyof Events & string, T extends Events[P] = Events[P]>(
+    prc: P,
+    ...args: T['Data'] extends never ? [config?: { data?: never }] : [config: { data: T['Data'] }]
+  ) => Promise<void>
+  request: <P extends keyof Requests & string, T extends Requests[P] = Requests[P]>(
+    prc: P,
+    ...args: T['Param'] extends never
+      ? [config?: { param?: never } & RequestOptions]
+      : [config: { param: T['Param'] } & RequestOptions]
+  ) => Promise<T['Result']>
+  gather: <P extends keyof Requests & string, T extends Requests[P] = Requests[P]>(
+    prc: P,
+    ...args: T['Param'] extends never
+      ? [config?: { param?: never } & GatherOptions]
+      : [config: { param: T['Param'] } & GatherOptions]
+  ) => Promise<Array<GatheredReply<T['Result']>>>
   to: (memberDID: string) => Promise<Client<Protocol>>
 }
 
-export type GroupPeer<Protocols extends Record<string, ProtocolDefinition>> = {
+// The untyped internal shape surfaceFor builds against, bridged to the positional BroadcastClient.
+// Exported so the conformance test binds to this real type rather than a hand-copied literal.
+export type InternalSurface = {
+  dispatch: (prc: string, config?: { data?: Record<string, unknown> }) => Promise<void>
+  request: (prc: string, config?: { param?: unknown } & RequestOptions) => Promise<unknown>
+  gather: (
+    prc: string,
+    config?: { param?: unknown } & GatherOptions,
+  ) => Promise<Array<GatheredReply>>
+  to: (memberDID: string) => Promise<Client<ProtocolDefinition>>
+}
+
+export type GroupPeer<Protocols extends Record<string, GroupProtocolDefinition>> = {
   protocol: <K extends keyof Protocols>(name: K) => ProtocolSurface<Protocols[K]>
   /**
    * Commit to the group, rebasing until it lands.
@@ -725,24 +779,33 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     }
   }
 
-  const surfaceFor = (name: string): ProtocolSurface<ProtocolDefinition> => {
+  const surfaceFor = (name: string): InternalSurface => {
     const runtime = runtimes.get(name)
     if (runtime == null) throw new Error(`Unknown protocol: ${name}`)
     return {
-      dispatch: async (prc, data) => {
+      dispatch: async (prc, config) => {
+        const data = config?.data ?? {}
         // Route by the procedure's declared retention. A `log` event goes to the app topic's log
         // lane (retained, pullable); ephemeral events and RPC stay on the live mailbox lane. The
         // log payload is byte-identical to what the broadcast transport would produce, so online
         // subscribers still receive it through the same drain.
         if (retentionOf(protocols[name], prc) === 'log') {
-          const { topicID, payload } = await sealForSegment(name, encodeEventFrame(prc, data ?? {}))
+          const { topicID, payload } = await sealForSegment(name, encodeEventFrame(prc, data))
           await mux.publish({ topicID, payload, retain: 'log' })
           return
         }
         await runtime.client.dispatch(prc, data)
       },
-      request: (prc, prm, options) => runtime.client.request(prc, prm, options),
-      gather: (prc, prm, options) => runtime.client.gather(prc, prm, options),
+      request: (prc, config) =>
+        runtime.client.request(prc, config?.param, {
+          errorThreshold: config?.errorThreshold,
+          timeoutMs: config?.timeoutMs,
+        }),
+      gather: (prc, config) =>
+        runtime.client.gather(prc, config?.param, {
+          quorum: config?.quorum,
+          timeoutMs: config?.timeoutMs,
+        }),
       to: async (memberDID) => {
         // Normalized ONCE, at the ingress: the cache key, the topic derivation and the
         // directed client's own filter (`senderDID !== memberDID`) must all see one canonical
@@ -2107,16 +2170,23 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     return fn()
   }
 
+  // Hoisted and explicitly typed (rather than inlined in the return object below) so the
+  // checker can match its type against `GroupPeer<Protocols>['protocol']` by identity: inlined,
+  // the whole return-object structural check against `GroupPeer<Protocols>` recurses through
+  // `ProtocolSurface`'s definitions-map machinery for a still-abstract `Protocols` and blows
+  // TypeScript's instantiation-depth limit (TS2589).
+  const protocolMethod: GroupPeer<Protocols>['protocol'] = (name) => {
+    const key = String(name)
+    return {
+      dispatch: (prc, config) => withReady(() => surfaceFor(key).dispatch(prc, config)),
+      request: (prc, config) => withReady(() => surfaceFor(key).request(prc, config)),
+      gather: (prc, config) => withReady(() => surfaceFor(key).gather(prc, config)),
+      to: (memberDID) => withReady(() => surfaceFor(key).to(memberDID)),
+    } as ProtocolSurface<Protocols[typeof name]>
+  }
+
   return {
-    protocol: <K extends keyof Protocols>(name: K) => {
-      const key = String(name)
-      return {
-        dispatch: (prc, data) => withReady(() => surfaceFor(key).dispatch(prc, data)),
-        request: (prc, prm, options) => withReady(() => surfaceFor(key).request(prc, prm, options)),
-        gather: (prc, prm, options) => withReady(() => surfaceFor(key).gather(prc, prm, options)),
-        to: (memberDID) => withReady(() => surfaceFor(key).to(memberDID)),
-      } as ProtocolSurface<Protocols[K]>
-    },
+    protocol: protocolMethod,
     commit,
     replay,
     recover,

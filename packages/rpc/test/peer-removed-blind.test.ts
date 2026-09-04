@@ -105,7 +105,9 @@ describe('the rotation puts the group on a topic only the post-removal epoch sec
     // Carol is a member, and her handlers are really wired: she hears the group before she is
     // removed. Without this her silence afterwards would be indistinguishable from a peer that
     // was never listening at all.
-    await alice.peer.protocol('room').dispatch('room/posted', { said: 'while carol is here' })
+    await alice.peer
+      .protocol('room')
+      .dispatch('room/posted', { data: { said: 'while carol is here' } })
     await flush()
     expect(carolSaw).toEqual([{ said: 'while carol is here' }])
 
@@ -143,9 +145,11 @@ describe('the rotation puts the group on a topic only the post-removal epoch sec
     expect(groupTopic).not.toBe(carolTopic)
     expect(bob.anchorStore.stored()?.secret).toEqual(anchor.secret)
 
-    await alice.peer.protocol('room').dispatch('room/posted', { said: 'after the eviction' })
+    await alice.peer
+      .protocol('room')
+      .dispatch('room/posted', { data: { said: 'after the eviction' } })
     await flush()
-    await bob.peer.protocol('room').dispatch('room/posted', { said: 'and again' })
+    await bob.peer.protocol('room').dispatch('room/posted', { data: { said: 'and again' } })
     await flush()
 
     // The two remaining members go on hearing each other, in plaintext, across the rotation.

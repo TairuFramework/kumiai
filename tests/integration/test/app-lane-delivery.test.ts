@@ -138,8 +138,8 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     await flush()
 
     // --- Messages on the first segment. ----------------------------------------------------
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'one' })
-    await bob.peer.protocol('chat').dispatch('chat/posted', { text: 'two' })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'one' } })
+    await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'two' } })
     await flush()
 
     const anchorBefore = alice.peer.anchorEpoch()
@@ -175,8 +175,8 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     expect(anchorAfter).not.toBe(anchorBefore)
 
     // --- Messages on the new segment. ------------------------------------------------------
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'three' })
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'four' })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'three' } })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'four' } })
     await flush()
 
     // Nothing reached Carol: she was never online, and a subscription back-fills nothing.
@@ -366,7 +366,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     })
     await flush()
 
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'before restart' })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'before restart' } })
     await flush()
     expect(seen).toEqual([{ text: 'before restart' }])
 
@@ -376,7 +376,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     // refused its push channel and reads by pull alone.
     await bob.peer.dispose()
     await bob.disconnect()
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'while away' })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'while away' } })
     await flush()
 
     const restoredHandle = await restoreMemberHandle(bob, bobSlot)
@@ -395,7 +395,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     expect(seen).toEqual([{ text: 'before restart' }, { text: 'while away' }])
 
     // And a frame published after he is back is delivered live.
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'after restart' })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'after restart' } })
     await flush()
     expect(seen).toEqual([
       { text: 'before restart' },
@@ -468,7 +468,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
 
     // Bob is away. One frame at epoch 1, then a roster-neutral commit carrying the group to
     // epoch 2 — the anchor does not move, so both frames live on one topic.
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'at epoch one' })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at epoch one' } })
     const advanced = await alice.peer.commit(
       buildLedgerCommit(alice, aliceID, `did:key:subject-${Date.now()}`, 'member'),
     )
@@ -490,7 +490,9 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
           injected = true
           // Bob's walk has pulled the segment and has not yet applied the commit that leaves
           // epoch 1. Alice publishes at epoch 2 — an epoch bob is not at yet.
-          await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'mid-walk, at two' })
+          await alice.peer
+            .protocol('chat')
+            .dispatch('chat/posted', { data: { text: 'mid-walk, at two' } })
         },
       },
     })
@@ -558,7 +560,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
 
     // A backlog spanning three epochs, with no roster change: one topic, three seal epochs, and
     // a walk that has to ratchet twice to read all of it.
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'at epoch one' })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at epoch one' } })
     for (const [index, value] of [['a', 'member'] as const, ['b', 'member'] as const].entries()) {
       const result = await alice.peer.commit(
         buildLedgerCommit(alice, aliceID, `did:key:subject-${value[0]}-${index}`, value[1]),
@@ -567,7 +569,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
       await flush()
       await alice.peer
         .protocol('chat')
-        .dispatch('chat/posted', { text: `at epoch ${Number(alice.handle().epoch)}` })
+        .dispatch('chat/posted', { data: { text: `at epoch ${Number(alice.handle().epoch)}` } })
       await flush()
     }
     expect(alice.handle().epoch).toBe(3n)
@@ -747,7 +749,9 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     // publish (`chat/posted` is `retain: 'log'`, sent via `mux.publish`, awaited), so the frame is
     // already durably on the wire the instant this returns — checking it does not need to wait on
     // Bob at all, and unlike Bob's open, it does not depend on Bob's decrypt succeeding either.
-    await alice.peer.protocol('chat').dispatch('chat/posted', { text: 'authored after a restart' })
+    await alice.peer
+      .protocol('chat')
+      .dispatch('chat/posted', { data: { text: 'authored after a restart' } })
 
     // The test's name promises the seal landed at the epoch the commit adopted, not merely that
     // a frame arrived: read the epoch off the frame as it sits on the wire, in the clear, from an

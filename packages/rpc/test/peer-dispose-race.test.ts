@@ -42,9 +42,9 @@ describe('dispose against an establishing directed session', () => {
 
     // The other ordering, where teardown has already emptied `runtimes`: without the disposed
     // check this reports `Unknown protocol: chat` — the protocol is fine, the peer is gone.
-    await expect(alice.peer.protocol('chat').dispatch('chat/changed', {})).rejects.toBeInstanceOf(
-      PeerDisposedError,
-    )
+    await expect(
+      alice.peer.protocol('chat').dispatch('chat/changed', { data: {} }),
+    ).rejects.toBeInstanceOf(PeerDisposedError)
   })
 
   test('resync() after dispose refuses rather than rebuilding onto a disposed mux', async () => {
@@ -912,7 +912,9 @@ describe('dispose against a lane op parked before the mux bus-publish route', ()
     // Armed only now: peer init and the acceptor's own construction call `crypto.wrap` for
     // nothing, but gating from the start would be fragile against that changing.
     gateArmed = true
-    const op = alice.peer.protocol('chat').dispatch('chat/changed', { text: 'post-dispose' })
+    const op = alice.peer
+      .protocol('chat')
+      .dispatch('chat/changed', { data: { text: 'post-dispose' } })
     const owned = op.catch(() => {})
     await flush()
     expect(wrapEntered).toBe(true)

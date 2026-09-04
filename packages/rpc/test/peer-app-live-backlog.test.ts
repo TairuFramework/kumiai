@@ -32,7 +32,7 @@ describe('the live lane replays a reconnecting member its mailbox backlog', () =
     // topic keeps its listener; the hub simply has nowhere to push.
     hub.detach('bob')
 
-    await alice.peer.protocol('chat').dispatch('chat/changed', { text: 'before lunch' })
+    await alice.peer.protocol('chat').dispatch('chat/changed', { data: { text: 'before lunch' } })
     for (let i = 0; i < 10; i++) {
       await alice.peer.commit(buildLedgerCommit(alice, []))
     }
