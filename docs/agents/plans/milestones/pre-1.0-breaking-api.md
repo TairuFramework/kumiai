@@ -66,8 +66,7 @@ that package's surface for a filed reason, check this list for a neighbour worth
   (`unsubscribe`/`getSubscribers`/`storeKeyPackage`/`fetchKeyPackages`/`countKeyPackages`/
   `storeLastResortKeyPackage`/`fetchLastResortKeyPackage`) now take a single params object, matching
   every other `HubStore` method. See
-  [../2026-09-04-hub-params-objects.plan.md](../2026-09-04-hub-params-objects.plan.md) and its
-  design doc, [../2026-09-04-hub-params-objects.design.md](../2026-09-04-hub-params-objects.design.md).
+  [../completed/2026-09-04-hub-params-objects.complete.md](../completed/2026-09-04-hub-params-objects.complete.md).
 - `deduped` surfaced end-to-end. Three layers, and only one of them is breaking: the store computes
   `deduped` (`types.ts:77`), the wire schema drops it (`protocol.ts:31-38`), and `LogHub.publish`
   (`hub-tunnel/src/transport.ts:139`) is typed narrower than `HubStore.publish`. The **wire** half is
@@ -80,8 +79,7 @@ that package's surface for a filed reason, check this list for a neighbour worth
   standard Base64 (`toB64`) before sending; on-wire bytes are unchanged. The full `HubClient`
   positional-method sweep (`subscribe`/`unsubscribe`/`uploadKeyPackages`/
   `uploadLastResortKeyPackage`/`fetchKeyPackages` → params objects) rode along in the same branch.
-  See [../2026-09-04-hub-params-objects.plan.md](../2026-09-04-hub-params-objects.plan.md) and its
-  design doc, [../2026-09-04-hub-params-objects.design.md](../2026-09-04-hub-params-objects.design.md).
+  See [../completed/2026-09-04-hub-params-objects.complete.md](../completed/2026-09-04-hub-params-objects.complete.md).
 - The `urn:enkaku:` schema `$id`s — an unsettled identifier scheme that also names `enkaku` for
   types now living in kumiai.
 
