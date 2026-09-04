@@ -1,5 +1,32 @@
 # @kumiai/rpc
 
+## 0.9.0
+
+### Minor Changes
+
+- Add authenticated-data (AAD) binding to the group application-message cryptographic layer. The `GroupHandle.encrypt()` and `GroupHandle.decrypt()` methods now accept an optional AAD parameter, and the `@kumiai/rpc` `GroupCrypto` port's `wrap()` and `unwrap()` operations now accept AAD and `expectedAAD` respectively. Each application message and directed frame is now cryptographically bound to the topicID on which it is published; a frame sealed for one topic cannot be opened on another. The AAD comparison is performed before the message is decrypted, preventing a wrong-topic frame from consuming a ratchet generation.
+
+  **Breaking change:** Pre-upgrade retained application history is invalidated on upgrade. The upgrade drain now enforces the topic AAD constraint and advances the durable cursor past legacy empty-AAD frames. There is no legacy-acceptance code path for frames without AAD.
+
+  This change does not modify topic-ID derivation logic or the durable commit and recovery-topic infrastructure.
+
+- Broadcast control frames now ride a dedicated `typ:'ctrl'` wire discriminator (`BROADCAST_VERSION` 2), freeing `data.kind` for application use. Previously, control replies/requests shared `typ:'event'` with app data and were distinguished only by an app-controlled `data.kind` field, so an application event whose own data happened to carry a colliding `kind` (e.g. `kind:'req'`) could be misclassified as protocol control traffic. Responder and client classifiers now key on `payload.typ`; `data.kind` is read only under `typ==='ctrl'` and is never inspected for app events.
+
+  **Breaking:** frames encoded under `BROADCAST_VERSION` 1 are no longer decodable — `decodeFrame` refuses a stale wire version. The RPC app-lane drain's interim control-shape fallback (dropping replayed frames that merely looked like a control reply/request) is removed; drained frames are classified the same way live frames are, by `typ`, not by shape-sniffing `data`.
+
+- Type `@kumiai/rpc`'s `ProtocolSurface` against the protocol's procedure map, closing its phantom type parameter. `dispatch`/`request`/`gather` are now keyed off the concrete protocol — `dispatch` accepts event procedure names with typed `data`, `request`/`gather` accept request procedure names with typed `param` and typed `result`, and `gather` returns `Array<GatheredReply<Result>>`.
+
+  **Breaking:** the three methods now take a single enkaku-style config object instead of positional arguments — `dispatch(prc, { data })`, `request(prc, { param, ...options })`, `gather(prc, { param, ...options })`. Every call site must migrate. The `GroupPeer` and `GroupPeerParams` `Protocols` bound also tightens from `Record<string, ProtocolDefinition>` to `Record<string, GroupProtocolDefinition>`.
+
+  `@kumiai/broadcast`'s `GatheredReply` is now generic over its value type (`GatheredReply<T = unknown>`); the default keeps every existing use valid (additive, non-breaking).
+
+### Patch Changes
+
+- Updated dependencies:
+  - @kumiai/broadcast@0.9.0
+  - @kumiai/hub-protocol@0.9.0
+  - @kumiai/hub-tunnel@0.9.0
+
 ## 0.8.0
 
 ### Minor Changes

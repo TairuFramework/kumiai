@@ -1,6 +1,6 @@
 {
   "name": "@kumiai/hub-client",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Hub client for Enkaku E2EE group messaging",
   "keywords": [
     "hub",

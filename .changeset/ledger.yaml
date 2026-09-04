@@ -15,6 +15,11 @@
   dir: packages/broadcast
   intents:
     - band-align-0-8
+"@kumiai/broadcast@0.9.0":
+  dir: packages/broadcast
+  intents:
+    - loose-memes-say
+    - rpc-protocol-surface-typing
 "@kumiai/hub-client@0.5.0":
   dir: packages/hub-client
   intents:
@@ -32,6 +37,10 @@
   dir: packages/hub-client
   intents:
     - band-align-0-8
+"@kumiai/hub-client@0.9.0":
+  dir: packages/hub-client
+  intents:
+    - hub-params-objects
 "@kumiai/hub-conformance@0.5.0":
   dir: packages/hub-conformance
   intents:
@@ -50,6 +59,10 @@
   dir: packages/hub-conformance
   intents:
     - band-align-0-8
+"@kumiai/hub-conformance@0.9.0":
+  dir: packages/hub-conformance
+  intents:
+    - band-align-0-9
 "@kumiai/hub-protocol@0.5.0":
   dir: packages/hub-protocol
   intents:
@@ -68,6 +81,10 @@
   dir: packages/hub-protocol
   intents:
     - topicid-pattern
+"@kumiai/hub-protocol@0.9.0":
+  dir: packages/hub-protocol
+  intents:
+    - hub-params-objects
 "@kumiai/hub-server@0.5.0":
   dir: packages/hub-server
   intents:
@@ -86,6 +103,10 @@
   dir: packages/hub-server
   intents:
     - hub-receive-authorization
+"@kumiai/hub-server@0.9.0":
+  dir: packages/hub-server
+  intents:
+    - band-align-0-9
 "@kumiai/hub-tunnel@0.5.0":
   dir: packages/hub-tunnel
   intents:
@@ -103,6 +124,10 @@
   dir: packages/hub-tunnel
   intents:
     - band-align-0-8
+"@kumiai/hub-tunnel@0.9.0":
+  dir: packages/hub-tunnel
+  intents:
+    - band-align-0-9
 "@kumiai/hub-wake@0.6.0":
   dir: packages/hub-wake
   intents:
@@ -111,6 +136,10 @@
   dir: packages/hub-wake
   intents:
     - band-align-0-8
+"@kumiai/hub-wake@0.9.0":
+  dir: packages/hub-wake
+  intents:
+    - band-align-0-9
 "@kumiai/mls-hub@0.5.0":
   dir: packages/mls-hub
   intents:
@@ -128,6 +157,10 @@
   dir: packages/mls-hub
   intents:
     - band-align-0-8
+"@kumiai/mls-hub@0.9.0":
+  dir: packages/mls-hub
+  intents:
+    - band-align-0-9
 "@kumiai/mls-rpc@0.5.0":
   dir: packages/mls-rpc
   intents:
@@ -144,6 +177,10 @@
   dir: packages/mls-rpc
   intents:
     - band-align-0-8
+"@kumiai/mls-rpc@0.9.0":
+  dir: packages/mls-rpc
+  intents:
+    - aad-app-message-binding
 "@kumiai/mls@0.5.0":
   dir: packages/mls
   intents:
@@ -162,6 +199,10 @@
   dir: packages/mls
   intents:
     - band-align-0-8
+"@kumiai/mls@0.9.0":
+  dir: packages/mls
+  intents:
+    - aad-app-message-binding
 "@kumiai/rpc-conformance@0.5.0":
   dir: packages/rpc-conformance
   intents:
@@ -178,6 +219,10 @@
   dir: packages/rpc-conformance
   intents:
     - band-align-0-8
+"@kumiai/rpc-conformance@0.9.0":
+  dir: packages/rpc-conformance
+  intents:
+    - aad-app-message-binding
 "@kumiai/rpc@0.5.0":
   dir: packages/rpc
   intents:
@@ -199,3 +244,9 @@
   dir: packages/rpc
   intents:
     - band-align-0-8
+"@kumiai/rpc@0.9.0":
+  dir: packages/rpc
+  intents:
+    - aad-app-message-binding
+    - loose-memes-say
+    - rpc-protocol-surface-typing
