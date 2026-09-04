@@ -48,9 +48,19 @@ Declared in `packages/rpc/src/crypto.ts`, exported from `packages/rpc/src/index.
 export type RosterEntry = {
   /** Normalized short DID of the member holding this leaf. */
   did: string
-  /** MLS ratchet-tree leaf index — stable for a member across their membership. */
+  /**
+   * MLS ratchet-tree leaf index. Stable *while this leaf remains present* — a commit that does not
+   * remove this member does not move it. A remove-then-rejoin (external commit) MAY reassign it:
+   * the rejoin takes the leftmost blank, which need not be the slot just vacated. Not a stable
+   * per-member identity across a membership gap.
+   */
   leafIndex: number
-  /** The resolvable DID form (long form for did:peer:4, id itself for did:key). Never absent. */
+  /**
+   * The leaf credential's long form when it carries one, else `id` (the real impl is
+   * `parsed.longForm ?? parsed.id`). Never absent — but NOT a guarantee of a dereferenceable /
+   * resolvable DID: it is whatever the credential holds, and for an id with no long form it is
+   * just the id.
+   */
   longForm: string
 }
 ```
@@ -63,10 +73,12 @@ would still be a break. That is the whole reason to spend the break here rather 
 required field (`packages/mls/src/credential.ts:64`; the type is `GroupMember` at `:49-64`), so it
 is free real data rather than a speculative field.
 
-Caveat on `longForm`: it is **never absent** (the type is `string`, and `listMembers` fills it —
-see the real-impl section), but it is not *guaranteed resolvable* in one edge case: restored
-persisted state can bypass the did:peer:4 validation (`group-handle.ts:662`), so a malformed legacy
-leaf may carry the short form here. "Never absent" holds; "always a resolvable long form" does not.
+Caveat on `longForm` — it is **never absent** but **never a resolvability guarantee**. The real
+impl sources it as `parsed.longForm ?? parsed.id` (`group-handle.ts:672`): the value is the leaf's
+long form only when the credential carries one, and otherwise the `id` itself. Restored persisted
+state that bypasses did:peer:4 validation (`group-handle.ts:662`) is one such case; an id that
+simply has no long form (did:key, or the memory double's fixture ids) is the ordinary one. So the
+contract is "long form or id fallback, always a non-empty string" — not "a dereferenceable DID."
 No current consumer reads `longForm`, so this is a documented property, not a live risk.
 
 ### Port — `@kumiai/rpc`
@@ -133,11 +145,23 @@ simply absent") is retitled for `rosterEntries` and still holds: an unparsable l
 `Array<string>` of DIDs (`leaves`, `:368`), returned by `rosterDIDs` (`:485`) and the `leaves()`
 accessor. To yield leaf indices it becomes a **hole-preserving leaf-slot model**:
 
-- a sparse array (or index → DID map) of occupied leaves — **holes are preserved, never compacted**;
+- an **index → DID map** (`Map<number, string>`) of occupied leaves — **holes are simply absent
+  keys, never compacted**. Prefer the map over a native sparse `Array`: a real sparse array is a
+  footgun here, because `[...arr]` materializes holes as `undefined` and `.map`/`.forEach` skip
+  them, which would corrupt both `leaves()` and `rosterEntries()`.
 - **add** fills the lowest free index;
 - **remove** blanks the index (so it is reused by the next add), matching ts-mls;
-- `rosterEntries()` returns one `RosterEntry` per occupied slot, `leafIndex` = the slot index,
-  `longForm` = the DID string (the memory double's DIDs are self-resolving).
+- **`leaves()`** returns the occupied DIDs in ascending index order (`[...map.keys()].sort().map(...)`)
+  — occupied slots only, holes filtered. This preserves the exact-array assertions that consume it:
+  `peer-roster-change-detect.test.ts:67/102/160` (`toEqual(['bob','dave'])` etc.), plus the
+  `toContain`/`not.toContain` reads in `peer-ledger-gather.test.ts:173`,
+  `peer-app-segment-drain.test.ts:150`, `peer-recovery.test.ts:68`. Lowest-free-slot reuse places a
+  removed-then-readded DID back in its low slot, so ascending-index order still matches those
+  expected arrays.
+- **`rosterEntries()`** returns one `RosterEntry` per occupied slot, `leafIndex` = the slot index,
+  `longForm` = the DID string. That is the **id fallback**, consistent with the port contract
+  (`parsed.longForm ?? parsed.id`): the double's fixture ids (`alice`, `bob`) carry no long form, so
+  `longForm === did` for them — correct, not a violation.
 
 Hole preservation is required, not optional, because of the test-double strictness rule: **a double
 may be stricter than its port, never more permissive.** A compact array with `leafIndex` = array
@@ -189,8 +213,11 @@ tests that only care about DIDs; it reads the slot model's occupied DIDs.
   ("reflects an APPLIED roster change, and only an applied one") is preserved, rekeyed to `.did`.
 - **New clause** in that block asserting leaf identity: for a live roster, every entry has an
   integer `leafIndex >= 0`, `leafIndex` is unique across the roster, a given member's `leafIndex`
-  is stable across a commit that does not touch that member, and every entry has a non-empty
-  `longForm`.
+  is stable across a commit that does **not** touch that member (a remove/rejoin of the member
+  itself is explicitly excluded — it may reassign the index), and every entry has a non-empty
+  `longForm`. The `longForm` check asserts presence only, **not** resolvability — the contract is
+  long-form-or-id fallback, so a resolvability assertion would be false against both the double's
+  fixture ids and did:key leaves.
 
 Not asserted: (a) reuse-after-remove of a blanked leaf index, and (b) that `leafIndex` identifies
 the *correct* leaf through a remove/reuse cycle or when one DID holds two leaves. These are real
@@ -235,3 +262,12 @@ which is a live API reference and is renamed to `rosterEntries` in the change it
   it (the object return is what makes that free).
 - Changing `detectRosterChange` to be leaf-aware — it stays a DID-set compare.
 - Rejoin/leaf-reuse detection in the lane — already owned by `CommitHeader.external`.
+
+## Adjacent fix (optional, in `@kumiai/mls`)
+
+`packages/mls/src/group-handle.ts:713-717` (the `listMembers` doc comment) claims an external-commit
+rejoin's new leaf "takes the leftmost blank — the one just blanked", asserting the member's leaf
+index is unchanged. That is overstated: if an earlier blank exists, the rejoin takes *that*, moving
+the member's index. The rejoin-invisibility argument the comment supports still holds via the DID
+set (and `CommitHeader.external`), so this is a comment accuracy fix, not a behavior change. Worth
+correcting while in this area; not required for the change, and it lives in a different package.
