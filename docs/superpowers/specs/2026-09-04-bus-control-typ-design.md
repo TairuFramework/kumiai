@@ -71,6 +71,30 @@ drain — doing so would be scope creep and would reject already-persisted, stil
 the drain ever needs to refuse a version, that is its own separate change. Acceptable pre-1.0 on
 today's in-memory bus and logs either way.
 
+*Ruling (2026-09-04, final-review adjudication).* A whole-branch review raised the mirror case: the
+live broadcast path refuses a v1 frame at `decodeFrame`, while the drain (no version gate) would
+deliver one — so could a **v1 control frame** (which in v1 rode `typ:'event'` with `data.kind`) be
+retained and, under v2, delivered into an app handler? Verified against source and judged benign in
+every reachable case, so **not** fixed in code:
+
+- Control frames are never retained, and this is structural, not conventional. The broadcast bus
+  publishes control (req/res) through `BroadcastBus.publish(topicID, payload)` (`bus.ts:6`,
+  `transport.ts:194`), which has no `retain` parameter — bus traffic is ephemeral fan-out. Every
+  `retain:'log'` publish is a `mux.publish({…, retain:'log'})` in `peer.ts` (the app lane `:794`, the
+  commit lane), carrying app-lane or commit bytes, never a bus control frame. A legitimate v1 control
+  frame therefore cannot be in any log.
+- The only control-shaped bytes that can reach the drain are an app event whose *app data* legitimately
+  carries `kind:'req'|'res'` (exactly the case this change exists to deliver), or an adversarial member
+  hand-publishing control-shaped bytes with `retain:'log'`. In both, the drain only ever `events.emit`s
+  the payload to an app-event listener — there is no control processing on the drain, the recovered
+  `senderDID` is authenticated by `crypto.unwrap` (never read from the frame body), and no reply or
+  correlation is produced. The payload arrives as ordinary app data, which is the same guarantee the
+  feature gives every app event.
+- Fixing this in code would mean version-gating the drain, which would reject already-persisted valid
+  v1 **app** history — the very outcome the paragraph above deliberately avoids. The asymmetry only
+  ever concerns v1 frames, whose meaning is unchanged for app events; there is no reachable
+  mis-delivery. Recorded here so carrying it is deliberate, not accidental.
+
 ## Components touched
 
 ### `@kumiai/broadcast`
