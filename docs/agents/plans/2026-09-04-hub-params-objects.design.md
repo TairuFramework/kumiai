@@ -60,15 +60,19 @@ Full params-object sweep of the remaining positional methods, plus the one filed
 | `uploadKeyPackages` | `(params: UploadKeyPackagesParams)` | `keyPackages`, `notAfter?` | |
 | `uploadLastResortKeyPackage` | `(params: UploadLastResortKeyPackageParams)` | `keyPackage` | |
 | `fetchKeyPackages` | `(params: FetchKeyPackagesParams)` | `did`, `count?` | |
-| `publish` | `(params: PublishParams)` — already a params object | `payload` type `string` → `Uint8Array` | client base64url-encodes internally; caller stops pre-encoding |
+| `publish` | `(params: PublishParams)` — already a params object | `payload` type `string` → `Uint8Array` | client standard-Base64-encodes internally; caller stops pre-encoding |
 
 Already params-object or no-arg — **untouched**: `fetchTopic`, `receive`, `keyPackageStatus`,
 `registerWake`, `unregisterWake`.
 
-The `publish.payload` change moves base64url encoding from the caller into `HubClient.publish`
-itself. The encoder is the same one the wire schema expects (resolve the exact import in the plan —
-`@kumiai/hub-protocol` already carries payload/digest helpers). `HubClient`'s callers in `src` are
-few; most `publish` call sites are tests. Note the rpc/hub-tunnel `.publish` calls
+The `publish.payload` change moves **standard Base64** encoding from the caller into
+`HubClient.publish` itself, using `toB64` from `@sozai/codec` (already a `hub-client` dependency,
+`hub-client/package.json:41`). This preserves identical on-wire bytes: the wire schema declares
+standard Base64 (`hub-protocol/src/protocol.ts:35`) and the server decodes with `fromB64`
+(`hub-server/src/handlers.ts:392`), so `toB64U` is **wrong** — its `-`/`_` alphabet would typecheck
+and then fail `fromB64` at runtime. `@kumiai/hub-protocol` exports no payload encoder
+(`hub-protocol/src/index.ts:7`); `toB64` is what today's callers already use. `HubClient`'s callers
+in `src` are few; most `publish` call sites are tests. Note the rpc/hub-tunnel `.publish` calls
 (`peer.ts`, `transport.ts`, `directed.ts`, `hub-mux.ts`) go through the hub-tunnel `LogHub`/
 `MailboxHub` port (`HubPublishParams`, already `Uint8Array` via `encodeFrame`) — a **different**
 surface, out of scope here.
@@ -97,28 +101,41 @@ All within the hub-* cluster plus mls-hub tests — no cross-repo, single PR.
 | Site | Change |
 |---|---|
 | `hub-protocol/src/types.ts` | 7 `HubStore` sigs + 7 new param types |
+| `hub-protocol/src/index.ts` | export the 7 new `HubStore` param types from the barrel (`:25`) |
 | `hub-server/src/memoryStore.ts` | 7 impl defs (the only real `HubStore`) |
-| `hub-server/src/handlers.ts` | 8 internal `store.*` call sites (`:458,557,822,825,886,913,920,957,958`) |
+| `hub-server/src/handlers.ts` | 9 internal `store.*` call sites (`:458,557,822,825,886,913,920,957,958`) |
 | `hub-conformance/src/index.ts` | ~35 `HubStore` call sites — **the contract** |
-| `hub-client/src/client.ts` | 5 method sigs + `publish` payload type + internal encode |
+| `hub-client/src/client.ts` | 5 method sigs + `publish` payload type + internal `toB64` encode |
+| `hub-client/src/index.ts` | export new client param types; drop the obsolete `SubscribeOptions` export (`:3`) |
+| `hub-client/README.md` | update positional `subscribe` example (`:23`) and the caller-side `toB64` pre-encode guidance (`:24,:35`) to the params-object + raw-`Uint8Array` API |
 | `mls-hub/src/pool.ts`, `mls-hub/src/provisioner.ts` | client call sites (`uploadKeyPackages`, `uploadLastResortKeyPackage`) |
-| `hub-server/test/*`, `mls-hub/test/*`, `hub-client/test/*` | call sites + Proxy-based `HubStore` doubles (`failingStore(method: keyof HubStore)`) |
+| `hub-server/test/*`, `mls-hub/test/*`, `hub-client/test/*` | call sites + Proxy-based fault injectors typed `keyof HubStore` (`failingStore`) |
 
 ## Testing
 
-Per AGENTS.md, a port change runs the contract suite against the real implementation **and** the
-doubles. `@kumiai/hub-conformance` is the suite; `createMemoryStore` the real impl; the Proxy-based
-test doubles the doubles.
+Per AGENTS.md, a port change runs the contract suite against the real implementation. For `HubStore`
+that suite (`@kumiai/hub-conformance`) is registered against exactly one implementation,
+`createMemoryStore` (`hub-server/test/conformance.test.ts:10`) — there are **no** conformance
+doubles for this port. The Proxy-based stores in `hub-server/test/*` are fault-injection regression
+tests, deliberately *not* offered to the suite (`handlers-store-errors.test.ts:51`); they must still
+be migrated to the new signatures, but they are not "doubles" in the contract-suite sense.
+
+Regression gates:
+
+1. `@kumiai/hub-conformance` green against `createMemoryStore` (the real impl).
+2. Both contract suites run (per AGENTS.md, any port change).
+3. Repo-wide `turbo run test:types` — a breaking type change must be verified repo-wide; a consumer
+   package can hide un-migrated sites a per-package `--filter` misses.
 
 TDD order per surface:
 
 1. Reshape the `hub-conformance` call sites first (they *are* the contract) and watch them fail to
    typecheck / run against the un-reshaped port.
-2. Reshape `HubStore` type → `memoryStore` impl → `handlers.ts` callers until the suite is green.
-3. Reshape `HubClient` methods + `publish` payload; update mls-hub src callers and all tests.
-4. Run both contract suites and a **repo-wide** `turbo run test:types` (a breaking type change must
-   be verified repo-wide — a consumer package can hide un-migrated sites a per-package filter
-   misses).
+2. Reshape `HubStore` type + `hub-protocol` barrel → `memoryStore` impl → `handlers.ts` callers
+   until the suite is green.
+3. Reshape `HubClient` methods + `publish` payload (`toB64`) + `hub-client` barrel; update mls-hub
+   src callers, the README, and all tests.
+4. Run the regression gates above.
 
 ## Milestone bookkeeping
 
