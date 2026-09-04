@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Stage:** executing
+**Stage:** finishing
 **Mode:** tasks
 
 **Goal:** Move broadcast-bus control frames off `typ:'event'`/`data.kind` onto a distinct
