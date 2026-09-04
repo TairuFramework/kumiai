@@ -70,18 +70,18 @@ describe('Hub relay: multi-device delivery', () => {
     const { client: laptop, identity: laptopID } = testHub.connect()
     const inbox = fixtureTopic(`inbox:${laptopID.id}`)
 
-    await laptop.subscribe(inbox)
+    await laptop.subscribe({ topicID: inbox })
     const channel = laptop.receive()
     const reader = channel.readable.getReader()
     await delay(50)
 
-    const payload = btoa('encrypted-blob')
-    await phone.publish({ topicID: inbox, payload })
+    const text = 'encrypted-blob'
+    await phone.publish({ topicID: inbox, payload: new TextEncoder().encode(text) })
 
     const msg = await reader.read()
     expect(msg.done).toBe(false)
     expect(msg.value?.topicID).toBe(inbox)
-    expect(msg.value?.payload).toBe(payload)
+    expect(msg.value?.payload).toBe(btoa(text))
 
     channel.close()
     await expect(channel).rejects.toEqual('Close')
@@ -97,9 +97,12 @@ describe('Hub relay: multi-device delivery', () => {
 
     // Laptop subscribes once, then goes offline (no open receive channel).
     const { client: laptopSetup } = testHub.connect(laptopID)
-    await laptopSetup.subscribe(inbox)
+    await laptopSetup.subscribe({ topicID: inbox })
 
-    await phone.publish({ topicID: inbox, payload: btoa('msg-while-offline') })
+    await phone.publish({
+      topicID: inbox,
+      payload: new TextEncoder().encode('msg-while-offline'),
+    })
     await delay(50)
 
     // Laptop reconnects and drains its durable inbox.
@@ -227,14 +230,17 @@ describe('Hub groups: authorized-DID pub/sub', () => {
     const { client: aliceClient } = testHub.connect(alice)
     const { client: bobClient } = testHub.connect(bob)
 
-    await aliceClient.subscribe(groupTopic(groupID))
-    await bobClient.subscribe(groupTopic(groupID))
+    await aliceClient.subscribe({ topicID: groupTopic(groupID) })
+    await bobClient.subscribe({ topicID: groupTopic(groupID) })
 
     const channel = bobClient.receive()
     const reader = channel.readable.getReader()
     await delay(50)
 
-    await aliceClient.publish({ topicID: groupTopic(groupID), payload: btoa('hello-group') })
+    await aliceClient.publish({
+      topicID: groupTopic(groupID),
+      payload: new TextEncoder().encode('hello-group'),
+    })
 
     const msg = await reader.read()
     expect(msg.value?.payload).toBe(btoa('hello-group'))
@@ -253,9 +259,14 @@ describe('Hub groups: authorized-DID pub/sub', () => {
     const testHub = setupGroupHub(groupID, [alice.id])
     const { client: carol } = testHub.connect()
 
-    await expect(carol.subscribe(groupTopic(groupID))).rejects.toThrow('Not authorized')
+    await expect(carol.subscribe({ topicID: groupTopic(groupID) })).rejects.toThrow(
+      'Not authorized',
+    )
     await expect(
-      carol.publish({ topicID: groupTopic(groupID), payload: btoa('intrusion') }),
+      carol.publish({
+        topicID: groupTopic(groupID),
+        payload: new TextEncoder().encode('intrusion'),
+      }),
     ).rejects.toThrow('Not authorized')
 
     await testHub.dispose()

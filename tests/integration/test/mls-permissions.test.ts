@@ -26,7 +26,6 @@ import { describe, expect, test } from 'vitest'
 
 import { fixtureTopic } from './fixture-topic.js'
 
-const b64 = (bytes: Uint8Array): string => Buffer.from(bytes).toString('base64')
 const unb64 = (s: string): Uint8Array => new Uint8Array(Buffer.from(s, 'base64'))
 
 function delay(ms: number): Promise<void> {
@@ -85,7 +84,7 @@ function createTestHub() {
 /** Subscribe and open a receive channel before the sender publishes, so delivery
  *  is a deterministic single read rather than a race against a background loop. */
 async function openReceiver(client: HubClient, topicID: string) {
-  await client.subscribe(topicID)
+  await client.subscribe({ topicID })
   const channel = client.receive()
   const reader = channel.readable.getReader()
   await delay(50)
@@ -175,10 +174,10 @@ describe('an admin-authored Remove converges to every peer over the hub', () => 
     const { client: aliceHub } = testHub.connect(alice)
     const { client: bobHub } = testHub.connect(bob)
     const topic = groupTopic(groupID)
-    await aliceHub.subscribe(topic)
+    await aliceHub.subscribe({ topicID: topic })
     const { channel, reader } = await openReceiver(bobHub, topic)
 
-    await aliceHub.publish({ topicID: topic, payload: b64(removeCarol.commitMessage) })
+    await aliceHub.publish({ topicID: topic, payload: removeCarol.commitMessage })
     const received = await nextCommitBytes(reader)
     await bobGroup.processMessage(received)
 
@@ -255,10 +254,10 @@ describe('a promotion travels with the commit that relies on it', () => {
     const { client: aliceHub } = testHub.connect(alice)
     const { client: bobHub } = testHub.connect(bob)
     const topic = groupTopic(groupID)
-    await aliceHub.subscribe(topic)
+    await aliceHub.subscribe({ topicID: topic })
     const { channel, reader } = await openReceiver(bobHub, topic)
 
-    await aliceHub.publish({ topicID: topic, payload: b64(promotion.commitMessage) })
+    await aliceHub.publish({ topicID: topic, payload: promotion.commitMessage })
     const received = await nextCommitBytes(reader)
     await bobGroup.processMessage(received)
 
@@ -324,10 +323,10 @@ describe('a missing ledger entry blocks a commit until it is resolved out of ban
     const { client: aliceHub } = testHub.connect(alice)
     const { client: bobHub } = testHub.connect(bob)
     const topic = groupTopic(groupID)
-    await aliceHub.subscribe(topic)
+    await aliceHub.subscribe({ topicID: topic })
     const { channel, reader } = await openReceiver(bobHub, topic)
 
-    await aliceHub.publish({ topicID: topic, payload: b64(promotion.commitMessage) })
+    await aliceHub.publish({ topicID: topic, payload: promotion.commitMessage })
     const received = await nextCommitBytes(reader)
 
     const epochBefore = bobGroup.epoch
@@ -382,7 +381,7 @@ describe('a roster member may resync; a stranger may not', () => {
     })
 
     const epochBefore = aliceGroup.epoch
-    await bobHub.publish({ topicID: topic, payload: b64(commitMessage) })
+    await bobHub.publish({ topicID: topic, payload: commitMessage })
     const received = await nextCommitBytes(reader)
     await aliceGroup.processMessage(received)
 

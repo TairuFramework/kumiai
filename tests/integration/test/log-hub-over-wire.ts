@@ -13,19 +13,15 @@ import type { HubReceiveSubscription, LogHub } from '@kumiai/hub-tunnel'
  * This is transport glue and nothing else: every publish, subscribe, fetch and delivery
  * crosses `hub/v1/publish`, `hub/v1/subscribe`, `hub/v1/topic/fetch` and `hub/v1/receive` on
  * an actual `createHub`, against an actual store. It substitutes no hub behaviour — the only
- * work here is the base64 the protocol carries payloads as, which `LogHub` states in bytes.
+ * work here is the base64 the `hub/v1/receive` channel carries payloads as, which `LogHub`
+ * states in bytes. `HubClient.publish` already takes bytes, so the publish side needs no
+ * conversion.
  */
 
 type HubTransports = DirectTransports<
   AnyServerMessageOf<HubProtocol>,
   AnyClientMessageOf<HubProtocol>
 >
-
-function toBase64(bytes: Uint8Array): string {
-  let binary = ''
-  for (const byte of bytes) binary += String.fromCharCode(byte)
-  return btoa(binary)
-}
 
 function fromBase64(text: string): Uint8Array {
   const binary = atob(text)
@@ -140,15 +136,15 @@ export function createWireHub(options: { retentionSeconds?: number } = {}): Wire
       subscribe: async (_subscriberDID, topicID, subscribeOptions) => {
         // The hub authenticates the subscriber from the connection, so the DID the caller
         // passes is not sent — it is already the connection's.
-        await client.subscribe(topicID, subscribeOptions)
+        await client.subscribe({ topicID, ...subscribeOptions })
       },
       unsubscribe: async (_subscriberDID, topicID) => {
-        await client.unsubscribe(topicID)
+        await client.unsubscribe({ topicID })
       },
       publish: async (params) => {
         return await client.publish({
           topicID: params.topicID,
-          payload: toBase64(params.payload),
+          payload: params.payload,
           ...(params.retain != null && { retain: params.retain }),
           ...('expectedHead' in params && { expectedHead: params.expectedHead }),
           ...(params.publishID != null && { publishID: params.publishID }),

@@ -50,7 +50,7 @@ that package's surface for a filed reason, check this list for a neighbour worth
 
 ### `@kumiai/hub-*` — [hub protocol/server cleanup](../backlog/2026-07-07-hub-protocol-server-cleanup.md)
 
-- `HubStore`'s **four** positional methods — `unsubscribe`, `getSubscribers`, `storeKeyPackage`,
+- ~~`HubStore`'s **four** positional methods — `unsubscribe`, `getSubscribers`, `storeKeyPackage`,
   `fetchKeyPackages`. Reshaping breaks every implementor *and* every conformance double.
 
   **The cheap moment passed (noted 2026-07-28).** This item said to take the reshape with
@@ -58,7 +58,16 @@ that package's surface for a filed reason, check this list for a neighbour worth
   [shipped 2026-07-25](../completed/2026-07-25-hub-keypackage-subscribe-caps.complete.md) and did
   not take it — `storeKeyPackage` in fact *gained* a positional `notAfter` parameter
   (`hub-protocol/src/types.ts:235`) rather than moving to a params object. The item stands; the
-  argument for when to take it does not. The next work to open `HubStore` is the new moment.
+  argument for when to take it does not. The next work to open `HubStore` is the new moment.~~
+  *Taken 2026-09-04:* **the premise was four; it was seven by the time this landed.**
+  `countKeyPackages`, `storeLastResortKeyPackage` and `fetchLastResortKeyPackage` did not exist at
+  `5eb220a`, and `storeKeyPackage` had since gained the positional `notAfter` noted above — all
+  postdate this item's filing. All seven positional methods
+  (`unsubscribe`/`getSubscribers`/`storeKeyPackage`/`fetchKeyPackages`/`countKeyPackages`/
+  `storeLastResortKeyPackage`/`fetchLastResortKeyPackage`) now take a single params object, matching
+  every other `HubStore` method. See
+  [../2026-09-04-hub-params-objects.plan.md](../2026-09-04-hub-params-objects.plan.md) and its
+  design doc, [../2026-09-04-hub-params-objects.design.md](../2026-09-04-hub-params-objects.design.md).
 - `deduped` surfaced end-to-end. Three layers, and only one of them is breaking: the store computes
   `deduped` (`types.ts:77`), the wire schema drops it (`protocol.ts:31-38`), and `LogHub.publish`
   (`hub-tunnel/src/transport.ts:139`) is typed narrower than `HubStore.publish`. The **wire** half is
@@ -66,7 +75,13 @@ that package's surface for a filed reason, check this list for a neighbour worth
   widening a sealed schema. The **port** half is what breaks: widening the return type is fine for
   callers but forces every implementor and double to supply the field.
 - Flat `HubRateLimits` — no home for a per-action limit matching `AuthorizeRequest`'s six actions.
-- `HubClient.publish`'s pre-base64 `payload: string` — accepting `Uint8Array` is the break.
+- ~~`HubClient.publish`'s pre-base64 `payload: string` — accepting `Uint8Array` is the break.~~
+  *Taken 2026-09-04:* `publish` now accepts `payload: Uint8Array` and encodes it internally with
+  standard Base64 (`toB64`) before sending; on-wire bytes are unchanged. The full `HubClient`
+  positional-method sweep (`subscribe`/`unsubscribe`/`uploadKeyPackages`/
+  `uploadLastResortKeyPackage`/`fetchKeyPackages` → params objects) rode along in the same branch.
+  See [../2026-09-04-hub-params-objects.plan.md](../2026-09-04-hub-params-objects.plan.md) and its
+  design doc, [../2026-09-04-hub-params-objects.design.md](../2026-09-04-hub-params-objects.design.md).
 - The `urn:enkaku:` schema `$id`s — an unsettled identifier scheme that also names `enkaku` for
   types now living in kumiai.
 
