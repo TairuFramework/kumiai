@@ -95,6 +95,12 @@ rosterEntries(): Promise<Array<RosterEntry>>
 The rename is taken in the same break: a method named `rosterDIDs` that returns entries is a
 misnomer, and the break already rewrites every call site, so the honest name costs nothing extra.
 
+**Ordering is part of the contract:** `rosterEntries()` returns entries in **ascending `leafIndex`
+order**. The real impl already does (`listMembers` is "ascending leaf-index order",
+`group-handle.ts:705-727`) and the double does likewise, so pinning it costs nothing and spares
+external implementers an unspecified decision. `detectRosterChange` is order-independent regardless
+(it compares DIDs as a set), so the guarantee is for other/future consumers, not this one.
+
 Doc comments that describe the old method are rewritten for the new shape:
 
 - `crypto.ts:258-270` — the `rosterEntries` doc block itself (still "one entry per leaf"; the entry
@@ -106,8 +112,10 @@ Doc comments that describe the old method are rewritten for the new shape:
 
 `detectRosterChange` (`packages/rpc/src/roster.ts:22`, exported at `index.ts:95`) **keeps its
 `Array<string>` signature.** It is a pure DID-set comparison by design, and leaf identity does not
-help it: a rejoin that reuses a blanked leaf index changes neither the DID set nor the leaf index,
-so `CommitHeader.external` still owns rejoin detection. The two call sites in `advanceHandle`
+help it: an external-commit rejoin by a member the roster still holds leaves the DID set unchanged,
+and a leaf-index diff cannot reliably catch it either (the rejoin may reuse the vacated slot or, if
+an earlier blank exists, move to that one — see the `leafIndex` note), so `CommitHeader.external`
+still owns rejoin detection. The two call sites in `advanceHandle`
 (`peer.ts:1211`, `:1229`) extract `.did` before normalizing:
 
 ```ts
@@ -151,13 +159,20 @@ accessor. To yield leaf indices it becomes a **hole-preserving leaf-slot model**
   them, which would corrupt both `leaves()` and `rosterEntries()`.
 - **add** fills the lowest free index;
 - **remove** blanks the index (so it is reused by the next add), matching ts-mls;
-- **`leaves()`** returns the occupied DIDs in ascending index order (`[...map.keys()].sort().map(...)`)
-  — occupied slots only, holes filtered. This preserves the exact-array assertions that consume it:
-  `peer-roster-change-detect.test.ts:67/102/160` (`toEqual(['bob','dave'])` etc.), plus the
-  `toContain`/`not.toContain` reads in `peer-ledger-gather.test.ts:173`,
-  `peer-app-segment-drain.test.ts:150`, `peer-recovery.test.ts:68`. Lowest-free-slot reuse places a
-  removed-then-readded DID back in its low slot, so ascending-index order still matches those
-  expected arrays.
+- **`leaves()`** returns the occupied DIDs in **ascending slot-index order** (numeric sort of the
+  map keys, holes filtered — not `[...map]`). The three exact-array assertions that consume it were
+  traced against this model and still hold: `peer-roster-change-detect.test.ts:67`
+  (`{0:bob,1:carol}` → remove carol → add dave at freed slot 1 → `['bob','dave']`), `:102`
+  (`{0:bob,1:carol}` unchanged → `['bob','carol']`), `:160` (`{0:bob,1:dave}` → resync blanks slot 1
+  → dave refills slot 1 → `['bob','dave']`). The `toContain`/`not.toContain` reads
+  (`peer-ledger-gather.test.ts:173`, `peer-app-segment-drain.test.ts:150`, `peer-recovery.test.ts:68`)
+  are order-independent.
+
+  **Order-change note (no test breaks today):** ascending-slot order is *not* identical to the old
+  compact insertion order. An ordinary add after an unrelated removal fills the freed low slot, so
+  `{0:a,1:b,2:c}` → remove `b`, add `d` projects `[a,d,c]` where the old compact model gave
+  `[a,c,d]`. No current exact-array assertion exercises that case; the implementer must not
+  reintroduce insertion order to "fix" a test — ascending slot order is the intended contract.
 - **`rosterEntries()`** returns one `RosterEntry` per occupied slot, `leafIndex` = the slot index,
   `longForm` = the DID string. That is the **id fallback**, consistent with the port contract
   (`parsed.longForm ?? parsed.id`): the double's fixture ids (`alice`, `bob`) carry no long form, so
@@ -211,23 +226,27 @@ tests that only care about DIDs; it reads the slot model's occupied DIDs.
   readable.
 - The `describe('rosterDIDs')` block (`:313`) is renamed to `rosterEntries`. Its existing test
   ("reflects an APPLIED roster change, and only an applied one") is preserved, rekeyed to `.did`.
-- **New clause** in that block asserting leaf identity: for a live roster, every entry has an
-  integer `leafIndex >= 0`, `leafIndex` is unique across the roster, a given member's `leafIndex`
-  is stable across a commit that does **not** touch that member (a remove/rejoin of the member
-  itself is explicitly excluded — it may reassign the index), and every entry has a non-empty
-  `longForm`. The `longForm` check asserts presence only, **not** resolvability — the contract is
+- **New clause** in that block asserting leaf identity. Structural properties: every entry has an
+  integer `leafIndex >= 0`, unique across the roster; entries are returned in ascending `leafIndex`
+  order; a given member's `leafIndex` is stable across a commit that does **not** touch that member
+  (a remove/rejoin of the member itself is explicitly excluded — it may reassign the index); every
+  entry has a non-empty `longForm`.
+  **Value properties** (so a conforming impl cannot return stable-but-meaningless integers like
+  `100,101,102`): a freshly created `n`-member group has `leafIndex` values exactly `{0..n-1}`; and
+  an add after a removal reuses the freed leaf index — remove the member at slot 1 of a `{0,1,2}`
+  group, add a new DID, and the new entry has `leafIndex === 1` (RFC 9420 leftmost-blank). This is
+  the ordinary different-DID reuse path, distinct from the scoped-out duplicate-DID case.
+  The `longForm` check asserts presence only, **not** resolvability — the contract is
   long-form-or-id fallback, so a resolvability assertion would be false against both the double's
   fixture ids and did:key leaves.
 
-Not asserted: (a) reuse-after-remove of a blanked leaf index, and (b) that `leafIndex` identifies
-the *correct* leaf through a remove/reuse cycle or when one DID holds two leaves. These are real
-ts-mls properties, but no consumer depends on them (the lane rotates on `CommitHeader.external`, not
-on leaf identity or reuse), and the double is deliberately not made faithful to duplicate-DID
-removal (see the double section). So the suite guarantees `leafIndex` is present, unique, and stable
-— not that it is the semantically correct leaf under duplicate-DID membership. That is the **known
-coverage gap** the scope decision records; closing it (double + a conformance clause) is additive
-and waits on a consumer. The double's lowest-free-index reuse means property (a) holds in practice;
-it is simply not a conformance clause.
+Still **not** asserted (the scoped-out case): that `leafIndex` identifies the *correct* leaf when one
+DID holds two leaves — a remove/rejoin cycle that must disambiguate *which* of a DID's leaves moved.
+The double addresses removal by DID and cannot model removing one of two same-DID leaves (see the
+double section), and no consumer depends on it (the lane rotates on `CommitHeader.external`, not on
+leaf identity). So the suite pins `leafIndex` values and different-DID reuse, but not the
+duplicate-DID semantic — the **known coverage gap** the scope decision records, closed (double +
+conformance clause, additive, non-breaking) when a consumer first needs it.
 
 ## Testing
 
