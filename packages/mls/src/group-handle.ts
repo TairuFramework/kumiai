@@ -711,9 +711,7 @@ export class GroupHandle {
    * The diff sees MEMBERSHIP, and only membership: an Add, a Remove, or both in
    * one commit (compare as a set — a count misses that last case). It does NOT
    * see an external-commit REJOIN by a member the group still holds. That member
-   * keeps its id, so the id set is unchanged; and its leaf index is unchanged
-   * too, because a resync blanks the member's old leaf and the new leaf then
-   * takes the leftmost blank — the one just blanked (RFC 9420 §12.4.3.2). No
+   * keeps its id, so the id set is unchanged; the new leaf takes the leftmost blank, which is the just-vacated slot only when no earlier blank exists; otherwise the rejoiner moves. The DID set is unchanged regardless, which is why a `did` diff cannot see the rejoin and the caller reads `CommitHeader.external` instead. No
    * field of this result moves, and no before/after diff of it can be made to.
    * A caller that must detect a rejoin reads the COMMIT instead — an external
    * commit is structurally one: a public message from a non-member carrying a
