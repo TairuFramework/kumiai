@@ -1,5 +1,6 @@
 import type { ChannelCall, Client, RequestCall } from '@enkaku/client'
 import type { HubProtocol } from '@kumiai/hub-protocol'
+import { toB64 } from '@sozai/codec'
 
 export type HubClientParams = {
   client: Client<HubProtocol>
@@ -7,7 +8,7 @@ export type HubClientParams = {
 
 export type PublishParams = {
   topicID: string
-  payload: string
+  payload: Uint8Array
   /** Retention class. Absent: 'mailbox' — the frame dies with its last ack. */
   retain?: 'log' | 'mailbox'
   /**
@@ -92,7 +93,9 @@ export class HubClient {
     return this.#client.request('hub/v1/publish', {
       param: {
         topicID: params.topicID,
-        payload: params.payload,
+        // Standard Base64 — the wire schema declares contentEncoding 'base64' and the server
+        // decodes with fromB64; toB64U's -/_ alphabet would fail that decode.
+        payload: toB64(params.payload),
         retain: params.retain,
         // Absent and null are different requests — null is the empty-topic sentinel — so the key
         // is only sent when the caller actually set it.

@@ -69,7 +69,7 @@ describe('HubClient', () => {
     const reader = channel.readable.getReader()
     await delay(50)
 
-    await alice.publish({ topicID: TOPIC, payload: encodePayload('hello') })
+    await alice.publish({ topicID: TOPIC, payload: fromUTF('hello') })
 
     const msg = await reader.read()
     expect(msg.done).toBe(false)
@@ -94,12 +94,12 @@ describe('HubClient', () => {
     const reader = channel.readable.getReader()
     await delay(50)
 
-    await alice.publish({ topicID: TOPIC, payload: encodePayload('chat-msg') })
+    await alice.publish({ topicID: TOPIC, payload: fromUTF('chat-msg') })
     const msg1 = await reader.read()
     expect(msg1.value?.topicID).toBe(TOPIC)
     expect(msg1.value?.payload).toBe(encodePayload('chat-msg'))
 
-    await alice.publish({ topicID: TOPIC_WORK, payload: encodePayload('work-msg') })
+    await alice.publish({ topicID: TOPIC_WORK, payload: fromUTF('work-msg') })
     const msg2 = await reader.read()
     expect(msg2.value?.topicID).toBe(TOPIC_WORK)
     expect(msg2.value?.payload).toBe(encodePayload('work-msg'))
@@ -121,7 +121,7 @@ describe('HubClient', () => {
     const unsub = await bob.unsubscribe({ topicID: TOPIC })
     expect(unsub.unsubscribed).toBe(true)
 
-    await alice.publish({ topicID: TOPIC, payload: encodePayload('gone') })
+    await alice.publish({ topicID: TOPIC, payload: fromUTF('gone') })
     await delay(50)
     expect((await testHub.store.fetch({ recipientDID: bobIdentity.id })).messages).toHaveLength(0)
 
