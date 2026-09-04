@@ -1159,10 +1159,10 @@ export class GroupHandle {
       //
       // `external: true` is reported, not just consumed to find the committer: a resync rejoin
       // is invisible to every before/after diff a caller could run — it changes no member DID
-      // (the roster already held it) and no occupied leaf index (the new leaf lands on the
-      // leftmost blank, which is the one the resync just blanked). A caller that must know the
-      // group's membership shifted has no other way to see it, so the fact is surfaced here
-      // rather than discarded. Absent means a member commit.
+      // (the roster already held it); its leaf lands on the leftmost blank and may shift, but
+      // the DID set is unchanged. A caller that must know the group's membership shifted has no
+      // other way to see it, so the fact is surfaced here rather than discarded. Absent means a
+      // member commit.
       const external = readExternalCommit(decoded)
       if (external != null) {
         // It IS a commit, so it gets a header even when the leaf credential will not parse to a
