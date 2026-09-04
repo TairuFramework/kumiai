@@ -279,7 +279,13 @@ type GroupRequestDefs<Protocol extends GroupProtocolDefinition> = FilterNever<{
     : never
 }>
 
-export type ProtocolSurface<
+// One public type argument only. The `Events`/`Requests` helper params — present solely to avoid
+// recomputing the defs maps in each member — live on the non-exported `ProtocolSurfaceOf` this
+// delegates to, so a caller cannot write `ProtocolSurface<X, ForgedEvents, ForgedRequests>` to
+// inject names/payloads/results the protocol never declared.
+export type ProtocolSurface<Protocol extends GroupProtocolDefinition> = ProtocolSurfaceOf<Protocol>
+
+type ProtocolSurfaceOf<
   Protocol extends GroupProtocolDefinition,
   Events extends GroupEventDefs<Protocol> = GroupEventDefs<Protocol>,
   Requests extends GroupRequestDefs<Protocol> = GroupRequestDefs<Protocol>,
@@ -304,7 +310,8 @@ export type ProtocolSurface<
 }
 
 // The untyped internal shape surfaceFor builds against, bridged to the positional BroadcastClient.
-type InternalSurface = {
+// Exported so the conformance test binds to this real type rather than a hand-copied literal.
+export type InternalSurface = {
   dispatch: (prc: string, config?: { data?: Record<string, unknown> }) => Promise<void>
   request: (prc: string, config?: { param?: unknown } & RequestOptions) => Promise<unknown>
   gather: (
