@@ -88,6 +88,8 @@ testGroupMLSConformance({
     // one. It keeps its own epoch: building a commit is what advances its author, and nothing
     // else may advance a member.
     let committerEpoch = 0
+    // Disambiguates repeated `{ adds: true }` calls within one group's lifetime.
+    let addCount = 0
 
     // Enact the ledger entries, so every member holds the same non-empty ledger the way it would
     // in life: a commit carrying them, applied. No new harness method — the group simply comes
@@ -111,8 +113,14 @@ testGroupMLSConformance({
       committerDID: COMMITTER_DID,
       buildCommit: async (options) => {
         const removes = options?.removes == null ? undefined : [didAt(options.removes)]
+        // A genuinely new identity — never one already modelled in `members` — so a reuse test
+        // can tell "the freed leaf went to an arrival" from "the freed leaf went to a DID the
+        // suite already knew about".
+        const adds =
+          options?.adds === true ? [`did:key:conformance-newcomer-${id}-${addCount++}`] : undefined
         const commit = encodeMemoryCommit(committerEpoch, COMMITTER_DID, [], {
           ...(removes != null && { removes }),
+          ...(adds != null && { adds }),
         })
         committerEpoch += 1
         return { commit, context: { senderDID: COMMITTER_DID } }

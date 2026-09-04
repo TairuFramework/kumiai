@@ -96,9 +96,15 @@ export type ConformanceMLSGroup = {
    * real committer does when the hub accepts, and as nothing else may. `members` are untouched:
    * a member reaches the new epoch by being handed these bytes and not otherwise.
    *
-   * `removes` names the index in `members` whose leaf the Commit drops.
+   * `removes` names the index in `members` whose leaf the Commit drops. `adds`, when `true`,
+   * invites one genuinely NEW identity — never one already modelled in `members` — so a caller
+   * can prove a freed leaf is reused by an arrival the group has never seen, not merely
+   * re-verify a DID it already knew. Both implementations already had the primitive this
+   * threads through: a real committer's plain (no-`removes`) commit already invites a fresh
+   * identity to advance the epoch, and the memory double's commit encoding already carries an
+   * `adds` list — `adds` only asks each harness to exercise that existing path on request.
    */
-  buildCommit: (options?: { removes?: number }) => Promise<ConformanceCommit>
+  buildCommit: (options?: { removes?: number; adds?: boolean }) => Promise<ConformanceCommit>
   /**
    * A genuine EXTERNAL commit — a rejoin — framed at the group's current epoch, together with a
    * forgery of it: the same frame with only the claimed author rewritten, which is what a
@@ -346,6 +352,85 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           // Bob was handed nothing, so his roster is untouched — the lane must be able to tell
           // "this member applied a remove" from "a remove happened somewhere".
           expect(new Set(dids(await bob.mls.rosterEntries()))).toEqual(new Set(before))
+        })
+      })
+
+      /**
+       * PINNED VALUES, not merely "stable": a `leafIndex` that never moves but is otherwise
+       * arbitrary (leaf 7, leaf 1000 — whatever an implementation likes, forever) would pass
+       * every clause above and still be useless to a caller that has to name a leaf. This clause
+       * closes that gap.
+       *
+       * The dense range is asserted against `entries.length`, NOT against `withGroup`'s `size`:
+       * the group's own COMMITTER holds a leaf too — both harnesses seat it in the tree at
+       * construction (the real fixture's `createGroup` call, the double's `roster =
+       * [COMMITTER_DID, ...dids]` seed) — so an `n`-member conformance group's roster is `n + 1`
+       * entries wide. Asserting `{0..size-1}` would be a premise about harness plumbing, not
+       * about the port; `{0..entries.length-1}` is the actual dense-and-complete contract.
+       */
+      test('leafIndex is a dense 0..n-1 on a fresh group, unique, ascending, and stable for untouched members', async () => {
+        await withGroup(3, 'roster-leaf-identity', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const entries = await alice.mls.rosterEntries()
+
+          // A fresh group occupies exactly slots {0..entries.length-1}: dense, no gaps.
+          expect(entries.map((e) => e.leafIndex).sort((a, b) => a - b)).toEqual(
+            Array.from({ length: entries.length }, (_, i) => i),
+          )
+          // Unique.
+          expect(new Set(entries.map((e) => e.leafIndex)).size).toBe(entries.length)
+          // Ascending order as returned.
+          expect(entries.map((e) => e.leafIndex)).toEqual(
+            [...entries.map((e) => e.leafIndex)].sort((a, b) => a - b),
+          )
+          // Non-empty longForm (presence only, NOT resolvability).
+          for (const e of entries) expect(e.longForm.length).toBeGreaterThan(0)
+
+          // Stability: removing an unrelated member does not move alice's own leafIndex.
+          const alice0 = entries.find((e) => e.did === alice.did)?.leafIndex
+          const carol = memberAt(group.members, 2)
+          expect(dids(entries)).toContain(carol.did)
+          const removal = await group.buildCommit({ removes: 2 })
+          await alice.mls.processCommit(removal.commit, removal.context)
+          const after = await alice.mls.rosterEntries()
+          expect(after.find((e) => e.did === alice.did)?.leafIndex).toBe(alice0)
+        })
+      })
+
+      /**
+       * FREED-INDEX REUSE, by a genuinely NEW arrival — never a DID the group already modelled.
+       * `buildCommit({ adds: true })` is the harness's own primitive for that (see its doc in
+       * `ConformanceMLSGroup`), not a helper invented for this test.
+       *
+       * The freed leaf is read off `rosterEntries()` BY DID, not assumed to equal the removed
+       * member's position in `group.members`: the committer occupies a leaf of its own in both
+       * harnesses (see the previous test's note), so `group.members[1]`'s leaf is NOT
+       * necessarily leaf index `1` — the two are only related through the roster this port
+       * actually reports.
+       */
+      test('an add after a removal reuses the freed leaf index (leftmost blank, different DID)', async () => {
+        await withGroup(3, 'roster-leaf-reuse', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const bob = memberAt(group.members, 1)
+
+          const before = await alice.mls.rosterEntries()
+          const bobEntry = before.find((e) => e.did === bob.did)
+          // Narrowed rather than optional-chained: `expect` does not narrow.
+          if (bobEntry == null) throw new Error('the harness reported no leaf for bob')
+          const freedIndex = bobEntry.leafIndex
+          const freedDID = bobEntry.did
+
+          const removal = await group.buildCommit({ removes: 1 })
+          await alice.mls.processCommit(removal.commit, removal.context)
+          const add = await group.buildCommit({ adds: true })
+          await alice.mls.processCommit(add.commit, add.context)
+
+          const entries = await alice.mls.rosterEntries()
+          const newcomer = entries.find(
+            (e) => e.did !== alice.did && e.did !== freedDID && e.leafIndex === freedIndex,
+          )
+          // The newcomer occupies the freed leaf (leftmost blank), not a fresh one past the end.
+          expect(newcomer).toBeDefined()
         })
       })
     })
