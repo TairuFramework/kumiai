@@ -92,9 +92,12 @@ in the linked doc; the one real defect the check turned up is folded into the `d
 
 ### `@kumiai/rpc` — [rpc API surface](../backlog/rpc-api-surface.md)
 
-- `ProtocolSurface` ignores its own type parameter (`peer.ts:254-258`) — `prc: string`,
+- ~~`ProtocolSurface` ignores its own type parameter (`peer.ts:254-258`) — `prc: string`,
   `prm?: unknown`, `Promise<unknown>`. The largest single item on this milestone, and the one least
-  doable after 1.0.
+  doable after 1.0.~~ *Taken 2026-09-04:* `ProtocolSurface` is now typed against the protocol's
+  procedure map — `dispatch`/`request`/`gather` take an enkaku-style config object keyed off the
+  concrete protocol, and the `GroupPeer`/`GroupPeerParams` `Protocols` bound tightens to
+  `GroupProtocolDefinition` (completed-doc path added at completing stage).
 - `open-once`/`directed` still typed against the optional-sender `UnwrapResult`
   (`open-once.ts:15`, `directed.ts:35`) — has a runtime guard under it already, so it is
   type-safety debt rather than a live gap.
