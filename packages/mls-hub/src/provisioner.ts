@@ -144,7 +144,7 @@ export function createLastResortProvisioner(
   // Split so only the hub call sits inside a caller's try: a failing `store.put` here is a local
   // failure, not a hub outcome, and must propagate unchanged rather than being classified.
   const uploadToHub = async (record: LastResortRecord): Promise<void> => {
-    await client.uploadLastResortKeyPackage(record.keyPackage)
+    await client.uploadLastResortKeyPackage({ keyPackage: record.keyPackage })
   }
 
   const markUploaded = async (record: LastResortRecord): Promise<void> => {

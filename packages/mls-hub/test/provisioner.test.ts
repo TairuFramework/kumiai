@@ -1,3 +1,4 @@
+import type { UploadLastResortKeyPackageParams } from '@kumiai/hub-client'
 import {
   createLastResortKeyPackageBundle,
   decodeKeyPackage,
@@ -594,8 +595,8 @@ describe('rotation and retention', () => {
     const realUpload = hub.client.uploadLastResortKeyPackage.bind(hub.client)
     const uploadSpy = vi
       .spyOn(hub.client, 'uploadLastResortKeyPackage')
-      .mockImplementation((keyPackage: string) => {
-        const call = realUpload(keyPackage)
+      .mockImplementation((params: UploadLastResortKeyPackageParams) => {
+        const call = realUpload(params)
         // Fire-and-forget: advances the clock once the real upload settles, before the
         // provisioner's own `await` on this same call resumes.
         void call.then(() => {
