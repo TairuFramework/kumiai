@@ -41,8 +41,9 @@ prm)` are string/`unknown` typed (`packages/broadcast/src/client.ts:84,88,131`).
 for broadcast and stays.
 
 All typing is therefore added at the rpc `ProtocolSurface` boundary, which holds `Protocol` in its
-type parameter. The surface presents typed methods that erase to the untyped `BroadcastClient` calls
-behind one cast at the `runtime.client` boundary. No runtime behavior changes.
+type parameter. The surface presents typed methods that erase to the untyped `BroadcastClient`
+calls; `surfaceFor` builds against an untyped internal shape and `GroupPeer.protocol` casts to
+`ProtocolSurface<Protocols[K]>` at its return (see "Internal bridge"). No runtime behavior changes.
 
 ## Model
 
@@ -70,7 +71,7 @@ export type ProtocolSurface<Protocol extends GroupProtocolDefinition> = {
   ) => Promise<void>
   request: <P extends RequestNames<Protocol>>(
     prc: P,
-    ...args: RequestArgs<Protocol[P]>   // param + options; param optional when the schema is absent
+    ...args: RequestArgs<Protocol[P]>   // [prm?, options?] — see argument encoding below
   ) => Promise<ReturnOf<Protocol[P]['result']>>
   gather: <P extends RequestNames<Protocol>>(
     prc: P,
@@ -82,21 +83,59 @@ export type ProtocolSurface<Protocol extends GroupProtocolDefinition> = {
 
 - `EventNames<Protocol>` / `RequestNames<Protocol>` — the keys whose procedure matches
   `EventProcedureDefinition` / `RequestProcedureDefinition`, selected with a `FilterNever`-style
-  mapped type as enkaku does.
-- No-param / no-data procedures take an **optional** argument (`param?: never`), mirroring enkaku's
-  `RequestArguments` never-branch, so a call with no data still type-checks.
-- `options?` (`RequestOptions` / `GatherOptions`) is preserved on `request`/`gather`; it exists on
-  the current surface and on the `BroadcastClient` methods.
-- Constraint tightened from `ProtocolDefinition` to `GroupProtocolDefinition` — the bound
-  `defineGroupProtocol` produces and the one carrying the retention discriminant. `GroupPeer` and
-  `GroupPeerParams` keep `Record<string, ProtocolDefinition>` for now (out of scope; a
-  `GroupProtocolDefinition` is a `ProtocolDefinition`, so `Protocols[K]` still satisfies the tighter
-  bound at the `protocol()` call — confirm during implementation, widen the map's constraint only if
-  the checker demands it).
+  mapped type as enkaku does. **These resolve only against a *concrete* protocol** whose members are
+  single procedure defs (what `defineGroupProtocol({...} as const)` and every real `protocol(name)`
+  call site produce). Against the *abstract* upper bound `GroupProtocolDefinition = Record<string,
+  GroupProcedureDefinition>`, each indexed value is the full event/request/stream/channel union
+  (`protocol.ts:40`), which wholly extends neither the event nor the request subtype, so both name
+  sets **collapse to `never`**. This is why the internal surface cannot be a wide instance of the
+  filtered type (see "Internal bridge" below).
 
-The exact argument-tuple encoding (single mapped `...args` helper vs. explicit optional positional
-params) is an implementation choice for the plan; the two must produce the same call ergonomics as
-enkaku's client and admit the existing no-arg call form.
+### Argument encoding (finding 4)
+
+Kumiai's surface is **positional** — `request(prc, prm?, options?)` — not enkaku's single config
+object. The plan pins one tuple and tests it:
+
+```ts
+type RequestArgs<P> =
+  DataOf<P['param']> extends never
+    ? [prm?: undefined, options?: RequestOptions]   // no-param: request(name) | request(name, undefined, opts)
+    : [prm: DataOf<P['param']>, options?: RequestOptions]
+```
+
+`GatherArgs` mirrors it with `GatherOptions`; `DispatchArgs` mirrors it for the event `data` schema
+with no options member. "Mirror enkaku" describes the *filtering* machinery only — the call
+ergonomics stay the current positional shape, and the no-param-with-options form
+(`request(name, undefined, opts)`) is a named type-test case (see Testing) so it cannot silently
+regress.
+
+### Constraint — tighten the whole chain (findings 1+2)
+
+`GroupProtocolDefinition` is **narrower** than `ProtocolDefinition` (it adds the retention
+discriminant, `protocol.ts:21,40`), so a generic bounded only by `ProtocolDefinition` does **not**
+satisfy the tighter bound — the variance runs the opposite way to an earlier draft's claim.
+Tightening `ProtocolSurface` therefore **cascades**, and all three move together in this `minor`:
+
+- `ProtocolSurface<Protocol extends GroupProtocolDefinition>`
+- `GroupPeer<Protocols extends Record<string, GroupProtocolDefinition>>` (`peer.ts:270`)
+- `GroupPeerParams<Protocols extends Record<string, GroupProtocolDefinition>>` (`peer.ts:188`)
+
+This is the honest bound — these *are* group protocols — accepted as a wider break in the same
+release. **Implementation must verify** the tighten does not force rework in `GroupPeerParams`'s
+`handlers` typing (`handlers[name]`, `peer.ts:645`) or the anchor/journal params; if the checker
+demands a `handlers` retype, that is in scope for this PR, and any change beyond the three type
+bounds and the internal-bridge cast is a finding to re-surface, not to absorb silently.
+
+### Internal bridge (finding 3)
+
+`surfaceFor` (`peer.ts:728`) currently types itself `ProtocolSurface<ProtocolDefinition>`. It cannot
+become `ProtocolSurface<GroupProtocolDefinition>` — that instance's methods accept *no* procedure
+name (the `never` collapse above). Instead `surfaceFor` builds against a **dedicated untyped
+internal shape** — the current wide `(prc: string, data?/prm?: unknown, options?) => Promise<...>`
+signatures, named as its own type rather than an instantiation of the public surface — and
+`GroupPeer.protocol` casts that to `ProtocolSurface<Protocols[K]>` at the return boundary. The impl
+body (delegation to the untyped `BroadcastClient`) is unchanged; only the internal type and the
+one cast at `protocol()` are new.
 
 ## `GatheredReply<Result>` — `@kumiai/broadcast`
 
@@ -113,11 +152,12 @@ rpc-local duplicate. Same version band, so it ships in the same `minor`.
 
 ## Implementation surface
 
-- `packages/rpc/src/peer.ts` — the `ProtocolSurface` type and the `surfaceFor` impl
-  (`peer.ts:728-772`). Impl **body unchanged**; a cast at the `runtime.client` boundary bridges the
-  typed surface to the untyped `BroadcastClient`. `surfaceFor` is internally typed
-  `ProtocolSurface<ProtocolDefinition>` today (`peer.ts:728`) and stays a wide internal type; the
-  public narrowing is at `GroupPeer.protocol`.
+- `packages/rpc/src/peer.ts` — the `ProtocolSurface` type, the two cascaded bounds (`GroupPeer`
+  `peer.ts:270`, `GroupPeerParams` `peer.ts:188`), and the `surfaceFor` impl (`peer.ts:728-772`).
+  Impl **body unchanged**; `surfaceFor` types itself against a dedicated untyped internal shape and
+  `GroupPeer.protocol` casts to `ProtocolSurface<Protocols[K]>` at the return boundary (see
+  "Internal bridge"). Verify the `handlers[name]` typing (`peer.ts:645`) survives the tighter
+  `Protocols` bound.
 - `packages/broadcast/src/client.ts` — `GatheredReply<T = unknown>`.
 - Possibly `packages/rpc/src/index.ts` re-exports — no surface addition expected beyond the retyped
   `ProtocolSurface` already exported.
@@ -132,7 +172,10 @@ Compile-time only — the backlog doc's "Test hooks" section calls for exactly t
 - `request` result **infers** to the declared `ReturnOf<result>`;
 - `gather` result **infers** to `Array<GatheredReply<ReturnOf<result>>>`;
 - `dispatch` on a **request procedure** (and vice versa) fails to compile;
-- a no-param procedure still accepts the **no-arg** call.
+- a no-param procedure accepts the **no-arg** call `request(name)`;
+- a no-param procedure accepts the **options-only** call `request(name, undefined, options)` (the
+  finding-4 case) — and, if the chosen tuple forbids it, that is caught here rather than by a
+  consumer.
 
 vitest strips types, so a green vitest run proves nothing about these assertions. Every step pairs
 with `pnpm --filter @kumiai/rpc test:types` (or the repo's typecheck), which is the real gate.
@@ -146,6 +189,10 @@ adjustment that is the intended break and gets fixed in place.
 
 - **Breaking** for any consumer that relied on the surface's `unknown`/`string` looseness — the
   accepted cost, and the reason it is on the pre-1.0 milestone. `minor` at 0.x.
+- **Also breaking**: the cascaded `GroupPeer`/`GroupPeerParams` `Protocols` bound tightens from
+  `ProtocolDefinition` to `GroupProtocolDefinition` (findings 1+2). A consumer whose `Protocols` map
+  holds a non-group `ProtocolDefinition` (a retained non-event procedure) now fails to compile —
+  intended, since `defineGroupProtocol` already rejects that at runtime. Same `minor`.
 - **No runtime change** — the break is compile-time; runtime suites stay green.
 - **Conformance suites** (`@kumiai/rpc-conformance`, `@kumiai/hub-conformance`) type against
   `GroupMLS` and the hub ports, not `ProtocolSurface`; no contract-suite churn expected. Confirm by
@@ -156,8 +203,8 @@ adjustment that is the intended break and gets fixed in place.
 
 - The other two `rpc-api-surface.md` items (`open-once`/`directed` `UnwrapResult` narrowing;
   `GroupMLS.rosterDIDs` leaf identity) — separate breaks, separate PRs per that doc.
-- Widening `GroupPeer`/`GroupPeerParams` `Protocols` constraint beyond what the tightened
-  `ProtocolSurface` bound forces.
+- Any `GroupPeer`/`GroupPeerParams` change beyond the `Protocols` bound tighten and whatever
+  `handlers` retype that bound forces.
 
 ## Release note
 
