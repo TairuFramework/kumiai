@@ -246,11 +246,59 @@ type ServerSession = {
 }
 
 /**
+ * Frame-HEADER field the acceptor stamps with the MLS-recovered sender, read back by
+ * {@link withHeaderSenderIss}. It rides the header, not the call payload: enkaku validates the
+ * payload against a closed schema (`additionalProperties: false`; `iss` is legal only on a signed
+ * message, and directed frames are unsigned), so a payload `iss` is rejected before any handler
+ * runs — whereas the unsigned header schema is open (`additionalProperties: true`), so a stamped
+ * header field survives validation and reaches the handler context.
+ *
+ * The `kumiai/` header namespace is RESERVED by the acceptor: every inbound directed frame has this
+ * key overwritten with the authenticated sender, so a host must not use it for its own metadata.
+ * The namespaced, unlikely-to-collide name keeps that reservation explicit.
+ */
+const HEADER_SENDER_KEY = 'kumiai/senderDID'
+
+/**
+ * Wrap every handler so it surfaces the frame's MLS-recovered sender at `message.payload.iss`,
+ * mirroring what `adaptBusHandlers` injects on the broadcast lane — so a handler reads the same
+ * authenticated `iss` regardless of which lane served it.
+ *
+ * The value is injected into the handler CONTEXT (never the wire payload), read from the header
+ * field the acceptor stamped ({@link HEADER_SENDER_KEY}). One wrapper serves the single shared
+ * Server: the sender is per-FRAME (from the header the acceptor overwrote with the recovered
+ * sender), so it does not need a Server per session to stay correct.
+ */
+function withHeaderSenderIss(handlers: Record<string, unknown>): Record<string, unknown> {
+  const wrapped: Record<string, unknown> = {}
+  for (const [procedure, handler] of Object.entries(handlers)) {
+    const fn = handler as (context: {
+      message?: { header?: Record<string, unknown>; payload?: Record<string, unknown> }
+    }) => unknown
+    wrapped[procedure] = (context: {
+      message?: { header?: Record<string, unknown>; payload?: Record<string, unknown> }
+    }) => {
+      const message = context.message
+      const senderDID = message?.header?.[HEADER_SENDER_KEY]
+      return fn({
+        ...context,
+        message: { ...message, payload: { ...message?.payload, iss: senderDID } },
+      })
+    }
+  }
+  return wrapped
+}
+
+/**
  * Accept directed RPC. A single sealed drain of `selfInboxTopic` opens each inbound frame with
  * `unwrap`, binds every session to the MLS-authenticated sender recovered from the ciphertext,
  * and feeds decrypted bytes into a per-session in-memory transport whose replies are sealed
  * with `wrap`. Frames whose recovered sender does not match the session binding are dropped, so
  * a malicious hub can neither read the lane nor forge/splice a sender.
+ *
+ * The recovered sender is stamped into each frame's header and threaded into the handler's
+ * `message.payload.iss` (see {@link withHeaderSenderIss}), so directed attribution is symmetric
+ * with the broadcast lane.
  */
 export function createInboxAcceptor<Protocol extends ProtocolDefinition>(
   params: InboxAcceptorParams<Protocol>,
@@ -266,7 +314,15 @@ export function createInboxAcceptor<Protocol extends ProtocolDefinition>(
     handlers,
     wrap,
   } = params
-  const server = new Server<Protocol>({ protocol, handlers, requireAuth: false })
+  // One shared Server across all sessions (its own resource limiter caps handlers/controllers
+  // collectively). Its handlers are wrapped once to surface each frame's stamped sender as `iss`.
+  const server = new Server<Protocol>({
+    protocol,
+    handlers: withHeaderSenderIss(
+      handlers as Record<string, unknown>,
+    ) as ProcedureHandlers<Protocol>,
+    requireAuth: false,
+  })
   const sessions = new Map<string, ServerSession>()
 
   const createSession = (senderDID: string): ServerSession => {
@@ -380,13 +436,22 @@ export function createInboxAcceptor<Protocol extends ProtocolDefinition>(
       return
     }
     if (frame.kind !== 'message') return
+    // Drop a sender mismatch on an established session (splice attempt) BEFORE re-encoding, so a
+    // hostile member cannot make us serialise a large frame per rejected splice.
+    if (existing != null && existing.senderDID !== senderDID) return
+    // Stamp the MLS-recovered sender into the frame header, overwriting any caller-supplied value,
+    // so the shared Server's handler wrapper can surface it as `message.payload.iss`. The header
+    // schema is open (the payload schema is not); the acceptor is the authority on the sender, so
+    // the write is unconditional and a caller cannot assert its own.
+    frame.body.header = { ...frame.body.header, [HEADER_SENDER_KEY]: senderDID }
+    const stamped = encodeFrame(frame)
     if (existing != null) {
-      if (existing.senderDID === senderDID) existing.feed(message.payload)
-      return // sender mismatch on an established session — splice attempt, drop
+      existing.feed(stamped)
+      return
     }
     const session = createSession(senderDID)
     sessions.set(frame.sessionID, session)
-    session.feed(message.payload)
+    session.feed(stamped)
   })
 
   return {
@@ -395,6 +460,8 @@ export function createInboxAcceptor<Protocol extends ProtocolDefinition>(
       const pending = [...sessions.values()].map((session) => session.dispose())
       sessions.clear()
       await Promise.allSettled(pending)
+      // The shared Server drains its in-flight handlers here (bounded by enkaku's cleanup timeout),
+      // covering sessions torn down by a `session-end` frame whose own dispose is not awaited.
       await server.dispose()
     },
   }
