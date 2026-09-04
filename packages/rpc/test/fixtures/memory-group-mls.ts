@@ -3,7 +3,13 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { concatBytes } from '@noble/hashes/utils.js'
 import { fromB64U, fromUTF, toB64U, toUTF } from '@sozai/codec'
 
-import type { CommitContext, CommitHeader, GroupMLS, PendingRecovery } from '../../src/crypto.js'
+import type {
+  CommitContext,
+  CommitHeader,
+  GroupMLS,
+  PendingRecovery,
+  RosterEntry,
+} from '../../src/crypto.js'
 
 export type MemoryGroupMLS = GroupMLS & {
   epoch: () => number
@@ -388,6 +394,13 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   const slotHas = (did: string): boolean => [...slots.values()].includes(did)
   const occupiedDIDs = (): Array<string> =>
     [...slots.keys()].sort((a, b) => a - b).map((i) => slots.get(i) as string)
+  const rosterEntries = (): Array<RosterEntry> =>
+    [...slots.keys()]
+      .sort((a, b) => a - b)
+      .map((i) => {
+        const did = slots.get(i) as string
+        return { did, leafIndex: i, longForm: did } // longForm = id fallback; fixture ids carry no long form
+      })
   /**
    * Ephemeral PRIVATE keys, keyed by requestID: minted with the request, retained by the port
    * until the reply is opened, and never on the wire. It is the whole of what makes a reply
@@ -496,8 +509,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     lastSender: () => lastSender,
     ledgerIDs: () => [...ledger],
     leaves: () => occupiedDIDs(),
-    async rosterDIDs() {
-      return occupiedDIDs()
+    async rosterEntries() {
+      return rosterEntries()
     },
     fold: () => {
       const folded = new Map<string, string>()

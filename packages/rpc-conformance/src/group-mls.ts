@@ -34,6 +34,13 @@ export type ConformancePendingRecovery = {
   onAccepted: () => Promise<void>
 }
 
+/** The `RosterEntry` of `@kumiai/rpc`, re-declared structurally. */
+export type ConformanceRosterEntry = {
+  did: string
+  leafIndex: number
+  longForm: string
+}
+
 /**
  * The `GroupMLS` this suite exercises — ALL of it.
  *
@@ -44,7 +51,7 @@ export type ConformancePendingRecovery = {
  * passing bytes between two instances, which is all the clauses below do.
  */
 export type ConformanceGroupMLS = {
-  rosterDIDs: () => Promise<Array<string>>
+  rosterEntries: () => Promise<Array<ConformanceRosterEntry>>
   readCommitHeader: (commit: Uint8Array) => Promise<ConformanceCommitHeader | null>
   processCommit: (
     commit: Uint8Array,
@@ -122,6 +129,8 @@ function memberAt(members: Array<ConformanceMLSMember>, index: number): Conforma
   if (member == null) throw new Error(`the harness returned no member at index ${index}`)
   return member
 }
+
+const dids = (r: Array<ConformanceRosterEntry>) => r.map((e) => e.did)
 
 const NOT_A_COMMIT: Array<Uint8Array> = [
   new Uint8Array(),
@@ -220,14 +229,14 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
         await withGroup(3, 'apply-in-place', async (group) => {
           const alice = memberAt(group.members, 0)
           const carol = memberAt(group.members, 2)
-          expect(await alice.mls.rosterDIDs()).toContain(carol.did)
+          expect(dids(await alice.mls.rosterEntries())).toContain(carol.did)
 
           const removal = await group.buildCommit({ removes: 2 })
           expect(await alice.mls.processCommit(removal.commit, removal.context)).toEqual({
             advanced: true,
           })
           // Nothing was adopted, and the roster moved anyway.
-          expect(await alice.mls.rosterDIDs()).not.toContain(carol.did)
+          expect(dids(await alice.mls.rosterEntries())).not.toContain(carol.did)
         })
       })
 
@@ -258,7 +267,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           // That combination exists nowhere else, and undiscriminated it reads as a rotation, so
           // it is a clause and not a footnote: `peer.ts` gates its roster diff on the handle
           // having actually ratcheted precisely because of it.
-          expect(await carol.mls.rosterDIDs()).not.toContain(carol.did)
+          expect(dids(await carol.mls.rosterEntries())).not.toContain(carol.did)
 
           // And the commit is perfectly applicable by everyone else, so what refused it was the
           // removal and not the bytes.
@@ -310,7 +319,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
       })
     })
 
-    describe('rosterDIDs', () => {
+    describe('rosterEntries', () => {
       /**
        * It answers for membership and for nothing else, and it must reflect an APPLIED roster
        * change and only an applied one. The lane reads it around `processCommit` to tell a commit
@@ -324,19 +333,19 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const bob = memberAt(group.members, 1)
           const carol = memberAt(group.members, 2)
 
-          const before = await alice.mls.rosterDIDs()
+          const before = dids(await alice.mls.rosterEntries())
           expect(before).toContain(carol.did)
-          expect(new Set(await bob.mls.rosterDIDs())).toEqual(new Set(before))
+          expect(new Set(dids(await bob.mls.rosterEntries()))).toEqual(new Set(before))
 
           const removal = await group.buildCommit({ removes: 2 })
           // Merely BUILDING it changes nobody's roster: the group moves when a member applies.
-          expect(new Set(await alice.mls.rosterDIDs())).toEqual(new Set(before))
+          expect(new Set(dids(await alice.mls.rosterEntries()))).toEqual(new Set(before))
 
           await alice.mls.processCommit(removal.commit, removal.context)
-          expect(await alice.mls.rosterDIDs()).not.toContain(carol.did)
+          expect(dids(await alice.mls.rosterEntries())).not.toContain(carol.did)
           // Bob was handed nothing, so his roster is untouched — the lane must be able to tell
           // "this member applied a remove" from "a remove happened somewhere".
-          expect(new Set(await bob.mls.rosterDIDs())).toEqual(new Set(before))
+          expect(new Set(dids(await bob.mls.rosterEntries()))).toEqual(new Set(before))
         })
       })
     })
@@ -451,7 +460,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           expect(await alice.mls.processCommit(removal.commit, removal.context)).toEqual({
             advanced: true,
           })
-          expect(await alice.mls.rosterDIDs()).not.toContain(bob.did)
+          expect(dids(await alice.mls.rosterEntries())).not.toContain(bob.did)
 
           const request = await bob.mls.createRecoveryRequest('req-removed')
           await expect(alice.mls.sealGroupInfo(request)).rejects.toThrow()

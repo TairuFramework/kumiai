@@ -1208,7 +1208,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     await appLane.deliver()
     // Normalized at this ingress so an MLS-recovered form flip between the two reads (never a
     // real membership change) does not read as one — see {@link detectRosterChange}.
-    const rosterBefore = (await port.rosterDIDs()).map(normalizeDID)
+    const rosterBefore = (await port.rosterEntries()).map((e) => normalizeDID(e.did))
     const epochBefore = crypto.epoch()
     const advanced = await advance()
     // GATED ON THE HANDLE ACTUALLY RATCHETING: a roster diff alone is not evidence that it did. A
@@ -1226,7 +1226,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     const ratcheted = crypto.epoch() !== epochBefore
     if (
       ratcheted &&
-      (detectRosterChange(rosterBefore, (await port.rosterDIDs()).map(normalizeDID)) ||
+      (detectRosterChange(
+        rosterBefore,
+        (await port.rosterEntries()).map((e) => normalizeDID(e.did)),
+      ) ||
         rotatesAnyway(advanced))
     ) {
       await captureAnchor()

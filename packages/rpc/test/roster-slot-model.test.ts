@@ -8,13 +8,13 @@ import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
 describe('memory double slot model', () => {
   test('remove frees a slot and the next add reuses it (ascending order preserved)', async () => {
     const g = createMemoryGroupMLS({ localDID: 'alice', members: ['alice', 'bob', 'carol'] })
-    expect(await g.rosterDIDs()).toEqual(['alice', 'bob', 'carol'])
+    expect(g.leaves()).toEqual(['alice', 'bob', 'carol'])
 
     g.adopt(g.buildCommit([], { removes: ['bob'] }))
-    expect(await g.rosterDIDs()).toEqual(['alice', 'carol']) // hole at slot 1
+    expect(g.leaves()).toEqual(['alice', 'carol']) // hole at slot 1
 
     g.adopt(g.buildCommit([], { adds: ['dave'] }))
     // dave takes freed slot 1 -> ascending order is alice, dave, carol
-    expect(await g.rosterDIDs()).toEqual(['alice', 'dave', 'carol'])
+    expect(g.leaves()).toEqual(['alice', 'dave', 'carol'])
   })
 })
