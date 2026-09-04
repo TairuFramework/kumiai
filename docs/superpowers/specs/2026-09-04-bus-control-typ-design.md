@@ -57,9 +57,19 @@ bodies otherwise intact.
 
 `BROADCAST_VERSION` goes `1 → 2` (`packages/broadcast/src/transport.ts`). The version discriminant
 exists for exactly this — reinterpreting or removing a wire field; here `typ` is reinterpreted (control
-frames leave the `event` typ) and `data.kind` is removed from the app-data namespace. `decodeFrame`
-already refuses any version it does not speak, so a retained v1 frame reaching a v2 reader is refused,
-not best-effort read. Acceptable pre-1.0 on today's in-memory bus and logs.
+frames leave the `event` typ) and `data.kind` is removed from the app-data namespace. On the live
+transport, `decodeFrame` (`transport.ts:86`) refuses any version it does not speak, so a retained v1
+frame reaching a v2 reader over the live path is refused, not best-effort read.
+
+**The app-lane drain does not go through `decodeFrame`.** It calls `JSON.parse` directly
+(`app-lane.ts:452-457`) and classifies solely by `payload.typ` (`:459`), never inspecting `v`. This is
+a pre-existing gap, not introduced here, and it is *benign for this change*: only control frames move
+`typ`, and control frames are never retained (see the drain data-flow below), so every retained frame
+is a `typ:'event'` app event whose shape is identical under v1 and v2. A v1 app frame replayed by a v2
+drain is therefore read correctly. This design deliberately does **not** add version enforcement to the
+drain — doing so would be scope creep and would reject already-persisted, still-valid app history. If
+the drain ever needs to refuse a version, that is its own separate change. Acceptable pre-1.0 on
+today's in-memory bus and logs either way.
 
 ## Components touched
 
@@ -133,7 +143,9 @@ transport-teardown rejections.
   after. This is the single test that would fail if the discriminator regressed to reading
   `data.kind`.
 - **Updated existing tests:** responder/client anycast + reply tests and the drain tests move their
-  control frames to `typ: 'ctrl'`. The version-refusal test asserts `v2` is spoken and `v1` refused.
+  control frames to `typ: 'ctrl'`. The transport version-refusal test asserts the live path speaks
+  `v2` and refuses `v1`. Note this covers only the `decodeFrame` ingress; the drain's `JSON.parse`
+  ingress has no version gate by design (see Wire version), so no drain version test is added.
 - **A control frame is never misread as an app event and vice versa:** assert a `typ: 'ctrl'` frame
   does not reach the event fan-out, and a `typ: 'event'` frame is never dispatched as a request.
 - **Conformance:** `rpc-conformance` and `hub-conformance` run uncached against the real
@@ -142,7 +154,8 @@ transport-teardown rejections.
 ## Breaking-change record
 
 - Wire: `BROADCAST_VERSION` 1→2; `typ: 'ctrl'` introduced; `data.kind` removed from the app-data
-  namespace. Every bus producer and consumer on this build; retained v1 frames refused.
+  namespace. Every bus producer and consumer on this build. Live path refuses v1 (`decodeFrame`); the
+  drain replays v1 app frames unchanged (no drain version gate, by design — see Wire version).
 - The `minor` bump is recorded in a `pnpm change` intent as the work lands.
 - On completion, mark the milestone item taken and note that the two interim drop-classifications
   (`app-lane.ts` control-shape drop, responder malformed-control fallthrough) are now deleted, per the
