@@ -39,7 +39,10 @@ export type BroadcastResponderParams = {
    */
   from: string
   requestHandlers: Record<string, BroadcastHandler | SuppressibleHandler>
-  /** Optional fan-out for fire-and-forget event frames (typ 'event', no req/res kind). */
+  /**
+   * Optional fan-out for fire-and-forget app-event frames (`typ:'event'`). `data.kind` is app
+   * data here and is never inspected — control lives entirely under `typ:'ctrl'`.
+   */
   events?: EventEmitter<BusEvents>
   sleep?: (ms: number) => Promise<void>
   getJitterMs?: (maxMs: number) => number
@@ -132,7 +135,7 @@ export function createBroadcastResponder(params: BroadcastResponderParams): {
     // rides at the transport level, where an authenticating transport replaces it with what it
     // recovered; see {@link BroadcastResponderParams.from}.
     await transport
-      .write({ payload: { typ: 'event', prc, data: reply }, senderDID: from })
+      .write({ payload: { typ: 'ctrl', prc, data: reply }, senderDID: from })
       .catch(() => {})
   }
 
@@ -142,33 +145,37 @@ export function createBroadcastResponder(params: BroadcastResponderParams): {
         break
       }
       const payload = msg?.payload
-      if (payload?.typ !== 'event') {
+      const typ = payload?.typ
+      if (typ !== 'event' && typ !== 'ctrl') {
         continue
       }
-      const data = payload.data as InboundData | undefined
-      if (data?.kind === 'res' && typeof data.rid === 'string') {
-        // Only a peer's SUCCESS suppresses us; its error frame must not.
-        if (data.err == null) {
-          markReplied(data.rid, DEFAULT_SUPPRESS_TTL_MS)
+      if (typ === 'ctrl') {
+        const data = payload.data as InboundData | undefined
+        if (data?.kind === 'res' && typeof data.rid === 'string') {
+          // Only a peer's SUCCESS suppresses us; its error frame must not.
+          if (data.err == null) {
+            markReplied(data.rid, DEFAULT_SUPPRESS_TTL_MS)
+          }
+          continue
         }
+        if (
+          data?.kind === 'req' &&
+          typeof data.rid === 'string' &&
+          typeof payload.prc === 'string'
+        ) {
+          const handler = requestHandlers[payload.prc]
+          if (handler != null) {
+            void handleRequest(payload.prc, data as RequestData, handler, msg.senderDID)
+          }
+        }
+        // Any other ctrl frame is malformed control; drop it. It is never an app event.
         continue
       }
+      // typ === 'event': a genuine fire-and-forget app event. Its data.kind, if present, is app
+      // data and is never inspected here.
       if (typeof payload.prc !== 'string') {
         continue
       }
-      if (data?.kind === 'req' && typeof data.rid === 'string') {
-        const handler = requestHandlers[payload.prc]
-        if (handler != null) {
-          void handleRequest(payload.prc, data as RequestData, handler, msg.senderDID)
-        }
-        continue
-      }
-      // A control frame (kind 'req'/'res') that failed its rid check above is malformed, not an
-      // event — drop it rather than forwarding its raw {kind,rid,…} object to event listeners.
-      if (data?.kind === 'req' || data?.kind === 'res') {
-        continue
-      }
-      // Genuine fire-and-forget event: real app data carries no `kind` field.
       void events
         ?.emit(payload.prc, { data: payload.data, senderDID: msg.senderDID })
         .catch(() => {})

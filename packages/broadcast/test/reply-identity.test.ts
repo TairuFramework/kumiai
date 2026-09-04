@@ -60,10 +60,10 @@ function forger(
     for await (const msg of transport as AsyncIterable<BroadcastMessage>) {
       if (!running) break
       const data = msg.payload.data as { kind?: string; rid?: string } | undefined
-      if (msg.payload.typ !== 'event' || msg.payload.prc !== prc || data?.kind !== 'req') continue
+      if (msg.payload.typ !== 'ctrl' || msg.payload.prc !== prc || data?.kind !== 'req') continue
       await transport
         .write({
-          payload: { typ: 'event', prc, data: { kind: 'res', rid: data.rid, ...body } },
+          payload: { typ: 'ctrl', prc, data: { kind: 'res', rid: data.rid, ...body } },
         })
         .catch(() => {})
     }
@@ -143,7 +143,7 @@ describe('broadcast reply identity', () => {
           await transport
             .write({
               payload: {
-                typ: 'event',
+                typ: 'ctrl',
                 prc: 'census',
                 data: { kind: 'res', rid: data.rid, from: name, ok: name },
               },

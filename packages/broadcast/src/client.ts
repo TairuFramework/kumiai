@@ -5,12 +5,18 @@ import { createRuntime, type Runtime } from '@sozai/runtime'
 import { buildEventMessage } from './event-frame.js'
 import type { BroadcastMessage } from './transport.js'
 
+/**
+ * A request body, carried under `typ:'ctrl'`. `kind` is a sub-discriminator scoped to the control
+ * lane — it distinguishes a request from a reply there, and shares no namespace with app-event
+ * `data`, which may use its own `kind` field for anything.
+ */
 export type RequestData = { kind: 'req'; rid: string; prm: unknown; gather?: boolean }
 /**
- * A reply body: WHAT the answer is, never WHO gave it. The sender travels at the transport level
- * as `BroadcastMessage.senderDID`, settable only by an authenticating `unwrap` — there is no
- * second place for a responder to name itself. Never add a `from` field here: anything a
- * responder writes into its own reply is a self-asserted claim, not an identity.
+ * A reply body, carried under `typ:'ctrl'`: WHAT the answer is, never WHO gave it. The sender
+ * travels at the transport level as `BroadcastMessage.senderDID`, settable only by an
+ * authenticating `unwrap` — there is no second place for a responder to name itself. Never add a
+ * `from` field here: anything a responder writes into its own reply is a self-asserted claim, not
+ * an identity. `kind` is a sub-discriminator scoped to the control lane; see {@link RequestData}.
  */
 export type ReplyData = { kind: 'res'; rid: string; ok?: unknown; err?: string }
 
@@ -62,7 +68,7 @@ export class BroadcastClient extends Disposer {
   async #read(): Promise<void> {
     for await (const msg of this.#transport) {
       const payload = msg?.payload
-      if (payload?.typ !== 'event') {
+      if (payload?.typ !== 'ctrl') {
         continue
       }
       const data = payload.data as Partial<ReplyData> | undefined
@@ -120,7 +126,7 @@ export class BroadcastClient extends Disposer {
         },
       })
       this.#transport
-        .write({ payload: { typ: 'event', prc, data: { kind: 'req', rid, prm } } })
+        .write({ payload: { typ: 'ctrl', prc, data: { kind: 'req', rid, prm } } })
         .catch((error) => {
           cleanup()
           reject(error)
@@ -168,7 +174,7 @@ export class BroadcastClient extends Disposer {
         },
       })
       this.#transport
-        .write({ payload: { typ: 'event', prc, data: { kind: 'req', rid, prm, gather: true } } })
+        .write({ payload: { typ: 'ctrl', prc, data: { kind: 'req', rid, prm, gather: true } } })
         // Reject on write failure rather than silently resolving with no replies.
         .catch((error) => {
           clearTimeout(timer)

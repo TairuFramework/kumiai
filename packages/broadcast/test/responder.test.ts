@@ -159,7 +159,7 @@ describe('createBroadcastResponder', () => {
     bus.publish(
       TOPIC,
       encodeFrame({
-        payload: { typ: 'event', prc: 'ping', data: { kind: 'res', rid, err: 'boom' } },
+        payload: { typ: 'ctrl', prc: 'ping', data: { kind: 'res', rid, err: 'boom' } },
       }),
     )
     const client = new BroadcastClient({
@@ -201,7 +201,7 @@ describe('createBroadcastResponder', () => {
     await responder.dispose()
   })
 
-  test('drops a malformed control frame instead of forwarding it to events', async () => {
+  test('delivers an app event whose data is shaped like a control frame', async () => {
     const bus = createMemoryBus()
     const events = new EventEmitter<{ note: { data: unknown; senderDID?: string } }>()
     const received: Array<{ data: unknown; senderDID?: string }> = []
@@ -215,12 +215,42 @@ describe('createBroadcastResponder', () => {
       events,
     })
 
-    // A control frame (`kind: 'req'`) whose `rid` is not a string fails both the
-    // 'res' and 'req' guards and must NOT fall through to the events emitter.
+    // An app event (typ:'event') whose OWN data legitimately carries kind:'req'. This is app data,
+    // not a control frame, and must reach the event listener — the collision this change fixes.
     bus.publish(
       TOPIC,
       encodeFrame({
-        payload: { typ: 'event', prc: 'note', data: { kind: 'req', rid: 123, prm: {} } },
+        payload: { typ: 'event', prc: 'note', data: { kind: 'req', rid: 'x', hello: 'world' } },
+      }),
+    )
+    await new Promise<void>((resolve) => setTimeout(resolve, 10))
+
+    expect(received).toHaveLength(1)
+    expect(received[0]?.data).toEqual({ kind: 'req', rid: 'x', hello: 'world' })
+
+    await responder.dispose()
+  })
+
+  test('drops a malformed ctrl frame instead of forwarding it to events', async () => {
+    const bus = createMemoryBus()
+    const events = new EventEmitter<{ note: { data: unknown; senderDID?: string } }>()
+    const received: Array<{ data: unknown; senderDID?: string }> = []
+    events.on('note', (e) => {
+      received.push(e)
+    })
+    const responder = createBroadcastResponder({
+      transport: createBroadcastTransport({ topicID: TOPIC, bus }),
+      from: 'peer-1',
+      requestHandlers: {},
+      events,
+    })
+
+    // A control frame (typ:'ctrl', kind:'req') whose rid is not a string fails the req guard. It is
+    // control, so it is NEVER forwarded to the events emitter regardless.
+    bus.publish(
+      TOPIC,
+      encodeFrame({
+        payload: { typ: 'ctrl', prc: 'note', data: { kind: 'req', rid: 123, prm: {} } },
       }),
     )
     await new Promise<void>((resolve) => setTimeout(resolve, 10))
