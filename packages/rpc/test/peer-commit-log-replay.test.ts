@@ -106,7 +106,7 @@ describe('a genuine external commit re-published by the hub steers nothing', () 
     expect(alice.mls.epoch()).toBe(2)
     expect(alice.mls.commits()).toBe(1)
     expect(alice.mls.seen()).toBe(seenAfterRejoin)
-    expect([...(await alice.mls.rosterDIDs())].sort()).toEqual(['alice', 'bob'])
+    expect((await alice.mls.rosterEntries()).map((e) => e.did).sort()).toEqual(['alice', 'bob'])
     // The steer that would have mattered. `advanceHandle` rotates the anchor on
     // `result.advanced && header.external === true`; a replay that never advances never rotates,
     // so the app-lane topic every member derives stays where it is.

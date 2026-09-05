@@ -711,10 +711,10 @@ export class GroupHandle {
    * The diff sees MEMBERSHIP, and only membership: an Add, a Remove, or both in
    * one commit (compare as a set — a count misses that last case). It does NOT
    * see an external-commit REJOIN by a member the group still holds. That member
-   * keeps its id, so the id set is unchanged; and its leaf index is unchanged
-   * too, because a resync blanks the member's old leaf and the new leaf then
-   * takes the leftmost blank — the one just blanked (RFC 9420 §12.4.3.2). No
-   * field of this result moves, and no before/after diff of it can be made to.
+   * keeps its id, so the id set is unchanged; the new leaf takes the leftmost blank, which is the
+   * just-vacated slot only when no earlier blank exists — otherwise the rejoiner's `leafIndex`
+   * moves. Only the id-set projection of this result is guaranteed unchanged across a rejoin;
+   * `leafIndex` is not, so a before/after diff on `leafIndex` cannot be relied on either.
    * A caller that must detect a rejoin reads the COMMIT instead — an external
    * commit is structurally one: a public message from a non-member carrying a
    * commit, recognizable from its own bytes before it is applied, and carrying
@@ -1159,10 +1159,10 @@ export class GroupHandle {
       //
       // `external: true` is reported, not just consumed to find the committer: a resync rejoin
       // is invisible to every before/after diff a caller could run — it changes no member DID
-      // (the roster already held it) and no occupied leaf index (the new leaf lands on the
-      // leftmost blank, which is the one the resync just blanked). A caller that must know the
-      // group's membership shifted has no other way to see it, so the fact is surfaced here
-      // rather than discarded. Absent means a member commit.
+      // (the roster already held it); its leaf lands on the leftmost blank and may shift, but
+      // the DID set is unchanged. A caller that must know the group's membership shifted has no
+      // other way to see it, so the fact is surfaced here rather than discarded. Absent means a
+      // member commit.
       const external = readExternalCommit(decoded)
       if (external != null) {
         // It IS a commit, so it gets a header even when the leaf credential will not parse to a

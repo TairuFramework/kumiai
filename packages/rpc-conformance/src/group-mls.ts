@@ -34,6 +34,13 @@ export type ConformancePendingRecovery = {
   onAccepted: () => Promise<void>
 }
 
+/** The `RosterEntry` of `@kumiai/rpc`, re-declared structurally. */
+export type ConformanceRosterEntry = {
+  did: string
+  leafIndex: number
+  longForm: string
+}
+
 /**
  * The `GroupMLS` this suite exercises — ALL of it.
  *
@@ -44,7 +51,7 @@ export type ConformancePendingRecovery = {
  * passing bytes between two instances, which is all the clauses below do.
  */
 export type ConformanceGroupMLS = {
-  rosterDIDs: () => Promise<Array<string>>
+  rosterEntries: () => Promise<Array<ConformanceRosterEntry>>
   readCommitHeader: (commit: Uint8Array) => Promise<ConformanceCommitHeader | null>
   processCommit: (
     commit: Uint8Array,
@@ -89,9 +96,15 @@ export type ConformanceMLSGroup = {
    * real committer does when the hub accepts, and as nothing else may. `members` are untouched:
    * a member reaches the new epoch by being handed these bytes and not otherwise.
    *
-   * `removes` names the index in `members` whose leaf the Commit drops.
+   * `removes` names the index in `members` whose leaf the Commit drops. `adds`, when `true`,
+   * invites one genuinely NEW identity — never one already modelled in `members` — so a caller
+   * can prove a freed leaf is reused by an arrival the group has never seen, not merely
+   * re-verify a DID it already knew. Both implementations already had the primitive this
+   * threads through: a real committer's plain (no-`removes`) commit already invites a fresh
+   * identity to advance the epoch, and the memory double's commit encoding already carries an
+   * `adds` list — `adds` only asks each harness to exercise that existing path on request.
    */
-  buildCommit: (options?: { removes?: number }) => Promise<ConformanceCommit>
+  buildCommit: (options?: { removes?: number; adds?: boolean }) => Promise<ConformanceCommit>
   /**
    * A genuine EXTERNAL commit — a rejoin — framed at the group's current epoch, together with a
    * forgery of it: the same frame with only the claimed author rewritten, which is what a
@@ -122,6 +135,8 @@ function memberAt(members: Array<ConformanceMLSMember>, index: number): Conforma
   if (member == null) throw new Error(`the harness returned no member at index ${index}`)
   return member
 }
+
+const dids = (r: Array<ConformanceRosterEntry>) => r.map((e) => e.did)
 
 const NOT_A_COMMIT: Array<Uint8Array> = [
   new Uint8Array(),
@@ -220,14 +235,14 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
         await withGroup(3, 'apply-in-place', async (group) => {
           const alice = memberAt(group.members, 0)
           const carol = memberAt(group.members, 2)
-          expect(await alice.mls.rosterDIDs()).toContain(carol.did)
+          expect(dids(await alice.mls.rosterEntries())).toContain(carol.did)
 
           const removal = await group.buildCommit({ removes: 2 })
           expect(await alice.mls.processCommit(removal.commit, removal.context)).toEqual({
             advanced: true,
           })
           // Nothing was adopted, and the roster moved anyway.
-          expect(await alice.mls.rosterDIDs()).not.toContain(carol.did)
+          expect(dids(await alice.mls.rosterEntries())).not.toContain(carol.did)
         })
       })
 
@@ -258,7 +273,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           // That combination exists nowhere else, and undiscriminated it reads as a rotation, so
           // it is a clause and not a footnote: `peer.ts` gates its roster diff on the handle
           // having actually ratcheted precisely because of it.
-          expect(await carol.mls.rosterDIDs()).not.toContain(carol.did)
+          expect(dids(await carol.mls.rosterEntries())).not.toContain(carol.did)
 
           // And the commit is perfectly applicable by everyone else, so what refused it was the
           // removal and not the bytes.
@@ -310,7 +325,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
       })
     })
 
-    describe('rosterDIDs', () => {
+    describe('rosterEntries', () => {
       /**
        * It answers for membership and for nothing else, and it must reflect an APPLIED roster
        * change and only an applied one. The lane reads it around `processCommit` to tell a commit
@@ -324,19 +339,125 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const bob = memberAt(group.members, 1)
           const carol = memberAt(group.members, 2)
 
-          const before = await alice.mls.rosterDIDs()
+          const before = dids(await alice.mls.rosterEntries())
           expect(before).toContain(carol.did)
-          expect(new Set(await bob.mls.rosterDIDs())).toEqual(new Set(before))
+          expect(new Set(dids(await bob.mls.rosterEntries()))).toEqual(new Set(before))
 
           const removal = await group.buildCommit({ removes: 2 })
           // Merely BUILDING it changes nobody's roster: the group moves when a member applies.
-          expect(new Set(await alice.mls.rosterDIDs())).toEqual(new Set(before))
+          expect(new Set(dids(await alice.mls.rosterEntries()))).toEqual(new Set(before))
 
           await alice.mls.processCommit(removal.commit, removal.context)
-          expect(await alice.mls.rosterDIDs()).not.toContain(carol.did)
+          expect(dids(await alice.mls.rosterEntries())).not.toContain(carol.did)
           // Bob was handed nothing, so his roster is untouched — the lane must be able to tell
           // "this member applied a remove" from "a remove happened somewhere".
-          expect(new Set(await bob.mls.rosterDIDs())).toEqual(new Set(before))
+          expect(new Set(dids(await bob.mls.rosterEntries()))).toEqual(new Set(before))
+        })
+      })
+
+      /**
+       * PINNED VALUES, not merely "stable": a `leafIndex` that never moves but is otherwise
+       * arbitrary (leaf 7, leaf 1000 — whatever an implementation likes, forever) would pass
+       * every clause above and still be useless to a caller that has to name a leaf. This clause
+       * closes that gap.
+       *
+       * The dense range is asserted against `entries.length`, NOT against `withGroup`'s `size`:
+       * the group's own COMMITTER holds a leaf too — both harnesses seat it in the tree at
+       * construction (the real fixture's `createGroup` call, the double's `roster =
+       * [COMMITTER_DID, ...dids]` seed) — so an `n`-member conformance group's roster is `n + 1`
+       * entries wide. Asserting `{0..size-1}` would be a premise about harness plumbing, not
+       * about the port; `{0..entries.length-1}` is the actual dense-and-complete contract.
+       */
+      test('leafIndex is a dense 0..n-1 on a fresh group, unique, ascending, and stable for untouched members', async () => {
+        await withGroup(3, 'roster-leaf-identity', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const entries = await alice.mls.rosterEntries()
+
+          // A fresh group occupies exactly slots {0..entries.length-1}: dense, no gaps.
+          expect(entries.map((e) => e.leafIndex).sort((a, b) => a - b)).toEqual(
+            Array.from({ length: entries.length }, (_, i) => i),
+          )
+          // Unique.
+          expect(new Set(entries.map((e) => e.leafIndex)).size).toBe(entries.length)
+          // Ascending order as returned.
+          expect(entries.map((e) => e.leafIndex)).toEqual(
+            [...entries.map((e) => e.leafIndex)].sort((a, b) => a - b),
+          )
+          // Non-empty longForm (presence only, NOT resolvability).
+          for (const e of entries) expect(e.longForm.length).toBeGreaterThan(0)
+
+          // Stability: removing an unrelated member does not move alice's own leafIndex.
+          const aliceEntry = entries.find((e) => e.did === alice.did)
+          // Narrowed rather than optional-chained: an optional-chained read compared against
+          // another optional-chained read below would degrade to `undefined === undefined` and
+          // pass vacuously if alice were ever missing from her own roster.
+          if (aliceEntry == null) throw new Error('the harness reported no leaf for alice')
+          const alice0 = aliceEntry.leafIndex
+          const carol = memberAt(group.members, 2)
+          expect(dids(entries)).toContain(carol.did)
+          const removal = await group.buildCommit({ removes: 2 })
+          await alice.mls.processCommit(removal.commit, removal.context)
+          const after = await alice.mls.rosterEntries()
+          const aliceAfter = after.find((e) => e.did === alice.did)
+          if (aliceAfter == null) {
+            throw new Error('alice lost her leaf after an unrelated member was removed')
+          }
+          expect(aliceAfter.leafIndex).toBe(alice0)
+        })
+      })
+
+      /**
+       * FREED-INDEX REUSE, by a genuinely NEW arrival — never a DID the group already modelled.
+       * `buildCommit({ adds: true })` is the harness's own primitive for that (see its doc in
+       * `ConformanceMLSGroup`), not a helper invented for this test.
+       *
+       * TWO holes, not one, and non-adjacent: bob's leaf and dave's leaf are freed with carol's
+       * leaf left occupied between them, so "leftmost freed" and "most-recently-freed" name two
+       * different indices — a single-hole version cannot tell an implementation that always fills
+       * the most-recently-vacated slot from one that correctly fills the leftmost blank.
+       *
+       * The freed leaves are read off `rosterEntries()` BY DID, not assumed to equal the removed
+       * members' positions in `group.members`: the committer occupies a leaf of its own in both
+       * harnesses (see the earlier test's note), so `group.members[1]`'s leaf is NOT necessarily
+       * leaf index `1` — the two are only related through the roster this port actually reports.
+       *
+       * The newcomer match also excludes every DID the PRE-removal roster held, not just alice and
+       * the freed DIDs: an implementation that "filled" the hole by relocating an existing,
+       * untouched member (carol) rather than seating the genuine newcomer there would otherwise
+       * still satisfy a same-leafIndex, different-freed-DID check.
+       */
+      test('an add after two removals reuses the LEFTMOST freed leaf index, never a relocated existing member', async () => {
+        await withGroup(4, 'roster-leaf-reuse', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const bob = memberAt(group.members, 1)
+          const dave = memberAt(group.members, 3)
+
+          const before = await alice.mls.rosterEntries()
+          const beforeDIDs = dids(before)
+          const bobEntry = before.find((e) => e.did === bob.did)
+          // Narrowed rather than optional-chained: `expect` does not narrow.
+          if (bobEntry == null) throw new Error('the harness reported no leaf for bob')
+          const daveEntry = before.find((e) => e.did === dave.did)
+          if (daveEntry == null) throw new Error('the harness reported no leaf for dave')
+          const leftFreed = Math.min(bobEntry.leafIndex, daveEntry.leafIndex)
+          const rightFreed = Math.max(bobEntry.leafIndex, daveEntry.leafIndex)
+
+          const removeBob = await group.buildCommit({ removes: 1 })
+          await alice.mls.processCommit(removeBob.commit, removeBob.context)
+          const removeDave = await group.buildCommit({ removes: 3 })
+          await alice.mls.processCommit(removeDave.commit, removeDave.context)
+          const add = await group.buildCommit({ adds: true })
+          await alice.mls.processCommit(add.commit, add.context)
+
+          const entries = await alice.mls.rosterEntries()
+          const newcomer = entries.find(
+            (e) => e.leafIndex === leftFreed && !beforeDIDs.includes(e.did),
+          )
+          // The newcomer occupies the LEFTMOST freed leaf and is genuinely new — not an existing
+          // member relocated into the hole.
+          expect(newcomer).toBeDefined()
+          // The rightmost (more-recently-freed) hole stays blank: nothing fills it out of order.
+          expect(entries.find((e) => e.leafIndex === rightFreed)).toBeUndefined()
         })
       })
     })
@@ -451,7 +572,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           expect(await alice.mls.processCommit(removal.commit, removal.context)).toEqual({
             advanced: true,
           })
-          expect(await alice.mls.rosterDIDs()).not.toContain(bob.did)
+          expect(dids(await alice.mls.rosterEntries())).not.toContain(bob.did)
 
           const request = await bob.mls.createRecoveryRequest('req-removed')
           await expect(alice.mls.sealGroupInfo(request)).rejects.toThrow()

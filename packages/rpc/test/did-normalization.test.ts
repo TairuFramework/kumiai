@@ -58,7 +58,7 @@ describe('DID normalization at rpc ingress', () => {
   })
 
   test('roster change is not detected on an equivalent DID-form flip', () => {
-    // Mirrors the fix at the `rosterDIDs()` ingress (`peer.ts`): normalize before diffing, not
+    // Mirrors the fix at the `rosterEntries()` ingress (`peer.ts`): normalize before diffing, not
     // inside `detectRosterChange` itself (which stays a pure set-equality check).
     const before = [SHORT_B, 'carol'].map(normalizeDID)
     const after = [LONG_B, 'carol'].map(normalizeDID)

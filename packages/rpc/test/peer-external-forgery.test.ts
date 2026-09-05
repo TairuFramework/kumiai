@@ -154,7 +154,7 @@ describe('an external commit cannot name its reader as its author unless it auth
     expect(alice.mls.epoch()).toBe(2)
     expect(alice.mls.commits()).toBe(1)
     // A rejoin rotates the anchor from a member the roster diff cannot see — it replaces a leaf
-    // the roster already holds, so no DID and no leaf index moves. That still happens.
+    // the roster already holds, so the DID is unchanged. That still happens.
     expect(alice.peer.anchorEpoch()).toBe(2)
     expect(alice.peer.anchorEpoch()).not.toBe(anchorBefore)
     expect(recoveryRequests(hub, rs)).toHaveLength(0)

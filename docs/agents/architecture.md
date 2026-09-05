@@ -43,7 +43,7 @@ overview: https://github.com/TairuFramework/kigu/blob/main/docs/stack.md
 | | |
 | --- | --- |
 | `GroupCrypto` | `epoch`, `exportSecret`, `wrap`, `unwrap`, `frameEpoch`, `sealEntries`, `openEntries` |
-| `GroupMLS` | commit lifecycle, `rosterDIDs`, `readCommitHeader` (incl. `external`) |
+| `GroupMLS` | commit lifecycle, `rosterEntries`, `readCommitHeader` (incl. `external`) |
 | `CommitJournal` | single slot; loses a commit whose process died in the acceptance window |
 | `AnchorStore` | the anchor; without it a restart partitions the peer from its own group |
 | `AppCursorStore` | the read position; without it the drain re-reads history forever |

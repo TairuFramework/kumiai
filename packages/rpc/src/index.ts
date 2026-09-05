@@ -44,6 +44,7 @@ export {
   type GroupUnwrapResult,
   isMissingLedgerEntries,
   type PendingRecovery,
+  type RosterEntry,
 } from './crypto.js'
 export {
   asDeliveryPosition,

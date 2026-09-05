@@ -138,7 +138,7 @@ describe('GroupMLS port', () => {
     expect(stranded.epoch()).toBe(0)
     // And the commit says it is a REJOIN, before it is applied and without being applied. Nothing
     // else about it will ever say so: it replaces a leaf the roster already holds, so it changes
-    // no DID and no occupied leaf index, and a member applying it has only this to rotate on.
+    // no DID, and a member applying it has only this to rotate on.
     //
     // The rejoiner itself reads NO committer off it. The flag and the epoch are structural, but an
     // external commit's committer is only as available as the signature that binds it, and that is

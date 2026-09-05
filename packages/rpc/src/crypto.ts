@@ -149,6 +149,28 @@ export type GroupUnwrapResult = {
 }
 
 /**
+ * One occupied leaf of a group's ratchet tree. `rosterEntries()` yields these in ascending
+ * `leafIndex` order.
+ */
+export type RosterEntry = {
+  /** Normalized short DID of the member holding this leaf. */
+  did: string
+  /**
+   * MLS ratchet-tree leaf index. Stable WHILE this leaf remains present — a commit that does not
+   * remove this member does not move it. A remove-then-rejoin (external commit) MAY reassign it:
+   * the rejoin takes the leftmost blank, which need not be the slot just vacated. Not a stable
+   * per-member identity across a membership gap.
+   */
+  leafIndex: number
+  /**
+   * The leaf credential's long form when it carries one, else `id` (real impl:
+   * `parsed.longForm ?? parsed.id`). Never absent — but NOT a dereferenceable/resolvable DID
+   * guarantee: it is whatever the credential holds, and for an id with no long form it is the id.
+   */
+  longForm: string
+}
+
+/**
  * What a Commit says about itself, readable WITHOUT applying it and without decrypting: the
  * epoch it's framed at, its author, and whether it's an external commit. All come from the
  * commit's own bytes, never from the frame's transport sender — that's the hub's word, and the
@@ -183,10 +205,11 @@ export type CommitHeader = {
    * itself rather than from a leaf it already held — a rejoin.
    *
    * The app-lane anchor rotates on it and CANNOT be told any other way: a rejoin by a member the
-   * roster still holds changes no DID ({@link rosterDIDs} reads the same set before and after)
-   * and no occupied leaf index (the resync blanks the member's old leaf and the new one lands on
-   * that same blank). Nothing a before/after diff can see moves, yet the rejoiner's fresh handle
-   * would anchor where it booted while the group stayed put — so the commit has to say so itself.
+   * roster still holds changes no DID ({@link rosterEntries} reads the same `did` set before and
+   * after) but MAY move that member's `leafIndex` (leftmost-blank, not necessarily the just-
+   * vacated slot — RFC 9420 §12.4.3.2). A `did`-set diff can't see the rejoin either way, yet the
+   * rejoiner's fresh handle would anchor where it booted while the group stayed put — so the
+   * commit has to say so itself.
    *
    * Structural and pre-apply, like its neighbours: an external commit is a public message from a
    * non-member, readable from the frame without advancing state, carrying its committer's DID in
@@ -256,19 +279,18 @@ export type PendingRecovery = {
  */
 export type GroupMLS = {
   /**
-   * The DIDs this handle's ratchet tree currently holds a leaf for — one entry per leaf. Purely
-   * local: reads no secret, advances nothing.
+   * The leaves this handle's ratchet tree currently holds, one {@link RosterEntry} per leaf, in
+   * ascending `leafIndex` order. Purely local: reads no secret, advances nothing.
    *
    * Read around {@link processCommit} to tell a Commit that dropped a leaf from one that didn't:
-   * a DID present before and absent after means a Remove was enacted (robust to a Commit
-   * carrying both an Add and a Remove, where the count is unchanged), and dropping a leaf
-   * rotates the app-lane anchor. Order doesn't matter — compared as a set.
+   * a `did` present before and absent after means a Remove was enacted (robust to a Commit
+   * carrying both an Add and a Remove). Compared as a set of `did` — order and `leafIndex` do not
+   * matter to that diff (see {@link "roster".detectRosterChange}).
    *
-   * Membership only: a rejoin by a member the roster still holds changes no DID and is invisible
-   * here — {@link CommitHeader.external} is what the lane rotates on for that. The two together
-   * are the whole rotation rule.
+   * Membership only: a rejoin by a member the roster still holds changes no `did` and is invisible
+   * to a `did` diff — {@link CommitHeader.external} is what the lane rotates on for that.
    */
-  rosterDIDs(): Promise<Array<string>>
+  rosterEntries(): Promise<Array<RosterEntry>>
   /**
    * Read what a Commit says about itself — epoch, committer, and whether it's external — WITHOUT
    * advancing state. Lets the lane classify a frame (epoch = this peer's to apply? committer =

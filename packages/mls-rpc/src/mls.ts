@@ -10,7 +10,13 @@ import {
   sealGroupInfo,
   sealLedger,
 } from '@kumiai/mls'
-import type { CommitContext, CommitHeader, GroupMLS, PendingRecovery } from '@kumiai/rpc'
+import type {
+  CommitContext,
+  CommitHeader,
+  GroupMLS,
+  PendingRecovery,
+  RosterEntry,
+} from '@kumiai/rpc'
 
 const utf8 = new TextEncoder()
 
@@ -102,7 +108,7 @@ const REQUEST_TTL_MS = 120_000
  *    adopts it in `onAccepted`). A host that treated every commit as adopt-later would
  *    double-apply received ones.
  *
- * 2. **`rosterDIDs` reads the ratchet tree, so a leaf with an unparsable credential is
+ * 2. **`rosterEntries` reads the ratchet tree, so a leaf with an unparsable credential is
  *    simply absent** rather than present-with-a-placeholder. The double's roster is a set of
  *    strings it was handed.
  *
@@ -127,10 +133,14 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
   }
 
   return {
-    async rosterDIDs(): Promise<Array<string>> {
+    async rosterEntries(): Promise<Array<RosterEntry>> {
       return handle()
         .listMembers()
-        .map((member) => member.id)
+        .map((member) => ({
+          did: member.id,
+          leafIndex: member.leafIndex,
+          longForm: member.longForm,
+        }))
     },
 
     async readCommitHeader(commit: Uint8Array): Promise<CommitHeader | null> {

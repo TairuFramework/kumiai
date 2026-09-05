@@ -48,7 +48,7 @@ the deadline. Line numbers are as of `5eb220a`.
   was left. The fix is to narrow these to the group-authenticated result type, which breaks any
   consumer supplying a crypto-agnostic `unwrap`.
 
-- **`GroupMLS.rosterDIDs` carries no leaf identity.** `packages/rpc/src/crypto.ts:240` —
+- ~~**`GroupMLS.rosterDIDs` carries no leaf identity.** `packages/rpc/src/crypto.ts:240` —
   `rosterDIDs(): Promise<Array<string>>`, documented at `:228` as "one entry per leaf". So a DID
   holding two leaves appears twice, but nothing says *which* leaf each entry is: no leaf index, no
   credential metadata. Fine while nothing needs to disambiguate two leaves for the same DID (a
@@ -60,7 +60,16 @@ the deadline. Line numbers are as of `5eb220a`.
   breaks the port (`rpc/src/crypto.ts:226`, exported at `rpc/src/index.ts:40`), its real
   implementation (`packages/mls-rpc/src/mls.ts:130`), and the contract suite every implementation
   *and* every double must pass (`packages/rpc-conformance/src/group-mls.ts:47`, exercised at
-  `:313`). Three packages, not one.
+  `:313`). Three packages, not one.~~
+
+  *Taken 2026-09-04:* `rosterDIDs(): Promise<Array<string>>` is now `rosterEntries():
+  Promise<Array<RosterEntry>>`, `RosterEntry` being `{ did, leafIndex, longForm }`, returned in
+  ascending `leafIndex` order. Ported across `@kumiai/rpc`, `@kumiai/mls-rpc`, and
+  `@kumiai/rpc-conformance`, with the double converted to a hole-preserving leaf-slot model and new
+  conformance clauses pinning `leafIndex` denseness/uniqueness/ordering/stability and freed-index
+  reuse. Duplicate-DID-leaf-removal disambiguation is a documented, deliberately scoped-out double
+  coverage gap — see
+  [../completed/2026-09-04-roster-leaf-identity.complete.md](../completed/2026-09-04-roster-leaf-identity.complete.md).
 
 ## Related, blocked elsewhere
 

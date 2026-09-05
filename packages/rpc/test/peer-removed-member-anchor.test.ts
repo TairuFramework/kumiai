@@ -70,7 +70,7 @@ describe('a member removed by a commit it applies keeps its anchor', () => {
     // His handle could not follow the commit, so his epoch is where it was and his roster is what
     // the commit left him: the tree applied, his own leaf gone.
     expect(restarted.crypto.epoch()).toBe(1)
-    expect(await restarted.mls.rosterDIDs()).toEqual(['alice'])
+    expect((await restarted.mls.rosterEntries()).map((e) => e.did)).toEqual(['alice'])
 
     // And no anchor was written for it. A capture here would re-derive the value already stored
     // and clear the segment buffer on the way — a rotation's cleanup for something that did not

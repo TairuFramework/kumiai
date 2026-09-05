@@ -374,11 +374,9 @@ describe('every member agrees on the anchor, including one that boots after it',
 describe('a rejoining member and the group agree on one app topic', () => {
   /**
    * The case no diff can reach. Eve is stranded on a stale epoch and rejoins by external commit —
-   * and she is a member the roster never stopped holding, so her rejoin changes no DID and no
-   * occupied leaf index (the resync blanks her old leaf, and her new one takes the leftmost blank:
-   * the leaf it just blanked). There is nothing to diff. The rotation rides the applied commit's
-   * own external flag, and Eve — who can never apply her own commit — sets her anchor from the
-   * handle her rejoin derived.
+   * and she is a member the roster never stopped holding, so her rejoin changes no DID. There is
+   * nothing to diff. The rotation rides the applied commit's own external flag, and Eve — who can
+   * never apply her own commit — sets her anchor from the handle her rejoin derived.
    *
    * The group's anchor is DRIFTED behind its live epoch first, with commits that touch no leaf. It
    * is the whole point: if the anchor already sat at the epoch the rejoin lands on, agreement would
