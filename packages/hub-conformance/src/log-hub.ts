@@ -184,7 +184,9 @@ export function testMailboxHubConformance<Hub extends ConformanceMailboxHub>(
       // a cursor parked on the ninth. Sorting must be a no-op.
       expect([...minted].sort()).toEqual(minted)
       for (let index = 1; index < minted.length; index++) {
-        expect(minted[index] > minted[index - 1]).toBe(true)
+        const prev = minted[index - 1]
+        const curr = minted[index]
+        expect(prev !== undefined && curr !== undefined && curr > prev).toBe(true)
       }
     })
 

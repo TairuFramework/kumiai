@@ -185,7 +185,7 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
   const xor = (bytes: Uint8Array, at: number): Uint8Array => {
     const epochKey = (key ^ at) & 0xff
     const out = new Uint8Array(bytes.length)
-    for (let i = 0; i < bytes.length; i++) out[i] = bytes[i] ^ epochKey
+    for (let i = 0; i < bytes.length; i++) out[i] = (bytes[i] ?? 0) ^ epochKey
     return out
   }
 
@@ -345,7 +345,8 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
 
   const entryStream = (bytes: Uint8Array, key: Uint8Array): Uint8Array => {
     const out = new Uint8Array(bytes.length)
-    for (let i = 0; i < bytes.length; i++) out[i] = bytes[i] ^ (key[i % key.length] as number)
+    for (let i = 0; i < bytes.length; i++)
+      out[i] = (bytes[i] ?? 0) ^ (key[i % key.length] as number)
     return out
   }
 

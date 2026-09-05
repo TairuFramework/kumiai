@@ -2,18 +2,27 @@
   "$schema": "./node_modules/turbo/schema.json",
   "tasks": {
     "build:js": {
-      "dependsOn": ["^build:js"],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/tsconfig.json",
+        "$TURBO_ROOT$/tsconfig.build.json"
+      ],
       "outputs": ["lib/**/*.js"]
     },
     "build:types": {
       "dependsOn": ["^build:types"],
-      "outputs": ["lib/**/*.d.ts"]
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/tsconfig.json",
+        "$TURBO_ROOT$/tsconfig.build.json"
+      ],
+      "outputs": ["lib/**/*.d.ts", "lib/**/*.d.ts.map"]
     },
     "test:types": {
       "dependsOn": ["^build:types", "build:types"]
     },
     "test:unit": {
-      "dependsOn": ["^build:js", "^build:types", "build:js"]
+      "dependsOn": ["^build:js", "build:js"]
     }
   }
 }

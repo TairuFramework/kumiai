@@ -95,7 +95,7 @@ describe('sealWakeHint', () => {
 
     const rs = new DataView(body.buffer, body.byteOffset).getUint32(16)
     expect(rs).toBe(WAKE_RECORD_SIZE)
-    const keyIDLength = body[20]
+    const keyIDLength = body[20] ?? 0
     const ciphertextLength = body.length - (21 + keyIDLength)
     expect(rs).toBeGreaterThan(ciphertextLength)
   })

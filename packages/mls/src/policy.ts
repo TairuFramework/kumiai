@@ -151,6 +151,7 @@ function evaluateGroupContextExtensions(
   for (let i = 0; i < expected.length; i++) {
     const got = candidate[i]
     const want = expected[i]
+    if (got === undefined || want === undefined) return 'reject'
     if (got.extensionType !== want.extensionType) return 'reject'
     // Both sides must be raw bytes to compare. ts-mls's extensionsEqual isn't re-exported, so
     // this hand-rolled compare only handles Uint8Array data; a decoded-object extension (e.g.

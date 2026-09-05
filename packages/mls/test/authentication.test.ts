@@ -99,8 +99,9 @@ describe('createDIDAuthenticationService — peer4', () => {
     const credential = makeMLSCredential(identity)
     const service = createDIDAuthenticationService()
     const sigKeys = identity.keys.filter((k) => k.purpose === 'sig')
-    if (sigKeys.length < 2) throw new Error('expected at least 2 sig keys')
-    const ok = await service.validateCredential(credential, sigKeys[1].publicKey)
+    const secondSigKey = sigKeys[1]
+    if (secondSigKey === undefined) throw new Error('expected at least 2 sig keys')
+    const ok = await service.validateCredential(credential, secondSigKey.publicKey)
     expect(ok).toBe(true)
   })
 

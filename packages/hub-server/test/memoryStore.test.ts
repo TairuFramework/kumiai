@@ -55,9 +55,10 @@ describe('createMemoryStore pub/sub', () => {
 
     const bob = await store.fetch({ recipientDID: BOB })
     expect(bob.messages).toHaveLength(1)
-    expect(bob.messages[0].topicID).toBe(TOPIC)
-    expect(bob.messages[0].senderDID).toBe(ALICE)
-    expect(bob.messages[0].payload).toEqual(new Uint8Array([1, 2]))
+    const [bobMessage] = bob.messages
+    expect(bobMessage?.topicID).toBe(TOPIC)
+    expect(bobMessage?.senderDID).toBe(ALICE)
+    expect(bobMessage?.payload).toEqual(new Uint8Array([1, 2]))
 
     // Sender is excluded from its own publish.
     const alice = await store.fetch({ recipientDID: ALICE })

@@ -217,7 +217,8 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
       await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
       const result = await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
       expect(result.messages.map((message) => message.sequenceID)).toEqual([sequenceID])
-      expect(result.messages[0].payload).toEqual(payload(1))
+      const [first] = result.messages
+      expect(first?.payload).toEqual(payload(1))
       expect(result.head).toBe(sequenceID)
       expect(result.oldest).toBe(sequenceID)
     })
@@ -359,7 +360,9 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
       // boundary ("10" < "9"); a UUID fails on the very first pair.
       expect([...sequenceIDs].sort()).toEqual(sequenceIDs)
       for (let index = 1; index < sequenceIDs.length; index++) {
-        expect(sequenceIDs[index] > sequenceIDs[index - 1]).toBe(true)
+        const prev = sequenceIDs[index - 1]
+        const curr = sequenceIDs[index]
+        expect(prev !== undefined && curr !== undefined && curr > prev).toBe(true)
       }
     })
 

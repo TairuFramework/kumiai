@@ -44,13 +44,20 @@ function decodeJwt(authorization: string): {
   const match = authorization.match(/^vapid t=([\w-]+\.[\w-]+\.[\w-]+), k=([\w-]+)$/)
   if (match == null) throw new Error('authorization header does not match the vapid scheme')
   const token = match[1]
+  const keyPart = match[2]
+  if (token === undefined || keyPart === undefined) {
+    throw new Error('authorization header is missing a token or key part')
+  }
   const [headerPart, claimsPart, signaturePart] = token.split('.')
+  if (headerPart === undefined || claimsPart === undefined || signaturePart === undefined) {
+    throw new Error('vapid token does not have three parts')
+  }
   return {
     header: JSON.parse(new TextDecoder().decode(fromB64U(headerPart))),
     claims: JSON.parse(new TextDecoder().decode(fromB64U(claimsPart))),
     signature: fromB64U(signaturePart),
     signingInput: `${headerPart}.${claimsPart}`,
-    transmittedKey: fromB64U(match[2]),
+    transmittedKey: fromB64U(keyPart),
   }
 }
 
@@ -62,9 +69,10 @@ describe('createWebPushSender', () => {
     await expect(sender.send({ registration, body })).resolves.toBe('delivered')
 
     expect(calls).toHaveLength(1)
-    expect(calls[0].url).toBe('https://push.example.com/send/abc')
-    const headers = new Headers(calls[0].init.headers)
-    expect(calls[0].init.method).toBe('POST')
+    const [call] = calls
+    expect(call?.url).toBe('https://push.example.com/send/abc')
+    const headers = new Headers(call?.init.headers)
+    expect(call?.init.method).toBe('POST')
     expect(headers.get('content-encoding')).toBe('aes128gcm')
     expect(headers.get('content-type')).toBe('application/octet-stream')
     expect(headers.get('ttl')).toBe('86400')
@@ -77,7 +85,8 @@ describe('createWebPushSender', () => {
 
     await sender.send({ registration, body })
 
-    const sent = calls[0].init.body
+    const [call] = calls
+    const sent = call?.init.body
     expect(sent).toBeInstanceOf(Uint8Array)
     const sentBytes = sent as Uint8Array
     expect(sentBytes).toHaveLength(body.length)
@@ -90,7 +99,8 @@ describe('createWebPushSender', () => {
 
     await sender.send({ registration, body })
 
-    const headers = new Headers(calls[0].init.headers)
+    const [call] = calls
+    const headers = new Headers(call?.init.headers)
     const authorization = headers.get('authorization')
     if (authorization == null) throw new Error('expected an authorization header')
     const { claims } = decodeJwt(authorization)
@@ -106,7 +116,8 @@ describe('createWebPushSender', () => {
     await sender.send({ registration, body })
     const now = Math.floor(Date.now() / 1000)
 
-    const headers = new Headers(calls[0].init.headers)
+    const [call] = calls
+    const headers = new Headers(call?.init.headers)
     const authorization = headers.get('authorization')
     if (authorization == null) throw new Error('expected an authorization header')
     const { header, claims } = decodeJwt(authorization)
@@ -129,7 +140,8 @@ describe('createWebPushSender', () => {
     await sender.send({ registration, body })
     const now = Math.floor(Date.now() / 1000)
 
-    const headers = new Headers(calls[0].init.headers)
+    const [call] = calls
+    const headers = new Headers(call?.init.headers)
     const authorization = headers.get('authorization')
     if (authorization == null) throw new Error('expected an authorization header')
     const { claims } = decodeJwt(authorization)
@@ -148,7 +160,8 @@ describe('createWebPushSender', () => {
 
     await sender.send({ registration, body })
 
-    const headers = new Headers(calls[0].init.headers)
+    const [call] = calls
+    const headers = new Headers(call?.init.headers)
     expect(headers.get('ttl')).toBe('60')
   })
 
@@ -158,7 +171,8 @@ describe('createWebPushSender', () => {
 
     await sender.send({ registration, body })
 
-    const headers = new Headers(calls[0].init.headers)
+    const [call] = calls
+    const headers = new Headers(call?.init.headers)
     const authorization = headers.get('authorization')
     if (authorization == null) throw new Error('expected an authorization header')
     const { signature, signingInput, transmittedKey } = decodeJwt(authorization)
@@ -176,7 +190,8 @@ describe('createWebPushSender', () => {
 
     await sender.send({ registration, body })
 
-    const headers = new Headers(calls[0].init.headers)
+    const [call] = calls
+    const headers = new Headers(call?.init.headers)
     const serializedHeaders = JSON.stringify(Object.fromEntries(headers.entries()))
     expect(serializedHeaders).not.toContain('did:key:alice')
     expect(serializedHeaders.toLowerCase()).not.toContain('topic')

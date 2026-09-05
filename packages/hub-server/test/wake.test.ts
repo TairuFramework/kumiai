@@ -46,7 +46,9 @@ describe('createWakeDispatcher', () => {
     dispatcher.notify({ did: 'did:key:alice', topicID: 'topic-a', sequenceID: '001' })
     await vi.waitFor(() => expect(sent).toHaveLength(1))
 
-    expect(openWakeHint(sent[0].body, opener)).toEqual({
+    const leadingEdge = sent[0]
+    if (leadingEdge === undefined) throw new Error('expected a sent wake ping')
+    expect(openWakeHint(leadingEdge.body, opener)).toEqual({
       topicID: 'topic-a',
       sequenceID: '001',
       count: 1,
@@ -69,7 +71,9 @@ describe('createWakeDispatcher', () => {
 
     await vi.advanceTimersByTimeAsync(60_000)
     await vi.waitFor(() => expect(sent).toHaveLength(2))
-    expect(openWakeHint(sent[1].body, opener)).toEqual({
+    const trailingPing = sent[1]
+    if (trailingPing === undefined) throw new Error('expected a trailing wake ping')
+    expect(openWakeHint(trailingPing.body, opener)).toEqual({
       topicID: 'topic-b',
       sequenceID: '004',
       count: 3,
@@ -126,7 +130,9 @@ describe('createWakeDispatcher', () => {
     // `count` restarted at 1 — not be folded into the window `online` was supposed to have closed.
     dispatcher.notify({ did: 'did:key:alice', topicID: 'topic-c', sequenceID: '003' })
     await vi.waitFor(() => expect(sent).toHaveLength(2))
-    expect(openWakeHint(sent[1].body, opener)).toEqual({
+    const rearmedPing = sent[1]
+    if (rearmedPing === undefined) throw new Error('expected a re-armed wake ping')
+    expect(openWakeHint(rearmedPing.body, opener)).toEqual({
       topicID: 'topic-c',
       sequenceID: '003',
       count: 1,
@@ -158,7 +164,9 @@ describe('createWakeDispatcher', () => {
     // …and collected by that window's own summary when it closes.
     await vi.advanceTimersByTimeAsync(60_000)
     await vi.waitFor(() => expect(sent).toHaveLength(3))
-    expect(openWakeHint(sent[2].body, opener)).toEqual({
+    const summaryPing = sent[2]
+    if (summaryPing === undefined) throw new Error('expected a summary wake ping')
+    expect(openWakeHint(summaryPing.body, opener)).toEqual({
       topicID: 'topic-a',
       sequenceID: '003',
       count: 1,

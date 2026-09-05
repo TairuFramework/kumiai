@@ -324,7 +324,8 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
         startIndex = 0
       } else {
         for (let index = 0; index < pending.length; index++) {
-          if (pending[index] > params.after) {
+          const sequenceID = pending[index]
+          if (sequenceID !== undefined && sequenceID > params.after) {
             startIndex = index
             break
           }
@@ -344,8 +345,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
         }
       }
 
-      const cursor =
-        resultMessages.length > 0 ? resultMessages[resultMessages.length - 1].sequenceID : null
+      const cursor = resultMessages.at(-1)?.sequenceID ?? null
 
       const result: FetchResult = { messages: resultMessages, cursor }
       if (hasMore) {
@@ -387,7 +387,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
       return {
         messages,
         head: heads.get(params.topicID) ?? null,
-        oldest: log.length > 0 ? log[0] : null,
+        oldest: log[0] ?? null,
       }
     },
 

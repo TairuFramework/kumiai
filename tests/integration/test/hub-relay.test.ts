@@ -173,7 +173,9 @@ describe('Hub store: pagination and acks', () => {
     const result2 = await store.fetch({ recipientDID: recipient.id })
     expect(result2.messages).toHaveLength(1)
 
-    await store.ack({ recipientDID: recipient.id, sequenceIDs: [result2.messages[0].sequenceID] })
+    const [acked] = result2.messages
+    if (acked === undefined) throw new Error('expected a message to ack')
+    await store.ack({ recipientDID: recipient.id, sequenceIDs: [acked.sequenceID] })
 
     const result3 = await store.fetch({ recipientDID: recipient.id })
     expect(result3.messages).toHaveLength(0)
@@ -198,7 +200,8 @@ describe('Hub store: pagination and acks', () => {
 
     const result = await store.fetch({ recipientDID: recipient.id, ack: [id1] })
     expect(result.messages).toHaveLength(1)
-    expect(result.messages[0].payload).toEqual(new Uint8Array([2]))
+    const [message] = result.messages
+    expect(message?.payload).toEqual(new Uint8Array([2]))
   })
 })
 

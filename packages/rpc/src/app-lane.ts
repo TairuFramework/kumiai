@@ -459,7 +459,9 @@ export function createAppLane(params: AppLaneParams): AppLane {
         if (message.payload?.typ !== 'event' || typeof prc !== 'string') continue
         // A retained frame naming an EPHEMERAL procedure was published `retain: 'log'` by a member
         // whose dispatch would never do that. Retention is the protocol's word, not the frame's.
-        if (retentionOf(protocols[name], prc) !== 'log') continue
+        const protocol = protocols[name]
+        if (protocol === undefined) continue
+        if (retentionOf(protocol, prc) !== 'log') continue
         try {
           // Same door as the live push: emit the retained frame's plaintext into the
           // per-protocol emitter the live bus is also built from. No listener → no-op.

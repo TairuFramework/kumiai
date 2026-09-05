@@ -37,8 +37,9 @@ describe('createExpoSender', () => {
 
     await expect(sender.send({ registration, body })).resolves.toBe('delivered')
 
-    expect(calls[0].url).toBe('https://exp.host/--/api/v2/push/send')
-    const sent = calls[0].body as {
+    const [call] = calls
+    expect(call?.url).toBe('https://exp.host/--/api/v2/push/send')
+    const sent = call?.body as {
       to: string
       data: { w: string }
       mutableContent: boolean
@@ -61,7 +62,8 @@ describe('createExpoSender', () => {
 
     await sender.send({ registration, body })
 
-    const sent = calls[0].body as Record<string, unknown>
+    const [call] = calls
+    const sent = call?.body as Record<string, unknown>
     expect(Object.keys(sent).sort()).toEqual([
       'contentAvailable',
       'data',
@@ -78,7 +80,8 @@ describe('createExpoSender', () => {
 
     await sender.send({ registration, body })
 
-    expect((calls[0].body as { title: string }).title).toBe('New activity')
+    const [call] = calls
+    expect((call?.body as { title: string } | undefined)?.title).toBe('New activity')
   })
 
   test('the placeholderTitle override replaces it', async () => {
@@ -90,14 +93,16 @@ describe('createExpoSender', () => {
 
     await sender.send({ registration, body })
 
-    expect((calls[0].body as { title: string }).title).toBe('Nudge')
+    const [call] = calls
+    expect((call?.body as { title: string } | undefined)?.title).toBe('Nudge')
   })
 
   test('carries no cleartext topic, DID or count', async () => {
     const { calls, fetchImpl } = jsonFetch({ data: [{ status: 'ok', id: '1' }] })
     const sender = createExpoSender({ runtime: createRuntime({ fetch: fetchImpl }) })
     await sender.send({ registration, body })
-    const serialized = JSON.stringify(calls[0].body)
+    const [call] = calls
+    const serialized = JSON.stringify(call?.body)
     expect(serialized).not.toContain('did:key:alice')
     expect(serialized).not.toContain('topic')
   })
@@ -151,7 +156,8 @@ describe('createExpoSender', () => {
 
     await sender.send({ registration, body })
 
-    expect(calls[0].headers.get('authorization')).toBeNull()
+    const [call] = calls
+    expect(call?.headers.get('authorization')).toBeNull()
   })
 
   test('an accessToken is sent as a Bearer token', async () => {
@@ -163,6 +169,7 @@ describe('createExpoSender', () => {
 
     await sender.send({ registration, body })
 
-    expect(calls[0].headers.get('authorization')).toBe('Bearer secret-token')
+    const [call] = calls
+    expect(call?.headers.get('authorization')).toBe('Bearer secret-token')
   })
 })

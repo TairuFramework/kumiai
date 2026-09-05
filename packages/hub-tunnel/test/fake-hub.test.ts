@@ -35,9 +35,11 @@ describe('FakeHub fixture', () => {
     const messages = await received
     expect(messages).toHaveLength(5)
     for (let i = 0; i < 5; i++) {
-      expect(messages[i].senderDID).toBe(a)
-      expect(messages[i].topicID).toBe(topic)
-      expect(textDecoder.decode(messages[i].payload)).toBe(`msg-${i}`)
+      const message = messages[i]
+      expect(message?.senderDID).toBe(a)
+      expect(message?.topicID).toBe(topic)
+      const payload = message === undefined ? undefined : textDecoder.decode(message.payload)
+      expect(payload).toBe(`msg-${i}`)
     }
     subscription.return()
   })

@@ -354,7 +354,7 @@ describe('control lane lifecycle', () => {
     // there for a member invited tomorrow.
     const committed = hub.published.filter((m) => m.topicID === commitTopic(recoverySecret))
     expect(committed).toHaveLength(1)
-    expect(hub.head(commitTopic(recoverySecret))).toBe(committed[0].sequenceID)
+    expect(hub.head(commitTopic(recoverySecret))).toBe(committed[0]?.sequenceID)
 
     await alice.peer.dispose()
     await bob.peer.dispose()

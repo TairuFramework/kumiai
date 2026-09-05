@@ -54,14 +54,14 @@ export class FakeEncryptor implements Encryptor {
 
     const out = new Uint8Array(plaintext.length + TAG_LENGTH)
     for (let i = 0; i < plaintext.length; i++) {
-      out[i] = plaintext[i] ^ this.#key[i % this.#key.length]
+      out[i] = (plaintext[i] ?? 0) ^ (this.#key[i % this.#key.length] ?? 0)
     }
     out.set(this.#tag, plaintext.length)
 
     if (this.#pendingCorruptions > 0) {
       this.#pendingCorruptions--
       // WHY: flip a tag byte to simulate wire tamper that decrypt's tag check catches deterministically
-      out[out.length - 1] ^= 0xff
+      out[out.length - 1] = (out[out.length - 1] ?? 0) ^ 0xff
     }
 
     return out
@@ -85,7 +85,7 @@ export class FakeEncryptor implements Encryptor {
 
     const out = new Uint8Array(bodyLength)
     for (let i = 0; i < bodyLength; i++) {
-      out[i] = ciphertext[i] ^ this.#key[i % this.#key.length]
+      out[i] = (ciphertext[i] ?? 0) ^ (this.#key[i % this.#key.length] ?? 0)
     }
     return out
   }

@@ -54,9 +54,7 @@ describe('handshake frame codec', () => {
     // the group moved on and the peer heals, everywhere else it is dropped — and only the caller
     // knows which lane it is on. A decoder that threw here would decide for all of them, which
     // is how a version bump strands every old peer at a dead epoch.
-    const decoded = decodeHandshakeFrame(
-      new Uint8Array([HANDSHAKE_MAGIC[0], HANDSHAKE_MAGIC[1], 99, 0, 9]),
-    )
+    const decoded = decodeHandshakeFrame(new Uint8Array([...HANDSHAKE_MAGIC, 99, 0, 9]))
     expect(decoded.version).toBe(99)
     expect(decoded.version).not.toBe(HANDSHAKE_VERSION)
   })
@@ -70,9 +68,7 @@ describe('handshake frame codec', () => {
 
   test('rejects an unknown kind tag', () => {
     expect(() =>
-      decodeHandshakeFrame(
-        new Uint8Array([HANDSHAKE_MAGIC[0], HANDSHAKE_MAGIC[1], HANDSHAKE_VERSION, 0xff, 1]),
-      ),
+      decodeHandshakeFrame(new Uint8Array([...HANDSHAKE_MAGIC, HANDSHAKE_VERSION, 0xff, 1])),
     ).toThrow(/kind/)
   })
 })

@@ -152,7 +152,14 @@ describe('app frames outlive the commits that leave their epoch', () => {
     )
     expect(commits).toHaveLength(1)
     expect(posted).toHaveLength(1)
-    expect(posted[0].sequenceID > commits[0].sequenceID).toBe(true) // the ordering IS the scenario
+    const [postedFrame] = posted
+    const [commitFrame] = commits
+    // the ordering IS the scenario
+    expect(
+      postedFrame !== undefined &&
+        commitFrame !== undefined &&
+        postedFrame.sequenceID > commitFrame.sequenceID,
+    ).toBe(true)
 
     // Bob is at epoch 1 too, so the frame is sealed under a key he holds — and he reads it before
     // he applies the commit that would take that key away from him.

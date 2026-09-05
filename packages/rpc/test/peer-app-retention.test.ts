@@ -71,7 +71,9 @@ describe('per-procedure retention for app events', () => {
     // and bob's peer opened this frame on the live lane above. The claim under test is that the
     // frame is RETAINED and openable at this epoch, which is exactly what a fresh reader shows.
     const reader = createFakeCrypto({ epoch: 1, localDID: 'carol' })
-    const opened = await reader.unwrap(drained.messages[0].payload)
+    const [firstMessage] = drained.messages
+    if (firstMessage === undefined) throw new Error('expected a drained message')
+    const opened = await reader.unwrap(firstMessage.payload)
     // `v` included deliberately: the retained bytes are produced by `encodeEventFrame` off the
     // transport, and a retained frame that omitted the wire version would be refused by the
     // decode a live one passes. Pinning it here is what says the two paths agree.

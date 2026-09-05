@@ -41,14 +41,18 @@ describe('adaptBusHandlers', () => {
     const { requestHandlers } = adaptBusHandlers(protocol as never, {
       compute: ({ param }: { param: number }) => param + 1,
     })
-    await expect(Promise.resolve(requestHandlers.compute('not-a-number', {}))).rejects.toThrow()
+    const { compute } = requestHandlers
+    if (compute === undefined) throw new Error('compute handler missing')
+    await expect(Promise.resolve(compute('not-a-number', {}))).rejects.toThrow()
   })
 
   test('accepts a request whose param passes validation', async () => {
     const { requestHandlers } = adaptBusHandlers(protocol as never, {
       compute: ({ param }: { param: number }) => param + 1,
     })
-    await expect(Promise.resolve(requestHandlers.compute(41, {}))).resolves.toBe(42)
+    const { compute } = requestHandlers
+    if (compute === undefined) throw new Error('compute handler missing')
+    await expect(Promise.resolve(compute(41, {}))).resolves.toBe(42)
   })
 
   test('drops an event whose data fails validation and never calls the handler', async () => {
@@ -78,7 +82,9 @@ describe('adaptBusHandlers', () => {
         return 0
       },
     })
-    await Promise.resolve(requestHandlers.compute(1, { signal: controller.signal }))
+    const { compute } = requestHandlers
+    if (compute === undefined) throw new Error('compute handler missing')
+    await Promise.resolve(compute(1, { signal: controller.signal }))
     expect(seen).toBe(controller.signal)
   })
 

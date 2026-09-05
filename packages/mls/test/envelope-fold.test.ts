@@ -191,7 +191,7 @@ describe('foldEnvelope', () => {
     expect(result.ok).toBe(true)
     if (result.ok) {
       expect(result.surfaced).toEqual([arbitrary.verified])
-      expect(result.surfaced[0].entry.value).toBe(arbitrary.verified.entry.value)
+      expect(result.surfaced[0]?.entry.value).toBe(arbitrary.verified.entry.value)
     }
   })
 

@@ -13,10 +13,11 @@
     "lint": "biome check --write ./packages ./scripts ./tests",
     "prepare": "git config core.hooksPath .githooks",
     "release": "pnpm run check:versions && pnpm run build && pnpm publish -r",
-    "test": "pnpm run check:versions && turbo run test:types test:unit"
+    "test": "pnpm run check:versions && turbo run test:types test:unit",
+    "test:types": "turbo run test:types"
   },
   "devDependencies": {
-    "@kigu/dev": "^0.2.1"
+    "@kigu/dev": "^0.3.1"
   },
   "packageManager": "pnpm@11.25.0"
 }

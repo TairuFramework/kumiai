@@ -158,7 +158,8 @@ describe('Topic log over the wire', () => {
 
     // The server received the class the client sent — not a default.
     expect(publishes.map((params) => params.retain)).toEqual([undefined, 'log'])
-    expect(publishes[1].senderDID).toBe(aliceIdentity.id)
+    const [, secondPublish] = publishes
+    expect(secondPublish?.senderDID).toBe(aliceIdentity.id)
 
     await store.ack({
       recipientDID: bobIdentity.id,
@@ -189,7 +190,8 @@ describe('Topic log over the wire', () => {
     })
     // The empty-topic sentinel arrived as null, not as an absent field: those are different
     // requests, and a wire that collapses them turns every conditional publish unconditional.
-    expect(publishes[0].expectedHead).toBeNull()
+    const [firstPublish] = publishes
+    expect(firstPublish?.expectedHead).toBeNull()
 
     // A second publish at the same head loses the compare-and-set.
     const rejected = await alice
@@ -255,7 +257,8 @@ describe('Topic log over the wire', () => {
     const { client: bob } = ctx.connect()
 
     await bob.subscribe({ topicID: TOPIC, retention: MAX_RETENTION })
-    expect(subscribes[0].retention).toBe(MAX_RETENTION)
+    const [firstSubscribe] = subscribes
+    expect(firstSubscribe?.retention).toBe(MAX_RETENTION)
 
     const rejected = await bob
       .subscribe({ topicID: fixtureTopic('greedy'), retention: MAX_RETENTION + 1 })

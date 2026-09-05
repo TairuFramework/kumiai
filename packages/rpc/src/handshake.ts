@@ -106,6 +106,9 @@ export function decodeHandshakeFrame(frame: Uint8Array): {
   }
   const version = frame[HANDSHAKE_MAGIC.length]
   const kind = frame[HANDSHAKE_MAGIC.length + 1]
+  if (version === undefined || kind === undefined) {
+    throw new Error('handshake frame is too short')
+  }
   if (!isHandshakeKind(kind)) {
     throw new Error(`unknown handshake kind: ${kind}`)
   }

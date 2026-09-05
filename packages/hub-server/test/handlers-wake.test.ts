@@ -647,7 +647,9 @@ describe('wake on publish', () => {
     // something was sent. `did` alone is covered by the registry lookup (a wrong DID finds no
     // registration), but `topicID`/`sequenceID` are only ever asserted at the dispatcher level in
     // wake.test.ts, never through this fan-out hook.
-    expect(openWakeHint(sent[0].body, recipientOpener)).toEqual({
+    const sentFirst = sent[0]
+    if (sentFirst === undefined) throw new Error('expected a sent wake ping')
+    expect(openWakeHint(sentFirst.body, recipientOpener)).toEqual({
       topicID: PAIR_TOPIC,
       sequenceID,
       count: 1,
@@ -776,7 +778,9 @@ describe('wake on publish', () => {
 
     await vi.waitFor(() => expect(sent).toHaveLength(2), { timeout: 2000 })
     // The summary, not a second leading edge: it names the LATEST frame and counts the window.
-    expect(openWakeHint(sent[1].body, recipientOpener)).toEqual({
+    const sentSecond = sent[1]
+    if (sentSecond === undefined) throw new Error('expected a second sent wake ping')
+    expect(openWakeHint(sentSecond.body, recipientOpener)).toEqual({
       topicID: PAIR_TOPIC,
       sequenceID,
       count: 1,

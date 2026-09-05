@@ -150,7 +150,7 @@ export class DurableFakeHub implements LogHub {
     return {
       messages,
       head: this.#heads.get(params.topicID) ?? null,
-      oldest: log.length > 0 ? log[0].sequenceID : null,
+      oldest: log[0]?.sequenceID ?? null,
     }
   }
 

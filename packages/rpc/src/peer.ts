@@ -799,7 +799,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         // lane (retained, pullable); ephemeral events and RPC stay on the live mailbox lane. The
         // log payload is byte-identical to what the broadcast transport would produce, so online
         // subscribers still receive it through the same drain.
-        if (retentionOf(protocols[name], prc) === 'log') {
+        const protocol = protocols[name]
+        if (protocol === undefined) throw new Error(`Unknown protocol: ${name}`)
+        if (retentionOf(protocol, prc) === 'log') {
           const { topicID, payload } = await sealForSegment(name, encodeEventFrame(prc, data))
           await mux.publish({ topicID, payload, retain: 'log' })
           return

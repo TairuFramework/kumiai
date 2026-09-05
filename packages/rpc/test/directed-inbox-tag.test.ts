@@ -33,8 +33,9 @@ describe('createInboxPath tag decoding', () => {
     const inner = fromUTF(JSON.stringify({ v: 1, sessionID: 's', seq: 0, kind: 'message' }))
     mux.deliver(encodeDirectedPayload('chat', inner))
     await vi.waitFor(() => expect(seen).toHaveLength(1))
-    expect(seen[0].protocol).toBe('chat')
-    expect(seen[0].payload).toEqual(inner)
+    const [first] = seen
+    expect(first?.protocol).toBe('chat')
+    expect(first?.payload).toEqual(inner)
   })
 
   test('drops a legacy untagged frame', async () => {

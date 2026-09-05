@@ -97,6 +97,9 @@ export function decodeCommitFrame(frame: Uint8Array): CommitFrame {
     throw new Error('commit frame is too short')
   }
   const version = frame[0]
+  if (version === undefined) {
+    throw new Error('commit frame is too short')
+  }
   if (version !== COMMIT_FRAME_VERSION) {
     throw new UnsupportedCommitFrameVersionError(version)
   }

@@ -170,7 +170,9 @@ describe('the bodies ride the commit', () => {
     expect(published).toHaveLength(1)
     // What the hub holds is a commit frame: the commit in the clear (MLS is its own
     // envelope) and a blob it has no key for.
-    const frame = decodeHandshakeFrame(published[0].payload)
+    const [publishedFrame] = published
+    if (publishedFrame === undefined) throw new Error('expected a published commit')
+    const frame = decodeHandshakeFrame(publishedFrame.payload)
     expect(frame.kind).toBe(HANDSHAKE_KIND.commit)
     expect(leakedBody(hub, token)).toBe(false)
     // Nothing was published on the rendezvous: enacting an entry is not a recovery.

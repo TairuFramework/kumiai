@@ -351,7 +351,7 @@ export class FakeHub implements LogHub {
     return {
       messages: [...messages],
       head: this.#heads.get(params.topicID) ?? null,
-      oldest: log.length > 0 ? log[0].sequenceID : null,
+      oldest: log[0]?.sequenceID ?? null,
     }
   }
 

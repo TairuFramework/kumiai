@@ -180,7 +180,7 @@ function drainGateStore(
       const index = call++
       if (index === 0) await gate // pause during the first page so a live push can race in
       const messages = pages[index] ?? []
-      const cursor = messages.length > 0 ? messages[messages.length - 1].sequenceID : null
+      const cursor = messages.at(-1)?.sequenceID ?? null
       const hasMore = index < pages.length - 1
       return hasMore ? { messages, cursor, hasMore: true } : { messages, cursor }
     },
@@ -395,7 +395,7 @@ function backlogStore(messages: Array<StoredMessage>): HubStore {
     async fetch(): Promise<FetchResult> {
       if (done) return { messages: [], cursor: null }
       done = true
-      const cursor = messages.length > 0 ? messages[messages.length - 1].sequenceID : null
+      const cursor = messages.at(-1)?.sequenceID ?? null
       return { messages, cursor } // no hasMore -> single page
     },
   } as HubStore
