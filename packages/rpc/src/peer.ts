@@ -376,6 +376,16 @@ export type GroupPeer<Protocols extends Record<string, GroupProtocolDefinition>>
    * caller can observe a roster change being detected without reaching into the port.
    */
   anchorEpoch: () => number
+  /**
+   * Re-drive any hub subscription this peer latched as refused, on the host's word that the refusal
+   * may now be answered differently. The one case that needs it: a peer whose group topics were
+   * subscribed the instant it joined — before the app-level authorization that gates them had landed
+   * — is refused `AuthorizationDeniedError`, and that refusal is latched permanent (a busy retry
+   * against an answer would be worse). Once the host knows the peer is authorized (its membership
+   * row has replicated), it calls this to ask again. Single-shot per call: a topic the hub still
+   * refuses simply re-latches, so call it on each authorization change rather than to poll.
+   */
+  reauthorize: () => void
   dispose: () => Promise<void>
 }
 
@@ -2205,6 +2215,13 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       await runSerial(() => rebuildEpoch())
     },
     anchorEpoch: () => anchor.epoch,
+    reauthorize: () => {
+      // No `assertLive`/`ready` wait: rearming a refused subscription is a synchronous, idempotent
+      // hint the mux applies against its own state, safe on a peer that is still initializing and a
+      // no-op on a disposed one (the mux guards `disposed`). It touches only topics the hub already
+      // refused, so it cannot subscribe anything a normal retain would not have.
+      mux.rearmRefusedTopics()
+    },
     dispose: () => {
       if (disposePromise != null) return disposePromise
       disposed = true

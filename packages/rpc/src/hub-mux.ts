@@ -161,6 +161,19 @@ export type HubMux = {
    * is not held, so a later retain asks again, carrying its own `options`.
    */
   retainTopic: (topicID: string, options?: HubSubscribeOptions) => void
+  /**
+   * Clear a latched subscribe refusal and ask once more, for a topic whose refusal may now be
+   * answered differently — an `AuthorizationDeniedError` cleared by the peer since becoming a group
+   * member, above all. Single-shot: it re-asks exactly once and re-latches if the hub still refuses,
+   * so the host calls it on each authorization change rather than to poll. A no-op unless the topic
+   * is currently refused and still retained; re-asks with the options the hub refused.
+   */
+  rearmTopic: (topicID: string) => void
+  /**
+   * Rearm every currently-refused topic at once — the group-wide {@link rearmTopic}, for a caller
+   * that has become authorized and does not track which topics were individually refused.
+   */
+  rearmRefusedTopics: () => void
   /** Pull a topic's log as the local DID. */
   fetchTopic: (params: MuxFetchTopicParams) => Promise<HubFetchTopicResult>
   onInbound: (
@@ -221,12 +234,19 @@ type TopicSubscription =
   | { kind: 'asking' }
   | { kind: 'held' }
   /**
-   * `permanent` and `retention` together decide what a later retain may do. A refusal is a refusal
-   * OF A REQUEST: only a different explicit request can be answered differently, so a permanent
-   * refusal of `retention: N` is cleared by a retain asking for something other than N, and by
-   * nothing else. A retry-exhausted failure carries no answer at all, so any retain re-asks.
+   * `permanent` and the request `options` together decide what a later retain may do. A refusal is
+   * a refusal OF A REQUEST: only a different explicit request can be answered differently, so a
+   * permanent refusal of `retention: N` is cleared by a retain asking for something other than N,
+   * and by nothing else. A retry-exhausted failure carries no answer at all, so any retain re-asks.
+   * The full `options` is kept so an explicit {@link HubMux.rearmTopic} can re-ask with exactly the
+   * request the hub refused.
    */
-  | { kind: 'refused'; error: unknown; permanent: boolean; retention: number | undefined }
+  | {
+      kind: 'refused'
+      error: unknown
+      permanent: boolean
+      options: HubSubscribeOptions | undefined
+    }
 
 /**
  * Permanent means the hub has ANSWERED, not that it failed. A retention above the operator's cap
@@ -372,7 +392,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
           kind: 'refused',
           error,
           permanent,
-          retention: options?.retention,
+          options,
         })
         reportFailure({ topicID, error, permanent })
         return
@@ -401,10 +421,56 @@ export function createHubMux(params: HubMuxParams): HubMux {
     // downgrade the hub refused to perform, which is worse than the refusal it replaces.
     //
     // A retry-exhausted failure carries no answer, so any retain re-asks.
-    if (state.permanent && (options?.retention == null || options.retention === state.retention)) {
+    if (
+      state.permanent &&
+      (options?.retention == null || options.retention === state.options?.retention)
+    ) {
       return
     }
     void attemptSubscribe(topicID, options, 0)
+  }
+
+  /**
+   * Clear a latched refusal so the topic is asked for once more, on the caller's word that the
+   * answer may now be different. A permanent refusal — an `AuthorizationDeniedError` above all — is
+   * an answer to a request made under conditions that CAN change: a peer refused because it was not
+   * yet a group member is admitted moments later, and nothing about that transition re-shapes the
+   * request, so the retain gate (which only re-asks under a different retention) never re-drives it.
+   * This is the external-event clear the note on `createHubMux` describes, the same shape a freed
+   * quota would need: the host, which owns the membership/authorization change the hub cannot see,
+   * says "ask again."
+   *
+   * Single-shot by construction: it re-asks EXACTLY once (via `attemptSubscribe(..., 0)`), and if
+   * the hub still refuses, the topic re-latches. A rearm is one fresh chance to ask, never a retry
+   * loop — call it again on the next authorization change. A no-op unless the topic is currently
+   * `refused` (a held or in-flight subscription is left untouched) and still has holders (a topic
+   * nothing retains is not resurrected). Re-asks with the SAME `options` the hub refused.
+   */
+  const rearmTopic = (topicID: string): void => {
+    if (disposed) return
+    const state = subscriptions.get(topicID)
+    if (state?.kind !== 'refused') return
+    const { options } = state
+    subscriptions.delete(topicID)
+    if ((refcount.get(topicID) ?? 0) > 0) {
+      void attemptSubscribe(topicID, options, 0)
+    }
+  }
+
+  /**
+   * Rearm EVERY currently-refused topic — the group-wide form of {@link rearmTopic}, for a caller
+   * that learns it has become authorized without tracking which individual topics were refused
+   * (a freshly-admitted group member, whose whole set of group topics was refused during the window
+   * before its membership landed). Snapshots the refused set first, so rearming one — which deletes
+   * its subscription entry — does not disturb the iteration.
+   */
+  const rearmRefusedTopics = (): void => {
+    if (disposed) return
+    const refused: Array<string> = []
+    for (const [topicID, state] of subscriptions) {
+      if (state.kind === 'refused') refused.push(topicID)
+    }
+    for (const topicID of refused) rearmTopic(topicID)
   }
 
   /**
@@ -734,6 +800,8 @@ export function createHubMux(params: HubMuxParams): HubMux {
     retainTopic: (topicID, options) => {
       retain(topicID, options)
     },
+    rearmTopic,
+    rearmRefusedTopics,
     fetchTopic,
     onInbound,
     suspendPublishing: (): void => {

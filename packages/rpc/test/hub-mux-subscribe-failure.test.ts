@@ -283,6 +283,136 @@ describe('a subscribe the hub refuses', () => {
   })
 })
 
+describe('rearming a latched refusal', () => {
+  test('an authorization refusal, latched permanent, is re-asked and cleared once the peer is authorized', async () => {
+    const hub = new FakeHub({ maxRetention: 100 })
+    const mux = createHubMux({
+      hub,
+      localDID: 'bob',
+      subscribeRetryDelaysMs: FAST_RETRIES,
+      onSubscribeFailed: () => {},
+    })
+
+    // `refuseSubscribeWith` is one-shot: the first subscribe throws authz, the next succeeds — the
+    // exact shape of "not yet a member, then admitted".
+    hub.refuseSubscribeWith('topic:authz', new AuthorizationDeniedError('not yet a member'))
+    mux.retainTopic('topic:authz', { retention: 50 })
+    await flush()
+    expect(hub.subscribeAttempts('topic:authz')).toBe(1)
+    expect(hub.subscriberCount('topic:authz')).toBe(0)
+    // Latched: a plain retain for the same window does not re-ask (the pre-fix behaviour that poisons
+    // a freshly-paired peer's own sync engine).
+    mux.retainTopic('topic:authz', { retention: 50 })
+    await flush()
+    expect(hub.subscribeAttempts('topic:authz')).toBe(1)
+    await expect(mux.fetchTopic({ topicID: 'topic:authz' })).rejects.toThrow(
+      AuthorizationDeniedError,
+    )
+
+    // The host learns the peer is now authorized and rearms: re-asked exactly once, with the SAME
+    // options the hub refused, and now held.
+    mux.rearmTopic('topic:authz')
+    await flush()
+    expect(hub.subscribeAttempts('topic:authz')).toBe(2)
+    expect(hub.subscriberCount('topic:authz')).toBe(1)
+    expect(hub.requestedRetention('topic:authz')).toBe(50)
+    await expect(mux.fetchTopic({ topicID: 'topic:authz' })).resolves.toMatchObject({
+      messages: [],
+    })
+
+    await mux.dispose()
+  })
+
+  test('rearm is single-shot: a topic the hub still refuses re-latches after exactly one more ask, never a loop', async () => {
+    // A retention above the ceiling refuses PERSISTENTLY (not one-shot), so the rearm re-ask is
+    // refused again — proving rearm asks once and stops rather than spinning.
+    const hub = new FakeHub({ maxRetention: 100 })
+    const mux = createHubMux({
+      hub,
+      localDID: 'bob',
+      subscribeRetryDelaysMs: FAST_RETRIES,
+      onSubscribeFailed: () => {},
+    })
+
+    mux.retainTopic('topic:still', { retention: 101 })
+    await flush()
+    expect(hub.subscribeAttempts('topic:still')).toBe(1)
+
+    mux.rearmTopic('topic:still')
+    await flush()
+    // Exactly one additional attempt, then re-latched — no retry storm against the settled answer.
+    expect(hub.subscribeAttempts('topic:still')).toBe(2)
+    await expect(mux.fetchTopic({ topicID: 'topic:still' })).rejects.toThrow(RetentionExceededError)
+
+    await mux.dispose()
+  })
+
+  test('rearm is a no-op on a held topic, an unknown topic, and a topic nothing retains', async () => {
+    const hub = new FakeHub({ maxRetention: 100 })
+    const mux = createHubMux({ hub, localDID: 'bob', onSubscribeFailed: () => {} })
+
+    // Held: rearm must not disturb a working subscription (no second attempt).
+    mux.retainTopic('topic:held', { retention: 50 })
+    await flush()
+    expect(hub.subscribeAttempts('topic:held')).toBe(1)
+    mux.rearmTopic('topic:held')
+    await flush()
+    expect(hub.subscribeAttempts('topic:held')).toBe(1)
+
+    // Unknown: nothing to rearm, nothing happens.
+    mux.rearmTopic('topic:never-seen')
+    await flush()
+    expect(hub.subscribeAttempts('topic:never-seen')).toBe(0)
+
+    await mux.dispose()
+  })
+
+  test('rearmRefusedTopics re-asks every refused topic at once and leaves held ones untouched', async () => {
+    const hub = new FakeHub({ maxRetention: 100 })
+    const mux = createHubMux({
+      hub,
+      localDID: 'bob',
+      subscribeRetryDelaysMs: FAST_RETRIES,
+      onSubscribeFailed: () => {},
+    })
+
+    hub.refuseSubscribeWith('topic:a', new AuthorizationDeniedError('no'))
+    hub.refuseSubscribeWith('topic:b', new AuthorizationDeniedError('no'))
+    mux.retainTopic('topic:a', { retention: 50 })
+    mux.retainTopic('topic:b', { retention: 50 })
+    mux.retainTopic('topic:ok', { retention: 50 })
+    await flush()
+    expect(hub.subscriberCount('topic:a')).toBe(0)
+    expect(hub.subscriberCount('topic:b')).toBe(0)
+    expect(hub.subscriberCount('topic:ok')).toBe(1)
+    const okAttempts = hub.subscribeAttempts('topic:ok')
+
+    mux.rearmRefusedTopics()
+    await flush()
+    // Both refused topics re-asked and now held; the already-held one was not asked again.
+    expect(hub.subscriberCount('topic:a')).toBe(1)
+    expect(hub.subscriberCount('topic:b')).toBe(1)
+    expect(hub.subscribeAttempts('topic:ok')).toBe(okAttempts)
+
+    await mux.dispose()
+  })
+
+  test('rearm after dispose is a no-op', async () => {
+    const hub = new FakeHub({ maxRetention: 100 })
+    const mux = createHubMux({ hub, localDID: 'bob', onSubscribeFailed: () => {} })
+    hub.refuseSubscribeWith('topic:z', new AuthorizationDeniedError('no'))
+    mux.retainTopic('topic:z', { retention: 50 })
+    await flush()
+    expect(hub.subscribeAttempts('topic:z')).toBe(1)
+
+    await mux.dispose()
+    mux.rearmTopic('topic:z')
+    mux.rearmRefusedTopics()
+    await flush()
+    expect(hub.subscribeAttempts('topic:z')).toBe(1)
+  })
+})
+
 const room = defineGroupProtocol({
   'room/typing': { type: 'event', data: { type: 'object' } },
 })
