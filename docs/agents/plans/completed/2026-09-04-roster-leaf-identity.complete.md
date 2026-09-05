@@ -7,7 +7,6 @@
 `GroupMLS.rosterDIDs` item under the `@kumiai/rpc` section.
 **Backlog origin:** [rpc API surface](../backlog/rpc-api-surface.md), finding "`GroupMLS.rosterDIDs`
 carries no leaf identity."
-**Design:** [docs/superpowers/specs/2026-09-04-roster-leaf-identity-design.md](../../../superpowers/specs/2026-09-04-roster-leaf-identity-design.md)
 
 ## Goal
 
