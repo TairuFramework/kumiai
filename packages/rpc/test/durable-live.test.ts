@@ -31,11 +31,14 @@ class PushMetadataHub extends DurableFakeHub {
 
 function pendingStore() {
   const records = new Map<string, PendingAppFrame>()
+  const opened: Array<PendingAppFrame> = []
   return {
     records,
+    opened,
     port: {
       async persistOpened(_state: Uint8Array, record: PendingAppFrame) {
         records.set(record.frame.id, record)
+        opened.push(record)
       },
       async list() {
         return [...records.values()]
@@ -88,8 +91,8 @@ describe('durable live app delivery', () => {
     await vi.waitFor(() => expect(hub.ackedCount('bob')).toBe(1))
     expect(unwrap).not.toHaveBeenCalled()
     releaseFetch?.()
-    await vi.waitFor(() => expect(store.records.size).toBe(2))
-    expect([...store.records.values()].map((record) => record.frame.position)).toEqual([
+    await vi.waitFor(() => expect(store.opened).toHaveLength(2))
+    expect(store.opened.map((record) => record.frame.position)).toEqual([
       a.sequenceID,
       hub.published.at(-1)?.sequenceID,
     ])
@@ -104,8 +107,8 @@ describe('durable live app delivery', () => {
     hub.transform = (message) => ({ ...message, logPosition: undefined })
     const { bob, store, publish } = await setup(hub)
     const message = await publish('without-position')
-    await vi.waitFor(() => expect(store.records.size).toBe(1))
-    expect([...store.records.values()][0]?.frame.position).toBe(message.sequenceID)
+    await vi.waitFor(() => expect(store.opened).toHaveLength(1))
+    expect(store.opened[0]?.frame.position).toBe(message.sequenceID)
     await bob.peer.dispose()
   })
 
@@ -119,7 +122,7 @@ describe('durable live app delivery', () => {
       return fetch(params)
     })
     await publish('retry')
-    await vi.waitFor(() => expect(store.records.size).toBe(1), { timeout: 2500 })
+    await vi.waitFor(() => expect(store.opened).toHaveLength(1), { timeout: 2500 })
     expect(failures).toBeGreaterThanOrEqual(2)
     await bob.peer.dispose()
   })
@@ -128,7 +131,7 @@ describe('durable live app delivery', () => {
     const { bob, store, publish } = await setup()
     vi.spyOn(store.port, 'persistOpened').mockRejectedValueOnce(new Error('transient storage'))
     await publish('retry storage')
-    await vi.waitFor(() => expect(store.records.size).toBe(1), { timeout: 2500 })
+    await vi.waitFor(() => expect(store.opened).toHaveLength(1), { timeout: 2500 })
     await bob.peer.dispose()
   })
 
@@ -140,7 +143,7 @@ describe('durable live app delivery', () => {
     await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toThrow(
       'failed to persist opened app frame',
     )
-    await vi.waitFor(() => expect(store.records.size).toBe(1), { timeout: 2500 })
+    await vi.waitFor(() => expect(store.opened).toHaveLength(1), { timeout: 2500 })
     await bob.peer.dispose()
   })
 
@@ -161,7 +164,7 @@ describe('durable live app delivery', () => {
       return result
     })
     const { bob, store } = await setup(hub)
-    await vi.waitFor(() => expect(store.records.size).toBe(1))
+    await vi.waitFor(() => expect(store.opened).toHaveLength(1))
     expect(inserted).toBe(true)
     await bob.peer.dispose()
   })

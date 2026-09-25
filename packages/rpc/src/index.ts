@@ -60,6 +60,7 @@ export {
   type LogPosition,
 } from './cursor.js'
 export { PeerDisposedError } from './errors.js'
+export type { GroupProcedureHandlers } from './handlers.js'
 export {
   decodeHandshakeFrame,
   encodeHandshakeFrame,

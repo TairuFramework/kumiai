@@ -288,3 +288,22 @@ $ tsc --noEmit --skipLibCheck -p tsconfig.test.json
 
 $ tsc --noEmit --skipLibCheck -p tsconfig.test.json
 ```
+
+### 2026-09-25 — Question 3.3
+
+- **Learned:** A pending record can be delivered in a per-protocol worker after the drain releases the app-lane and commit mutexes. An earlier sealed fetched position blocks delivery of a later pending record even when the later frame opened at an earlier epoch. A handler can await `commit()`; successful completion advances the cursor, while handler or `complete()` failure retries the same record after backoff.
+- **Deviations:** The first six usage tests failed before implementation; a seventh peer-disposal guard was added afterward. Existing Question 3.2 tests now inspect saved-record history because the worker promptly completes records with no host handler. Seven source mutations each failed its focused guard test and were restored. The first full rpc unit run had one timing-sensitive failure in `peer-unknown-frame-version.test.ts`; that file passed alone and the full suite passed on rerun (74 files, 492 tests). Integration passed (8 files, 43 tests) because the handler context's exported type changed.
+- **Spec/plan contradiction:** None. Restart restoration and old-segment record seeding remain Question 3.4.
+- **Verify:** `pnpm --filter @kumiai/rpc exec vitest run test/durable-queue.test.ts && pnpm --filter @kumiai/rpc run test:types`
+
+```text
+ RUN  v5.0.1 /Users/paul/dev/yulsi/kumiai.worktrees/durable-app-delivery/packages/rpc
+
+
+ Test Files  1 passed (1)
+      Tests  7 passed (7)
+   Start at  16:04:18
+   Duration  4.91s (tests 95%, transform 3%, import 2%)
+
+$ tsc --noEmit --skipLibCheck -p tsconfig.test.json
+```

@@ -64,7 +64,7 @@ import {
   type InboundPath,
 } from './directed.js'
 import { PeerDisposedError } from './errors.js'
-import { adaptBusHandlers, type BusHandlerMaps } from './handlers.js'
+import { adaptBusHandlers, type BusHandlerMaps, type GroupProcedureHandlers } from './handlers.js'
 import {
   decodeHandshakeFrame,
   encodeHandshakeFrame,
@@ -248,7 +248,7 @@ export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefini
   crypto: GroupCrypto
   localDID: string
   protocols: Protocols
-  handlers: { [K in keyof Protocols]: ProcedureHandlers<Protocols[K]> }
+  handlers: { [K in keyof Protocols]: GroupProcedureHandlers<Protocols[K]> }
   suppress?: SuppressConfig
   /** Runtime providing platform primitives. Defaults to `createRuntime()`. */
   runtime?: Runtime
@@ -2662,6 +2662,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     dispose: () => {
       if (disposePromise != null) return disposePromise
       disposed = true
+      appLane.dispose()
       if (appPullTimer != null) clearTimeout(appPullTimer)
       appPullTimer = undefined
       // Synchronous and FIRST, before anything is awaited: a lane op that already passed its own

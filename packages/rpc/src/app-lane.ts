@@ -59,7 +59,7 @@ export type AppLaneParams = {
   localDID: string
   protocols: Record<string, ProtocolDefinition>
   /**
-   * The host's app event handlers, per protocol, as the drain calls them — the same adaptation
+   * The host's app event handlers, per protocol, as the delivery worker calls them — the same adaptation
    * the live bus server is built from, so a drained frame and a pushed one reach the host by the
    * same door.
    */
@@ -107,6 +107,8 @@ export type AppLane = {
   reset: () => void
   /** Opened records awaiting the delivery worker. */
   pendingRecords: () => Array<PendingAppFrame>
+  /** Stop queued retries and prevent new handler calls. */
+  dispose: () => void
 }
 
 /**
@@ -169,6 +171,11 @@ export function createAppLane(params: AppLaneParams): AppLane {
    */
   let segment = new Map<string, Array<AppFrame>>()
   const pendingRecords: Array<PendingAppFrame> = []
+  let disposed = false
+  const workers = new Map<
+    string,
+    { running: boolean; requested: boolean; backoff: number; timer?: ReturnType<typeof setTimeout> }
+  >()
 
   /** The current segment's read positions, per protocol. See {@link AppCursor}. */
   let cursors = new Map<string, AppCursor>()
@@ -359,6 +366,110 @@ export function createAppLane(params: AppLaneParams): AppLane {
     if (position == null || position === cursor.position) return
     cursor.position = position
     await appCursorStore?.save(cursor.topicID, position)
+  }
+
+  const orderedRecords = (name: string): Array<PendingAppFrame> =>
+    pendingRecords
+      .filter((record) => record.frame.protocol === name)
+      .sort(
+        (a, b) =>
+          a.frame.segment - b.frame.segment || a.frame.position.localeCompare(b.frame.position),
+      )
+
+  const blockedByEarlierSealed = (record: PendingAppFrame): boolean => {
+    const cursor = cursors.get(record.frame.protocol)
+    if (cursor?.topicID !== record.frame.topicID) return false
+    return (segment.get(record.frame.protocol) ?? []).some(
+      (frame) => frame.position < record.frame.position && frame.sealed.state === 'sealed',
+    )
+  }
+
+  const finishRecord = async (record: PendingAppFrame): Promise<void> => {
+    await crypto.pending?.complete(record.frame.id)
+    await runAppLane(async () => {
+      const index = pendingRecords.findIndex((item) => item.frame.id === record.frame.id)
+      if (index !== -1) pendingRecords.splice(index, 1)
+      const cursor = cursors.get(record.frame.protocol)
+      if (cursor?.topicID !== record.frame.topicID) return
+      const frames = segment.get(record.frame.protocol)
+      if (frames == null) return
+      const buffered = frames.find((frame) => frame.position === record.frame.position)
+      if (buffered?.sealed.state === 'pending' && buffered.sealed.id === record.frame.id) {
+        buffered.sealed = { state: 'done' }
+      }
+      await advanceCursor(record.frame.protocol, frames)
+    })
+  }
+
+  const deliverRecord = async (record: PendingAppFrame): Promise<void> => {
+    let message: { payload?: { typ?: string; prc?: unknown; data?: unknown } } | undefined
+    try {
+      message = JSON.parse(toUTF(record.payload))
+    } catch {
+      // A malformed durable frame is acknowledged without reaching the host.
+    }
+    const prc = message?.payload?.prc
+    const protocol = protocols[record.frame.protocol]
+    const events = appEventHandlers.get(record.frame.protocol)
+    if (
+      normalizeDID(record.senderDID) !== localDID &&
+      message?.payload?.typ === 'event' &&
+      typeof prc === 'string' &&
+      protocol != null &&
+      retentionOf(protocol, prc) === 'log' &&
+      events != null
+    ) {
+      const event = {
+        data: message.payload.data ?? {},
+        senderDID: normalizeDID(record.senderDID),
+        frame: record.frame,
+      }
+      await events.emit(prc, event)
+    }
+    await finishRecord(record)
+  }
+
+  const scheduleWorker = (name: string, delay = 0): void => {
+    if (disposed || crypto.pending == null) return
+    let worker = workers.get(name)
+    if (worker == null) {
+      worker = { running: false, requested: false, backoff: 1000 }
+      workers.set(name, worker)
+    }
+    worker.requested = true
+    if (worker.running || worker.timer != null) return
+    worker.timer = setTimeout(() => {
+      if (disposed) return
+      worker.timer = undefined
+      worker.running = true
+      worker.requested = false
+      void (async () => {
+        let failed = false
+        try {
+          while (!disposed) {
+            const record = orderedRecords(name)[0]
+            if (record == null || (await runAppLane(async () => blockedByEarlierSealed(record))))
+              break
+            try {
+              await deliverRecord(record)
+              worker.backoff = 1000
+            } catch {
+              failed = true
+              break
+            }
+          }
+        } finally {
+          worker.running = false
+          if (failed) {
+            const retry = worker.backoff
+            worker.backoff = Math.min(worker.backoff * 2, 60_000)
+            scheduleWorker(name, retry)
+          } else if (worker.requested) {
+            scheduleWorker(name)
+          }
+        }
+      })()
+    }, delay)
   }
 
   /**
@@ -582,13 +693,24 @@ export function createAppLane(params: AppLaneParams): AppLane {
      * {@link advanceCursor}'s read of a done run and its splice silently drops frames.
      *
      * NO DEADLOCK against the peer's commit mutex: every call here is from inside `runSerial`,
-     * taking the app lane second, and nothing inside it takes `runSerial` back — the one path that
-     * could, a host handler re-entering from the delivery below, already deadlocks on `runSerial`
-     * itself.
+     * taking the app lane second. Durable handlers run later in a separate worker, after this
+     * drain has released both mutexes, so they may call the peer.
      */
-    deliver: (): Promise<void> => runAppLane(drain),
+    deliver: async (): Promise<void> => {
+      await runAppLane(drain)
+      if (crypto.pending != null) {
+        for (const name of new Set(pendingRecords.map((record) => record.frame.protocol)))
+          scheduleWorker(name)
+      }
+    },
     note,
     pendingRecords: () => [...pendingRecords],
+    dispose: (): void => {
+      disposed = true
+      for (const worker of workers.values()) {
+        if (worker.timer != null) clearTimeout(worker.timer)
+      }
+    },
     reset: (): void => {
       segment = new Map()
       cursors = new Map()
