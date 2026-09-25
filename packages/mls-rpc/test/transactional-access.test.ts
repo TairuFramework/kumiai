@@ -224,3 +224,53 @@ describe('transactional access: atomic durable open', () => {
     expect(store.snapshot().state).toEqual(encodeClientState(host.live().state))
   })
 })
+
+describe('adapter faults around a durable open', () => {
+  test('a fault the adapter raises outside the open is a storage error, so the lane retries', async () => {
+    const { host, seal } = await setup('tx-adapter-fault')
+    const sealed = await seal('hello')
+    const failing = {
+      ...host.access,
+      open: async () => {
+        throw new Error('restore failed')
+      },
+    }
+    const crypto = createGroupCrypto({ access: failing, pending: host.pending })
+    const failure = await failureOf(() =>
+      crypto.unwrap(sealed, { expectedAAD: aad, frame: frameRef('f1') }),
+    )
+    expect(failure).toBeInstanceOf(AppFrameStorageError)
+    expect((failure as Error).cause).toMatchObject({ message: 'restore failed' })
+  })
+})
+
+test('an open cannot publish over a newer mutation that committed after its write', async () => {
+  const { store, host, crypto, seal } = await setup('tx-publish-order')
+  const sealed = await seal('hello')
+  const writing = deferred()
+  const release = deferred()
+  let first = true
+  store.beforeWrite = async () => {
+    if (!first) return
+    first = false
+    writing.resolve()
+    await release.promise
+  }
+  const opening = crypto.unwrap(sealed, { expectedAAD: aad, frame: frameRef('f1') })
+  await writing.promise
+  // Hold the lock so the mutation queues ahead of the open's publish.
+  const hold = deferred()
+  const holding = host.access.read(async () => {
+    await hold.promise
+  })
+  const mutating = host.access.mutate(async (handle) => {
+    await handle.encrypt(utf8.encode('later'))
+  })
+  release.resolve()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  hold.resolve()
+  await Promise.all([opening, holding, mutating])
+
+  expect(store.snapshot().revision).toBe(2)
+  expect(encodeClientState(host.live().state)).toEqual(store.snapshot().state)
+})

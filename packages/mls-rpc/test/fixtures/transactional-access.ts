@@ -108,6 +108,7 @@ export async function createTransactionalAccess(
 
   let live = await restore(store.snapshot())
   let publishedEpoch = Number(live.epoch)
+  let liveRevision = store.snapshot().revision
   let tail: Promise<void> = Promise.resolve()
   const locked = async <TValue>(fn: () => Promise<TValue>): Promise<TValue> => {
     const previous = tail
@@ -122,8 +123,12 @@ export async function createTransactionalAccess(
       release()
     }
   }
-  const publish = (next: GroupHandle): void => {
+  // A handle is published only if its write is newer than the live one's: an open publishes
+  // after its lock is released, and a mutation may have committed in between.
+  const publish = (next: GroupHandle, revision: number): void => {
+    if (revision <= liveRevision) return
     live = next
+    liveRevision = revision
     publishedEpoch = Number(next.epoch)
   }
 
@@ -146,14 +151,14 @@ export async function createTransactionalAccess(
         if (!saved) {
           await store.save(row.revision, encodeClientState(working.state), working.ledgerTokens)
         }
-        publish(working)
+        publish(working, row.revision + 1)
         return result
       }),
     replace: (next) =>
       locked(async () => {
         const row = store.snapshot()
         await store.save(row.revision, encodeClientState(next.state), next.ledgerTokens)
-        publish(next)
+        publish(next, row.revision + 1)
       }),
     open: (fn, persistOpened) => {
       const run = openTail.then(async () => {
@@ -172,7 +177,7 @@ export async function createTransactionalAccess(
             if (error instanceof Error && error.cause instanceof RevisionConflictError) continue
             throw error
           }
-          await locked(async () => publish(working))
+          await locked(async () => publish(working, row.revision + 1))
           return result
         }
       })

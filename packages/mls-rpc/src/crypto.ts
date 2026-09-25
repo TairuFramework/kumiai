@@ -180,7 +180,8 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
             throw new AppFrameStorageError('failed to persist opened app frame', { cause: error })
           }
         }
-        const opened = await access.open(async (group, persistStaged) => {
+        let openError: unknown
+        const open = async (group: GroupHandle, persistStaged: typeof persistOpened) => {
           const epoch = Number(group.epoch)
           const frameEpoch = readMessageEpoch(bytes)
           if (frameEpoch != null && Number(frameEpoch) !== epoch) {
@@ -194,7 +195,25 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
             }),
           )
           return { ...result, epoch }
-        }, persistOpened)
+        }
+        let opened: Awaited<ReturnType<typeof open>>
+        try {
+          opened = await access.open(async (group, persistStaged) => {
+            try {
+              return await open(group, persistStaged)
+            } catch (error) {
+              openError = error
+              throw error
+            }
+          }, persistOpened)
+        } catch (error) {
+          // The open's own refusal says whether the frame is dead. Anything the adapter raised
+          // around it (a restore, a read) left the key unspent, so the lane must retry.
+          if (error === openError || error instanceof AppFrameStorageError) throw error
+          throw new AppFrameStorageError('handle access failed during durable open', {
+            cause: error,
+          })
+        }
         return { payload: opened.payload, senderDID: opened.senderDID, epoch: opened.epoch }
       }
       const { payload, senderDID, epoch } = await access.mutate(async (group) => {

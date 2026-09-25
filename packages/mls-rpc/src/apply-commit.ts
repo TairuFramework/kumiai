@@ -1,3 +1,4 @@
+import { normalizeDID } from '@kokuin/token'
 import {
   type GroupHandle,
   MissingLedgerEntriesError,
@@ -74,9 +75,13 @@ export async function applyCommit(
   const header = await handle.readCommitHeader(commit)
   if (header == null || readMessageEpoch(commit) !== before) return refused()
   const committerDID = header.committerDID
-  if (committerDID != null && committerDID === context.ownDID) return refused(committerDID)
+  if (committerDID != null && normalizeDID(committerDID) === normalizeDID(context.ownDID)) {
+    return refused(committerDID)
+  }
 
   let persistFailed = false
+  let persisted = false
+  let threw = false
   context.entrySlot.install(context.resolveLedgerEntries)
   try {
     await handle.processMessage(commit, {
@@ -84,6 +89,7 @@ export async function applyCommit(
         persist: async (current: GroupHandle) => {
           try {
             await persist(current)
+            persisted = true
           } catch (error) {
             persistFailed = true
             throw error
@@ -93,13 +99,19 @@ export async function applyCommit(
     })
   } catch (error) {
     if (error instanceof MissingLedgerEntriesError || persistFailed) throw error
-    if (handle.epoch === before) return refused(committerDID)
+    threw = true
   } finally {
     context.entrySlot.install(undefined)
   }
-  // A commit removing this member changes the tree without ratcheting the handle.
   if (handle.epoch === before) {
-    return { ...refused(committerDID), applied: true, rosterAfter: rosterOf(handle) }
+    // A commit removing this member changes the tree without ratcheting the handle, and a host
+    // callback may throw after that state was stored.
+    const rosterAfter = rosterOf(handle)
+    const changed =
+      rosterAfter.length !== rosterBefore.length ||
+      rosterAfter.some((entry, index) => entry.did !== rosterBefore[index]?.did)
+    if (threw && !persisted && !changed) return refused(committerDID)
+    return { ...refused(committerDID), applied: true, rosterAfter }
   }
 
   return {

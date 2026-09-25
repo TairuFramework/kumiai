@@ -195,3 +195,30 @@ test('a host callback throwing after durable acceptance still reports the advanc
   expect(result.advanced).toBe(true)
   expect(persist).toHaveBeenCalledOnce()
 })
+
+test('a self-removal stored before a host callback threw is still applied', async () => {
+  const group = await createRealGroup(2, 'apply-commit-removed-callback')
+  const self = member(group)
+  const commit = await buildRealCommit(group, { removes: 0 })
+  const real = self.handle
+  const persist = vi.fn(async () => {})
+  // The real apply, then the throw a host callback raises after the state was stored.
+  const handle = new Proxy(real, {
+    get(target, key) {
+      if (key === 'processMessage') {
+        return async (bytes: Uint8Array, options: { persist?: (h: unknown) => Promise<void> }) => {
+          await target.processMessage(bytes, options as never)
+          throw new Error('host callback failed')
+        }
+      }
+      const value = Reflect.get(target, key, target)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+
+  const result = await applyCommit(handle, commit, context(group, self), persist)
+
+  expect(persist).toHaveBeenCalledOnce()
+  expect(result).toMatchObject({ applied: true, advanced: false })
+  expect(result.rosterAfter.map((e) => e.did)).not.toContain(self.identity.id)
+})
