@@ -80,7 +80,7 @@ export type GroupMLSParams = {
   entrySlot: LedgerEntrySlot
   /**
    * Persist the handle's state durably. `processCommit` must be durable before it resolves,
-   * and this is where that happens. It also covers proposals and ledger bootstrap, not
+   * and this is where that happens. It also covers ledger bootstrap, not
    * application-message receive ratchets. Writes must be atomic: rejection means nothing
    * was stored. Received-message and bootstrap persist runs under the handle mutex and
    * must not call back into that handle. Recovery persists before `adopt`; if `adopt`
@@ -170,6 +170,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       context: CommitContext,
     ): Promise<{ advanced: boolean }> {
       const group = handle()
+      if ((await group.readCommitHeader(commit)) == null) return { advanced: false }
       const before = group.epoch
       let persistFailed = false
       entrySlot.install(context.resolveLedgerEntries)
