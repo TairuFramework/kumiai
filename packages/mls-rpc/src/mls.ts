@@ -96,6 +96,60 @@ type PendingRequest = {
  */
 const REQUEST_TTL_MS = 120_000
 
+export type RecoveryPending = {
+  get(requestID: string): Uint8Array | null
+  put(requestID: string, ephemeralPrivateKey: Uint8Array): void
+  delete(requestID: string): void
+}
+
+export function createRecoveryPending(options?: { ttlMS?: number }): RecoveryPending {
+  const ttlMS = options?.ttlMS ?? REQUEST_TTL_MS
+  const requests = new Map<string, PendingRequest>()
+  const remove = (requestID: string, request: PendingRequest): void => {
+    clearTimeout(request.timer)
+    request.ephemeralPrivateKey.fill(0)
+    requests.delete(requestID)
+  }
+  const sweep = (): void => {
+    const cutoff = Date.now() - ttlMS
+    for (const [id, request] of requests) {
+      if (request.mintedAt <= cutoff) remove(id, request)
+    }
+  }
+  return {
+    get: (requestID) => {
+      sweep()
+      return requests.get(requestID)?.ephemeralPrivateKey ?? null
+    },
+    put: (requestID, ephemeralPrivateKey) => {
+      sweep()
+      const previous = requests.get(requestID)
+      if (previous != null) remove(requestID, previous)
+      const timer = setTimeout(() => {
+        const held = requests.get(requestID)
+        if (held?.ephemeralPrivateKey === ephemeralPrivateKey) remove(requestID, held)
+      }, ttlMS)
+      const nodeTimer = timer as unknown as { unref?: () => void }
+      nodeTimer.unref?.()
+      requests.set(requestID, { ephemeralPrivateKey, mintedAt: Date.now(), timer })
+    },
+    delete: (requestID) => {
+      sweep()
+      const request = requests.get(requestID)
+      if (request != null) remove(requestID, request)
+    },
+  }
+}
+
+export async function deriveRecoverySecret(handle: GroupHandle): Promise<Uint8Array> {
+  const { cipherSuite } = handle.context
+  return await cipherSuite.kdf.expand(
+    await cipherSuite.kdf.extract(utf8.encode(handle.groupID), encodeGroupAnchor(handle.anchor)),
+    utf8.encode(RECOVERY_LABEL),
+    32,
+  )
+}
+
 /**
  * {@link GroupMLS} over a live {@link GroupHandle} — the real lifecycle port.
  *
@@ -123,18 +177,7 @@ const REQUEST_TTL_MS = 120_000
  */
 export function createGroupMLS(params: GroupMLSParams): GroupMLS {
   const { access, identity, entrySlot } = params
-  const pending = new Map<string, PendingRequest>()
-
-  const sweep = (): void => {
-    const cutoff = Date.now() - REQUEST_TTL_MS
-    for (const [id, request] of pending) {
-      if (request.mintedAt < cutoff) {
-        clearTimeout(request.timer)
-        request.ephemeralPrivateKey.fill(0)
-        pending.delete(id)
-      }
-    }
-  }
+  const pending = createRecoveryPending()
 
   return {
     async rosterEntries(): Promise<Array<RosterEntry>> {
@@ -215,7 +258,6 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
     },
 
     async createRecoveryRequest(requestID: string): Promise<Uint8Array> {
-      sweep()
       const { request, ephemeralPrivateKey } = await access.read((group) =>
         createRecoveryRequest({
           group,
@@ -223,20 +265,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
           requestID,
         }),
       )
-      const previous = pending.get(requestID)
-      if (previous != null) {
-        clearTimeout(previous.timer)
-        previous.ephemeralPrivateKey.fill(0)
-      }
-      const timer = setTimeout(() => {
-        const held = pending.get(requestID)
-        if (held?.ephemeralPrivateKey !== ephemeralPrivateKey) return
-        ephemeralPrivateKey.fill(0)
-        pending.delete(requestID)
-      }, REQUEST_TTL_MS)
-      const nodeTimer = timer as unknown as { unref?: () => void }
-      nodeTimer.unref?.()
-      pending.set(requestID, { ephemeralPrivateKey, mintedAt: Date.now(), timer })
+      pending.put(requestID, ephemeralPrivateKey)
       return utf8.encode(request)
     },
 
@@ -262,7 +291,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
             group,
             sealed,
             requestID,
-            ephemeralPrivateKey: held.ephemeralPrivateKey,
+            ephemeralPrivateKey: held,
           }),
         )
       } catch {
@@ -284,8 +313,6 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
         // on a branch of its own the moment it lost the compare-and-set.
         onAccepted: async () => {
           await access.replace(rejoined.group)
-          held.ephemeralPrivateKey.fill(0)
-          clearTimeout(held.timer)
           if (pending.get(requestID) === held) pending.delete(requestID)
         },
       }
@@ -316,7 +343,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
             group,
             sealed,
             requestID,
-            ephemeralPrivateKey: held.ephemeralPrivateKey,
+            ephemeralPrivateKey: held,
           }),
         )
       } catch {
@@ -336,17 +363,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       // Epoch-INDEPENDENT by construction: the genesis anchor never changes, so a peer
       // stranded at any epoch derives the same rendezvous. See the class doc — this is not
       // a confidential value.
-      return await access.read(async (group) => {
-        const { cipherSuite } = group.context
-        return await cipherSuite.kdf.expand(
-          await cipherSuite.kdf.extract(
-            utf8.encode(group.groupID),
-            encodeGroupAnchor(group.anchor),
-          ),
-          utf8.encode(RECOVERY_LABEL),
-          32,
-        )
-      })
+      return await access.read(deriveRecoverySecret)
     },
   }
 }

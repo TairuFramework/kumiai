@@ -1,4 +1,4 @@
-import { readMessageAAD, readMessageEpoch } from '@kumiai/mls'
+import { type GroupHandle, readMessageAAD, readMessageEpoch } from '@kumiai/mls'
 import {
   AppFrameStorageError,
   type GroupCrypto,
@@ -48,6 +48,39 @@ const ENTRY_NONCE_BYTES = 24
  * rather than an AEAD refusal indistinguishable from a wrong epoch or a tampered frame.
  */
 const ENTRY_VERSION = 1
+
+export function deriveEntryKey(handle: GroupHandle, label?: string): Promise<Uint8Array> {
+  return handle.exportSecret(label ?? ENTRY_SEAL_LABEL, new Uint8Array(), SECRET_LENGTH)
+}
+
+export function sealEntries(
+  key: Uint8Array,
+  entries: Uint8Array,
+  runtime: Runtime = createRuntime(),
+): Uint8Array {
+  // Random per seal: two members can frame a commit at the same epoch.
+  const nonce = runtime.getRandomValues(new Uint8Array(ENTRY_NONCE_BYTES))
+  const ciphertext = xchacha20poly1305(key, nonce).encrypt(entries)
+  const sealed = new Uint8Array(1 + nonce.length + ciphertext.length)
+  sealed[0] = ENTRY_VERSION
+  sealed.set(nonce, 1)
+  sealed.set(ciphertext, 1 + nonce.length)
+  return sealed
+}
+
+function assertSealedEntryBlob(sealed: Uint8Array): void {
+  if (sealed.length <= 1 + ENTRY_NONCE_BYTES) throw new Error('openEntries: not a sealed blob')
+  if (sealed[0] !== ENTRY_VERSION) {
+    throw new Error(`openEntries: unsupported blob version ${sealed[0]}`)
+  }
+}
+
+export function openEntries(key: Uint8Array, sealed: Uint8Array): Uint8Array {
+  assertSealedEntryBlob(sealed)
+  return xchacha20poly1305(key, sealed.subarray(1, 1 + ENTRY_NONCE_BYTES)).decrypt(
+    sealed.subarray(1 + ENTRY_NONCE_BYTES),
+  )
+}
 
 export type GroupCryptoParams = {
   access: HandleAccess
@@ -113,39 +146,19 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
     wrap: (bytes, opts) => access.mutate((group) => group.encrypt(bytes, opts)),
 
     sealEntries: async (bytes) => {
-      const key = await access.read((group) =>
-        group.exportSecret(entryLabel, EXPORT_CONTEXT, SECRET_LENGTH),
-      )
+      const key = await access.read((group) => deriveEntryKey(group, entryLabel))
       try {
-        // Random per seal: two members can frame a commit at the same epoch, and a repeated nonce
-        // under one key is a break. 24 bytes makes a collision unreachable without a counter.
-        const nonce = runtime.getRandomValues(new Uint8Array(ENTRY_NONCE_BYTES))
-        const ciphertext = xchacha20poly1305(key, nonce).encrypt(bytes)
-        const sealed = new Uint8Array(1 + nonce.length + ciphertext.length)
-        sealed[0] = ENTRY_VERSION
-        sealed.set(nonce, 1)
-        sealed.set(ciphertext, 1 + nonce.length)
-        return sealed
+        return sealEntries(key, bytes, runtime)
       } finally {
         key.fill(0)
       }
     },
 
     openEntries: async (sealed) => {
-      if (sealed.length <= 1 + ENTRY_NONCE_BYTES) throw new Error('openEntries: not a sealed blob')
-      if (sealed[0] !== ENTRY_VERSION) {
-        // Distinguishable on purpose: every other failure here is an opaque AEAD refusal, and
-        // this lets an operator tell "unsupported version" from a wrong epoch or a tampered
-        // frame — the lane treats all three the same way (poison, advance, heal) regardless.
-        throw new Error(`openEntries: unsupported blob version ${sealed[0]}`)
-      }
-      const key = await access.read((group) =>
-        group.exportSecret(entryLabel, EXPORT_CONTEXT, SECRET_LENGTH),
-      )
+      assertSealedEntryBlob(sealed)
+      const key = await access.read((group) => deriveEntryKey(group, entryLabel))
       try {
-        return xchacha20poly1305(key, sealed.subarray(1, 1 + ENTRY_NONCE_BYTES)).decrypt(
-          sealed.subarray(1 + ENTRY_NONCE_BYTES),
-        )
+        return openEntries(key, sealed)
       } finally {
         key.fill(0)
       }

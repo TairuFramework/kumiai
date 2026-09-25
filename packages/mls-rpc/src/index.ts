@@ -20,11 +20,21 @@
  */
 
 export { type HandleAccess, type SimpleHandleAccessParams, simpleHandleAccess } from './access.js'
-export { createGroupCrypto, ENTRY_SEAL_LABEL, type GroupCryptoParams } from './crypto.js'
+export {
+  createGroupCrypto,
+  deriveEntryKey,
+  ENTRY_SEAL_LABEL,
+  type GroupCryptoParams,
+  openEntries,
+  sealEntries,
+} from './crypto.js'
 export {
   createGroupMLS,
   createLedgerEntrySlot,
+  createRecoveryPending,
+  deriveRecoverySecret,
   type GroupMLSParams,
   type LedgerEntrySlot,
   RECOVERY_LABEL,
+  type RecoveryPending,
 } from './mls.js'
