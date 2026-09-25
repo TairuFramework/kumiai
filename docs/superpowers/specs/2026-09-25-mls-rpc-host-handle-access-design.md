@@ -75,7 +75,7 @@ A probe against Kubun (real KubunDB and SQLite) showed the scalar cannot be exac
 
 The deeper cause is in `@kumiai/rpc`: the commit mutex and the app-lane mutex are not the host's handle lock, so even an exact read can go stale before the awaited handle operation. The rule for this release:
 
-- `epoch()` stays synchronous. Only fast paths and diagnostics read it: the constructor seeds, the unknown-version classifier inputs (`peer.ts:1448,1487`), and error messages.
+- `epoch()` stays synchronous. Only fast paths and diagnostics read it: the constructor seeds and error messages. The unknown-version classifier inputs (`peer.ts:1448,1487`) feed `classifyCommit` and can move the cursor, so they take the locked epoch too.
 - Every decision takes its epoch from a port result computed under the handle lock (`access.read` or `access.mutate`). The port result carries the epoch it acted at, and `@kumiai/rpc` decides from that value:
   - commit classification and the cursor advance (`peer.ts:1532,1604`): `applyCommit` compares the frame epoch under the lock and returns `epochBefore` and `epochAfter`; a mismatch returns a disposition, not an advance, so the peer reclassifies instead of moving its cursor past an applicable commit;
   - advance baselines and repair (`peer.ts:1348,1363,1376,1681,1689,2382,2395`): use `epochBefore` / `epochAfter` from the port result, not two scalar reads;
