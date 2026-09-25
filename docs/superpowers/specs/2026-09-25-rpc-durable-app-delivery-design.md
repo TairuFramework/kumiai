@@ -4,6 +4,9 @@
 `@kubun/plugin-p2p`, which needs a transient failure between MLS open and host apply to recover
 automatically.
 
+**Revision 4** — revision 3 plus its review fixes: delivery barrier on the earliest unresolved fetched
+position, host save ordering and same-epoch guard, rebuild after partial walk progress, retention until
+durable open, fail-closed storage stall with an operator drop, retried startup restore, settled fetches.
 **Revision 3** — revision 2 plus the fixes from its blind review (key zeroing, walk-wide storage stop,
 isolated staged state, liveness retries, fetch-only positions, sender check, guarantee boundary, Kubun
 lock order). **Revision 2** — after a blind review found that (1) `GroupHandle.decrypt` commits the consumed key to
@@ -31,7 +34,10 @@ in log order per protocol, with a stable frame identity the host deduplicates on
 today's semantics.
 
 **Guarantee boundary.** The guarantee holds for frames a **conforming hub** appended to the topic log and
-still retains when this peer reads it. Out of scope, documented:
+still retains until this peer has **durably opened** them (a failed `persistOpened` followed by a crash
+and retention expiry before the retry loses the frame). The AAD authenticates intent and topic only; a
+malicious hub may still omit, reorder, or lie about fetched positions, as the repo's hub threat model
+already allows. Out of scope, documented:
 
 - A hub (or member) that delivers a log-intent frame only by mailbox, or never appends it: the hub is
   already trusted for availability and can drop any frame. Such a frame is acked, not opened, and lost.
@@ -207,6 +213,11 @@ persistOpened(stagedState, record))`, wrapping a `persistOpened` throw in an `Ap
   peer.
 - The host must never hold a database transaction (or its single connection) while it awaits a peer or
   handle operation. A handler finishes its own transaction before awaiting `commit()`, `dispatch()`, etc.
+- **Save ordering.** `persistOpened`'s write must be ordered after any handle save the host issued
+  before it, and the host store must reject an older state at the same epoch (a monotonic state
+  version). Otherwise a delayed earlier save overwrites the staged state while the pending record
+  survives. Kubun needs both (its registry persists after releasing its mutex, and its MLS state upsert
+  accepts an older same-epoch state).
 - **Kubun adoption prerequisite.** Kubun's registry persists outside its per-group lock precisely because
   some transactions await `readHandle` while holding the single connection
   (`../kubun/packages/plugin-p2p/src/groups/group-handle-registry.ts:268`, regression test
@@ -229,6 +240,10 @@ pre-open. For intent `log`:
 In durable mode, bytes and positions of log-intent frames come **only** from `fetchTopic`. Frames with
 intent `ephemeral`, or an unreadable AAD, keep today's open-once path.
 
+**Settled fetches.** `loadSegment()` uses `Promise.allSettled` over the protocol fetches and rethrows the
+first failure only after all have settled, so no fetch keeps mutating buffers or `fetched` positions after
+the app-lane mutex is released and a retry starts.
+
 **Liveness.** A drain request never depends on a later push:
 
 - A failed fetch or a storage failure reschedules the drain with the delivery-queue backoff (1 s doubling
@@ -243,10 +258,28 @@ mutex, as today, in log order. For a frame at the handle's epoch:
   is appended to that protocol's delivery queue. The drain does not emit.
 - decoded intent `ephemeral`: dead (a log-retained frame must carry log intent).
 - `unwrap` throws `AppFrameStorageError`: the frame stays `sealed`, the cursor does not pass it, and
-  `deliver()` **rejects**. The commit walk treats that like a failed pull: it stops before applying the
+  `deliver()` **rejects** (after every protocol's fetch has settled; see "Settled fetches"). The commit walk treats that like a failed pull: it stops before applying the
   next commit, so no epoch advances past a log frame that was neither durably opened nor classified
   dead. The walk retries on the liveness schedule above. (Continuing would mark the frame dead on the
   next drain by the below-epoch rule, `app-lane.ts:420`.)
+
+**Rebuild after partial progress.** The walk may have applied commits before the drain that rejects. If
+the epoch or anchor moved during a pull that then rejects, `pullCommits` still runs `rebuildEpoch()` (and
+anchor capture) before rethrowing the original error, so the runtime never sits on an old epoch or topic
+while a retry finds "no new advance".
+
+**Fail-closed storage stall.** A persistent `persistOpened` fault halts the commit walk for this group:
+commits behind the frame are not classified, strand signals are delayed, and `recover()` blocks at its
+first pull. This is deliberate (no epoch passes an unpersisted log frame). It is made observable and
+operable:
+
+- The walk retry resumes the full **journal-first** lane operation (replay, ledger invariant, pull), not
+  just the app drain, on the liveness schedule.
+- A host notice `onAppDeliveryStalled({ groupID, protocol, topicID, position, error })` fires (through
+  the shared `notifyHost` outbox) when a storage failure first blocks a frame, and again only if the
+  blocking frame changes.
+- `GroupPeer.dropAppFrame(topicID, position)` lets an operator accept the loss: it marks that buffered
+  frame dead (cursor may pass it) and resumes the walk. It never touches a frame already `pending`.
 - `unwrap` throws anything else: dead, as today.
 
 Not-this-epoch rules are unchanged.
@@ -265,6 +298,13 @@ Not-this-epoch rules are unchanged.
 One ordered queue per protocol, fed only by the drain (and by restart), running **outside** the commit
 mutex and the app-lane mutex.
 
+**Delivery barrier.** A non-rotating commit keeps the app topic, so a member already at epoch *e+1* can
+append position A before a lagging member at *e* appends B. The drain keeps A sealed (ahead) and opens B.
+Delivering B first would break log order. So each protocol's worker delivers a record only when no
+**earlier fetched position** of the same topic is still unresolved (`sealed`); `pending` and `done`
+earlier positions do not block. Records of older segments are not blocked by the current segment's
+buffer. Test the epoch-inversion case.
+
 For each record, in `(segment, position)` order:
 
 1. Parse the payload. Self-echo (normalized `senderDID === localDID`), malformed JSON, not
@@ -281,7 +321,8 @@ For each record, in `(segment, position)` order:
 6. `complete()` throws: retry with the same backoff; the handler may run again (at least once).
 
 **Restart.** In `ready`, after the anchor is restored and **before** `initControlLanes()` (whose seed
-pull runs the first drain), `list()` all records and enqueue them per protocol by `frame.protocol`, in
+pull runs the first drain), `list()` all records (a rejected `list()` is retried on the liveness
+backoff, and disposal aborts the wait; the seed pull never runs before restoration succeeds) and enqueue them per protocol by `frame.protocol`, in
 `(segment, position)` order. A record naming a protocol this peer does not serve is completed without
 delivery. `ready` does not wait for any handler: a handler awaiting `commit()` would otherwise wait on
 `ready` itself. The restored records also seed the app lane: when the drain buffers a position whose
@@ -344,6 +385,14 @@ double must be no more permissive than the real port.
 - Failed fetch with no later push: the drain retries on its own and delivers.
 - Publication in the gap between the seed pull and listener registration: delivered after startup.
 - Directed and self-inbox AAD round trips with the new format.
+- Epoch inversion: ahead frame A before at-epoch frame B on one topic: B waits, A then B delivered.
+- Storage failure in the final drain after an applied roster-changing commit, then recovery with no
+  further commit: the runtime is on the new epoch and topic.
+- Persistent storage fault: `onAppDeliveryStalled` once; `dropAppFrame` resumes the walk.
+- Transient `list()` failure at startup: retried; seed pull waits for it.
+- One protocol's fetch rejecting fast while another's is delayed: no buffer mutation after the retry
+  begins.
+- Retention expiry after a failed durable open and a crash: frame lost, documented behaviour.
 - Single-connection SQLite host double: `persistOpened` inside the handle mutex while a handler
   transaction runs does not deadlock under the host contract.
 - Hub stripping `logPosition` or adding it to an ephemeral frame changes nothing (path by AAD).
