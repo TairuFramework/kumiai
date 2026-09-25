@@ -574,7 +574,10 @@ export class GroupHandle {
    * Throws {@link LedgerIncompleteError} on a head mismatch; the caller drops that
    * responder and tries the next.
    */
-  async bootstrapLedger(tokens: Array<string>): Promise<void> {
+  async bootstrapLedger(
+    tokens: Array<string>,
+    opts?: { persist?: (handle: GroupHandle) => Promise<void> | void },
+  ): Promise<void> {
     return mutexFor(this).run(async () => {
       const authenticated = readLedgerHead(this)
       if (authenticated == null) {
@@ -619,13 +622,30 @@ export class GroupHandle {
         )
         .map(({ verified }) => verified)
 
+      const previous = {
+        state: this.#state,
+        ledger: this.#ledger,
+        entryBodies: this.#entryBodies,
+        roster: this.#roster,
+        registry: this.#registry,
+      }
+      const folded = foldLedgerControl(log, this.#anchor, this.groupID)
       this.#ledger = log
       this.#entryBodies = new Map(
         log.map(({ entryID, token, verified }) => [entryID, { token, verified }]),
       )
-      const folded = foldLedgerControl(log, this.#anchor, this.groupID)
       this.#roster = folded.roster
       this.#registry = folded.registry
+      try {
+        await opts?.persist?.(this)
+      } catch (error) {
+        this.#state = previous.state
+        this.#ledger = previous.ledger
+        this.#entryBodies = previous.entryBodies
+        this.#roster = previous.roster
+        this.#registry = previous.registry
+        throw error
+      }
 
       // SURFACED HERE TOO, not only on the commit path. A heal is how a peer that missed commits
       // catches up — it rejoins, gathers the whole ledger, and lands here — so a bootstrap that
@@ -869,7 +889,8 @@ export class GroupHandle {
   ): Promise<{
     callback: IncomingMessageCallback | undefined
     capture: { rejected?: RejectedCommit }
-    applyOnAccept: () => void
+    applyOnAccept: (notify?: boolean) => () => void
+    isCommitMessage: boolean
   }> {
     const callerPolicy = opts?.commitPolicy ?? this.#commitPolicy
     const capture: { rejected?: RejectedCommit } = {}
@@ -997,7 +1018,7 @@ export class GroupHandle {
       return defaultCommitPolicy(incoming, context)
     }
 
-    const applyOnAccept = () => {
+    const applyOnAccept = (notify = true): (() => void) => {
       // Appended, never deduped: the log records what this commit enacted, at the
       // position the head chained it.
       for (const { token, verified, entryID } of acceptedEntries) {
@@ -1006,15 +1027,24 @@ export class GroupHandle {
       }
       this.#roster = candidateRoster
       this.#registry = candidateRegistry
-      if (surfaced.length > 0) this.#onLedgerEntries?.(surfaced)
-      this.emitControlEvents(
-        acceptedEntries
-          .filter(({ verified }) => verified.entry.type === DEVICE_ENTRY_TYPE)
-          .map(({ verified }) => verified),
-      )
+      const emit = () => {
+        if (surfaced.length > 0) this.#onLedgerEntries?.(surfaced)
+        this.emitControlEvents(
+          acceptedEntries
+            .filter(({ verified }) => verified.entry.type === DEVICE_ENTRY_TYPE)
+            .map(({ verified }) => verified),
+        )
+      }
+      if (notify) emit()
+      return emit
     }
 
-    return { callback: wrapCommitPolicy(combined, capture), capture, applyOnAccept }
+    return {
+      callback: wrapCommitPolicy(combined, capture),
+      capture,
+      applyOnAccept,
+      isCommitMessage,
+    }
   }
 
   /**
@@ -1209,7 +1239,10 @@ export class GroupHandle {
    */
   async processMessage(
     message: Uint8Array | unknown,
-    opts?: { commitPolicy?: IncomingMessageCallback },
+    opts?: {
+      commitPolicy?: IncomingMessageCallback
+      persist?: (handle: GroupHandle) => Promise<void> | void
+    },
   ): Promise<Uint8Array | null> {
     let decoded: unknown = message
     if (message instanceof Uint8Array) {
@@ -1220,7 +1253,9 @@ export class GroupHandle {
       decoded = parsed
     }
     return mutexFor(this).run(async () => {
-      const { callback, capture, applyOnAccept } = await this.#prepareCommitPipeline(decoded, opts)
+      const { callback, capture, applyOnAccept, isCommitMessage } =
+        await this.#prepareCommitPipeline(decoded, opts)
+      const previousState = this.#state
       const result = await mlsProcessMessage({
         context: this.#context,
         state: this.#state,
@@ -1228,17 +1263,43 @@ export class GroupHandle {
         ...(callback != null && { callback }),
       })
       this.#state = result.newState
-      zeroAll(result.consumed)
       if (result.kind === 'newState' && result.actionTaken === 'reject') {
+        zeroAll(result.consumed)
         throw new CommitRejectedError(
           capture.rejected?.proposals ?? [],
           capture.rejected?.senderLeafIndex,
         )
       }
       if (result.kind === 'applicationMessage') {
+        zeroAll(result.consumed)
         return result.message
       }
-      applyOnAccept()
+      if (isCommitMessage && opts?.persist != null) {
+        const previousLedger = this.#ledger
+        const previousEntryBodies = this.#entryBodies
+        const previousRoster = this.#roster
+        const previousRegistry = this.#registry
+        // The accept callback appends to these collections. Give the tentative
+        // state its own copies so rollback restores the exact old objects.
+        this.#ledger = [...previousLedger]
+        this.#entryBodies = new Map(previousEntryBodies)
+        const notify = applyOnAccept(false)
+        try {
+          await opts.persist(this)
+        } catch (error) {
+          this.#state = previousState
+          this.#ledger = previousLedger
+          this.#entryBodies = previousEntryBodies
+          this.#roster = previousRoster
+          this.#registry = previousRegistry
+          throw error
+        }
+        zeroAll(result.consumed)
+        notify()
+      } else {
+        zeroAll(result.consumed)
+        applyOnAccept()
+      }
       return null
     })
   }

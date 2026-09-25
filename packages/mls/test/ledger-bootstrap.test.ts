@@ -1,5 +1,5 @@
 import { normalizeDID, type OwnIdentity, randomIdentity } from '@kokuin/token'
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 import {
   CommitRejectedError,
@@ -330,7 +330,51 @@ describe('bootstrapLedger surfaces what it brought in', () => {
       },
     })
 
-    await healed.bootstrapLedger(await aliceGroup.getLedger())
+    const honestLedger = await aliceGroup.getLedger()
+    const controlEvents = vi.spyOn(healed, 'emitControlEvents')
+    const before = {
+      state: healed.state,
+      ledger: healed.ledger,
+      roster: healed.roster,
+      registry: healed.registry,
+      epoch: healed.epoch,
+    }
+    await expect(
+      healed.bootstrapLedger(honestLedger, {
+        persist: async () => {
+          throw new Error('disk failed')
+        },
+      }),
+    ).rejects.toThrow('disk failed')
+    expect(healed.state).toBe(before.state)
+    expect(healed.ledger).toBe(before.ledger)
+    expect(healed.roster).toBe(before.roster)
+    expect(healed.registry).toBe(before.registry)
+    expect(healed.epoch).toBe(before.epoch)
+    expect(await healed.isLedgerComplete()).toBe(false)
+    expect(surfaced).toEqual([])
+    expect(controlEvents).not.toHaveBeenCalled()
+
+    let release!: () => void
+    const pending = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let entered = false
+    const applying = healed.bootstrapLedger(honestLedger, {
+      persist: async (handle) => {
+        expect(handle).toBe(healed)
+        expect(handle.ledgerTokens).toEqual(honestLedger)
+        expect(surfaced).toEqual([])
+        entered = true
+        await pending
+      },
+    })
+    await vi.waitFor(() => expect(entered).toBe(true))
+    expect(surfaced).toEqual([])
+    expect(controlEvents).not.toHaveBeenCalled()
+    release()
+    await applying
+    expect(controlEvents).toHaveBeenCalledOnce()
 
     // The app entry, and only it: the invite's role entries are `kumiai.*`, which the roster fold
     // consumes rather than surfacing.

@@ -70,6 +70,59 @@ describe('device events', () => {
     expect(seen[0]?.map((r) => r.device)).toContain(normalizeDID(g.targetDeviceID))
   })
 
+  test('a failed commit persist emits no revoke; retry emits it once', async () => {
+    const g = await twoDeviceProfileGroup()
+    const seen: Array<string> = []
+    g.creatorGroup.events.on('deviceRevoked', (batch) => {
+      seen.push(...batch.map((entry) => entry.device))
+    })
+    const res = await revokeDevice(g.managerGroup, g.managerIdentity, {
+      device: g.targetDeviceID,
+      capability: g.capability,
+    })
+    publishTokens(g.tokens, res.newGroup)
+    const before = g.creatorGroup.epoch
+    await expect(
+      g.creatorGroup.processMessage(res.commitMessage, {
+        persist: async () => {
+          throw new Error('disk failed')
+        },
+      }),
+    ).rejects.toThrow('disk failed')
+    expect(g.creatorGroup.epoch).toBe(before)
+    expect(seen).toEqual([])
+    await g.creatorGroup.processMessage(res.commitMessage, { persist: async () => {} })
+    expect(seen).toEqual([normalizeDID(g.targetDeviceID)])
+  })
+
+  test('a failed bootstrap persist emits no revoke; retry emits it once', async () => {
+    const g = await twoDeviceProfileGroup()
+    const res = await revokeDevice(g.managerGroup, g.managerIdentity, {
+      device: g.targetDeviceID,
+      capability: g.capability,
+    })
+    const fresh = await restoreGroup({
+      state: res.newGroup.state,
+      credential: res.newGroup.credential,
+      ledgerEntries: [],
+    })
+    const seen: Array<string> = []
+    fresh.events.on('deviceRevoked', (batch) => {
+      seen.push(...batch.map((entry) => entry.device))
+    })
+    await expect(
+      fresh.bootstrapLedger(res.newGroup.ledgerTokens, {
+        persist: async () => {
+          throw new Error('disk failed')
+        },
+      }),
+    ).rejects.toThrow('disk failed')
+    expect(fresh.ledgerTokens).toEqual([])
+    expect(seen).toEqual([])
+    await fresh.bootstrapLedger(res.newGroup.ledgerTokens, { persist: async () => {} })
+    expect(seen).toEqual([normalizeDID(g.targetDeviceID)])
+  })
+
   test('a receiver processing a register/add-only commit fires no deviceRevoked', async () => {
     const g = await twoDeviceProfileGroup()
     const seen: Array<Array<{ device: string; controller: string }>> = []
