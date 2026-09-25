@@ -1026,6 +1026,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     trigger: RecoveryTrigger
     entries: Array<string>
   } | null = null
+  let rejoinAnchorNeedsCapture = false
+  let rejoinRuntimeNeedsBuild = false
 
   /**
    * Entries a heal decided must be re-enacted, waiting for a lane operation with a return value —
@@ -1866,9 +1868,24 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     }
   }
 
+  const repairRejoin = async (): Promise<void> => {
+    if (awaitingBootstrap == null) return
+    // Restore the subscription before gathering the ledger: responders may already have
+    // rotated to the new app anchor. A failed repair remains pending for the next lane call.
+    if (rejoinAnchorNeedsCapture) {
+      await captureAnchor()
+      rejoinAnchorNeedsCapture = false
+    }
+    if (rejoinRuntimeNeedsBuild) {
+      await rebuildEpoch()
+      rejoinRuntimeNeedsBuild = false
+    }
+  }
+
   const finalizeBootstrap = async (port: GroupMLS): Promise<void> => {
     if (awaitingBootstrap == null) return
     const { attemptID, trigger, entries } = awaitingBootstrap
+    await repairRejoin()
     const held = new Set(await port.getLedger())
     const owed = entries.filter((token) => !held.has(token))
     if (owed.length > 0) pendingReenact = [...pendingReenact, ...owed]
@@ -1901,6 +1918,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    */
   const ensureLedger = async (deadline: number): Promise<boolean> => {
     if (mls == null || rendezvousTopicID == null) return true
+    await repairRejoin()
     const port = mls
     const topicID = rendezvousTopicID
     if (await port.isLedgerComplete()) return true
@@ -2293,11 +2311,15 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
               // ratchet itself: a pre-adoption failure leaves this snapshot with the retry.
               if (crypto.epoch() !== epochBeforeRejoin) {
                 awaitingBootstrap = { attemptID, trigger, entries: inFlight }
+                stranded = false
+                rejoinAnchorNeedsCapture = true
+                rejoinRuntimeNeedsBuild = true
               }
             }
           },
           () => true,
         )
+        rejoinAnchorNeedsCapture = false
         assertLive()
         const accepted = asLogPosition(sequenceID)
         reconciledHead = accepted
@@ -2314,8 +2336,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         // The one place the commit gate is released: the rejoin landed, so this peer's leaf is
         // back in the tree and the stale-epoch fork it guards is closed. A bootstrap that still
         // fails below is `commit()`'s own ledger-completeness check to handle.
-        stranded = false
         await rebuildEpoch()
+        rejoinRuntimeNeedsBuild = false
         assertLive()
 
         // 8. Bootstrap: REQUIRED, not a formality. Until it runs, the ledger is empty against a

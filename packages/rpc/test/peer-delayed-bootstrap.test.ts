@@ -13,7 +13,7 @@ import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
 const members = ['alice', 'bob', 'carol']
 const owed = 'circle:x=Alice'
 
-async function setup(byte: number) {
+async function setup(byte: number, onStrand?: () => void) {
   const hub = new FakeHub()
   const rs = new Uint8Array(32).fill(byte)
   let lying = true
@@ -48,6 +48,7 @@ async function setup(byte: number) {
     onRecovery: (event) => {
       events.push(event)
     },
+    ...(onStrand != null ? { onStrand } : {}),
   })
   const recoveryRequests = () =>
     hub.published.filter(
@@ -98,6 +99,41 @@ describe('delayed ledger bootstrap', () => {
     await bob.peer.dispose()
   })
 
+  test('a failed anchor save after adoption repairs the runtime before bootstrapped', async () => {
+    let armFailure = false
+    const state = await setup(0xca, () => {
+      armFailure = true
+    })
+    const { alice, bob, events } = state
+    state.stopLying()
+    const error = new Error('anchor save failed')
+    const save = alice.anchorStore.save.bind(alice.anchorStore)
+    vi.spyOn(alice.anchorStore, 'save').mockImplementation(async (anchor) => {
+      if (armFailure) {
+        armFailure = false
+        throw error
+      }
+      return save(anchor)
+    })
+    // Her own unmerged commit establishes the strand gate without stranding the responder.
+    await publishCommit({
+      hub: state.hub,
+      senderDID: 'alice',
+      committerDID: 'alice',
+      recoverySecret: state.rs,
+      epoch: alice.mls.epoch(),
+    })
+    await vi.waitFor(() => expect(events.some((event) => event.phase === 'failed')).toBe(true))
+    expect(events[1]).toMatchObject({ phase: 'failed', reason: 'error', error })
+    expect(await alice.peer.replay()).toEqual({ reenact: [owed] })
+    expect(events.filter((event) => event.phase === 'bootstrapped')).toHaveLength(1)
+    expect(alice.peer.anchorEpoch()).toBe(alice.mls.epoch())
+    await expect(
+      alice.peer.commit(buildLedgerCommit(alice, ['circle:y=Alice'])),
+    ).resolves.toBeDefined()
+    await alice.peer.dispose()
+    await bob.peer.dispose()
+  })
   test('replay drains the owed entry once when the post-bootstrap ledger read throws', async () => {
     const state = await setup(0xc7)
     const { alice, bob, events } = state
