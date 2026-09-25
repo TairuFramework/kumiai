@@ -6,6 +6,12 @@ the whole group (events), a subgroup, anycast a request, gather replies, or run
 directed 1:1 RPC (request/stream/channel) to a single member — all over
 epoch-rotating opaque topics, with an authenticated sender on every surface.
 
+`peer.protocol(name).gather(prc, { param, quorum?, timeoutMs?, onReply?, signal? })` resolves with
+the collected replies. `onReply` runs once per accepted reply as it arrives, with its authenticated
+`senderDID` and the same object stored in the result array. Treat that object as read-only. A
+throwing callback is ignored. Aborting `signal` resolves with replies collected so far. A signal
+already aborted resolves `[]` without sending, including while the peer waits for initial readiness.
+
 ## The two consumer ports
 
 group-rpc never imports MLS. It owns transport and orchestration; the consumer supplies the crypto

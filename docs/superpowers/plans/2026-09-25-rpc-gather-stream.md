@@ -232,12 +232,12 @@ authority for every behaviour below.
 - Modify: `packages/broadcast/README.md`, `packages/rpc/README.md`
 - Create: `.changeset/gather-stream.md`
 
-- [ ] **Step 1: README.** In each README's gather description, document: `onReply` (per accepted
+- [x] **Step 1: README.** In each README's gather description, document: `onReply` (per accepted
   reply, authenticated `senderDID`, same object as the result, throwing ignored) and `signal` (abort
   resolves partial replies; pre-aborted resolves `[]` without sending; rpc: aborts the wait on `ready`).
   Surface only; no rationale essays.
 
-- [ ] **Step 2: Change intent** `.changeset/gather-stream.md`:
+- [x] **Step 2: Change intent** `.changeset/gather-stream.md`:
   ```md
   ---
   "@kumiai/broadcast": minor
@@ -252,12 +252,12 @@ authority for every behaviour below.
   Check `.changeset/roster-leaf-identity.md` for the exact bump keyword the repo uses within the
   band and match it.
 
-- [ ] **Step 3: Full gate**
+- [x] **Step 3: Full gate**
 
   Run: `pnpm exec turbo run test:types test:unit --force` — expect all successful and `Cached: 0`.
   Run: `pnpm exec vitest run --root tests/integration` — expect PASS (exported signature changed).
 
-- [ ] **Step 4: Lint and commit**
+- [x] **Step 4: Lint and commit**
 
   ```bash
   rtk proxy pnpm run lint
