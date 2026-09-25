@@ -518,6 +518,24 @@ export function testGroupCryptoConformance(params: GroupCryptoConformanceParams)
         })
       })
 
+      test('refuses a ciphertext change with a matching linear-XOR tag correction', async () => {
+        await withGroup(2, 'entries-linear-forgery', async ({ members }) => {
+          const alice = memberAt(members, 0)
+          const bob = memberAt(members, 1)
+          const sealed = await alice.crypto.sealEntries(
+            utf8.encode('a message long enough to forge'),
+          )
+          for (const tagBytes of [8, 16, 32]) {
+            const forged = Uint8Array.from(sealed)
+            const index = tagBytes + 3
+            const before = forged[index] as number
+            forged[index] = before ^ 1
+            forged[3] = (forged[3] as number) ^ ((before + 3) & 0xff) ^ (((before ^ 1) + 3) & 0xff)
+            await refuses(() => bob.crypto.openEntries(forged))
+          }
+        })
+      })
+
       test('is AGREED: every member at an epoch opens what any other sealed, with nothing exchanged', async () => {
         await withGroup(2, 'entries-agreed', async ({ members }) => {
           const alice = memberAt(members, 0)
