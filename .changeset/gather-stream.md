@@ -1,6 +1,6 @@
 ---
-"@kumiai/broadcast": minor
-"@kumiai/rpc": minor
+"@kumiai/broadcast": patch
+"@kumiai/rpc": patch
 ---
 
 `gather` gains `onReply` (called once per accepted, attributed reply as it arrives) and `signal`
