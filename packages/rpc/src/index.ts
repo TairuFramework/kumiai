@@ -74,6 +74,12 @@ export {
   type GroupPeerMLSParams,
   type GroupPeerParams,
   type ProtocolSurface,
+  type RecoveryEvent,
+  type RecoveryFailureReason,
+  type RecoveryTrigger,
+  type StrandConfidence,
+  type StrandKind,
+  type StrandObservation,
 } from './peer.js'
 export {
   defineGroupProtocol,

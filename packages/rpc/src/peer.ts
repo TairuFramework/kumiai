@@ -71,6 +71,7 @@ import {
   HANDSHAKE_KIND,
   HANDSHAKE_VERSION,
 } from './handshake.js'
+import { notifyHost } from './host-notice.js'
 import {
   createHubMux,
   type HubMux,
@@ -153,6 +154,12 @@ const COMMIT_ATTEMPT_CEILING = 1000
  */
 const SUPPRESSED_REQUESTS_MAX = 1024
 
+const CONFIDENCE_RANK: Record<StrandConfidence, number> = {
+  claimed: 0,
+  observed: 1,
+  authenticated: 2,
+}
+
 /**
  * The MLS half of a peer: the lifecycle port, the durable journal, the restart-adopt hook, and the
  * durable anchor/cursor stores. They arrive together or not at all — each missing piece fails
@@ -190,6 +197,51 @@ export type GroupPeerMLSParams = {
    */
   adoptJournalled: (journal: Uint8Array) => Promise<void>
 }
+
+export type StrandKind = 'own-unmerged' | 'fork-losing' | 'ahead' | 'unknown-version'
+/**
+ * For `own-unmerged`, `authenticated` means this device sealed a commit at this epoch that the
+ * hub now places in the log. `readCommitHeader` identifies its leaf from PrivateMessage sender
+ * data, AEAD-opened with this epoch's `sender_data_secret` and a ciphertext sample. Commit content
+ * is unverified; a hub can tamper past the sample and serve a captured, rejected frame.
+ */
+export type StrandConfidence = 'authenticated' | 'observed' | 'claimed'
+/** A stranded-frame notice. `own-unmerged` does not prove commit content or hub acceptance; heal. */
+export type StrandObservation = {
+  groupID: string
+  position: string
+  commitDigest: string | null
+  localEpoch: number
+  claimedEpoch: number | null
+  kind: StrandKind
+  confidence: StrandConfidence
+}
+
+export type RecoveryTrigger = 'automatic' | 'consumer'
+export type RecoveryFailureReason =
+  | 'no-responder'
+  | 'bootstrap-failed'
+  | 'deadline'
+  | 'disposed'
+  | 'error'
+
+type RecoveryEventBase = { groupID: string; attemptID: string; trigger: RecoveryTrigger }
+
+export type RecoveryEvent =
+  | (RecoveryEventBase & { phase: 'started' })
+  | (RecoveryEventBase & { phase: 'succeeded' })
+  | (RecoveryEventBase & {
+      phase: 'failed'
+      reason: RecoveryFailureReason
+      error?: unknown
+    })
+  | (RecoveryEventBase & { phase: 'bootstrapped' })
+
+type RendezvousOutcome =
+  | { kind: 'reply'; sealed: Uint8Array }
+  | { kind: 'timeout'; atDeadline: boolean }
+  | { kind: 'disposed' }
+  | { kind: 'publish-failed'; error: unknown }
 
 export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefinition>> = {
   hub: LogHub
@@ -233,6 +285,8 @@ export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefini
    * Fire-and-forget: a throw is swallowed and the drain carries on.
    */
   onAppWindowPruned?: (event: AppWindowPruned) => void | Promise<void>
+  onStrand?: (observation: StrandObservation) => void | Promise<void>
+  onRecovery?: (event: RecoveryEvent) => void | Promise<void>
   /**
    * Called when the hub definitively refuses to subscribe this peer to a topic — most plausibly a
    * retention setting above the operator's own cap, which a hub refuses rather than clamps.
@@ -920,10 +974,13 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * The heal trigger, RECORDED and never awaited where found: `recover()` takes the commit mutex,
    * so a pull that awaited it would wait on a tail including the pull. The trigger only writes
    * this flag; the pull unwinds, releases the lane, and the heal runs afterward as its own
-   * operation. `healing` stops a second wakeup starting a concurrent one.
+   * operation. An active recovery absorbs concurrent requests.
    */
   let healRequested = false
-  let healing = false
+  let activeRecovery: Promise<{ advanced: boolean }> | null = null
+  let recoveryGeneration = 0
+  let bootstrapHealRequested = false
+  let episode: { strongest: StrandConfidence } | null = null
 
   /**
    * Positive evidence this peer is off the group's line, and the sole guard on `commit()`. Set
@@ -966,6 +1023,13 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * entries rather than snapshotting an empty ledger.
    */
   let inFlightEntries: Array<string> | null = null
+  let awaitingBootstrap: {
+    attemptID: string
+    trigger: RecoveryTrigger
+    entries: Array<string>
+  } | null = null
+  let rejoinAnchorNeedsCapture = false
+  let rejoinRuntimeNeedsBuild = false
 
   /**
    * Entries a heal decided must be re-enacted, waiting for a lane operation with a return value —
@@ -973,6 +1037,33 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * re-enacts with an ordinary `commit()`.
    */
   let pendingReenact: Array<string> = []
+
+  let hostOutbox: Array<() => void> = []
+  const emitStrand = (observation: StrandObservation): void => {
+    hostOutbox.push(() => notifyHost(params.onStrand, observation))
+  }
+  const emitRecovery = (event: RecoveryEvent): void => {
+    hostOutbox.push(() => notifyHost(params.onRecovery, event))
+  }
+  const observeStrand = (observation: Omit<StrandObservation, 'groupID'>): void => {
+    bootstrapHealRequested = false
+    if (commitTopicID == null) return
+    if (
+      episode != null &&
+      CONFIDENCE_RANK[observation.confidence] <= CONFIDENCE_RANK[episode.strongest]
+    )
+      return
+    episode = { strongest: observation.confidence }
+    emitStrand({ ...observation, groupID: commitTopicID })
+  }
+  const closeEpisode = (): void => {
+    episode = null
+  }
+  const flushHostOutbox = (): void => {
+    const batch = hostOutbox
+    hostOutbox = []
+    for (const notice of batch) notice()
+  }
 
   /**
    * The group's commit mutex: every commit-lane operation serialized through one tail. The
@@ -992,7 +1083,16 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       () => {},
       () => {},
     )
-    return op
+    return op.then(
+      (value) => {
+        flushHostOutbox()
+        return value
+      },
+      (error: unknown) => {
+        flushHostOutbox()
+        throw error
+      },
+    )
   }
 
   /**
@@ -1007,9 +1107,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   let journalReplayed = false
 
   // Recovery rendezvous state, keyed by requestID.
-  const recoveryWaiters = new Map<string, (groupInfo: Uint8Array | null) => void>()
+  const recoveryWaiters = new Map<string, (outcome: RendezvousOutcome) => void>()
   const recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>()
   const pendingReplies = new Map<string, ReturnType<typeof setTimeout>>()
+  const inFlightBootstraps = new Set<Promise<void>>()
   const suppressedRequests = new Set<string>()
   /**
    * Ledger-gather waiters, keyed by requestID. Called for EVERY reply, not just the first: a
@@ -1017,6 +1118,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * to the next reply rather than giving up.
    */
   const ledgerWaiters = new Map<string, (sealed: Uint8Array) => void>()
+  const ledgerGatherFinishes = new Set<() => void>()
   const pendingLedgerReplies = new Set<ReturnType<typeof setTimeout>>()
 
   // Responder: after a jitter delay, answer a recovery request with GroupInfo sealed to the
@@ -1080,7 +1182,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         clearTimeout(timer)
         recoveryTimers.delete(reply.requestID)
       }
-      waiter(reply.groupInfo)
+      waiter({ kind: 'reply', sealed: reply.groupInfo })
     }
   }
 
@@ -1309,11 +1411,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         if (frame.version !== HANDSHAKE_VERSION) {
           // No digest: the frame's version put its commit bytes out of reach entirely. Settled at
           // `ahead` before the digest is read.
+          const localEpoch = crypto.epoch()
           const unreadable = classifyCommit({
             header: UNKNOWN_FRAME_VERSION,
             sequenceID: position,
             commitDigest: null,
-            state: { localDID, epoch: crypto.epoch(), appliedByEpoch },
+            state: { localDID, epoch: localEpoch, appliedByEpoch },
           })
           reconciledHead = position
           // Do what the classifier said, not what this branch assumes: it answers `ahead` today,
@@ -1321,6 +1424,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           if (unreadable.row === 'ahead') {
             healRequested = true
             stranded = true
+            observeStrand({
+              position,
+              commitDigest: null,
+              localEpoch,
+              claimedEpoch: null,
+              kind: 'unknown-version',
+              confidence: 'claimed',
+            })
           }
           continue
         }
@@ -1339,17 +1450,26 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           // version fails BEFORE the commit bytes are extracted, so there is no next frame to
           // heal from — dropping it would step over the group's whole future. To the classifier.
           if (isUnsupportedCommitFrameVersion(error)) {
+            const localEpoch = crypto.epoch()
             const unreadable = classifyCommit({
               header: UNKNOWN_FRAME_VERSION,
               sequenceID: position,
               commitDigest: null,
-              state: { localDID, epoch: crypto.epoch(), appliedByEpoch },
+              state: { localDID, epoch: localEpoch, appliedByEpoch },
             })
             reconciledHead = position
             // The classifier's answer, not this branch's assumption — as above.
             if (unreadable.row === 'ahead') {
               healRequested = true
               stranded = true
+              observeStrand({
+                position,
+                commitDigest: null,
+                localEpoch,
+                claimedEpoch: null,
+                kind: 'unknown-version',
+                confidence: 'claimed',
+              })
             }
             continue
           }
@@ -1375,19 +1495,28 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           readHeader?.committerDID != null
             ? { ...readHeader, committerDID: normalizeDID(readHeader.committerDID) }
             : readHeader
+        const localEpoch = crypto.epoch()
         const disposition = classifyCommit({
           header,
           sequenceID: position,
           commitDigest,
-          state: { localDID, epoch: crypto.epoch(), appliedByEpoch },
+          state: { localDID, epoch: localEpoch, appliedByEpoch },
         })
 
         if (disposition.row === 'own-unmerged') {
-          // This peer's own commit, at the epoch it is still at: the hub took it, the group moved
-          // on, and the pending state died with its process. Cannot be applied (MLS merges a
-          // pending commit, never processes one), so the drain stops here and the peer heals.
+          // Sender data names this peer at its current epoch, but neither commit content nor hub
+          // acceptance is verified. The peer cannot process its own commit without pending state,
+          // so the drain stops here and it heals.
           healRequested = true
           stranded = true
+          observeStrand({
+            position,
+            commitDigest,
+            localEpoch,
+            claimedEpoch: header?.epoch ?? null,
+            kind: 'own-unmerged',
+            confidence: 'authenticated',
+          })
           return advancedEpoch
         }
         if (disposition.row === 'ahead') {
@@ -1396,6 +1525,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           reconciledHead = position
           healRequested = true
           stranded = true
+          observeStrand({
+            position,
+            commitDigest,
+            localEpoch,
+            claimedEpoch: header?.epoch ?? null,
+            kind: 'ahead',
+            confidence: 'claimed',
+          })
           continue
         }
         if (disposition.row === 'history') {
@@ -1412,6 +1549,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           if (disposition.branch === 'losing') {
             healRequested = true
             stranded = true
+            observeStrand({
+              position,
+              commitDigest,
+              localEpoch,
+              claimedEpoch: header?.epoch ?? null,
+              kind: 'fork-losing',
+              confidence: 'observed',
+            })
           }
           continue
         }
@@ -1527,7 +1672,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       // A wakeup is a lane operation: step 0, the ledger invariant, then the pull. No return
       // value, so anything found is stashed for the next call that has one.
       const replayed = await replayJournal()
-      await ensureLedger(Date.now() + recoveryTimeoutMs)
+      if (mls != null && (await ensureLedger(Date.now() + recoveryTimeoutMs))) {
+        await finalizeBootstrap(mls)
+      }
       const pulled = await pullCommits()
       if (replayed || pulled) await rebuildEpoch()
     })
@@ -1591,7 +1738,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       // A peer restored with an incomplete ledger was killed between rejoining and bootstrapping.
       // The invariant finds it here and at every later lane operation, with no memory of how it
       // got there.
-      await ensureLedger(Date.now() + recoveryTimeoutMs)
+      if (await ensureLedger(Date.now() + recoveryTimeoutMs)) await finalizeBootstrap(mls)
       await pullCommits()
     }).catch(() => {
       // a failed seed leaves the cursor put; the next wakeup replays and pulls again
@@ -1725,6 +1872,43 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     }
   }
 
+  const repairRejoin = async (): Promise<void> => {
+    if (awaitingBootstrap == null) return
+    // Restore the subscription before gathering the ledger: responders may already have
+    // rotated to the new app anchor. A failed repair remains pending for the next lane call.
+    if (rejoinAnchorNeedsCapture) {
+      await captureAnchor()
+      rejoinAnchorNeedsCapture = false
+    }
+    if (rejoinRuntimeNeedsBuild) {
+      await rebuildEpoch()
+      rejoinRuntimeNeedsBuild = false
+    }
+  }
+
+  const finalizeBootstrap = async (port: GroupMLS): Promise<void> => {
+    assertLive()
+    if (awaitingBootstrap == null) return
+    const { attemptID, trigger, entries } = awaitingBootstrap
+    await repairRejoin()
+    assertLive()
+    const held = new Set(await port.getLedger())
+    assertLive()
+    const owed = entries.filter((token) => !held.has(token))
+    if (owed.length > 0) pendingReenact = [...pendingReenact, ...owed]
+    awaitingBootstrap = null
+    inFlightEntries = null
+    if (bootstrapHealRequested) {
+      healRequested = false
+      bootstrapHealRequested = false
+    }
+    recoveryGeneration += 1
+    closeEpisode()
+    if (commitTopicID != null) {
+      emitRecovery({ phase: 'bootstrapped', groupID: commitTopicID, attemptID, trigger })
+    }
+  }
+
   /**
    * The ledger completeness invariant, checked before every lane operation and repaired on the
    * spot. Purely local (the head folded from the handle's entries against the authenticated head
@@ -1741,6 +1925,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    */
   const ensureLedger = async (deadline: number): Promise<boolean> => {
     if (mls == null || rendezvousTopicID == null) return true
+    await repairRejoin()
     const port = mls
     const topicID = rendezvousTopicID
     if (await port.isLedgerComplete()) return true
@@ -1756,16 +1941,28 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     // for one publish; without the second, so does the hub.
     const requestID = newPublishID()
     const request = await port.createRecoveryRequest(requestID)
+    if (disposed) return false
     return await new Promise<boolean>((resolve) => {
       let settled = false
+      const bootstraps = new Set<Promise<void>>()
       const finish = (complete: boolean): void => {
         if (settled) return
         settled = true
         ledgerWaiters.delete(requestID)
+        ledgerGatherFinishes.delete(finishOnDispose)
         clearTimeout(timer)
-        resolve(complete)
+        // Keep the lane until every bootstrap already touching this handle has finished.
+        if (bootstraps.size === 0) resolve(complete && !disposed)
+        else
+          void Promise.allSettled([...bootstraps]).then((results) => {
+            resolve(
+              !disposed && (complete || results.some((result) => result.status === 'fulfilled')),
+            )
+          })
       }
+      const finishOnDispose = () => finish(false)
       const timer = setTimeout(() => finish(false), Math.max(0, deadline - Date.now()))
+      ledgerGatherFinishes.add(finishOnDispose)
       ledgerWaiters.set(requestID, (sealed) => {
         void (async () => {
           if (settled || disposed) return
@@ -1775,10 +1972,17 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             // here, since the next responder's reply is sealed to the same key.
             const tokens = await port.openSealedLedger(sealed, requestID)
             if (tokens == null) return
-            // Re-check: `disposed` can flip during the openSealedLedger await, and bootstrapLedger
-            // REPLACES the host-owned ledger — it must not run against a torn-down handle.
-            if (disposed) return
-            await port.bootstrapLedger(tokens)
+            // Timeout or disposal can settle the gather while opening the reply.
+            if (settled || disposed) return
+            const bootstrap = port.bootstrapLedger(tokens)
+            bootstraps.add(bootstrap)
+            inFlightBootstraps.add(bootstrap)
+            try {
+              await bootstrap
+            } finally {
+              bootstraps.delete(bootstrap)
+              inFlightBootstraps.delete(bootstrap)
+            }
             finish(true)
           } catch {
             // Recomputed head does not match the authenticated one: this responder withheld,
@@ -1828,6 +2032,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           'commit: the ledger is incomplete, so this handle rejoined the group and its bootstrap has not completed — its roster has reset, and a commit built now would be judged against a group whose admins it cannot see. It must finish bootstrapping its ledger before it can commit again.',
         )
       }
+      await finalizeBootstrap(mls)
 
       const deadline = Date.now() + commitDeadlineMs
       for (let attempt = 0; attempt < COMMIT_ATTEMPT_CEILING; attempt++) {
@@ -1940,29 +2145,34 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     assertLive()
     return runSerial(async () => {
       if (await replayJournal()) await rebuildEpoch()
-      await ensureLedger(Date.now() + recoveryTimeoutMs)
+      if (mls != null && (await ensureLedger(Date.now() + recoveryTimeoutMs))) {
+        await finalizeBootstrap(mls)
+      }
+      assertLive()
       return takeLost()
     })
   }
 
   /**
    * Ask the group for its state and wait for one member to answer, bounded by the deadline.
-   * `null` when nobody does — heal is a rendezvous and cannot work without a responder.
+   * The outcome distinguishes a silent responder, disposal and a failed request publish.
    */
   const requestGroupInfo = async (
     request: Uint8Array,
     requestID: string,
     topicID: string,
     deadline: number,
-  ): Promise<Uint8Array | null> => {
-    const wait = Math.max(0, Math.min(recoveryTimeoutMs, deadline - Date.now()))
-    return await new Promise<Uint8Array | null>((resolve) => {
+  ): Promise<RendezvousOutcome> => {
+    const remaining = deadline - Date.now()
+    const wait = Math.max(0, Math.min(recoveryTimeoutMs, remaining))
+    const atDeadline = remaining <= recoveryTimeoutMs
+    return await new Promise<RendezvousOutcome>((resolve) => {
       recoveryWaiters.set(requestID, resolve)
       recoveryTimers.set(
         requestID,
         setTimeout(() => {
           recoveryTimers.delete(requestID)
-          if (recoveryWaiters.delete(requestID)) resolve(null)
+          if (recoveryWaiters.delete(requestID)) resolve({ kind: 'timeout', atDeadline })
         }, wait),
       )
       void Promise.resolve(
@@ -1973,7 +2183,13 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             encodeRecoveryRequest(requestID, request),
           ),
         }),
-      ).catch(() => {})
+      ).catch((error: unknown) => {
+        if (!recoveryWaiters.delete(requestID)) return
+        const timer = recoveryTimers.get(requestID)
+        if (timer != null) clearTimeout(timer)
+        recoveryTimers.delete(requestID)
+        resolve({ kind: 'publish-failed', error })
+      })
     })
   }
 
@@ -2000,19 +2216,31 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * mutex, so either nesting deadlocks. The re-enactment a heal owes is a SUBSEQUENT `commit()` the
    * host makes once this releases the lane.
    */
-  const recover = async (): Promise<{ advanced: boolean; reenact: Array<string> }> => {
-    await ready
+  const attemptBody = async (
+    trigger: RecoveryTrigger,
+    generation: number,
+    port: GroupMLS,
+    commits: string,
+    rendezvous: string,
+  ): Promise<{ advanced: boolean }> => {
     assertLive()
-    if (mls == null || commitTopicID == null || rendezvousTopicID == null) {
-      return { advanced: false, reenact: [] }
+    if (recoveryGeneration !== generation && !stranded && !healRequested) {
+      return { advanced: true }
     }
-    const port = mls
-    const commits = commitTopicID
-    const rendezvous = rendezvousTopicID
-    return runSerial(async () => {
+    const attemptID = newPublishID()
+    const base = { groupID: commits, attemptID, trigger }
+    queueMicrotask(() => notifyHost(params.onRecovery, { ...base, phase: 'started' }))
+    const failed = (reason: RecoveryFailureReason): { advanced: false } => {
+      emitRecovery({ ...base, phase: 'failed', reason })
+      return { advanced: false }
+    }
+    try {
       // 0. Replay the journal ahead of everything, as every lane operation does: a peer holding a
       //    commit whose fate it never learned settles that first, and may find nothing left to heal.
       if (await replayJournal()) await rebuildEpoch()
+      assertLive()
+      if (await ensureLedger(Date.now() + recoveryTimeoutMs)) await finalizeBootstrap(port)
+      assertLive()
 
       const deadline = Date.now() + recoveryDeadlineMs
       while (Date.now() < deadline) {
@@ -2022,41 +2250,54 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         //    applies the winner's commit HERE.
         healRequested = false
         await reconcileCommits()
+        assertLive()
 
         // 2. The head to race at, from the store's own reply.
         const expectedHead = await readCommitHead(commits)
+        assertLive()
 
         // 3. Mint a request and rendezvous for a sealed GroupInfo. Fresh request per attempt: the
         //    ephemeral key is minted with it, and a reply to an already-used request is unopenable.
         const requestID = newPublishID()
         const request = await port.createRecoveryRequest(requestID)
-        const sealed = await requestGroupInfo(request, requestID, rendezvous, deadline)
-        if (sealed == null) {
+        assertLive()
+        const outcome = await requestGroupInfo(request, requestID, rendezvous, deadline)
+        if (outcome.kind === 'disposed' || disposed) throw new PeerDisposedError('Peer is disposed')
+        if (outcome.kind === 'publish-failed') throw outcome.error
+        if (outcome.kind === 'timeout') {
           // Nobody answered. Heal REQUIRES another online member that can seal a GroupInfo;
           // without one it cannot work. The peer stays degraded and asks again later.
-          break
+          return failed(outcome.atDeadline ? 'deadline' : 'no-responder')
         }
 
         // 4. Open it and BUILD the external commit, adopting nothing. Bytes this peer cannot open
         //    are a hub-injected or misaddressed reply: ask again.
         let pending: Awaited<ReturnType<typeof port.applyRecovery>>
         try {
-          pending = await port.applyRecovery(sealed, requestID)
+          pending = await port.applyRecovery(outcome.sealed, requestID)
         } catch {
           pending = null
         }
+        assertLive()
         if (pending == null) continue
 
         // 5. The entries this peer holds, snapshotted BEFORE the rejoined handle replaces them —
         //    the last moment they can be read. Kept across a failed attempt, so a retry filters
         //    the same entries rather than snapshotting the empty ledger a failed bootstrap left.
-        if (inFlightEntries == null) inFlightEntries = await port.getLedger()
+        inFlightEntries = [
+          ...new Set([
+            ...(inFlightEntries ?? awaitingBootstrap?.entries ?? []),
+            ...(await port.getLedger()),
+          ]),
+        ]
+        assertLive()
         const inFlight = inFlightEntries
 
         // 6. Publish the external commit, compare-and-set at the head: it changes the ratchet
         //    tree, so it races like any commit.
         const publishID = newPublishID()
         const payload = await frameCommit(pending.commit, [])
+        assertLive()
         let sequenceID: string
         try {
           sequenceID = (
@@ -2069,12 +2310,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             })
           ).sequenceID
         } catch (error) {
+          if (disposed) throw new PeerDisposedError('Peer is disposed', { cause: error })
           if (!isHeadMismatch(error)) throw error
           // Lost the race — the likely outcome. DISCARD THE GROUPINFO, not merely the commit: it
           // describes a tree the winning commit already changed, so a commit rebuilt from it is
           // one no member at the new epoch can apply. Re-request and rebuild from a fresh one.
           continue
         }
+        assertLive()
 
         // 7. Accepted: the group has this peer's new leaf. Adopt the rejoined handle — the only
         //    place it may be adopted. Deliberately UNJOURNALLED: a crash here leaves an orphaned
@@ -2082,40 +2325,61 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         //    so the own-commit trigger stays quiet, the heal condition still holds, and `resync`
         //    later collects the leaf the orphan added.
         const rejoinedAtEpoch = (await port.readCommitHeader(pending.commit))?.epoch
+        assertLive()
+        const epochBeforeRejoin = crypto.epoch()
         // Through the seam, like every other site that ratchets the handle — and it rotates
         // ANYWAY: this is the rejoin, which no roster diff can see (see {@link anchor}). The
         // anchor is the POST-commit epoch: the handle advances inside the seam and only then is
         // the anchor captured, exactly where an applying member lands.
         await advanceHandle(
           port,
-          () => pending.onAccepted(),
+          async () => {
+            try {
+              await pending.onAccepted()
+            } finally {
+              // The adapter may adopt the handle and then fail to persist it. Observe the
+              // ratchet itself: a pre-adoption failure leaves this snapshot with the retry.
+              if (crypto.epoch() !== epochBeforeRejoin) {
+                awaitingBootstrap = { attemptID, trigger, entries: inFlight }
+                // Adoption enacted these bytes even if persistence rejected afterward.
+                if (rejoinedAtEpoch != null) {
+                  appliedByEpoch.set(rejoinedAtEpoch, {
+                    sequenceID,
+                    digest: digestAppliedCommit(pending.commit),
+                  })
+                }
+                stranded = false
+                rejoinAnchorNeedsCapture = true
+                rejoinRuntimeNeedsBuild = true
+              }
+            }
+          },
           () => true,
         )
+        rejoinAnchorNeedsCapture = false
+        assertLive()
         const accepted = asLogPosition(sequenceID)
         reconciledHead = accepted
         commitLogHead = accepted
-        // Enacted at that epoch, like an applied commit: without the record a second commit at
-        // that epoch reads as history rather than the fork it is.
-        if (rejoinedAtEpoch != null) {
-          appliedByEpoch.set(rejoinedAtEpoch, {
-            sequenceID,
-            digest: digestAppliedCommit(pending.commit),
-          })
-        }
         healRequested = false
         // The one place the commit gate is released: the rejoin landed, so this peer's leaf is
         // back in the tree and the stale-epoch fork it guards is closed. A bootstrap that still
         // fails below is `commit()`'s own ledger-completeness check to handle.
-        stranded = false
         await rebuildEpoch()
+        rejoinRuntimeNeedsBuild = false
+        assertLive()
 
         // 8. Bootstrap: REQUIRED, not a formality. Until it runs, the ledger is empty against a
         //    live head — every admin promoted since genesis is invisible and the next commit is
         //    rejected. Failure here is a persistent degraded state, NOT a heal.
         if (!(await ensureLedger(deadline))) {
+          assertLive()
+          awaitingBootstrap = { attemptID, trigger, entries: inFlight }
           healRequested = true
-          return { advanced: false, reenact: [] }
+          bootstrapHealRequested = true
+          return failed('bootstrap-failed')
         }
+        assertLive()
 
         // 9. Re-enact by MEMBERSHIP, never by the failure that brought this peer here: keep only
         //    entries the group's ledger does NOT hold. An entry it DOES hold was enacted for
@@ -2123,12 +2387,67 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         //    last-write-wins — it would win, silently reverting whatever a later admin wrote over
         //    the same subject.
         const held = new Set(await port.getLedger())
+        assertLive()
         const reenact = inFlight.filter((token) => !held.has(token))
         inFlightEntries = null
-        return { advanced: true, reenact }
+        awaitingBootstrap = null
+        bootstrapHealRequested = false
+        if (reenact.length > 0) pendingReenact = [...pendingReenact, ...reenact]
+        recoveryGeneration += 1
+        closeEpisode()
+        emitRecovery({ ...base, phase: 'succeeded' })
+        return { advanced: true }
       }
-      return { advanced: false, reenact: [] }
-    })
+      return failed('deadline')
+    } catch (error) {
+      if (disposed || error instanceof PeerDisposedError) {
+        emitRecovery({ ...base, phase: 'failed', reason: 'disposed' })
+        throw error instanceof PeerDisposedError ? error : new PeerDisposedError('Peer is disposed')
+      }
+      emitRecovery({ ...base, phase: 'failed', reason: 'error', error })
+      throw error
+    }
+  }
+
+  const runRecovery = (trigger: RecoveryTrigger): Promise<{ advanced: boolean }> => {
+    if (activeRecovery != null) return activeRecovery
+    const generation = recoveryGeneration
+    const attempt = (async (): Promise<{ advanced: boolean }> => {
+      await ready
+      assertLive()
+      if (mls == null || commitTopicID == null || rendezvousTopicID == null) {
+        return { advanced: false }
+      }
+      const port = mls
+      const commits = commitTopicID
+      const rendezvous = rendezvousTopicID
+      return runSerial(async () => {
+        try {
+          return await attemptBody(trigger, generation, port, commits, rendezvous)
+        } finally {
+          // The body and its mutex hold are finished before runSerial flushes terminal
+          // notices. A synchronous observer retry must not join this settled attempt.
+          if (activeRecovery === attempt) activeRecovery = null
+        }
+      })
+    })()
+    activeRecovery = attempt
+    void attempt.then(
+      () => {
+        if (activeRecovery === attempt) activeRecovery = null
+      },
+      () => {
+        if (activeRecovery === attempt) activeRecovery = null
+      },
+    )
+    return attempt
+  }
+
+  const recover = async (): Promise<{ advanced: boolean; reenact: Array<string> }> => {
+    const { advanced } = await runRecovery('consumer')
+    const reenact = pendingReenact
+    pendingReenact = []
+    return { advanced, reenact }
   }
 
   /**
@@ -2138,19 +2457,13 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * and the next pull raises it again if the heal did not settle it.
    */
   const healIfRequested = async (): Promise<void> => {
-    if (!healRequested || healing) return
-    healing = true
+    if (!healRequested || activeRecovery != null) return
     healRequested = false
     try {
-      // Still two commits; the second is the host's. No return value to put the entries in, so
-      // they wait for a lane operation that has one — same as a lost commit.
-      const { reenact } = await recover()
-      if (reenact.length > 0) pendingReenact = [...pendingReenact, ...reenact]
+      await runRecovery('automatic')
     } catch {
       // No responder, or a reply that would not open. The peer stays degraded, and the frame that
       // asked for the heal is still in the log: the next pull asks again.
-    } finally {
-      healing = false
     }
   }
 
@@ -2261,18 +2574,20 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       // closes the mux's three routes to the wire immediately, so whatever the op does next, it
       // cannot land a write. `mux.dispose()` — the full teardown — stays LAST, unchanged.
       mux.suspendPublishing()
+      // Release a lane waiting for ledger replies now; its deadline may be far away.
+      for (const finish of [...ledgerGatherFinishes]) finish()
       disposePromise = (async () => {
         // Tear down even a peer whose init failed — it still holds a hub drain.
         await settled
+        await Promise.allSettled([...inFlightBootstraps])
         commitUnsubscribe?.()
         rendezvousUnsubscribe?.()
         // Resolve any in-flight recovery rendezvous FIRST, before clearing its timers: a
         // `recover()` blocked in `requestGroupInfo` is settled by exactly two things — a reply or
         // its timeout — and dispose is about to clear that timeout. Skipping this drain would hang
         // the heal, `commitTail`, and every lane operation queued behind it. Resolve, then clear,
-        // so a fired timer cannot race a half-drained map. (The ledger gather needs no such drain:
-        // its timeout is a local held in none of these maps.)
-        for (const waiter of recoveryWaiters.values()) waiter(null)
+        // so a fired timer cannot race a half-drained map.
+        for (const waiter of recoveryWaiters.values()) waiter({ kind: 'disposed' })
         recoveryWaiters.clear()
         for (const timer of recoveryTimers.values()) clearTimeout(timer)
         for (const timer of pendingReplies.values()) clearTimeout(timer)

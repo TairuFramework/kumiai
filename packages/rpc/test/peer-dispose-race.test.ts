@@ -346,6 +346,7 @@ describe('dispose against a commit delivery queued behind a lane operation', () 
     // becoming ready.
     gateArmed = true
     const holder = bob.peer.replay()
+    const holderRejected = expect(holder).rejects.toBeInstanceOf(PeerDisposedError)
     await flush()
 
     // Alice's commit reaches bob's commit listener, which acks and hands its lane operation to
@@ -359,7 +360,7 @@ describe('dispose against a commit delivery queued behind a lane operation', () 
     recorder.start()
 
     openGate()
-    await holder
+    await holderRejected
     await flush(80)
 
     // The queued callback has now run, against a peer disposed several awaits ago. Unguarded it

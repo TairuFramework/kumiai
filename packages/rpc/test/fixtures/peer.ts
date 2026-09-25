@@ -3,7 +3,12 @@ import type { LogHub } from '@kumiai/hub-tunnel'
 import type { AppWindowPruned } from '../../src/app-cursor.js'
 import type { PendingCommit } from '../../src/commit.js'
 import type { SubscribeFailure } from '../../src/hub-mux.js'
-import { createGroupPeer, type GroupPeer } from '../../src/peer.js'
+import {
+  createGroupPeer,
+  type GroupPeer,
+  type RecoveryEvent,
+  type StrandObservation,
+} from '../../src/peer.js'
 import type { GroupProtocolDefinition } from '../../src/protocol.js'
 import { createMemoryAnchorStore, type MemoryAnchorStore } from './anchor.js'
 import { createMemoryAppCursorStore, type MemoryAppCursorStore } from './app-cursor.js'
@@ -96,6 +101,8 @@ export type MakeMLSPeerOptions = {
   appCursorStore?: MemoryAppCursorStore
   /** The host's notice that an app topic's retention floor passed this peer's read position. */
   onAppWindowPruned?: (event: AppWindowPruned) => void
+  onStrand?: (observation: StrandObservation) => void | Promise<void>
+  onRecovery?: (event: RecoveryEvent) => void | Promise<void>
   /** The host's notice that a subscribe was refused or exhausted its retries. */
   onSubscribeFailed?: (failure: SubscribeFailure) => void
   /**
@@ -152,6 +159,8 @@ export function makeMLSPeer(
     anchorStore,
     appCursorStore,
     ...(options.onAppWindowPruned != null ? { onAppWindowPruned: options.onAppWindowPruned } : {}),
+    ...(options.onStrand != null ? { onStrand: options.onStrand } : {}),
+    ...(options.onRecovery != null ? { onRecovery: options.onRecovery } : {}),
     ...(options.onSubscribeFailed != null ? { onSubscribeFailed: options.onSubscribeFailed } : {}),
     // The restart half of onAccepted, over the same blob — and idempotent, as it must be.
     adoptJournalled: async (blob) => {

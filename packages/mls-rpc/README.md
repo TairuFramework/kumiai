@@ -64,6 +64,13 @@ const mls = createGroupMLS({
 Passing anything else means a commit resolves its entries against whatever resolver the handle
 happened to be born with.
 
+The optional `persist` callback receives the tentative state after an accepted commit or proposal,
+or the bootstrapped handle. It does not persist application-message receive ratchets. Writes must
+be atomic: rejection must leave storage unchanged, since the in-memory handle rolls back and no
+control notifications fire. Received-message and bootstrap persist runs under the handle mutex;
+it must not call back into that handle. Recovery persists the rejoined handle before `adopt`. If
+`adopt` throws, storage already holds the new handle and a restart loads it.
+
 ## Two seals, one exporter
 
 `wrap`/`unwrap` carry app traffic and are ratchet-backed: each open consumes a message key and

@@ -72,7 +72,7 @@ export function createLedgerEntrySlot(): LedgerEntrySlot {
 export type GroupMLSParams = {
   /** The handle the peer is at right now. See {@link GroupCryptoParams.handle}. */
   handle: () => GroupHandle
-  /** Replace the handle — the ONLY way the peer's MLS state is swapped wholesale. */
+  /** Replace the handle after successful persist. If adopt throws, restart from the stored handle. */
   adopt: (handle: GroupHandle) => void | Promise<void>
   /** This member's signing identity: recovery requests and attestations are signed with it. */
   identity: OwnIdentity
@@ -80,14 +80,22 @@ export type GroupMLSParams = {
   entrySlot: LedgerEntrySlot
   /**
    * Persist the handle's state durably. `processCommit` must be durable before it resolves,
-   * and this is where that happens; a host with no durable store passes a no-op and accepts
-   * that a crash loses the epoch.
+   * and this is where that happens. It also covers proposals and ledger bootstrap, not
+   * application-message receive ratchets. Writes must be atomic: rejection means nothing
+   * was stored. Received-message and bootstrap persist runs under the handle mutex and
+   * must not call back into that handle. Recovery persists before `adopt`; if `adopt`
+   * throws, a restart loads the new handle from storage. A host without a durable store
+   * may omit this callback and accepts that a crash loses the epoch.
    */
   persist?: (handle: GroupHandle) => void | Promise<void>
 }
 
 /** The private half of a recovery request, retained until the reply opens or the TTL passes. */
-type PendingRequest = { ephemeralPrivateKey: Uint8Array; mintedAt: number }
+type PendingRequest = {
+  ephemeralPrivateKey: Uint8Array
+  mintedAt: number
+  timer: ReturnType<typeof setTimeout>
+}
 
 /**
  * How long a minted recovery request's private half is kept. The port makes retention the
@@ -128,7 +136,11 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
   const sweep = (): void => {
     const cutoff = Date.now() - REQUEST_TTL_MS
     for (const [id, request] of pending) {
-      if (request.mintedAt < cutoff) pending.delete(id)
+      if (request.mintedAt < cutoff) {
+        clearTimeout(request.timer)
+        request.ephemeralPrivateKey.fill(0)
+        pending.delete(id)
+      }
     }
   }
 
@@ -159,24 +171,31 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
     ): Promise<{ advanced: boolean }> {
       const group = handle()
       const before = group.epoch
+      let persistFailed = false
       entrySlot.install(context.resolveLedgerEntries)
       try {
-        await group.processMessage(commit)
+        await group.processMessage(commit, {
+          ...(persist != null && {
+            persist: async (current) => {
+              try {
+                await persist(current)
+              } catch (error) {
+                persistFailed = true
+                throw error
+              }
+            },
+          }),
+        })
       } catch (error) {
-        // The ONE throw the port is allowed: the commit named entries whose bodies would
-        // not resolve from its own frame. Everything else — a commit at another epoch, one
-        // the policy refuses, undecodable bytes — is `{ advanced: false }`, never a throw:
-        // a throw makes the lane re-read the frame, and a frame this member was never in a
-        // position to apply would wedge it there forever.
-        if (error instanceof MissingLedgerEntriesError) throw error
-        return { advanced: false }
+        // Missing frame bodies and a failed persist must propagate so the lane can retry.
+        // Other errors do not make the lane re-read a frame indefinitely. A host callback
+        // can throw after a durable advance, so report the handle's actual epoch.
+        if (error instanceof MissingLedgerEntriesError || persistFailed) throw error
+        return { advanced: handle().epoch !== before }
       } finally {
         entrySlot.install(undefined)
       }
       const advanced = handle().epoch !== before
-      // Durable before it resolves: the lane advances its cursor on this answer, so a crash
-      // between applying and persisting would lose the commit and never re-read it.
-      if (advanced) await persist?.(handle())
       return { advanced }
     },
 
@@ -187,7 +206,20 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
         identity,
         requestID,
       })
-      pending.set(requestID, { ephemeralPrivateKey, mintedAt: Date.now() })
+      const previous = pending.get(requestID)
+      if (previous != null) {
+        clearTimeout(previous.timer)
+        previous.ephemeralPrivateKey.fill(0)
+      }
+      const timer = setTimeout(() => {
+        const held = pending.get(requestID)
+        if (held?.ephemeralPrivateKey !== ephemeralPrivateKey) return
+        ephemeralPrivateKey.fill(0)
+        pending.delete(requestID)
+      }, REQUEST_TTL_MS)
+      const nodeTimer = timer as unknown as { unref?: () => void }
+      nodeTimer.unref?.()
+      pending.set(requestID, { ephemeralPrivateKey, mintedAt: Date.now(), timer })
       return utf8.encode(request)
     },
 
@@ -228,9 +260,11 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
         // Adopted ONLY if the hub accepts the commit. A peer that adopted first would sit
         // on a branch of its own the moment it lost the compare-and-set.
         onAccepted: async () => {
-          pending.delete(requestID)
-          await adopt(rejoined.group)
           await persist?.(rejoined.group)
+          await adopt(rejoined.group)
+          held.ephemeralPrivateKey.fill(0)
+          clearTimeout(held.timer)
+          if (pending.get(requestID) === held) pending.delete(requestID)
         },
       }
     },
@@ -267,8 +301,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
     async bootstrapLedger(tokens: Array<string>): Promise<void> {
       // Throws for a list whose recomputed head does not match the authenticated one — a
       // lying responder can withhold, never rewrite.
-      await handle().bootstrapLedger(tokens)
-      await persist?.(handle())
+      await handle().bootstrapLedger(tokens, persist == null ? undefined : { persist })
     },
 
     async exportRecoverySecret(): Promise<Uint8Array> {

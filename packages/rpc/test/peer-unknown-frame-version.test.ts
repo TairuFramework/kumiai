@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 import { RecoveryRequiredError } from '../src/commit.js'
 import {
@@ -13,8 +13,6 @@ import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
-
-const flush = (ms = 40) => new Promise((r) => setTimeout(r, ms))
 
 /** Fast rendezvous, so a heal that is going to happen happens inside a test — and a heal that
  *  will find nobody gives up inside one too. */
@@ -92,6 +90,18 @@ function bobsRecoveryRequest(
  * and no restart that fixes it.
  */
 describe('a frame whose handshake version this build does not know', () => {
+  test('an unknown future kind on the commit topic requests a heal', async () => {
+    const hub = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x75)
+    const frame = futureVersionFrame()
+    frame[HANDSHAKE_MAGIC.length + 1] = 0xee
+    await hub.publish({ senderDID: 'zoe', topicID: commitTopic(rs), payload: frame, retain: 'log' })
+
+    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
+    await vi.waitFor(() => expect(healsBy(hub, rs, 'bob')).toHaveLength(1))
+    await bob.peer.dispose()
+  })
+
   test('on the commit topic: the peer heals, and its epoch moves', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x71)
@@ -102,12 +112,21 @@ describe('a frame whose handshake version this build does not know', () => {
     // the frame out of her log, since a fixture cannot run two builds at once.
     hub.hideFrom('carol', sequenceID)
     const carol = makeMLSPeer(hub, 'carol', rs, { epoch: 1, members, recovery })
-    await flush()
+    await carol.peer.replay()
     expect(carol.mls.epoch()).toBe(1)
 
     // Bob runs today's build and meets it.
+    vi.useFakeTimers()
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
-    await flush(500)
+    try {
+      await vi.waitFor(() => {
+        expect(healsBy(hub, rs, 'bob')).toHaveLength(1)
+        expect(bob.mls.epoch()).toBeGreaterThan(1)
+        expect(bob.mls.epoch()).toBe(carol.mls.epoch())
+      })
+    } finally {
+      vi.useRealTimers()
+    }
 
     // The assertion is the heal ACTUALLY happening — a rendezvous Bob asked for, and an epoch
     // that moved — not the absence of an error. A peer that files the frame as poison throws
@@ -132,7 +151,7 @@ describe('a frame whose handshake version this build does not know', () => {
     // it either way. Bob's only evidence he is off the group's line is the in-memory strand: the
     // frame that raised it is behind his cursor and the live tip is recorded, exactly as on the
     // `ahead` path.
-    await flush(220)
+    await vi.waitFor(() => expect(healsBy(hub, rs, 'bob')).toHaveLength(1))
 
     const headBefore = hub.head(commitTopic(rs))
     const framesBefore = commitFrames(hub, rs)
@@ -157,56 +176,57 @@ describe('a frame whose handshake version this build does not know', () => {
     const rs = new Uint8Array(32).fill(0x74)
 
     await publishFutureFrame(hub, rs)
-    // A short per-attempt timeout, deliberately: `commit()` and `recover()` share one
-    // non-reentrant mutex, so the assertion below cannot run until bob's OWN heal attempt gives
-    // up waiting for a reply — and with the default 5s timeout that outlasts vitest's own test
-    // timeout. 350ms is short enough to give the mutex back quickly and long enough that this
-    // test's own reply-forging (well under it) is still the live request when the forged reply
-    // arrives.
-    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery: { timeoutMs: 350 } })
-    await flush(100)
-
-    const { requestID, request } = bobsRecoveryRequest(hub, rs)
-
-    // A genuine responder answers bob's exact request: sealed to the ephemeral key bob's own
-    // request carried, over group state that is unremarkable in every way that matters here.
-    // `sealGroupInfo` is the very port call `handleRecoveryRequest` makes to build a real reply —
-    // called directly, rather than standing up a second live peer whose own correctly-versioned
-    // reply would race this test's forged one and heal bob anyway, for a reason unrelated to the
-    // version check this test exists to pin.
-    const responder = createMemoryGroupMLS({ recoverySecret: rs, epoch: 1, members })
-    const groupInfo = await responder.sealGroupInfo(request)
-
-    // Today's kind, today's envelope — `encodeRecoveryReply`, exactly as the real responder path
-    // builds one — wrapping a genuinely sealed reply to bob's own outstanding request. Only the
-    // version byte is wrong. If `peer.ts`'s version check were gone, this decodes, opens with the
-    // ephemeral key bob's own request minted, and lands his rejoin — the same path exercised by
-    // `handleRecoveryReply` (peer.ts:1003) and the rejoin-landing block that clears `stranded`
-    // (peer.ts:2440-2469).
-    const forged = encodeHandshakeFrame(
-      HANDSHAKE_KIND.recoveryReply,
-      encodeRecoveryReply(requestID, groupInfo),
-    )
-    forged[HANDSHAKE_MAGIC.length] = HANDSHAKE_VERSION + 1
-
-    await hub.publish({
-      senderDID: 'zoe',
-      topicID: rendezvousTopic(rs),
-      payload: forged,
+    // The forged reply must arrive while the request is live; the clock advances only after it.
+    vi.useFakeTimers()
+    const bob = makeMLSPeer(hub, 'bob', rs, {
+      epoch: 1,
+      members,
+      recovery: { timeoutMs: 5000, deadlineMs: 10000 },
     })
-    // Past bob's own 350ms per-attempt timeout: his heal has already given up waiting for a
-    // reply and released the lane mutex `commit()` shares with it, so the assertion below is not
-    // itself waiting out that timeout.
-    await flush(500)
+    try {
+      await vi.waitFor(() => expect(healsBy(hub, rs, 'bob')).toHaveLength(1))
 
-    // Dropped: bob's epoch never moved, and — the assertion `healsBy`/`epoch()` alone cannot
-    // make here, since nothing else in this test was ever going to answer bob for real either —
-    // he is still refusing commits exactly as test 2's genuinely-stranded bob does, not merely
-    // un-healed by coincidence of timing.
-    expect(bob.mls.epoch()).toBe(1)
-    await expect(bob.peer.commit(buildLedgerCommit(bob, ['role:zoe=admin']))).rejects.toThrow(
-      RecoveryRequiredError,
-    )
+      const { requestID, request } = bobsRecoveryRequest(hub, rs)
+
+      // A genuine responder answers bob's exact request: sealed to the ephemeral key bob's own
+      // request carried, over group state that is unremarkable in every way that matters here.
+      // `sealGroupInfo` is the very port call `handleRecoveryRequest` makes to build a real reply —
+      // called directly, rather than standing up a second live peer whose own correctly-versioned
+      // reply would race this test's forged one and heal bob anyway, for a reason unrelated to the
+      // version check this test exists to pin.
+      const responder = createMemoryGroupMLS({ recoverySecret: rs, epoch: 1, members })
+      const groupInfo = await responder.sealGroupInfo(request)
+
+      // Today's kind, today's envelope — `encodeRecoveryReply`, exactly as the real responder path
+      // builds one — wrapping a genuinely sealed reply to bob's own outstanding request. Only the
+      // version byte is wrong. If `peer.ts`'s version check were gone, this decodes, opens with the
+      // ephemeral key bob's own request minted, and lands his rejoin — the same path exercised by
+      // `handleRecoveryReply` (peer.ts:1003) and the rejoin-landing block that clears `stranded`
+      // (peer.ts:2440-2469).
+      const forged = encodeHandshakeFrame(
+        HANDSHAKE_KIND.recoveryReply,
+        encodeRecoveryReply(requestID, groupInfo),
+      )
+      forged[HANDSHAKE_MAGIC.length] = HANDSHAKE_VERSION + 1
+
+      await hub.publish({
+        senderDID: 'zoe',
+        topicID: rendezvousTopic(rs),
+        payload: forged,
+      })
+      await vi.advanceTimersByTimeAsync(5000)
+
+      // Dropped: bob's epoch never moved, and — the assertion `healsBy`/`epoch()` alone cannot
+      // make here, since nothing else in this test was ever going to answer bob for real either —
+      // he is still refusing commits exactly as test 2's genuinely-stranded bob does, not merely
+      // un-healed by coincidence of timing.
+      expect(bob.mls.epoch()).toBe(1)
+      await expect(bob.peer.commit(buildLedgerCommit(bob, ['role:zoe=admin']))).rejects.toThrow(
+        RecoveryRequiredError,
+      )
+    } finally {
+      vi.useRealTimers()
+    }
 
     await bob.peer.dispose()
   })

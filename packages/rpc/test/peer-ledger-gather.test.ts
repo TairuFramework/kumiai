@@ -1,7 +1,9 @@
 import { fromUTF } from '@sozai/codec'
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
+import { PeerDisposedError } from '../src/errors.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
+import type { RecoveryEvent } from '../src/peer.js'
 import { decodeLedgerReply, encodeLedgerRequest } from '../src/recovery.js'
 import { rendezvousTopic } from '../src/topic.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
@@ -71,26 +73,244 @@ async function askForTheLedger(
       encodeLedgerRequest(requestID, request),
     ),
   })
-  await flush(120)
 }
 
 describe('the ledger gather does not hand the group to the relay', () => {
+  test('a timed-out reply cannot bootstrap during a later recovery', async () => {
+    const hub = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x65)
+    const timing = { timeoutMs: 5000, getDelayMs: () => 0, deadlineMs: 10000 }
+    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery: timing })
+    await bob.peer.commit(buildLedgerCommit(bob, ['role:carol=admin']))
+    const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, recovery: timing })
+    let releaseOpen: () => void = () => {}
+    const openGate = new Promise<void>((resolve) => {
+      releaseOpen = resolve
+    })
+    const open = alice.mls.openSealedLedger.bind(alice.mls)
+    let opens = 0
+    let staleOpenReturned = false
+    vi.spyOn(alice.mls, 'openSealedLedger').mockImplementation(async (...args) => {
+      if (++opens > 1) return null
+      await openGate
+      const tokens = await open(...args)
+      staleOpenReturned = true
+      return tokens
+    })
+    const bootstrap = vi.spyOn(alice.mls, 'bootstrapLedger')
+    vi.useFakeTimers()
+    try {
+      const first = alice.peer.recover()
+      await vi.waitFor(() => expect(opens).toBe(1))
+      await vi.advanceTimersByTimeAsync(15_000)
+      expect(await first).toEqual({ advanced: false, reenact: [] })
+      const second = alice.peer.recover()
+      await vi.waitFor(() => expect(opens).toBeGreaterThan(1))
+      releaseOpen()
+      await vi.waitFor(() => expect(staleOpenReturned).toBe(true))
+      expect(bootstrap).toHaveBeenCalledTimes(0)
+      await vi.advanceTimersByTimeAsync(15_000)
+      await second
+      expect(bootstrap).toHaveBeenCalledTimes(0)
+    } finally {
+      vi.useRealTimers()
+    }
+    await alice.peer.dispose()
+    await bob.peer.dispose()
+  })
+
+  test('a gather keeps the lane while bootstrapLedger is in flight', async () => {
+    const hub = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x66)
+    const timing = { timeoutMs: 80, getDelayMs: () => 0, deadlineMs: 250 }
+    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery: timing })
+    await bob.peer.commit(buildLedgerCommit(bob, ['role:carol=admin']))
+    const owed = 'circle:x=Alice'
+    const aliceCrypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
+    const aliceMLS = createMemoryGroupMLS({
+      recoverySecret: rs,
+      epoch: 1,
+      localDID: 'alice',
+      members,
+      onAdvance: (epoch) => aliceCrypto.setEpoch(epoch),
+    })
+    aliceMLS.adopt(aliceMLS.buildCommit([owed]))
+    const events: Array<RecoveryEvent> = []
+    const alice = makeMLSPeer(hub, 'alice', rs, {
+      mls: aliceMLS,
+      crypto: aliceCrypto,
+      members,
+      recovery: timing,
+      onRecovery: (event) => {
+        events.push(event)
+      },
+    })
+    let releaseBootstrap: () => void = () => {}
+    const bootstrapGate = new Promise<void>((resolve) => {
+      releaseBootstrap = resolve
+    })
+    const bootstrap = alice.mls.bootstrapLedger.bind(alice.mls)
+    vi.spyOn(alice.mls, 'bootstrapLedger').mockImplementation(async (tokens) => {
+      await bootstrapGate
+      await bootstrap(tokens)
+    })
+    vi.useFakeTimers()
+    try {
+      let firstSettled = false
+      const first = alice.peer.recover().finally(() => {
+        firstSettled = true
+      })
+      await vi.waitFor(() => expect(alice.mls.bootstrapLedger).toHaveBeenCalled())
+      // Expire the gather deadline while bootstrap is held at the port boundary.
+      await vi.advanceTimersByTimeAsync(300)
+      expect(firstSettled).toBe(false)
+      const second = alice.peer.recover()
+      releaseBootstrap()
+      const [firstResult, secondResult] = await Promise.all([first, second])
+      expect(firstResult).toEqual({ advanced: true, reenact: [owed] })
+      expect(secondResult).toEqual({ advanced: true, reenact: [] })
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(events.map((event) => event.phase)).toEqual(['started', 'succeeded'])
+    expect(await alice.mls.isLedgerComplete()).toBe(true)
+    expect((await alice.peer.replay()).reenact).toBeUndefined()
+    await alice.peer.dispose()
+    await bob.peer.dispose()
+  })
+
+  test('dispose waits for an in-flight ledger bootstrap and its notices', async () => {
+    const hub = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x6a)
+    const timing = { timeoutMs: 5000, getDelayMs: () => 0, deadlineMs: 10000 }
+    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery: timing })
+    await bob.peer.commit(buildLedgerCommit(bob, ['role:carol=admin']))
+    const events: Array<RecoveryEvent> = []
+    const alice = makeMLSPeer(hub, 'alice', rs, {
+      epoch: 1,
+      members,
+      recovery: timing,
+      onRecovery: (event) => {
+        events.push(event)
+      },
+    })
+    let releasePersist: () => void = () => {}
+    const persistGate = new Promise<void>((resolve) => {
+      releasePersist = resolve
+    })
+    const bootstrap = alice.mls.bootstrapLedger.bind(alice.mls)
+    vi.spyOn(alice.mls, 'bootstrapLedger').mockImplementation(async (tokens) => {
+      await persistGate
+      await bootstrap(tokens)
+    })
+    const attempt = alice.peer.recover().catch((error: unknown) => error)
+    await vi.waitFor(() => expect(alice.mls.bootstrapLedger).toHaveBeenCalled())
+    let disposed = false
+    const disposal = alice.peer.dispose().then(() => {
+      disposed = true
+    })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(disposed).toBe(false)
+    releasePersist()
+    await disposal
+    const atDispose = [...events]
+    expect(await attempt).toBeInstanceOf(PeerDisposedError)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(events).toEqual(atDispose)
+    await bob.peer.dispose()
+  })
+
+  test('dispose during ledger request creation settles recovery without a gather timer', async () => {
+    const hub = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x67)
+    const timing = { timeoutMs: 5000, getDelayMs: () => 0, deadlineMs: 10000 }
+    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery: timing })
+    await bob.peer.commit(buildLedgerCommit(bob, ['role:carol=admin']))
+    const events: Array<RecoveryEvent> = []
+    const alice = makeMLSPeer(hub, 'alice', rs, {
+      epoch: 1,
+      members,
+      recovery: timing,
+      onRecovery: (event) => {
+        events.push(event)
+      },
+    })
+    let releaseRequest: () => void = () => {}
+    const requestGate = new Promise<void>((resolve) => {
+      releaseRequest = resolve
+    })
+    const createRequest = alice.mls.createRecoveryRequest.bind(alice.mls)
+    let requests = 0
+    vi.spyOn(alice.mls, 'createRecoveryRequest').mockImplementation(async (requestID) => {
+      if (++requests === 2) await requestGate
+      return createRequest(requestID)
+    })
+    const setTimer = vi.spyOn(globalThis, 'setTimeout')
+    const attempt = alice.peer.recover().then(
+      () => 'resolved',
+      (error: unknown) => error,
+    )
+    await vi.waitFor(() => expect(requests).toBe(2))
+    const gatherTimersBeforeDispose = setTimer.mock.calls.filter(
+      (call) => (call[1] ?? 0) > 8000 && (call[1] ?? 0) <= 10000,
+    ).length
+    const disposal = alice.peer.dispose()
+    releaseRequest()
+    await disposal
+    let promptTimer: ReturnType<typeof setTimeout> | undefined
+    const outcome = await Promise.race([
+      attempt,
+      new Promise((resolve) => {
+        promptTimer = setTimeout(() => resolve('still gathering'), 200)
+      }),
+    ])
+    clearTimeout(promptTimer)
+    expect(outcome).toBeInstanceOf(PeerDisposedError)
+    expect(events.map((event) => event.phase)).toEqual(['started', 'failed'])
+    expect(events[1]).toMatchObject({ reason: 'disposed' })
+    expect(
+      setTimer.mock.calls.filter((call) => (call[1] ?? 0) > 8000 && (call[1] ?? 0) <= 10000),
+    ).toHaveLength(gatherTimersBeforeDispose)
+    setTimer.mockRestore()
+    await bob.peer.dispose()
+  })
+
+  test('a completed ledger gather releases its dispose finish', async () => {
+    const hub = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x68)
+    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
+    await bob.peer.commit(buildLedgerCommit(bob, ['role:carol=admin']))
+    const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, recovery })
+    const add = Set.prototype.add
+    let gatherFinishes: Set<unknown> | undefined
+    Set.prototype.add = function <TValue>(this: Set<TValue>, value: TValue): Set<TValue> {
+      if (typeof value === 'function' && value.name === 'finishOnDispose') {
+        gatherFinishes = this
+      }
+      return add.call(this, value)
+    }
+    try {
+      expect((await alice.peer.recover()).advanced).toBe(true)
+    } finally {
+      Set.prototype.add = add
+    }
+    expect(gatherFinishes).toBeDefined()
+    await alice.peer.dispose()
+    expect(gatherFinishes?.size).toBe(0)
+    await bob.peer.dispose()
+  })
+
   test('the hub carries a gathered ledger, and never sees a body', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x61)
 
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
-    await flush()
     const role = 'role:carol=admin'
     await bob.peer.commit(buildLedgerCommit(bob, [role]))
-    await flush()
 
     const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, recovery })
-    await flush()
 
     const result = await alice.peer.recover()
-    await flush(100)
-
     // MOVED STATE, not "no error was raised": the ledger is in her handle, folded, and the
     // head her own group state attests to accepts it.
     expect(result.advanced).toBe(true)
@@ -113,13 +333,13 @@ describe('the ledger gather does not hand the group to the relay', () => {
 
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
     const carol = makeMLSPeer(hub, 'carol', rs, { epoch: 1, members, recovery })
-    await flush()
+    await carol.peer.replay()
     await bob.peer.commit(buildLedgerCommit(bob, ['role:carol=admin']))
-    await flush()
 
     // A request from nobody: no signed blob at all, which is what the lane used to send and
     // what anyone reading the topic could have replayed.
     await askForTheLedger(hub, rs, 'mallory', 'anon-1', new Uint8Array())
+    await flush(120)
     expect(ledgerReplies(hub, rs, 'anon-1')).toHaveLength(0)
 
     // And a request that is perfectly well-formed, minted by a DID that simply has no leaf in
@@ -133,6 +353,7 @@ describe('the ledger gather does not hand the group to the relay', () => {
       'anon-2',
       await mallory.createRecoveryRequest('anon-2'),
     )
+    await flush(120)
     expect(ledgerReplies(hub, rs, 'anon-2')).toHaveLength(0)
 
     // The silence is about MALLORY, and not about a group that answers nobody: the same
@@ -145,7 +366,7 @@ describe('the ledger gather does not hand the group to the relay', () => {
       'member-1',
       await aliceMLS.createRecoveryRequest('member-1'),
     )
-    expect(ledgerReplies(hub, rs, 'member-1')).toHaveLength(2)
+    await vi.waitFor(() => expect(ledgerReplies(hub, rs, 'member-1')).toHaveLength(2))
 
     await bob.peer.dispose()
     await carol.peer.dispose()
@@ -156,23 +377,21 @@ describe('the ledger gather does not hand the group to the relay', () => {
     const rs = new Uint8Array(32).fill(0x63)
 
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
-    await flush()
     await bob.peer.commit(buildLedgerCommit(bob, ['role:carol=admin']))
-    await flush()
 
     // Carol is still in bob's tree, so bob answers her.
     const carol = createMemoryGroupMLS({ recoverySecret: rs, localDID: 'carol' })
     await askForTheLedger(hub, rs, 'carol', 'carol-1', await carol.createRecoveryRequest('carol-1'))
-    expect(ledgerReplies(hub, rs, 'carol-1')).toHaveLength(1)
+    await vi.waitFor(() => expect(ledgerReplies(hub, rs, 'carol-1')).toHaveLength(1))
 
     // Bob commits her removal and adopts the post-commit handle: her leaf is gone from the
     // tree he authorizes against. Authorization is roster-intrinsic — nothing was configured,
     // and there is no policy for a host to forget.
     await bob.peer.commit(buildRemoveCommit(bob, 'carol'))
-    await flush()
     expect(bob.mls.leaves()).not.toContain('carol')
 
     await askForTheLedger(hub, rs, 'carol', 'carol-2', await carol.createRecoveryRequest('carol-2'))
+    await flush(120)
     expect(ledgerReplies(hub, rs, 'carol-2')).toHaveLength(0)
 
     await bob.peer.dispose()
@@ -201,10 +420,8 @@ describe('the ledger gather does not hand the group to the relay', () => {
       onAdvance: (e) => bobCrypto.setEpoch(e),
     })
     const bob = makeMLSPeer(hub, 'bob', rs, { mls: bobMLS, crypto: bobCrypto, recovery })
-    await flush()
     const role = 'role:carol=admin'
     await bob.peer.commit(buildLedgerCommit(bob, [role]))
-    await flush()
 
     const aliceCrypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
     const aliceMLS = createMemoryGroupMLS({
@@ -219,10 +436,8 @@ describe('the ledger gather does not hand the group to the relay', () => {
       crypto: aliceCrypto,
       recovery,
     })
-    await flush()
 
     expect(await stranded.peer.recover()).toEqual({ advanced: false, reenact: [] })
-    await flush(100)
     expect(await aliceMLS.isLedgerComplete()).toBe(false)
     const strandedAt = aliceMLS.epoch()
     await stranded.peer.dispose()
@@ -233,7 +448,6 @@ describe('the ledger gather does not hand the group to the relay', () => {
     serving = true
     await bob.peer.commit(buildLedgerCommit(bob, []))
     await bob.peer.commit(buildLedgerCommit(bob, []))
-    await flush()
     expect(bobMLS.epoch()).toBeGreaterThan(strandedAt)
 
     // She restarts over the same handle. The lane gathers BEFORE it pulls — so she asks while
@@ -252,7 +466,7 @@ describe('the ledger gather does not hand the group to the relay', () => {
       crypto: aliceCrypto,
       recovery,
     })
-    await flush(200)
+    await vi.waitFor(async () => expect(await aliceMLS.isLedgerComplete()).toBe(true))
 
     // The ephemeral seal is epoch-independent, and here is the proof: she opened a reply
     // sealed by a responder two epochs ahead of the epoch she was at when she opened it.
@@ -294,17 +508,21 @@ describe('the ledger gather does not hand the group to the relay', () => {
       members,
       recovery: { ...recovery, getDelayMs: () => 60 },
     })
-    await flush()
+    await carol.peer.replay()
 
     const entries = ['role:carol=admin', 'role:dave=member', 'role:carol=member']
     await bob.peer.commit(buildLedgerCommit(bob, entries))
-    await flush()
 
     const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, recovery })
-    await flush()
-
-    const result = await alice.peer.recover()
-    await flush(150)
+    vi.useFakeTimers()
+    let result: Awaited<ReturnType<typeof alice.peer.recover>>
+    try {
+      const attempt = alice.peer.recover()
+      await vi.waitFor(() => expect(ledgerReplies(hub, rs)).toHaveLength(2))
+      result = await attempt
+    } finally {
+      vi.useRealTimers()
+    }
 
     // Both responders answered, and only one of them was folded.
     expect(ledgerReplies(hub, rs)).toHaveLength(2)

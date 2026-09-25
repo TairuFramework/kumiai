@@ -42,11 +42,8 @@ export const HANDSHAKE_VERSION = 1
 const HEADER_LENGTH = HANDSHAKE_MAGIC.length + 2
 
 /**
- * The message kinds carried on the handshake lane. {@link decodeHandshakeFrame} THROWS on a kind
- * byte not listed here, before the caller learns the frame's version — and on the commit topic a
- * throw is poison, not the heal. So no future version may publish a kind this enum lacks:
- * `commit` stays `0` forever, and a new commit-topic message needs its kind added HERE, not just
- * allowed by a version bump. Deliberate — kind is validated before version.
+ * The message kinds carried on the current handshake version. An unsupported version is returned
+ * before its kind is validated, so the commit lane can classify it as ahead.
  */
 export const HANDSHAKE_KIND = {
   /** An MLS Commit fanned out to advance every member's epoch. */
@@ -85,7 +82,7 @@ export function encodeHandshakeFrame(kind: HandshakeKind, payload: Uint8Array): 
 
 /**
  * Validate the header and split a frame into its version, kind and payload. Throws on a short
- * frame, a bad magic, or an unknown kind — bytes that are not this protocol at all.
+ * frame, a bad magic, or an unknown kind in the current version.
  *
  * DOES NOT throw on an unsupported VERSION; it returns it, since the right answer differs by
  * lane and only the caller knows which lane it's on. Every caller MUST compare `version` against
@@ -108,6 +105,9 @@ export function decodeHandshakeFrame(frame: Uint8Array): {
   const kind = frame[HANDSHAKE_MAGIC.length + 1]
   if (version === undefined || kind === undefined) {
     throw new Error('handshake frame is too short')
+  }
+  if (version !== HANDSHAKE_VERSION) {
+    return { version, kind: kind as HandshakeKind, payload: frame.subarray(HEADER_LENGTH) }
   }
   if (!isHandshakeKind(kind)) {
     throw new Error(`unknown handshake kind: ${kind}`)

@@ -170,6 +170,8 @@ type MemoryCommit = {
    * the double has no real signature to break.
    */
   signerDID?: string
+  /** Sender data remains readable, but tampered commit content cannot be processed. */
+  invalidContent?: true
   /**
    * The roster op this Commit enacts, applied to `leaves` when the commit ADVANCES this handle.
    * The real double has no MLS proposals, so this stands in for the one tree effect a Commit's
@@ -187,12 +189,10 @@ type MemoryCommit = {
  * A Commit for the memory port: the epoch it was framed at, the member that authored it,
  * and the content ids of the ledger entries it enacts.
  *
- * Both the epoch and the committer live INSIDE the commit, and both are what make the double
- * faithful about the things this lane turns on. A real MLS Commit can only be applied by a
- * member AT the epoch it was framed at, and cannot even be decrypted by one that is not. And
- * a real MLS Commit authenticates its own author, with the Commit's own signature — so a
- * peer asking "did I write this?" reads the commit, and never the frame's transport sender,
- * which is only the hub's word about who handed it over.
+ * Both the epoch and committer are modelled inside the commit. A real member commit names its
+ * sender through PrivateMessage sender data sealed at the epoch, independently of content
+ * validity; the hub's transport sender says nothing about authorship. `invalidContent` models
+ * a ciphertext edit beyond the sender-data sample while keeping that sender readable.
  */
 export function encodeMemoryCommit(
   epoch: number,
@@ -238,6 +238,7 @@ export function decodeMemoryCommit(commit: Uint8Array): MemoryCommit | null {
       (value.head != null && typeof value.head !== 'string') ||
       (value.external != null && typeof value.external !== 'boolean') ||
       (value.signerDID != null && typeof value.signerDID !== 'string') ||
+      (value.invalidContent != null && value.invalidContent !== true) ||
       !Array.isArray(value.entryIDs) ||
       (value.adds != null && !isDIDArray(value.adds)) ||
       (value.removes != null && !isDIDArray(value.removes))
@@ -575,9 +576,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       if (parsed.epoch !== epoch) {
         return { epoch: parsed.epoch, ...(isExternal ? { external: true } : {}) }
       }
-      // At this member's epoch the signature is checkable, and a commit whose claimed author is
-      // not who signed it authenticates nobody. The real port answers this with crypto; here the
-      // forgery is the two fields disagreeing.
+      // At this member's epoch sender identity is checkable separately from commit content.
+      // The double uses mismatched identities to model a forged sender claim.
       if ((parsed.signerDID ?? parsed.committerDID) !== parsed.committerDID) {
         return { epoch: parsed.epoch, ...(isExternal ? { external: true } : {}) }
       }
@@ -599,6 +599,11 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       // joiner's own add-commit is exactly this — and NOT corruption. The blob riding it
       // is never opened, because the entries are never resolved.
       if (parsed.epoch !== epoch) {
+        return { advanced: false }
+      }
+      // Sender-data authorship and commit-content validity are separate in real MLS. A hub can
+      // change ciphertext beyond the sampled prefix without breaking the sender-data read.
+      if (parsed.invalidContent === true) {
         return { advanced: false }
       }
       // A Commit that REMOVES this member is one it can never apply: the commit's path excludes
