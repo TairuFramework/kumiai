@@ -586,7 +586,6 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     retentionSeconds: appLogRetentionSeconds,
     anchor: () => anchor,
     groupID: () => commitTopicID,
-    justifiedEpochCeiling: () => justifiedEpochCeiling(),
     ...(appCursorStore != null ? { appCursorStore } : {}),
     ...(onAppWindowPruned != null ? { onAppWindowPruned } : {}),
     onAppDeliveryStalled: (event) => {
@@ -1317,63 +1316,6 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
 
   const handleLedgerReply = (reply: { requestID: string; sealed: Uint8Array }): void => {
     ledgerWaiters.get(reply.requestID)?.(reply.sealed)
-  }
-
-  /**
-   * The highest epoch the group's OWN COMMIT LOG can justify a frame having been sealed at.
-   *
-   * A member seals at epoch E only after applying the commit that produced E, so a log whose
-   * furthest commit is framed at H bounds every member at H + 1. READ FRESH, never from this
-   * peer's own view of the log: a returning member's own view would bound the group at the epoch
-   * IT reached — killing exactly the frames it came back for.
-   *
-   * THIS IS THE HUB'S WORD, and it can only ever be wrong in ONE direction. A commit's framed
-   * epoch is cleartext — unauthenticated until applied — so a hub free to inject frames can RAISE
-   * this ceiling at will but never LOWER it: the honest commits are in the log too, and the
-   * ceiling is the max over all of them, so no injected frame can hide one. Raising it costs the
-   * attacker nothing; lowering it — which would destroy an honest member's frames — is
-   * unreachable.
-   *
-   * That asymmetry is why an untrusted field is acceptable HERE and would not be for opening a
-   * frame: this decides how long to WAIT, never what to believe — `unwrap` alone still decides
-   * what is finally read.
-   *
-   * Epochs are read pre-apply from the commit's own cleartext, and every frame is asked rather
-   * than only the last: the log's furthest frame may be poison or a fork loser.
-   */
-  const justifiedEpochCeiling = async (): Promise<number> => {
-    let ceiling = crypto.epoch()
-    if (commitTopicID == null) return ceiling
-    let after: LogPosition | null = null
-    while (true) {
-      const result = await mux.fetchTopic({
-        topicID: commitTopicID,
-        ...(after != null ? { after } : {}),
-        limit: COMMIT_FETCH_LIMIT,
-      })
-      assertForwardPage(after, result.messages)
-      for (const message of result.messages) {
-        after = asLogPosition(message.sequenceID)
-        let commit: Uint8Array
-        try {
-          const frame = decodeHandshakeFrame(message.payload)
-          // An unknown wire version is unreadable here and stays unreadable: this ceiling is
-          // built from epochs read out of commit bytes, and a frame this build cannot parse
-          // yields none. Not the heal signal — raising that twice would not raise it harder.
-          if (frame.version !== HANDSHAKE_VERSION) continue
-          if (frame.kind !== HANDSHAKE_KIND.commit) continue
-          commit = decodeCommitFrame(frame.payload).commit
-        } catch {
-          continue // not a commit frame: it says nothing about where the group got to
-        }
-        // The commit's CLEARTEXT epoch, not `readCommitHeader`: that resolves the committer
-        // against this handle's own epoch secret and answers `null` for every commit framed ahead
-        // of this peer — exactly the commits a returning member has yet to walk.
-        const framedAt = crypto.frameEpoch(commit)
-        if (framedAt != null && framedAt + 1 > ceiling) ceiling = framedAt + 1
-      }
-      if (result.messages.length < COMMIT_FETCH_LIMIT) return ceiling
-    }
   }
 
   /**

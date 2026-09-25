@@ -261,8 +261,8 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
    *
    * BOTH message shapes, because the real one answers for both. A sealed app frame carries it in
    * the two bytes `wrap` writes in the clear; a COMMIT is an MLSMessage too and carries the same
-   * field, so a caller bounding a claim against the commit log reads it from here rather than
-   * asking a handle to authenticate a commit it is not yet at the epoch to authenticate. The two
+   * field, so a caller inspecting a commit can read its epoch without asking a handle to
+   * authenticate a commit it is not yet at the epoch to authenticate. The two
    * encodings are distinct here only because the doubles are: in MLS they are one format with one
    * epoch field, and a fake that answered for only one of them would make the epoch of a commit
    * look unreadable when it is the most readable thing about it.
@@ -275,7 +275,7 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
    * sender, the AAD it declares, AND the trailing tag — a check every member can make, because
    * the epoch and the XOR key are in the clear.
    * Without it any two bytes are an epoch, and garbage whose leading bytes read as a number the
-   * commit log justifies is indistinguishable from a frame sealed ahead of the walk: the reader
+   * reader cannot reach is indistinguishable from a frame sealed ahead of the walk: the reader
    * keeps its place and the cursor rests behind it. The port's word for bytes that are not a
    * readable sealed frame is `null`, and a double that invents a plausible one instead is a double
    * that can never be asked this question.

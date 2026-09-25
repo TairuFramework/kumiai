@@ -98,7 +98,6 @@ describe('durable storage stall', () => {
       onAppDeliveryStalled: notices,
       anchor: () => anchor,
       groupID: () => 'group',
-      justifiedEpochCeiling: async () => 2,
     })
     await lane.deliver()
     await lane.deliver()
@@ -106,7 +105,7 @@ describe('durable storage stall', () => {
     lane.dispose()
   })
 
-  test('a justified future-epoch frame reports a stall until dropped', async () => {
+  test('a far-future frame reports a stall until dropped', async () => {
     const sender = createFakeCrypto({ epoch: 65535, localDID: 'mallory' })
     const sealed = await sender.wrap(fromUTF('future'), {
       aad: encodeAppAAD({ topicID, intent: 'log' }),
@@ -143,7 +142,6 @@ describe('durable storage stall', () => {
       onAppDeliveryStalled: notices,
       anchor: () => ({ epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }),
       groupID: () => 'group',
-      justifiedEpochCeiling: async () => 65535,
     })
     await lane.deliver()
     await lane.deliver()

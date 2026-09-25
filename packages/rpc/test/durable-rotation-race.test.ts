@@ -111,7 +111,6 @@ describe('durable app rotation', () => {
       retentionSeconds: 60,
       anchor: () => ({ epoch: 2, secret: fakeEpochSecret(2, APP_TOPIC_LABEL) }),
       groupID: () => 'group',
-      justifiedEpochCeiling: async () => 2,
     })
     await lane.deliver()
     await vi.waitFor(() => expect(seen).toHaveBeenCalledTimes(1))

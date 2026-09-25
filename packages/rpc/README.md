@@ -84,7 +84,7 @@ The port's `unwrap(bytes, { expectedAAD, frame })` must atomically save the cons
 state and the pending record before resolving. A failed save must leave the handle openable and
 throw an error recognized by `isAppFrameStorageError`; the app lane retries without advancing
 past that frame. `onAppDeliveryStalled` reports a persistent storage block, a missing protocol on
-restore, or a justified future-epoch frame once per blocking frame. A missing-protocol record stays
+restore, or a future-epoch frame once per blocking frame. A missing-protocol record stays
 pending and can be delivered after that protocol is registered on a later start. An operator can
 accept a frame's loss with `dropAppFrame(topicID, position)`; it can explicitly discard a
 missing-protocol record, but refuses a pending frame under a registered protocol. It also refuses
@@ -99,8 +99,11 @@ Frames pruned before a read, or lost after a failed durable open followed by ret
 cannot be recovered; `onAppWindowPruned` reports a visible gap. A hub that only sends a log frame
 by mailbox also gives no durable guarantee. A frame published at epoch E and first fetched after
 this peer has moved past E is refused: the peer cannot authenticate its sender after that move.
-A hub can withhold or omit frames. A forged high-epoch justification can hold the cursor until an
-operator drops the frame; `onAppDeliveryStalled` reports that wait with `reason: 'future-epoch'`.
+A hub can withhold or omit frames. A frame claiming an epoch above this peer's current epoch remains
+retained with the cursor behind it even if a commit fetch omits the matching commit. It opens when the
+peer reaches that epoch, or an operator can explicitly discard it with `dropAppFrame`. A forged
+far-future claim can hold delivery until that drop; `onAppDeliveryStalled` reports the wait once with
+`reason: 'future-epoch'`. A frame below the current epoch remains refused.
 The existing commit-applied-before-anchor-saved crash window can still leave a restarted peer on
 a stale app topic.
 

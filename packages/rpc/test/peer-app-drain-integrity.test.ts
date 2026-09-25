@@ -41,19 +41,12 @@ class FlakyFetchHub extends DurableFakeHub {
  * doors — the position is durable and the handle never comes back — so every question here is
  * decided before the door shuts, not after.
  */
-describe('the drain bounds what a frame may claim, and passes no epoch it failed to read', () => {
+describe('the drain retains future claims and passes no epoch it failed to read', () => {
   /**
-   * A frame's cleartext epoch is the untrusted hub's relay of a publisher's word, and the drain
-   * waits on a frame that claims to be ahead of the walk. Unbounded, that word is a way to pin the
-   * cursor forever: one injected frame claiming an epoch no group will ever reach holds the
-   * position behind it for the segment's whole life, and a roster-stable group never rotates out
-   * from under it.
-   *
-   * The bound is the group's OWN commit log: a member seals at an epoch only after applying the
-   * commit that produced it, so a claim the log cannot justify is one no member could have made.
-   * Not ahead — DEAD, and dead is done.
+   * A future claim retains its position even if the commit log omits the matching commit.
+   * An operator can explicitly release a forged claim that the group will never reach.
    */
-  test('a frame claiming an epoch the commit log cannot justify is dead, and the cursor passes it', async () => {
+  test('a far-future claim blocks the cursor', async () => {
     const hub = new DurableFakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x91)
     const seen: Array<unknown> = []
@@ -68,8 +61,7 @@ describe('the drain bounds what a frame may claim, and passes no epoch it failed
     hub.detach('bob')
 
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at epoch one' } })
-    // The injected frame. Its bytes claim epoch 65535 while the group's commit log holds no
-    // commit at all — nothing anywhere says the group ever left epoch 1.
+    // The injected frame claims epoch 65535 while the group is still at epoch 1.
     const forged = createFakeCrypto({ epoch: 65535, localDID: 'mallory' })
     await hub.publish({
       senderDID: 'mallory',
@@ -89,12 +81,10 @@ describe('the drain bounds what a frame may claim, and passes no epoch it failed
 
     expect(seen).toEqual([{ text: 'at epoch one' }])
 
-    // The whole assertion is on the PERSISTED position: the forged frame is not merely undelivered
-    // (it never could be), it is behind the cursor, so it is out of the buffer and out of every
-    // future pull. Nothing about it survives to be re-fetched or re-reported.
+    // The forged frame is not marked done. The durable operator drop is tested separately.
     const posted = hub.published.filter((m) => m.topicID === topicID)
     expect(posted).toHaveLength(2)
-    expect(bob.appCursorStore.stored(topicID)).toBe(posted[1]?.sequenceID)
+    expect(bob.appCursorStore.stored(topicID)).toBe(posted[0]?.sequenceID)
     expect(pruned).toEqual([])
 
     await alice.peer.dispose()
@@ -102,14 +92,7 @@ describe('the drain bounds what a frame may claim, and passes no epoch it failed
   })
 
   /**
-   * The other side of that bound, and the loss it must not cause: a frame sealed GENUINELY ahead —
-   * its commit is in the log, so the group really is where the frame says it is — keeps its bytes
-   * and its place until the walk reaches its epoch.
-   *
-   * Two epochs ahead, not one, because a bound taken from this peer's own handle rather than from
-   * the log would still admit the first and eat the second: a returning member is behind by
-   * however long it was away, and every epoch it has not reached yet is one the log already
-   * justifies.
+   * A frame sealed two epochs ahead keeps its bytes and place until the walk reaches that epoch.
    */
   test('a frame the commit log justifies keeps its place, and the cursor passes it only on delivery', async () => {
     const hub = new DurableFakeHub()
@@ -158,12 +141,9 @@ describe('the drain bounds what a frame may claim, and passes no epoch it failed
   })
 
   /**
-   * BYTES THAT ARE NOT A FRAME AT ALL, whose first two happen to read as an epoch the commit log
-   * does justify. Nothing about them is a publisher's claim — no member wrote them — but a reader
-   * that answers "what epoch does this claim?" structurally, without asking whether the bytes are
-   * a frame, mints one out of the noise and then honours it.
+   * Bytes that are not a frame claim no epoch, even if their leading bytes resemble one.
    *
-   * The cost is the cursor: a claim of AHEAD-and-justified is the one answer that makes a frame
+   * The cost is the cursor: a claim of ahead is the one answer that makes a frame
    * keep its place, so the position sits behind the garbage for every epoch between here and the
    * claim, and every frame delivered in that window is re-read and re-delivered by a restart. The
    * port's answer for bytes that are not a readable sealed frame is `null`, which is DEAD, and
@@ -183,8 +163,7 @@ describe('the drain bounds what a frame may claim, and passes no epoch it failed
     hub.detach('bob')
 
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at epoch one' } })
-    // `03 00` little-endian is epoch 3, and the two commits below carry the group there — so the
-    // log justifies the number, and only the shape of the rest can refuse it.
+    // `03 00` little-endian is epoch 3. Only the shape of the rest can refuse it.
     await hub.publish({
       senderDID: 'mallory',
       topicID,

@@ -79,9 +79,10 @@ Bounds this design has, on purpose, rather than hides:
   design: forward secrecy.
 - **Durable log delivery depends on the hub and the peer's epoch.** A hub can withhold or omit
   frames; a frame first fetched after the peer has moved past its sealing epoch is refused. A
-  justified future-epoch claim can pin the cursor until an operator drops it. The host receives
-  `onAppDeliveryStalled` for that wait.
-- **App and epoch-ceiling pages must advance their cursors.** A page containing a position at or
+  future-epoch claim stays retained with the cursor behind it, even if the hub omits its commit.
+  The peer opens it on reaching that epoch; a forged claim can hold delivery until an operator
+  calls `dropAppFrame`. The host receives one `onAppDeliveryStalled` notice for that wait.
+- **App pages must advance their cursors.** A page containing a position at or
   before `after`, or positions out of order, fails as a hub fault. The commit walk also rejects a
   non-forward full page; it still examines a short, one-shot fork reveal below its cursor.
 - **A wake ping tells the push provider that a device received something, and when.** The content

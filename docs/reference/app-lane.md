@@ -98,7 +98,9 @@ DEAD.** It advances over the contiguous run of finished frames and stops dead at
 not, because a position is a place in the *log*, and passing it passes everything before it. A frame
 sealed *ahead* of the walk is neither — it opens once the walk gets there — so the cursor waits
 behind it. Passing it would drop it on the next restart, which is the loss the whole lane exists to
-stop.
+stop. A future claim stays retained even when the hub temporarily omits the commit that would
+produce its epoch. A forged claim can hold the cursor until an operator calls `dropAppFrame`;
+durable peers report that wait once through `onAppDeliveryStalled`.
 
 That rule needs a distinction `unwrap` cannot make. It throws "not my epoch" and cannot say *which*:
 sealed-ahead (opens later) and sealed-below (never opens again) are the same exception. So

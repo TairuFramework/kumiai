@@ -1,11 +1,9 @@
 import type { HubFetchTopicParams, HubFetchTopicResult } from '@kumiai/hub-tunnel'
-import { fromUTF } from '@sozai/codec'
 import { describe, expect, test } from 'vitest'
 
-import { encodeAppAAD } from '../src/app-aad.js'
 import { createAppLane } from '../src/app-lane.js'
 import { asLogPosition, assertForwardPage } from '../src/cursor.js'
-import { APP_TOPIC_LABEL, commitTopic, protocolTopic } from '../src/topic.js'
+import { APP_TOPIC_LABEL, commitTopic } from '../src/topic.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { buildLedgerCommit, chat, makeMLSPeer } from './fixtures/peer.js'
@@ -46,7 +44,6 @@ describe('hub log paging', () => {
       retentionSeconds: 60,
       anchor: () => ({ epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }),
       groupID: () => 'group',
-      justifiedEpochCeiling: async () => 1,
     })
     await expect(lane.deliver()).rejects.toThrow(/non-increasing log positions/)
     expect(fetches).toBe(2)
@@ -70,47 +67,6 @@ describe('hub log paging', () => {
     const hub = new RepeatingHub()
     const bob = makeMLSPeer(hub, 'bob', secret)
     await bob.peer.protocol('chat').to('alice')
-    hub.armed = true
-    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toThrow(
-      /non-increasing log positions/,
-    )
-    expect(hub.fetches).toBe(2)
-    await bob.peer.dispose()
-  })
-
-  test('the future-epoch commit ceiling rejects a repeated full page', async () => {
-    const appTopic = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
-    class RepeatingCeilingHub extends DurableFakeHub {
-      armed = false
-      ceiling = false
-      fetches = 0
-      override async fetchTopic(params: HubFetchTopicParams): Promise<HubFetchTopicResult> {
-        if (this.ceiling && params.topicID === commitTopic(secret)) {
-          if (++this.fetches > 2) throw new Error('fixture cutoff')
-          return {
-            messages: repeated as HubFetchTopicResult['messages'],
-            head: repeated.at(-1)?.sequenceID ?? null,
-            oldest: repeated[0]?.sequenceID ?? null,
-          }
-        }
-        const result = await super.fetchTopic(params)
-        if (this.armed && params.topicID === appTopic) this.ceiling = true
-        return result
-      }
-    }
-    const hub = new RepeatingCeilingHub()
-    const bob = makeMLSPeer(hub, 'bob', secret)
-    await bob.peer.protocol('chat').to('alice')
-    hub.detach('bob')
-    const sender = createFakeCrypto({ epoch: 2, localDID: 'alice' })
-    await hub.publish({
-      topicID: appTopic,
-      senderDID: 'alice',
-      payload: await sender.wrap(fromUTF('future'), {
-        aad: encodeAppAAD({ topicID: appTopic, intent: 'log' }),
-      }),
-      retain: 'log',
-    })
     hub.armed = true
     await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toThrow(
       /non-increasing log positions/,

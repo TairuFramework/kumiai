@@ -59,7 +59,6 @@ function fixture(
     appCursorStore: cursor,
     anchor: () => anchor,
     groupID: () => 'group',
-    justifiedEpochCeiling: async () => 2,
   })
   const append = async (position: string, text: string, epoch = 1) => {
     messages.push({
@@ -179,7 +178,6 @@ describe('durable delivery queue', () => {
       retentionSeconds: 60,
       anchor: () => ({ epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }),
       groupID: () => 'group',
-      justifiedEpochCeiling: async () => 1,
     })
     await lane.restore([record])
     await expect(lane.deliver()).rejects.toThrow('other protocol fetch failed')

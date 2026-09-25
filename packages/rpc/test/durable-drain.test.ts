@@ -64,7 +64,6 @@ function retainedLane() {
     appCursorStore: cursor,
     anchor: () => anchor,
     groupID: () => 'group',
-    justifiedEpochCeiling: async () => 1,
   })
   const append = async (position: string, intent: 'log' | 'ephemeral') => {
     messages.push({
@@ -163,7 +162,6 @@ describe('durable retained drain', () => {
       retentionSeconds: 60,
       anchor: () => anchor,
       groupID: () => 'group',
-      justifiedEpochCeiling: async () => 1,
     })
     const first = lane.deliver()
     const failed = expect(first).rejects.toThrow('first fetch failed')

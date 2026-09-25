@@ -89,14 +89,6 @@ export type AppLaneParams = {
   anchor: () => Anchor
   /** The group's commit topic, or `undefined` before the control lanes are up. */
   groupID: () => string | undefined
-  /**
-   * The highest epoch the group's own commit log can justify a frame having been sealed at.
-   *
-   * A PORT rather than this lane's own work: it pages the COMMIT log with the commit lane's
-   * codecs and limits, and only the bound it answers belongs here. See the implementation in
-   * `peer.ts` for why an untrusted field is acceptable for this one question.
-   */
-  justifiedEpochCeiling: () => Promise<number>
 }
 
 export type AppLane = {
@@ -177,7 +169,6 @@ export function createAppLane(params: AppLaneParams): AppLane {
     scheduleDelivery = (start) => start(),
     anchor,
     groupID,
-    justifiedEpochCeiling,
   } = params
 
   /**
@@ -613,14 +604,6 @@ export function createAppLane(params: AppLaneParams): AppLane {
 
   const drain = async (): Promise<void> => {
     await loadSegment()
-    // Read once per drain and only if a frame actually claims to be ahead: the log is a network
-    // read, the honest buffer holds no such claim, and this handle's epoch does not move under a
-    // single drain.
-    let ceiling: number | null = null
-    const justifies = async (claim: number): Promise<boolean> => {
-      ceiling ??= await justifiedEpochCeiling()
-      return claim <= ceiling
-    }
     for (const [name, frames] of segment) {
       const events = appEventHandlers.get(name)
       const cursor = cursors.get(name)
@@ -632,10 +615,9 @@ export function createAppLane(params: AppLaneParams): AppLane {
         const sealed = frame.sealed.bytes
         const sealedAt = crypto.frameEpoch(sealed)
         if (sealedAt !== crypto.epoch()) {
-          // Not sealed at the handle's current epoch. Ahead of the walk AND justified by the
-          // commit log: keep its bytes and place. Otherwise — below the walk, an epoch no member
-          // could have sealed at, or unreadable — it is dead, and dead is done.
-          if (sealedAt != null && sealedAt > crypto.epoch() && (await justifies(sealedAt))) {
+          // A future claim keeps its bytes and position even when the hub omits its commit.
+          // Below the current epoch or unreadable is dead and done.
+          if (sealedAt != null && sealedAt > crypto.epoch()) {
             if (crypto.pending != null) {
               const key = `future\u0000${cursor.topicID}\u0000${frame.position}`
               if (blockingFrames.get(name) !== key) {
@@ -790,9 +772,8 @@ export function createAppLane(params: AppLaneParams): AppLane {
      *
      * Which frames are this epoch's is read from their own cleartext (`crypto.frameEpoch`), not
      * found by trying every frame and catching, since `unwrap` throwing cannot distinguish "not my
-     * epoch yet" from "never again". A FUTURE-epoch claim is bounded by
-     * {@link AppLaneParams.justifiedEpochCeiling} for the same reason — unbounded, it would pin
-     * the cursor behind it forever.
+     * epoch yet" from "never again". A forged future-epoch claim can hold the cursor until an
+     * operator drops it.
      *
      * The buffer is walked whole, not stopped at the first frame that is not this epoch's, since
      * the front can still hold a frame from an epoch the handle already passed (a journal replay

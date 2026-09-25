@@ -189,7 +189,6 @@ describe('durable pending restoration', () => {
       anchor: () => anchor,
       groupID: () => 'group',
       onAppDeliveryStalled: notices,
-      justifiedEpochCeiling: async () => 2,
     })
     await lane.restore([record, unknown])
     await lane.restore([record, unknown])
@@ -258,7 +257,6 @@ describe('durable pending restoration', () => {
         anchor: () => ({ epoch: 2, secret: fakeEpochSecret(2, APP_TOPIC_LABEL) }),
         groupID: () => 'group',
         onAppDeliveryStalled: notices,
-        justifiedEpochCeiling: async () => 2,
       })
     const first = makeLane(false)
     await first.restore([record])

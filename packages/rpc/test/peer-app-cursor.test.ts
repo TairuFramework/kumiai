@@ -83,11 +83,9 @@ describe('the app-lane drain reads from a durable position and reports what aged
    * treated "will not open" as done would write a position past this frame, and the next restart
    * would fetch after it and never see it again. Nothing would report that.
    *
-   * THE FRAME MUST BE JUSTIFIED, and that is what shapes the staging below. A claim to be ahead is
-   * only honoured as far as the group's own commit log can vouch for it — a member seals at epoch 4
-   * only after applying the commit that produced 4, so that commit is in the log — and a claim the
-   * log cannot justify is dead, not waiting. So the log here really does carry the group to epoch
-   * 4, and the reader really is a member that cannot get there.
+   * The log here carries the group to epoch 4, but the retention rule does not depend on the hub
+   * showing those commits. A future claim stays sealed until the reader reaches that epoch or an
+   * operator drops it. This reader cannot get there because it strands on its own commit.
    *
    * WHICH MAKES THE READER A STRANDED ONE, necessarily. A peer that merely lags reads the log,
    * applies what is in it, and arrives — the very commits that justify the frame are the ones that
@@ -116,7 +114,7 @@ describe('the app-lane drain reads from a durable position and reports what aged
     // and no journal to repair him. He can never apply the frame that is his own commit.
     await publishCommit({ hub, senderDID: 'bob', recoverySecret, epoch: 1 })
     // The group applied it and carried on without him: commits framed at 2 and 3 leave it at epoch
-    // 4. This is what makes the frame below justified — and none of it is reachable by bob, whose
+    // 4. The commit history confirms the frame's epoch — but none of it is reachable by bob, whose
     // walk stops at his own commit before it ever reads these.
     await publishCommit({ hub, senderDID: 'zoe', recoverySecret, epoch: 2 })
     await publishCommit({ hub, senderDID: 'zoe', recoverySecret, epoch: 3 })

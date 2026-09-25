@@ -247,7 +247,7 @@ intent `ephemeral`, or an unreadable AAD, keep today's open-once path.
 first failure only after all have settled, so no fetch keeps mutating buffers or `fetched` positions after
 the app-lane mutex is released and a retry starts.
 Each fetched page must advance beyond `after` with strictly increasing positions; otherwise the pull
-fails as a hub fault. The commit epoch-ceiling pager applies the same rule.
+fails as a hub fault.
 
 **Liveness.** A drain request never depends on a later push:
 
@@ -282,7 +282,7 @@ operable:
   just the app drain, on the liveness schedule.
 - A host notice `onAppDeliveryStalled({ groupID, protocol, topicID, position, error })` fires (through
   the shared `notifyHost` outbox) when a storage failure first blocks a frame, and again only if the
-  blocking frame changes. A justified future-epoch claim also raises one stall notice with
+  blocking frame changes. Every future-epoch claim also raises one stall notice with
   `reason: 'future-epoch'` and remains operable through `dropAppFrame`.
 - `GroupPeer.dropAppFrame(topicID, position)` lets an operator accept the loss: it marks that buffered
   frame dead (cursor may pass it) and resumes the walk. It refuses a registered protocol's pending
@@ -291,7 +291,13 @@ operable:
   serve.
 - `unwrap` throws anything else: dead, as today.
 
-Not-this-epoch rules are unchanged.
+**Epoch retention.** A frame claiming an epoch above this peer's current epoch stays sealed. The
+durable cursor stops before it, even when the hub's current commit fetch does not include the commit
+that would produce that epoch. The peer opens it if it later reaches the claimed epoch. An operator
+can explicitly discard it with `dropAppFrame`; the drop is recorded by the durable cursor and survives
+restart. This avoids silent loss when a hub temporarily omits a commit. A forged future claim can hold
+delivery until an operator drops it, and the stall notice makes that wait visible. A frame claiming an
+epoch below the current epoch remains dead: this peer can no longer authenticate its sender.
 
 **Frame states.** `AppFrame.sealed: Uint8Array | null` becomes
 `{ state: 'sealed'; bytes } | { state: 'pending'; id } | { state: 'done' }`.
