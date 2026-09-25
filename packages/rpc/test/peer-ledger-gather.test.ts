@@ -1,6 +1,7 @@
 import { fromUTF } from '@sozai/codec'
 import { describe, expect, test, vi } from 'vitest'
 
+import { PeerDisposedError } from '../src/errors.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import type { RecoveryEvent } from '../src/peer.js'
 import { decodeLedgerReply, encodeLedgerRequest } from '../src/recovery.js'
@@ -163,6 +164,61 @@ describe('the ledger gather does not hand the group to the relay', () => {
     expect(await alice.mls.isLedgerComplete()).toBe(true)
     expect((await alice.peer.replay()).reenact).toBeUndefined()
     await alice.peer.dispose()
+    await bob.peer.dispose()
+  })
+
+  test('dispose during ledger request creation settles recovery without a gather timer', async () => {
+    const hub = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x67)
+    const timing = { timeoutMs: 5000, getDelayMs: () => 0, deadlineMs: 10000 }
+    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery: timing })
+    await bob.peer.commit(buildLedgerCommit(bob, ['role:carol=admin']))
+    const events: Array<RecoveryEvent> = []
+    const alice = makeMLSPeer(hub, 'alice', rs, {
+      epoch: 1,
+      members,
+      recovery: timing,
+      onRecovery: (event) => {
+        events.push(event)
+      },
+    })
+    let releaseRequest: () => void = () => {}
+    const requestGate = new Promise<void>((resolve) => {
+      releaseRequest = resolve
+    })
+    const createRequest = alice.mls.createRecoveryRequest.bind(alice.mls)
+    let requests = 0
+    vi.spyOn(alice.mls, 'createRecoveryRequest').mockImplementation(async (requestID) => {
+      if (++requests === 2) await requestGate
+      return createRequest(requestID)
+    })
+    const setTimer = vi.spyOn(globalThis, 'setTimeout')
+    const attempt = alice.peer.recover().then(
+      () => 'resolved',
+      (error: unknown) => error,
+    )
+    await vi.waitFor(() => expect(requests).toBe(2))
+    const gatherTimersBeforeDispose = setTimer.mock.calls.filter(
+      (call) => (call[1] ?? 0) > 8000 && (call[1] ?? 0) <= 10000,
+    ).length
+    const disposal = alice.peer.dispose()
+    releaseRequest()
+    await disposal
+    let promptTimer: ReturnType<typeof setTimeout> | undefined
+    const outcome = await Promise.race([
+      attempt,
+      new Promise((resolve) => {
+        promptTimer = setTimeout(() => resolve('still gathering'), 200)
+      }),
+    ])
+    clearTimeout(promptTimer)
+    expect(outcome).toBeInstanceOf(PeerDisposedError)
+    expect(events.map((event) => event.phase)).toEqual(['started', 'failed'])
+    expect(events[1]).toMatchObject({ reason: 'disposed' })
+    expect(
+      setTimer.mock.calls.filter((call) => (call[1] ?? 0) > 8000 && (call[1] ?? 0) <= 10000),
+    ).toHaveLength(gatherTimersBeforeDispose)
+    setTimer.mockRestore()
     await bob.peer.dispose()
   })
 

@@ -1935,6 +1935,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     // for one publish; without the second, so does the hub.
     const requestID = newPublishID()
     const request = await port.createRecoveryRequest(requestID)
+    if (disposed) return false
     return await new Promise<boolean>((resolve) => {
       let settled = false
       const bootstraps = new Set<Promise<void>>()
