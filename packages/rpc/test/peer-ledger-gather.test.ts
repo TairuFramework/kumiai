@@ -1,5 +1,5 @@
 import { fromUTF } from '@sozai/codec'
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import { decodeLedgerReply, encodeLedgerRequest } from '../src/recovery.js'
@@ -75,6 +75,76 @@ async function askForTheLedger(
 }
 
 describe('the ledger gather does not hand the group to the relay', () => {
+  test('a timed-out reply cannot bootstrap during a later recovery', async () => {
+    const hub = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x65)
+    const timing = { timeoutMs: 80, getDelayMs: () => 0, deadlineMs: 250 }
+    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery: timing })
+    await bob.peer.commit(buildLedgerCommit(bob, ['role:carol=admin']))
+    const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, recovery: timing })
+    let releaseOpen: () => void = () => {}
+    const openGate = new Promise<void>((resolve) => {
+      releaseOpen = resolve
+    })
+    const open = alice.mls.openSealedLedger.bind(alice.mls)
+    let opens = 0
+    let staleOpenReturned = false
+    const openSpy = vi.spyOn(alice.mls, 'openSealedLedger').mockImplementation(async (...args) => {
+      if (++opens > 1) return null
+      await openGate
+      const tokens = await open(...args)
+      staleOpenReturned = true
+      return tokens
+    })
+    const bootstrap = vi.spyOn(alice.mls, 'bootstrapLedger')
+    expect(await alice.peer.recover()).toEqual({ advanced: false, reenact: [] })
+    expect(openSpy).toHaveBeenCalled()
+    const second = alice.peer.recover()
+    await vi.waitFor(() => expect(opens).toBeGreaterThan(1))
+    releaseOpen()
+    await vi.waitFor(() => expect(staleOpenReturned).toBe(true))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(bootstrap).toHaveBeenCalledTimes(0)
+    await second
+    expect(bootstrap).toHaveBeenCalledTimes(0)
+    await alice.peer.dispose()
+    await bob.peer.dispose()
+  })
+
+  test('a gather keeps the lane while bootstrapLedger is in flight', async () => {
+    const hub = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x66)
+    const timing = { timeoutMs: 80, getDelayMs: () => 0, deadlineMs: 250 }
+    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery: timing })
+    await bob.peer.commit(buildLedgerCommit(bob, ['role:carol=admin']))
+    const alice = makeMLSPeer(hub, 'alice', rs, {
+      epoch: 1,
+      members,
+      recovery: timing,
+    })
+    let releaseBootstrap: () => void = () => {}
+    const bootstrapGate = new Promise<void>((resolve) => {
+      releaseBootstrap = resolve
+    })
+    const bootstrap = alice.mls.bootstrapLedger.bind(alice.mls)
+    vi.spyOn(alice.mls, 'bootstrapLedger').mockImplementation(async (tokens) => {
+      await bootstrapGate
+      await bootstrap(tokens)
+    })
+    let firstSettled = false
+    const first = alice.peer.recover().finally(() => {
+      firstSettled = true
+    })
+    await vi.waitFor(() => expect(alice.mls.bootstrapLedger).toHaveBeenCalled())
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(firstSettled).toBe(false)
+    const second = alice.peer.recover()
+    releaseBootstrap()
+    await Promise.all([first, second])
+    await alice.peer.dispose()
+    await bob.peer.dispose()
+  })
+
   test('the hub carries a gathered ledger, and never sees a body', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x61)

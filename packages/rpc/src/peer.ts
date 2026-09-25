@@ -1936,12 +1936,15 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     const request = await port.createRecoveryRequest(requestID)
     return await new Promise<boolean>((resolve) => {
       let settled = false
+      const bootstraps = new Set<Promise<void>>()
       const finish = (complete: boolean): void => {
         if (settled) return
         settled = true
         ledgerWaiters.delete(requestID)
         clearTimeout(timer)
-        resolve(complete)
+        // Keep the lane until every bootstrap already touching this handle has finished.
+        if (bootstraps.size === 0) resolve(complete)
+        else void Promise.allSettled([...bootstraps]).then(() => resolve(complete))
       }
       const timer = setTimeout(() => finish(false), Math.max(0, deadline - Date.now()))
       ledgerWaiters.set(requestID, (sealed) => {
@@ -1953,10 +1956,15 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             // here, since the next responder's reply is sealed to the same key.
             const tokens = await port.openSealedLedger(sealed, requestID)
             if (tokens == null) return
-            // Re-check: `disposed` can flip during the openSealedLedger await, and bootstrapLedger
-            // REPLACES the host-owned ledger — it must not run against a torn-down handle.
-            if (disposed) return
-            await port.bootstrapLedger(tokens)
+            // Timeout or disposal can settle the gather while opening the reply.
+            if (settled || disposed) return
+            const bootstrap = port.bootstrapLedger(tokens)
+            bootstraps.add(bootstrap)
+            try {
+              await bootstrap
+            } finally {
+              bootstraps.delete(bootstrap)
+            }
             finish(true)
           } catch {
             // Recomputed head does not match the authenticated one: this responder withheld,
