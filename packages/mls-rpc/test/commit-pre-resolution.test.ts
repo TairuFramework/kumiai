@@ -128,4 +128,12 @@ test('resolver faults and missing bodies retain their error boundary', async () 
       resolveLedgerEntries: async () => [],
     }),
   ).rejects.toBeInstanceOf(MissingLedgerEntriesError)
+  // A body whose digest matches no requested ID is absent, not trusted.
+  await expect(
+    mls.processCommit(commit, {
+      senderDID: group.committer.identity.id,
+      resolveLedgerEntries: async () => ['not-a-token'],
+    }),
+  ).rejects.toBeInstanceOf(MissingLedgerEntriesError)
+  expect(member.handle.epoch).toBe(group.committer.handle.epoch - 1n)
 })

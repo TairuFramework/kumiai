@@ -23,6 +23,7 @@ import type {
 } from '@kumiai/rpc'
 
 import type { HandleAccess } from './access.js'
+import { applyCommit } from './apply-commit.js'
 
 const utf8 = new TextEncoder()
 
@@ -227,46 +228,27 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
           if (group.epoch !== frameEpoch) {
             throw new Error('commit epoch changed during entry resolution')
           }
-          const before = group.epoch
-          let persistFailed = false
-          entrySlot.install(async (requested) =>
-            requested.flatMap((id) => {
-              const token = resolved.get(id)
-              return token == null ? [] : [token]
-            }),
+          const result = await applyCommit(
+            group,
+            commit,
+            {
+              ...context,
+              resolveLedgerEntries: async (requested) =>
+                requested.flatMap((id) => {
+                  const token = resolved.get(id)
+                  return token == null ? [] : [token]
+                }),
+              entrySlot,
+              ownDID: identity.id,
+            },
+            persist,
           )
-          try {
-            try {
-              await group.processMessage(commit, {
-                persist: async (current) => {
-                  try {
-                    await persist(current)
-                  } catch (error) {
-                    persistFailed = true
-                    throw error
-                  }
-                },
-              })
-            } catch (error) {
-              if (error instanceof MissingLedgerEntriesError || persistFailed) throw error
-              if (group.epoch === before) {
-                refusedEpoch = Number(before)
-                throw ignored
-              }
-              return {
-                advanced: true,
-                epochBefore: Number(before),
-                epochAfter: Number(group.epoch),
-              }
-            }
-            if (group.epoch === before) {
-              refusedEpoch = Number(before)
-              throw ignored
-            }
-            return { advanced: true, epochBefore: Number(before), epochAfter: Number(group.epoch) }
-          } finally {
-            entrySlot.install(undefined)
+          // Thrown so the adapter does not save a handle the commit left untouched.
+          if (!result.advanced) {
+            refusedEpoch = result.epochBefore
+            throw ignored
           }
+          return { advanced: true, epochBefore: result.epochBefore, epochAfter: result.epochAfter }
         })
       } catch (error) {
         if (error === ignored && refusedEpoch != null)
