@@ -243,6 +243,8 @@ Exactly once: steps 1–5 run in one mutex hold and step 3 prevents a second pas
 
 An expired ledger gather ignores replies that finish opening after it settles. If a reply has
 entered `bootstrapLedger`, the gather keeps the lane until that write finishes, even at timeout.
+Disposal settles active ledger gathers and clears their deadline timers. A recovery waiting in
+bootstrap then emits `failed` / `disposed` promptly without waiting for the gather deadline.
 
 ## Observer safety
 

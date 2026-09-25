@@ -226,6 +226,71 @@ describe('recovery lifecycle', () => {
     expect(events[1]).toMatchObject({ reason: 'disposed' })
   })
 
+  test('dispose settles a ledger gather and clears its deadline timer', async () => {
+    const hub = new FakeHub()
+    const rs = secret(0xce)
+    const timing = { timeoutMs: 5000, deadlineMs: 10000, getDelayMs: () => 0 }
+    const bobCrypto = createFakeCrypto({ epoch: 1, localDID: 'bob' })
+    const bobMLS = createMemoryGroupMLS({
+      recoverySecret: rs,
+      epoch: 1,
+      localDID: 'bob',
+      members,
+      serveLedger: (ledger) => ledger.slice(0, ledger.length - 1),
+      onAdvance: (epoch) => bobCrypto.setEpoch(epoch),
+    })
+    const bob = makeMLSPeer(hub, 'bob', rs, {
+      mls: bobMLS,
+      crypto: bobCrypto,
+      members,
+      recovery: timing,
+    })
+    await bob.peer.commit(buildLedgerCommit(bob, ['role:alice=admin']))
+    const events: Array<RecoveryEvent> = []
+    const alice = makeMLSPeer(hub, 'alice', rs, {
+      members,
+      recovery: timing,
+      onRecovery: (event) => {
+        events.push(event)
+      },
+    })
+    const setTimer = vi.spyOn(globalThis, 'setTimeout')
+    const clearTimer = vi.spyOn(globalThis, 'clearTimeout')
+    const attempt = alice.peer.recover().then(
+      () => 'resolved',
+      (error: unknown) => error,
+    )
+    await vi.waitFor(() =>
+      expect(
+        hub.published.some(
+          (message) =>
+            message.topicID === rendezvousTopic(rs) &&
+            message.senderDID === 'alice' &&
+            decodeHandshakeFrame(message.payload).kind === HANDSHAKE_KIND.ledgerRequest,
+        ),
+      ).toBe(true),
+    )
+    const gatherTimerIndex = setTimer.mock.calls.findLastIndex((call) => (call[1] ?? 0) > 8000)
+    expect(gatherTimerIndex).toBeGreaterThanOrEqual(0)
+    const gatherTimer = setTimer.mock.results[gatherTimerIndex]?.value
+    await alice.peer.dispose()
+    let promptTimer: ReturnType<typeof setTimeout> | undefined
+    const outcome = await Promise.race([
+      attempt,
+      new Promise((resolve) => {
+        promptTimer = setTimeout(() => resolve('still gathering'), 200)
+      }),
+    ])
+    clearTimeout(promptTimer)
+    expect(outcome).toBeInstanceOf(PeerDisposedError)
+    expect(eventsOf(events)).toEqual(['started', 'failed'])
+    expect(events[1]).toMatchObject({ reason: 'disposed' })
+    expect(clearTimer).toHaveBeenCalledWith(gatherTimer)
+    setTimer.mockRestore()
+    clearTimer.mockRestore()
+    await bob.peer.dispose()
+  })
+
   test('an automatic attempt and consumer call share one terminal event', async () => {
     const hub = new FakeHub()
     const rs = secret(0xb8)

@@ -1115,6 +1115,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * to the next reply rather than giving up.
    */
   const ledgerWaiters = new Map<string, (sealed: Uint8Array) => void>()
+  const ledgerGatherFinishes = new Set<() => void>()
   const pendingLedgerReplies = new Set<ReturnType<typeof setTimeout>>()
 
   // Responder: after a jitter delay, answer a recovery request with GroupInfo sealed to the
@@ -1941,12 +1942,15 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         if (settled) return
         settled = true
         ledgerWaiters.delete(requestID)
+        ledgerGatherFinishes.delete(finishOnDispose)
         clearTimeout(timer)
         // Keep the lane until every bootstrap already touching this handle has finished.
         if (bootstraps.size === 0) resolve(complete)
         else void Promise.allSettled([...bootstraps]).then(() => resolve(complete))
       }
+      const finishOnDispose = () => finish(false)
       const timer = setTimeout(() => finish(false), Math.max(0, deadline - Date.now()))
+      ledgerGatherFinishes.add(finishOnDispose)
       ledgerWaiters.set(requestID, (sealed) => {
         void (async () => {
           if (settled || disposed) return
@@ -2533,6 +2537,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       // closes the mux's three routes to the wire immediately, so whatever the op does next, it
       // cannot land a write. `mux.dispose()` — the full teardown — stays LAST, unchanged.
       mux.suspendPublishing()
+      // Release a lane waiting for ledger replies now; its deadline may be far away.
+      for (const finish of [...ledgerGatherFinishes]) finish()
       disposePromise = (async () => {
         // Tear down even a peer whose init failed — it still holds a hub drain.
         await settled
@@ -2542,8 +2548,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         // `recover()` blocked in `requestGroupInfo` is settled by exactly two things — a reply or
         // its timeout — and dispose is about to clear that timeout. Skipping this drain would hang
         // the heal, `commitTail`, and every lane operation queued behind it. Resolve, then clear,
-        // so a fired timer cannot race a half-drained map. (The ledger gather needs no such drain:
-        // its timeout is a local held in none of these maps.)
+        // so a fired timer cannot race a half-drained map.
         for (const waiter of recoveryWaiters.values()) waiter({ kind: 'disposed' })
         recoveryWaiters.clear()
         for (const timer of recoveryTimers.values()) clearTimeout(timer)
