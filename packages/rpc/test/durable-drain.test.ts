@@ -48,9 +48,9 @@ function retainedLane() {
   const lane = createAppLane({
     mux: {
       retainTopic() {},
-      async fetchTopic() {
+      async fetchTopic({ after }: { after?: string }) {
         return {
-          messages,
+          messages: messages.filter((message) => after == null || message.sequenceID > after),
           head: messages.at(-1)?.sequenceID ?? null,
           oldest: messages[0]?.sequenceID ?? null,
         }

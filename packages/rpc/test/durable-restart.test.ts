@@ -154,6 +154,7 @@ describe('durable pending restoration', () => {
       rows.delete(id)
     })
     const seen = vi.fn()
+    const notices = vi.fn()
     const anchor = { epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }
     const lane = createAppLane({
       mux: {
@@ -187,21 +188,129 @@ describe('durable pending restoration', () => {
       appCursorStore: cursor,
       anchor: () => anchor,
       groupID: () => 'group',
+      onAppDeliveryStalled: notices,
       justifiedEpochCeiling: async () => 2,
     })
     await lane.restore([record, unknown])
-    expect(complete).toHaveBeenCalledWith('unknown-id')
-    expect(rows.has('unknown-id')).toBe(false)
+    await lane.restore([record, unknown])
+    expect(complete).not.toHaveBeenCalledWith('unknown-id')
+    expect(rows.has('unknown-id')).toBe(true)
+    expect(notices).toHaveBeenCalledTimes(1)
+    expect(notices).toHaveBeenCalledWith(
+      expect.objectContaining({ protocol: 'unserved', reason: 'unknown-protocol' }),
+    )
     anchor.epoch = 2
     anchor.secret = fakeEpochSecret(2, APP_TOPIC_LABEL)
     lane.reset()
     await lane.deliver()
     await vi.waitFor(() => expect(seen).toHaveBeenCalledTimes(1))
-    await vi.waitFor(() => expect(rows.size).toBe(0))
+    await vi.waitFor(() => expect(rows.size).toBe(1))
+    await expect(
+      lane.dropFrame(unknown.frame.topicID, unknown.frame.position),
+    ).resolves.toBeUndefined()
+    expect(rows.size).toBe(0)
     expect(complete).toHaveBeenCalledWith('old-id')
     expect(cursor.stored(newTopic)).toBeNull()
     expect(cursor.history(newTopic)).toEqual([])
     lane.dispose()
+  })
+
+  test('a missing-protocol record survives one start and delivers when registered on the next', async () => {
+    const record: PendingAppFrame = {
+      frame: {
+        id: 'later-id',
+        topicID: oldTopic,
+        protocol: 'later',
+        segment: 1,
+        position: '000000000001',
+      },
+      payload: payload('saved'),
+      senderDID: 'alice',
+    }
+    const rows = new Map([[record.frame.id, record]])
+    const complete = vi.fn(async (id: string) => {
+      rows.delete(id)
+    })
+    const pending = {
+      async persistOpened() {},
+      async list() {
+        return [...rows.values()]
+      },
+      complete,
+    }
+    const notices = vi.fn()
+    const seen = vi.fn()
+    const makeLane = (registered: boolean) =>
+      createAppLane({
+        mux: {
+          retainTopic() {},
+          async fetchTopic() {
+            return { messages: [], head: null, oldest: null }
+          },
+        } as never,
+        crypto: createFakeCrypto({ epoch: 2, localDID: 'bob', pending }),
+        localDID: 'bob',
+        protocols: registered ? { later: chat } : {},
+        eventHandlers: registered
+          ? new Map([['later', adaptBusHandlers(chat, { 'chat/posted': seen }).events]])
+          : new Map(),
+        retentionSeconds: 60,
+        anchor: () => ({ epoch: 2, secret: fakeEpochSecret(2, APP_TOPIC_LABEL) }),
+        groupID: () => 'group',
+        onAppDeliveryStalled: notices,
+        justifiedEpochCeiling: async () => 2,
+      })
+    const first = makeLane(false)
+    await first.restore([record])
+    await first.deliver()
+    expect(rows.size).toBe(1)
+    expect(complete).not.toHaveBeenCalled()
+    expect(notices).toHaveBeenCalledTimes(1)
+    first.dispose()
+    const second = makeLane(true)
+    await second.restore(await pending.list())
+    await second.deliver()
+    await vi.waitFor(() => expect(seen).toHaveBeenCalledTimes(1))
+    await vi.waitFor(() => expect(rows.size).toBe(0))
+    second.dispose()
+  })
+
+  test('startup reports a missing protocol after the group id is available', async () => {
+    const record: PendingAppFrame = {
+      frame: {
+        id: 'missing-at-start',
+        topicID: oldTopic,
+        protocol: 'missing',
+        segment: 1,
+        position: '000000000001',
+      },
+      payload: payload('saved'),
+      senderDID: 'alice',
+    }
+    const rows = new Map([[record.frame.id, record]])
+    const notices = vi.fn()
+    const bob = makeMLSPeer(new DurableFakeHub(), 'bob', recoverySecret, {
+      crypto: createFakeCrypto({
+        localDID: 'bob',
+        pending: {
+          async persistOpened() {},
+          async list() {
+            return [...rows.values()]
+          },
+          async complete(id) {
+            rows.delete(id)
+          },
+        },
+      }),
+      onAppDeliveryStalled: notices,
+    })
+    await bob.peer.protocol('chat').to('alice')
+    await vi.waitFor(() => expect(notices).toHaveBeenCalledTimes(1))
+    expect(notices).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: 'unknown-protocol', protocol: 'missing' }),
+    )
+    expect(rows.size).toBe(1)
+    await bob.peer.dispose()
   })
 
   test('disposing during startup restore backoff stops retries and settles disposal', async () => {

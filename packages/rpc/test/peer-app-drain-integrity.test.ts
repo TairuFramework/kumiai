@@ -383,7 +383,9 @@ describe('the drain delivers only what the live lane would', () => {
       senderDID: 'alice',
       topicID,
       retain: 'log',
-      payload: await atOne.wrap(encodeEventFrame('chat/changed', { text: 'alice is typing' })),
+      payload: await atOne.wrap(encodeEventFrame('chat/changed', { text: 'alice is typing' }), {
+        aad: encodeAppAAD({ topicID, intent: 'log' }),
+      }),
     })
     await flush()
 

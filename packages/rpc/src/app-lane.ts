@@ -13,7 +13,7 @@ import {
   isAppFrameStorageError,
   type PendingAppFrame,
 } from './crypto.js'
-import { asLogPosition, type LogPosition } from './cursor.js'
+import { asLogPosition, assertForwardPage, type LogPosition } from './cursor.js'
 import type { BusHandlerMaps } from './handlers.js'
 import type { HubMux } from './hub-mux.js'
 import { retentionOf } from './protocol.js'
@@ -36,6 +36,7 @@ export type AppDeliveryStalled = {
   topicID: string
   position: string
   error: Error
+  reason?: 'unknown-protocol' | 'future-epoch'
 }
 
 function frameID(topicID: string, bytes: Uint8Array): string {
@@ -186,6 +187,26 @@ export function createAppLane(params: AppLaneParams): AppLane {
   const pendingRecords: Array<PendingAppFrame> = []
   let blockingFrame: string | undefined
   let disposed = false
+  const reportedUnknown = new Set<string>()
+  const reportUnknown = (record: PendingAppFrame): void => {
+    if (
+      disposed ||
+      protocols[record.frame.protocol] != null ||
+      reportedUnknown.has(record.frame.id)
+    )
+      return
+    const group = groupID()
+    if (group == null) return
+    reportedUnknown.add(record.frame.id)
+    onAppDeliveryStalled?.({
+      groupID: group,
+      protocol: record.frame.protocol,
+      topicID: record.frame.topicID,
+      position: record.frame.position,
+      error: new Error(`unknown app protocol: ${record.frame.protocol}`),
+      reason: 'unknown-protocol',
+    })
+  }
   const workers = new Map<
     string,
     { running: boolean; requested: boolean; backoff: number; timer?: ReturnType<typeof setTimeout> }
@@ -332,6 +353,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
           ...(after != null ? { after } : {}),
           limit: APP_FETCH_LIMIT,
         })
+        assertForwardPage(after, result.messages)
         if (!reported) {
           // `result.oldest` is where the hub's retention begins, and only the FIRST page's reply is
           // asked: every later page reports the same floor, and a gap is one gap.
@@ -411,7 +433,9 @@ export function createAppLane(params: AppLaneParams): AppLane {
   }
 
   const finishRecord = async (record: PendingAppFrame): Promise<void> => {
+    if (disposed) return
     await crypto.pending?.complete(record.frame.id)
+    if (disposed) return
     await runAppLane(async () => {
       const index = pendingRecords.findIndex((item) => item.frame.id === record.frame.id)
       if (index !== -1) pendingRecords.splice(index, 1)
@@ -428,6 +452,8 @@ export function createAppLane(params: AppLaneParams): AppLane {
   }
 
   const deliverRecord = async (record: PendingAppFrame): Promise<void> => {
+    if (disposed) return
+    if (protocols[record.frame.protocol] == null) return
     let message: { payload?: { typ?: string; prc?: unknown; data?: unknown } } | undefined
     try {
       message = JSON.parse(toUTF(record.payload))
@@ -452,7 +478,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
       }
       await events.emit(prc, event)
     }
-    await finishRecord(record)
+    if (!disposed) await finishRecord(record)
   }
 
   const scheduleWorker = (name: string, delay = 0): void => {
@@ -474,8 +500,13 @@ export function createAppLane(params: AppLaneParams): AppLane {
         try {
           while (!disposed) {
             const record = orderedRecords(name)[0]
-            if (record == null || (await runAppLane(async () => blockedByEarlierSealed(record))))
+            if (
+              record == null ||
+              protocols[record.frame.protocol] == null ||
+              (await runAppLane(async () => blockedByEarlierSealed(record)))
+            )
               break
+            if (disposed) break
             try {
               await deliverRecord(record)
               worker.backoff = 1000
@@ -602,7 +633,25 @@ export function createAppLane(params: AppLaneParams): AppLane {
           // Not sealed at the handle's current epoch. Ahead of the walk AND justified by the
           // commit log: keep its bytes and place. Otherwise — below the walk, an epoch no member
           // could have sealed at, or unreadable — it is dead, and dead is done.
-          if (sealedAt != null && sealedAt > crypto.epoch() && (await justifies(sealedAt))) continue
+          if (sealedAt != null && sealedAt > crypto.epoch() && (await justifies(sealedAt))) {
+            if (crypto.pending != null) {
+              const key = `future\u0000${cursor.topicID}\u0000${frame.position}`
+              if (blockingFrame !== key) {
+                blockingFrame = key
+                const group = groupID()
+                if (group != null)
+                  onAppDeliveryStalled?.({
+                    groupID: group,
+                    protocol: name,
+                    topicID: cursor.topicID,
+                    position: frame.position,
+                    error: new Error(`frame claims future epoch ${sealedAt}`),
+                    reason: 'future-epoch',
+                  })
+              }
+            }
+            continue
+          }
           frame.sealed = { state: 'done' }
           continue
         }
@@ -634,7 +683,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
           })
         } catch (error) {
           if (crypto.pending != null && isAppFrameStorageError(error)) {
-            const key = `${cursor.topicID}\u0000${frame.position}`
+            const key = `storage\u0000${cursor.topicID}\u0000${frame.position}`
             if (blockingFrame !== key) {
               blockingFrame = key
               const group = groupID()
@@ -707,6 +756,17 @@ export function createAppLane(params: AppLaneParams): AppLane {
     dropFrame: (topicID, position) =>
       runAppLane(async () => {
         if (crypto.pending == null) throw new Error('durable app delivery is disabled')
+        const unknown = pendingRecords.find(
+          (record) =>
+            protocols[record.frame.protocol] == null &&
+            record.frame.topicID === topicID &&
+            record.frame.position === position,
+        )
+        if (unknown != null) {
+          await crypto.pending.complete(unknown.frame.id)
+          pendingRecords.splice(pendingRecords.indexOf(unknown), 1)
+          return
+        }
         const entry = [...cursors.entries()].find(([, cursor]) => cursor.topicID === topicID)
         if (entry == null) throw new Error('app frame is not buffered')
         const [name] = entry
@@ -715,6 +775,9 @@ export function createAppLane(params: AppLaneParams): AppLane {
         if (frames == null || frame == null) throw new Error('app frame is not buffered')
         if (frame.sealed.state === 'pending') throw new Error('app frame is pending')
         if (frame.sealed.state !== 'sealed') throw new Error('app frame is already done')
+        if (frames.some((item) => item.position < position && item.sealed.state !== 'done')) {
+          throw new Error('an earlier pending or sealed frame blocks the durable cursor')
+        }
         frame.sealed = { state: 'done' }
         await advanceCursor(name, frames)
       }),
@@ -753,10 +816,15 @@ export function createAppLane(params: AppLaneParams): AppLane {
      * drain has released both mutexes, so they may call the peer.
      */
     deliver: async (): Promise<void> => {
-      await runAppLane(drain)
-      if (crypto.pending != null) {
-        for (const name of new Set(pendingRecords.map((record) => record.frame.protocol)))
-          scheduleWorker(name)
+      try {
+        await runAppLane(drain)
+      } finally {
+        if (crypto.pending != null && !disposed) {
+          for (const record of pendingRecords) reportUnknown(record)
+          for (const name of new Set(pendingRecords.map((record) => record.frame.protocol))) {
+            scheduleWorker(name)
+          }
+        }
       }
     },
     note,
@@ -764,10 +832,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
     restore: async (records): Promise<void> => {
       await runAppLane(async () => {
         for (const record of records) {
-          if (protocols[record.frame.protocol] == null) {
-            await crypto.pending?.complete(record.frame.id)
-            continue
-          }
+          reportUnknown(record)
           if (!pendingRecords.some((item) => item.frame.id === record.frame.id)) {
             pendingRecords.push(record)
           }

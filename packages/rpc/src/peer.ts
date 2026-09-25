@@ -56,7 +56,7 @@ import {
   isMissingLedgerEntries,
   type PendingAppFrame,
 } from './crypto.js'
-import { asLogPosition, type LogPosition } from './cursor.js'
+import { asLogPosition, assertForwardPage, type LogPosition } from './cursor.js'
 import {
   createDirectedClient,
   createInboxAcceptor,
@@ -475,6 +475,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     handlers,
     suppress,
   } = params
+  if (crypto.pending != null && mls == null) {
+    throw new Error('GroupCrypto.pending requires mls and the durable commit lane')
+  }
   // Normalized ONCE, here, at the one ingress every downstream `localDID` use reads from —
   // equivalent DID forms must compare and derive topics identically (`@kokuin/token`
   // canonicalizes, it does not validate).
@@ -1343,6 +1346,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         ...(after != null ? { after } : {}),
         limit: COMMIT_FETCH_LIMIT,
       })
+      assertForwardPage(after, result.messages)
       for (const message of result.messages) {
         after = asLogPosition(message.sequenceID)
         let commit: Uint8Array
@@ -1454,6 +1458,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       commitLogHead = head == null ? null : asLogPosition(head)
     }
     while (true) {
+      const pageAfter = reconciledHead
       const result = await mux.fetchTopic({
         topicID,
         // From the cursor. With no cursor (fresh member, trimmed backlog, just rejoined) read
@@ -1461,6 +1466,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         ...(reconciledHead != null ? { after: reconciledHead } : {}),
         limit: COMMIT_FETCH_LIMIT,
       })
+      // A short page may carry a one-shot fork reveal below the cursor. Only a full page loops.
+      if (result.messages.length === COMMIT_FETCH_LIMIT) {
+        assertForwardPage(pageAfter, result.messages)
+      }
       if (result.messages.length === 0) {
         // Drained. The tip an EMPTY page reports is not redundant: a topic keeps its head when
         // its frames age out, so anchoring on the cursor here would compare-and-set against

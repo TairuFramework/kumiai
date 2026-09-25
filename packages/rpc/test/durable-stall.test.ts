@@ -3,12 +3,14 @@ import { describe, expect, test, vi } from 'vitest'
 
 import { encodeAppAAD } from '../src/app-aad.js'
 import type { AppDeliveryStalled } from '../src/app-lane.js'
+import { createAppLane } from '../src/app-lane.js'
 import type { PendingAppFrame } from '../src/crypto.js'
 import { isAppFrameStorageError } from '../src/crypto.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
+import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
-import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
+import { buildLedgerCommit, chat, makeMLSPeer } from './fixtures/peer.js'
 
 const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
 const secret = new Uint8Array(32).fill(0x97)
@@ -53,6 +55,55 @@ async function publish(
 }
 
 describe('durable storage stall', () => {
+  test('a justified future-epoch frame reports a stall until dropped', async () => {
+    const sender = createFakeCrypto({ epoch: 65535, localDID: 'mallory' })
+    const sealed = await sender.wrap(fromUTF('future'), {
+      aad: encodeAppAAD({ topicID, intent: 'log' }),
+    })
+    const notices = vi.fn()
+    const cursor = createMemoryAppCursorStore()
+    const lane = createAppLane({
+      mux: {
+        retainTopic() {},
+        async fetchTopic({ after }: { after?: string }) {
+          return {
+            messages: after == null ? [{ sequenceID: '000000000001', payload: sealed }] : [],
+            head: '000000000001',
+            oldest: '000000000001',
+          }
+        },
+      } as never,
+      crypto: createFakeCrypto({
+        epoch: 1,
+        localDID: 'bob',
+        pending: {
+          async persistOpened() {},
+          async list() {
+            return []
+          },
+          async complete() {},
+        },
+      }),
+      localDID: 'bob',
+      protocols: { chat },
+      eventHandlers: new Map(),
+      retentionSeconds: 60,
+      appCursorStore: cursor,
+      onAppDeliveryStalled: notices,
+      anchor: () => ({ epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }),
+      groupID: () => 'group',
+      justifiedEpochCeiling: async () => 65535,
+    })
+    await lane.deliver()
+    await lane.deliver()
+    expect(notices).toHaveBeenCalledTimes(1)
+    expect(notices).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: 'future-epoch', position: '000000000001' }),
+    )
+    await lane.dropFrame(topicID, '000000000001')
+    expect(cursor.stored(topicID)).toBe('000000000001')
+    lane.dispose()
+  })
   test('reports each blocking frame once, and dropping it resumes the journal-first walk', async () => {
     const hub = new DurableFakeHub()
     const store = pendingStore()
@@ -118,12 +169,21 @@ describe('durable storage stall', () => {
       handlers: { 'chat/posted': handler },
     })
     await bob.peer.protocol('chat').to('alice')
-    const frame = await publish(hub, createFakeCrypto({ epoch: 1, localDID: 'alice' }), 'held')
+    const sender = createFakeCrypto({ epoch: 1, localDID: 'alice' })
+    const frame = await publish(hub, sender, 'held')
     await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(1))
     await expect(bob.peer.dropAppFrame('another topic', frame.sequenceID)).rejects.toThrow(
       /buffered/,
     )
     await expect(bob.peer.dropAppFrame(topicID, frame.sequenceID)).rejects.toThrow(/pending/)
+    store.setFail(true)
+    const behind = await publish(hub, sender, 'behind')
+    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toSatisfy(
+      isAppFrameStorageError,
+    )
+    await expect(bob.peer.dropAppFrame(topicID, behind.sequenceID)).rejects.toThrow(
+      /earlier.*pending/,
+    )
     expect(store.rows.size).toBe(1)
     expect(bob.appCursorStore.stored(topicID)).toBeNull()
     release?.()

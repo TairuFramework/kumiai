@@ -17,6 +17,7 @@ const payload = (text: string) =>
 
 function fixture(
   handler: (context: { data: { text: string }; frame?: PendingAppFrame['frame'] }) => unknown,
+  failPersist?: (record: PendingAppFrame) => boolean,
 ) {
   const records = new Map<string, PendingAppFrame>()
   const complete = vi.fn(async (id: string) => {
@@ -24,6 +25,7 @@ function fixture(
   })
   const pending = {
     async persistOpened(_state: Uint8Array, record: PendingAppFrame) {
+      if (failPersist?.(record)) throw new Error('persistent storage failure')
       records.set(record.frame.id, record)
     },
     async list() {
@@ -128,6 +130,79 @@ describe('durable delivery queue', () => {
     await vi.waitFor(() => expect(seen).toEqual(['A', 'A']), { timeout: 2500 })
     await vi.waitFor(() => expect(records.size).toBe(0))
     lane.dispose()
+  })
+
+  test('a later persist failure still starts delivery of an earlier durable record', async () => {
+    const seen = vi.fn()
+    const { lane, records, append } = fixture(
+      seen,
+      (record) => record.frame.position === '000000000002',
+    )
+    await append('000000000001', 'A')
+    await append('000000000002', 'B')
+    await expect(lane.deliver()).rejects.toThrow('failed to persist opened app frame')
+    await vi.waitFor(() => expect(seen).toHaveBeenCalledTimes(1))
+    expect(seen.mock.calls[0]?.[0].data.text).toBe('A')
+    expect(records.size).toBe(0)
+    lane.dispose()
+  })
+
+  test('a failed fetch for another protocol still starts a restored record', async () => {
+    const record: PendingAppFrame = {
+      frame: { id: 'saved-a', topicID, protocol: 'chat', segment: 1, position: '000000000001' },
+      payload: payload('A'),
+      senderDID: 'alice',
+    }
+    const seen = vi.fn()
+    const complete = vi.fn(async () => {})
+    const lane = createAppLane({
+      mux: {
+        retainTopic() {},
+        async fetchTopic({ topicID: requested }: { topicID: string }) {
+          if (requested !== topicID) throw new Error('other protocol fetch failed')
+          return { messages: [], head: null, oldest: null }
+        },
+      } as never,
+      crypto: createFakeCrypto({
+        localDID: 'bob',
+        pending: {
+          async persistOpened() {},
+          async list() {
+            return [record]
+          },
+          complete,
+        },
+      }),
+      localDID: 'bob',
+      protocols: { chat, other: chat },
+      eventHandlers: new Map([['chat', adaptBusHandlers(chat, { 'chat/posted': seen }).events]]),
+      retentionSeconds: 60,
+      anchor: () => ({ epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }),
+      groupID: () => 'group',
+      justifiedEpochCeiling: async () => 1,
+    })
+    await lane.restore([record])
+    await expect(lane.deliver()).rejects.toThrow('other protocol fetch failed')
+    await vi.waitFor(() => expect(seen).toHaveBeenCalledTimes(1))
+    await vi.waitFor(() => expect(complete).toHaveBeenCalledWith('saved-a'))
+    lane.dispose()
+  })
+
+  test('a worker does not complete a record after disposal while its handler is in flight', async () => {
+    let release: (() => void) | undefined
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const seen = vi.fn(async () => held)
+    const { lane, records, complete, append } = fixture(seen)
+    await append('000000000001', 'A')
+    await lane.deliver()
+    await vi.waitFor(() => expect(seen).toHaveBeenCalledTimes(1))
+    lane.dispose()
+    release?.()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(complete).not.toHaveBeenCalled()
+    expect(records.size).toBe(1)
   })
 
   test('unusable records are completed and do not block a later valid event', async () => {

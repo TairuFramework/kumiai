@@ -34,6 +34,21 @@ export function asLogPosition(sequenceID: string): LogPosition {
   return sequenceID as LogPosition
 }
 
+/** Reject a hub page that cannot move a log cursor forward. */
+export function assertForwardPage(
+  after: LogPosition | null,
+  messages: ReadonlyArray<{ sequenceID: string }>,
+): void {
+  let previous = after
+  for (const message of messages) {
+    const position = asLogPosition(message.sequenceID)
+    if (previous != null && position <= previous) {
+      throw new Error('hub returned non-increasing log positions')
+    }
+    previous = position
+  }
+}
+
 /** Name a sequenceID as a position in this recipient's delivery queue (i.e. an ack). */
 export function asDeliveryPosition(sequenceID: string): DeliveryPosition {
   return sequenceID as DeliveryPosition

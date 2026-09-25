@@ -60,6 +60,21 @@ async function fixture(groupID: string) {
 }
 
 describe('GroupHandle.decryptStaged', () => {
+  test('wrong AAD does not spend the key before a correct staged open', async () => {
+    const { receiver, sealed } = await fixture('staged-aad')
+    const persist = vi.fn(async () => {})
+    await expect(
+      receiver.decryptStaged(sealed, { expectedAAD: utf8.encode('wrong') }, persist),
+    ).rejects.toThrow(/authenticated data/)
+    expect(persist).not.toHaveBeenCalled()
+    const opened = await receiver.decryptStaged(
+      sealed,
+      { expectedAAD: utf8.encode('app topic') },
+      persist,
+    )
+    expect(new TextDecoder().decode(opened.payload)).toBe('staged payload')
+    expect(persist).toHaveBeenCalledTimes(1)
+  })
   test('persists an openable post-state before adopting it, without replacing the deny provider', async () => {
     const { alice, receiver, sealed, restore } = await fixture('staged-success')
     const before = encodeClientState(receiver.state)

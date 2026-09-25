@@ -1,3 +1,4 @@
+import { hmac } from '@noble/hashes/hmac.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { fromUTF, toUTF } from '@sozai/codec'
 
@@ -52,7 +53,7 @@ const AAD_LEN_BYTES = 4
 /** Bytes of the keyed tag appended to a sealed app frame's body, authenticating the whole frame. */
 const TAG_BYTES = 8
 /** Bytes of the keyed tag over an entry's ciphertext. */
-const ENTRY_TAG_BYTES = 8
+const ENTRY_TAG_BYTES = 16
 
 /**
  * A keyed, non-linear tag over `epoch` AND `body` (the WHOLE framed plaintext, AAD included): a
@@ -440,16 +441,8 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
    * bytes", and a double that reported them differently would let a test depend on a distinction
    * the real port does not offer.
    */
-  const entryTag = (ciphertext: Uint8Array, key: Uint8Array): Uint8Array => {
-    const tag = new Uint8Array(ENTRY_TAG_BYTES)
-    for (let i = 0; i < ENTRY_TAG_BYTES; i++) tag[i] = key[i] as number
-    for (let i = 0; i < ciphertext.length; i++) {
-      const slot = i % ENTRY_TAG_BYTES
-      // Position-dependent, so reordering or truncating the ciphertext changes the tag.
-      tag[slot] = ((tag[slot] as number) ^ ((ciphertext[i] as number) + i)) & 0xff
-    }
-    return tag
-  }
+  const entryTag = (ciphertext: Uint8Array, key: Uint8Array): Uint8Array =>
+    hmac(sha256, key, ciphertext).subarray(0, ENTRY_TAG_BYTES)
 
   const sealEntries: GroupCrypto['sealEntries'] = (bytes) => {
     const key = entryKey(epoch)
