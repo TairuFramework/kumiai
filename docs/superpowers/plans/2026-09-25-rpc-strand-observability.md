@@ -342,7 +342,7 @@ type RendezvousOutcome =
   levels and what each proves, one observation = one strand), `onRecovery` (phases, reasons, one
   terminal per attempt, `bootstrapped`), `recover()` single-flight and stash drain (may return entries
   an earlier automatic heal stashed). Surface only.
-- [x] **Step 2: Change intent** `.changeset/strand-observability.md` (`"@kumiai/rpc": minor`): additive
+- [x] **Step 2: Change intent** `.changeset/strand-observability.md` (`"@kumiai/rpc": patch`): additive
   callbacks; `recover()` single-flight and stash behaviour change; handshake unknown-version fix; late
   bootstrap re-enact fix; publish failure during recovery now throws instead of timing out (if Task 4
   changed that).
