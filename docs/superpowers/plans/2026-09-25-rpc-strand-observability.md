@@ -232,7 +232,7 @@ type RendezvousOutcome =
 
 **Interfaces — Consumes:** `emitRecovery`, `closeEpisode`, `RendezvousOutcome`.
 
-- [ ] **Step 1: Failing tests** (spec "Tests", recovery part): automatic heal `started`→`succeeded`
+- [x] **Step 1: Failing tests** (spec "Tests", recovery part): automatic heal `started`→`succeeded`
   with `trigger: 'automatic'` and a new episode opening on the next strand; no-responder; deadline;
   dispose mid-attempt (`failed`/`disposed`, `recover()` rejects `PeerDisposedError`); bootstrap failure
   (`failed`/`bootstrap-failed`); thrown attempt (`failed`/`error` with the error); two `recover()` calls
@@ -241,8 +241,8 @@ type RendezvousOutcome =
   `recover()`, `commit()`, `replay()`; queued `recover()` after a success meanwhile → `{ advanced: true }`,
   no events; observers throwing / rejecting / calling `dispose()` (with a real intervening await) do not
   change results.
-- [ ] **Step 2:** FAIL.
-- [ ] **Step 3: Implement.**
+- [x] **Step 2:** FAIL.
+- [x] **Step 3: Implement.**
   ```ts
   let activeRecovery: Promise<{ advanced: boolean }> | null = null
   let recoveryGeneration = 0
@@ -284,10 +284,10 @@ type RendezvousOutcome =
   `healIfRequested`: `if (!healRequested || activeRecovery != null) return; healRequested = false;`
   then `await runRecovery('automatic').catch(() => {})`. Remove `healing`. Keep the existing comments'
   substance where the code they describe survives.
-- [ ] **Step 4:** PASS; all rpc tests PASS (existing recover/heal tests must stay green; if one pins the
+- [x] **Step 4:** PASS; all rpc tests PASS (existing recover/heal tests must stay green; if one pins the
   old "direct recover returns only its own entries" behaviour, update it and note it — that is the
   documented behaviour change).
-- [ ] **Step 5:** Lint, commit `feat(rpc): single-flight recovery with lifecycle events`.
+- [x] **Step 5:** Lint, commit `feat(rpc): single-flight recovery with lifecycle events`.
 
 ### Task 6: Delayed bootstrap and one snapshot owner
 
