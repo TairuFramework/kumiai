@@ -1149,12 +1149,6 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * NOT reentrant: a task that calls `runSerial` again waits on a tail including itself — which is
    * why a loss is RETURNED to the host, never handed to it under the lock.
    */
-  let hostOutbox: Array<() => void> = []
-  const flushHostOutbox = (): void => {
-    const batch = hostOutbox
-    hostOutbox = []
-    for (const notice of batch) notice()
-  }
   let commitTail: Promise<void> = Promise.resolve()
   const runSerial = <T>(fn: () => Promise<T>): Promise<T> => {
     const op = commitTail.then(() => {
