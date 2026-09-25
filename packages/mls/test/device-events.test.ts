@@ -1,7 +1,9 @@
 import { normalizeDID } from '@kokuin/token'
+import { defaultProposalTypes, encode, mlsMessageEncoder } from 'ts-mls'
 import { describe, expect, test } from 'vitest'
 
 import { restoreGroup } from '../src/group.js'
+import { commitWithEntries } from '../src/group-commit.js'
 import {
   announceControllerBeacon,
   labelDevice,
@@ -17,6 +19,7 @@ import {
   MLS_LEAF_RES as _LEAF_RES,
   announceControllerBeacon as _pub,
 } from '../src/index.js'
+import { ledgerEntryDigest, signLedgerEntry } from '../src/ledger.js'
 import { beaconOf } from '../src/registry.js'
 import { publishTokens, twoDeviceProfileGroup } from './fixtures/device-harness.js'
 
@@ -92,6 +95,58 @@ describe('device events', () => {
     expect(g.creatorGroup.epoch).toBe(before)
     expect(seen).toEqual([])
     await g.creatorGroup.processMessage(res.commitMessage, { persist: async () => {} })
+    expect(seen).toEqual([normalizeDID(g.targetDeviceID)])
+  })
+
+  test('a throwing ledger callback still delivers a durable revoke event', async () => {
+    const g = await twoDeviceProfileGroup()
+    const receiver = await restoreGroup({
+      state: g.managerGroup.state,
+      credential: g.managerGroup.credential,
+      ledgerEntries: g.managerGroup.ledgerTokens,
+      options: {
+        resolveLedgerEntries: async (ids) =>
+          ids.flatMap((id) => {
+            const token = g.tokens.get(id)
+            return token == null ? [] : [token]
+          }),
+        onLedgerEntries: () => {
+          throw new Error('host callback failed')
+        },
+      },
+    })
+    const seen: Array<string> = []
+    receiver.events.on('deviceRevoked', (batch) => {
+      seen.push(...batch.map((entry) => entry.device))
+    })
+    const res = await revokeDevice(g.managerGroup, g.managerIdentity, {
+      device: g.targetDeviceID,
+      capability: g.capability,
+    })
+    const revokeToken = res.newGroup.ledgerTokens.at(-1)
+    if (revokeToken == null) throw new Error('missing revoke token')
+    const note = await signLedgerEntry(g.creatorIdentity, {
+      type: 'note',
+      groupID: receiver.groupID,
+      subject: g.targetDeviceID,
+      value: 'notify',
+    })
+    const removed = g.creatorGroup.findMemberLeafIndex(g.targetDeviceID)
+    if (removed == null) throw new Error('missing target leaf')
+    const combined = await commitWithEntries(
+      g.creatorGroup,
+      [{ proposalType: defaultProposalTypes.remove, remove: { removed } }],
+      [revokeToken, note],
+    )
+    g.tokens.set(ledgerEntryDigest(revokeToken), revokeToken)
+    g.tokens.set(ledgerEntryDigest(note), note)
+    const before = receiver.epoch
+    await expect(
+      receiver.processMessage(encode(mlsMessageEncoder, combined.commit), {
+        persist: async () => {},
+      }),
+    ).rejects.toThrow('host callback failed')
+    expect(receiver.epoch).toBe(before + 1n)
     expect(seen).toEqual([normalizeDID(g.targetDeviceID)])
   })
 

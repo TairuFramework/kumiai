@@ -480,6 +480,26 @@ export class GroupHandle {
     if (revoked.length > 0) emitter.fire('deviceRevoked', revoked)
   }
 
+  /** Deliver independent host notifications after acceptance and any requested persist. */
+  #notifyAccepted(
+    surfaced: Array<VerifiedLedgerEntry>,
+    enactedDevice: Array<VerifiedLedgerEntry>,
+  ): void {
+    const errors: Array<unknown> = []
+    try {
+      if (surfaced.length > 0) this.#onLedgerEntries?.(surfaced)
+    } catch (error) {
+      errors.push(error)
+    }
+    try {
+      this.emitControlEvents(enactedDevice)
+    } catch (error) {
+      errors.push(error)
+    }
+    if (errors.length === 1) throw errors[0]
+    if (errors.length > 1) throw new AggregateError(errors, 'host notifications failed')
+  }
+
   /**
    * Verify signed ledger tokens, append the valid ones in the order given, and
    * refold the roster. Tokens that fail verification or whose groupID mismatches are
@@ -572,7 +592,8 @@ export class GroupHandle {
    * signatures do not. The bound: **a lying responder can withhold, never rewrite.**
    *
    * Throws {@link LedgerIncompleteError} on a head mismatch; the caller drops that
-   * responder and tries the next.
+   * responder and tries the next. When persist is supplied, host callbacks run after it
+   * succeeds; a callback throw does not undo the bootstrap.
    */
   async bootstrapLedger(
     tokens: Array<string>,
@@ -655,8 +676,7 @@ export class GroupHandle {
       //
       // Deduped against what this handle already held, so a peer bootstrapping over a partial
       // ledger is not re-notified of entries it has already seen.
-      if (surfaced.length > 0) this.#onLedgerEntries?.(surfaced)
-      this.emitControlEvents(enactedDevice)
+      this.#notifyAccepted(surfaced, enactedDevice)
     })
   }
 
@@ -890,7 +910,6 @@ export class GroupHandle {
     callback: IncomingMessageCallback | undefined
     capture: { rejected?: RejectedCommit }
     applyOnAccept: (notify?: boolean) => () => void
-    isCommitMessage: boolean
   }> {
     const callerPolicy = opts?.commitPolicy ?? this.#commitPolicy
     const capture: { rejected?: RejectedCommit } = {}
@@ -1028,8 +1047,8 @@ export class GroupHandle {
       this.#roster = candidateRoster
       this.#registry = candidateRegistry
       const emit = () => {
-        if (surfaced.length > 0) this.#onLedgerEntries?.(surfaced)
-        this.emitControlEvents(
+        this.#notifyAccepted(
+          surfaced,
           acceptedEntries
             .filter(({ verified }) => verified.entry.type === DEVICE_ENTRY_TYPE)
             .map(({ verified }) => verified),
@@ -1043,7 +1062,6 @@ export class GroupHandle {
       callback: wrapCommitPolicy(combined, capture),
       capture,
       applyOnAccept,
-      isCommitMessage,
     }
   }
 
@@ -1236,6 +1254,8 @@ export class GroupHandle {
    * wire-form bytes (preferred, e.g. from commitInvite/removeMember) or a pre-decoded
    * ts-mls object (legacy). Param widens to `unknown` because `Uint8Array | unknown`
    * collapses to `unknown`; the runtime `instanceof` selects the decode path.
+   * When persist is supplied, host callbacks run after it succeeds; a callback throw
+   * does not undo an advance.
    */
   async processMessage(
     message: Uint8Array | unknown,
@@ -1253,8 +1273,7 @@ export class GroupHandle {
       decoded = parsed
     }
     return mutexFor(this).run(async () => {
-      const { callback, capture, applyOnAccept, isCommitMessage } =
-        await this.#prepareCommitPipeline(decoded, opts)
+      const { callback, capture, applyOnAccept } = await this.#prepareCommitPipeline(decoded, opts)
       const previousState = this.#state
       const result = await mlsProcessMessage({
         context: this.#context,
@@ -1274,7 +1293,7 @@ export class GroupHandle {
         zeroAll(result.consumed)
         return result.message
       }
-      if (isCommitMessage && opts?.persist != null) {
+      if (opts?.persist != null) {
         const previousLedger = this.#ledger
         const previousEntryBodies = this.#entryBodies
         const previousRoster = this.#roster

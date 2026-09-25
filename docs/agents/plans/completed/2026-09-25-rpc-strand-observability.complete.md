@@ -39,9 +39,10 @@ the commit walk or the recovery outcome.
 - **One owner for re-enact entries**: the `pendingReenact` stash, drained by `recover()`, `commit()`
   and `replay()` alike, so `recover()` may return entries an earlier automatic heal left. Nothing is
   handed out twice.
-- **Staged persist for real MLS handles**: received commits and ledger bootstrap publish tentative
-  state to the persistence callback under the handle mutex, roll back on failure, and notify the host
-  only after success. Recovery persists its new handle before adoption.
+- **Staged persist for real MLS handles**: all accepted state changes and ledger bootstrap publish
+  tentative state to the persistence callback under the handle mutex, roll back on failure, and run
+  host callbacks only after durable persist. A callback throw does not undo the advance. Recovery
+  persists its new handle before adoption.
 - **Behaviour changes, documented in the changeset**: a failed rendezvous publish now rejects
   `recover()` instead of silently waiting out the deadline (typed `RendezvousOutcome`); an unsupported
   handshake version is classified before its kind, so a future-version frame with an unknown kind heals
