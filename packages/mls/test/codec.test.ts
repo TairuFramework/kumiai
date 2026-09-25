@@ -47,6 +47,20 @@ describe('encodeClientState / decodeClientState', () => {
     expect(decoded?.groupContext.groupId).toEqual(group.state.groupContext.groupId)
   })
 
+  test('the decoded state does not alias the encoded bytes', async () => {
+    const { group } = await createGroup(randomIdentity(), 'codec-no-alias')
+    const encoded = encodeClientState(group.state)
+    const copy = encoded.slice()
+    const decoded = decodeClientState(encoded)
+    if (decoded == null) throw new Error('decode failed')
+
+    // Decrypt zeroes consumed secrets in place; that must not reach bytes a host still holds.
+    decoded.keySchedule.exporterSecret.fill(0)
+    decoded.keySchedule.senderDataSecret.fill(0)
+
+    expect(encoded).toEqual(copy)
+  })
+
   test('refuses a blob whose version byte is not 1, even though the rest decodes fine', async () => {
     const alice = randomIdentity()
     const { group } = await createGroup(alice, 'codec-unknown-version')
