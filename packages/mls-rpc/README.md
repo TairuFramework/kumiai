@@ -69,8 +69,8 @@ With `pending`, `unwrap(bytes, { expectedAAD, frame })` calls `GroupHandle.decry
 resolves only after the atomic write. A persistence failure becomes `AppFrameStorageError` for
 the RPC lane to retry; an unopenable frame is classified dead. Without `pending`, app delivery
 keeps its prior best-effort behavior. `frameAAD(bytes)` exposes the cleartext AAD as a routing
-hint; the full `expectedAAD` on open authenticates it. The 0.11 app AAD carries version and log
-intent, so older bare-topic app frames cannot interoperate with 0.11 peers. See the
+hint; the full `expectedAAD` on open authenticates it. The 0.10 app AAD carries version and log
+intent, so older bare-topic app frames cannot interoperate with 0.10 peers. See the
 `@kumiai/rpc` README for the at-least-once guarantee, deduplication, and retention boundary.
 
 ## `createLedgerEntrySlot` is mandatory, and must be installed where the handle is built

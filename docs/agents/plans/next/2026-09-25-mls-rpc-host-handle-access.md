@@ -1,8 +1,8 @@
 # Let hosts with their own handle store reuse `@kumiai/mls-rpc`
 
 **Priority:** next. **Waits on:** durable app-frame delivery (`feat/rpc-durable-app-delivery`) being
-done; this reshapes the ports that work adds, so it lands after it and in the same 0.11 release. See
-`../milestones/v0.11-release.md`.
+done; this reshapes the ports that work adds, so it lands after it and in the same 0.10 release. See
+`../milestones/v0.10-release.md`.
 **Origin:** Kubun adoption review, 2026-09-25. Kubun implements `GroupMLS` and `GroupCrypto` itself
 instead of using `@kumiai/mls-rpc`, and duplicates much of it.
 

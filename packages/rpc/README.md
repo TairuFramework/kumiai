@@ -109,7 +109,7 @@ a stale app topic.
 
 App-frame AAD is `[0x01, intent, ...UTF8(topicID)]`, where intent is `0x01` for log and `0x00`
 for ephemeral. `frameAAD` reads this cleartext routing hint; only `unwrap` with the full expected
-AAD authenticates it. Old bare-topic AAD fails to open, so mixed 0.10/0.11 app peers are
+AAD authenticates it. Old bare-topic AAD fails to open, so mixed 0.9/0.10 app peers are
 incompatible. Use `encodeAppAAD` and `decodeAppAAD` for the shared format.
 
 An `event` procedure in a group protocol may declare `retain: 'log'`, which makes every dispatch of
