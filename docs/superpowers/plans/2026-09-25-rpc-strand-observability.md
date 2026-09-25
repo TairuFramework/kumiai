@@ -206,13 +206,13 @@ type RendezvousOutcome =
   | { kind: 'publish-failed'; error: unknown }
 ```
 
-- [ ] **Step 1: Failing tests** — through `recover()` with fixtures: publish that rejects surfaces as a
+- [x] **Step 1: Failing tests** — through `recover()` with fixtures: publish that rejects surfaces as a
   thrown error from `recover()` (today it is swallowed and waits out the timer — confirm by reading the
   existing behaviour; if an existing test pins the old swallow, update it and note it); dispose during
   the wait makes `recover()` reject with `PeerDisposedError`; no-responder and deadline still return
   `{ advanced: false }`.
-- [ ] **Step 2:** FAIL.
-- [ ] **Step 3: Implement.** `wait = Math.max(0, Math.min(recoveryTimeoutMs, deadline - Date.now()))`;
+- [x] **Step 2:** FAIL.
+- [x] **Step 3: Implement.** `wait = Math.max(0, Math.min(recoveryTimeoutMs, deadline - Date.now()))`;
   `atDeadline = deadline - Date.now() <= recoveryTimeoutMs` at computation. Waiters resolve with
   `RendezvousOutcome`; the reply handler resolves `{ kind: 'reply', sealed }`; the timer
   `{ kind: 'timeout', atDeadline }`; `dispose()`'s drain `{ kind: 'disposed' }`; publish rejection
@@ -220,8 +220,8 @@ type RendezvousOutcome =
   continues; `timeout`/`!atDeadline` breaks as no-responder; `timeout`/`atDeadline` breaks as deadline;
   `disposed` throws `new PeerDisposedError('Peer is disposed')`; `publish-failed` throws its error. Keep
   a local `failure: RecoveryFailureReason | null` in the body for Task 5 to read.
-- [ ] **Step 4:** PASS; all rpc tests PASS.
-- [ ] **Step 5:** Lint, commit `refactor(rpc): typed rendezvous outcome for recovery`.
+- [x] **Step 4:** PASS; all rpc tests PASS.
+- [x] **Step 5:** Lint, commit `refactor(rpc): typed rendezvous outcome for recovery`.
 
 ### Task 5: Single-flight `runRecovery`, recovery events, stash ownership
 

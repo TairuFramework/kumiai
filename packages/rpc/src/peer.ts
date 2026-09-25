@@ -230,6 +230,12 @@ export type RecoveryEvent =
     })
   | (RecoveryEventBase & { phase: 'bootstrapped' })
 
+type RendezvousOutcome =
+  | { kind: 'reply'; sealed: Uint8Array }
+  | { kind: 'timeout'; atDeadline: boolean }
+  | { kind: 'disposed' }
+  | { kind: 'publish-failed'; error: unknown }
+
 export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefinition>> = {
   hub: LogHub
   crypto: GroupCrypto
@@ -1084,7 +1090,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   let journalReplayed = false
 
   // Recovery rendezvous state, keyed by requestID.
-  const recoveryWaiters = new Map<string, (groupInfo: Uint8Array | null) => void>()
+  const recoveryWaiters = new Map<string, (outcome: RendezvousOutcome) => void>()
   const recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>()
   const pendingReplies = new Map<string, ReturnType<typeof setTimeout>>()
   const suppressedRequests = new Set<string>()
@@ -1157,7 +1163,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         clearTimeout(timer)
         recoveryTimers.delete(reply.requestID)
       }
-      waiter(reply.groupInfo)
+      waiter({ kind: 'reply', sealed: reply.groupInfo })
     }
   }
 
@@ -2067,22 +2073,24 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
 
   /**
    * Ask the group for its state and wait for one member to answer, bounded by the deadline.
-   * `null` when nobody does — heal is a rendezvous and cannot work without a responder.
+   * The outcome distinguishes a silent responder, disposal and a failed request publish.
    */
   const requestGroupInfo = async (
     request: Uint8Array,
     requestID: string,
     topicID: string,
     deadline: number,
-  ): Promise<Uint8Array | null> => {
-    const wait = Math.max(0, Math.min(recoveryTimeoutMs, deadline - Date.now()))
-    return await new Promise<Uint8Array | null>((resolve) => {
+  ): Promise<RendezvousOutcome> => {
+    const remaining = deadline - Date.now()
+    const wait = Math.max(0, Math.min(recoveryTimeoutMs, remaining))
+    const atDeadline = remaining <= recoveryTimeoutMs
+    return await new Promise<RendezvousOutcome>((resolve) => {
       recoveryWaiters.set(requestID, resolve)
       recoveryTimers.set(
         requestID,
         setTimeout(() => {
           recoveryTimers.delete(requestID)
-          if (recoveryWaiters.delete(requestID)) resolve(null)
+          if (recoveryWaiters.delete(requestID)) resolve({ kind: 'timeout', atDeadline })
         }, wait),
       )
       void Promise.resolve(
@@ -2093,7 +2101,13 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             encodeRecoveryRequest(requestID, request),
           ),
         }),
-      ).catch(() => {})
+      ).catch((error: unknown) => {
+        if (!recoveryWaiters.delete(requestID)) return
+        const timer = recoveryTimers.get(requestID)
+        if (timer != null) clearTimeout(timer)
+        recoveryTimers.delete(requestID)
+        resolve({ kind: 'publish-failed', error })
+      })
     })
   }
 
@@ -2150,8 +2164,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         //    ephemeral key is minted with it, and a reply to an already-used request is unopenable.
         const requestID = newPublishID()
         const request = await port.createRecoveryRequest(requestID)
-        const sealed = await requestGroupInfo(request, requestID, rendezvous, deadline)
-        if (sealed == null) {
+        const outcome = await requestGroupInfo(request, requestID, rendezvous, deadline)
+        if (outcome.kind === 'disposed' || disposed) throw new PeerDisposedError('Peer is disposed')
+        if (outcome.kind === 'publish-failed') throw outcome.error
+        if (outcome.kind === 'timeout') {
           // Nobody answered. Heal REQUIRES another online member that can seal a GroupInfo;
           // without one it cannot work. The peer stays degraded and asks again later.
           break
@@ -2161,7 +2177,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         //    are a hub-injected or misaddressed reply: ask again.
         let pending: Awaited<ReturnType<typeof port.applyRecovery>>
         try {
-          pending = await port.applyRecovery(sealed, requestID)
+          pending = await port.applyRecovery(outcome.sealed, requestID)
         } catch {
           pending = null
         }
@@ -2370,7 +2386,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         // the heal, `commitTail`, and every lane operation queued behind it. Resolve, then clear,
         // so a fired timer cannot race a half-drained map. (The ledger gather needs no such drain:
         // its timeout is a local held in none of these maps.)
-        for (const waiter of recoveryWaiters.values()) waiter(null)
+        for (const waiter of recoveryWaiters.values()) waiter({ kind: 'disposed' })
         recoveryWaiters.clear()
         for (const timer of recoveryTimers.values()) clearTimeout(timer)
         for (const timer of pendingReplies.values()) clearTimeout(timer)
