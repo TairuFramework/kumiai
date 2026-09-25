@@ -176,3 +176,18 @@ Exit criteria: Both RPC suites pass for simple access, transactional access, and
 **Findings:** DONE (directly). `GroupMLSParams.recoverySecret?: (handle) => Promise<Uint8Array>`, called under `access.read`; the default stays `deriveRecoverySecret`. Tests: default equals the anchor KDF; the override's secret is returned and both topics derive from it; after `access.replace` the override reads the published handle; an empty, short or non-byte result and a throwing override all reject, never falling back to the default.
 **Spec impact:** a minimum of 16 bytes is enforced on the override's result (the default derives 32).
 **Learned:** no peer change needed: `@kumiai/rpc` derives both topics from `exportRecoverySecret`. Kubun's override is `readGroupAnchor(handle)` plus its existing seed validation.
+
+### 2026-09-25 -- Question 6.1: Do the real adapters and doubles satisfy the same contracts?
+**Findings:** DONE (directly). New `ports-conformance-transactional.test.ts` runs the `GroupCrypto`, pending `GroupCrypto` and `GroupMLS` suites over the transactional adapter (lying hints in both directions come from the existing `setEpochHintOffset` clauses). It found a real divergence: a commit removing the local member is applied without an epoch move (measured: `processMessage` returns, persists once, tree shrinks), but `processCommit` threw its no-save sentinel on `advanced: false`, so a transactional adapter discarded the change. Fixed with `ApplyCommitResult.applied`; mutating back to `advanced` fails only the transactional suite. Fixture: restore reads a fork of the committed row sharing the pending table, since a restarted process's writes are its own. Output:
+```
+$ pnpm exec vitest run packages/mls-rpc/test/ports-conformance.test.ts packages/mls-rpc/test/ports-conformance-transactional.test.ts packages/rpc/test/ports-conformance.test.ts packages/rpc/test/hub-conformance.test.ts packages/hub-server/test/log-hub-conformance.test.ts packages/hub-tunnel/test/hub-conformance.test.ts
+ Test Files  6 passed (6)
+      Tests  205 passed (205)
+$ rtk proxy pnpm turbo run test:types test:unit --force --concurrency=2
+ Tasks:    49 successful, 49 total
+Cached:    0 cached, 49 total
+$ pnpm exec vitest run --root tests/integration
+      Tests  43 passed (43)
+```
+**Spec impact:** `ApplyCommitResult` gains `applied`: a host keeps the state whenever it is true, even with `advanced: false`.
+**Learned:** a simple adapter hides state that was mutated but never saved; only an adapter that restores per mutation shows it.
