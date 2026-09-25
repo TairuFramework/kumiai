@@ -165,33 +165,40 @@ describe('commit strand observations', () => {
     })
     const observations: Array<StrandObservation> = []
     const recoveries: Array<RecoveryEvent> = []
-    const bob = makeMLSPeer(hub, 'bob', rs, {
-      members,
-      recovery,
-      onStrand: (observation) => {
-        observations.push(observation)
-      },
-      onRecovery: (event) => {
-        recoveries.push(event)
-      },
-    })
-    await vi.waitFor(() => expect(observations).toHaveLength(1))
-    expect(observations[0]).toEqual({
-      groupID: commitTopic(rs),
-      position: sequenceID,
-      commitDigest: publishedCommitDigest(hub, sequenceID),
-      localEpoch: 1,
-      claimedEpoch: 1,
-      kind: 'own-unmerged',
-      confidence: 'authenticated',
-    })
-    await vi.waitFor(() => expect(recoveries.some((event) => event.phase === 'started')).toBe(true))
-    await vi.waitFor(() =>
-      expect(
-        recoveries.some((event) => event.phase === 'failed' && event.reason === 'no-responder'),
-      ).toBe(true),
-    )
-    await bob.peer.dispose()
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000)
+    try {
+      const bob = makeMLSPeer(hub, 'bob', rs, {
+        members,
+        recovery,
+        onStrand: (observation) => {
+          observations.push(observation)
+        },
+        onRecovery: (event) => {
+          recoveries.push(event)
+        },
+      })
+      await vi.waitFor(() => expect(observations).toHaveLength(1))
+      expect(observations[0]).toEqual({
+        groupID: commitTopic(rs),
+        position: sequenceID,
+        commitDigest: publishedCommitDigest(hub, sequenceID),
+        localEpoch: 1,
+        claimedEpoch: 1,
+        kind: 'own-unmerged',
+        confidence: 'authenticated',
+      })
+      await vi.waitFor(() =>
+        expect(recoveries.some((event) => event.phase === 'started')).toBe(true),
+      )
+      await vi.waitFor(() =>
+        expect(
+          recoveries.some((event) => event.phase === 'failed' && event.reason === 'no-responder'),
+        ).toBe(true),
+      )
+      await bob.peer.dispose()
+    } finally {
+      now.mockRestore()
+    }
   })
 
   test('many ahead frames across pulls report one claimed observation', async () => {

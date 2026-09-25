@@ -22,25 +22,32 @@ describe('recovery lifecycle', () => {
   ] as const)(
     'a silent rendezvous emits $reason once',
     async ({ timeoutMs, deadlineMs, reason }) => {
-      const hub = new FakeHub()
-      const rs = secret(reason === 'deadline' ? 0xb1 : 0xb2)
-      const events: Array<RecoveryEvent> = []
-      const bob = makeMLSPeer(hub, 'bob', rs, {
-        members,
-        recovery: { timeoutMs, deadlineMs },
-        onRecovery: (e) => {
-          events.push(e)
-        },
-      })
-      expect(await bob.peer.recover()).toEqual({ advanced: false, reenact: [] })
-      expect(eventsOf(events)).toEqual(['started', 'failed'])
-      expect(events[1]).toMatchObject({
-        reason,
-        trigger: 'consumer',
-        attemptID: events[0]?.attemptID,
-        groupID: commitTopic(rs),
-      })
-      await bob.peer.dispose()
+      // Keep the absolute deadline fixed while the real rendezvous timer runs.
+      // A stalled runner cannot turn a per-request timeout into a deadline timeout.
+      const now = vi.spyOn(Date, 'now').mockReturnValue(1_000)
+      try {
+        const hub = new FakeHub()
+        const rs = secret(reason === 'deadline' ? 0xb1 : 0xb2)
+        const events: Array<RecoveryEvent> = []
+        const bob = makeMLSPeer(hub, 'bob', rs, {
+          members,
+          recovery: { timeoutMs, deadlineMs },
+          onRecovery: (e) => {
+            events.push(e)
+          },
+        })
+        expect(await bob.peer.recover()).toEqual({ advanced: false, reenact: [] })
+        expect(eventsOf(events)).toEqual(['started', 'failed'])
+        expect(events[1]).toMatchObject({
+          reason,
+          trigger: 'consumer',
+          attemptID: events[0]?.attemptID,
+          groupID: commitTopic(rs),
+        })
+        await bob.peer.dispose()
+      } finally {
+        now.mockRestore()
+      }
     },
   )
 
