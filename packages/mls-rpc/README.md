@@ -64,6 +64,10 @@ const mls = createGroupMLS({
 Passing anything else means a commit resolves its entries against whatever resolver the handle
 happened to be born with.
 
+The optional `persist` callback receives the tentative post-commit or bootstrapped handle.
+If it rejects, the handle returns to its previous state and no control notifications fire.
+Recovery persists the rejoined handle before calling `adopt`.
+
 ## Two seals, one exporter
 
 `wrap`/`unwrap` carry app traffic and are ratchet-backed: each open consumes a message key and

@@ -2,8 +2,7 @@
 
 **Date:** 2026-09-25
 **Status:** complete
-**Packages:** `@kumiai/rpc` (patch intent, additive API; ships in the 0.10 band release with the
-`rosterEntries` break already on main)
+**Packages:** `@kumiai/rpc` (patch), `@kumiai/mls` (patch), `@kumiai/mls-rpc` (patch); additive API, ships in the 0.10 band release with the `rosterEntries` break already on main
 **Origin:** Kubun `GroupHealthMonitor`, which inferred strand and recovery state by counting
 `epoch-stale` signals, and which also calls `GroupPeer.recover()` itself.
 
@@ -40,6 +39,9 @@ the commit walk or the recovery outcome.
 - **One owner for re-enact entries**: the `pendingReenact` stash, drained by `recover()`, `commit()`
   and `replay()` alike, so `recover()` may return entries an earlier automatic heal left. Nothing is
   handed out twice.
+- **Staged persist for real MLS handles**: received commits and ledger bootstrap publish tentative
+  state to the persistence callback under the handle mutex, roll back on failure, and notify the host
+  only after success. Recovery persists its new handle before adoption.
 - **Behaviour changes, documented in the changeset**: a failed rendezvous publish now rejects
   `recover()` instead of silently waiting out the deadline (typed `RendezvousOutcome`); an unsupported
   handshake version is classified before its kind, so a future-version frame with an unknown kind heals
@@ -50,7 +52,7 @@ the commit walk or the recovery outcome.
 - **Episodes, not per-frame events**: one strand is one observation, so a health monitor maps it
   directly instead of counting.
 - **Ownership follows observed adoption.** Once the rejoin's handle is adopted (detected by the epoch
-  change, not by whether `onAccepted` resolved, because the real adapter adopts and then persists), the
+  change, not by whether `onAccepted` resolved), the
   snapshot moves to `awaitingBootstrap`, the enacted commit is recorded in `appliedByEpoch`, and the
   strand gate lifts. A later lane bootstrap repairs any skipped anchor capture or epoch rebuild before
   it emits `bootstrapped`. Before adoption, the snapshot stays with the retry, and each attempt unions
@@ -70,6 +72,5 @@ post-disposal `bootstrapped`.
 
 ## Follow-on
 
-- `docs/agents/plans/backlog/2026-09-25-mls-rpc-persist-after-mutate.md`: the adapter mutates the
-  handle before persisting, so a failed persist leaves memory ahead of storage.
+- A host port call that never returns can still delay `dispose()` settling a recovery, accepted as a general port-contract property.
 - Kubun adoption is Kubun-side work, tracked in Kubun's `next/`.
