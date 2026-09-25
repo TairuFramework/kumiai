@@ -80,7 +80,7 @@ export type GroupMLSParams = {
   entrySlot: LedgerEntrySlot
   /**
    * Persist the handle's state durably. `processCommit` must be durable before it resolves,
-   * and this is where that happens; a host with no durable store passes a no-op and accepts
+   * and this is where that happens; a host with no durable store may omit it and accepts
    * that a crash loses the epoch.
    */
   persist?: (handle: GroupHandle) => void | Promise<void>
@@ -159,24 +159,33 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
     ): Promise<{ advanced: boolean }> {
       const group = handle()
       const before = group.epoch
+      let persistFailed = false
       entrySlot.install(context.resolveLedgerEntries)
       try {
-        await group.processMessage(commit)
+        await group.processMessage(commit, {
+          ...(persist != null && {
+            persist: async (current) => {
+              try {
+                await persist(current)
+              } catch (error) {
+                persistFailed = true
+                throw error
+              }
+            },
+          }),
+        })
       } catch (error) {
-        // The ONE throw the port is allowed: the commit named entries whose bodies would
-        // not resolve from its own frame. Everything else — a commit at another epoch, one
-        // the policy refuses, undecodable bytes — is `{ advanced: false }`, never a throw:
+        // Missing frame bodies and a failed persist must propagate so the lane can retry.
+        // Everything else — a commit at another epoch, one the policy refuses,
+        // undecodable bytes — is `{ advanced: false }`, never a throw:
         // a throw makes the lane re-read the frame, and a frame this member was never in a
         // position to apply would wedge it there forever.
-        if (error instanceof MissingLedgerEntriesError) throw error
+        if (error instanceof MissingLedgerEntriesError || persistFailed) throw error
         return { advanced: false }
       } finally {
         entrySlot.install(undefined)
       }
       const advanced = handle().epoch !== before
-      // Durable before it resolves: the lane advances its cursor on this answer, so a crash
-      // between applying and persisting would lose the commit and never re-read it.
-      if (advanced) await persist?.(handle())
       return { advanced }
     },
 
@@ -228,9 +237,9 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
         // Adopted ONLY if the hub accepts the commit. A peer that adopted first would sit
         // on a branch of its own the moment it lost the compare-and-set.
         onAccepted: async () => {
-          pending.delete(requestID)
-          await adopt(rejoined.group)
           await persist?.(rejoined.group)
+          await adopt(rejoined.group)
+          pending.delete(requestID)
         },
       }
     },
@@ -267,8 +276,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
     async bootstrapLedger(tokens: Array<string>): Promise<void> {
       // Throws for a list whose recomputed head does not match the authenticated one — a
       // lying responder can withhold, never rewrite.
-      await handle().bootstrapLedger(tokens)
-      await persist?.(handle())
+      await handle().bootstrapLedger(tokens, persist == null ? undefined : { persist })
     },
 
     async exportRecoverySecret(): Promise<Uint8Array> {
