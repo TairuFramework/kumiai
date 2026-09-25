@@ -14,6 +14,8 @@
 
 ## Phase 1: Locked epoch results in `@kumiai/rpc`
 
+Order: runs after Question 2.1 (see Decision Log, Question 1.1).
+
 Exit criteria: Both ports and their doubles report the epoch used under the handle lock. No disposition, cursor move, anchor, seal, replay, or repair decision uses `crypto.epoch()`. Run `pnpm exec vitest run --root tests/integration` and `rtk proxy pnpm run test:types` from the repo root.
 
 ### Question 1.1: Can the port return the epoch that each operation used?
@@ -119,3 +121,8 @@ Exit criteria: Both RPC suites pass for simple access, transactional access, and
 | Duplicate frame ID consumes a key twice | Question 4.2 |
 
 ## Decision Log
+
+### 2026-09-25 -- Question 1.1: Can the port return the epoch that each operation used?
+**Findings:** BLOCKED. The result shapes read well at the caller (`{ advanced, epochBefore, epochAfter }`, `{ secret, epoch }`, `{ sealed, epoch }`, `unwrap` gains `epoch`, `FrameEpochError`). The real ports cannot supply a locked epoch: they receive `handle: () => GroupHandle`, and `decrypt` / `decryptStaged` / `processMessage` take the handle mutex internally without returning the epoch used. Wrapping them in `mutexFor(handle).run` double-acquires a non-reentrant mutex; reading `handle().epoch` around the call races. A refused commit never reaches a persist callback. `exportSecret` is lock-free on purpose (in-commit resolver).
+**Spec impact:** order changed: `HandleAccess` (Question 2.1) comes first; its lock serialises every handle operation, so epochs read inside `access.read` / `access.mutate` are coherent. The strict frame-epoch refusal belongs in that locked operation, because real `decrypt` still opens a bounded past window.
+**Learned:** locked epoch results depend on the access boundary, not on the port types. No production code changed.
