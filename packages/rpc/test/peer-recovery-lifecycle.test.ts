@@ -184,6 +184,27 @@ describe('recovery lifecycle', () => {
     await bob.peer.dispose()
   })
 
+  test('recover called synchronously from a terminal observer starts a new attempt', async () => {
+    const hub = new FakeHub()
+    const rs = secret(0xcc)
+    const events: Array<RecoveryEvent> = []
+    let retry: Promise<{ advanced: boolean; reenact: Array<string> }> | undefined
+    let bob: ReturnType<typeof makeMLSPeer>
+    bob = makeMLSPeer(hub, 'bob', rs, {
+      members,
+      recovery: { timeoutMs: 10, deadlineMs: 100 },
+      onRecovery: (event) => {
+        events.push(event)
+        if (event.phase === 'failed' && retry == null) retry = bob.peer.recover()
+      },
+    })
+    expect(await bob.peer.recover()).toEqual({ advanced: false, reenact: [] })
+    expect(await retry).toEqual({ advanced: false, reenact: [] })
+    expect(eventsOf(events)).toEqual(['started', 'failed', 'started', 'failed'])
+    expect(events[0]?.attemptID).not.toBe(events[2]?.attemptID)
+    await bob.peer.dispose()
+  })
+
   test('dispose during rendezvous reports disposed and rejects', async () => {
     const hub = new FakeHub()
     const rs = secret(0xb7)

@@ -123,9 +123,9 @@ State: `episode: { strongest: StrandConfidence } | null`.
 A new internal `runRecovery(trigger)` owns every attempt. `recover()` calls it with `'consumer'`;
 `healIfRequested()` calls it with `'automatic'`. The existing `healing` flag is replaced by:
 
-- `activeRecovery: Promise<{ advanced: boolean }> | null` — the attempt in flight, from call to
-  settlement. It resolves with the attempt's `advanced` or rejects with its error; joiners get exactly
-  that. The `reenact` drain stays separate (see below), so the first caller to drain wins.
+- `activeRecovery: Promise<{ advanced: boolean }> | null` — the attempt in flight while its body
+  holds the lane. It resolves with the attempt's `advanced` or rejects with its error; joiners get
+  exactly that. The `reenact` drain stays separate (see below), so the first caller to drain wins.
 - `recoveryGeneration: number` — incremented when an attempt emits `succeeded`.
 
 **Installation.** `runRecovery` installs `activeRecovery` **synchronously, before its first `await`**
@@ -147,7 +147,8 @@ as today, even on a peer that is not stranded.
 
 **Events.** `started` fires when the attempt body is inside the mutex and about to run step 0. The whole
 body after `started` is wrapped so that **every** exit, including a throw, emits exactly one terminal
-event.
+event. The active attempt is cleared after its body completes and before `runSerial` flushes terminal
+notices. A `recover()` called synchronously by a terminal observer starts a new, serialized attempt.
 
 ### Typed rendezvous outcome
 
@@ -199,16 +200,21 @@ replacing the bare `inFlightEntries` use for this case. A snapshot from an attem
 today.
 
 Ownership moves to `awaitingBootstrap` as soon as the rejoined handle is adopted. This also covers
+an `onAccepted` that adopts the handle and then rejects (such as a failed persistence write), and
 throws during the rest of the rotation, epoch rebuild, or the post-bootstrap ledger read: the attempt
 emits `failed` / `error`, and the next successful lane bootstrap filters and drains the entries once.
 The episode stays open on that failure and closes when `bootstrapped` is emitted (or when a later
-attempt emits `succeeded`).
+attempt emits `succeeded`). Adoption is detected from the observed epoch ratchet; a rejection before
+that ratchet leaves the snapshot with the retry path. Adoption also clears the strand gate. If anchor
+capture or epoch rebuild failed after adoption, the next lane operation retries them before gathering
+the ledger. It emits `bootstrapped` only after that repair and ledger completion, so the peer can commit.
 
 **One snapshot owner across retries.** The snapshot of the peer's pre-rejoin entries is taken once and
 travels until it is finalized:
 
-- A new attempt's step 5 uses `awaitingBootstrap.entries` (or the existing `inFlightEntries` retry
-  snapshot) when one exists, and never re-snapshots the empty or partial ledger a failed bootstrap left.
+- A new attempt's step 5 unions `awaitingBootstrap.entries` (or the existing `inFlightEntries` retry
+  snapshot) with the current ledger. This retains entries from before an adopted rejoin's empty or
+  partial ledger while including entries committed after a failed pre-adoption attempt.
 - If that new attempt's rejoin lands and bootstraps, it filters **that** snapshot at step 9, clears
   `awaitingBootstrap`, and emits `succeeded` for itself. The superseded attempt never gets
   `bootstrapped`.

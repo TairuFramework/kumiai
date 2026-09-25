@@ -2395,7 +2395,15 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       const port = mls
       const commits = commitTopicID
       const rendezvous = rendezvousTopicID
-      return runSerial(() => attemptBody(trigger, generation, port, commits, rendezvous))
+      return runSerial(async () => {
+        try {
+          return await attemptBody(trigger, generation, port, commits, rendezvous)
+        } finally {
+          // The body and its mutex hold are finished before runSerial flushes terminal
+          // notices. A synchronous observer retry must not join this settled attempt.
+          if (activeRecovery === attempt) activeRecovery = null
+        }
+      })
     })()
     activeRecovery = attempt
     void attempt.then(
