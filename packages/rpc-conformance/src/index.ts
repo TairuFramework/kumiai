@@ -35,3 +35,11 @@ export {
   type GroupMLSConformanceParams,
   testGroupMLSConformance,
 } from './group-mls.js'
+export {
+  type ConformanceAppFrameRef,
+  type ConformancePendingAppFrame,
+  type PendingCrypto,
+  type PendingCryptoConformanceParams,
+  type PendingCryptoFixture,
+  testPendingGroupCryptoConformance,
+} from './pending-group-crypto.js'

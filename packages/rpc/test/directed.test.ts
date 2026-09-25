@@ -1,12 +1,12 @@
 import type { Client } from '@enkaku/client'
 import type { ProtocolDefinition } from '@enkaku/protocol'
 import type { ProcedureHandlers } from '@enkaku/server'
-import type { Unwrap } from '@kumiai/broadcast'
 import { encodeFrame } from '@kumiai/hub-tunnel'
-import { toUTF } from '@sozai/codec'
 import { createRuntime } from '@sozai/runtime'
 import { describe, expect, test } from 'vitest'
 
+import { decodeAppAAD } from '../src/app-aad.js'
+import type { GroupUnwrapResult } from '../src/crypto.js'
 import { createDirectedClient, createInboxAcceptor, createInboxPath } from '../src/directed.js'
 import { encodeDirectedPayload } from '../src/directed-tag.js'
 import { createHubMux } from '../src/hub-mux.js'
@@ -16,6 +16,7 @@ import { FakeHub } from './fixtures/fake-hub.js'
 
 const SECRET = new Uint8Array(32).fill(3)
 const EPOCH = 1
+type GroupUnwrap = (bytes: Uint8Array) => GroupUnwrapResult | Promise<GroupUnwrapResult>
 
 const protocol = {
   'rpc/double': { type: 'request', param: { type: 'object' }, result: { type: 'object' } },
@@ -55,7 +56,7 @@ function member(
   hub: FakeHub,
   localDID: string,
   handlers: Record<string, unknown>,
-  unwrap?: Unwrap,
+  unwrap?: GroupUnwrap,
   /** Called with the AAD every `wrap` seals with, for tests that inspect what got bound. */
   onWrapAAD?: (aad: Uint8Array | undefined) => void,
 ) {
@@ -155,7 +156,10 @@ describe('directed RPC', () => {
     expect(aliceAAD.length).toBeGreaterThan(0)
     for (const aad of aliceAAD) {
       expect(aad).toBeInstanceOf(Uint8Array)
-      expect(toUTF(aad as Uint8Array)).toBe(bobTopicID)
+      expect(decodeAppAAD(aad as Uint8Array)).toEqual({
+        topicID: bobTopicID,
+        intent: 'ephemeral',
+      })
     }
 
     // Bob's reply publish bound the AAD to alice's inbox topic — where the reply was sent.
@@ -163,7 +167,10 @@ describe('directed RPC', () => {
     expect(bobAAD.length).toBeGreaterThan(0)
     for (const aad of bobAAD) {
       expect(aad).toBeInstanceOf(Uint8Array)
-      expect(toUTF(aad as Uint8Array)).toBe(aliceTopicID)
+      expect(decodeAppAAD(aad as Uint8Array)).toEqual({
+        topicID: aliceTopicID,
+        intent: 'ephemeral',
+      })
     }
 
     await dispose()
@@ -213,9 +220,10 @@ describe('directed RPC security', () => {
     // lane that fell back to it would take a lying hub's word for who wrote the frame, and every
     // directed session is bound to that value.
     const bobCrypto = createFakeCrypto({ localDID: 'bob' })
-    const senderless: Unwrap = async (bytes) => {
+    // Fault injection deliberately violates the now-narrowed GroupUnwrapResult contract.
+    const senderless: GroupUnwrap = async (bytes) => {
       const result = await bobCrypto.unwrap(bytes)
-      return result instanceof Uint8Array ? result : result.payload
+      return result.payload as unknown as GroupUnwrapResult
     }
     const bob = member(
       hub,
@@ -491,7 +499,7 @@ describe('directed RPC security', () => {
     // unwrap cannot even *start* until the first has fully dispatched, so no
     // amount of latency skew can reorder them.
     let seen = 0
-    const delayedUnwrap: Unwrap = async (bytes) => {
+    const delayedUnwrap: GroupUnwrap = async (bytes) => {
       const index = seen++
       const delayMs = index === 0 ? 20 : 2
       await new Promise((resolve) => setTimeout(resolve, delayMs))

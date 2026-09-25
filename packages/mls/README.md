@@ -15,6 +15,28 @@ Credential-aware MLS (RFC 9420) group lifecycle for enkaku. Wraps [`ts-mls`](htt
 - `encodePrivateKeyPackage` + `decodePrivateKeyPackage` — the canonical string form of a key package's **private** half, for a host that must persist it across restarts (a reusable last-resort package outlives the process that made it). Secret material: never publish or log it.
 - `keyPackageRef` — the base64 KeyPackageRef a Welcome names, stable across a codec round trip. Use it as the identity of a stored package.
 - `exportGroupInfo` + `joinGroupExternal` — stale-device self-rejoin (see below)
+- `GroupHandle.decryptStaged` — open an app frame while withholding its consumed-key state until
+  a host has atomically saved that state and its pending delivery record
+- `readMessageAAD(bytes)` — read a PrivateMessage's cleartext authenticated data without a key;
+  returns `null` for unreadable bytes and never throws
+
+## Persisting a staged app open
+
+`await group.decryptStaged(message, { expectedAAD }, async (stagedState, opened) => { ... })`
+computes the post-open state under the handle mutex but does not adopt it until the callback
+resolves. `stagedState` is encoded `ClientState`, in the same format the host already stores for
+`restoreGroup`; save these bytes as the group's handle state, together with the pending record,
+in one atomic transaction. `opened` contains `payload`, authenticated `senderDID`, and `aad`.
+An unnamed sender is rejected before the callback. If opening or persistence fails, the live
+state and its message key remain available for retry. After persistence succeeds, the handle
+adopts the staged state and the same frame cannot open again.
+
+The callback runs while the handle mutex is held. It must not call this handle or its peer.
+The host must order earlier handle saves before the staged write and reject older writes at the
+same epoch using a monotonic state version; otherwise an earlier delayed save can overwrite the
+consumed-key state while leaving the pending record. No database transaction or single connection
+may be held while awaiting a handle or peer operation. The real `@kumiai/mls-rpc` port's optional
+`pending` adapter calls `decryptStaged` for durable logged events.
 
 ## Authority model
 

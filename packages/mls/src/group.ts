@@ -47,6 +47,7 @@ export {
   type InspectGroupInfoResult,
   inspectGroupInfo,
   readGroupInfoBinding,
+  readMessageAAD,
   readMessageEpoch,
 } from './group-info.js'
 export { type RemoveMemberResult, removeMember } from './group-membership.js'

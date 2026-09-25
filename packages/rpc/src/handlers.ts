@@ -1,4 +1,5 @@
-import type { ProtocolDefinition } from '@enkaku/protocol'
+import type { EventProcedureDefinition, ProtocolDefinition } from '@enkaku/protocol'
+import type { EventHandlerContext, ProcedureHandlers } from '@enkaku/server'
 import {
   type BroadcastHandler,
   type BusEvents,
@@ -8,6 +9,20 @@ import {
 import { EventEmitter } from '@sozai/event'
 import { getReporter } from '@sozai/log'
 import { createValidator, type Validator } from '@sozai/schema'
+
+import type { AppFrameRef } from './crypto.js'
+
+/** Log deliveries carry a stable frame ref; live ephemeral events have no frame.
+ * A handler that never settles blocks later log events in its protocol. Disposal does not cancel
+ * it; the host must settle its work or restart the peer to retry the pending record.
+ */
+export type GroupProcedureHandlers<Protocol extends ProtocolDefinition> = {
+  [Procedure in keyof Protocol & string]: Protocol[Procedure] extends EventProcedureDefinition
+    ? (
+        context: EventHandlerContext<Protocol, Procedure> & { frame?: AppFrameRef },
+      ) => void | Promise<void>
+    : ProcedureHandlers<Protocol>[Procedure]
+}
 
 export type BusHandlerMaps = {
   /** Fire-and-forget event fan-out, keyed by procedure name. Host handlers are pre-registered. */
@@ -29,6 +44,7 @@ type LooseHandler = (context: {
   param?: unknown
   signal?: AbortSignal
   message: { payload: { iss?: string } }
+  frame?: AppFrameRef
 }) => unknown
 
 /**
@@ -55,7 +71,8 @@ export function adaptBusHandlers(
     if (definition.type === 'event') {
       const validator: Validator<unknown> | undefined =
         definition.data != null ? createValidator(definition.data as never) : undefined
-      events.on(prc, ({ data, senderDID }) => {
+      events.on(prc, (event) => {
+        const { data, senderDID, frame } = event as typeof event & { frame?: AppFrameRef }
         if (validator != null) {
           const result = validator(data)
           if (result instanceof Error) {
@@ -63,7 +80,11 @@ export function adaptBusHandlers(
             return
           }
         }
-        return handler({ data, message: busMessage(senderDID) }) as void | Promise<void>
+        return handler({
+          data,
+          message: busMessage(senderDID),
+          ...(frame == null ? {} : { frame }),
+        }) as void | Promise<void>
       })
     } else if (definition.type === 'request') {
       const validator: Validator<unknown> | undefined =

@@ -42,7 +42,7 @@ overview: https://github.com/TairuFramework/kigu/blob/main/docs/stack.md
 
 | | |
 | --- | --- |
-| `GroupCrypto` | `epoch`, `exportSecret`, `wrap`, `unwrap`, `frameEpoch`, `sealEntries`, `openEntries` |
+| `GroupCrypto` | `epoch`, `exportSecret`, `wrap`, `unwrap`, `frameEpoch`, `frameAAD`, `sealEntries`, `openEntries`; optional `pending` for durable app delivery |
 | `GroupMLS` | commit lifecycle, `rosterEntries`, `readCommitHeader` (incl. `external`) |
 | `CommitJournal` | single slot; loses a commit whose process died in the acceptance window |
 | `AnchorStore` | the anchor; without it a restart partitions the peer from its own group |
@@ -58,6 +58,12 @@ talk, removals still remove, and the single symptom is that an evicted member ca
 read the topic. Take `@kumiai/mls-rpc` and it is right by construction; write your own and
 `@kumiai/rpc-conformance` is the only thing that will tell you.
 
+With `pending`, the host atomically saves the consumed MLS handle state and each opened app record.
+The handler receives its stable frame id, applies its effect, and returns to acknowledge. A failed
+handler or completion retries the record. The host must let a handler settle; one that never does
+holds later events in that protocol. Live log-intent pushes only wake a retained fetch. The drain
+opens those fetched frames and the delivery worker runs outside the commit and app-lane mutexes.
+
 ## Stated residuals
 
 Bounds this design has, on purpose, rather than hides:
@@ -71,8 +77,14 @@ Bounds this design has, on purpose, rather than hides:
   has rotated past it seals bytes nobody can open again. Inherent.
 - **A fresh joiner cannot drain pre-join frames** (its ts-mls history window is empty). Correct by
   design: forward secrecy.
-- **The drain is at-least-once against the live path.** The cursor tracks the drain, so a restart can
-  re-deliver frames that arrived live and sit after it.
+- **Durable log delivery depends on the hub and the peer's epoch.** A hub can withhold or omit
+  frames; a frame first fetched after the peer has moved past its sealing epoch is refused. A
+  future-epoch claim stays retained with the cursor behind it, even if the hub omits its commit.
+  The peer opens it on reaching that epoch; a forged claim can hold delivery until an operator
+  calls `dropAppFrame`. The host receives one `onAppDeliveryStalled` notice for that wait.
+- **App pages must advance their cursors.** A page containing a position at or
+  before `after`, or positions out of order, fails as a hub fault. The commit walk also rejects a
+  non-forward full page; it still examines a short, one-shot fork reveal below its cursor.
 - **A wake ping tells the push provider that a device received something, and when.** The content
   is sealed and the topic never leaves the hub, but timing is inherent to waking a suspended app.
   Self-hosting the push service collapses this to the hub operator, who already saw the timing.

@@ -21,12 +21,12 @@ import {
 } from '@kumiai/broadcast'
 import type { StoredMessage } from '@kumiai/hub-protocol'
 import type { LogHub } from '@kumiai/hub-tunnel'
-import { fromUTF } from '@sozai/codec'
 import { createRuntime, type Runtime } from '@sozai/runtime'
 
 import type { Anchor, AnchorStore } from './anchor.js'
+import { decodeAppAAD, encodeAppAAD } from './app-aad.js'
 import type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
-import { createAppLane } from './app-lane.js'
+import { type AppDeliveryStalled, createAppLane } from './app-lane.js'
 import {
   type AppliedCommit,
   classifyCommit,
@@ -54,8 +54,9 @@ import {
   type GroupMLS,
   type GroupUnwrapResult,
   isMissingLedgerEntries,
+  type PendingAppFrame,
 } from './crypto.js'
-import { asLogPosition, type LogPosition } from './cursor.js'
+import { asLogPosition, assertForwardPage, type LogPosition } from './cursor.js'
 import {
   createDirectedClient,
   createInboxAcceptor,
@@ -64,7 +65,7 @@ import {
   type InboundPath,
 } from './directed.js'
 import { PeerDisposedError } from './errors.js'
-import { adaptBusHandlers, type BusHandlerMaps } from './handlers.js'
+import { adaptBusHandlers, type BusHandlerMaps, type GroupProcedureHandlers } from './handlers.js'
 import {
   decodeHandshakeFrame,
   encodeHandshakeFrame,
@@ -248,7 +249,7 @@ export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefini
   crypto: GroupCrypto
   localDID: string
   protocols: Protocols
-  handlers: { [K in keyof Protocols]: ProcedureHandlers<Protocols[K]> }
+  handlers: { [K in keyof Protocols]: GroupProcedureHandlers<Protocols[K]> }
   suppress?: SuppressConfig
   /** Runtime providing platform primitives. Defaults to `createRuntime()`. */
   runtime?: Runtime
@@ -287,6 +288,7 @@ export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefini
   onAppWindowPruned?: (event: AppWindowPruned) => void | Promise<void>
   onStrand?: (observation: StrandObservation) => void | Promise<void>
   onRecovery?: (event: RecoveryEvent) => void | Promise<void>
+  onAppDeliveryStalled?: (event: AppDeliveryStalled) => void | Promise<void>
   /**
    * Called when the hub definitively refuses to subscribe this peer to a topic — most plausibly a
    * retention setting above the operator's own cap, which a hub refuses rather than clamps.
@@ -377,6 +379,8 @@ export type InternalSurface = {
 
 export type GroupPeer<Protocols extends Record<string, GroupProtocolDefinition>> = {
   protocol: <K extends keyof Protocols>(name: K) => ProtocolSurface<Protocols[K]>
+  /** Accept loss of one buffered sealed app frame, then resume the journal-first walk. */
+  dropAppFrame: (topicID: string, position: string) => Promise<void>
   /**
    * Commit to the group, rebasing until it lands.
    *
@@ -471,6 +475,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     handlers,
     suppress,
   } = params
+  if (crypto.pending != null && mls == null) {
+    throw new Error('GroupCrypto.pending requires mls and the durable commit lane')
+  }
   // Normalized ONCE, here, at the one ingress every downstream `localDID` use reads from —
   // equivalent DID forms must compare and derive topics identically (`@kokuin/token`
   // canonicalizes, it does not validate).
@@ -579,10 +586,24 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     retentionSeconds: appLogRetentionSeconds,
     anchor: () => anchor,
     groupID: () => commitTopicID,
-    justifiedEpochCeiling: () => justifiedEpochCeiling(),
     ...(appCursorStore != null ? { appCursorStore } : {}),
     ...(onAppWindowPruned != null ? { onAppWindowPruned } : {}),
+    onAppDeliveryStalled: (event) => {
+      hostOutbox.push(() => notifyHost(params.onAppDeliveryStalled, event))
+    },
+    scheduleDelivery: (start) => {
+      hostOutbox.push(start)
+    },
   })
+
+  let sealBarrier: Promise<void> | undefined
+  let releaseSealBarrier: (() => void) | undefined
+  let sealError: Error | undefined
+  const finishSealBarrier = (): void => {
+    sealBarrier = undefined
+    releaseSealBarrier?.()
+    releaseSealBarrier = undefined
+  }
 
   /**
    * Capture the anchor from the port's post-commit handle and persist it. The one place the
@@ -595,6 +616,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    */
   const captureAnchor = async (): Promise<void> => {
     anchor = { secret: await crypto.exportSecret(APP_TOPIC_LABEL), epoch: crypto.epoch() }
+    sealError = undefined
+    finishSealBarrier()
     await anchorStore?.save(anchor)
     // The anchor moving IS the segment boundary, so every capture ends the segment the buffer
     // belongs to. AFTER the assignment above: the lane rebuilds its cursors off the live anchor.
@@ -625,6 +648,46 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     return at != null && at > crypto.epoch()
   }
 
+  // Live log pushes carry no authoritative bytes or position. One queued journal-first pull
+  // covers a burst; a failed pull retries without waiting for another hub delivery.
+  let appPullNeeded = false
+  let appPullActive = false
+  let appPullTimer: ReturnType<typeof setTimeout> | undefined
+  let appPullBackoff = 1000
+  const armAppPull = (delay: number): void => {
+    if (disposed || appPullActive || appPullTimer != null) return
+    appPullTimer = setTimeout(() => {
+      appPullTimer = undefined
+      if (disposed) return
+      appPullActive = true
+      appPullNeeded = false
+      let retryDelay = 0
+      void (async () => {
+        try {
+          await ready
+          if (disposed) return
+          await runSerial(async () => {
+            await replayJournal()
+            await ensureLedger(Date.now() + recoveryTimeoutMs)
+            await reconcileCommits()
+          })
+          appPullBackoff = 1000
+        } catch {
+          appPullNeeded = true
+          retryDelay = appPullBackoff
+          appPullBackoff = Math.min(appPullBackoff * 2, 60_000)
+        } finally {
+          appPullActive = false
+          if (appPullNeeded && !disposed) armAppPull(retryDelay)
+        }
+      })()
+    }, delay)
+  }
+  const requestAppPull = (): void => {
+    appPullNeeded = true
+    armAppPull(0)
+  }
+
   /**
    * The app lane's inbound path: one open per topic, fanned out as plaintext, with each frame's
    * log position noted before the open. Every consumer's own `unwrap` is then a pure lookup of the
@@ -636,7 +699,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     return createOpenOncePath<Uint8Array>({
       mux,
       topicID,
-      unwrap: (b) => crypto.unwrap(b, { expectedAAD: fromUTF(topicID) }),
+      unwrap: (b) => {
+        const hinted = crypto.frameAAD(b)
+        const decoded = hinted == null ? null : decodeAppAAD(hinted)
+        const intent = decoded?.topicID === topicID ? decoded.intent : 'ephemeral'
+        return crypto.unwrap(b, { expectedAAD: encodeAppAAD({ topicID, intent }) })
+      },
       retainOnFailure,
       project: (_message, opened) => {
         const { payload, senderDID } = opened
@@ -654,6 +722,13 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         return payload
       },
       note: (message) => appLane.note(name, topicID, message),
+      wakeup: (message) => {
+        if (crypto.pending == null) return false
+        const aad = crypto.frameAAD(message.payload)
+        if (aad == null || decodeAppAAD(aad)?.intent !== 'log') return false
+        requestAppPull()
+        return true
+      },
     })
   }
 
@@ -710,7 +785,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       path: createInboxPath({
         mux,
         topicID: selfInbox,
-        unwrap: (b) => crypto.unwrap(b, { expectedAAD: fromUTF(selfInbox) }),
+        unwrap: (b) =>
+          crypto.unwrap(b, {
+            expectedAAD: encodeAppAAD({ topicID: selfInbox, intent: 'ephemeral' }),
+          }),
         retainOnFailure,
       }),
     }
@@ -795,31 +873,23 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     }
   }
 
-  /**
-   * Seal an app frame and name the segment it belongs on, as ONE answer: a frame must land on the
-   * segment that CONTAINS its seal epoch, and only the live anchor knows which segment that is.
-   *
-   * Read from the live anchor and never from a `runtime`, because the two come apart exactly when
-   * it matters: a rotation moves the anchor and the handle together inside the commit walk, but
-   * runtimes rebuild only once the whole walk returns. A dispatch takes no mutex, so in that
-   * window it can seal under the NEW epoch — publishing to the topic the runtime still holds would
-   * land the frame on the segment the group just left, readable by nobody, ever.
-   *
-   * The anchor is re-read AFTER the seal and the pair thrown away if it moved — identity, not
-   * epoch equality, since every capture mints a fresh anchor — which is what makes the two halves
-   * one segment's: an anchor that did not move across the seal is one whose segment covers the
-   * seal epoch. A moved anchor re-seals under the one now live instead of publishing against the
-   * one it missed.
-   */
+  /** Wait while an advance can move the handle before its new anchor is captured. */
   const sealForSegment = async (
     name: string,
     bytes: Uint8Array,
+    intent: 'ephemeral' | 'log' = 'ephemeral',
   ): Promise<{ topicID: string; payload: Uint8Array }> => {
     while (true) {
+      if (sealError != null) throw sealError
+      if (sealBarrier != null) {
+        await sealBarrier
+        continue
+      }
       const at = anchor
       const topicID = protocolTopic(at.secret, at.epoch, name)
-      const payload = await crypto.wrap(bytes, { aad: fromUTF(topicID) })
-      if (anchor === at) return { topicID, payload }
+      const payload = await crypto.wrap(bytes, { aad: encodeAppAAD({ topicID, intent }) })
+      if (sealError != null) throw sealError
+      if (anchor === at && sealBarrier == null) return { topicID, payload }
     }
   }
 
@@ -838,7 +908,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     while (true) {
       const at = anchor
       const topicID = inboxTopic(at.secret, at.epoch, recipientDID)
-      const payload = await crypto.wrap(tagged, { aad: fromUTF(topicID) })
+      const payload = await crypto.wrap(tagged, {
+        aad: encodeAppAAD({ topicID, intent: 'ephemeral' }),
+      })
       if (anchor === at) return { topicID, payload }
     }
   }
@@ -856,7 +928,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         const protocol = protocols[name]
         if (protocol === undefined) throw new Error(`Unknown protocol: ${name}`)
         if (retentionOf(protocol, prc) === 'log') {
-          const { topicID, payload } = await sealForSegment(name, encodeEventFrame(prc, data))
+          const { topicID, payload } = await sealForSegment(
+            name,
+            encodeEventFrame(prc, data),
+            'log',
+          )
           await mux.publish({ topicID, payload, retain: 'log' })
           return
         }
@@ -1237,62 +1313,6 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   }
 
   /**
-   * The highest epoch the group's OWN COMMIT LOG can justify a frame having been sealed at.
-   *
-   * A member seals at epoch E only after applying the commit that produced E, so a log whose
-   * furthest commit is framed at H bounds every member at H + 1. READ FRESH, never from this
-   * peer's own view of the log: a returning member's own view would bound the group at the epoch
-   * IT reached — killing exactly the frames it came back for.
-   *
-   * THIS IS THE HUB'S WORD, and it can only ever be wrong in ONE direction. A commit's framed
-   * epoch is cleartext — unauthenticated until applied — so a hub free to inject frames can RAISE
-   * this ceiling at will but never LOWER it: the honest commits are in the log too, and the
-   * ceiling is the max over all of them, so no injected frame can hide one. Raising it costs the
-   * attacker nothing; lowering it — which would destroy an honest member's frames — is
-   * unreachable.
-   *
-   * That asymmetry is why an untrusted field is acceptable HERE and would not be for opening a
-   * frame: this decides how long to WAIT, never what to believe — `unwrap` alone still decides
-   * what is finally read.
-   *
-   * Epochs are read pre-apply from the commit's own cleartext, and every frame is asked rather
-   * than only the last: the log's furthest frame may be poison or a fork loser.
-   */
-  const justifiedEpochCeiling = async (): Promise<number> => {
-    let ceiling = crypto.epoch()
-    if (commitTopicID == null) return ceiling
-    let after: LogPosition | null = null
-    while (true) {
-      const result = await mux.fetchTopic({
-        topicID: commitTopicID,
-        ...(after != null ? { after } : {}),
-        limit: COMMIT_FETCH_LIMIT,
-      })
-      for (const message of result.messages) {
-        after = asLogPosition(message.sequenceID)
-        let commit: Uint8Array
-        try {
-          const frame = decodeHandshakeFrame(message.payload)
-          // An unknown wire version is unreadable here and stays unreadable: this ceiling is
-          // built from epochs read out of commit bytes, and a frame this build cannot parse
-          // yields none. Not the heal signal — raising that twice would not raise it harder.
-          if (frame.version !== HANDSHAKE_VERSION) continue
-          if (frame.kind !== HANDSHAKE_KIND.commit) continue
-          commit = decodeCommitFrame(frame.payload).commit
-        } catch {
-          continue // not a commit frame: it says nothing about where the group got to
-        }
-        // The commit's CLEARTEXT epoch, not `readCommitHeader`: that resolves the committer
-        // against this handle's own epoch secret and answers `null` for every commit framed ahead
-        // of this peer — exactly the commits a returning member has yet to walk.
-        const framedAt = crypto.frameEpoch(commit)
-        if (framedAt != null && framedAt + 1 > ceiling) ceiling = framedAt + 1
-      }
-      if (result.messages.length < COMMIT_FETCH_LIMIT) return ceiling
-    }
-  }
-
-  /**
    * THE ONE PATH THE HANDLE RATCHETS ON, and the invariant it holds: a handle does not ratchet
    * past an epoch until that epoch's frames are read and its anchor is taken. Both are one-way
    * doors — after the advance those frames are ciphertext forever, and that epoch's secret can
@@ -1326,31 +1346,40 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     // real membership change) does not read as one — see {@link detectRosterChange}.
     const rosterBefore = (await port.rosterEntries()).map((e) => normalizeDID(e.did))
     const epochBefore = crypto.epoch()
-    const advanced = await advance()
-    // GATED ON THE HANDLE ACTUALLY RATCHETING: a roster diff alone is not evidence that it did. A
-    // commit that REMOVES this member does not advance its handle (there is no epoch to move to,
-    // since the commit's path excludes the dropped leaf), yet real MLS still applies proposals to
-    // the tree — so the roster comes back WITHOUT this member at an epoch that did not move.
-    // (Measured against ts-mls: `processMessage` returns without throwing, epoch stays,
-    // `listMembers()` has lost the leaf.) Undiscriminated, that reads as a rotation.
-    //
-    // An ungated capture would re-derive the anchor at the epoch it already names and clear the
-    // segment buffer for nothing: {@link captureAnchor} drops undelivered frames on the premise a
-    // rotation makes them unopenable, which is false here — the handle is still at the epoch those
-    // frames were sealed at, and a frame the live lane staged mid-walk would be thrown away
-    // openable.
-    const ratcheted = crypto.epoch() !== epochBefore
-    if (
-      ratcheted &&
-      (detectRosterChange(
-        rosterBefore,
-        (await port.rosterEntries()).map((e) => normalizeDID(e.did)),
-      ) ||
-        rotatesAnyway(advanced))
-    ) {
-      await captureAnchor()
+    sealBarrier = new Promise<void>((resolve) => {
+      releaseSealBarrier = resolve
+    })
+    try {
+      const advanced = await advance()
+      // GATED ON THE HANDLE ACTUALLY RATCHETING: a roster diff alone is not evidence that it did. A
+      // commit that REMOVES this member does not advance its handle (there is no epoch to move to,
+      // since the commit's path excludes the dropped leaf), yet real MLS still applies proposals to
+      // the tree — so the roster comes back WITHOUT this member at an epoch that did not move.
+      // (Measured against ts-mls: `processMessage` returns without throwing, epoch stays,
+      // `listMembers()` has lost the leaf.) Undiscriminated, that reads as a rotation.
+      //
+      // An ungated capture would clear the segment buffer while the handle still holds its epoch,
+      // dropping frames that can still be opened.
+      const ratcheted = crypto.epoch() !== epochBefore
+      if (
+        ratcheted &&
+        (detectRosterChange(
+          rosterBefore,
+          (await port.rosterEntries()).map((e) => normalizeDID(e.did)),
+        ) ||
+          rotatesAnyway(advanced))
+      ) {
+        await captureAnchor()
+      }
+      return advanced
+    } catch (error) {
+      if (crypto.epoch() !== epochBefore && sealBarrier != null) {
+        sealError = new Error('app anchor unavailable after failed epoch advance', { cause: error })
+      }
+      throw error
+    } finally {
+      finishSealBarrier()
     }
-    return advanced
   }
 
   /**
@@ -1379,6 +1408,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       commitLogHead = head == null ? null : asLogPosition(head)
     }
     while (true) {
+      const pageAfter = reconciledHead
       const result = await mux.fetchTopic({
         topicID,
         // From the cursor. With no cursor (fresh member, trimmed backlog, just rejoined) read
@@ -1386,6 +1416,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         ...(reconciledHead != null ? { after: reconciledHead } : {}),
         limit: COMMIT_FETCH_LIMIT,
       })
+      // A short page may carry a one-shot fork reveal below the cursor. Only a full page loops.
+      if (result.messages.length === COMMIT_FETCH_LIMIT) {
+        assertForwardPage(pageAfter, result.messages)
+      }
       if (result.messages.length === 0) {
         // Drained. The tip an EMPTY page reports is not redundant: a topic keeps its head when
         // its frames age out, so anchoring on the cursor here would compare-and-set against
@@ -1644,9 +1678,28 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       )
     }
     if (mls == null || commitTopicID == null) return false
-    const advanced = await walkCommits(mls, commitTopicID)
-    await appLane.deliver()
-    return advanced
+    const epochBefore = crypto.epoch()
+    const anchorBefore = anchor
+    try {
+      const advanced = await walkCommits(mls, commitTopicID)
+      await appLane.deliver()
+      return advanced
+    } catch (error) {
+      // A failed final drain can follow applied commits. Refresh the runtime before a retry.
+      if (inboxLane != null && (crypto.epoch() !== epochBefore || anchor !== anchorBefore)) {
+        try {
+          await rebuildEpoch()
+        } catch {
+          // The walk's original failure remains the retryable cause.
+        }
+      }
+      if (crypto.pending != null && !appPullActive) {
+        appPullNeeded = true
+        armAppPull(appPullBackoff)
+        appPullBackoff = Math.min(appPullBackoff * 2, 60_000)
+      }
+      throw error
+    }
   }
 
   /** Pull the commit log, and rebuild the app lane if the pull moved the epoch. */
@@ -2467,6 +2520,37 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     }
   }
 
+  let pendingRestoreTimer: ReturnType<typeof setTimeout> | undefined
+  let abortPendingRestore: (() => void) | undefined
+  const pendingRestoreAborted = new Promise<void>((resolve) => {
+    abortPendingRestore = resolve
+  })
+  const restorePending = async (): Promise<void> => {
+    if (crypto.pending == null) return
+    let backoff = 1000
+    while (!disposed) {
+      try {
+        const records = await Promise.race<Array<PendingAppFrame> | null>([
+          crypto.pending.list(),
+          pendingRestoreAborted.then(() => null),
+        ])
+        if (records == null || disposed) return
+        await appLane.restore(records)
+        return
+      } catch {
+        if (disposed) return
+        await Promise.race([
+          new Promise<void>((resolve) => {
+            pendingRestoreTimer = setTimeout(resolve, backoff)
+          }),
+          pendingRestoreAborted,
+        ])
+        pendingRestoreTimer = undefined
+        backoff = Math.min(backoff * 2, 60_000)
+      }
+    }
+  }
+
   const ready = (async () => {
     // Settle the app-lane anchor BEFORE the seed pull: a roster change the seed pull applies must
     // be able to rotate it off whatever lands here rather than have a later seed overwrite it.
@@ -2484,8 +2568,24 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     } else {
       await captureAnchor()
     }
+    await restorePending()
+    if (disposed) return
     await initControlLanes()
     await buildEpoch()
+    // The seed pull precedes the app listeners. Read once more after registration to close
+    // the publication gap; a failed read is retried on the same independent schedule.
+    if (crypto.pending != null) {
+      try {
+        await runSerial(async () => {
+          await replayJournal()
+          await ensureLedger(Date.now() + recoveryTimeoutMs)
+          await reconcileCommits()
+        })
+      } catch {
+        appPullNeeded = true
+        armAppPull(appPullBackoff)
+      }
+    }
   })()
   // A failed init rejects every public call, but must not raise an unhandled rejection before the
   // first is made.
@@ -2539,6 +2639,16 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
 
   return {
     protocol: protocolMethod,
+    dropAppFrame: async (topicID, position) => {
+      await ready
+      assertLive()
+      await runSerial(async () => {
+        await appLane.dropFrame(topicID, position)
+        await replayJournal()
+        await ensureLedger(Date.now() + recoveryTimeoutMs)
+        await reconcileCommits()
+      })
+    },
     commit,
     replay,
     recover,
@@ -2567,6 +2677,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     dispose: () => {
       if (disposePromise != null) return disposePromise
       disposed = true
+      abortPendingRestore?.()
+      if (pendingRestoreTimer != null) clearTimeout(pendingRestoreTimer)
+      appLane.dispose()
+      if (appPullTimer != null) clearTimeout(appPullTimer)
+      appPullTimer = undefined
       // Synchronous and FIRST, before anything is awaited: a lane op that already passed its own
       // `assertLive` can be running inside `runSerial`, past the point this `dispose()` can reach
       // it — awaiting the commit mutex here is unsafe (`build()`/`onAccepted()` are host-supplied

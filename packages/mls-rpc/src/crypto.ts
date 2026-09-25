@@ -1,6 +1,12 @@
 import type { GroupHandle } from '@kumiai/mls'
-import { readMessageEpoch } from '@kumiai/mls'
-import type { GroupCrypto } from '@kumiai/rpc'
+import { readMessageAAD, readMessageEpoch } from '@kumiai/mls'
+import {
+  AppFrameStorageError,
+  type GroupCrypto,
+  type PendingAppFrame,
+  type PendingAppFrames,
+  sortPendingAppFrames,
+} from '@kumiai/rpc'
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js'
 import { createRuntime, type Runtime } from '@sozai/runtime'
 
@@ -55,6 +61,12 @@ export type GroupCryptoParams = {
   entryLabel?: string
   /** Runtime providing platform primitives. Defaults to `createRuntime()`. */
   runtime?: Runtime
+  /** Atomic host store for post-open handle state and the pending record. */
+  pending?: {
+    persistOpened(stagedState: Uint8Array, record: PendingAppFrame): Promise<void>
+    list(): Promise<Array<PendingAppFrame>>
+    complete(id: string): Promise<void>
+  }
 }
 
 /**
@@ -80,8 +92,12 @@ export type GroupCryptoParams = {
  *    a sealed app frame and a commit — returning `null` (never throwing) for anything ts-mls
  *    won't decode. The fake answers only for its own two encodings.
  */
+export function createGroupCrypto(
+  params: GroupCryptoParams & { pending: NonNullable<GroupCryptoParams['pending']> },
+): GroupCrypto & { pending: PendingAppFrames }
+export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto
 export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
-  const { handle, entryLabel = ENTRY_SEAL_LABEL, runtime = createRuntime() } = params
+  const { handle, entryLabel = ENTRY_SEAL_LABEL, runtime = createRuntime(), pending } = params
 
   return {
     epoch: () => Number(handle().epoch),
@@ -101,15 +117,19 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
 
     sealEntries: async (bytes) => {
       const key = await handle().exportSecret(entryLabel, EXPORT_CONTEXT, SECRET_LENGTH)
-      // Random per seal: two members can frame a commit at the same epoch, and a repeated nonce
-      // under one key is a break. 24 bytes makes a collision unreachable without a counter.
-      const nonce = runtime.getRandomValues(new Uint8Array(ENTRY_NONCE_BYTES))
-      const ciphertext = xchacha20poly1305(key, nonce).encrypt(bytes)
-      const sealed = new Uint8Array(1 + nonce.length + ciphertext.length)
-      sealed[0] = ENTRY_VERSION
-      sealed.set(nonce, 1)
-      sealed.set(ciphertext, 1 + nonce.length)
-      return sealed
+      try {
+        // Random per seal: two members can frame a commit at the same epoch, and a repeated nonce
+        // under one key is a break. 24 bytes makes a collision unreachable without a counter.
+        const nonce = runtime.getRandomValues(new Uint8Array(ENTRY_NONCE_BYTES))
+        const ciphertext = xchacha20poly1305(key, nonce).encrypt(bytes)
+        const sealed = new Uint8Array(1 + nonce.length + ciphertext.length)
+        sealed[0] = ENTRY_VERSION
+        sealed.set(nonce, 1)
+        sealed.set(ciphertext, 1 + nonce.length)
+        return sealed
+      } finally {
+        key.fill(0)
+      }
     },
 
     openEntries: async (sealed) => {
@@ -123,12 +143,32 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
       // Pure: exporting is epoch-level and touches no handle state, so this may be called from
       // inside the apply of the very commit whose blob it opens — the only place it's called from.
       const key = await handle().exportSecret(entryLabel, EXPORT_CONTEXT, SECRET_LENGTH)
-      return xchacha20poly1305(key, sealed.subarray(1, 1 + ENTRY_NONCE_BYTES)).decrypt(
-        sealed.subarray(1 + ENTRY_NONCE_BYTES),
-      )
+      try {
+        return xchacha20poly1305(key, sealed.subarray(1, 1 + ENTRY_NONCE_BYTES)).decrypt(
+          sealed.subarray(1 + ENTRY_NONCE_BYTES),
+        )
+      } finally {
+        key.fill(0)
+      }
     },
 
     unwrap: async (bytes, opts) => {
+      if (opts?.frame != null) {
+        if (pending == null) throw new Error('unwrap: pending store required for durable open')
+        const frame = opts.frame
+        const opened = await handle().decryptStaged(bytes, opts, async (stagedState, result) => {
+          try {
+            await pending.persistOpened(stagedState, {
+              frame,
+              payload: result.payload,
+              senderDID: result.senderDID,
+            })
+          } catch (error) {
+            throw new AppFrameStorageError('failed to persist opened app frame', { cause: error })
+          }
+        })
+        return { payload: opened.payload, senderDID: opened.senderDID }
+      }
       const { payload, senderDID } = await handle().decrypt(bytes, opts)
       if (senderDID == null) {
         throw new Error('unwrap: opened frame has no authenticated sender')
@@ -141,5 +181,14 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
       const epoch = readMessageEpoch(bytes)
       return epoch == null ? null : Number(epoch)
     },
+    frameAAD: (bytes) => readMessageAAD(bytes),
+    ...(pending == null
+      ? {}
+      : {
+          pending: {
+            list: async () => sortPendingAppFrames(await pending.list()),
+            complete: (id: string) => pending.complete(id),
+          },
+        }),
   }
 }

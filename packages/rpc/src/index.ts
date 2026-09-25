@@ -5,7 +5,9 @@
  */
 
 export type { Anchor, AnchorStore } from './anchor.js'
+export { type AppAAD, decodeAppAAD, encodeAppAAD } from './app-aad.js'
 export type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
+export type { AppDeliveryStalled } from './app-lane.js'
 export {
   type AppliedCommit,
   type ClassifyCommitParams,
@@ -37,14 +39,20 @@ export {
   UnsupportedCommitFrameVersionError,
 } from './commit-frame.js'
 export {
+  type AppFrameRef,
+  AppFrameStorageError,
   type CommitContext,
   type CommitHeader,
   type GroupCrypto,
   type GroupMLS,
   type GroupUnwrapResult,
+  isAppFrameStorageError,
   isMissingLedgerEntries,
+  type PendingAppFrame,
+  type PendingAppFrames,
   type PendingRecovery,
   type RosterEntry,
+  sortPendingAppFrames,
 } from './crypto.js'
 export {
   asDeliveryPosition,
@@ -53,6 +61,7 @@ export {
   type LogPosition,
 } from './cursor.js'
 export { PeerDisposedError } from './errors.js'
+export type { GroupProcedureHandlers } from './handlers.js'
 export {
   decodeHandshakeFrame,
   encodeHandshakeFrame,

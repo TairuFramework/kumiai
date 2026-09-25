@@ -46,6 +46,13 @@ describe('fake crypto', () => {
     expect(fakeEpochSecret(1, APP_TOPIC_LABEL)).toEqual(atOne)
   })
 
+  test('an epoch export does not algebraically reveal the next epoch', async () => {
+    const atOne = fakeEpochSecret(1, APP_TOPIC_LABEL)
+    const atTwo = fakeEpochSecret(2, APP_TOPIC_LABEL)
+    const predicted = atOne.map((byte, index) => byte ^ ((1 + index) & 0xff) ^ ((2 + index) & 0xff))
+    expect(atTwo).not.toEqual(predicted)
+  })
+
   test('exportSecret is bound to the label: two labels at the same epoch are different bytes', async () => {
     const crypto = createFakeCrypto({ epoch: 1 })
     const appSecret = await crypto.exportSecret(APP_TOPIC_LABEL)

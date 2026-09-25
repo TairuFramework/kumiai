@@ -112,9 +112,10 @@ in the linked doc; the one real defect the check turned up is folded into the `d
   concrete protocol, and the `GroupPeer`/`GroupPeerParams` `Protocols` bound tightens to
   `GroupProtocolDefinition`. See
   [../completed/2026-09-04-rpc-protocol-surface-typing.complete.md](../completed/2026-09-04-rpc-protocol-surface-typing.complete.md).
-- `open-once`/`directed` still typed against the optional-sender `UnwrapResult`
+- ~~`open-once`/`directed` still typed against the optional-sender `UnwrapResult`
   (`open-once.ts:15`, `directed.ts:35`) — has a runtime guard under it already, so it is
-  type-safety debt rather than a live gap.
+  type-safety debt rather than a live gap.~~ *Taken 2026-09-25:* both inbound paths now require
+  rpc's `GroupUnwrapResult` with a required authenticated `senderDID`.
 - ~~`GroupMLS.rosterDIDs` carries no leaf identity (`rpc/src/crypto.ts:240`). **Refiled from mls
   2026-07-23** — `@kumiai/mls` has no such method; it is `@kumiai/rpc`'s consumer port, so the
   change also hits `@kumiai/mls-rpc` and the `@kumiai/rpc-conformance` contract suite.~~ *Taken

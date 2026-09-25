@@ -20,6 +20,7 @@ import {
 } from 'ts-mls'
 
 import { type GroupAnchor, readGroupAnchor } from './anchor.js'
+import { encodeClientState } from './codec.js'
 import {
   type GroupMember,
   type MemberCredential,
@@ -829,12 +830,10 @@ export class GroupHandle {
    * Open an application message sealed for the group and recover WHO SENT IT — the
    * counterpart to {@link encrypt}, and the read half of the group's application lane.
    *
-   * Throws for bytes this handle cannot open, which for an application message means
-   * ANY epoch but its own: MLS ratchets forward, so a frame sealed below this handle's
-   * epoch is gone and one sealed above it has not arrived yet. That is ordinary control
-   * flow for a caller walking a retained log full of frames from epochs it does not hold
-   * — it is how a frame says "not mine" — and such a caller must not read the throw as
-   * corruption. Use {@link readMessageEpoch} to tell those two cases apart before trying.
+   * Throws for bytes this handle cannot open. A future-epoch frame cannot open yet;
+   * ts-mls can open some past-epoch frames while their retained key material lasts.
+   * That window is bounded by epoch transitions. Use {@link readMessageEpoch} to
+   * distinguish an epoch mismatch from malformed bytes before trying.
    *
    * WHY THE SENDER IS AUTHENTICATED and not merely claimed: the leaf index comes from the
    * message's sender-data, encrypted under this epoch's sender-data secret, and the
@@ -887,6 +886,51 @@ export class GroupHandle {
       }
       const senderDID = leafIndex == null ? undefined : this.#didOfLeaf(leafIndex)
       return { payload: result.message, aad: result.aad, ...(senderDID != null && { senderDID }) }
+    })
+  }
+
+  /**
+   * Open an application frame, but make its post-open state durable before adopting it.
+   * The callback runs under this handle's mutex and must store `stagedState` as the
+   * group's handle state. It must not call this handle or the peer. If opening or
+   * persistence fails, the live state and its ratchet secrets remain untouched.
+   */
+  async decryptStaged(
+    message: Uint8Array,
+    opts: { expectedAAD?: Uint8Array },
+    persist: (
+      stagedState: Uint8Array,
+      opened: { payload: Uint8Array; senderDID: string; aad: Uint8Array },
+    ) => Promise<void>,
+  ): Promise<{ payload: Uint8Array; senderDID: string; aad: Uint8Array }> {
+    const decoded = decode(mlsMessageDecoder, message)
+    if (decoded == null) throw new Error('decryptStaged: failed to decode MLSMessage')
+    return mutexFor(this).run(async () => {
+      const pm = readPrivateFrame(decoded, contentTypes.application)
+      if (pm == null) throw new Error('decryptStaged: not a PrivateMessage application frame')
+      if (opts.expectedAAD != null && !bytesEqual(pm.authenticatedData, opts.expectedAAD)) {
+        throw new Error('decryptStaged: frame authenticated data does not match expected AAD')
+      }
+      const leafIndex = await readSenderLeafIndex(
+        this.#context,
+        this.#state.keySchedule.senderDataSecret,
+        pm,
+      )
+      const result = await mlsProcessMessage({
+        context: this.#context,
+        state: this.#state,
+        message: decoded as Parameters<typeof mlsProcessMessage>[0]['message'],
+      })
+      if (result.kind !== 'applicationMessage') {
+        throw new Error('decryptStaged: frame was not an application message')
+      }
+      const senderDID = leafIndex == null ? undefined : this.#didOfLeaf(leafIndex)
+      if (senderDID == null) throw new Error('decryptStaged: unnamed sender')
+      const opened = { payload: result.message, senderDID, aad: result.aad }
+      await persist(encodeClientState(result.newState), opened)
+      this.#state = result.newState
+      zeroAll(result.consumed)
+      return opened
     })
   }
 

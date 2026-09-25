@@ -7,7 +7,6 @@ import {
 } from '@enkaku/protocol'
 import { HandlerError, type ProcedureHandlers, Server } from '@enkaku/server'
 import { normalizeDID } from '@kokuin/token'
-import type { Unwrap } from '@kumiai/broadcast'
 import type { StoredMessage } from '@kumiai/hub-protocol'
 import {
   createHubTunnelTransport,
@@ -15,10 +14,10 @@ import {
   encodeFrame,
   type MailboxHub,
 } from '@kumiai/hub-tunnel'
-import { fromUTF } from '@sozai/codec'
 import { createRuntime, type Runtime } from '@sozai/runtime'
 
-import type { GroupCrypto } from './crypto.js'
+import { encodeAppAAD } from './app-aad.js'
+import type { GroupCrypto, GroupUnwrapResult } from './crypto.js'
 import {
   decodeDirectedPayload,
   encodeDirectedPayload,
@@ -53,7 +52,7 @@ export type InboundPath = (onOpened: (message: OpenedInbound) => void) => () => 
 export type InboxPathParams = {
   mux: HubMux
   topicID: string
-  unwrap: Unwrap
+  unwrap: (bytes: Uint8Array) => GroupUnwrapResult | Promise<GroupUnwrapResult>
   /** Forwarded to {@link createOpenOncePath} — see there for what it decides. */
   retainOnFailure?: (message: StoredMessage) => boolean
 }
@@ -148,7 +147,9 @@ export function createDirectedClient<Protocol extends ProtocolDefinition>(
       return mux.mailbox.publish({
         senderDID: publishParams.senderDID,
         topicID: publishParams.topicID,
-        payload: await wrap(tagged, { aad: fromUTF(publishParams.topicID) }),
+        payload: await wrap(tagged, {
+          aad: encodeAppAAD({ topicID: publishParams.topicID, intent: 'ephemeral' }),
+        }),
       })
     },
     subscribe() {},
@@ -332,7 +333,9 @@ export function createInboxAcceptor<Protocol extends ProtocolDefinition>(
     const sessionHub: MailboxHub = {
       async publish(publishParams) {
         const tagged = encodeDirectedPayload(protocolName, publishParams.payload)
-        const sealed = await wrap(tagged, { aad: fromUTF(publishParams.topicID) })
+        const sealed = await wrap(tagged, {
+          aad: encodeAppAAD({ topicID: publishParams.topicID, intent: 'ephemeral' }),
+        })
         return mux.mailbox.publish({
           senderDID: publishParams.senderDID,
           topicID: publishParams.topicID,

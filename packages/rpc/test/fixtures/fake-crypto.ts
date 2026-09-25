@@ -1,7 +1,14 @@
+import { hmac } from '@noble/hashes/hmac.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { fromUTF, toUTF } from '@sozai/codec'
 
-import type { GroupCrypto } from '../../src/crypto.js'
+import {
+  AppFrameStorageError,
+  type GroupCrypto,
+  type PendingAppFrame,
+  type PendingAppFrames,
+  sortPendingAppFrames,
+} from '../../src/crypto.js'
 import { decodeMemoryCommit } from './memory-group-mls.js'
 
 export type FakeCryptoOptions = {
@@ -12,9 +19,20 @@ export type FakeCryptoOptions = {
   key?: number
   /** The local member DID stamped into every wrapped message. */
   localDID?: string
+  /** Serialized spent generations and sending counter, as saved by a host. */
+  state?: Uint8Array
+  pending?: {
+    persistOpened(state: Uint8Array, record: PendingAppFrame): Promise<void>
+    list(): Promise<Array<PendingAppFrame>>
+    complete(id: string): Promise<void>
+  }
 }
 
-export type FakeCrypto = GroupCrypto & { setEpoch: (n: number) => void }
+export type FakeCrypto = GroupCrypto & {
+  setEpoch: (n: number) => void
+  saveState: () => Uint8Array
+  forceUnnamedSender: () => () => void
+}
 
 /** The base secret every fake member shares, so members at the same epoch export the same bytes. */
 export const FAKE_BASE_SECRET = new Uint8Array(32).fill(0xab)
@@ -35,7 +53,7 @@ const AAD_LEN_BYTES = 4
 /** Bytes of the keyed tag appended to a sealed app frame's body, authenticating the whole frame. */
 const TAG_BYTES = 8
 /** Bytes of the keyed tag over an entry's ciphertext. */
-const ENTRY_TAG_BYTES = 8
+const ENTRY_TAG_BYTES = 16
 
 /**
  * A keyed, non-linear tag over `epoch` AND `body` (the WHOLE framed plaintext, AAD included): a
@@ -94,18 +112,8 @@ const FAKE_ENTRY_LABEL = 'kumiai/fake-entries/v1'
  * Exported because a test that wants the topic the group is on needs the secret of the ANCHOR
  * epoch, which the live handle has usually run past — the same reason the anchor is persisted.
  *
- * The epoch mix is a XOR, NOT a ratchet: it models none of MLS's one-wayness, and a member
- * holding one epoch's bytes can trivially compute another's for the same label. That truth is
- * real only where the crypto is (see `@kumiai/mls`); here the fake is a double for wiring and
- * must not pretend otherwise. The label-AND-length mix (a SHA-256 of `label` and `length`
- * together, cycled across the output) is not modelling anything MLS does either — it exists only
- * so two labels, or two lengths of the same label, are different keystreams, deterministically and
- * with nothing exchanged, which is all any clause here asks of domain separation. `length` is
- * folded into the same hash as `label` rather than mixed in some other way so that a length-16
- * export is not a prefix of the length-32 one — `GroupCrypto.exportSecret`'s doc claims a
- * same-label export at a different length is an independent key, never a truncation, and a fake
- * whose short export were a prefix of its long one would make that claim false for the one
- * implementation every other test in this repo runs against.
+ * HMAC derives a separate epoch key from the shared base, then expands each label and length.
+ * Knowing one exported epoch's bytes does not reveal the base or another epoch's key.
  */
 export function fakeEpochSecret(
   epoch: number,
@@ -113,12 +121,13 @@ export function fakeEpochSecret(
   length: number = FAKE_BASE_SECRET.length,
   base: Uint8Array = FAKE_BASE_SECRET,
 ): Uint8Array {
-  const mask = sha256(fromUTF(`${label}:${length}`))
+  const epochKey = hmac(sha256, base, fromUTF(`epoch:${epoch}`))
   const out = new Uint8Array(length)
-  for (let i = 0; i < length; i++) {
-    const baseByte = base[i % base.length] as number
-    const maskByte = mask[i % mask.length] as number
-    out[i] = (baseByte ^ ((epoch + i) & 0xff) ^ maskByte) & 0xff
+  for (let offset = 0, block = 0; offset < length; offset += 32, block++) {
+    out.set(
+      hmac(sha256, epochKey, fromUTF(`${label}:${length}:${block}`)).subarray(0, length - offset),
+      offset,
+    )
   }
   return out
 }
@@ -176,8 +185,20 @@ export function fakeEpochSecret(
  * NOT real encryption. All members in a test share `key` so they can decrypt each other
  * at a shared epoch; different keys model different groups.
  */
+export function createFakeCrypto(
+  options: FakeCryptoOptions & { pending: NonNullable<FakeCryptoOptions['pending']> },
+): FakeCrypto & { pending: PendingAppFrames }
+export function createFakeCrypto(options?: FakeCryptoOptions): FakeCrypto
 export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
-  let epoch = options.epoch ?? 1
+  const restored =
+    options.state == null || options.state.length === 0
+      ? null
+      : (JSON.parse(toUTF(options.state)) as {
+          epoch: number
+          generation: number
+          spent: Array<string>
+        })
+  let epoch = restored?.epoch ?? options.epoch ?? 1
   const secret = options.secret ?? FAKE_BASE_SECRET
   const key = options.key ?? 0x5a
   const localDID = options.localDID ?? ''
@@ -190,13 +211,22 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
   }
 
   /** This sender's own sending chain: one generation per frame, never reused. */
-  let generation = 0
+  let generation = restored?.generation ?? 0
   /**
    * The generations this RECEIVER has already spent, as `epoch:senderDID:generation`. A real
    * handle deletes the message key as it opens; this remembers instead, which refuses the same
    * second open for the same reason.
    */
-  const spent = new Set<string>()
+  const spent = new Set<string>(restored?.spent ?? [])
+  let unnamedSender = false
+  const saveState = (extraSpent?: string): Uint8Array =>
+    fromUTF(
+      JSON.stringify({
+        epoch,
+        generation,
+        spent: extraSpent == null ? [...spent] : [...spent, extraSpent],
+      }),
+    )
 
   const wrap: GroupCrypto['wrap'] = (bytes, opts) => {
     const did = fromUTF(localDID)
@@ -231,8 +261,8 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
    *
    * BOTH message shapes, because the real one answers for both. A sealed app frame carries it in
    * the two bytes `wrap` writes in the clear; a COMMIT is an MLSMessage too and carries the same
-   * field, so a caller bounding a claim against the commit log reads it from here rather than
-   * asking a handle to authenticate a commit it is not yet at the epoch to authenticate. The two
+   * field, so a caller inspecting a commit can read its epoch without asking a handle to
+   * authenticate a commit it is not yet at the epoch to authenticate. The two
    * encodings are distinct here only because the doubles are: in MLS they are one format with one
    * epoch field, and a fake that answered for only one of them would make the epoch of a commit
    * look unreadable when it is the most readable thing about it.
@@ -245,7 +275,7 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
    * sender, the AAD it declares, AND the trailing tag — a check every member can make, because
    * the epoch and the XOR key are in the clear.
    * Without it any two bytes are an epoch, and garbage whose leading bytes read as a number the
-   * commit log justifies is indistinguishable from a frame sealed ahead of the walk: the reader
+   * reader cannot reach is indistinguishable from a frame sealed ahead of the walk: the reader
    * keeps its place and the cursor rests behind it. The port's word for bytes that are not a
    * readable sealed frame is `null`, and a double that invents a plausible one instead is a double
    * that can never be asked this question.
@@ -268,7 +298,25 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
       : null
   }
 
-  const unwrap: GroupCrypto['unwrap'] = (bytes, opts) => {
+  const frameAAD: GroupCrypto['frameAAD'] = (bytes) => {
+    if (frameEpoch(bytes) == null || decodeMemoryCommit(bytes) != null) return null
+    const sealedAt = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint16(
+      0,
+      true,
+    )
+    const framed = xor(bytes.subarray(2), sealedAt)
+    const view = new DataView(framed.buffer, framed.byteOffset, framed.byteLength)
+    const didLen = view.getUint16(GENERATION_BYTES, true)
+    const aadLen = view.getUint32(FRAMED_HEADER_BYTES, true)
+    const start = FRAMED_HEADER_BYTES + AAD_LEN_BYTES + didLen
+    return framed.slice(start, start + aadLen)
+  }
+
+  const open = (
+    bytes: Uint8Array,
+    opts: { expectedAAD?: Uint8Array } | undefined,
+    consume: boolean,
+  ) => {
     if (bytes.length < 2 + FRAMED_HEADER_BYTES + AAD_LEN_BYTES + TAG_BYTES) {
       throw new Error('cannot open: not sealed bytes')
     }
@@ -299,6 +347,7 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
       throw new Error('cannot open: frame authentication tag does not match')
     }
     const senderDID = toUTF(framed.subarray(headerEnd, headerEnd + didLen))
+    if (unnamedSender) throw new Error('cannot open: unnamed sender')
     const aad = framed.subarray(headerEnd + didLen, headerEnd + didLen + aadLen)
     // Pre-spent: a wrong-topic frame is rejected before the generation is consumed, mirroring the
     // real handle's pre-open compare — an attacker replaying a frame under the wrong AAD must not
@@ -315,10 +364,30 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
         `cannot open: the message key for generation ${sealedGeneration} from ${senderDID} at epoch ${sealedAt} is spent`,
       )
     }
-    spent.add(spentKey)
+    if (consume) spent.add(spentKey)
     const payload = framed.subarray(headerEnd + didLen + aadLen, framed.length - TAG_BYTES)
-    return { payload, senderDID }
+    return { payload, senderDID, spentKey }
   }
+  const unwrap: GroupCrypto['unwrap'] = (bytes, opts) => {
+    if (opts?.frame == null) {
+      const { payload, senderDID } = open(bytes, opts, true)
+      return { payload, senderDID }
+    }
+    const pending = options.pending
+    if (pending == null) throw new Error('unwrap: pending store required for durable open')
+    const { payload, senderDID, spentKey } = open(bytes, opts, false)
+    const record = { frame: opts.frame, payload, senderDID }
+    return (async () => {
+      try {
+        await pending.persistOpened(saveState(spentKey), record)
+      } catch (error) {
+        throw new AppFrameStorageError('failed to persist opened app frame', { cause: error })
+      }
+      spent.add(spentKey)
+      return { payload, senderDID }
+    })()
+  }
+  const pending = options.pending
 
   /**
    * The ledger-entry seal, modelled as a keystream XOR under a key derived from the epoch's
@@ -363,16 +432,8 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
    * bytes", and a double that reported them differently would let a test depend on a distinction
    * the real port does not offer.
    */
-  const entryTag = (ciphertext: Uint8Array, key: Uint8Array): Uint8Array => {
-    const tag = new Uint8Array(ENTRY_TAG_BYTES)
-    for (let i = 0; i < ENTRY_TAG_BYTES; i++) tag[i] = key[i] as number
-    for (let i = 0; i < ciphertext.length; i++) {
-      const slot = i % ENTRY_TAG_BYTES
-      // Position-dependent, so reordering or truncating the ciphertext changes the tag.
-      tag[slot] = ((tag[slot] as number) ^ ((ciphertext[i] as number) + i)) & 0xff
-    }
-    return tag
-  }
+  const entryTag = (ciphertext: Uint8Array, key: Uint8Array): Uint8Array =>
+    hmac(sha256, key, ciphertext).subarray(0, ENTRY_TAG_BYTES)
 
   const sealEntries: GroupCrypto['sealEntries'] = (bytes) => {
     const key = entryKey(epoch)
@@ -406,10 +467,26 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
     wrap,
     unwrap,
     frameEpoch,
+    frameAAD,
+    ...(pending == null
+      ? {}
+      : {
+          pending: {
+            list: async () => sortPendingAppFrames(await pending.list()),
+            complete: (id: string) => pending.complete(id),
+          },
+        }),
     sealEntries,
     openEntries,
     setEpoch: (n) => {
       epoch = n
+    },
+    saveState: () => saveState(),
+    forceUnnamedSender: () => {
+      unnamedSender = true
+      return () => {
+        unnamedSender = false
+      }
     },
   }
 }

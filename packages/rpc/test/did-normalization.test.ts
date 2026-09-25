@@ -1,9 +1,9 @@
 import type { ProtocolDefinition } from '@enkaku/protocol'
 import { normalizeDID } from '@kokuin/token'
 import { encodeEventFrame } from '@kumiai/broadcast'
-import { fromUTF } from '@sozai/codec'
 import { describe, expect, test } from 'vitest'
 
+import { encodeAppAAD } from '../src/app-aad.js'
 import { createGroupPeer } from '../src/peer.js'
 import { detectRosterChange } from '../src/roster.js'
 import { APP_TOPIC_LABEL, inboxTopic, protocolTopic } from '../src/topic.js'
@@ -80,7 +80,7 @@ describe('DID normalization at rpc ingress', () => {
     // `opened.senderDID === localDID` check from any live-path filtering.
     const echoCrypto = createFakeCrypto({ epoch: 1, localDID: LONG_B })
     const echoSealed = await echoCrypto.wrap(encodeEventFrame('chat/posted', { text: 'echo' }), {
-      aad: fromUTF(chatTopicID),
+      aad: encodeAppAAD({ topicID: chatTopicID, intent: 'log' }),
     })
     await hub.publish({
       senderDID: LONG_B,
@@ -93,7 +93,7 @@ describe('DID normalization at rpc ingress', () => {
     const carolSealed = await carolCrypto.wrap(
       encodeEventFrame('chat/posted', { text: 'from carol' }),
       {
-        aad: fromUTF(chatTopicID),
+        aad: encodeAppAAD({ topicID: chatTopicID, intent: 'log' }),
       },
     )
     await hub.publish({
