@@ -1,6 +1,6 @@
 # Acknowledged durable app-frame delivery Plan
 
-**Stage:** executing
+**Stage:** reviewing
 **Mode:** learning-loop
 **Spec:** docs/superpowers/specs/2026-09-25-rpc-durable-app-delivery-design.md (revision 4) — authoritative; read whole first.
 
