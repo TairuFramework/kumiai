@@ -2,7 +2,7 @@ import { BroadcastClient } from '@kumiai/broadcast'
 import { describe, expect, test, vi } from 'vitest'
 
 import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
-import type { RecoveryEvent } from '../src/peer.js'
+import type { RecoveryEvent, StrandObservation } from '../src/peer.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
@@ -13,7 +13,7 @@ import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
 const members = ['alice', 'bob', 'carol']
 const owed = 'circle:x=Alice'
 
-async function setup(byte: number, onStrand?: () => void) {
+async function setup(byte: number, onStrand?: (observation: StrandObservation) => void) {
   const hub = new FakeHub()
   const rs = new Uint8Array(32).fill(byte)
   let lying = true
@@ -71,6 +71,56 @@ async function setup(byte: number, onStrand?: () => void) {
 }
 
 describe('delayed ledger bootstrap', () => {
+  test('an adopted rejoin records its commit before acceptance rejects', async () => {
+    const observations: Array<StrandObservation> = []
+    const state = await setup(0xcd, (observation) => {
+      observations.push(observation)
+    })
+    const { hub, rs, alice, bob, events, recoveryRequests } = state
+    hub.acceptAtAnyHead()
+    vi.spyOn(bob.mls, 'processCommit').mockResolvedValue({ advanced: false })
+    const competing = await publishCommit({
+      hub,
+      senderDID: 'carol',
+      recoverySecret: rs,
+      epoch: bob.mls.epoch(),
+    })
+    hub.hideFrom('alice', competing.sequenceID)
+    hub.hideFrom('bob', competing.sequenceID)
+    state.stopLying()
+    const error = new Error('persist failed after adoption')
+    const applyRecovery = alice.mls.applyRecovery.bind(alice.mls)
+    const spy = vi.spyOn(alice.mls, 'applyRecovery').mockImplementation(async (...args) => {
+      const pending = await applyRecovery(...args)
+      if (pending == null) return null
+      return {
+        ...pending,
+        onAccepted: async () => {
+          await pending.onAccepted()
+          throw error
+        },
+      }
+    })
+    await expect(alice.peer.recover()).rejects.toBe(error)
+    spy.mockRestore()
+    const requestsBefore = recoveryRequests()
+    hub.revealTo('alice', competing.sequenceID)
+    await alice.peer.replay()
+    expect(events.map((event) => event.phase)).toContain('bootstrapped')
+    await hub.publish({
+      senderDID: 'zoe',
+      topicID: commitTopic(rs),
+      payload: new Uint8Array([0]),
+    })
+    await vi.waitFor(() =>
+      expect(observations.map((observation) => observation.kind)).toContain('fork-losing'),
+    )
+    await vi.waitFor(() => expect(recoveryRequests()).toBeGreaterThan(requestsBefore))
+    expect(events.some((event) => event.phase === 'bootstrapped')).toBe(true)
+    await alice.peer.dispose()
+    await bob.peer.dispose()
+  })
+
   test('adoption followed by an acceptance error keeps the owed snapshot', async () => {
     const state = await setup(0xc9)
     const { alice, bob, events } = state

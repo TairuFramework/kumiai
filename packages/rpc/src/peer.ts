@@ -2314,6 +2314,13 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
               // ratchet itself: a pre-adoption failure leaves this snapshot with the retry.
               if (crypto.epoch() !== epochBeforeRejoin) {
                 awaitingBootstrap = { attemptID, trigger, entries: inFlight }
+                // Adoption enacted these bytes even if persistence rejected afterward.
+                if (rejoinedAtEpoch != null) {
+                  appliedByEpoch.set(rejoinedAtEpoch, {
+                    sequenceID,
+                    digest: digestAppliedCommit(pending.commit),
+                  })
+                }
                 stranded = false
                 rejoinAnchorNeedsCapture = true
                 rejoinRuntimeNeedsBuild = true
@@ -2327,14 +2334,6 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         const accepted = asLogPosition(sequenceID)
         reconciledHead = accepted
         commitLogHead = accepted
-        // Enacted at that epoch, like an applied commit: without the record a second commit at
-        // that epoch reads as history rather than the fork it is.
-        if (rejoinedAtEpoch != null) {
-          appliedByEpoch.set(rejoinedAtEpoch, {
-            sequenceID,
-            digest: digestAppliedCommit(pending.commit),
-          })
-        }
         healRequested = false
         // The one place the commit gate is released: the rejoin landed, so this peer's leaf is
         // back in the tree and the stale-epoch fork it guards is closed. A bootstrap that still

@@ -203,6 +203,8 @@ Ownership moves to `awaitingBootstrap` as soon as the rejoined handle is adopted
 an `onAccepted` that adopts the handle and then rejects (such as a failed persistence write), and
 throws during the rest of the rotation, epoch rebuild, or the post-bootstrap ledger read: the attempt
 emits `failed` / `error`, and the next successful lane bootstrap filters and drains the entries once.
+Adoption also records the enacted rejoin commit by epoch before `onAccepted` can reject. A later
+different commit at that epoch can therefore report `fork-losing` even after an acceptance error.
 The episode stays open on that failure and closes when `bootstrapped` is emitted (or when a later
 attempt emits `succeeded`). Adoption is detected from the observed epoch ratchet; a rejection before
 that ratchet leaves the snapshot with the retry path. Adoption also clears the strand gate. If anchor
