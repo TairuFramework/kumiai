@@ -29,22 +29,34 @@ export type TransactionalStore = {
   records: Map<string, PendingAppFrame>
   /** Another connection's commit to the row: same state, next revision. */
   bump(): void
+  /**
+   * Once queued writes settle, a store over a copy of the row and the same pending table: a
+   * restarted process reads what was committed, and its writes stay its own.
+   */
+  fork(): Promise<TransactionalStore>
   /** Runs inside a write, before the row changes. Tests throw, wait or bump from here. */
   beforeWrite?: (() => void | Promise<void>) | undefined
 }
 
 export function createTransactionalStore(handle: GroupHandle): TransactionalStore {
-  let row: StoredRow = {
-    state: encodeClientState(handle.state),
-    ledger: handle.ledgerTokens,
-    revision: 0,
-  }
+  return storeOver(
+    { state: encodeClientState(handle.state), ledger: handle.ledgerTokens, revision: 0 },
+    new Map(),
+  )
+}
+
+function storeOver(initial: StoredRow, records: Map<string, PendingAppFrame>): TransactionalStore {
+  let row = initial
   let tail: Promise<void> = Promise.resolve()
   const store: TransactionalStore = {
     snapshot: () => row,
-    records: new Map(),
+    records,
     bump: () => {
       row = { ...row, revision: row.revision + 1 }
+    },
+    fork: async () => {
+      await tail
+      return storeOver({ ...row, state: row.state.slice() }, records)
     },
     save: (expected, state, ledger, record) => {
       const write = tail.then(async () => {

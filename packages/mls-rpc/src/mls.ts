@@ -253,11 +253,15 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
             persist,
           )
           // Thrown so the adapter does not save a handle the commit left untouched.
-          if (!result.advanced) {
+          if (!result.applied) {
             refusedEpoch = result.epochBefore
             throw ignored
           }
-          return { advanced: true, epochBefore: result.epochBefore, epochAfter: result.epochAfter }
+          return {
+            advanced: result.advanced,
+            epochBefore: result.epochBefore,
+            epochAfter: result.epochAfter,
+          }
         })
       } catch (error) {
         if (error === ignored && refusedEpoch != null)

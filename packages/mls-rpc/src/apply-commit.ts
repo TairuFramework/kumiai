@@ -18,6 +18,9 @@ export type ApplyCommitContext = CommitContext & {
 }
 
 export type ApplyCommitResult = {
+  /** The handle took the commit's state. A host keeps it even when `advanced` is false. */
+  applied: boolean
+  /** The epoch moved. A commit removing this member is applied without advancing it. */
   advanced: boolean
   epochBefore: number
   epochAfter: number
@@ -57,6 +60,7 @@ export async function applyCommit(
   const rosterBefore = rosterOf(handle)
   const ledgerLengthBefore = handle.ledger.length
   const refused = (committerDID?: string): ApplyCommitResult => ({
+    applied: false,
     advanced: false,
     epochBefore: Number(before),
     epochAfter: Number(before),
@@ -94,9 +98,12 @@ export async function applyCommit(
     context.entrySlot.install(undefined)
   }
   // A commit removing this member changes the tree without ratcheting the handle.
-  if (handle.epoch === before) return { ...refused(committerDID), rosterAfter: rosterOf(handle) }
+  if (handle.epoch === before) {
+    return { ...refused(committerDID), applied: true, rosterAfter: rosterOf(handle) }
+  }
 
   return {
+    applied: true,
     advanced: true,
     epochBefore: Number(before),
     epochAfter: Number(handle.epoch),

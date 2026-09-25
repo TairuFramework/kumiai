@@ -99,6 +99,7 @@ test('non-Commit and wrong-epoch frames are refused before resolver or mutation'
     const before = self.handle.epoch
     const result = await applyCommit(self.handle, bytes, context(group, self, resolve), persist)
     expect(result).toMatchObject({
+      applied: false,
       advanced: false,
       epochBefore: Number(before),
       epochAfter: Number(before),
@@ -141,7 +142,7 @@ test('a commit that removes this member does not advance and reports the tree it
 
   const result = await applyCommit(self.handle, commit, context(group, self))
 
-  expect(result.advanced).toBe(false)
+  expect(result).toMatchObject({ applied: true, advanced: false })
   expect(result.epochAfter).toBe(Number(before))
   expect(result.rosterAfter.map((e) => e.did)).not.toContain(self.identity.id)
 })
