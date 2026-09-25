@@ -625,6 +625,46 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     return at != null && at > crypto.epoch()
   }
 
+  // Live log pushes carry no authoritative bytes or position. One queued journal-first pull
+  // covers a burst; a failed pull retries without waiting for another hub delivery.
+  let appPullNeeded = false
+  let appPullActive = false
+  let appPullTimer: ReturnType<typeof setTimeout> | undefined
+  let appPullBackoff = 1000
+  const armAppPull = (delay: number): void => {
+    if (disposed || appPullActive || appPullTimer != null) return
+    appPullTimer = setTimeout(() => {
+      appPullTimer = undefined
+      if (disposed) return
+      appPullActive = true
+      appPullNeeded = false
+      let retryDelay = 0
+      void (async () => {
+        try {
+          await ready
+          if (disposed) return
+          await runSerial(async () => {
+            await replayJournal()
+            await ensureLedger(Date.now() + recoveryTimeoutMs)
+            await reconcileCommits()
+          })
+          appPullBackoff = 1000
+        } catch {
+          appPullNeeded = true
+          retryDelay = appPullBackoff
+          appPullBackoff = Math.min(appPullBackoff * 2, 60_000)
+        } finally {
+          appPullActive = false
+          if (appPullNeeded && !disposed) armAppPull(retryDelay)
+        }
+      })()
+    }, delay)
+  }
+  const requestAppPull = (): void => {
+    appPullNeeded = true
+    armAppPull(0)
+  }
+
   /**
    * The app lane's inbound path: one open per topic, fanned out as plaintext, with each frame's
    * log position noted before the open. Every consumer's own `unwrap` is then a pure lookup of the
@@ -659,6 +699,13 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         return payload
       },
       note: (message) => appLane.note(name, topicID, message),
+      wakeup: (message) => {
+        if (crypto.pending == null) return false
+        const aad = crypto.frameAAD(message.payload)
+        if (aad == null || decodeAppAAD(aad)?.intent !== 'log') return false
+        requestAppPull()
+        return true
+      },
     })
   }
 
@@ -1674,6 +1721,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           // The walk's original failure remains the retryable cause.
         }
       }
+      if (crypto.pending != null && !appPullActive) {
+        appPullNeeded = true
+        armAppPull(appPullBackoff)
+        appPullBackoff = Math.min(appPullBackoff * 2, 60_000)
+      }
       throw error
     }
   }
@@ -2515,6 +2567,20 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     }
     await initControlLanes()
     await buildEpoch()
+    // The seed pull precedes the app listeners. Read once more after registration to close
+    // the publication gap; a failed read is retried on the same independent schedule.
+    if (crypto.pending != null) {
+      try {
+        await runSerial(async () => {
+          await replayJournal()
+          await ensureLedger(Date.now() + recoveryTimeoutMs)
+          await reconcileCommits()
+        })
+      } catch {
+        appPullNeeded = true
+        armAppPull(appPullBackoff)
+      }
+    }
   })()
   // A failed init rejects every public call, but must not raise an unhandled rejection before the
   // first is made.
@@ -2596,6 +2662,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     dispose: () => {
       if (disposePromise != null) return disposePromise
       disposed = true
+      if (appPullTimer != null) clearTimeout(appPullTimer)
+      appPullTimer = undefined
       // Synchronous and FIRST, before anything is awaited: a lane op that already passed its own
       // `assertLive` can be running inside `runSerial`, past the point this `dispose()` can reach
       // it — awaiting the commit mutex here is unsafe (`build()`/`onAccepted()` are host-supplied

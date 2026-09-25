@@ -16,6 +16,8 @@ export type OpenOncePathParams<Opened> = {
   /** Called with the raw message BEFORE the open, for anything recorded at the epoch the frame
    * opens against. */
   note?: (message: StoredMessage) => void
+  /** A live push that only asks its owner to read the retained log. */
+  wakeup?: (message: StoredMessage) => boolean
   /**
    * Consulted when the open fails (any throw in the chain — `unwrap`, `project`, or a listener).
    * Answering `true` withholds the ack: the frame is sealed at an epoch this handle has not reached
@@ -44,13 +46,17 @@ export type OpenOncePathParams<Opened> = {
 export function createOpenOncePath<Opened>(
   params: OpenOncePathParams<Opened>,
 ): (onOpened: (value: Opened) => void) => () => void {
-  const { mux, topicID, unwrap, project, note, retainOnFailure } = params
+  const { mux, topicID, unwrap, project, note, wakeup, retainOnFailure } = params
   const listeners = new Set<(value: Opened) => void>()
   let unsubscribe: (() => void) | undefined
   let opening: Promise<void> = Promise.resolve()
   return (onOpened: (value: Opened) => void): (() => void) => {
     listeners.add(onOpened)
     unsubscribe ??= mux.onInbound(topicID, (message, ack) => {
+      if (wakeup?.(message) === true) {
+        ack()
+        return
+      }
       note?.(message)
       // Every outcome is HANDLED — opened, or permanently unopenable — except a failure
       // `retainOnFailure` says is not yet reachable, which flips this false to withhold the ack.

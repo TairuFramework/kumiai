@@ -269,3 +269,22 @@ Cached:    0 cached, 49 total
 
 $ tsc --noEmit --skipLibCheck -p tsconfig.test.json
 ```
+
+### 2026-09-25 — Question 3.2
+
+- **Learned:** A durable live push can be acknowledged immediately and used only to request a journal-first retained pull. Fetch results supply both the ciphertext and position; pushed `logPosition` has no authority. A coalesced pull must retry fetch and storage failures without another push, and a second pull after app listener registration closes the seed-pull gap.
+- **Deviations:** The initial usage tests failed before implementation (three failures; the startup-gap fixture initially published before the seed fetch and was tightened to publish after its result). The 3.3 delivery worker is not present yet, so the order guard checks the durable pending records' fetched order rather than host handler calls. A failed host-initiated walk also schedules a journal-first retry, as the spec's liveness rule requires. Seven guard mutations each failed their focused test and were restored. The full rpc unit suite passed (73 files, 486 tests).
+- **Spec/plan contradiction:** None. Handler delivery and completion remain Question 3.3.
+- **Verify:** `pnpm --filter @kumiai/rpc exec vitest run test/durable-live.test.ts && pnpm --filter @kumiai/rpc run test:types`
+
+```text
+ RUN  v5.0.1 /Users/paul/dev/yulsi/kumiai.worktrees/durable-app-delivery/packages/rpc
+
+
+ Test Files  1 passed (1)
+      Tests  7 passed (7)
+   Start at  15:48:59
+   Duration  3.57s (tests 93%, transform 4%, import 3%)
+
+$ tsc --noEmit --skipLibCheck -p tsconfig.test.json
+```
