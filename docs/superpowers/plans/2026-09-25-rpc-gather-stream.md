@@ -1,6 +1,6 @@
 # Stream gathered replies and cancel a gather — Implementation Plan
 
-**Stage:** executing
+**Stage:** qa
 **Mode:** tasks
 
 > **For agentic workers:** Implement task by task, TDD. Steps use checkbox (`- [ ]`) syntax for tracking.
