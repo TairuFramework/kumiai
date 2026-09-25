@@ -71,6 +71,7 @@ import {
   HANDSHAKE_KIND,
   HANDSHAKE_VERSION,
 } from './handshake.js'
+import { notifyHost } from './host-notice.js'
 import {
   createHubMux,
   type HubMux,
@@ -191,6 +192,38 @@ export type GroupPeerMLSParams = {
   adoptJournalled: (journal: Uint8Array) => Promise<void>
 }
 
+export type StrandKind = 'own-unmerged' | 'fork-losing' | 'ahead' | 'unknown-version'
+export type StrandConfidence = 'authenticated' | 'observed' | 'claimed'
+export type StrandObservation = {
+  groupID: string
+  position: string
+  commitDigest: string | null
+  localEpoch: number
+  claimedEpoch: number | null
+  kind: StrandKind
+  confidence: StrandConfidence
+}
+
+export type RecoveryTrigger = 'automatic' | 'consumer'
+export type RecoveryFailureReason =
+  | 'no-responder'
+  | 'bootstrap-failed'
+  | 'deadline'
+  | 'disposed'
+  | 'error'
+
+type RecoveryEventBase = { groupID: string; attemptID: string; trigger: RecoveryTrigger }
+
+export type RecoveryEvent =
+  | (RecoveryEventBase & { phase: 'started' })
+  | (RecoveryEventBase & { phase: 'succeeded' })
+  | (RecoveryEventBase & {
+      phase: 'failed'
+      reason: RecoveryFailureReason
+      error?: unknown
+    })
+  | (RecoveryEventBase & { phase: 'bootstrapped' })
+
 export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefinition>> = {
   hub: LogHub
   crypto: GroupCrypto
@@ -233,6 +266,8 @@ export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefini
    * Fire-and-forget: a throw is swallowed and the drain carries on.
    */
   onAppWindowPruned?: (event: AppWindowPruned) => void | Promise<void>
+  onStrand?: (observation: StrandObservation) => void | Promise<void>
+  onRecovery?: (event: RecoveryEvent) => void | Promise<void>
   /**
    * Called when the hub definitively refuses to subscribe this peer to a topic — most plausibly a
    * retention setting above the operator's own cap, which a hub refuses rather than clamps.
@@ -972,6 +1007,19 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    */
   let pendingReenact: Array<string> = []
 
+  let hostOutbox: Array<() => void> = []
+  const emitStrand = (observation: StrandObservation): void => {
+    hostOutbox.push(() => notifyHost(params.onStrand, observation))
+  }
+  const emitRecovery = (event: RecoveryEvent): void => {
+    hostOutbox.push(() => notifyHost(params.onRecovery, event))
+  }
+  const flushHostOutbox = (): void => {
+    const batch = hostOutbox
+    hostOutbox = []
+    for (const notice of batch) notice()
+  }
+
   /**
    * The group's commit mutex: every commit-lane operation serialized through one tail. The
    * compare-and-set resolves races between devices, not two callers here — two `build()` calls
@@ -990,7 +1038,16 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       () => {},
       () => {},
     )
-    return op
+    return op.then(
+      (value) => {
+        flushHostOutbox()
+        return value
+      },
+      (error: unknown) => {
+        flushHostOutbox()
+        throw error
+      },
+    )
   }
 
   /**

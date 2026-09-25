@@ -100,12 +100,12 @@ onRecovery?: (event: RecoveryEvent) => void | Promise<void>
 Place the types where the other host-callback types live (next to `AppWindowPruned` usage in
 `GroupPeerParams`); a new `src/lifecycle.ts` for the types is fine if `peer.ts` imports it.
 
-- [ ] **Step 1: Failing tests** for `notifyHost`: undefined callback is a no-op; a synchronous throw is
+- [x] **Step 1: Failing tests** for `notifyHost`: undefined callback is a no-op; a synchronous throw is
   swallowed; a rejected promise produces no unhandled rejection (listen on `process` for
   `unhandledRejection` in the test, fail if fired); the callback is called synchronously (the outbox
   decides timing, not this helper).
-- [ ] **Step 2:** FAIL.
-- [ ] **Step 3: Implement** `notifyHost`:
+- [x] **Step 2:** FAIL.
+- [x] **Step 3: Implement** `notifyHost`:
   ```ts
   export function notifyHost<T>(
     callback: ((value: T) => void | Promise<void>) | undefined,
@@ -141,8 +141,8 @@ Place the types where the other host-callback types live (next to `AppWindowPrun
   `runSerial`: after `op` settles, flush — `op.then(flushHostOutbox, flushHostOutbox)` chained so the
   flush runs after the task settled (the tail is already released by then because `commitTail` is the
   settled `op`). Keep `runSerial`'s return value and rejection unchanged.
-- [ ] **Step 4:** PASS; rpc `test:types` PASS.
-- [ ] **Step 5:** Lint, commit `feat(rpc): host lifecycle types and a lane-safe notice outbox`.
+- [x] **Step 4:** PASS; rpc `test:types` PASS.
+- [x] **Step 5:** Lint, commit `feat(rpc): host lifecycle types and a lane-safe notice outbox`.
 
 ### Task 3: Strand observations and episodes
 
