@@ -830,12 +830,10 @@ export class GroupHandle {
    * Open an application message sealed for the group and recover WHO SENT IT — the
    * counterpart to {@link encrypt}, and the read half of the group's application lane.
    *
-   * Throws for bytes this handle cannot open, which for an application message means
-   * ANY epoch but its own: MLS ratchets forward, so a frame sealed below this handle's
-   * epoch is gone and one sealed above it has not arrived yet. That is ordinary control
-   * flow for a caller walking a retained log full of frames from epochs it does not hold
-   * — it is how a frame says "not mine" — and such a caller must not read the throw as
-   * corruption. Use {@link readMessageEpoch} to tell those two cases apart before trying.
+   * Throws for bytes this handle cannot open. A future-epoch frame cannot open yet;
+   * ts-mls can open some past-epoch frames while their retained key material lasts.
+   * That window is bounded by epoch transitions. Use {@link readMessageEpoch} to
+   * distinguish an epoch mismatch from malformed bytes before trying.
    *
    * WHY THE SENDER IS AUTHENTICATED and not merely claimed: the leaf index comes from the
    * message's sender-data, encrypted under this epoch's sender-data secret, and the

@@ -270,6 +270,66 @@ describe('durable delivery queue', () => {
     await bob.peer.dispose()
   })
 
+  test('a pending handler waits for the producing commit operation to release', async () => {
+    const hub = new DurableFakeHub()
+    const records = new Map<string, PendingAppFrame>()
+    const crypto = createFakeCrypto({
+      epoch: 1,
+      localDID: 'bob',
+      pending: {
+        async persistOpened(_state, record) {
+          records.set(record.frame.id, record)
+        },
+        async list() {
+          return [...records.values()]
+        },
+        async complete(id) {
+          records.delete(id)
+        },
+      },
+    })
+    const seen = vi.fn()
+    const bob = makeMLSPeer(hub, 'bob', new Uint8Array(32).fill(0x91), {
+      crypto,
+      handlers: { 'chat/posted': seen },
+    })
+    await bob.peer.protocol('chat').to('alice')
+    hub.detach('bob')
+    await hub.publish({
+      topicID,
+      senderDID: 'alice',
+      payload: await createFakeCrypto({ epoch: 1, localDID: 'alice' }).wrap(payload('held'), {
+        aad: encodeAppAAD({ topicID, intent: 'log' }),
+      }),
+      retain: 'log',
+    })
+    let entered!: () => void
+    let release!: () => void
+    const atRoster = new Promise<void>((resolve) => {
+      entered = resolve
+    })
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const originalRoster = bob.mls.rosterEntries.bind(bob.mls)
+    vi.spyOn(bob.mls, 'rosterEntries').mockImplementation(async () => {
+      entered()
+      await held
+      return originalRoster()
+    })
+    vi.useFakeTimers()
+    const committing = bob.peer.commit(buildLedgerCommit(bob, []))
+    await atRoster
+    await vi.advanceTimersByTimeAsync(0)
+    expect(seen).not.toHaveBeenCalled()
+    release()
+    await committing
+    await vi.advanceTimersByTimeAsync(0)
+    expect(seen).toHaveBeenCalledTimes(1)
+    vi.useRealTimers()
+    await bob.peer.dispose()
+  })
+
   test('dispose during retry backoff prevents another handler call', async () => {
     const seen = vi.fn(() => {
       throw new Error('host failed')

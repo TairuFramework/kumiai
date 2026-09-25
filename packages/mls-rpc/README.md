@@ -136,10 +136,8 @@ one. The ones a host is most likely to trip on:
   six transitions later is refused. The window is spent by epoch *transitions*, not by time, so
   nothing may depend on it — and `@kumiai/rpc` does not. An implementation opening strictly at the
   current epoch is a correct implementation of the port.
-- **`exportSecret` is one-way.** The fake XORs the epoch into a fixed base, so any member holding one
-  epoch's bytes computes every other's. This exports from the epoch's exporter secret, which a
-  removed member cannot reach forward from. That difference is the entire security property the
-  app-lane topic rests on, and it is real only here.
+- **`exportSecret` derives from MLS exporter state.** The fake uses HMAC to model epoch separation,
+  while the real port derives from the handle's exporter secret.
 - **`wrap` mutates.** It consumes a per-message ratchet key, so sealing the same plaintext twice
   gives different bytes.
 - **`exportRecoverySecret` is derived from the group's genesis anchor, which is public.** MLS has no

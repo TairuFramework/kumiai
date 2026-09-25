@@ -592,7 +592,19 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     onAppDeliveryStalled: (event) => {
       hostOutbox.push(() => notifyHost(params.onAppDeliveryStalled, event))
     },
+    scheduleDelivery: (start) => {
+      hostOutbox.push(start)
+    },
   })
+
+  let sealBarrier: Promise<void> | undefined
+  let releaseSealBarrier: (() => void) | undefined
+  let sealError: Error | undefined
+  const finishSealBarrier = (): void => {
+    sealBarrier = undefined
+    releaseSealBarrier?.()
+    releaseSealBarrier = undefined
+  }
 
   /**
    * Capture the anchor from the port's post-commit handle and persist it. The one place the
@@ -605,6 +617,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    */
   const captureAnchor = async (): Promise<void> => {
     anchor = { secret: await crypto.exportSecret(APP_TOPIC_LABEL), epoch: crypto.epoch() }
+    sealError = undefined
+    finishSealBarrier()
     await anchorStore?.save(anchor)
     // The anchor moving IS the segment boundary, so every capture ends the segment the buffer
     // belongs to. AFTER the assignment above: the lane rebuilds its cursors off the live anchor.
@@ -860,32 +874,23 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     }
   }
 
-  /**
-   * Seal an app frame and name the segment it belongs on, as ONE answer: a frame must land on the
-   * segment that CONTAINS its seal epoch, and only the live anchor knows which segment that is.
-   *
-   * Read from the live anchor and never from a `runtime`, because the two come apart exactly when
-   * it matters: a rotation moves the anchor and the handle together inside the commit walk, but
-   * runtimes rebuild only once the whole walk returns. A dispatch takes no mutex, so in that
-   * window it can seal under the NEW epoch — publishing to the topic the runtime still holds would
-   * land the frame on the segment the group just left, readable by nobody, ever.
-   *
-   * The anchor is re-read AFTER the seal and the pair thrown away if it moved — identity, not
-   * epoch equality, since every capture mints a fresh anchor — which is what makes the two halves
-   * one segment's: an anchor that did not move across the seal is one whose segment covers the
-   * seal epoch. A moved anchor re-seals under the one now live instead of publishing against the
-   * one it missed.
-   */
+  /** Wait while an advance can move the handle before its new anchor is captured. */
   const sealForSegment = async (
     name: string,
     bytes: Uint8Array,
     intent: 'ephemeral' | 'log' = 'ephemeral',
   ): Promise<{ topicID: string; payload: Uint8Array }> => {
     while (true) {
+      if (sealError != null) throw sealError
+      if (sealBarrier != null) {
+        await sealBarrier
+        continue
+      }
       const at = anchor
       const topicID = protocolTopic(at.secret, at.epoch, name)
       const payload = await crypto.wrap(bytes, { aad: encodeAppAAD({ topicID, intent }) })
-      if (anchor === at) return { topicID, payload }
+      if (sealError != null) throw sealError
+      if (anchor === at && sealBarrier == null) return { topicID, payload }
     }
   }
 
@@ -1405,31 +1410,40 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     // real membership change) does not read as one — see {@link detectRosterChange}.
     const rosterBefore = (await port.rosterEntries()).map((e) => normalizeDID(e.did))
     const epochBefore = crypto.epoch()
-    const advanced = await advance()
-    // GATED ON THE HANDLE ACTUALLY RATCHETING: a roster diff alone is not evidence that it did. A
-    // commit that REMOVES this member does not advance its handle (there is no epoch to move to,
-    // since the commit's path excludes the dropped leaf), yet real MLS still applies proposals to
-    // the tree — so the roster comes back WITHOUT this member at an epoch that did not move.
-    // (Measured against ts-mls: `processMessage` returns without throwing, epoch stays,
-    // `listMembers()` has lost the leaf.) Undiscriminated, that reads as a rotation.
-    //
-    // An ungated capture would re-derive the anchor at the epoch it already names and clear the
-    // segment buffer for nothing: {@link captureAnchor} drops undelivered frames on the premise a
-    // rotation makes them unopenable, which is false here — the handle is still at the epoch those
-    // frames were sealed at, and a frame the live lane staged mid-walk would be thrown away
-    // openable.
-    const ratcheted = crypto.epoch() !== epochBefore
-    if (
-      ratcheted &&
-      (detectRosterChange(
-        rosterBefore,
-        (await port.rosterEntries()).map((e) => normalizeDID(e.did)),
-      ) ||
-        rotatesAnyway(advanced))
-    ) {
-      await captureAnchor()
+    sealBarrier = new Promise<void>((resolve) => {
+      releaseSealBarrier = resolve
+    })
+    try {
+      const advanced = await advance()
+      // GATED ON THE HANDLE ACTUALLY RATCHETING: a roster diff alone is not evidence that it did. A
+      // commit that REMOVES this member does not advance its handle (there is no epoch to move to,
+      // since the commit's path excludes the dropped leaf), yet real MLS still applies proposals to
+      // the tree — so the roster comes back WITHOUT this member at an epoch that did not move.
+      // (Measured against ts-mls: `processMessage` returns without throwing, epoch stays,
+      // `listMembers()` has lost the leaf.) Undiscriminated, that reads as a rotation.
+      //
+      // An ungated capture would clear the segment buffer while the handle still holds its epoch,
+      // dropping frames that can still be opened.
+      const ratcheted = crypto.epoch() !== epochBefore
+      if (
+        ratcheted &&
+        (detectRosterChange(
+          rosterBefore,
+          (await port.rosterEntries()).map((e) => normalizeDID(e.did)),
+        ) ||
+          rotatesAnyway(advanced))
+      ) {
+        await captureAnchor()
+      }
+      return advanced
+    } catch (error) {
+      if (crypto.epoch() !== epochBefore && sealBarrier != null) {
+        sealError = new Error('app anchor unavailable after failed epoch advance', { cause: error })
+      }
+      throw error
+    } finally {
+      finishSealBarrier()
     }
-    return advanced
   }
 
   /**

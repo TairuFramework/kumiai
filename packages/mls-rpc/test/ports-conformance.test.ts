@@ -103,6 +103,7 @@ testPendingGroupCryptoConformance({
       return createGroupCrypto({ handle: () => handle, pending })
     }
     return {
+      senderDID: group.committer.identity.id,
       sender: createGroupCrypto({ handle: () => group.committer.handle }),
       receiver,
       restore,

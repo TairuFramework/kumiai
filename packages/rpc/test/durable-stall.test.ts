@@ -55,6 +55,57 @@ async function publish(
 }
 
 describe('durable storage stall', () => {
+  test('reports each blocked protocol once across repeated drains', async () => {
+    const anchor = { epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }
+    const topics = ['chat', 'other'].map((name) => protocolTopic(anchor.secret, 1, name))
+    const sender = createFakeCrypto({ epoch: 2, localDID: 'alice' })
+    const frames = await Promise.all(
+      topics.map((topic) =>
+        sender.wrap(fromUTF('future'), { aad: encodeAppAAD({ topicID: topic, intent: 'log' }) }),
+      ),
+    )
+    const notices = vi.fn()
+    const lane = createAppLane({
+      mux: {
+        retainTopic() {},
+        async fetchTopic({ topicID: requested, after }: { topicID: string; after?: string }) {
+          const index = topics.indexOf(requested)
+          return {
+            messages:
+              after == null && index >= 0
+                ? [{ sequenceID: '000000000001', payload: frames[index] }]
+                : [],
+            head: '000000000001',
+            oldest: '000000000001',
+          }
+        },
+      } as never,
+      crypto: createFakeCrypto({
+        epoch: 1,
+        localDID: 'bob',
+        pending: {
+          async persistOpened() {},
+          async list() {
+            return []
+          },
+          async complete() {},
+        },
+      }),
+      localDID: 'bob',
+      protocols: { chat, other: chat },
+      eventHandlers: new Map(),
+      retentionSeconds: 60,
+      onAppDeliveryStalled: notices,
+      anchor: () => anchor,
+      groupID: () => 'group',
+      justifiedEpochCeiling: async () => 2,
+    })
+    await lane.deliver()
+    await lane.deliver()
+    expect(notices.mock.calls.map(([event]) => event.protocol)).toEqual(['chat', 'other'])
+    lane.dispose()
+  })
+
   test('a justified future-epoch frame reports a stall until dropped', async () => {
     const sender = createFakeCrypto({ epoch: 65535, localDID: 'mallory' })
     const sealed = await sender.wrap(fromUTF('future'), {

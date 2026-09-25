@@ -78,6 +78,8 @@ export type AppLaneParams = {
   appCursorStore?: AppCursorStore | undefined
   onAppWindowPruned?: ((event: AppWindowPruned) => void | Promise<void>) | undefined
   onAppDeliveryStalled?: ((event: AppDeliveryStalled) => void) | undefined
+  /** Start workers after the caller's serialization boundary; direct lanes start immediately. */
+  scheduleDelivery?: ((start: () => void) => void) | undefined
   /**
    * The live anchor, read rather than held: it moves under the peer, and the topic every buffer
    * and cursor here belongs to is derived from it. Read once per lazy buffer creation, so a
@@ -111,9 +113,8 @@ export type AppLane = {
    * every buffer and cursor rebuilt from here reads the anchor back through {@link
    * AppLaneParams.anchor}.
    *
-   * Dropping UNDELIVERED frames is not a loss: the walk already read everything openable on the
-   * way here, so what remains is unopenable forever. Cursors go with the buffer; nothing is
-   * cleared at the STORE, since a cursor is keyed by topic and stays true of the topic being left.
+   * The walk has drained the old epoch before this reset. Cursors stay in the store, keyed by
+   * topic, while pending records survive in the delivery queue.
    */
   reset: () => void
   /** Opened records awaiting the delivery worker. */
@@ -173,6 +174,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
     appCursorStore,
     onAppWindowPruned,
     onAppDeliveryStalled,
+    scheduleDelivery = (start) => start(),
     anchor,
     groupID,
     justifiedEpochCeiling,
@@ -185,7 +187,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
    */
   let segment = new Map<string, Array<AppFrame>>()
   const pendingRecords: Array<PendingAppFrame> = []
-  let blockingFrame: string | undefined
+  const blockingFrames = new Map<string, string>()
   let disposed = false
   const reportedUnknown = new Set<string>()
   const reportUnknown = (record: PendingAppFrame): void => {
@@ -636,8 +638,8 @@ export function createAppLane(params: AppLaneParams): AppLane {
           if (sealedAt != null && sealedAt > crypto.epoch() && (await justifies(sealedAt))) {
             if (crypto.pending != null) {
               const key = `future\u0000${cursor.topicID}\u0000${frame.position}`
-              if (blockingFrame !== key) {
-                blockingFrame = key
+              if (blockingFrames.get(name) !== key) {
+                blockingFrames.set(name, key)
                 const group = groupID()
                 if (group != null)
                   onAppDeliveryStalled?.({
@@ -684,8 +686,8 @@ export function createAppLane(params: AppLaneParams): AppLane {
         } catch (error) {
           if (crypto.pending != null && isAppFrameStorageError(error)) {
             const key = `storage\u0000${cursor.topicID}\u0000${frame.position}`
-            if (blockingFrame !== key) {
-              blockingFrame = key
+            if (blockingFrames.get(name) !== key) {
+              blockingFrames.set(name, key)
               const group = groupID()
               if (group != null) {
                 onAppDeliveryStalled?.({
@@ -811,9 +813,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
      * the ordered buffer mid-walk re-reads or steps over a frame, and a sync landing between
      * {@link advanceCursor}'s read of a done run and its splice silently drops frames.
      *
-     * NO DEADLOCK against the peer's commit mutex: every call here is from inside `runSerial`,
-     * taking the app lane second. Durable handlers run later in a separate worker, after this
-     * drain has released both mutexes, so they may call the peer.
+     * The peer starts workers after its commit operation releases; direct lanes start them here.
      */
     deliver: async (): Promise<void> => {
       try {
@@ -822,7 +822,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
         if (crypto.pending != null && !disposed) {
           for (const record of pendingRecords) reportUnknown(record)
           for (const name of new Set(pendingRecords.map((record) => record.frame.protocol))) {
-            scheduleWorker(name)
+            scheduleDelivery(() => scheduleWorker(name))
           }
         }
       }

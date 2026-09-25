@@ -112,18 +112,8 @@ const FAKE_ENTRY_LABEL = 'kumiai/fake-entries/v1'
  * Exported because a test that wants the topic the group is on needs the secret of the ANCHOR
  * epoch, which the live handle has usually run past — the same reason the anchor is persisted.
  *
- * The epoch mix is a XOR, NOT a ratchet: it models none of MLS's one-wayness, and a member
- * holding one epoch's bytes can trivially compute another's for the same label. That truth is
- * real only where the crypto is (see `@kumiai/mls`); here the fake is a double for wiring and
- * must not pretend otherwise. The label-AND-length mix (a SHA-256 of `label` and `length`
- * together, cycled across the output) is not modelling anything MLS does either — it exists only
- * so two labels, or two lengths of the same label, are different keystreams, deterministically and
- * with nothing exchanged, which is all any clause here asks of domain separation. `length` is
- * folded into the same hash as `label` rather than mixed in some other way so that a length-16
- * export is not a prefix of the length-32 one — `GroupCrypto.exportSecret`'s doc claims a
- * same-label export at a different length is an independent key, never a truncation, and a fake
- * whose short export were a prefix of its long one would make that claim false for the one
- * implementation every other test in this repo runs against.
+ * HMAC derives a separate epoch key from the shared base, then expands each label and length.
+ * Knowing one exported epoch's bytes does not reveal the base or another epoch's key.
  */
 export function fakeEpochSecret(
   epoch: number,
@@ -131,12 +121,13 @@ export function fakeEpochSecret(
   length: number = FAKE_BASE_SECRET.length,
   base: Uint8Array = FAKE_BASE_SECRET,
 ): Uint8Array {
-  const mask = sha256(fromUTF(`${label}:${length}`))
+  const epochKey = hmac(sha256, base, fromUTF(`epoch:${epoch}`))
   const out = new Uint8Array(length)
-  for (let i = 0; i < length; i++) {
-    const baseByte = base[i % base.length] as number
-    const maskByte = mask[i % mask.length] as number
-    out[i] = (baseByte ^ ((epoch + i) & 0xff) ^ maskByte) & 0xff
+  for (let offset = 0, block = 0; offset < length; offset += 32, block++) {
+    out.set(
+      hmac(sha256, epochKey, fromUTF(`${label}:${length}:${block}`)).subarray(0, length - offset),
+      offset,
+    )
   }
   return out
 }

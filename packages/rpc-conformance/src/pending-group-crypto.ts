@@ -30,6 +30,7 @@ export type PendingCrypto = Omit<ConformanceGroupCrypto, 'unwrap'> & {
 }
 
 export type PendingCryptoFixture = {
+  senderDID: string
   sender: ConformanceGroupCrypto
   receiver: PendingCrypto
   /** Construct a new port over the saved state and the same pending-record store. */
@@ -70,18 +71,16 @@ export function testPendingGroupCryptoConformance(params: PendingCryptoConforman
   const { label, createFixture, isStorageError } = params
   describe(`GroupCrypto pending conformance — ${label}`, () => {
     test('durable open saves a record and spent state; replay cannot save another', async () => {
-      const { sender, receiver, restore, saveHandle } = await createFixture('success')
+      const { sender, senderDID, receiver, restore, saveHandle } = await createFixture('success')
       const payload = bytes.encode('first')
       const aad = bytes.encode('topic AAD')
       const sealed = await sender.wrap(payload, { aad })
       const ref = frame('first')
       expect(await receiver.unwrap(sealed, { expectedAAD: aad, frame: ref })).toEqual({
         payload,
-        senderDID: expect.any(String),
+        senderDID,
       })
-      expect(await receiver.pending.list()).toEqual([
-        { frame: ref, payload, senderDID: expect.any(String) },
-      ])
+      expect(await receiver.pending.list()).toEqual([{ frame: ref, payload, senderDID }])
       await refuses(() => receiver.unwrap(sealed, { expectedAAD: aad, frame: ref }))
       expect(await receiver.pending.list()).toHaveLength(1)
       await receiver.wrap(bytes.encode('later send'))
@@ -90,6 +89,31 @@ export function testPendingGroupCryptoConformance(params: PendingCryptoConforman
       expect(await restarted.pending.list()).toHaveLength(1)
       await refuses(() => restarted.unwrap(sealed, { expectedAAD: aad, frame: ref }))
       expect(await restarted.pending.list()).toHaveLength(1)
+    })
+
+    test('wrong AAD leaves a durable frame openable without persisting', async () => {
+      const fixture = await createFixture('wrong-aad')
+      const payload = bytes.encode('aad retry')
+      const aad = bytes.encode('correct AAD')
+      const sealed = await fixture.sender.wrap(payload, { aad })
+      const before = fixture.liveState()
+      const calls = fixture.persistCalls()
+      await refuses(() =>
+        fixture.receiver.unwrap(sealed, {
+          expectedAAD: bytes.encode('wrong AAD'),
+          frame: frame('wrong-aad'),
+        }),
+      )
+      expect(fixture.persistCalls()).toBe(calls)
+      expect(fixture.liveState()).toEqual(before)
+      expect(await fixture.receiver.pending.list()).toEqual([])
+      expect(
+        await fixture.receiver.unwrap(sealed, {
+          expectedAAD: aad,
+          frame: frame('wrong-aad'),
+        }),
+      ).toEqual({ payload, senderDID: fixture.senderDID })
+      expect(fixture.persistCalls()).toBe(calls + 1)
     })
 
     test('failed storage leaves live and stored ratchets able to open the frame', async () => {
