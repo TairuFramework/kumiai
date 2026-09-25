@@ -1,6 +1,7 @@
 import { BroadcastClient } from '@kumiai/broadcast'
 import { describe, expect, test, vi } from 'vitest'
 
+import { PeerDisposedError } from '../src/errors.js'
 import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import type { RecoveryEvent, StrandObservation } from '../src/peer.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
@@ -71,6 +72,36 @@ async function setup(byte: number, onStrand?: (observation: StrandObservation) =
 }
 
 describe('delayed ledger bootstrap', () => {
+  test('replay cannot finalize a bootstrap completed after disposal', async () => {
+    const state = await setup(0xce)
+    const { alice, bob, events } = state
+    expect(await alice.peer.recover()).toEqual({ advanced: false, reenact: [] })
+    expect(events.map((event) => event.phase)).toEqual(['started', 'failed'])
+    state.stopLying()
+
+    let releaseBootstrap: () => void = () => {}
+    const bootstrapGate = new Promise<void>((resolve) => {
+      releaseBootstrap = resolve
+    })
+    const bootstrap = alice.mls.bootstrapLedger.bind(alice.mls)
+    const bootstrapSpy = vi
+      .spyOn(alice.mls, 'bootstrapLedger')
+      .mockImplementation(async (tokens) => {
+        await bootstrapGate
+        await bootstrap(tokens)
+      })
+
+    const replay = alice.peer.replay()
+    const rejected = expect(replay).rejects.toBeInstanceOf(PeerDisposedError)
+    await vi.waitFor(() => expect(bootstrapSpy).toHaveBeenCalled())
+    const disposal = alice.peer.dispose()
+    releaseBootstrap()
+    await rejected
+    await disposal
+    expect(events.filter((event) => event.phase === 'bootstrapped')).toHaveLength(0)
+    await bob.peer.dispose()
+  })
+
   test('an adopted rejoin records its commit before acceptance rejects', async () => {
     const observations: Array<StrandObservation> = []
     const state = await setup(0xcd, (observation) => {

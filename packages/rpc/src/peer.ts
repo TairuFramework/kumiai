@@ -1884,10 +1884,13 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   }
 
   const finalizeBootstrap = async (port: GroupMLS): Promise<void> => {
+    assertLive()
     if (awaitingBootstrap == null) return
     const { attemptID, trigger, entries } = awaitingBootstrap
     await repairRejoin()
+    assertLive()
     const held = new Set(await port.getLedger())
+    assertLive()
     const owed = entries.filter((token) => !held.has(token))
     if (owed.length > 0) pendingReenact = [...pendingReenact, ...owed]
     awaitingBootstrap = null
@@ -1946,10 +1949,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         ledgerGatherFinishes.delete(finishOnDispose)
         clearTimeout(timer)
         // Keep the lane until every bootstrap already touching this handle has finished.
-        if (bootstraps.size === 0) resolve(complete)
+        if (bootstraps.size === 0) resolve(complete && !disposed)
         else
           void Promise.allSettled([...bootstraps]).then((results) => {
-            resolve(complete || results.some((result) => result.status === 'fulfilled'))
+            resolve(
+              !disposed && (complete || results.some((result) => result.status === 'fulfilled')),
+            )
           })
       }
       const finishOnDispose = () => finish(false)
@@ -2138,6 +2143,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       if (mls != null && (await ensureLedger(Date.now() + recoveryTimeoutMs))) {
         await finalizeBootstrap(mls)
       }
+      assertLive()
       return takeLost()
     })
   }
