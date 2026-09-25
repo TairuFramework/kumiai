@@ -1,4 +1,3 @@
-import type { GroupHandle } from '@kumiai/mls'
 import { readMessageAAD, readMessageEpoch } from '@kumiai/mls'
 import {
   AppFrameStorageError,
@@ -9,6 +8,8 @@ import {
 } from '@kumiai/rpc'
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js'
 import { createRuntime, type Runtime } from '@sozai/runtime'
+
+import type { HandleAccess } from './access.js'
 
 /**
  * Label the ledger-entry seal key is exported under. Distinct from any label a caller passes to
@@ -49,11 +50,7 @@ const ENTRY_NONCE_BYTES = 24
 const ENTRY_VERSION = 1
 
 export type GroupCryptoParams = {
-  /**
-   * The peer's current handle. A function, not a value: the handle is replaced when the peer
-   * adopts its own commit, and closing over a fixed handle would silently seal at a dead epoch.
-   */
-  handle: () => GroupHandle
+  access: HandleAccess
   /**
    * Override the ledger-entry seal's exporter label. Members must agree on it, or they can't
    * apply each other's commits.
@@ -97,10 +94,10 @@ export function createGroupCrypto(
 ): GroupCrypto & { pending: PendingAppFrames }
 export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto
 export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
-  const { handle, entryLabel = ENTRY_SEAL_LABEL, runtime = createRuntime(), pending } = params
+  const { access, entryLabel = ENTRY_SEAL_LABEL, runtime = createRuntime(), pending } = params
 
   return {
-    epoch: () => Number(handle().epoch),
+    epoch: () => access.epoch(),
 
     // Passed straight through to the handle's exporter, except `entryLabel`: reusing it would
     // not be an independent export — it's the exact exporter call `sealEntries`/`openEntries`
@@ -110,13 +107,15 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
       if (label === entryLabel) {
         throw new Error(`exportSecret: label '${label}' is reserved for the ledger-entry seal`)
       }
-      return handle().exportSecret(label, EXPORT_CONTEXT, length)
+      return access.read((group) => group.exportSecret(label, EXPORT_CONTEXT, length))
     },
 
-    wrap: (bytes, opts) => handle().encrypt(bytes, opts),
+    wrap: (bytes, opts) => access.mutate((group) => group.encrypt(bytes, opts)),
 
     sealEntries: async (bytes) => {
-      const key = await handle().exportSecret(entryLabel, EXPORT_CONTEXT, SECRET_LENGTH)
+      const key = await access.read((group) =>
+        group.exportSecret(entryLabel, EXPORT_CONTEXT, SECRET_LENGTH),
+      )
       try {
         // Random per seal: two members can frame a commit at the same epoch, and a repeated nonce
         // under one key is a break. 24 bytes makes a collision unreachable without a counter.
@@ -140,9 +139,9 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
         // frame — the lane treats all three the same way (poison, advance, heal) regardless.
         throw new Error(`openEntries: unsupported blob version ${sealed[0]}`)
       }
-      // Pure: exporting is epoch-level and touches no handle state, so this may be called from
-      // inside the apply of the very commit whose blob it opens — the only place it's called from.
-      const key = await handle().exportSecret(entryLabel, EXPORT_CONTEXT, SECRET_LENGTH)
+      const key = await access.read((group) =>
+        group.exportSecret(entryLabel, EXPORT_CONTEXT, SECRET_LENGTH),
+      )
       try {
         return xchacha20poly1305(key, sealed.subarray(1, 1 + ENTRY_NONCE_BYTES)).decrypt(
           sealed.subarray(1 + ENTRY_NONCE_BYTES),
@@ -156,20 +155,26 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
       if (opts?.frame != null) {
         if (pending == null) throw new Error('unwrap: pending store required for durable open')
         const frame = opts.frame
-        const opened = await handle().decryptStaged(bytes, opts, async (stagedState, result) => {
-          try {
-            await pending.persistOpened(stagedState, {
-              frame,
-              payload: result.payload,
-              senderDID: result.senderDID,
-            })
-          } catch (error) {
-            throw new AppFrameStorageError('failed to persist opened app frame', { cause: error })
-          }
-        })
+        const opened = await access.open(
+          (group, persistOpened) =>
+            group.decryptStaged(bytes, opts, async (stagedState, result) => {
+              try {
+                await persistOpened(stagedState, {
+                  frame,
+                  payload: result.payload,
+                  senderDID: result.senderDID,
+                })
+              } catch (error) {
+                throw new AppFrameStorageError('failed to persist opened app frame', {
+                  cause: error,
+                })
+              }
+            }),
+          (state, record) => pending.persistOpened(state, record),
+        )
         return { payload: opened.payload, senderDID: opened.senderDID }
       }
-      const { payload, senderDID } = await handle().decrypt(bytes, opts)
+      const { payload, senderDID } = await access.mutate((group) => group.decrypt(bytes, opts))
       if (senderDID == null) {
         throw new Error('unwrap: opened frame has no authenticated sender')
       }

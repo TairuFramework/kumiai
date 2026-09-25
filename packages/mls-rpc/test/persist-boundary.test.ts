@@ -1,8 +1,26 @@
 import { commitLedgerEntries, ledgerEntryDigest, restoreGroup, signLedgerEntry } from '@kumiai/mls'
 import { expect, test, vi } from 'vitest'
 
+import { simpleHandleAccess } from '../src/access.js'
 import { createGroupMLS } from '../src/mls.js'
-import { buildRealCommit, createRealGroup } from './fixtures/real-group.js'
+import { buildRealCommit, buildRealExternalCommit, createRealGroup } from './fixtures/real-group.js'
+
+test('a refused commit does not save unchanged state', async () => {
+  const group = await createRealGroup(1, 'rpc-refused-save')
+  const member = group.members[0]
+  if (member == null) throw new Error('missing member')
+  const persist = vi.fn()
+  const access = simpleHandleAccess({ handle: () => member.handle, adopt: () => {}, persist })
+  const port = createGroupMLS({ access, identity: member.identity, entrySlot: member.slot })
+  const { forged } = await buildRealExternalCommit(group, {
+    rejoining: 0,
+    forgeAs: 'did:key:forged',
+  })
+  await expect(port.processCommit(forged, { senderDID: 'did:key:forged' })).resolves.toEqual({
+    advanced: false,
+  })
+  expect(persist).not.toHaveBeenCalled()
+})
 
 test('processCommit keeps the handle at its old epoch on failed persist and retries', async () => {
   const group = await createRealGroup(1, 'rpc-persist-commit')
@@ -13,12 +31,11 @@ test('processCommit keeps the handle at its old epoch on failed persist and retr
   const persist = vi.fn(async () => {
     if (fail) throw new Error('disk failed')
   })
+  const access = simpleHandleAccess({ handle: () => member.handle, adopt, persist })
   const port = createGroupMLS({
-    handle: () => member.handle,
-    adopt,
+    access,
     identity: member.identity,
     entrySlot: member.slot,
-    persist,
   })
   const commit = await buildRealCommit(group)
   const before = { epoch: member.handle.epoch, ledger: member.handle.ledgerTokens }
@@ -28,11 +45,13 @@ test('processCommit keeps the handle at its old epoch on failed persist and retr
   }
   await expect(port.processCommit(commit, context)).rejects.toThrow('disk failed')
   expect(member.handle.epoch).toBe(before.epoch)
+  expect(access.epoch()).toBe(Number(before.epoch))
   expect(member.handle.ledgerTokens).toEqual(before.ledger)
   expect(adopt).not.toHaveBeenCalled()
   fail = false
   await expect(port.processCommit(commit, context)).resolves.toEqual({ advanced: true })
   expect(member.handle.epoch).toBe(before.epoch + 1n)
+  expect(access.epoch()).toBe(Number(before.epoch + 1n))
   expect(persist).toHaveBeenCalledTimes(2)
 })
 
@@ -53,11 +72,9 @@ test('processCommit reports an advance when a post-persist host callback throws'
   })
   const persist = vi.fn()
   const port = createGroupMLS({
-    handle: () => member.handle,
-    adopt: vi.fn(),
+    access: simpleHandleAccess({ handle: () => member.handle, adopt: vi.fn(), persist }),
     identity: member.identity,
     entrySlot: member.slot,
-    persist,
   })
   const note = await signLedgerEntry(group.committer.identity, {
     type: 'note',
@@ -95,15 +112,12 @@ test('recovery persists before adoption and bootstrap retries after a failed per
     if (fail) throw new Error('disk failed')
   })
   const requester = createGroupMLS({
-    handle: () => member.handle,
-    adopt,
+    access: simpleHandleAccess({ handle: () => member.handle, adopt, persist }),
     identity: member.identity,
     entrySlot: member.slot,
-    persist,
   })
   const responder = createGroupMLS({
-    handle: () => group.committer.handle,
-    adopt: vi.fn(),
+    access: simpleHandleAccess({ handle: () => group.committer.handle, adopt: vi.fn() }),
     identity: group.committer.identity,
     entrySlot: group.committer.slot,
   })
@@ -139,16 +153,17 @@ test('a recovery key expires without another request', async () => {
   const member = group.members[0]
   if (member == null) throw new Error('missing member')
   const requester = createGroupMLS({
-    handle: () => member.handle,
-    adopt: (next) => {
-      member.handle = next
-    },
+    access: simpleHandleAccess({
+      handle: () => member.handle,
+      adopt: (next) => {
+        member.handle = next
+      },
+    }),
     identity: member.identity,
     entrySlot: member.slot,
   })
   const responder = createGroupMLS({
-    handle: () => group.committer.handle,
-    adopt: vi.fn(),
+    access: simpleHandleAccess({ handle: () => group.committer.handle, adopt: vi.fn() }),
     identity: group.committer.identity,
     entrySlot: group.committer.slot,
   })
@@ -169,16 +184,17 @@ test('accepting an older recovery cannot delete a replacement request key', asyn
   const member = group.members[0]
   if (member == null) throw new Error('missing member')
   const requester = createGroupMLS({
-    handle: () => member.handle,
-    adopt: (next) => {
-      member.handle = next
-    },
+    access: simpleHandleAccess({
+      handle: () => member.handle,
+      adopt: (next) => {
+        member.handle = next
+      },
+    }),
     identity: member.identity,
     entrySlot: member.slot,
   })
   const responder = createGroupMLS({
-    handle: () => group.committer.handle,
-    adopt: vi.fn(),
+    access: simpleHandleAccess({ handle: () => group.committer.handle, adopt: vi.fn() }),
     identity: group.committer.identity,
     entrySlot: group.committer.slot,
   })

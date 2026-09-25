@@ -17,17 +17,18 @@ depend on both.
 
 ## Exports
 
-- `createGroupCrypto({ handle, entryLabel?, pending? })` — `GroupCrypto` over a live handle.
-- `createGroupMLS({ handle, adopt, identity, entrySlot, persist? })` — `GroupMLS` over the same.
+- `simpleHandleAccess({ handle, adopt, persist? })` -- serialised access to a live handle.
+- `createGroupCrypto({ access, entryLabel?, pending? })` -- `GroupCrypto` over that access.
+- `createGroupMLS({ access, identity, entrySlot })` -- `GroupMLS` over the same access.
 - `createLedgerEntrySlot()` — the per-commit ledger-entry resolver seam (see below).
 - `RECOVERY_LABEL` — the exporter label `exportRecoverySecret` derives under.
 
-## The handle is a function, not a value
+## Share one access instance
 
-Both factories take `handle: () => GroupHandle`, and that is not a convenience. A peer's handle is
-replaced wholesale when it adopts a commit it authored, or rejoins by external commit; a port
-closing over the handle it was constructed with would seal at a dead epoch forever. `createGroupMLS`
-takes `adopt` as the one place that replacement happens.
+Both factories take the same `access` instance. The adapter reads the current handle through
+`handle: () => GroupHandle`, because authored commits and recovery replace it wholesale. A host
+adopts an authored commit through `access.replace(next)` after acceptance. The adapter saves before
+publishing the replacement and publishes its synchronous epoch hint after a successful save.
 
 For a *received* commit there is nothing to adopt: ts-mls's `processMessage` advances the handle in
 place. A host that treated every commit as adopt-later would double-apply received ones.
@@ -41,8 +42,13 @@ restart, ordered by `(frame.segment, frame.position)` by this port. `complete(id
 record and resolves for an unknown id. Deduplicate inserts by `record.frame.id`.
 
 ```ts
-const crypto = createGroupCrypto({
+const access = simpleHandleAccess({
   handle: () => handle,
+  adopt: (next) => { handle = next },
+  persist: (current) => store.save(current),
+})
+const crypto = createGroupCrypto({
+  access,
   pending: {
     persistOpened: async (stagedState, record) => {
       await store.transaction(async (tx) => {
@@ -67,11 +73,11 @@ waits on paths overlapping app opens and prove the lock order against SQLite.
 
 With `pending`, `unwrap(bytes, { expectedAAD, frame })` calls `GroupHandle.decryptStaged` and
 resolves only after the atomic write. A persistence failure becomes `AppFrameStorageError` for
-the RPC lane to retry; an unopenable frame is classified dead. Without `pending`, app delivery
-keeps its prior best-effort behavior. `frameAAD(bytes)` exposes the cleartext AAD as a routing
-hint; the full `expectedAAD` on open authenticates it. The 0.10 app AAD carries version and log
-intent, so older bare-topic app frames cannot interoperate with 0.10 peers. See the
-`@kumiai/rpc` README for the at-least-once guarantee, deduplication, and retention boundary.
+the RPC lane to retry; an unopenable frame is classified dead. Without `pending`, the adapter saves
+the post-open ratchet state without a pending record for crash replay. `frameAAD(bytes)` exposes
+the cleartext AAD as a routing hint. The full `expectedAAD` on open authenticates it.
+The 0.10 app AAD carries version and log intent. Older bare-topic app frames cannot interoperate
+with 0.10 peers. See the `@kumiai/rpc` README for the delivery and retention boundary.
 
 ## `createLedgerEntrySlot` is mandatory, and must be installed where the handle is built
 
@@ -81,7 +87,7 @@ once, in `GroupOptions`, and offers no way to change it afterwards. So the indir
 installed when the group is *built*:
 
 ```ts
-import { createGroupCrypto, createGroupMLS, createLedgerEntrySlot } from '@kumiai/mls-rpc'
+import { createGroupCrypto, createGroupMLS, createLedgerEntrySlot, simpleHandleAccess } from '@kumiai/mls-rpc'
 
 const entrySlot = createLedgerEntrySlot()
 // Every construction site: createGroup / processWelcome / restoreGroup.
@@ -90,27 +96,28 @@ const { group } = await createGroup(identity, groupID, {
 })
 
 let handle = group
-const crypto = createGroupCrypto({ handle: () => handle })
-const mls = createGroupMLS({
+const access = simpleHandleAccess({
   handle: () => handle,
-  adopt: (next) => {
-    handle = next
-  },
+  adopt: (next) => { handle = next },
+  persist: (current) => store.save(current),
+})
+const crypto = createGroupCrypto({ access })
+const mls = createGroupMLS({
+  access,
   identity,
   entrySlot,
-  persist: async (current) => await store.save(current),
 })
 ```
 
 Passing anything else means a commit resolves its entries against whatever resolver the handle
 happened to be born with.
 
-The optional `persist` callback receives the tentative state after an accepted commit or proposal,
-or the bootstrapped handle. It does not persist application-message receive ratchets. Writes must
+The optional adapter `persist` callback receives the tentative state after an accepted commit,
+the bootstrapped handle, or an ordinary ratchet operation. Writes must
 be atomic: rejection must leave storage unchanged, since the in-memory handle rolls back and no
 control notifications fire. Received-message and bootstrap persist runs under the handle mutex;
-it must not call back into that handle. Recovery persists the rejoined handle before `adopt`. If
-`adopt` throws, storage already holds the new handle and a restart loads it.
+it must not call back into that handle. Recovery persists the rejoined handle before adoption. If
+adoption throws, storage already holds the new handle and a restart loads it.
 
 ## Two seals, one exporter
 

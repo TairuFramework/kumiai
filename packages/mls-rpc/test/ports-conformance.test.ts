@@ -14,6 +14,7 @@ import {
 } from '@kumiai/rpc-conformance'
 import { nodeTypes } from 'ts-mls'
 
+import { simpleHandleAccess } from '../src/access.js'
 import { createGroupCrypto } from '../src/crypto.js'
 import { createGroupMLS } from '../src/mls.js'
 import { buildRealCommit, buildRealExternalCommit, createRealGroup } from './fixtures/real-group.js'
@@ -47,22 +48,30 @@ testGroupCryptoConformance({
   label: 'createGroupCrypto over a real GroupHandle',
   createGroup: async (size, id) => {
     const group = await createRealGroup(size, `crypto-conformance-${id}`)
+    const accesses = group.members.map((member) =>
+      simpleHandleAccess({
+        handle: () => member.handle,
+        adopt: (next) => {
+          member.handle = next
+        },
+      }),
+    )
     return {
-      members: group.members.map((member) => ({
-        did: member.identity.id,
-        // The handle is read through a function, as a peer's is: `processMessage` advances the
-        // handle in place, and the commit walk below replaces nothing.
-        crypto: createGroupCrypto({ handle: () => member.handle }),
-      })),
+      members: accesses.map((access, index) => {
+        const member = group.members[index]
+        if (member == null) throw new Error('missing member')
+        return { did: member.identity.id, crypto: createGroupCrypto({ access }) }
+      }),
       advance: async () => {
         const commit = await buildRealCommit(group, {})
-        for (const member of group.members) await member.handle.processMessage(commit)
+        for (const access of accesses)
+          await access.mutate((handle, persist) => handle.processMessage(commit, { persist }))
       },
       removeMember: async (index) => {
         const commit = await buildRealCommit(group, { removes: index })
-        for (const [at, member] of group.members.entries()) {
+        for (const [at, access] of accesses.entries()) {
           if (at === index) continue
-          await member.handle.processMessage(commit)
+          await access.mutate((handle, persist) => handle.processMessage(commit, { persist }))
         }
       },
     }
@@ -95,16 +104,39 @@ testPendingGroupCryptoConformance({
         store.records.delete(recordID)
       },
     }
-    const receiver = createGroupCrypto({ handle: () => member.handle, pending })
+    const receiver = createGroupCrypto({
+      access: simpleHandleAccess({
+        handle: () => member.handle,
+        adopt: (next) => {
+          member.handle = next
+        },
+      }),
+      pending,
+    })
     const restore = async () => {
       const state = decodeClientState(store.state)
       if (state == null) throw new Error('invalid saved state')
-      const handle = await restoreGroup({ state, credential: member.handle.credential })
-      return createGroupCrypto({ handle: () => handle, pending })
+      const handle = await restoreGroup({
+        state,
+        credential: member.handle.credential,
+        ledgerEntries: member.handle.ledgerTokens,
+        options: { resolveLedgerEntries: member.slot.resolve },
+      })
+      return createGroupCrypto({
+        access: simpleHandleAccess({ handle: () => handle, adopt: () => {} }),
+        pending,
+      })
     }
     return {
       senderDID: group.committer.identity.id,
-      sender: createGroupCrypto({ handle: () => group.committer.handle }),
+      sender: createGroupCrypto({
+        access: simpleHandleAccess({
+          handle: () => group.committer.handle,
+          adopt: (next) => {
+            group.committer.handle = next
+          },
+        }),
+      }),
       receiver,
       restore,
       failPersist: (yes: boolean) => {
@@ -152,10 +184,12 @@ testGroupMLSConformance({
       members: group.members.map((member) => ({
         did: member.identity.id,
         mls: createGroupMLS({
-          handle: () => member.handle,
-          adopt: (next) => {
-            member.handle = next
-          },
+          access: simpleHandleAccess({
+            handle: () => member.handle,
+            adopt: (next) => {
+              member.handle = next
+            },
+          }),
           identity: member.identity,
           entrySlot: member.slot,
         }),

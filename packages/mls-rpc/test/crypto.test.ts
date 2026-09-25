@@ -12,6 +12,7 @@ import {
 } from '@kumiai/mls'
 import { describe, expect, test } from 'vitest'
 
+import { simpleHandleAccess } from '../src/access.js'
 import { createGroupCrypto, ENTRY_SEAL_LABEL } from '../src/crypto.js'
 
 const utf8 = new TextEncoder()
@@ -90,11 +91,15 @@ async function addMember(params: {
 /** A crypto over a handle slot, so a test can swap the handle the way a peer does. */
 function cryptoOver(initial: GroupHandle) {
   let handle = initial
-  return {
-    crypto: createGroupCrypto({ handle: () => handle }),
-    adopt: (next: GroupHandle) => {
+  const access = simpleHandleAccess({
+    handle: () => handle,
+    adopt: (next) => {
       handle = next
     },
+  })
+  return {
+    crypto: createGroupCrypto({ access }),
+    adopt: (next: GroupHandle) => access.replace(next),
     current: () => handle,
   }
 }
@@ -103,14 +108,18 @@ describe('createGroupCrypto', () => {
   test('wipes each exported ledger key after seal and open, including failed open', async () => {
     const keys: Array<Uint8Array> = []
     const crypto = createGroupCrypto({
-      handle: () =>
-        ({
-          exportSecret: async () => {
-            const key = new Uint8Array(32).fill(7)
-            keys.push(key)
-            return key
-          },
-        }) as unknown as GroupHandle,
+      access: simpleHandleAccess({
+        handle: () =>
+          ({
+            epoch: 0n,
+            exportSecret: async () => {
+              const key = new Uint8Array(32).fill(7)
+              keys.push(key)
+              return key
+            },
+          }) as unknown as GroupHandle,
+        adopt: () => {},
+      }),
     })
     const sealed = await crypto.sealEntries(utf8.encode('entries'))
     expect(keys[0]?.every((byte) => byte === 0)).toBe(true)
@@ -151,7 +160,7 @@ describe('createGroupCrypto', () => {
     // secret moves with the epoch. A crypto closing over the handle it was built with would
     // still be exporting the line above.
     const removed = await removeMember(aliceGroup, 1)
-    alice.adopt(removed.newGroup)
+    await alice.adopt(removed.newGroup)
     expect(alice.crypto.epoch()).toBe(2)
     const rotated = await alice.crypto.exportSecret(LABEL)
     expect(rotated).not.toEqual(shared)
@@ -182,7 +191,10 @@ describe('createGroupCrypto', () => {
     // A custom entryLabel is refused too — the collision is with whatever label sealEntries
     // actually uses, not with the default constant.
     const customLabel = 'kumiai/mls-rpc-test/custom-entry-label'
-    const customCrypto = createGroupCrypto({ handle: () => aliceGroup, entryLabel: customLabel })
+    const customCrypto = createGroupCrypto({
+      access: simpleHandleAccess({ handle: () => aliceGroup, adopt: () => {} }),
+      entryLabel: customLabel,
+    })
     expect(() => customCrypto.exportSecret(customLabel)).toThrow(
       `label '${customLabel}' is reserved for the ledger-entry seal`,
     )
@@ -206,7 +218,7 @@ describe('createGroupCrypto', () => {
   /**
    * `wrap` reads the handle FRESH on every call, and this is the only test that says so.
    *
-   * The defect it excludes is the one `GroupCryptoParams.handle`'s doc comment names: a `wrap`
+   * The defect it excludes is a `wrap`
    * that captured `handle()`'s return once would keep sealing against the pre-commit epoch's
    * secrets forever, and nothing about a successful seal reveals which epoch it targeted.
    *
@@ -236,7 +248,7 @@ describe('createGroupCrypto', () => {
       publish,
       resolveLedgerEntries,
     })
-    alice.adopt(adminGroup)
+    await alice.adopt(adminGroup)
     const carol = cryptoOver(joinedGroup)
     expect(alice.crypto.epoch()).toBe(2)
     expect(carol.crypto.epoch()).toBe(2)
@@ -259,8 +271,7 @@ describe('createGroupCrypto', () => {
    * `GroupCrypto.unwrap`'s required `senderDID`. `GroupHandle.decrypt` itself types the field
    * optional and no fixture here constructs a credential-less leaf to make it actually come back
    * absent — so this reaches the throw the way it is actually reachable: a `handle` whose
-   * `decrypt` resolves without `senderDID`, which `GroupCryptoParams.handle` is an injected
-   * function specifically to allow swapping in per test.
+   * `decrypt` resolves without `senderDID`, through an injected access handle.
    *
    * A `Proxy` over a real handle rather than a hand-built stub: every method but `decrypt`
    * still needs to behave like `GroupHandle` for `createGroupCrypto` to construct and call
@@ -269,16 +280,18 @@ describe('createGroupCrypto', () => {
   test('unwrap refuses an opened frame with no authenticated sender', async () => {
     const { bobGroup } = await twoMemberGroup('ports-unwrap-no-sender')
     const senderlessHandle = new Proxy(bobGroup, {
-      get(target, prop, receiver) {
+      get(target, prop) {
         if (prop === 'decrypt') {
           return async (): Promise<{ payload: Uint8Array }> => ({
             payload: utf8.encode('no sender'),
           })
         }
-        return Reflect.get(target, prop, receiver)
+        return Reflect.get(target, prop, target)
       },
     })
-    const crypto = createGroupCrypto({ handle: () => senderlessHandle })
+    const crypto = createGroupCrypto({
+      access: simpleHandleAccess({ handle: () => senderlessHandle, adopt: () => {} }),
+    })
     await expect(crypto.unwrap(new Uint8Array([0]))).rejects.toThrow(
       'unwrap: opened frame has no authenticated sender',
     )

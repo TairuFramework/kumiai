@@ -11,6 +11,7 @@ import {
 } from 'ts-mls'
 
 import { GROUP_ANCHOR_EXTENSION_TYPE } from './anchor.js'
+import { decodeControlEnvelope } from './envelope.js'
 import type { GroupHandle } from './group-handle.js'
 
 /**
@@ -55,6 +56,20 @@ export function readMessageAAD(bytes: Uint8Array): Uint8Array | null {
     return frame.authenticatedData instanceof Uint8Array ? frame.authenticatedData : null
   } catch {
     return null
+  }
+}
+
+/** Cleartext entry IDs are only a fetch hint; processMessage verifies every body. */
+export function readCommitEntryIDs(bytes: Uint8Array): Array<string> {
+  try {
+    const message = decode(mlsMessageDecoder, bytes)
+    if (message?.wireformat !== wireformats.mls_private_message) return []
+    const frame = message.privateMessage
+    if (frame.contentType !== contentTypes.commit) return []
+    const envelope = decodeControlEnvelope(frame.authenticatedData)
+    return envelope.ok ? (envelope.envelope.entries ?? []) : []
+  } catch {
+    return []
   }
 }
 

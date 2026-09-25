@@ -105,6 +105,7 @@ export {
   processWelcomeOnce,
   type RemoveMemberResult,
   type RestoreGroupParams,
+  readCommitEntryIDs,
   readMessageAAD,
   readMessageEpoch,
   registerDevice,

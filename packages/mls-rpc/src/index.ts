@@ -19,6 +19,7 @@
  * @module mls-rpc
  */
 
+export { type HandleAccess, type SimpleHandleAccessParams, simpleHandleAccess } from './access.js'
 export { createGroupCrypto, ENTRY_SEAL_LABEL, type GroupCryptoParams } from './crypto.js'
 export {
   createGroupMLS,

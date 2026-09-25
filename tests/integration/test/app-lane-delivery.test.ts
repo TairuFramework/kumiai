@@ -288,10 +288,9 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     }
     // ...nor the lifelong recovery secret, which really is his for life.
     const recovery = await (async () => {
-      const { createGroupMLS } = await import('@kumiai/mls-rpc')
+      const { createGroupMLS, simpleHandleAccess } = await import('@kumiai/mls-rpc')
       return await createGroupMLS({
-        handle: () => bob.handle(),
-        adopt: () => {},
+        access: simpleHandleAccess({ handle: () => bob.handle(), adopt: () => {} }),
         identity: bobID,
         entrySlot: bobSlot,
       }).exportRecoverySecret()
@@ -596,6 +595,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
       group: bobHandle,
       entrySlot: bobSlot,
       handlers,
+      durablePending: true,
     })
     dying = bob
     await flush(400)
@@ -616,13 +616,8 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
 
     // The second process finished the walk, in order, and lost nothing.
     //
-    // The epoch-one frame arrives TWICE, and that is the correct answer rather than a defect: the
-    // first process died INSIDE its handler, so the read position was never written past it and
-    // the host never confirmed the frame. The lane is at-least-once across a crash mid-delivery,
-    // and the alternative — advancing the cursor before the host holds the frame — is the one that
-    // loses messages. What makes the repeat possible at all against a real ratchet is that bob
-    // restored MLS state persisted BEFORE the open, so the frame's message key had not been spent
-    // in anything durable. A peer that persisted after opening could not re-open it.
+    // The first process persisted the opened record with the consumed ratchet state, then died
+    // inside its handler. The restart replays that record because the cursor was not advanced.
     expect(bob.handle().epoch).toBe(3n)
     expect(seen).toEqual([
       { text: 'at epoch one' },
@@ -644,7 +639,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
    * The distinction is not cosmetic. A received commit is applied by `processMessage`, which
    * mutates the handle IN PLACE; an authored one produces a NEW handle object that the peer swaps
    * in from `onAccepted`. Only the second path replaces the reference `createGroupCrypto` reads,
-   * which is the event `GroupCryptoParams.handle` is a function to survive. Nothing else in the
+   * which is the event the shared access instance must survive. Nothing else in the
    * repo reaches it against a real ratchet.
    *
    * A LEDGER commit, so the roster does not change and the app-lane anchor does not rotate: the
