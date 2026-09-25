@@ -158,3 +158,22 @@ change intents, full gate and integration green.
 ## Decision Log
 
 <!-- One entry per question: date, what was learned, deviations, spec/plan updates, pasted verify output. -->
+
+### 2026-09-25 — Question 1.1
+
+- **Learned:** ts-mls returns a separate, serializable post-open `ClientState`. The live handle and its old ratchet secret stay usable while persistence is pending or fails. After persistence, adopting the staged state and zeroing consumed buffers prevents reopening. Staging does not repoint the shared device-deny provider.
+- **Deviations:** None. The three usage tests failed before implementation, then passed. Five mutations (adoption, zeroing, deny-provider ownership, persistence, and unnamed-sender rejection) each made its guard test fail; the source was restored after each.
+- **Spec/plan contradiction:** None in the Question 1.1 probe. The release section's 0.6 target differs from the repository's existing `@kumiai/mls` version 0.9.0; this question does not change versions.
+- **Verify:** `pnpm --filter @kumiai/mls exec vitest run test/decrypt-staged.test.ts && pnpm --filter @kumiai/mls run test:types`
+
+```text
+ RUN  v5.0.1 /Users/paul/dev/yulsi/kumiai.worktrees/durable-app-delivery/packages/mls
+
+
+ Test Files  1 passed (1)
+      Tests  3 passed (3)
+   Start at  14:19:02
+   Duration  443ms (tests 40%, import 33%, transform 27%)
+
+$ tsc --noEmit --skipLibCheck -p tsconfig.test.json
+```

@@ -20,6 +20,7 @@ import {
 } from 'ts-mls'
 
 import { type GroupAnchor, readGroupAnchor } from './anchor.js'
+import { encodeClientState } from './codec.js'
 import {
   type GroupMember,
   type MemberCredential,
@@ -887,6 +888,51 @@ export class GroupHandle {
       }
       const senderDID = leafIndex == null ? undefined : this.#didOfLeaf(leafIndex)
       return { payload: result.message, aad: result.aad, ...(senderDID != null && { senderDID }) }
+    })
+  }
+
+  /**
+   * Open an application frame, but make its post-open state durable before adopting it.
+   * The callback runs under this handle's mutex and must store `stagedState` as the
+   * group's handle state. It must not call this handle or the peer. If opening or
+   * persistence fails, the live state and its ratchet secrets remain untouched.
+   */
+  async decryptStaged(
+    message: Uint8Array,
+    opts: { expectedAAD?: Uint8Array },
+    persist: (
+      stagedState: Uint8Array,
+      opened: { payload: Uint8Array; senderDID: string; aad: Uint8Array },
+    ) => Promise<void>,
+  ): Promise<{ payload: Uint8Array; senderDID: string; aad: Uint8Array }> {
+    const decoded = decode(mlsMessageDecoder, message)
+    if (decoded == null) throw new Error('decryptStaged: failed to decode MLSMessage')
+    return mutexFor(this).run(async () => {
+      const pm = readPrivateFrame(decoded, contentTypes.application)
+      if (pm == null) throw new Error('decryptStaged: not a PrivateMessage application frame')
+      if (opts.expectedAAD != null && !bytesEqual(pm.authenticatedData, opts.expectedAAD)) {
+        throw new Error('decryptStaged: frame authenticated data does not match expected AAD')
+      }
+      const leafIndex = await readSenderLeafIndex(
+        this.#context,
+        this.#state.keySchedule.senderDataSecret,
+        pm,
+      )
+      const result = await mlsProcessMessage({
+        context: this.#context,
+        state: this.#state,
+        message: decoded as Parameters<typeof mlsProcessMessage>[0]['message'],
+      })
+      if (result.kind !== 'applicationMessage') {
+        throw new Error('decryptStaged: frame was not an application message')
+      }
+      const senderDID = leafIndex == null ? undefined : this.#didOfLeaf(leafIndex)
+      if (senderDID == null) throw new Error('decryptStaged: unnamed sender')
+      const opened = { payload: result.message, senderDID, aad: result.aad }
+      await persist(encodeClientState(result.newState), opened)
+      this.#state = result.newState
+      zeroAll(result.consumed)
+      return opened
     })
   }
 
