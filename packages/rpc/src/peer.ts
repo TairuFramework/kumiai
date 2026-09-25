@@ -2278,6 +2278,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         //    later collects the leaf the orphan added.
         const rejoinedAtEpoch = (await port.readCommitHeader(pending.commit))?.epoch
         assertLive()
+        const epochBeforeRejoin = crypto.epoch()
         // Through the seam, like every other site that ratchets the handle — and it rotates
         // ANYWAY: this is the rejoin, which no roster diff can see (see {@link anchor}). The
         // anchor is the POST-commit epoch: the handle advances inside the seam and only then is
@@ -2285,11 +2286,15 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         await advanceHandle(
           port,
           async () => {
-            await pending.onAccepted()
-            // The rejoined handle now owns this snapshot. A throw from the remaining rotation,
-            // epoch rebuild, or ledger read leaves it for the next successful lane bootstrap.
-            // That finalizer emits `bootstrapped` and closes the episode; failure does neither.
-            awaitingBootstrap = { attemptID, trigger, entries: inFlight }
+            try {
+              await pending.onAccepted()
+            } finally {
+              // The adapter may adopt the handle and then fail to persist it. Observe the
+              // ratchet itself: a pre-adoption failure leaves this snapshot with the retry.
+              if (crypto.epoch() !== epochBeforeRejoin) {
+                awaitingBootstrap = { attemptID, trigger, entries: inFlight }
+              }
+            }
           },
           () => true,
         )

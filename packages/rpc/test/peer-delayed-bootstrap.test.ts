@@ -70,6 +70,34 @@ async function setup(byte: number) {
 }
 
 describe('delayed ledger bootstrap', () => {
+  test('adoption followed by an acceptance error keeps the owed snapshot', async () => {
+    const state = await setup(0xc9)
+    const { alice, bob, events } = state
+    state.stopLying()
+    const error = new Error('persist failed after adoption')
+    const applyRecovery = alice.mls.applyRecovery.bind(alice.mls)
+    vi.spyOn(alice.mls, 'applyRecovery').mockImplementation(async (...args) => {
+      const pending = await applyRecovery(...args)
+      if (pending == null) return null
+      return {
+        ...pending,
+        onAccepted: async () => {
+          await pending.onAccepted()
+          throw error
+        },
+      }
+    })
+
+    await expect(alice.peer.recover()).rejects.toBe(error)
+    expect(alice.mls.epoch()).toBe(bob.mls.epoch())
+    expect(events.map((event) => event.phase)).toEqual(['started', 'failed'])
+    expect(await alice.peer.replay()).toEqual({ reenact: [owed] })
+    expect(await alice.peer.replay()).toEqual({})
+    expect(events.map((event) => event.phase)).toEqual(['started', 'failed', 'bootstrapped'])
+    await alice.peer.dispose()
+    await bob.peer.dispose()
+  })
+
   test('replay drains the owed entry once when the post-bootstrap ledger read throws', async () => {
     const state = await setup(0xc7)
     const { alice, bob, events } = state
