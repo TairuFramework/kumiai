@@ -172,30 +172,29 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
       if (opts?.frame != null) {
         if (pending == null) throw new Error('unwrap: pending store required for durable open')
         const frame = opts.frame
-        const opened = await access.open(
-          async (group, persistOpened) => {
-            const epoch = Number(group.epoch)
-            const frameEpoch = readMessageEpoch(bytes)
-            if (frameEpoch != null && Number(frameEpoch) !== epoch) {
-              throw new FrameEpochError(Number(frameEpoch), epoch)
-            }
-            const result = await group.decryptStaged(bytes, opts, async (stagedState, result) => {
-              try {
-                await persistOpened(stagedState, {
-                  frame,
-                  payload: result.payload,
-                  senderDID: result.senderDID,
-                })
-              } catch (error) {
-                throw new AppFrameStorageError('failed to persist opened app frame', {
-                  cause: error,
-                })
-              }
-            })
-            return { ...result, epoch }
-          },
-          (state, record) => pending.persistOpened(state, record),
-        )
+        // Wrapped here, not inside `fn`: a transactional adapter makes the write after `fn`.
+        const persistOpened = async (state: Uint8Array, record: PendingAppFrame) => {
+          try {
+            await pending.persistOpened(state, record)
+          } catch (error) {
+            throw new AppFrameStorageError('failed to persist opened app frame', { cause: error })
+          }
+        }
+        const opened = await access.open(async (group, persistStaged) => {
+          const epoch = Number(group.epoch)
+          const frameEpoch = readMessageEpoch(bytes)
+          if (frameEpoch != null && Number(frameEpoch) !== epoch) {
+            throw new FrameEpochError(Number(frameEpoch), epoch)
+          }
+          const result = await group.decryptStaged(bytes, opts, (stagedState, result) =>
+            persistStaged(stagedState, {
+              frame,
+              payload: result.payload,
+              senderDID: result.senderDID,
+            }),
+          )
+          return { ...result, epoch }
+        }, persistOpened)
         return { payload: opened.payload, senderDID: opened.senderDID, epoch: opened.epoch }
       }
       const { payload, senderDID, epoch } = await access.mutate(async (group) => {
