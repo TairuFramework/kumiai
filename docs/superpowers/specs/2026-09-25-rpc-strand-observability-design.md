@@ -299,5 +299,5 @@ Run the full repo test and `test:types` gates and the integration suite.
 
 ## Release
 
-`pnpm change` intent for `@kumiai/rpc`: patch within the 0.9 band (additive API). Note the `recover()`
+`pnpm change` intent for `@kumiai/rpc`: patch intent (additive API); ships in the 0.10 band release with the roster break already on main. Note the `recover()`
 stash behaviour change and the handshake decode fix. Update the rpc README host-callback section.
