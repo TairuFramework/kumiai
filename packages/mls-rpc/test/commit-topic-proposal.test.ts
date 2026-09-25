@@ -1,6 +1,7 @@
 import { createUpdateProposal, encode, mlsMessageEncoder } from 'ts-mls'
 import { expect, test, vi } from 'vitest'
 
+import { simpleHandleAccess } from '../src/access.js'
 import { createGroupMLS } from '../src/mls.js'
 import { buildRealCommit, createRealGroup } from './fixtures/real-group.js'
 
@@ -18,16 +19,14 @@ test('a Proposal on the commit topic cannot enter the next Commit', async () => 
   const adopt = vi.fn()
   const persist = vi.fn()
   const port = createGroupMLS({
-    handle: () => group.committer.handle,
-    adopt,
+    access: simpleHandleAccess({ handle: () => group.committer.handle, adopt, persist }),
     identity: group.committer.identity,
     entrySlot: group.committer.slot,
-    persist,
   })
 
   const before = group.committer.handle.epoch
   expect(await port.readCommitHeader(bytes)).toBeNull()
-  expect(await port.processCommit(bytes, { senderDID: member.identity.id })).toEqual({
+  expect(await port.processCommit(bytes, { senderDID: member.identity.id })).toMatchObject({
     advanced: false,
   })
   expect(group.committer.handle.epoch).toBe(before)
@@ -48,19 +47,17 @@ test('garbage and application messages on the commit topic leave the handle unto
   const adopt = vi.fn()
   const persist = vi.fn()
   const port = createGroupMLS({
-    handle: () => member.handle,
-    adopt,
+    access: simpleHandleAccess({ handle: () => member.handle, adopt, persist }),
     identity: member.identity,
     entrySlot: member.slot,
-    persist,
   })
   const before = member.handle.epoch
   const application = await group.committer.handle.encrypt(new TextEncoder().encode('message'))
   for (const bytes of [new Uint8Array([0xff, 0xff]), application]) {
     expect(await port.readCommitHeader(bytes)).toBeNull()
-    expect(await port.processCommit(bytes, { senderDID: group.committer.identity.id })).toEqual({
-      advanced: false,
-    })
+    expect(
+      await port.processCommit(bytes, { senderDID: group.committer.identity.id }),
+    ).toMatchObject({ advanced: false })
     expect(member.handle.epoch).toBe(before)
     expect(Object.keys(member.handle.state.unappliedProposals)).toHaveLength(0)
     expect(persist).not.toHaveBeenCalled()
