@@ -68,7 +68,10 @@ and the fake double both pass the new conformance clauses; hub conformance green
   "Conformance" section runs against the real port (in-memory host store that stores encoded state and
   records, simulating restart by restoring a new handle from stored bytes) and the fake double, all
   clauses green on both; a deliberately permissive double variant (e.g. saving the record after adopting)
-  fails at least one clause (mutation check).
+  fails at least one clause (mutation check). `frameAAD` already landed in 1.2. Milestone pickup (pre-1.0
+  breaking-api, rpc): retype `open-once.ts:15` `project` and `directed.ts:35` against rpc's
+  `GroupUnwrapResult` (required `senderDID`) instead of broadcast's optional-sender `UnwrapResult`, and
+  mark the milestone item taken.
 - **Spec excerpt:** "Port change", "Conformance", "Host contract" (save ordering) sections.
 - **Verify:** `pnpm exec turbo run test:types test:unit --force --filter=@kumiai/rpc-conformance --filter=@kumiai/mls-rpc --filter=@kumiai/rpc --filter=@kumiai/hub-conformance`
 
@@ -150,7 +153,7 @@ change intents, full gate and integration green.
 
 ### Question 4.2: Release readiness
 - **Done when:** rpc, mls, mls-rpc READMEs document the guarantee, host contract, opt-in, new APIs; change
-  intents for the 0.10 band across all twelve packages (check `.changeset/roster-leaf-identity.md` for the
+  intents for the 0.11 band across all twelve packages (check `.changeset/roster-leaf-identity.md` for the
   format and bump keyword), calling out the AAD mixed-version incompatibility; full gate `Cached: 0` and
   integration green.
 - **Verify:** `pnpm exec turbo run test:types test:unit --force && pnpm exec vitest run --root tests/integration`

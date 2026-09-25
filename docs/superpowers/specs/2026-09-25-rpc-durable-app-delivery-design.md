@@ -79,8 +79,8 @@ aad = [0x01 (AAD version)] [0x00 ephemeral | 0x01 log] [topicID UTF-8]
 - Routing reads the intent from the frame's **cleartext** AAD **before** opening, via a new port method
   (below). The cleartext is only a routing hint; the open authenticates it.
 - `logPosition` is no longer used to decide durability or path. It stays positional metadata.
-- A frame with an old-format AAD fails the open (dead). 0.9 and 0.10 peers cannot exchange app frames;
-  this ships with the 0.10 band bump.
+- A frame with an old-format AAD fails the open (dead). 0.10 and 0.11 peers cannot exchange app frames;
+  this ships with the 0.11 band bump.
 
 New `GroupCrypto` member:
 
@@ -411,7 +411,7 @@ double must be no more permissive than the real port.
 
 ## Release
 
-Minor band bump to 0.10 for all twelve packages: AAD wire format, `GroupCrypto` port members, `GroupHandle`
+Minor band bump to 0.11 for all twelve packages: AAD wire format, `GroupCrypto` port members, `GroupHandle`
 method, handler retry semantics. `pnpm change` intents per package. The mixed-version incompatibility is
 called out.
 
