@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-25
 **Status:** complete
-**Packages:** `@kumiai/broadcast` (patch within the 0.5 band, additive), `@kumiai/rpc` (patch within the 0.5 band, additive)
+**Packages:** `@kumiai/broadcast` (patch within the 0.9 band, additive), `@kumiai/rpc` (patch within the 0.9 band, additive)
 **Origin:** Kubun `@kubun/plugin-p2p` `discoverWorkflows`, which fans one query out through one peer per
 hub and could neither count a global quorum as replies arrived nor stop gathers waiting on dark hubs.
 
