@@ -45,12 +45,12 @@ Four constraints a port implementation is most likely to get wrong, all of which
   acted on the handle carries the epoch it acted at, read under the host's handle lock:
   `exportSecret` returns `{ secret, epoch }`, `sealEntries` returns `{ sealed, epoch }`, `unwrap`
   returns `epoch`, `processCommit` returns `{ advanced, epochBefore, epochAfter }`, and
-  `GroupMLS.readEpoch()` answers when no operation runs. The suite runs every clause with the hint one
-  behind and one ahead.
+  `GroupMLS.readEpoch()` answers when no operation runs. The suite's epoch clauses set the hint one
+  behind and one ahead and expect the same answers.
 - **`unwrap` throwing is ordinary control flow**, not an error: it is how a retained frame says "not
   my epoch". A readable frame at another epoch must throw `FrameEpochError { frameEpoch,
-  handleEpoch }` before anything is decrypted; the lane retains a frame only on that error's
-  "ahead" answer and drops it only on its "past" one.
+  handleEpoch }` before anything is decrypted. The lane retains a frame only on that error's
+  "ahead" answer; any other refusal marks it dead.
 - **`readCommitHeader` returning `null` means "these bytes are not a Commit at all"** — never "a
   Commit I could not read". The lane files `null` as poison and steps over it, so a port answering
   `null` for every commit framed away from its own epoch makes a peer that fell behind read the

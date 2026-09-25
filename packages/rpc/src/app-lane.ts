@@ -763,10 +763,9 @@ export function createAppLane(params: AppLaneParams): AppLane {
      * key material, and those bytes are ciphertext forever. Per-FRAME-EPOCH, not per-rotation:
      * every epoch inside a segment is dispensed as the walk passes through it.
      *
-     * Which frames are this epoch's is read from their own cleartext (`crypto.frameEpoch`), not
-     * found by trying every frame and catching, since `unwrap` throwing cannot distinguish "not my
-     * epoch yet" from "never again". A forged future-epoch claim can hold the cursor until an
-     * operator drops it.
+     * Which frames are this epoch's is the open's own answer: `unwrap` refuses another epoch with
+     * `FrameEpochError` before decrypting, and only its "ahead" answer keeps a frame. A forged
+     * future-epoch claim can hold the cursor until an operator drops it.
      *
      * The buffer is walked whole, not stopped at the first frame that is not this epoch's, since
      * the front can still hold a frame from an epoch the handle already passed (a journal replay

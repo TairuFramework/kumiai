@@ -8,7 +8,7 @@
  * epoch, so opening is pure and may run from inside a commit's own apply — the one place it does
  * run, and which the ratchet-backed pair cannot serve.
  *
- * `epoch()` and `exportSecret(label)` are read on init and every {@link "peer".GroupPeer.resync}.
+ * `epoch()` is a hint for display and logging; every decision uses the epoch a result reports.
  * `wrap`/`unwrap` close over the live group and always use current epoch state. `unwrap` returns
  * the authenticated sender (`senderDID`), REQUIRED — see {@link GroupUnwrapResult}.
  *
@@ -16,9 +16,8 @@
  * closure, whilst directed lanes call the two-arg form directly. `unwrap`'s optional `expectedAAD`
  * is compared PRE-OPEN, so a wrong-topic frame costs no ratchet generation.
  *
- * `unwrap` MUST open bytes sealed at the handle's CURRENT epoch — that is the whole requirement.
- * A real MLS handle retains a bounded past window, but this port refuses other epochs before
- * decrypting so a caller always gets the epoch of the current handle.
+ * `unwrap` MUST open bytes sealed at the handle's CURRENT epoch, and refuse a readable frame at any
+ * other epoch with {@link FrameEpochError} before decrypting.
  *
  * `unwrap` throwing is ORDINARY CONTROL FLOW on the read paths, not an error — it means "not my
  * epoch". Readers walk logs full of frames from epochs they don't hold and drop them without

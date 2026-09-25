@@ -312,18 +312,19 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
       0,
       true,
     )
-    if (sealedAt !== epoch) {
-      throw new FrameEpochError(sealedAt, epoch)
-    }
     const framed = xor(bytes.subarray(2), sealedAt)
     const framedView = new DataView(framed.buffer, framed.byteOffset, framed.byteLength)
     const sealedGeneration = framedView.getUint32(0, true)
     const didLen = framedView.getUint16(GENERATION_BYTES, true)
     const aadLen = framedView.getUint32(FRAMED_HEADER_BYTES, true)
     const headerEnd = FRAMED_HEADER_BYTES + AAD_LEN_BYTES
-    // Structure-check first: the declared did/aad lengths, AND the trailing tag, must fit.
+    // Structure-check first: the declared did/aad lengths, AND the trailing tag, must fit. Junk is
+    // never an epoch answer, so it cannot be retained as "ahead".
     if (headerEnd + didLen + aadLen + TAG_BYTES > framed.length) {
       throw new Error('cannot open: not a well-formed sealed frame')
+    }
+    if (sealedAt !== epoch) {
+      throw new FrameEpochError(sealedAt, epoch)
     }
     // Tag-verify BEFORE the expectedAAD compare and BEFORE spending the generation: a tampered or
     // forged frame — including one an attacker rewrote by exploiting the XOR's linearity — must

@@ -61,8 +61,9 @@ A host with its own handle store implements the port instead:
 - `open(fn, persistOpened)` is the durable open. `fn` stages the open and hands its state and record
   to the callback it is given. A host may capture them, release its lock, and then call
   `persistOpened` to write both in one transaction guarded by the state row's revision, publishing
-  the working handle only after that commits. On a revision conflict it retries from a fresh handle.
-  Faults from `persistOpened` come back as `AppFrameStorageError`.
+  the working handle only after that commits, and only if no newer write was published meanwhile.
+  On a revision conflict it retries from a fresh handle. Faults from `persistOpened`, and faults the
+  adapter raises around `fn`, come back as `AppFrameStorageError`, which the lane retries.
 
 ## Durable logged app delivery
 
@@ -154,7 +155,8 @@ adoption throws, storage already holds the new handle and a restart loads it.
 ## Applying a commit inside a host transaction
 
 `processCommit` is `applyCommit` inside `access.mutate`, plus entry resolution before the lock. A host
-that projects commits into its own tables calls `applyCommit` inside its own transaction instead:
+that projects commits into its own tables calls `applyCommit` inside its own transaction instead, from
+its own `GroupMLS.processCommit`, so the peer still sees each result and rotates its anchor:
 
 ```ts
 const result = await applyCommit(handle, commit, {

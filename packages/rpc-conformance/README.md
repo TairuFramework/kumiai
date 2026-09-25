@@ -48,7 +48,7 @@ implementation with no way to build a rejoin says so by omitting it, and the two
 are skipped rather than faked.
 
 Both harnesses also return `setEpochHintOffset(offset)`: the implementation's synchronous `epoch()`
-must then report its locked epoch plus `offset`. Clauses run with the hint one behind and one ahead
+must then report its locked epoch plus `offset`. The epoch clauses set it one behind and one ahead
 and expect the same answers, because no port result may depend on the hint.
 
 ```ts

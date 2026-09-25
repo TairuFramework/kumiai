@@ -632,7 +632,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
 
   /**
    * Whether a frame `unwrap` just refused might still open once this handle catches up — read from
-   * its cleartext epoch, never the throw (which can't tell "not reached yet" from "never again").
+   * the refusal's locked answer ({@link "crypto".FrameEpochError}), never the epoch hint.
    * On the open-once failure path ({@link "open-once".OpenOncePathParams.retainOnFailure}) answering
    * `true` withholds the ack so the frame survives a reconnect. Mailbox-class frames have no staging
    * of their own (unlike `app-lane.ts`'s `note`/`ahead`), which is what made acking a transient
@@ -682,7 +682,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
 
   /**
    * The app lane's inbound path: one open per topic, fanned out as plaintext, with each frame's
-   * log position noted before the open. Every consumer's own `unwrap` is then a pure lookup of the
+   * log position noted once its open settles. Every consumer's own `unwrap` is then a pure lookup of the
    * opened result ({@link openedFrames}), and nothing downstream touches the handle.
    *
    * See {@link createOpenOncePath} for why a lane may only open a frame once.
