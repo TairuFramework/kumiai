@@ -60,7 +60,7 @@ authority for every behaviour below.
   gather(prc: string, prm?: unknown, options?: GatherOptions): Promise<Array<GatheredReply>>
   ```
 
-- [ ] **Step 1: Write the failing tests** in `packages/broadcast/test/gather-stream.test.ts`. Reuse the
+- [x] **Step 1: Write the failing tests** in `packages/broadcast/test/gather-stream.test.ts`. Reuse the
   `startResponder` helper pattern from `client.test.ts` (copy it; tests files stay self-contained). For
   write-failure cases build a minimal fake transport object implementing `TransportType`'s
   `write`/`dispose`/async-iterator. Cover:
@@ -102,12 +102,12 @@ authority for every behaviour below.
     `signal.addEventListener`/`removeEventListener` with counting spies and assert adds === removes
     after all settle (pre-aborted path adds none).
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
   Run: `pnpm --filter @kumiai/broadcast exec vitest run test/gather-stream.test.ts`
   Expected: FAIL (onReply never called / signal ignored).
 
-- [ ] **Step 3: Implement.** In `client.ts`:
+- [x] **Step 3: Implement.** In `client.ts`:
   - Change `GatherOptions` to the generic form above (method-syntax `onReply`).
   - In `gather`: if `options.signal?.aborted`, return `Promise.resolve([])` before minting a `rid`.
   - Inside the promise: `let settled = false`; `const settle = (outcome: { ok: true } | { ok: false; error: unknown }) => { if (settled) return; settled = true; clearTimeout(timer); this.#pending.delete(rid); signal?.removeEventListener('abort', onAbort); outcome.ok ? resolve(replies) : reject(outcome.error) }`.
@@ -119,12 +119,12 @@ authority for every behaviour below.
   - Update the `GatherOptions` doc comment: abort resolves partial replies; `onReply` receives the stored
     object, read-only; throwing observers are ignored.
 
-- [ ] **Step 4: Run to verify pass**, plus existing broadcast tests:
+- [x] **Step 4: Run to verify pass**, plus existing broadcast tests:
 
   Run: `pnpm --filter @kumiai/broadcast exec vitest run` and `pnpm --filter @kumiai/broadcast run test:types`
   Expected: PASS.
 
-- [ ] **Step 5: Lint and commit**
+- [x] **Step 5: Lint and commit**
 
   ```bash
   rtk proxy pnpm run lint
