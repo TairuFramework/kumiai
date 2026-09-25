@@ -177,3 +177,28 @@ change intents, full gate and integration green.
 
 $ tsc --noEmit --skipLibCheck -p tsconfig.test.json
 ```
+
+### 2026-09-25 — Question 1.2
+
+- **Learned:** ts-mls exposes a PrivateMessage application's AAD without an epoch key; changing its cleartext intent still fails authenticated open. The live app topic carries both log and ephemeral frames, so its expected AAD must be selected from that untrusted cleartext hint and compared in full during open. UTF-8 encoding replaces lone surrogates, so the codec rejects ill-formed topic strings to keep its encoding injective.
+- **Deviations:** Brought the `GroupCrypto.frameAAD` member, real and fake implementations, and its shared conformance clause forward from Question 2.1 because the Question 1.2 live open needs to distinguish log from ephemeral intent. Updated legacy fixture seals to versioned log AAD; the intentional 0.9 bare-topic fixture remains. Usage tests failed before implementation. Eighteen guard mutations made their target tests fail; all source was restored. Integration initially lacked built `hub-client`/`hub-server` JavaScript in this worktree; building integration dependencies resolved it.
+- **Spec/plan contradiction:** None. The phase split places `frameAAD` in Question 2.1, but the spec requires it for Question 1.2's live AAD round trip; only that member and its conformance clause moved forward. The repository remains in the 0.9 band; the planned band bump is 0.10 in Question 4.2.
+- **Verify:** `pnpm exec turbo run test:types test:unit --force --filter=@kumiai/mls --filter=@kumiai/rpc && pnpm exec vitest run --root tests/integration`
+
+```text
+@kumiai/rpc:test:unit:  Test Files  71 passed (71)
+@kumiai/rpc:test:unit:       Tests  467 passed (467)
+@kumiai/mls:test:unit:  Test Files  47 passed (47)
+@kumiai/mls:test:unit:       Tests  522 passed (522)
+
+ Tasks:    18 successful, 18 total
+Cached:    0 cached, 18 total
+  Time:    15.859s
+
+ RUN  v5.0.1 /Users/paul/dev/yulsi/kumiai.worktrees/durable-app-delivery/tests/integration
+
+ Test Files  8 passed (8)
+      Tests  43 passed (43)
+   Start at  14:38:17
+   Duration  7.06s (tests 72%, transform 19%, import 9%)
+```

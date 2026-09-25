@@ -2,6 +2,7 @@ import { encodeEventFrame } from '@kumiai/broadcast'
 import { fromUTF } from '@sozai/codec'
 import { describe, expect, test } from 'vitest'
 
+import { encodeAppAAD } from '../src/app-aad.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
@@ -43,7 +44,7 @@ describe('the retained drain binds expectedAAD to the cursor topic', () => {
       topicID,
       retain: 'log',
       payload: await forged.wrap(encodeEventFrame('chat/posted', { text: 'wrong topic' }), {
-        aad: fromUTF(otherTopicID),
+        aad: encodeAppAAD({ topicID: otherTopicID, intent: 'log' }),
       }),
     })
     await flush()
@@ -80,14 +81,15 @@ describe('the retained drain binds expectedAAD to the cursor topic', () => {
 
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'genuine' } })
 
-    // A pre-upgrade frame: sealed with NO AAD at all, as every retained frame was before this
-    // binding existed. `wrap` with no `opts` carries an empty AAD, exactly that legacy shape.
+    // A 0.9 frame carried the bare topic bytes, without the version and intent prefix.
     const legacy = createFakeCrypto({ epoch: 1, localDID: 'mallory' })
     await hub.publish({
       senderDID: 'mallory',
       topicID,
       retain: 'log',
-      payload: await legacy.wrap(encodeEventFrame('chat/posted', { text: 'legacy, unbound' })),
+      payload: await legacy.wrap(encodeEventFrame('chat/posted', { text: 'legacy, unbound' }), {
+        aad: fromUTF(topicID),
+      }),
     })
     await flush()
 

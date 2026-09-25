@@ -1,9 +1,10 @@
 import type { ProtocolDefinition } from '@enkaku/protocol'
 import { normalizeDID } from '@kokuin/token'
 import type { StoredMessage } from '@kumiai/hub-protocol'
-import { fromUTF, toUTF } from '@sozai/codec'
+import { toUTF } from '@sozai/codec'
 
 import type { Anchor } from './anchor.js'
+import { encodeAppAAD } from './app-aad.js'
 import type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
 import type { GroupCrypto, GroupUnwrapResult } from './crypto.js'
 import { asLogPosition, type LogPosition } from './cursor.js'
@@ -431,7 +432,9 @@ export function createAppLane(params: AppLaneParams): AppLane {
           // `crypto.unwrap` always returns the full result — `senderDID` is REQUIRED — so there is
           // no bare-`Uint8Array` shortcut left to normalize away here. `expectedAAD` is bound to
           // the cursor's own topic, the authoritative answer to "what lane is this drain reading".
-          opened = await crypto.unwrap(sealed, { expectedAAD: fromUTF(cursor.topicID) })
+          opened = await crypto.unwrap(sealed, {
+            expectedAAD: encodeAppAAD({ topicID: cursor.topicID, intent: 'log' }),
+          })
         } catch {
           // Claimed this epoch and the handle refused it — OR its AAD did not match this topic (a
           // wrong-topic frame, or a pre-upgrade empty-AAD frame). Either way, dead: the handle

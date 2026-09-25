@@ -1,7 +1,7 @@
 import { encodeEventFrame } from '@kumiai/broadcast'
-import { fromUTF } from '@sozai/codec'
 import { describe, expect, test } from 'vitest'
 
+import { encodeAppAAD } from '../src/app-aad.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { createMemoryAnchorStore, type MemoryAnchorStore } from './fixtures/anchor.js'
 import { publishCommit } from './fixtures/commits.js'
@@ -193,7 +193,7 @@ describe('a peer that adopts a journalled roster change reads its backlog and ro
       topicID: chatTopic(1),
       retain: 'log',
       payload: await alice.wrap(encodeEventFrame('chat/posted', { text: 'while he was gone' }), {
-        aad: fromUTF(chatTopic(1)),
+        aad: encodeAppAAD({ topicID: chatTopic(1), intent: 'log' }),
       }),
     })
 

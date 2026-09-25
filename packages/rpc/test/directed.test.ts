@@ -3,10 +3,10 @@ import type { ProtocolDefinition } from '@enkaku/protocol'
 import type { ProcedureHandlers } from '@enkaku/server'
 import type { Unwrap } from '@kumiai/broadcast'
 import { encodeFrame } from '@kumiai/hub-tunnel'
-import { toUTF } from '@sozai/codec'
 import { createRuntime } from '@sozai/runtime'
 import { describe, expect, test } from 'vitest'
 
+import { decodeAppAAD } from '../src/app-aad.js'
 import { createDirectedClient, createInboxAcceptor, createInboxPath } from '../src/directed.js'
 import { encodeDirectedPayload } from '../src/directed-tag.js'
 import { createHubMux } from '../src/hub-mux.js'
@@ -155,7 +155,10 @@ describe('directed RPC', () => {
     expect(aliceAAD.length).toBeGreaterThan(0)
     for (const aad of aliceAAD) {
       expect(aad).toBeInstanceOf(Uint8Array)
-      expect(toUTF(aad as Uint8Array)).toBe(bobTopicID)
+      expect(decodeAppAAD(aad as Uint8Array)).toEqual({
+        topicID: bobTopicID,
+        intent: 'ephemeral',
+      })
     }
 
     // Bob's reply publish bound the AAD to alice's inbox topic — where the reply was sent.
@@ -163,7 +166,10 @@ describe('directed RPC', () => {
     expect(bobAAD.length).toBeGreaterThan(0)
     for (const aad of bobAAD) {
       expect(aad).toBeInstanceOf(Uint8Array)
-      expect(toUTF(aad as Uint8Array)).toBe(aliceTopicID)
+      expect(decodeAppAAD(aad as Uint8Array)).toEqual({
+        topicID: aliceTopicID,
+        intent: 'ephemeral',
+      })
     }
 
     await dispose()

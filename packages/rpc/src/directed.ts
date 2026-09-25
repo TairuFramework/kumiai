@@ -15,9 +15,9 @@ import {
   encodeFrame,
   type MailboxHub,
 } from '@kumiai/hub-tunnel'
-import { fromUTF } from '@sozai/codec'
 import { createRuntime, type Runtime } from '@sozai/runtime'
 
+import { encodeAppAAD } from './app-aad.js'
 import type { GroupCrypto } from './crypto.js'
 import {
   decodeDirectedPayload,
@@ -148,7 +148,9 @@ export function createDirectedClient<Protocol extends ProtocolDefinition>(
       return mux.mailbox.publish({
         senderDID: publishParams.senderDID,
         topicID: publishParams.topicID,
-        payload: await wrap(tagged, { aad: fromUTF(publishParams.topicID) }),
+        payload: await wrap(tagged, {
+          aad: encodeAppAAD({ topicID: publishParams.topicID, intent: 'ephemeral' }),
+        }),
       })
     },
     subscribe() {},
@@ -332,7 +334,9 @@ export function createInboxAcceptor<Protocol extends ProtocolDefinition>(
     const sessionHub: MailboxHub = {
       async publish(publishParams) {
         const tagged = encodeDirectedPayload(protocolName, publishParams.payload)
-        const sealed = await wrap(tagged, { aad: fromUTF(publishParams.topicID) })
+        const sealed = await wrap(tagged, {
+          aad: encodeAppAAD({ topicID: publishParams.topicID, intent: 'ephemeral' }),
+        })
         return mux.mailbox.publish({
           senderDID: publishParams.senderDID,
           topicID: publishParams.topicID,

@@ -35,6 +35,7 @@ export type ConformanceGroupCrypto = {
     bytes: Uint8Array,
     opts?: { expectedAAD?: Uint8Array },
   ) => ConformanceUnwrapResult | Promise<ConformanceUnwrapResult>
+  frameAAD: (bytes: Uint8Array) => Uint8Array | null
   frameEpoch: (bytes: Uint8Array) => number | null
   sealEntries: (bytes: Uint8Array) => Uint8Array | Promise<Uint8Array>
   openEntries: (sealed: Uint8Array) => Uint8Array | Promise<Uint8Array>
@@ -328,6 +329,18 @@ export function testGroupCryptoConformance(params: GroupCryptoConformanceParams)
     })
 
     describe('wrap / unwrap AAD', () => {
+      test('frameAAD reads app AAD without a key and returns null for garbage', async () => {
+        await withGroup(3, 'aad-cleartext', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const removed = memberAt(group.members, 2)
+          await group.removeMember(2)
+          const aad = new Uint8Array([1, 1, 97])
+          const sealed = await alice.crypto.wrap(utf8.encode('hi'), { aad })
+          expect(removed.crypto.frameAAD(sealed)).toEqual(aad)
+          expect(removed.crypto.frameAAD(new Uint8Array([0xff]))).toBeNull()
+        })
+      })
+
       test('round-trips AAD: wrap with AAD, unwrap with matching expectedAAD', async () => {
         await withGroup(2, 'aad-roundtrip', async ({ members }) => {
           const alice = memberAt(members, 0)

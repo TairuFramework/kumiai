@@ -21,10 +21,10 @@ import {
 } from '@kumiai/broadcast'
 import type { StoredMessage } from '@kumiai/hub-protocol'
 import type { LogHub } from '@kumiai/hub-tunnel'
-import { fromUTF } from '@sozai/codec'
 import { createRuntime, type Runtime } from '@sozai/runtime'
 
 import type { Anchor, AnchorStore } from './anchor.js'
+import { decodeAppAAD, encodeAppAAD } from './app-aad.js'
 import type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
 import { createAppLane } from './app-lane.js'
 import {
@@ -636,7 +636,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     return createOpenOncePath<Uint8Array>({
       mux,
       topicID,
-      unwrap: (b) => crypto.unwrap(b, { expectedAAD: fromUTF(topicID) }),
+      unwrap: (b) => {
+        const hinted = crypto.frameAAD(b)
+        const decoded = hinted == null ? null : decodeAppAAD(hinted)
+        const intent = decoded?.topicID === topicID ? decoded.intent : 'ephemeral'
+        return crypto.unwrap(b, { expectedAAD: encodeAppAAD({ topicID, intent }) })
+      },
       retainOnFailure,
       project: (_message, opened) => {
         const { payload, senderDID } = opened
@@ -710,7 +715,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       path: createInboxPath({
         mux,
         topicID: selfInbox,
-        unwrap: (b) => crypto.unwrap(b, { expectedAAD: fromUTF(selfInbox) }),
+        unwrap: (b) =>
+          crypto.unwrap(b, {
+            expectedAAD: encodeAppAAD({ topicID: selfInbox, intent: 'ephemeral' }),
+          }),
         retainOnFailure,
       }),
     }
@@ -814,11 +822,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   const sealForSegment = async (
     name: string,
     bytes: Uint8Array,
+    intent: 'ephemeral' | 'log' = 'ephemeral',
   ): Promise<{ topicID: string; payload: Uint8Array }> => {
     while (true) {
       const at = anchor
       const topicID = protocolTopic(at.secret, at.epoch, name)
-      const payload = await crypto.wrap(bytes, { aad: fromUTF(topicID) })
+      const payload = await crypto.wrap(bytes, { aad: encodeAppAAD({ topicID, intent }) })
       if (anchor === at) return { topicID, payload }
     }
   }
@@ -838,7 +847,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     while (true) {
       const at = anchor
       const topicID = inboxTopic(at.secret, at.epoch, recipientDID)
-      const payload = await crypto.wrap(tagged, { aad: fromUTF(topicID) })
+      const payload = await crypto.wrap(tagged, {
+        aad: encodeAppAAD({ topicID, intent: 'ephemeral' }),
+      })
       if (anchor === at) return { topicID, payload }
     }
   }
@@ -856,7 +867,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         const protocol = protocols[name]
         if (protocol === undefined) throw new Error(`Unknown protocol: ${name}`)
         if (retentionOf(protocol, prc) === 'log') {
-          const { topicID, payload } = await sealForSegment(name, encodeEventFrame(prc, data))
+          const { topicID, payload } = await sealForSegment(
+            name,
+            encodeEventFrame(prc, data),
+            'log',
+          )
           await mux.publish({ topicID, payload, retain: 'log' })
           return
         }

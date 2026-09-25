@@ -1,5 +1,5 @@
 import type { GroupHandle } from '@kumiai/mls'
-import { readMessageEpoch } from '@kumiai/mls'
+import { readMessageAAD, readMessageEpoch } from '@kumiai/mls'
 import type { GroupCrypto } from '@kumiai/rpc'
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js'
 import { createRuntime, type Runtime } from '@sozai/runtime'
@@ -141,5 +141,6 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
       const epoch = readMessageEpoch(bytes)
       return epoch == null ? null : Number(epoch)
     },
+    frameAAD: (bytes) => readMessageAAD(bytes),
   }
 }

@@ -100,6 +100,19 @@ function cryptoOver(initial: GroupHandle) {
 }
 
 describe('createGroupCrypto', () => {
+  test('frameAAD reads cleartext app AAD before opening and returns null for garbage', async () => {
+    const { aliceGroup, bobGroup } = await twoMemberGroup('ports-frame-aad')
+    const alice = cryptoOver(aliceGroup)
+    const bob = cryptoOver(bobGroup)
+    const aad = new Uint8Array([1, 1, 97])
+    const sealed = await alice.crypto.wrap(utf8.encode('hello'), { aad })
+    expect(bob.crypto.frameAAD(sealed)).toEqual(aad)
+    expect(bob.crypto.frameAAD(new Uint8Array([0xff]))).toBeNull()
+    await expect(bob.crypto.unwrap(sealed, { expectedAAD: aad })).resolves.toMatchObject({
+      payload: utf8.encode('hello'),
+    })
+  })
+
   test('epoch and exportSecret follow the live handle, and every member at an epoch agrees', async () => {
     const { aliceGroup, bobGroup } = await twoMemberGroup('ports-export')
     const alice = cryptoOver(aliceGroup)

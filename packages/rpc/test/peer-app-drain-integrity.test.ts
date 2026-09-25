@@ -1,8 +1,8 @@
 import { encodeEventFrame } from '@kumiai/broadcast'
 import type { HubFetchTopicParams, HubFetchTopicResult } from '@kumiai/hub-tunnel'
-import { fromUTF } from '@sozai/codec'
 import { describe, expect, test } from 'vitest'
 
+import { encodeAppAAD } from '../src/app-aad.js'
 import type { AppWindowPruned } from '../src/app-cursor.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
@@ -313,7 +313,7 @@ describe('the drain bounds what a frame may claim, and passes no epoch it failed
           topicID,
           retain: 'log',
           payload: await atTwo.wrap(encodeEventFrame('chat/posted', { text: 'mid-walk, at two' }), {
-            aad: fromUTF(topicID),
+            aad: encodeAppAAD({ topicID, intent: 'log' }),
           }),
         })
         hub.reattach('bob')
@@ -431,7 +431,7 @@ describe('the drain delivers only what the live lane would', () => {
       topicID,
       retain: 'log',
       payload: await atOne.wrap(encodeEventFrame('chat/posted', { kind: 'req', rid: 'x' }), {
-        aad: fromUTF(topicID),
+        aad: encodeAppAAD({ topicID, intent: 'log' }),
       }),
     })
     await flush()

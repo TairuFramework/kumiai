@@ -268,6 +268,20 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
       : null
   }
 
+  const frameAAD: GroupCrypto['frameAAD'] = (bytes) => {
+    if (frameEpoch(bytes) == null || decodeMemoryCommit(bytes) != null) return null
+    const sealedAt = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint16(
+      0,
+      true,
+    )
+    const framed = xor(bytes.subarray(2), sealedAt)
+    const view = new DataView(framed.buffer, framed.byteOffset, framed.byteLength)
+    const didLen = view.getUint16(GENERATION_BYTES, true)
+    const aadLen = view.getUint32(FRAMED_HEADER_BYTES, true)
+    const start = FRAMED_HEADER_BYTES + AAD_LEN_BYTES + didLen
+    return framed.slice(start, start + aadLen)
+  }
+
   const unwrap: GroupCrypto['unwrap'] = (bytes, opts) => {
     if (bytes.length < 2 + FRAMED_HEADER_BYTES + AAD_LEN_BYTES + TAG_BYTES) {
       throw new Error('cannot open: not sealed bytes')
@@ -406,6 +420,7 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
     wrap,
     unwrap,
     frameEpoch,
+    frameAAD,
     sealEntries,
     openEntries,
     setEpoch: (n) => {

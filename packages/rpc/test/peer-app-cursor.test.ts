@@ -1,7 +1,7 @@
 import { encodeEventFrame } from '@kumiai/broadcast'
-import { fromUTF } from '@sozai/codec'
 import { describe, expect, test } from 'vitest'
 
+import { encodeAppAAD } from '../src/app-aad.js'
 import type { AppWindowPruned } from '../src/app-cursor.js'
 import { APP_TOPIC_LABEL, commitTopic, protocolTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
@@ -134,7 +134,7 @@ describe('the app-lane drain reads from a durable position and reports what aged
         topicID,
         retain: 'log',
         payload: await crypto.wrap(encodeEventFrame('chat/posted', { text }), {
-          aad: fromUTF(topicID),
+          aad: encodeAppAAD({ topicID, intent: 'log' }),
         }),
       })
     }

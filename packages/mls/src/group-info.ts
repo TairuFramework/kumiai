@@ -1,4 +1,5 @@
 import {
+  contentTypes,
   createGroupInfoWithExternalPubAndRatchetTree,
   decode,
   encode,
@@ -38,6 +39,23 @@ export function readMessageEpoch(bytes: Uint8Array): bigint | undefined {
     return message.publicMessage.content.epoch
   }
   return undefined
+}
+
+/**
+ * Read an app PrivateMessage's cleartext authenticated data without an epoch key.
+ * This is an untrusted routing hint until decrypt authenticates the complete AAD.
+ * Total over arbitrary bytes: malformed or non-app frames return null.
+ */
+export function readMessageAAD(bytes: Uint8Array): Uint8Array | null {
+  try {
+    const message = decode(mlsMessageDecoder, bytes)
+    if (message?.wireformat !== wireformats.mls_private_message) return null
+    const frame = message.privateMessage
+    if (frame.contentType !== contentTypes.application) return null
+    return frame.authenticatedData instanceof Uint8Array ? frame.authenticatedData : null
+  } catch {
+    return null
+  }
 }
 
 export type InspectGroupInfoResult = {

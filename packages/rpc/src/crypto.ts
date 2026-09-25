@@ -75,6 +75,8 @@ export type GroupCrypto = {
     bytes: Uint8Array,
     opts?: { expectedAAD?: Uint8Array },
   ): GroupUnwrapResult | Promise<GroupUnwrapResult>
+  /** Cleartext app AAD for pre-open routing. Untrusted until unwrap authenticates it. Never throws. */
+  frameAAD(bytes: Uint8Array): Uint8Array | null
   /**
    * The epoch a sealed frame was sealed at, read from its own CLEARTEXT without opening it —
    * structural and pre-open, like {@link GroupMLS.readCommitHeader} is pre-apply. `null` for
