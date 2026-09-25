@@ -150,7 +150,7 @@ change intents, full gate and integration green.
 
 ### Question 4.2: Release readiness
 - **Done when:** rpc, mls, mls-rpc READMEs document the guarantee, host contract, opt-in, new APIs; change
-  intents for the 0.6 band across all twelve packages (check `.changeset/roster-leaf-identity.md` for the
+  intents for the 0.10 band across all twelve packages (check `.changeset/roster-leaf-identity.md` for the
   format and bump keyword), calling out the AAD mixed-version incompatibility; full gate `Cached: 0` and
   integration green.
 - **Verify:** `pnpm exec turbo run test:types test:unit --force && pnpm exec vitest run --root tests/integration`
