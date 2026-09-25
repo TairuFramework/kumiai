@@ -128,7 +128,9 @@ describe('joinGroupExternal — stale device recovery', () => {
 
     // A decodes and processes B's rejoin commit
     const decodedRejoin = decode(mlsMessageDecoder, commitMessage)
-    if (decodedRejoin == null) throw new Error('failed to decode rejoin commit')
+    if (decodedRejoin?.wireformat !== wireformats.mls_public_message) {
+      throw new Error('failed to decode rejoin commit')
+    }
     await aliceAdvanced.processMessage(decodedRejoin)
     expect(aliceAdvanced.epoch).toBe(bobRejoined.epoch)
 
@@ -238,7 +240,9 @@ describe('joinGroupExternal — stale device recovery', () => {
 
     // Alice processes the rejoin commit and round-trip messaging resumes.
     const decodedRejoin = decode(mlsMessageDecoder, commitMessage)
-    if (decodedRejoin == null) throw new Error('failed to decode rejoin commit')
+    if (decodedRejoin?.wireformat !== wireformats.mls_public_message) {
+      throw new Error('failed to decode rejoin commit')
+    }
     await aliceAdvanced.processMessage(decodedRejoin)
     const message = await aliceAdvanced.encrypt(new TextEncoder().encode('back with ext'))
     const got = await bobRejoined.processMessage(message)
@@ -494,7 +498,9 @@ describe('joinGroupExternal — stale device recovery', () => {
 
     // A and C both decode + process B's rejoin commit
     const decodedRejoin = decode(mlsMessageDecoder, rejoinCommit)
-    if (decodedRejoin == null) throw new Error('failed to decode rejoin commit')
+    if (decodedRejoin?.wireformat !== wireformats.mls_public_message) {
+      throw new Error('failed to decode rejoin commit')
+    }
     await aliceD.processMessage(decodedRejoin)
     await carolGroup.processMessage(decodedRejoin)
     expect(aliceD.epoch).toBe(bobRejoined.epoch)

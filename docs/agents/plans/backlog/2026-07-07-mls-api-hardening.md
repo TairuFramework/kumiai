@@ -25,10 +25,9 @@ findings naming either are void rather than outstanding.
   `ClientState | undefined` but ts-mls `decode` also throws (e.g. `CodecError`), so the
   "undefined on failure" contract is false. Fix: try/catch to `undefined` or document the
   throw. (correctness)
-- **`Uint8Array | unknown` params collapse to `unknown`,** so `processMessage`/`processWelcome`
-  accept anything at compile time and rely on runtime casts. Fix: type the legacy path as the
-  concrete ts-mls message union. (API design) — still outstanding; `decrypt` is gone, so this now
-  applies to `processMessage`/`processWelcome` only.
+- ~~**`Uint8Array | unknown` params collapse to `unknown`**~~ — **taken 2026-09-25** in the 0.10 band:
+  `processMessage` takes `Uint8Array | MlsFramedMessage`, `processWelcome` and
+  `welcomeKeyPackageRefs` take `Uint8Array | Welcome`.
 
 ### Low
 
@@ -70,7 +69,8 @@ Every item marked **breaking** costs a `minor` bump while `@kumiai/mls` is 0.x a
 1.0 — see `../milestones/pre-1.0-breaking-api.md` for the deadline that implies. None is a
 correctness bug; each is a shape a filed consumer would force a break to fix, and none has one yet.
 
-- **A third `GroupPermission`** (breaking). `packages/mls/src/roster.ts` — the role model is exactly
+- **A third `GroupPermission`** (breaking). **Left 2026-09-25** for 0.10: no consumer needs one; see
+  `../milestones/v0.10-release.md`. `packages/mls/src/roster.ts` — the role model is exactly
   `'admin' | 'member'`. Widening a value consumers exhaustively `switch` over is the same break class
   `AuthorizeRequest` was built to avoid taking twice. No filed use needs a third role.
 - ~~**The dead `GroupSyncScope` export**~~ — **taken 2026-08-02**, deleted ahead of the 0.5 band

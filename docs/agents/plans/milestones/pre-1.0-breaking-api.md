@@ -39,7 +39,10 @@ that package's surface for a filed reason, check this list for a neighbour worth
 ### `@kumiai/mls` — [mls API hardening](../backlog/2026-07-07-mls-api-hardening.md)
 
 - A third `GroupPermission` — widening a union consumers exhaustively `switch` over
-  (`packages/mls/src/roster.ts:7`, exactly `'admin' | 'member'`).
+  (`packages/mls/src/roster.ts:7`, exactly `'admin' | 'member'`). *Left for 0.10 (2026-09-25):* no
+  consumer needs one; see `v0.10-release.md`.
+- ~~`processMessage` / `processWelcome` `Uint8Array | unknown` input typing.~~ *Taken 2026-09-25* in
+  the 0.10 band.
 - ~~AAD on `GroupHandle.encrypt`/`decrypt` — **blocks** the rpc-side AAD binding; this is the change
   that must come first.~~ *Taken 2026-09-03:* AAD threaded through `encrypt`/`decrypt` and the rpc
   `GroupCrypto` port, each app frame bound to its topicID, in the same `minor` — see
