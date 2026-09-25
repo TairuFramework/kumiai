@@ -1,3 +1,4 @@
+import { commitLedgerEntries, ledgerEntryDigest, restoreGroup, signLedgerEntry } from '@kumiai/mls'
 import { expect, test, vi } from 'vitest'
 
 import { createGroupMLS } from '../src/mls.js'
@@ -33,6 +34,50 @@ test('processCommit keeps the handle at its old epoch on failed persist and retr
   await expect(port.processCommit(commit, context)).resolves.toEqual({ advanced: true })
   expect(member.handle.epoch).toBe(before.epoch + 1n)
   expect(persist).toHaveBeenCalledTimes(2)
+})
+
+test('processCommit reports an advance when a post-persist host callback throws', async () => {
+  const group = await createRealGroup(1, 'rpc-callback-advance')
+  const member = group.members[0]
+  if (member == null) throw new Error('missing member')
+  member.handle = await restoreGroup({
+    state: member.handle.state,
+    credential: member.handle.credential,
+    ledgerEntries: member.handle.ledgerTokens,
+    options: {
+      resolveLedgerEntries: member.slot.resolve,
+      onLedgerEntries: () => {
+        throw new Error('host callback failed')
+      },
+    },
+  })
+  const persist = vi.fn()
+  const port = createGroupMLS({
+    handle: () => member.handle,
+    adopt: vi.fn(),
+    identity: member.identity,
+    entrySlot: member.slot,
+    persist,
+  })
+  const note = await signLedgerEntry(group.committer.identity, {
+    type: 'note',
+    groupID: member.handle.groupID,
+    subject: member.identity.id,
+    value: 'callback',
+  })
+  group.bodies.set(ledgerEntryDigest(note), note)
+  const authored = await commitLedgerEntries(group.committer.handle, [note])
+  group.committer.handle = authored.newGroup
+  const commit = authored.commitMessage
+  const before = member.handle.epoch
+  await expect(
+    port.processCommit(commit, {
+      senderDID: group.committer.identity.id,
+      resolveLedgerEntries: group.resolveLedgerEntries,
+    }),
+  ).resolves.toEqual({ advanced: true })
+  expect(persist).toHaveBeenCalledOnce()
+  expect(member.handle.epoch).toBe(before + 1n)
 })
 
 test('recovery persists before adoption and bootstrap retries after a failed persist', async () => {

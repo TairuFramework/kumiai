@@ -128,7 +128,10 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
   const sweep = (): void => {
     const cutoff = Date.now() - REQUEST_TTL_MS
     for (const [id, request] of pending) {
-      if (request.mintedAt < cutoff) pending.delete(id)
+      if (request.mintedAt < cutoff) {
+        request.ephemeralPrivateKey.fill(0)
+        pending.delete(id)
+      }
     }
   }
 
@@ -176,12 +179,10 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
         })
       } catch (error) {
         // Missing frame bodies and a failed persist must propagate so the lane can retry.
-        // Everything else — a commit at another epoch, one the policy refuses,
-        // undecodable bytes — is `{ advanced: false }`, never a throw:
-        // a throw makes the lane re-read the frame, and a frame this member was never in a
-        // position to apply would wedge it there forever.
+        // Other errors do not make the lane re-read a frame indefinitely. A host callback
+        // can throw after a durable advance, so report the handle's actual epoch.
         if (error instanceof MissingLedgerEntriesError || persistFailed) throw error
-        return { advanced: false }
+        return { advanced: handle().epoch !== before }
       } finally {
         entrySlot.install(undefined)
       }
@@ -196,6 +197,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
         identity,
         requestID,
       })
+      pending.get(requestID)?.ephemeralPrivateKey.fill(0)
       pending.set(requestID, { ephemeralPrivateKey, mintedAt: Date.now() })
       return utf8.encode(request)
     },
@@ -239,7 +241,8 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
         onAccepted: async () => {
           await persist?.(rejoined.group)
           await adopt(rejoined.group)
-          pending.delete(requestID)
+          held.ephemeralPrivateKey.fill(0)
+          if (pending.get(requestID) === held) pending.delete(requestID)
         },
       }
     },
