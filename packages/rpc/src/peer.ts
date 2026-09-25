@@ -2277,7 +2277,13 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         // the anchor captured, exactly where an applying member lands.
         await advanceHandle(
           port,
-          () => pending.onAccepted(),
+          async () => {
+            await pending.onAccepted()
+            // The rejoined handle now owns this snapshot. A throw from the remaining rotation,
+            // epoch rebuild, or ledger read leaves it for the next successful lane bootstrap.
+            // That finalizer emits `bootstrapped` and closes the episode; failure does neither.
+            awaitingBootstrap = { attemptID, trigger, entries: inFlight }
+          },
           () => true,
         )
         assertLive()

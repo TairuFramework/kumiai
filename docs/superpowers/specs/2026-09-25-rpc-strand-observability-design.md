@@ -188,11 +188,17 @@ One owner: the `pendingReenact` stash.
 
 ### Delayed bootstrap
 
-A rejoin that lands but fails `ensureLedger` keeps its snapshot in a new state,
+A rejoin that lands but does not finish recovery keeps its snapshot in a new state,
 `awaitingBootstrap: { attemptID: string; trigger: RecoveryTrigger; entries: Array<string> } | null`,
 replacing the bare `inFlightEntries` use for this case. A snapshot from an attempt whose rejoin did
 **not** land (lost race, no responder) is never finalized this way; it stays the retry snapshot as
 today.
+
+Ownership moves to `awaitingBootstrap` as soon as the rejoined handle is adopted. This also covers
+throws during the rest of the rotation, epoch rebuild, or the post-bootstrap ledger read: the attempt
+emits `failed` / `error`, and the next successful lane bootstrap filters and drains the entries once.
+The episode stays open on that failure and closes when `bootstrapped` is emitted (or when a later
+attempt emits `succeeded`).
 
 **One snapshot owner across retries.** The snapshot of the peer's pre-rejoin entries is taken once and
 travels until it is finalized:

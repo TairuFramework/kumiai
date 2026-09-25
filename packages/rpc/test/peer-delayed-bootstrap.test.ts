@@ -1,3 +1,4 @@
+import { BroadcastClient } from '@kumiai/broadcast'
 import { describe, expect, test, vi } from 'vitest'
 
 import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
@@ -69,6 +70,55 @@ async function setup(byte: number) {
 }
 
 describe('delayed ledger bootstrap', () => {
+  test('replay drains the owed entry once when the post-bootstrap ledger read throws', async () => {
+    const state = await setup(0xc7)
+    const { alice, bob, events } = state
+    state.stopLying()
+    const error = new Error('transient post-bootstrap ledger read')
+    const getLedger = alice.mls.getLedger.bind(alice.mls)
+    let reads = 0
+    const spy = vi.spyOn(alice.mls, 'getLedger').mockImplementation(async () => {
+      if (++reads === 2) throw error
+      return getLedger()
+    })
+
+    await expect(alice.peer.recover()).rejects.toBe(error)
+    spy.mockRestore()
+    expect(reads).toBe(2)
+    expect(events.map((event) => event.phase)).toEqual(['started', 'failed'])
+    expect(events[1]).toMatchObject({ reason: 'error', error })
+    expect(await alice.peer.replay()).toEqual({ reenact: [owed] })
+    expect(await alice.peer.replay()).toEqual({})
+    expect(events.map((event) => event.phase)).toEqual(['started', 'failed', 'bootstrapped'])
+    expect(events[2]).toMatchObject({ attemptID: events[0]?.attemptID, trigger: 'consumer' })
+    await alice.peer.dispose()
+    await bob.peer.dispose()
+  })
+
+  test('replay drains the owed entry once when epoch rebuild throws after adoption', async () => {
+    const state = await setup(0xc8)
+    const { alice, bob, events } = state
+    state.stopLying()
+    const error = new Error('transient epoch teardown')
+    const spy = vi
+      .spyOn(BroadcastClient.prototype, 'dispose')
+      .mockImplementationOnce(() => Promise.reject(error))
+
+    await expect(alice.peer.recover()).rejects.toMatchObject({
+      message: 'Group epoch teardown failed',
+      errors: [error],
+    })
+    spy.mockRestore()
+    expect(events.map((event) => event.phase)).toEqual(['started', 'failed'])
+    expect(events[1]).toMatchObject({ reason: 'error' })
+    expect(await alice.peer.replay()).toEqual({ reenact: [owed] })
+    expect(await alice.peer.replay()).toEqual({})
+    expect(events.map((event) => event.phase)).toEqual(['started', 'failed', 'bootstrapped'])
+    expect(events[2]).toMatchObject({ attemptID: events[0]?.attemptID, trigger: 'consumer' })
+    await alice.peer.dispose()
+    await bob.peer.dispose()
+  })
+
   test('replay finalizes an earlier attempt and returns its owed entry exactly once', async () => {
     const state = await setup(0xc1)
     const { alice, bob, events } = state
