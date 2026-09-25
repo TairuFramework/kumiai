@@ -117,15 +117,19 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
 
     sealEntries: async (bytes) => {
       const key = await handle().exportSecret(entryLabel, EXPORT_CONTEXT, SECRET_LENGTH)
-      // Random per seal: two members can frame a commit at the same epoch, and a repeated nonce
-      // under one key is a break. 24 bytes makes a collision unreachable without a counter.
-      const nonce = runtime.getRandomValues(new Uint8Array(ENTRY_NONCE_BYTES))
-      const ciphertext = xchacha20poly1305(key, nonce).encrypt(bytes)
-      const sealed = new Uint8Array(1 + nonce.length + ciphertext.length)
-      sealed[0] = ENTRY_VERSION
-      sealed.set(nonce, 1)
-      sealed.set(ciphertext, 1 + nonce.length)
-      return sealed
+      try {
+        // Random per seal: two members can frame a commit at the same epoch, and a repeated nonce
+        // under one key is a break. 24 bytes makes a collision unreachable without a counter.
+        const nonce = runtime.getRandomValues(new Uint8Array(ENTRY_NONCE_BYTES))
+        const ciphertext = xchacha20poly1305(key, nonce).encrypt(bytes)
+        const sealed = new Uint8Array(1 + nonce.length + ciphertext.length)
+        sealed[0] = ENTRY_VERSION
+        sealed.set(nonce, 1)
+        sealed.set(ciphertext, 1 + nonce.length)
+        return sealed
+      } finally {
+        key.fill(0)
+      }
     },
 
     openEntries: async (sealed) => {
@@ -139,9 +143,13 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
       // Pure: exporting is epoch-level and touches no handle state, so this may be called from
       // inside the apply of the very commit whose blob it opens — the only place it's called from.
       const key = await handle().exportSecret(entryLabel, EXPORT_CONTEXT, SECRET_LENGTH)
-      return xchacha20poly1305(key, sealed.subarray(1, 1 + ENTRY_NONCE_BYTES)).decrypt(
-        sealed.subarray(1 + ENTRY_NONCE_BYTES),
-      )
+      try {
+        return xchacha20poly1305(key, sealed.subarray(1, 1 + ENTRY_NONCE_BYTES)).decrypt(
+          sealed.subarray(1 + ENTRY_NONCE_BYTES),
+        )
+      } finally {
+        key.fill(0)
+      }
     },
 
     unwrap: async (bytes, opts) => {

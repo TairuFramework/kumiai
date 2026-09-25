@@ -100,6 +100,26 @@ function cryptoOver(initial: GroupHandle) {
 }
 
 describe('createGroupCrypto', () => {
+  test('wipes each exported ledger key after seal and open, including failed open', async () => {
+    const keys: Array<Uint8Array> = []
+    const crypto = createGroupCrypto({
+      handle: () =>
+        ({
+          exportSecret: async () => {
+            const key = new Uint8Array(32).fill(7)
+            keys.push(key)
+            return key
+          },
+        }) as unknown as GroupHandle,
+    })
+    const sealed = await crypto.sealEntries(utf8.encode('entries'))
+    expect(keys[0]?.every((byte) => byte === 0)).toBe(true)
+    expect(await crypto.openEntries(sealed)).toEqual(utf8.encode('entries'))
+    expect(keys[1]?.every((byte) => byte === 0)).toBe(true)
+    sealed[sealed.length - 1] = (sealed[sealed.length - 1] as number) ^ 1
+    await expect(crypto.openEntries(sealed)).rejects.toThrow()
+    expect(keys[2]?.every((byte) => byte === 0)).toBe(true)
+  })
   test('frameAAD reads cleartext app AAD before opening and returns null for garbage', async () => {
     const { aliceGroup, bobGroup } = await twoMemberGroup('ports-frame-aad')
     const alice = cryptoOver(aliceGroup)
