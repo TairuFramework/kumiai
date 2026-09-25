@@ -20,7 +20,7 @@ export type GatherOptions<T = unknown> = {
   quorum?: number
   timeoutMs?: number
   /** Called once per accepted reply (non-error, first from its sender), before the quorum check. */
-  onReply?: (reply: GatheredReply<T>) => void
+  onReply?(reply: GatheredReply<T>): void
   /** Cancels this gather. The promise resolves with the replies collected so far. */
   signal?: AbortSignal
 }
@@ -30,6 +30,10 @@ export type GatherOptions<T = unknown> = {
   result. Existing callers are unaffected.
 - `ProtocolSurface.gather` (`packages/rpc/src/peer.ts`) types `onReply` per protocol:
   `GatheredReply<T['Result']>`. `InternalSurface.gather` uses the untyped form.
+- `onReply` is declared with **method syntax**, deliberately. Method parameters are bivariant under
+  `strictFunctionTypes`, so a public config whose `onReply` takes `GatheredReply<string>` stays assignable
+  to the internal `GatherOptions<unknown>` config, which `protocol-surface-types.test.ts` asserts. A
+  property-syntax arrow type would break that assignment. Keep the hoisted `protocolMethod` (TS2589).
 - The surface forwarding (`peer.ts` `surfaceFor(...).gather`) passes all four options through.
 - `request()` gets no signal. No consumer needs it.
 
@@ -41,7 +45,12 @@ exactly as the transport established it; broadcast does no normalization (the rp
 normalizes before delivery).
 
 **`onReply` ordering.** Invoked synchronously inside `collect`, after the reply is recorded and before
-the quorum check. The reply that completes the quorum is therefore delivered to `onReply` too.
+the quorum check. The reply that completes the quorum is therefore delivered to `onReply` too. The
+**same object** pushed into the result array is passed to `onReply`; observers must treat it as
+read-only (documented, not enforced).
+
+**Reentrancy.** `onReply` may abort its own signal or dispose the client. Either settles the call after
+the current reply is recorded; the quorum check that follows is then a no-op because `settle` is guarded.
 
 **Throwing `onReply`.** Caught and discarded. A throwing observer never changes the recorded replies,
 the quorum count, or how the call settles.
@@ -65,7 +74,9 @@ other exits, so a long-lived signal shared by many gathers does not accumulate l
 
 **Timeout.** `timeoutMs` stays the maximum call duration and still resolves with collected replies.
 
-**Write failure.** Still rejects with the write error, through the same cleanup.
+**Write failure.** Still rejects with the write error, through the same cleanup. The write call is
+wrapped in `try/catch` so a transport whose `write` throws synchronously is handled exactly like one
+whose promise rejects.
 
 **Dispose.** Unchanged outcome (resolves with partial replies), now through the same cleanup, so the
 abort listener is removed too.
@@ -74,10 +85,15 @@ abort listener is removed too.
 
 `GroupPeer.protocol(name).gather` wraps the surface call in `withReady`, which awaits the peer's
 initial `ready`. A peer that is not yet ready (for example, a dark hub) would otherwise hold an aborted
-gather until `ready` settles. The gather wrapper therefore races `ready` against the signal: if the
-signal aborts first (or is already aborted), resolve `[]` without waiting further and without calling
-the surface. If `ready` rejects, the existing rejection propagates unchanged. `assertLive` still runs
-before the surface call when `ready` wins.
+gather until `ready` settles. The gather wrapper therefore races `ready` against the signal:
+
+- **Abort wins** (or the signal is already aborted): run `assertLive()` (a disposed peer still throws),
+  then resolve `[]` without calling the surface.
+- **`ready` resolves first:** `assertLive()`, then call the surface as today.
+- **`ready` rejects first:** the rejection propagates unchanged.
+- The abort listener the race adds is removed on **every** outcome, so a long-lived signal does not
+  accumulate listeners across calls. A later `ready` rejection stays observed by the existing
+  `ready.catch`.
 
 ## Out of scope
 
@@ -110,6 +126,11 @@ part of them.
 - Write failure rejects; pending entry, timer and listener removed.
 - Dispose resolves with partial replies; listener removed.
 - A throwing `onReply` does not change the result or stop later replies being collected.
+- `onReply` aborting its own signal: resolves with replies including the current one; no second
+  settlement.
+- `onReply` disposing the client: same.
+- The object passed to `onReply` is the one in the resolved array.
+- A transport whose `write` throws synchronously: rejects; entry, timer and listener removed.
 - A shared signal across many settled gathers holds no leftover listeners.
 
 `packages/rpc/test/`:
@@ -118,6 +139,8 @@ part of them.
 - `onReply` and `signal` are forwarded end to end through a group peer (extend
   `peer.test.ts` or `integration.test.ts`).
 - Abort while the peer is waiting on `ready` resolves `[]` without waiting for `ready`.
+- Abort while waiting on `ready` on a disposed peer throws like other disposed-peer calls.
+- The readiness race leaves no abort listener behind when `ready` wins or rejects.
 
 ## Release
 
