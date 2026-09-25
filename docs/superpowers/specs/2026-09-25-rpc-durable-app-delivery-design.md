@@ -4,7 +4,9 @@
 `@kubun/plugin-p2p`, which needs a transient failure between MLS open and host apply to recover
 automatically.
 
-**Revision 2** — after a blind review found that (1) `GroupHandle.decrypt` commits the consumed key to
+**Revision 3** — revision 2 plus the fixes from its blind review (key zeroing, walk-wide storage stop,
+isolated staged state, liveness retries, fetch-only positions, sender check, guarantee boundary, Kubun
+lock order). **Revision 2** — after a blind review found that (1) `GroupHandle.decrypt` commits the consumed key to
 in-memory state before any persist hook can run, (2) live opens outside the mutexes break log order,
 and (3) `logPosition` is unauthenticated hub metadata.
 
@@ -27,6 +29,16 @@ the open and the pending record atomic.
 Declared `retain: 'log'` app events are delivered **at least once** across crashes and handler failures,
 in log order per protocol, with a stable frame identity the host deduplicates on. Everything else keeps
 today's semantics.
+
+**Guarantee boundary.** The guarantee holds for frames a **conforming hub** appended to the topic log and
+still retains when this peer reads it. Out of scope, documented:
+
+- A hub (or member) that delivers a log-intent frame only by mailbox, or never appends it: the hub is
+  already trusted for availability and can drop any frame. Such a frame is acked, not opened, and lost.
+- Log pruning or retention expiry before the peer reads the frame: reported by `onAppWindowPruned` as
+  today.
+- The existing commit-applied-before-anchor-saved crash window (`architecture.md`), which can leave a
+  restarted peer reading a stale app topic.
 
 ## Scope
 
@@ -53,8 +65,11 @@ aad = [0x01 (AAD version)] [0x00 ephemeral | 0x01 log] [topicID UTF-8]
   decision that already selects `retain: 'log'` on publish. Directed and request/reply frames use
   `ephemeral`.
 - Readers compare the **whole** AAD pre-open (`expectedAAD`), so a frame's intent is authenticated by
-  the open: a hub that rewrites the intent byte makes the open fail (dead frame); it cannot reroute a
-  frame between paths.
+  the open: a hub that rewrites the intent byte makes the open fail (dead frame). The AAD proves the
+  publisher's intent, not that the hub retained the frame (see the guarantee boundary).
+- Every seal and open site changes: `peer.ts` app publish (`:767`) and directed publish (`:787`), the
+  app open-once path (`:585`), the self-inbox (`:659`), the drain (`app-lane.ts:434`), and the directed
+  request and reply seals (`directed.ts:151`, `directed.ts:335`) and their opens.
 - Routing reads the intent from the frame's **cleartext** AAD **before** opening, via a new port method
   (below). The cleartext is only a routing hint; the open authenticates it.
 - `logPosition` is no longer used to decide durability or path. It stays positional metadata.
@@ -105,26 +120,38 @@ New `GroupHandle` method:
 ```ts
 /**
  * Open like `decrypt`, but make the new state durable BEFORE adopting it. Runs under this handle's
- * mutex: computes the post-open state without assigning it, awaits `persist(staged, opened)`, then
- * assigns the state and zeroes the consumed key. If `persist` throws, the handle's state is unchanged
- * (the frame is still openable) and the error propagates.
+ * mutex: computes the post-open state without assigning it, rejects an unnamed sender, awaits
+ * `persist(stagedState, opened)`, then assigns the state and zeroes the consumed secrets. If anything
+ * before adoption throws, the live state and its secrets are untouched (the frame is still openable)
+ * and the error propagates.
  *
- * `staged` is a handle over the post-open state (via `deriveGroup`) for the host to serialize. `persist`
- * must not call any method of this handle or of the peer: the mutex is held.
+ * `stagedState` is the encoded post-open `ClientState` (the same encoding the host already stores for
+ * this group), NOT a live `GroupHandle`: constructing a handle would repoint the shared group context's
+ * device-deny provider (`group-handle.ts:343`, `deriveGroup` at `:1295`). `persist` must not call any
+ * method of this handle or of the peer: the mutex is held.
  */
 async decryptStaged(
   message: Uint8Array,
   opts: { expectedAAD?: Uint8Array },
-  persist: (staged: GroupHandle, opened: { payload: Uint8Array; senderDID?: string; aad: Uint8Array }) => Promise<void>,
-): Promise<{ payload: Uint8Array; senderDID?: string; aad: Uint8Array }>
+  persist: (stagedState: Uint8Array, opened: { payload: Uint8Array; senderDID: string; aad: Uint8Array }) => Promise<void>,
+): Promise<{ payload: Uint8Array; senderDID: string; aad: Uint8Array }>
 ```
 
 `encrypt`, `processMessage` and every other state-mutating method take the same `mutexFor(this)`, so no
 other writer can persist the handle between the open and the pending write, nor adopt a stale state
 after it.
 
-Zeroing `result.consumed` moves after `persist` succeeds. On `persist` failure the consumed material is
-still zeroed from the discarded result: the discarded state never becomes live.
+**Zeroing.** `result.consumed` from ts-mls includes the **old** ratchet secret, which still belongs to the
+live state while the new state is withheld (`ts-mls secretTree.js:203-223`). It is zeroed only after
+`persist` succeeds and the new state is adopted. On failure nothing in `result.consumed` is zeroed;
+temporary keys that alias neither state may be cleared.
+
+**Sender.** An open that yields no authenticated sender throws **before** `persist`, so the live state is
+unchanged, matching the port's "unnamed sender is an error" rule without consuming the key.
+
+**Encoding.** `stagedState` uses the repo's `ClientState` encoder (`packages/mls/src/codec.ts:47`), the
+same form a host restores from. The `@kumiai/mls` README documents that `persist` must store it as the
+group's handle state.
 
 ## Port change: `GroupCrypto`
 
@@ -164,15 +191,15 @@ export type GroupCrypto = {
 
 ```ts
 pending?: {
-  /** One host transaction: serialize `staged` as the group's handle and insert `record`. */
-  persistOpened(staged: GroupHandle, record: PendingAppFrame): Promise<void>
+  /** One host transaction: store `stagedState` as the group's handle state and insert `record`. */
+  persistOpened(stagedState: Uint8Array, record: PendingAppFrame): Promise<void>
   list(): Promise<Array<PendingAppFrame>>
   complete(id: string): Promise<void>
 }
 ```
 
-`unwrap` with `frame` calls `handle().decryptStaged(bytes, opts, (staged, opened) =>
-persistOpened(staged, record))`, wrapping a `persistOpened` throw in an `AppFrameStorageError`.
+`unwrap` with `frame` calls `handle().decryptStaged(bytes, opts, (stagedState, opened) =>
+persistOpened(stagedState, record))`, wrapping a `persistOpened` throw in an `AppFrameStorageError`.
 
 ## Host contract (documented)
 
@@ -180,18 +207,34 @@ persistOpened(staged, record))`, wrapping a `persistOpened` throw in an `AppFram
   peer.
 - The host must never hold a database transaction (or its single connection) while it awaits a peer or
   handle operation. A handler finishes its own transaction before awaiting `commit()`, `dispatch()`, etc.
+- **Kubun adoption prerequisite.** Kubun's registry persists outside its per-group lock precisely because
+  some transactions await `readHandle` while holding the single connection
+  (`../kubun/packages/plugin-p2p/src/groups/group-handle-registry.ts:268`, regression test
+  `group-mutex-db-deadlock.test.ts`). `persistOpened` inside the handle mutex is the opposite order.
+  Kubun must remove every transaction-then-registry wait on paths that can overlap an app open before
+  enabling durable delivery, and prove it against SQLite. Tracked as a kubun follow-up; kumiai's
+  learning loop validates the lock order with a single-connection SQLite host double.
 
 ## App lane
 
 **Live log-intent push: wakeup only.** In durable mode, the open-once path reads `crypto.frameAAD`
 pre-open. For intent `log`:
 
-- it does **not** open the frame and does **not** fan it out;
-- it acks the hub delivery (the log retains the frame; an ack does not delete a retained entry);
+- it does **not** open the frame, does **not** fan it out, and does **not** stage its bytes or position:
+  pushed metadata never enters the buffer (a pushed frame could claim another entry's position);
+- it acks the hub delivery (a conforming hub appends before it pushes and keeps the log entry after the
+  ack);
 - it schedules a drain (coalesced), as a commit-topic push does.
 
-Frames with intent `ephemeral`, or an unreadable AAD, keep today's open-once path. `note()`'s done-ness
-staging is skipped for log-intent frames in durable mode: the drain owns their state.
+In durable mode, bytes and positions of log-intent frames come **only** from `fetchTopic`. Frames with
+intent `ephemeral`, or an unreadable AAD, keep today's open-once path.
+
+**Liveness.** A drain request never depends on a later push:
+
+- A failed fetch or a storage failure reschedules the drain with the delivery-queue backoff (1 s doubling
+  to 60 s), independent of pushes, until it succeeds or the peer is disposed.
+- Startup: after the live app subscriptions are registered, `ready` runs one more app-lane pull, closing
+  the gap between the seed pull and listener registration (`peer.ts:2155`, `hub-mux.ts:653`).
 
 **Retained drain: the only opener of log-intent frames.** Runs under the commit mutex and the app-lane
 mutex, as today, in log order. For a frame at the handle's epoch:
@@ -199,8 +242,11 @@ mutex, as today, in log order. For a frame at the handle's epoch:
 - decoded intent `log`: `unwrap` with `frame` → on success the frame becomes `pending(id)` and its record
   is appended to that protocol's delivery queue. The drain does not emit.
 - decoded intent `ephemeral`: dead (a log-retained frame must carry log intent).
-- `unwrap` throws `AppFrameStorageError`: **stop the drain** for this protocol. The frame stays `sealed`,
-  the cursor does not pass it, and the next drain retries.
+- `unwrap` throws `AppFrameStorageError`: the frame stays `sealed`, the cursor does not pass it, and
+  `deliver()` **rejects**. The commit walk treats that like a failed pull: it stops before applying the
+  next commit, so no epoch advances past a log frame that was neither durably opened nor classified
+  dead. The walk retries on the liveness schedule above. (Continuing would mark the frame dead on the
+  next drain by the below-epoch rule, `app-lane.ts:420`.)
 - `unwrap` throws anything else: dead, as today.
 
 Not-this-epoch rules are unchanged.
@@ -209,9 +255,9 @@ Not-this-epoch rules are unchanged.
 `{ state: 'sealed'; bytes } | { state: 'pending'; id } | { state: 'done' }`.
 
 - `pending` is entered only after `unwrap` with `frame` resolved.
-- Merge rule for duplicate observations of one position: `pending` dominates `sealed` and `done` until
-  its `complete()` succeeds; `sealed` dominates `done`. Two different ciphertexts at one position: keep
-  the first, drop the second.
+- Merge rule for duplicate observations of one position (all from `fetchTopic` or restored records):
+  `pending` dominates `sealed` and `done` until its `complete()` succeeds; `sealed` dominates `done`. Two
+  different ciphertexts at one fetched position: keep the first, drop the second.
 - The cursor passes a run of `done` frames and stops at the first that is not.
 
 ## Delivery queue
@@ -272,7 +318,11 @@ store that serializes the handle) and the fake crypto double:
 - `unwrap` with `frame` saves a record `list()` returns; a second open of the same bytes throws, saves
   nothing.
 - `persistOpened` throws: `unwrap` throws a storage error; `list()` empty; the **live** handle still opens
-  the frame; a handle **restored from the stored bytes** also opens it.
+  the frame (old ratchet secret not zeroed); a handle **restored from the stored bytes** also opens it.
+- An unnamed-sender frame: `unwrap` with `frame` throws before persisting; live and restored handles
+  unchanged.
+- A failed staged open, then a successful one: the group context's device-deny provider is the live
+  handle's throughout.
 - After a successful staged open, a later `wrap` and its save do not lose the record, and a restored
   handle cannot reopen the frame.
 - `list()` order by `(segment, position)`; `complete()` idempotent; records survive a new port instance
@@ -288,6 +338,14 @@ double must be no more permissive than the real port.
 - Live log-intent push in durable mode: not opened live, hub acked, drain opens it, one delivery with
   `frame` in context.
 - Live push order: pushes B then A's retained copy arriving later still deliver A before B.
+- A pushed log-intent frame claiming the position of a different fetched entry: no effect on the buffer.
+- Storage failure on a frame immediately before a commit: the commit is not applied until the frame is
+  durably opened; then both proceed.
+- Failed fetch with no later push: the drain retries on its own and delivers.
+- Publication in the gap between the seed pull and listener registration: delivered after startup.
+- Directed and self-inbox AAD round trips with the new format.
+- Single-connection SQLite host double: `persistOpened` inside the handle mutex while a handler
+  transaction runs does not deadlock under the host contract.
 - Hub stripping `logPosition` or adding it to an ephemeral frame changes nothing (path by AAD).
 - Hub rewriting the intent byte: frame dead, no delivery.
 - Retained pull: cursor passes the frame only after the handler resolves.
