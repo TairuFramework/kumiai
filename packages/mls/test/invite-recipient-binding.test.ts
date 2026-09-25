@@ -247,8 +247,7 @@ describe('commitInvite refuses an invite it cannot bind', () => {
     )
   })
 
-  // This is the documented residual, not an endorsement of it: the design
-  // (docs/superpowers/specs/2026-07-26-bind-keypackage-recipient-design.md) is explicit that
+  // This is the documented residual, not an endorsement of it: the design is explicit that
   // last-position is load-bearing on a hand-built invite, and that violating it binds to the
   // trailing grant's subject instead of the intended invitee. Pinning it here keeps it a known
   // behaviour rather than an undiscovered one.

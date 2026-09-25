@@ -404,3 +404,11 @@ Cached:    0 cached, 49 total
    Start at  16:44:45
    Duration  8.28s (tests 64%, transform 24%, import 12%)
 ```
+
+### 2026-09-25 — Blind whole-branch review
+
+- **Findings:** R1–R9 were confirmed in source. The staged-open AAD guard in R8a was already present, but lacked a biting test. The R8b forged fixture omitted the required AAD. D1 omitted the epoch and hub availability limits, and its future-epoch stall had no notice. D2 described the old app path.
+- **Changed:** Durable records are scheduled even when a later open or fetch fails; a drop blocked by an earlier unresolved frame is refused; missing-protocol records survive restore, receive one notice after startup has a group id, deliver on a later start, and can be explicitly dropped. App and epoch-ceiling pages reject non-forward positions; the commit walk rejects non-forward full pages. Pending delivery requires MLS, disposal prevents worker completion, the fake entry seal uses HMAC-SHA256, and the real entry seal wipes exported keys. The spec, README, handler docs, architecture, and review tests were updated.
+- **Accepted and why:** A below-epoch frame first fetched after the peer advances is refused because its sender cannot be authenticated. Hub omission remains outside the availability guarantee. A high-epoch claim that the hub justifies may pin the cursor, so the peer reports it and leaves an operator drop available. The commit walk still accepts a short, one-shot below-cursor fork reveal; only its full pages can loop indefinitely.
+- **Tests and mutations:** Focused red tests preceded the delivery, drop, restore, configuration, and disposal fixes. The new AAD, retention, paging, MAC, and key-wipe guards each failed under removal or replacement mutations; all source was restored. The first forced gate exposed a stale app-fetch fixture and an overbroad commit-page guard, not timing failures. The fixture now honors `after`, and the guard preserves one-shot fork handling. Each affected file passed alone.
+- **Verify:** `rtk proxy pnpm turbo run test:types test:unit --force --concurrency=2`: 49 successful, 0 cached. RPC and MLS-RPC port conformance: 50 tests each. Hub server, tunnel, and wake conformance: 54, 4, and 16 tests. Integration: 8 files, 43 tests. `rtk proxy pnpm run lint`: clean.

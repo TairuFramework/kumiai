@@ -70,6 +70,8 @@ For a conforming hub that appends and retains the frame until it is durably open
 delivers these events **at least once**, in log order per protocol, across process restarts and
 handler failures. A successful handler return acknowledges the event; a thrown handler or failed
 `pending.complete` retries the same record with backoff, holding later events in that protocol.
+An event handler that never settles holds its protocol indefinitely. Disposing the peer does not
+cancel an active handler; the host must settle its work or restart the peer to retry the record.
 The handler context's `frame: AppFrameRef` identifies a logged delivery. Store a deduplication
 entry keyed by `frame.id` in the same transaction as the handler's effect before returning.
 External effects must be idempotent or reconciled by that id. A record may be delivered again if
@@ -81,9 +83,13 @@ restores records at startup in `(segment, position)` order; `pending.complete(id
 The port's `unwrap(bytes, { expectedAAD, frame })` must atomically save the consumed-key handle
 state and the pending record before resolving. A failed save must leave the handle openable and
 throw an error recognized by `isAppFrameStorageError`; the app lane retries without advancing
-past that frame. `onAppDeliveryStalled` reports a persistent storage block once per blocking
-position. An operator can accept its loss with `dropAppFrame(topicID, position)`, which refuses a
-frame already pending.
+past that frame. `onAppDeliveryStalled` reports a persistent storage block, a missing protocol on
+restore, or a justified future-epoch frame once per blocking frame. A missing-protocol record stays
+pending and can be delivered after that protocol is registered on a later start. An operator can
+accept a frame's loss with `dropAppFrame(topicID, position)`; it can explicitly discard a
+missing-protocol record, but refuses a pending frame under a registered protocol. It also refuses
+to drop a sealed frame behind an earlier pending or sealed frame, because the durable cursor cannot
+record that drop until the earlier frame is settled.
 
 Durable delivery is off when `GroupCrypto.pending` is absent. Ephemeral events remain best effort;
 directed traffic and anycast requests and replies keep their existing live completion or expiry
@@ -91,8 +97,12 @@ semantics. Log-intent pushes only wake a retained fetch: pushed bytes and positi
 pending records. The hub must have appended the frame to the topic log before pushing it.
 Frames pruned before a read, or lost after a failed durable open followed by retention expiry,
 cannot be recovered; `onAppWindowPruned` reports a visible gap. A hub that only sends a log frame
-by mailbox also gives no durable guarantee. The existing commit-applied-before-anchor-saved
-crash window can still leave a restarted peer on a stale app topic.
+by mailbox also gives no durable guarantee. A frame published at epoch E and first fetched after
+this peer has moved past E is refused: the peer cannot authenticate its sender after that move.
+A hub can withhold or omit frames. A forged high-epoch justification can hold the cursor until an
+operator drops the frame; `onAppDeliveryStalled` reports that wait with `reason: 'future-epoch'`.
+The existing commit-applied-before-anchor-saved crash window can still leave a restarted peer on
+a stale app topic.
 
 App-frame AAD is `[0x01, intent, ...UTF8(topicID)]`, where intent is `0x01` for log and `0x00`
 for ephemeral. `frameAAD` reads this cleartext routing hint; only `unwrap` with the full expected

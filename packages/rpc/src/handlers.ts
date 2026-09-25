@@ -12,7 +12,10 @@ import { createValidator, type Validator } from '@sozai/schema'
 
 import type { AppFrameRef } from './crypto.js'
 
-/** Log deliveries carry a stable frame ref; live ephemeral events have no frame. */
+/** Log deliveries carry a stable frame ref; live ephemeral events have no frame.
+ * A handler that never settles blocks later log events in its protocol. Disposal does not cancel
+ * it; the host must settle its work or restart the peer to retry the pending record.
+ */
 export type GroupProcedureHandlers<Protocol extends ProtocolDefinition> = {
   [Procedure in keyof Protocol & string]: Protocol[Procedure] extends EventProcedureDefinition
     ? (

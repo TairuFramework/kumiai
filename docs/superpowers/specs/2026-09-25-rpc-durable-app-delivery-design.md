@@ -39,6 +39,9 @@ and retention expiry before the retry loses the frame). The AAD authenticates in
 malicious hub may still omit, reorder, or lie about fetched positions, as the repo's hub threat model
 already allows. Out of scope, documented:
 
+- A frame sealed at epoch E but first fetched after this peer advanced past E is refused: it cannot
+  authenticate that earlier epoch's sender. A laggard publisher can create this case.
+
 - A hub (or member) that delivers a log-intent frame only by mailbox, or never appends it: the hub is
   already trusted for availability and can drop any frame. Such a frame is acked, not opened, and lost.
 - Log pruning or retention expiry before the peer reads the frame: reported by `onAppWindowPruned` as
@@ -243,6 +246,8 @@ intent `ephemeral`, or an unreadable AAD, keep today's open-once path.
 **Settled fetches.** `loadSegment()` uses `Promise.allSettled` over the protocol fetches and rethrows the
 first failure only after all have settled, so no fetch keeps mutating buffers or `fetched` positions after
 the app-lane mutex is released and a retry starts.
+Each fetched page must advance beyond `after` with strictly increasing positions; otherwise the pull
+fails as a hub fault. The commit epoch-ceiling pager applies the same rule.
 
 **Liveness.** A drain request never depends on a later push:
 
@@ -277,9 +282,13 @@ operable:
   just the app drain, on the liveness schedule.
 - A host notice `onAppDeliveryStalled({ groupID, protocol, topicID, position, error })` fires (through
   the shared `notifyHost` outbox) when a storage failure first blocks a frame, and again only if the
-  blocking frame changes.
+  blocking frame changes. A justified future-epoch claim also raises one stall notice with
+  `reason: 'future-epoch'` and remains operable through `dropAppFrame`.
 - `GroupPeer.dropAppFrame(topicID, position)` lets an operator accept the loss: it marks that buffered
-  frame dead (cursor may pass it) and resumes the walk. It never touches a frame already `pending`.
+  frame dead (cursor may pass it) and resumes the walk. It refuses a registered protocol's pending
+  frame and a sealed frame behind an earlier unresolved position, since that drop cannot yet reach
+  the durable cursor. It may explicitly complete a pending record for a protocol this peer does not
+  serve.
 - `unwrap` throws anything else: dead, as today.
 
 Not-this-epoch rules are unchanged.
@@ -297,6 +306,8 @@ Not-this-epoch rules are unchanged.
 
 One ordered queue per protocol, fed only by the drain (and by restart), running **outside** the commit
 mutex and the app-lane mutex.
+Every record the drain makes durable is scheduled even if a later open or another protocol's fetch
+fails and the drain rejects.
 
 **Delivery barrier.** A non-rotating commit keeps the app topic, so a member already at epoch *e+1* can
 append position A before a lagging member at *e* appends B. The drain keeps A sealed (ahead) and opens B.
@@ -308,8 +319,8 @@ buffer. Test the epoch-inversion case.
 For each record, in `(segment, position)` order:
 
 1. Parse the payload. Self-echo (normalized `senderDID === localDID`), malformed JSON, not
-   `typ: 'event'`, unknown protocol, or a procedure not declared `retain: 'log'`: `complete(id)` and
-   move on.
+   `typ: 'event'`, or a procedure not declared `retain: 'log'`: `complete(id)` and move on. A
+   missing protocol stays pending and raises one `onAppDeliveryStalled` notice per peer start.
 2. Validate event data against the protocol schema; invalid: log, `complete(id)`, move on.
 3. Emit to the host handler; its context gains `frame: AppFrameRef` (`handlers.ts`).
 4. **Handler resolves** = acknowledgement: `await pending.complete(id)`, then under the app-lane mutex
@@ -323,8 +334,9 @@ For each record, in `(segment, position)` order:
 **Restart.** In `ready`, after the anchor is restored and **before** `initControlLanes()` (whose seed
 pull runs the first drain), `list()` all records (a rejected `list()` is retried on the liveness
 backoff, and disposal aborts the wait; the seed pull never runs before restoration succeeds) and enqueue them per protocol by `frame.protocol`, in
-`(segment, position)` order. A record naming a protocol this peer does not serve is completed without
-delivery. `ready` does not wait for any handler: a handler awaiting `commit()` would otherwise wait on
+`(segment, position)` order. A record naming a protocol this peer does not serve stays pending, can
+be delivered after that protocol is registered on a later start, and can be discarded explicitly
+with `dropAppFrame`. `ready` does not wait for any handler: a handler awaiting `commit()` would otherwise wait on
 `ready` itself. The restored records also seed the app lane: when the drain buffers a position whose
 `(topicID, position)` matches a restored record, that frame enters as `pending(id)`, never `sealed`, so
 it is not re-opened (its key is consumed and the open would call it dead) and the cursor stays behind it
@@ -333,8 +345,9 @@ until the record is completed.
 **Rotation.** `reset()` clears segment buffers and cursors as today. Queues and pending records are not
 cleared; old-segment records keep delivering.
 
-**Dispose.** Cancels backoff timers and stops starting new handler calls. A handler already running may
-finish and complete its record. Pending records stay for the next start.
+**Dispose.** Cancels backoff timers and stops starting new handler calls or completing a record. A
+handler already running may finish, but its record stays pending for the next start. A handler that
+never settles blocks its protocol while the peer runs; the host must settle the work or restart.
 
 ## Locking summary
 
