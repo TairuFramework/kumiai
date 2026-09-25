@@ -307,3 +307,22 @@ $ tsc --noEmit --skipLibCheck -p tsconfig.test.json
 
 $ tsc --noEmit --skipLibCheck -p tsconfig.test.json
 ```
+
+### 2026-09-25 — Question 3.4
+
+- **Learned:** Startup must restore saved pending records before its first retained pull. Matching fetched positions enter as `pending`, so a spent key is never reopened and the cursor stays behind the record until the handler resolves. The delivery queue survives an app-topic rotation, and completing an old-segment record leaves the new topic's cursor alone. A transient `list()` failure can hold the seed pull until a backoff retry succeeds; disposal interrupts that wait.
+- **Deviations:** The decisive test simulates a crash by disposing the first peer synchronously after the atomic state-and-record write, before its queued handler starts. Its second peer restores the serialized fake handle from the same in-memory database. Rotation is tested at the app-lane boundary so the old record and new cursor can be observed directly. The four usage tests failed before implementation, then passed. Seven targeted mutations each failed its guard and were restored. The full RPC unit suite passed (75 files, 497 tests).
+- **Spec/plan contradiction:** None. No spec or plan change was needed.
+- **Verify:** `pnpm --filter @kumiai/rpc exec vitest run test/durable-restart.test.ts && pnpm --filter @kumiai/rpc run test:types`
+
+```text
+ RUN  v5.0.1 /Users/paul/dev/yulsi/kumiai.worktrees/durable-app-delivery/packages/rpc
+
+
+ Test Files  1 passed (1)
+      Tests  4 passed (4)
+   Start at  16:11:58
+   Duration  1.88s (tests 77%, transform 13%, import 10%)
+
+$ tsc --noEmit --skipLibCheck -p tsconfig.test.json
+```

@@ -54,6 +54,7 @@ import {
   type GroupMLS,
   type GroupUnwrapResult,
   isMissingLedgerEntries,
+  type PendingAppFrame,
 } from './crypto.js'
 import { asLogPosition, type LogPosition } from './cursor.js'
 import {
@@ -2548,6 +2549,37 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     }
   }
 
+  let pendingRestoreTimer: ReturnType<typeof setTimeout> | undefined
+  let abortPendingRestore: (() => void) | undefined
+  const pendingRestoreAborted = new Promise<void>((resolve) => {
+    abortPendingRestore = resolve
+  })
+  const restorePending = async (): Promise<void> => {
+    if (crypto.pending == null) return
+    let backoff = 1000
+    while (!disposed) {
+      try {
+        const records = await Promise.race<Array<PendingAppFrame> | null>([
+          crypto.pending.list(),
+          pendingRestoreAborted.then(() => null),
+        ])
+        if (records == null || disposed) return
+        await appLane.restore(records)
+        return
+      } catch {
+        if (disposed) return
+        await Promise.race([
+          new Promise<void>((resolve) => {
+            pendingRestoreTimer = setTimeout(resolve, backoff)
+          }),
+          pendingRestoreAborted,
+        ])
+        pendingRestoreTimer = undefined
+        backoff = Math.min(backoff * 2, 60_000)
+      }
+    }
+  }
+
   const ready = (async () => {
     // Settle the app-lane anchor BEFORE the seed pull: a roster change the seed pull applies must
     // be able to rotate it off whatever lands here rather than have a later seed overwrite it.
@@ -2565,6 +2597,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     } else {
       await captureAnchor()
     }
+    await restorePending()
+    if (disposed) return
     await initControlLanes()
     await buildEpoch()
     // The seed pull precedes the app listeners. Read once more after registration to close
@@ -2662,6 +2696,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     dispose: () => {
       if (disposePromise != null) return disposePromise
       disposed = true
+      abortPendingRestore?.()
+      if (pendingRestoreTimer != null) clearTimeout(pendingRestoreTimer)
       appLane.dispose()
       if (appPullTimer != null) clearTimeout(appPullTimer)
       appPullTimer = undefined

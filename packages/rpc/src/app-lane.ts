@@ -107,6 +107,8 @@ export type AppLane = {
   reset: () => void
   /** Opened records awaiting the delivery worker. */
   pendingRecords: () => Array<PendingAppFrame>
+  /** Restore durable records before the first retained pull. */
+  restore: (records: Array<PendingAppFrame>) => Promise<void>
   /** Stop queued retries and prevent new handler calls. */
   dispose: () => void
 }
@@ -326,9 +328,21 @@ export function createAppLane(params: AppLaneParams): AppLane {
         }
         for (const message of result.messages) {
           const position = asLogPosition(message.sequenceID)
+          const restored = pendingRecords.find(
+            (record) =>
+              record.frame.protocol === name &&
+              record.frame.topicID === topicID &&
+              record.frame.position === position,
+          )
           takeAppFrame(
             frames,
-            { position, sealed: { state: 'sealed', bytes: message.payload } },
+            {
+              position,
+              sealed:
+                restored == null
+                  ? { state: 'sealed', bytes: message.payload }
+                  : { state: 'pending', id: restored.frame.id },
+            },
             crypto.pending != null,
           )
           after = position
@@ -705,6 +719,23 @@ export function createAppLane(params: AppLaneParams): AppLane {
     },
     note,
     pendingRecords: () => [...pendingRecords],
+    restore: async (records): Promise<void> => {
+      await runAppLane(async () => {
+        for (const record of records) {
+          if (protocols[record.frame.protocol] == null) {
+            await crypto.pending?.complete(record.frame.id)
+            continue
+          }
+          if (!pendingRecords.some((item) => item.frame.id === record.frame.id)) {
+            pendingRecords.push(record)
+          }
+        }
+        pendingRecords.sort(
+          (a, b) =>
+            a.frame.segment - b.frame.segment || a.frame.position.localeCompare(b.frame.position),
+        )
+      })
+    },
     dispose: (): void => {
       disposed = true
       for (const worker of workers.values()) {
