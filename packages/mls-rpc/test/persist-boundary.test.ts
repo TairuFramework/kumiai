@@ -133,3 +133,61 @@ test('recovery persists before adoption and bootstrap retries after a failed per
   await requester.bootstrapLedger(tokens)
   expect(member.handle.ledgerTokens).toEqual(tokens)
 })
+
+test('a recovery key expires without another request', async () => {
+  const group = await createRealGroup(1, 'rpc-recovery-ttl')
+  const member = group.members[0]
+  if (member == null) throw new Error('missing member')
+  const requester = createGroupMLS({
+    handle: () => member.handle,
+    adopt: (next) => {
+      member.handle = next
+    },
+    identity: member.identity,
+    entrySlot: member.slot,
+  })
+  const responder = createGroupMLS({
+    handle: () => group.committer.handle,
+    adopt: vi.fn(),
+    identity: group.committer.identity,
+    entrySlot: group.committer.slot,
+  })
+  vi.useFakeTimers()
+  try {
+    const requestID = 'expires-without-sweep'
+    const request = await requester.createRecoveryRequest(requestID)
+    const sealed = await responder.sealGroupInfo(request)
+    await vi.advanceTimersByTimeAsync(120_001)
+    expect(await requester.applyRecovery(sealed, requestID)).toBeNull()
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+test('accepting an older recovery cannot delete a replacement request key', async () => {
+  const group = await createRealGroup(1, 'rpc-recovery-replaced-key')
+  const member = group.members[0]
+  if (member == null) throw new Error('missing member')
+  const requester = createGroupMLS({
+    handle: () => member.handle,
+    adopt: (next) => {
+      member.handle = next
+    },
+    identity: member.identity,
+    entrySlot: member.slot,
+  })
+  const responder = createGroupMLS({
+    handle: () => group.committer.handle,
+    adopt: vi.fn(),
+    identity: group.committer.identity,
+    entrySlot: group.committer.slot,
+  })
+  const id = 'reused-request-id'
+  const first = await requester.createRecoveryRequest(id)
+  const firstPending = await requester.applyRecovery(await responder.sealGroupInfo(first), id)
+  if (firstPending == null) throw new Error('expected first recovery')
+  const replacement = await requester.createRecoveryRequest(id)
+  const replacementReply = await responder.sealGroupInfo(replacement)
+  await firstPending.onAccepted()
+  expect(await requester.applyRecovery(replacementReply, id)).not.toBeNull()
+})
