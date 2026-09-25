@@ -4,7 +4,7 @@ import { describe, expect, test, vi } from 'vitest'
 import { encodeAppAAD } from '../src/app-aad.js'
 import { createAppLane } from '../src/app-lane.js'
 import type { PendingAppFrame } from '../src/crypto.js'
-import { isAppFrameStorageError } from '../src/crypto.js'
+import { FrameEpochError, isAppFrameStorageError } from '../src/crypto.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { publishCommit } from './fixtures/commits.js'
@@ -116,15 +116,20 @@ describe('durable retained drain', () => {
   test('a pushed position cannot replace the ciphertext fetched at that position', async () => {
     const { lane, store, topicID, append } = retainedLane()
     const ahead = createFakeCrypto({ epoch: 2, localDID: 'alice' })
-    lane.note('chat', topicID, {
-      sequenceID: '000000000001',
-      logPosition: '000000000001',
-      senderDID: 'alice',
+    lane.note(
+      'chat',
       topicID,
-      payload: await ahead.wrap(fromUTF('untrusted push'), {
-        aad: encodeAppAAD({ topicID, intent: 'log' }),
-      }),
-    })
+      {
+        sequenceID: '000000000001',
+        logPosition: '000000000001',
+        senderDID: 'alice',
+        topicID,
+        payload: await ahead.wrap(fromUTF('untrusted push'), {
+          aad: encodeAppAAD({ topicID, intent: 'log' }),
+        }),
+      },
+      new FrameEpochError(2, 1),
+    )
     await new Promise((resolve) => setTimeout(resolve, 0))
     await append('000000000001', 'log')
     await lane.deliver()

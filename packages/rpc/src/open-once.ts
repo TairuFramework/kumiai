@@ -13,19 +13,19 @@ export type OpenOncePathParams<Opened> = {
    * leaving each consumer to decide.
    */
   project: (message: StoredMessage, opened: GroupUnwrapResult) => Opened | undefined
-  /** Called with the raw message BEFORE the open, for anything recorded at the epoch the frame
-   * opens against. */
-  note?: (message: StoredMessage) => void
+  /** Called with the raw message once its open settles: `undefined` when it opened, else the
+   * throw. The throw carries the handle's locked answer ({@link "crypto".FrameEpochError}). */
+  note?: (message: StoredMessage, failure: unknown) => void
   /** A live push that only asks its owner to read the retained log. */
   wakeup?: (message: StoredMessage) => boolean
   /**
    * Consulted when the open fails (any throw in the chain — `unwrap`, `project`, or a listener).
    * Answering `true` withholds the ack: the frame is sealed at an epoch this handle has not reached
    * yet (the window between a commit landing and this peer applying it) and must survive for a later
-   * reconnect. Every other failure acks; `unwrap`'s throw alone can't tell them apart. See
-   * `app-lane.ts`'s `note`/`ahead` for the same distinction against a live push.
+   * reconnect. Every other failure acks. See `app-lane.ts`'s `note` for the same distinction against
+   * a live push.
    */
-  retainOnFailure?: (message: StoredMessage) => boolean
+  retainOnFailure?: (message: StoredMessage, error: unknown) => boolean
 }
 
 /**
@@ -57,26 +57,31 @@ export function createOpenOncePath<Opened>(
         ack()
         return
       }
-      note?.(message)
       // Every outcome is HANDLED — opened, or permanently unopenable — except a failure
       // `retainOnFailure` says is not yet reachable, which flips this false to withhold the ack.
       let handled = true
       opening = opening
         .then(async () => {
-          const opened = await unwrap(message.payload)
+          let opened: GroupUnwrapResult
+          try {
+            opened = await unwrap(message.payload)
+          } catch (error) {
+            note?.(message, error)
+            throw error
+          }
+          note?.(message, undefined)
           const value = project(message, opened)
           if (value === undefined) return
           // Snapshot: a consumer disposing from inside its own delivery must not perturb the
           // fan-out of the frame it is being given.
           for (const listener of [...listeners]) listener(value)
         })
-        .catch(() => {
+        .catch((error: unknown) => {
           // A frame this handle cannot open — another epoch's, another group's, or not a frame at
-          // all — is ordinary on a shared log; one failure must not break the chain. `unwrap`'s
-          // throw can't say which case it is, and a frame sealed one epoch ahead will open once the
-          // handle catches up — acking it here would reclaim a frame never handled. `retainOnFailure`
-          // reads the frame's cleartext epoch to tell that apart; every other failure acks.
-          if (retainOnFailure?.(message) === true) handled = false
+          // all — is ordinary on a shared log; one failure must not break the chain. A frame sealed
+          // ahead will open once the handle catches up, so acking it would reclaim a frame never
+          // handled; `retainOnFailure` reads that from the open's own refusal.
+          if (retainOnFailure?.(message, error) === true) handled = false
         })
         .finally(() => {
           // Acked once the frame's link settles, unless `handled` was flipped false. Acking on

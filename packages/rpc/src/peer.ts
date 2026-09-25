@@ -53,6 +53,7 @@ import {
   type GroupCrypto,
   type GroupMLS,
   type GroupUnwrapResult,
+  isFrameAhead,
   isMissingLedgerEntries,
   type PendingAppFrame,
 } from './crypto.js'
@@ -535,15 +536,6 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   }
 
   /**
-   * The live epoch this peer frames commits at, seeded from the handle, not zero. Not the app
-   * lane's epoch (anchor-bound) but the commit lane's: `frameCommit` refuses to seal bodies once
-   * the live handle has moved past this. Zero is not neutral — the first lane operation (replay
-   * then pull) runs BEFORE this is re-read, so a peer restarted holding a journalled commit would
-   * have its own replay wrongly refused at startup.
-   */
-  let epoch = crypto.epoch()
-
-  /**
    * The app-lane anchor: the per-epoch secret and epoch the app-lane topic derivation is bound
    * to. Seeded at genesis and rotated when an applied Commit changes the roster OR rejoins a
    * member — captured from the port's own post-commit epoch secret, never the recovery secret.
@@ -567,6 +559,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    *
    * Only the epoch is observable outside this scope (see {@link GroupPeer.anchorEpoch}).
    */
+  // Placeholder until `ready` restores or captures the anchor; nothing derives a topic before.
   let anchor: Anchor = {
     secret: new Uint8Array(),
     epoch: crypto.epoch(),
@@ -614,9 +607,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * the next roster change rotates it again. Closing it needs the anchor inside the same durable
    * write as the handle, which this layer cannot reach.
    */
-  const captureAnchor = async (advancedEpoch?: number): Promise<void> => {
-    const { secret } = await crypto.exportSecret(APP_TOPIC_LABEL)
-    anchor = { secret, epoch: advancedEpoch ?? crypto.epoch() }
+  const captureAnchor = async (): Promise<void> => {
+    // Secret and epoch from one export: a pair from two reads can straddle a handle move.
+    const { secret, epoch } = await crypto.exportSecret(APP_TOPIC_LABEL)
+    anchor = { secret, epoch }
     sealError = undefined
     finishSealBarrier()
     await anchorStore?.save(anchor)
@@ -644,10 +638,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * of their own (unlike `app-lane.ts`'s `note`/`ahead`), which is what made acking a transient
    * refusal here a permanent loss.
    */
-  const retainOnFailure = (message: StoredMessage): boolean => {
-    const at = crypto.frameEpoch(message.payload)
-    return at != null && at > crypto.epoch()
-  }
+  const retainOnFailure = (_message: StoredMessage, error: unknown): boolean => isFrameAhead(error)
 
   // Live log pushes carry no authoritative bytes or position. One queued journal-first pull
   // covers a burst; a failed pull retries without waiting for another hub delivery.
@@ -722,7 +713,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         openedFrames.set(payload, { ...opened, senderDID: normalizeDID(senderDID) })
         return payload
       },
-      note: (message) => appLane.note(name, topicID, message),
+      note: (message, failure) => appLane.note(name, topicID, message, failure),
       wakeup: (message) => {
         if (crypto.pending == null) return false
         const aad = crypto.frameAAD(message.payload)
@@ -775,7 +766,6 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   }
 
   const buildEpoch = async (): Promise<void> => {
-    epoch = crypto.epoch()
     const next = new Map<string, ProtocolRuntime>()
     // ONE inbox lane for the whole peer, not one per protocol: the topic does not name a
     // protocol, so every acceptor and directed client opening its own frames is the defect this
@@ -1374,7 +1364,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         ) ||
           rotatesAnyway(advanced))
       ) {
-        await captureAnchor(epochAfter)
+        await captureAnchor()
       }
       return advanced
     } catch (error) {
@@ -1820,16 +1810,26 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * from the epoch the commit is FRAMED at — the epoch every member that can apply it is at, and
    * the one this group stays at until the commit is adopted. A host that adopted first has rotated
    * past it and can seal for nobody, so it is told rather than publishing a blob no member can
-   * open.
+   * open. `framedAt` is null for an external commit, framed at the group's epoch, not this handle's.
    */
-  const frameCommit = async (commit: Uint8Array, bodies: Array<string>): Promise<Uint8Array> => {
-    if (crypto.epoch() !== epoch) {
+  const frameCommit = async (
+    commit: Uint8Array,
+    bodies: Array<string>,
+    framedAt: number | null,
+  ): Promise<{ payload: Uint8Array; epoch: number }> => {
+    const { sealed: sealedEntries, epoch } = await crypto.sealEntries(encodeLedgerEntries(bodies))
+    if (framedAt != null && epoch !== framedAt) {
       throw new Error(
         'commit: the local group has already advanced past the epoch this commit was framed at. A commit is adopted in onAccepted, never before.',
       )
     }
-    const { sealed: sealedEntries } = await crypto.sealEntries(encodeLedgerEntries(bodies))
-    return encodeHandshakeFrame(HANDSHAKE_KIND.commit, encodeCommitFrame(commit, sealedEntries))
+    return {
+      payload: encodeHandshakeFrame(
+        HANDSHAKE_KIND.commit,
+        encodeCommitFrame(commit, sealedEntries),
+      ),
+      epoch,
+    }
   }
 
   /**
@@ -1872,13 +1872,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     // Republishing means RE-SEALING the bodies, sealable only under the host's current epoch —
     // which equals the framed epoch only while `onAccepted` is the sole place the host adopts.
     // Sealing anyway publishes a blob no member can open and wedges the lane for the whole group.
-    if (crypto.epoch() !== entry.epoch) {
+    const handleEpoch = await mls.readEpoch()
+    if (handleEpoch !== entry.epoch) {
       throw new JournalEpochError(
-        `commit replay: the journalled commit was framed at epoch ${entry.epoch}, and this group is now at ${crypto.epoch()}. A commit is adopted in onAccepted, and nowhere else.`,
+        `commit replay: the journalled commit was framed at epoch ${entry.epoch}, and this group is now at ${handleEpoch}. A commit is adopted in onAccepted, and nowhere else.`,
       )
     }
 
-    const payload = await frameCommit(entry.commit, entry.bodies)
+    const { payload } = await frameCommit(entry.commit, entry.bodies, entry.epoch)
     let sequenceID: string
     try {
       sequenceID = (
@@ -2132,8 +2133,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         //    which need not be one the head can ever name.
         const publishID = newPublishID()
         const expectedHead = commitLogHead
-        const framedEpoch = crypto.epoch()
-        const payload = await frameCommit(pending.commit, pending.bodies)
+        const { payload, epoch: framedEpoch } = await frameCommit(
+          pending.commit,
+          pending.bodies,
+          crypto.frameEpoch(pending.commit),
+        )
         await slot.put({
           publishID,
           expectedHead,
@@ -2366,7 +2370,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         // 6. Publish the external commit, compare-and-set at the head: it changes the ratchet
         //    tree, so it races like any commit.
         const publishID = newPublishID()
-        const payload = await frameCommit(pending.commit, [])
+        const { payload } = await frameCommit(pending.commit, [], null)
         assertLive()
         let sequenceID: string
         try {

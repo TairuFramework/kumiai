@@ -54,7 +54,7 @@ export type InboxPathParams = {
   topicID: string
   unwrap: (bytes: Uint8Array) => GroupUnwrapResult | Promise<GroupUnwrapResult>
   /** Forwarded to {@link createOpenOncePath} — see there for what it decides. */
-  retainOnFailure?: (message: StoredMessage) => boolean
+  retainOnFailure?: (message: StoredMessage, error: unknown) => boolean
 }
 
 /**

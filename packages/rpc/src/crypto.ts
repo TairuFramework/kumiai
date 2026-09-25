@@ -188,6 +188,11 @@ export class AppFrameStorageError extends Error {
   }
 }
 
+/** Whether an open refused a frame sealed at an epoch the handle has not reached. */
+export function isFrameAhead(error: unknown): error is FrameEpochError {
+  return error instanceof FrameEpochError && error.frameEpoch > error.handleEpoch
+}
+
 export function isAppFrameStorageError(error: unknown): error is AppFrameStorageError {
   return error instanceof AppFrameStorageError
 }
