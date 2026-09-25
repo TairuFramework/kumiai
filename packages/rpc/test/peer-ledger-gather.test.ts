@@ -222,6 +222,31 @@ describe('the ledger gather does not hand the group to the relay', () => {
     await bob.peer.dispose()
   })
 
+  test('a completed ledger gather releases its dispose finish', async () => {
+    const hub = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x68)
+    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
+    await bob.peer.commit(buildLedgerCommit(bob, ['role:carol=admin']))
+    const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, recovery })
+    const add = Set.prototype.add
+    let gatherFinishes: Set<unknown> | undefined
+    Set.prototype.add = function <TValue>(this: Set<TValue>, value: TValue): Set<TValue> {
+      if (typeof value === 'function' && value.name === 'finishOnDispose') {
+        gatherFinishes = this
+      }
+      return add.call(this, value)
+    }
+    try {
+      expect((await alice.peer.recover()).advanced).toBe(true)
+    } finally {
+      Set.prototype.add = add
+    }
+    expect(gatherFinishes).toBeDefined()
+    await alice.peer.dispose()
+    expect(gatherFinishes?.size).toBe(0)
+    await bob.peer.dispose()
+  })
+
   test('the hub carries a gathered ledger, and never sees a body', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x61)
