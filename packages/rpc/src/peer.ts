@@ -154,6 +154,12 @@ const COMMIT_ATTEMPT_CEILING = 1000
  */
 const SUPPRESSED_REQUESTS_MAX = 1024
 
+const CONFIDENCE_RANK: Record<StrandConfidence, number> = {
+  claimed: 0,
+  observed: 1,
+  authenticated: 2,
+}
+
 /**
  * The MLS half of a peer: the lifecycle port, the durable journal, the restart-adopt hook, and the
  * durable anchor/cursor stores. They arrive together or not at all — each missing piece fails
@@ -957,6 +963,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    */
   let healRequested = false
   let healing = false
+  let bootstrapHealRequested = false
+  let episode: { strongest: StrandConfidence } | null = null
 
   /**
    * Positive evidence this peer is off the group's line, and the sole guard on `commit()`. Set
@@ -1013,6 +1021,20 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   }
   const emitRecovery = (event: RecoveryEvent): void => {
     hostOutbox.push(() => notifyHost(params.onRecovery, event))
+  }
+  const observeStrand = (observation: Omit<StrandObservation, 'groupID'>): void => {
+    bootstrapHealRequested = false
+    if (commitTopicID == null) return
+    if (
+      episode != null &&
+      CONFIDENCE_RANK[observation.confidence] <= CONFIDENCE_RANK[episode.strongest]
+    )
+      return
+    episode = { strongest: observation.confidence }
+    emitStrand({ ...observation, groupID: commitTopicID })
+  }
+  const closeEpisode = (): void => {
+    episode = null
   }
   const flushHostOutbox = (): void => {
     const batch = hostOutbox
@@ -1364,11 +1386,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         if (frame.version !== HANDSHAKE_VERSION) {
           // No digest: the frame's version put its commit bytes out of reach entirely. Settled at
           // `ahead` before the digest is read.
+          const localEpoch = crypto.epoch()
           const unreadable = classifyCommit({
             header: UNKNOWN_FRAME_VERSION,
             sequenceID: position,
             commitDigest: null,
-            state: { localDID, epoch: crypto.epoch(), appliedByEpoch },
+            state: { localDID, epoch: localEpoch, appliedByEpoch },
           })
           reconciledHead = position
           // Do what the classifier said, not what this branch assumes: it answers `ahead` today,
@@ -1376,6 +1399,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           if (unreadable.row === 'ahead') {
             healRequested = true
             stranded = true
+            observeStrand({
+              position,
+              commitDigest: null,
+              localEpoch,
+              claimedEpoch: null,
+              kind: 'unknown-version',
+              confidence: 'claimed',
+            })
           }
           continue
         }
@@ -1394,17 +1425,26 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           // version fails BEFORE the commit bytes are extracted, so there is no next frame to
           // heal from — dropping it would step over the group's whole future. To the classifier.
           if (isUnsupportedCommitFrameVersion(error)) {
+            const localEpoch = crypto.epoch()
             const unreadable = classifyCommit({
               header: UNKNOWN_FRAME_VERSION,
               sequenceID: position,
               commitDigest: null,
-              state: { localDID, epoch: crypto.epoch(), appliedByEpoch },
+              state: { localDID, epoch: localEpoch, appliedByEpoch },
             })
             reconciledHead = position
             // The classifier's answer, not this branch's assumption — as above.
             if (unreadable.row === 'ahead') {
               healRequested = true
               stranded = true
+              observeStrand({
+                position,
+                commitDigest: null,
+                localEpoch,
+                claimedEpoch: null,
+                kind: 'unknown-version',
+                confidence: 'claimed',
+              })
             }
             continue
           }
@@ -1430,11 +1470,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           readHeader?.committerDID != null
             ? { ...readHeader, committerDID: normalizeDID(readHeader.committerDID) }
             : readHeader
+        const localEpoch = crypto.epoch()
         const disposition = classifyCommit({
           header,
           sequenceID: position,
           commitDigest,
-          state: { localDID, epoch: crypto.epoch(), appliedByEpoch },
+          state: { localDID, epoch: localEpoch, appliedByEpoch },
         })
 
         if (disposition.row === 'own-unmerged') {
@@ -1443,6 +1484,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           // pending commit, never processes one), so the drain stops here and the peer heals.
           healRequested = true
           stranded = true
+          observeStrand({
+            position,
+            commitDigest,
+            localEpoch,
+            claimedEpoch: header?.epoch ?? null,
+            kind: 'own-unmerged',
+            confidence: 'authenticated',
+          })
           return advancedEpoch
         }
         if (disposition.row === 'ahead') {
@@ -1451,6 +1500,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           reconciledHead = position
           healRequested = true
           stranded = true
+          observeStrand({
+            position,
+            commitDigest,
+            localEpoch,
+            claimedEpoch: header?.epoch ?? null,
+            kind: 'ahead',
+            confidence: 'claimed',
+          })
           continue
         }
         if (disposition.row === 'history') {
@@ -1467,6 +1524,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           if (disposition.branch === 'losing') {
             healRequested = true
             stranded = true
+            observeStrand({
+              position,
+              commitDigest,
+              localEpoch,
+              claimedEpoch: header?.epoch ?? null,
+              kind: 'fork-losing',
+              confidence: 'observed',
+            })
           }
           continue
         }

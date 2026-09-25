@@ -153,7 +153,7 @@ Place the types where the other host-callback types live (next to `AppWindowPrun
 
 **Interfaces — Consumes:** `emitStrand`, types from Task 2.
 
-- [ ] **Step 1: Failing tests** (spec "Tests" list, strand part):
+- [x] **Step 1: Failing tests** (spec "Tests" list, strand part):
   - each kind once with mapped `confidence`, `claimedEpoch`, `commitDigest`, `groupID` = the peer's
     commit topic ID, `position` = the frame's sequenceID, `localEpoch`;
   - one strand with several `ahead` frames across two pulls: one observation;
@@ -163,8 +163,8 @@ Place the types where the other host-callback types live (next to `AppWindowPrun
   - callbacks run after the walk's `runSerial` op settled: record `stranded`/cursor state inside the
     callback via an exposed getter the tests already use, or assert ordering with a flag set by the
     test after awaiting the lane op.
-- [ ] **Step 2:** FAIL.
-- [ ] **Step 3: Implement.**
+- [x] **Step 2:** FAIL.
+- [x] **Step 3: Implement.**
   ```ts
   const CONFIDENCE_RANK: Record<StrandConfidence, number> = { claimed: 0, observed: 1, authenticated: 2 }
   let episode: { strongest: StrandConfidence } | null = null
@@ -186,8 +186,8 @@ Place the types where the other host-callback types live (next to `AppWindowPrun
   `classifyCommit`) for `localEpoch`; adjust `observeStrand` to take it explicitly if simpler.
   A strand transition also clears `bootstrapHealRequested` (introduced in Task 6; add the variable now
   as `let bootstrapHealRequested = false` so this call site is final).
-- [ ] **Step 4:** PASS; all rpc tests PASS.
-- [ ] **Step 5:** Lint, commit `feat(rpc): report commit strand episodes with evidence confidence`.
+- [x] **Step 4:** PASS; all rpc tests PASS.
+- [x] **Step 5:** Lint, commit `feat(rpc): report commit strand episodes with evidence confidence`.
 
 ### Task 4: Typed rendezvous outcome
 
