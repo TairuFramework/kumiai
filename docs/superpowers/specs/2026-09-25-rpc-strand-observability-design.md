@@ -119,7 +119,9 @@ State: `episode: { strongest: StrandConfidence } | null`.
 A new internal `runRecovery(trigger)` owns every attempt. `recover()` calls it with `'consumer'`;
 `healIfRequested()` calls it with `'automatic'`. The existing `healing` flag is replaced by:
 
-- `activeRecovery: Promise<void> | null` — the attempt in flight, from call to settlement.
+- `activeRecovery: Promise<{ advanced: boolean }> | null` — the attempt in flight, from call to
+  settlement. It resolves with the attempt's `advanced` or rejects with its error; joiners get exactly
+  that. The `reenact` drain stays separate (see below), so the first caller to drain wins.
 - `recoveryGeneration: number` — incremented when an attempt emits `succeeded`.
 
 **Installation.** `runRecovery` installs `activeRecovery` **synchronously, before its first `await`**
@@ -127,8 +129,9 @@ A new internal `runRecovery(trigger)` owns every attempt. `recover()` calls it w
 consumer call, cannot both start attempts. It clears it in `finally`, **by identity** (only if it still
 holds this attempt's promise).
 
-**Join.** A call made while `activeRecovery` is non-null awaits it. It emits no events and starts
-nothing; the trigger stays the one that started the attempt.
+**Join.** A call made while `activeRecovery` is non-null awaits it and returns its `advanced` (or
+rethrows its error). It emits no events and starts nothing; the trigger stays the one that started the
+attempt.
 
 **Recheck.** A new attempt records `recoveryGeneration` on entry. When its body finally runs inside
 `runSerial`, if the generation has moved **and** the peer is neither `stranded` nor has
@@ -191,12 +194,30 @@ replacing the bare `inFlightEntries` use for this case. A snapshot from an attem
 **not** land (lost race, no responder) is never finalized this way; it stays the retry snapshot as
 today.
 
+**One snapshot owner across retries.** The snapshot of the peer's pre-rejoin entries is taken once and
+travels until it is finalized:
+
+- A new attempt's step 5 uses `awaitingBootstrap.entries` (or the existing `inFlightEntries` retry
+  snapshot) when one exists, and never re-snapshots the empty or partial ledger a failed bootstrap left.
+- If that new attempt's rejoin lands and bootstraps, it filters **that** snapshot at step 9, clears
+  `awaitingBootstrap`, and emits `succeeded` for itself. The superseded attempt never gets
+  `bootstrapped`.
+- If the new attempt's rejoin lands and bootstrap fails again, `awaitingBootstrap` keeps the original
+  `entries` and takes the new `attemptID` and `trigger`. A later delayed bootstrap names the newest
+  attempt.
+
+**Heal request raised by a failed bootstrap.** A failed bootstrap sets `healRequested` today. Track its
+origin: `bootstrapHealRequested = true` alongside it. A later strand transition clears
+`bootstrapHealRequested` (the request is now the strand's). Finalization clears `healRequested` only if
+`bootstrapHealRequested` is still true, then clears both, so a completed delayed bootstrap does not
+trigger an unneeded rejoin, and a strand raised in the same operation still heals.
+
 When any later lane operation's `ensureLedger` succeeds while `awaitingBootstrap` is set (`replay()`,
 `commit()`, a wakeup, or a new recovery attempt's step 0), in that same mutex hold:
 
 1. filter `entries` against the now-complete ledger, by membership, as step 9 does;
 2. append the difference to `pendingReenact`;
-3. clear `awaitingBootstrap`;
+3. clear `awaitingBootstrap`, and the bootstrap-origin heal request as above;
 4. increment `recoveryGeneration`, close the episode;
 5. emit `bootstrapped` with the stored `attemptID` and `trigger`.
 
@@ -204,16 +225,22 @@ Exactly once: steps 1–5 run in one mutex hold and step 3 prevents a second pas
 
 ## Observer safety
 
-A shared helper `notifyHost(callback, value)` in `packages/rpc/src/`:
+**Outbox, flushed after the lane operation.** Strand and recovery events are appended to a per-peer
+`hostOutbox` while produced. `runSerial` flushes the outbox after its task settles and its tail is
+released (in the task's `finally`, after the mutex hand-off), so no callback ever runs while the commit
+mutex is held or between two awaits of the operation that produced it. Recovery events produced outside
+`runSerial` (none today) would flush immediately.
 
-- schedules the call with `queueMicrotask`, so it never runs inside the walk or the attempt body;
+The flush calls each entry through a shared helper `notifyHost(callback, value)` in
+`packages/rpc/src/`, which:
+
 - catches a synchronous throw;
 - attaches a no-op rejection handler to a returned thenable;
 - never awaits.
 
-Guarantee, stated precisely: a throwing or rejecting observer changes nothing. An observer that calls
-peer methods (for example `dispose()`) acts after the lane step that produced the event has returned,
-like any other host call; it cannot re-enter the step itself. Events are emitted in the order produced.
+Guarantee: a throwing or rejecting observer changes nothing. An observer that calls peer methods (for
+example `dispose()` or `recover()`) acts only after the operation that produced the event has settled,
+like any other host call; it cannot affect that operation. Events are delivered in production order.
 
 Differs from `reportPrunedWindow` (`app-lane.ts:196-209`), which awaits its callback: strand and
 recovery events are produced inside the non-reentrant commit mutex. `onAppWindowPruned` is unchanged.
@@ -262,7 +289,13 @@ Run the full repo test and `test:types` gates and the integration suite.
 - Queued `recover()` behind a lane operation, recovery succeeded meanwhile: `{ advanced: true }`, no new
   attempt, no events.
 - Throwing, rejecting, and `dispose()`-calling observers: walk outcome, cursor, `stranded` and recovery
-  result unchanged; callbacks run after the step returns.
+  result unchanged. The `dispose()` case must place a real `await` between the event's production and
+  the rest of the operation (e.g. a hub fetch that resolves on a later tick) and assert the operation
+  still completes as without the observer.
+- Joined `recover()` callers get the shared attempt's `advanced`, or its rejection.
+- Failed bootstrap, then a second `recover()` whose step-0 gather fails and later bootstrap succeeds:
+  owed entries returned exactly once; only the newest attempt gets a terminal or `bootstrapped` event.
+- Delayed bootstrap completing during a wakeup: no extra rejoin runs afterwards.
 
 ## Release
 
