@@ -17,7 +17,7 @@ already aborted resolves `[]` without sending, including while the peer waits fo
 group-rpc never imports MLS. It owns transport and orchestration; the consumer supplies the crypto
 half through two ports:
 
-- **`GroupCrypto`** — the epoch number, `exportSecret(label, length?)` for as many epoch-bound,
+- **`GroupCrypto`** — a synchronous epoch hint, `exportSecret(label, length?)` for as many epoch-bound,
   domain-separated exported secrets as there are labels, `wrap`/`unwrap` for app traffic,
   `frameEpoch` and `frameAAD` to read a sealed frame's cleartext metadata, optional `pending`
   storage for durable app delivery, and `sealEntries`/`openEntries` for a commit's ledger-entry blob.
@@ -38,19 +38,25 @@ quiet — while an evicted member can still name and read the app topic, which d
 hand-rolled seal keyed off anything but the epoch secret round-trips, throws nothing, and lets a
 removed member open the ledger-entry blobs of commits enacted after its removal.
 
-Three constraints a port implementation is most likely to get wrong, all of which the suite pins:
+Four constraints a port implementation is most likely to get wrong, all of which the suite pins:
 
+- **`epoch()` is a hint; decisions use the epoch a result reports.** A host's published epoch can
+  lag its handle or, after a rolled-back transaction, run ahead of it. So every port result that
+  acted on the handle carries the epoch it acted at, read under the host's handle lock:
+  `exportSecret` returns `{ secret, epoch }`, `sealEntries` returns `{ sealed, epoch }`, `unwrap`
+  returns `epoch`, `processCommit` returns `{ advanced, epochBefore, epochAfter }`, and
+  `GroupMLS.readEpoch()` answers when no operation runs. The suite runs every clause with the hint one
+  behind and one ahead.
 - **`unwrap` throwing is ordinary control flow**, not an error: it is how a retained frame says "not
-  my epoch". Every reader here walks logs full of frames from epochs it does not hold. An
-  implementation that opens strictly at the current epoch is a correct implementation of the port —
-  a real handle's few epochs of retained key material are spent by epoch *transitions* rather than by
-  time, so nothing may depend on the window.
+  my epoch". A readable frame at another epoch must throw `FrameEpochError { frameEpoch,
+  handleEpoch }` before anything is decrypted; the lane retains a frame only on that error's
+  "ahead" answer and drops it only on its "past" one.
 - **`readCommitHeader` returning `null` means "these bytes are not a Commit at all"** — never "a
   Commit I could not read". The lane files `null` as poison and steps over it, so a port answering
   `null` for every commit framed away from its own epoch makes a peer that fell behind read the
   group's entire future as garbage, walk to the end of the log, and report itself fully reconciled at
   a dead epoch.
-- **`processCommit` returns `{ advanced: false }` for anything it cannot apply, and throws for
+- **`processCommit` returns `advanced: false` for anything it cannot apply, and throws for
   exactly one outcome**: a Commit it should apply whose named ledger entries will not resolve from
   the Commit's own frame. A throw makes the lane re-read the frame, so a port that throws on a commit
   it was never in a position to apply wedges the lane there forever — a late joiner would wedge on
