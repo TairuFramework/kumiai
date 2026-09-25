@@ -1108,6 +1108,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   const recoveryWaiters = new Map<string, (outcome: RendezvousOutcome) => void>()
   const recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>()
   const pendingReplies = new Map<string, ReturnType<typeof setTimeout>>()
+  const inFlightBootstraps = new Set<Promise<void>>()
   const suppressedRequests = new Set<string>()
   /**
    * Ledger-gather waiters, keyed by requestID. Called for EVERY reply, not just the first: a
@@ -1973,10 +1974,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             if (settled || disposed) return
             const bootstrap = port.bootstrapLedger(tokens)
             bootstraps.add(bootstrap)
+            inFlightBootstraps.add(bootstrap)
             try {
               await bootstrap
             } finally {
               bootstraps.delete(bootstrap)
+              inFlightBootstraps.delete(bootstrap)
             }
             finish(true)
           } catch {
@@ -2224,7 +2227,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     }
     const attemptID = newPublishID()
     const base = { groupID: commits, attemptID, trigger }
-    emitRecovery({ ...base, phase: 'started' })
+    queueMicrotask(() => notifyHost(params.onRecovery, { ...base, phase: 'started' }))
     const failed = (reason: RecoveryFailureReason): { advanced: false } => {
       emitRecovery({ ...base, phase: 'failed', reason })
       return { advanced: false }
@@ -2552,6 +2555,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       disposePromise = (async () => {
         // Tear down even a peer whose init failed — it still holds a hub drain.
         await settled
+        await Promise.allSettled([...inFlightBootstraps])
         commitUnsubscribe?.()
         rendezvousUnsubscribe?.()
         // Resolve any in-flight recovery rendezvous FIRST, before clearing its timers: a

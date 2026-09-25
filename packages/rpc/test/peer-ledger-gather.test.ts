@@ -167,6 +167,47 @@ describe('the ledger gather does not hand the group to the relay', () => {
     await bob.peer.dispose()
   })
 
+  test('dispose waits for an in-flight ledger bootstrap and its notices', async () => {
+    const hub = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x6a)
+    const timing = { timeoutMs: 5000, getDelayMs: () => 0, deadlineMs: 10000 }
+    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery: timing })
+    await bob.peer.commit(buildLedgerCommit(bob, ['role:carol=admin']))
+    const events: Array<RecoveryEvent> = []
+    const alice = makeMLSPeer(hub, 'alice', rs, {
+      epoch: 1,
+      members,
+      recovery: timing,
+      onRecovery: (event) => {
+        events.push(event)
+      },
+    })
+    let releasePersist: () => void = () => {}
+    const persistGate = new Promise<void>((resolve) => {
+      releasePersist = resolve
+    })
+    const bootstrap = alice.mls.bootstrapLedger.bind(alice.mls)
+    vi.spyOn(alice.mls, 'bootstrapLedger').mockImplementation(async (tokens) => {
+      await persistGate
+      await bootstrap(tokens)
+    })
+    const attempt = alice.peer.recover().catch((error: unknown) => error)
+    await vi.waitFor(() => expect(alice.mls.bootstrapLedger).toHaveBeenCalled())
+    let disposed = false
+    const disposal = alice.peer.dispose().then(() => {
+      disposed = true
+    })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(disposed).toBe(false)
+    releasePersist()
+    await disposal
+    const atDispose = [...events]
+    expect(await attempt).toBeInstanceOf(PeerDisposedError)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(events).toEqual(atDispose)
+    await bob.peer.dispose()
+  })
+
   test('dispose during ledger request creation settles recovery without a gather timer', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x67)

@@ -226,6 +226,70 @@ describe('recovery lifecycle', () => {
     expect(events[1]).toMatchObject({ reason: 'disposed' })
   })
 
+  test('started reaches the host while rendezvous is still pending', async () => {
+    const hub = new FakeHub()
+    const rs = secret(0xcf)
+    const events: Array<RecoveryEvent> = []
+    const bob = makeMLSPeer(hub, 'bob', rs, {
+      members,
+      recovery: { timeoutMs: 5000, deadlineMs: 10000 },
+      onRecovery: (event) => {
+        events.push(event)
+      },
+    })
+    const attempt = bob.peer.recover()
+    await vi.waitFor(() =>
+      expect(hub.published.some((m) => m.topicID === rendezvousTopic(rs))).toBe(true),
+    )
+    await vi.waitFor(() => expect(eventsOf(events)).toEqual(['started']))
+    await bob.peer.dispose()
+    await expect(attempt).rejects.toBeInstanceOf(PeerDisposedError)
+    expect(eventsOf(events)).toEqual(['started', 'failed'])
+  })
+
+  test('dispose after accepted recovery publish prevents adoption', async () => {
+    const hub = new FakeHub()
+    const rs = secret(0xd0)
+    const carol = makeMLSPeer(hub, 'carol', rs, {
+      epoch: 2,
+      members,
+      recovery: { getDelayMs: () => 0 },
+    })
+    const bob = makeMLSPeer(hub, 'bob', rs, {
+      members,
+      recovery: { timeoutMs: 5000, deadlineMs: 10000 },
+    })
+    const accepted = hub.publish.bind(hub)
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let published = false
+    hub.publish = async (params) => {
+      const result = await accepted(params)
+      if (
+        params.topicID === commitTopic(rs) &&
+        params.senderDID === 'bob' &&
+        params.retain === 'log'
+      ) {
+        published = true
+        await gate
+      }
+      return result
+    }
+    const readHeader = vi.spyOn(bob.mls, 'readCommitHeader')
+    const attempt = bob.peer.recover().catch((error: unknown) => error)
+    await vi.waitFor(() => expect(published).toBe(true))
+    const readsAtPublish = readHeader.mock.calls.length
+    const disposal = bob.peer.dispose()
+    release()
+    await disposal
+    expect(await attempt).toBeInstanceOf(PeerDisposedError)
+    expect(readHeader).toHaveBeenCalledTimes(readsAtPublish)
+    expect(bob.mls.epoch()).toBe(1)
+    await carol.peer.dispose()
+  })
+
   test('dispose settles a ledger gather and clears its deadline timer', async () => {
     const hub = new FakeHub()
     const rs = secret(0xce)
@@ -414,7 +478,7 @@ describe('recovery lifecycle', () => {
     await carol.peer.dispose()
   })
 
-  test('observer disposal runs after the attempt, including its awaited rendezvous', async () => {
+  test('started observer may dispose an attempt during rendezvous', async () => {
     const hub = new FakeHub()
     const rs = secret(0xbc)
     const carol = makeMLSPeer(hub, 'carol', rs, {
@@ -432,8 +496,9 @@ describe('recovery lifecycle', () => {
         if (event.phase === 'started') void bob.peer.dispose()
       },
     })
-    expect((await bob.peer.recover()).advanced).toBe(true)
-    expect(eventsOf(events)).toEqual(['started', 'succeeded'])
+    await expect(bob.peer.recover()).rejects.toBeInstanceOf(PeerDisposedError)
+    expect(eventsOf(events)).toEqual(['started', 'failed'])
+    expect(events[1]).toMatchObject({ reason: 'disposed' })
     await bob.peer.dispose()
     await carol.peer.dispose()
   })
