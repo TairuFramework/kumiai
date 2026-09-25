@@ -297,14 +297,14 @@ type RendezvousOutcome =
 - Test: `packages/rpc/test/peer-delayed-bootstrap.test.ts` (create). Start from the existing test at
   `peer-recover-lane.test.ts` that shows a later `replay()` completing a failed bootstrap.
 
-- [ ] **Step 1: Failing tests:** failed bootstrap → `replay()` with a responder → `bootstrapped` with the
+- [x] **Step 1: Failing tests:** failed bootstrap → `replay()` with a responder → `bootstrapped` with the
   same `attemptID`, owed entries out of `replay()` exactly once; failed bootstrap → second `recover()`
   whose step-0 gather fails and whose own rejoin later bootstraps → entries exactly once, only the newest
   attempt gets events, the first never gets `bootstrapped`; delayed bootstrap during a wakeup → no extra
   rejoin afterwards (count rendezvous requests); a strand raised in the same operation as a delayed
   bootstrap still heals.
-- [ ] **Step 2:** FAIL.
-- [ ] **Step 3: Implement.**
+- [x] **Step 2:** FAIL.
+- [x] **Step 3: Implement.**
   ```ts
   let awaitingBootstrap: { attemptID: string; trigger: RecoveryTrigger; entries: Array<string> } | null = null
   const finalizeBootstrap = async (port: GroupMLS): Promise<void> => {
@@ -331,8 +331,8 @@ type RendezvousOutcome =
   - Every other site where `ensureLedger(...)` returns `true` inside `runSerial` (replay, commit, wakeup,
     recover step 0 — find them with grep): `if (await ensureLedger(d)) await finalizeBootstrap(mls)`.
     Ensure it runs at most once per op and inside the same mutex hold.
-- [ ] **Step 4:** PASS; all rpc tests PASS.
-- [ ] **Step 5:** Lint, commit `fix(rpc): finalize owed re-enact entries when bootstrap completes late`.
+- [x] **Step 4:** PASS; all rpc tests PASS.
+- [x] **Step 5:** Lint, commit `fix(rpc): finalize owed re-enact entries when bootstrap completes late`.
 
 ### Task 7: Docs, release intent, full gate
 

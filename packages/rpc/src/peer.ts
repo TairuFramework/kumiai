@@ -1014,6 +1014,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * entries rather than snapshotting an empty ledger.
    */
   let inFlightEntries: Array<string> | null = null
+  let awaitingBootstrap: {
+    attemptID: string
+    trigger: RecoveryTrigger
+    entries: Array<string>
+  } | null = null
 
   /**
    * Entries a heal decided must be re-enacted, waiting for a lane operation with a return value —
@@ -1654,7 +1659,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       // A wakeup is a lane operation: step 0, the ledger invariant, then the pull. No return
       // value, so anything found is stashed for the next call that has one.
       const replayed = await replayJournal()
-      await ensureLedger(Date.now() + recoveryTimeoutMs)
+      if (mls != null && (await ensureLedger(Date.now() + recoveryTimeoutMs))) {
+        await finalizeBootstrap(mls)
+      }
       const pulled = await pullCommits()
       if (replayed || pulled) await rebuildEpoch()
     })
@@ -1718,7 +1725,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       // A peer restored with an incomplete ledger was killed between rejoining and bootstrapping.
       // The invariant finds it here and at every later lane operation, with no memory of how it
       // got there.
-      await ensureLedger(Date.now() + recoveryTimeoutMs)
+      if (await ensureLedger(Date.now() + recoveryTimeoutMs)) await finalizeBootstrap(mls)
       await pullCommits()
     }).catch(() => {
       // a failed seed leaves the cursor put; the next wakeup replays and pulls again
@@ -1852,6 +1859,25 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     }
   }
 
+  const finalizeBootstrap = async (port: GroupMLS): Promise<void> => {
+    if (awaitingBootstrap == null) return
+    const { attemptID, trigger, entries } = awaitingBootstrap
+    const held = new Set(await port.getLedger())
+    const owed = entries.filter((token) => !held.has(token))
+    if (owed.length > 0) pendingReenact = [...pendingReenact, ...owed]
+    awaitingBootstrap = null
+    inFlightEntries = null
+    if (bootstrapHealRequested) {
+      healRequested = false
+      bootstrapHealRequested = false
+    }
+    recoveryGeneration += 1
+    closeEpisode()
+    if (commitTopicID != null) {
+      emitRecovery({ phase: 'bootstrapped', groupID: commitTopicID, attemptID, trigger })
+    }
+  }
+
   /**
    * The ledger completeness invariant, checked before every lane operation and repaired on the
    * spot. Purely local (the head folded from the handle's entries against the authenticated head
@@ -1955,6 +1981,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           'commit: the ledger is incomplete, so this handle rejoined the group and its bootstrap has not completed — its roster has reset, and a commit built now would be judged against a group whose admins it cannot see. It must finish bootstrapping its ledger before it can commit again.',
         )
       }
+      await finalizeBootstrap(mls)
 
       const deadline = Date.now() + commitDeadlineMs
       for (let attempt = 0; attempt < COMMIT_ATTEMPT_CEILING; attempt++) {
@@ -2067,7 +2094,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     assertLive()
     return runSerial(async () => {
       if (await replayJournal()) await rebuildEpoch()
-      await ensureLedger(Date.now() + recoveryTimeoutMs)
+      if (mls != null && (await ensureLedger(Date.now() + recoveryTimeoutMs))) {
+        await finalizeBootstrap(mls)
+      }
       return takeLost()
     })
   }
@@ -2158,6 +2187,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       //    commit whose fate it never learned settles that first, and may find nothing left to heal.
       if (await replayJournal()) await rebuildEpoch()
       assertLive()
+      if (await ensureLedger(Date.now() + recoveryTimeoutMs)) await finalizeBootstrap(port)
+      assertLive()
 
       const deadline = Date.now() + recoveryDeadlineMs
       while (Date.now() < deadline) {
@@ -2201,7 +2232,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         // 5. The entries this peer holds, snapshotted BEFORE the rejoined handle replaces them —
         //    the last moment they can be read. Kept across a failed attempt, so a retry filters
         //    the same entries rather than snapshotting the empty ledger a failed bootstrap left.
-        if (inFlightEntries == null) inFlightEntries = await port.getLedger()
+        if (inFlightEntries == null) {
+          inFlightEntries = awaitingBootstrap?.entries ?? (await port.getLedger())
+        }
         assertLive()
         const inFlight = inFlightEntries
 
@@ -2272,7 +2305,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         //    rejected. Failure here is a persistent degraded state, NOT a heal.
         if (!(await ensureLedger(deadline))) {
           assertLive()
+          awaitingBootstrap = { attemptID, trigger, entries: inFlight }
           healRequested = true
+          bootstrapHealRequested = true
           return failed('bootstrap-failed')
         }
         assertLive()
@@ -2286,6 +2321,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         assertLive()
         const reenact = inFlight.filter((token) => !held.has(token))
         inFlightEntries = null
+        awaitingBootstrap = null
+        bootstrapHealRequested = false
         if (reenact.length > 0) pendingReenact = [...pendingReenact, ...reenact]
         recoveryGeneration += 1
         closeEpisode()
