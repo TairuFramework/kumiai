@@ -82,7 +82,16 @@ export type GroupMLSParams = {
   identity: OwnIdentity
   /** The slot the handle was built with. See {@link LedgerEntrySlot}. */
   entrySlot: LedgerEntrySlot
+  /**
+   * The group's recovery secret, read under `access.read`. Defaults to
+   * {@link deriveRecoverySecret}. A host whose groups already use another derivation passes it
+   * here for every restore of that group: the commit and rendezvous topics follow the choice.
+   */
+  recoverySecret?: (handle: GroupHandle) => Promise<Uint8Array>
 }
+
+/** Below this a topic secret is guessable; the default derives 32 bytes. */
+const MIN_RECOVERY_SECRET_BYTES = 16
 
 /** The private half of a recovery request, retained until the reply opens or the TTL passes. */
 type PendingRequest = {
@@ -363,7 +372,13 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       // Epoch-INDEPENDENT by construction: the genesis anchor never changes, so a peer
       // stranded at any epoch derives the same rendezvous. See the class doc — this is not
       // a confidential value.
-      return await access.read(deriveRecoverySecret)
+      const secret = await access.read(params.recoverySecret ?? deriveRecoverySecret)
+      if (!(secret instanceof Uint8Array) || secret.length < MIN_RECOVERY_SECRET_BYTES) {
+        throw new Error(
+          `recoverySecret: expected at least ${MIN_RECOVERY_SECRET_BYTES} bytes from the host`,
+        )
+      }
+      return secret
     },
   }
 }
