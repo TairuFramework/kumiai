@@ -145,7 +145,7 @@ authority for every behaviour below.
 - Produces: `ProtocolSurface.gather` config type `{ param } & GatherOptions<T['Result']>`;
   `InternalSurface.gather` config `{ param?: unknown } & GatherOptions`.
 
-- [ ] **Step 1: Write failing tests.**
+- [x] **Step 1: Write failing tests.**
   - Type test in `protocol-surface-types.test.ts`: inside the existing typed-surface block, add
     ```ts
     await chat.gather('chat/ask', {
@@ -171,13 +171,13 @@ authority for every behaviour below.
     - after `ready` resolves normally, the signal has no abort listener left (counting spies as in
       Task 1).
 
-- [ ] **Step 2: Run to verify fail**
+- [x] **Step 2: Run to verify fail**
 
   Run: `pnpm --filter @kumiai/rpc exec vitest run test/gather-stream.test.ts` and
   `pnpm --filter @kumiai/rpc run test:types`
   Expected: FAIL.
 
-- [ ] **Step 3: Implement.**
+- [x] **Step 3: Implement.**
   - `ProtocolSurface.gather`: config becomes `{ param: T['Param'] } & GatherOptions<T['Result']>` (and
     the `never` variant `{ param?: never } & GatherOptions<T['Result']>`); result unchanged.
   - Forwarding at ~816: pass `quorum`, `timeoutMs`, `onReply`, `signal`. Cast `onReply` only if the
@@ -213,12 +213,12 @@ authority for every behaviour below.
     ```
     A `ready` rejection propagates out of the race unchanged.
 
-- [ ] **Step 4: Run to verify pass**
+- [x] **Step 4: Run to verify pass**
 
   Run: `pnpm --filter @kumiai/rpc exec vitest run` and `pnpm --filter @kumiai/rpc run test:types`
   Expected: PASS.
 
-- [ ] **Step 5: Lint and commit**
+- [x] **Step 5: Lint and commit**
 
   ```bash
   rtk proxy pnpm run lint

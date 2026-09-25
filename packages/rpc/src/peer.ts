@@ -303,8 +303,8 @@ type ProtocolSurfaceOf<
   gather: <P extends keyof Requests & string, T extends Requests[P] = Requests[P]>(
     prc: P,
     ...args: T['Param'] extends never
-      ? [config?: { param?: never } & GatherOptions]
-      : [config: { param: T['Param'] } & GatherOptions]
+      ? [config?: { param?: never } & GatherOptions<T['Result']>]
+      : [config: { param: T['Param'] } & GatherOptions<T['Result']>]
   ) => Promise<Array<GatheredReply<T['Result']>>>
   to: (memberDID: string) => Promise<Client<Protocol>>
 }
@@ -817,6 +817,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         runtime.client.gather(prc, config?.param, {
           quorum: config?.quorum,
           timeoutMs: config?.timeoutMs,
+          onReply: config?.onReply,
+          signal: config?.signal,
         }),
       to: async (memberDID) => {
         // Normalized ONCE, at the ingress: the cache key, the topic derivation and the
@@ -2184,6 +2186,23 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     assertLive()
     return fn()
   }
+  const readyOrAbort = async (signal: AbortSignal | undefined): Promise<'ready' | 'aborted'> => {
+    if (signal == null) {
+      await ready
+      return 'ready'
+    }
+    if (signal.aborted) return 'aborted'
+    let onAbort: (() => void) | undefined
+    const aborted = new Promise<'aborted'>((resolve) => {
+      onAbort = () => resolve('aborted')
+      signal.addEventListener('abort', onAbort, { once: true })
+    })
+    try {
+      return await Promise.race([ready.then(() => 'ready' as const), aborted])
+    } finally {
+      if (onAbort != null) signal.removeEventListener('abort', onAbort)
+    }
+  }
 
   // Hoisted and explicitly typed (rather than inlined in the return object below) so the
   // checker can match its type against `GroupPeer<Protocols>['protocol']` by identity: inlined,
@@ -2195,7 +2214,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     return {
       dispatch: (prc, config) => withReady(() => surfaceFor(key).dispatch(prc, config)),
       request: (prc, config) => withReady(() => surfaceFor(key).request(prc, config)),
-      gather: (prc, config) => withReady(() => surfaceFor(key).gather(prc, config)),
+      gather: async (prc, config) => {
+        const outcome = await readyOrAbort(config?.signal)
+        assertLive()
+        if (outcome === 'aborted') return []
+        return surfaceFor(key).gather(prc, config)
+      },
       to: (memberDID) => withReady(() => surfaceFor(key).to(memberDID)),
     } as ProtocolSurface<Protocols[typeof name]>
   }
