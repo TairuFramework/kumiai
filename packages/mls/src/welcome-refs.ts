@@ -10,7 +10,7 @@ import { decode, mlsMessageDecoder, type Welcome, wireformats } from 'ts-mls'
  * Accepts framed `MLSMessage(Welcome)` bytes or a pre-decoded ts-mls Welcome, exactly as
  * `processWelcome` does — the same value reaches both.
  */
-export function welcomeKeyPackageRefs(welcome: Uint8Array | unknown): Array<string> {
+export function welcomeKeyPackageRefs(welcome: Uint8Array | Welcome): Array<string> {
   let resolved: unknown = welcome
   if (welcome instanceof Uint8Array) {
     const decoded = decode(mlsMessageDecoder, welcome)

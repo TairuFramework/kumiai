@@ -1,5 +1,5 @@
 import { randomIdentity } from '@kokuin/token'
-import { decode, mlsMessageDecoder, wireformats } from 'ts-mls'
+import { decode, mlsMessageDecoder, type Welcome, wireformats } from 'ts-mls'
 import { describe, expect, test } from 'vitest'
 
 import { commitInvite, createGroup, createInvite, createKeyPackageBundle } from '../src/group.js'
@@ -40,6 +40,8 @@ describe('welcomeKeyPackageRefs', () => {
   })
 
   test('rejects an object that is not a Welcome', () => {
-    expect(() => welcomeKeyPackageRefs({ nope: true })).toThrow(/not a Welcome/)
+    expect(() => welcomeKeyPackageRefs({ nope: true } as unknown as Welcome)).toThrow(
+      /not a Welcome/,
+    )
   })
 })

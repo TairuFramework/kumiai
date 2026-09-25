@@ -9,6 +9,7 @@ import {
   type IncomingMessageAction,
   type IncomingMessageCallback,
   type MlsContext,
+  type MlsFramedMessage,
   mlsExporter,
   mlsMessageDecoder,
   mlsMessageEncoder,
@@ -1297,15 +1298,14 @@ export class GroupHandle {
   /**
    * Process a received MLS message (Commit, Proposal, or application). Accepts
    * wire-form bytes (preferred, e.g. from commitInvite/removeMember) or a pre-decoded
-   * ts-mls object (legacy). Param widens to `unknown` because `Uint8Array | unknown`
-   * collapses to `unknown`; the runtime `instanceof` selects the decode path.
+   * ts-mls framed message (legacy). The runtime `instanceof` selects the decode path.
    * `persist` covers accepted commits and proposals, not application messages or their
    * receive ratchet. It runs under this handle's mutex and must not call back into it.
    * It must write atomically: rejection means nothing was stored. Host callbacks run
    * after successful persist; a callback throw does not undo an advance.
    */
   async processMessage(
-    message: Uint8Array | unknown,
+    message: Uint8Array | MlsFramedMessage,
     opts?: {
       commitPolicy?: IncomingMessageCallback
       persist?: (handle: GroupHandle) => Promise<void> | void

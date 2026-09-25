@@ -9,6 +9,7 @@ import {
   mlsMessageDecoder,
   mlsMessageEncoder,
   protocolVersions,
+  type Welcome,
   wireformats,
 } from 'ts-mls'
 
@@ -31,9 +32,8 @@ export type ProcessWelcomeParams = {
   identity: OwnIdentity
   invite: Invite
   /** Wire-form framed MLSMessage(Welcome) bytes (preferred), or a pre-decoded
-   *  ts-mls Welcome object (legacy). `Uint8Array | unknown` collapses to
-   *  `unknown` in TypeScript; the runtime `instanceof` check selects the path. */
-  welcome: Uint8Array | unknown
+   *  ts-mls Welcome object (legacy). */
+  welcome: Uint8Array | Welcome
   keyPackageBundle: KeyPackageBundle
   ratchetTree?: unknown
   options?: GroupOptions
