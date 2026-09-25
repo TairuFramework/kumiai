@@ -326,3 +326,39 @@ $ tsc --noEmit --skipLibCheck -p tsconfig.test.json
 
 $ tsc --noEmit --skipLibCheck -p tsconfig.test.json
 ```
+
+### 2026-09-25 — Question 3.5
+
+- **Learned:** A storage fault leaves the same fetched position sealed across repeated walks. The app lane can identify the blocking frame and queue one notice per position. An operator drop can mark that sealed position done and resume the journal-first walk, while a pending record remains protected.
+- **Deviations:** Two usage tests failed before implementation, then passed. Seven targeted mutations each failed its guard test and were restored. The first integration run overlapped Turbo's generated-file rebuild and failed on temporarily missing `lib/` modules; rerunning after the build passed. The full RPC unit suite passed (76 files, 499 tests).
+- **Spec/plan contradiction:** None. The shared `notifyHost` helper was copied identically from `feat/rpc-strand-observability` as the plan requires. The current version band remains 0.9 and this work targets 0.11.
+- **Verify:** `pnpm --filter @kumiai/rpc exec vitest run test/durable-stall.test.ts && pnpm --filter @kumiai/rpc run test:types`
+
+```text
+ RUN  v5.0.1 /Users/paul/dev/yulsi/kumiai.worktrees/durable-app-delivery/packages/rpc
+
+
+ Test Files  1 passed (1)
+      Tests  2 passed (2)
+   Start at  16:25:27
+   Duration  692ms (transform 46%, import 29%, tests 24%)
+
+$ tsc --noEmit --skipLibCheck -p tsconfig.test.json
+```
+
+- **Phase-exit gate:** `pnpm exec turbo run test:types test:unit --force`
+
+```text
+ Tasks:    49 successful, 49 total
+Cached:    0 cached, 49 total
+  Time:    29.893s
+```
+
+- **Integration:** `pnpm exec vitest run --root tests/integration`
+
+```text
+ Test Files  8 passed (8)
+      Tests  43 passed (43)
+   Start at  16:26:08
+   Duration  7.17s (tests 70%, transform 21%, import 9%)
+```

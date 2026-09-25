@@ -30,6 +30,14 @@ export type AppFrame = {
     | { state: 'done' }
 }
 
+export type AppDeliveryStalled = {
+  groupID: string
+  protocol: string
+  topicID: string
+  position: string
+  error: Error
+}
+
 function frameID(topicID: string, bytes: Uint8Array): string {
   const topic = fromUTF(topicID)
   const input = new Uint8Array(4 + topic.length + bytes.length)
@@ -68,6 +76,7 @@ export type AppLaneParams = {
   retentionSeconds: number
   appCursorStore?: AppCursorStore | undefined
   onAppWindowPruned?: ((event: AppWindowPruned) => void | Promise<void>) | undefined
+  onAppDeliveryStalled?: ((event: AppDeliveryStalled) => void) | undefined
   /**
    * The live anchor, read rather than held: it moves under the peer, and the topic every buffer
    * and cursor here belongs to is derived from it. Read once per lazy buffer creation, so a
@@ -93,6 +102,7 @@ export type AppLane = {
    * leave the rest buffered. Called before each apply and once more when the walk ends.
    */
   deliver: () => Promise<void>
+  dropFrame: (topicID: string, position: string) => Promise<void>
   /** Record a log-class frame the live lane was pushed, at the moment it arrives. */
   note: (name: string, topicID: string, message: StoredMessage) => void
   /**
@@ -161,6 +171,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
     retentionSeconds,
     appCursorStore,
     onAppWindowPruned,
+    onAppDeliveryStalled,
     anchor,
     groupID,
     justifiedEpochCeiling,
@@ -173,6 +184,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
    */
   let segment = new Map<string, Array<AppFrame>>()
   const pendingRecords: Array<PendingAppFrame> = []
+  let blockingFrame: string | undefined
   let disposed = false
   const workers = new Map<
     string,
@@ -621,7 +633,23 @@ export function createAppLane(params: AppLaneParams): AppLane {
             ...(ref == null ? {} : { frame: ref }),
           })
         } catch (error) {
-          if (crypto.pending != null && isAppFrameStorageError(error)) throw error
+          if (crypto.pending != null && isAppFrameStorageError(error)) {
+            const key = `${cursor.topicID}\u0000${frame.position}`
+            if (blockingFrame !== key) {
+              blockingFrame = key
+              const group = groupID()
+              if (group != null) {
+                onAppDeliveryStalled?.({
+                  groupID: group,
+                  protocol: name,
+                  topicID: cursor.topicID,
+                  position: frame.position,
+                  error,
+                })
+              }
+            }
+            throw error
+          }
           // Claimed this epoch and the handle refused it — OR its AAD did not match this topic (a
           // wrong-topic frame, or a pre-upgrade empty-AAD frame). Either way, dead: the handle
           // never returns to this epoch and the topic binding never changes. Retained history from
@@ -676,6 +704,20 @@ export function createAppLane(params: AppLaneParams): AppLane {
   }
 
   return {
+    dropFrame: (topicID, position) =>
+      runAppLane(async () => {
+        if (crypto.pending == null) throw new Error('durable app delivery is disabled')
+        const entry = [...cursors.entries()].find(([, cursor]) => cursor.topicID === topicID)
+        if (entry == null) throw new Error('app frame is not buffered')
+        const [name] = entry
+        const frames = segment.get(name)
+        const frame = frames?.find((item) => item.position === position)
+        if (frames == null || frame == null) throw new Error('app frame is not buffered')
+        if (frame.sealed.state === 'pending') throw new Error('app frame is pending')
+        if (frame.sealed.state !== 'sealed') throw new Error('app frame is already done')
+        frame.sealed = { state: 'done' }
+        await advanceCursor(name, frames)
+      }),
     /**
      * MUST run BEFORE the apply, never after: once the commit applies the handle holds different
      * key material, and those bytes are ciphertext forever. Per-FRAME-EPOCH, not per-rotation:

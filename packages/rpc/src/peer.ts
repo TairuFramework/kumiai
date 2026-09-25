@@ -26,7 +26,7 @@ import { createRuntime, type Runtime } from '@sozai/runtime'
 import type { Anchor, AnchorStore } from './anchor.js'
 import { decodeAppAAD, encodeAppAAD } from './app-aad.js'
 import type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
-import { createAppLane } from './app-lane.js'
+import { type AppDeliveryStalled, createAppLane } from './app-lane.js'
 import {
   type AppliedCommit,
   classifyCommit,
@@ -288,6 +288,7 @@ export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefini
   onAppWindowPruned?: (event: AppWindowPruned) => void | Promise<void>
   onStrand?: (observation: StrandObservation) => void | Promise<void>
   onRecovery?: (event: RecoveryEvent) => void | Promise<void>
+  onAppDeliveryStalled?: (event: AppDeliveryStalled) => void | Promise<void>
   /**
    * Called when the hub definitively refuses to subscribe this peer to a topic — most plausibly a
    * retention setting above the operator's own cap, which a hub refuses rather than clamps.
@@ -378,6 +379,8 @@ export type InternalSurface = {
 
 export type GroupPeer<Protocols extends Record<string, GroupProtocolDefinition>> = {
   protocol: <K extends keyof Protocols>(name: K) => ProtocolSurface<Protocols[K]>
+  /** Accept loss of one buffered sealed app frame, then resume the journal-first walk. */
+  dropAppFrame: (topicID: string, position: string) => Promise<void>
   /**
    * Commit to the group, rebasing until it lands.
    *
@@ -583,6 +586,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     justifiedEpochCeiling: () => justifiedEpochCeiling(),
     ...(appCursorStore != null ? { appCursorStore } : {}),
     ...(onAppWindowPruned != null ? { onAppWindowPruned } : {}),
+    onAppDeliveryStalled: (event) => {
+      hostOutbox.push(() => notifyHost(params.onAppDeliveryStalled, event))
+    },
   })
 
   /**
@@ -1136,6 +1142,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * NOT reentrant: a task that calls `runSerial` again waits on a tail including itself — which is
    * why a loss is RETURNED to the host, never handed to it under the lock.
    */
+  let hostOutbox: Array<() => void> = []
+  const flushHostOutbox = (): void => {
+    const batch = hostOutbox
+    hostOutbox = []
+    for (const notice of batch) notice()
+  }
   let commitTail: Promise<void> = Promise.resolve()
   const runSerial = <T>(fn: () => Promise<T>): Promise<T> => {
     const op = commitTail.then(() => {
@@ -2668,6 +2680,16 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
 
   return {
     protocol: protocolMethod,
+    dropAppFrame: async (topicID, position) => {
+      await ready
+      assertLive()
+      await runSerial(async () => {
+        await appLane.dropFrame(topicID, position)
+        await replayJournal()
+        await ensureLedger(Date.now() + recoveryTimeoutMs)
+        await reconcileCommits()
+      })
+    },
     commit,
     replay,
     recover,

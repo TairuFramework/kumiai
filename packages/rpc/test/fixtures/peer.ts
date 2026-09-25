@@ -1,6 +1,7 @@
 import type { LogHub } from '@kumiai/hub-tunnel'
 
 import type { AppWindowPruned } from '../../src/app-cursor.js'
+import type { AppDeliveryStalled } from '../../src/app-lane.js'
 import type { PendingCommit } from '../../src/commit.js'
 import type { SubscribeFailure } from '../../src/hub-mux.js'
 import {
@@ -103,6 +104,7 @@ export type MakeMLSPeerOptions = {
   onAppWindowPruned?: (event: AppWindowPruned) => void
   onStrand?: (observation: StrandObservation) => void | Promise<void>
   onRecovery?: (event: RecoveryEvent) => void | Promise<void>
+  onAppDeliveryStalled?: (event: AppDeliveryStalled) => void
   /** The host's notice that a subscribe was refused or exhausted its retries. */
   onSubscribeFailed?: (failure: SubscribeFailure) => void
   /**
@@ -161,6 +163,9 @@ export function makeMLSPeer(
     ...(options.onAppWindowPruned != null ? { onAppWindowPruned: options.onAppWindowPruned } : {}),
     ...(options.onStrand != null ? { onStrand: options.onStrand } : {}),
     ...(options.onRecovery != null ? { onRecovery: options.onRecovery } : {}),
+    ...(options.onAppDeliveryStalled != null
+      ? { onAppDeliveryStalled: options.onAppDeliveryStalled }
+      : {}),
     ...(options.onSubscribeFailed != null ? { onSubscribeFailed: options.onSubscribeFailed } : {}),
     // The restart half of onAccepted, over the same blob — and idempotent, as it must be.
     adoptJournalled: async (blob) => {

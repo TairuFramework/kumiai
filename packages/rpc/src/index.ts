@@ -7,6 +7,7 @@
 export type { Anchor, AnchorStore } from './anchor.js'
 export { type AppAAD, decodeAppAAD, encodeAppAAD } from './app-aad.js'
 export type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
+export type { AppDeliveryStalled } from './app-lane.js'
 export {
   type AppliedCommit,
   type ClassifyCommitParams,
