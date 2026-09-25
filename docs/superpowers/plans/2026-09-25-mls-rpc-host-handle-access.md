@@ -1,6 +1,6 @@
 # MLS RPC Host Handle Access Plan
 
-**Stage:** executing
+**Stage:** reviewing
 **Mode:** learning-loop
 **Spec:** docs/superpowers/specs/2026-09-25-mls-rpc-host-handle-access-design.md
 
@@ -191,3 +191,8 @@ $ pnpm exec vitest run --root tests/integration
 ```
 **Spec impact:** `ApplyCommitResult` gains `applied`: a host keeps the state whenever it is true, even with `advanced: false`.
 **Learned:** a simple adapter hides state that was mutated but never saved; only an adapter that restores per mutation shows it.
+
+### 2026-09-25 -- Question 6.2: Is the host migration and 0.10 release path explicit?
+**Findings:** DONE (directly). `@kumiai/mls-rpc` README: full export list, the one-line 0.9 migration, a custom `HandleAccess` section (lock lifetime, hint publication and rollback, staged `open` with revision-guarded write and conflict retry), the frame-loss consequence without `pending`, an `applyCommit` section (`applied` vs `advanced`), the recovery override, and the stale "bounded past window" bullet replaced by strict `FrameEpochError`. `@kumiai/rpc` README: `epoch()` is a hint, results carry locked epochs, `FrameEpochError` drives retain/drop. `@kumiai/rpc-conformance` README: `setEpochHintOffset`. New changeset `mls-rpc-host-handle-access.md` (minor for mls-rpc, rpc, rpc-conformance) plus `decode-client-state-copy.md` (patch for mls).
+**Spec impact:** the premise check's "no second minor" worry does not apply: Changesets computes one bump per package per release, so a separate minor file for packages already minor in `durable-app-delivery.md` raises nothing twice and keeps a changelog entry per feature. The Proposal fix shipped separately as #51.
+**Learned:** Phase 6 exit criteria met (full gate green, 0 cached).
