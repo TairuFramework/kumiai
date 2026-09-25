@@ -362,3 +362,20 @@ Cached:    0 cached, 49 total
    Start at  16:26:08
    Duration  7.17s (tests 70%, transform 21%, import 9%)
 ```
+
+### 2026-09-25 — Question 4.1
+
+- **Learned:** A single serialized connection permits a delayed pre-open handle save to finish before the staged open, and a same-epoch monotonic version rejects a late older write without losing the pending record. A handler that finishes its transaction before calling the peer can share that connection with a concurrent durable open. Holding the transaction while awaiting the peer creates the expected lock cycle; releasing the transaction lets the work finish.
+- **Deviations:** The usage tests failed before the host double existed. The first implementation run exposed two fixture mistakes: an earlier save blocked startup `list()`, and the store rejected a second valid staged open. Moving the delayed save after startup and assigning increasing same-epoch versions fixed them. Three guard mutations (stale-write rejection and connection serialization against both the safe and violating transaction tests) each failed their focused test and were restored. The RPC test typecheck passed.
+- **Spec/plan contradiction:** None. The probe uses the existing durable peer and fake crypto with a one-connection host double; the real handle's staged-open mutex behavior was established in Questions 1.1 and 2.1. The current band remains 0.9 and A targets 0.11.
+- **Verify:** `pnpm --filter @kumiai/rpc exec vitest run test/durable-host-contract.test.ts`
+
+```text
+ RUN  v5.0.1 /Users/paul/dev/yulsi/kumiai.worktrees/durable-app-delivery/packages/rpc
+
+
+ Test Files  1 passed (1)
+      Tests  3 passed (3)
+   Start at  16:35:28
+   Duration  1.65s (tests 42%, transform 40%, import 18%)
+```
