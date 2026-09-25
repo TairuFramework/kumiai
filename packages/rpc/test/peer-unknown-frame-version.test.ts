@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 import { RecoveryRequiredError } from '../src/commit.js'
 import {
@@ -92,6 +92,18 @@ function bobsRecoveryRequest(
  * and no restart that fixes it.
  */
 describe('a frame whose handshake version this build does not know', () => {
+  test('an unknown future kind on the commit topic requests a heal', async () => {
+    const hub = new FakeHub()
+    const rs = new Uint8Array(32).fill(0x75)
+    const frame = futureVersionFrame()
+    frame[HANDSHAKE_MAGIC.length + 1] = 0xee
+    await hub.publish({ senderDID: 'zoe', topicID: commitTopic(rs), payload: frame, retain: 'log' })
+
+    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
+    await vi.waitFor(() => expect(healsBy(hub, rs, 'bob')).toHaveLength(1))
+    await bob.peer.dispose()
+  })
+
   test('on the commit topic: the peer heals, and its epoch moves', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x71)

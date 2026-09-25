@@ -58,21 +58,21 @@ it whole before Task 1. Where this plan and the spec disagree, the spec wins; no
   `packages/rpc/test/peer-failed-heal-strand.test.ts` (or the file that already drives an
   unknown-version commit frame; grep `UNKNOWN_FRAME_VERSION` in `test/`)
 
-- [ ] **Step 1: Failing tests.**
+- [x] **Step 1: Failing tests.**
   - `decodeHandshakeFrame` on `[magic, HANDSHAKE_VERSION + 1, 0xEE, ...]` returns
     `{ version: HANDSHAKE_VERSION + 1, ... }` rather than throwing `unknown handshake kind`.
   - Current version with kind `0xEE` still throws `unknown handshake kind`.
   - Walk-level: a peer whose commit log holds a frame with a future version AND an unknown kind sets a
     heal (observe via an existing heal-signal hook in that test file, e.g. a recovery request published
     on the rendezvous topic).
-- [ ] **Step 2:** Run; expect the first and third to FAIL.
-- [ ] **Step 3: Implement.** In `decodeHandshakeFrame`, after reading `version` and `kind`: if
+- [x] **Step 2:** Run; expect the first and third to FAIL.
+- [x] **Step 3: Implement.** In `decodeHandshakeFrame`, after reading `version` and `kind`: if
   `version !== HANDSHAKE_VERSION`, return `{ version, kind: kind as HandshakeKind, payload }` without
   validating the kind (the caller checks the version first and never reads `kind` for it — keep the
   existing comment in `walkCommits` true). Validate the kind only for the current version. Update the
   function's doc to say so.
-- [ ] **Step 4:** Run `handshake.test.ts` and the walk test; PASS. Run all rpc tests.
-- [ ] **Step 5:** Lint, commit `fix(rpc): classify an unsupported handshake version before its kind`.
+- [x] **Step 4:** Run `handshake.test.ts` and the walk test; PASS. Run all rpc tests.
+- [x] **Step 5:** Lint, commit `fix(rpc): classify an unsupported handshake version before its kind`.
 
 ### Task 2: Public types, outbox and `notifyHost`
 

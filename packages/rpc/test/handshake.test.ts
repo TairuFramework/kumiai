@@ -59,6 +59,17 @@ describe('handshake frame codec', () => {
     expect(decoded.version).not.toBe(HANDSHAKE_VERSION)
   })
 
+  test('reports a future version even when its kind is unknown', () => {
+    const decoded = decodeHandshakeFrame(
+      new Uint8Array([...HANDSHAKE_MAGIC, HANDSHAKE_VERSION + 1, 0xee, 9]),
+    )
+    expect(decoded).toEqual({
+      version: HANDSHAKE_VERSION + 1,
+      kind: 0xee,
+      payload: new Uint8Array([9]),
+    })
+  })
+
   test('a frame this build does read reports the current version', () => {
     const decoded = decodeHandshakeFrame(
       encodeHandshakeFrame(HANDSHAKE_KIND.commit, new Uint8Array([1])),
