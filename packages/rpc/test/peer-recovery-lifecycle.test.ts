@@ -156,6 +156,34 @@ describe('recovery lifecycle', () => {
     await bob.peer.dispose()
   })
 
+  test('a new ledger entry after a failed pre-adoption attempt is reenacted once', async () => {
+    const hub = new FakeHub()
+    const rs = secret(0xcb)
+    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 2, members })
+    const alice = makeMLSPeer(hub, 'alice', rs, { members })
+    const original = hub.publish.bind(hub)
+    let failRejoin = true
+    hub.publish = async (params) => {
+      if (
+        failRejoin &&
+        params.topicID === commitTopic(rs) &&
+        params.senderDID === 'alice' &&
+        params.retain === 'log'
+      ) {
+        failRejoin = false
+        throw new Error('rejoin publish failed')
+      }
+      return original(params)
+    }
+    await expect(alice.peer.recover()).rejects.toThrow('rejoin publish failed')
+    const newer = 'circle:new=Alice'
+    await alice.peer.commit(buildLedgerCommit(alice, [newer]))
+    expect(await alice.peer.recover()).toEqual({ advanced: true, reenact: [newer] })
+    expect(await alice.peer.replay()).toEqual({})
+    await alice.peer.dispose()
+    await bob.peer.dispose()
+  })
+
   test('dispose during rendezvous reports disposed and rejects', async () => {
     const hub = new FakeHub()
     const rs = secret(0xb7)

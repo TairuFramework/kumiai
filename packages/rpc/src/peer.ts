@@ -2257,9 +2257,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         // 5. The entries this peer holds, snapshotted BEFORE the rejoined handle replaces them —
         //    the last moment they can be read. Kept across a failed attempt, so a retry filters
         //    the same entries rather than snapshotting the empty ledger a failed bootstrap left.
-        if (inFlightEntries == null) {
-          inFlightEntries = awaitingBootstrap?.entries ?? (await port.getLedger())
-        }
+        inFlightEntries = [
+          ...new Set([
+            ...(inFlightEntries ?? awaitingBootstrap?.entries ?? []),
+            ...(await port.getLedger()),
+          ]),
+        ]
         assertLive()
         const inFlight = inFlightEntries
 
