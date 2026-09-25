@@ -162,11 +162,15 @@ peer's `localEpoch`, a `kind`, and a `confidence`. `claimedEpoch` comes from the
 bootstrap completed. If a rejoin landed but bootstrap failed, a later lane operation can finish it
 and emit `bootstrapped` with that failed attempt's ID. This closes the stranded episode.
 
+`started` is dispatched asynchronously as the attempt begins, before any rendezvous reply or
+terminal event is required. It can arrive while the attempt is waiting on a port call; an observer
+that disposes the peer then ends the attempt with `failed` (`disposed`).
+
 Automatic healing and calls to `recover()` share one in-flight attempt. Joiners get its result or
 error; they do not start another attempt. Owed `reenact` entries are kept until the first
 `recover()`, `commit()` or `replay()` that drains them. A direct `recover()` can therefore return
 entries stashed by an earlier automatic heal. Each entry is handed out once.
 
-These two optional callbacks run after the producing commit-lane operation settles. They are not
-awaited, and a callback that throws or rejects cannot change the lane outcome. `onAppWindowPruned`
+`onStrand` and terminal `onRecovery` notices run after the producing commit-lane operation settles.
+`started` is dispatched earlier. None is awaited; throws and rejections are swallowed. `onAppWindowPruned`
 retains its existing behavior.

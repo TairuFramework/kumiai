@@ -592,8 +592,9 @@ export class GroupHandle {
    * signatures do not. The bound: **a lying responder can withhold, never rewrite.**
    *
    * Throws {@link LedgerIncompleteError} on a head mismatch; the caller drops that
-   * responder and tries the next. When persist is supplied, host callbacks run after it
-   * succeeds; a callback throw does not undo the bootstrap.
+   * responder and tries the next. `persist` runs under this handle's mutex and must not
+   * call back into it. It must write atomically: rejection means nothing was stored.
+   * Host callbacks run after successful persist; a callback throw does not undo bootstrap.
    */
   async bootstrapLedger(
     tokens: Array<string>,
@@ -1254,8 +1255,10 @@ export class GroupHandle {
    * wire-form bytes (preferred, e.g. from commitInvite/removeMember) or a pre-decoded
    * ts-mls object (legacy). Param widens to `unknown` because `Uint8Array | unknown`
    * collapses to `unknown`; the runtime `instanceof` selects the decode path.
-   * When persist is supplied, host callbacks run after it succeeds; a callback throw
-   * does not undo an advance.
+   * `persist` covers accepted commits and proposals, not application messages or their
+   * receive ratchet. It runs under this handle's mutex and must not call back into it.
+   * It must write atomically: rejection means nothing was stored. Host callbacks run
+   * after successful persist; a callback throw does not undo an advance.
    */
   async processMessage(
     message: Uint8Array | unknown,

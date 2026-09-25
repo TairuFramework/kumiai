@@ -31,18 +31,21 @@ the commit walk or the recovery outcome.
   `bootstrap-failed`, `deadline`, `disposed`, `error`), plus a later `bootstrapped` (same `attemptID`)
   when a rejoin's bootstrap completes after its attempt ended. Every event carries `attemptID` and
   `trigger` (`automatic` | `consumer`).
-- **Lane-safe delivery**: notices queue in a host outbox flushed after the producing `runSerial`
-  operation settles; throws and rejections are swallowed.
+- **Lane-safe delivery**: `started` is dispatched asynchronously when its attempt begins, even
+  while rendezvous is pending. Strand and terminal notices queue in a host outbox flushed after
+  the producing `runSerial` settles. Observers are not awaited; throws and rejections are swallowed.
 - **Single-flight recovery**: `activeRecovery` is installed before the first await and cleared before
   terminal notices flush, so a joiner shares the running attempt and a retry from a terminal observer
   starts a new one. Bodies stay serialized.
 - **One owner for re-enact entries**: the `pendingReenact` stash, drained by `recover()`, `commit()`
   and `replay()` alike, so `recover()` may return entries an earlier automatic heal left. Nothing is
   handed out twice.
-- **Staged persist for real MLS handles**: all accepted state changes and ledger bootstrap publish
-  tentative state to the persistence callback under the handle mutex, roll back on failure, and run
-  host callbacks only after durable persist. A callback throw does not undo the advance. Recovery
-  persists its new handle before adoption.
+- **Staged persist for real MLS handles**: accepted received commits and proposals, plus ledger
+  bootstrap, publish tentative state to the persistence callback under the handle mutex. The option
+  does not persist application-message receive ratchets. Persist must write atomically and must not
+  call back into the same handle. Rejection rolls memory back and must leave storage unchanged; host
+  callbacks run only after durable persist. Recovery persists its new handle before adoption; if
+  adoption throws, restart loads the stored handle.
 - **Behaviour changes, documented in the changeset**: a failed rendezvous publish now rejects
   `recover()` instead of silently waiting out the deadline (typed `RendezvousOutcome`); an unsupported
   handshake version is classified before its kind, so a future-version frame with an unknown kind heals
@@ -60,7 +63,8 @@ the commit walk or the recovery outcome.
   it with the current ledger.
 - **The ledger gather owns the lane until its writes finish**: a reply may not touch the handle after
   the gather settles; a gather does not resolve while a `bootstrapLedger` is in flight and then reports
-  the real outcome; dispose settles gathers promptly and a disposed peer never finalizes a bootstrap.
+  the real outcome. Dispose settles gathers promptly, waits for bootstraps already in progress, and a
+  disposed peer never finalizes a bootstrap or delivers a late RPC notice.
 
 ## Verification
 
