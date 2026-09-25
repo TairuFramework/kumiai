@@ -56,7 +56,7 @@ export type ConformanceGroupMLS = {
   processCommit: (
     commit: Uint8Array,
     context: ConformanceCommitContext,
-  ) => Promise<{ advanced: boolean }>
+  ) => Promise<{ advanced: boolean; epochBefore: number; epochAfter: number }>
   exportRecoverySecret: () => Uint8Array | Promise<Uint8Array>
   createRecoveryRequest: (requestID: string) => Promise<Uint8Array>
   sealGroupInfo: (request: Uint8Array) => Promise<Uint8Array>
@@ -89,6 +89,7 @@ export type ConformanceMLSGroup = {
    * which is the case the port's contract is about, and the case the memory double got wrong.
    */
   members: Array<ConformanceMLSMember>
+  setEpochHintOffset: (offset: number) => void
   /** The DID of the member that authors the commits, for the committer clauses. */
   committerDID: string
   /**
@@ -163,6 +164,40 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
   }
 
   describe(`GroupMLS conformance — ${label}`, () => {
+    test('commit results and refusals ignore a lagging or leading epoch hint', async () => {
+      await withGroup(3, 'lying-epoch-hint', async (group) => {
+        const alice = memberAt(group.members, 0)
+        const first = await group.buildCommit()
+        const future = await group.buildCommit()
+        const epoch = (await alice.mls.readCommitHeader(first.commit))?.epoch
+        if (epoch == null) throw new Error('commit epoch unreadable')
+        for (const [index, offset] of [0, -1, 1].entries()) {
+          group.setEpochHintOffset(offset)
+          const member = memberAt(group.members, index)
+          expect(await member.mls.processCommit(future.commit, future.context)).toEqual({
+            advanced: false,
+            epochBefore: epoch,
+            epochAfter: epoch,
+          })
+          expect(await member.mls.processCommit(first.commit, first.context)).toEqual({
+            advanced: true,
+            epochBefore: epoch,
+            epochAfter: epoch + 1,
+          })
+          expect(await member.mls.processCommit(first.commit, first.context)).toEqual({
+            advanced: false,
+            epochBefore: epoch + 1,
+            epochAfter: epoch + 1,
+          })
+          expect(await member.mls.processCommit(new Uint8Array([0]), {})).toEqual({
+            advanced: false,
+            epochBefore: epoch + 1,
+            epochAfter: epoch + 1,
+          })
+        }
+      })
+    })
+
     describe('readCommitHeader', () => {
       /**
        * The two facts have different trust AND different availability, and conflating them is the
@@ -185,7 +220,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           expect(atOwnEpoch?.committerDID).toBe(group.committerDID)
 
           // Alice applies it and is now one epoch ON from where that commit was framed.
-          expect(await alice.mls.processCommit(first.commit, first.context)).toEqual({
+          expect(await alice.mls.processCommit(first.commit, first.context)).toMatchObject({
             advanced: true,
           })
 
@@ -238,7 +273,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           expect(dids(await alice.mls.rosterEntries())).toContain(carol.did)
 
           const removal = await group.buildCommit({ removes: 2 })
-          expect(await alice.mls.processCommit(removal.commit, removal.context)).toEqual({
+          expect(await alice.mls.processCommit(removal.commit, removal.context)).toMatchObject({
             advanced: true,
           })
           // Nothing was adopted, and the roster moved anyway.
@@ -259,7 +294,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const carol = memberAt(group.members, 2)
 
           const removal = await group.buildCommit({ removes: 2 })
-          expect(await carol.mls.processCommit(removal.commit, removal.context)).toEqual({
+          expect(await carol.mls.processCommit(removal.commit, removal.context)).toMatchObject({
             advanced: false,
           })
 
@@ -277,7 +312,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
 
           // And the commit is perfectly applicable by everyone else, so what refused it was the
           // removal and not the bytes.
-          expect(await bob.mls.processCommit(removal.commit, removal.context)).toEqual({
+          expect(await bob.mls.processCommit(removal.commit, removal.context)).toMatchObject({
             advanced: true,
           })
         })
@@ -295,21 +330,21 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const bob = memberAt(group.members, 1)
 
           const first = await group.buildCommit()
-          expect(await alice.mls.processCommit(first.commit, first.context)).toEqual({
+          expect(await alice.mls.processCommit(first.commit, first.context)).toMatchObject({
             advanced: true,
           })
           // BELOW: alice is past it now. Re-reading the frame she has already applied.
-          expect(await alice.mls.processCommit(first.commit, first.context)).toEqual({
+          expect(await alice.mls.processCommit(first.commit, first.context)).toMatchObject({
             advanced: false,
           })
 
           // ABOVE: bob never applied the first, so the second is framed an epoch ahead of him.
           const second = await group.buildCommit()
-          expect(await bob.mls.processCommit(second.commit, second.context)).toEqual({
+          expect(await bob.mls.processCommit(second.commit, second.context)).toMatchObject({
             advanced: false,
           })
           // Bob is exactly where he was: a refusal advances nothing.
-          expect(await bob.mls.processCommit(first.commit, first.context)).toEqual({
+          expect(await bob.mls.processCommit(first.commit, first.context)).toMatchObject({
             advanced: true,
           })
         })
@@ -319,7 +354,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
         await withGroup(1, 'apply-garbage', async (group) => {
           const alice = memberAt(group.members, 0)
           for (const bytes of NOT_A_COMMIT) {
-            expect(await alice.mls.processCommit(bytes, {})).toEqual({ advanced: false })
+            expect(await alice.mls.processCommit(bytes, {})).toMatchObject({ advanced: false })
           }
         })
       })
@@ -569,7 +604,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           // Bob is removed. Alice applies it; Bob cannot, so he still holds a live handle and the
           // rendezvous secret — exactly the position an evicted member is in.
           const removal = await group.buildCommit({ removes: 1 })
-          expect(await alice.mls.processCommit(removal.commit, removal.context)).toEqual({
+          expect(await alice.mls.processCommit(removal.commit, removal.context)).toMatchObject({
             advanced: true,
           })
           expect(dids(await alice.mls.rosterEntries())).not.toContain(bob.did)

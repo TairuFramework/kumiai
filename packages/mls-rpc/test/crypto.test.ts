@@ -121,7 +121,7 @@ describe('createGroupCrypto', () => {
         adopt: () => {},
       }),
     })
-    const sealed = await crypto.sealEntries(utf8.encode('entries'))
+    const { sealed } = await crypto.sealEntries(utf8.encode('entries'))
     expect(keys[0]?.every((byte) => byte === 0)).toBe(true)
     expect(await crypto.openEntries(sealed)).toEqual(utf8.encode('entries'))
     expect(keys[1]?.every((byte) => byte === 0)).toBe(true)
@@ -149,12 +149,12 @@ describe('createGroupCrypto', () => {
 
     expect(alice.crypto.epoch()).toBe(1)
     expect(bob.crypto.epoch()).toBe(1)
-    const shared = await alice.crypto.exportSecret(LABEL)
-    expect(await bob.crypto.exportSecret(LABEL)).toEqual(shared)
+    const { secret: shared } = await alice.crypto.exportSecret(LABEL)
+    expect((await bob.crypto.exportSecret(LABEL)).secret).toEqual(shared)
 
     // A different label at the SAME epoch is a different secret — the caller's label reaches the
     // handle's own exporter untouched, rather than this implementation closing over one of its own.
-    expect(await alice.crypto.exportSecret(OTHER_LABEL)).not.toEqual(shared)
+    expect((await alice.crypto.exportSecret(OTHER_LABEL)).secret).not.toEqual(shared)
 
     // The handle swap a peer makes when it adopts its own commit: the port follows it, and the
     // secret moves with the epoch. A crypto closing over the handle it was built with would
@@ -162,13 +162,13 @@ describe('createGroupCrypto', () => {
     const removed = await removeMember(aliceGroup, 1)
     await alice.adopt(removed.newGroup)
     expect(alice.crypto.epoch()).toBe(2)
-    const rotated = await alice.crypto.exportSecret(LABEL)
+    const { secret: rotated } = await alice.crypto.exportSecret(LABEL)
     expect(rotated).not.toEqual(shared)
 
     // Bob, removed, is left holding the old one for life and cannot reach the new one. This is
     // the property the whole app-lane topic rests on, and the only implementation that has it.
-    expect(await bob.crypto.exportSecret(LABEL)).toEqual(shared)
-    expect(await bob.crypto.exportSecret(LABEL)).not.toEqual(rotated)
+    expect((await bob.crypto.exportSecret(LABEL)).secret).toEqual(shared)
+    expect((await bob.crypto.exportSecret(LABEL)).secret).not.toEqual(rotated)
   })
 
   /**
@@ -199,7 +199,7 @@ describe('createGroupCrypto', () => {
       `label '${customLabel}' is reserved for the ledger-entry seal`,
     )
     // Every other label is unaffected.
-    await expect(customCrypto.exportSecret(LABEL)).resolves.toBeInstanceOf(Uint8Array)
+    expect((await customCrypto.exportSecret(LABEL)).secret).toBeInstanceOf(Uint8Array)
   })
 
   test('wrap and unwrap round-trip and name the authenticated sender', async () => {
@@ -355,10 +355,10 @@ describe('createGroupCrypto', () => {
       const alice = cryptoOver(aliceGroup)
       const bob = cryptoOver(bobGroup)
 
-      const atOne = await alice.crypto.sealEntries(utf8.encode('entries at one'))
+      const { sealed: atOne } = await alice.crypto.sealEntries(utf8.encode('entries at one'))
       const removed = await removeMember(aliceGroup, 1)
       alice.adopt(removed.newGroup)
-      const atTwo = await alice.crypto.sealEntries(utf8.encode('entries at two'))
+      const { sealed: atTwo } = await alice.crypto.sealEntries(utf8.encode('entries at two'))
 
       // The removal boundary, and it rests on this exactly as the app-lane anchor does: Bob keeps
       // epoch 1's key for life and it opens nothing the group sealed after he left.
@@ -383,7 +383,7 @@ describe('createGroupCrypto', () => {
       const { aliceGroup } = await twoMemberGroup('ports-entry-version')
       const alice = cryptoOver(aliceGroup)
 
-      const sealed = await alice.crypto.sealEntries(utf8.encode('versioned'))
+      const { sealed } = await alice.crypto.sealEntries(utf8.encode('versioned'))
       expect(sealed[0]).toBe(1)
       expect(new TextDecoder().decode(await alice.crypto.openEntries(sealed))).toBe('versioned')
 
@@ -405,9 +405,9 @@ describe('createGroupCrypto', () => {
       const bob = cryptoOver(bobGroup)
 
       // Both directions: the key is derived from shared epoch state, not from the sealer.
-      const fromAlice = await alice.crypto.sealEntries(utf8.encode('alice sealed'))
+      const { sealed: fromAlice } = await alice.crypto.sealEntries(utf8.encode('alice sealed'))
       expect(new TextDecoder().decode(await bob.crypto.openEntries(fromAlice))).toBe('alice sealed')
-      const fromBob = await bob.crypto.sealEntries(utf8.encode('bob sealed'))
+      const { sealed: fromBob } = await bob.crypto.sealEntries(utf8.encode('bob sealed'))
       expect(new TextDecoder().decode(await alice.crypto.openEntries(fromBob))).toBe('bob sealed')
     })
 
@@ -416,7 +416,7 @@ describe('createGroupCrypto', () => {
       const alice = cryptoOver(aliceGroup)
       const bob = cryptoOver(bobGroup)
 
-      const sealed = await alice.crypto.sealEntries(utf8.encode('opened twice'))
+      const { sealed } = await alice.crypto.sealEntries(utf8.encode('opened twice'))
       expect(await bob.crypto.openEntries(sealed)).toEqual(await bob.crypto.openEntries(sealed))
 
       // Nothing the open could have spent: an application frame sealed after those opens still

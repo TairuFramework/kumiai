@@ -109,7 +109,11 @@ describe('delayed ledger bootstrap', () => {
     })
     const { hub, rs, alice, bob, events, recoveryRequests } = state
     hub.acceptAtAnyHead()
-    vi.spyOn(bob.mls, 'processCommit').mockResolvedValue({ advanced: false })
+    vi.spyOn(bob.mls, 'processCommit').mockResolvedValue({
+      advanced: false,
+      epochBefore: bob.mls.epoch(),
+      epochAfter: bob.mls.epoch(),
+    })
     const competing = await publishCommit({
       hub,
       senderDID: 'carol',

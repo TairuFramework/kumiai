@@ -154,7 +154,7 @@ describe('commit strand observations', () => {
     const tampered = new TextEncoder().encode(JSON.stringify({ ...original, invalidContent: true }))
     const reader = createMemoryGroupMLS({ recoverySecret: rs, epoch: 1, localDID: 'carol' })
     expect(await reader.readCommitHeader(tampered)).toEqual({ epoch: 1, committerDID: 'bob' })
-    expect(await reader.processCommit(tampered, {})).toEqual({ advanced: false })
+    expect(await reader.processCommit(tampered, {})).toMatchObject({ advanced: false })
 
     const { sequenceID } = await publishCommit({
       hub,

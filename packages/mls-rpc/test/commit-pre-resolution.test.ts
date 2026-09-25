@@ -22,7 +22,7 @@ test('a commit resolves entries through access.read without re-entering mutate',
   expect(readCommitEntryIDs(commit).length).toBeGreaterThan(0)
   const resolver = vi.fn(async (ids: Array<string>) => {
     await access.read((handle) => handle.epoch)
-    const sealed = await crypto.sealEntries(new TextEncoder().encode(JSON.stringify(ids)))
+    const { sealed } = await crypto.sealEntries(new TextEncoder().encode(JSON.stringify(ids)))
     await crypto.openEntries(sealed)
     return await group.resolveLedgerEntries(ids)
   })
@@ -31,7 +31,7 @@ test('a commit resolves entries through access.read without re-entering mutate',
       senderDID: group.committer.identity.id,
       resolveLedgerEntries: resolver,
     }),
-  ).resolves.toEqual({ advanced: true })
+  ).resolves.toMatchObject({ advanced: true })
   expect(resolver).toHaveBeenCalledOnce()
 }, 3000)
 
@@ -95,13 +95,13 @@ test('wrong-epoch and non-Commit frames never open entry bodies', async () => {
       senderDID: group.committer.identity.id,
       resolveLedgerEntries: opened,
     }),
-  ).resolves.toEqual({ advanced: false })
+  ).resolves.toMatchObject({ advanced: false })
   await expect(
     mls.processCommit(new Uint8Array([0]), {
       senderDID: group.committer.identity.id,
       resolveLedgerEntries: opened,
     }),
-  ).resolves.toEqual({ advanced: false })
+  ).resolves.toMatchObject({ advanced: false })
   expect(readCommitEntryIDs(new Uint8Array([0]))).toEqual([])
   expect(opened).not.toHaveBeenCalled()
 })

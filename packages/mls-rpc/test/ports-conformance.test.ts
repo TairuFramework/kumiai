@@ -48,15 +48,22 @@ testGroupCryptoConformance({
   label: 'createGroupCrypto over a real GroupHandle',
   createGroup: async (size, id) => {
     const group = await createRealGroup(size, `crypto-conformance-${id}`)
+    let hintOffset = 0
     const accesses = group.members.map((member) =>
-      simpleHandleAccess({
-        handle: () => member.handle,
-        adopt: (next) => {
-          member.handle = next
-        },
-      }),
+      (() => {
+        const base = simpleHandleAccess({
+          handle: () => member.handle,
+          adopt: (next) => {
+            member.handle = next
+          },
+        })
+        return { ...base, epoch: () => base.epoch() + hintOffset }
+      })(),
     )
     return {
+      setEpochHintOffset: (offset) => {
+        hintOffset = offset
+      },
       members: accesses.map((access, index) => {
         const member = group.members[index]
         if (member == null) throw new Error('missing member')
@@ -179,17 +186,24 @@ testGroupMLSConformance({
   label: 'createGroupMLS over a real GroupHandle',
   createGroup: async (size, id) => {
     const group = await createRealGroup(size, `mls-conformance-${id}`)
+    let hintOffset = 0
     return {
+      setEpochHintOffset: (offset) => {
+        hintOffset = offset
+      },
       committerDID: group.committer.identity.id,
       members: group.members.map((member) => ({
         did: member.identity.id,
         mls: createGroupMLS({
-          access: simpleHandleAccess({
-            handle: () => member.handle,
-            adopt: (next) => {
-              member.handle = next
-            },
-          }),
+          access: (() => {
+            const base = simpleHandleAccess({
+              handle: () => member.handle,
+              adopt: (next) => {
+                member.handle = next
+              },
+            })
+            return { ...base, epoch: () => base.epoch() + hintOffset }
+          })(),
           identity: member.identity,
           entrySlot: member.slot,
         }),

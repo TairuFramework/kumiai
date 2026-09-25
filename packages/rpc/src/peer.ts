@@ -615,7 +615,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * write as the handle, which this layer cannot reach.
    */
   const captureAnchor = async (): Promise<void> => {
-    anchor = { secret: await crypto.exportSecret(APP_TOPIC_LABEL), epoch: crypto.epoch() }
+    const { secret } = await crypto.exportSecret(APP_TOPIC_LABEL)
+    anchor = { secret, epoch: crypto.epoch() }
     sealError = undefined
     finishSealBarrier()
     await anchorStore?.save(anchor)
@@ -718,7 +719,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         // Normalized at the open, before it is keyed: every consumer of `openedFrames` (the
         // acceptor, `gather`'s quorum) must see one canonical sender regardless of which DID form
         // MLS recovered this frame under.
-        openedFrames.set(payload, { payload, senderDID: normalizeDID(senderDID) })
+        openedFrames.set(payload, { ...opened, senderDID: normalizeDID(senderDID) })
         return payload
       },
       note: (message) => appLane.note(name, topicID, message),
@@ -1811,7 +1812,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         'commit: the local group has already advanced past the epoch this commit was framed at. A commit is adopted in onAccepted, never before.',
       )
     }
-    const sealedEntries = await crypto.sealEntries(encodeLedgerEntries(bodies))
+    const { sealed: sealedEntries } = await crypto.sealEntries(encodeLedgerEntries(bodies))
     return encodeHandshakeFrame(HANDSHAKE_KIND.commit, encodeCommitFrame(commit, sealedEntries))
   }
 

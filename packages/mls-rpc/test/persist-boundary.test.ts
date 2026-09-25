@@ -16,7 +16,7 @@ test('a refused commit does not save unchanged state', async () => {
     rejoining: 0,
     forgeAs: 'did:key:forged',
   })
-  await expect(port.processCommit(forged, { senderDID: 'did:key:forged' })).resolves.toEqual({
+  await expect(port.processCommit(forged, { senderDID: 'did:key:forged' })).resolves.toMatchObject({
     advanced: false,
   })
   expect(persist).not.toHaveBeenCalled()
@@ -49,7 +49,7 @@ test('processCommit keeps the handle at its old epoch on failed persist and retr
   expect(member.handle.ledgerTokens).toEqual(before.ledger)
   expect(adopt).not.toHaveBeenCalled()
   fail = false
-  await expect(port.processCommit(commit, context)).resolves.toEqual({ advanced: true })
+  await expect(port.processCommit(commit, context)).resolves.toMatchObject({ advanced: true })
   expect(member.handle.epoch).toBe(before.epoch + 1n)
   expect(access.epoch()).toBe(Number(before.epoch + 1n))
   expect(persist).toHaveBeenCalledTimes(2)
@@ -92,7 +92,7 @@ test('processCommit reports an advance when a post-persist host callback throws'
       senderDID: group.committer.identity.id,
       resolveLedgerEntries: group.resolveLedgerEntries,
     }),
-  ).resolves.toEqual({ advanced: true })
+  ).resolves.toMatchObject({ advanced: true })
   expect(persist).toHaveBeenCalledOnce()
   expect(member.handle.epoch).toBe(before + 1n)
 })

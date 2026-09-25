@@ -47,7 +47,7 @@ function senderStrippingCrypto(localDID: string): GroupCrypto {
     ...inner,
     unwrap: async (bytes: Uint8Array) => {
       const { payload } = await inner.unwrap(bytes)
-      return { payload } as unknown as { payload: Uint8Array; senderDID: string }
+      return { payload } as unknown as { payload: Uint8Array; senderDID: string; epoch: number }
     },
   }
 }

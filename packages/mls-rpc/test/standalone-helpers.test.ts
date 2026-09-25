@@ -50,7 +50,7 @@ test('standalone entry helpers preserve the factory blob format in both directio
     access: simpleHandleAccess({ handle: () => handle, adopt: () => {} }),
     runtime,
   })
-  expect(await crypto.sealEntries(entries)).toEqual(oldSealed)
+  expect((await crypto.sealEntries(entries)).sealed).toEqual(oldSealed)
   expect(await crypto.openEntries(sealEntries(key, entries, runtime))).toEqual(entries)
 })
 
@@ -98,7 +98,7 @@ test('factory seals after releasing access and wipes the derived key on a seal e
     },
   } as Runtime
   const crypto = createGroupCrypto({ access, runtime })
-  const sealed = await crypto.sealEntries(new Uint8Array([1]))
+  const { sealed } = await crypto.sealEntries(new Uint8Array([1]))
   expect(await crypto.openEntries(sealed)).toEqual(new Uint8Array([1]))
   expect(keys.every((key) => key.every((byte) => byte === 0))).toBe(true)
   failRandom = true

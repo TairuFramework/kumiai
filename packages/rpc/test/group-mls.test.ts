@@ -5,7 +5,7 @@ import { createMemoryGroupMLS, memoryEntryID } from './fixtures/memory-group-mls
 describe('GroupMLS port', () => {
   test('processCommit advances the epoch and reports it', async () => {
     const mls = createMemoryGroupMLS({ recoverySecret: new Uint8Array(32).fill(1) })
-    expect(await mls.processCommit(mls.buildCommit(), { senderDID: 'did:key:zA' })).toEqual({
+    expect(await mls.processCommit(mls.buildCommit(), { senderDID: 'did:key:zA' })).toMatchObject({
       advanced: true,
     })
     expect(mls.epoch()).toBe(1)
@@ -14,7 +14,7 @@ describe('GroupMLS port', () => {
 
   test('a no-op commit does not advance', async () => {
     const mls = createMemoryGroupMLS({ recoverySecret: new Uint8Array(32).fill(1) })
-    expect(await mls.processCommit(new Uint8Array(), {})).toEqual({ advanced: false })
+    expect(await mls.processCommit(new Uint8Array(), {})).toMatchObject({ advanced: false })
     expect(mls.epoch()).toBe(0)
   })
 
@@ -23,7 +23,7 @@ describe('GroupMLS port', () => {
     const older = createMemoryGroupMLS({ recoverySecret: new Uint8Array(32).fill(1), epoch: 1 })
     // A commit framed at an epoch this member is not at is not one it can apply — real MLS
     // cannot even decrypt it. It is history, not a failure.
-    expect(await mls.processCommit(older.buildCommit(), {})).toEqual({ advanced: false })
+    expect(await mls.processCommit(older.buildCommit(), {})).toMatchObject({ advanced: false })
     expect(mls.epoch()).toBe(2)
     expect(mls.seen()).toBe(1)
   })
@@ -53,7 +53,7 @@ describe('GroupMLS port', () => {
     // MLS merges a pending commit; it does not process one. The state that could have
     // carried it is the pending state, and a member meeting its own commit in the log has
     // lost it. It is refused, and not with a throw: there is nothing here to retry.
-    expect(await mls.processCommit(mls.buildCommit(), { senderDID: 'self' })).toEqual({
+    expect(await mls.processCommit(mls.buildCommit(), { senderDID: 'self' })).toMatchObject({
       advanced: false,
     })
     expect(mls.epoch()).toBe(1)
@@ -74,7 +74,7 @@ describe('GroupMLS port', () => {
     // A refusal is a `{ advanced: false }`, never a throw: the lane's rule is that a throw
     // leaves the cursor put and the frame is read again, and a commit deliberately refused
     // is a commit that will be refused every time.
-    expect(await bob.processCommit(removed.buildCommit(), { senderDID: 'mallory' })).toEqual({
+    expect(await bob.processCommit(removed.buildCommit(), { senderDID: 'mallory' })).toMatchObject({
       advanced: false,
     })
     expect(bob.epoch()).toBe(1)
@@ -95,7 +95,7 @@ describe('GroupMLS port', () => {
       },
     })
 
-    expect(result).toEqual({ advanced: true })
+    expect(result).toMatchObject({ advanced: true })
     expect(asked).toEqual([[memoryEntryID(token)]])
     expect(mls.ledgerIDs()).toEqual([memoryEntryID(token)])
   })

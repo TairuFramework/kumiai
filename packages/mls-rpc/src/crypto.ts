@@ -1,6 +1,7 @@
 import { type GroupHandle, readMessageAAD, readMessageEpoch } from '@kumiai/mls'
 import {
   AppFrameStorageError,
+  FrameEpochError,
   type GroupCrypto,
   type PendingAppFrame,
   type PendingAppFrames,
@@ -104,10 +105,7 @@ export type GroupCryptoParams = {
  *
  * ## Where this diverges from the fake in `@kumiai/rpc`'s test fixtures
  *
- * 1. `unwrap` refuses any epoch the handle hasn't REACHED, but opens a bounded window below it
- *    via ts-mls's retained key material (the fake refuses everything but its current epoch, so
- *    the fake is stricter — both are valid implementations of the port; group-rpc must not
- *    depend on the window, which is spent by epoch transitions, not time).
+ * 1. `unwrap` gates the frame epoch before ts-mls's bounded past-window decrypt.
  *
  * 2. `exportSecret` is one-way; the fake's is not. The fake XORs epoch and label into a fixed
  *    base, so one epoch's bytes yield every other epoch's for that label. This exports from the
@@ -140,15 +138,21 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
       if (label === entryLabel) {
         throw new Error(`exportSecret: label '${label}' is reserved for the ledger-entry seal`)
       }
-      return access.read((group) => group.exportSecret(label, EXPORT_CONTEXT, length))
+      return access.read(async (group) => ({
+        secret: await group.exportSecret(label, EXPORT_CONTEXT, length),
+        epoch: Number(group.epoch),
+      }))
     },
 
     wrap: (bytes, opts) => access.mutate((group) => group.encrypt(bytes, opts)),
 
     sealEntries: async (bytes) => {
-      const key = await access.read((group) => deriveEntryKey(group, entryLabel))
+      const { key, epoch } = await access.read(async (group) => ({
+        key: await deriveEntryKey(group, entryLabel),
+        epoch: Number(group.epoch),
+      }))
       try {
-        return sealEntries(key, bytes, runtime)
+        return { sealed: sealEntries(key, bytes, runtime), epoch }
       } finally {
         key.fill(0)
       }
@@ -169,8 +173,13 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
         if (pending == null) throw new Error('unwrap: pending store required for durable open')
         const frame = opts.frame
         const opened = await access.open(
-          (group, persistOpened) =>
-            group.decryptStaged(bytes, opts, async (stagedState, result) => {
+          async (group, persistOpened) => {
+            const epoch = Number(group.epoch)
+            const frameEpoch = readMessageEpoch(bytes)
+            if (frameEpoch != null && Number(frameEpoch) !== epoch) {
+              throw new FrameEpochError(Number(frameEpoch), epoch)
+            }
+            const result = await group.decryptStaged(bytes, opts, async (stagedState, result) => {
               try {
                 await persistOpened(stagedState, {
                   frame,
@@ -182,16 +191,26 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
                   cause: error,
                 })
               }
-            }),
+            })
+            return { ...result, epoch }
+          },
           (state, record) => pending.persistOpened(state, record),
         )
-        return { payload: opened.payload, senderDID: opened.senderDID }
+        return { payload: opened.payload, senderDID: opened.senderDID, epoch: opened.epoch }
       }
-      const { payload, senderDID } = await access.mutate((group) => group.decrypt(bytes, opts))
+      const { payload, senderDID, epoch } = await access.mutate(async (group) => {
+        const epoch = Number(group.epoch)
+        const frameEpoch = readMessageEpoch(bytes)
+        if (frameEpoch != null && Number(frameEpoch) !== epoch) {
+          throw new FrameEpochError(Number(frameEpoch), epoch)
+        }
+        const opened = await group.decrypt(bytes, opts)
+        return { ...opened, epoch }
+      })
       if (senderDID == null) {
         throw new Error('unwrap: opened frame has no authenticated sender')
       }
-      return { payload, senderDID }
+      return { payload, senderDID, epoch }
     },
 
     frameEpoch: (bytes) => {

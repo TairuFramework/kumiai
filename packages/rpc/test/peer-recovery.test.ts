@@ -42,7 +42,7 @@ describe('recovery rendezvous', () => {
     expect(eve.mls.epoch()).toBe(4)
     expect(carol.mls.epoch()).toBe(4)
     expect(hub.published.filter((m) => m.topicID === commitTopic(rs))).toHaveLength(1)
-    const secret = await eve.crypto.exportSecret(APP_TOPIC_LABEL)
+    const { secret } = await eve.crypto.exportSecret(APP_TOPIC_LABEL)
     // Eve was stranded, never evicted, so the roster held her DID throughout: her rejoin REPLACES
     // her leaf and the DID set is identical before and after it. Nothing a roster diff reads moves
     // — so the rotation rides the commit's own external flag, and every member lands on the epoch

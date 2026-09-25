@@ -43,6 +43,8 @@ export {
   AppFrameStorageError,
   type CommitContext,
   type CommitHeader,
+  type ExportSecretResult,
+  FrameEpochError,
   type GroupCrypto,
   type GroupMLS,
   type GroupUnwrapResult,
@@ -51,7 +53,9 @@ export {
   type PendingAppFrame,
   type PendingAppFrames,
   type PendingRecovery,
+  type ProcessCommitResult,
   type RosterEntry,
+  type SealEntriesResult,
   sortPendingAppFrames,
 } from './crypto.js'
 export {

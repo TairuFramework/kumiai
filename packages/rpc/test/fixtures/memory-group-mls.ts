@@ -592,19 +592,19 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       seen += 1
       const parsed = decodeMemoryCommit(commit)
       if (parsed == null) {
-        return { advanced: false }
+        return { advanced: false, epochBefore: epoch, epochAfter: epoch }
       }
       // A Commit framed at another epoch is not this member's to apply: real MLS cannot
       // decrypt it at all. Ordinary history for a member walking the log — the late
       // joiner's own add-commit is exactly this — and NOT corruption. The blob riding it
       // is never opened, because the entries are never resolved.
       if (parsed.epoch !== epoch) {
-        return { advanced: false }
+        return { advanced: false, epochBefore: epoch, epochAfter: epoch }
       }
       // Sender-data authorship and commit-content validity are separate in real MLS. A hub can
       // change ciphertext beyond the sampled prefix without breaking the sender-data read.
       if (parsed.invalidContent === true) {
-        return { advanced: false }
+        return { advanced: false, epochBefore: epoch, epochAfter: epoch }
       }
       // A Commit that REMOVES this member is one it can never apply: the commit's path excludes
       // the leaf it drops, so the removed member is handed nothing to derive the new epoch's
@@ -624,7 +624,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       // re-anchored off that diff.
       if (localDID != null && parsed.removes?.includes(localDID)) {
         slotRemoveDID(localDID)
-        return { advanced: false }
+        return { advanced: false, epochBefore: epoch, epochAfter: epoch }
       }
       // A member can never apply the frame that is its OWN commit: MLS merges a pending
       // commit, it does not process one, and the pending state is the only thing that could
@@ -632,13 +632,13 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       // and no amount of processing will get it back. An external commit is the exception
       // that proves it — the rejoining member adopts the handle its own rejoin derived.
       if (localDID != null && parsed.committerDID === localDID) {
-        return { advanced: false }
+        return { advanced: false, epochBefore: epoch, epochAfter: epoch }
       }
       // Well-formed, and refused: the group's policy does not accept commits from this
       // committer. A refusal is NOT a throw — the peer read the commit, judged it, and
       // declined it, and there is nothing to retry.
       if (!acceptsCommitter(parsed.committerDID)) {
-        return { advanced: false }
+        return { advanced: false, epochBefore: epoch, epochAfter: epoch }
       }
       const missing = parsed.entryIDs.filter((id) => !bodies.has(id))
       if (missing.length > 0) {
@@ -654,8 +654,9 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         }
       }
       commits += 1
+      const epochBefore = epoch
       enact(parsed)
-      return { advanced: true }
+      return { advanced: true, epochBefore, epochAfter: epoch }
     },
     async isLedgerComplete() {
       return memoryLedgerHead(ledger) === ledgerHead

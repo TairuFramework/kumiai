@@ -15,7 +15,7 @@ describe('the open-once path acks what it opens', () => {
     const path = createOpenOncePath<Uint8Array>({
       mux,
       topicID: 'topic:app',
-      unwrap: async (payload) => ({ payload, senderDID: 'did:key:alice' }),
+      unwrap: async (payload) => ({ payload, senderDID: 'did:key:alice', epoch: 1 }),
       project: (_message, result) => result.payload,
     })
     path((value) => opened.push(value))

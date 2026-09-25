@@ -91,7 +91,7 @@ describe('real MLS durable host save ordering', () => {
     expect(records.size).toBe(0)
     gate.resolve()
     await earlierSave
-    await expect(opening).resolves.toEqual({
+    await expect(opening).resolves.toMatchObject({
       payload: utf8.encode('hello'),
       senderDID: group.committer.identity.id,
     })

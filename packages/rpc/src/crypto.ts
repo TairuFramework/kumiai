@@ -17,10 +17,8 @@
  * is compared PRE-OPEN, so a wrong-topic frame costs no ratchet generation.
  *
  * `unwrap` MUST open bytes sealed at the handle's CURRENT epoch — that is the whole requirement.
- * A real MLS handle also opens a few epochs behind (ts-mls keeps four; evicting the fifth zeroes
- * their keys), but group-rpc must NOT depend on that window: it is spent by epoch TRANSITIONS
- * rather than time, so a peer catching up destroys the very keys a past-epoch read would need.
- * Implementations that open strictly at the current epoch are correct.
+ * A real MLS handle retains a bounded past window, but this port refuses other epochs before
+ * decrypting so a caller always gets the epoch of the current handle.
  *
  * `unwrap` throwing is ORDINARY CONTROL FLOW on the read paths, not an error — it means "not my
  * epoch". Readers walk logs full of frames from epochs they don't hold and drop them without
@@ -32,6 +30,7 @@
  * not run the suite has an untested crypto boundary, whatever else it tests.
  */
 export type GroupCrypto = {
+  /** Published hint; decisions must use an epoch returned by the operation they await. */
   epoch(): number
   /**
    * An MLS exporter secret for THIS epoch, domain-separated by `label`: different labels at the
@@ -61,7 +60,7 @@ export type GroupCrypto = {
    * the ledger-entry blobs of every commit enacted after its removal, with nothing throwing to
    * say so.
    */
-  exportSecret(label: string, length?: number): Uint8Array | Promise<Uint8Array>
+  exportSecret(label: string, length?: number): ExportSecretResult | Promise<ExportSecretResult>
   wrap(bytes: Uint8Array, opts?: { aad?: Uint8Array }): Uint8Array | Promise<Uint8Array>
   /**
    * Open a sealed app frame and recover who sent it. Returns {@link GroupUnwrapResult}, whose
@@ -70,6 +69,7 @@ export type GroupCrypto = {
    *
    * `expectedAAD` is compared PRE-OPEN: authenticating without opening defends against wrong-topic
    * frames that would otherwise burn a ratchet generation (DoS).
+   * A readable frame at another epoch throws {@link FrameEpochError} before decrypting.
    */
   unwrap(
     bytes: Uint8Array,
@@ -85,12 +85,9 @@ export type GroupCrypto = {
    * bytes that are not a readable sealed frame. Must NOT throw: it is asked about every frame a
    * log holds, most of which are not this handle's to open.
    *
-   * WHAT IT IS FOR: `unwrap` throwing says "not my epoch" but can't say which direction. A frame
-   * sealed AHEAD will open once the reader catches up; one sealed BELOW can never open again,
-   * because MLS ratchets forward. A reader that can't tell these apart can't hold a durable read
-   * position — passing an ahead frame loses it on restart, refusing everything pins the position
-   * forever. This is what makes the app lane's cursor (see {@link "app-cursor".AppCursorStore})
-   * safe.
+   * A frame sealed AHEAD can open once the reader catches up; one sealed BELOW cannot. This
+   * cleartext hint helps route frames before opening. A mismatched open reports the authoritative
+   * direction in {@link FrameEpochError}.
    *
    * UNTRUSTED: it's the publisher's word, relayed by an untrusted hub. Use it only to decide what
    * to try, never to decide bytes are authentic — only `unwrap` is authoritative about opening.
@@ -122,7 +119,7 @@ export type GroupCrypto = {
    * tokens whose trust comes from their own signatures, which the MLS port re-verifies; the seal
    * authenticates nobody.
    */
-  sealEntries(bytes: Uint8Array): Uint8Array | Promise<Uint8Array>
+  sealEntries(bytes: Uint8Array): SealEntriesResult | Promise<SealEntriesResult>
   /**
    * Open a blob {@link sealEntries} produced at THIS epoch. Throws for bytes sealed at any other
    * epoch, for a group this member is not in, or for bytes that aren't a sealed blob — the same
@@ -143,6 +140,31 @@ export type AppFrameRef = {
   segment: number
   /** Position in this topic's log. */
   position: string
+}
+
+export type ExportSecretResult = { secret: Uint8Array; epoch: number }
+export type SealEntriesResult = { sealed: Uint8Array; epoch: number }
+export type ProcessCommitResult = { advanced: boolean; epochBefore: number; epochAfter: number }
+
+/** A frame refused against the locked handle epoch, before spending a decrypt key. */
+export class FrameEpochError extends Error {
+  #frameEpoch: number
+  #handleEpoch: number
+
+  constructor(frameEpoch: number, handleEpoch: number) {
+    super(`frame epoch ${frameEpoch} differs from handle epoch ${handleEpoch}`)
+    this.name = 'FrameEpochError'
+    this.#frameEpoch = frameEpoch
+    this.#handleEpoch = handleEpoch
+  }
+
+  get frameEpoch(): number {
+    return this.#frameEpoch
+  }
+
+  get handleEpoch(): number {
+    return this.#handleEpoch
+  }
 }
 
 export type PendingAppFrame = {
@@ -196,10 +218,12 @@ export function sortPendingAppFrames(records: Array<PendingAppFrame>): Array<Pen
  * always MLS-sealed, so there's no identity-less case to accommodate: a sender is either PRESENT
  * and CORRECT, or the open throws. Optional would type-check against an implementation that has
  * no sender to give and quietly returns one anyway. Do not widen this back to optional.
+ * `epoch` is the locked handle epoch that opened the frame.
  */
 export type GroupUnwrapResult = {
   payload: Uint8Array
   senderDID: string
+  epoch: number
 }
 
 /**
@@ -375,7 +399,8 @@ export type GroupMLS = {
    * Apply a received Commit and durably persist the result, returning whether the epoch advanced
    * (the signal to resync the app lane). Must be durable before it resolves.
    *
-   * A frame it cannot apply is `{ advanced: false }`, NEVER a throw: a throw leaves the cursor put
+   * A frame it cannot apply has `advanced: false` and equal before/after epochs, NEVER a throw:
+   * a throw leaves the cursor put
    * and re-reads the frame, wedging the lane on it forever (a late joiner would wedge on its own
    * add-commit, the first frame it reads). A Commit at another epoch, or one policy refuses, is
    * also `{ advanced: false }`.
@@ -387,7 +412,7 @@ export type GroupMLS = {
    * contract on a frame it should have applied, which the lane DOES re-read. See
    * {@link isMissingLedgerEntries}.
    */
-  processCommit(commit: Uint8Array, context: CommitContext): Promise<{ advanced: boolean }>
+  processCommit(commit: Uint8Array, context: CommitContext): Promise<ProcessCommitResult>
   /**
    * Mint the rendezvous request this peer publishes to ask the group for its state: an HPKE
    * keypair for this one request, public half in a token signed by this member's identity key.

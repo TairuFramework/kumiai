@@ -18,6 +18,7 @@ import type {
   CommitHeader,
   GroupMLS,
   PendingRecovery,
+  ProcessCommitResult,
   RosterEntry,
 } from '@kumiai/rpc'
 
@@ -200,21 +201,24 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       }
     },
 
-    async processCommit(
-      commit: Uint8Array,
-      context: CommitContext,
-    ): Promise<{ advanced: boolean }> {
+    async processCommit(commit: Uint8Array, context: CommitContext): Promise<ProcessCommitResult> {
       const frameEpoch = readMessageEpoch(commit)
       const eligible = await access.read(async (group) => {
         const header = await group.readCommitHeader(commit)
-        return header != null && frameEpoch === group.epoch
+        return {
+          eligible: header != null && frameEpoch === group.epoch,
+          epoch: Number(group.epoch),
+        }
       })
-      if (!eligible) return { advanced: false }
+      if (!eligible.eligible) {
+        return { advanced: false, epochBefore: eligible.epoch, epochAfter: eligible.epoch }
+      }
       const ids = readCommitEntryIDs(commit)
       const tokens = ids.length === 0 ? [] : await context.resolveLedgerEntries?.(ids)
       const resolved = new Map<string, string>()
       for (const token of tokens ?? []) resolved.set(ledgerEntryDigest(token), token)
       const ignored = Symbol('ignored commit')
+      let refusedEpoch: number | undefined
       try {
         return await access.mutate(async (group, persist) => {
           if (group.epoch !== frameEpoch) {
@@ -242,17 +246,28 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
               })
             } catch (error) {
               if (error instanceof MissingLedgerEntriesError || persistFailed) throw error
-              if (group.epoch === before) throw ignored
-              return { advanced: true }
+              if (group.epoch === before) {
+                refusedEpoch = Number(before)
+                throw ignored
+              }
+              return {
+                advanced: true,
+                epochBefore: Number(before),
+                epochAfter: Number(group.epoch),
+              }
             }
-            if (group.epoch === before) throw ignored
-            return { advanced: true }
+            if (group.epoch === before) {
+              refusedEpoch = Number(before)
+              throw ignored
+            }
+            return { advanced: true, epochBefore: Number(before), epochAfter: Number(group.epoch) }
           } finally {
             entrySlot.install(undefined)
           }
         })
       } catch (error) {
-        if (error === ignored) return { advanced: false }
+        if (error === ignored && refusedEpoch != null)
+          return { advanced: false, epochBefore: refusedEpoch, epochAfter: refusedEpoch }
         throw error
       }
     },
