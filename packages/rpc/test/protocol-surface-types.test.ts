@@ -60,6 +60,14 @@ async function _protocolSurfaceTypes(peer: ReturnType<typeof createGroupPeer<Pro
   // gather: typed replies
   const replies = await chat.gather('chat/ask', { param: {} })
   expectTypeOf(replies).toEqualTypeOf<Array<GatheredReply<string>>>()
+  await chat.gather('chat/ask', {
+    param: {},
+    onReply(reply) {
+      const text: string = reply.value
+      void text
+    },
+    signal: new AbortController().signal,
+  })
 
   // Absent-schema event (`chat/ping` has no `data`): config is optional, a data payload rejected.
   await chat.dispatch('chat/ping')

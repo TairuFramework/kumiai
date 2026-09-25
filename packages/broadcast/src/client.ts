@@ -21,7 +21,14 @@ export type RequestData = { kind: 'req'; rid: string; prm: unknown; gather?: boo
 export type ReplyData = { kind: 'res'; rid: string; ok?: unknown; err?: string }
 
 export type RequestOptions = { errorThreshold?: number; timeoutMs?: number }
-export type GatherOptions = { quorum?: number; timeoutMs?: number }
+export type GatherOptions<T = unknown> = {
+  quorum?: number
+  timeoutMs?: number
+  /** Receives the stored reply object, which observers must treat as read-only. Throws are ignored. */
+  onReply?(reply: GatheredReply<T>): void
+  /** Aborting resolves with the replies collected so far. */
+  signal?: AbortSignal
+}
 /**
  * One gathered reply, attributed to the AUTHENTICATED sender the transport established — never a
  * self-asserted `from` in the reply body.
@@ -139,48 +146,66 @@ export class BroadcastClient extends Disposer {
     prm: unknown = {},
     options: GatherOptions = {},
   ): Promise<Array<GatheredReply>> {
+    if (options.signal?.aborted) return []
     const rid = this.#getRandomID()
     const quorum = options.quorum ?? Number.POSITIVE_INFINITY
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
+    const signal = options.signal
 
     return new Promise<Array<GatheredReply>>((resolve, reject) => {
       const replies: Array<GatheredReply> = []
       const seen = new Set<string>()
-      const finish = () => {
+      let settled = false
+      const settle = (outcome: { ok: true } | { ok: false; error: unknown }) => {
+        if (settled) return
+        settled = true
         clearTimeout(timer)
         this.#pending.delete(rid)
-        resolve(replies)
+        signal?.removeEventListener('abort', onAbort)
+        if (outcome.ok) resolve(replies)
+        else reject(outcome.error)
       }
-      const timer = setTimeout(finish, timeoutMs)
+      const onAbort = () => settle({ ok: true })
+      const timer = setTimeout(onAbort, timeoutMs)
       this.#pending.set(rid, {
         // Keyed on the AUTHENTICATED sender — that's what makes this a quorum rather than a frame
         // count. Keyed on an asserted name instead, one member could suppress another's real
         // answer by racing a forgery under its DID, or reach a quorum of N alone by answering N
         // times under N names.
         collect: (reply, senderDID) => {
-          if (reply.err != null || seen.has(senderDID)) {
+          if (settled || reply.err != null || seen.has(senderDID)) {
             return
           }
           seen.add(senderDID)
-          replies.push({ senderDID, value: reply.ok })
+          const gathered = { senderDID, value: reply.ok }
+          replies.push(gathered)
+          try {
+            options.onReply?.(gathered)
+          } catch {
+            // Observers cannot change gather settlement.
+          }
           if (replies.length >= quorum) {
-            finish()
+            settle({ ok: true })
           }
         },
         // Resolve with partial replies on dispose rather than wait for the timeout.
-        onDispose: () => {
-          clearTimeout(timer)
-          resolve(replies)
-        },
+        onDispose: onAbort,
       })
-      this.#transport
-        .write({ payload: { typ: 'ctrl', prc, data: { kind: 'req', rid, prm, gather: true } } })
-        // Reject on write failure rather than silently resolving with no replies.
-        .catch((error) => {
-          clearTimeout(timer)
-          this.#pending.delete(rid)
-          reject(error)
+      signal?.addEventListener('abort', onAbort, { once: true })
+      if (signal?.aborted) {
+        settle({ ok: true })
+        return
+      }
+      let write: Promise<void>
+      try {
+        write = this.#transport.write({
+          payload: { typ: 'ctrl', prc, data: { kind: 'req', rid, prm, gather: true } },
         })
+      } catch (error) {
+        settle({ ok: false, error })
+        return
+      }
+      void write.catch((error) => settle({ ok: false, error }))
     })
   }
 }
