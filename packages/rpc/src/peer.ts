@@ -199,7 +199,14 @@ export type GroupPeerMLSParams = {
 }
 
 export type StrandKind = 'own-unmerged' | 'fork-losing' | 'ahead' | 'unknown-version'
+/**
+ * For `own-unmerged`, `authenticated` means this device sealed a commit at this epoch that the
+ * hub now places in the log. `readCommitHeader` identifies its leaf from PrivateMessage sender
+ * data, AEAD-opened with this epoch's `sender_data_secret` and a ciphertext sample. Commit content
+ * is unverified; a hub can tamper past the sample and serve a captured, rejected frame.
+ */
 export type StrandConfidence = 'authenticated' | 'observed' | 'claimed'
+/** A stranded-frame notice. `own-unmerged` does not prove commit content or hub acceptance; heal. */
 export type StrandObservation = {
   groupID: string
   position: string
@@ -1491,9 +1498,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         })
 
         if (disposition.row === 'own-unmerged') {
-          // This peer's own commit, at the epoch it is still at: the hub took it, the group moved
-          // on, and the pending state died with its process. Cannot be applied (MLS merges a
-          // pending commit, never processes one), so the drain stops here and the peer heals.
+          // Sender data names this peer at its current epoch, but neither commit content nor hub
+          // acceptance is verified. The peer cannot process its own commit without pending state,
+          // so the drain stops here and it heals.
           healRequested = true
           stranded = true
           observeStrand({

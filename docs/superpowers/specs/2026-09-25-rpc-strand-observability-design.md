@@ -73,12 +73,16 @@ export type RecoveryEvent =
 
 | Walk site (`peer.ts` `walkCommits`) | `kind` | `confidence` | `claimedEpoch` | `commitDigest` |
 |---|---|---|---|---|
-| `disposition.row === 'own-unmerged'` | `own-unmerged` | `authenticated` | header epoch | digest |
+| `disposition.row === 'own-unmerged'` | `own-unmerged` | `authenticated`: sender data proves this device sealed a commit at this epoch that the hub now places in the log; content is unverified and the hub can fake acceptance | header epoch | digest |
 | `disposition.row === 'fork'`, `branch === 'losing'` | `fork-losing` | `observed` | header epoch | digest |
 | `disposition.row === 'ahead'` (readable frame) | `ahead` | `claimed` | header epoch | digest |
 | unknown handshake version, or unsupported commit-frame version, classified `ahead` | `unknown-version` | `claimed` | `null` | `null` |
 
-- **`authenticated`:** the committer is MLS-authenticated as this peer (`classify.ts` `own-unmerged`).
+- **`authenticated`:** `readCommitHeader` decrypts PrivateMessage sender data using this epoch's
+  `sender_data_secret` and a ciphertext sample, identifying this device's leaf. This proves the
+  device sealed a commit frame at this epoch that the hub now places in the log. It does not verify
+  commit content: a hub can alter ciphertext beyond the sample and serve a captured frame, even
+  after rejecting its publish. The hub can fake acceptance; heal.
 - **`observed`:** this peer holds different commit bytes at an epoch it enacted. The conflict is real
   bytes, but the other commit is not authenticated and the tiebreak position is the hub's. A hub serving
   divergent logs, or a forged frame, can produce it.

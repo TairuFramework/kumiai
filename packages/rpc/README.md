@@ -150,7 +150,7 @@ peer's `localEpoch`, a `kind`, and a `confidence`. `claimedEpoch` comes from the
 
 | Kind | Confidence | What the evidence establishes |
 | --- | --- | --- |
-| `own-unmerged` | `authenticated` | MLS authenticates this peer as author of a commit it has not merged. |
+| `own-unmerged` | `authenticated` | Sender data proves this device sealed a commit at this epoch that the hub now places in the log. Commit content is unverified; a hub can tamper beyond the ciphertext sample or fake acceptance. Heal. |
 | `fork-losing` | `observed` | This peer enacted different commit bytes at that epoch and is on the branch that loses the log-position tiebreak. The other commit is not authenticated. |
 | `ahead` | `claimed` | A frame's cleartext epoch is ahead of this peer. A commit-topic publisher can forge that claim. |
 | `unknown-version` | `claimed` | A frame's handshake or commit-frame version cannot be read by this build. Its epoch and commit bytes are unavailable. |

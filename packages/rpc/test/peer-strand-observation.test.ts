@@ -11,6 +11,11 @@ import type { RecoveryEvent, StrandObservation } from '../src/peer.js'
 import { commitTopic } from '../src/topic.js'
 import { publishCommit, publishedCommitDigest } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
+import {
+  createMemoryGroupMLS,
+  decodeMemoryCommit,
+  encodeMemoryCommit,
+} from './fixtures/memory-group-mls.js'
 import { makeMLSPeer } from './fixtures/peer.js'
 
 const recovery = { timeoutMs: 10, deadlineMs: 30, getDelayMs: () => 0 }
@@ -136,6 +141,56 @@ describe('commit strand observations', () => {
       )
     }
     expect(observations).toHaveLength(1)
+    await bob.peer.dispose()
+  })
+
+  test('tampered commit content with valid own sender data remains authenticated and heals', async () => {
+    const hub = new FakeHub()
+    const rs = secret(0x9a)
+    const original = decodeMemoryCommit(encodeMemoryCommit(1, 'bob'))
+    if (original == null) throw new Error('missing memory commit')
+    // The port double models a ciphertext edit beyond the sender-data sample: authorship is
+    // still readable, while the commit content is invalid and cannot be processed.
+    const tampered = new TextEncoder().encode(JSON.stringify({ ...original, invalidContent: true }))
+    const reader = createMemoryGroupMLS({ recoverySecret: rs, epoch: 1, localDID: 'carol' })
+    expect(await reader.readCommitHeader(tampered)).toEqual({ epoch: 1, committerDID: 'bob' })
+    expect(await reader.processCommit(tampered, {})).toEqual({ advanced: false })
+
+    const { sequenceID } = await publishCommit({
+      hub,
+      senderDID: 'zoe',
+      recoverySecret: rs,
+      epoch: 1,
+      commit: tampered,
+    })
+    const observations: Array<StrandObservation> = []
+    const recoveries: Array<RecoveryEvent> = []
+    const bob = makeMLSPeer(hub, 'bob', rs, {
+      members,
+      recovery,
+      onStrand: (observation) => {
+        observations.push(observation)
+      },
+      onRecovery: (event) => {
+        recoveries.push(event)
+      },
+    })
+    await vi.waitFor(() => expect(observations).toHaveLength(1))
+    expect(observations[0]).toEqual({
+      groupID: commitTopic(rs),
+      position: sequenceID,
+      commitDigest: publishedCommitDigest(hub, sequenceID),
+      localEpoch: 1,
+      claimedEpoch: 1,
+      kind: 'own-unmerged',
+      confidence: 'authenticated',
+    })
+    await vi.waitFor(() => expect(recoveries.some((event) => event.phase === 'started')).toBe(true))
+    await vi.waitFor(() =>
+      expect(
+        recoveries.some((event) => event.phase === 'failed' && event.reason === 'no-responder'),
+      ).toBe(true),
+    )
     await bob.peer.dispose()
   })
 
