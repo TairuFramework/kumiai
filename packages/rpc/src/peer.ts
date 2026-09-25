@@ -1659,9 +1659,23 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       )
     }
     if (mls == null || commitTopicID == null) return false
-    const advanced = await walkCommits(mls, commitTopicID)
-    await appLane.deliver()
-    return advanced
+    const epochBefore = crypto.epoch()
+    const anchorBefore = anchor
+    try {
+      const advanced = await walkCommits(mls, commitTopicID)
+      await appLane.deliver()
+      return advanced
+    } catch (error) {
+      // A failed final drain can follow applied commits. Refresh the runtime before a retry.
+      if (inboxLane != null && (crypto.epoch() !== epochBefore || anchor !== anchorBefore)) {
+        try {
+          await rebuildEpoch()
+        } catch {
+          // The walk's original failure remains the retryable cause.
+        }
+      }
+      throw error
+    }
   }
 
   /** Pull the commit log, and rebuild the app lane if the pull moved the epoch. */

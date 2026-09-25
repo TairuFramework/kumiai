@@ -1,12 +1,18 @@
 import type { ProtocolDefinition } from '@enkaku/protocol'
 import { normalizeDID } from '@kokuin/token'
 import type { StoredMessage } from '@kumiai/hub-protocol'
-import { toUTF } from '@sozai/codec'
+import { sha256 } from '@noble/hashes/sha2.js'
+import { fromUTF, toB64U, toUTF } from '@sozai/codec'
 
 import type { Anchor } from './anchor.js'
-import { encodeAppAAD } from './app-aad.js'
+import { decodeAppAAD, encodeAppAAD } from './app-aad.js'
 import type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
-import type { GroupCrypto, GroupUnwrapResult } from './crypto.js'
+import {
+  type GroupCrypto,
+  type GroupUnwrapResult,
+  isAppFrameStorageError,
+  type PendingAppFrame,
+} from './crypto.js'
 import { asLogPosition, type LogPosition } from './cursor.js'
 import type { BusHandlerMaps } from './handlers.js'
 import type { HubMux } from './hub-mux.js'
@@ -15,12 +21,23 @@ import { protocolTopic } from './topic.js'
 
 const APP_FETCH_LIMIT = 100
 
-/**
- * One buffered app frame. `sealed` goes `null` once the frame is done — delivered or dead — but
- * the position outlives it: the cursor advances over a RUN of done frames, so a done frame's
- * place in that run is the whole of what it still has to say.
- */
-export type AppFrame = { position: LogPosition; sealed: Uint8Array | null }
+/** The position outlives sealed bytes until the cursor can pass a run of done frames. */
+export type AppFrame = {
+  position: LogPosition
+  sealed:
+    | { state: 'sealed'; bytes: Uint8Array }
+    | { state: 'pending'; id: string }
+    | { state: 'done' }
+}
+
+function frameID(topicID: string, bytes: Uint8Array): string {
+  const topic = fromUTF(topicID)
+  const input = new Uint8Array(4 + topic.length + bytes.length)
+  new DataView(input.buffer).setUint32(0, topic.length, false)
+  input.set(topic, 4)
+  input.set(bytes, 4 + topic.length)
+  return toB64U(sha256(input))
+}
 
 /**
  * The app lane's TWO read positions for one protocol's CURRENT segment — not the same position,
@@ -88,27 +105,35 @@ export type AppLane = {
    * cleared at the STORE, since a cursor is keyed by topic and stays true of the topic being left.
    */
   reset: () => void
+  /** Opened records awaiting the delivery worker. */
+  pendingRecords: () => Array<PendingAppFrame>
 }
 
 /**
  * Take one frame into the buffer at its place in the log, or reconcile it with the copy already
  * there. The ONE way a frame enters the buffer, from either deliverer.
  *
- * A POSITION IS TAKEN ONCE: the live lane is pushed a frame and the pull reads it back out of the
- * log, so a second entry for a position already held is a second delivery of one message — the
- * duplicate the cursor exists to make impossible. A repeat is a reconcile, never an append, and
- * only ever marks a frame DONE, never undoes it: `sealed: null` says the live lane had this frame
- * at its seal epoch, and a pull reading it back afterwards must not redeliver it.
+ * A POSITION IS TAKEN ONCE. In durable mode, pending wins over every duplicate and sealed wins
+ * over done. Without durable delivery, a live done observation still wins as before.
  *
  * Kept in log order by insertion, not append, since the two deliverers do not arrive in one order:
  * a pull runs from behind the live stream and returns frames the pushes already brought.
  */
-function takeAppFrame(frames: Array<AppFrame>, incoming: AppFrame): void {
+function takeAppFrame(frames: Array<AppFrame>, incoming: AppFrame, durable: boolean): void {
   let index = frames.length
   while (index > 0 && (frames[index - 1] as AppFrame).position > incoming.position) index -= 1
   const existing = index > 0 ? (frames[index - 1] as AppFrame) : undefined
   if (existing?.position === incoming.position) {
-    if (incoming.sealed == null) existing.sealed = null
+    if (!durable) {
+      if (incoming.sealed.state === 'done') existing.sealed = incoming.sealed
+      return
+    }
+    if (existing.sealed.state === 'pending') return
+    if (incoming.sealed.state === 'pending') {
+      existing.sealed = incoming.sealed
+    } else if (existing.sealed.state === 'done') {
+      existing.sealed = incoming.sealed
+    }
     return
   }
   frames.splice(index, 0, incoming)
@@ -143,6 +168,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
    * (below) and dispensed epoch by epoch as the commit walk passes through it.
    */
   let segment = new Map<string, Array<AppFrame>>()
+  const pendingRecords: Array<PendingAppFrame> = []
 
   /** The current segment's read positions, per protocol. See {@link AppCursor}. */
   let cursors = new Map<string, AppCursor>()
@@ -270,7 +296,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
       // A push landed on a topic this peer has since rotated off names a position in a log this
       // segment's cursor knows nothing about. Dropped, not merged.
       for (const push of staged.get(name) ?? []) {
-        if (push.topicID === topicID) takeAppFrame(frames, push.frame)
+        if (push.topicID === topicID) takeAppFrame(frames, push.frame, crypto.pending != null)
       }
       staged.delete(name)
 
@@ -293,16 +319,21 @@ export function createAppLane(params: AppLaneParams): AppLane {
         }
         for (const message of result.messages) {
           const position = asLogPosition(message.sequenceID)
-          takeAppFrame(frames, { position, sealed: message.payload })
+          takeAppFrame(
+            frames,
+            { position, sealed: { state: 'sealed', bytes: message.payload } },
+            crypto.pending != null,
+          )
           after = position
         }
         cursor.fetched = after
         if (result.messages.length < APP_FETCH_LIMIT) break
       }
     }
-    // NOT `allSettled`: a failed pull must reach the caller, whose walk stops on it rather than
-    // stepping over an epoch whose frames were never read.
-    await Promise.all(Object.keys(protocols).map(loadOne))
+    // Keep the app-lane mutex until every fetch has stopped mutating its buffer.
+    const results = await Promise.allSettled(Object.keys(protocols).map(loadOne))
+    const failure = results.find((result) => result.status === 'rejected')
+    if (failure?.status === 'rejected') throw failure.reason
   }
 
   /**
@@ -320,7 +351,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
     if (cursor == null) return
     let passed = 0
     let position: LogPosition | null = null
-    while (passed < frames.length && (frames[passed] as AppFrame).sealed == null) {
+    while (passed < frames.length && (frames[passed] as AppFrame).sealed.state === 'done') {
       position = (frames[passed] as AppFrame).position
       passed += 1
     }
@@ -387,6 +418,12 @@ export function createAppLane(params: AppLaneParams): AppLane {
   const note = (name: string, topicID: string, message: StoredMessage): void => {
     const position = message.logPosition
     if (position == null) return
+    if (crypto.pending != null) {
+      // Pushed positions are unauthenticated metadata. Only fetches may populate this buffer.
+      scheduleSync()
+      return
+    }
+    if (position == null) return
     const sealedAt = crypto.frameEpoch(message.payload)
     const ahead = sealedAt != null && sealedAt > crypto.epoch()
     let pushes = staged.get(name)
@@ -396,7 +433,10 @@ export function createAppLane(params: AppLaneParams): AppLane {
     }
     pushes.push({
       topicID,
-      frame: { position: asLogPosition(position), sealed: ahead ? message.payload : null },
+      frame: {
+        position: asLogPosition(position),
+        sealed: ahead ? { state: 'sealed', bytes: message.payload } : { state: 'done' },
+      },
     })
     scheduleSync()
   }
@@ -414,19 +454,38 @@ export function createAppLane(params: AppLaneParams): AppLane {
     for (const [name, frames] of segment) {
       const events = appEventHandlers.get(name)
       const cursor = cursors.get(name)
-      if (events == null || cursor == null || frames.length === 0) continue
+      if (cursor == null || frames.length === 0 || (events == null && crypto.pending == null)) {
+        continue
+      }
       for (const frame of frames) {
-        const sealed = frame.sealed
-        if (sealed == null) continue // done on an earlier pass, and only holding its place
+        if (frame.sealed.state !== 'sealed') continue
+        const sealed = frame.sealed.bytes
         const sealedAt = crypto.frameEpoch(sealed)
         if (sealedAt !== crypto.epoch()) {
           // Not sealed at the handle's current epoch. Ahead of the walk AND justified by the
           // commit log: keep its bytes and place. Otherwise — below the walk, an epoch no member
           // could have sealed at, or unreadable — it is dead, and dead is done.
           if (sealedAt != null && sealedAt > crypto.epoch() && (await justifies(sealedAt))) continue
-          frame.sealed = null
+          frame.sealed = { state: 'done' }
           continue
         }
+        if (crypto.pending != null) {
+          const decoded = decodeAppAAD(crypto.frameAAD(sealed) ?? new Uint8Array())
+          if (decoded?.topicID !== cursor.topicID || decoded.intent !== 'log') {
+            frame.sealed = { state: 'done' }
+            continue
+          }
+        }
+        const ref =
+          crypto.pending == null
+            ? undefined
+            : {
+                id: frameID(cursor.topicID, sealed),
+                topicID: cursor.topicID,
+                protocol: name,
+                segment: anchor().epoch,
+                position: frame.position,
+              }
         let opened: GroupUnwrapResult
         try {
           // `crypto.unwrap` always returns the full result — `senderDID` is REQUIRED — so there is
@@ -434,18 +493,31 @@ export function createAppLane(params: AppLaneParams): AppLane {
           // the cursor's own topic, the authoritative answer to "what lane is this drain reading".
           opened = await crypto.unwrap(sealed, {
             expectedAAD: encodeAppAAD({ topicID: cursor.topicID, intent: 'log' }),
+            ...(ref == null ? {} : { frame: ref }),
           })
-        } catch {
+        } catch (error) {
+          if (crypto.pending != null && isAppFrameStorageError(error)) throw error
           // Claimed this epoch and the handle refused it — OR its AAD did not match this topic (a
           // wrong-topic frame, or a pre-upgrade empty-AAD frame). Either way, dead: the handle
           // never returns to this epoch and the topic binding never changes. Retained history from
           // before this bind existed is DELIBERATELY invalidated, not silently re-offered.
-          frame.sealed = null
+          frame.sealed = { state: 'done' }
+          continue
+        }
+        if (ref != null) {
+          const record = {
+            frame: ref,
+            payload: opened.payload,
+            senderDID: opened.senderDID,
+          }
+          frame.sealed = { state: 'pending', id: record.frame.id }
+          pendingRecords.push(record)
           continue
         }
         // Opened, so it is done whatever the payload turns out to be — every path below either
         // delivers it or drops it exactly as the live transport would.
-        frame.sealed = null
+        frame.sealed = { state: 'done' }
+        if (events == null) continue
         // This `unwrap` is its own ingress — not fed by `peer.ts`'s normalized inbound path — so
         // the recovered sender is normalized HERE, once, before either use below: `localDID` (the
         // param above) is already normalized at peer construction, and the two must compare on
@@ -516,6 +588,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
      */
     deliver: (): Promise<void> => runAppLane(drain),
     note,
+    pendingRecords: () => [...pendingRecords],
     reset: (): void => {
       segment = new Map()
       cursors = new Map()

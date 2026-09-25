@@ -241,3 +241,31 @@ Cached:    0 cached, 49 total
    Start at  14:58:57
    Duration  6.18s (tests 84%, import 8%, transform 8%)
 ```
+
+### 2026-09-25 — Question 3.1
+
+- **Learned:** A storage fault leaves a retained frame sealed. A successful atomic open makes it
+  pending and holds the cursor. Settling all protocol fetches before releasing the app-lane mutex
+  prevents late buffer writes after a retry starts. A failed final drain can follow a successful
+  roster-changing apply. The runtime must rebuild before the original error propagates.
+- **Deviations:** The first peer test used `recover()`, which waited for healing. The test switched
+  to `commit()` as the journal-first entry point before implementation. Fetch-only position handling
+  in `note()` moved forward from Question 3.2 because the buffer must reject pushed positions.
+  Question 3.2 retains live push routing and retries. Question 3.3 retains the delivery worker.
+  Initial usage tests exposed three failures before implementation. Two further guards were added
+  and mutation-checked. All six pass. Eight source mutations each failed their guard test and were
+  restored. The full rpc unit suite passed (72 files, 479 tests).
+- **Spec/plan contradiction:** None. The Question 3.1 slice stages pending records in the app lane; the later questions connect live wakeups and handler delivery.
+- **Verify:** `pnpm --filter @kumiai/rpc exec vitest run test/durable-drain.test.ts && pnpm --filter @kumiai/rpc run test:types`
+
+```text
+ RUN  v5.0.1 /Users/paul/dev/yulsi/kumiai.worktrees/durable-app-delivery/packages/rpc
+
+
+ Test Files  1 passed (1)
+      Tests  6 passed (6)
+   Start at  15:29:30
+   Duration  688ms (tests 41%, transform 32%, import 27%)
+
+$ tsc --noEmit --skipLibCheck -p tsconfig.test.json
+```
