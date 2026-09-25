@@ -133,7 +133,8 @@ describe('protocol gather streaming', () => {
     const hub = new FakeHub()
     const peer = makePeer(hub, 'alice')
     const controller = new AbortController()
-    const listeners = countAbortListeners(controller.signal)
+    const add = vi.spyOn(controller.signal, 'addEventListener')
+    const remove = vi.spyOn(controller.signal, 'removeEventListener')
     expect(
       await peer.protocol('chat').gather('chat/echo', {
         param: {},
@@ -141,8 +142,13 @@ describe('protocol gather streaming', () => {
         timeoutMs: 20,
       }),
     ).toEqual([])
-    expect(listeners.added()).toBe(listeners.removed())
-    expect(listeners.added()).toBeGreaterThan(0)
+    const readinessListener = add.mock.calls.find(([type]) => type === 'abort')?.[1]
+    expect(readinessListener).toBeDefined()
+    expect(
+      remove.mock.calls.some(
+        ([type, listener]) => type === 'abort' && listener === readinessListener,
+      ),
+    ).toBe(true)
     await peer.dispose()
   })
 

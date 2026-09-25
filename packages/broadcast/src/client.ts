@@ -192,6 +192,10 @@ export class BroadcastClient extends Disposer {
         onDispose: onAbort,
       })
       signal?.addEventListener('abort', onAbort, { once: true })
+      if (signal?.aborted) {
+        settle({ ok: true })
+        return
+      }
       let write: Promise<void>
       try {
         write = this.#transport.write({

@@ -1,3 +1,4 @@
+import { createRuntime } from '@sozai/runtime'
 import { describe, expect, test, vi } from 'vitest'
 
 import { createMemoryBus } from '../src/bus.js'
@@ -140,6 +141,36 @@ describe('BroadcastClient.gather streaming', () => {
     expect(write).not.toHaveBeenCalled()
     expect(listeners.added()).toBe(0)
     await client.dispose()
+  })
+
+  test('an abort during request ID generation resolves promptly without writing', async () => {
+    const bus = createMemoryBus()
+    const transport = createBroadcastTransport({ topicID: TOPIC, bus })
+    const write = vi.spyOn(transport, 'write')
+    const controller = new AbortController()
+    const client = new BroadcastClient({
+      transport,
+      runtime: createRuntime({
+        getRandomID: () => {
+          controller.abort()
+          return 'request-id'
+        },
+      }),
+    })
+    const gathered = client.gather('census', {}, { signal: controller.signal, timeoutMs: 1000 })
+    try {
+      expect(
+        await Promise.race([
+          gathered,
+          new Promise<never>((_, reject) => {
+            setTimeout(() => reject(new Error('gather did not settle promptly')), 100)
+          }),
+        ]),
+      ).toEqual([])
+      expect(write).not.toHaveBeenCalled()
+    } finally {
+      await client.dispose()
+    }
   })
 
   test('abort resolves partial replies and ignores a later reply', async () => {
@@ -337,6 +368,37 @@ describe('BroadcastClient.gather streaming', () => {
     expect(replies).toEqual([{ senderDID: 'did:a', value: 1 }])
     expect(onReply).toHaveBeenCalledTimes(1)
     await responder.dispose()
+  })
+
+  test('aborting from the quorum reply cleans up exactly once', async () => {
+    const bus = createMemoryBus()
+    const responder = startResponder(bus, 'did:a', () => ({ ok: 1 }))
+    const controller = new AbortController()
+    const remove = vi.spyOn(controller.signal, 'removeEventListener')
+    const client = new BroadcastClient({
+      transport: createBroadcastTransport({ topicID: TOPIC, bus }),
+    })
+    const resolved = vi.fn()
+    const replies = await client
+      .gather(
+        'census',
+        {},
+        {
+          quorum: 1,
+          signal: controller.signal,
+          onReply() {
+            controller.abort()
+          },
+        },
+      )
+      .then((result) => {
+        resolved(result)
+        return result
+      })
+    expect(replies).toEqual([{ senderDID: 'did:a', value: 1 }])
+    expect(resolved).toHaveBeenCalledExactlyOnceWith(replies)
+    expect(remove.mock.calls.filter(([type]) => type === 'abort')).toHaveLength(1)
+    await Promise.all([client.dispose(), responder.dispose()])
   })
 
   test('one signal shared by many settled gathers has no listeners left', async () => {
