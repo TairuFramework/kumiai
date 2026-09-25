@@ -2,6 +2,7 @@ import { fromUTF } from '@sozai/codec'
 import { describe, expect, test, vi } from 'vitest'
 
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
+import type { RecoveryEvent } from '../src/peer.js'
 import { decodeLedgerReply, encodeLedgerRequest } from '../src/recovery.js'
 import { rendezvousTopic } from '../src/topic.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
@@ -117,10 +118,25 @@ describe('the ledger gather does not hand the group to the relay', () => {
     const timing = { timeoutMs: 80, getDelayMs: () => 0, deadlineMs: 250 }
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery: timing })
     await bob.peer.commit(buildLedgerCommit(bob, ['role:carol=admin']))
-    const alice = makeMLSPeer(hub, 'alice', rs, {
+    const owed = 'circle:x=Alice'
+    const aliceCrypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
+    const aliceMLS = createMemoryGroupMLS({
+      recoverySecret: rs,
       epoch: 1,
+      localDID: 'alice',
+      members,
+      onAdvance: (epoch) => aliceCrypto.setEpoch(epoch),
+    })
+    aliceMLS.adopt(aliceMLS.buildCommit([owed]))
+    const events: Array<RecoveryEvent> = []
+    const alice = makeMLSPeer(hub, 'alice', rs, {
+      mls: aliceMLS,
+      crypto: aliceCrypto,
       members,
       recovery: timing,
+      onRecovery: (event) => {
+        events.push(event)
+      },
     })
     let releaseBootstrap: () => void = () => {}
     const bootstrapGate = new Promise<void>((resolve) => {
@@ -140,7 +156,12 @@ describe('the ledger gather does not hand the group to the relay', () => {
     expect(firstSettled).toBe(false)
     const second = alice.peer.recover()
     releaseBootstrap()
-    await Promise.all([first, second])
+    const [firstResult, secondResult] = await Promise.all([first, second])
+    expect(firstResult).toEqual({ advanced: true, reenact: [owed] })
+    expect(secondResult).toEqual({ advanced: true, reenact: [] })
+    expect(events.map((event) => event.phase)).toEqual(['started', 'succeeded'])
+    expect(await alice.mls.isLedgerComplete()).toBe(true)
+    expect((await alice.peer.replay()).reenact).toBeUndefined()
     await alice.peer.dispose()
     await bob.peer.dispose()
   })

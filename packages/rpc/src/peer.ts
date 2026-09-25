@@ -1946,7 +1946,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         clearTimeout(timer)
         // Keep the lane until every bootstrap already touching this handle has finished.
         if (bootstraps.size === 0) resolve(complete)
-        else void Promise.allSettled([...bootstraps]).then(() => resolve(complete))
+        else
+          void Promise.allSettled([...bootstraps]).then((results) => {
+            resolve(complete || results.some((result) => result.status === 'fulfilled'))
+          })
       }
       const finishOnDispose = () => finish(false)
       const timer = setTimeout(() => finish(false), Math.max(0, deadline - Date.now()))
