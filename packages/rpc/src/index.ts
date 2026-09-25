@@ -38,14 +38,20 @@ export {
   UnsupportedCommitFrameVersionError,
 } from './commit-frame.js'
 export {
+  type AppFrameRef,
+  AppFrameStorageError,
   type CommitContext,
   type CommitHeader,
   type GroupCrypto,
   type GroupMLS,
   type GroupUnwrapResult,
+  isAppFrameStorageError,
   isMissingLedgerEntries,
+  type PendingAppFrame,
+  type PendingAppFrames,
   type PendingRecovery,
   type RosterEntry,
+  sortPendingAppFrames,
 } from './crypto.js'
 export {
   asDeliveryPosition,

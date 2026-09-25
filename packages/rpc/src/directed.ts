@@ -7,7 +7,6 @@ import {
 } from '@enkaku/protocol'
 import { HandlerError, type ProcedureHandlers, Server } from '@enkaku/server'
 import { normalizeDID } from '@kokuin/token'
-import type { Unwrap } from '@kumiai/broadcast'
 import type { StoredMessage } from '@kumiai/hub-protocol'
 import {
   createHubTunnelTransport,
@@ -18,7 +17,7 @@ import {
 import { createRuntime, type Runtime } from '@sozai/runtime'
 
 import { encodeAppAAD } from './app-aad.js'
-import type { GroupCrypto } from './crypto.js'
+import type { GroupCrypto, GroupUnwrapResult } from './crypto.js'
 import {
   decodeDirectedPayload,
   encodeDirectedPayload,
@@ -53,7 +52,7 @@ export type InboundPath = (onOpened: (message: OpenedInbound) => void) => () => 
 export type InboxPathParams = {
   mux: HubMux
   topicID: string
-  unwrap: Unwrap
+  unwrap: (bytes: Uint8Array) => GroupUnwrapResult | Promise<GroupUnwrapResult>
   /** Forwarded to {@link createOpenOncePath} — see there for what it decides. */
   retainOnFailure?: (message: StoredMessage) => boolean
 }

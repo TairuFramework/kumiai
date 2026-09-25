@@ -1,6 +1,12 @@
 import type { GroupHandle } from '@kumiai/mls'
 import { readMessageAAD, readMessageEpoch } from '@kumiai/mls'
-import type { GroupCrypto } from '@kumiai/rpc'
+import {
+  AppFrameStorageError,
+  type GroupCrypto,
+  type PendingAppFrame,
+  type PendingAppFrames,
+  sortPendingAppFrames,
+} from '@kumiai/rpc'
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js'
 import { createRuntime, type Runtime } from '@sozai/runtime'
 
@@ -55,6 +61,12 @@ export type GroupCryptoParams = {
   entryLabel?: string
   /** Runtime providing platform primitives. Defaults to `createRuntime()`. */
   runtime?: Runtime
+  /** Atomic host store for post-open handle state and the pending record. */
+  pending?: {
+    persistOpened(stagedState: Uint8Array, record: PendingAppFrame): Promise<void>
+    list(): Promise<Array<PendingAppFrame>>
+    complete(id: string): Promise<void>
+  }
 }
 
 /**
@@ -80,8 +92,12 @@ export type GroupCryptoParams = {
  *    a sealed app frame and a commit — returning `null` (never throwing) for anything ts-mls
  *    won't decode. The fake answers only for its own two encodings.
  */
+export function createGroupCrypto(
+  params: GroupCryptoParams & { pending: NonNullable<GroupCryptoParams['pending']> },
+): GroupCrypto & { pending: PendingAppFrames }
+export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto
 export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
-  const { handle, entryLabel = ENTRY_SEAL_LABEL, runtime = createRuntime() } = params
+  const { handle, entryLabel = ENTRY_SEAL_LABEL, runtime = createRuntime(), pending } = params
 
   return {
     epoch: () => Number(handle().epoch),
@@ -129,6 +145,22 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
     },
 
     unwrap: async (bytes, opts) => {
+      if (opts?.frame != null) {
+        if (pending == null) throw new Error('unwrap: pending store required for durable open')
+        const frame = opts.frame
+        const opened = await handle().decryptStaged(bytes, opts, async (stagedState, result) => {
+          try {
+            await pending.persistOpened(stagedState, {
+              frame,
+              payload: result.payload,
+              senderDID: result.senderDID,
+            })
+          } catch (error) {
+            throw new AppFrameStorageError('failed to persist opened app frame', { cause: error })
+          }
+        })
+        return { payload: opened.payload, senderDID: opened.senderDID }
+      }
       const { payload, senderDID } = await handle().decrypt(bytes, opts)
       if (senderDID == null) {
         throw new Error('unwrap: opened frame has no authenticated sender')
@@ -142,5 +174,13 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
       return epoch == null ? null : Number(epoch)
     },
     frameAAD: (bytes) => readMessageAAD(bytes),
+    ...(pending == null
+      ? {}
+      : {
+          pending: {
+            list: async () => sortPendingAppFrames(await pending.list()),
+            complete: (id: string) => pending.complete(id),
+          },
+        }),
   }
 }

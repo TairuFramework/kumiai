@@ -1,7 +1,13 @@
 import { sha256 } from '@noble/hashes/sha2.js'
 import { fromUTF, toUTF } from '@sozai/codec'
 
-import type { GroupCrypto } from '../../src/crypto.js'
+import {
+  AppFrameStorageError,
+  type GroupCrypto,
+  type PendingAppFrame,
+  type PendingAppFrames,
+  sortPendingAppFrames,
+} from '../../src/crypto.js'
 import { decodeMemoryCommit } from './memory-group-mls.js'
 
 export type FakeCryptoOptions = {
@@ -12,9 +18,20 @@ export type FakeCryptoOptions = {
   key?: number
   /** The local member DID stamped into every wrapped message. */
   localDID?: string
+  /** Serialized spent generations and sending counter, as saved by a host. */
+  state?: Uint8Array
+  pending?: {
+    persistOpened(state: Uint8Array, record: PendingAppFrame): Promise<void>
+    list(): Promise<Array<PendingAppFrame>>
+    complete(id: string): Promise<void>
+  }
 }
 
-export type FakeCrypto = GroupCrypto & { setEpoch: (n: number) => void }
+export type FakeCrypto = GroupCrypto & {
+  setEpoch: (n: number) => void
+  saveState: () => Uint8Array
+  forceUnnamedSender: () => () => void
+}
 
 /** The base secret every fake member shares, so members at the same epoch export the same bytes. */
 export const FAKE_BASE_SECRET = new Uint8Array(32).fill(0xab)
@@ -176,8 +193,20 @@ export function fakeEpochSecret(
  * NOT real encryption. All members in a test share `key` so they can decrypt each other
  * at a shared epoch; different keys model different groups.
  */
+export function createFakeCrypto(
+  options: FakeCryptoOptions & { pending: NonNullable<FakeCryptoOptions['pending']> },
+): FakeCrypto & { pending: PendingAppFrames }
+export function createFakeCrypto(options?: FakeCryptoOptions): FakeCrypto
 export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
-  let epoch = options.epoch ?? 1
+  const restored =
+    options.state == null || options.state.length === 0
+      ? null
+      : (JSON.parse(toUTF(options.state)) as {
+          epoch: number
+          generation: number
+          spent: Array<string>
+        })
+  let epoch = restored?.epoch ?? options.epoch ?? 1
   const secret = options.secret ?? FAKE_BASE_SECRET
   const key = options.key ?? 0x5a
   const localDID = options.localDID ?? ''
@@ -190,13 +219,22 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
   }
 
   /** This sender's own sending chain: one generation per frame, never reused. */
-  let generation = 0
+  let generation = restored?.generation ?? 0
   /**
    * The generations this RECEIVER has already spent, as `epoch:senderDID:generation`. A real
    * handle deletes the message key as it opens; this remembers instead, which refuses the same
    * second open for the same reason.
    */
-  const spent = new Set<string>()
+  const spent = new Set<string>(restored?.spent ?? [])
+  let unnamedSender = false
+  const saveState = (extraSpent?: string): Uint8Array =>
+    fromUTF(
+      JSON.stringify({
+        epoch,
+        generation,
+        spent: extraSpent == null ? [...spent] : [...spent, extraSpent],
+      }),
+    )
 
   const wrap: GroupCrypto['wrap'] = (bytes, opts) => {
     const did = fromUTF(localDID)
@@ -282,7 +320,11 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
     return framed.slice(start, start + aadLen)
   }
 
-  const unwrap: GroupCrypto['unwrap'] = (bytes, opts) => {
+  const open = (
+    bytes: Uint8Array,
+    opts: { expectedAAD?: Uint8Array } | undefined,
+    consume: boolean,
+  ) => {
     if (bytes.length < 2 + FRAMED_HEADER_BYTES + AAD_LEN_BYTES + TAG_BYTES) {
       throw new Error('cannot open: not sealed bytes')
     }
@@ -313,6 +355,7 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
       throw new Error('cannot open: frame authentication tag does not match')
     }
     const senderDID = toUTF(framed.subarray(headerEnd, headerEnd + didLen))
+    if (unnamedSender) throw new Error('cannot open: unnamed sender')
     const aad = framed.subarray(headerEnd + didLen, headerEnd + didLen + aadLen)
     // Pre-spent: a wrong-topic frame is rejected before the generation is consumed, mirroring the
     // real handle's pre-open compare — an attacker replaying a frame under the wrong AAD must not
@@ -329,10 +372,30 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
         `cannot open: the message key for generation ${sealedGeneration} from ${senderDID} at epoch ${sealedAt} is spent`,
       )
     }
-    spent.add(spentKey)
+    if (consume) spent.add(spentKey)
     const payload = framed.subarray(headerEnd + didLen + aadLen, framed.length - TAG_BYTES)
-    return { payload, senderDID }
+    return { payload, senderDID, spentKey }
   }
+  const unwrap: GroupCrypto['unwrap'] = (bytes, opts) => {
+    if (opts?.frame == null) {
+      const { payload, senderDID } = open(bytes, opts, true)
+      return { payload, senderDID }
+    }
+    const pending = options.pending
+    if (pending == null) throw new Error('unwrap: pending store required for durable open')
+    const { payload, senderDID, spentKey } = open(bytes, opts, false)
+    const record = { frame: opts.frame, payload, senderDID }
+    return (async () => {
+      try {
+        await pending.persistOpened(saveState(spentKey), record)
+      } catch (error) {
+        throw new AppFrameStorageError('failed to persist opened app frame', { cause: error })
+      }
+      spent.add(spentKey)
+      return { payload, senderDID }
+    })()
+  }
+  const pending = options.pending
 
   /**
    * The ledger-entry seal, modelled as a keystream XOR under a key derived from the epoch's
@@ -421,10 +484,25 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
     unwrap,
     frameEpoch,
     frameAAD,
+    ...(pending == null
+      ? {}
+      : {
+          pending: {
+            list: async () => sortPendingAppFrames(await pending.list()),
+            complete: (id: string) => pending.complete(id),
+          },
+        }),
     sealEntries,
     openEntries,
     setEpoch: (n) => {
       epoch = n
+    },
+    saveState: () => saveState(),
+    forceUnnamedSender: () => {
+      unnamedSender = true
+      return () => {
+        unnamedSender = false
+      }
     },
   }
 }

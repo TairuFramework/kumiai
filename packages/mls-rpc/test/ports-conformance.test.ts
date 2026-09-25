@@ -1,10 +1,18 @@
-import type { GroupCrypto, GroupMLS } from '@kumiai/rpc'
+import { decodeClientState, encodeClientState, restoreGroup } from '@kumiai/mls'
+import {
+  type GroupCrypto,
+  type GroupMLS,
+  isAppFrameStorageError,
+  type PendingAppFrame,
+} from '@kumiai/rpc'
 import {
   type ConformanceCryptoMember,
   type ConformanceMLSMember,
   testGroupCryptoConformance,
   testGroupMLSConformance,
+  testPendingGroupCryptoConformance,
 } from '@kumiai/rpc-conformance'
+import { nodeTypes } from 'ts-mls'
 
 import { createGroupCrypto } from '../src/crypto.js'
 import { createGroupMLS } from '../src/mls.js'
@@ -56,6 +64,79 @@ testGroupCryptoConformance({
           if (at === index) continue
           await member.handle.processMessage(commit)
         }
+      },
+    }
+  },
+})
+
+testPendingGroupCryptoConformance({
+  label: 'createGroupCrypto over a real GroupHandle',
+  isStorageError: isAppFrameStorageError,
+  createFixture: async (id) => {
+    const group = await createRealGroup(1, `pending-${id}`)
+    const member = group.members[0]
+    if (member == null) throw new Error('missing real group member')
+    const originalHandle = member.handle
+    let persistCalls = 0
+    const store = {
+      state: encodeClientState(member.handle.state),
+      records: new Map<string, PendingAppFrame>(),
+      fail: false,
+    }
+    const pending = {
+      persistOpened: async (state: Uint8Array, record: PendingAppFrame) => {
+        persistCalls++
+        if (store.fail) throw new Error('database unavailable')
+        store.state = state.slice()
+        store.records.set(record.frame.id, record)
+      },
+      list: async () => [...store.records.values()],
+      complete: async (recordID: string) => {
+        store.records.delete(recordID)
+      },
+    }
+    const receiver = createGroupCrypto({ handle: () => member.handle, pending })
+    const restore = async () => {
+      const state = decodeClientState(store.state)
+      if (state == null) throw new Error('invalid saved state')
+      const handle = await restoreGroup({ state, credential: member.handle.credential })
+      return createGroupCrypto({ handle: () => handle, pending })
+    }
+    return {
+      sender: createGroupCrypto({ handle: () => group.committer.handle }),
+      receiver,
+      restore,
+      failPersist: (yes: boolean) => {
+        store.fail = yes
+      },
+      saveHandle: async () => {
+        store.state = encodeClientState(member.handle.state)
+      },
+      liveContextOwned: () => member.handle === originalHandle,
+      liveState: () => encodeClientState(member.handle.state),
+      persistCalls: () => persistCalls,
+      unnamedSender: () => {
+        const leafIndex = member.handle
+          .listMembers()
+          .find((entry) => entry.id === group.committer.identity.id)?.leafIndex
+        if (leafIndex == null) throw new Error('missing sender leaf')
+        const node = member.handle.state.ratchetTree[leafIndex * 2]
+        if (
+          node == null ||
+          node.nodeType !== nodeTypes.leaf ||
+          !('identity' in node.leaf.credential)
+        )
+          throw new Error('missing credential')
+        const credential = node.leaf.credential
+        const original = credential.identity
+        credential.identity = new TextEncoder().encode('not-json-garbage')
+        return () => {
+          credential.identity = original
+        }
+      },
+      advance: async () => {
+        const commit = await buildRealCommit(group, {})
+        await member.handle.processMessage(commit)
       },
     }
   },

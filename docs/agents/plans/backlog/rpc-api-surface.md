@@ -35,7 +35,7 @@ the deadline. Line numbers are as of `5eb220a`.
   `Record<string, ProtocolDefinition>` to `Record<string, GroupProtocolDefinition>`. See
   [../completed/2026-09-04-rpc-protocol-surface-typing.complete.md](../completed/2026-09-04-rpc-protocol-surface-typing.complete.md).
 
-- **`open-once` and `directed` still type against the optional-sender `UnwrapResult`.** Task 6 of
+- ~~**`open-once` and `directed` still type against the optional-sender `UnwrapResult`.** Task 6 of
   the forward-compatibility plan closed the *runtime* hole in `packages/rpc/src/peer.ts` —
   `openedFrames` is typed `GroupUnwrapResult`, and a frame missing `senderDID` is refused before
   anything downstream sees it. It did not re-type `packages/rpc/src/open-once.ts:15`'s
@@ -46,7 +46,8 @@ the deadline. Line numbers are as of `5eb220a`.
 
   Type-safety debt with a runtime guard already under it, not a live gap — which is exactly why it
   was left. The fix is to narrow these to the group-authenticated result type, which breaks any
-  consumer supplying a crypto-agnostic `unwrap`.
+  consumer supplying a crypto-agnostic `unwrap`.~~ *Taken 2026-09-25:* both paths now require
+  rpc's `GroupUnwrapResult` and reject optional-sender unwrap functions at compile time.
 
 - ~~**`GroupMLS.rosterDIDs` carries no leaf identity.** `packages/rpc/src/crypto.ts:240` —
   `rosterDIDs(): Promise<Array<string>>`, documented at `:228` as "one entry per leaf". So a DID

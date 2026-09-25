@@ -73,10 +73,12 @@ export type GroupCrypto = {
    */
   unwrap(
     bytes: Uint8Array,
-    opts?: { expectedAAD?: Uint8Array },
+    opts?: { expectedAAD?: Uint8Array; frame?: AppFrameRef },
   ): GroupUnwrapResult | Promise<GroupUnwrapResult>
   /** Cleartext app AAD for pre-open routing. Untrusted until unwrap authenticates it. Never throws. */
   frameAAD(bytes: Uint8Array): Uint8Array | null
+  /** Present iff opened app frames and their consumed handle state are saved atomically. */
+  pending?: PendingAppFrames
   /**
    * The epoch a sealed frame was sealed at, read from its own CLEARTEXT without opening it —
    * structural and pre-open, like {@link GroupMLS.readCommitHeader} is pre-apply. `null` for
@@ -130,6 +132,56 @@ export type GroupCrypto = {
    * Callers open from inside an apply.
    */
   openEntries(sealed: Uint8Array): Uint8Array | Promise<Uint8Array>
+}
+
+export type AppFrameRef = {
+  /** Stable identity derived from topic and ciphertext. */
+  id: string
+  topicID: string
+  protocol: string
+  /** App-lane anchor epoch of the frame's segment. */
+  segment: number
+  /** Position in this topic's log. */
+  position: string
+}
+
+export type PendingAppFrame = {
+  frame: AppFrameRef
+  payload: Uint8Array
+  senderDID: string
+}
+
+export type PendingAppFrames = {
+  /** Every saved, uncompleted record in (segment, position) order. */
+  list(): Promise<Array<PendingAppFrame>>
+  /** Unknown IDs resolve successfully. */
+  complete(id: string): Promise<void>
+}
+
+/** A failed atomic handle-state and pending-record write; callers may retry the same frame. */
+export class AppFrameStorageError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'AppFrameStorageError'
+  }
+}
+
+export function isAppFrameStorageError(error: unknown): error is AppFrameStorageError {
+  return error instanceof AppFrameStorageError
+}
+
+/** Hub positions are numeric strings; retain a stable lexical fallback for opaque hosts. */
+export function sortPendingAppFrames(records: Array<PendingAppFrame>): Array<PendingAppFrame> {
+  return [...records].sort((a, b) => {
+    if (a.frame.segment !== b.frame.segment) return a.frame.segment - b.frame.segment
+    const aPos = a.frame.position
+    const bPos = b.frame.position
+    if (/^\d+$/.test(aPos) && /^\d+$/.test(bPos)) {
+      const difference = BigInt(aPos) - BigInt(bPos)
+      return difference < 0n ? -1 : difference > 0n ? 1 : 0
+    }
+    return aPos < bPos ? -1 : aPos > bPos ? 1 : 0
+  })
 }
 
 /**

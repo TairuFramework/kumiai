@@ -369,7 +369,11 @@ store that serializes the handle) and the fake crypto double:
 - `list()` order by `(segment, position)`; `complete()` idempotent; records survive a new port instance
   over the same store.
 - `frameAAD` returns the cleartext AAD and never throws on garbage.
-- A frame below the current epoch that the real port can still open: staged open behaves identically.
+- A frame below the current epoch: staged open fails closed. It rejects without calling `persistOpened`
+  and leaves the live state unchanged, so the frame can still be retried. The real handle names the
+  sender from the current epoch's sender-data secret and roster, so it cannot authenticate an earlier
+  epoch's sender. No caller needs it: the drain marks below-epoch frames dead before opening
+  (`app-lane.ts:420`), and the walk never applies a commit past an unresolved log frame.
 
 `GroupHandle.decryptStaged` gets unit tests in `@kumiai/mls`. Hub conformance runs as regression. The
 double must be no more permissive than the real port.

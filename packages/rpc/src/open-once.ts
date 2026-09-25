@@ -1,18 +1,18 @@
-import type { Unwrap, UnwrapResult } from '@kumiai/broadcast'
 import type { StoredMessage } from '@kumiai/hub-protocol'
 
+import type { GroupUnwrapResult } from './crypto.js'
 import type { HubMux } from './hub-mux.js'
 
 export type OpenOncePathParams<Opened> = {
   mux: HubMux
   topicID: string
-  unwrap: Unwrap
+  unwrap: (bytes: Uint8Array) => GroupUnwrapResult | Promise<GroupUnwrapResult>
   /**
    * Turn an opened frame into what this lane's consumers receive. Returning `undefined` drops
    * the frame — the open has already happened either way, so a lane rejects here rather than
    * leaving each consumer to decide.
    */
-  project: (message: StoredMessage, opened: UnwrapResult) => Opened | undefined
+  project: (message: StoredMessage, opened: GroupUnwrapResult) => Opened | undefined
   /** Called with the raw message BEFORE the open, for anything recorded at the epoch the frame
    * opens against. */
   note?: (message: StoredMessage) => void
@@ -57,8 +57,7 @@ export function createOpenOncePath<Opened>(
       let handled = true
       opening = opening
         .then(async () => {
-          const result = await unwrap(message.payload)
-          const opened = result instanceof Uint8Array ? { payload: result } : result
+          const opened = await unwrap(message.payload)
           const value = project(message, opened)
           if (value === undefined) return
           // Snapshot: a consumer disposing from inside its own delivery must not perturb the

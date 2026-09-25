@@ -3,9 +3,15 @@ import {
   type ConformanceMLSMember,
   testGroupCryptoConformance,
   testGroupMLSConformance,
+  testPendingGroupCryptoConformance,
 } from '@kumiai/rpc-conformance'
 
-import type { GroupCrypto, GroupMLS } from '../src/crypto.js'
+import {
+  type GroupCrypto,
+  type GroupMLS,
+  isAppFrameStorageError,
+  type PendingAppFrame,
+} from '../src/crypto.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import {
   createMemoryGroupMLS,
@@ -58,6 +64,53 @@ testGroupCryptoConformance({
         for (const [at, member] of members.entries()) {
           if (at !== index) member.crypto.setEpoch(member.crypto.epoch() + 1)
         }
+      },
+    }
+  },
+})
+
+testPendingGroupCryptoConformance({
+  label: 'createFakeCrypto',
+  isStorageError: isAppFrameStorageError,
+  createFixture: async () => {
+    let persistCalls = 0
+    const store = {
+      state: new Uint8Array() as Uint8Array,
+      records: new Map<string, PendingAppFrame>(),
+      fail: false,
+    }
+    const pending = {
+      persistOpened: async (state: Uint8Array, record: PendingAppFrame) => {
+        persistCalls++
+        if (store.fail) throw new Error('database unavailable')
+        store.state = state.slice()
+        store.records.set(record.frame.id, record)
+      },
+      list: async () => [...store.records.values()],
+      complete: async (recordID: string) => {
+        store.records.delete(recordID)
+      },
+    }
+    const sender = createFakeCrypto({ epoch: 1, localDID: 'did:key:alice' })
+    const receiver = createFakeCrypto({ epoch: 1, localDID: 'did:key:bob', pending })
+    store.state = receiver.saveState()
+    return {
+      sender,
+      receiver,
+      restore: async () =>
+        createFakeCrypto({ epoch: 1, localDID: 'did:key:bob', pending, state: store.state }),
+      failPersist: (yes: boolean) => {
+        store.fail = yes
+      },
+      saveHandle: async () => {
+        store.state = receiver.saveState()
+      },
+      liveContextOwned: () => true,
+      liveState: () => receiver.saveState(),
+      persistCalls: () => persistCalls,
+      unnamedSender: () => receiver.forceUnnamedSender(),
+      advance: async () => {
+        receiver.setEpoch(2)
       },
     }
   },

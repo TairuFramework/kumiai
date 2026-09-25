@@ -205,3 +205,39 @@ Cached:    0 cached, 18 total
    Start at  14:38:17
    Duration  7.06s (tests 72%, transform 19%, import 9%)
 ```
+
+### 2026-09-25 — Question 2.1
+
+- **Learned:** The real handle can retain earlier-epoch payload ratchet material but cannot authenticate that epoch's sender after advancing. A staged below-epoch open therefore fails closed. Both the real port and the fake double reject it without calling `persistOpened` or changing live state; a repeat attempt with nothing changed rejects the same way. An atomic host write of staged handle state and the pending record lets a restored handle keep the consumed key spent while retaining the record.
+- **Deviations:** The first run stopped on the contradictory below-epoch probe, with its partial implementation unstaged. After the user's resolution, the shared clause was changed to fail closed and the double was advanced in that test. The test harness was also adjusted to accept synchronous throws and rejected promises, both allowed by the port. The original usage tests failed on missing API members before implementation. Six targeted mutations, including adopting the fake state before persistence, each failed its conformance clause; all source was restored. The exported signature prompted an additional integration run.
+- **Spec/plan contradiction:** The original Conformance clause expected a successful earlier-epoch staged open, contrary to the real port's authenticated-sender requirement. The user resolved this by changing the spec to fail closed. No contradiction remains for Question 2.1. Current packages are in the 0.9 band and this work targets 0.11; the earlier Question 1.2 log's 0.10 target is superseded.
+- **Resolution (user, 2026-09-25):** option (a). The below-epoch clause now fails closed: staged open rejects without calling `persistOpened` and leaves live state unchanged, on the real port and the double. No past-epoch sender naming. Resume 2.1 from the partial work.
+- **Verify:** `pnpm exec turbo run test:types test:unit --force --filter=@kumiai/rpc-conformance --filter=@kumiai/mls-rpc --filter=@kumiai/rpc --filter=@kumiai/hub-conformance`
+
+```text
+@kumiai/mls-rpc:test:unit:  Test Files  2 passed (2)
+@kumiai/mls-rpc:test:unit:       Tests  64 passed (64)
+@kumiai/rpc:test:unit:  Test Files  71 passed (71)
+@kumiai/rpc:test:unit:       Tests  473 passed (473)
+
+ Tasks:    22 successful, 22 total
+Cached:    0 cached, 22 total
+  Time:    10.111s
+```
+
+- **Phase-exit gate:** `pnpm exec turbo run test:types test:unit --force`
+
+```text
+ Tasks:    49 successful, 49 total
+Cached:    0 cached, 49 total
+  Time:    16.468s
+```
+
+- **Integration:** `pnpm exec vitest run --root tests/integration`
+
+```text
+ Test Files  8 passed (8)
+      Tests  43 passed (43)
+   Start at  14:58:57
+   Duration  6.18s (tests 84%, import 8%, transform 8%)
+```
