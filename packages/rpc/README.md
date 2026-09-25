@@ -19,8 +19,8 @@ half through two ports:
 
 - **`GroupCrypto`** — the epoch number, `exportSecret(label, length?)` for as many epoch-bound,
   domain-separated exported secrets as there are labels, `wrap`/`unwrap` for app traffic,
-  `frameEpoch` to read a sealed frame's epoch from its cleartext, and `sealEntries`/`openEntries`
-  for a commit's ledger-entry blob.
+  `frameEpoch` and `frameAAD` to read a sealed frame's cleartext metadata, optional `pending`
+  storage for durable app delivery, and `sealEntries`/`openEntries` for a commit's ledger-entry blob.
 - **`GroupMLS`** — the lifecycle half: read a Commit's own claims before touching it, apply the ones
   this member is in a position to apply, report the roster the apply left behind, and drive the
   recovery/ledger rendezvous.
@@ -62,6 +62,42 @@ is unsound there however it is scheduled. Derived-key sealing makes opening pure
 when it is safe to open stops existing rather than being managed.
 
 ## The app lane: logged events
+
+### Durable delivery (opt-in)
+
+Supplying `GroupCrypto.pending` enables acknowledged delivery for events declared `retain: 'log'`.
+For a conforming hub that appends and retains the frame until it is durably opened, the peer
+delivers these events **at least once**, in log order per protocol, across process restarts and
+handler failures. A successful handler return acknowledges the event; a thrown handler or failed
+`pending.complete` retries the same record with backoff, holding later events in that protocol.
+The handler context's `frame: AppFrameRef` identifies a logged delivery. Store a deduplication
+entry keyed by `frame.id` in the same transaction as the handler's effect before returning.
+External effects must be idempotent or reconciled by that id. A record may be delivered again if
+the process crashes after the effect but before completion.
+
+`AppFrameRef` includes `id`, `topicID`, `protocol`, anchor `segment`, and log `position`. The id
+is derived from the topic and ciphertext, so it stays stable across replay. `pending.list()`
+restores records at startup in `(segment, position)` order; `pending.complete(id)` is idempotent.
+The port's `unwrap(bytes, { expectedAAD, frame })` must atomically save the consumed-key handle
+state and the pending record before resolving. A failed save must leave the handle openable and
+throw an error recognized by `isAppFrameStorageError`; the app lane retries without advancing
+past that frame. `onAppDeliveryStalled` reports a persistent storage block once per blocking
+position. An operator can accept its loss with `dropAppFrame(topicID, position)`, which refuses a
+frame already pending.
+
+Durable delivery is off when `GroupCrypto.pending` is absent. Ephemeral events remain best effort;
+directed traffic and anycast requests and replies keep their existing live completion or expiry
+semantics. Log-intent pushes only wake a retained fetch: pushed bytes and positions never become
+pending records. The hub must have appended the frame to the topic log before pushing it.
+Frames pruned before a read, or lost after a failed durable open followed by retention expiry,
+cannot be recovered; `onAppWindowPruned` reports a visible gap. A hub that only sends a log frame
+by mailbox also gives no durable guarantee. The existing commit-applied-before-anchor-saved
+crash window can still leave a restarted peer on a stale app topic.
+
+App-frame AAD is `[0x01, intent, ...UTF8(topicID)]`, where intent is `0x01` for log and `0x00`
+for ephemeral. `frameAAD` reads this cleartext routing hint; only `unwrap` with the full expected
+AAD authenticates it. Old bare-topic AAD fails to open, so mixed 0.10/0.11 app peers are
+incompatible. Use `encodeAppAAD` and `decodeAppAAD` for the shared format.
 
 An `event` procedure in a group protocol may declare `retain: 'log'`, which makes every dispatch of
 it retained by the hub and pullable later, whatever the call site:

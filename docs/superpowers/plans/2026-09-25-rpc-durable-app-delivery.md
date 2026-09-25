@@ -379,3 +379,28 @@ Cached:    0 cached, 49 total
    Start at  16:35:28
    Duration  1.65s (tests 42%, transform 40%, import 18%)
 ```
+
+### 2026-09-25 — Question 4.2
+
+- **Learned:** The real `mls-rpc` staged-open port preserves the consumed-key state and pending record when the host serializes a delayed pre-open save ahead of `persistOpened` and rejects a late older same-epoch write. Restoring the saved MLS state cannot reopen the frame. The release surface also requires explaining the host lock order and the versioned AAD incompatibility in all three package READMEs.
+- **Deviations:** Added a real-port delayed-save acceptance test because Question 4.1 used fake crypto only. Its naive host store failed first on the stale write; the serialized, version-guarded host store passed. Removing the serialization wait or the same-epoch guard separately made the test fail; both lines were restored. The first full gate hit the previously observed timing-sensitive `peer-unknown-commit-frame-version.test.ts` assertion; that file passed alone and the full gate passed on rerun. Change intents were written in the established `.changeset` format for all twelve packages; manifests remain in the current 0.9 band pending the coordinated 0.11 release.
+- **Spec/plan contradiction:** None in the Question 4.2 probe. The spec names 0.10/0.11 mixed-version incompatibility while this worktree is still at 0.9; 0.11 remains the release target.
+- **Verify:** `pnpm exec turbo run test:types test:unit --force && pnpm exec vitest run --root tests/integration`
+
+```text
+@kumiai/mls-rpc:test:unit:  Test Files  3 passed (3)
+@kumiai/mls-rpc:test:unit:       Tests  65 passed (65)
+@kumiai/mls-rpc:test:unit:    Start at  16:44:17
+@kumiai/mls-rpc:test:unit:    Duration  26.60s (tests 64%, transform 28%, import 7%)
+
+ Tasks:    49 successful, 49 total
+Cached:    0 cached, 49 total
+  Time:    33.824s
+
+ RUN  v5.0.1 /Users/paul/dev/yulsi/kumiai.worktrees/durable-app-delivery/tests/integration
+
+ Test Files  8 passed (8)
+      Tests  43 passed (43)
+   Start at  16:44:45
+   Duration  8.28s (tests 64%, transform 24%, import 12%)
+```

@@ -17,7 +17,7 @@ depend on both.
 
 ## Exports
 
-- `createGroupCrypto({ handle, entryLabel? })` — `GroupCrypto` over a live handle.
+- `createGroupCrypto({ handle, entryLabel?, pending? })` — `GroupCrypto` over a live handle.
 - `createGroupMLS({ handle, adopt, identity, entrySlot, persist? })` — `GroupMLS` over the same.
 - `createLedgerEntrySlot()` — the per-commit ledger-entry resolver seam (see below).
 - `RECOVERY_LABEL` — the exporter label `exportRecoverySecret` derives under.
@@ -31,6 +31,47 @@ takes `adopt` as the one place that replacement happens.
 
 For a *received* commit there is nothing to adopt: ts-mls's `processMessage` advances the handle in
 place. A host that treated every commit as adopt-later would double-apply received ones.
+
+## Durable logged app delivery
+
+Pass a `pending` adapter to `createGroupCrypto` to opt in. Its `persistOpened(stagedState, record)`
+must write the encoded post-open `ClientState` as the group's handle state **and** insert the
+`PendingAppFrame` in one atomic transaction. `list()` returns all uncompleted records after a
+restart, ordered by `(frame.segment, frame.position)` by this port. `complete(id)` clears one
+record and resolves for an unknown id. Deduplicate inserts by `record.frame.id`.
+
+```ts
+const crypto = createGroupCrypto({
+  handle: () => handle,
+  pending: {
+    persistOpened: async (stagedState, record) => {
+      await store.transaction(async (tx) => {
+        await tx.saveHandleState(groupID, stagedState)
+        await tx.insertPendingIfAbsent(record.frame.id, record)
+      })
+    },
+    list: () => store.listPending(groupID),
+    complete: (id) => store.completePending(id),
+  },
+})
+```
+
+The example's `saveHandleState` must also enforce the host's save ordering and same-epoch
+monotonic version rule. Saves issued before `persistOpened` must finish before it; a delayed
+older state at the same epoch must be rejected. `persistOpened` runs under the handle mutex and
+the peer's commit mutex: it must not call either object. Never hold a transaction or the sole
+database connection while awaiting a peer or handle call; a handler should commit its own
+transaction before awaiting `commit()` or `dispatch()`. A single-connection host that reverses
+this order can deadlock. Hosts adopting this in Kubun must first remove transaction-then-registry
+waits on paths overlapping app opens and prove the lock order against SQLite.
+
+With `pending`, `unwrap(bytes, { expectedAAD, frame })` calls `GroupHandle.decryptStaged` and
+resolves only after the atomic write. A persistence failure becomes `AppFrameStorageError` for
+the RPC lane to retry; an unopenable frame is classified dead. Without `pending`, app delivery
+keeps its prior best-effort behavior. `frameAAD(bytes)` exposes the cleartext AAD as a routing
+hint; the full `expectedAAD` on open authenticates it. The 0.11 app AAD carries version and log
+intent, so older bare-topic app frames cannot interoperate with 0.11 peers. See the
+`@kumiai/rpc` README for the at-least-once guarantee, deduplication, and retention boundary.
 
 ## `createLedgerEntrySlot` is mandatory, and must be installed where the handle is built
 
