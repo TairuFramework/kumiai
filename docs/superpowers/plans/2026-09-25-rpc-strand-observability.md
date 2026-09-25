@@ -338,14 +338,14 @@ type RendezvousOutcome =
 
 **Files:** `packages/rpc/README.md`, `.changeset/strand-observability.md`
 
-- [ ] **Step 1: README** — host callbacks section: `onStrand` (episode semantics, the three confidence
+- [x] **Step 1: README** — host callbacks section: `onStrand` (episode semantics, the three confidence
   levels and what each proves, one observation = one strand), `onRecovery` (phases, reasons, one
   terminal per attempt, `bootstrapped`), `recover()` single-flight and stash drain (may return entries
   an earlier automatic heal stashed). Surface only.
-- [ ] **Step 2: Change intent** `.changeset/strand-observability.md` (`"@kumiai/rpc": minor`): additive
+- [x] **Step 2: Change intent** `.changeset/strand-observability.md` (`"@kumiai/rpc": minor`): additive
   callbacks; `recover()` single-flight and stash behaviour change; handshake unknown-version fix; late
   bootstrap re-enact fix; publish failure during recovery now throws instead of timing out (if Task 4
   changed that).
-- [ ] **Step 3: Gate:** `pnpm exec turbo run test:types test:unit --force` (quote `Cached: 0`) and
+- [x] **Step 3: Gate:** `pnpm exec turbo run test:types test:unit --force` (quote `Cached: 0`) and
   `pnpm exec vitest run --root tests/integration`.
-- [ ] **Step 4:** Lint, commit `docs(rpc): document strand and recovery lifecycle callbacks`.
+- [x] **Step 4:** Lint, commit `docs(rpc): document strand and recovery lifecycle callbacks`.

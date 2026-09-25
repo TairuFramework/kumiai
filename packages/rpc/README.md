@@ -135,3 +135,38 @@ refuses a retention above its ceiling rather than clamping it, and a default sit
 ceiling would make every upward override an outright refusal — leaving the peer not a subscriber of
 its own commit topic. The two windows are aligned so there is no span in which a returning member can
 rebuild its membership but not its messages.
+
+## Host notices for commit strands and recovery
+
+`GroupPeerParams.onStrand` reports when the commit walk finds evidence that this peer is stranded.
+One observation marks one stranded episode; further frames stay silent unless they provide strictly
+stronger evidence. A successful recovery, including a bootstrap completed later, ends the episode.
+The next strand starts a new one. A failed attempt leaves the episode open. The state is in memory,
+so restarting a peer can produce a new observation for the same strand.
+
+Each `StrandObservation` names the stable commit-topic `groupID`, the frame's log `position`, the
+peer's `localEpoch`, a `kind`, and a `confidence`. `claimedEpoch` comes from the cleartext header;
+`commitDigest` identifies the commit bytes. Both are `null` for an unreadable future version.
+
+| Kind | Confidence | What the evidence establishes |
+| --- | --- | --- |
+| `own-unmerged` | `authenticated` | MLS authenticates this peer as author of a commit it has not merged. |
+| `fork-losing` | `observed` | This peer enacted different commit bytes at that epoch and is on the branch that loses the log-position tiebreak. The other commit is not authenticated. |
+| `ahead` | `claimed` | A frame's cleartext epoch is ahead of this peer. A commit-topic publisher can forge that claim. |
+| `unknown-version` | `claimed` | A frame's handshake or commit-frame version cannot be read by this build. Its epoch and commit bytes are unavailable. |
+
+`GroupPeerParams.onRecovery` reports `started` and exactly one terminal event (`succeeded` or
+`failed`) for each attempt. The event's `attemptID`, `groupID` and `trigger` (`automatic` or
+`consumer`) stay the same. A failure has reason `no-responder`, `deadline`, `bootstrap-failed`,
+`disposed` or `error`; `error` includes the thrown value. Success means both the rejoin and ledger
+bootstrap completed. If a rejoin landed but bootstrap failed, a later lane operation can finish it
+and emit `bootstrapped` with that failed attempt's ID. This closes the stranded episode.
+
+Automatic healing and calls to `recover()` share one in-flight attempt. Joiners get its result or
+error; they do not start another attempt. Owed `reenact` entries are kept until the first
+`recover()`, `commit()` or `replay()` that drains them. A direct `recover()` can therefore return
+entries stashed by an earlier automatic heal. Each entry is handed out once.
+
+These two optional callbacks run after the producing commit-lane operation settles. They are not
+awaited, and a callback that throws or rejects cannot change the lane outcome. `onAppWindowPruned`
+retains its existing behavior.

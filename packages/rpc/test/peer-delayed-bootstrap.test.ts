@@ -25,7 +25,7 @@ async function setup(byte: number) {
     serveLedger: (ledger) => (lying ? ledger.slice(0, ledger.length - 1) : ledger),
     onAdvance: (epoch) => bobCrypto.setEpoch(epoch),
   })
-  const recovery = { timeoutMs: 40, deadlineMs: 140, getDelayMs: () => 10 }
+  const recovery = { timeoutMs: 400, deadlineMs: 1200, getDelayMs: () => 10 }
   const bob = makeMLSPeer(hub, 'bob', rs, { mls: bobMLS, crypto: bobCrypto, members, recovery })
   await bob.peer.commit(buildLedgerCommit(bob, ['circle:x=Bob']))
 
@@ -126,6 +126,42 @@ describe('delayed ledger bootstrap', () => {
       'bootstrapped',
     ])
     expect(events[4]).toMatchObject({ attemptID: secondID, trigger: 'consumer' })
+    await alice.peer.dispose()
+    await bob.peer.dispose()
+  })
+
+  test('recover queued behind a successful bootstrap sees the new generation', async () => {
+    const state = await setup(0xc6)
+    const { hub, rs, alice, bob, events, recoveryRequests } = state
+    expect(await alice.peer.recover()).toEqual({ advanced: false, reenact: [] })
+    const requestsBefore = recoveryRequests()
+    state.stopLying()
+    let releaseReply: () => void = () => {}
+    const replyGate = new Promise<void>((resolve) => {
+      releaseReply = resolve
+    })
+    let replyHeld = false
+    const original = hub.publish.bind(hub)
+    hub.publish = async (params) => {
+      if (
+        !replyHeld &&
+        params.topicID === rendezvousTopic(rs) &&
+        params.senderDID === 'bob' &&
+        decodeHandshakeFrame(params.payload).kind === HANDSHAKE_KIND.ledgerReply
+      ) {
+        replyHeld = true
+        await replyGate
+      }
+      return original(params)
+    }
+    const replay = alice.peer.replay()
+    await vi.waitFor(() => expect(replyHeld).toBe(true))
+    const queued = alice.peer.recover()
+    releaseReply()
+    expect(await replay).toEqual({ reenact: [owed] })
+    expect(await queued).toEqual({ advanced: true, reenact: [] })
+    expect(events.map((event) => event.phase)).toEqual(['started', 'failed', 'bootstrapped'])
+    expect(recoveryRequests()).toBe(requestsBefore)
     await alice.peer.dispose()
     await bob.peer.dispose()
   })

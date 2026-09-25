@@ -7,7 +7,7 @@ import {
   HANDSHAKE_MAGIC,
   HANDSHAKE_VERSION,
 } from '../src/handshake.js'
-import type { StrandObservation } from '../src/peer.js'
+import type { RecoveryEvent, StrandObservation } from '../src/peer.js'
 import { commitTopic } from '../src/topic.js'
 import { publishCommit, publishedCommitDigest } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
@@ -101,11 +101,15 @@ describe('commit strand observations', () => {
       epoch: 1,
     })
     const observations: Array<StrandObservation> = []
+    const recoveries: Array<RecoveryEvent> = []
     const bob = makeMLSPeer(hub, 'bob', rs, {
       members,
       recovery,
       onStrand: (o) => {
         observations.push(o)
+      },
+      onRecovery: (event) => {
+        recoveries.push(event)
       },
     })
     await vi.waitFor(() => expect(observations).toHaveLength(1))
@@ -118,8 +122,19 @@ describe('commit strand observations', () => {
       kind: 'own-unmerged',
       confidence: 'authenticated',
     })
-    await bob.peer.replay()
-    await bob.peer.replay()
+    await vi.waitFor(() =>
+      expect(recoveries.filter((event) => event.phase === 'failed')).toHaveLength(1),
+    )
+    for (const expected of [2, 3]) {
+      await hub.publish({
+        senderDID: 'zoe',
+        topicID: commitTopic(rs),
+        payload: new Uint8Array([0]),
+      })
+      await vi.waitFor(() =>
+        expect(recoveries.filter((event) => event.phase === 'failed')).toHaveLength(expected),
+      )
+    }
     expect(observations).toHaveLength(1)
     await bob.peer.dispose()
   })
@@ -130,11 +145,15 @@ describe('commit strand observations', () => {
     const first = await publishCommit({ hub, senderDID: 'zoe', recoverySecret: rs, epoch: 3 })
     const second = await publishCommit({ hub, senderDID: 'zoe', recoverySecret: rs, epoch: 4 })
     const observations: Array<StrandObservation> = []
+    const recoveries: Array<RecoveryEvent> = []
     const bob = makeMLSPeer(hub, 'bob', rs, {
       members,
       recovery,
       onStrand: (o) => {
         observations.push(o)
+      },
+      onRecovery: (event) => {
+        recoveries.push(event)
       },
     })
     await vi.waitFor(() => expect(observations).toHaveLength(1))
@@ -147,8 +166,13 @@ describe('commit strand observations', () => {
       kind: 'ahead',
       confidence: 'claimed',
     })
+    await vi.waitFor(() =>
+      expect(recoveries.filter((event) => event.phase === 'failed')).toHaveLength(1),
+    )
     await publishCommit({ hub, senderDID: 'zoe', recoverySecret: rs, epoch: 5 })
-    await bob.peer.replay()
+    await vi.waitFor(() =>
+      expect(recoveries.filter((event) => event.phase === 'failed')).toHaveLength(2),
+    )
     expect(observations).toHaveLength(1)
     expect(second.sequenceID).not.toBe(first.sequenceID)
     await bob.peer.dispose()
