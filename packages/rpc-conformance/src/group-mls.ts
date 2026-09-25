@@ -51,6 +51,7 @@ export type ConformanceRosterEntry = {
  * passing bytes between two instances, which is all the clauses below do.
  */
 export type ConformanceGroupMLS = {
+  readEpoch: () => Promise<number>
   rosterEntries: () => Promise<Array<ConformanceRosterEntry>>
   readCommitHeader: (commit: Uint8Array) => Promise<ConformanceCommitHeader | null>
   processCommit: (
@@ -174,6 +175,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
         for (const [index, offset] of [0, -1, 1].entries()) {
           group.setEpochHintOffset(offset)
           const member = memberAt(group.members, index)
+          expect(await member.mls.readEpoch()).toBe(epoch)
           expect(await member.mls.processCommit(future.commit, future.context)).toEqual({
             advanced: false,
             epochBefore: epoch,

@@ -356,6 +356,8 @@ export type PendingRecovery = {
  * until the suite was made to cover the shape rather than a sample of it.
  */
 export type GroupMLS = {
+  /** Read the current handle epoch under the host's handle lock. */
+  readEpoch(): Promise<number>
   /**
    * The leaves this handle's ratchet tree currently holds, one {@link RosterEntry} per leaf, in
    * ascending `leafIndex` order. Purely local: reads no secret, advances nothing.

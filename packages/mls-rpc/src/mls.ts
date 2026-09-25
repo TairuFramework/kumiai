@@ -181,6 +181,9 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
   const pending = createRecoveryPending()
 
   return {
+    async readEpoch(): Promise<number> {
+      return await access.read((group) => Number(group.epoch))
+    },
     async rosterEntries(): Promise<Array<RosterEntry>> {
       return await access.read((group) =>
         group.listMembers().map((member) => ({

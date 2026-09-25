@@ -549,6 +549,9 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     evict(did: string) {
       slotRemoveDID(did)
     },
+    async readEpoch(): Promise<number> {
+      return epoch
+    },
     async readCommitHeader(commit: Uint8Array): Promise<CommitHeader | null> {
       // Two facts, two availabilities — the whole point of the port's contract, modelled exactly.
       //

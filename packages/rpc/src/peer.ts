@@ -614,9 +614,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * the next roster change rotates it again. Closing it needs the anchor inside the same durable
    * write as the handle, which this layer cannot reach.
    */
-  const captureAnchor = async (): Promise<void> => {
+  const captureAnchor = async (advancedEpoch?: number): Promise<void> => {
     const { secret } = await crypto.exportSecret(APP_TOPIC_LABEL)
-    anchor = { secret, epoch: crypto.epoch() }
+    anchor = { secret, epoch: advancedEpoch ?? crypto.epoch() }
     sealError = undefined
     finishSealBarrier()
     await anchorStore?.save(anchor)
@@ -1337,6 +1337,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     port: GroupMLS,
     advance: () => Promise<T>,
     rotatesAnyway: (advanced: T) => boolean = () => false,
+    appliedEpochs?: (advanced: T) => { epochBefore: number; epochAfter: number },
   ): Promise<T> => {
     // Read this epoch's app frames BEFORE the advance that leaves it — the last moment they can
     // be read, since the advance ratchets the handle on and takes this epoch's key material with
@@ -1346,12 +1347,15 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     // Normalized at this ingress so an MLS-recovered form flip between the two reads (never a
     // real membership change) does not read as one — see {@link detectRosterChange}.
     const rosterBefore = (await port.rosterEntries()).map((e) => normalizeDID(e.did))
-    const epochBefore = crypto.epoch()
+    const epochBefore = await port.readEpoch()
     sealBarrier = new Promise<void>((resolve) => {
       releaseSealBarrier = resolve
     })
     try {
       const advanced = await advance()
+      const epochs = appliedEpochs?.(advanced)
+      const actualBefore = epochs?.epochBefore ?? epochBefore
+      const epochAfter = epochs?.epochAfter ?? (await port.readEpoch())
       // GATED ON THE HANDLE ACTUALLY RATCHETING: a roster diff alone is not evidence that it did. A
       // commit that REMOVES this member does not advance its handle (there is no epoch to move to,
       // since the commit's path excludes the dropped leaf), yet real MLS still applies proposals to
@@ -1361,7 +1365,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       //
       // An ungated capture would clear the segment buffer while the handle still holds its epoch,
       // dropping frames that can still be opened.
-      const ratcheted = crypto.epoch() !== epochBefore
+      const ratcheted = epochAfter !== actualBefore
       if (
         ratcheted &&
         (detectRosterChange(
@@ -1370,11 +1374,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         ) ||
           rotatesAnyway(advanced))
       ) {
-        await captureAnchor()
+        await captureAnchor(epochAfter)
       }
       return advanced
     } catch (error) {
-      if (crypto.epoch() !== epochBefore && sealBarrier != null) {
+      if ((await port.readEpoch()) !== epochBefore && sealBarrier != null) {
         sealError = new Error('app anchor unavailable after failed epoch advance', { cause: error })
       }
       throw error
@@ -1446,7 +1450,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         if (frame.version !== HANDSHAKE_VERSION) {
           // No digest: the frame's version put its commit bytes out of reach entirely. Settled at
           // `ahead` before the digest is read.
-          const localEpoch = crypto.epoch()
+          const localEpoch = await port.readEpoch()
           const unreadable = classifyCommit({
             header: UNKNOWN_FRAME_VERSION,
             sequenceID: position,
@@ -1485,7 +1489,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           // version fails BEFORE the commit bytes are extracted, so there is no next frame to
           // heal from — dropping it would step over the group's whole future. To the classifier.
           if (isUnsupportedCommitFrameVersion(error)) {
-            const localEpoch = crypto.epoch()
+            const localEpoch = await port.readEpoch()
             const unreadable = classifyCommit({
               header: UNKNOWN_FRAME_VERSION,
               sequenceID: position,
@@ -1522,66 +1526,27 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         // `message.senderDID` — the hub's word about who handed it over, and the hub is not
         // trusted: it could stamp every recipient's own DID onto one poison frame and make the
         // whole group heal at once.
-        const readHeader = await port.readCommitHeader(commitFrame.commit)
-        // Normalized before `classifyCommit` compares it against `state.localDID` (also
-        // normalized, at construction) — an own-unmerged commit authenticated under a different
-        // form of this member's own DID must still be recognized as its own.
-        const header =
-          readHeader?.committerDID != null
-            ? { ...readHeader, committerDID: normalizeDID(readHeader.committerDID) }
-            : readHeader
-        const localEpoch = crypto.epoch()
-        const disposition = classifyCommit({
-          header,
-          sequenceID: position,
-          commitDigest,
-          state: { localDID, epoch: localEpoch, appliedByEpoch },
-        })
+        let localEpoch = await port.readEpoch()
+        while (true) {
+          const readHeader = await port.readCommitHeader(commitFrame.commit)
+          // Normalized before `classifyCommit` compares it against `state.localDID` (also
+          // normalized, at construction) — an own-unmerged commit authenticated under a different
+          // form of this member's own DID must still be recognized as its own.
+          const header =
+            readHeader?.committerDID != null
+              ? { ...readHeader, committerDID: normalizeDID(readHeader.committerDID) }
+              : readHeader
+          const disposition = classifyCommit({
+            header,
+            sequenceID: position,
+            commitDigest,
+            state: { localDID, epoch: localEpoch, appliedByEpoch },
+          })
 
-        if (disposition.row === 'own-unmerged') {
-          // Sender data names this peer at its current epoch, but neither commit content nor hub
-          // acceptance is verified. The peer cannot process its own commit without pending state,
-          // so the drain stops here and it heals.
-          healRequested = true
-          stranded = true
-          observeStrand({
-            position,
-            commitDigest,
-            localEpoch,
-            claimedEpoch: header?.epoch ?? null,
-            kind: 'own-unmerged',
-            confidence: 'authenticated',
-          })
-          return advancedEpoch
-        }
-        if (disposition.row === 'ahead') {
-          // The group advanced at an epoch this peer did not. Step over the frame — the heal
-          // repairs this, not a re-read — and ask for one.
-          reconciledHead = position
-          healRequested = true
-          stranded = true
-          observeStrand({
-            position,
-            commitDigest,
-            localEpoch,
-            claimedEpoch: header?.epoch ?? null,
-            kind: 'ahead',
-            confidence: 'claimed',
-          })
-          continue
-        }
-        if (disposition.row === 'history') {
-          // A frame from an epoch below this peer's, with no record for it or a record naming
-          // this same commit. Not a fork, not poison, not the port's business — its blob is never
-          // touched.
-          reconciledHead = position
-          continue
-        }
-        if (disposition.row === 'fork') {
-          // Two commits at one epoch. The lower-sequenceID branch wins; the loser rejoins onto it
-          // (a heal). The winner just steps over the frame.
-          reconciledHead = position
-          if (disposition.branch === 'losing') {
+          if (disposition.row === 'own-unmerged') {
+            // Sender data names this peer at its current epoch, but neither commit content nor hub
+            // acceptance is verified. The peer cannot process its own commit without pending state,
+            // so the drain stops here and it heals.
             healRequested = true
             stranded = true
             observeStrand({
@@ -1589,71 +1554,119 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
               commitDigest,
               localEpoch,
               claimedEpoch: header?.epoch ?? null,
-              kind: 'fork-losing',
-              confidence: 'observed',
+              kind: 'own-unmerged',
+              confidence: 'authenticated',
             })
+            return advancedEpoch
           }
-          continue
-        }
-        if (disposition.row === 'poison') {
-          reconciledHead = position // not a commit at all: stepped over, and never retried
-          continue
-        }
-
-        // Framed at this peer's epoch, by somebody else: a frame it can apply. Everything below is
-        // the port's answer to it.
-        const framedEpoch = crypto.epoch()
-        let applied: { advanced: boolean }
-        try {
-          // Through the seam, like every other site that ratchets the handle: it reads this
-          // epoch's app frames ahead of the apply and takes the anchor if the roster moved.
-          applied = await advanceHandle(
-            port,
-            () => {
-              return port.processCommit(commitFrame.commit, {
-                senderDID: message.senderDID,
-                // The resolver, not the bodies: the blob opens only if the port asks for entries
-                // this commit names, and only for a commit it applies — framed at this peer's
-                // epoch, the epoch the blob is sealed under, making body delivery atomic with the
-                // commit. Called from INSIDE the apply, so the open must not touch the handle's
-                // ratchet: `openEntries` reads only the epoch's exporter secret and is pure.
-                resolveLedgerEntries: createLedgerEntryResolver(
-                  commitFrame.sealedEntries,
-                  crypto.openEntries,
-                ),
+          if (disposition.row === 'ahead') {
+            // The group advanced at an epoch this peer did not. Step over the frame — the heal
+            // repairs this, not a re-read — and ask for one.
+            reconciledHead = position
+            healRequested = true
+            stranded = true
+            observeStrand({
+              position,
+              commitDigest,
+              localEpoch,
+              claimedEpoch: header?.epoch ?? null,
+              kind: 'ahead',
+              confidence: 'claimed',
+            })
+            break
+          }
+          if (disposition.row === 'history') {
+            // A frame from an epoch below this peer's, with no record for it or a record naming
+            // this same commit. Not a fork, not poison, not the port's business — its blob is never
+            // touched.
+            reconciledHead = position
+            break
+          }
+          if (disposition.row === 'fork') {
+            // Two commits at one epoch. The lower-sequenceID branch wins; the loser rejoins onto it
+            // (a heal). The winner just steps over the frame.
+            reconciledHead = position
+            if (disposition.branch === 'losing') {
+              healRequested = true
+              stranded = true
+              observeStrand({
+                position,
+                commitDigest,
+                localEpoch,
+                claimedEpoch: header?.epoch ?? null,
+                kind: 'fork-losing',
+                confidence: 'observed',
               })
-            },
-            // A REJOIN rotates the anchor too, from a member the roster diff cannot see: an
-            // external commit by a member the roster still holds leaves every DID where it was.
-            // Only an APPLIED commit says anything about the group.
-            (result) => result.advanced && header?.external === true,
-          )
-        } catch (error) {
-          if (!isMissingLedgerEntries(error)) {
-            // The port broke its contract. The cursor stays and the frame is re-read — the pull is
-            // a retry, and this is not an outcome it can name.
-            throw error
+            }
+            break
           }
-          // The commit names ledger entries whose bodies will not resolve. POISON: drop, advance,
-          // do NOT heal. The bodies ride the commit sealed under its framed epoch, so a blob this
-          // peer cannot open is one no member at this epoch can — nobody applies it, and the next
-          // honest commit is framed at the same epoch and compare-and-sets behind it.
-          //
-          // Healing here would hand any member a group-wide recovery storm for one publish.
-          // Retrying only delays that. The one case where this peer really is the broken one
-          // announces itself later: the next commit is then framed AHEAD of this peer's, which
-          // heals it.
+          if (disposition.row === 'poison') {
+            reconciledHead = position // not a commit at all: stepped over, and never retried
+            break
+          }
+
+          // Framed at this peer's epoch, by somebody else: a frame it can apply. Everything below is
+          // the port's answer to it.
+          const framedEpoch = localEpoch
+          let applied: { advanced: boolean; epochBefore: number; epochAfter: number }
+          try {
+            // Through the seam, like every other site that ratchets the handle: it reads this
+            // epoch's app frames ahead of the apply and takes the anchor if the roster moved.
+            applied = await advanceHandle(
+              port,
+              () => {
+                return port.processCommit(commitFrame.commit, {
+                  senderDID: message.senderDID,
+                  // The resolver, not the bodies: the blob opens only if the port asks for entries
+                  // this commit names, and only for a commit it applies — framed at this peer's
+                  // epoch, the epoch the blob is sealed under, making body delivery atomic with the
+                  // commit. Called from INSIDE the apply, so the open must not touch the handle's
+                  // ratchet: `openEntries` reads only the epoch's exporter secret and is pure.
+                  resolveLedgerEntries: createLedgerEntryResolver(
+                    commitFrame.sealedEntries,
+                    crypto.openEntries,
+                  ),
+                })
+              },
+              // A REJOIN rotates the anchor too, from a member the roster diff cannot see: an
+              // external commit by a member the roster still holds leaves every DID where it was.
+              // Only an APPLIED commit says anything about the group.
+              (result) => result.advanced && header?.external === true,
+              (result) => result,
+            )
+          } catch (error) {
+            if (!isMissingLedgerEntries(error)) {
+              // The port broke its contract. The cursor stays and the frame is re-read — the pull is
+              // a retry, and this is not an outcome it can name.
+              throw error
+            }
+            // The commit names ledger entries whose bodies will not resolve. POISON: drop, advance,
+            // do NOT heal. The bodies ride the commit sealed under its framed epoch, so a blob this
+            // peer cannot open is one no member at this epoch can — nobody applies it, and the next
+            // honest commit is framed at the same epoch and compare-and-sets behind it.
+            //
+            // Healing here would hand any member a group-wide recovery storm for one publish.
+            // Retrying only delays that. The one case where this peer really is the broken one
+            // announces itself later: the next commit is then framed AHEAD of this peer's, which
+            // heals it.
+            reconciledHead = position
+            break
+          }
+          if (!applied.advanced && applied.epochBefore !== framedEpoch) {
+            advancedEpoch = true
+            localEpoch = applied.epochBefore
+            continue
+          }
+          if (applied.advanced) {
+            advancedEpoch = true
+            // The fork check's record; the only place it is written from the log.
+            appliedByEpoch.set(framedEpoch, { sequenceID: position, digest: commitDigest })
+          }
+          // `{ advanced: false }` here is the port REFUSING a well-formed commit at this peer's own
+          // epoch from another member: poison on the same terms as an unresolvable one.
           reconciledHead = position
-          continue
+          break
         }
-        if (applied.advanced) {
-          advancedEpoch = true
-          // The fork check's record; the only place it is written from the log.
-          appliedByEpoch.set(framedEpoch, { sequenceID: position, digest: commitDigest })
-        }
-        // `{ advanced: false }` here is the port REFUSING a well-formed commit at this peer's own
-        // epoch from another member: poison on the same terms as an unresolvable one.
-        reconciledHead = position
       }
       // A short page ends the log: every frame this reply named is processed, so its tip is
       // reconciled. A full page is not — loop and take the head from the reply that finally drains.
@@ -1679,7 +1692,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       )
     }
     if (mls == null || commitTopicID == null) return false
-    const epochBefore = crypto.epoch()
+    const epochBefore = await mls.readEpoch()
     const anchorBefore = anchor
     try {
       const advanced = await walkCommits(mls, commitTopicID)
@@ -1687,7 +1700,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       return advanced
     } catch (error) {
       // A failed final drain can follow applied commits. Refresh the runtime before a retry.
-      if (inboxLane != null && (crypto.epoch() !== epochBefore || anchor !== anchorBefore)) {
+      if (
+        inboxLane != null &&
+        ((await mls.readEpoch()) !== epochBefore || anchor !== anchorBefore)
+      ) {
         try {
           await rebuildEpoch()
         } catch {
@@ -2380,7 +2396,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         //    later collects the leaf the orphan added.
         const rejoinedAtEpoch = (await port.readCommitHeader(pending.commit))?.epoch
         assertLive()
-        const epochBeforeRejoin = crypto.epoch()
+        const epochBeforeRejoin = await port.readEpoch()
         // Through the seam, like every other site that ratchets the handle — and it rotates
         // ANYWAY: this is the rejoin, which no roster diff can see (see {@link anchor}). The
         // anchor is the POST-commit epoch: the handle advances inside the seam and only then is
@@ -2393,7 +2409,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             } finally {
               // The adapter may adopt the handle and then fail to persist it. Observe the
               // ratchet itself: a pre-adoption failure leaves this snapshot with the retry.
-              if (crypto.epoch() !== epochBeforeRejoin) {
+              if ((await port.readEpoch()) !== epochBeforeRejoin) {
                 awaitingBootstrap = { attemptID, trigger, entries: inFlight }
                 // Adoption enacted these bytes even if persistence rejected afterward.
                 if (rejoinedAtEpoch != null) {
