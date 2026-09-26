@@ -239,21 +239,19 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
             refusedEpoch = Number(group.epoch)
             throw ignored
           }
-          const result = await applyCommit(
-            group,
+          const result = await applyCommit({
+            ...context,
+            handle: group,
             commit,
-            {
-              ...context,
-              resolveLedgerEntries: async (requested) =>
-                requested.flatMap((id) => {
-                  const token = resolved.get(id)
-                  return token == null ? [] : [token]
-                }),
-              entrySlot,
-              ownDID: identity.id,
-            },
+            resolveLedgerEntries: async (requested) =>
+              requested.flatMap((id) => {
+                const token = resolved.get(id)
+                return token == null ? [] : [token]
+              }),
+            entrySlot,
+            ownDID: identity.id,
             persist,
-          )
+          })
           // Thrown so the adapter does not save a handle the commit left untouched.
           if (!result.applied) {
             refusedEpoch = result.epochBefore

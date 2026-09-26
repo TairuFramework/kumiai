@@ -12,10 +12,14 @@ import type { LedgerEntrySlot } from './mls.js'
 /** Reserved by `@kumiai/mls` for its own control entries; never surfaced to a host. */
 const CONTROL_TYPE_PREFIX = 'kumiai.'
 
-export type ApplyCommitContext = CommitContext & {
+export type ApplyCommitParams = CommitContext & {
+  handle: GroupHandle
+  commit: Uint8Array
   entrySlot: LedgerEntrySlot
   /** This member's DID: its own authenticated commit is never applied as received. */
   ownDID: string
+  /** Runs before the handle adopts the new state. */
+  persist?: ((handle: GroupHandle) => Promise<void>) | undefined
 }
 
 export type ApplyCommitResult = {
@@ -43,7 +47,7 @@ function rosterOf(handle: GroupHandle): Array<RosterEntry> {
 
 /**
  * Apply a received Commit to `handle` in place, for a caller that already holds the handle's
- * lock and owns the surrounding transaction. `context.resolveLedgerEntries` runs inside that lock
+ * lock and owns the surrounding transaction. `resolveLedgerEntries` runs inside that lock
  * and must not take it again.
  *
  * `persist` runs before the handle adopts the new state; its failure propagates and leaves the
@@ -51,12 +55,8 @@ function rosterOf(handle: GroupHandle): Array<RosterEntry> {
  * classify. Any other refusal returns `applied: false`, and a throw after the handle took the
  * commit (a callback after durable acceptance) reports it applied rather than inviting a replay.
  */
-export async function applyCommit(
-  handle: GroupHandle,
-  commit: Uint8Array,
-  context: ApplyCommitContext,
-  persist?: (handle: GroupHandle) => Promise<void>,
-): Promise<ApplyCommitResult> {
+export async function applyCommit(params: ApplyCommitParams): Promise<ApplyCommitResult> {
+  const { handle, commit, entrySlot, ownDID, persist } = params
   const before = handle.epoch
   const rosterBefore = rosterOf(handle)
   const ledgerLengthBefore = handle.ledger.length
@@ -81,7 +81,7 @@ export async function applyCommit(
   const header = await handle.readCommitHeader(commit)
   if (header == null || readMessageEpoch(commit) !== before) return refused()
   const committerDID = header.committerDID
-  if (committerDID != null && normalizeDID(committerDID) === normalizeDID(context.ownDID)) {
+  if (committerDID != null && normalizeDID(committerDID) === normalizeDID(ownDID)) {
     return refused(committerDID)
   }
 
@@ -89,8 +89,8 @@ export async function applyCommit(
   let persisted = false
   let resolverFailed = false
   let threw = false
-  const resolve = context.resolveLedgerEntries
-  context.entrySlot.install(
+  const resolve = params.resolveLedgerEntries
+  entrySlot.install(
     resolve &&
       (async (ids) => {
         try {
@@ -120,7 +120,7 @@ export async function applyCommit(
     if (error instanceof MissingLedgerEntriesError || persistFailed || resolverFailed) throw error
     threw = true
   } finally {
-    context.entrySlot.install(undefined)
+    entrySlot.install(undefined)
   }
   if (handle.epoch === before) {
     // A commit removing this member changes the tree without ratcheting the handle, and a host

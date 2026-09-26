@@ -20,7 +20,7 @@
  */
 
 export { type HandleAccess, type SimpleHandleAccessParams, simpleHandleAccess } from './access.js'
-export { type ApplyCommitContext, type ApplyCommitResult, applyCommit } from './apply-commit.js'
+export { type ApplyCommitParams, type ApplyCommitResult, applyCommit } from './apply-commit.js'
 export {
   createGroupCrypto,
   deriveEntryKey,

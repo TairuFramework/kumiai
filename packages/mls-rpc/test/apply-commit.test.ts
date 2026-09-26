@@ -57,7 +57,12 @@ test('an accepted commit reports rosters, ledger length, committer and surfaced 
   const ledgerLength = self.handle.ledger.length
   const persist = vi.fn(async () => {})
 
-  const result = await applyCommit(self.handle, commit, context(group, self), persist)
+  const result = await applyCommit({
+    handle: self.handle,
+    commit,
+    ...context(group, self),
+    persist,
+  })
 
   expect(result).toMatchObject({
     advanced: true,
@@ -80,7 +85,7 @@ test('an Add reports the new roster and surfaces no control entries', async () =
   const self = member(group)
   const commit = await buildRealCommit(group)
 
-  const result = await applyCommit(self.handle, commit, context(group, self))
+  const result = await applyCommit({ handle: self.handle, commit, ...context(group, self) })
 
   expect(result.advanced).toBe(true)
   expect(result.rosterAfter).toHaveLength(result.rosterBefore.length + 1)
@@ -99,7 +104,12 @@ test('non-Commit and wrong-epoch frames are refused before resolver or mutation'
     const resolve = vi.fn(group.resolveLedgerEntries)
     const persist = vi.fn(async () => {})
     const before = self.handle.epoch
-    const result = await applyCommit(self.handle, bytes, context(group, self, resolve), persist)
+    const result = await applyCommit({
+      handle: self.handle,
+      commit: bytes,
+      ...context(group, self, resolve),
+      persist,
+    })
     expect(result).toMatchObject({
       applied: false,
       advanced: false,
@@ -129,7 +139,11 @@ test('an own authenticated commit is refused and names its committer', async () 
   const resolve = vi.fn(group.resolveLedgerEntries)
   const before = self.handle.epoch
 
-  const result = await applyCommit(self.handle, own, context(group, self, resolve))
+  const result = await applyCommit({
+    handle: self.handle,
+    commit: own,
+    ...context(group, self, resolve),
+  })
 
   expect(result).toMatchObject({ advanced: false, committerDID: self.identity.id })
   expect(resolve).not.toHaveBeenCalled()
@@ -142,7 +156,7 @@ test('a commit that removes this member does not advance and reports the tree it
   const commit = await buildRealCommit(group, { removes: 0 })
   const before = self.handle.epoch
 
-  const result = await applyCommit(self.handle, commit, context(group, self))
+  const result = await applyCommit({ handle: self.handle, commit, ...context(group, self) })
 
   expect(result).toMatchObject({ applied: true, advanced: false })
   expect(result.epochAfter).toBe(Number(before))
@@ -155,8 +169,13 @@ test('a failed persist propagates and leaves the handle at its epoch', async () 
   const commit = await noteCommit(group, ['x'])
   const before = self.handle.epoch
   await expect(
-    applyCommit(self.handle, commit, context(group, self), async () => {
-      throw new Error('disk failed')
+    applyCommit({
+      handle: self.handle,
+      commit,
+      ...context(group, self),
+      persist: async () => {
+        throw new Error('disk failed')
+      },
     }),
   ).rejects.toThrow('disk failed')
   expect(self.handle.epoch).toBe(before)
@@ -168,11 +187,7 @@ test('missing entry bodies propagate for the caller to classify', async () => {
   const commit = await noteCommit(group, ['x'])
   const before = self.handle.epoch
   await expect(
-    applyCommit(
-      self.handle,
-      commit,
-      context(group, self, async () => []),
-    ),
+    applyCommit({ handle: self.handle, commit, ...context(group, self, async () => []) }),
   ).rejects.toBeInstanceOf(MissingLedgerEntriesError)
   expect(self.handle.epoch).toBe(before)
 })
@@ -193,7 +208,12 @@ test('a host callback throwing after durable acceptance still reports the advanc
   })
   const commit = await noteCommit(group, ['x'])
   const persist = vi.fn(async () => {})
-  const result = await applyCommit(self.handle, commit, context(group, self), persist)
+  const result = await applyCommit({
+    handle: self.handle,
+    commit,
+    ...context(group, self),
+    persist,
+  })
   expect(result.advanced).toBe(true)
   expect(persist).toHaveBeenCalledOnce()
 })
@@ -234,12 +254,12 @@ test('a self-removal a host callback threw after is still applied, with or witho
       await target.processMessage(bytes, options)
     })
 
-    const result = await applyCommit(
+    const result = await applyCommit({
       handle,
       commit,
-      context(group, self),
-      withPersist ? persist : undefined,
-    )
+      ...context(group, self),
+      persist: withPersist ? persist : undefined,
+    })
 
     expect(persist).toHaveBeenCalledTimes(withPersist ? 1 : 0)
     expect(result).toMatchObject({ applied: true, advanced: false })
@@ -256,7 +276,12 @@ test('state persisted before a throw is reported applied even when nothing visib
     await options.persist?.(target)
   })
 
-  const result = await applyCommit(handle, commit, context(group, self), async () => {})
+  const result = await applyCommit({
+    handle,
+    commit,
+    ...context(group, self),
+    persist: async () => {},
+  })
 
   expect(result).toMatchObject({ applied: true, advanced: false })
 })
@@ -267,17 +292,17 @@ test('a resolver fault propagates, and the same commit applies on retry', async 
   const commit = await noteCommit(group, ['x'])
   const before = self.handle.epoch
   await expect(
-    applyCommit(
-      self.handle,
+    applyCommit({
+      handle: self.handle,
       commit,
-      context(group, self, async () => {
+      ...context(group, self, async () => {
         throw new Error('network down')
       }),
-    ),
+    }),
   ).rejects.toThrow('network down')
   expect(self.handle.epoch).toBe(before)
 
-  const retry = await applyCommit(self.handle, commit, context(group, self))
+  const retry = await applyCommit({ handle: self.handle, commit, ...context(group, self) })
   expect(retry).toMatchObject({ applied: true, advanced: true })
 })
 
@@ -295,7 +320,11 @@ test('a commit removing this member surfaces the entries it appended', async () 
   if (leaf == null) throw new Error('missing leaf')
   const removed = await removeMember(group.committer.handle, leaf, [token])
 
-  const result = await applyCommit(self.handle, removed.commitMessage, context(group, self))
+  const result = await applyCommit({
+    handle: self.handle,
+    commit: removed.commitMessage,
+    ...context(group, self),
+  })
 
   expect(result).toMatchObject({ applied: true, advanced: false })
   expect(result.surfacedEntries.map((v) => v.entry.value)).toEqual(['parting'])

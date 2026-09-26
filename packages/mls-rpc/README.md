@@ -22,7 +22,7 @@ depend on both.
 - `createGroupCrypto({ access, entryLabel?, runtime?, pending? })` — `GroupCrypto` over that access.
 - `createGroupMLS({ access, identity, entrySlot, recoverySecret? })` — `GroupMLS` over the same
   access.
-- `applyCommit(handle, commit, context, persist?)` — apply a received Commit inside the host's own
+- `applyCommit({ handle, commit, entrySlot, ownDID, persist?, ... })` — apply a received Commit inside the host's own
   transaction (see below).
 - `createLedgerEntrySlot()` — the per-commit ledger-entry resolver seam (see below).
 - `deriveEntryKey`, `sealEntries`, `openEntries`, `ENTRY_SEAL_LABEL` — the ledger-entry seal.
@@ -160,12 +160,15 @@ that projects commits into its own tables calls `applyCommit` inside its own tra
 its own `GroupMLS.processCommit`, so the peer still sees each result and rotates its anchor:
 
 ```ts
-const result = await applyCommit(handle, commit, {
+const result = await applyCommit({
+  handle,
+  commit,
   senderDID,
   resolveLedgerEntries: (ids) => resolved(ids), // must not take the handle lock
   entrySlot,
   ownDID: identity.id,
-}, persist)
+  persist,
+})
 if (result.applied) {
   // write result.rosterAfter, result.surfacedEntries, ... and commit
 }
