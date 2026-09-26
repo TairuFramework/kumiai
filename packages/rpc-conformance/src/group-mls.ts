@@ -165,6 +165,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
   }
 
   describe(`GroupMLS conformance — ${label}`, () => {
+    // Three passes (hint offsets 0, -1, 1) over a real MLS group: slow on CI runners.
     test('commit results and refusals ignore a lagging or leading epoch hint', async () => {
       await withGroup(3, 'lying-epoch-hint', async (group) => {
         const alice = memberAt(group.members, 0)
@@ -198,7 +199,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           })
         }
       })
-    })
+    }, 30_000)
 
     describe('readCommitHeader', () => {
       /**

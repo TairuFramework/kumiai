@@ -142,6 +142,7 @@ export function testGroupCryptoConformance(params: GroupCryptoConformanceParams)
   }
 
   describe(`GroupCrypto conformance — ${label}`, () => {
+    // Three passes (hint offsets 0, -1, 1) over a real MLS group: slow on CI runners.
     test('locked results and frame refusals ignore a lagging or leading epoch hint', async () => {
       await withGroup(3, 'lying-epoch-hint', async (group) => {
         const alice = memberAt(group.members, 0)
@@ -182,7 +183,7 @@ export function testGroupCryptoConformance(params: GroupCryptoConformanceParams)
           }
         }
       })
-    })
+    }, 30_000)
 
     describe('exportSecret', () => {
       /**
