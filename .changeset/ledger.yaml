@@ -1,3 +1,8 @@
+"@kumiai/broadcast@0.10.0":
+  dir: packages/broadcast
+  intents:
+    - durable-app-delivery
+    - gather-stream
 "@kumiai/broadcast@0.5.0":
   dir: packages/broadcast
   intents:
@@ -20,6 +25,10 @@
   intents:
     - loose-memes-say
     - rpc-protocol-surface-typing
+"@kumiai/hub-client@0.10.0":
+  dir: packages/hub-client
+  intents:
+    - durable-app-delivery
 "@kumiai/hub-client@0.5.0":
   dir: packages/hub-client
   intents:
@@ -41,6 +50,10 @@
   dir: packages/hub-client
   intents:
     - hub-params-objects
+"@kumiai/hub-conformance@0.10.0":
+  dir: packages/hub-conformance
+  intents:
+    - durable-app-delivery
 "@kumiai/hub-conformance@0.5.0":
   dir: packages/hub-conformance
   intents:
@@ -63,6 +76,10 @@
   dir: packages/hub-conformance
   intents:
     - band-align-0-9
+"@kumiai/hub-protocol@0.10.0":
+  dir: packages/hub-protocol
+  intents:
+    - durable-app-delivery
 "@kumiai/hub-protocol@0.5.0":
   dir: packages/hub-protocol
   intents:
@@ -85,6 +102,10 @@
   dir: packages/hub-protocol
   intents:
     - hub-params-objects
+"@kumiai/hub-server@0.10.0":
+  dir: packages/hub-server
+  intents:
+    - durable-app-delivery
 "@kumiai/hub-server@0.5.0":
   dir: packages/hub-server
   intents:
@@ -107,6 +128,10 @@
   dir: packages/hub-server
   intents:
     - band-align-0-9
+"@kumiai/hub-tunnel@0.10.0":
+  dir: packages/hub-tunnel
+  intents:
+    - durable-app-delivery
 "@kumiai/hub-tunnel@0.5.0":
   dir: packages/hub-tunnel
   intents:
@@ -128,6 +153,10 @@
   dir: packages/hub-tunnel
   intents:
     - band-align-0-9
+"@kumiai/hub-wake@0.10.0":
+  dir: packages/hub-wake
+  intents:
+    - durable-app-delivery
 "@kumiai/hub-wake@0.6.0":
   dir: packages/hub-wake
   intents:
@@ -140,6 +169,10 @@
   dir: packages/hub-wake
   intents:
     - band-align-0-9
+"@kumiai/mls-hub@0.10.0":
+  dir: packages/mls-hub
+  intents:
+    - durable-app-delivery
 "@kumiai/mls-hub@0.5.0":
   dir: packages/mls-hub
   intents:
@@ -161,6 +194,14 @@
   dir: packages/mls-hub
   intents:
     - band-align-0-9
+"@kumiai/mls-rpc@0.10.0":
+  dir: packages/mls-rpc
+  intents:
+    - commit-topic-proposal
+    - durable-app-delivery
+    - mls-rpc-host-handle-access
+    - roster-leaf-identity
+    - strand-observability
 "@kumiai/mls-rpc@0.5.0":
   dir: packages/mls-rpc
   intents:
@@ -181,6 +222,13 @@
   dir: packages/mls-rpc
   intents:
     - aad-app-message-binding
+"@kumiai/mls@0.10.0":
+  dir: packages/mls
+  intents:
+    - decode-client-state-copy
+    - durable-app-delivery
+    - mls-input-typing
+    - strand-observability
 "@kumiai/mls@0.5.0":
   dir: packages/mls
   intents:
@@ -203,6 +251,12 @@
   dir: packages/mls
   intents:
     - aad-app-message-binding
+"@kumiai/rpc-conformance@0.10.0":
+  dir: packages/rpc-conformance
+  intents:
+    - durable-app-delivery
+    - mls-rpc-host-handle-access
+    - roster-leaf-identity
 "@kumiai/rpc-conformance@0.5.0":
   dir: packages/rpc-conformance
   intents:
@@ -223,6 +277,14 @@
   dir: packages/rpc-conformance
   intents:
     - aad-app-message-binding
+"@kumiai/rpc@0.10.0":
+  dir: packages/rpc
+  intents:
+    - durable-app-delivery
+    - gather-stream
+    - mls-rpc-host-handle-access
+    - roster-leaf-identity
+    - strand-observability
 "@kumiai/rpc@0.5.0":
   dir: packages/rpc
   intents:

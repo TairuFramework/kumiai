@@ -1,5 +1,50 @@
 # @kumiai/mls-rpc
 
+## 0.10.0
+
+### Minor Changes
+
+- Ship in the 0.10 release band for acknowledged durable app-frame delivery. `@kumiai/rpc`
+  adds opt-in at-least-once delivery of retained events, a pending-record port, handler frame
+  identity, and retry and operator-drop behavior. `@kumiai/mls` adds staged decrypt and cleartext
+  AAD reading; `@kumiai/mls-rpc` implements the atomic durable-open port. The conformance suite
+  covers the new contract, and the remaining packages move together in the shared version band.
+
+  **Breaking:** all app frames now use versioned AAD carrying authenticated log intent. 0.9 and
+  0.10 peers cannot exchange app frames; a frame with the older bare-topic AAD is refused. Consumers
+  implementing `GroupCrypto` must provide `frameAAD` and support the new `unwrap` options. Hosts opting in to
+  durable delivery must atomically persist consumed-key state with each pending record, order
+  handle saves, reject stale same-epoch writes, and avoid holding a database transaction while
+  awaiting a peer or handle operation.
+
+- Host handle access, in the same 0.10 band as durable delivery.
+
+  **`@kumiai/mls-rpc` (breaking):** both factories take one shared `access: HandleAccess` in place of `handle` / `adopt` / `persist`; `simpleHandleAccess({ handle, adopt, persist })` builds it from the old parameters. A host with its own store implements `HandleAccess` (`epoch`, `read`, `mutate`, `replace`, `open`) and owns the lock, the transaction and the persist order. New exports: `applyCommit` for applying a received Commit inside a host transaction (it returns both rosters, the surfaced ledger entries, the committer, and `applied` / `advanced`), `deriveEntryKey`, `sealEntries`, `openEntries`, `createRecoveryPending` and `deriveRecoverySecret`. `createGroupMLS` takes an optional `recoverySecret(handle)` override; the default is unchanged, so existing groups keep their topics. Without `pending`, the simple adapter now saves the ratchet state after `wrap` and `unwrap`: a crash after `unwrap` and before the handler finishes loses that frame, and `pending` is the at-least-once path. `applyCommit` propagates resolver faults instead of reporting a refusal. A durable open reports a fault from the adapter's staging callback as `AppFrameStorageError`, so the frame is retried. `processCommit` answers `advanced: false` with the handle's epoch when the handle moved while entries resolved, and `bootstrapLedger` keeps a stored bootstrap when a host callback throws after the write.
+
+  **`@kumiai/rpc` (breaking port change):** `GroupCrypto.epoch()` is a hint, and decisions use the epoch a locked port result reports. `exportSecret` returns `{ secret, epoch }`, `sealEntries` returns `{ sealed, epoch }`, `unwrap` results carry `epoch`, `processCommit` returns `{ advanced, epochBefore, epochAfter }`, and `GroupMLS` gains `readEpoch()`. `unwrap` throws `FrameEpochError { frameEpoch, handleEpoch }` for a readable frame at another epoch, before decrypting. App-frame retention, the drain, anchor capture, the commit walk and journal replay read the epoch under the handle lock instead of the hint. `isFrameAhead` and `isAppFrameStorageError` check by error name, so errors from a second installed copy of the package classify correctly.
+
+  **`@kumiai/rpc-conformance`:** harnesses provide `setEpochHintOffset(offset)`, and clauses run with a lying hint in both directions. The `GroupMLS` shape gains `readEpoch`.
+
+- `GroupMLS.rosterDIDs` → `rosterEntries` with per-leaf identity (breaking). `rosterDIDs(): Promise<Array<string>>` is replaced by `rosterEntries(): Promise<Array<RosterEntry>>`, where `RosterEntry` is `{ did, leafIndex, longForm }`. Entries are returned in ascending `leafIndex` order; `leafIndex` is stable while a leaf remains present and is reassigned by a remove/rejoin of that member; `longForm` is the leaf credential's long form when it carries one, else its `id` (never absent, not a resolvability guarantee).
+
+  **Breaking:** the port rename and shape change hit the `@kumiai/rpc` `GroupMLS` port, the `@kumiai/mls-rpc` real implementation, and the `@kumiai/rpc-conformance` contract suite every implementation and every double must pass. `detectRosterChange` is unchanged — it keeps its `Array<string>` DID-set signature.
+
+  Known coverage gap (documented, not implemented): the in-repo test double addresses removal by DID and cannot model removing one of two leaves the same DID holds, so the duplicate-DID-leaf-removal case is not covered by conformance. No filed consumer needs it today; the real `@kumiai/mls-rpc` implementation is already faithful via ts-mls.
+
+### Patch Changes
+
+- Reject non-Commit bytes on the commit topic before they reach the MLS handle. This prevents stray Proposals from entering the next authored Commit and keeps peers that missed them able to apply it.
+
+- Expose commit strand observations and recovery lifecycle callbacks. `started` is dispatched asynchronously when the attempt begins, before its terminal event and while a port call may still be pending. Recovery attempts are single-flight, and `recover()` may drain re-enact entries left by an earlier automatic heal. Future-version handshake frames with unknown kinds now trigger healing, failed request publishes throw instead of timing out, and a ledger bootstrap completed later returns the owed re-enact entries. Disposal waits for ledger bootstraps already in progress.
+
+  `@kumiai/mls` persists accepted received commits and proposals, plus ledger bootstrap, before notifications; this option does not persist application-message receive ratchets. Persist must write atomically and must not call back into the same handle while its mutex is held. A rejection restores prior in-memory state and must leave storage unchanged. Host callback errors do not undo a durable advance.
+
+  `@kumiai/mls-rpc` persists recovery handles before adoption; if adoption throws, a restart loads the new stored handle. It uses the MLS handle persistence boundary for commits and ledger bootstrap, reports durable advances even if a host callback throws, and expires and zeroes recovery request keys on timers without requiring another request.
+
+- Updated dependencies:
+  - @kumiai/mls@0.10.0
+  - @kumiai/rpc@0.10.0
+
 ## 0.9.0
 
 ### Minor Changes

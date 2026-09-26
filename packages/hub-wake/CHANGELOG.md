@@ -1,5 +1,27 @@
 # @kumiai/hub-wake
 
+## 0.10.0
+
+### Minor Changes
+
+- Ship in the 0.10 release band for acknowledged durable app-frame delivery. `@kumiai/rpc`
+  adds opt-in at-least-once delivery of retained events, a pending-record port, handler frame
+  identity, and retry and operator-drop behavior. `@kumiai/mls` adds staged decrypt and cleartext
+  AAD reading; `@kumiai/mls-rpc` implements the atomic durable-open port. The conformance suite
+  covers the new contract, and the remaining packages move together in the shared version band.
+
+  **Breaking:** all app frames now use versioned AAD carrying authenticated log intent. 0.9 and
+  0.10 peers cannot exchange app frames; a frame with the older bare-topic AAD is refused. Consumers
+  implementing `GroupCrypto` must provide `frameAAD` and support the new `unwrap` options. Hosts opting in to
+  durable delivery must atomically persist consumed-key state with each pending record, order
+  handle saves, reject stale same-epoch writes, and avoid holding a database transaction while
+  awaiting a peer or handle operation.
+
+### Patch Changes
+
+- Updated dependencies:
+  - @kumiai/hub-protocol@0.10.0
+
 ## 0.9.0
 
 ### Minor Changes

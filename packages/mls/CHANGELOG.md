@@ -1,5 +1,38 @@
 # @kumiai/mls
 
+## 0.10.0
+
+### Minor Changes
+
+- Ship in the 0.10 release band for acknowledged durable app-frame delivery. `@kumiai/rpc`
+  adds opt-in at-least-once delivery of retained events, a pending-record port, handler frame
+  identity, and retry and operator-drop behavior. `@kumiai/mls` adds staged decrypt and cleartext
+  AAD reading; `@kumiai/mls-rpc` implements the atomic durable-open port. The conformance suite
+  covers the new contract, and the remaining packages move together in the shared version band.
+
+  **Breaking:** all app frames now use versioned AAD carrying authenticated log intent. 0.9 and
+  0.10 peers cannot exchange app frames; a frame with the older bare-topic AAD is refused. Consumers
+  implementing `GroupCrypto` must provide `frameAAD` and support the new `unwrap` options. Hosts opting in to
+  durable delivery must atomically persist consumed-key state with each pending record, order
+  handle saves, reject stale same-epoch writes, and avoid holding a database transaction while
+  awaiting a peer or handle operation.
+
+- **Breaking (types only):** `GroupHandle.processMessage` takes `Uint8Array | MlsFramedMessage`, and
+  `processWelcome`'s `welcome` and `welcomeKeyPackageRefs` take `Uint8Array | Welcome` (ts-mls types).
+  The old `Uint8Array | unknown` parameters collapsed to `unknown` and accepted anything at compile
+  time. Runtime behaviour is unchanged. Callers that pass wire bytes need no change; a caller holding
+  an untyped value (for example a Welcome decoded from JSON) must check it is a `Uint8Array` first.
+
+### Patch Changes
+
+- `decodeClientState` no longer aliases its input. ts-mls decoded secrets as views into the encoded bytes, and ratcheting zeroes consumed secrets in place, so a host that kept the bytes it restored from (a cache, or a retry after a failed transaction) found them corrupted by the next decrypt. Also exports `readCommitEntryIDs`, which reads the ledger-entry IDs a private Commit names without processing it.
+
+- Expose commit strand observations and recovery lifecycle callbacks. `started` is dispatched asynchronously when the attempt begins, before its terminal event and while a port call may still be pending. Recovery attempts are single-flight, and `recover()` may drain re-enact entries left by an earlier automatic heal. Future-version handshake frames with unknown kinds now trigger healing, failed request publishes throw instead of timing out, and a ledger bootstrap completed later returns the owed re-enact entries. Disposal waits for ledger bootstraps already in progress.
+
+  `@kumiai/mls` persists accepted received commits and proposals, plus ledger bootstrap, before notifications; this option does not persist application-message receive ratchets. Persist must write atomically and must not call back into the same handle while its mutex is held. A rejection restores prior in-memory state and must leave storage unchanged. Host callback errors do not undo a durable advance.
+
+  `@kumiai/mls-rpc` persists recovery handles before adoption; if adoption throws, a restart loads the new stored handle. It uses the MLS handle persistence boundary for commits and ledger bootstrap, reports durable advances even if a host callback throws, and expires and zeroes recovery request keys on timers without requiring another request.
+
 ## 0.9.0
 
 ### Minor Changes
