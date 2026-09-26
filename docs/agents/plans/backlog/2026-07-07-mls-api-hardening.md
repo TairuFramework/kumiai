@@ -69,10 +69,13 @@ Every item marked **breaking** costs a `minor` bump while `@kumiai/mls` is 0.x a
 1.0 — see `../milestones/pre-1.0-breaking-api.md` for the deadline that implies. None is a
 correctness bug; each is a shape a filed consumer would force a break to fix, and none has one yet.
 
-- **A third `GroupPermission`** (breaking). **Left 2026-09-25** for 0.10: no consumer needs one; see
-  `../milestones/v0.10-release.md`. `packages/mls/src/roster.ts` — the role model is exactly
-  `'admin' | 'member'`. Widening a value consumers exhaustively `switch` over is the same break class
-  `AuthorizeRequest` was built to avoid taking twice. No filed use needs a third role.
+- **A third `GroupPermission`** (breaking). **Left 2026-09-25** for 0.10: no consumer needs one. The
+  signed `kumiai.role` value, the folded roster and Kubun's role types all name only `admin` and
+  `member`; a new role needs a defined authority rule and coordinated peer and consumer changes.
+  Narrower application rights go in separate ledger claims when a use appears.
+  `packages/mls/src/roster.ts` — the role model is exactly `'admin' | 'member'`. Widening a value
+  consumers exhaustively `switch` over is the same break class `AuthorizeRequest` was built to avoid
+  taking twice. No filed use needs a third role.
 - ~~**The dead `GroupSyncScope` export**~~ — **taken 2026-08-02**, deleted ahead of the 0.5 band
   release. Still referenced nowhere at the time of removal. See
   `../completed/2026-08-02-trim-dead-api-surface.complete.md`.

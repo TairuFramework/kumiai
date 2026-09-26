@@ -92,8 +92,7 @@ lint clean.
 ## Follow-on
 
 - Host handle access for `mls-rpc` reshapes `pending.persistOpened` so the host owns the lock and write
-  order: `2026-09-26-mls-rpc-host-handle-access.complete.md`, same 0.10 release
-  (`../milestones/v0.10-release.md`).
+  order: `2026-09-26-mls-rpc-host-handle-access.complete.md`, same 0.10 release.
 - Accepted: the seal barrier resolves at anchor assignment, before anchor-store I/O, so a reentrant
   dispatch from the anchor save remains possible. The commit walk accepts a short, one-shot
   below-cursor fork reveal; only its full pages are bounded.
