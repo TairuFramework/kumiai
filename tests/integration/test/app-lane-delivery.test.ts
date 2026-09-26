@@ -1,5 +1,5 @@
 import { APP_TOPIC_LABEL, protocolTopic } from '@kumiai/rpc'
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 import {
   buildInviteCommit,
@@ -575,6 +575,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
 
     const seen: Array<unknown> = []
     let dying: Member | undefined
+    let died = false
     const handlers = {
       'chat/posted': async (ctx: { data: unknown }) => {
         seen.push(ctx.data)
@@ -586,6 +587,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
         dying = undefined
         await process.peer.dispose()
         await process.disconnect()
+        died = true
       },
     }
 
@@ -598,7 +600,9 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
       durablePending: true,
     })
     dying = bob
-    await flush(400)
+    // Polled, not a fixed wait: CI runs this file several times slower than a laptop.
+    await vi.waitFor(() => expect(died).toBe(true), { timeout: 15_000 })
+    await flush()
 
     // It died partway: the first frame reached the host and the walk did not finish.
     expect(seen).toEqual([{ text: 'at epoch one' }])
@@ -612,7 +616,15 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
       handlers,
       restartOf: bob,
     })
-    await flush(600)
+    await vi.waitFor(
+      () => {
+        expect(bob.handle().epoch).toBe(3n)
+        expect(seen).toHaveLength(4)
+      },
+      { timeout: 15_000 },
+    )
+    // Room for a duplicate to show up before the exact check below.
+    await flush()
 
     // The second process finished the walk, in order, and lost nothing.
     //
@@ -629,7 +641,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     await alice.peer.dispose()
     await bob.peer.dispose()
     await hub.dispose()
-  })
+  }, 30_000)
 
   /**
    * A RESTARTED member that AUTHORS, over real MLS: the admin dies, comes back over its persisted
