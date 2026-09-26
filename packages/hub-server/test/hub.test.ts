@@ -1,5 +1,6 @@
 import { Client } from '@enkaku/client'
 import type { AnyClientMessageOf, AnyServerMessageOf } from '@enkaku/protocol'
+import { MemoryReplayCache } from '@enkaku/server'
 import { DirectTransports } from '@enkaku/transport'
 import { type OwnIdentity, randomIdentity } from '@kokuin/token'
 import type { HubProtocol, HubStore } from '@kumiai/hub-protocol'
@@ -7,7 +8,12 @@ import { fromB64, fromUTF, toB64, toB64U } from '@sozai/codec'
 import { describe, expect, test, vi } from 'vitest'
 
 import { type AuthorizeRequest, createHandlers, type HubStoreErrorEvent } from '../src/handlers.js'
-import { type CreateHubParams, createHub, type HubInstance } from '../src/hub.js'
+import {
+  type CreateHubParams,
+  createHub,
+  type HubInstance,
+  type HubReplayOptions,
+} from '../src/hub.js'
 import { createMemoryStore } from '../src/memoryStore.js'
 import { HubClientRegistry } from '../src/registry.js'
 
@@ -39,6 +45,7 @@ function encodePayload(value: string): string {
 }
 
 type TestHubOptions = Omit<CreateHubParams, 'identity' | 'store' | 'transport'> & {
+  hubIdentity?: OwnIdentity
   store?: HubStore
 }
 
@@ -55,9 +62,9 @@ type TestHub = {
 }
 
 function createTestHub(options: TestHubOptions = {}): TestHub {
-  const { store: providedStore, ...hubOptions } = options
+  const { hubIdentity: providedIdentity, store: providedStore, ...hubOptions } = options
   const store = providedStore ?? createMemoryStore()
-  const hubIdentity = randomIdentity()
+  const hubIdentity = providedIdentity ?? randomIdentity()
   const firstTransports: HubTransports = new DirectTransports()
   const allTransports: Array<HubTransports> = [firstTransports]
   const hub = createHub({
@@ -175,6 +182,114 @@ describe('hub authentication', () => {
         signal: new AbortController().signal,
       } as never),
     ).rejects.toThrow('missing verified issuer DID')
+  })
+})
+
+describe('hub replay protection across restarts', () => {
+  async function sendReplayRequest({
+    hubIdentity,
+    message,
+    replay,
+  }: {
+    hubIdentity: OwnIdentity
+    message: AnyClientMessageOf<HubProtocol>
+    replay?: HubReplayOptions
+  }) {
+    const ctx = createTestHub({ hubIdentity, replay })
+    const transports: HubTransports = new DirectTransports()
+    ctx.hub.server.handle(transports.server)
+    try {
+      await transports.client.write(message)
+      return (await transports.client.read()).value?.payload
+    } finally {
+      await ctx.dispose()
+      await transports.dispose()
+    }
+  }
+
+  test('hub ignores attempts to disable replay checks on a shared cache', async () => {
+    const hubIdentity = randomIdentity()
+    const clientIdentity = randomIdentity()
+    const cache = new MemoryReplayCache()
+    const replay = { cache, enabled: false, rejectStale: false } as HubReplayOptions
+    const message = await clientIdentity.signToken({
+      typ: 'request',
+      aud: hubIdentity.id,
+      prc: 'hub/v1/subscribe',
+      rid: 'replay-request',
+      prm: { topicID: TOPIC },
+      jti: crypto.randomUUID(),
+      exp: Math.floor(Date.now() / 1000) + 300,
+    })
+
+    const signedMessage = message as unknown as AnyClientMessageOf<HubProtocol>
+    expect(await sendReplayRequest({ hubIdentity, message: signedMessage, replay })).toMatchObject({
+      typ: 'result',
+      rid: 'replay-request',
+      val: { subscribed: true },
+    })
+    expect(await sendReplayRequest({ hubIdentity, message: signedMessage, replay })).toMatchObject({
+      typ: 'error',
+      rid: 'replay-request',
+      code: 'EK09',
+    })
+  })
+
+  test('shared replay cache rejects the same signed request after a restart with EK09', async () => {
+    const hubIdentity = randomIdentity()
+    const clientIdentity = randomIdentity()
+    const cache = new MemoryReplayCache()
+    const message = await clientIdentity.signToken({
+      typ: 'request',
+      aud: hubIdentity.id,
+      prc: 'hub/v1/subscribe',
+      rid: 'replay-request',
+      prm: { topicID: TOPIC },
+      jti: crypto.randomUUID(),
+      exp: Math.floor(Date.now() / 1000) + 300,
+    })
+
+    const signedMessage = message as unknown as AnyClientMessageOf<HubProtocol>
+    expect(
+      await sendReplayRequest({ hubIdentity, message: signedMessage, replay: { cache } }),
+    ).toMatchObject({
+      typ: 'result',
+      rid: 'replay-request',
+      val: { subscribed: true },
+    })
+    expect(
+      await sendReplayRequest({ hubIdentity, message: signedMessage, replay: { cache } }),
+    ).toMatchObject({
+      typ: 'error',
+      rid: 'replay-request',
+      code: 'EK09',
+    })
+  })
+
+  test('default replay caches accept the same signed request after a restart', async () => {
+    const hubIdentity = randomIdentity()
+    const clientIdentity = randomIdentity()
+    const message = await clientIdentity.signToken({
+      typ: 'request',
+      aud: hubIdentity.id,
+      prc: 'hub/v1/subscribe',
+      rid: 'replay-request',
+      prm: { topicID: TOPIC },
+      jti: crypto.randomUUID(),
+      exp: Math.floor(Date.now() / 1000) + 300,
+    })
+
+    const signedMessage = message as unknown as AnyClientMessageOf<HubProtocol>
+    expect(await sendReplayRequest({ hubIdentity, message: signedMessage })).toMatchObject({
+      typ: 'result',
+      rid: 'replay-request',
+      val: { subscribed: true },
+    })
+    expect(await sendReplayRequest({ hubIdentity, message: signedMessage })).toMatchObject({
+      typ: 'result',
+      rid: 'replay-request',
+      val: { subscribed: true },
+    })
   })
 })
 

@@ -16,6 +16,10 @@ client registry for push fan-out, and an in-memory `HubStore` for development an
   `DEFAULT_HUB_ACCESS_RULES`.
 - `HubStoreErrorEvent`, `HubStoreErrorHook` — the `onStoreError` event and hook types.
 
+`createHub` accepts `replay` with a cache and tuning (`maxAge`, `leeway`, `maxEntries`).
+The hub always enables replay checks and rejects stale tokens. Supply a persistent `replay.cache`
+to keep replay protection across restarts; omitted, it uses a per-process memory cache.
+
 ```ts
 import { createHub, createMemoryStore } from '@kumiai/hub-server'
 

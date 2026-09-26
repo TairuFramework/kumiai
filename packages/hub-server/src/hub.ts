@@ -1,5 +1,5 @@
 import type { ServerTransportOf } from '@enkaku/protocol'
-import type { AccessRules, ResourceLimits, Server } from '@enkaku/server'
+import type { AccessRules, ReplayOptions, ResourceLimits, Server } from '@enkaku/server'
 import { serve } from '@enkaku/server'
 import type { Identity } from '@kokuin/token'
 import type { HubProtocol, HubStore, WakeRegistry, WakeSender } from '@kumiai/hub-protocol'
@@ -36,6 +36,9 @@ export type HubPurgeOptions = {
   olderThan?: number
 }
 
+/** Replay settings a host may tune. The hub always enables replay checks and rejects stale tokens. */
+export type HubReplayOptions = Omit<ReplayOptions, 'enabled' | 'rejectStale'>
+
 export type CreateHubParams = {
   transport: ServerTransportOf<HubProtocol>
   store: HubStore
@@ -46,6 +49,8 @@ export type CreateHubParams = {
   identity: Identity
   /** Access rules enforced by the server. Defaults to {@link DEFAULT_HUB_ACCESS_RULES}. */
   accessRules?: AccessRules
+  /** Omitted: per-process memory cache. Only a persistent `cache` survives a hub restart. */
+  replay?: HubReplayOptions
   /**
    * Per-action authorization hook. Consulted for publish, subscribe, topic/fetch, keypackage/*,
    * wake/*, and receive — the coarse `receive` gate at channel open plus a per-frame
@@ -136,6 +141,7 @@ export function createHub(params: CreateHubParams): HubInstance {
     transport: params.transport,
     identity: params.identity,
     accessRules: params.accessRules ?? DEFAULT_HUB_ACCESS_RULES,
+    replay: { ...params.replay, enabled: true, rejectStale: true },
     limits,
   })
   if (params.purge !== false) {
