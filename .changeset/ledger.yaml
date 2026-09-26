@@ -106,6 +106,10 @@
   dir: packages/hub-server
   intents:
     - durable-app-delivery
+"@kumiai/hub-server@0.10.1":
+  dir: packages/hub-server
+  intents:
+    - hub-server-replay-option
 "@kumiai/hub-server@0.5.0":
   dir: packages/hub-server
   intents:

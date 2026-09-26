@@ -165,17 +165,17 @@ settings:
 catalogs:
   default:
     '@enkaku/client':
-      specifier: ^0.21.2
-      version: 0.21.2
+      specifier: ^0.21.3
+      version: 0.21.3
     '@enkaku/protocol':
-      specifier: ^0.21.1
-      version: 0.21.1
+      specifier: ^0.21.3
+      version: 0.21.3
     '@enkaku/server':
-      specifier: ^0.21.2
-      version: 0.21.2
+      specifier: ^0.21.3
+      version: 0.21.3
     '@enkaku/transport':
-      specifier: ^0.21.0
-      version: 0.21.0
+      specifier: ^0.21.3
+      version: 0.21.3
     '@kokuin/capability':
       specifier: ^0.3.0
       version: 0.3.0
@@ -243,8 +243,8 @@ catalogs:
       specifier: ^6.0.3
       version: 6.0.3
     vitest:
-      specifier: ^5.0.1
-      version: 5.0.1
+      specifier: ^5.0.2
+      version: 5.0.2
 
 importers:
 
@@ -258,10 +258,10 @@ importers:
     dependencies:
       '@enkaku/protocol':
         specifier: 'catalog:'
-        version: 0.21.1(@logtape/logtape@2.3.0)
+        version: 0.21.3(@logtape/logtape@2.3.0)
       '@enkaku/transport':
         specifier: 'catalog:'
-        version: 0.21.0
+        version: 0.21.3
       '@noble/hashes':
         specifier: 'catalog:'
         version: 2.4.0
@@ -280,13 +280,13 @@ importers:
     devDependencies:
       vitest:
         specifier: 'catalog:'
-        version: 5.0.1(@opentelemetry/api@1.9.1)(@types/node@26.4.1)(@vitest/ui@5.0.0)(vite@8.0.16(@types/node@26.4.1)(esbuild@0.28.2)(terser@5.51.2)(tsx@4.23.13)(yaml@2.9.0))
+        version: 5.0.2(@opentelemetry/api@1.9.1)(@types/node@26.4.1)(@vitest/ui@5.0.0)(vite@8.0.16(@types/node@26.4.1)(esbuild@0.28.2)(terser@5.51.2)(tsx@4.23.13)(yaml@2.9.0))
 
   packages/hub-client:
     dependencies:
       '@enkaku/client':
         specifier: 'catalog:'
-        version: 0.21.2(@logtape/logtape@2.3.0)
+        version: 0.21.3(@logtape/logtape@2.3.0)
       '@kumiai/hub-protocol':
         specifier: workspace:^
         version: link:../hub-protocol
@@ -305,10 +305,10 @@ importers:
     devDependencies:
       '@enkaku/protocol':
         specifier: 'catalog:'
-        version: 0.21.1(@logtape/logtape@2.3.0)
+        version: 0.21.3(@logtape/logtape@2.3.0)
       '@enkaku/transport':
         specifier: 'catalog:'
-        version: 0.21.0
+        version: 0.21.3
       '@kokuin/token':
         specifier: 'catalog:'
         version: 0.5.0(@logtape/logtape@2.3.0)
@@ -330,13 +330,13 @@ importers:
     devDependencies:
       vitest:
         specifier: 'catalog:'
-        version: 5.0.1(@opentelemetry/api@1.9.1)(@types/node@26.4.1)(@vitest/ui@5.0.0)(vite@8.0.16(@types/node@26.4.1)(esbuild@0.28.2)(terser@5.51.2)(tsx@4.23.13)(yaml@2.9.0))
+        version: 5.0.2(@opentelemetry/api@1.9.1)(@types/node@26.4.1)(@vitest/ui@5.0.0)(vite@8.0.16(@types/node@26.4.1)(esbuild@0.28.2)(terser@5.51.2)(tsx@4.23.13)(yaml@2.9.0))
 
   packages/hub-protocol:
     dependencies:
       '@enkaku/protocol':
         specifier: 'catalog:'
-        version: 0.21.1(@logtape/logtape@2.3.0)
+        version: 0.21.3(@logtape/logtape@2.3.0)
       '@noble/ciphers':
         specifier: 'catalog:'
         version: 2.4.0
@@ -355,16 +355,16 @@ importers:
     devDependencies:
       vitest:
         specifier: 'catalog:'
-        version: 5.0.1(@opentelemetry/api@1.9.1)(@types/node@26.4.1)(@vitest/ui@5.0.0)(vite@8.0.16(@types/node@26.4.1)(esbuild@0.28.2)(terser@5.51.2)(tsx@4.23.13)(yaml@2.9.0))
+        version: 5.0.2(@opentelemetry/api@1.9.1)(@types/node@26.4.1)(@vitest/ui@5.0.0)(vite@8.0.16(@types/node@26.4.1)(esbuild@0.28.2)(terser@5.51.2)(tsx@4.23.13)(yaml@2.9.0))
 
   packages/hub-server:
     dependencies:
       '@enkaku/protocol':
         specifier: 'catalog:'
-        version: 0.21.1(@logtape/logtape@2.3.0)
+        version: 0.21.3(@logtape/logtape@2.3.0)
       '@enkaku/server':
         specifier: 'catalog:'
-        version: 0.21.2(@logtape/logtape@2.3.0)
+        version: 0.21.3(@logtape/logtape@2.3.0)
       '@kokuin/token':
         specifier: 'catalog:'
         version: 0.5.0(@logtape/logtape@2.3.0)
@@ -383,10 +383,10 @@ importers:
     devDependencies:
       '@enkaku/client':
         specifier: 'catalog:'
-        version: 0.21.2(@logtape/logtape@2.3.0)
+        version: 0.21.3(@logtape/logtape@2.3.0)
       '@enkaku/transport':
         specifier: 'catalog:'
-        version: 0.21.0
+        version: 0.21.3
       '@kumiai/hub-conformance':
         specifier: workspace:^
         version: link:../hub-conformance
@@ -398,7 +398,7 @@ importers:
     dependencies:
       '@enkaku/transport':
         specifier: 'catalog:'
-        version: 0.21.0
+        version: 0.21.3
       '@kumiai/hub-protocol':
         specifier: workspace:^
         version: link:../hub-protocol
@@ -417,13 +417,13 @@ importers:
     devDependencies:
       '@enkaku/client':
         specifier: 'catalog:'
-        version: 0.21.2(@logtape/logtape@2.3.0)
+        version: 0.21.3(@logtape/logtape@2.3.0)
       '@enkaku/protocol':
         specifier: 'catalog:'
-        version: 0.21.1(@logtape/logtape@2.3.0)
+        version: 0.21.3(@logtape/logtape@2.3.0)
       '@enkaku/server':
         specifier: 'catalog:'
-        version: 0.21.2(@logtape/logtape@2.3.0)
+        version: 0.21.3(@logtape/logtape@2.3.0)
       '@kokuin/token':
         specifier: 'catalog:'
         version: 0.5.0(@logtape/logtape@2.3.0)
@@ -490,7 +490,7 @@ importers:
     dependencies:
       '@enkaku/protocol':
         specifier: 'catalog:'
-        version: 0.21.1(@logtape/logtape@2.3.0)
+        version: 0.21.3(@logtape/logtape@2.3.0)
       '@kokuin/token':
         specifier: 'catalog:'
         version: 0.5.0(@logtape/logtape@2.3.0)
@@ -509,10 +509,10 @@ importers:
     devDependencies:
       '@enkaku/client':
         specifier: 'catalog:'
-        version: 0.21.2(@logtape/logtape@2.3.0)
+        version: 0.21.3(@logtape/logtape@2.3.0)
       '@enkaku/transport':
         specifier: 'catalog:'
-        version: 0.21.0
+        version: 0.21.3
       '@kumiai/hub-server':
         specifier: workspace:^
         version: link:../hub-server
@@ -543,22 +543,22 @@ importers:
         version: 2.0.0-rc.13(@noble/ciphers@2.4.0)(@noble/curves@2.2.0)
       vitest:
         specifier: 'catalog:'
-        version: 5.0.1(@opentelemetry/api@1.9.1)(@types/node@26.4.1)(@vitest/ui@5.0.0)(vite@8.0.16(@types/node@26.4.1)(esbuild@0.28.2)(terser@5.51.2)(tsx@4.23.13)(yaml@2.9.0))
+        version: 5.0.2(@opentelemetry/api@1.9.1)(@types/node@26.4.1)(@vitest/ui@5.0.0)(vite@8.0.16(@types/node@26.4.1)(esbuild@0.28.2)(terser@5.51.2)(tsx@4.23.13)(yaml@2.9.0))
 
   packages/rpc:
     dependencies:
       '@enkaku/client':
         specifier: 'catalog:'
-        version: 0.21.2(@logtape/logtape@2.3.0)
+        version: 0.21.3(@logtape/logtape@2.3.0)
       '@enkaku/protocol':
         specifier: 'catalog:'
-        version: 0.21.1(@logtape/logtape@2.3.0)
+        version: 0.21.3(@logtape/logtape@2.3.0)
       '@enkaku/server':
         specifier: 'catalog:'
-        version: 0.21.2(@logtape/logtape@2.3.0)
+        version: 0.21.3(@logtape/logtape@2.3.0)
       '@enkaku/transport':
         specifier: 'catalog:'
-        version: 0.21.0
+        version: 0.21.3
       '@kokuin/token':
         specifier: 'catalog:'
         version: 0.5.0(@logtape/logtape@2.3.0)
@@ -601,13 +601,13 @@ importers:
         version: 2.4.0
       vitest:
         specifier: 'catalog:'
-        version: 5.0.1(@opentelemetry/api@1.9.1)(@types/node@26.4.1)(@vitest/ui@5.0.0)(vite@8.0.16(@types/node@26.4.1)(esbuild@0.28.2)(terser@5.51.2)(tsx@4.23.13)(yaml@2.9.0))
+        version: 5.0.2(@opentelemetry/api@1.9.1)(@types/node@26.4.1)(@vitest/ui@5.0.0)(vite@8.0.16(@types/node@26.4.1)(esbuild@0.28.2)(terser@5.51.2)(tsx@4.23.13)(yaml@2.9.0))
 
   packages/rpc-conformance:
     devDependencies:
       vitest:
         specifier: 'catalog:'
-        version: 5.0.1(@opentelemetry/api@1.9.1)(@types/node@26.4.1)(@vitest/ui@5.0.0)(vite@8.0.16(@types/node@26.4.1)(esbuild@0.28.2)(terser@5.51.2)(tsx@4.23.13)(yaml@2.9.0))
+        version: 5.0.2(@opentelemetry/api@1.9.1)(@types/node@26.4.1)(@vitest/ui@5.0.0)(vite@8.0.16(@types/node@26.4.1)(esbuild@0.28.2)(terser@5.51.2)(tsx@4.23.13)(yaml@2.9.0))
 
   tests/e2e-expo:
     dependencies:
@@ -647,16 +647,16 @@ importers:
     devDependencies:
       '@enkaku/client':
         specifier: 'catalog:'
-        version: 0.21.2(@logtape/logtape@2.3.0)
+        version: 0.21.3(@logtape/logtape@2.3.0)
       '@enkaku/protocol':
         specifier: 'catalog:'
-        version: 0.21.1(@logtape/logtape@2.3.0)
+        version: 0.21.3(@logtape/logtape@2.3.0)
       '@enkaku/server':
         specifier: 'catalog:'
-        version: 0.21.2(@logtape/logtape@2.3.0)
+        version: 0.21.3(@logtape/logtape@2.3.0)
       '@enkaku/transport':
         specifier: 'catalog:'
-        version: 0.21.0
+        version: 0.21.3
       '@kokuin/token':
         specifier: 'catalog:'
         version: 0.5.0(@logtape/logtape@2.3.0)
@@ -686,7 +686,7 @@ importers:
         version: 0.4.0
       vitest:
         specifier: 'catalog:'
-        version: 5.0.1(@opentelemetry/api@1.9.1)(@types/node@26.4.1)(@vitest/ui@5.0.0)(vite@8.0.16(@types/node@26.4.1)(esbuild@0.28.2)(terser@5.51.2)(tsx@4.23.13)(yaml@2.9.0))
+        version: 5.0.2(@opentelemetry/api@1.9.1)(@types/node@26.4.1)(@vitest/ui@5.0.0)(vite@8.0.16(@types/node@26.4.1)(esbuild@0.28.2)(terser@5.51.2)(tsx@4.23.13)(yaml@2.9.0))
 
 packages:
 
@@ -1125,20 +1125,20 @@ packages:
   '@emnapi/wasi-threads@1.2.1':
     resolution: {integrity: sha512-uTII7OYF+/Mes/MrcIOYp5yOtSMLBWSIoLPpcgwipoiKbli6k322tcoFsxoIIxPDqW01SQGAgko4EzZi2BNv2w==}
 
-  '@enkaku/client@0.21.2':
-    resolution: {integrity: sha512-KMgYd0szlJoqLwbGeh7ak4UZwOzygmNvqSlQ+XfpRbshZlKNxFf3l7nCZuGghjrDUuc4FFfmbzM2OVS3Db3CdA==}
+  '@enkaku/client@0.21.3':
+    resolution: {integrity: sha512-6Dyln9TazMyWJFG588/Ce4Wz6KoeLtqD73Of3amIGDVs0uKcNsE0UGUCSsTd3kLguW6CB8PX1rdz+iyrBFfB6g==}
 
-  '@enkaku/otel@0.21.0':
-    resolution: {integrity: sha512-lf/2gyuuz4v5jzjKqx2pZlbaFzW/Ajnr4zeSOgjLgBV3QdTaOKKlMDmD5R1XJV1rvsPGMwKRkZI7Bnd0kQReHw==}
+  '@enkaku/otel@0.21.3':
+    resolution: {integrity: sha512-Dy6AaOFlIVmWnGFJVBlOc0ltEK+hE4bmPKvS666i4cvtsjZOcPCM3GC057moQJiy9F/k5WUk5ELgj4OgEHiwiQ==}
 
-  '@enkaku/protocol@0.21.1':
-    resolution: {integrity: sha512-c961LzIwmDHn1D1HDVAFPCJw4B3FY/w1KngESS/DcWpMOHUVCe9uq+zt/nNGcBb6hSpBflW69n9eGtHo1UrIZA==}
+  '@enkaku/protocol@0.21.3':
+    resolution: {integrity: sha512-Fu+mmo6FFajkpOseLQCbp9Uj+pGpyVXAl775m6ltXgj3fXD54HgTjZQLRtlX+rgsv9M9xIOe0jt0X1i9YYBclg==}
 
-  '@enkaku/server@0.21.2':
-    resolution: {integrity: sha512-HLn5YjXBXAMyHpwe/aphFCE1yu9InEk9HPFd6Hyz2KGzEeCl39hZPr54Tm1P+A5/cb/TKB9AZFDeBVJNJzTZlQ==}
+  '@enkaku/server@0.21.3':
+    resolution: {integrity: sha512-CCkBsyPInrHkOh788/YQpON36bm8IlYpjR9JUvvwOBh3/OPU9gQIAUiSfgd5Ct1S0AJDemkD7mM68FucJ2eY5g==}
 
-  '@enkaku/transport@0.21.0':
-    resolution: {integrity: sha512-7ilSGDet7FrV3yOK1+qksk99qcHlXGJG+61O1YZf216ZbdyZy6poYiMa6p6JIAH6nB4nC9UuoBrp7CJdjeFFCQ==}
+  '@enkaku/transport@0.21.3':
+    resolution: {integrity: sha512-Ou0q2SNCZt4yUpu18xfYQbtm7OWVM5O4b+KEwLPmdiyfjyXR1prU65MphNHXvrdsPEQSHv+0P60QtFO3k5bRBg==}
 
   '@esbuild/aix-ppc64@0.28.2':
     resolution: {integrity: sha512-XExcO+dvLKvVtNTibSTBej1NCAbaGhWn9Ww1ZPx80qsahhPFe/8jgWP0IchNe0F3HwkU7n8ejhH8bjonqht8mQ==}
@@ -2122,8 +2122,8 @@ packages:
       vite:
         optional: true
 
-  '@vitest/mocker@5.0.1':
-    resolution: {integrity: sha512-6K1DoBNAPGvuOcSsGA4D6x+5zEEff/KmOOP3uetT2TrGpVfI+HRHRnJJfKi5ib/g1vx8IYHQD8s0pbJz8WQI7Q==}
+  '@vitest/mocker@5.0.2':
+    resolution: {integrity: sha512-Z5FS00Q1SJHkB35xATsmWGdQ5WA1/0MV3CDjqyv7GavHv1OfOj145MNfHOlHk7QLes21dKFDHr8EO2zvL+9WGA==}
     peerDependencies:
       msw: ^2.4.9
       vite: ^6.0.0 || ^7.0.0 || ^8.0.0
@@ -2139,8 +2139,8 @@ packages:
   '@vitest/spy@5.0.0':
     resolution: {integrity: sha512-uy+luWBAPw9XfthoHi5AkfHUnuPYEESjl0p/r+meoBnU8bxg5GDQ3Ey8MjcJ6sqahkL4PFyrvfMJJBw7LbU06g==}
 
-  '@vitest/spy@5.0.1':
-    resolution: {integrity: sha512-rbto/mF/SGERxEgYOek7Xm6B9b+y+mVoo+f4b2LymYO8zM1b7uB5nHuhVMTP2hxdzgxvGiZYGxGIaMvL5y180Q==}
+  '@vitest/spy@5.0.2':
+    resolution: {integrity: sha512-Ijc7T1nT9efNb5LxvjaBrEqw3f/QwUv5EE0nKqZxgqsaV/FxAAZ8baGylA8X/Z2oS4Lp+K74Jr6dTJsDKxJDeg==}
 
   '@vitest/ui@5.0.0':
     resolution: {integrity: sha512-h2FIFwggCY2GxUd2UdQoYNVQkOIqEQLPhNREcl3FUiRsdzQep7NWwYbSmhGEA9nFLPDq5pXzRMcBZQU8Py83sg==}
@@ -4218,20 +4218,20 @@ packages:
       jsdom:
         optional: true
 
-  vitest@5.0.1:
-    resolution: {integrity: sha512-iA95lQbKEkvrtTkdAgnWbXfbipWiiWe/hDl2P5tMi6WFwD76G0NxXAGp/M9EOcYupeGJRr6wppMc7CoA41TQjg==}
+  vitest@5.0.2:
+    resolution: {integrity: sha512-7MQrx9pDv5aHiUcovIb/70Ys3tgtkUVgCtledvKdCmEO+/1Dicq5ZqoSxOW034m03oqC+oHOKui2dM6qtMLoJg==}
     engines: {node: ^22.12.0 || ^24.0.0 || >=26.0.0}
     hasBin: true
     peerDependencies:
       '@edge-runtime/vm': '*'
       '@opentelemetry/api': ^1.9.0
       '@types/node': ^22.0.0 || >=24.0.0
-      '@vitest/browser-playwright': 5.0.1
-      '@vitest/browser-preview': 5.0.1
+      '@vitest/browser-playwright': 5.0.2
+      '@vitest/browser-preview': 5.0.2
       '@vitest/browser-webdriverio': ^5.0.0-beta.5 || >=5.0.0
-      '@vitest/coverage-istanbul': 5.0.1
-      '@vitest/coverage-v8': 5.0.1
-      '@vitest/ui': 5.0.1
+      '@vitest/coverage-istanbul': 5.0.2
+      '@vitest/coverage-v8': 5.0.2
+      '@vitest/ui': 5.0.2
       happy-dom: '*'
       jsdom: '*'
       vite: ^6.4.0 || ^7.0.0 || ^8.0.0
@@ -4285,6 +4285,11 @@ packages:
   why-is-node-running@2.3.0:
     resolution: {integrity: sha512-hUrmaWBdVDcxvYqnyh09zunKzROWjbZTiNy8dBEjkS7ehEDQibXJ7XvlmtbwuTclUiIyN+CyXQD4Vmko8fNm8w==}
     engines: {node: '>=8'}
+    hasBin: true
+
+  why-is-node-running@3.2.2:
+    resolution: {integrity: sha512-NKUzAelcoCXhXL4dJzKIwXeR8iEVqsA0Lq6Vnd0UXvgaKbzVo4ZTHROF2Jidrv+SgxOQ03fMinnNhzZATxOD3A==}
+    engines: {node: '>=20.11'}
     hasBin: true
 
   wrap-ansi@7.0.0:
@@ -4912,9 +4917,9 @@ snapshots:
       tslib: 2.8.1
     optional: true
 
-  '@enkaku/client@0.21.2(@logtape/logtape@2.3.0)':
+  '@enkaku/client@0.21.3(@logtape/logtape@2.3.0)':
     dependencies:
-      '@enkaku/otel': 0.21.0(@logtape/logtape@2.3.0)
+      '@enkaku/otel': 0.21.3(@logtape/logtape@2.3.0)
       '@kokuin/token': 0.5.0(@logtape/logtape@2.3.0)
       '@sozai/async': 0.2.1
       '@sozai/event': 0.1.3
@@ -4926,23 +4931,23 @@ snapshots:
     transitivePeerDependencies:
       - '@logtape/logtape'
 
-  '@enkaku/otel@0.21.0(@logtape/logtape@2.3.0)':
+  '@enkaku/otel@0.21.3(@logtape/logtape@2.3.0)':
     dependencies:
       '@opentelemetry/api': 1.9.1
       '@sozai/otel': 0.3.2(@logtape/logtape@2.3.0)
     transitivePeerDependencies:
       - '@logtape/logtape'
 
-  '@enkaku/protocol@0.21.1(@logtape/logtape@2.3.0)':
+  '@enkaku/protocol@0.21.3(@logtape/logtape@2.3.0)':
     dependencies:
       '@kokuin/token': 0.5.0(@logtape/logtape@2.3.0)
     transitivePeerDependencies:
       - '@logtape/logtape'
 
-  '@enkaku/server@0.21.2(@logtape/logtape@2.3.0)':
+  '@enkaku/server@0.21.3(@logtape/logtape@2.3.0)':
     dependencies:
-      '@enkaku/otel': 0.21.0(@logtape/logtape@2.3.0)
-      '@enkaku/protocol': 0.21.1(@logtape/logtape@2.3.0)
+      '@enkaku/otel': 0.21.3(@logtape/logtape@2.3.0)
+      '@enkaku/protocol': 0.21.3(@logtape/logtape@2.3.0)
       '@kokuin/capability': 0.3.0(@logtape/logtape@2.3.0)
       '@kokuin/token': 0.5.0(@logtape/logtape@2.3.0)
       '@sozai/async': 0.2.1
@@ -4955,7 +4960,7 @@ snapshots:
     transitivePeerDependencies:
       - '@logtape/logtape'
 
-  '@enkaku/transport@0.21.0':
+  '@enkaku/transport@0.21.3':
     dependencies:
       '@sozai/async': 0.2.1
       '@sozai/event': 0.1.3
@@ -6037,10 +6042,10 @@ snapshots:
     optionalDependencies:
       vite: 8.0.16(@types/node@26.4.1)(esbuild@0.28.2)(terser@5.51.2)(tsx@4.23.13)(yaml@2.9.0)
 
-  '@vitest/mocker@5.0.1(vite@8.0.16(@types/node@26.4.1)(esbuild@0.28.2)(terser@5.51.2)(tsx@4.23.13)(yaml@2.9.0))':
+  '@vitest/mocker@5.0.2(vite@8.0.16(@types/node@26.4.1)(esbuild@0.28.2)(terser@5.51.2)(tsx@4.23.13)(yaml@2.9.0))':
     dependencies:
       '@jridgewell/trace-mapping': 0.3.31
-      '@vitest/spy': 5.0.1
+      '@vitest/spy': 5.0.2
       estree-walker: 3.0.3
       magic-string: 1.2.3
     optionalDependencies:
@@ -6052,7 +6057,7 @@ snapshots:
 
   '@vitest/spy@5.0.0': {}
 
-  '@vitest/spy@5.0.1': {}
+  '@vitest/spy@5.0.2': {}
 
   '@vitest/ui@5.0.0(vitest@5.0.0)':
     dependencies:
@@ -8302,10 +8307,10 @@ snapshots:
     transitivePeerDependencies:
       - msw
 
-  vitest@5.0.1(@opentelemetry/api@1.9.1)(@types/node@26.4.1)(@vitest/ui@5.0.0)(vite@8.0.16(@types/node@26.4.1)(esbuild@0.28.2)(terser@5.51.2)(tsx@4.23.13)(yaml@2.9.0)):
+  vitest@5.0.2(@opentelemetry/api@1.9.1)(@types/node@26.4.1)(@vitest/ui@5.0.0)(vite@8.0.16(@types/node@26.4.1)(esbuild@0.28.2)(terser@5.51.2)(tsx@4.23.13)(yaml@2.9.0)):
     dependencies:
       '@types/chai': 5.2.3
-      '@vitest/mocker': 5.0.1(vite@8.0.16(@types/node@26.4.1)(esbuild@0.28.2)(terser@5.51.2)(tsx@4.23.13)(yaml@2.9.0))
+      '@vitest/mocker': 5.0.2(vite@8.0.16(@types/node@26.4.1)(esbuild@0.28.2)(terser@5.51.2)(tsx@4.23.13)(yaml@2.9.0))
       chai: 6.2.2
       es-module-lexer: 2.3.2
       expect-type: 1.4.0
@@ -8317,7 +8322,7 @@ snapshots:
       tinyexec: 1.3.0
       tinyglobby: 0.2.17
       vite: 8.0.16(@types/node@26.4.1)(esbuild@0.28.2)(terser@5.51.2)(tsx@4.23.13)(yaml@2.9.0)
-      why-is-node-running: 2.3.0
+      why-is-node-running: 3.2.2
     optionalDependencies:
       '@opentelemetry/api': 1.9.1
       '@types/node': 26.4.1
@@ -8349,6 +8354,8 @@ snapshots:
     dependencies:
       siginfo: 2.0.0
       stackback: 0.0.2
+
+  why-is-node-running@3.2.2: {}
 
   wrap-ansi@7.0.0:
     dependencies:

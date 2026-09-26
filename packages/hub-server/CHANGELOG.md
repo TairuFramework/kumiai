@@ -1,5 +1,11 @@
 # @kumiai/hub-server
 
+## 0.10.1
+
+### Patch Changes
+
+- `createHub` accepts `replay` (a replay cache plus tuning) and forwards it to enkaku `serve()`, so a host can supply a persistent replay cache that survives a hub restart. The hub cannot be configured to disable replay checks.
+
 ## 0.10.0
 
 ### Minor Changes

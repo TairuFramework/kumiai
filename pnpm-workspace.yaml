@@ -13,11 +13,11 @@ catalog:
   '@noble/curves': ^2.4.0
   '@noble/hashes': ^2.4.0
   'ts-mls': 2.0.0-rc.13
-  'vitest': ^5.0.1
-  '@enkaku/client': ^0.21.2
-  '@enkaku/protocol': ^0.21.1
-  '@enkaku/server': ^0.21.2
-  '@enkaku/transport': ^0.21.0
+  'vitest': ^5.0.2
+  '@enkaku/client': ^0.21.3
+  '@enkaku/protocol': ^0.21.3
+  '@enkaku/server': ^0.21.3
+  '@enkaku/transport': ^0.21.3
   '@kokuin/capability': ^0.3.0
   '@kokuin/controller': ^0.1.0
   '@kokuin/token': ^0.5.0
