@@ -11,6 +11,11 @@
 
 Fix direction: one locked read that returns both facts (for example `readCommitHeader` also reporting the handle epoch), and an anchor capture that refuses when its export epoch differs from `epochAfter`.
 
+## Faults read as refusals
+
+- `openEntries`'s resolver (`packages/rpc/src/ledger-entries.ts`) turns every error into missing bodies. The resolver now reads through `HandleAccess.read`, a host-owned boundary, so a transient store or lock fault becomes `MissingLedgerEntriesError` and the peer steps over a valid commit as poison. It recovers only when the next commit is framed ahead. Fix direction: let faults other than a failed open escape, so the lane re-reads the frame.
+- A commit the handle rejects spends a handshake-ratchet generation in memory before throwing (`GroupHandle.processMessage`), and `processCommit` then skips the save. Under the simple adapter the live handle and the stored state differ by that one generation. Harmless today, since a replay of the same frame is rejected either way.
+
 ## Cost
 
 Every past or future frame now goes through `unwrap` on each drain. Under a transactional adapter that is a lock and a restore per frame, indefinitely for a forged future frame pinning the cursor. No key is consumed and nothing is written.

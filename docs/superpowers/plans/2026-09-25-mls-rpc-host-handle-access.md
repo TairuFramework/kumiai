@@ -201,3 +201,17 @@ $ pnpm exec vitest run --root tests/integration
 **Findings:** 0 high, 2 medium, 9 low. Fixed: M1 (`applyCommit` reported `applied: false` for a self-removal persisted before a host callback threw; now tracks `persisted` and roster change, mutation-checked), M2 (adapter faults around a durable open became dead frames; now `AppFrameStorageError`), L4 (own-commit check normalises DIDs; untested, see backlog), L5 (fake crypto answered `FrameEpochError` for junk; structure check first), L6 (transactional fixture could publish over a newer mutation; revision-guarded publish, red/green test), L8 (stale comments, README and changeset claims, `readCommitEntryIDs` changeset). Accepted into `docs/agents/plans/backlog/2026-09-26-rpc-locked-epoch-residuals.md`: L1, L2 (two locked reads raced by an external mover), L3 (epoch move during resolution throws and the pull retries), L7 (drain cost). Gate after fixes: 49 tasks, 0 cached; 43 integration; lint clean.
 **Spec impact:** none.
 **Learned:** non-durable `unwrap` under the simple adapter can still lose a decrypted frame when the post-open save fails; that is the documented no-`pending` trade.
+
+### 2026-09-26 -- Review: second blind pass (Claude; Codex unavailable, 401)
+**Findings:** 0 high, 4 medium, 6 low; M1-M3 confirmed by probes. Fixed:
+- M1: `applyCommit` reported a transient resolver fault as a refusal, so a host following the README dropped a valid commit as poison. Resolver throws are now tagged and propagate.
+- M2: a fault from the adapter's staging callback inside `open`'s `fn` dropped a frame whose key was never spent. It is now `AppFrameStorageError`.
+- M3: a self-removal commit carrying app entries returned empty `surfacedEntries`.
+- M4: `bootstrapLedger` let a post-write host callback throw escape `mutate`, so a transactional host stored the ledger but never published it. The fixture gains `onLedgerEntries` to reproduce it.
+- L1: an epoch move during entry resolution threw; it now answers `advanced: false` at the moved epoch, and the rpc README contract is reworded.
+- L3: `isFrameAhead` and `isAppFrameStorageError` check by name.
+- L6: the self-removal test is split so that `persisted` and `changed` are each pinned; fixture reads wait for queued writes.
+
+All new tests mutation-checked (each guard removed fails exactly one test). Accepted into the residuals backlog: L2 (`openEntries` swallows access faults as missing bodies), L4 (a rejected commit's spent handshake generation is not saved). L5 (drain cost) was already there. Gate: 49 tasks, 0 cached; 43 integration; lint clean.
+**Spec impact:** `processCommit` throws for missing entries and for faults unrelated to the commit; an epoch move is `advanced: false`.
+**Learned:** a fixture without host callbacks hid a publish gap; an adapter double needs the host's callback surface too, not only its storage.

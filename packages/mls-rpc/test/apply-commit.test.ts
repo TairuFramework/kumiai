@@ -1,7 +1,9 @@
 import {
   commitLedgerEntries,
+  type GroupHandle,
   ledgerEntryDigest,
   MissingLedgerEntriesError,
+  removeMember,
   restoreGroup,
   signLedgerEntry,
 } from '@kumiai/mls'
@@ -196,18 +198,23 @@ test('a host callback throwing after durable acceptance still reports the advanc
   expect(persist).toHaveBeenCalledOnce()
 })
 
-test('a self-removal stored before a host callback threw is still applied', async () => {
-  const group = await createRealGroup(2, 'apply-commit-removed-callback')
-  const self = member(group)
-  const commit = await buildRealCommit(group, { removes: 0 })
-  const real = self.handle
-  const persist = vi.fn(async () => {})
-  // The real apply, then the throw a host callback raises after the state was stored.
-  const handle = new Proxy(real, {
+/** `handle`, whose `processMessage` runs `apply` and then throws as a host callback would. */
+function throwingAfter(
+  handle: GroupHandle,
+  apply: (
+    target: GroupHandle,
+    bytes: Uint8Array,
+    options: { persist?: (h: GroupHandle) => Promise<void> },
+  ) => Promise<void>,
+): GroupHandle {
+  return new Proxy(handle, {
     get(target, key) {
       if (key === 'processMessage') {
-        return async (bytes: Uint8Array, options: { persist?: (h: unknown) => Promise<void> }) => {
-          await target.processMessage(bytes, options as never)
+        return async (
+          bytes: Uint8Array,
+          options: { persist?: (h: GroupHandle) => Promise<void> },
+        ) => {
+          await apply(target, bytes, options)
           throw new Error('host callback failed')
         }
       }
@@ -215,10 +222,81 @@ test('a self-removal stored before a host callback threw is still applied', asyn
       return typeof value === 'function' ? value.bind(target) : value
     },
   })
+}
 
-  const result = await applyCommit(handle, commit, context(group, self), persist)
+test('a self-removal a host callback threw after is still applied, with or without persist', async () => {
+  for (const withPersist of [true, false]) {
+    const group = await createRealGroup(2, `apply-commit-removed-callback-${withPersist}`)
+    const self = member(group)
+    const commit = await buildRealCommit(group, { removes: 0 })
+    const persist = vi.fn(async () => {})
+    const handle = throwingAfter(self.handle, async (target, bytes, options) => {
+      await target.processMessage(bytes, options)
+    })
 
-  expect(persist).toHaveBeenCalledOnce()
+    const result = await applyCommit(
+      handle,
+      commit,
+      context(group, self),
+      withPersist ? persist : undefined,
+    )
+
+    expect(persist).toHaveBeenCalledTimes(withPersist ? 1 : 0)
+    expect(result).toMatchObject({ applied: true, advanced: false })
+    expect(result.rosterAfter.map((e) => e.did)).not.toContain(self.identity.id)
+  }
+})
+
+test('state persisted before a throw is reported applied even when nothing visible changed', async () => {
+  const group = await createRealGroup(1, 'apply-commit-persisted-callback')
+  const self = member(group)
+  const commit = await noteCommit(group, ['x'])
+  // The host stored a state; the handle must not be reported as refused over it.
+  const handle = throwingAfter(self.handle, async (target, _bytes, options) => {
+    await options.persist?.(target)
+  })
+
+  const result = await applyCommit(handle, commit, context(group, self), async () => {})
+
   expect(result).toMatchObject({ applied: true, advanced: false })
-  expect(result.rosterAfter.map((e) => e.did)).not.toContain(self.identity.id)
+})
+
+test('a resolver fault propagates, and the same commit applies on retry', async () => {
+  const group = await createRealGroup(1, 'apply-commit-resolver-fault')
+  const self = member(group)
+  const commit = await noteCommit(group, ['x'])
+  const before = self.handle.epoch
+  await expect(
+    applyCommit(
+      self.handle,
+      commit,
+      context(group, self, async () => {
+        throw new Error('network down')
+      }),
+    ),
+  ).rejects.toThrow('network down')
+  expect(self.handle.epoch).toBe(before)
+
+  const retry = await applyCommit(self.handle, commit, context(group, self))
+  expect(retry).toMatchObject({ applied: true, advanced: true })
+})
+
+test('a commit removing this member surfaces the entries it appended', async () => {
+  const group = await createRealGroup(2, 'apply-commit-removed-entries')
+  const self = member(group)
+  const token = await signLedgerEntry(group.committer.identity, {
+    type: 'app.note',
+    groupID: group.committer.handle.groupID,
+    subject: group.committer.identity.id,
+    value: 'parting',
+  })
+  group.bodies.set(ledgerEntryDigest(token), token)
+  const leaf = group.committer.handle.findMemberLeafIndex(self.identity.id)
+  if (leaf == null) throw new Error('missing leaf')
+  const removed = await removeMember(group.committer.handle, leaf, [token])
+
+  const result = await applyCommit(self.handle, removed.commitMessage, context(group, self))
+
+  expect(result).toMatchObject({ applied: true, advanced: false })
+  expect(result.surfacedEntries.map((v) => v.entry.value)).toEqual(['parting'])
 })

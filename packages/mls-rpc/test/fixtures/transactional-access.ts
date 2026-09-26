@@ -1,4 +1,10 @@
-import { decodeClientState, encodeClientState, type GroupHandle, restoreGroup } from '@kumiai/mls'
+import {
+  decodeClientState,
+  encodeClientState,
+  type GroupHandle,
+  type GroupOptions,
+  restoreGroup,
+} from '@kumiai/mls'
 import type { PendingAppFrame } from '@kumiai/rpc'
 
 import type { HandleAccess } from '../../src/access.js'
@@ -27,6 +33,8 @@ export type TransactionalStore = {
     record?: PendingAppFrame,
   ): Promise<void>
   records: Map<string, PendingAppFrame>
+  /** Resolves once every write issued so far has settled: a read after it sees them. */
+  settled(): Promise<void>
   /** Another connection's commit to the row: same state, next revision. */
   bump(): void
   /**
@@ -51,6 +59,7 @@ function storeOver(initial: StoredRow, records: Map<string, PendingAppFrame>): T
   const store: TransactionalStore = {
     snapshot: () => row,
     records,
+    settled: () => tail,
     bump: () => {
       row = { ...row, revision: row.revision + 1 }
     },
@@ -94,6 +103,7 @@ export type TransactionalAccess = {
 export async function createTransactionalAccess(
   member: RealMember,
   store: TransactionalStore,
+  callbacks: Pick<GroupOptions, 'onLedgerEntries'> = {},
 ): Promise<TransactionalAccess> {
   const restore = async (row: StoredRow): Promise<GroupHandle> => {
     const state = decodeClientState(row.state)
@@ -102,7 +112,7 @@ export async function createTransactionalAccess(
       state,
       credential: member.handle.credential,
       ledgerEntries: row.ledger,
-      options: { resolveLedgerEntries: member.slot.resolve },
+      options: { ...callbacks, resolveLedgerEntries: member.slot.resolve },
     })
   }
 
@@ -141,6 +151,7 @@ export async function createTransactionalAccess(
     read: (fn) => locked(async () => await fn(live)),
     mutate: (fn) =>
       locked(async () => {
+        await store.settled()
         const row = store.snapshot()
         const working = await restore(row)
         let saved = false
@@ -163,7 +174,10 @@ export async function createTransactionalAccess(
     open: (fn, persistOpened) => {
       const run = openTail.then(async () => {
         while (true) {
-          const row = await locked(async () => store.snapshot())
+          const row = await locked(async () => {
+            await store.settled()
+            return store.snapshot()
+          })
           const working = await restore(row)
           let staged: { state: Uint8Array; record: PendingAppFrame } | undefined
           const result = await fn(working, async (state, record) => {

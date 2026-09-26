@@ -62,8 +62,9 @@ A host with its own handle store implements the port instead:
   to the callback it is given. A host may capture them, release its lock, and then call
   `persistOpened` to write both in one transaction guarded by the state row's revision, publishing
   the working handle only after that commits, and only if no newer write was published meanwhile.
-  On a revision conflict it retries from a fresh handle. Faults from `persistOpened`, and faults the
-  adapter raises around `fn`, come back as `AppFrameStorageError`, which the lane retries.
+  On a revision conflict it retries from a fresh handle. Faults from `persistOpened`, from the staging
+  callback the adapter hands `fn`, and from anything the adapter raises around `fn` come back as
+  `AppFrameStorageError`, which the lane retries.
 
 ## Durable logged app delivery
 
@@ -174,7 +175,9 @@ It refuses non-Commit bytes, a frame at another epoch, and this member's own aut
 before any resolver or mutation runs. `applied` means the handle took the commit's state; `advanced`
 means the epoch moved. A commit removing this member is applied without advancing. The result
 carries both rosters, the ledger length before, the committer, and the verified non-`kumiai.*`
-entries the commit appended, repeats kept. `MissingLedgerEntriesError` and store faults propagate.
+entries the commit appended, repeats kept. `MissingLedgerEntriesError`, resolver faults and store
+faults propagate: map them to a throw from `processCommit`, never to `advanced: false`, which the peer
+steps over as a commit it will never apply.
 
 ## Recovery secret
 

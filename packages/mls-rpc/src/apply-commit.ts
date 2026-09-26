@@ -47,9 +47,9 @@ function rosterOf(handle: GroupHandle): Array<RosterEntry> {
  * and must not take it again.
  *
  * `persist` runs before the handle adopts the new state; its failure propagates and leaves the
- * handle where it was. `MissingLedgerEntriesError` propagates for the caller to classify. Any
- * other refusal returns `advanced: false`, and a throw after the handle advanced (a callback
- * after durable acceptance) reports the advance rather than inviting a replay.
+ * handle where it was. `MissingLedgerEntriesError` and resolver faults propagate for the caller to
+ * classify. Any other refusal returns `applied: false`, and a throw after the handle took the
+ * commit (a callback after durable acceptance) reports it applied rather than inviting a replay.
  */
 export async function applyCommit(
   handle: GroupHandle,
@@ -72,6 +72,12 @@ export async function applyCommit(
     ...(committerDID != null && { committerDID }),
   })
 
+  const surfaced = (): Array<VerifiedLedgerEntry> =>
+    handle.ledger
+      .slice(ledgerLengthBefore)
+      .map((entry) => entry.verified)
+      .filter((verified) => !verified.entry.type.startsWith(CONTROL_TYPE_PREFIX))
+
   const header = await handle.readCommitHeader(commit)
   if (header == null || readMessageEpoch(commit) !== before) return refused()
   const committerDID = header.committerDID
@@ -81,8 +87,21 @@ export async function applyCommit(
 
   let persistFailed = false
   let persisted = false
+  let resolverFailed = false
   let threw = false
-  context.entrySlot.install(context.resolveLedgerEntries)
+  const resolve = context.resolveLedgerEntries
+  context.entrySlot.install(
+    resolve &&
+      (async (ids) => {
+        try {
+          return await resolve(ids)
+        } catch (error) {
+          // A fault fetching bodies says nothing about the commit, which may apply on retry.
+          resolverFailed = true
+          throw error
+        }
+      }),
+  )
   try {
     await handle.processMessage(commit, {
       ...(persist != null && {
@@ -98,7 +117,7 @@ export async function applyCommit(
       }),
     })
   } catch (error) {
-    if (error instanceof MissingLedgerEntriesError || persistFailed) throw error
+    if (error instanceof MissingLedgerEntriesError || persistFailed || resolverFailed) throw error
     threw = true
   } finally {
     context.entrySlot.install(undefined)
@@ -111,7 +130,7 @@ export async function applyCommit(
       rosterAfter.length !== rosterBefore.length ||
       rosterAfter.some((entry, index) => entry.did !== rosterBefore[index]?.did)
     if (threw && !persisted && !changed) return refused(committerDID)
-    return { ...refused(committerDID), applied: true, rosterAfter }
+    return { ...refused(committerDID), applied: true, rosterAfter, surfacedEntries: surfaced() }
   }
 
   return {
@@ -121,10 +140,7 @@ export async function applyCommit(
     epochAfter: Number(handle.epoch),
     rosterBefore,
     rosterAfter: rosterOf(handle),
-    surfacedEntries: handle.ledger
-      .slice(ledgerLengthBefore)
-      .map((entry) => entry.verified)
-      .filter((verified) => !verified.entry.type.startsWith(CONTROL_TYPE_PREFIX)),
+    surfacedEntries: surfaced(),
     ledgerLengthBefore,
     ...(committerDID != null && { committerDID }),
   }

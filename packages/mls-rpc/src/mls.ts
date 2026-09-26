@@ -235,7 +235,9 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       try {
         return await access.mutate(async (group, persist) => {
           if (group.epoch !== frameEpoch) {
-            throw new Error('commit epoch changed during entry resolution')
+            // Moved while entries resolved: the caller re-classifies against the epoch it names.
+            refusedEpoch = Number(group.epoch)
+            throw ignored
           }
           const result = await applyCommit(
             group,
@@ -368,7 +370,19 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       // Throws for a list whose recomputed head does not match the authenticated one — a
       // lying responder can withhold, never rewrite.
       await access.mutate(async (group, persist) => {
-        await group.bootstrapLedger(tokens, { persist })
+        let persisted = false
+        try {
+          await group.bootstrapLedger(tokens, {
+            persist: async (current) => {
+              await persist(current)
+              persisted = true
+            },
+          })
+        } catch (error) {
+          // A host callback after the write: the stored ledger is complete, so the adapter must
+          // still publish this handle.
+          if (!persisted) throw error
+        }
       })
     },
 

@@ -56,11 +56,13 @@ Four constraints a port implementation is most likely to get wrong, all of which
   `null` for every commit framed away from its own epoch makes a peer that fell behind read the
   group's entire future as garbage, walk to the end of the log, and report itself fully reconciled at
   a dead epoch.
-- **`processCommit` returns `advanced: false` for anything it cannot apply, and throws for
-  exactly one outcome**: a Commit it should apply whose named ledger entries will not resolve from
-  the Commit's own frame. A throw makes the lane re-read the frame, so a port that throws on a commit
-  it was never in a position to apply wedges the lane there forever — a late joiner would wedge on
-  its own add-commit, the first frame it reads.
+- **`processCommit` returns `advanced: false` for anything it cannot apply, and throws only for a
+  Commit it may yet apply**: one whose named ledger entries will not resolve from the Commit's own
+  frame (a `MissingLedgerEntriesError`), or a fault that says nothing about the Commit, such as a
+  resolver or store failure. A commit at another epoch, including one the handle moved past while
+  entries resolved, is `advanced: false` with the handle's epoch. A fault makes the lane re-read
+  the frame, so a port that throws on a commit it was never in a position to apply wedges the lane
+  there forever — a late joiner would wedge on its own add-commit, the first frame it reads.
 
 `sealEntries`/`openEntries` are deliberately not `wrap`/`unwrap`. The entry blob is opened from
 inside the apply of the commit that carries it, and a ratchet-backed open mutates the handle, which

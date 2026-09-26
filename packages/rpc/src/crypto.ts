@@ -188,12 +188,17 @@ export class AppFrameStorageError extends Error {
 }
 
 /** Whether an open refused a frame sealed at an epoch the handle has not reached. */
+// Both checks go by name: a host with two copies of this package still classifies correctly.
 export function isFrameAhead(error: unknown): error is FrameEpochError {
-  return error instanceof FrameEpochError && error.frameEpoch > error.handleEpoch
+  if (!(error instanceof Error) || error.name !== 'FrameEpochError') return false
+  const { frameEpoch, handleEpoch } = error as FrameEpochError
+  return (
+    typeof frameEpoch === 'number' && typeof handleEpoch === 'number' && frameEpoch > handleEpoch
+  )
 }
 
 export function isAppFrameStorageError(error: unknown): error is AppFrameStorageError {
-  return error instanceof AppFrameStorageError
+  return error instanceof Error && error.name === 'AppFrameStorageError'
 }
 
 /** Hub positions are numeric strings; retain a stable lexical fallback for opaque hosts. */

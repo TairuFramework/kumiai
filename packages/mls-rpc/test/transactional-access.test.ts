@@ -1,9 +1,10 @@
-import { encodeClientState } from '@kumiai/mls'
+import { commitLedgerEntries, encodeClientState, signLedgerEntry } from '@kumiai/mls'
 import { type AppFrameRef, AppFrameStorageError } from '@kumiai/rpc'
 import { describe, expect, test } from 'vitest'
 
-import { simpleHandleAccess } from '../src/access.js'
+import { type HandleAccess, simpleHandleAccess } from '../src/access.js'
 import { createGroupCrypto } from '../src/crypto.js'
+import { createGroupMLS } from '../src/mls.js'
 import { createRealGroup, type RealGroup } from './fixtures/real-group.js'
 import {
   createTransactionalAccess,
@@ -242,6 +243,35 @@ describe('adapter faults around a durable open', () => {
     expect(failure).toBeInstanceOf(AppFrameStorageError)
     expect((failure as Error).cause).toMatchObject({ message: 'restore failed' })
   })
+
+  test('a fault from the staging callback handed to the open is a storage error, and the frame still opens', async () => {
+    const { host, seal } = await setup('tx-staging-fault')
+    const sealed = await seal('hello')
+    let busy = true
+    const staging: HandleAccess = {
+      ...host.access,
+      open: (fn, persistOpened) =>
+        host.access.open(
+          (handle, stage) =>
+            fn(handle, async (state, record) => {
+              if (busy) throw new Error('SQLITE_BUSY')
+              await stage(state, record)
+            }),
+          persistOpened,
+        ),
+    }
+    const crypto = createGroupCrypto({ access: staging, pending: host.pending })
+    const failure = await failureOf(() =>
+      crypto.unwrap(sealed, { expectedAAD: aad, frame: frameRef('f1') }),
+    )
+    expect(failure).toBeInstanceOf(AppFrameStorageError)
+    expect((failure as Error).cause).toMatchObject({ message: 'SQLITE_BUSY' })
+
+    busy = false
+    await expect(
+      crypto.unwrap(sealed, { expectedAAD: aad, frame: frameRef('f1') }),
+    ).resolves.toMatchObject({ payload: utf8.encode('hello') })
+  })
 })
 
 test('an open cannot publish over a newer mutation that committed after its write', async () => {
@@ -273,4 +303,60 @@ test('an open cannot publish over a newer mutation that committed after its writ
 
   expect(store.snapshot().revision).toBe(2)
   expect(encodeClientState(host.live().state)).toEqual(store.snapshot().state)
+})
+
+test('a bootstrap whose host callback throws after the write still publishes the stored ledger', async () => {
+  const group = await createRealGroup(1, 'tx-bootstrap-callback')
+  const member = group.members[0]
+  if (member == null) throw new Error('missing member')
+  const note = await signLedgerEntry(group.committer.identity, {
+    type: 'app.note',
+    groupID: group.committer.handle.groupID,
+    subject: group.committer.identity.id,
+    value: 'missed',
+  })
+  group.committer.handle = (await commitLedgerEntries(group.committer.handle, [note])).newGroup
+  // Rejoin through recovery, which leaves the ledger incomplete until a bootstrap.
+  const requester = createGroupMLS({
+    access: simpleHandleAccess({
+      handle: () => member.handle,
+      adopt: (next) => {
+        member.handle = next
+      },
+    }),
+    identity: member.identity,
+    entrySlot: member.slot,
+  })
+  const responder = createGroupMLS({
+    access: simpleHandleAccess({ handle: () => group.committer.handle, adopt: () => {} }),
+    identity: group.committer.identity,
+    entrySlot: group.committer.slot,
+  })
+  const request = await requester.createRecoveryRequest('tx-bootstrap')
+  const recovered = await requester.applyRecovery(
+    await responder.sealGroupInfo(request),
+    'tx-bootstrap',
+  )
+  if (recovered == null) throw new Error('expected recovery')
+  await recovered.onAccepted()
+
+  const store = createTransactionalStore(member.handle)
+  const host = await createTransactionalAccess(member, store, {
+    onLedgerEntries: () => {
+      throw new Error('host callback failed')
+    },
+  })
+  const mls = createGroupMLS({
+    access: host.access,
+    identity: member.identity,
+    entrySlot: member.slot,
+  })
+  expect(await mls.isLedgerComplete()).toBe(false)
+  const tokens = await group.committer.handle.getLedger()
+
+  await mls.bootstrapLedger(tokens)
+
+  expect(store.snapshot().ledger).toEqual(tokens)
+  expect(host.live().ledgerTokens).toEqual(tokens)
+  expect(await mls.isLedgerComplete()).toBe(true)
 })

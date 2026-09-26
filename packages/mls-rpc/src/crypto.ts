@@ -3,6 +3,7 @@ import {
   AppFrameStorageError,
   FrameEpochError,
   type GroupCrypto,
+  isAppFrameStorageError,
   type PendingAppFrame,
   type PendingAppFrames,
   sortPendingAppFrames,
@@ -187,13 +188,20 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
           if (frameEpoch != null && Number(frameEpoch) !== epoch) {
             throw new FrameEpochError(Number(frameEpoch), epoch)
           }
-          const result = await group.decryptStaged(bytes, opts, (stagedState, result) =>
-            persistStaged(stagedState, {
-              frame,
-              payload: result.payload,
-              senderDID: result.senderDID,
-            }),
-          )
+          const result = await group.decryptStaged(bytes, opts, async (stagedState, result) => {
+            // The handle adopts the staged state only after this returns: a fault here leaves
+            // the key unspent, so the frame must be retried, not dropped.
+            try {
+              await persistStaged(stagedState, {
+                frame,
+                payload: result.payload,
+                senderDID: result.senderDID,
+              })
+            } catch (error) {
+              if (isAppFrameStorageError(error)) throw error
+              throw new AppFrameStorageError('failed to stage opened app frame', { cause: error })
+            }
+          })
           return { ...result, epoch }
         }
         let opened: Awaited<ReturnType<typeof open>>
@@ -209,7 +217,7 @@ export function createGroupCrypto(params: GroupCryptoParams): GroupCrypto {
         } catch (error) {
           // The open's own refusal says whether the frame is dead. Anything the adapter raised
           // around it (a restore, a read) left the key unspent, so the lane must retry.
-          if (error === openError || error instanceof AppFrameStorageError) throw error
+          if (error === openError || isAppFrameStorageError(error)) throw error
           throw new AppFrameStorageError('handle access failed during durable open', {
             cause: error,
           })

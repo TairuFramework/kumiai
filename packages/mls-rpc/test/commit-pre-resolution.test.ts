@@ -51,7 +51,7 @@ test('an empty entry list skips the resolver', async () => {
   expect(resolver).not.toHaveBeenCalled()
 })
 
-test('an epoch move during pre-resolution rejects without applying the old commit', async () => {
+test('an epoch move during pre-resolution reports the new epoch without applying the old commit', async () => {
   const group = await createRealGroup(1, 'pre-resolve-epoch-move')
   const member = group.members[0]
   if (member == null) throw new Error('missing member')
@@ -67,12 +67,13 @@ test('an epoch move during pre-resolution rejects without applying the old commi
     await access.replace(group.committer.handle)
     return await group.resolveLedgerEntries(ids)
   }
+  const moved = Number(group.committer.handle.epoch)
   await expect(
     mls.processCommit(commit, {
       senderDID: group.committer.identity.id,
       resolveLedgerEntries: resolver,
     }),
-  ).rejects.toThrow('commit epoch changed during entry resolution')
+  ).resolves.toEqual({ advanced: false, epochBefore: moved, epochAfter: moved })
   expect(member.handle).toBe(group.committer.handle)
 })
 
