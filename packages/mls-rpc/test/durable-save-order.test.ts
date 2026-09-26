@@ -2,6 +2,7 @@ import { decodeClientState, encodeClientState, restoreGroup } from '@kumiai/mls'
 import type { PendingAppFrame } from '@kumiai/rpc'
 import { describe, expect, test } from 'vitest'
 
+import { simpleHandleAccess } from '../src/access.js'
 import { createGroupCrypto } from '../src/crypto.js'
 import { createRealGroup } from './fixtures/real-group.js'
 
@@ -66,8 +67,13 @@ describe('real MLS durable host save ordering', () => {
         records.delete(id)
       },
     }
-    const sender = createGroupCrypto({ handle: () => group.committer.handle })
-    const receiverPort = createGroupCrypto({ handle: () => receiver.handle, pending })
+    const sender = createGroupCrypto({
+      access: simpleHandleAccess({ handle: () => group.committer.handle, adopt: () => {} }),
+    })
+    const receiverPort = createGroupCrypto({
+      access: simpleHandleAccess({ handle: () => receiver.handle, adopt: () => {} }),
+      pending,
+    })
     const aad = utf8.encode('topic')
     const sealed = await sender.wrap(utf8.encode('hello'), { aad })
     const frame = {
@@ -85,7 +91,7 @@ describe('real MLS durable host save ordering', () => {
     expect(records.size).toBe(0)
     gate.resolve()
     await earlierSave
-    await expect(opening).resolves.toEqual({
+    await expect(opening).resolves.toMatchObject({
       payload: utf8.encode('hello'),
       senderDID: group.committer.identity.id,
     })

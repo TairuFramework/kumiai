@@ -438,7 +438,7 @@ describe('a peer whose app-topic subscribe is refused', () => {
     })
     await flush()
 
-    const secret = await crypto.exportSecret(APP_TOPIC_LABEL)
+    const { secret } = await crypto.exportSecret(APP_TOPIC_LABEL)
     const topicID = protocolTopic(secret, 1, 'room')
 
     expect(hub.subscriberCount(topicID)).toBe(0)

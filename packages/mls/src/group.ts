@@ -46,6 +46,7 @@ export {
   type GroupInfoBinding,
   type InspectGroupInfoResult,
   inspectGroupInfo,
+  readCommitEntryIDs,
   readGroupInfoBinding,
   readMessageAAD,
   readMessageEpoch,

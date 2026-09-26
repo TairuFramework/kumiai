@@ -4,9 +4,12 @@ import {
   encodeGroupAnchor,
   type GroupHandle,
   joinGroupExternal,
+  ledgerEntryDigest,
   MissingLedgerEntriesError,
   openSealedGroupInfo,
   openSealedLedger,
+  readCommitEntryIDs,
+  readMessageEpoch,
   sealGroupInfo,
   sealLedger,
 } from '@kumiai/mls'
@@ -15,8 +18,12 @@ import type {
   CommitHeader,
   GroupMLS,
   PendingRecovery,
+  ProcessCommitResult,
   RosterEntry,
 } from '@kumiai/rpc'
+
+import type { HandleAccess } from './access.js'
+import { applyCommit } from './apply-commit.js'
 
 const utf8 = new TextEncoder()
 
@@ -70,25 +77,21 @@ export function createLedgerEntrySlot(): LedgerEntrySlot {
 }
 
 export type GroupMLSParams = {
-  /** The handle the peer is at right now. See {@link GroupCryptoParams.handle}. */
-  handle: () => GroupHandle
-  /** Replace the handle after successful persist. If adopt throws, restart from the stored handle. */
-  adopt: (handle: GroupHandle) => void | Promise<void>
+  access: HandleAccess
   /** This member's signing identity: recovery requests and attestations are signed with it. */
   identity: OwnIdentity
   /** The slot the handle was built with. See {@link LedgerEntrySlot}. */
   entrySlot: LedgerEntrySlot
   /**
-   * Persist the handle's state durably. `processCommit` must be durable before it resolves,
-   * and this is where that happens. It also covers ledger bootstrap, not
-   * application-message receive ratchets. Writes must be atomic: rejection means nothing
-   * was stored. Received-message and bootstrap persist runs under the handle mutex and
-   * must not call back into that handle. Recovery persists before `adopt`; if `adopt`
-   * throws, a restart loads the new handle from storage. A host without a durable store
-   * may omit this callback and accepts that a crash loses the epoch.
+   * The group's recovery secret, read under `access.read`. Defaults to
+   * {@link deriveRecoverySecret}. A host whose groups already use another derivation passes it
+   * here for every restore of that group: the commit and rendezvous topics follow the choice.
    */
-  persist?: (handle: GroupHandle) => void | Promise<void>
+  recoverySecret?: (handle: GroupHandle) => Promise<Uint8Array>
 }
+
+/** Below this a topic secret is guessable; the default derives 32 bytes. */
+const MIN_RECOVERY_SECRET_BYTES = 16
 
 /** The private half of a recovery request, retained until the reply opens or the TTL passes. */
 type PendingRequest = {
@@ -103,6 +106,60 @@ type PendingRequest = {
  * timeout without saying so — so this bounds it off the mint time.
  */
 const REQUEST_TTL_MS = 120_000
+
+export type RecoveryPending = {
+  get(requestID: string): Uint8Array | null
+  put(requestID: string, ephemeralPrivateKey: Uint8Array): void
+  delete(requestID: string): void
+}
+
+export function createRecoveryPending(options?: { ttlMS?: number }): RecoveryPending {
+  const ttlMS = options?.ttlMS ?? REQUEST_TTL_MS
+  const requests = new Map<string, PendingRequest>()
+  const remove = (requestID: string, request: PendingRequest): void => {
+    clearTimeout(request.timer)
+    request.ephemeralPrivateKey.fill(0)
+    requests.delete(requestID)
+  }
+  const sweep = (): void => {
+    const cutoff = Date.now() - ttlMS
+    for (const [id, request] of requests) {
+      if (request.mintedAt <= cutoff) remove(id, request)
+    }
+  }
+  return {
+    get: (requestID) => {
+      sweep()
+      return requests.get(requestID)?.ephemeralPrivateKey ?? null
+    },
+    put: (requestID, ephemeralPrivateKey) => {
+      sweep()
+      const previous = requests.get(requestID)
+      if (previous != null) remove(requestID, previous)
+      const timer = setTimeout(() => {
+        const held = requests.get(requestID)
+        if (held?.ephemeralPrivateKey === ephemeralPrivateKey) remove(requestID, held)
+      }, ttlMS)
+      const nodeTimer = timer as unknown as { unref?: () => void }
+      nodeTimer.unref?.()
+      requests.set(requestID, { ephemeralPrivateKey, mintedAt: Date.now(), timer })
+    },
+    delete: (requestID) => {
+      sweep()
+      const request = requests.get(requestID)
+      if (request != null) remove(requestID, request)
+    },
+  }
+}
+
+export async function deriveRecoverySecret(handle: GroupHandle): Promise<Uint8Array> {
+  const { cipherSuite } = handle.context
+  return await cipherSuite.kdf.expand(
+    await cipherSuite.kdf.extract(utf8.encode(handle.groupID), encodeGroupAnchor(handle.anchor)),
+    utf8.encode(RECOVERY_LABEL),
+    32,
+  )
+}
 
 /**
  * {@link GroupMLS} over a live {@link GroupHandle} — the real lifecycle port.
@@ -130,33 +187,25 @@ const REQUEST_TTL_MS = 120_000
  *    host must not put anything on it that confidentiality depends on.
  */
 export function createGroupMLS(params: GroupMLSParams): GroupMLS {
-  const { handle, adopt, identity, entrySlot, persist } = params
-  const pending = new Map<string, PendingRequest>()
-
-  const sweep = (): void => {
-    const cutoff = Date.now() - REQUEST_TTL_MS
-    for (const [id, request] of pending) {
-      if (request.mintedAt < cutoff) {
-        clearTimeout(request.timer)
-        request.ephemeralPrivateKey.fill(0)
-        pending.delete(id)
-      }
-    }
-  }
+  const { access, identity, entrySlot } = params
+  const pending = createRecoveryPending()
 
   return {
+    async readEpoch(): Promise<number> {
+      return await access.read((group) => Number(group.epoch))
+    },
     async rosterEntries(): Promise<Array<RosterEntry>> {
-      return handle()
-        .listMembers()
-        .map((member) => ({
+      return await access.read((group) =>
+        group.listMembers().map((member) => ({
           did: member.id,
           leafIndex: member.leafIndex,
           longForm: member.longForm,
-        }))
+        })),
+      )
     },
 
     async readCommitHeader(commit: Uint8Array): Promise<CommitHeader | null> {
-      const header = await handle().readCommitHeader(commit)
+      const header = await access.read((group) => group.readCommitHeader(commit))
       if (header == null) return null
       return {
         epoch: Number(header.epoch),
@@ -165,73 +214,84 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       }
     },
 
-    async processCommit(
-      commit: Uint8Array,
-      context: CommitContext,
-    ): Promise<{ advanced: boolean }> {
-      const group = handle()
-      if ((await group.readCommitHeader(commit)) == null) return { advanced: false }
-      const before = group.epoch
-      let persistFailed = false
-      entrySlot.install(context.resolveLedgerEntries)
+    async processCommit(commit: Uint8Array, context: CommitContext): Promise<ProcessCommitResult> {
+      const frameEpoch = readMessageEpoch(commit)
+      const eligible = await access.read(async (group) => {
+        const header = await group.readCommitHeader(commit)
+        return {
+          eligible: header != null && frameEpoch === group.epoch,
+          epoch: Number(group.epoch),
+        }
+      })
+      if (!eligible.eligible) {
+        return { advanced: false, epochBefore: eligible.epoch, epochAfter: eligible.epoch }
+      }
+      const ids = readCommitEntryIDs(commit)
+      const tokens = ids.length === 0 ? [] : await context.resolveLedgerEntries?.(ids)
+      const resolved = new Map<string, string>()
+      for (const token of tokens ?? []) resolved.set(ledgerEntryDigest(token), token)
+      const ignored = Symbol('ignored commit')
+      let refusedEpoch: number | undefined
       try {
-        await group.processMessage(commit, {
-          ...(persist != null && {
-            persist: async (current) => {
-              try {
-                await persist(current)
-              } catch (error) {
-                persistFailed = true
-                throw error
-              }
-            },
-          }),
+        return await access.mutate(async (group, persist) => {
+          if (group.epoch !== frameEpoch) {
+            // Moved while entries resolved: the caller re-classifies against the epoch it names.
+            refusedEpoch = Number(group.epoch)
+            throw ignored
+          }
+          const result = await applyCommit({
+            ...context,
+            handle: group,
+            commit,
+            resolveLedgerEntries: async (requested) =>
+              requested.flatMap((id) => {
+                const token = resolved.get(id)
+                return token == null ? [] : [token]
+              }),
+            entrySlot,
+            ownDID: identity.id,
+            persist,
+          })
+          // Thrown so the adapter does not save a handle the commit left untouched.
+          if (!result.applied) {
+            refusedEpoch = result.epochBefore
+            throw ignored
+          }
+          return {
+            advanced: result.advanced,
+            epochBefore: result.epochBefore,
+            epochAfter: result.epochAfter,
+          }
         })
       } catch (error) {
-        // Missing frame bodies and a failed persist must propagate so the lane can retry.
-        // Other errors do not make the lane re-read a frame indefinitely. A host callback
-        // can throw after a durable advance, so report the handle's actual epoch.
-        if (error instanceof MissingLedgerEntriesError || persistFailed) throw error
-        return { advanced: handle().epoch !== before }
-      } finally {
-        entrySlot.install(undefined)
+        if (error === ignored && refusedEpoch != null)
+          return { advanced: false, epochBefore: refusedEpoch, epochAfter: refusedEpoch }
+        throw error
       }
-      const advanced = handle().epoch !== before
-      return { advanced }
     },
 
     async createRecoveryRequest(requestID: string): Promise<Uint8Array> {
-      sweep()
-      const { request, ephemeralPrivateKey } = await createRecoveryRequest({
-        group: handle(),
-        identity,
-        requestID,
-      })
-      const previous = pending.get(requestID)
-      if (previous != null) {
-        clearTimeout(previous.timer)
-        previous.ephemeralPrivateKey.fill(0)
-      }
-      const timer = setTimeout(() => {
-        const held = pending.get(requestID)
-        if (held?.ephemeralPrivateKey !== ephemeralPrivateKey) return
-        ephemeralPrivateKey.fill(0)
-        pending.delete(requestID)
-      }, REQUEST_TTL_MS)
-      const nodeTimer = timer as unknown as { unref?: () => void }
-      nodeTimer.unref?.()
-      pending.set(requestID, { ephemeralPrivateKey, mintedAt: Date.now(), timer })
+      const { request, ephemeralPrivateKey } = await access.read((group) =>
+        createRecoveryRequest({
+          group,
+          identity,
+          requestID,
+        }),
+      )
+      pending.put(requestID, ephemeralPrivateKey)
       return utf8.encode(request)
     },
 
     async sealGroupInfo(request: Uint8Array): Promise<Uint8Array> {
       // Throws for a request this member refuses — a removed requester holds no leaf in
       // this member's tree — and the peer stays silent. Roster-intrinsic, not a check here.
-      return await sealGroupInfo({
-        group: handle(),
-        identity,
-        request: new TextDecoder().decode(request),
-      })
+      return await access.read((group) =>
+        sealGroupInfo({
+          group,
+          identity,
+          request: new TextDecoder().decode(request),
+        }),
+      )
     },
 
     async applyRecovery(sealed: Uint8Array, requestID: string): Promise<PendingRecovery | null> {
@@ -239,47 +299,50 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       if (held == null) return null
       let groupInfo: Uint8Array
       try {
-        groupInfo = await openSealedGroupInfo({
-          group: handle(),
-          sealed,
-          requestID,
-          ephemeralPrivateKey: held.ephemeralPrivateKey,
-        })
+        groupInfo = await access.read((group) =>
+          openSealedGroupInfo({
+            group,
+            sealed,
+            requestID,
+            ephemeralPrivateKey: held,
+          }),
+        )
       } catch {
         // Bytes this peer cannot open OR cannot trust: a forged reply that merely decrypts
         // fails the membership attestation, and both are `null`.
         return null
       }
-      const rejoined = await joinGroupExternal({
-        identity,
-        groupInfo,
-        credential: handle().credential,
-        resync: true,
-      })
+      const rejoined = await access.read((group) =>
+        joinGroupExternal({
+          identity,
+          groupInfo,
+          credential: group.credential,
+          resync: true,
+        }),
+      )
       return {
         commit: rejoined.commitMessage,
         // Adopted ONLY if the hub accepts the commit. A peer that adopted first would sit
         // on a branch of its own the moment it lost the compare-and-set.
         onAccepted: async () => {
-          await persist?.(rejoined.group)
-          await adopt(rejoined.group)
-          held.ephemeralPrivateKey.fill(0)
-          clearTimeout(held.timer)
+          await access.replace(rejoined.group)
           if (pending.get(requestID) === held) pending.delete(requestID)
         },
       }
     },
 
     async isLedgerComplete(): Promise<boolean> {
-      return await handle().isLedgerComplete()
+      return await access.read((group) => group.isLedgerComplete())
     },
 
     async getLedger(): Promise<Array<string>> {
-      return await handle().getLedger()
+      return await access.read((group) => group.getLedger())
     },
 
     async sealLedger(request: Uint8Array): Promise<Uint8Array> {
-      return await sealLedger({ group: handle(), request: new TextDecoder().decode(request) })
+      return await access.read((group) =>
+        sealLedger({ group, request: new TextDecoder().decode(request) }),
+      )
     },
 
     async openSealedLedger(sealed: Uint8Array, requestID: string): Promise<Array<string> | null> {
@@ -288,12 +351,14 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       try {
         // The key is NOT consumed: every responder answers, and the requester must open the
         // next reply after dropping one.
-        return await openSealedLedger({
-          group: handle(),
-          sealed,
-          requestID,
-          ephemeralPrivateKey: held.ephemeralPrivateKey,
-        })
+        return await access.read((group) =>
+          openSealedLedger({
+            group,
+            sealed,
+            requestID,
+            ephemeralPrivateKey: held,
+          }),
+        )
       } catch {
         return null
       }
@@ -302,20 +367,34 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
     async bootstrapLedger(tokens: Array<string>): Promise<void> {
       // Throws for a list whose recomputed head does not match the authenticated one — a
       // lying responder can withhold, never rewrite.
-      await handle().bootstrapLedger(tokens, persist == null ? undefined : { persist })
+      await access.mutate(async (group, persist) => {
+        let persisted = false
+        try {
+          await group.bootstrapLedger(tokens, {
+            persist: async (current) => {
+              await persist(current)
+              persisted = true
+            },
+          })
+        } catch (error) {
+          // A host callback after the write: the stored ledger is complete, so the adapter must
+          // still publish this handle.
+          if (!persisted) throw error
+        }
+      })
     },
 
     async exportRecoverySecret(): Promise<Uint8Array> {
       // Epoch-INDEPENDENT by construction: the genesis anchor never changes, so a peer
       // stranded at any epoch derives the same rendezvous. See the class doc — this is not
       // a confidential value.
-      const group = handle()
-      const { cipherSuite } = group.context
-      return await cipherSuite.kdf.expand(
-        await cipherSuite.kdf.extract(utf8.encode(group.groupID), encodeGroupAnchor(group.anchor)),
-        utf8.encode(RECOVERY_LABEL),
-        32,
-      )
+      const secret = await access.read(params.recoverySecret ?? deriveRecoverySecret)
+      if (!(secret instanceof Uint8Array) || secret.length < MIN_RECOVERY_SECRET_BYTES) {
+        throw new Error(
+          `recoverySecret: expected at least ${MIN_RECOVERY_SECRET_BYTES} bytes from the host`,
+        )
+      }
+      return secret
     },
   }
 }

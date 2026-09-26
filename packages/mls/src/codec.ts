@@ -41,7 +41,8 @@ export function decodeClientState(encoded: Uint8Array): ClientState | undefined 
   if (encoded[0] !== CLIENT_STATE_VERSION) {
     throw new Error(`decodeClientState: unsupported client-state version ${encoded[0]}`)
   }
-  return decode(clientStateDecoder, encoded.subarray(1))
+  // A copy: ts-mls decodes secrets as views, and ratcheting zeroes consumed ones in place.
+  return decode(clientStateDecoder, encoded.slice(1))
 }
 
 export function encodeClientState(state: ClientState): Uint8Array {

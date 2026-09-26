@@ -26,7 +26,7 @@ describe('createInboxPath tag decoding', () => {
     const path = createInboxPath({
       mux: mux as unknown as HubMux,
       topicID: 't',
-      unwrap: async (b: Uint8Array) => ({ payload: b, senderDID: 'did:key:alice' }),
+      unwrap: async (b: Uint8Array) => ({ payload: b, senderDID: 'did:key:alice', epoch: 1 }),
     })
     const seen: Array<OpenedInbound> = []
     path((m) => seen.push(m))
@@ -43,7 +43,7 @@ describe('createInboxPath tag decoding', () => {
     const path = createInboxPath({
       mux: mux as unknown as HubMux,
       topicID: 't',
-      unwrap: async (b: Uint8Array) => ({ payload: b, senderDID: 'did:key:alice' }),
+      unwrap: async (b: Uint8Array) => ({ payload: b, senderDID: 'did:key:alice', epoch: 1 }),
     })
     const seen: Array<OpenedInbound> = []
     path((m) => seen.push(m))

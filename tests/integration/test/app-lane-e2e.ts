@@ -18,7 +18,12 @@ import {
   restoreGroup,
   signLedgerEntry,
 } from '@kumiai/mls'
-import { createGroupCrypto, createGroupMLS, type LedgerEntrySlot } from '@kumiai/mls-rpc'
+import {
+  createGroupCrypto,
+  createGroupMLS,
+  type LedgerEntrySlot,
+  simpleHandleAccess,
+} from '@kumiai/mls-rpc'
 import type {
   Anchor,
   AnchorStore,
@@ -27,6 +32,7 @@ import type {
   GroupPeer,
   GroupProtocolDefinition,
   JournalEntry,
+  PendingAppFrame,
   PendingCommit,
 } from '@kumiai/rpc'
 import { createGroupPeer } from '@kumiai/rpc'
@@ -108,6 +114,7 @@ export function createMemoryCommitJournal(): CommitJournal & { slot: () => Journ
  */
 export type StateStore = {
   save: (handle: GroupHandle) => void
+  saveOpened: (state: Uint8Array, ledger: Array<string>) => void
   saved: () => { state: Uint8Array; ledger: Array<string> } | null
 }
 
@@ -116,6 +123,9 @@ export function createMemoryStateStore(): StateStore {
   return {
     save: (handle) => {
       blob = { state: encodeClientState(handle.state), ledger: [...handle.ledgerTokens] }
+    },
+    saveOpened: (state, ledger) => {
+      blob = { state: state.slice(), ledger: [...ledger] }
     },
     saved: () => blob,
   }
@@ -129,11 +139,12 @@ export type Member = {
   identity: OwnIdentity
   peer: GroupPeer<Protocols>
   handle: () => GroupHandle
-  adopt: (handle: GroupHandle) => void
+  adopt: (handle: GroupHandle) => Promise<void>
   anchorStore: ReturnType<typeof createMemoryAnchorStore>
   appCursorStore: ReturnType<typeof createMemoryAppCursorStore>
   journal: ReturnType<typeof createMemoryCommitJournal>
   stateStore: StateStore
+  pendingStore?: Map<string, PendingAppFrame>
   entrySlot: LedgerEntrySlot
   /**
    * Drop this member's hub connection — the other half of a process dying. Disposing the peer
@@ -155,6 +166,7 @@ export type MakeMemberParams = {
   handlers?: Record<string, unknown>
   /** Carry a dead member's durable state forward — this is what a restart IS. */
   restartOf?: Member
+  durablePending?: boolean
 }
 
 export function makeMember(params: MakeMemberParams): Member {
@@ -164,21 +176,40 @@ export function makeMember(params: MakeMemberParams): Member {
   const appCursorStore = restartOf?.appCursorStore ?? createMemoryAppCursorStore()
   const journal = restartOf?.journal ?? createMemoryCommitJournal()
   const stateStore = restartOf?.stateStore ?? createMemoryStateStore()
+  const pendingStore =
+    restartOf?.pendingStore ??
+    (params.durablePending ? new Map<string, PendingAppFrame>() : undefined)
 
   const getHandle = () => handle
-  const adopt = (next: GroupHandle) => {
+  const adoptHandle = (next: GroupHandle) => {
     handle = next
-    stateStore.save(next)
   }
   stateStore.save(handle)
 
-  const crypto = createGroupCrypto({ handle: getHandle })
-  const mls = createGroupMLS({
+  const access = simpleHandleAccess({
     handle: getHandle,
-    adopt,
+    adopt: adoptHandle,
+    persist: (next) => stateStore.save(next),
+  })
+  const adopt = (next: GroupHandle) => access.replace(next)
+  const pending =
+    pendingStore == null
+      ? undefined
+      : {
+          persistOpened: async (state: Uint8Array, record: PendingAppFrame) => {
+            stateStore.saveOpened(state, handle.ledgerTokens)
+            pendingStore.set(record.frame.id, record)
+          },
+          list: async () => [...pendingStore.values()],
+          complete: async (id: string) => {
+            pendingStore.delete(id)
+          },
+        }
+  const crypto = createGroupCrypto({ access, pending })
+  const mls = createGroupMLS({
+    access,
     identity,
     entrySlot,
-    persist: (next) => stateStore.save(next),
   })
 
   const connection = hub.connect(identity)
@@ -198,7 +229,7 @@ export function makeMember(params: MakeMemberParams): Member {
       // has adopted it, and a repeat is a no-op.
       const state = decodeClientState(blob)
       if (state == null || state.groupContext.epoch <= handle.epoch) return
-      adopt(
+      await adopt(
         await restoreGroup({
           state,
           credential: handle.credential,
@@ -218,6 +249,7 @@ export function makeMember(params: MakeMemberParams): Member {
     appCursorStore,
     journal,
     stateStore,
+    pendingStore,
     entrySlot,
     disconnect: connection.disconnect,
   }
@@ -312,7 +344,7 @@ export function buildInviteCommit(
       kind: 'invite',
       journal: encodeClientState(committed.newGroup.state),
       onAccepted: async () => {
-        member.adopt(committed.newGroup)
+        await member.adopt(committed.newGroup)
         deliverWelcome(committed.welcomeMessage)
       },
     }
@@ -331,7 +363,7 @@ export function buildRemoveCommit(member: Member, victimDID: string): () => Prom
       kind: 'remove',
       journal: encodeClientState(committed.newGroup.state),
       onAccepted: async () => {
-        member.adopt(committed.newGroup)
+        await member.adopt(committed.newGroup)
       },
     }
   }
@@ -372,7 +404,7 @@ export function buildLedgerCommit(
       kind: 'ledger',
       journal: encodeClientState(committed.newGroup.state),
       onAccepted: async () => {
-        member.adopt(committed.newGroup)
+        await member.adopt(committed.newGroup)
       },
     }
   }

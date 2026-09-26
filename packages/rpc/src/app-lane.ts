@@ -11,6 +11,7 @@ import {
   type GroupCrypto,
   type GroupUnwrapResult,
   isAppFrameStorageError,
+  isFrameAhead,
   type PendingAppFrame,
 } from './crypto.js'
 import { asLogPosition, assertForwardPage, type LogPosition } from './cursor.js'
@@ -99,7 +100,7 @@ export type AppLane = {
   deliver: () => Promise<void>
   dropFrame: (topicID: string, position: string) => Promise<void>
   /** Record a log-class frame the live lane was pushed, at the moment it arrives. */
-  note: (name: string, topicID: string, message: StoredMessage) => void
+  note: (name: string, topicID: string, message: StoredMessage, failure: unknown) => void
   /**
    * End the segment the buffer belongs to. Called by the peer AFTER it moves the anchor, since
    * every buffer and cursor rebuilt from here reads the anchor back through {@link
@@ -552,31 +553,26 @@ export function createAppLane(params: AppLaneParams): AppLane {
   }
 
   /**
-   * Record a log-class frame the LIVE lane was pushed, at the moment it arrives.
+   * Record a log-class frame the LIVE lane was pushed, once the live open of it settles.
    *
    * THE OTHER DELIVERER TAKING THE SAME READ POSITION: before the push carried its own log
    * position there was nothing for the live path to write down, so the cursor sat behind every
    * frame an online peer had already been given and every re-pull read them all back.
    *
    * WHAT IS RECORDED IS DONE-NESS, NOT DELIVERY — the same thing here, since the transport that
-   * carries this frame to the host unwraps with the same handle:
+   * carries this frame to the host unwraps with the same handle. The open's own outcome decides,
+   * never the epoch hint:
    *
-   * - AT the handle's epoch: this is the live lane's one chance, now — whatever the outcome, the
-   *   frame is DONE (the drain's own paths deliver or drop exactly as the transport does).
-   * - ABOVE it: ahead of the walk. The transport cannot open it, so its bytes are kept for the
-   *   drain to deliver once the walk reaches that epoch — whether the claim is justified is the
-   *   drain's question, asked with a network read this path must not make.
-   * - BELOW it, or unreadable: dead. MLS ratchets forward, so no epoch this peer will ever hold
-   *   again opens those bytes.
-   *
-   * Read HERE, not at the merge: the handle moves under this mutex-free push loop, so the answer
-   * is only true of the moment the frame arrived.
+   * - OPENED, or refused at the handle's epoch: the live lane's one chance, taken — DONE.
+   * - Refused as AHEAD ({@link FrameEpochError}): its bytes are kept for the drain to deliver
+   *   once the walk reaches that epoch.
+   * - Refused as past, or unreadable: dead. MLS ratchets forward.
    *
    * A MAILBOX frame is skipped outright — nothing to advance over. The class travels with the push
    * because ephemeral and logged app traffic share one topic, and guessing from the topic would
    * move the cursor over frames the log does not contain.
    */
-  const note = (name: string, topicID: string, message: StoredMessage): void => {
+  const note = (name: string, topicID: string, message: StoredMessage, failure: unknown): void => {
     const position = message.logPosition
     if (position == null) return
     if (crypto.pending != null) {
@@ -584,9 +580,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
       scheduleSync()
       return
     }
-    if (position == null) return
-    const sealedAt = crypto.frameEpoch(message.payload)
-    const ahead = sealedAt != null && sealedAt > crypto.epoch()
+    const ahead = isFrameAhead(failure)
     let pushes = staged.get(name)
     if (pushes == null) {
       pushes = []
@@ -613,29 +607,8 @@ export function createAppLane(params: AppLaneParams): AppLane {
       for (const frame of frames) {
         if (frame.sealed.state !== 'sealed') continue
         const sealed = frame.sealed.bytes
-        const sealedAt = crypto.frameEpoch(sealed)
-        if (sealedAt !== crypto.epoch()) {
-          // A future claim keeps its bytes and position even when the hub omits its commit.
-          // Below the current epoch or unreadable is dead and done.
-          if (sealedAt != null && sealedAt > crypto.epoch()) {
-            if (crypto.pending != null) {
-              const key = `future\u0000${cursor.topicID}\u0000${frame.position}`
-              if (blockingFrames.get(name) !== key) {
-                blockingFrames.set(name, key)
-                const group = groupID()
-                if (group != null)
-                  onAppDeliveryStalled?.({
-                    groupID: group,
-                    protocol: name,
-                    topicID: cursor.topicID,
-                    position: frame.position,
-                    error: new Error(`frame claims future epoch ${sealedAt}`),
-                    reason: 'future-epoch',
-                  })
-              }
-            }
-            continue
-          }
+        // Unreadable bytes are dead. Past and future are the open's locked answer, below.
+        if (crypto.frameEpoch(sealed) == null) {
           frame.sealed = { state: 'done' }
           continue
         }
@@ -666,6 +639,26 @@ export function createAppLane(params: AppLaneParams): AppLane {
             ...(ref == null ? {} : { frame: ref }),
           })
         } catch (error) {
+          if (isFrameAhead(error)) {
+            // A future claim keeps its bytes and position even when the hub omits its commit.
+            if (crypto.pending != null) {
+              const key = `future\u0000${cursor.topicID}\u0000${frame.position}`
+              if (blockingFrames.get(name) !== key) {
+                blockingFrames.set(name, key)
+                const group = groupID()
+                if (group != null)
+                  onAppDeliveryStalled?.({
+                    groupID: group,
+                    protocol: name,
+                    topicID: cursor.topicID,
+                    position: frame.position,
+                    error: new Error(`frame claims future epoch ${error.frameEpoch}`),
+                    reason: 'future-epoch',
+                  })
+              }
+            }
+            continue
+          }
           if (crypto.pending != null && isAppFrameStorageError(error)) {
             const key = `storage\u0000${cursor.topicID}\u0000${frame.position}`
             if (blockingFrames.get(name) !== key) {
@@ -770,10 +763,9 @@ export function createAppLane(params: AppLaneParams): AppLane {
      * key material, and those bytes are ciphertext forever. Per-FRAME-EPOCH, not per-rotation:
      * every epoch inside a segment is dispensed as the walk passes through it.
      *
-     * Which frames are this epoch's is read from their own cleartext (`crypto.frameEpoch`), not
-     * found by trying every frame and catching, since `unwrap` throwing cannot distinguish "not my
-     * epoch yet" from "never again". A forged future-epoch claim can hold the cursor until an
-     * operator drops it.
+     * Which frames are this epoch's is the open's own answer: `unwrap` refuses another epoch with
+     * `FrameEpochError` before decrypting, and only its "ahead" answer keeps a frame. A forged
+     * future-epoch claim can hold the cursor until an operator drops it.
      *
      * The buffer is walked whole, not stopped at the first frame that is not this epoch's, since
      * the front can still hold a frame from an epoch the handle already passed (a journal replay

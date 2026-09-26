@@ -17,20 +17,54 @@ depend on both.
 
 ## Exports
 
-- `createGroupCrypto({ handle, entryLabel?, pending? })` — `GroupCrypto` over a live handle.
-- `createGroupMLS({ handle, adopt, identity, entrySlot, persist? })` — `GroupMLS` over the same.
+- `simpleHandleAccess({ handle, adopt, persist? })` — serialised access to a live handle; the
+  `HandleAccess` type for a host that brings its own.
+- `createGroupCrypto({ access, entryLabel?, runtime?, pending? })` — `GroupCrypto` over that access.
+- `createGroupMLS({ access, identity, entrySlot, recoverySecret? })` — `GroupMLS` over the same
+  access.
+- `applyCommit({ handle, commit, entrySlot, ownDID, persist?, ... })` — apply a received Commit inside the host's own
+  transaction (see below).
 - `createLedgerEntrySlot()` — the per-commit ledger-entry resolver seam (see below).
-- `RECOVERY_LABEL` — the exporter label `exportRecoverySecret` derives under.
+- `deriveEntryKey`, `sealEntries`, `openEntries`, `ENTRY_SEAL_LABEL` — the ledger-entry seal.
+- `createRecoveryPending`, `deriveRecoverySecret`, `RECOVERY_LABEL` — recovery request keys and the
+  default recovery secret.
 
-## The handle is a function, not a value
+## Share one access instance
 
-Both factories take `handle: () => GroupHandle`, and that is not a convenience. A peer's handle is
-replaced wholesale when it adopts a commit it authored, or rejoins by external commit; a port
-closing over the handle it was constructed with would seal at a dead epoch forever. `createGroupMLS`
-takes `adopt` as the one place that replacement happens.
+Both factories take the same `access` instance. The adapter reads the current handle through
+`handle: () => GroupHandle`, because authored commits and recovery replace it wholesale. A host
+adopts an authored commit through `access.replace(next)` after acceptance. The adapter saves before
+publishing the replacement and publishes its synchronous epoch hint after a successful save.
 
 For a *received* commit there is nothing to adopt: ts-mls's `processMessage` advances the handle in
 place. A host that treated every commit as adopt-later would double-apply received ones.
+
+Migrating from 0.9: build one adapter from the old `handle` / `adopt` / `persist` parameters and pass
+it to both factories in their place.
+
+```ts
+const access = simpleHandleAccess({ handle: () => handle, adopt, persist })
+const crypto = createGroupCrypto({ access, pending })
+const mls = createGroupMLS({ access, identity, entrySlot })
+```
+
+### A host's own `HandleAccess`
+
+A host with its own handle store implements the port instead:
+
+- `read(fn)` lends the handle for the callback only. `mutate(fn)` serialises with every other
+  operation and resolves after the state is stored; `fn`'s `persist` argument goes to
+  `processMessage` and `bootstrapLedger`. `replace(next)` stores before publishing. A transactional
+  host may restore a fresh handle per mutation, discard it on rollback, and publish on commit.
+- `epoch()` is a synchronous hint. Publish it only after the outermost successful commit, and restore
+  it on rollback. No port decision reads it: every one uses an epoch read under the lock.
+- `open(fn, persistOpened)` is the durable open. `fn` stages the open and hands its state and record
+  to the callback it is given. A host may capture them, release its lock, and then call
+  `persistOpened` to write both in one transaction guarded by the state row's revision, publishing
+  the working handle only after that commits, and only if no newer write was published meanwhile.
+  On a revision conflict it retries from a fresh handle. Faults from `persistOpened`, from the staging
+  callback the adapter hands `fn`, and from anything the adapter raises around `fn` come back as
+  `AppFrameStorageError`, which the lane retries.
 
 ## Durable logged app delivery
 
@@ -41,8 +75,13 @@ restart, ordered by `(frame.segment, frame.position)` by this port. `complete(id
 record and resolves for an unknown id. Deduplicate inserts by `record.frame.id`.
 
 ```ts
-const crypto = createGroupCrypto({
+const access = simpleHandleAccess({
   handle: () => handle,
+  adopt: (next) => { handle = next },
+  persist: (current) => store.save(current),
+})
+const crypto = createGroupCrypto({
+  access,
   pending: {
     persistOpened: async (stagedState, record) => {
       await store.transaction(async (tx) => {
@@ -67,11 +106,12 @@ waits on paths overlapping app opens and prove the lock order against SQLite.
 
 With `pending`, `unwrap(bytes, { expectedAAD, frame })` calls `GroupHandle.decryptStaged` and
 resolves only after the atomic write. A persistence failure becomes `AppFrameStorageError` for
-the RPC lane to retry; an unopenable frame is classified dead. Without `pending`, app delivery
-keeps its prior best-effort behavior. `frameAAD(bytes)` exposes the cleartext AAD as a routing
-hint; the full `expectedAAD` on open authenticates it. The 0.10 app AAD carries version and log
-intent, so older bare-topic app frames cannot interoperate with 0.10 peers. See the
-`@kumiai/rpc` README for the at-least-once guarantee, deduplication, and retention boundary.
+the RPC lane to retry; an unopenable frame is classified dead. Without `pending`, the adapter saves
+the post-open ratchet state without a pending record, so a crash after `unwrap` and before the
+handler finishes loses that frame: `pending` is the at-least-once path. `frameAAD(bytes)` exposes
+the cleartext AAD as a routing hint. The full `expectedAAD` on open authenticates it.
+The 0.10 app AAD carries version and log intent. Older bare-topic app frames cannot interoperate
+with 0.10 peers. See the `@kumiai/rpc` README for the delivery and retention boundary.
 
 ## `createLedgerEntrySlot` is mandatory, and must be installed where the handle is built
 
@@ -81,7 +121,7 @@ once, in `GroupOptions`, and offers no way to change it afterwards. So the indir
 installed when the group is *built*:
 
 ```ts
-import { createGroupCrypto, createGroupMLS, createLedgerEntrySlot } from '@kumiai/mls-rpc'
+import { createGroupCrypto, createGroupMLS, createLedgerEntrySlot, simpleHandleAccess } from '@kumiai/mls-rpc'
 
 const entrySlot = createLedgerEntrySlot()
 // Every construction site: createGroup / processWelcome / restoreGroup.
@@ -90,27 +130,64 @@ const { group } = await createGroup(identity, groupID, {
 })
 
 let handle = group
-const crypto = createGroupCrypto({ handle: () => handle })
-const mls = createGroupMLS({
+const access = simpleHandleAccess({
   handle: () => handle,
-  adopt: (next) => {
-    handle = next
-  },
+  adopt: (next) => { handle = next },
+  persist: (current) => store.save(current),
+})
+const crypto = createGroupCrypto({ access })
+const mls = createGroupMLS({
+  access,
   identity,
   entrySlot,
-  persist: async (current) => await store.save(current),
 })
 ```
 
 Passing anything else means a commit resolves its entries against whatever resolver the handle
 happened to be born with.
 
-The optional `persist` callback receives the tentative state after an accepted commit or proposal,
-or the bootstrapped handle. It does not persist application-message receive ratchets. Writes must
+The optional adapter `persist` callback receives the tentative state after an accepted commit,
+the bootstrapped handle, or an ordinary ratchet operation. Writes must
 be atomic: rejection must leave storage unchanged, since the in-memory handle rolls back and no
 control notifications fire. Received-message and bootstrap persist runs under the handle mutex;
-it must not call back into that handle. Recovery persists the rejoined handle before `adopt`. If
-`adopt` throws, storage already holds the new handle and a restart loads it.
+it must not call back into that handle. Recovery persists the rejoined handle before adoption. If
+adoption throws, storage already holds the new handle and a restart loads it.
+
+## Applying a commit inside a host transaction
+
+`processCommit` is `applyCommit` inside `access.mutate`, plus entry resolution before the lock. A host
+that projects commits into its own tables calls `applyCommit` inside its own transaction instead, from
+its own `GroupMLS.processCommit`, so the peer still sees each result and rotates its anchor:
+
+```ts
+const result = await applyCommit({
+  handle,
+  commit,
+  senderDID,
+  resolveLedgerEntries: (ids) => resolved(ids), // must not take the handle lock
+  entrySlot,
+  ownDID: identity.id,
+  persist,
+})
+if (result.applied) {
+  // write result.rosterAfter, result.surfacedEntries, ... and commit
+}
+```
+
+It refuses non-Commit bytes, a frame at another epoch, and this member's own authenticated commit
+before any resolver or mutation runs. `applied` means the handle took the commit's state; `advanced`
+means the epoch moved. A commit removing this member is applied without advancing. The result
+carries both rosters, the ledger length before, the committer, and the verified non-`kumiai.*`
+entries the commit appended, repeats kept. `MissingLedgerEntriesError`, resolver faults and store
+faults propagate: map them to a throw from `processCommit`, never to `advanced: false`, which the peer
+steps over as a commit it will never apply.
+
+## Recovery secret
+
+`exportRecoverySecret` defaults to `deriveRecoverySecret`, the anchor KDF. A host whose groups
+already rendezvous on another secret passes `recoverySecret: (handle) => ...` for every restore of
+those groups: both the commit and the rendezvous topic follow it. A result under 16 bytes or a throw
+is refused; the default is never tried as a fallback.
 
 ## Two seals, one exporter
 
@@ -131,11 +208,10 @@ leave a peer stepping over frames without ever classifying one and never learnin
 Documented on the factories themselves; the conformance suite in `@kumiai/rpc-conformance` pins each
 one. The ones a host is most likely to trip on:
 
-- **`unwrap` opens a bounded window below the current epoch.** ts-mls retains a few epochs of key
-  material, so a frame sealed at epoch 3 opens against a handle carried to epoch 4, and the same read
-  six transitions later is refused. The window is spent by epoch *transitions*, not by time, so
-  nothing may depend on it — and `@kumiai/rpc` does not. An implementation opening strictly at the
-  current epoch is a correct implementation of the port.
+- **`unwrap` opens only at the current epoch.** A readable frame at any other epoch throws
+  `FrameEpochError` before decryption, under the handle lock. ts-mls could open a few past epochs,
+  but `GroupHandle.decrypt` resolves senders at the current epoch, so such a frame never had a
+  sender.
 - **`exportSecret` derives from MLS exporter state.** The fake uses HMAC to model epoch separation,
   while the real port derives from the handle's exporter secret.
 - **`wrap` mutates.** It consumes a per-message ratchet key, so sealing the same plaintext twice

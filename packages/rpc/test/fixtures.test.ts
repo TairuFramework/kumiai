@@ -25,7 +25,7 @@ describe('fake crypto', () => {
   test('exposes epoch and exportSecret, epoch mutable for resync tests', async () => {
     const crypto = createFakeCrypto({ epoch: 1 })
     expect(crypto.epoch()).toBe(1)
-    const secret = await crypto.exportSecret(APP_TOPIC_LABEL)
+    const { secret } = await crypto.exportSecret(APP_TOPIC_LABEL)
     expect(secret).toBeInstanceOf(Uint8Array)
     crypto.setEpoch(2)
     expect(crypto.epoch()).toBe(2)
@@ -33,16 +33,18 @@ describe('fake crypto', () => {
 
   test('exportSecret is bound to the epoch: a different epoch is different bytes', async () => {
     const crypto = createFakeCrypto({ epoch: 1 })
-    const atOne = await crypto.exportSecret(APP_TOPIC_LABEL)
+    const { secret: atOne } = await crypto.exportSecret(APP_TOPIC_LABEL)
     crypto.setEpoch(2)
-    const atTwo = await crypto.exportSecret(APP_TOPIC_LABEL)
+    const { secret: atTwo } = await crypto.exportSecret(APP_TOPIC_LABEL)
     // The property the port contract asks for and the app-lane topic rests on. A fake exporting a
     // fixed value would be a lifelong secret plus a guessable epoch number — the one thing a
     // topic derivation must not be, and it would look identical to a correct one from here.
     expect(atTwo).not.toEqual(atOne)
     // Every member is the same function of the epoch, so members AT an epoch agree — and one
     // stuck behind does not follow.
-    expect(await createFakeCrypto({ epoch: 2 }).exportSecret(APP_TOPIC_LABEL)).toEqual(atTwo)
+    expect((await createFakeCrypto({ epoch: 2 }).exportSecret(APP_TOPIC_LABEL)).secret).toEqual(
+      atTwo,
+    )
     expect(fakeEpochSecret(1, APP_TOPIC_LABEL)).toEqual(atOne)
   })
 
@@ -55,8 +57,8 @@ describe('fake crypto', () => {
 
   test('exportSecret is bound to the label: two labels at the same epoch are different bytes', async () => {
     const crypto = createFakeCrypto({ epoch: 1 })
-    const appSecret = await crypto.exportSecret(APP_TOPIC_LABEL)
-    const otherSecret = await crypto.exportSecret('kumiai/fixtures-test/other-label')
+    const { secret: appSecret } = await crypto.exportSecret(APP_TOPIC_LABEL)
+    const { secret: otherSecret } = await crypto.exportSecret('kumiai/fixtures-test/other-label')
     expect(otherSecret).not.toEqual(appSecret)
   })
 

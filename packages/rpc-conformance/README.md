@@ -47,6 +47,10 @@ contract is about, and the one the memory double got wrong. `buildExternalCommit
 implementation with no way to build a rejoin says so by omitting it, and the two external clauses
 are skipped rather than faked.
 
+Both harnesses also return `setEpochHintOffset(offset)`: the implementation's synchronous `epoch()`
+must then report its locked epoch plus `offset`. The epoch clauses set it one behind and one ahead
+and expect the same answers, because no port result may depend on the hint.
+
 ```ts
 import { testGroupCryptoConformance } from '@kumiai/rpc-conformance'
 

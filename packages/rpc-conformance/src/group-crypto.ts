@@ -24,12 +24,15 @@ import { describe, expect, test } from 'vitest'
  * that returns one with the sender missing satisfy this suite, which is exactly the silent hole
  * the real type was narrowed to close.
  */
-export type ConformanceUnwrapResult = { payload: Uint8Array; senderDID: string }
+export type ConformanceUnwrapResult = { payload: Uint8Array; senderDID: string; epoch: number }
 
 /** The `GroupCrypto` of `@kumiai/rpc`, re-declared structurally. */
 export type ConformanceGroupCrypto = {
   epoch: () => number
-  exportSecret: (label: string, length?: number) => Uint8Array | Promise<Uint8Array>
+  exportSecret: (
+    label: string,
+    length?: number,
+  ) => { secret: Uint8Array; epoch: number } | Promise<{ secret: Uint8Array; epoch: number }>
   wrap: (bytes: Uint8Array, opts?: { aad?: Uint8Array }) => Uint8Array | Promise<Uint8Array>
   unwrap: (
     bytes: Uint8Array,
@@ -37,7 +40,9 @@ export type ConformanceGroupCrypto = {
   ) => ConformanceUnwrapResult | Promise<ConformanceUnwrapResult>
   frameAAD: (bytes: Uint8Array) => Uint8Array | null
   frameEpoch: (bytes: Uint8Array) => number | null
-  sealEntries: (bytes: Uint8Array) => Uint8Array | Promise<Uint8Array>
+  sealEntries: (
+    bytes: Uint8Array,
+  ) => { sealed: Uint8Array; epoch: number } | Promise<{ sealed: Uint8Array; epoch: number }>
   openEntries: (sealed: Uint8Array) => Uint8Array | Promise<Uint8Array>
 }
 
@@ -50,6 +55,7 @@ export type ConformanceCryptoMember = {
 export type ConformanceCryptoGroup = {
   /** One entry per member, all at the same epoch, in a fresh group. */
   members: Array<ConformanceCryptoMember>
+  setEpochHintOffset: (offset: number) => void
   /**
    * Enact a Commit that REMOVES `members[index]`. Every other member advances one epoch; the
    * removed one does not, and holds the epoch it was at for life.
@@ -136,6 +142,49 @@ export function testGroupCryptoConformance(params: GroupCryptoConformanceParams)
   }
 
   describe(`GroupCrypto conformance — ${label}`, () => {
+    // Three passes (hint offsets 0, -1, 1) over a real MLS group: slow on CI runners.
+    test('locked results and frame refusals ignore a lagging or leading epoch hint', async () => {
+      await withGroup(3, 'lying-epoch-hint', async (group) => {
+        const alice = memberAt(group.members, 0)
+        const bob = memberAt(group.members, 1)
+        const carol = memberAt(group.members, 2)
+        const baseline = await alice.crypto.exportSecret(EXPORT_LABEL_A)
+        const epoch = baseline.epoch
+        const bytes = utf8.encode('locked epoch')
+        for (const offset of [0, -1, 1]) {
+          group.setEpochHintOffset(offset)
+          expect(await alice.crypto.exportSecret(EXPORT_LABEL_A)).toEqual(baseline)
+          const { sealed, epoch: sealedAt } = await alice.crypto.sealEntries(bytes)
+          expect(sealedAt).toBe(epoch)
+          expect(await bob.crypto.openEntries(sealed)).toEqual(bytes)
+          const frame = await alice.crypto.wrap(bytes)
+          expect(await bob.crypto.unwrap(frame)).toMatchObject({
+            payload: bytes,
+            senderDID: alice.did,
+            epoch,
+          })
+        }
+        group.setEpochHintOffset(0)
+        const oldFrame = await carol.crypto.wrap(bytes)
+        await group.removeMember(2)
+        const newEpoch = (await alice.crypto.exportSecret(EXPORT_LABEL_A)).epoch
+        const newFrame = await alice.crypto.wrap(bytes)
+        for (const offset of [0, -1, 1]) {
+          group.setEpochHintOffset(offset)
+          for (const [reader, frame, frameEpoch, handleEpoch] of [
+            [alice.crypto, oldFrame, epoch, newEpoch],
+            [carol.crypto, newFrame, newEpoch, epoch],
+          ] as const) {
+            await expect(Promise.resolve().then(() => reader.unwrap(frame))).rejects.toMatchObject({
+              name: 'FrameEpochError',
+              frameEpoch,
+              handleEpoch,
+            })
+          }
+        }
+      })
+    }, 30_000)
+
     describe('exportSecret', () => {
       /**
        * The app-lane topic is derived from this and from nothing that travels, so a port whose
@@ -144,10 +193,10 @@ export function testGroupCryptoConformance(params: GroupCryptoConformanceParams)
       test('every member at an epoch derives the SAME secret, with nothing exchanged', async () => {
         await withGroup(3, 'export-agreed', async ({ members }) => {
           const first = memberAt(members, 0)
-          const secret = await first.crypto.exportSecret(EXPORT_LABEL_A)
+          const { secret } = await first.crypto.exportSecret(EXPORT_LABEL_A)
           expect(secret.length).toBeGreaterThan(0)
           for (const member of members.slice(1)) {
-            expect(await member.crypto.exportSecret(EXPORT_LABEL_A)).toEqual(secret)
+            expect((await member.crypto.exportSecret(EXPORT_LABEL_A)).secret).toEqual(secret)
           }
         })
       })
@@ -161,17 +210,17 @@ export function testGroupCryptoConformance(params: GroupCryptoConformanceParams)
         await withGroup(3, 'export-per-epoch', async (group) => {
           const alice = memberAt(group.members, 0)
           const carol = memberAt(group.members, 2)
-          const before = await alice.crypto.exportSecret(EXPORT_LABEL_A)
-          expect(await carol.crypto.exportSecret(EXPORT_LABEL_A)).toEqual(before)
+          const { secret: before } = await alice.crypto.exportSecret(EXPORT_LABEL_A)
+          expect((await carol.crypto.exportSecret(EXPORT_LABEL_A)).secret).toEqual(before)
 
           await group.removeMember(2)
 
-          const after = await alice.crypto.exportSecret(EXPORT_LABEL_A)
+          const { secret: after } = await alice.crypto.exportSecret(EXPORT_LABEL_A)
           expect(after).not.toEqual(before)
           // Carol never advanced, so she is left holding the value she had — for life, and it is
           // not the one the group moved to.
-          expect(await carol.crypto.exportSecret(EXPORT_LABEL_A)).toEqual(before)
-          expect(await carol.crypto.exportSecret(EXPORT_LABEL_A)).not.toEqual(after)
+          expect((await carol.crypto.exportSecret(EXPORT_LABEL_A)).secret).toEqual(before)
+          expect((await carol.crypto.exportSecret(EXPORT_LABEL_A)).secret).not.toEqual(after)
         })
       })
 
@@ -187,13 +236,13 @@ export function testGroupCryptoConformance(params: GroupCryptoConformanceParams)
         await withGroup(2, 'export-per-label', async ({ members }) => {
           const alice = memberAt(members, 0)
           const bob = memberAt(members, 1)
-          const a = await alice.crypto.exportSecret(EXPORT_LABEL_A)
-          const b = await alice.crypto.exportSecret(EXPORT_LABEL_B)
+          const { secret: a } = await alice.crypto.exportSecret(EXPORT_LABEL_A)
+          const { secret: b } = await alice.crypto.exportSecret(EXPORT_LABEL_B)
           expect(a).not.toEqual(b)
           // Domain separation, not disagreement: every member still agrees on EACH label taken on
           // its own.
-          expect(await bob.crypto.exportSecret(EXPORT_LABEL_A)).toEqual(a)
-          expect(await bob.crypto.exportSecret(EXPORT_LABEL_B)).toEqual(b)
+          expect((await bob.crypto.exportSecret(EXPORT_LABEL_A)).secret).toEqual(a)
+          expect((await bob.crypto.exportSecret(EXPORT_LABEL_B)).secret).toEqual(b)
         })
       })
 
@@ -298,32 +347,21 @@ export function testGroupCryptoConformance(params: GroupCryptoConformanceParams)
         })
       })
 
-      /**
-       * BELOW the current epoch there is a WINDOW, and its width is implementation-defined — which
-       * is exactly why nothing in group-rpc may depend on it.
-       *
-       * The two implementations genuinely disagree one epoch down, and both are conformant. The
-       * fake refuses immediately. A real ts-mls handle advanced by `processMessage` still holds a
-       * few epochs' key material and opens it (observed: a frame sealed at epoch 3 opens against
-       * the same handle at epoch 4). The port contract says so in as many words — "a real MLS
-       * handle also opens a few epochs BELOW the current one ... but group-rpc must not depend on
-       * that window" — so this suite does not assert which, and asserts instead the thing that
-       * makes the window unusable: it is BOUNDED, and it is spent by epoch TRANSITIONS rather than
-       * by time. A peer catching up destroys the very keys a past-epoch read would need, so a
-       * member away four commits could read and a member away a week could not, and correctness
-       * would turn on how far behind a peer happened to fall.
-       *
-       * Six transitions is past every implementation's window here; ts-mls keeps four.
-       */
-      test('a frame sealed FAR below the current epoch is gone for good: the window is bounded and spent by transitions', async () => {
-        await withGroup(2, 'unwrap-window', async (group) => {
+      test('a frame one epoch below the current handle is refused', async () => {
+        await withGroup(2, 'unwrap-past', async (group) => {
           const alice = memberAt(group.members, 0)
           const bob = memberAt(group.members, 1)
           const stale = await alice.crypto.wrap(utf8.encode('long ago'))
           const from = bob.crypto.epoch()
-          for (let step = 0; step < 6; step++) await group.advance()
-          expect(bob.crypto.epoch()).toBe(from + 6)
-          await refuses(() => bob.crypto.unwrap(stale))
+          await group.advance()
+          expect(bob.crypto.epoch()).toBe(from + 1)
+          await expect(
+            Promise.resolve().then(() => bob.crypto.unwrap(stale)),
+          ).rejects.toMatchObject({
+            name: 'FrameEpochError',
+            frameEpoch: from,
+            handleEpoch: from + 1,
+          })
         })
       })
     })
@@ -473,9 +511,9 @@ export function testGroupCryptoConformance(params: GroupCryptoConformanceParams)
         await withGroup(3, 'entries-per-epoch', async (group) => {
           const alice = memberAt(group.members, 0)
           const carol = memberAt(group.members, 2)
-          const atOld = await alice.crypto.sealEntries(utf8.encode('entries before'))
+          const { sealed: atOld } = await alice.crypto.sealEntries(utf8.encode('entries before'))
           await group.removeMember(2)
-          const atNew = await alice.crypto.sealEntries(utf8.encode('entries after'))
+          const { sealed: atNew } = await alice.crypto.sealEntries(utf8.encode('entries after'))
 
           // The removal boundary again, and the entry blob rests on it exactly as the anchor
           // does: carol keeps the old epoch's key for life and it opens nothing sealed after.
@@ -502,7 +540,7 @@ export function testGroupCryptoConformance(params: GroupCryptoConformanceParams)
         await withGroup(2, 'entries-tampered', async ({ members }) => {
           const alice = memberAt(members, 0)
           const bob = memberAt(members, 1)
-          const sealed = await alice.crypto.sealEntries(utf8.encode('the real entries'))
+          const { sealed } = await alice.crypto.sealEntries(utf8.encode('the real entries'))
           expect(text(await bob.crypto.openEntries(sealed))).toBe('the real entries')
 
           // Every byte position, one at a time: a seal whose tail is authenticated but whose
@@ -522,7 +560,7 @@ export function testGroupCryptoConformance(params: GroupCryptoConformanceParams)
         await withGroup(2, 'entries-linear-forgery', async ({ members }) => {
           const alice = memberAt(members, 0)
           const bob = memberAt(members, 1)
-          const sealed = await alice.crypto.sealEntries(
+          const { sealed } = await alice.crypto.sealEntries(
             utf8.encode('a message long enough to forge'),
           )
           for (const tagBytes of [8, 16, 32]) {
@@ -540,9 +578,9 @@ export function testGroupCryptoConformance(params: GroupCryptoConformanceParams)
         await withGroup(2, 'entries-agreed', async ({ members }) => {
           const alice = memberAt(members, 0)
           const bob = memberAt(members, 1)
-          const fromAlice = await alice.crypto.sealEntries(utf8.encode('alice sealed'))
+          const { sealed: fromAlice } = await alice.crypto.sealEntries(utf8.encode('alice sealed'))
           expect(text(await bob.crypto.openEntries(fromAlice))).toBe('alice sealed')
-          const fromBob = await bob.crypto.sealEntries(utf8.encode('bob sealed'))
+          const { sealed: fromBob } = await bob.crypto.sealEntries(utf8.encode('bob sealed'))
           expect(text(await alice.crypto.openEntries(fromBob))).toBe('bob sealed')
         })
       })
@@ -556,7 +594,7 @@ export function testGroupCryptoConformance(params: GroupCryptoConformanceParams)
         await withGroup(2, 'entries-pure', async ({ members }) => {
           const alice = memberAt(members, 0)
           const bob = memberAt(members, 1)
-          const sealed = await alice.crypto.sealEntries(utf8.encode('opened twice'))
+          const { sealed } = await alice.crypto.sealEntries(utf8.encode('opened twice'))
           expect(await bob.crypto.openEntries(sealed)).toEqual(await bob.crypto.openEntries(sealed))
 
           const frame = await alice.crypto.wrap(utf8.encode('still works'))
@@ -573,7 +611,7 @@ export function testGroupCryptoConformance(params: GroupCryptoConformanceParams)
         await withGroup(2, 'entries-distinct', async ({ members }) => {
           const alice = memberAt(members, 0)
           const bob = memberAt(members, 1)
-          const blob = await alice.crypto.sealEntries(utf8.encode('ledger bodies'))
+          const { sealed: blob } = await alice.crypto.sealEntries(utf8.encode('ledger bodies'))
           await refuses(() => bob.crypto.unwrap(blob))
           const frame = await alice.crypto.wrap(utf8.encode('app payload'))
           await refuses(() => bob.crypto.openEntries(frame))

@@ -79,7 +79,7 @@ export async function publishCommit(params: PublishCommitParams): Promise<{ sequ
       ...(params.external === true ? { external: true } : {}),
       ...(params.signerDID != null ? { signerDID: params.signerDID } : {}),
     })
-  const sealed = await crypto.sealEntries(encodeLedgerEntries(entries))
+  const { sealed } = await crypto.sealEntries(encodeLedgerEntries(entries))
   return hub.publish({
     senderDID,
     topicID: commitTopic(recoverySecret),

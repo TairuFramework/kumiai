@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest'
 
+import { FrameEpochError, isFrameAhead } from '../src/crypto.js'
 import { createHubMux } from '../src/hub-mux.js'
 import { createOpenOncePath } from '../src/open-once.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
@@ -15,7 +16,7 @@ describe('the open-once path acks what it opens', () => {
     const path = createOpenOncePath<Uint8Array>({
       mux,
       topicID: 'topic:app',
-      unwrap: async (payload) => ({ payload, senderDID: 'did:key:alice' }),
+      unwrap: async (payload) => ({ payload, senderDID: 'did:key:alice', epoch: 1 }),
       project: (_message, result) => result.payload,
     })
     path((value) => opened.push(value))
@@ -63,6 +64,30 @@ describe('the open-once path acks what it opens', () => {
     await mux.dispose()
   })
 
+  test('a frame from an epoch already left is acked', async () => {
+    const hub = new DurableFakeHub()
+    const mux = createHubMux({ hub, localDID: 'bob', onSubscribeFailed: () => {} })
+
+    const path = createOpenOncePath<Uint8Array>({
+      mux,
+      topicID: 'topic:app',
+      unwrap: async () => {
+        throw new FrameEpochError(1, 2)
+      },
+      retainOnFailure: (_message, error) => isFrameAhead(error),
+      project: (_message, result) => result.payload,
+    })
+    path(() => {})
+    await flush()
+
+    await hub.publish({ senderDID: 'alice', topicID: 'topic:app', payload: new Uint8Array([1]) })
+    await flush()
+
+    expect(hub.ackedCount('bob')).toBe(1)
+
+    await mux.dispose()
+  })
+
   test('a frame from an epoch not yet reached is retained, not acked', async () => {
     const hub = new DurableFakeHub()
     const mux = createHubMux({ hub, localDID: 'bob', onSubscribeFailed: () => {} })
@@ -71,12 +96,9 @@ describe('the open-once path acks what it opens', () => {
       mux,
       topicID: 'topic:app',
       unwrap: async () => {
-        // Real MLS: `unwrap` refuses any epoch the handle hasn't reached. `retainOnFailure`
-        // stands in for reading the frame's own cleartext epoch against the handle's current one
-        // (see `peer.ts`'s wiring) without needing a real crypto port here.
-        throw new Error('epoch not reached yet')
+        throw new FrameEpochError(2, 1)
       },
-      retainOnFailure: () => true,
+      retainOnFailure: (_message, error) => isFrameAhead(error),
       project: (_message, result) => result.payload,
     })
     path(() => {})

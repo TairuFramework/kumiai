@@ -1,5 +1,5 @@
 import { APP_TOPIC_LABEL, protocolTopic } from '@kumiai/rpc'
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 import {
   buildInviteCommit,
@@ -288,10 +288,9 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     }
     // ...nor the lifelong recovery secret, which really is his for life.
     const recovery = await (async () => {
-      const { createGroupMLS } = await import('@kumiai/mls-rpc')
+      const { createGroupMLS, simpleHandleAccess } = await import('@kumiai/mls-rpc')
       return await createGroupMLS({
-        handle: () => bob.handle(),
-        adopt: () => {},
+        access: simpleHandleAccess({ handle: () => bob.handle(), adopt: () => {} }),
         identity: bobID,
         entrySlot: bobSlot,
       }).exportRecoverySecret()
@@ -576,6 +575,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
 
     const seen: Array<unknown> = []
     let dying: Member | undefined
+    let died = false
     const handlers = {
       'chat/posted': async (ctx: { data: unknown }) => {
         seen.push(ctx.data)
@@ -587,6 +587,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
         dying = undefined
         await process.peer.dispose()
         await process.disconnect()
+        died = true
       },
     }
 
@@ -596,9 +597,12 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
       group: bobHandle,
       entrySlot: bobSlot,
       handlers,
+      durablePending: true,
     })
     dying = bob
-    await flush(400)
+    // Polled, not a fixed wait: CI runs this file several times slower than a laptop.
+    await vi.waitFor(() => expect(died).toBe(true), { timeout: 15_000 })
+    await flush()
 
     // It died partway: the first frame reached the host and the walk did not finish.
     expect(seen).toEqual([{ text: 'at epoch one' }])
@@ -612,17 +616,20 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
       handlers,
       restartOf: bob,
     })
-    await flush(600)
+    await vi.waitFor(
+      () => {
+        expect(bob.handle().epoch).toBe(3n)
+        expect(seen).toHaveLength(4)
+      },
+      { timeout: 15_000 },
+    )
+    // Room for a duplicate to show up before the exact check below.
+    await flush()
 
     // The second process finished the walk, in order, and lost nothing.
     //
-    // The epoch-one frame arrives TWICE, and that is the correct answer rather than a defect: the
-    // first process died INSIDE its handler, so the read position was never written past it and
-    // the host never confirmed the frame. The lane is at-least-once across a crash mid-delivery,
-    // and the alternative — advancing the cursor before the host holds the frame — is the one that
-    // loses messages. What makes the repeat possible at all against a real ratchet is that bob
-    // restored MLS state persisted BEFORE the open, so the frame's message key had not been spent
-    // in anything durable. A peer that persisted after opening could not re-open it.
+    // The first process persisted the opened record with the consumed ratchet state, then died
+    // inside its handler. The restart replays that record because the cursor was not advanced.
     expect(bob.handle().epoch).toBe(3n)
     expect(seen).toEqual([
       { text: 'at epoch one' },
@@ -634,7 +641,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     await alice.peer.dispose()
     await bob.peer.dispose()
     await hub.dispose()
-  })
+  }, 30_000)
 
   /**
    * A RESTARTED member that AUTHORS, over real MLS: the admin dies, comes back over its persisted
@@ -644,7 +651,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
    * The distinction is not cosmetic. A received commit is applied by `processMessage`, which
    * mutates the handle IN PLACE; an authored one produces a NEW handle object that the peer swaps
    * in from `onAccepted`. Only the second path replaces the reference `createGroupCrypto` reads,
-   * which is the event `GroupCryptoParams.handle` is a function to survive. Nothing else in the
+   * which is the event the shared access instance must survive. Nothing else in the
    * repo reaches it against a real ratchet.
    *
    * A LEDGER commit, so the roster does not change and the app-lane anchor does not rotate: the

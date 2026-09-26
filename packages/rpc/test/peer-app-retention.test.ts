@@ -61,7 +61,7 @@ describe('per-procedure retention for app events', () => {
 
     // Only the logged event is retained: draining the topic returns it and nothing else, decoded
     // to its plaintext — proving pull-ability independently of the live delivery above.
-    const secret = await alice.crypto.exportSecret(APP_TOPIC_LABEL)
+    const { secret } = await alice.crypto.exportSecret(APP_TOPIC_LABEL)
     const topicID = protocolTopic(secret, 1, 'room')
     const drained = await hub.fetchTopic({ subscriberDID: 'bob', topicID })
     expect(drained.messages).toHaveLength(1)

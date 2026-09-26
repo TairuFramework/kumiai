@@ -48,13 +48,20 @@ function didAt(index: number): string {
 testGroupCryptoConformance({
   label: 'createFakeCrypto',
   createGroup: async (size) => {
+    let hintOffset = 0
     const members = Array.from({ length: size }, (_, index) => ({
       did: didAt(index),
       // One shared base secret and one shared XOR key: fake members of one group.
       crypto: createFakeCrypto({ epoch: 1, localDID: didAt(index) }),
     }))
     return {
-      members,
+      members: members.map((member) => ({
+        did: member.did,
+        crypto: { ...member.crypto, epoch: () => member.crypto.epoch() + hintOffset },
+      })),
+      setEpochHintOffset: (offset) => {
+        hintOffset = offset
+      },
       advance: async () => {
         for (const member of members) member.crypto.setEpoch(member.crypto.epoch() + 1)
       },
@@ -122,6 +129,7 @@ const COMMITTER_DID = 'did:key:committer'
 testGroupMLSConformance({
   label: 'createMemoryGroupMLS',
   createGroup: async (size, id) => {
+    let hintOffset = 0
     const dids = Array.from({ length: size }, (_, index) => didAt(index))
     const roster = [COMMITTER_DID, ...dids]
     // A NON-EMPTY LEDGER, because several clauses have no subject without one — the head check
@@ -163,7 +171,13 @@ testGroupMLSConformance({
     }
 
     return {
-      members,
+      members: members.map((member) => ({
+        did: member.did,
+        mls: { ...member.mls, epoch: () => member.mls.epoch() + hintOffset },
+      })),
+      setEpochHintOffset: (offset) => {
+        hintOffset = offset
+      },
       committerDID: COMMITTER_DID,
       buildCommit: async (options) => {
         const removes = options?.removes == null ? undefined : [didAt(options.removes)]

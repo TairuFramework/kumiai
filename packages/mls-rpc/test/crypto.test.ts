@@ -12,6 +12,7 @@ import {
 } from '@kumiai/mls'
 import { describe, expect, test } from 'vitest'
 
+import { simpleHandleAccess } from '../src/access.js'
 import { createGroupCrypto, ENTRY_SEAL_LABEL } from '../src/crypto.js'
 
 const utf8 = new TextEncoder()
@@ -90,11 +91,15 @@ async function addMember(params: {
 /** A crypto over a handle slot, so a test can swap the handle the way a peer does. */
 function cryptoOver(initial: GroupHandle) {
   let handle = initial
-  return {
-    crypto: createGroupCrypto({ handle: () => handle }),
-    adopt: (next: GroupHandle) => {
+  const access = simpleHandleAccess({
+    handle: () => handle,
+    adopt: (next) => {
       handle = next
     },
+  })
+  return {
+    crypto: createGroupCrypto({ access }),
+    adopt: (next: GroupHandle) => access.replace(next),
     current: () => handle,
   }
 }
@@ -103,16 +108,20 @@ describe('createGroupCrypto', () => {
   test('wipes each exported ledger key after seal and open, including failed open', async () => {
     const keys: Array<Uint8Array> = []
     const crypto = createGroupCrypto({
-      handle: () =>
-        ({
-          exportSecret: async () => {
-            const key = new Uint8Array(32).fill(7)
-            keys.push(key)
-            return key
-          },
-        }) as unknown as GroupHandle,
+      access: simpleHandleAccess({
+        handle: () =>
+          ({
+            epoch: 0n,
+            exportSecret: async () => {
+              const key = new Uint8Array(32).fill(7)
+              keys.push(key)
+              return key
+            },
+          }) as unknown as GroupHandle,
+        adopt: () => {},
+      }),
     })
-    const sealed = await crypto.sealEntries(utf8.encode('entries'))
+    const { sealed } = await crypto.sealEntries(utf8.encode('entries'))
     expect(keys[0]?.every((byte) => byte === 0)).toBe(true)
     expect(await crypto.openEntries(sealed)).toEqual(utf8.encode('entries'))
     expect(keys[1]?.every((byte) => byte === 0)).toBe(true)
@@ -140,26 +149,26 @@ describe('createGroupCrypto', () => {
 
     expect(alice.crypto.epoch()).toBe(1)
     expect(bob.crypto.epoch()).toBe(1)
-    const shared = await alice.crypto.exportSecret(LABEL)
-    expect(await bob.crypto.exportSecret(LABEL)).toEqual(shared)
+    const { secret: shared } = await alice.crypto.exportSecret(LABEL)
+    expect((await bob.crypto.exportSecret(LABEL)).secret).toEqual(shared)
 
     // A different label at the SAME epoch is a different secret — the caller's label reaches the
     // handle's own exporter untouched, rather than this implementation closing over one of its own.
-    expect(await alice.crypto.exportSecret(OTHER_LABEL)).not.toEqual(shared)
+    expect((await alice.crypto.exportSecret(OTHER_LABEL)).secret).not.toEqual(shared)
 
     // The handle swap a peer makes when it adopts its own commit: the port follows it, and the
     // secret moves with the epoch. A crypto closing over the handle it was built with would
     // still be exporting the line above.
     const removed = await removeMember(aliceGroup, 1)
-    alice.adopt(removed.newGroup)
+    await alice.adopt(removed.newGroup)
     expect(alice.crypto.epoch()).toBe(2)
-    const rotated = await alice.crypto.exportSecret(LABEL)
+    const { secret: rotated } = await alice.crypto.exportSecret(LABEL)
     expect(rotated).not.toEqual(shared)
 
     // Bob, removed, is left holding the old one for life and cannot reach the new one. This is
     // the property the whole app-lane topic rests on, and the only implementation that has it.
-    expect(await bob.crypto.exportSecret(LABEL)).toEqual(shared)
-    expect(await bob.crypto.exportSecret(LABEL)).not.toEqual(rotated)
+    expect((await bob.crypto.exportSecret(LABEL)).secret).toEqual(shared)
+    expect((await bob.crypto.exportSecret(LABEL)).secret).not.toEqual(rotated)
   })
 
   /**
@@ -182,12 +191,15 @@ describe('createGroupCrypto', () => {
     // A custom entryLabel is refused too — the collision is with whatever label sealEntries
     // actually uses, not with the default constant.
     const customLabel = 'kumiai/mls-rpc-test/custom-entry-label'
-    const customCrypto = createGroupCrypto({ handle: () => aliceGroup, entryLabel: customLabel })
+    const customCrypto = createGroupCrypto({
+      access: simpleHandleAccess({ handle: () => aliceGroup, adopt: () => {} }),
+      entryLabel: customLabel,
+    })
     expect(() => customCrypto.exportSecret(customLabel)).toThrow(
       `label '${customLabel}' is reserved for the ledger-entry seal`,
     )
     // Every other label is unaffected.
-    await expect(customCrypto.exportSecret(LABEL)).resolves.toBeInstanceOf(Uint8Array)
+    expect((await customCrypto.exportSecret(LABEL)).secret).toBeInstanceOf(Uint8Array)
   })
 
   test('wrap and unwrap round-trip and name the authenticated sender', async () => {
@@ -206,7 +218,7 @@ describe('createGroupCrypto', () => {
   /**
    * `wrap` reads the handle FRESH on every call, and this is the only test that says so.
    *
-   * The defect it excludes is the one `GroupCryptoParams.handle`'s doc comment names: a `wrap`
+   * The defect it excludes is a `wrap`
    * that captured `handle()`'s return once would keep sealing against the pre-commit epoch's
    * secrets forever, and nothing about a successful seal reveals which epoch it targeted.
    *
@@ -236,7 +248,7 @@ describe('createGroupCrypto', () => {
       publish,
       resolveLedgerEntries,
     })
-    alice.adopt(adminGroup)
+    await alice.adopt(adminGroup)
     const carol = cryptoOver(joinedGroup)
     expect(alice.crypto.epoch()).toBe(2)
     expect(carol.crypto.epoch()).toBe(2)
@@ -259,8 +271,7 @@ describe('createGroupCrypto', () => {
    * `GroupCrypto.unwrap`'s required `senderDID`. `GroupHandle.decrypt` itself types the field
    * optional and no fixture here constructs a credential-less leaf to make it actually come back
    * absent — so this reaches the throw the way it is actually reachable: a `handle` whose
-   * `decrypt` resolves without `senderDID`, which `GroupCryptoParams.handle` is an injected
-   * function specifically to allow swapping in per test.
+   * `decrypt` resolves without `senderDID`, through an injected access handle.
    *
    * A `Proxy` over a real handle rather than a hand-built stub: every method but `decrypt`
    * still needs to behave like `GroupHandle` for `createGroupCrypto` to construct and call
@@ -269,16 +280,18 @@ describe('createGroupCrypto', () => {
   test('unwrap refuses an opened frame with no authenticated sender', async () => {
     const { bobGroup } = await twoMemberGroup('ports-unwrap-no-sender')
     const senderlessHandle = new Proxy(bobGroup, {
-      get(target, prop, receiver) {
+      get(target, prop) {
         if (prop === 'decrypt') {
           return async (): Promise<{ payload: Uint8Array }> => ({
             payload: utf8.encode('no sender'),
           })
         }
-        return Reflect.get(target, prop, receiver)
+        return Reflect.get(target, prop, target)
       },
     })
-    const crypto = createGroupCrypto({ handle: () => senderlessHandle })
+    const crypto = createGroupCrypto({
+      access: simpleHandleAccess({ handle: () => senderlessHandle, adopt: () => {} }),
+    })
     await expect(crypto.unwrap(new Uint8Array([0]))).rejects.toThrow(
       'unwrap: opened frame has no authenticated sender',
     )
@@ -342,10 +355,10 @@ describe('createGroupCrypto', () => {
       const alice = cryptoOver(aliceGroup)
       const bob = cryptoOver(bobGroup)
 
-      const atOne = await alice.crypto.sealEntries(utf8.encode('entries at one'))
+      const { sealed: atOne } = await alice.crypto.sealEntries(utf8.encode('entries at one'))
       const removed = await removeMember(aliceGroup, 1)
       alice.adopt(removed.newGroup)
-      const atTwo = await alice.crypto.sealEntries(utf8.encode('entries at two'))
+      const { sealed: atTwo } = await alice.crypto.sealEntries(utf8.encode('entries at two'))
 
       // The removal boundary, and it rests on this exactly as the app-lane anchor does: Bob keeps
       // epoch 1's key for life and it opens nothing the group sealed after he left.
@@ -370,7 +383,7 @@ describe('createGroupCrypto', () => {
       const { aliceGroup } = await twoMemberGroup('ports-entry-version')
       const alice = cryptoOver(aliceGroup)
 
-      const sealed = await alice.crypto.sealEntries(utf8.encode('versioned'))
+      const { sealed } = await alice.crypto.sealEntries(utf8.encode('versioned'))
       expect(sealed[0]).toBe(1)
       expect(new TextDecoder().decode(await alice.crypto.openEntries(sealed))).toBe('versioned')
 
@@ -392,9 +405,9 @@ describe('createGroupCrypto', () => {
       const bob = cryptoOver(bobGroup)
 
       // Both directions: the key is derived from shared epoch state, not from the sealer.
-      const fromAlice = await alice.crypto.sealEntries(utf8.encode('alice sealed'))
+      const { sealed: fromAlice } = await alice.crypto.sealEntries(utf8.encode('alice sealed'))
       expect(new TextDecoder().decode(await bob.crypto.openEntries(fromAlice))).toBe('alice sealed')
-      const fromBob = await bob.crypto.sealEntries(utf8.encode('bob sealed'))
+      const { sealed: fromBob } = await bob.crypto.sealEntries(utf8.encode('bob sealed'))
       expect(new TextDecoder().decode(await alice.crypto.openEntries(fromBob))).toBe('bob sealed')
     })
 
@@ -403,7 +416,7 @@ describe('createGroupCrypto', () => {
       const alice = cryptoOver(aliceGroup)
       const bob = cryptoOver(bobGroup)
 
-      const sealed = await alice.crypto.sealEntries(utf8.encode('opened twice'))
+      const { sealed } = await alice.crypto.sealEntries(utf8.encode('opened twice'))
       expect(await bob.crypto.openEntries(sealed)).toEqual(await bob.crypto.openEntries(sealed))
 
       // Nothing the open could have spent: an application frame sealed after those opens still

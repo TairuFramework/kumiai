@@ -4,6 +4,7 @@ import { fromUTF, toUTF } from '@sozai/codec'
 
 import {
   AppFrameStorageError,
+  FrameEpochError,
   type GroupCrypto,
   type PendingAppFrame,
   type PendingAppFrames,
@@ -166,21 +167,8 @@ export function fakeEpochSecret(
  * every frame from before it joined. `unwrap` throws for those, which is what a member
  * walking a log full of them has to survive without calling them corrupt.
  *
- * CURRENT EPOCH ONLY, and it must stay that way — but this IS stricter than the real port, and the
- * margin underneath is real. An earlier note here claimed parity on the grounds that
- * `GroupHandle.decrypt` delegates to ts-mls's `processMessage`, which resolves against the current
- * epoch's secret tree alone. That is wrong, and observing it is what corrected it: a real handle
- * advanced by `processMessage` still holds the previous epochs' key material and opens a frame
- * sealed below it (a frame sealed at epoch 3 opens against the same handle at epoch 4; six
- * transitions on, the same read is refused with ts-mls's own "Cannot process message, epoch too
- * old"). Only a handle REPLACED wholesale — adopting the derived handle of a commit this member
- * authored — starts with no history, which is why the case looked like parity.
- *
- * So this is the port contract in `crypto.ts` enforced ABOVE the floor, deliberately: group-rpc
- * may only ever require the current epoch, and reads every retained frame ahead of the commit that
- * ratchets past it. The window is spent by epoch TRANSITIONS rather than by time, so leaning on it
- * would make correctness turn on how far behind a peer happened to fall. Loosening this would let
- * a dependency in that the real port serves only sometimes, which is worse than not at all.
+ * CURRENT EPOCH ONLY: the real adapter now gates past frames before ts-mls's retained-key open,
+ * so this double and the real port report the same epoch refusal.
  *
  * NOT real encryption. All members in a test share `key` so they can decrypt each other
  * at a shared epoch; different keys model different groups.
@@ -324,19 +312,19 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
       0,
       true,
     )
-    if (sealedAt !== epoch) {
-      // This member does not hold that epoch's secret — it is not at that epoch.
-      throw new Error(`cannot open bytes sealed at epoch ${sealedAt}: this member is at ${epoch}`)
-    }
     const framed = xor(bytes.subarray(2), sealedAt)
     const framedView = new DataView(framed.buffer, framed.byteOffset, framed.byteLength)
     const sealedGeneration = framedView.getUint32(0, true)
     const didLen = framedView.getUint16(GENERATION_BYTES, true)
     const aadLen = framedView.getUint32(FRAMED_HEADER_BYTES, true)
     const headerEnd = FRAMED_HEADER_BYTES + AAD_LEN_BYTES
-    // Structure-check first: the declared did/aad lengths, AND the trailing tag, must fit.
+    // Structure-check first: the declared did/aad lengths, AND the trailing tag, must fit. Junk is
+    // never an epoch answer, so it cannot be retained as "ahead".
     if (headerEnd + didLen + aadLen + TAG_BYTES > framed.length) {
       throw new Error('cannot open: not a well-formed sealed frame')
+    }
+    if (sealedAt !== epoch) {
+      throw new FrameEpochError(sealedAt, epoch)
     }
     // Tag-verify BEFORE the expectedAAD compare and BEFORE spending the generation: a tampered or
     // forged frame — including one an attacker rewrote by exploiting the XOR's linearity — must
@@ -371,10 +359,11 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
   const unwrap: GroupCrypto['unwrap'] = (bytes, opts) => {
     if (opts?.frame == null) {
       const { payload, senderDID } = open(bytes, opts, true)
-      return { payload, senderDID }
+      return { payload, senderDID, epoch }
     }
     const pending = options.pending
     if (pending == null) throw new Error('unwrap: pending store required for durable open')
+    const openedAt = epoch
     const { payload, senderDID, spentKey } = open(bytes, opts, false)
     const record = { frame: opts.frame, payload, senderDID }
     return (async () => {
@@ -384,7 +373,7 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
         throw new AppFrameStorageError('failed to persist opened app frame', { cause: error })
       }
       spent.add(spentKey)
-      return { payload, senderDID }
+      return { payload, senderDID, epoch: openedAt }
     })()
   }
   const pending = options.pending
@@ -441,7 +430,7 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
     const sealed = new Uint8Array(ENTRY_TAG_BYTES + ciphertext.length)
     sealed.set(entryTag(ciphertext, key), 0)
     sealed.set(ciphertext, ENTRY_TAG_BYTES)
-    return sealed
+    return { sealed, epoch }
   }
 
   const openEntries: GroupCrypto['openEntries'] = (sealed) => {
@@ -463,7 +452,10 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
     // fell back to a default for an omitted label would hide the exact caller mistake the port's
     // required parameter exists to make loud. See {@link fakeEpochSecret}: its own default label
     // is a convenience for OTHER test call sites, not something this method may lean on.
-    exportSecret: (label, length = secret.length) => fakeEpochSecret(epoch, label, length, secret),
+    exportSecret: (label, length = secret.length) => ({
+      secret: fakeEpochSecret(epoch, label, length, secret),
+      epoch,
+    }),
     wrap,
     unwrap,
     frameEpoch,

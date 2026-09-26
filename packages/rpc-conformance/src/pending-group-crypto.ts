@@ -70,13 +70,31 @@ async function refuses(call: () => unknown): Promise<void> {
 export function testPendingGroupCryptoConformance(params: PendingCryptoConformanceParams): void {
   const { label, createFixture, isStorageError } = params
   describe(`GroupCrypto pending conformance — ${label}`, () => {
+    test('a past frame is refused before a durable open or store write', async () => {
+      const fixture = await createFixture('epoch-refusal')
+      const sealed = await fixture.sender.wrap(bytes.encode('old frame'))
+      const frameEpoch = fixture.sender.frameEpoch(sealed)
+      if (frameEpoch == null) throw new Error('sender did not frame an epoch')
+      await fixture.advance()
+      const calls = fixture.persistCalls()
+      await expect(
+        Promise.resolve().then(() => fixture.receiver.unwrap(sealed, { frame: frame('old') })),
+      ).rejects.toMatchObject({
+        name: 'FrameEpochError',
+        frameEpoch,
+        handleEpoch: frameEpoch + 1,
+      })
+      expect(fixture.persistCalls()).toBe(calls)
+      expect(await fixture.receiver.pending.list()).toEqual([])
+    })
+
     test('durable open saves a record and spent state; replay cannot save another', async () => {
       const { sender, senderDID, receiver, restore, saveHandle } = await createFixture('success')
       const payload = bytes.encode('first')
       const aad = bytes.encode('topic AAD')
       const sealed = await sender.wrap(payload, { aad })
       const ref = frame('first')
-      expect(await receiver.unwrap(sealed, { expectedAAD: aad, frame: ref })).toEqual({
+      expect(await receiver.unwrap(sealed, { expectedAAD: aad, frame: ref })).toMatchObject({
         payload,
         senderDID,
       })
@@ -112,7 +130,7 @@ export function testPendingGroupCryptoConformance(params: PendingCryptoConforman
           expectedAAD: aad,
           frame: frame('wrong-aad'),
         }),
-      ).toEqual({ payload, senderDID: fixture.senderDID })
+      ).toMatchObject({ payload, senderDID: fixture.senderDID })
       expect(fixture.persistCalls()).toBe(calls + 1)
     })
 
