@@ -40,7 +40,7 @@ that package's surface for a filed reason, check this list for a neighbour worth
 
 - A third `GroupPermission` — widening a union consumers exhaustively `switch` over
   (`packages/mls/src/roster.ts:7`, exactly `'admin' | 'member'`). *Left for 0.10 (2026-09-25):* no
-  consumer needs one; see `v0.10-release.md`.
+  consumer needs one (see the mls API hardening item).
 - ~~`processMessage` / `processWelcome` `Uint8Array | unknown` input typing.~~ *Taken 2026-09-25* in
   the 0.10 band.
 - ~~AAD on `GroupHandle.encrypt`/`decrypt` — **blocks** the rpc-side AAD binding; this is the change
