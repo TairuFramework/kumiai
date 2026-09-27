@@ -16,6 +16,7 @@ import {
 } from './crypto.js'
 import { asLogPosition, assertForwardPage, type LogPosition } from './cursor.js'
 import type { BusHandlerMaps } from './handlers.js'
+import { notifyHost } from './host-notice.js'
 import type { HubMux } from './hub-mux.js'
 import { retentionOf } from './protocol.js'
 import { protocolTopic } from './topic.js'
@@ -194,13 +195,13 @@ export function createAppLane(params: AppLaneParams): AppLane {
     const event = blockingFrames.get(key)
     if (event == null || disposed) return
     blockingFrames.delete(key)
-    onAppDeliveryResumed?.(event)
+    notifyHost(onAppDeliveryResumed, event)
   }
   const resumeUnknown = (record: PendingAppFrame): void => {
     const event = reportedUnknown.get(record.frame.id)
     if (event == null || disposed) return
     reportedUnknown.delete(record.frame.id)
-    onAppDeliveryResumed?.(event)
+    notifyHost(onAppDeliveryResumed, event)
   }
   const reportBlocked = (
     protocol: string,
@@ -221,7 +222,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
       ...(reason == null ? {} : { reason }),
     }
     blockingFrames.set(key, event)
-    onAppDeliveryStalled?.({ ...event, error })
+    notifyHost(onAppDeliveryStalled, { ...event, error })
   }
   const reportUnknown = (record: PendingAppFrame): void => {
     if (
@@ -241,7 +242,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
       reason: 'unknown-protocol',
     }
     reportedUnknown.set(record.frame.id, event)
-    onAppDeliveryStalled?.({
+    notifyHost(onAppDeliveryStalled, {
       ...event,
       error: new Error(`unknown app protocol: ${record.frame.protocol}`),
     })
@@ -484,6 +485,8 @@ export function createAppLane(params: AppLaneParams): AppLane {
     await runAppLane(async () => {
       const index = pendingRecords.findIndex((item) => item.frame.id === record.frame.id)
       if (index !== -1) pendingRecords.splice(index, 1)
+      resumeBlocked(record.frame.topicID, record.frame.position)
+      resumeUnknown(record)
       const cursor = cursors.get(record.frame.protocol)
       if (cursor?.topicID !== record.frame.topicID) return
       const frames = segment.get(record.frame.protocol)
@@ -494,8 +497,6 @@ export function createAppLane(params: AppLaneParams): AppLane {
       }
       await advanceCursor(record.frame.protocol, frames)
     })
-    resumeBlocked(record.frame.topicID, record.frame.position)
-    resumeUnknown(record)
   }
 
   const deliverRecord = async (record: PendingAppFrame): Promise<void> => {
@@ -825,8 +826,8 @@ export function createAppLane(params: AppLaneParams): AppLane {
           throw new Error('an earlier pending or sealed frame blocks the durable cursor')
         }
         frame.sealed = { state: 'done' }
-        await advanceCursor(name, frames)
         resumeBlocked(topicID, position)
+        await advanceCursor(name, frames)
       }),
     retryDelivery,
     /**
@@ -894,10 +895,9 @@ export function createAppLane(params: AppLaneParams): AppLane {
       }
     },
     reset: (): void => {
-      for (const event of blockingFrames.values()) {
-        if (!disposed) onAppDeliveryResumed?.(event)
-      }
+      const cleared = [...blockingFrames.values()]
       blockingFrames.clear()
+      if (!disposed) for (const event of cleared) notifyHost(onAppDeliveryResumed, event)
       segment = new Map()
       cursors = new Map()
       // Staged pushes go with the buffer for the same reason: a rotation mid-push carries its own

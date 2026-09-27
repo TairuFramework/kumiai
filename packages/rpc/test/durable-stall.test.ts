@@ -162,8 +162,15 @@ describe('durable storage stall', () => {
     expect(resumed).toHaveBeenCalledTimes(2)
     await lane.deliver()
     expect(notices).toHaveBeenCalledTimes(4)
+    lane.reset()
+    expect(resumed.mock.calls.map(([event]) => event.protocol)).toEqual([
+      'chat',
+      'other',
+      'chat',
+      'other',
+    ])
     lane.dispose()
-    expect(resumed).toHaveBeenCalledTimes(2)
+    expect(resumed).toHaveBeenCalledTimes(4)
 
     const withoutStalled = createAppLane({
       mux: {
@@ -201,8 +208,241 @@ describe('durable storage stall', () => {
     })
     await withoutStalled.deliver()
     withoutStalled.reset()
-    expect(resumed).toHaveBeenCalledTimes(2)
+    expect(resumed).toHaveBeenCalledTimes(4)
     withoutStalled.dispose()
+  })
+
+  test('a completed pending frame resumes even when cursor save rejects', async () => {
+    const position = '000000000001'
+    const sender = createFakeCrypto({ epoch: 2, localDID: 'alice' })
+    const sealed = await sender.wrap(fromUTF('saved'), {
+      aad: encodeAppAAD({ topicID, intent: 'log' }),
+    })
+    const reader = createFakeCrypto({
+      epoch: 1,
+      localDID: 'bob',
+      pending: {
+        async persistOpened() {},
+        async list() {
+          return []
+        },
+        async complete() {},
+      },
+    })
+    const stalled = vi.fn()
+    const resumed = vi.fn()
+    const save = vi.fn(async () => {
+      throw new Error('cursor unavailable')
+    })
+    const lane = createAppLane({
+      mux: {
+        retainTopic() {},
+        async fetchTopic({ after }: { after?: string }) {
+          return {
+            messages: after == null ? [{ sequenceID: position, payload: sealed }] : [],
+            head: position,
+            oldest: position,
+          }
+        },
+      } as never,
+      crypto: reader,
+      localDID: 'bob',
+      protocols: { chat },
+      eventHandlers: new Map(),
+      retentionSeconds: 60,
+      appCursorStore: {
+        async load() {
+          return null
+        },
+        save,
+      },
+      onAppDeliveryStalled: stalled,
+      onAppDeliveryResumed: resumed,
+      anchor: () => ({ epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }),
+      groupID: () => 'group',
+    })
+    await lane.deliver()
+    expect(stalled).toHaveBeenCalledTimes(1)
+    reader.setEpoch(2)
+    await lane.deliver()
+    await vi.waitFor(() => expect(save).toHaveBeenCalledWith(topicID, position))
+    await vi.waitFor(() => expect(lane.pendingRecords()).toHaveLength(0))
+    expect(resumed).toHaveBeenCalledExactlyOnceWith({
+      groupID: 'group',
+      protocol: 'chat',
+      topicID,
+      position,
+      reason: 'future-epoch',
+    })
+    lane.dispose()
+  })
+
+  test('dropping a sealed frame resumes even when cursor save rejects', async () => {
+    const position = '000000000001'
+    const sealed = await createFakeCrypto({ epoch: 65535, localDID: 'alice' }).wrap(
+      fromUTF('future'),
+      { aad: encodeAppAAD({ topicID, intent: 'log' }) },
+    )
+    const stalled = vi.fn()
+    const resumed = vi.fn()
+    const save = vi.fn(async () => {
+      throw new Error('cursor unavailable')
+    })
+    const lane = createAppLane({
+      mux: {
+        retainTopic() {},
+        async fetchTopic({ after }: { after?: string }) {
+          return {
+            messages: after == null ? [{ sequenceID: position, payload: sealed }] : [],
+            head: position,
+            oldest: position,
+          }
+        },
+      } as never,
+      crypto: createFakeCrypto({
+        epoch: 1,
+        localDID: 'bob',
+        pending: {
+          async persistOpened() {},
+          async list() {
+            return []
+          },
+          async complete() {},
+        },
+      }),
+      localDID: 'bob',
+      protocols: { chat },
+      eventHandlers: new Map(),
+      retentionSeconds: 60,
+      appCursorStore: {
+        async load() {
+          return null
+        },
+        save,
+      },
+      onAppDeliveryStalled: stalled,
+      onAppDeliveryResumed: resumed,
+      anchor: () => ({ epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }),
+      groupID: () => 'group',
+    })
+    await lane.deliver()
+    expect(stalled).toHaveBeenCalledTimes(1)
+    await expect(lane.dropFrame(topicID, position)).rejects.toThrow('cursor unavailable')
+    expect(save).toHaveBeenCalledWith(topicID, position)
+    expect(resumed).toHaveBeenCalledExactlyOnceWith({
+      groupID: 'group',
+      protocol: 'chat',
+      topicID,
+      position,
+      reason: 'future-epoch',
+    })
+    lane.dispose()
+  })
+
+  test('a direct lane contains throwing stall and resume observers across reset and drop', async () => {
+    const position = '000000000001'
+    const sealed = await createFakeCrypto({ epoch: 65535, localDID: 'alice' }).wrap(
+      fromUTF('future'),
+      { aad: encodeAppAAD({ topicID, intent: 'log' }) },
+    )
+    const stalled = vi.fn(() => {
+      throw new Error('stall observer failed')
+    })
+    let lane: ReturnType<typeof createAppLane>
+    const resumed = vi.fn(() => {
+      if (resumed.mock.calls.length === 1) lane.reset()
+      throw new Error('resume observer failed')
+    })
+    lane = createAppLane({
+      mux: {
+        retainTopic() {},
+        async fetchTopic({ after }: { after?: string }) {
+          return {
+            messages: after == null ? [{ sequenceID: position, payload: sealed }] : [],
+            head: position,
+            oldest: position,
+          }
+        },
+      } as never,
+      crypto: createFakeCrypto({
+        epoch: 1,
+        localDID: 'bob',
+        pending: {
+          async persistOpened() {},
+          async list() {
+            return []
+          },
+          async complete() {},
+        },
+      }),
+      localDID: 'bob',
+      protocols: { chat },
+      eventHandlers: new Map(),
+      retentionSeconds: 60,
+      appCursorStore: createMemoryAppCursorStore(),
+      onAppDeliveryStalled: stalled,
+      onAppDeliveryResumed: resumed,
+      anchor: () => ({ epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }),
+      groupID: () => 'group',
+    })
+    await lane.deliver()
+    await lane.deliver()
+    expect(stalled).toHaveBeenCalledTimes(1)
+    expect(() => lane.reset()).not.toThrow()
+    expect(resumed).toHaveBeenCalledTimes(1)
+    await lane.deliver()
+    expect(stalled).toHaveBeenCalledTimes(2)
+    await expect(lane.dropFrame(topicID, position)).resolves.toBeUndefined()
+    expect(resumed).toHaveBeenCalledTimes(2)
+    lane.reset()
+    expect(resumed).toHaveBeenCalledTimes(2)
+    lane.dispose()
+  })
+
+  test('disposing with an uncleared stall emits no resume', async () => {
+    const position = '000000000001'
+    const sealed = await createFakeCrypto({ epoch: 65535, localDID: 'alice' }).wrap(
+      fromUTF('future'),
+      { aad: encodeAppAAD({ topicID, intent: 'log' }) },
+    )
+    const stalled = vi.fn()
+    const resumed = vi.fn()
+    const lane = createAppLane({
+      mux: {
+        retainTopic() {},
+        async fetchTopic({ after }: { after?: string }) {
+          return {
+            messages: after == null ? [{ sequenceID: position, payload: sealed }] : [],
+            head: position,
+            oldest: position,
+          }
+        },
+      } as never,
+      crypto: createFakeCrypto({
+        epoch: 1,
+        localDID: 'bob',
+        pending: {
+          async persistOpened() {},
+          async list() {
+            return []
+          },
+          async complete() {},
+        },
+      }),
+      localDID: 'bob',
+      protocols: { chat },
+      eventHandlers: new Map(),
+      retentionSeconds: 60,
+      onAppDeliveryStalled: stalled,
+      onAppDeliveryResumed: resumed,
+      anchor: () => ({ epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }),
+      groupID: () => 'group',
+    })
+    await lane.deliver()
+    expect(stalled).toHaveBeenCalledTimes(1)
+    lane.dispose()
+    lane.reset()
+    expect(resumed).not.toHaveBeenCalled()
   })
 
   test('a far-future frame reports a stall until dropped', async () => {
