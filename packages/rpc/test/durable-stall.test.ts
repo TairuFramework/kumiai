@@ -2,10 +2,11 @@ import { fromUTF } from '@sozai/codec'
 import { describe, expect, test, vi } from 'vitest'
 
 import { encodeAppAAD } from '../src/app-aad.js'
-import type { AppDeliveryStalled } from '../src/app-lane.js'
+import type { AppDeliveryResumed, AppDeliveryStalled } from '../src/app-lane.js'
 import { createAppLane } from '../src/app-lane.js'
 import type { PendingAppFrame } from '../src/crypto.js'
 import { isAppFrameStorageError } from '../src/crypto.js'
+import { adaptBusHandlers } from '../src/handlers.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
@@ -55,6 +56,57 @@ async function publish(
 }
 
 describe('durable storage stall', () => {
+  test('retryAppDelivery pulls a stalled frame immediately without recreating the peer', async () => {
+    const hub = new DurableFakeHub()
+    const store = pendingStore()
+    const stalled = vi.fn()
+    const resumed = vi.fn()
+    const handler = vi.fn()
+    const alice = makeMLSPeer(hub, 'alice', secret, { epoch: 1 })
+    const bob = makeMLSPeer(hub, 'bob', secret, {
+      crypto: createFakeCrypto({ epoch: 1, localDID: 'bob', pending: store.port }),
+      handlers: { 'chat/posted': handler },
+      onAppDeliveryStalled: stalled,
+      onAppDeliveryResumed: resumed,
+    })
+    await bob.peer.protocol('chat').to('alice')
+    hub.detach('bob')
+    const frame = await publish(hub, createFakeCrypto({ epoch: 1, localDID: 'alice' }), 'retry')
+    await alice.peer.commit(buildLedgerCommit(alice, []))
+    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toSatisfy(
+      isAppFrameStorageError,
+    )
+    expect(stalled).toHaveBeenCalledTimes(1)
+    store.setFail(false)
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      await bob.peer.retryAppDelivery(topicID)
+      expect(handler).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(0)
+      await vi.waitFor(() => expect(bob.mls.epoch()).toBe(2))
+      await vi.advanceTimersByTimeAsync(0)
+    } finally {
+      vi.useRealTimers()
+    }
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(1))
+    await vi.waitFor(() =>
+      expect(resumed).toHaveBeenCalledExactlyOnceWith({
+        groupID: expect.any(String),
+        protocol: 'chat',
+        topicID,
+        position: frame.sequenceID,
+      }),
+    )
+    await bob.peer.retryAppDelivery(topicID)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(handler).toHaveBeenCalledTimes(1)
+    expect(resumed).toHaveBeenCalledTimes(1)
+    await bob.peer.dispose()
+    await expect(bob.peer.retryAppDelivery()).resolves.toBeUndefined()
+    expect(handler).toHaveBeenCalledTimes(1)
+    await alice.peer.dispose()
+  })
+
   test('reports each blocked protocol once across repeated drains', async () => {
     const anchor = { epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }
     const topics = ['chat', 'other'].map((name) => protocolTopic(anchor.secret, 1, name))
@@ -65,6 +117,7 @@ describe('durable storage stall', () => {
       ),
     )
     const notices = vi.fn()
+    const resumed = vi.fn()
     const lane = createAppLane({
       mux: {
         retainTopic() {},
@@ -96,13 +149,60 @@ describe('durable storage stall', () => {
       eventHandlers: new Map(),
       retentionSeconds: 60,
       onAppDeliveryStalled: notices,
+      onAppDeliveryResumed: resumed,
       anchor: () => anchor,
       groupID: () => 'group',
     })
     await lane.deliver()
     await lane.deliver()
     expect(notices.mock.calls.map(([event]) => event.protocol)).toEqual(['chat', 'other'])
+    lane.reset()
+    expect(resumed.mock.calls.map(([event]) => event.protocol)).toEqual(['chat', 'other'])
+    lane.reset()
+    expect(resumed).toHaveBeenCalledTimes(2)
+    await lane.deliver()
+    expect(notices).toHaveBeenCalledTimes(4)
     lane.dispose()
+    expect(resumed).toHaveBeenCalledTimes(2)
+
+    const withoutStalled = createAppLane({
+      mux: {
+        retainTopic() {},
+        async fetchTopic({ topicID: requested, after }: { topicID: string; after?: string }) {
+          const index = topics.indexOf(requested)
+          return {
+            messages:
+              after == null && index >= 0
+                ? [{ sequenceID: '000000000001', payload: frames[index] }]
+                : [],
+            head: '000000000001',
+            oldest: '000000000001',
+          }
+        },
+      } as never,
+      crypto: createFakeCrypto({
+        epoch: 1,
+        localDID: 'bob',
+        pending: {
+          async persistOpened() {},
+          async list() {
+            return []
+          },
+          async complete() {},
+        },
+      }),
+      localDID: 'bob',
+      protocols: { chat, other: chat },
+      eventHandlers: new Map(),
+      retentionSeconds: 60,
+      onAppDeliveryResumed: resumed,
+      anchor: () => anchor,
+      groupID: () => 'group',
+    })
+    await withoutStalled.deliver()
+    withoutStalled.reset()
+    expect(resumed).toHaveBeenCalledTimes(2)
+    withoutStalled.dispose()
   })
 
   test('a far-future frame reports a stall until dropped', async () => {
@@ -111,6 +211,7 @@ describe('durable storage stall', () => {
       aad: encodeAppAAD({ topicID, intent: 'log' }),
     })
     const notices = vi.fn()
+    const resumed = vi.fn()
     const cursor = createMemoryAppCursorStore()
     const lane = createAppLane({
       mux: {
@@ -140,9 +241,12 @@ describe('durable storage stall', () => {
       retentionSeconds: 60,
       appCursorStore: cursor,
       onAppDeliveryStalled: notices,
+      onAppDeliveryResumed: resumed,
       anchor: () => ({ epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }),
       groupID: () => 'group',
     })
+    lane.reset()
+    expect(resumed).not.toHaveBeenCalled()
     await lane.deliver()
     await lane.deliver()
     expect(notices).toHaveBeenCalledTimes(1)
@@ -151,6 +255,177 @@ describe('durable storage stall', () => {
     )
     await lane.dropFrame(topicID, '000000000001')
     expect(cursor.stored(topicID)).toBe('000000000001')
+    expect(resumed).toHaveBeenCalledExactlyOnceWith({
+      groupID: 'group',
+      protocol: 'chat',
+      topicID,
+      position: '000000000001',
+      reason: 'future-epoch',
+    })
+    await lane.deliver()
+    expect(resumed).toHaveBeenCalledTimes(1)
+    lane.dispose()
+  })
+
+  test('a future-epoch stall resumes after its record completes', async () => {
+    const sender = createFakeCrypto({ epoch: 2, localDID: 'alice' })
+    const sealed = await sender.wrap(
+      fromUTF(JSON.stringify({ payload: { typ: 'event', prc: 'chat/posted', data: {} } })),
+      { aad: encodeAppAAD({ topicID, intent: 'log' }) },
+    )
+    const reader = createFakeCrypto({
+      epoch: 1,
+      localDID: 'bob',
+      pending: {
+        async persistOpened() {},
+        async list() {
+          return []
+        },
+        async complete() {},
+      },
+    })
+    const stalled = vi.fn()
+    const resumed = vi.fn()
+    const lane = createAppLane({
+      mux: {
+        retainTopic() {},
+        async fetchTopic({ after }: { after?: string }) {
+          return {
+            messages: after == null ? [{ sequenceID: '000000000001', payload: sealed }] : [],
+            head: '000000000001',
+            oldest: '000000000001',
+          }
+        },
+      } as never,
+      crypto: reader,
+      localDID: 'bob',
+      protocols: { chat },
+      eventHandlers: new Map(),
+      retentionSeconds: 60,
+      onAppDeliveryStalled: stalled,
+      onAppDeliveryResumed: resumed,
+      anchor: () => ({ epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }),
+      groupID: () => 'group',
+    })
+    await lane.deliver()
+    expect(stalled).toHaveBeenCalledTimes(1)
+    expect(resumed).not.toHaveBeenCalled()
+    reader.setEpoch(2)
+    await lane.deliver()
+    await vi.waitFor(() =>
+      expect(resumed).toHaveBeenCalledExactlyOnceWith({
+        groupID: 'group',
+        protocol: 'chat',
+        topicID,
+        position: '000000000001',
+        reason: 'future-epoch',
+      }),
+    )
+    await lane.deliver()
+    expect(resumed).toHaveBeenCalledTimes(1)
+    lane.dispose()
+  })
+
+  test('an unknown-protocol stall resumes on drop, and disposal does not resume a stall', async () => {
+    const frame: PendingAppFrame = {
+      frame: { id: 'missing', topicID, protocol: 'missing', segment: 1, position: '000000000002' },
+      payload: fromUTF('saved'),
+      senderDID: 'alice',
+    }
+    const stalled = vi.fn()
+    const resumed = vi.fn()
+    const lane = createAppLane({
+      mux: {
+        retainTopic() {},
+        async fetchTopic() {
+          return { messages: [], head: null, oldest: null }
+        },
+      } as never,
+      crypto: createFakeCrypto({
+        localDID: 'bob',
+        pending: {
+          async persistOpened() {},
+          async list() {
+            return [frame]
+          },
+          async complete() {},
+        },
+      }),
+      localDID: 'bob',
+      protocols: {},
+      eventHandlers: new Map(),
+      retentionSeconds: 60,
+      onAppDeliveryStalled: stalled,
+      onAppDeliveryResumed: resumed,
+      anchor: () => ({ epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }),
+      groupID: () => 'group',
+    })
+    await lane.restore([frame])
+    expect(stalled).toHaveBeenCalledTimes(1)
+    await lane.dropFrame(topicID, frame.frame.position)
+    expect(resumed).toHaveBeenCalledExactlyOnceWith({
+      groupID: 'group',
+      protocol: 'missing',
+      topicID,
+      position: frame.frame.position,
+      reason: 'unknown-protocol',
+    })
+    lane.dispose()
+    expect(resumed).toHaveBeenCalledTimes(1)
+  })
+
+  test('an unknown-protocol stall resumes after registration and delivery', async () => {
+    const record: PendingAppFrame = {
+      frame: { id: 'saved', topicID, protocol: 'missing', segment: 1, position: '000000000003' },
+      payload: fromUTF(JSON.stringify({ payload: { typ: 'event', prc: 'chat/posted', data: {} } })),
+      senderDID: 'alice',
+    }
+    const protocols: Record<string, typeof chat> = {}
+    const events = new Map()
+    const handler = vi.fn()
+    const stalled = vi.fn()
+    const resumed = vi.fn()
+    const lane = createAppLane({
+      mux: {
+        retainTopic() {},
+        async fetchTopic() {
+          return { messages: [], head: null, oldest: null }
+        },
+      } as never,
+      crypto: createFakeCrypto({
+        localDID: 'bob',
+        pending: {
+          async persistOpened() {},
+          async list() {
+            return [record]
+          },
+          async complete() {},
+        },
+      }),
+      localDID: 'bob',
+      protocols,
+      eventHandlers: events,
+      retentionSeconds: 60,
+      onAppDeliveryStalled: stalled,
+      onAppDeliveryResumed: resumed,
+      anchor: () => ({ epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }),
+      groupID: () => 'group',
+    })
+    await lane.restore([record])
+    expect(stalled).toHaveBeenCalledTimes(1)
+    protocols.missing = chat
+    events.set('missing', adaptBusHandlers(chat, { 'chat/posted': handler }).events)
+    await lane.deliver()
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(1))
+    await vi.waitFor(() =>
+      expect(resumed).toHaveBeenCalledExactlyOnceWith({
+        groupID: 'group',
+        protocol: 'missing',
+        topicID,
+        position: record.frame.position,
+        reason: 'unknown-protocol',
+      }),
+    )
     lane.dispose()
   })
   test('reports each blocking frame once, and dropping it resumes the journal-first walk', async () => {
@@ -159,11 +434,15 @@ describe('durable storage stall', () => {
     const notices = vi.fn((_event: AppDeliveryStalled) => {
       throw new Error('observer failed')
     })
+    const resumed = vi.fn((_event: AppDeliveryResumed) => {
+      throw new Error('observer failed')
+    })
     const alice = makeMLSPeer(hub, 'alice', secret, { epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', secret, {
       epoch: 1,
       crypto: createFakeCrypto({ epoch: 1, localDID: 'bob', pending: store.port }),
       onAppDeliveryStalled: notices,
+      onAppDeliveryResumed: resumed,
     })
     await bob.peer.protocol('chat').to('alice')
     hub.detach('bob')
@@ -193,6 +472,12 @@ describe('durable storage stall', () => {
     expect(bob.mls.epoch()).toBe(2)
     expect(bob.appCursorStore.stored(topicID)).toBe(first.sequenceID)
     expect(store.rows.size).toBe(0)
+    expect(resumed).toHaveBeenCalledExactlyOnceWith({
+      groupID: expect.any(String),
+      protocol: 'chat',
+      topicID,
+      position: first.sequenceID,
+    })
 
     const second = await publish(hub, createFakeCrypto({ epoch: 2, localDID: 'alice' }), 'second')
     await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toSatisfy(
