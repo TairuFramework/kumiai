@@ -448,6 +448,71 @@ describe('durable storage stall', () => {
     lane.dispose()
   })
 
+  test('a resume queued behind a cursor save is not delivered after disposal', async () => {
+    const position = '000000000001'
+    const sealed = await createFakeCrypto({ epoch: 2, localDID: 'alice' }).wrap(fromUTF('saved'), {
+      aad: encodeAppAAD({ topicID, intent: 'log' }),
+    })
+    const reader = createFakeCrypto({
+      epoch: 1,
+      localDID: 'bob',
+      pending: {
+        async persistOpened() {},
+        async list() {
+          return []
+        },
+        async complete() {},
+      },
+    })
+    let releaseSave: () => void = () => {}
+    let saving = false
+    const save = vi.fn(async () => {
+      if (saving) return
+      saving = true
+      await new Promise<void>((resolve) => {
+        releaseSave = resolve
+      })
+    })
+    const stalled = vi.fn()
+    const resumed = vi.fn()
+    const lane = createAppLane({
+      mux: {
+        retainTopic() {},
+        async fetchTopic({ after }: { after?: string }) {
+          return {
+            messages: after == null ? [{ sequenceID: position, payload: sealed }] : [],
+            head: position,
+            oldest: position,
+          }
+        },
+      } as never,
+      crypto: reader,
+      localDID: 'bob',
+      protocols: { chat },
+      eventHandlers: new Map(),
+      retentionSeconds: 60,
+      appCursorStore: {
+        async load() {
+          return null
+        },
+        save,
+      },
+      onAppDeliveryStalled: stalled,
+      onAppDeliveryResumed: resumed,
+      anchor: () => ({ epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }),
+      groupID: () => 'group',
+    })
+    await lane.deliver()
+    expect(stalled).toHaveBeenCalledTimes(1)
+    reader.setEpoch(2)
+    void lane.deliver()
+    await vi.waitFor(() => expect(saving).toBe(true))
+    lane.dispose()
+    releaseSave()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(resumed).not.toHaveBeenCalled()
+  })
+
   test('a direct lane contains throwing stall and resume observers across reset and drop', async () => {
     const position = '000000000001'
     const sealed = await createFakeCrypto({ epoch: 65535, localDID: 'alice' }).wrap(

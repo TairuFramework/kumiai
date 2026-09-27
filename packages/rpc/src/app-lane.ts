@@ -192,7 +192,10 @@ export function createAppLane(params: AppLaneParams): AppLane {
   let pendingNotices: Array<() => void> | undefined
   const notifyAppHost = <T>(callback: ((event: T) => void) | undefined, event: T): void => {
     if (callback == null) return
-    const notify = () => notifyHost(callback, event)
+    // A notice queued behind an in-flight save is dropped if the lane is disposed meanwhile.
+    const notify = () => {
+      if (!disposed) notifyHost(callback, event)
+    }
     if (pendingNotices == null) notify()
     else pendingNotices.push(notify)
   }
