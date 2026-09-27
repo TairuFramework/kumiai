@@ -189,19 +189,26 @@ export function createAppLane(params: AppLaneParams): AppLane {
   const blockingFrames = new Map<string, AppDeliveryResumed>()
   let disposed = false
   const reportedUnknown = new Map<string, AppDeliveryResumed>()
+  let pendingNotices: Array<() => void> | undefined
+  const notifyAppHost = <T>(callback: ((event: T) => void) | undefined, event: T): void => {
+    if (callback == null) return
+    const notify = () => notifyHost(callback, event)
+    if (pendingNotices == null) notify()
+    else pendingNotices.push(notify)
+  }
   const blockingKey = (topicID: string, position: string): string => `${topicID}\u0000${position}`
   const resumeBlocked = (topicID: string, position: string): void => {
     const key = blockingKey(topicID, position)
     const event = blockingFrames.get(key)
     if (event == null || disposed) return
     blockingFrames.delete(key)
-    notifyHost(onAppDeliveryResumed, event)
+    notifyAppHost(onAppDeliveryResumed, event)
   }
   const resumeUnknown = (record: PendingAppFrame): void => {
     const event = reportedUnknown.get(record.frame.id)
     if (event == null || disposed) return
     reportedUnknown.delete(record.frame.id)
-    notifyHost(onAppDeliveryResumed, event)
+    notifyAppHost(onAppDeliveryResumed, event)
   }
   const reportBlocked = (
     protocol: string,
@@ -222,7 +229,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
       ...(reason == null ? {} : { reason }),
     }
     blockingFrames.set(key, event)
-    notifyHost(onAppDeliveryStalled, { ...event, error })
+    notifyAppHost(onAppDeliveryStalled, { ...event, error })
   }
   const reportUnknown = (record: PendingAppFrame): void => {
     if (
@@ -242,7 +249,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
       reason: 'unknown-protocol',
     }
     reportedUnknown.set(record.frame.id, event)
-    notifyHost(onAppDeliveryStalled, {
+    notifyAppHost(onAppDeliveryStalled, {
       ...event,
       error: new Error(`unknown app protocol: ${record.frame.protocol}`),
     })
@@ -290,7 +297,18 @@ export function createAppLane(params: AppLaneParams): AppLane {
    */
   let tail: Promise<void> = Promise.resolve()
   const runAppLane = <T>(fn: () => Promise<T>): Promise<T> => {
-    const op = tail.then(fn)
+    const op = tail.then(async () => {
+      const notices: Array<() => void> = []
+      pendingNotices = notices
+      try {
+        return await fn()
+      } finally {
+        // State and cursor writes settle before observers can re-enter this lane.
+        // A reentrant reset can append more notices to this batch.
+        for (let index = 0; index < notices.length; index++) notices[index]?.()
+        pendingNotices = undefined
+      }
+    })
     tail = op.then(
       () => {},
       () => {},
@@ -897,7 +915,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
     reset: (): void => {
       const cleared = [...blockingFrames.values()]
       blockingFrames.clear()
-      if (!disposed) for (const event of cleared) notifyHost(onAppDeliveryResumed, event)
+      if (!disposed) for (const event of cleared) notifyAppHost(onAppDeliveryResumed, event)
       segment = new Map()
       cursors = new Map()
       // Staged pushes go with the buffer for the same reason: a rotation mid-push carries its own

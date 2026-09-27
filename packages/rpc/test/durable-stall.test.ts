@@ -339,6 +339,115 @@ describe('durable storage stall', () => {
     lane.dispose()
   })
 
+  test('a resume observer reset cannot skip the cursor save for a dropped frame', async () => {
+    const position = '000000000001'
+    const sealed = await createFakeCrypto({ epoch: 65535, localDID: 'alice' }).wrap(
+      fromUTF('future'),
+      { aad: encodeAppAAD({ topicID, intent: 'log' }) },
+    )
+    const cursor = createMemoryAppCursorStore()
+    const stalled = vi.fn()
+    let lane: ReturnType<typeof createAppLane>
+    const resumed = vi.fn(() => lane.reset())
+    const fetchTopic = vi.fn(async ({ after }: { after?: string }) => {
+      return {
+        messages: after == null ? [{ sequenceID: position, payload: sealed }] : [],
+        head: position,
+        oldest: position,
+      }
+    })
+    lane = createAppLane({
+      mux: {
+        retainTopic() {},
+        fetchTopic,
+      } as never,
+      crypto: createFakeCrypto({
+        epoch: 1,
+        localDID: 'bob',
+        pending: {
+          async persistOpened() {},
+          async list() {
+            return []
+          },
+          async complete() {},
+        },
+      }),
+      localDID: 'bob',
+      protocols: { chat },
+      eventHandlers: new Map(),
+      retentionSeconds: 60,
+      appCursorStore: cursor,
+      onAppDeliveryStalled: stalled,
+      onAppDeliveryResumed: resumed,
+      anchor: () => ({ epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }),
+      groupID: () => 'group',
+    })
+    await lane.deliver()
+    expect(stalled).toHaveBeenCalledTimes(1)
+    await lane.dropFrame(topicID, position)
+    expect(resumed).toHaveBeenCalledTimes(1)
+    expect(cursor.stored(topicID)).toBe(position)
+    await lane.deliver()
+    expect(fetchTopic).toHaveBeenLastCalledWith(expect.objectContaining({ after: position }))
+    expect(stalled).toHaveBeenCalledTimes(1)
+    lane.dispose()
+  })
+
+  test('a resume observer reset cannot skip the cursor save for a completed record', async () => {
+    const position = '000000000001'
+    const sealed = await createFakeCrypto({ epoch: 2, localDID: 'alice' }).wrap(fromUTF('saved'), {
+      aad: encodeAppAAD({ topicID, intent: 'log' }),
+    })
+    const reader = createFakeCrypto({
+      epoch: 1,
+      localDID: 'bob',
+      pending: {
+        async persistOpened() {},
+        async list() {
+          return []
+        },
+        async complete() {},
+      },
+    })
+    const cursor = createMemoryAppCursorStore()
+    const stalled = vi.fn()
+    let lane: ReturnType<typeof createAppLane>
+    const resumed = vi.fn(() => lane.reset())
+    const fetchTopic = vi.fn(async ({ after }: { after?: string }) => {
+      return {
+        messages: after == null ? [{ sequenceID: position, payload: sealed }] : [],
+        head: position,
+        oldest: position,
+      }
+    })
+    lane = createAppLane({
+      mux: {
+        retainTopic() {},
+        fetchTopic,
+      } as never,
+      crypto: reader,
+      localDID: 'bob',
+      protocols: { chat },
+      eventHandlers: new Map(),
+      retentionSeconds: 60,
+      appCursorStore: cursor,
+      onAppDeliveryStalled: stalled,
+      onAppDeliveryResumed: resumed,
+      anchor: () => ({ epoch: 1, secret: fakeEpochSecret(1, APP_TOPIC_LABEL) }),
+      groupID: () => 'group',
+    })
+    await lane.deliver()
+    expect(stalled).toHaveBeenCalledTimes(1)
+    reader.setEpoch(2)
+    await lane.deliver()
+    await vi.waitFor(() => expect(resumed).toHaveBeenCalledTimes(1))
+    expect(cursor.stored(topicID)).toBe(position)
+    await lane.deliver()
+    expect(fetchTopic).toHaveBeenLastCalledWith(expect.objectContaining({ after: position }))
+    expect(stalled).toHaveBeenCalledTimes(1)
+    lane.dispose()
+  })
+
   test('a direct lane contains throwing stall and resume observers across reset and drop', async () => {
     const position = '000000000001'
     const sealed = await createFakeCrypto({ epoch: 65535, localDID: 'alice' }).wrap(
