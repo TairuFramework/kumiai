@@ -1,5 +1,11 @@
 # @kumiai/rpc
 
+## 0.10.1
+
+### Patch Changes
+
+- Add in-place app delivery retry and resumed notifications
+
 ## 0.10.0
 
 ### Minor Changes
