@@ -1,7 +1,7 @@
 import type { LogHub } from '@kumiai/hub-tunnel'
 
 import type { AppWindowPruned } from '../../src/app-cursor.js'
-import type { AppDeliveryStalled } from '../../src/app-lane.js'
+import type { AppDeliveryResumed, AppDeliveryStalled } from '../../src/app-lane.js'
 import type { PendingCommit } from '../../src/commit.js'
 import type { SubscribeFailure } from '../../src/hub-mux.js'
 import {
@@ -105,6 +105,7 @@ export type MakeMLSPeerOptions = {
   onStrand?: (observation: StrandObservation) => void | Promise<void>
   onRecovery?: (event: RecoveryEvent) => void | Promise<void>
   onAppDeliveryStalled?: (event: AppDeliveryStalled) => void
+  onAppDeliveryResumed?: (event: AppDeliveryResumed) => void
   /** The host's notice that a subscribe was refused or exhausted its retries. */
   onSubscribeFailed?: (failure: SubscribeFailure) => void
   /**
@@ -165,6 +166,9 @@ export function makeMLSPeer(
     ...(options.onRecovery != null ? { onRecovery: options.onRecovery } : {}),
     ...(options.onAppDeliveryStalled != null
       ? { onAppDeliveryStalled: options.onAppDeliveryStalled }
+      : {}),
+    ...(options.onAppDeliveryResumed != null
+      ? { onAppDeliveryResumed: options.onAppDeliveryResumed }
       : {}),
     ...(options.onSubscribeFailed != null ? { onSubscribeFailed: options.onSubscribeFailed } : {}),
     // The restart half of onAccepted, over the same blob — and idempotent, as it must be.

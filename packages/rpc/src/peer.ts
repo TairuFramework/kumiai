@@ -26,7 +26,7 @@ import { createRuntime, type Runtime } from '@sozai/runtime'
 import type { Anchor, AnchorStore } from './anchor.js'
 import { decodeAppAAD, encodeAppAAD } from './app-aad.js'
 import type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
-import { type AppDeliveryStalled, createAppLane } from './app-lane.js'
+import { type AppDeliveryResumed, type AppDeliveryStalled, createAppLane } from './app-lane.js'
 import {
   type AppliedCommit,
   classifyCommit,
@@ -290,6 +290,7 @@ export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefini
   onStrand?: (observation: StrandObservation) => void | Promise<void>
   onRecovery?: (event: RecoveryEvent) => void | Promise<void>
   onAppDeliveryStalled?: (event: AppDeliveryStalled) => void | Promise<void>
+  onAppDeliveryResumed?: (event: AppDeliveryResumed) => void | Promise<void>
   /**
    * Called when the hub definitively refuses to subscribe this peer to a topic — most plausibly a
    * retention setting above the operator's own cap, which a hub refuses rather than clamps.
@@ -382,6 +383,8 @@ export type GroupPeer<Protocols extends Record<string, GroupProtocolDefinition>>
   protocol: <K extends keyof Protocols>(name: K) => ProtocolSurface<Protocols[K]>
   /** Accept loss of one buffered sealed app frame, then resume the journal-first walk. */
   dropAppFrame: (topicID: string, position: string) => Promise<void>
+  /** Schedule an immediate app pull and wake matching delivery workers. No-op after disposal. */
+  retryAppDelivery: (topicID?: string) => Promise<void>
   /**
    * Commit to the group, rebasing until it lands.
    *
@@ -564,6 +567,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     secret: new Uint8Array(),
     epoch: crypto.epoch(),
   }
+  let appNoticeInSerial = false
 
   /**
    * The peer's app lane: the retained-frame buffer, its durable read position, and the drain. It
@@ -581,9 +585,26 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     groupID: () => commitTopicID,
     ...(appCursorStore != null ? { appCursorStore } : {}),
     ...(onAppWindowPruned != null ? { onAppWindowPruned } : {}),
-    onAppDeliveryStalled: (event) => {
-      hostOutbox.push(() => notifyHost(params.onAppDeliveryStalled, event))
-    },
+    ...(params.onAppDeliveryStalled != null
+      ? {
+          onAppDeliveryStalled: (event: AppDeliveryStalled) => {
+            hostOutbox.push(() => {
+              if (!disposed) notifyHost(params.onAppDeliveryStalled, event)
+            })
+          },
+        }
+      : {}),
+    ...(params.onAppDeliveryResumed != null
+      ? {
+          onAppDeliveryResumed: (event: AppDeliveryResumed) => {
+            const notify = () => {
+              if (!disposed) notifyHost(params.onAppDeliveryResumed, event)
+            }
+            if (appNoticeInSerial) hostOutbox.push(notify)
+            else queueMicrotask(notify)
+          },
+        }
+      : {}),
     scheduleDelivery: (start) => {
       hostOutbox.push(start)
     },
@@ -646,6 +667,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   let appPullActive = false
   let appPullTimer: ReturnType<typeof setTimeout> | undefined
   let appPullBackoff = 1000
+  let appPullRetryNow = false
   const armAppPull = (delay: number): void => {
     if (disposed || appPullActive || appPullTimer != null) return
     appPullTimer = setTimeout(() => {
@@ -670,13 +692,27 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           appPullBackoff = Math.min(appPullBackoff * 2, 60_000)
         } finally {
           appPullActive = false
-          if (appPullNeeded && !disposed) armAppPull(retryDelay)
+          if (appPullNeeded && !disposed) {
+            armAppPull(appPullRetryNow ? 0 : retryDelay)
+            appPullRetryNow = false
+          }
         }
       })()
     }, delay)
   }
   const requestAppPull = (): void => {
     appPullNeeded = true
+    armAppPull(0)
+  }
+  const retryAppPull = (): void => {
+    if (disposed) return
+    appPullBackoff = 1000
+    appPullNeeded = true
+    if (appPullTimer != null) {
+      clearTimeout(appPullTimer)
+      appPullTimer = undefined
+    }
+    appPullRetryNow = appPullActive
     armAppPull(0)
   }
 
@@ -1142,9 +1178,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    */
   let commitTail: Promise<void> = Promise.resolve()
   const runSerial = <T>(fn: () => Promise<T>): Promise<T> => {
-    const op = commitTail.then(() => {
+    const op = commitTail.then(async () => {
       journalReplayed = false
-      return fn()
+      appNoticeInSerial = true
+      try {
+        return await fn()
+      } finally {
+        appNoticeInSerial = false
+      }
     })
     commitTail = op.then(
       () => {},
@@ -2660,6 +2701,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
 
   return {
     protocol: protocolMethod,
+    retryAppDelivery: async (topicID) => {
+      if (disposed) return
+      appLane.retryDelivery(topicID)
+      retryAppPull()
+    },
     dropAppFrame: async (topicID, position) => {
       await ready
       assertLive()

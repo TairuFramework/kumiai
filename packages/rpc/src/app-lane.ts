@@ -16,6 +16,7 @@ import {
 } from './crypto.js'
 import { asLogPosition, assertForwardPage, type LogPosition } from './cursor.js'
 import type { BusHandlerMaps } from './handlers.js'
+import { notifyHost } from './host-notice.js'
 import type { HubMux } from './hub-mux.js'
 import { retentionOf } from './protocol.js'
 import { protocolTopic } from './topic.js'
@@ -39,6 +40,8 @@ export type AppDeliveryStalled = {
   error: Error
   reason?: 'unknown-protocol' | 'future-epoch'
 }
+
+export type AppDeliveryResumed = Omit<AppDeliveryStalled, 'error'>
 
 function frameID(topicID: string, bytes: Uint8Array): string {
   const topic = fromUTF(topicID)
@@ -79,6 +82,7 @@ export type AppLaneParams = {
   appCursorStore?: AppCursorStore | undefined
   onAppWindowPruned?: ((event: AppWindowPruned) => void | Promise<void>) | undefined
   onAppDeliveryStalled?: ((event: AppDeliveryStalled) => void) | undefined
+  onAppDeliveryResumed?: ((event: AppDeliveryResumed) => void) | undefined
   /** Start workers after the caller's serialization boundary; direct lanes start immediately. */
   scheduleDelivery?: ((start: () => void) => void) | undefined
   /**
@@ -99,6 +103,8 @@ export type AppLane = {
    */
   deliver: () => Promise<void>
   dropFrame: (topicID: string, position: string) => Promise<void>
+  /** Wake queued delivery for a topic, or every topic, without waiting for completion. */
+  retryDelivery: (topicID?: string) => void
   /** Record a log-class frame the live lane was pushed, at the moment it arrives. */
   note: (name: string, topicID: string, message: StoredMessage, failure: unknown) => void
   /**
@@ -167,6 +173,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
     appCursorStore,
     onAppWindowPruned,
     onAppDeliveryStalled,
+    onAppDeliveryResumed,
     scheduleDelivery = (start) => start(),
     anchor,
     groupID,
@@ -179,31 +186,86 @@ export function createAppLane(params: AppLaneParams): AppLane {
    */
   let segment = new Map<string, Array<AppFrame>>()
   const pendingRecords: Array<PendingAppFrame> = []
-  const blockingFrames = new Map<string, string>()
+  const blockingFrames = new Map<string, AppDeliveryResumed>()
   let disposed = false
-  const reportedUnknown = new Set<string>()
+  const reportedUnknown = new Map<string, AppDeliveryResumed>()
+  let pendingNotices: Array<() => void> | undefined
+  const notifyAppHost = <T>(callback: ((event: T) => void) | undefined, event: T): void => {
+    if (callback == null) return
+    // A notice queued behind an in-flight save is dropped if the lane is disposed meanwhile.
+    const notify = () => {
+      if (!disposed) notifyHost(callback, event)
+    }
+    if (pendingNotices == null) notify()
+    else pendingNotices.push(notify)
+  }
+  const blockingKey = (topicID: string, position: string): string => `${topicID}\u0000${position}`
+  const resumeBlocked = (topicID: string, position: string): void => {
+    const key = blockingKey(topicID, position)
+    const event = blockingFrames.get(key)
+    if (event == null || disposed) return
+    blockingFrames.delete(key)
+    notifyAppHost(onAppDeliveryResumed, event)
+  }
+  const resumeUnknown = (record: PendingAppFrame): void => {
+    const event = reportedUnknown.get(record.frame.id)
+    if (event == null || disposed) return
+    reportedUnknown.delete(record.frame.id)
+    notifyAppHost(onAppDeliveryResumed, event)
+  }
+  const reportBlocked = (
+    protocol: string,
+    topicID: string,
+    position: string,
+    error: Error,
+    reason?: AppDeliveryStalled['reason'],
+  ): void => {
+    const key = blockingKey(topicID, position)
+    if (disposed || onAppDeliveryStalled == null || blockingFrames.has(key)) return
+    const group = groupID()
+    if (group == null) return
+    const event = {
+      groupID: group,
+      protocol,
+      topicID,
+      position,
+      ...(reason == null ? {} : { reason }),
+    }
+    blockingFrames.set(key, event)
+    notifyAppHost(onAppDeliveryStalled, { ...event, error })
+  }
   const reportUnknown = (record: PendingAppFrame): void => {
     if (
       disposed ||
+      onAppDeliveryStalled == null ||
       protocols[record.frame.protocol] != null ||
       reportedUnknown.has(record.frame.id)
     )
       return
     const group = groupID()
     if (group == null) return
-    reportedUnknown.add(record.frame.id)
-    onAppDeliveryStalled?.({
+    const event: AppDeliveryResumed = {
       groupID: group,
       protocol: record.frame.protocol,
       topicID: record.frame.topicID,
       position: record.frame.position,
-      error: new Error(`unknown app protocol: ${record.frame.protocol}`),
       reason: 'unknown-protocol',
+    }
+    reportedUnknown.set(record.frame.id, event)
+    notifyAppHost(onAppDeliveryStalled, {
+      ...event,
+      error: new Error(`unknown app protocol: ${record.frame.protocol}`),
     })
   }
   const workers = new Map<
     string,
-    { running: boolean; requested: boolean; backoff: number; timer?: ReturnType<typeof setTimeout> }
+    {
+      running: boolean
+      requested: boolean
+      retryNow: boolean
+      backoff: number
+      timer?: ReturnType<typeof setTimeout>
+    }
   >()
 
   /** The current segment's read positions, per protocol. See {@link AppCursor}. */
@@ -238,7 +300,18 @@ export function createAppLane(params: AppLaneParams): AppLane {
    */
   let tail: Promise<void> = Promise.resolve()
   const runAppLane = <T>(fn: () => Promise<T>): Promise<T> => {
-    const op = tail.then(fn)
+    const op = tail.then(async () => {
+      const notices: Array<() => void> = []
+      pendingNotices = notices
+      try {
+        return await fn()
+      } finally {
+        // State and cursor writes settle before observers can re-enter this lane.
+        // A reentrant reset can append more notices to this batch.
+        for (let index = 0; index < notices.length; index++) notices[index]?.()
+        pendingNotices = undefined
+      }
+    })
     tail = op.then(
       () => {},
       () => {},
@@ -433,6 +506,8 @@ export function createAppLane(params: AppLaneParams): AppLane {
     await runAppLane(async () => {
       const index = pendingRecords.findIndex((item) => item.frame.id === record.frame.id)
       if (index !== -1) pendingRecords.splice(index, 1)
+      resumeBlocked(record.frame.topicID, record.frame.position)
+      resumeUnknown(record)
       const cursor = cursors.get(record.frame.protocol)
       if (cursor?.topicID !== record.frame.topicID) return
       const frames = segment.get(record.frame.protocol)
@@ -479,7 +554,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
     if (disposed || crypto.pending == null) return
     let worker = workers.get(name)
     if (worker == null) {
-      worker = { running: false, requested: false, backoff: 1000 }
+      worker = { running: false, requested: false, retryNow: false, backoff: 1000 }
       workers.set(name, worker)
     }
     worker.requested = true
@@ -511,7 +586,10 @@ export function createAppLane(params: AppLaneParams): AppLane {
           }
         } finally {
           worker.running = false
-          if (failed) {
+          if (worker.retryNow) {
+            worker.retryNow = false
+            scheduleWorker(name)
+          } else if (failed) {
             const retry = worker.backoff
             worker.backoff = Math.min(worker.backoff * 2, 60_000)
             scheduleWorker(name, retry)
@@ -521,6 +599,34 @@ export function createAppLane(params: AppLaneParams): AppLane {
         }
       })()
     }, delay)
+  }
+
+  const retryDelivery = (topicID?: string): void => {
+    if (disposed) return
+    const names = new Set([
+      ...workers.keys(),
+      ...pendingRecords.map((record) => record.frame.protocol),
+    ])
+    for (const name of names) {
+      if (
+        topicID != null &&
+        cursors.get(name)?.topicID !== topicID &&
+        !pendingRecords.some(
+          (record) => record.frame.protocol === name && record.frame.topicID === topicID,
+        )
+      )
+        continue
+      const worker = workers.get(name)
+      if (worker != null) {
+        worker.backoff = 1000
+        worker.retryNow = worker.running
+        if (worker.timer != null) {
+          clearTimeout(worker.timer)
+          worker.timer = undefined
+        }
+      }
+      scheduleWorker(name)
+    }
   }
 
   /**
@@ -610,12 +716,14 @@ export function createAppLane(params: AppLaneParams): AppLane {
         // Unreadable bytes are dead. Past and future are the open's locked answer, below.
         if (crypto.frameEpoch(sealed) == null) {
           frame.sealed = { state: 'done' }
+          resumeBlocked(cursor.topicID, frame.position)
           continue
         }
         if (crypto.pending != null) {
           const decoded = decodeAppAAD(crypto.frameAAD(sealed) ?? new Uint8Array())
           if (decoded?.topicID !== cursor.topicID || decoded.intent !== 'log') {
             frame.sealed = { state: 'done' }
+            resumeBlocked(cursor.topicID, frame.position)
             continue
           }
         }
@@ -642,38 +750,18 @@ export function createAppLane(params: AppLaneParams): AppLane {
           if (isFrameAhead(error)) {
             // A future claim keeps its bytes and position even when the hub omits its commit.
             if (crypto.pending != null) {
-              const key = `future\u0000${cursor.topicID}\u0000${frame.position}`
-              if (blockingFrames.get(name) !== key) {
-                blockingFrames.set(name, key)
-                const group = groupID()
-                if (group != null)
-                  onAppDeliveryStalled?.({
-                    groupID: group,
-                    protocol: name,
-                    topicID: cursor.topicID,
-                    position: frame.position,
-                    error: new Error(`frame claims future epoch ${error.frameEpoch}`),
-                    reason: 'future-epoch',
-                  })
-              }
+              reportBlocked(
+                name,
+                cursor.topicID,
+                frame.position,
+                new Error(`frame claims future epoch ${error.frameEpoch}`),
+                'future-epoch',
+              )
             }
             continue
           }
           if (crypto.pending != null && isAppFrameStorageError(error)) {
-            const key = `storage\u0000${cursor.topicID}\u0000${frame.position}`
-            if (blockingFrames.get(name) !== key) {
-              blockingFrames.set(name, key)
-              const group = groupID()
-              if (group != null) {
-                onAppDeliveryStalled?.({
-                  groupID: group,
-                  protocol: name,
-                  topicID: cursor.topicID,
-                  position: frame.position,
-                  error,
-                })
-              }
-            }
+            reportBlocked(name, cursor.topicID, frame.position, error)
             throw error
           }
           // Claimed this epoch and the handle refused it — OR its AAD did not match this topic (a
@@ -681,6 +769,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
           // never returns to this epoch and the topic binding never changes. Retained history from
           // before this bind existed is DELIBERATELY invalidated, not silently re-offered.
           frame.sealed = { state: 'done' }
+          resumeBlocked(cursor.topicID, frame.position)
           continue
         }
         if (ref != null) {
@@ -696,6 +785,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
         // Opened, so it is done whatever the payload turns out to be — every path below either
         // delivers it or drops it exactly as the live transport would.
         frame.sealed = { state: 'done' }
+        resumeBlocked(cursor.topicID, frame.position)
         if (events == null) continue
         // This `unwrap` is its own ingress — not fed by `peer.ts`'s normalized inbound path — so
         // the recovered sender is normalized HERE, once, before either use below: `localDID` (the
@@ -742,6 +832,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
         if (unknown != null) {
           await crypto.pending.complete(unknown.frame.id)
           pendingRecords.splice(pendingRecords.indexOf(unknown), 1)
+          resumeUnknown(unknown)
           return
         }
         const entry = [...cursors.entries()].find(([, cursor]) => cursor.topicID === topicID)
@@ -756,8 +847,10 @@ export function createAppLane(params: AppLaneParams): AppLane {
           throw new Error('an earlier pending or sealed frame blocks the durable cursor')
         }
         frame.sealed = { state: 'done' }
+        resumeBlocked(topicID, position)
         await advanceCursor(name, frames)
       }),
+    retryDelivery,
     /**
      * MUST run BEFORE the apply, never after: once the commit applies the handle holds different
      * key material, and those bytes are ciphertext forever. Per-FRAME-EPOCH, not per-rotation:
@@ -823,6 +916,9 @@ export function createAppLane(params: AppLaneParams): AppLane {
       }
     },
     reset: (): void => {
+      const cleared = [...blockingFrames.values()]
+      blockingFrames.clear()
+      if (!disposed) for (const event of cleared) notifyAppHost(onAppDeliveryResumed, event)
       segment = new Map()
       cursors = new Map()
       // Staged pushes go with the buffer for the same reason: a rotation mid-push carries its own

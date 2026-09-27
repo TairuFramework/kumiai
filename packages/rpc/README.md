@@ -94,6 +94,11 @@ throw an error recognized by `isAppFrameStorageError`; the app lane retries with
 past that frame. `onAppDeliveryStalled` reports a persistent storage block, a missing protocol on
 restore, or a future-epoch frame once per blocking frame. A missing-protocol record stays
 pending and can be delivered after that protocol is registered on a later start. An operator can
+call `retryAppDelivery(topicID?)` to reset backoff and schedule an immediate retained pull and
+matching delivery workers without replacing the peer. It returns when the attempt is scheduled.
+`onAppDeliveryResumed` reports the same group, protocol, topic, position, and optional reason once
+the reported block clears through delivery, drop, dead-frame handling, or segment rotation.
+Disposal does not report a resume. An operator can
 accept a frame's loss with `dropAppFrame(topicID, position)`; it can explicitly discard a
 missing-protocol record, but refuses a pending frame under a registered protocol. It also refuses
 to drop a sealed frame behind an earlier pending or sealed frame, because the durable cursor cannot
