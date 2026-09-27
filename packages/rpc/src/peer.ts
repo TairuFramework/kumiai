@@ -588,14 +588,18 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     ...(params.onAppDeliveryStalled != null
       ? {
           onAppDeliveryStalled: (event: AppDeliveryStalled) => {
-            hostOutbox.push(() => notifyHost(params.onAppDeliveryStalled, event))
+            hostOutbox.push(() => {
+              if (!disposed) notifyHost(params.onAppDeliveryStalled, event)
+            })
           },
         }
       : {}),
     ...(params.onAppDeliveryResumed != null
       ? {
           onAppDeliveryResumed: (event: AppDeliveryResumed) => {
-            const notify = () => notifyHost(params.onAppDeliveryResumed, event)
+            const notify = () => {
+              if (!disposed) notifyHost(params.onAppDeliveryResumed, event)
+            }
             if (appNoticeInSerial) hostOutbox.push(notify)
             else queueMicrotask(notify)
           },

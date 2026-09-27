@@ -903,6 +903,94 @@ describe('durable storage stall', () => {
     await bob.peer.dispose()
   })
 
+  test('does not deliver an outbox stall notice after peer disposal', async () => {
+    const hub = new DurableFakeHub()
+    const stalled = vi.fn()
+    const bob = makeMLSPeer(hub, 'bob', secret, {
+      crypto: createFakeCrypto({ epoch: 1, localDID: 'bob', pending: pendingStore().port }),
+      onAppDeliveryStalled: stalled,
+    })
+    await bob.peer.protocol('chat').to('alice')
+    hub.detach('bob')
+    await publish(hub, createFakeCrypto({ epoch: 65535, localDID: 'alice' }), 'future')
+
+    let enterBuild: (() => void) | undefined
+    const building = new Promise<void>((resolve) => {
+      enterBuild = resolve
+    })
+    let releaseBuild: (() => void) | undefined
+    const held = new Promise<void>((resolve) => {
+      releaseBuild = resolve
+    })
+    const stopped = new Error('stop before publishing')
+    const commit = bob.peer.commit(async () => {
+      enterBuild?.()
+      await held
+      throw stopped
+    })
+    const rejected = expect(commit).rejects.toBe(stopped)
+    await building
+    expect(stalled).not.toHaveBeenCalled()
+    const disposing = bob.peer.dispose()
+    releaseBuild?.()
+    await rejected
+    await disposing
+    expect(stalled).not.toHaveBeenCalled()
+  })
+
+  test('does not deliver a queued resume microtask after peer disposal', async () => {
+    const hub = new DurableFakeHub()
+    const store = pendingStore()
+    const stalled = vi.fn()
+    const resumed = vi.fn()
+    let releaseHandler: (() => void) | undefined
+    const held = new Promise<void>((resolve) => {
+      releaseHandler = resolve
+    })
+    const handler = vi.fn(async () => held)
+    const alice = makeMLSPeer(hub, 'alice', secret, { epoch: 1 })
+    const bob = makeMLSPeer(hub, 'bob', secret, {
+      crypto: createFakeCrypto({ epoch: 1, localDID: 'bob', pending: store.port }),
+      handlers: { 'chat/posted': handler },
+      onAppDeliveryStalled: stalled,
+      onAppDeliveryResumed: resumed,
+    })
+    await bob.peer.protocol('chat').to('alice')
+    hub.detach('bob')
+    await publish(hub, createFakeCrypto({ epoch: 1, localDID: 'alice' }), 'resume')
+    await alice.peer.commit(buildLedgerCommit(alice, []))
+    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toSatisfy(
+      isAppFrameStorageError,
+    )
+    expect(stalled).toHaveBeenCalledTimes(1)
+
+    store.setFail(false)
+    await bob.peer.retryAppDelivery(topicID)
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(1))
+    const queued: Array<VoidFunction> = []
+    const realQueueMicrotask = globalThis.queueMicrotask
+    const queueMicrotaskSpy = vi
+      .spyOn(globalThis, 'queueMicrotask')
+      .mockImplementation((callback) => queued.push(callback))
+    try {
+      releaseHandler?.()
+      await vi.waitFor(() => expect(store.rows.size).toBe(0))
+      await vi.waitFor(() => expect(queued).toHaveLength(1))
+      expect(resumed).not.toHaveBeenCalled()
+      const disposing = bob.peer.dispose()
+      queueMicrotaskSpy.mockRestore()
+      for (const callback of queued) realQueueMicrotask(callback)
+      await disposing
+      await new Promise<void>((resolve) => realQueueMicrotask(resolve))
+      expect(resumed).not.toHaveBeenCalled()
+    } finally {
+      queueMicrotaskSpy.mockRestore()
+      releaseHandler?.()
+      await bob.peer.dispose()
+      await alice.peer.dispose()
+    }
+  })
+
   test('refuses a pending frame and keeps its record and cursor', async () => {
     const hub = new DurableFakeHub()
     const store = pendingStore()
