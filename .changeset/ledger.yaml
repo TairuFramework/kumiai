@@ -293,6 +293,10 @@
   dir: packages/rpc
   intents:
     - soft-wasps-reflect
+"@kumiai/rpc@0.10.2":
+  dir: packages/rpc
+  intents:
+    - quiet-pandas-wait
 "@kumiai/rpc@0.5.0":
   dir: packages/rpc
   intents:

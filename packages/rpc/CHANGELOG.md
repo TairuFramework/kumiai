@@ -1,5 +1,11 @@
 # @kumiai/rpc
 
+## 0.10.2
+
+### Patch Changes
+
+- Prevent commit deliveries from blocking peer initialization. Let disposal bypass stalled readiness while waiting for in-flight host ledger bootstraps, and stop seed work after disposal.
+
 ## 0.10.1
 
 ### Patch Changes
