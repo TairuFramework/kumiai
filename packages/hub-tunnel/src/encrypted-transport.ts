@@ -19,6 +19,7 @@ import {
 export type EncryptedHubTunnelTransportParams = HubTunnelTransportParams & {
   encryptor: Encryptor
   groupID: string
+  drainTimeoutMs?: number
 }
 
 type WrapHubParams = {
@@ -27,9 +28,19 @@ type WrapHubParams = {
   groupID: string
   onEvent?: ObservabilityEventListener
   onEncryptError: (error: EncryptError) => void
+  drainTimeoutMs: number
+  drains: Set<Promise<void>>
 }
 
-function wrapHub({ hub, encryptor, groupID, onEvent, onEncryptError }: WrapHubParams): MailboxHub {
+function wrapHub({
+  hub,
+  encryptor,
+  groupID,
+  onEvent,
+  onEncryptError,
+  drainTimeoutMs,
+  drains,
+}: WrapHubParams): MailboxHub {
   const wrapped: MailboxHub = {
     async publish(params: MailboxPublishParams): Promise<{ sequenceID: string }> {
       let ciphertextBytes: Uint8Array
@@ -64,21 +75,32 @@ function wrapHub({ hub, encryptor, groupID, onEvent, onEncryptError }: WrapHubPa
     receive(subscriberDID: string, options?: HubReceiveOptions): HubReceiveSubscription {
       const inner = hub.receive(subscriberDID, options)
       const innerIterator = inner[Symbol.asyncIterator]()
+      const ackedOnDecrypt = new Set<string>()
+      const inFlightDecrypts = new Set<Promise<void>>()
+      let closing = false
+      let closePromise: Promise<IteratorResult<StoredMessage>> | undefined
 
       // A hub's ack may be synchronous and throw synchronously, before `Promise.resolve` sees it —
       // so the rejection guard alone is not enough (same fix as `ackUpstream` in `rpc/src/hub-mux.ts`).
-      const ackHandled = (sequenceID: string): void => {
+      const ackHandled = (sequenceID: string, decrypted = false): void => {
+        if (ackedOnDecrypt.delete(sequenceID)) return
+        if (inner.ack == null) return
+        if (decrypted) ackedOnDecrypt.add(sequenceID)
         try {
-          void Promise.resolve(inner.ack?.(sequenceID)).catch(() => {})
-        } catch {
-          // ignore
+          void Promise.resolve(inner.ack(sequenceID)).catch((error: unknown) => {
+            onEvent?.({ type: 'ack-failed', sequenceID, error })
+          })
+        } catch (error) {
+          onEvent?.({ type: 'ack-failed', sequenceID, error })
         }
       }
 
       const iterator: AsyncIterator<StoredMessage> = {
         async next(): Promise<IteratorResult<StoredMessage>> {
           while (true) {
+            if (closing) return { value: undefined, done: true }
             const result = await innerIterator.next()
+            if (closing) return { value: undefined, done: true }
             if (result.done) {
               return { value: undefined as unknown as StoredMessage, done: true }
             }
@@ -108,9 +130,20 @@ function wrapHub({ hub, encryptor, groupID, onEvent, onEncryptError }: WrapHubPa
               ackHandled(message.sequenceID)
               continue
             }
+            const decryptWork = (async () => {
+              const plaintext = await encryptor.decrypt(fromB64(envelope.ciphertext))
+              // The receive key is spent now, even if the pump cannot deliver this frame.
+              ackHandled(message.sequenceID, true)
+              return plaintext
+            })()
+            const settled = decryptWork.then(
+              () => {},
+              () => {},
+            )
+            inFlightDecrypts.add(settled)
             let plaintext: Uint8Array
             try {
-              plaintext = await encryptor.decrypt(fromB64(envelope.ciphertext))
+              plaintext = await decryptWork
             } catch (cause) {
               const err = new DecryptError('decrypt failed', { cause })
               onEvent?.({ type: 'decrypt-failed', error: err })
@@ -121,6 +154,12 @@ function wrapHub({ hub, encryptor, groupID, onEvent, onEncryptError }: WrapHubPa
               // would discard a frame a later key could open).
               ackHandled(message.sequenceID)
               continue
+            } finally {
+              inFlightDecrypts.delete(settled)
+            }
+            if (closing) {
+              ackedOnDecrypt.delete(message.sequenceID)
+              return { value: undefined, done: true }
             }
             const decrypted: StoredMessage = {
               sequenceID: message.sequenceID,
@@ -136,8 +175,40 @@ function wrapHub({ hub, encryptor, groupID, onEvent, onEncryptError }: WrapHubPa
           }
         },
         return(): Promise<IteratorResult<StoredMessage>> {
-          innerIterator.return?.()
-          return Promise.resolve({ value: undefined as unknown as StoredMessage, done: true })
+          if (closePromise != null) return closePromise
+          closing = true
+          closePromise = (async () => {
+            if (inFlightDecrypts.size > 0) {
+              let timer: ReturnType<typeof setTimeout> | undefined
+              const expiry = new Promise<'expired'>((resolve) => {
+                timer = setTimeout(() => resolve('expired'), drainTimeoutMs)
+              })
+              const outcome = await Promise.race([
+                Promise.allSettled([...inFlightDecrypts]).then(() => 'drained' as const),
+                expiry,
+              ])
+              if (timer != null) clearTimeout(timer)
+              if (outcome === 'expired') {
+                onEvent?.({ type: 'decrypt-drain-timeout', timeoutMs: drainTimeoutMs })
+              }
+            }
+            ackedOnDecrypt.clear()
+            try {
+              // A wire hub may leave return() parked behind an idle next().
+              const result = innerIterator.return?.()
+              if (result != null) void Promise.resolve(result).catch(() => {})
+            } catch {
+              // Closing is best effort.
+            }
+            return { value: undefined, done: true }
+          })()
+          const drain = closePromise.then(() => {})
+          drains.add(drain)
+          void drain.then(
+            () => drains.delete(drain),
+            () => drains.delete(drain),
+          )
+          return closePromise
         },
       }
 
@@ -162,7 +233,16 @@ function wrapHub({ hub, encryptor, groupID, onEvent, onEncryptError }: WrapHubPa
 export function createEncryptedHubTunnelTransport<R, W>(
   params: EncryptedHubTunnelTransportParams,
 ): TransportType<R, W> {
-  const { hub, encryptor, groupID, onEvent, signal: externalSignal, ...rest } = params
+  const {
+    hub,
+    encryptor,
+    groupID,
+    onEvent,
+    signal: externalSignal,
+    drainTimeoutMs = 5000,
+    ...rest
+  } = params
+  const drains = new Set<Promise<void>>()
 
   const internalController = new AbortController()
   if (externalSignal != null) {
@@ -184,15 +264,22 @@ export function createEncryptedHubTunnelTransport<R, W>(
     encryptor,
     groupID,
     onEvent,
+    drainTimeoutMs,
+    drains,
     onEncryptError: (err) => {
       internalController.abort(err)
     },
   })
 
-  return createHubTunnelTransport<R, W>({
+  const transport = createHubTunnelTransport<R, W>({
     ...rest,
     hub: wrappedHub,
     signal: internalController.signal,
     onEvent,
   })
+  // Enkaku awaits disposed listeners; the pump starts return() in its earlier listener.
+  transport.events.on('disposed', async () => {
+    await Promise.allSettled([...drains])
+  })
+  return transport
 }
