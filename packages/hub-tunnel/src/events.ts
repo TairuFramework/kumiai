@@ -11,6 +11,8 @@ export type FrameDroppedReason =
 export type ObservabilityEvent =
   | { type: 'decrypt-failed'; error: DecryptError }
   | { type: 'envelope-decode-failed'; error: EnvelopeDecodeError }
+  | { type: 'decrypt-drain-timeout'; timeoutMs: number }
+  | { type: 'ack-failed'; sequenceID: string; error: unknown }
   | { type: 'frame-dropped'; reason: FrameDroppedReason }
 
 export type ObservabilityEventListener = (event: ObservabilityEvent) => void
