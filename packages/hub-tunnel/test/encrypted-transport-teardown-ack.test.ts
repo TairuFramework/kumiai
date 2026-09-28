@@ -114,6 +114,7 @@ function transport(
     inboxCapacity?: number
     drainTimeoutMs?: number
     onEvent?: (event: ObservabilityEvent) => void
+    signal?: AbortSignal
   } = {},
 ) {
   return createEncryptedHubTunnelTransport({
@@ -130,6 +131,7 @@ function transport(
     inboxCapacity: options.inboxCapacity,
     drainTimeoutMs: options.drainTimeoutMs,
     onEvent: options.onEvent,
+    signal: options.signal,
   })
 }
 
@@ -157,6 +159,25 @@ describe('encrypted tunnel acknowledges spent receive keys', () => {
     await replacement.dispose()
     expect(redelivered).toEqual([])
     expect(acked).toEqual(['in-flight'])
+  })
+
+  test('a decryptor that aborts the transport synchronously is still drained before close', async () => {
+    const { hub, acked, deliver, returnedWithAcks } = fixture()
+    const controller = new AbortController()
+    const release = gate()
+    const receiver = transport(hub, {
+      signal: controller.signal,
+      decrypt: (bytes) => {
+        controller.abort()
+        return release.promise.then(() => bytes)
+      },
+    })
+    deliver('aborting', frame(0))
+    await vi.waitFor(() => expect(controller.signal.aborted).toBe(true))
+    release.release()
+    await vi.waitFor(() => expect(acked).toEqual(['aborting']))
+    expect(returnedWithAcks).toEqual([['aborting']])
+    await receiver.dispose()
   })
 
   test('acks the decrypted frame that overflows the inbox', async () => {

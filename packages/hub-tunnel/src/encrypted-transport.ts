@@ -130,17 +130,20 @@ function wrapHub({
               ackHandled(message.sequenceID)
               continue
             }
+            // Registered before the decryptor runs: a decryptor that synchronously triggers teardown
+            // must still find its own work in the drain.
+            let markSettled = () => {}
+            const settled = new Promise<void>((resolve) => {
+              markSettled = resolve
+            })
+            inFlightDecrypts.add(settled)
             const decryptWork = (async () => {
               const plaintext = await encryptor.decrypt(fromB64(envelope.ciphertext))
               // The receive key is spent now, even if the pump cannot deliver this frame.
               ackHandled(message.sequenceID, true)
               return plaintext
             })()
-            const settled = decryptWork.then(
-              () => {},
-              () => {},
-            )
-            inFlightDecrypts.add(settled)
+            void decryptWork.then(markSettled, markSettled)
             let plaintext: Uint8Array
             try {
               plaintext = await decryptWork
