@@ -136,6 +136,10 @@
   dir: packages/hub-tunnel
   intents:
     - durable-app-delivery
+"@kumiai/hub-tunnel@0.10.1":
+  dir: packages/hub-tunnel
+  intents:
+    - hub-tunnel-ack-on-decrypt
 "@kumiai/hub-tunnel@0.5.0":
   dir: packages/hub-tunnel
   intents:
