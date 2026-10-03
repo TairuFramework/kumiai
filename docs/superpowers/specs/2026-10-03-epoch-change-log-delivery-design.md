@@ -17,8 +17,7 @@ Consumer impact: kubun's `delegation:revoke` is a log event. Losing it fails ope
 - **Ephemeral delivery stays best-effort** for a receiver that has not applied the commit, whose new subscription is not yet acknowledged, or whose walk passes more than one epoch before its listeners register. Pull is the fallback.
 - **Over-approximation.** The at-risk check counts any commit-topic movement after the floor, including history, poison and non-advancing frames. The cost is a hold until a covered walk certifies the entry, or at most one extra duplicate if a ratchet comes first.
 - **Backpressure, not loss.** When the outbox is at the host's cap, `dispatch` rejects. Nothing is silently dropped.
-- **A retention gap costs a rejoin.** If the hub removed a commit-topic frame after the peer's cursor that the peer never read, the peer strands and rejoins at once (§1), even when the removed frames were not commits. A rejoin is an external commit, so it changes the tree for the whole group. The peer takes the hub's `gap` on trust; a hub can already withhold frames, so a false `gap` adds a forced rejoin and nothing else. Removal of the cursor's own frame is not a gap and costs nothing.
-- **A fresh joiner has no cursor to measure a gap from.** Its first walk reads from the oldest retained frame. If the hub ever removed frames on the topic, that walk is uncovered and does not strand (§1), and the joiner's at-risk entries wait for its first ratchet. This is the only hold that remains.
+- **A retention gap costs a rejoin.** If the hub removed a commit-topic frame after the peer's cursor that the peer never read, the peer strands and rejoins at once (§1), even when the removed frames were not commits. A rejoin is an external commit, so it changes the tree for the whole group. The peer takes the hub's `gap` on trust; a hub can already withhold frames, so a false `gap` adds a forced rejoin and nothing else. Removal of the cursor's own frame is not a gap and costs nothing. A fresh joiner whose first walk is uncovered rejoins only if it has an entry at risk (§4).
 - **Stale admission at enqueue.** The enqueue gate reads a published snapshot that can lag an adoption in progress (§3). A sender renewed by that adoption can be refused once, and a sender lapsed by it is held after enqueue.
 - **Plaintext at rest.** The outbox holds app event plaintext until delivery is proven (§5).
 
@@ -58,7 +57,7 @@ The peer tracks `floor = { epoch: number, position: LogPosition | null, covered:
 
 A page is **covered** when it had an `after` cursor and reported `gap: false`. A walk is covered when every page it fetched was covered. An empty page whose `head` is beyond its cursor and which reports no gap breaks the hub contract, and the walk treats it as a gap. The cursor is exclusive, so a page whose cursor is the floor's own frame stays covered when that frame aged out. A covered walk read every commit-topic frame after its starting cursor.
 
-The peer keeps `floor.covered`. A ratchet sets it to true, since the floor is then a frame the peer applied. Any uncovered walk sets it to false until the next ratchet. While it is false, no walk raises the floor or certifies a publication (§4). With a cursor, an uncovered page strands the peer (below) and recovery ratchets it. The one uncovered walk that does not strand is a fetch with no cursor. That is a fresh joiner's first walk, which cannot tell frames removed before its join from frames removed after it, and stranding there would rejoin every member that joins a trimmed group.
+The peer keeps `floor.covered`. A ratchet sets it to true, since the floor is then a frame the peer applied. Any uncovered walk sets it to false until the next ratchet. While it is false, no walk raises the floor or certifies a publication (§4). With a cursor, an uncovered page strands the peer (below) and recovery ratchets it. The one uncovered walk that does not strand is a fetch with no cursor. That is a fresh joiner's first walk, which cannot tell frames removed before its join from frames removed after it. Stranding there would make every member that joins a trimmed group rejoin. The worker rejoins instead, and only when an entry needs it (§4).
 
 **A gap strands the peer.** A page with a cursor that reports `gap: true` means a commit-topic frame this peer never read is gone, so the peer cannot prove it reaches the head. The walk then:
 
@@ -138,6 +137,15 @@ The pass stops at the first entry it cannot publish (held, failed or barrier). A
 Every commit ordered before the publication was then read by the walk and applied or rejected at E. The worker re-evaluates after every reconciliation, ratcheting or not. That clears false positives from history, poison and non-advancing frames, which a probe alone would keep flagging under traffic.
 
 **Retention gap.** A page that reports a gap certifies nothing. It strands the peer, and the rejoin runs at once (§1). While the peer is stranded the pass holds at step 2. The worker keeps its backoff timer armed, so its catch-up pull re-raises the heal if an attempt failed. The rejoin's ratchet re-seals every held entry at the rejoined epoch, and the entries are then delivered like any other.
+
+**Uncovered floor, no cursor.** An entry can also go uncertified without a strand: a fresh joiner's first walk had no cursor and reported a gap, so `floor.covered` is false. The worker rejoins when all of these hold after a catch-up pull:
+
+- an entry has an acknowledged publication at the current epoch;
+- the probe flagged it at risk;
+- the walk that followed was complete, did not strand and did not ratchet;
+- `floor.covered` is false.
+
+The worker sets `healRequested` and calls `healIfRequested` once its pull has released the lane, with trigger `'automatic'`. It does not set `stranded`, because the peer has seen no evidence that it is off the group's line, so `commit()` stays open. The rejoin ratchets, the floor becomes the rejoin's position with `covered: true`, and the entry is re-sealed and delivered. A failed attempt is retried on the worker's backoff while the same conditions hold. A ratchet from an ordinary commit ends the need first, since it also sets `floor.covered`. A joiner with nothing at risk never rejoins.
 
 **Triggers.** The worker runs on enqueue, on probe result, at init after the anchor repair and seed pull (§5), on every lane operation's completion, and on its backoff timer.
 
@@ -241,6 +249,8 @@ New clauses in `@kumiai/hub-conformance`, run with separate publisher and reader
 
 The probe (§4) depends on clause 1 from commit topic to app topic. The receiver's pre-apply drain depends on it the other way round. The covered walk and the gap strand (§1) depend on clause 4, and the one-value implementation of clause 4 depends on clause 3. The memory store and both doubles already satisfy clause 3: they trim by a `before` bound, the memory store purges at one retention per topic, and both doubles evict oldest first.
 
+**App lane pruned-window notice.** `reportPrunedWindow` (`app-lane.ts:332-346`) decides with `oldest > cursor`, from the first page of a segment's first pull (`app-lane.ts:418-429`). It has the same flaw as the old covered walk. A cursor frame that aged out with nothing behind it fires a notice, and its doc admits the over-report (`app-lane.ts:327-331`, `app-cursor.ts:36-49`). A window pruned down to an empty log is never reported, because a null `oldest` returns early (`app-lane.ts:339`). The notice now fires exactly when that first page reports `gap: true`. Its `after` is the stored cursor there, since `cursor.fetched` is null on the first pull (`app-lane.ts:415-416`). `AppWindowPruned.oldest` (`app-cursor.ts:62-63`) becomes `string | null`, and it is null when the whole window after the cursor aged out. With no cursor, still no notice.
+
 Clause 4 goes into both suites. `testHubStoreConformance` (`hub-conformance/src/index.ts:87`) drives it with trim, purge and depth. `testLogHubConformance` (`log-hub.ts:224`), whose hub exposes no trim, drives it with depth eviction (`log-hub.ts:409-436`). `ConformanceLogHub.fetchTopic` (`log-hub.ts:48-53`) gains `gap`.
 
 ### 8. Contract docs
@@ -277,71 +287,73 @@ Each test must fail with its fix removed.
 13. **Only the floor's own commit aged out.** Bob's floor commit is trimmed, and nothing after it is. A poison frame from another member follows, and frames on other topics sit between the two positions, so `oldest` is beyond the cursor. The page reports `gap: false`, the walk is covered, and the entry is retired with no re-seal and no rejoin. Under the old `oldest` rule this test holds F.
 14. **Recovery fails, then lands.** As in 8, with no responder online. `onRecovery` reports `failed`, nothing is published, and the entry stays in the outbox. The worker's backoff catch-up re-raises the heal. Once alice is back online the rejoin lands and alice receives F′.
 15. **Removed behind a gap.** Bob is removed while detached, and the remove commit is trimmed before he pulls. Bob strands, and every rejoin fails because no responder seals a GroupInfo for a leaf outside its tree. Bob publishes nothing, his outbox keeps the entry, and `onStrand` and each recovery failure reach the host. When the host clears the outbox the promise ends with the host's own clear, and nothing is published.
-16. **Fresh joiner on a trimmed topic.** Dave joins by Welcome after early commits were trimmed. His first walk has no cursor and reports a gap. He does not strand and does not rejoin, and his at-risk entry waits for his first ratchet.
+16. **Fresh joiner with an entry at risk.** Dave joins by Welcome after early commits were trimmed, and his first walk has no cursor and reports a gap. He dispatches F, and a poison frame lands on the commit topic after F's publish. The probe flags F, the walk does not ratchet, and the uncovered floor triggers a rejoin with no timer. F′ is sealed at the rejoined epoch, and alice receives it. Dave never strands, and `commit()` stays open throughout.
+17. **Fresh joiner with nothing at risk.** The same join, and Dave's dispatched F probes safe, or he dispatches nothing. He does not rejoin.
 
 **Ordering (I3):**
 
-17. F1 is at risk, then F2 is dispatched after catch-up. Alice receives F1′ before F2.
-18. **Same-epoch at-risk replacement.** F1′ at E+1 is at risk because C2 is already on the hub. F2 dispatched now is published after F1′ and re-sealed after F1″, and a receiver at E+2 sees F1″ before F2′.
-19. **Concurrent dispatch, delayed first insert.** Two dispatches are issued without awaiting, and the first `put` is delayed. The second `put` resolves and kicks the worker, which publishes nothing until the first resolves. Publications follow call order.
-20. **Rejected insert.** The first `put` rejects. Its `dispatch` rejects, its reservation is released, and the second entry is published.
-21. **Simultaneous calls at the cap.** With one slot free, two dispatches are issued without awaiting. Exactly one resolves, and the other rejects with `AppOutboxFullError`.
-22. **Adoption callback awaiting dispatch (R-I9).** Run in `@kumiai/integration-tests` against the real `createGroupMLS` with `simpleHandleAccess` (as `tests/integration/test/app-lane-e2e.ts:189-209` wires them), not the RPC double. A host adoption callback inside `replace` awaits `GroupMLS.sendAdmission()` and then `dispatch`. Both resolve, the adoption completes, and the admission reports the pre-adoption epoch with its own verdict. After `replace` resolves, it reports the new epoch. The queued entry is sealed only at an epoch whose admission matches the ciphertext epoch.
+18. F1 is at risk, then F2 is dispatched after catch-up. Alice receives F1′ before F2.
+19. **Same-epoch at-risk replacement.** F1′ at E+1 is at risk because C2 is already on the hub. F2 dispatched now is published after F1′ and re-sealed after F1″, and a receiver at E+2 sees F1″ before F2′.
+20. **Concurrent dispatch, delayed first insert.** Two dispatches are issued without awaiting, and the first `put` is delayed. The second `put` resolves and kicks the worker, which publishes nothing until the first resolves. Publications follow call order.
+21. **Rejected insert.** The first `put` rejects. Its `dispatch` rejects, its reservation is released, and the second entry is published.
+22. **Simultaneous calls at the cap.** With one slot free, two dispatches are issued without awaiting. Exactly one resolves, and the other rejects with `AppOutboxFullError`.
+23. **Adoption callback awaiting dispatch (R-I9).** Run in `@kumiai/integration-tests` against the real `createGroupMLS` with `simpleHandleAccess` (as `tests/integration/test/app-lane-e2e.ts:189-209` wires them), not the RPC double. A host adoption callback inside `replace` awaits `GroupMLS.sendAdmission()` and then `dispatch`. Both resolve, the adoption completes, and the admission reports the pre-adoption epoch with its own verdict. After `replace` resolves, it reports the new epoch. The queued entry is sealed only at an epoch whose admission matches the ciphertext epoch.
 
 **Wakeups and failures (I2):**
 
-23. **Delayed put.** A `put` resolves after the sender has ratcheted and finished its lane operation. The entry is still published at the current epoch and delivered.
-24. **Failed probe, failed write and failed remove**, each with no further commit. The entry is retried on backoff and delivered, or removed, without another lane trigger.
-25. **Publish fails after the prepared write (R-I5).** `lastAttempt` is written and the hub publish then fails, with no later commit. The entry is published again at the same epoch on backoff and delivered.
-26. **Backpressure.** At `appOutboxLimit`, `dispatch` rejects with `AppOutboxFullError`, and nothing already queued is dropped.
+24. **Delayed put.** A `put` resolves after the sender has ratcheted and finished its lane operation. The entry is still published at the current epoch and delivered.
+25. **Failed probe, failed write and failed remove**, each with no further commit. The entry is retried on backoff and delivered, or removed, without another lane trigger.
+26. **Publish fails after the prepared write (R-I5).** `lastAttempt` is written and the hub publish then fails, with no later commit. The entry is published again at the same epoch on backoff and delivered.
+27. **Backpressure.** At `appOutboxLimit`, `dispatch` rejects with `AppOutboxFullError`, and nothing already queued is dropped.
 
 **Crash (I1, I8):**
 
-27. **Crash after an at-risk publish.** Bob is killed before his walk. On restart with the same outbox, alice receives F.
-28. **Crash before publish.** The entry is written but not published. On restart, alice receives F.
-29. **Crash between probe and publish.** C lands after recovery's catch-up and before its publish. The post-publish probe flags the entry, and it is re-sealed and delivered.
-30. **Crash before anchor save.** Bob applies a roster commit, and the handle is durable but the anchor save is lost. On restart the anchor is repaired before the worker runs, and alice receives the recovered entry on the new segment. Without the repair, the test fails.
-31. **Rotation record, advance not landed.** A crash before `processCommit` persists leaves `pending` at the current epoch. The anchor is unchanged and the record is dropped.
-32. **Throwing adoption, then another advance (R-I7).** A roster-changing replacement is persisted and the host's adoption callback throws. A non-rotating advance follows, then a restart. The pending record still carries the roster from before the roster change, the anchor is captured at the current epoch, and alice receives the recovered entry. Without restart, the non-rotating advance's resolution captures it in-process.
+28. **Crash after an at-risk publish.** Bob is killed before his walk. On restart with the same outbox, alice receives F.
+29. **Crash before publish.** The entry is written but not published. On restart, alice receives F.
+30. **Crash between probe and publish.** C lands after recovery's catch-up and before its publish. The post-publish probe flags the entry, and it is re-sealed and delivered.
+31. **Crash before anchor save.** Bob applies a roster commit, and the handle is durable but the anchor save is lost. On restart the anchor is repaired before the worker runs, and alice receives the recovered entry on the new segment. Without the repair, the test fails.
+32. **Rotation record, advance not landed.** A crash before `processCommit` persists leaves `pending` at the current epoch. The anchor is unchanged and the record is dropped.
+33. **Throwing adoption, then another advance (R-I7).** A roster-changing replacement is persisted and the host's adoption callback throws. A non-rotating advance follows, then a restart. The pending record still carries the roster from before the roster change, the anchor is captured at the current epoch, and alice receives the recovered entry. Without restart, the non-rotating advance's resolution captures it in-process.
 
 **Membership and lapse (I10):**
 
-33. **Removed sender.** Bob is removed while detached and dispatches at E, then pulls. He publishes nothing after the pull, his outbox is empty, and `onAppOutboxCleared` fires.
-34. **Removed member.** Carol is removed and bob re-seals. Carol cannot open F′, and F′ is on the new segment topic.
-35. **Lapsed sender.** `dispatch` from a lapsed leaf rejects with `SendNotAdmissibleError` whose `reason` is `'lapsed'`.
-36. **Lapse after enqueue.** A commit lapses bob after enqueue. The entry is held, and nothing is published. After renewal it is published and delivered. If bob's leaf is instead removed as lapsed, the queue is cleared with a notice.
+34. **Removed sender.** Bob is removed while detached and dispatches at E, then pulls. He publishes nothing after the pull, his outbox is empty, and `onAppOutboxCleared` fires.
+35. **Removed member.** Carol is removed and bob re-seals. Carol cannot open F′, and F′ is on the new segment topic.
+36. **Lapsed sender.** `dispatch` from a lapsed leaf rejects with `SendNotAdmissibleError` whose `reason` is `'lapsed'`.
+37. **Lapse after enqueue.** A commit lapses bob after enqueue. The entry is held, and nothing is published. After renewal it is published and delivered. If bob's leaf is instead removed as lapsed, the queue is cleared with a notice.
 
 **Subscribe and mux (I4, I5):**
 
-37. **Mux hand-off.** A frame pushed on a retained topic before any listener exists reaches the first listener registered within TTL, and is acked once, after that listener acks.
-38. **Delayed hub subscription.** A frame published before the new subscription is acknowledged is not delivered live, and a frame published after it is.
-39. **Bounds pinned.** Two commits in one walk, and a walk past the TTL. The intermediate-epoch frame is not delivered. These tests document the narrowed promise.
+38. **Mux hand-off.** A frame pushed on a retained topic before any listener exists reaches the first listener registered within TTL, and is acked once, after that listener acks.
+39. **Delayed hub subscription.** A frame published before the new subscription is acknowledged is not delivered live, and a frame published after it is.
+40. **Bounds pinned.** Two commits in one walk, and a walk past the TTL. The intermediate-epoch frame is not delivered. These tests document the narrowed promise.
 
 **Hub:**
 
-40. **Conformance clauses** run against the memory store and `DurableFakeHub`, with separate publisher and reader clients, and with a trim and a purge between publish and fetch. Clause 3 checks `oldest` and every later log frame after each removal.
-41. **Gap clause (clause 4), `testHubStoreConformance`** (`@kumiai/hub-conformance`, run by `hub-server/test/conformance.test.ts` and by kubun's store). Each case uses trim, then purge, then depth eviction as the deleter:
+41. **Conformance clauses** run against the memory store and `DurableFakeHub`, with separate publisher and reader clients, and with a trim and a purge between publish and fetch. Clause 3 checks `oldest` and every later log frame after each removal.
+42. **Gap clause (clause 4), `testHubStoreConformance`** (`@kumiai/hub-conformance`, run by `hub-server/test/conformance.test.ts` and by kubun's store). Each case uses trim, then purge, then depth eviction as the deleter:
     - **Trimmed behind the cursor.** Publish a, b, c. Remove b. A fetch after a returns `[c]` with `gap: true`.
     - **Only the cursor's frame removed.** Publish a, a frame on another topic, a mailbox frame on this topic, then b. Remove a. A fetch after a returns `[b]` with `oldest` beyond `a` and `gap: false`.
     - **Empty page.** Publish a, b. Remove both. A fetch after a is empty with `head` b and `gap: true`. A fetch after b reports `gap: false`.
     - **No cursor.** `gap` is true once any log frame of the topic was removed, and false before.
     - **Mailbox removal.** An acked or aged-out mailbox frame never sets `gap`.
     - **Stored state.** After later publishes, a fetch from the old cursor still reports `gap: true`.
-42. **Gap clause, `testLogHubConformance`**, by depth eviction, against `FakeHub` and `DurableFakeHub` (`rpc/test/hub-conformance.test.ts`) and over the wire (`hub-server/test/log-hub-conformance.test.ts`): the trimmed-behind-cursor, cursor-only and empty-page cases above.
-43. **Gap crosses the wire** (`@kumiai/integration-tests`, `hub-log-lane.test.ts`): `gap` from the memory store reaches a `HubClient` reader through the handler.
+43. **Gap clause, `testLogHubConformance`**, by depth eviction, against `FakeHub` and `DurableFakeHub` (`rpc/test/hub-conformance.test.ts`) and over the wire (`hub-server/test/log-hub-conformance.test.ts`): the trimmed-behind-cursor, cursor-only and empty-page cases above.
+44. **App lane notice.** On an app topic, the cursor's own frame aged out with nothing behind it: no `onAppWindowPruned`, which fires today. Frames after the cursor aged out while later ones remain: one notice with `oldest` set. Every frame after the cursor aged out: one notice with `oldest` null, which today is silent. In `@kumiai/rpc` (`peer-app-cursor.test.ts`).
+45. **Gap crosses the wire** (`@kumiai/integration-tests`, `hub-log-lane.test.ts`): `gap` from the memory store reaches a `HubClient` reader through the handler.
 
 Existing init-race tests (`peer-delivery-before-ready.test.ts`, `hub-mux-ack-refcount.test.ts`) may need updating for §6.
 
 ## Release
 
 - Patch versions for `@kumiai/rpc`, `@kumiai/mls-rpc` (`sendAdmission`), `@kumiai/hub-protocol` and `@kumiai/hub-server` (`gap`), `@kumiai/hub-client` and `@kumiai/hub-tunnel` (the `gap` result field) and `@kumiai/hub-conformance` (clause 4).
-- Breaking for `GroupPeerMLSParams` (`AppOutbox`, `appOutboxLimit`, the anchor-slot rotation record), `GroupMLS` (`sendAdmission`), `HandleAccess` (`admission`), `StrandKind` (`'retention-gap'`), and every `HubStore` and `LogHub` (`gap` is required). kubun is the single consumer.
+- Breaking for `GroupPeerMLSParams` (`AppOutbox`, `appOutboxLimit`, the anchor-slot rotation record), `GroupMLS` (`sendAdmission`), `HandleAccess` (`admission`), `StrandKind` (`'retention-gap'`), `AppWindowPruned` (`oldest` nullable), and every `HubStore` and `LogHub` (`gap` is required). kubun is the single consumer.
 - `gap` is required in the wire result schema. A missing `gap` is unsafe either way: read as true, every walk rejoins; read as false, a real gap certifies. The walk therefore fails a fetch whose reply has no boolean `gap`, as it fails any fetch, and the pull retries. The hub is deployed before or with its peers.
 - Released together with `feat/bound-leaf-lifecycle`, which defines lapse.
 - kubun then:
   - bumps;
   - implements `gap` in its own hub store. kubun's relay takes its handlers, and with them the wire field, from `@kumiai/hub-server` (`create-relay.ts:9`). Its `HubStore`, however, is kubun's SQL store (`packages/hub/src/hub-store.ts:148`), not the memory store, so the bump alone does not provide `gap`. The store keeps a per-topic `removed_through` on `kubun_hub_topics`, raised atomically with each log-class delete in `deleteFrames` (`hub-store.ts:175`), which trim, purge and depth eviction all use. `fetchTopic` reads it with `head` and the page in one snapshot; today those are separate statements outside a transaction (`hub-store.ts:428-490`). The store then passes clause 4 in `packages/hub/test/conformance.test.ts`;
-  - forwards `gap` in its client `LogHub` adapter (`plugin-p2p/src/hub/hub-like.ts:931`, next to `oldest`), and handles the `'retention-gap'` strand kind;
+  - forwards `gap` in its client `LogHub` adapter (`plugin-p2p/src/hub/hub-like.ts:931`, next to `oldest`), and handles the `'retention-gap'` strand kind and accepts a null `AppWindowPruned.oldest` (its handler at `plugin-p2p/src/groups/group-peer-manager.ts:1111` only logs it);
   - adds the outbox store and its migration;
   - extends its anchor store for the rotation record;
   - publishes `admission()` from its registry `HandleAccess` alongside `epoch()`, without taking the handle lock;
