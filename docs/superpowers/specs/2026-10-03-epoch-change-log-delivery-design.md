@@ -82,7 +82,7 @@ The worker never passes an unresolved reservation: it works only entries whose `
 
 `dispatch` never waits on a lane operation, the commit mutex, the worker or the MLS port's handle lock, so a host may await it from inside an epoch or adoption callback. The host's `put` must not wait on the host's own in-flight adoption transaction either.
 
-**Snapshot timing.** `HandleAccess.admission()`, which backs `sendAdmission()`, is published together with `epoch()`, from the same handle state and at the same points. In `simpleHandleAccess` those are the end of `mutate` and `open`, and the return of `replace`'s adoption callback (`access.ts:58`, `:65`, `:71`). A `dispatch` inside an adoption callback therefore sees the pre-adoption state. If that state is admissible and the adopted one is not, the entry is held (§4). If it is lapsed and the adopted one is renewed, the caller is refused and may retry once the callback returns.
+**Snapshot timing.** `HandleAccess.admission()`, which backs `sendAdmission()`, is published together with `epoch()`, from the same handle state and at the same points. In `simpleHandleAccess` those are the end of `mutate` and `open`, and the return of `replace`'s adoption callback (`access.ts:58`, `:65`, `:71`). A `dispatch` inside an adoption callback therefore sees the pre-adoption state. If that state is admissible and the adopted one is not, the entry is held (§4). If it is lapsed and the adopted one is renewed (a `dispatch` from inside the adoption of the sender's own renewal), the caller is refused; the host dispatches after adoption.
 
 **What the promise means.** Resolved: the event is durable and the promise in the Goal applies. Rejected: the event was not accepted, and nothing will be published.
 
@@ -171,9 +171,9 @@ export type AppOutbox = {
 
 A pure recompute from the handle alone is impossible: the rotation decision needs the pre-advance roster, which the advance destroys.
 
-**`HandleAccess`** in `@kumiai/mls-rpc` gains a synchronous `admission(): SendAdmission`, published with `epoch()` initially and at each publication point (§3). `simpleHandleAccess` reads it from the handle there. This requires the companion spec's `GroupHandle.sendAdmission()` to be synchronous, which a pure function of the tree allows.
+**`HandleAccess`** in `@kumiai/mls-rpc` gains a synchronous `admission(): SendAdmission`, published with `epoch()` initially and at each publication point (§3). `simpleHandleAccess` reads it from the handle there. The companion spec makes `GroupHandle.sendAdmission()` synchronous and precomputed per epoch; `replace` publishes after the host adoption callback resolves, as `confirmAdopted()` does for control events.
 
-**`GroupMLS.sendAdmission`** is new (§2). `@kumiai/mls-rpc` implements it as `access.admission()`, never through `access.read`: `read` queues behind a `replace` that is awaiting the host's adoption callback (`access.ts:28-38`, `:47`, `:61-65`), so a `dispatch` awaited inside that callback would deadlock.
+**`GroupMLS.sendAdmission`** is new (§2). It is synchronous, returns `access.admission()`, and never goes through `HandleAccess.read`, `mutate`, `replace` or `open`: those serialise with `replace`, which awaits the host's adoption callback (`access.ts:28-40`, `:61-66`), so a `dispatch` awaited inside that callback would deadlock. Inside an adoption callback it reports the epoch being left, paired with its own verdict; the worker's seal-time check (§2) makes that safe. The stated cost: a `dispatch` from inside the adoption of the sender's own renewal is refused, and the host dispatches after adoption.
 
 These changes are breaking for `GroupPeerMLSParams`, `GroupMLS` and `HandleAccess`. They ship as a patch version, because kubun is the single consumer.
 
@@ -253,7 +253,7 @@ Each test must fail with its fix removed.
 15. **Concurrent dispatch, delayed first insert.** Two dispatches are issued without awaiting, and the first `put` is delayed. The second `put` resolves and kicks the worker, which publishes nothing until the first resolves. Publications follow call order.
 16. **Rejected insert.** The first `put` rejects. Its `dispatch` rejects, its reservation is released, and the second entry is published.
 17. **Simultaneous calls at the cap.** With one slot free, two dispatches are issued without awaiting. Exactly one resolves, and the other rejects with `AppOutboxFullError`.
-18. **Adoption callback awaiting dispatch.** Run in `@kumiai/integration-tests` against the real `createGroupMLS` with `simpleHandleAccess` (as `tests/integration/test/app-lane-e2e.ts:189-209` wires them), not the RPC double. A host adoption callback inside `replace` awaits `dispatch`. It resolves with the pre-adoption snapshot, and the commit completes.
+18. **Adoption callback awaiting dispatch (R-I9).** Run in `@kumiai/integration-tests` against the real `createGroupMLS` with `simpleHandleAccess` (as `tests/integration/test/app-lane-e2e.ts:189-209` wires them), not the RPC double. A host adoption callback inside `replace` awaits `GroupMLS.sendAdmission()` and then `dispatch`. Both resolve, the adoption completes, and the admission reports the pre-adoption epoch with its own verdict. After `replace` resolves, it reports the new epoch. The queued entry is sealed only at an epoch whose admission matches the ciphertext epoch.
 
 **Wakeups and failures (I2):**
 
