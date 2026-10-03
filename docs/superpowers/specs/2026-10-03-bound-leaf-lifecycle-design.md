@@ -34,6 +34,8 @@ In scope, in `@kumiai/mls`:
 - an invite path without role entries, and speculative helper handles that leave the live handle untouched until adoption
 - the commit-pipeline gates these need, and the issuing and lifecycle API.
 
+In scope, in `@kumiai/mls-rpc` and `@kumiai/rpc`: automatic recovery that rejoins a lifecycle group with a bound leaf, and asks the host for a fresh binding when the cached one is unusable (§5).
+
 In scope, in `@kokuin/capability`: a child capability may not outlive its parent.
 
 Out of scope:
@@ -279,7 +281,24 @@ mintTrustedGrant(params: {
 
 **Group setup:**
 - `createGroup(identity, groupID, { controller?: ControllerBinding, ... })` builds a bound creator leaf (today it is always floating, `group-create.ts:58`) and writes `GroupAnchor.controller = binding.id`. That makes it a lifecycle group.
-- `createKeyPackageBundle`, `createLastResortKeyPackageBundle` and `joinGroupExternal` take `controller?: ControllerBinding` (today `group-credential.ts:54`, `group-welcome.ts:237`).
+- `createKeyPackageBundle`, `createLastResortKeyPackageBundle` and `joinGroupExternal` take `controller?: ControllerBinding` (today `group-credential.ts:54`, `group-welcome.ts:237`). In a lifecycle group, `joinGroupExternal` without `controller` throws `LeafBindingError` (`floating-refused`) instead of building a floating leaf.
+
+**Recovery in a lifecycle group** (`@kumiai/mls-rpc`, `@kumiai/rpc`). Automatic recovery rejoins by external commit (`attemptBody`, `rpc/src/peer.ts:2402`). The adapter's `applyRecovery` passes only `group.credential` (`mls-rpc/src/mls.ts:315-321`), so `joinGroupExternal` builds a floating leaf (`mls/src/group-welcome.ts:236-240`), which survivors refuse. In a lifecycle group:
+- **Binding.** The replacement leaf always carries a complete `ControllerBinding`. The adapter reads the own leaf's current binding from the handle's tree and reuses it when it passes the recovery check. Otherwise it asks the host.
+- **Recovery check.** A candidate binding passes when it names the anchor's H with fixed identity (entry check 6); it passes the external-join authoring check (`iat ≤ now < exp`, §2); its `exp` exceeds the tree time and its generation meets the floor; its leaf token `iat` is at least the own leaf's (check 7); and its attested time does not lower tree time, since an external commit carries no `clock` entry (§4). These are the survivors' entry checks. Before the request they run on the handle's own, possibly stale, state. After the GroupInfo they run on the exact state survivors judge against (below). A cached binding expired by wall clock but live in tree time would pass survivors, but the authoring check still forbids reusing it.
+- **Port.** `GroupMLSParams`, the params of `createGroupMLS` (`mls-rpc/src/mls.ts:79-91`, `:189`), gains:
+  ```ts
+  recoveryBinding?: (request: { groupID: string; controllerID: string; current: ControllerBinding }) => Promise<ControllerBinding | null>
+  ```
+  kumiai calls it only in a lifecycle group, only when the cached binding fails the check, and at most once per attempt. `null`, an absent port, or a returned binding that fails the check all mean "none". The binding is held for that attempt only. Once the rejoin lands, it is the own leaf's binding, which later recoveries reuse.
+- **Before the request.** The `GroupMLS` port (`rpc/src/crypto.ts:367`) gains `prepareRecovery(): Promise<'ready' | 'renewal-required'>`. `attemptBody` calls it before minting the request (`peer.ts:2445`). It picks the binding against the handle's own tree and registry. `'renewal-required'` ends the attempt before any GroupInfo is requested. Outside lifecycle groups it always answers `'ready'`.
+- **The reply carries the ledger.** Today the sealed reply frames only the attestation and the GroupInfo (`mls/src/recovery.ts:553`, `:674`), and the rejoiner fetches the ledger only after its commit is published (`peer.ts:2555-2558`). So it cannot see a `timeFloor`, `genFloor` or deny entry raised during its gap. In a lifecycle group, `sealGroupInfo` also frames the responder's whole ordered ledger, the same tokens `sealLedger` seals, and the attestation's digest covers both. `openSealedGroupInfo` requires the ledger to fold to the head in the GroupInfo's GroupContext, or the reply is refused like any untrusted reply (`null`). The reply already goes only to a requester with a leaf in the responder's tree, as `sealLedger` does, so the ledger reaches no one new.
+- **After the GroupInfo.** `applyRecovery` (`crypto.ts:468`) re-runs the check against the GroupInfo's tree and the registry folded from the reply's ledger. That is exactly the pre-commit state survivors judge the external commit against: if another commit lands first, the compare-and-set fails and the GroupInfo is discarded (`peer.ts:2479`, existing). If the held binding fails, it asks the host once (unless the host supplied it in this attempt). With no usable binding, it returns `{ renewalRequired: true }`, so its result widens to `PendingRecovery | { renewalRequired: true } | null`. The peer then ends the attempt instead of re-requesting (`peer.ts:2465`).
+- **Outcome.** `RecoveryFailureReason` (`peer.ts:223-228`) gains `'renewal-required'`, reported through `onRecovery` as `phase: 'failed'`. It differs from `no-responder` and `deadline`: no responder can fix it.
+- **No retry loop.** The peer sets `renewalRequired`. While it is set, no automatic trigger starts an attempt or requests a GroupInfo: not `healIfRequested` (`peer.ts:2642-2652`), and not the delivery worker's backoff or its uncovered-floor rejoin (epoch-change spec). The strand and the held outbox entries stay, as for any failed recovery.
+- **Resume.** The host calls `recover()` (`peer.ts:2629`, trigger `'consumer'`) once it can supply a fresh binding. That clears the flag and runs one attempt, which calls `recoveryBinding()` again. A ratchet by any other path also clears it. A `recover()` with nothing new costs one port call and no GroupInfo request.
+- **Survivors.** Nothing new. The external-commit rule (§4) judges the replacement against the pre-commit tree and floors. A floating replacement fails entry check 1. One lapsed in tree time fails check 3. One below the floor fails check 4. One that lowers tree time fails the no-`clock` rule.
+- **Why the ledger must ride the reply.** Without it, a rejoin that survivors reject splits the group silently. Survivors refuse it like any refused commit and step over it (`mls-rpc/src/apply-commit.ts:119-132`, `peer.ts:1713-1716`). The rejoiner has already adopted its handle once the hub accepted the commit (`peer.ts:2544-2545`). Its bootstrap then succeeds, because the external commit moved no head. The next honest commit is framed at the rejoiner's old epoch, at a later position, so the rejoiner classifies it as the winning side of a fork and steps over it (`classify.ts:282`). It then seals app frames at an epoch no other member holds, until a commit two epochs ahead strands it (`classify.ts:256`). Checking against the exact registry closes this: a binding survivors would refuse reports `'renewal-required'` and is never published.
 
 **Invites in a lifecycle group.** Today the invite path needs a role entry three times: the inviter guard (`group-commit.ts:114-116`), the recipient binding (`:400-412`) and the Welcome check (`group-welcome.ts:53-69`). A lifecycle group rejects role entries, so each is replaced:
 - `Invite` gains `recipientDID`. The invite still carries the group's whole ledger, and the joiner still checks it against the authenticated head, so the history reaches the joiner without any new role grant.
@@ -343,37 +362,26 @@ That is the only kokuin change. Deterministic verification needs nothing new: `v
   - old peers silently ignore `GroupAnchor.controller`, so they would apply none of the lifecycle rules;
   - pinning the issuer rejects any self-issued leaf capability;
   - the time-free auth service accepts expired existing leaves that old peers refuse.
-- API breaks for the consumer: `Invite.recipientDID`, `createInvite` without `permission` in lifecycle groups, the synchronous `HandleAccess.admission()`, `confirmAdopted()`, and helpers no longer emitting before adoption.
+- API breaks for the consumer: `Invite.recipientDID`, `createInvite` without `permission` in lifecycle groups, the synchronous `HandleAccess.admission()`, `confirmAdopted()`, helpers no longer emitting before adoption, and recovery: `GroupMLSParams.recoveryBinding`, `GroupMLS.prepareRecovery`, the widened `applyRecovery` result, `RecoveryFailureReason` `'renewal-required'`, and a sealed GroupInfo reply that carries the ledger in lifecycle groups (a wire change, so responders and rejoiners must run the same release). These add to the `@kumiai/mls-rpc` and `@kumiai/rpc` patches the epoch-change spec releases.
 - The consumer adopts the kokuin and kumiai releases together.
 
 ## Consumer contract
 
-This release ships with the epoch-change delivery spec (`kumiai.worktrees/epoch-change-log-delivery/docs/superpowers/specs/2026-10-03-epoch-change-log-delivery-design.md`), and kubun adopts both in one bump. The list below is every kubun obligation from both. Paths: `C` is kubun's spec (`kubun-wt/catalog-sync/docs/superpowers/specs/2026-09-27-catalog-sync-design.md`), `P` its plan (`.../plans/2026-09-27-catalog-sync.md`). The controller amends kubun; this spec does not.
+This release ships with the epoch-change delivery spec (`kumiai.worktrees/epoch-change-log-delivery/docs/superpowers/specs/2026-10-03-epoch-change-log-delivery-design.md`), and kubun adopts both in one bump. Paths: `C` is kubun's spec (`kubun-wt/catalog-sync/docs/superpowers/specs/2026-09-27-catalog-sync-design.md`), `P` its plan (`.../plans/2026-09-27-catalog-sync.md`). `C` names the controller C and the group H (`C:854`). Below, H is the controller, as in the rest of this spec.
 
-**A. Own-agents groups (`C` §5, plan row 85 at `P:85`, Tasks 13a+13c).**
-1. **Membership** (`C:864-866`). Effective membership is a live leaf bound to H in the tree, which any member verifies from the tree. The current-head check stays as a local refusal of sessions and requests, never as an MLS acceptance input.
-2. **Registry and unbinding** (`C:867-873`). No device registers at join: `register`, `add`, `label` and capability revoke are rejected in lifecycle groups. Unbinding is H's authority key signing `rev x=D`. Any member that obtains the log calls `publishRevokeProof` in every own-agents group, including groups where D has no leaf.
-3. **Broadcast hold** (`C:874-879`). The hold is removed. A member that sees `rev x=D` commits D's removal before its next broadcast to H. Local refusal of D stays.
-4. **Unresolved head and advisory notice** (`C:880-883`). Denial on an unresolved head stays local and scoped to H. "Admission requires a freshly resolved head" becomes a local precondition of the admitting member, never an MLS gate; "labelling" means kubun's `ownAgents.group` record label, not the kumiai `label` op. The advisory head notice stays `announceControllerBeacon`, which lifecycle groups accept and which gates nothing.
-5. **Creation** (`C:861`, `C:986`). `createOwnAgentsGroup` passes the creator's `ControllerBinding`, so the anchor's controller equals the creator's leaf controller. A joiner's Welcome check authenticates the anchor. The label is required in both the prose and the GraphQL signature.
-6. **Admin semantics.** Every member may admit agents and enact kubun's own ledger entries. No member may remove another except by proof, lapse or self-removal. kubun must not offer discretionary removal in own-agents groups.
-7. **Three separate contracts** (`C:893-912`), which §5 must not merge:
-   - **Leaf binding.** The handoff delivers a leaf capability from H or from T. It is reusable until `exp` and is what kumiai checks. A trusted agent is not a revocation signer.
-   - **Group invite consent.** The per-group one-time join capability stays kubun's. The admitting member verifies it and that its ID is unconsumed, builds the invite with `recipientDID` and a kubun entry recording the consumed ID in `entries`, and commits it with `commitInvite`, so admission and consumption land in one commit. A losing concurrent admission sees the ID consumed on retry.
-   - **Advisory controller head.** The beacon (item 4) only prompts re-resolution.
-   Admission requires the joiner's key package to be bound to H and not lapsed. A freshly resolved head is not an MLS gate.
-8. **Renewal.** A named consumer operation obtains fresh capabilities and calls `renewLeaf` in each group before `exp`. Because only H-signed time advances tree time, the consumer decides H's signing cadence, and that cadence is the lapse granularity.
-9. **Write results and adoption.** The consumer publishes every helper's commit, adopts the new handle on acceptance, and re-runs the helper after losing an epoch race. kubun's `HandleAccess` (`plugin-p2p/src/groups/group-handle-access.ts`) calls `confirmAdopted()` after its adoption, and any adoption outside it does too; otherwise `deviceRevoked` never fires for own commits.
-10. **Revocation events.** `deviceRevoked` fires at accepted adoption only; restore and Welcome are silent, so a consumer that needs the state after either reads `revocationOf`.
-11. **Permanence.** A revoked agent DID is never re-admitted, and a reset revokes every agent of the earlier generation. Replacements need new DIDs and new grants.
+**Delivery.** The epoch-change spec's Release list (its kubun items) is the authoritative delivery checklist, and this spec does not repeat it. kubun carries it as Task I6 (`P:471-507`).
 
-**B. Delivery (epoch-change spec; plan row 86 at `P:86`, the I6 task).** Row 86 and the execution order (`P:108`) scope I6 as a bump plus the reproducing test. That is no longer enough; the I6 task must also:
-12. **Send admission.** kubun's `HandleAccess` implements the synchronous `admission()` and publishes it with `epoch()` at the same points, without going through its serialised handle reads (§2). Its `epoch()` already reads without a lock.
-13. **Outbox.** Supply the required `AppOutbox` store and `appOutboxLimit`, with a storage migration; encrypt the plaintext at rest; clear it on group leave and deletion.
-14. **Anchor store.** Extend the anchor store's single slot for the rotation record, and handle its write failures.
-15. **Dispatch semantics.** A resolved log `dispatch` means durably enqueued, not published. Handle `SendNotAdmissibleError` (`reason: 'lapsed'`) and `AppOutboxFullError`, and report the events `onAppOutboxCleared` names.
-16. **Handlers.** Make every log handler completion-safe on retry, with adoption tests. The share handler's cross-check repair is already in kubun (`plugin-p2p/src/groups/store-received-grant.ts:167-173`).
-17. **Carried from row 85.** Recovery fault propagation (`throwIfFault()`), the documentation corrections and the merged 13a+13c scope stay as ruled.
+**Own-agents groups.** `C` §5 (`C:847-975`) and Task 13a+13c (`P:509-542`) adopt the lifecycle obligations below. Each must hold after the bump.
+1. **Creation** (`C:867-871`). `createOwnAgentsGroup` passes the creator's `ControllerBinding`, so the anchor's controller is the creator's leaf controller. The label is required.
+2. **Membership** (`C:872-880`). Effective membership is a live leaf bound to H in the tree. The current-head check stays a local refusal, never an MLS acceptance input.
+3. **Admin semantics** (`C:881-886`). Every member may admit agents and enact kubun's ledger entries. No member removes another except by proof, lapse or self-removal, and kubun offers no discretionary removal. No device registers.
+4. **Revocation** (`C:887-901`). Any member that obtains H's `rev x=D` calls `publishRevokeProof` in every own-agents group of H, including groups where D has no leaf, and commits D's removal before its next broadcast to that group. There is no broadcast hold.
+5. **Permanence** (`C:906-908`). A revoked agent DID is never re-admitted, and a reset revokes the earlier generation.
+6. **Lapse and renewal** (`C:909-917`). A named operation obtains fresh capabilities and calls `renewLeaf` before `exp`. H's signing cadence is the lapse granularity.
+7. **Unresolved head and advisory notice** (`C:918-923`). Both stay local. The beacon gates nothing.
+8. **Adoption and events** (`C:929-936`). kubun publishes every helper's commit, adopts on acceptance and reruns after a lost race. Every adoption calls `confirmAdopted()`. After restore or Welcome, kubun reads `revocationOf`.
+9. **Three contracts** (`C:942-954`). Leaf binding, group invite consent through `recipientDID` and `entries`, and the advisory head stay separate.
+10. **Recovery binding** (new, not yet in `C` or `P`; it belongs in Task 13a+13c, beside renewal). kubun's `createGroupMLS` wrapper (`plugin-p2p/src/groups/group-mls.ts:90`) passes `recoveryBinding` to the upstream factory for every own-agents group. It returns a fresh binding for the peer's own leaf key, with a leaf capability from H or from T, or `null` when none is available now. It never waits on the user. On `'renewal-required'`, kubun reports it, obtains a grant through item 6's path, and then calls `recover()` on that group's peer. kubun adds no recovery timer.
 
 ## Testing
 
@@ -426,6 +434,15 @@ Each test must fail with its fix removed.
 - After revoking T with cascade, and after a reset, a live receiver, the author's derived handle, a restored handle and a Welcome joiner hold identical records, deny sets and floors.
 - **Events at adoption.** Restore and Welcome fire no `deviceRevoked`; a live receiver fires it once after persisting; `bootstrapLedger` fires it only for entries it adds.
 - Authored through the low-level API, these are rejected: revoke of T with an Add of a T-issued child, reset with a stale-generation Add, revoke with a path renewal, and two revoke entries in one commit.
+
+**Recovery in lifecycle groups (R4-I2).** Through the real `@kumiai/mls-rpc` adapter and `@kumiai/rpc` peer, with a retention gap stranding a bound member:
+- A cached binding valid by wall clock rejoins with no `recoveryBinding` call, and the replacement leaf keeps that binding.
+- A cached binding expired by wall clock but live in tree time: `recoveryBinding` is called once, and the fresh binding rejoins and is accepted by survivors.
+- No fresh binding (`null`, or no port): `onRecovery` reports `'renewal-required'`, and no recovery request reaches the rendezvous topic, then or on later pulls, heal triggers or worker backoff. Once the port returns a binding, `recover()` rejoins.
+- A host binding that fails the recovery check (another controller, a lower `iat`, or one that lowers tree time) also reports `'renewal-required'`.
+- A floating replacement, authored through the low-level API, is rejected by survivors. `joinGroupExternal` without `controller` in a lifecycle group throws `floating-refused`.
+- A fresh joiner's uncovered-floor rejoin (epoch-change spec) goes through the same adapter and carries its binding.
+- **Floor raised in the gap.** While a member is detached, others remove the leaf holding the maximum and install a `timeFloor` above the detached leaf's `exp`, which is still above the remaining tree's maximum attested time. Its recovery reports `'renewal-required'` and publishes no external commit. With a fresh binding above the floor, it rejoins. A reply whose ledger does not fold to the GroupInfo's head is refused.
 
 **Pipeline (I3, I4)**
 - A renewal and a lapse Remove go in separate commits. Combined in one commit, they are rejected.
