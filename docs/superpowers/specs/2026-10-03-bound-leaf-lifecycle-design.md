@@ -31,6 +31,7 @@ In scope, in `@kumiai/mls`:
 - removal of lapsed leaves
 - a deny set that also applies to floating leaves
 - registry/tree agreement for the existing device ops (C3)
+- an invite path without role entries, and speculative helper handles that leave the live handle untouched until adoption
 - the commit-pipeline gates these need, and the issuing and lifecycle API.
 
 In scope, in `@kokuin/capability`: a child capability may not outlive its parent.
@@ -91,7 +92,8 @@ GroupAnchor.controller?: string   // a did:kokuin DID
 
 In a lifecycle group:
 - **Every leaf is bound to H.** A floating or foreign-bound leaf is refused on Add, external join and Update. A joiner checks it for the whole Welcome tree.
-- **Authority is the binding.** The roster is seeded `{H: admin}` instead of `{creatorDID: admin}` (`roster.ts:45-47`), and `kumiai.role` entries are rejected. A commit sender whose pre-commit leaf is bound to H acts as H. Every member therefore may Add an agent and move the ledger head. Removal is narrower (§4).
+- **Authority is the binding.** The roster is seeded `{H: admin}` instead of `{creatorDID: admin}` (`roster.ts:45-47`), and `kumiai.role` entries are rejected. A commit sender whose pre-commit leaf is bound to H acts as H. So does the issuer of a consumer (non-`kumiai.*`) ledger entry that holds a leaf in the pre-commit tree: this replaces the registry-derived admin check of `foldEnvelope` (`envelope-fold.ts:92-94`) for those entries. Replays do not re-judge consumer entries, as today: the authenticated head covers them. Every member therefore may Add an agent, enact consumer entries and move the ledger head. Removal is narrower (§4).
+- **Invites** carry their recipient explicitly instead of in a role entry (§5).
 - **Device ops.** Only proven `revoke`, `reset`, `clock` and `beacon` are accepted. `register`, `add`, `label` and capability-authorised `revoke` are rejected: the registry here records only revocations and floors, and a trusted grant carries no `manage` permission.
 
 **Leaf credential.** The member is the agent:
@@ -156,14 +158,15 @@ What is not checked here: `exp` against any notion of "now" (§2), and the gener
 Checks 3 and 4 do not apply in non-lifecycle groups beyond `L.exp > treeTime(C)`.
 
 **Sending.**
-- A lapsed member's commit is accepted only when it is an empty commit whose path renews its own leaf out of lapse.
-- `GroupHandle.sendAdmission()` returns `{ epoch, admissible: true }`, or `{ epoch, admissible: false, reason: 'lapsed' }` when the own leaf is lapsed at the handle's current epoch. `encrypt` refuses a lapsed sender with `LeafLapsedError`, and the consumer's outbox must refuse to enqueue (see the epoch-change delivery spec).
+- A lapsed member's commit is accepted only when it is an empty commit whose path renews its own leaf out of lapse, plus a `clock` entry if §3 requires one.
+- `GroupHandle.sendAdmission()` is **synchronous**. It returns `{ epoch, admissible: true }`, or `{ epoch, admissible: false, reason: 'lapsed' }` when the own leaf is lapsed at the handle's current epoch. Tree time and the own leaf's verdict are computed once when an epoch's state is installed, so the call takes no lock, awaits nothing and reads no clock. `encrypt` refuses a lapsed sender with `LeafLapsedError`, and the consumer's outbox must refuse to enqueue (see the epoch-change delivery spec).
+- **The port's snapshot** (`@kumiai/mls-rpc`). `GroupMLS.sendAdmission()` never goes through `HandleAccess.read`, `mutate`, `replace` or `open`: those serialise with `replace`, which awaits the host's adoption callback (`mls-rpc/src/access.ts:28-40`, `:61-66`), so a dispatch awaited inside that callback would deadlock. Instead `HandleAccess` gains a synchronous `admission()` beside `epoch()`, and both are published together at the same points: initially, and at the end of `mutate`, `replace` and `open` (`access.ts:58`, `:65`, `:71`). `replace` publishes after the host adoption callback resolves. So inside an adoption or epoch callback, `admission()` still reports the epoch being left, paired with its own verdict. That is safe because the delivery worker re-checks admission at seal and accepts only an admission whose epoch equals the ciphertext epoch. The cost: a dispatch from inside the adoption of the sender's own renewal is judged at the lapsed epoch and refused; the host dispatches after adoption.
 - `decrypt` and `decryptStaged` read the sender leaf before opening (`group-handle.ts:873-877`, `:915-919`). They refuse a lapsed sender with `LeafLapsedError` there, so no ratchet generation is consumed. The sender is named only at the receiver's current epoch, so the receiver judges the same tree and ledger the sender did, and both reach the same verdict.
 
 **Author-side checks.** These use the local clock and only stop the device itself from producing a bad change. `createGroup`, `createKeyPackageBundle`, `createLastResortKeyPackageBundle`, `joinGroupExternal`, `commitInvite`, `addDevice` and `renewLeaf` refuse a capability whose `exp ≤ now` or whose `iat > now`.
 
 **Renewal.** `renewLeaf(group, binding)` makes an empty commit whose path carries the own leaf with the new binding.
-- It uses the same signature key, needs no ledger entry, and absorbs no pending proposals, so the commit always carries a path.
+- It uses the same signature key and absorbs no pending proposals, so the commit always carries a path. Its only possible ledger entry is a `clock` entry, when the new leaf lowers tree time (§3).
 - It builds the commit from a state copy whose own leaf, LeafNode and credential objects are deep-copied before the credential is replaced. Shared objects are never mutated.
 - After `createCommit`, it replaces the old epoch's historical receiver data in the returned state with the original pre-renewal tree, so delayed old-epoch messages are judged against the leaf as it was.
 - Only the leaf's owner can sign its LeafNode, so each agent renews itself. Delivering a new capability from H or T to the agent is the consumer's job.
@@ -200,8 +203,9 @@ Effects: each listed DID gets `{ status: 'revoked', controller: H, logPosition: 
 ```
 { op: 'clock', subject: H, time: number }
 ```
-- Accepted when `timeFloor(H) < time ≤ treeTime(H)` of the pre-commit epoch. Effect: `timeFloor(H) = time`.
-- **Required** in any commit whose post-commit tree time, computed without the floor, would fall below the pre-commit tree time. Removals are known before the path, and §4 keeps the path credential unchanged in removal commits, so this is checked in the callback. Helpers add the entry themselves.
+- Accepted when `timeFloor(H) < time ≤ treeTime(H)` of the pre-commit epoch. Effect: `timeFloor(H) = time`. At most one per commit.
+- **Required** in any commit whose post-commit tree time, computed **with the existing floor**, would fall below the pre-commit tree time. The entry must then carry `time = treeTime(H)` of the pre-commit epoch, so tree time never decreases. Such a commit always exists to carry it: a regression means a leaf's attested time was above the floor, so `timeFloor(H) < treeTime(H)`. Once the floor dominates every remaining leaf, ordinary commits and renewals below it need no entry.
+- A regression has two causes, and §4's composition rules keep them in separate commits. A Remove of the leaf holding the maximum is known before the path, so the callback judges it, and a removed receiver agrees. A path or Update leaf whose new attested time is lower than its old one (a chained renewal whose trusted grant is older than the replaced direct grant or grant) is judged where that leaf is checked: the callback for an Update, the post-apply gate for a path leaf. Lowering a leaf's attested time is allowed; it only needs the entry. Helpers add the entry themselves, `renewLeaf` included.
 
 **Deny set.** Every DID with a revoked record is denied as a leaf, bound or floating, on Add, external join and Update, and is denied as a chain issuer.
 
@@ -220,8 +224,8 @@ A manage-op `revoke` or `label` additionally requires that the target's current 
 
 **Stages.**
 1. **Pre-pass** (async, before ts-mls). It decodes the envelope, resolves the entries, folds the candidate registry (deny set, floors, records), verifies device entries and proofs, and parses an external commit's path leaf. It also precomputes the pre-commit tree time, the lapsed set and the derived `revoked` sets.
-2. **Callback** (sync, inside ts-mls; it runs for every receiver, including a removed one). It holds every proposal-level verdict: entry checks on Add and Update leaves, Remove legitimacy, the lapsed-sender restriction, composition rules, the clock requirement, and the external-commit rules. It needs no async work: chain signatures were already verified by the auth service, and the generation of a prefix is a synchronous fold.
-3. **Post-apply gate** (survivors only, after ts-mls returns, before the state is adopted). It judges the committer's path leaf against the pre-commit leaf: entry checks if the credential changed, unchanged credential where the composition rules require it, and renewal out of lapse for a lapsed sender. It runs before `this.#state` is assigned, persistence, ledger application, events and zeroisation.
+2. **Callback** (sync, inside ts-mls; it runs for every receiver, including a removed one). It holds every proposal-level verdict: entry checks on Add and Update leaves, Remove legitimacy, the lapsed-sender restriction, composition rules, the clock requirement for Removes and Updates, and the external-commit rules. It needs no async work: chain signatures were already verified by the auth service, and the generation of a prefix is a synchronous fold.
+3. **Post-apply gate** (survivors only, after ts-mls returns, before the state is adopted). It judges the committer's path leaf against the pre-commit leaf: entry checks if the credential changed, unchanged credential where the composition rules require it, renewal out of lapse for a lapsed sender, and the clock requirement for a path leaf that lowers its attested time. It runs before `this.#state` is assigned, persistence, ledger application, events and zeroisation.
    - On reject, the previous state stays authoritative. The result's `consumed` secrets are not zeroed, since they belong to the previous state. The new-epoch state is dropped, and `CommitRejectedError` is thrown.
    - `commitWithEntries` and every lifecycle helper run the same gate on their own result before returning, so authors and receivers agree.
 
@@ -237,7 +241,7 @@ A manage-op `revoke` or `label` additionally requires that the target's current 
   No other Remove is accepted. The anti-demotion rule (`policy.ts:229-235`) does not apply, since agents hold no roles.
 - **GroupContextExtensions:** the head move only, from any member.
 - **PSK and ReInit:** rejected.
-- **External commit:** exactly `external_init` plus one Remove of an existing leaf L. The new leaf passes the entry checks with L as the leaf it replaces, so it is the same agent with the same key, bound to H. It may not lower tree time, since an external commit carries no entries. Membership comes from the binding, not from a roster role, so this replaces the roster gate (`policy.ts:268-297`) in lifecycle groups.
+- **External commit:** exactly `external_init` plus one Remove of an existing leaf L. The new leaf passes the entry checks with L as the leaf it replaces, so it is the same agent with the same key, bound to H. It may not lower tree time, including the floor, since an external commit carries no entries. Membership comes from the binding, not from a roster role, so this replaces the roster gate (`policy.ts:268-297`) in lifecycle groups.
 
 **Composition rules.**
 - A commit that enacts a `revoke` or `reset` carries exactly one such entry, its derived Removes, the head move and an optional `clock` entry. It carries no Add, Update, PSK or other Remove, and the committer's path leaf keeps its credential. A member listed in `revoked` cannot author it.
@@ -276,7 +280,13 @@ mintTrustedGrant(params: {
 **Group setup:**
 - `createGroup(identity, groupID, { controller?: ControllerBinding, ... })` builds a bound creator leaf (today it is always floating, `group-create.ts:58`) and writes `GroupAnchor.controller = binding.id`. That makes it a lifecycle group.
 - `createKeyPackageBundle`, `createLastResortKeyPackageBundle` and `joinGroupExternal` take `controller?: ControllerBinding` (today `group-credential.ts:54`, `group-welcome.ts:237`).
-- `processWelcome` into a lifecycle group requires no role entry naming the joiner (`group-welcome.ts:54-67`). Instead it requires that the joiner's own binding names the anchor's controller and that every leaf in the tree is bound to it.
+
+**Invites in a lifecycle group.** Today the invite path needs a role entry three times: the inviter guard (`group-commit.ts:114-116`), the recipient binding (`:400-412`) and the Welcome check (`group-welcome.ts:53-69`). A lifecycle group rejects role entries, so each is replaced:
+- `Invite` gains `recipientDID`. The invite still carries the group's whole ledger, and the joiner still checks it against the authenticated head, so the history reaches the joiner without any new role grant.
+- `createInvite` takes no `permission` in a lifecycle group and signs no role entry. Its guard is that the inviter holds a leaf in the group, instead of a registry-derived admin role. It takes optional `entries`: consumer (non-`kumiai.*`) entries the inviter signed, appended after the history so they ride the Add commit.
+- `commitInvite` binds the key package to `invite.recipientDID` (the same `InviteRecipientMismatchError`), runs the entry checks and the author-side checks on the key package leaf, and enacts only the appended consumer entries. `commitWithEntries`'s admin guard (`group-commit.ts:194-199`) becomes, in a lifecycle group, "the committer holds a leaf".
+- `processWelcome` requires `invite.recipientDID` to be the joiner, that the joiner's own binding names the anchor's controller, and that every leaf in the tree is bound to it.
+- **One-time consent.** A leaf capability is reusable until it expires, so it is not consent to one admission. The consumer's per-group consent stays its own: the admitting member checks the consent and that its ID is not yet consumed, then passes a consumer entry recording the ID in `entries`. That entry lands in the same commit as the Add, so the admission and the consumption are one epoch and a concurrent second admission loses the epoch race and sees the ID consumed on retry. kumiai does not interpret the entry.
 
 **Lifecycle helpers.** They follow the existing write-result contract (`DeviceWriteResult`: `commitMessage`, `newGroup`, `epoch`).
 ```ts
@@ -295,6 +305,9 @@ publishRevokeProof(
 removeLapsedLeaves(group: GroupHandle): Promise<{ removed: Array<string>; result?: DeviceWriteResult }>
 ```
 - **Ownership.** Each helper runs under the group mutex, judges locally, and returns a commit and a derived handle. It neither mutates the input handle, persists, publishes nor retries.
+- **A derived handle is speculative until adopted.** Constructing or discarding one leaves the input handle and its subscribers untouched:
+  - **Own auth state.** Today the constructor re-points the context's shared deny holder at the newest handle (`group-handle.ts:345-349`), and `deriveGroup` shares the context (`:1423-1434`). So a candidate revoking T makes the live handle reject T-issued credentials before the group accepted anything, and a discarded candidate leaves that in place. Instead `deriveGroup` gives each handle its own context: the cipher suite is shared, the authentication service and its deny provider are the handle's own.
+  - **No early events.** Helpers no longer fire events on the derived handle. Today `revokeDevice` and `announceControllerBeacon` do (`group-device.ts:173`, `:203`), before any transport accepted the commit. The derived handle holds its enacted control events as pending, and `newGroup.confirmAdopted()` fires them once; later calls do nothing, and a handle never confirmed fires nothing. `HandleAccess.replace` calls it after the host adoption callback resolves; a host that adopts outside `HandleAccess` calls it itself.
 - **The consumer's part.** The consumer publishes `commitMessage` and adopts `newGroup` once its transport accepts the commit. If another commit wins the epoch, it discards `newGroup`, processes the winner, and calls the helper again on the new handle. Duplicates converge: after the winning revoke, a second call returns `'already-revoked'`.
 - **`publishRevokeProof`** returns:
   - `'already-revoked'` when every DID it would revoke is already revoked and no affected leaf remains;
@@ -305,8 +318,8 @@ removeLapsedLeaves(group: GroupHandle): Promise<{ removed: Array<string>; result
 
 **Reads and events:**
 - `revocationOf(group, did)` returns `{ controller, logPosition, reason?: 'reset', cascadedFrom? } | null`.
-- `GroupHandle.sendAdmission()` (§2).
-- `deviceRevoked` gains `logPosition`, `reason` and `cascadedFrom`. It fires once per listed DID, from the ledger fold, on every replay path.
+- `GroupHandle.sendAdmission()` and `HandleAccess.admission()` (§2).
+- `deviceRevoked` gains `logPosition`, `reason` and `cascadedFrom`. It fires once per listed DID at accepted adoption only: a received commit after it is persisted (`#notifyAccepted`, as today), an authored commit at `confirmAdopted()`, and `bootstrapLedger` for the entries it adds. Restore and Welcome project the records, deny set and floors silently, as today; the consumer reads them with `revocationOf`.
 
 **Errors.** These are error classes, following kumiai's convention, and each carries a `reason`.
 - `LeafBindingError`, with reasons `issuer-mismatch`, `subject-mismatch`, `chain-depth`, `self-issued`, `child-outlives-parent`, `denied-issuer`, `lifetime-cap`, `generation-floor`, `identity-change`, `controller-mismatch` and `floating-refused`.
@@ -330,21 +343,37 @@ That is the only kokuin change. Deterministic verification needs nothing new: `v
   - old peers silently ignore `GroupAnchor.controller`, so they would apply none of the lifecycle rules;
   - pinning the issuer rejects any self-issued leaf capability;
   - the time-free auth service accepts expired existing leaves that old peers refuse.
+- API breaks for the consumer: `Invite.recipientDID`, `createInvite` without `permission` in lifecycle groups, the synchronous `HandleAccess.admission()`, `confirmAdopted()`, and helpers no longer emitting before adoption.
 - The consumer adopts the kokuin and kumiai releases together.
 
 ## Consumer contract
 
-kubun's §5 (`kubun-wt/catalog-sync/docs/superpowers/specs/2026-09-27-catalog-sync-design.md`) must change as follows to match this design and plan row 85 (`.../plans/2026-09-27-catalog-sync.md:85`). The controller amends kubun; this spec does not.
-1. **Membership** (`:864-866`). Effective membership is a live leaf bound to H in the tree, which any member verifies from the tree. The current-head check stays as a local refusal of sessions and requests, never as an MLS acceptance input.
-2. **Registry and unbinding** (`:867-873`). No device registers at join: `register`, `add`, `label` and capability revoke are rejected in lifecycle groups. Unbinding is H's authority key signing `rev x=D`. Any member that obtains the log calls `publishRevokeProof` in every own-agents group, including groups where D has no leaf.
-3. **Broadcast hold** (`:874-879`). The hold is removed. A member that sees `rev x=D` commits D's removal before its next broadcast to H. Local refusal of D stays.
-4. **Creation** (`:861`, `:986`). `createOwnAgentsGroup` passes the creator's `ControllerBinding`, so the anchor's controller equals the creator's leaf controller. A joiner's Welcome check authenticates the anchor. The label is required in both the prose and the GraphQL signature.
-5. **Admin semantics.** Every member may admit agents. No member may remove another except by proof, lapse or self-removal. kubun must not offer discretionary removal in own-agents groups.
-6. **Handoff and admission** (`:893-906`). The handoff delivers a leaf capability from H or from T. A trusted agent is not a revocation signer. Admission requires the joiner's key package to be bound to H and not lapsed. A freshly resolved head is not an MLS gate.
-7. **Renewal.** A named consumer operation obtains fresh capabilities and calls `renewLeaf` in each group before `exp`. Because only H-signed time advances tree time, the consumer decides H's signing cadence, and that cadence is the lapse granularity.
-8. **Write results.** The consumer publishes every helper's commit, adopts the new handle on acceptance, and re-runs the helper after losing an epoch race.
-9. **Send admission.** `GroupHandle.sendAdmission()` backs the rpc port's `sendAdmission` from the epoch-change delivery spec.
-10. **Permanence.** A revoked agent DID is never re-admitted, and a reset revokes every agent of the earlier generation. Replacements need new DIDs and new grants.
+This release ships with the epoch-change delivery spec (`kumiai.worktrees/epoch-change-log-delivery/docs/superpowers/specs/2026-10-03-epoch-change-log-delivery-design.md`), and kubun adopts both in one bump. The list below is every kubun obligation from both. Paths: `C` is kubun's spec (`kubun-wt/catalog-sync/docs/superpowers/specs/2026-09-27-catalog-sync-design.md`), `P` its plan (`.../plans/2026-09-27-catalog-sync.md`). The controller amends kubun; this spec does not.
+
+**A. Own-agents groups (`C` §5, plan row 85 at `P:85`, Tasks 13a+13c).**
+1. **Membership** (`C:864-866`). Effective membership is a live leaf bound to H in the tree, which any member verifies from the tree. The current-head check stays as a local refusal of sessions and requests, never as an MLS acceptance input.
+2. **Registry and unbinding** (`C:867-873`). No device registers at join: `register`, `add`, `label` and capability revoke are rejected in lifecycle groups. Unbinding is H's authority key signing `rev x=D`. Any member that obtains the log calls `publishRevokeProof` in every own-agents group, including groups where D has no leaf.
+3. **Broadcast hold** (`C:874-879`). The hold is removed. A member that sees `rev x=D` commits D's removal before its next broadcast to H. Local refusal of D stays.
+4. **Unresolved head and advisory notice** (`C:880-883`). Denial on an unresolved head stays local and scoped to H. "Admission requires a freshly resolved head" becomes a local precondition of the admitting member, never an MLS gate; "labelling" means kubun's `ownAgents.group` record label, not the kumiai `label` op. The advisory head notice stays `announceControllerBeacon`, which lifecycle groups accept and which gates nothing.
+5. **Creation** (`C:861`, `C:986`). `createOwnAgentsGroup` passes the creator's `ControllerBinding`, so the anchor's controller equals the creator's leaf controller. A joiner's Welcome check authenticates the anchor. The label is required in both the prose and the GraphQL signature.
+6. **Admin semantics.** Every member may admit agents and enact kubun's own ledger entries. No member may remove another except by proof, lapse or self-removal. kubun must not offer discretionary removal in own-agents groups.
+7. **Three separate contracts** (`C:893-912`), which §5 must not merge:
+   - **Leaf binding.** The handoff delivers a leaf capability from H or from T. It is reusable until `exp` and is what kumiai checks. A trusted agent is not a revocation signer.
+   - **Group invite consent.** The per-group one-time join capability stays kubun's. The admitting member verifies it and that its ID is unconsumed, builds the invite with `recipientDID` and a kubun entry recording the consumed ID in `entries`, and commits it with `commitInvite`, so admission and consumption land in one commit. A losing concurrent admission sees the ID consumed on retry.
+   - **Advisory controller head.** The beacon (item 4) only prompts re-resolution.
+   Admission requires the joiner's key package to be bound to H and not lapsed. A freshly resolved head is not an MLS gate.
+8. **Renewal.** A named consumer operation obtains fresh capabilities and calls `renewLeaf` in each group before `exp`. Because only H-signed time advances tree time, the consumer decides H's signing cadence, and that cadence is the lapse granularity.
+9. **Write results and adoption.** The consumer publishes every helper's commit, adopts the new handle on acceptance, and re-runs the helper after losing an epoch race. kubun's `HandleAccess` (`plugin-p2p/src/groups/group-handle-access.ts`) calls `confirmAdopted()` after its adoption, and any adoption outside it does too; otherwise `deviceRevoked` never fires for own commits.
+10. **Revocation events.** `deviceRevoked` fires at accepted adoption only; restore and Welcome are silent, so a consumer that needs the state after either reads `revocationOf`.
+11. **Permanence.** A revoked agent DID is never re-admitted, and a reset revokes every agent of the earlier generation. Replacements need new DIDs and new grants.
+
+**B. Delivery (epoch-change spec; plan row 86 at `P:86`, the I6 task).** Row 86 and the execution order (`P:108`) scope I6 as a bump plus the reproducing test. That is no longer enough; the I6 task must also:
+12. **Send admission.** kubun's `HandleAccess` implements the synchronous `admission()` and publishes it with `epoch()` at the same points, without going through its serialised handle reads (§2). Its `epoch()` already reads without a lock.
+13. **Outbox.** Supply the required `AppOutbox` store and `appOutboxLimit`, with a storage migration; encrypt the plaintext at rest; clear it on group leave and deletion.
+14. **Anchor store.** Extend the anchor store's single slot for the rotation record, and handle its write failures.
+15. **Dispatch semantics.** A resolved log `dispatch` means durably enqueued, not published. Handle `SendNotAdmissibleError` (`reason: 'lapsed'`) and `AppOutboxFullError`, and report the events `onAppOutboxCleared` names.
+16. **Handlers.** Make every log handler completion-safe on retry, with adoption tests. The share handler's cross-check repair is already in kubun (`plugin-p2p/src/groups/store-received-grant.ts:167-173`).
+17. **Carried from row 85.** Recovery fault propagation (`throwIfFault()`), the documentation corrections and the merged 13a+13c scope stay as ruled.
 
 ## Testing
 
@@ -364,11 +393,16 @@ Each test must fail with its fix removed.
 - **Adversarial:** a stolen T mints a child with a far-future `iat` and admits it. `treeTime(H)` is unchanged, no honest leaf becomes lapsed, and a lapse Remove of an honest leaf is rejected.
 - A new direct grant from H advances tree time and lapses older leaves.
 - Removing the leaf holding the newest time without a `clock` entry is rejected; with one, the floor holds and lapsed leaves stay lapsed.
+- **Floor dominates (R-I1).** Leaves attest 100 and 90 with floor 0. Removing the first installs floor 100. A following non-rotating commit and a renewal of the surviving leaf at attested time 95 are both accepted with no `clock` entry, and tree time stays 100.
+- A chained renewal whose trusted grant is older than the replaced direct grant, when that leaf held the maximum, is rejected without a `clock` entry and accepted with one carrying the pre-commit tree time. A `clock` entry with any other time in that commit is rejected.
 - With no new H grant for months, nothing lapses. This documents the stall.
 
 **Lifecycle groups (C2, I7, I8)**
 - A capability revoke by T, and `register`, `add` and `label` entries, are rejected in a lifecycle group.
 - A group is created with a controller binding. A second agent is admitted with no device role, and the joiner's Welcome check passes. A floating or foreign-bound leaf is refused by Add, by external join and at Welcome.
+- **Invite path (R-I2).** H's creator agent invites a second agent with `createInvite` and `commitInvite`: no role entry is signed or enacted, the key package is bound to `recipientDID`, and a key package for another DID raises `InviteRecipientMismatchError`. The joiner's `processWelcome` accepts the invite by `recipientDID`, and refuses one naming another DID.
+- A consumer entry passed in `entries` lands in the Add commit. Two members admitting the same recipient with the same consumed-ID entry: one commit wins, and the loser's retry sees the entry in the ledger.
+- A consumer entry issued by a DID with no leaf in the pre-commit tree is rejected.
 - A controller-role-only agent resyncs externally. A replacement that changes key, goes floating, or names another controller is rejected.
 - A malformed `GroupAnchor.controller` makes the group refused.
 
@@ -390,12 +424,14 @@ Each test must fail with its fix removed.
 - A subject with no leaf gets a revoked record and is then refused at Add.
 - kokuin un-revoking D later does not restore D.
 - After revoking T with cascade, and after a reset, a live receiver, the author's derived handle, a restored handle and a Welcome joiner hold identical records, deny sets and floors.
+- **Events at adoption.** Restore and Welcome fire no `deviceRevoked`; a live receiver fires it once after persisting; `bootstrapLedger` fires it only for entries it adds.
 - Authored through the low-level API, these are rejected: revoke of T with an Add of a T-issued child, reset with a stale-generation Add, revoke with a path renewal, and two revoke entries in one commit.
 
 **Pipeline (I3, I4)**
 - A renewal and a lapse Remove go in separate commits. Combined in one commit, they are rejected.
 - A commit with an invalid path that removes a receiver: survivors reject it and keep their state, ledger and events, and the old epoch still decrypts. The removed receiver's outcome is the documented residual.
 - An always-accept caller policy does not admit an identity-changing Update, a floating Add into a lifecycle group, or a lapsed Add.
+- **Speculative handles (R-I3).** A member builds a revoke of T with `publishRevokeProof` and loses the epoch race. On the original handle, a T-issued credential still validates, and no `deviceRevoked` has fired. After the winning commit is processed, it fires once. For a won race, it fires at `confirmAdopted()` and not before; a second call fires nothing.
 
 **Renewal (M2)**
 - A renewal after the old `exp` succeeds, and a renewal with a lower `iat` is rejected.
@@ -404,6 +440,7 @@ Each test must fail with its fix removed.
 
 **Lapse and sending (I10)**
 - A lapsed member gets `admissible: false` from `sendAdmission`, and `encrypt` refuses. Receivers refuse a lapsed sender's frame before opening it.
+- **Admission without a lock (R-I9).** Against real `@kumiai/mls-rpc` with `simpleHandleAccess`, a host adoption callback inside `replace` awaits `GroupMLS.sendAdmission()` and then the rpc `dispatch`: both resolve, the adoption completes, and the admission reports the pre-adoption epoch. After `replace` resolves, it reports the new epoch with its own verdict.
 - After renewal, the member can send again.
 - A lapsed member's non-renewing commit is rejected.
 - Lapse removal works from any member.
