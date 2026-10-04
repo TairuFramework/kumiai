@@ -124,6 +124,12 @@ export type ConformanceCommit = {
 
 export type ConformanceMLSGroup = {
   groupID: string
+  /** Authenticated malformed payloads bypass the sender port's shape guard. */
+  sealVerdictPayload: (
+    member: number,
+    request: Uint8Array,
+    verdict: Record<string, unknown>,
+  ) => Promise<Uint8Array>
   /**
    * The ports under test. The COMMITTER is not among them: every Commit here is authored by a
    * member outside this list, so `processCommit` is only ever asked about a RECEIVED commit —
@@ -692,6 +698,35 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           expect(
             pending.judgeVerdict({ ...opened, verdict: { ...verdict, position: 'other' } }),
           ).toBe('advisory')
+        })
+      })
+
+      test.each([
+        { verdict: 'unknown' },
+        { verdict: 'refused', reason: 'unknown' },
+        { verdict: 'refused' },
+        { verdict: 'confirmed', epoch: -1, tag: 'tag' },
+        { verdict: 'confirmed', epoch: 1.5, tag: 'tag' },
+        { verdict: 'confirmed', epoch: 0, tag: 42 },
+        { verdict: 'superseded', position: '' },
+        { verdict: 'superseded', commitDigest: 42 },
+      ])('malformed sealed verdicts are refused: %j', async (change) => {
+        await withGroup(2, 'malformed-verdict', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const bob = memberAt(group.members, 1)
+          const request = await bob.mls.createRecoveryRequest('malformed')
+          const verdict = {
+            groupID: group.groupID,
+            requestID: 'malformed',
+            position: 'position',
+            commitDigest: 'digest',
+            ...change,
+          }
+          const sealed = await group.sealVerdictPayload(0, request, verdict)
+          expect(await bob.mls.openRecoveryVerdict(sealed, 'malformed')).toBeNull()
+          await expect(
+            alice.mls.sealRecoveryVerdict(request, verdict as ConformanceRecoveryVerdict),
+          ).rejects.toThrow()
         })
       })
 

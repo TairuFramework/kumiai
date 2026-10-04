@@ -17,6 +17,7 @@ import {
   createMemoryGroupMLS,
   encodeMemoryCommit,
   memoryEntryID,
+  sealMemoryRecoveryVerdict,
 } from './fixtures/memory-group-mls.js'
 
 /**
@@ -173,6 +174,11 @@ testGroupMLSConformance({
 
     return {
       groupID: id,
+      sealVerdictPayload: async (index, request, verdict) => {
+        const member = members[index]
+        if (member == null) throw new Error('missing member')
+        return sealMemoryRecoveryVerdict(request, member.did, verdict)
+      },
       members: members.map((member) => ({
         did: member.did,
         mls: { ...member.mls, epoch: () => member.mls.epoch() + hintOffset },

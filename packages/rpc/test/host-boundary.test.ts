@@ -1,6 +1,6 @@
 import { stdout } from 'node:process'
 import { createSigningIdentity } from '@kokuin/token'
-import { describe, expect, expectTypeOf, test, vi } from 'vitest'
+import { afterEach, describe, expect, expectTypeOf, test, vi } from 'vitest'
 
 import type { PendingCommit } from '../src/commit.js'
 import type { PendingRecovery } from '../src/crypto.js'
@@ -17,6 +17,8 @@ import {
 import { notifyHost } from '../src/host-notice.js'
 import type { GroupPeerMLSParams, GroupPeerParams } from '../src/peer.js'
 import type { GroupProtocolDefinition } from '../src/protocol.js'
+
+afterEach(() => vi.restoreAllMocks())
 
 function gate() {
   let release = (): void => {}
@@ -42,20 +44,20 @@ async function assertPaused(path: string, invoke: (pause: Promise<void>) => unkn
   await Promise.resolve()
   await Promise.resolve()
   expect(settled).toBe(false)
-  stdout.write(`${path}: method invoked -> close -> drain pending -> release\n`)
   pause.release()
   await call
   await drain
   expect(settled).toBe(true)
   expect(() => callable()).toThrow(PeerDisposedError)
-  stdout.write(`${path}: settled -> drained -> late method invocation refused\n`)
 }
 
 describe('host invocation boundary', () => {
   test('waits for a paused method and refuses its later invocation', async () => {
+    const output = vi.spyOn(stdout, 'write').mockImplementation(() => true)
     await assertPaused('host.write', async (pause) => {
       await pause
     })
+    expect(output).not.toHaveBeenCalled()
   })
 
   test('selects named acceptance members without touching returned data', async () => {
@@ -156,6 +158,7 @@ describe('host invocation boundary', () => {
   })
 
   test('counts a notice even though notifyHost abandons its promise and swallows errors', async () => {
+    const output = vi.spyOn(stdout, 'write').mockImplementation(() => true)
     const boundary = createHostBoundary()
     const pause = gate()
     let calls = 0
@@ -177,9 +180,7 @@ describe('host invocation boundary', () => {
     expect(calls).toBe(1)
     pause.release()
     await drain
-    stdout.write(
-      'notifyHost: observer paused -> close -> late notice swallowed without host call -> rejection -> drained\n',
-    )
+    expect(output).not.toHaveBeenCalled()
   })
 
   test('preserves receiver, reused callable identity and synchronous results without counting a wrapper twice', async () => {

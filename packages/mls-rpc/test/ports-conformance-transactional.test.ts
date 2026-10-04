@@ -11,7 +11,12 @@ import type { HandleAccess } from '../src/access.js'
 import { simpleHandleAccess } from '../src/access.js'
 import { createGroupCrypto } from '../src/crypto.js'
 import { createGroupMLS } from '../src/mls.js'
-import { buildRealCommit, buildRealExternalCommit, createRealGroup } from './fixtures/real-group.js'
+import {
+  buildRealCommit,
+  buildRealExternalCommit,
+  createRealGroup,
+  sealRealRecoveryVerdict,
+} from './fixtures/real-group.js'
 import {
   createTransactionalAccess,
   createTransactionalStore,
@@ -163,6 +168,11 @@ testGroupMLSConformance({
     )
     return {
       groupID: group.committer.handle.groupID,
+      sealVerdictPayload: async (index, request, verdict) => {
+        const member = group.members[index]
+        if (member == null) throw new Error('missing member')
+        return await sealRealRecoveryVerdict(member, request, verdict)
+      },
       setEpochHintOffset: (offset) => {
         hintOffset = offset
       },

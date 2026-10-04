@@ -290,6 +290,40 @@ const SEAL_DOMAIN = {
   verdict: 'kumiai/memory-recovery/verdict/v1',
 } as const
 
+function isRecoveryVerdict(value: unknown): value is RecoveryVerdict {
+  if (value == null || typeof value !== 'object') return false
+  const v = value as Record<string, unknown>
+  if (
+    ![v.groupID, v.requestID, v.position, v.commitDigest].every(
+      (field) => typeof field === 'string' && field.length > 0,
+    )
+  )
+    return false
+  return (
+    v.verdict === 'superseded' ||
+    (v.verdict === 'confirmed' &&
+      Number.isSafeInteger(v.epoch) &&
+      (v.epoch as number) >= 0 &&
+      typeof v.tag === 'string') ||
+    (v.verdict === 'refused' &&
+      ['binding', 'lapse', 'floor', 'policy', 'invalid'].includes(v.reason as string))
+  )
+}
+
+/** Seal an arbitrary authenticated payload to exercise the receiver's shape checks. */
+export function sealMemoryRecoveryVerdict(
+  request: Uint8Array,
+  signer: string,
+  verdict: unknown,
+): Uint8Array {
+  const to = JSON.parse(toUTF(request)) as MemoryRecoveryRequest
+  return sealToKey(
+    fromB64U(to.ephemeralKey),
+    sealContext(SEAL_DOMAIN.verdict, to.requesterDID, to.requestID),
+    fromUTF(JSON.stringify({ signer, verdict })),
+  )
+}
+
 /** enc(32) + tag(16): the shortest well-formed sealed reply. */
 const MIN_SEALED_LENGTH = 32 + 16
 
@@ -760,7 +794,11 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     },
     async sealRecoveryVerdict(request, verdict: RecoveryVerdict) {
       const to = authorize(request, 'sealRecoveryVerdict', false)
-      if (verdict.groupID !== groupID || verdict.requestID !== to.requestID)
+      if (
+        !isRecoveryVerdict(verdict) ||
+        verdict.groupID !== groupID ||
+        verdict.requestID !== to.requestID
+      )
         throw new Error('Verdict does not bind request')
       return sealReply(
         SEAL_DOMAIN.verdict,
@@ -775,6 +813,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         const value = JSON.parse(toUTF(opened)) as OpenedRecoveryVerdict
         if (
           typeof value.signer !== 'string' ||
+          !isRecoveryVerdict(value.verdict) ||
           value.verdict?.groupID !== groupID ||
           value.verdict.requestID !== requestID
         )
@@ -853,6 +892,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         judgeVerdict: ({ signer, verdict }) => {
           if (
             tuple == null ||
+            !isRecoveryVerdict(verdict) ||
             verdict.groupID !== groupID ||
             verdict.requestID !== requestID ||
             verdict.position !== tuple.position ||

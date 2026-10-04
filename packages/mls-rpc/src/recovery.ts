@@ -103,22 +103,33 @@ export function createRecoveryBindingState(identity: OwnIdentity, host?: Recover
       group: GroupHandle,
       reply: { groupInfo: Uint8Array; ledger: Array<string>; signer: string },
     ) {
-      if (!prepared && group.anchor.controller != null) {
-        if ((await this.prepare(group)) === 'renewal-required')
-          return { renewalRequired: true } as const
+      if (!prepared) {
+        prepared = true
+        binding = current(group)
       }
-      if (group.anchor.controller != null && (binding == null || !(await usable(group, binding)))) {
-        binding = await request(group)
-        if (binding == null || !(await usable(group, binding)))
-          return { renewalRequired: true } as const
-      }
-      const build = (controller?: ControllerBinding) =>
-        joinGroupExternal({
+      let signerEligible = group.anchor.controller == null
+      const build = (controller?: ControllerBinding) => {
+        signerEligible = group.anchor.controller == null
+        return joinGroupExternal({
           identity,
           groupInfo: reply.groupInfo,
           credential: group.credential,
           resync: true,
           controller,
+          beforeBinding: async (pending, source) => {
+            if (group.anchor.controller == null) return
+            if (
+              !recoverySignerEligible(
+                pending,
+                knownRecoveryRegistry(group.registry, source.registry),
+                reply.signer,
+              )
+            )
+              throw new Error('Ineligible recovery attestation signer')
+            signerEligible = true
+            if (controller == null || !(await usable(group, controller)))
+              throw new LeafBindingError('floating-refused')
+          },
           options: {
             commitPolicy: group.commitPolicy,
             resolveLedgerEntries: group.resolveLedgerEntries,
@@ -126,10 +137,12 @@ export function createRecoveryBindingState(identity: OwnIdentity, host?: Recover
           },
           ...(group.anchor.controller == null ? {} : { ledgerEntries: reply.ledger }),
         })
+      }
       try {
         return await build(binding)
       } catch (error) {
         if (
+          !signerEligible ||
           group.anchor.controller == null ||
           !(
             error instanceof LeafBindingError ||
@@ -144,6 +157,7 @@ export function createRecoveryBindingState(identity: OwnIdentity, host?: Recover
         try {
           return await build(binding)
         } catch (replacementError) {
+          if (!signerEligible) return null
           return replacementError instanceof LeafBindingError ||
             replacementError instanceof LeafLapsedError ||
             replacementError instanceof RevokeProofError

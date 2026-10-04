@@ -1,4 +1,4 @@
-import { type OwnIdentity, randomIdentity } from '@kokuin/token'
+import { type OwnIdentity, randomIdentity, stringifyToken } from '@kokuin/token'
 import {
   commitInvite,
   createGroup,
@@ -184,4 +184,31 @@ function rewriteExternalCommitIdentity(commit: Uint8Array, did: string): Uint8Ar
       },
     },
   } as never)
+}
+
+/** Seal a signed payload without the port's author-side shape guard. */
+export async function sealRealRecoveryVerdict(
+  member: RealMember,
+  request: Uint8Array,
+  verdict: Record<string, unknown>,
+): Promise<Uint8Array> {
+  const { sealToRequest } = await import(
+    new URL('../../../mls/src/recovery.ts', import.meta.url).href
+  )
+  const token = await member.identity.signToken(
+    { ...verdict, type: 'kumiai.recovery-verdict' },
+    { embedLongForm: true },
+  )
+  return await sealToRequest(
+    {
+      hpkeInfo: new TextEncoder().encode('kumiai/mls/recovery-verdict/v1'),
+      aadDomain: new TextEncoder().encode('kumiai/mls/recovery-verdict-aad/v1'),
+      version: 1,
+      fail: (_reason: unknown, message: string) => new Error(message),
+    },
+    member.handle,
+    new TextDecoder().decode(request),
+    new TextEncoder().encode(stringifyToken(token)),
+    false,
+  )
 }

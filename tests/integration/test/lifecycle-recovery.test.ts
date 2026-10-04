@@ -9,7 +9,7 @@ import {
   createKeyPackageBundle,
   type DeviceRegistry,
   exportGroupInfo,
-  type GroupHandle,
+  GroupHandle,
   joinGroupExternal,
   parseMLSCredentialIdentity,
   processWelcome,
@@ -151,6 +151,7 @@ function recoveryPeer(params: {
   access: ReturnType<typeof simpleHandleAccess>
   mls: ReturnType<typeof createGroupMLS>
   onRecovery?: (event: RecoveryEvent) => void
+  deadlineMs?: number
 }) {
   const { hub, identity, access, mls, onRecovery } = params
   return createGroupPeer<Protocols>({
@@ -167,7 +168,7 @@ function recoveryPeer(params: {
     },
     adoptJournalled: async () => {},
     onRecovery,
-    recovery: { timeoutMs: 100, deadlineMs: 1000, getDelayMs: () => 0 },
+    recovery: { timeoutMs: 100, deadlineMs: params.deadlineMs ?? 1000, getDelayMs: () => 0 },
   })
 }
 
@@ -614,3 +615,128 @@ test('a reply-ledger floor ends peer recovery without publication and holds late
     await hub.dispose()
   }
 }, 10_000)
+
+async function ineligibleReply(
+  s: Awaited<ReturnType<typeof setup>>,
+  kind: 'leafless' | 'revoked' | 'issuer',
+) {
+  vi.spyOn(Date, 'now').mockReturnValue(250_000)
+  s.installAlice(await installFloor(s, 250))
+  vi.spyOn(Date, 'now').mockReturnValue(150_000)
+  const identity = kind === 'leafless' ? fixture.agent(81) : s.alice
+  if (kind !== 'leafless') {
+    const devices = s.bobGroup().registry.devices as Map<
+      string,
+      { controller: string; status: 'revoked' }
+    >
+    devices.set(kind === 'issuer' ? fixture.agent(65).id : s.alice.id, {
+      controller: fixture.controllerID,
+      status: 'revoked',
+    })
+  }
+  const handle = new GroupHandle({
+    state: s.aliceGroup().state,
+    context: s.aliceGroup().context,
+    credential: { id: identity.id, groupID: s.aliceGroup().groupID },
+  })
+  await handle.bootstrapLedger(s.aliceGroup().ledgerTokens)
+  return createGroupMLS({
+    identity,
+    entrySlot: createLedgerEntrySlot(),
+    access: simpleHandleAccess({
+      handle: () => handle,
+      adopt: () => {
+        throw new Error('Unexpected adoption')
+      },
+    }),
+  })
+}
+
+test.each(['leafless', 'revoked', 'issuer'] as const)(
+  'an ineligible %s attestation cannot request binding remediation from a failing reply',
+  async (kind) => {
+    const host = vi.fn(async () => null)
+    const s = await setup(host)
+    expect(await s.mls.prepareRecovery()).toBe('ready')
+    const responder = await ineligibleReply(s, kind)
+    const request = await s.mls.createRecoveryRequest('ineligible-binding')
+    const result = await s.mls.applyRecovery(
+      await responder.sealGroupInfo(request),
+      'ineligible-binding',
+    )
+    expect({ result, hostCalls: host.mock.calls.length }).toEqual({ result: null, hostCalls: 0 })
+    expect(s.bobGroup().epoch).toBe(1n)
+  },
+)
+
+test('an ineligible attestation cannot impose a renewal-required peer hold', async () => {
+  const wallClock = Date.now.bind(Date)
+  const host = vi.fn(async () => null)
+  const s = await setup(host)
+  const responder = await ineligibleReply(s, 'leafless')
+  const ahead = await commitLedgerEntries(s.aliceGroup(), [
+    await signLedgerEntry(s.alice, {
+      groupID: s.aliceGroup().groupID,
+      type: 'note',
+      subject: s.alice.id,
+      value: 'ahead',
+    }),
+  ])
+  s.installAlice(ahead.newGroup)
+  const started = wallClock()
+  vi.spyOn(Date, 'now').mockImplementation(() => 150_000 + wallClock() - started)
+  const hub = createWireHub()
+  const events: Array<RecoveryEvent> = []
+  const alicePeer = recoveryPeer({
+    hub,
+    identity: s.alice,
+    mls: responder,
+    deadlineMs: 100,
+    access: simpleHandleAccess({ handle: s.aliceGroup, adopt: s.installAlice }),
+  })
+  const bobPeer = recoveryPeer({
+    hub,
+    identity: s.bob,
+    access: s.access,
+    mls: s.mls,
+    deadlineMs: 100,
+    onRecovery: (event) => events.push(event),
+  })
+  const requests = vi.spyOn(s.mls, 'createRecoveryRequest')
+  try {
+    await alicePeer.resync()
+    await bobPeer.resync()
+    expect(await bobPeer.recover()).toMatchObject({ advanced: false })
+    expect(
+      events.filter((event) => event.phase === 'failed').map((event) => event.reason),
+    ).not.toContain('renewal-required')
+    expect(host).not.toHaveBeenCalled()
+    const previous = requests.mock.calls.length
+    const connection = hub.connect(fixture.agent(75))
+    await connection.publish({
+      senderDID: fixture.agent(75).id,
+      topicID: commitTopic(await s.mls.exportRecoverySecret()),
+      payload: encodeHandshakeFrame(
+        HANDSHAKE_KIND.commit,
+        encodeCommitFrame(ahead.commitMessage, new Uint8Array()),
+      ),
+      retain: 'log',
+    })
+    await bobPeer.resync()
+    await vi.waitFor(() => expect(requests.mock.calls.length).toBeGreaterThan(previous))
+    await vi.waitFor(() =>
+      expect(
+        events.some((event) => event.phase === 'failed' && event.trigger === 'automatic'),
+      ).toBe(true),
+    )
+    expect(
+      events.filter((event) => event.phase === 'failed').map((event) => event.reason),
+    ).not.toContain('renewal-required')
+    expect(host).not.toHaveBeenCalled()
+    expect(s.bobGroup().epoch).toBe(1n)
+  } finally {
+    await bobPeer.dispose()
+    await alicePeer.dispose()
+    await hub.dispose()
+  }
+})

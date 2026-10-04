@@ -206,6 +206,8 @@ export type JoinGroupExternalParams = {
   controller?: ControllerBinding
   options?: GroupOptions
   authenticatedData?: Uint8Array
+  /** @internal Judge the attestation before any replacement-binding checks. */
+  beforeBinding?: (pending: GroupHandle, source: GroupHandle) => Promise<void>
 }
 
 export type JoinGroupExternalResult = {
@@ -273,9 +275,6 @@ export async function joinGroupExternal(
       ? decodeGroupAnchor(anchorExtension.extensionData)
       : null
   if (anchor == null) throw new Error('joinGroupExternal: the group has no valid anchor')
-  if (anchor.controller != null && controller == null)
-    throw new LeafBindingError('floating-refused')
-  assertBindingAuthorTime(controller)
   const context = await resolveMlsContext(options, anchor)
   const originalCredentials: Array<{ credential: Credential; signaturePublicKey: Uint8Array }> = []
   const joinContext = {
@@ -380,6 +379,10 @@ export async function joinGroupExternal(
     context: await resolveMlsContext(options, anchor),
   })
   if (ledgerEntries != null) await before.bootstrapLedger(ledgerEntries)
+  await params.beforeBinding?.(group, before)
+  if (anchor.controller != null && controller == null)
+    throw new LeafBindingError('floating-refused')
+  assertBindingAuthorTime(controller)
   const gate = await prepareLifecycleGate(
     before,
     [],
