@@ -5,6 +5,90 @@ import { createGroupCrypto } from '../src/crypto.js'
 import { createGroupMLS } from '../src/mls.js'
 import { buildRealCommit, createRealGroup } from './fixtures/real-group.js'
 
+test('admission stays synchronous at the old epoch through awaited adoption', async () => {
+  const group = await createRealGroup(1, 'admission-adoption')
+  const member = group.members[0]
+  if (member == null) throw new Error('missing member')
+  const epochBefore = Number(member.handle.epoch)
+  const access = simpleHandleAccess({
+    handle: () => member.handle,
+    adopt: async (next) => {
+      member.handle = next
+      const admissionInsideCallback = await mls.sendAdmission()
+      expect(admissionInsideCallback).toEqual({ epoch: epochBefore, admissible: true })
+      expect(access.epoch()).toBe(epochBefore)
+      expect(confirm).not.toHaveBeenCalled()
+    },
+  })
+  const mls = createGroupMLS({ access, identity: member.identity, entrySlot: member.slot })
+  expect(access.admission()).toEqual({ epoch: epochBefore, admissible: true })
+  await buildRealCommit(group)
+  const next = group.committer.handle
+  const confirm = vi.spyOn(next, 'confirmAdopted')
+  await access.replace(next)
+  expect(confirm).toHaveBeenCalledOnce()
+  expect(mls.sendAdmission()).toEqual({ epoch: Number(next.epoch), admissible: true })
+  expect(access.epoch()).toBe(mls.sendAdmission().epoch)
+})
+
+test('failed adoption neither confirms the candidate nor publishes its snapshots', async () => {
+  const group = await createRealGroup(1, 'failed-admission-adoption')
+  const member = group.members[0]
+  if (member == null) throw new Error('missing member')
+  const access = simpleHandleAccess({
+    handle: () => member.handle,
+    adopt: async () => {
+      throw new Error('adoption failed')
+    },
+  })
+  const before = access.admission()
+  await buildRealCommit(group)
+  const next = group.committer.handle
+  const confirm = vi.spyOn(next, 'confirmAdopted')
+  await expect(access.replace(next)).rejects.toThrow('adoption failed')
+  expect(access.admission()).toEqual(before)
+  expect(access.epoch()).toBe(before.epoch)
+  expect(confirm).not.toHaveBeenCalled()
+})
+
+test.each(['mutate', 'open'] as const)(
+  '%s publishes admission with epoch only at successful completion',
+  async (operation) => {
+    const group = await createRealGroup(1, `admission-${operation}`)
+    const member = group.members[0]
+    if (member == null) throw new Error('missing member')
+    const access = simpleHandleAccess({ handle: () => member.handle, adopt: () => {} })
+    const before = access.admission()
+    const commit = await buildRealCommit(group)
+    const run = async () => {
+      await member.handle.processMessage(commit)
+      expect(member.handle.sendAdmission().epoch).toBe(before.epoch + 1)
+      expect(access.admission()).toEqual(before)
+      expect(access.epoch()).toBe(before.epoch)
+    }
+    if (operation === 'mutate') await access.mutate(run)
+    else await access.open(run, async () => {})
+    expect(access.admission()).toEqual({ epoch: before.epoch + 1, admissible: true })
+    expect(access.epoch()).toBe(access.admission().epoch)
+  },
+)
+
+test('sendAdmission reads only the published access snapshot', async () => {
+  const group = await createRealGroup(1, 'admission-direct-access')
+  const member = group.members[0]
+  if (member == null) throw new Error('missing member')
+  const access = simpleHandleAccess({ handle: () => member.handle, adopt: () => {} })
+  const mls = createGroupMLS({ access, identity: member.identity, entrySlot: member.slot })
+  const spies = [
+    vi.spyOn(access, 'read'),
+    vi.spyOn(access, 'mutate'),
+    vi.spyOn(access, 'replace'),
+    vi.spyOn(access, 'open'),
+  ]
+  expect(mls.sendAdmission()).toEqual(member.handle.sendAdmission())
+  for (const spy of spies) expect(spy).not.toHaveBeenCalled()
+})
+
 test('one access instance serves both ports and publishes replacement after save', async () => {
   const group = await createRealGroup(1, 'shared-handle-access')
   const member = group.members[0]

@@ -353,6 +353,10 @@ export type PendingRecovery = {
   onAccepted: () => Promise<void>
 }
 
+export type SendAdmission =
+  | { epoch: number; admissible: true }
+  | { epoch: number; admissible: false; reason: 'lapsed' }
+
 /**
  * Consumer-supplied MLS lifecycle port. Sibling to {@link GroupCrypto}: this drives the
  * handshake lane — applying Commits to advance the epoch, re-syncing a stranded peer. group-rpc
@@ -365,6 +369,8 @@ export type PendingRecovery = {
  * until the suite was made to cover the shape rather than a sample of it.
  */
 export type GroupMLS = {
+  /** Published with the epoch, without taking the handle lock. */
+  sendAdmission(): SendAdmission
   /** Read the current handle epoch under the host's handle lock. */
   readEpoch(): Promise<number>
   /**

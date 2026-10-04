@@ -35,7 +35,7 @@ import { decodeControlEnvelope } from './envelope.js'
 import { foldEnvelope, GROUP_TYPE_PREFIX } from './envelope-fold.js'
 import { LeafLapsedError, RevokeProofError } from './errors.js'
 import type { FoldInput } from './fold.js'
-import { deviceDenyHolderFor } from './group-context.js'
+import { createMlsContext, deviceDenyHolderFor } from './group-context.js'
 import { readMessageEpoch } from './group-info.js'
 import {
   assertHeadMatches,
@@ -72,6 +72,7 @@ import {
   denySetOf,
   foldControl,
   isDeviceValue,
+  revocationOf,
 } from './registry.js'
 import type { RosterState } from './roster.js'
 import { type PrivateCommitFrame, readSenderLeafIndex } from './sender-data.js'
@@ -93,9 +94,19 @@ export function mutexFor(handle: GroupHandle): Mutex {
 /** Events a GroupHandle emits. Advisory notifications derived from the folded ledger; never
  *  a protocol input. Delivered via `fire` (a throwing listener never breaks a fold). */
 export type GroupHandleEvents = {
-  deviceRevoked: Array<{ device: string; controller: string }>
+  deviceRevoked: Array<{
+    device: string
+    controller: string
+    logPosition?: number
+    reason?: 'reset'
+    cascadedFrom?: string
+  }>
   controllerBeaconChanged: { controller: string; logLength: number; headDigest: string }
 }
+
+export type SendAdmission =
+  | { epoch: number; admissible: true }
+  | { epoch: number; admissible: false; reason: 'lapsed' }
 
 /** One event emitter per live handle, shared across every handle derived from it (deriveGroup),
  *  so a subscription on an early handle keeps receiving events fired on its post-commit successors.
@@ -321,6 +332,8 @@ export type GroupHandleParams = {
   onLedgerEntries?: (entries: Array<VerifiedLedgerEntry>) => void
   /** Shared event emitter; a derived handle inherits its parent's so subscriptions persist. */
   events?: EventEmitter<GroupHandleEvents>
+  /** Defer authored control notifications until adoption. */
+  speculative?: boolean
 }
 
 /** Mutable wrapper around MLS group state + Enkaku credential. */
@@ -341,6 +354,8 @@ export class GroupHandle {
   #entryBodies: Map<string, HeldLedgerEntry>
   #roster: RosterState
   #registry: DeviceRegistry
+  #admission: SendAdmission
+  #pendingControlEvents?: Array<VerifiedLedgerEntry>
 
   constructor(params: GroupHandleParams) {
     this.#state = params.state
@@ -364,9 +379,7 @@ export class GroupHandle {
     const folded = foldLedgerControl(this.#ledger, anchor, this.groupID)
     this.#roster = folded.roster
     this.#registry = folded.registry
-    // Point this context's deny holder at THIS handle. deriveGroup shares the context object, so a
-    // derived (post-commit) handle re-points it to itself — always the newest, live registry. A
-    // context not built by resolveMlsContext (none in the codebase) simply has no holder.
+    // Authentication reads only this handle's registry and lifetime limits.
     const denyHolder = deviceDenyHolderFor(this.#context)
     if (denyHolder != null) {
       denyHolder.provider = () => this.currentDenySet()
@@ -376,6 +389,28 @@ export class GroupHandle {
         anchor.controller == null ? undefined : (anchor.trustedGrantLifetime ?? 2_592_000)
     }
     EMITTERS.set(this, params.events ?? new EventEmitter<GroupHandleEvents>())
+    this.#pendingControlEvents = params.speculative ? [] : undefined
+    this.#admission = this.#computeAdmission()
+  }
+
+  #computeAdmission(): SendAdmission {
+    const leaf = leafAt(this.#state.ratchetTree, this.#state.privatePath.leafIndex)
+    const epoch = Number(this.epoch)
+    return Object.freeze(
+      leaf != null && isLapsed(this, leaf)
+        ? { epoch, admissible: false, reason: 'lapsed' }
+        : { epoch, admissible: true },
+    )
+  }
+
+  sendAdmission(): SendAdmission {
+    return this.#admission
+  }
+
+  confirmAdopted(): void {
+    const pending = this.#pendingControlEvents
+    this.#pendingControlEvents = undefined
+    if (pending != null) this.emitControlEvents(pending)
   }
 
   get groupID(): string {
@@ -483,20 +518,25 @@ export class GroupHandle {
 
   /**
    * @internal Fire notification events for the device entries just enacted in one operation.
-   * Called from the commit path, from bootstrapLedger, and from the local write APIs — NEVER from
+   * Called after acceptance or adoption — NEVER from
    * the constructor or a fresh-join applyLedgerEntries, so a joiner is not replayed the whole
    * history as live events (it reads revokedDevices()/beaconOf for current state instead). Uses
-   * `fire`: a throwing listener is swallowed and cannot break the fold. Reads controllerOf on the
-   * POST-fold registry.
+   * `fire`: a throwing listener is swallowed and cannot break the fold. Reads the post-fold registry.
    */
   emitControlEvents(enacted: ReadonlyArray<VerifiedLedgerEntry>): void {
     const emitter = emitterOf(this)
-    const revoked: Array<{ device: string; controller: string }> = []
+    const revoked: GroupHandleEvents['deviceRevoked'] = []
     for (const { entry } of enacted) {
       if (entry.type !== DEVICE_ENTRY_TYPE || !isDeviceValue(entry.value)) continue
       const value: DeviceValue = entry.value
       const subject = normalizeDID(entry.subject)
-      if (value.op === 'revoke') {
+      if (this.#anchor.controller != null && (value.op === 'revoke' || value.op === 'reset')) {
+        for (const effect of value.revoked ?? []) {
+          const device = normalizeDID(effect.did)
+          const record = revocationOf(this, device)
+          if (record != null) revoked.push({ device, ...record })
+        }
+      } else if (value.op === 'revoke') {
         const controller = controllerOf(this.#registry, subject)
         if (controller != null) revoked.push({ device: subject, controller })
       } else if (value.op === 'beacon' && value.logLength != null && value.headDigest != null) {
@@ -557,6 +597,10 @@ export class GroupHandle {
       const folded = foldLedgerControl(this.#ledger, this.#anchor, this.groupID)
       this.#roster = folded.roster
       this.#registry = folded.registry
+      this.#admission = this.#computeAdmission()
+      this.#pendingControlEvents?.push(
+        ...appended.filter(({ entry }) => entry.type === DEVICE_ENTRY_TYPE),
+      )
       return appended
     })
   }
@@ -680,6 +724,7 @@ export class GroupHandle {
         entryBodies: this.#entryBodies,
         roster: this.#roster,
         registry: this.#registry,
+        admission: this.#admission,
       }
       const folded = foldLedgerControl(log, this.#anchor, this.groupID)
       this.#ledger = log
@@ -688,6 +733,7 @@ export class GroupHandle {
       )
       this.#roster = folded.roster
       this.#registry = folded.registry
+      this.#admission = this.#computeAdmission()
       try {
         await opts?.persist?.(this)
       } catch (error) {
@@ -696,6 +742,7 @@ export class GroupHandle {
         this.#entryBodies = previous.entryBodies
         this.#roster = previous.roster
         this.#registry = previous.registry
+        this.#admission = previous.admission
         throw error
       }
 
@@ -1186,6 +1233,7 @@ export class GroupHandle {
       }
       this.#roster = candidateRoster
       this.#registry = candidateRegistry
+      this.#admission = this.#computeAdmission()
       const emit = () => {
         this.#notifyAccepted(
           surfaced,
@@ -1426,6 +1474,7 @@ export class GroupHandle {
         opts,
       )
       const previousState = this.#state
+      const previousAdmission = this.#admission
       const application = readPrivateFrame(decoded, contentTypes.application)
       if (application != null) {
         const historical = this.#state.historicalReceiverData.get(application.epoch)
@@ -1528,6 +1577,7 @@ export class GroupHandle {
           this.#entryBodies = previousEntryBodies
           this.#roster = previousRoster
           this.#registry = previousRegistry
+          this.#admission = previousAdmission
           throw error
         }
         zeroAll(result.consumed)
@@ -1591,11 +1641,12 @@ export function deriveGroup(group: GroupHandle, state: ClientState): GroupHandle
   return new GroupHandle({
     state,
     credential: group.credential,
-    context: group.context,
+    context: createMlsContext(group.context.cipherSuite, group.anchor),
     ledger: group.ledger,
     commitPolicy: group.commitPolicy,
     resolveLedgerEntries: group.resolveLedgerEntries,
     onLedgerEntries: group.onLedgerEntries,
     events: emitterOf(group),
+    speculative: true,
   })
 }

@@ -56,6 +56,7 @@ export {
   type ProcessCommitResult,
   type RosterEntry,
   type SealEntriesResult,
+  type SendAdmission,
   sortPendingAppFrames,
 } from './crypto.js'
 export {

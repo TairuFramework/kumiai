@@ -126,6 +126,7 @@ export {
   removeMember,
   restoreGroup,
   revokeDevice,
+  type SendAdmission,
 } from './group.js'
 export {
   type RevokeBuildResult,

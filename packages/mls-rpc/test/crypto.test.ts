@@ -112,6 +112,7 @@ describe('createGroupCrypto', () => {
         handle: () =>
           ({
             epoch: 0n,
+            sendAdmission: () => ({ epoch: 0, admissible: true }),
             exportSecret: async () => {
               const key = new Uint8Array(32).fill(7)
               keys.push(key)
@@ -286,6 +287,7 @@ describe('createGroupCrypto', () => {
             payload: utf8.encode('no sender'),
           })
         }
+        if (prop === 'sendAdmission') return target.sendAdmission.bind(target)
         return Reflect.get(target, prop, target)
       },
     })

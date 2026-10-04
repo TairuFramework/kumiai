@@ -194,6 +194,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
     async readEpoch(): Promise<number> {
       return await access.read((group) => Number(group.epoch))
     },
+    sendAdmission: () => access.admission(),
     async rosterEntries(): Promise<Array<RosterEntry>> {
       return await access.read((group) =>
         group.listMembers().map((member) => ({

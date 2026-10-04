@@ -51,6 +51,9 @@ export type ConformanceRosterEntry = {
  * passing bytes between two instances, which is all the clauses below do.
  */
 export type ConformanceGroupMLS = {
+  sendAdmission: () =>
+    | { epoch: number; admissible: true }
+    | { epoch: number; admissible: false; reason: 'lapsed' }
   readEpoch: () => Promise<number>
   rosterEntries: () => Promise<Array<ConformanceRosterEntry>>
   readCommitHeader: (commit: Uint8Array) => Promise<ConformanceCommitHeader | null>
@@ -165,6 +168,20 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
   }
 
   describe(`GroupMLS conformance — ${label}`, () => {
+    test('send admission is synchronous and follows only accepted epoch advances', async () => {
+      await withGroup(1, 'send-admission', async (group) => {
+        const member = memberAt(group.members, 0)
+        const epoch = await member.mls.readEpoch()
+        group.setEpochHintOffset(1)
+        expect(member.mls.sendAdmission()).toEqual({ epoch, admissible: true })
+        const commit = await group.buildCommit()
+        expect(member.mls.sendAdmission()).toEqual({ epoch, admissible: true })
+        await member.mls.processCommit(commit.commit, commit.context)
+        expect(member.mls.sendAdmission()).toEqual({ epoch: epoch + 1, admissible: true })
+        await member.mls.processCommit(commit.commit, commit.context)
+        expect(member.mls.sendAdmission()).toEqual({ epoch: epoch + 1, admissible: true })
+      })
+    })
     // Three passes (hint offsets 0, -1, 1) over a real MLS group: slow on CI runners.
     test('commit results and refusals ignore a lagging or leading epoch hint', async () => {
       await withGroup(3, 'lying-epoch-hint', async (group) => {

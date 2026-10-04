@@ -552,6 +552,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     async readEpoch(): Promise<number> {
       return epoch
     },
+    sendAdmission: () => ({ epoch, admissible: true }),
     async readCommitHeader(commit: Uint8Array): Promise<CommitHeader | null> {
       // Two facts, two availabilities — the whole point of the port's contract, modelled exactly.
       //

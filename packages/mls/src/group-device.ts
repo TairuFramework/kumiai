@@ -169,8 +169,7 @@ export async function revokeDevice(
       requireAdmin: false,
     })
     const newGroup = deriveGroup(group, result.newState)
-    const enacted = await newGroup.applyLedgerEntries([token])
-    newGroup.emitControlEvents(enacted)
+    await newGroup.applyLedgerEntries([token])
     return {
       commitMessage: encode(mlsMessageEncoder, result.commit),
       newGroup,
@@ -199,8 +198,7 @@ export async function announceControllerBeacon(
     })
     const result = await commitWithEntries(group, [], [token], { requireAdmin: false })
     const newGroup = deriveGroup(group, result.newState)
-    const enacted = await newGroup.applyLedgerEntries([token])
-    newGroup.emitControlEvents(enacted)
+    await newGroup.applyLedgerEntries([token])
     return {
       commitMessage: encode(mlsMessageEncoder, result.commit),
       newGroup,

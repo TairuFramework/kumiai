@@ -25,7 +25,7 @@ export type DeviceDenyHolder = {
 
 const DENY_HOLDERS = new WeakMap<MlsContext, DeviceDenyHolder>()
 
-/** The deny holder for a context built by {@link resolveMlsContext}, or undefined for others. */
+/** The deny holder for an internally built context, or undefined for others. */
 export function deviceDenyHolderFor(context: MlsContext): DeviceDenyHolder | undefined {
   return DENY_HOLDERS.get(context)
 }
@@ -36,6 +36,13 @@ export async function resolveMlsContext(
 ): Promise<MlsContext> {
   const name = (options?.ciphersuiteName ?? DEFAULT_CIPHERSUITE) as CiphersuiteName
   const cipherSuite = await getCiphersuiteImpl(name, options?.cryptoProvider ?? nobleCryptoProvider)
+  return createMlsContext(cipherSuite, anchor)
+}
+
+export function createMlsContext(
+  cipherSuite: MlsContext['cipherSuite'],
+  anchor?: GroupAnchor,
+): MlsContext {
   // The deny set cannot be known here — the handle that folds it does not exist yet. Bind a mutable
   // holder the auth service reads; the GroupHandle constructor points it at its own currentDenySet().
   const holder: DeviceDenyHolder = {

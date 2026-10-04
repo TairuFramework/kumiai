@@ -38,6 +38,7 @@ export {
   type GroupHandleParams,
   type HeldLedgerEntry,
   type LedgerLogEntry,
+  type SendAdmission,
 } from './group-handle.js'
 export {
   type ExportGroupInfoParams,
