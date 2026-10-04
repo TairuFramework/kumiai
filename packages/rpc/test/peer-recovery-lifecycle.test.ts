@@ -212,7 +212,7 @@ describe('recovery lifecycle', () => {
     await bob.peer.dispose()
   })
 
-  test('dispose during rendezvous reports disposed and rejects', async () => {
+  test('dispose during rendezvous rejects without a terminal host notice', async () => {
     const hub = new FakeHub()
     const rs = secret(0xb7)
     const events: Array<RecoveryEvent> = []
@@ -229,8 +229,8 @@ describe('recovery lifecycle', () => {
     )
     await bob.peer.dispose()
     await expect(attempt).rejects.toBeInstanceOf(PeerDisposedError)
-    expect(eventsOf(events)).toEqual(['started', 'failed'])
-    expect(events[1]).toMatchObject({ reason: 'disposed' })
+    await bob.peer.drained()
+    expect(eventsOf(events)).toEqual(['started'])
   })
 
   test('started reaches the host while rendezvous is still pending', async () => {
@@ -251,7 +251,8 @@ describe('recovery lifecycle', () => {
     await vi.waitFor(() => expect(eventsOf(events)).toEqual(['started']))
     await bob.peer.dispose()
     await expect(attempt).rejects.toBeInstanceOf(PeerDisposedError)
-    expect(eventsOf(events)).toEqual(['started', 'failed'])
+    await bob.peer.drained()
+    expect(eventsOf(events)).toEqual(['started'])
   })
 
   test('dispose after accepted recovery publish prevents adoption', async () => {
@@ -354,8 +355,8 @@ describe('recovery lifecycle', () => {
     ])
     clearTimeout(promptTimer)
     expect(outcome).toBeInstanceOf(PeerDisposedError)
-    expect(eventsOf(events)).toEqual(['started', 'failed'])
-    expect(events[1]).toMatchObject({ reason: 'disposed' })
+    await alice.peer.drained()
+    expect(eventsOf(events)).toEqual(['started'])
     expect(clearTimer).toHaveBeenCalledWith(gatherTimer)
     setTimer.mockRestore()
     clearTimer.mockRestore()
@@ -504,8 +505,8 @@ describe('recovery lifecycle', () => {
       },
     })
     await expect(bob.peer.recover()).rejects.toBeInstanceOf(PeerDisposedError)
-    expect(eventsOf(events)).toEqual(['started', 'failed'])
-    expect(events[1]).toMatchObject({ reason: 'disposed' })
+    await bob.peer.drained()
+    expect(eventsOf(events)).toEqual(['started'])
     await bob.peer.dispose()
     await carol.peer.dispose()
   })

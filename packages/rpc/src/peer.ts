@@ -74,6 +74,13 @@ import {
   HANDSHAKE_KIND,
   HANDSHAKE_VERSION,
 } from './handshake.js'
+import {
+  createHostBoundary,
+  wrapGatherOptions,
+  wrapPeerHost,
+  wrapPendingCommit,
+  wrapPendingRecovery,
+} from './host-boundary.js'
 import { notifyHost } from './host-notice.js'
 import {
   createHubMux,
@@ -451,6 +458,8 @@ export type GroupPeer<Protocols extends Record<string, GroupProtocolDefinition>>
    */
   reauthorize: () => void
   dispose: () => Promise<void>
+  /** Wait for disposal and all host effects. Never await this from a host callback. */
+  drained: () => Promise<void>
 }
 
 /**
@@ -467,8 +476,10 @@ type ProtocolRuntime = {
 }
 
 export function createGroupPeer<Protocols extends Record<string, ProtocolDefinition>>(
-  params: GroupPeerParams<Protocols>,
+  input: GroupPeerParams<Protocols>,
 ): GroupPeer<Protocols> {
+  const boundary = createHostBoundary()
+  const params = wrapPeerHost(boundary, input)
   const {
     hub,
     crypto,
@@ -591,7 +602,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       ? {
           onAppDeliveryStalled: (event: AppDeliveryStalled) => {
             hostOutbox.push(() => {
-              if (!disposed) notifyHost(params.onAppDeliveryStalled, event)
+              if (!disposed) notifyHost((value) => params.onAppDeliveryStalled?.(value), event)
             })
           },
         }
@@ -600,7 +611,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       ? {
           onAppDeliveryResumed: (event: AppDeliveryResumed) => {
             const notify = () => {
-              if (!disposed) notifyHost(params.onAppDeliveryResumed, event)
+              if (!disposed) notifyHost((value) => params.onAppDeliveryResumed?.(value), event)
             }
             if (appNoticeInSerial) hostOutbox.push(notify)
             else queueMicrotask(notify)
@@ -981,7 +992,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         runtime.client.gather(prc, config?.param, {
           quorum: config?.quorum,
           timeoutMs: config?.timeoutMs,
-          onReply: config?.onReply,
+          onReply: config == null ? undefined : wrapGatherOptions(boundary, config).onReply,
           signal: config?.signal,
         }),
       to: async (memberDID) => {
@@ -1156,10 +1167,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
 
   let hostOutbox: Array<() => void> = []
   const emitStrand = (observation: StrandObservation): void => {
-    hostOutbox.push(() => notifyHost(params.onStrand, observation))
+    hostOutbox.push(() => notifyHost((value) => params.onStrand?.(value), observation))
   }
   const emitRecovery = (event: RecoveryEvent): void => {
-    hostOutbox.push(() => notifyHost(params.onRecovery, event))
+    hostOutbox.push(() => notifyHost((value) => params.onRecovery?.(value), event))
   }
   const observeStrand = (observation: Omit<StrandObservation, 'groupID'>): void => {
     bootstrapHealRequested = false
@@ -2181,7 +2192,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * Commit to the group, rebasing until it lands or the deadline passes. Runs under the commit
    * mutex for its whole life, so `build()` never races another `build()` on this device.
    */
-  const commit = async (build: () => Promise<PendingCommit>): Promise<LaneResult> => {
+  const commit = async (buildInput: () => Promise<PendingCommit>): Promise<LaneResult> => {
+    const build = boundary.wrap(buildInput)
     await ready
     assertLive()
     if (mls == null || journal == null || commitTopicID == null) {
@@ -2233,7 +2245,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
 
         // 2. Build against the host's CURRENT handle, adopting nothing. `build` closes over that
         //    handle, so a rebased retry frames at the rebased epoch.
-        const pending = await build()
+        const pending = wrapPendingCommit(boundary, await build())
         assertLive()
 
         // 3. Journal BEFORE publishing, durably: from here to the hub's answer is the crash
@@ -2422,7 +2434,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     }
     const attemptID = newPublishID()
     const base = { groupID: commits, attemptID, trigger }
-    queueMicrotask(() => notifyHost(params.onRecovery, { ...base, phase: 'started' }))
+    queueMicrotask(() =>
+      notifyHost<RecoveryEvent>((value) => params.onRecovery?.(value), {
+        ...base,
+        phase: 'started',
+      }),
+    )
     const failed = (reason: RecoveryFailureReason): { advanced: false } => {
       if (reason === 'renewal-required') renewalRequiredEpoch = crypto.epoch()
       emitRecovery({ ...base, phase: 'failed', reason })
@@ -2476,6 +2493,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         let pending: Awaited<ReturnType<typeof port.applyRecovery>>
         try {
           pending = await port.applyRecovery(outcome.sealed, requestID)
+          if (pending != null && !('renewalRequired' in pending)) {
+            pending = wrapPendingRecovery(boundary, pending)
+          }
         } catch {
           pending = null
         }
@@ -2842,9 +2862,15 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       // refused, so it cannot subscribe anything a normal retain would not have.
       mux.rearmRefusedTopics()
     },
+    drained: () => {
+      if (disposePromise == null)
+        return Promise.reject(new Error('Call dispose() before drained()'))
+      return boundary.drained(disposePromise)
+    },
     dispose: () => {
       if (disposePromise != null) return disposePromise
       disposed = true
+      boundary.close()
       abortPendingRestore?.()
       if (pendingRestoreTimer != null) clearTimeout(pendingRestoreTimer)
       appLane.dispose()

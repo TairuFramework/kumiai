@@ -266,8 +266,8 @@ describe('the ledger gather does not hand the group to the relay', () => {
     ])
     clearTimeout(promptTimer)
     expect(outcome).toBeInstanceOf(PeerDisposedError)
-    expect(events.map((event) => event.phase)).toEqual(['started', 'failed'])
-    expect(events[1]).toMatchObject({ reason: 'disposed' })
+    await alice.peer.drained()
+    expect(events.map((event) => event.phase)).toEqual(['started'])
     expect(
       setTimer.mock.calls.filter((call) => (call[1] ?? 0) > 8000 && (call[1] ?? 0) <= 10000),
     ).toHaveLength(gatherTimersBeforeDispose)
