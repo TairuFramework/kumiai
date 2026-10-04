@@ -1,6 +1,7 @@
 import type { Capabilities, GroupContextExtension } from 'ts-mls'
 import { defaultCapabilities, makeCustomExtension } from 'ts-mls'
 
+import { MAX_LEAF_LIFETIME, MAX_TRUSTED_GRANT_LIFETIME } from './capability.js'
 import type { GroupHandle } from './group.js'
 
 /**
@@ -31,12 +32,15 @@ const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 
 /**
- * Genesis anchor baked into the MLS GroupContext at creation: the creator DID is the epoch-0
- * admin. Survives every epoch, authenticated by the GroupInfo signature, treated as immutable.
+ * Genesis anchor baked into the MLS GroupContext at creation: the controller or creator DID is
+ * the epoch-0 admin. Survives every epoch, authenticated by the GroupInfo signature, treated as immutable.
  */
 export type GroupAnchor = {
   creatorDID: string
   version: number
+  controller?: string
+  leafLifetime?: number
+  trustedGrantLifetime?: number
   /**
    * Opaque consumer payload written once at creation; `@kumiai/mls` never reads or interprets
    * it. A consumer holding raw bytes must JSON-safe-encode them (e.g. base64) itself. Kubun
@@ -59,8 +63,8 @@ export function encodeGroupAnchor(anchor: GroupAnchor): Uint8Array {
  * this build has never seen, and a v1 consumer reading it as v1 (kubun keeps its recovery seed in
  * `app`) cannot tell. `version` is preserved so a consumer distinguishes "future version, app
  * withheld" from "genuinely no app". Contract this rests on: a `version` bump means `app` semantics
- * changed and nothing else; any future control-relevant field must go in a new extension type, never
- * inside the anchor where a version-tolerant older peer would silently ignore it.
+ * changed and nothing else. Lifecycle fields are validated regardless of version, and lifecycle
+ * peers must run a release that understands them.
  */
 export function decodeGroupAnchor(bytes: Uint8Array): GroupAnchor | null {
   let parsed: unknown
@@ -76,7 +80,28 @@ export function decodeGroupAnchor(bytes: Uint8Array): GroupAnchor | null {
   if (typeof record.creatorDID !== 'string' || typeof record.version !== 'number') {
     return null
   }
+  if (
+    'controller' in record &&
+    (typeof record.controller !== 'string' || !record.controller.startsWith('did:kokuin:'))
+  ) {
+    return null
+  }
+  for (const [field, maximum] of [
+    ['leafLifetime', MAX_LEAF_LIFETIME],
+    ['trustedGrantLifetime', MAX_TRUSTED_GRANT_LIFETIME],
+  ] as const) {
+    if (field in record) {
+      const value = record[field]
+      if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > maximum) {
+        return null
+      }
+    }
+  }
   const anchor: GroupAnchor = { creatorDID: record.creatorDID, version: record.version }
+  if (typeof record.controller === 'string') anchor.controller = record.controller
+  if (typeof record.leafLifetime === 'number') anchor.leafLifetime = record.leafLifetime
+  if (typeof record.trustedGrantLifetime === 'number')
+    anchor.trustedGrantLifetime = record.trustedGrantLifetime
   // Withhold the app payload from a future build's anchor: a version this build
   // has never seen may carry a payload with v2 semantics, and handing it to a
   // consumer under v1 expectations is exactly the silent misread this guards.

@@ -7,9 +7,16 @@ import type {
   PrivateKeyPackage,
 } from 'ts-mls'
 
+import type { ControllerBinding } from './credential.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
 
 export type GroupOptions = {
+  /** Creator or key-package leaf binding. Creates a lifecycle group when passed to createGroup. */
+  controller?: ControllerBinding
+  /** Lifecycle leaf lifetime in seconds. Defaults to 86,400; maximum 604,800. */
+  leafLifetime?: number
+  /** Lifecycle trusted grant lifetime in seconds. Defaults to 2,592,000; maximum 31,536,000. */
+  trustedGrantLifetime?: number
   /** Custom CryptoProvider for ts-mls. Defaults to nobleCryptoProvider. */
   cryptoProvider?: CryptoProvider
   /** Ciphersuite name. Defaults to MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519. */

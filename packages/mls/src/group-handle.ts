@@ -346,7 +346,13 @@ export class GroupHandle {
     // derived (post-commit) handle re-points it to itself — always the newest, live registry. A
     // context not built by resolveMlsContext (none in the codebase) simply has no holder.
     const denyHolder = deviceDenyHolderFor(this.#context)
-    if (denyHolder != null) denyHolder.provider = () => this.currentDenySet()
+    if (denyHolder != null) {
+      denyHolder.provider = () => this.currentDenySet()
+      denyHolder.leafLifetime =
+        anchor.controller == null ? undefined : (anchor.leafLifetime ?? 86_400)
+      denyHolder.trustedGrantLifetime =
+        anchor.controller == null ? undefined : (anchor.trustedGrantLifetime ?? 2_592_000)
+    }
     EMITTERS.set(this, params.events ?? new EventEmitter<GroupHandleEvents>())
   }
 

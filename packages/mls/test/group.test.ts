@@ -23,6 +23,7 @@ import {
   readGroupAnchor,
   readGroupAnchorExtension,
 } from '../src/anchor.js'
+import { parseMLSCredentialIdentity } from '../src/credential.js'
 import { encodeControlEnvelope } from '../src/envelope.js'
 import {
   CommitRejectedError,
@@ -51,6 +52,8 @@ import { ledgerEntryDigest, signLedgerEntry, type VerifiedLedgerEntry } from '..
 import { MissingLedgerEntriesError } from '../src/policy.js'
 import { ROLE_ENTRY_TYPE } from '../src/roster.js'
 import type { GroupOptions, Invite } from '../src/types.js'
+import { buildBoundLeaf } from './fixtures/bound-leaf.js'
+import { leafCapabilityFixture } from './fixtures/leaf-capability.js'
 
 const consumedCapture = vi.hoisted(() => ({ last: null as Array<Uint8Array> | null }))
 vi.mock('ts-mls', async (importOriginal) => {
@@ -3318,4 +3321,99 @@ describe('the committer filters the pending set before authoring a commit', () =
     expect(carolGroup.findMemberLeafIndex(bob.id)).toBeUndefined()
     expect(carolGroup.epoch).toBe(removal.newGroup.epoch)
   })
+})
+
+test('lifecycleGenesisPinsControllerAndCeilings', async () => {
+  const leaf = await buildBoundLeaf()
+  const identity = await createIdentity({
+    keys: [{ purpose: 'sig', alg: 'EdDSA', privateKey: new Uint8Array(32).fill(41) }],
+    didMethod: 'key',
+  })
+  const controller = parseMLSCredentialIdentity(leaf.identity).controller
+  if (controller == null) throw new Error('fixture has no controller binding')
+  const { group } = await createGroup(identity, 'lifecycle-genesis', { controller })
+  const anchor = readGroupAnchor(group)
+  if (anchor == null) throw new Error('group has no anchor')
+  expect(anchor.controller).toBe(leaf.controllerID)
+  expect(anchor.leafLifetime).toBe(86_400)
+  expect(anchor.trustedGrantLifetime).toBe(2_592_000)
+  expect(anchor.version).toBe(1)
+  expect([...group.roster.roles]).toEqual([[leaf.controllerID, 'admin']])
+  expect(group.listMembers()[0]?.controller).toBe(leaf.controllerID)
+  const { group: maximum } = await createGroup(identity, 'maximum-genesis', {
+    controller,
+    leafLifetime: 604_800,
+    trustedGrantLifetime: 31_536_000,
+  })
+  expect(readGroupAnchor(maximum)).toMatchObject({
+    leafLifetime: 604_800,
+    trustedGrantLifetime: 31_536_000,
+  })
+  const { group: standard } = await createGroup(identity, 'standard-genesis')
+  expect([...standard.roster.roles]).toEqual([[identity.id, 'admin']])
+  expect(readGroupAnchor(standard)?.controller).toBeUndefined()
+  for (const [field, maximum] of [
+    ['leafLifetime', 604_800],
+    ['trustedGrantLifetime', 31_536_000],
+  ] as const) {
+    for (const value of [0, maximum + 1, Number.POSITIVE_INFINITY, Number.NaN, 1.5]) {
+      await expect(
+        createGroup(identity, 'invalid-genesis', { controller, [field]: value }),
+      ).rejects.toThrow()
+    }
+  }
+  await expect(
+    createGroup(identity, 'short-genesis', { controller, leafLifetime: 3599 }),
+  ).rejects.toThrow()
+})
+
+test('lifecycle authentication uses anchored lifetimes after creation and restore', async () => {
+  const timestamp = Math.floor(Date.now() / 1000)
+  const identity = await createIdentity({
+    keys: [{ purpose: 'sig', alg: 'EdDSA', privateKey: new Uint8Array(32).fill(41) }],
+    didMethod: 'key',
+  })
+  const leaf = await buildBoundLeaf()
+  const controller = parseMLSCredentialIdentity(leaf.identity).controller
+  if (controller == null) throw new Error('fixture has no controller binding')
+  const created = await createGroup(identity, 'anchored-auth', { controller })
+  const restored = await restoreGroup({
+    state: created.group.state,
+    credential: created.credential,
+  })
+  const atLeafLimit = await buildBoundLeaf({
+    capabilityOverrides: { iat: timestamp, exp: timestamp + 86_400 },
+  })
+  const aboveLeafLimit = await buildBoundLeaf({
+    capabilityOverrides: { iat: timestamp, exp: timestamp + 86_401 },
+  })
+  const atTrustedLimit = await leafCapabilityFixture({
+    parent: { iat: timestamp, nbf: timestamp, exp: timestamp + 2_592_000 },
+    child: { iat: timestamp, nbf: timestamp, exp: timestamp + 3600 },
+  })
+  const aboveTrustedLimit = await leafCapabilityFixture({
+    parent: { iat: timestamp, nbf: timestamp, exp: timestamp + 2_592_001 },
+    child: { iat: timestamp, nbf: timestamp, exp: timestamp + 3600 },
+  })
+  for (const group of [created.group, restored]) {
+    const service = group.context.authService
+    await expect(
+      service.validateCredential(
+        { credentialType: 1, identity: atLeafLimit.identity },
+        identity.publicKey,
+      ),
+    ).resolves.toBe(true)
+    await expect(
+      service.validateCredential(
+        { credentialType: 1, identity: aboveLeafLimit.identity },
+        identity.publicKey,
+      ),
+    ).resolves.toBe(false)
+    await expect(
+      service.validateCredential(atTrustedLimit.credential(), identity.publicKey),
+    ).resolves.toBe(true)
+    await expect(
+      service.validateCredential(aboveTrustedLimit.credential(), identity.publicKey),
+    ).resolves.toBe(false)
+  }
 })

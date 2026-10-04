@@ -3,13 +3,17 @@ import { type ClientState, generateKeyPackageWithKey, createGroup as mlsCreateGr
 
 import {
   buildCurrentGroupAnchorExtension,
+  buildGroupAnchorExtension,
   decodeGroupAnchor,
   GROUP_ANCHOR_EXTENSION_TYPE,
+  type GroupAnchor,
   LEDGER_HEAD_EXTENSION_TYPE,
 } from './anchor.js'
+import { verifyLeafCredential } from './authentication.js'
 import type { MemberCredential } from './credential.js'
+import { LeafBindingError } from './errors.js'
 import { buildLeafCapabilities, resolveMlsContext } from './group-context.js'
-import { makeMLSCredential } from './group-credential.js'
+import { assertBindingAuthorTime, makeMLSCredential } from './group-credential.js'
 import { GroupHandle } from './group-handle.js'
 import { buildLedgerHeadExtension, genesisHead } from './head.js'
 import type { GroupOptions } from './types.js'
@@ -25,12 +29,10 @@ export async function createGroup(
   groupID: string,
   options?: GroupOptions,
 ): Promise<CreateGroupResult> {
-  const context = await resolveMlsContext(options)
+  assertBindingAuthorTime(options?.controller)
 
-  // Every group is anchored at creation: creator is the epoch-0 admin, ledger head
-  // starts at genesis. A caller-supplied anchor is left untouched (the caller owns
-  // its contents); its `creatorDID` coupling to the creating identity is validated
-  // below. A decode failure here is left to the fail-closed decode in the constructor.
+  // A binding enriches a supplied anchor before genesis; standard anchor bytes stay untouched.
+  // Existing lifecycle fields must agree with the authored policy before the tree is validated.
   const extensions = [...(options?.extensions ?? [])]
   const suppliedAnchorExtension = extensions.find(
     (ext) => ext.extensionType === GROUP_ANCHOR_EXTENSION_TYPE,
@@ -47,15 +49,79 @@ export async function createGroup(
         `createGroup: the anchor's creatorDID (${suppliedAnchor.creatorDID}) must be the creating identity (${identity.id})`,
       )
     }
+    if (
+      suppliedAnchor != null &&
+      suppliedAnchorData instanceof Uint8Array &&
+      options?.controller != null
+    ) {
+      const leafLifetime = options.leafLifetime ?? 86_400
+      const trustedGrantLifetime = options.trustedGrantLifetime ?? 2_592_000
+      if (
+        suppliedAnchor.controller !== undefined &&
+        suppliedAnchor.controller !== options.controller.id
+      ) {
+        throw new LeafBindingError('controller-mismatch')
+      }
+      if (
+        (suppliedAnchor.leafLifetime !== undefined &&
+          suppliedAnchor.leafLifetime !== leafLifetime) ||
+        (suppliedAnchor.trustedGrantLifetime !== undefined &&
+          suppliedAnchor.trustedGrantLifetime !== trustedGrantLifetime)
+      ) {
+        throw new Error('Lifecycle lifetime options must match the supplied anchor')
+      }
+      // Reading normally withholds future-version app payloads; authoring must preserve them.
+      const original = JSON.parse(new TextDecoder().decode(suppliedAnchorData)) as GroupAnchor
+      extensions[extensions.indexOf(suppliedAnchorExtension)] = buildGroupAnchorExtension({
+        ...suppliedAnchor,
+        app: original.app,
+        controller: options.controller.id,
+        leafLifetime,
+        trustedGrantLifetime,
+      })
+    }
   }
-  if (!extensions.some((ext) => ext.extensionType === GROUP_ANCHOR_EXTENSION_TYPE)) {
-    extensions.push(buildCurrentGroupAnchorExtension(identity.id))
+  if (suppliedAnchorExtension == null) {
+    extensions.push(
+      options?.controller == null
+        ? buildCurrentGroupAnchorExtension(identity.id)
+        : buildGroupAnchorExtension({
+            creatorDID: identity.id,
+            version: 1,
+            controller: options.controller.id,
+            leafLifetime: options.leafLifetime ?? 86_400,
+            trustedGrantLifetime: options.trustedGrantLifetime ?? 2_592_000,
+          }),
+    )
+  }
+  const anchorExtension = extensions.find(
+    (ext) => ext.extensionType === GROUP_ANCHOR_EXTENSION_TYPE,
+  )
+  const anchorData = anchorExtension?.extensionData
+  const anchor: GroupAnchor | null =
+    anchorData instanceof Uint8Array ? decodeGroupAnchor(anchorData) : null
+  if (anchor == null) throw new Error('group anchor extension present but could not be decoded')
+  if (anchor.controller != null) {
+    if (options?.controller == null) throw new LeafBindingError('floating-refused')
+    if (normalizeDID(anchor.controller) !== normalizeDID(options.controller.id)) {
+      throw new LeafBindingError('controller-mismatch')
+    }
+  } else if (options?.controller != null) {
+    throw new LeafBindingError('controller-mismatch')
+  }
+  const context = await resolveMlsContext(options, anchor)
+  const mlsCredential = makeMLSCredential(identity, options?.controller)
+  if (options?.controller != null) {
+    await verifyLeafCredential(mlsCredential, identity.publicKey, {
+      leafLifetime: () => anchor.leafLifetime ?? 86_400,
+      trustedGrantLifetime: () => anchor.trustedGrantLifetime ?? 2_592_000,
+    })
   }
   if (!extensions.some((ext) => ext.extensionType === LEDGER_HEAD_EXTENSION_TYPE)) {
     extensions.push(buildLedgerHeadExtension(genesisHead(groupID)))
   }
   const statePromise = generateKeyPackageWithKey({
-    credential: makeMLSCredential(identity),
+    credential: mlsCredential,
     signatureKeyPair: { signKey: identity.privateKey, publicKey: identity.publicKey },
     cipherSuite: context.cipherSuite,
     capabilities: buildLeafCapabilities(extensions, options?.capabilities),
@@ -95,7 +161,7 @@ export type RestoreGroupParams = {
 }
 
 export async function restoreGroup(params: RestoreGroupParams): Promise<GroupHandle> {
-  // Construction reseeds `{creator: 'admin'}` from the anchor in the restored state;
+  // Construction reseeds control authority from the anchor in the restored state;
   // an anchorless state throws (the same fail-closed guard).
   const group = new GroupHandle({
     state: params.state,

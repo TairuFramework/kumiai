@@ -786,3 +786,27 @@ describe('MissingLedgerEntriesError', () => {
     expect(error.ids).toEqual(['entry-a', 'entry-b'])
   })
 })
+
+test('lifecycle extension policy pins caller bytes and refuses reserved installation', () => {
+  const anchor = anchorExtension(
+    new TextEncoder().encode(
+      JSON.stringify({
+        creatorDID: ADMIN_DID,
+        version: 1,
+        controller: 'did:kokuin:profile',
+        leafLifetime: 86_400,
+        trustedGrantLifetime: 2_592_000,
+      }),
+    ),
+  )
+  const currentExtensions = [anchor, headExtension(HEAD_BYTES), extraExtension(EXTRA_BYTES)]
+  const ctx = context({ currentExtensions })
+  const evaluate = (extensions: Array<GroupContextExtension>) =>
+    defaultCommitPolicy(commit(ADMIN_LEAF, [withSender(gceProposal(extensions), undefined)]), ctx)
+  expect(evaluate(currentExtensions)).toBe('accept')
+  expect(evaluate([...currentExtensions, reservedExtension(new Uint8Array())])).toBe('reject')
+  expect(evaluate([anchor, headExtension(HEAD_BYTES), extraExtension(new Uint8Array([1]))])).toBe(
+    'reject',
+  )
+  expect(evaluate([anchor, headExtension(HEAD_BYTES)])).toBe('reject')
+})
