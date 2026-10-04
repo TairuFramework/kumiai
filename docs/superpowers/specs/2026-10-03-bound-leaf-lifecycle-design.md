@@ -321,7 +321,7 @@ publishRevokeProof(
 
 ### 6. kokuin
 
-In `@kokuin/capability`, `createCapability` (`delegation.ts:43`) refuses a delegated child whose `exp` is later than its parent's, or that has no `exp` while its parent has one, and `assertValidDelegation` (`delegation.ts:107`), which `checkCapability` and `checkDelegationChain` call, rejects the same. That is the only kokuin change. `verifyToken` already takes `atTime` (`token/src/token.ts:41`), `checkCapability` threads it through the chain (`delegation.ts:215-263`, `:275`), and `getVerifier` is exported.
+In `@kokuin/capability`, `createCapability` (`delegation.ts:43`) refuses a delegated child whose `exp` is later than its parent's, or that has no `exp` while its parent has one, and every capability-to-capability link that `checkCapability` and `checkDelegationChain` verify rejects the same. An invocation is not a child capability: the invocation path through `assertValidDelegation` (`delegation.ts:107`) keeps its behaviour, and the capability it presents is still checked against its own `exp` at `atTime`. That is the only kokuin change. `verifyToken` already takes `atTime` (`token/src/token.ts:41`), `checkCapability` threads it through the chain (`delegation.ts:215-263`, `:275`), and `getVerifier` is exported.
 
 ## Errors and outcomes
 
