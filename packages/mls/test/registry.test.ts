@@ -483,3 +483,24 @@ describe('authenticated lifecycle projections', () => {
     expect(registry.devices.size).toBe(0)
   })
 })
+
+describe('device proof field placement', () => {
+  test.each(['register', 'add', 'label', 'clock', 'beacon'] as const)(
+    '%s cannot carry proof or revoked fields',
+    (op) => {
+      const value = { op, controller: PROFILE, time: 100, logLength: 1, headDigest: 'advisory' }
+      expect(isDeviceValue({ ...value, proof: [] })).toBe(false)
+      expect(isDeviceValue({ ...value, revoked: [] })).toBe(false)
+      expect(isDeviceValue({ ...value, proof: [], revoked: [] })).toBe(false)
+    },
+  )
+
+  test('a management revoke cannot carry declared proof effects', () => {
+    expect(isDeviceValue({ op: 'revoke', capability: 'management', revoked: [] })).toBe(false)
+  })
+
+  test('proof-bearing revokes and resets still carry proof and declared effects', () => {
+    expect(isDeviceValue({ op: 'revoke', proof: [], revoked: [] })).toBe(true)
+    expect(isDeviceValue({ op: 'reset', proof: [], revoked: [] })).toBe(true)
+  })
+})

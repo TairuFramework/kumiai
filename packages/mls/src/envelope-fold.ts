@@ -1,5 +1,6 @@
 import { normalizeDID } from '@kokuin/token'
 
+import { RevokeProofError } from './errors.js'
 import type { FoldInput } from './fold.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
 import {
@@ -34,7 +35,7 @@ export type EnvelopeFoldResult =
       registry: DeviceRegistry
       surfaced: Array<VerifiedLedgerEntry>
     }
-  | { ok: false; reason: string; entryID: string }
+  | { ok: false; reason: string; entryID: string; error?: RevokeProofError }
 
 export const GROUP_TYPE_PREFIX = 'kumiai.'
 
@@ -101,8 +102,13 @@ export function foldEnvelope(
           workingRegistry,
           context?.controllerID,
         )
-      } catch {
-        return { ok: false, reason: 'invalid lifecycle proof', entryID }
+      } catch (error) {
+        return {
+          ok: false,
+          reason: 'invalid lifecycle proof',
+          entryID,
+          ...(error instanceof RevokeProofError ? { error } : {}),
+        }
       }
       continue
     }

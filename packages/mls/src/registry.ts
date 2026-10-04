@@ -102,6 +102,8 @@ export function isDeviceValue(value: unknown): value is DeviceValue {
   ) {
     return false
   }
+  const proofBearing = v.op === 'reset' || (v.op === 'revoke' && v.proof !== undefined)
+  if (!proofBearing && ('proof' in v || 'revoked' in v)) return false
   if ((v.op === 'register' || v.op === 'add') && typeof v.controller !== 'string') return false
   if (v.op === 'beacon' && (typeof v.logLength !== 'number' || typeof v.headDigest !== 'string')) {
     return false
@@ -136,6 +138,7 @@ export function isDeviceValue(value: unknown): value is DeviceValue {
 }
 
 export function isLifecycleDeviceValue(value: DeviceValue): boolean {
+  if (!isDeviceValue(value)) return false
   return (
     value.op === 'beacon' ||
     value.op === 'clock' ||

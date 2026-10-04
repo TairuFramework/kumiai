@@ -226,6 +226,7 @@ export async function commitWithEntries(
         },
   )
   if (!fold.ok) {
+    if (fold.error != null) throw fold.error
     throw new Error(`cannot enact ledger entry ${fold.entryID}: ${fold.reason}`)
   }
 

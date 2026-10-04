@@ -30,6 +30,7 @@ import {
 import { type LeafBinding, verifyDeviceEntry } from './device-proof.js'
 import { decodeControlEnvelope } from './envelope.js'
 import { foldEnvelope, GROUP_TYPE_PREFIX } from './envelope-fold.js'
+import { RevokeProofError } from './errors.js'
 import type { FoldInput } from './fold.js'
 import { deviceDenyHolderFor } from './group-context.js'
 import { readMessageEpoch } from './group-info.js'
@@ -961,11 +962,11 @@ export class GroupHandle {
     opts?: { commitPolicy?: IncomingMessageCallback },
   ): Promise<{
     callback: IncomingMessageCallback | undefined
-    capture: { rejected?: RejectedCommit }
+    capture: { rejected?: RejectedCommit; proofError?: RevokeProofError }
     applyOnAccept: (notify?: boolean) => () => void
   }> {
     const callerPolicy = opts?.commitPolicy ?? this.#commitPolicy
-    const capture: { rejected?: RejectedCommit } = {}
+    const capture: { rejected?: RejectedCommit; proofError?: RevokeProofError } = {}
 
     const commit = readPrivateCommit(decoded)
     let externalCommitDID: string | undefined
@@ -1053,6 +1054,7 @@ export class GroupHandle {
           )
           if (!foldResult.ok) {
             precomputedReject = true
+            capture.proofError = foldResult.error
           } else {
             candidateRoster = foldResult.roster
             candidateRegistry = foldResult.registry
@@ -1071,8 +1073,9 @@ export class GroupHandle {
               ) {
                 try {
                   await verifyLifecycleProof(this, verified as VerifiedLedgerEntry<DeviceValue>)
-                } catch {
+                } catch (error) {
                   precomputedReject = true
+                  if (error instanceof RevokeProofError) capture.proofError = error
                   break
                 }
                 continue
@@ -1365,10 +1368,12 @@ export class GroupHandle {
       this.#state = result.newState
       if (result.kind === 'newState' && result.actionTaken === 'reject') {
         zeroAll(result.consumed)
-        throw new CommitRejectedError(
+        const rejection = new CommitRejectedError(
           capture.rejected?.proposals ?? [],
           capture.rejected?.senderLeafIndex,
         )
+        if (capture.proofError != null) rejection.cause = capture.proofError
+        throw rejection
       }
       if (result.kind === 'applicationMessage') {
         zeroAll(result.consumed)
