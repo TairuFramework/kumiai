@@ -142,6 +142,7 @@ export {
   readLedgerHead,
   readLedgerHeadExtension,
 } from './head.js'
+export { HISTORY_HORIZON, historySize } from './history.js'
 export {
   decodeKeyPackage,
   decodePrivateKeyPackage,

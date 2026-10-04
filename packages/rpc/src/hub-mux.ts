@@ -15,6 +15,7 @@ import { getReporter } from '@sozai/log'
 
 import { asDeliveryPosition, type DeliveryPosition } from './cursor.js'
 import { PeerDisposedError } from './errors.js'
+import { assertFrameFits } from './frame-size.js'
 
 /**
  * A subscribe the hub refused for good — either a permanent refusal (it has answered, and the
@@ -679,6 +680,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
       // nothing and what it does NOT cover.
       if (publishSuspended) throw new PeerDisposedError('mux: publish after dispose')
       assertSubscribable(topicID)
+      assertFrameFits(payload)
       await hub.publish({ senderDID: localDID, topicID, payload })
     },
     subscribe: (topicID, onMessage) =>
@@ -690,6 +692,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
       // See `publishSuspended`'s note above.
       if (publishSuspended) throw new PeerDisposedError('mux: publish after dispose')
       assertSubscribable(publishParams.topicID)
+      assertFrameFits(publishParams.payload)
       return await hub.publish(publishParams)
     },
     subscribe: (_subscriberDID, topicID) => {
@@ -761,6 +764,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
     // See `publishSuspended`'s note above. This is the commit lane's own route to the wire.
     if (publishSuspended) throw new PeerDisposedError('mux: publish after dispose')
     assertSubscribable(params.topicID)
+    assertFrameFits(params.payload)
     return await Promise.resolve(
       hub.publish({
         senderDID: localDID,

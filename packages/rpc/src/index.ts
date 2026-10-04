@@ -65,6 +65,7 @@ export {
   type LogPosition,
 } from './cursor.js'
 export { PeerDisposedError } from './errors.js'
+export { assertFrameFits, FrameTooLargeError } from './frame-size.js'
 export type { GroupProcedureHandlers } from './handlers.js'
 export {
   decodeHandshakeFrame,

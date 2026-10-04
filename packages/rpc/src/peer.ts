@@ -66,6 +66,7 @@ import {
   type InboundPath,
 } from './directed.js'
 import { PeerDisposedError } from './errors.js'
+import { assertFrameFits } from './frame-size.js'
 import { adaptBusHandlers, type BusHandlerMaps, type GroupProcedureHandlers } from './handlers.js'
 import {
   decodeHandshakeFrame,
@@ -918,7 +919,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       const topicID = protocolTopic(at.secret, at.epoch, name)
       const payload = await crypto.wrap(bytes, { aad: encodeAppAAD({ topicID, intent }) })
       if (sealError != null) throw sealError
-      if (anchor === at && sealBarrier == null) return { topicID, payload }
+      if (anchor === at && sealBarrier == null) {
+        assertFrameFits(payload)
+        return { topicID, payload }
+      }
     }
   }
 
@@ -1900,13 +1904,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         'commit: the local group has already advanced past the epoch this commit was framed at. A commit is adopted in onAccepted, never before.',
       )
     }
-    return {
-      payload: encodeHandshakeFrame(
-        HANDSHAKE_KIND.commit,
-        encodeCommitFrame(commit, sealedEntries),
-      ),
-      epoch,
-    }
+    const payload = encodeHandshakeFrame(
+      HANDSHAKE_KIND.commit,
+      encodeCommitFrame(commit, sealedEntries),
+    )
+    assertFrameFits(payload)
+    return { payload, epoch }
   }
 
   /**
