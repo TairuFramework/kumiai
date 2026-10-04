@@ -177,8 +177,8 @@ catalogs:
       specifier: ^0.21.3
       version: 0.21.3
     '@kokuin/capability':
-      specifier: ^0.3.0
-      version: 0.3.0
+      specifier: ^0.3.1
+      version: 0.3.1
     '@kokuin/controller':
       specifier: ^0.1.0
       version: 0.1.0
@@ -457,7 +457,7 @@ importers:
     dependencies:
       '@kokuin/capability':
         specifier: 'catalog:'
-        version: 0.3.0(@logtape/logtape@2.3.0)
+        version: 0.3.1(@logtape/logtape@2.3.0)
       '@kokuin/controller':
         specifier: 'catalog:'
         version: 0.1.0(@logtape/logtape@2.3.0)
@@ -1498,8 +1498,8 @@ packages:
     resolution: {integrity: sha512-hwloSBA7gqo9PdI70PKvQ6QFGJDNEviz8A4SHKxRfkADfhJTaEZ4ZUMUgmDvXELPNbmgq/auznJsOSgrBQnLOw==}
     hasBin: true
 
-  '@kokuin/capability@0.3.0':
-    resolution: {integrity: sha512-4ZqASd70op8aSnfIp+uras/avdIJaGcTZpzEeOsiyrWyeRTcTyE+2UqN/Ll8EBFvQGQ+4PR56VNEXHpF4DnLRg==}
+  '@kokuin/capability@0.3.1':
+    resolution: {integrity: sha512-+BiFHrngXVoDlm+9d/pNgb0WTu7S5jxh5LcMutJ0BGHGpQKtci8OnyHZUvQCMgvEV+o/2C8Qq1Zj0M103zSuIA==}
 
   '@kokuin/controller@0.1.0':
     resolution: {integrity: sha512-AgC97EW1F2oJYrdjXf4Ei4afM9NUP4em0Orr1Hr3W6QZRCJjGDZ6pctF5d4gA01uA9xbuzYw3UomhzaWlKy/EQ==}
@@ -4948,7 +4948,7 @@ snapshots:
     dependencies:
       '@enkaku/otel': 0.21.3(@logtape/logtape@2.3.0)
       '@enkaku/protocol': 0.21.3(@logtape/logtape@2.3.0)
-      '@kokuin/capability': 0.3.0(@logtape/logtape@2.3.0)
+      '@kokuin/capability': 0.3.1(@logtape/logtape@2.3.0)
       '@kokuin/token': 0.5.0(@logtape/logtape@2.3.0)
       '@sozai/async': 0.2.1
       '@sozai/event': 0.1.3
@@ -5468,7 +5468,7 @@ snapshots:
       - supports-color
       - vite
 
-  '@kokuin/capability@0.3.0(@logtape/logtape@2.3.0)':
+  '@kokuin/capability@0.3.1(@logtape/logtape@2.3.0)':
     dependencies:
       '@kokuin/token': 0.5.0(@logtape/logtape@2.3.0)
     transitivePeerDependencies:
