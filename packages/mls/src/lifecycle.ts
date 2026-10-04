@@ -1,5 +1,5 @@
 import { foldLog } from '@kokuin/controller'
-import { normalizeDID } from '@kokuin/token'
+import { normalizeDID, type OwnIdentity } from '@kokuin/token'
 import {
   type ClientState,
   defaultCredentialTypes,
@@ -21,8 +21,9 @@ import {
   MAX_TRUSTED_GRANT_LIFETIME,
   readCapability,
 } from './capability.js'
-import { parseMLSCredentialIdentity } from './credential.js'
+import { type ControllerBinding, parseMLSCredentialIdentity } from './credential.js'
 import { LeafBindingError, LeafLapsedError, RevokeProofError } from './errors.js'
+import { assertBindingAuthorTime, makeMLSCredential } from './group-credential.js'
 import type { GroupHandle } from './group-handle.js'
 import { decodeLedgerHead, extendHead, genesisHead, headsMatch } from './head.js'
 import { HISTORY_HORIZON, historySize } from './history.js'
@@ -558,4 +559,34 @@ export function assertSenderNotLapsed(
     readCapability(binding.capability).payload.exp < timeOf(tree, controller, floor)
   )
     throw new LeafLapsedError('lapsed')
+}
+
+/** @internal Check a replacement against the complete external admission predicates. */
+export async function assertRecoveryBinding(params: {
+  group: GroupHandle
+  identity: OwnIdentity
+  controller: ControllerBinding
+}): Promise<void> {
+  const { group, identity: ownIdentity, controller } = params
+  assertBindingAuthorTime(controller)
+  const index = group.findMemberLeafIndex(normalizeDID(ownIdentity.id))
+  const old = index == null ? undefined : leafAt(group.state.ratchetTree, index)
+  if (old == null || index == null) throw new LeafBindingError('identity-change')
+  const leaf = {
+    ...old,
+    signaturePublicKey: ownIdentity.publicKey,
+    credential: makeMLSCredential(ownIdentity, controller),
+  }
+  await validateEntry(group, leaf, old)
+  const tree = group.state.ratchetTree.slice()
+  tree[index * 2] = { nodeType: nodeTypes.leaf, leaf }
+  const controllerID = group.anchor.controller
+  if (controllerID == null) return
+  const floor = group.registry.controllers.get(normalizeDID(controllerID))?.timeFloor ?? 0
+  if (timeOf(tree, controllerID, floor) < treeTime(group, controllerID))
+    throw new RevokeProofError('effects-mismatch')
+  const ledger = group.ledger.map(({ verified }) => verified)
+  const size = historySize(tree, ledger)
+  if (size > HISTORY_HORIZON && size > historySize(group.state.ratchetTree, ledger))
+    throw new LeafBindingError('history-horizon')
 }

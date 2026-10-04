@@ -125,7 +125,7 @@ test('recovery persists before adoption and bootstrap retries after a failed per
   const request = await requester.createRecoveryRequest(requestID)
   const sealed = await responder.sealGroupInfo(request)
   const pending = await requester.applyRecovery(sealed, requestID)
-  if (pending == null) throw new Error('expected recovery')
+  if (pending == null || 'renewalRequired' in pending) throw new Error('expected recovery')
   await expect(pending.onAccepted()).rejects.toThrow('disk failed')
   expect(adopt).not.toHaveBeenCalled()
   expect(member.handle).toBe(old)
@@ -201,7 +201,8 @@ test('accepting an older recovery cannot delete a replacement request key', asyn
   const id = 'reused-request-id'
   const first = await requester.createRecoveryRequest(id)
   const firstPending = await requester.applyRecovery(await responder.sealGroupInfo(first), id)
-  if (firstPending == null) throw new Error('expected first recovery')
+  if (firstPending == null || 'renewalRequired' in firstPending)
+    throw new Error('expected first recovery')
   const replacement = await requester.createRecoveryRequest(id)
   const replacementReply = await responder.sealGroupInfo(replacement)
   await firstPending.onAccepted()

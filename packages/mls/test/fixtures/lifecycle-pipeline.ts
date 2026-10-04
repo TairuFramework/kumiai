@@ -1,5 +1,10 @@
 import { audienceConfirmation } from '@kokuin/capability'
-import { createControllerIdentity, type SignedEvent } from '@kokuin/controller'
+import {
+  createControllerIdentity,
+  createReset,
+  createRotate,
+  type SignedEvent,
+} from '@kokuin/controller'
 import { type OwnIdentity, stringifyToken } from '@kokuin/token'
 import {
   createApplicationMessage,
@@ -276,4 +281,19 @@ export async function lowLevelApply(group: GroupHandle, message: Uint8Array) {
     message: decoded,
   })
   return deriveGroup(group, result.newState)
+}
+
+export async function oversizedBinding(identity: OwnIdentity, iat: number, exp: number) {
+  const rotation = createRotate({
+    seed: controllerSeed,
+    profile: 0,
+    did: controllerID,
+    prior: inception.event,
+    options: { keyPosition: { gen: 0, seq: 0 }, seal: 's'.repeat(393216) },
+  })
+  return timedBinding(identity, iat, exp, { prefix: [inception, rotation] })
+}
+
+export function resetPrefix(): Array<SignedEvent> {
+  return [inception, createReset(controllerSeed, 0, 1)]
 }

@@ -127,7 +127,7 @@ describe('delayed ledger bootstrap', () => {
     const applyRecovery = alice.mls.applyRecovery.bind(alice.mls)
     const spy = vi.spyOn(alice.mls, 'applyRecovery').mockImplementation(async (...args) => {
       const pending = await applyRecovery(...args)
-      if (pending == null) return null
+      if (pending == null || 'renewalRequired' in pending) return pending
       return {
         ...pending,
         onAccepted: async () => {
@@ -164,7 +164,7 @@ describe('delayed ledger bootstrap', () => {
     const applyRecovery = alice.mls.applyRecovery.bind(alice.mls)
     vi.spyOn(alice.mls, 'applyRecovery').mockImplementation(async (...args) => {
       const pending = await applyRecovery(...args)
-      if (pending == null) return null
+      if (pending == null || 'renewalRequired' in pending) return pending
       return {
         ...pending,
         onAccepted: async () => {

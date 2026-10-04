@@ -3,10 +3,9 @@ import {
   createRecoveryRequest,
   encodeGroupAnchor,
   type GroupHandle,
-  joinGroupExternal,
   ledgerEntryDigest,
   MissingLedgerEntriesError,
-  openSealedGroupInfo,
+  openRecoveryGroupInfo,
   openSealedLedger,
   readCommitEntryIDs,
   readMessageEpoch,
@@ -24,6 +23,12 @@ import type {
 
 import type { HandleAccess } from './access.js'
 import { applyCommit } from './apply-commit.js'
+import {
+  createRecoveryBindingState,
+  knownRecoveryRegistry,
+  type RecoveryBinding,
+  type RecoveryCandidate,
+} from './recovery.js'
 
 const utf8 = new TextEncoder()
 
@@ -88,6 +93,7 @@ export type GroupMLSParams = {
    * here for every restore of that group: the commit and rendezvous topics follow the choice.
    */
   recoverySecret?: (handle: GroupHandle) => Promise<Uint8Array>
+  recoveryBinding?: RecoveryBinding
 }
 
 /** Below this a topic secret is guessable; the default derives 32 bytes. */
@@ -189,8 +195,12 @@ export async function deriveRecoverySecret(handle: GroupHandle): Promise<Uint8Ar
 export function createGroupMLS(params: GroupMLSParams): GroupMLS {
   const { access, identity, entrySlot } = params
   const pending = createRecoveryPending()
+  const recovery = createRecoveryBindingState(identity, params.recoveryBinding)
 
   return {
+    async prepareRecovery(): Promise<'ready' | 'renewal-required'> {
+      return await access.read((group) => recovery.prepare(group))
+    },
     async readEpoch(): Promise<number> {
       return await access.read((group) => Number(group.epoch))
     },
@@ -295,13 +305,16 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       )
     },
 
-    async applyRecovery(sealed: Uint8Array, requestID: string): Promise<PendingRecovery | null> {
+    async applyRecovery(
+      sealed: Uint8Array,
+      requestID: string,
+    ): Promise<PendingRecovery | { renewalRequired: true } | null> {
       const held = pending.get(requestID)
       if (held == null) return null
-      let groupInfo: Uint8Array
+      let reply: Awaited<ReturnType<typeof openRecoveryGroupInfo>>
       try {
-        groupInfo = await access.read((group) =>
-          openSealedGroupInfo({
+        reply = await access.read((group) =>
+          openRecoveryGroupInfo({
             group,
             sealed,
             requestID,
@@ -313,15 +326,23 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
         // fails the membership attestation, and both are `null`.
         return null
       }
-      const rejoined = await access.read((group) =>
-        joinGroupExternal({
-          identity,
-          groupInfo,
-          credential: group.credential,
-          resync: true,
-        }),
-      )
-      return {
+      const candidate = await access.read(async (group) => {
+        const rejoined = await recovery.join(group, reply)
+        if (rejoined == null || 'renewalRequired' in rejoined) return rejoined
+        return {
+          ...rejoined,
+          knownRegistry: knownRecoveryRegistry(group.registry, rejoined.sourceRegistry),
+        }
+      })
+      if (candidate == null || 'renewalRequired' in candidate) return candidate
+      const rejoined = candidate
+      const result: RecoveryCandidate = {
+        group: rejoined.group,
+        sourceTree: rejoined.sourceTree,
+        groupInfo: reply.groupInfo,
+        knownRegistry: rejoined.knownRegistry,
+        replyLedger: reply.ledger,
+        signer: reply.signer,
         commit: rejoined.commitMessage,
         // Adopted ONLY if the hub accepts the commit. A peer that adopted first would sit
         // on a branch of its own the moment it lost the compare-and-set.
@@ -330,6 +351,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
           if (pending.get(requestID) === held) pending.delete(requestID)
         },
       }
+      return result
     },
 
     async isLedgerComplete(): Promise<boolean> {

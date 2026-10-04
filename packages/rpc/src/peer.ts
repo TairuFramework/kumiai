@@ -223,6 +223,7 @@ export type StrandObservation = {
 export type RecoveryTrigger = 'automatic' | 'consumer'
 export type RecoveryFailureReason =
   | 'no-responder'
+  | 'renewal-required'
   | 'bootstrap-failed'
   | 'deadline'
   | 'disposed'
@@ -1109,6 +1110,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * refuses.
    */
   let stranded = false
+  let renewalRequiredEpoch: number | null = null
+  const renewalHeld = (): boolean => {
+    if (renewalRequiredEpoch != null && crypto.epoch() !== renewalRequiredEpoch)
+      renewalRequiredEpoch = null
+    return renewalRequiredEpoch != null
+  }
 
   /**
    * A commit this peer journalled that never landed and cannot re-issue itself: held until a lane
@@ -2417,6 +2424,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     const base = { groupID: commits, attemptID, trigger }
     queueMicrotask(() => notifyHost(params.onRecovery, { ...base, phase: 'started' }))
     const failed = (reason: RecoveryFailureReason): { advanced: false } => {
+      if (reason === 'renewal-required') renewalRequiredEpoch = crypto.epoch()
       emitRecovery({ ...base, phase: 'failed', reason })
       return { advanced: false }
     }
@@ -2429,6 +2437,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       assertLive()
 
       const deadline = Date.now() + recoveryDeadlineMs
+      let prepared = false
       while (Date.now() < deadline) {
         // 1. Pull to the end. It may resolve the strand outright, and a heal it no longer needs
         //    must NOT run: the external commit would rotate the tree for the whole group. Rebuild
@@ -2444,6 +2453,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
 
         // 3. Mint a request and rendezvous for a sealed GroupInfo. Fresh request per attempt: the
         //    ephemeral key is minted with it, and a reply to an already-used request is unopenable.
+        if (!prepared) {
+          prepared = true
+          if ((await port.prepareRecovery()) === 'renewal-required')
+            return failed('renewal-required')
+          assertLive()
+        }
         const requestID = newPublishID()
         const request = await port.createRecoveryRequest(requestID)
         assertLive()
@@ -2466,6 +2481,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         }
         assertLive()
         if (pending == null) continue
+        if ('renewalRequired' in pending) return failed('renewal-required')
 
         // 5. The entries this peer holds, snapshotted BEFORE the rejoined handle replaces them —
         //    the last moment they can be read. Kept across a failed attempt, so a retry filters
@@ -2596,6 +2612,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   }
 
   const runRecovery = (trigger: RecoveryTrigger): Promise<{ advanced: boolean }> => {
+    if (trigger === 'automatic' && renewalHeld()) return Promise.resolve({ advanced: false })
     if (activeRecovery != null) return activeRecovery
     const generation = recoveryGeneration
     const attempt = (async (): Promise<{ advanced: boolean }> => {
@@ -2630,6 +2647,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   }
 
   const recover = async (): Promise<{ advanced: boolean; reenact: Array<string> }> => {
+    renewalRequiredEpoch = null
     const { advanced } = await runRecovery('consumer')
     const reenact = pendingReenact
     pendingReenact = []
@@ -2643,7 +2661,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * and the next pull raises it again if the heal did not settle it.
    */
   const healIfRequested = async (): Promise<void> => {
-    if (disposed || !healRequested || activeRecovery != null) return
+    if (disposed || !healRequested || activeRecovery != null || renewalHeld()) return
     healRequested = false
     try {
       await runRecovery('automatic')

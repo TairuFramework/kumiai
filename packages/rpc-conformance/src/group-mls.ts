@@ -62,12 +62,13 @@ export type ConformanceGroupMLS = {
     context: ConformanceCommitContext,
   ) => Promise<{ advanced: boolean; epochBefore: number; epochAfter: number }>
   exportRecoverySecret: () => Uint8Array | Promise<Uint8Array>
+  prepareRecovery: () => Promise<'ready' | 'renewal-required'>
   createRecoveryRequest: (requestID: string) => Promise<Uint8Array>
   sealGroupInfo: (request: Uint8Array) => Promise<Uint8Array>
   applyRecovery: (
     sealed: Uint8Array,
     requestID: string,
-  ) => Promise<ConformancePendingRecovery | null>
+  ) => Promise<ConformancePendingRecovery | { renewalRequired: true } | null>
   isLedgerComplete: () => Promise<boolean>
   getLedger: () => Promise<Array<string>>
   sealLedger: (request: Uint8Array) => Promise<Uint8Array>
@@ -594,13 +595,17 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const alice = memberAt(group.members, 0)
           const bob = memberAt(group.members, 1)
 
+          const epochBefore = await bob.mls.readEpoch()
+          expect(await bob.mls.prepareRecovery()).toBe('ready')
+          expect(await bob.mls.readEpoch()).toBe(epochBefore)
           const request = await bob.mls.createRecoveryRequest('req-1')
           const sealed = await alice.mls.sealGroupInfo(request)
           const pending = await bob.mls.applyRecovery(sealed, 'req-1')
 
           // Narrowed rather than optional-chained: `expect` does not narrow, and a chain that
           // short-circuits would TypeError on `.length` instead of failing this assertion.
-          if (pending == null) throw new Error('applyRecovery returned no pending commit')
+          if (pending == null || 'renewalRequired' in pending)
+            throw new Error('applyRecovery returned no pending commit')
           expect(pending.commit).toBeInstanceOf(Uint8Array)
           expect(pending.commit.length).toBeGreaterThan(0)
         })

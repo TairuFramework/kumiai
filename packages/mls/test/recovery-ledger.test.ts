@@ -1,6 +1,7 @@
 import { type OwnIdentity, randomIdentity } from '@kokuin/token'
+import { concatBytes } from '@noble/hashes/utils.js'
 import type { ClientState } from 'ts-mls'
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 import {
   commitInvite,
@@ -604,4 +605,102 @@ describe('sealed ledger gather', () => {
       }),
     ).resolves.toEqual(tokens)
   })
+})
+
+test('the recovery opener retains the authenticated reply ledger and signer', async () => {
+  const recovery = await import('../src/recovery.js')
+  const { alice, bob, aliceGroup, bobGroup } = await threeMemberGroup('reply-ledger')
+  const { request, ephemeralPrivateKey } = await createRecoveryRequest({
+    group: bobGroup,
+    identity: bob,
+    requestID: 'reply-ledger',
+  })
+  const sealed = await sealGroupInfo({ group: aliceGroup, identity: alice, request })
+  expect(typeof recovery.openRecoveryGroupInfo).toBe('function')
+  const opened = await recovery.openRecoveryGroupInfo({
+    group: bobGroup,
+    sealed,
+    requestID: 'reply-ledger',
+    ephemeralPrivateKey,
+  })
+  expect(opened.signer).toBe(alice.id)
+  expect(opened.groupInfo).toEqual(
+    await openSealedGroupInfo({
+      group: bobGroup,
+      sealed,
+      requestID: 'reply-ledger',
+      ephemeralPrivateKey,
+    }),
+  )
+})
+
+test('a lifecycle reply authenticates the complete ordered ledger', async () => {
+  const { pipelineGroup } = await import('./fixtures/lifecycle-pipeline.js')
+  const { commitLedgerEntries } = await import('../src/group.js')
+  const { signLedgerEntry } = await import('../src/ledger.js')
+  const { openRecoveryGroupInfo } = await import('../src/recovery.js')
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(150_000)
+  try {
+    const { group, identity } = await pipelineGroup()
+    const token = await signLedgerEntry(identity, {
+      groupID: group.groupID,
+      type: 'note',
+      subject: identity.id,
+      value: 'reply-ledger-entry',
+    })
+    const responder = (await commitLedgerEntries(group, [token])).newGroup
+    const { request, ephemeralPrivateKey } = await createRecoveryRequest({
+      group,
+      identity,
+      requestID: 'authenticated-ledger',
+    })
+    const sealed = await sealGroupInfo({ group: responder, identity, request })
+    const opened = await openRecoveryGroupInfo({
+      group,
+      sealed,
+      requestID: 'authenticated-ledger',
+      ephemeralPrivateKey,
+    })
+    expect(opened.ledger).toEqual([token])
+    expect(opened.signer).toBe(identity.id)
+    const { hpke } = group.context.cipherSuite
+    const aad = ledgerAAD(group.groupID, identity.id, 'authenticated-ledger')
+    const domain = new TextEncoder().encode('kumiai/mls/recovery-ledger-aad/v1')
+    const infoAAD = concatBytes(
+      new TextEncoder().encode('kumiai/mls/recovery-aad/v1'),
+      aad.slice(domain.length),
+    )
+    const info = new TextEncoder().encode('kumiai/mls/recovery/v1')
+    const plaintext = await hpke.open(
+      await hpke.importPrivateKey(ephemeralPrivateKey),
+      sealed.slice(1, 33),
+      sealed.slice(33),
+      info,
+      infoAAD,
+    )
+    const tampered = plaintext.slice()
+    tampered[tampered.length - 1] = (tampered[tampered.length - 1] ?? 0) ^ 1
+    // Re-seal to the request's actual key; base-mode HPKE permits anyone observing the request to do this.
+    const parsed = JSON.parse(
+      new TextDecoder().decode(Buffer.from(request.split('.')[1] ?? '', 'base64url')),
+    ) as { ephemeralKey: string }
+    const { decodeMultibase } = await import('@kokuin/token')
+    const forged = await hpke.seal(
+      await hpke.importPublicKey(decodeMultibase(parsed.ephemeralKey)),
+      tampered,
+      info,
+      infoAAD,
+    )
+    const reply = concatBytes(new Uint8Array([1]), forged.enc, forged.ct)
+    await expect(
+      openRecoveryGroupInfo({
+        group,
+        sealed: reply,
+        requestID: 'authenticated-ledger',
+        ephemeralPrivateKey,
+      }),
+    ).rejects.toMatchObject({ reason: 'unauthenticated' })
+  } finally {
+    clock.mockRestore()
+  }
 })

@@ -430,6 +430,8 @@ export type GroupMLS = {
    * {@link isMissingLedgerEntries}.
    */
   processCommit(commit: Uint8Array, context: CommitContext): Promise<ProcessCommitResult>
+  /** Check lifecycle binding availability once before a recovery attempt requests GroupInfo. */
+  prepareRecovery(): Promise<'ready' | 'renewal-required'>
   /**
    * Mint the rendezvous request this peer publishes to ask the group for its state: an HPKE
    * keypair for this one request, public half in a token signed by this member's identity key.
@@ -471,7 +473,10 @@ export type GroupMLS = {
    * reply the AEAD refuses, or one that fails either check, is `null`; a throw is tolerated and
    * read the same way.
    */
-  applyRecovery(sealed: Uint8Array, requestID: string): Promise<PendingRecovery | null>
+  applyRecovery(
+    sealed: Uint8Array,
+    requestID: string,
+  ): Promise<PendingRecovery | { renewalRequired: true } | null>
   /**
    * Whether the ledger this handle holds is the whole ledger its OWN GroupContext attests to: the
    * head folded from the entries it holds, against the authenticated head it carries. Purely

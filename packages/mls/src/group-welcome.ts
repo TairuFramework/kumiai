@@ -1,5 +1,6 @@
 import { normalizeDID, type OwnIdentity } from '@kokuin/token'
 import {
+  type ClientState,
   type Credential,
   contentTypes,
   decode,
@@ -37,6 +38,7 @@ import { buildCommitPolicyContext, GroupHandle } from './group-handle.js'
 import { assertHeadMatches, computeHead, readLedgerHead } from './head.js'
 import { ledgerEntryDigest, verifyLedgerEntry } from './ledger.js'
 import { prepareLifecycleGate, validateWelcomeTree } from './lifecycle.js'
+import type { DeviceRegistry } from './registry.js'
 import { ROLE_ENTRY_TYPE } from './roster.js'
 import type { GroupOptions, Invite, KeyPackageBundle } from './types.js'
 
@@ -199,6 +201,8 @@ export type JoinGroupExternalParams = {
   credential: MemberCredential
   /** Stale-recovery only: atomically removes prior leaf for same identity. */
   resync: true
+  /** Authenticated recovery reply ledger, checked against the source GroupContext. */
+  ledgerEntries?: Array<string>
   controller?: ControllerBinding
   options?: GroupOptions
   authenticatedData?: Uint8Array
@@ -209,6 +213,9 @@ export type JoinGroupExternalResult = {
   commitMessage: Uint8Array
   /** New GroupHandle at post-commit epoch. */
   group: GroupHandle
+  /** @internal Inputs from the source admission gate, without operational source secrets. */
+  sourceTree: ClientState['ratchetTree']
+  sourceRegistry: DeviceRegistry
 }
 
 export async function joinGroupExternal(
@@ -222,6 +229,7 @@ export async function joinGroupExternal(
     options,
     authenticatedData,
     controller,
+    ledgerEntries,
   } = params
 
   // Resync replaces the caller's own prior leaf, so the rejoining identity must match
@@ -371,6 +379,7 @@ export async function joinGroupExternal(
     credential,
     context: await resolveMlsContext(options, anchor),
   })
+  if (ledgerEntries != null) await before.bootstrapLedger(ledgerEntries)
   const gate = await prepareLifecycleGate(
     before,
     [],
@@ -386,5 +395,5 @@ export async function joinGroupExternal(
   gate.check({ kind: 'commit', senderLeafIndex: undefined, proposals })
   await gate.postApply(newState)
   await validateWelcomeTree(group)
-  return { commitMessage, group }
+  return { commitMessage, group, sourceTree: beforeTree, sourceRegistry: before.registry }
 }

@@ -164,6 +164,7 @@ export {
   type VerifiedLedgerEntry,
   verifyLedgerEntry,
 } from './ledger.js'
+export { assertRecoveryBinding } from './lifecycle.js'
 export {
   type CommitPolicyContext,
   defaultCommitPolicy,
@@ -175,6 +176,7 @@ export {
   createRecoveryRequest,
   type OpenSealedGroupInfoParams,
   type OpenSealedLedgerParams,
+  openRecoveryGroupInfo,
   openSealedGroupInfo,
   openSealedLedger,
   RECOVERY_REQUEST_TYPE,

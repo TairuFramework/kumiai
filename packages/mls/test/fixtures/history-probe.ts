@@ -18,8 +18,10 @@ import { createGroup } from '../../src/group-create.js'
 import { createKeyPackageBundle } from '../../src/group-credential.js'
 import { deriveGroup } from '../../src/group-handle.js'
 import { exportGroupInfo } from '../../src/group-info.js'
+import { processWelcome } from '../../src/group-welcome.js'
 import { buildLedgerHeadExtension, computeHead } from '../../src/head.js'
 import { ledgerEntryDigest, signLedgerEntry } from '../../src/ledger.js'
+import { createRecoveryRequest, sealGroupInfo } from '../../src/recovery.js'
 
 export function printTable(rows: Array<Record<string, unknown>>) {
   if (process.env.KUMIAI_PROBE_REPORT !== '1') return
@@ -150,7 +152,10 @@ type EntrySeal = {
   sealEntries: (key: Uint8Array, bytes: Uint8Array) => Uint8Array
 }
 
-export async function frameMeasurements() {
+export async function frameMeasurements(options?: {
+  onlyHorizon?: boolean
+  onHorizonFrames?: (frames: Record<string, Uint8Array>, delta: number) => Promise<void>
+}) {
   // Runtime loading keeps the probe outside each sibling package's TypeScript rootDir.
   const rpcPath = new URL('../../../rpc/src/index.ts', import.meta.url).href
   const sealPath = new URL('../../../mls-rpc/src/crypto.ts', import.meta.url).href
@@ -159,7 +164,7 @@ export async function frameMeasurements() {
   const alice = await peer(41)
   const bob = await peer(51)
   const target = await peer(71)
-  const log = buildLog(2000, target.id)
+  const log = buildLog(options?.onlyHorizon ? 900 : 2000, target.id)
   const sums = [0]
   for (const event of log) sums.push((sums.at(-1) ?? 0) + jsonBytes(event).length)
   const groupID = 'history-probe'
@@ -335,6 +340,7 @@ export async function frameMeasurements() {
     const sealedEntries = entrySeal.sealEntries(await entrySeal.deriveEntryKey(group), ledger)
     const commitFrame = rpc.encodeHandshakeFrame(0, rpc.encodeCommitFrame(commit, sealedEntries))
     const derived = deriveGroup(group, result.newState)
+    await derived.bootstrapLedger(tokens)
     const { groupInfo } = await exportGroupInfo({ group: derived })
     const attestation = stringifyToken(
       await alice.signToken(
@@ -375,7 +381,25 @@ export async function frameMeasurements() {
     if (!Buffer.from(opened).equals(Buffer.from(plaintext)))
       throw new Error('HPKE round trip failed')
     const sealed = Uint8Array.from([1, ...enc, ...ct])
-    const reply = rpc.encodeHandshakeFrame(2, rpc.encodeRecoveryReply(requestID, sealed))
+    const provisional = rpc.encodeHandshakeFrame(2, rpc.encodeRecoveryReply(requestID, sealed))
+    const requester = await processWelcome({
+      identity: bob,
+      invite: { groupID, inviterID: alice.id, recipientDID: bob.id, ledgerEntries: tokens },
+      welcome,
+      keyPackageBundle: bundle,
+    })
+    const request = await createRecoveryRequest({
+      group: requester.group,
+      identity: bob,
+      requestID,
+    })
+    const finalSeal = await sealGroupInfo({
+      group: derived,
+      identity: alice,
+      request: request.request,
+    })
+    const reply = rpc.encodeHandshakeFrame(2, rpc.encodeRecoveryReply(requestID, finalSeal))
+    const delta = reply.length - provisional.length
     const invite = jsonBytes({
       groupID,
       inviterID: alice.id,
@@ -414,8 +438,21 @@ export async function frameMeasurements() {
       Welcome: welcome,
       'Welcome + ledger (provisional binary attachment)': Buffer.concat([welcome, ledger]),
       'invite (JSON fixture)': invite,
-      'sealed GroupInfo + ledger (provisional)': reply,
+      'sealed GroupInfo + ledger': reply,
       'verdict (estimated shape)': verdict,
+    }
+    if (exactHorizon && consumer) {
+      await options?.onHorizonFrames?.(frames, delta)
+      printTable([
+        {
+          distribution,
+          historyBytes: 393216,
+          consumerBytes: 65536,
+          provisionalReplyBytes: provisional.length,
+          finalReplyBytes: reply.length,
+          byteDelta: delta,
+        },
+      ])
     }
     const history = 2 * historyBytes(prefix) + historyBytes(proof)
     const measured = {
@@ -438,7 +475,7 @@ export async function frameMeasurements() {
   const rows = []
   const ceilings = []
   for (const distribution of ['tree', 'proof'] as const) {
-    for (const consumer of [false, true]) {
+    for (const consumer of options?.onlyHorizon ? [true] : [false, true]) {
       let near = 1
       while (
         (distribution === 'tree'
@@ -468,6 +505,7 @@ export async function frameMeasurements() {
           expansion: horizon.proofBytes === 0 ? null : horizon.proofTokenBytes / horizon.proofBytes,
         },
       ])
+      if (options?.onlyHorizon) continue
       for (const frame of Object.keys(horizon.frames)) {
         const independent =
           frame === 'verdict (estimated shape)' ||
@@ -537,5 +575,5 @@ export async function frameMeasurements() {
   printTable(ceilings)
   if (process.env.KUMIAI_PROBE_REPORT === '1')
     process.stdout.write(`PROBE_JSON ${JSON.stringify({ rows, ceilings })}\n`)
-  return rows.length > 0 && ceilings.length > 0
+  return rows.length > 0 && (options?.onlyHorizon === true || ceilings.length > 0)
 }

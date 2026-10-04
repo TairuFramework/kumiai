@@ -135,6 +135,8 @@ describe('GroupMLS port', () => {
     // BUILT, not adopted: the commit still has to win a compare-and-set at the head, and a
     // peer that adopted first would be alone on a branch the moment it lost.
     expect(pending).not.toBeNull()
+    if (pending == null || 'renewalRequired' in pending)
+      throw new Error('Expected pending recovery')
     expect(stranded.epoch()).toBe(0)
     // And the commit says it is a REJOIN, before it is applied and without being applied. Nothing
     // else about it will ever say so: it replaces a leaf the roster already holds, so it changes
@@ -182,7 +184,9 @@ describe('GroupMLS port', () => {
     })
     const request = await stranded.createRecoveryRequest('req-1')
     const pending = await stranded.applyRecovery(await live.sealGroupInfo(request), 'req-1')
-    await pending?.onAccepted()
+    if (pending == null || 'renewalRequired' in pending)
+      throw new Error('Expected pending recovery')
+    await pending.onAccepted()
 
     // Every token in this list is perfectly well-formed. The DEMOTION is simply missing —
     // which is exactly what a signature does not protect and what the head chain does.
