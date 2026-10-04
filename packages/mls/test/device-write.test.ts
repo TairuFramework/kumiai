@@ -111,10 +111,8 @@ describe('deny seam', () => {
     expect(g.creatorGroup.currentDenySet().has(normalizeDID(g.targetDeviceID))).toBe(true)
   })
 
-  test('a revoked device cannot re-authenticate on the bound path; a floating leaf is unaffected', async () => {
-    // A second BOUND device of P (not the floating target twoDeviceProfileGroup builds), added
-    // and then revoked, so the deny check inside validateBoundLeaf actually has something to bite:
-    // a floating credential of the SAME DID never reaches that check at all (no `.controller`).
+  test('a revoked device cannot re-authenticate with a bound or floating credential', async () => {
+    // Both credential forms name the same revoked device in the group's deny set.
     const { deviceGroup, deviceIdentity, controllerID, creatorGroup, tokens } =
       await joinBoundDevice()
     const { capability } = await buildManagementCapability({
@@ -157,7 +155,7 @@ describe('deny seam', () => {
 
     expect(await authService.validateCredential(boundCredential, targetLeaf.deviceKey)).toBe(false)
     expect(await authService.validateCredential(floatingCredential, targetLeaf.deviceKey)).toBe(
-      true,
+      false,
     )
   })
 })

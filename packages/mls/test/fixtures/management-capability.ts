@@ -42,6 +42,7 @@ export async function buildManagementCapability(
     aud: options.managerDID,
     act: 'manage',
     res: 'kumiai/devices',
+    iat: now(),
     exp: now() + 3600,
     cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: options.managerKey }),
     ...options.capabilityOverrides,

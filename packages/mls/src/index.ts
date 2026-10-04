@@ -30,6 +30,12 @@ export {
   verifyManagementCapability,
 } from './authentication.js'
 export {
+  type MintLeafCapabilityParams,
+  type MintTrustedGrantParams,
+  mintLeafCapability,
+  mintTrustedGrant,
+} from './capability.js'
+export {
   type ClientState,
   decodeClientState,
   encodeClientState,
@@ -56,6 +62,14 @@ export {
   encodeControlEnvelope,
 } from './envelope.js'
 export { type EnvelopeFoldResult, foldEnvelope } from './envelope-fold.js'
+export {
+  LeafBindingError,
+  type LeafBindingReason,
+  LeafLapsedError,
+  type LeafLapsedReason,
+  RevokeProofError,
+  type RevokeProofReason,
+} from './errors.js'
 export {
   type FoldDrop,
   type FoldInput,
