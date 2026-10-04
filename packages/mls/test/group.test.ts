@@ -478,6 +478,7 @@ describe('GroupHandle lifecycle', () => {
     const forgedInvite: Invite = {
       groupID: 'nonadmin-invite',
       inviterID: mallory.id,
+      recipientDID: bob.id,
       ledgerEntries: [forgedRole],
     }
 
@@ -1973,7 +1974,7 @@ describe('an invite seeds the roster', () => {
         keyPackageBundle: bobKP,
         ratchetTree: newGroup.state.ratchetTree,
       }),
-    ).rejects.toThrow(/carries no role entry naming this identity/)
+    ).rejects.toThrow(/invite recipient is not this identity/)
   })
 })
 

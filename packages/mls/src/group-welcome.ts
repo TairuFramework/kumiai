@@ -1,26 +1,42 @@
 import { normalizeDID, type OwnIdentity } from '@kokuin/token'
 import {
+  type Credential,
+  contentTypes,
   decode,
+  defaultCredentialTypes,
+  defaultProposalTypes,
   encode,
   generateKeyPackageWithKey,
+  isDefaultCredential,
+  isDefaultProposal,
+  type LeafIndex,
   type MlsPublicMessage,
   joinGroup as mlsJoinGroup,
   joinGroupExternal as mlsJoinGroupExternal,
   mlsMessageDecoder,
   mlsMessageEncoder,
+  nodeTypes,
+  proposalOrRefTypes,
   protocolVersions,
   type Welcome,
   wireformats,
 } from 'ts-mls'
 
+import { decodeGroupAnchor, GROUP_ANCHOR_EXTENSION_TYPE } from './anchor.js'
+import { verifyLeafCredential } from './authentication.js'
 import { sanitizeRatchetTree } from './codec.js'
-import type { MemberCredential } from './credential.js'
+import {
+  type ControllerBinding,
+  type MemberCredential,
+  parseMLSCredentialIdentity,
+} from './credential.js'
+import { LeafBindingError } from './errors.js'
 import { buildLeafCapabilities, resolveMlsContext } from './group-context.js'
-import { makeMLSCredential } from './group-credential.js'
-import { GroupHandle } from './group-handle.js'
+import { assertBindingAuthorTime, makeMLSCredential } from './group-credential.js'
+import { buildCommitPolicyContext, GroupHandle } from './group-handle.js'
 import { assertHeadMatches, computeHead, readLedgerHead } from './head.js'
 import { ledgerEntryDigest, verifyLedgerEntry } from './ledger.js'
-import { validateWelcomeTree } from './lifecycle.js'
+import { prepareLifecycleGate, validateWelcomeTree } from './lifecycle.js'
 import { ROLE_ENTRY_TYPE } from './roster.js'
 import type { GroupOptions, Invite, KeyPackageBundle } from './types.js'
 
@@ -49,24 +65,8 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
   const { identity, invite, welcome, keyPackageBundle, ratchetTree, options } = params
   const context = await resolveMlsContext(options)
 
-  // A Welcome is only this member's when the invite carries a role entry naming
-  // them: an invite minted for someone else is not an invitation to join.
-  const selfDID = normalizeDID(identity.id)
-  let namesSelf = false
-  for (const token of invite.ledgerEntries) {
-    const verified = await verifyLedgerEntry(token)
-    if (
-      verified != null &&
-      verified.entry.type === ROLE_ENTRY_TYPE &&
-      verified.entry.groupID === invite.groupID &&
-      normalizeDID(verified.entry.subject) === selfDID
-    ) {
-      namesSelf = true
-      break
-    }
-  }
-  if (!namesSelf) {
-    throw new Error('processWelcome: the invite carries no role entry naming this identity')
+  if (normalizeDID(invite.recipientDID) !== normalizeDID(identity.id)) {
+    throw new Error('processWelcome: the invite recipient is not this identity')
   }
 
   let resolvedWelcome: unknown = welcome
@@ -88,6 +88,17 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
       ratchetTree: sanitizedTree as JoinGroupParams['ratchetTree'],
     }),
   })
+
+  const joinedLeaf = state.ratchetTree[state.privatePath.leafIndex * 2]
+  if (
+    joinedLeaf?.nodeType !== nodeTypes.leaf ||
+    !isDefaultCredential(joinedLeaf.leaf.credential) ||
+    joinedLeaf.leaf.credential.credentialType !== defaultCredentialTypes.basic ||
+    normalizeDID(parseMLSCredentialIdentity(joinedLeaf.leaf.credential.identity).id) !==
+      normalizeDID(invite.recipientDID)
+  ) {
+    throw new Error('processWelcome: the joined leaf does not name the invite recipient')
+  }
 
   const credential: MemberCredential = {
     id: identity.id,
@@ -118,6 +129,20 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
   // Fold the invite's entries: the roster is seeded from the anchor and the fold grants
   // authority only to an admin-so-far, so a member-signed entry cannot promote anyone
   // even though applyLedgerEntries itself is the permissive primitive.
+  if (group.anchor.controller == null) {
+    let namesSelf = false
+    for (const token of invite.ledgerEntries) {
+      const verified = await verifyLedgerEntry(token)
+      if (
+        verified?.entry.type === ROLE_ENTRY_TYPE &&
+        verified.entry.groupID === invite.groupID &&
+        normalizeDID(verified.entry.subject) === normalizeDID(identity.id)
+      )
+        namesSelf = true
+    }
+    if (!namesSelf)
+      throw new Error('processWelcome: the invite carries no role entry naming this identity')
+  }
   await group.applyLedgerEntries(invite.ledgerEntries)
   await validateWelcomeTree(group)
 
@@ -174,6 +199,7 @@ export type JoinGroupExternalParams = {
   credential: MemberCredential
   /** Stale-recovery only: atomically removes prior leaf for same identity. */
   resync: true
+  controller?: ControllerBinding
   options?: GroupOptions
   authenticatedData?: Uint8Array
 }
@@ -195,6 +221,7 @@ export async function joinGroupExternal(
     resync,
     options,
     authenticatedData,
+    controller,
   } = params
 
   // Resync replaces the caller's own prior leaf, so the rejoining identity must match
@@ -207,8 +234,6 @@ export async function joinGroupExternal(
       `joinGroupExternal: identity.id (${identity.id}) must match credential.id (${credential.id}) for resync`,
     )
   }
-
-  const context = await resolveMlsContext(options)
 
   const message = decode(mlsMessageDecoder, groupInfoBytes)
   if (message == null) {
@@ -232,18 +257,61 @@ export async function joinGroupExternal(
     )
   }
 
+  const anchorExtension = groupInfo.groupContext.extensions.find(
+    (extension) => extension.extensionType === GROUP_ANCHOR_EXTENSION_TYPE,
+  )
+  const anchor =
+    anchorExtension?.extensionData instanceof Uint8Array
+      ? decodeGroupAnchor(anchorExtension.extensionData)
+      : null
+  if (anchor == null) throw new Error('joinGroupExternal: the group has no valid anchor')
+  if (anchor.controller != null && controller == null)
+    throw new LeafBindingError('floating-refused')
+  assertBindingAuthorTime(controller)
+  const context = await resolveMlsContext(options, anchor)
+  const originalCredentials: Array<{ credential: Credential; signaturePublicKey: Uint8Array }> = []
+  const joinContext = {
+    ...context,
+    authService: {
+      async validateCredential(leafCredential: Credential, signaturePublicKey: Uint8Array) {
+        if (
+          !isDefaultCredential(leafCredential) ||
+          leafCredential.credentialType !== defaultCredentialTypes.basic
+        )
+          return false
+        const parsed = parseMLSCredentialIdentity(leafCredential.identity)
+        if (anchor.controller != null && parsed.controller == null)
+          throw new LeafBindingError('floating-refused')
+        if (
+          anchor.controller != null &&
+          parsed.controller != null &&
+          normalizeDID(parsed.controller.id) !== normalizeDID(anchor.controller)
+        )
+          throw new LeafBindingError('controller-mismatch')
+        await verifyLeafCredential(leafCredential, signaturePublicKey, {
+          leafLifetime: () =>
+            anchor.controller == null ? undefined : (anchor.leafLifetime ?? 86_400),
+          trustedGrantLifetime: () =>
+            anchor.controller == null ? undefined : (anchor.trustedGrantLifetime ?? 2_592_000),
+        })
+        originalCredentials.push({ credential: leafCredential, signaturePublicKey })
+        return true
+      },
+    },
+  }
+
   // The rejoining leaf must advertise every GroupContext extension the group uses, or
   // ts-mls rejects the external join. Derive them from the GroupInfo being resynced
   // against, honoring an explicit capabilities override.
   const keyPackage = await generateKeyPackageWithKey({
-    credential: makeMLSCredential(identity),
+    credential: makeMLSCredential(identity, controller),
     signatureKeyPair: { signKey: identity.privateKey, publicKey: identity.publicKey },
     cipherSuite: context.cipherSuite,
     capabilities: buildLeafCapabilities(groupInfo.groupContext.extensions, options?.capabilities),
   })
 
   const { publicMessage, newState } = await mlsJoinGroupExternal({
-    context,
+    context: joinContext,
     groupInfo,
     keyPackage: keyPackage.publicPackage,
     privateKeys: keyPackage.privatePackage,
@@ -267,5 +335,56 @@ export async function joinGroupExternal(
     onLedgerEntries: options?.onLedgerEntries,
   })
 
+  const ownIndex = newState.privatePath.leafIndex
+  const own = newState.ratchetTree[ownIndex * 2]
+  const previous = originalCredentials.find(
+    ({ credential: candidate }) =>
+      isDefaultCredential(candidate) &&
+      candidate.credentialType === defaultCredentialTypes.basic &&
+      normalizeDID(parseMLSCredentialIdentity(candidate.identity).id) === normalizeDID(identity.id),
+  )
+  if (own?.nodeType !== nodeTypes.leaf || previous == null)
+    throw new LeafBindingError('identity-change')
+  // Only the replaced leaf's credential and key affect the lifecycle predicates.
+  if (publicMessage.content.contentType !== contentTypes.commit)
+    throw new Error('Expected external commit')
+  const proposals = publicMessage.content.commit.proposals.map((proposal) => {
+    if (proposal.proposalOrRefType !== proposalOrRefTypes.proposal)
+      throw new Error('Expected inline proposal')
+    return { proposal: proposal.proposal, senderLeafIndex: ownIndex as LeafIndex }
+  })
+  const removed = proposals.find(
+    ({ proposal }) =>
+      isDefaultProposal(proposal) && proposal.proposalType === defaultProposalTypes.remove,
+  )?.proposal
+  if (
+    removed == null ||
+    !isDefaultProposal(removed) ||
+    removed.proposalType !== defaultProposalTypes.remove
+  )
+    throw new Error('Missing replacement target')
+  const beforeTree = newState.ratchetTree.slice()
+  beforeTree[ownIndex * 2] = undefined
+  beforeTree[removed.remove.removed * 2] = { ...own, leaf: { ...own.leaf, ...previous } }
+  const before = new GroupHandle({
+    state: { ...newState, ratchetTree: beforeTree, groupContext: groupInfo.groupContext },
+    credential,
+    context: await resolveMlsContext(options, anchor),
+  })
+  const gate = await prepareLifecycleGate(
+    before,
+    [],
+    before.registry,
+    buildCommitPolicyContext(before, {
+      baseRoster: before.roster,
+      candidateRoster: before.roster,
+      entryIDs: [],
+      enactedDeviceEntries: [],
+    }),
+    own.leaf,
+  )
+  gate.check({ kind: 'commit', senderLeafIndex: undefined, proposals })
+  await gate.postApply(newState)
+  await validateWelcomeTree(group)
   return { commitMessage, group }
 }

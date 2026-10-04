@@ -29,7 +29,7 @@ import { makeMLSCredential } from '../../src/group-credential.js'
 import { deriveGroup, GroupHandle } from '../../src/group-handle.js'
 import { processWelcome } from '../../src/group-welcome.js'
 import { buildLedgerHeadExtension, extendHead, readLedgerHead } from '../../src/head.js'
-import { ledgerEntryDigest, signLedgerEntry } from '../../src/ledger.js'
+import { ledgerEntryDigest } from '../../src/ledger.js'
 import { agent, controllerID, controllerSeed, inception } from './lifecycle-ledger.js'
 
 export { agent, controllerID, inception }
@@ -233,32 +233,28 @@ export async function rawApplication(group: GroupHandle) {
   return encode(mlsMessageEncoder, result.message)
 }
 
-/** A low-level role-bearing ledger supplies the public Welcome's existing recipient guard. */
+/** Build a real Welcome while bypassing admission gates to exercise revalidation. */
 export async function welcomeBoundary(
   group: GroupHandle,
   identity: OwnIdentity,
   binding: ControllerBinding,
 ) {
   const bundle = await rawBundle(group, identity, binding)
-  const role = await signLedgerEntry(agent(41), {
-    type: 'kumiai.role',
-    groupID: group.groupID,
-    subject: identity.id,
-    value: 'member',
-  })
-  const result = await rawCommit(
-    group,
-    [{ proposalType: defaultProposalTypes.add, add: { keyPackage: bundle.publicPackage } }],
-    undefined,
-    [role],
-  )
+  const result = await rawCommit(group, [
+    { proposalType: defaultProposalTypes.add, add: { keyPackage: bundle.publicPackage } },
+  ])
   if (result.welcome == null) throw new Error('Missing Welcome')
   const welcome = result.welcome.welcome
   return {
     process: () =>
       processWelcome({
         identity,
-        invite: { groupID: group.groupID, inviterID: agent(41).id, ledgerEntries: [role] },
+        invite: {
+          groupID: group.groupID,
+          inviterID: agent(41).id,
+          recipientDID: identity.id,
+          ledgerEntries: group.ledgerTokens,
+        },
         welcome,
         keyPackageBundle: { ...bundle, ownerDID: identity.id },
       }),

@@ -60,10 +60,12 @@ export type GroupOptions = {
 export type Invite = {
   /** Group ID the invite is for */
   groupID: string
+  /** Intended recipient DID. */
+  recipientDID: string
   /** Inviter's DID */
   inviterID: string
   /** The group's whole signed control ledger, in application order, so the joiner
-   *  folds the same roster as everyone else. The invitee's own role entry is last. */
+   *  folds the same control state as everyone else. */
   ledgerEntries: Array<string>
 }
 

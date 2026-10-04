@@ -19,6 +19,7 @@ import { verifyDeviceEntry } from './device-proof.js'
 import { encodeControlEnvelope } from './envelope.js'
 import { foldEnvelope } from './envelope-fold.js'
 import type { FoldInput } from './fold.js'
+import { assertBindingAuthorTime } from './group-credential.js'
 import {
   buildCommitPolicyContext,
   deriveGroup,
@@ -43,25 +44,7 @@ export type InviteRecipientMismatchErrorParams = {
   actualDID: string
 }
 
-/**
- * Thrown by {@link commitInvite} when the supplied key package's credential DID is not the
- * identity the invite's enacted role entry grants a role to.
- *
- * Distinct from an ordinary rejection on purpose: the expected trigger is a key-package store
- * that served the wrong owner's package, and adding the package anyway would put a different
- * identity in the group than the one the roster grants the role to. A host should alert on this.
- *
- * The same error also fires for any invite whose trailing `kumiai.role` entry names someone
- * other than the intended invitee — hand-built, tampered, or reordered — with an otherwise
- * honest key package. A host seeing this should not assume a store compromise on that basis
- * alone.
- *
- * The receive-side add rule in {@link defaultCommitPolicy} does NOT close this residual, though it
- * is easy to assume it would. That rule rejects an Add whose DID the candidate roster grants
- * nothing; in the reordered case the trailing grant's subject IS granted, so the Add passes and the
- * intended invitee is left holding a grant it never joined against. Closing it needs this binding to
- * seek the enacted entry matching the key package's DID rather than reading the last one.
- */
+/** The supplied key package names a different identity from the invite's recipient. */
 export class InviteRecipientMismatchError extends Error {
   #groupID: string
   #expectedDID: string
@@ -69,7 +52,7 @@ export class InviteRecipientMismatchError extends Error {
 
   constructor(params: InviteRecipientMismatchErrorParams) {
     super(
-      `commitInvite: the key package presents ${params.actualDID}, but the invite grants a role to ${params.expectedDID}`,
+      `commitInvite: the key package presents ${params.actualDID}, but the invite names recipient ${params.expectedDID}`,
     )
     this.name = 'InviteRecipientMismatchError'
     this.#groupID = params.groupID
@@ -81,7 +64,7 @@ export class InviteRecipientMismatchError extends Error {
     return this.#groupID
   }
 
-  /** DID the invite's enacted role entry grants to. */
+  /** DID the invite names. */
   get expectedDID(): string {
     return this.#expectedDID
   }
@@ -96,49 +79,59 @@ export type CreateInviteParams = {
   group: GroupHandle
   identity: SigningIdentity
   recipientDID: string
-  permission: GroupPermission
-}
+} & (
+  | { permission: GroupPermission; entries?: never }
+  | { permission?: never; entries?: Array<string> }
+)
 
 export type CreateInviteResult = {
   invite: Invite
 }
 
-/**
- * Create an invite for a new member. Does NOT add them — call commitInvite with
- * their key package for that.
- *
- * Only an admin may invite: a role entry from a non-admin issuer is dropped by every
- * receiver's fold, so refusing here turns a silent downstream rejection into a local
- * error.
- */
+/** Create an invite without adding its recipient; commitInvite enacts the admission. */
 export async function createInvite(params: CreateInviteParams): Promise<CreateInviteResult> {
-  const { group, identity, recipientDID, permission } = params
-  if (group.roster.roles.get(authority(group.registry, identity.id)) !== 'admin') {
-    throw new Error('createInvite: the inviter must be an admin in the group roster')
+  const { group, identity, recipientDID } = params
+  let appended: Array<string>
+  if (group.anchor.controller != null) {
+    if (params.permission != null)
+      throw new Error('createInvite: lifecycle invites have no permission')
+    if (group.findMemberLeafIndex(identity.id) == null) {
+      throw new Error('createInvite: the inviter must hold a leaf')
+    }
+    appended = params.entries ?? []
+    for (const token of appended) {
+      const verified = await verifyLedgerEntry(token)
+      if (
+        verified == null ||
+        verified.entry.groupID !== group.groupID ||
+        verified.entry.type.startsWith('kumiai.') ||
+        normalizeDID(verified.issuer) !== normalizeDID(identity.id)
+      )
+        throw new Error('createInvite: entries must be consumer entries signed by the inviter')
+    }
+  } else {
+    if (params.permission == null)
+      throw new Error('createInvite: standard invites require permission')
+    if (group.roster.roles.get(authority(group.registry, identity.id)) !== 'admin') {
+      throw new Error('createInvite: the inviter must be an admin in the group roster')
+    }
+    appended = [
+      await signLedgerEntry(identity, {
+        type: ROLE_ENTRY_TYPE,
+        groupID: group.groupID,
+        subject: recipientDID,
+        value: params.permission,
+      }),
+    ]
   }
-
-  // The role entry naming the invitee. Its issuer is the inviter (authenticated by
-  // the token signature) and its value is the permission granted.
-  const roleToken = await signLedgerEntry(identity, {
-    type: ROLE_ENTRY_TYPE,
-    groupID: group.groupID,
-    subject: recipientDID,
-    value: permission,
-  })
-
-  const invite: Invite = {
-    groupID: group.groupID,
-    inviterID: identity.id,
-    // The whole log, new role entry last: a joiner handed only its own entry would
-    // never learn of earlier role changes and would reject every commit by an admin
-    // promoted since — a permanent fork nothing re-sends. The new entry must fold
-    // after the history it depends on, hence last. Re-granting a role the log already
-    // carries appends it again (a legal re-enactment). The joiner still folds from the
-    // anchor, so padding this list cannot promote anyone.
-    ledgerEntries: [...group.ledgerTokens, roleToken],
+  return {
+    invite: {
+      groupID: group.groupID,
+      inviterID: identity.id,
+      recipientDID,
+      ledgerEntries: [...group.ledgerTokens, ...appended],
+    },
   }
-
-  return { invite }
 }
 
 /**
@@ -191,6 +184,9 @@ export async function commitWithEntries(
     commitState?: ClientState
   } = {},
 ): Promise<Awaited<ReturnType<typeof createCommit>>> {
+  if (group.anchor.controller != null && group.findMemberLeafIndex(group.credential.id) == null) {
+    throw new Error('the committer must hold a leaf')
+  }
   const ratchetTreeExtension = options.ratchetTreeExtension ?? false
   const requireAdmin = options.requireAdmin ?? true
   // Same reason createInvite guards the inviter: a non-admin's commit is rejected by
@@ -296,8 +292,16 @@ export async function commitWithEntries(
   }
   gate.check(incoming)
   for (const proposal of proposals) {
-    if (proposal.proposalType === defaultProposalTypes.add)
-      await validateEntry(group, proposal.add.keyPackage.leafNode)
+    if (proposal.proposalType === defaultProposalTypes.add) {
+      const leaf = proposal.add.keyPackage.leafNode
+      if (
+        isDefaultCredential(leaf.credential) &&
+        leaf.credential.credentialType === defaultCredentialTypes.basic
+      ) {
+        assertBindingAuthorTime(parseMLSCredentialIdentity(leaf.credential.identity).controller)
+      }
+      await validateEntry(group, leaf)
+    }
   }
   const result = await createCommit({
     context: group.context,
@@ -396,7 +400,7 @@ export type CommitInviteResult = {
  *
  * The invite's ledger entries are enacted here: their content ids ride the commit's
  * control envelope and advance the head by exactly those ids, so every receiver folds
- * the invitee's role entry as it applies the Add. The envelope carries ids, not
+ * the appended entries as it applies the Add. The envelope carries ids, not
  * bodies — a receiver holding neither the entry nor a `resolveLedgerEntries` resolver
  * throws MissingLedgerEntriesError.
  *
@@ -422,29 +426,28 @@ export async function commitInvite(
 
     const enacted = entriesAddedByInvite(group, invite)
 
-    // Bind the leaf that joins to the role this same commit grants. Without it the joining
-    // identity is decided by whoever supplied the key package bytes — a store that served the
-    // wrong owner's package admits that owner while the roster names someone else, and neither
-    // side can see the disagreement from its own state.
-    //
-    // The LAST role entry, because an invite may legitimately carry an unrelated promotion
-    // riding the same commit, and createInvite puts the invitee's own grant last.
-    //
-    // The `groupID` check is belt-and-braces: `foldEnvelope` already hard-rejects any
-    // cross-group entry in `enacted`, so no invite reaching this point can carry one.
-    let grantedTo: string | null = null
-    for (const token of enacted) {
-      const verified = await verifyLedgerEntry(token)
-      if (verified?.entry.type === ROLE_ENTRY_TYPE && verified.entry.groupID === group.groupID) {
-        grantedTo = verified.entry.subject
+    const expectedDID = normalizeDID(invite.recipientDID)
+    if (group.anchor.controller == null) {
+      let grantedTo: string | null = null
+      for (const token of enacted) {
+        const verified = await verifyLedgerEntry(token)
+        if (verified?.entry.type === ROLE_ENTRY_TYPE && verified.entry.groupID === group.groupID) {
+          grantedTo = verified.entry.subject
+        }
+      }
+      if (grantedTo == null) {
+        throw new Error(
+          `commitInvite: the invite enacts no ${ROLE_ENTRY_TYPE} entry for this group`,
+        )
+      }
+      if (normalizeDID(grantedTo) !== expectedDID) {
+        throw new InviteRecipientMismatchError({
+          groupID: group.groupID,
+          expectedDID,
+          actualDID: normalizeDID(grantedTo),
+        })
       }
     }
-    if (grantedTo == null) {
-      throw new Error(
-        `commitInvite: the invite enacts no ${ROLE_ENTRY_TYPE} entry for this group, so there is no recipient to bind the key package to`,
-      )
-    }
-    const expectedDID = normalizeDID(grantedTo)
 
     // `credentialType !== basic` does not narrow on its own: CredentialCustom.credentialType is a
     // bare `number`, so the compiler cannot rule it out. ts-mls's own guard can.
