@@ -546,3 +546,50 @@ test('peer:4 members sign self-verifying proof entries using their leaf long for
   if (built.status !== 'built') throw new Error('Missing proof')
   expect(built.result.newGroup.ledger.at(-1)?.verified.issuer).toBe(identity.id)
 })
+
+test.each(['revoke', 'reset'] as const)(
+  'the first %s proof selects the latest reset segment for a repeated subject',
+  async (op) => {
+    const { group, identity } = await pipelineGroup()
+    const target = agent(61).id
+    const oldRevoke = revoke([inception], target)
+    const reset = createReset(controllerSeed, 0, 1)
+    const current = [inception, reset]
+    const currentRevoke = revoke(current, target)
+    const log = [inception, oldRevoke, reset, currentRevoke]
+    const renewed = await renewLeaf(
+      group,
+      await timedBinding(identity, 150, 250, { prefix: current }),
+    )
+    const before = structuredClone(renewed.newGroup.state)
+    const originalLog = structuredClone(log)
+    const built = await revokeWithProof(
+      renewed.newGroup,
+      op === 'reset' ? { reset: true, log } : { subject: target, log },
+    )
+    expect(built.status).toBe('built')
+    if (built.status !== 'built') throw new Error('Missing proof')
+    const expected = JSON.parse(JSON.stringify([inception, reset, currentRevoke]))
+    expect(built.result.newGroup.ledger.at(-1)?.verified.entry.value).toMatchObject({
+      proof: expected,
+    })
+    expect(built.result.newGroup.registry.controllers.get(controllerID)?.recordedLog).toEqual(
+      expected,
+    )
+    if (op === 'revoke') expect(revocationOf(built.result.newGroup, target)?.logPosition).toBe(2)
+    else expect(built.result.newGroup.registry.controllers.get(controllerID)?.genFloor).toBe(1)
+    expect(renewed.newGroup.state).toEqual(before)
+    expect(log).toEqual(originalLog)
+  },
+)
+
+test('a first proof cannot use a subject revoke before the latest reset', async () => {
+  const { group } = await pipelineGroup()
+  const target = agent(61).id
+  const log = [inception, revoke([inception], target), createReset(controllerSeed, 0, 1)]
+  expect(await revokeWithProof(group, { subject: target, log })).toEqual({
+    status: 'not-provable',
+    reason: 'no-rev',
+  })
+  expect(group.ledger).toEqual([])
+})

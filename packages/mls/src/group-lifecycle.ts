@@ -195,8 +195,10 @@ function proofFor(
   const generation = canonical.states.at(-1)?.gen ?? 0
   if (recorded.length > 0 && generation > (recordedHead?.gen ?? floor))
     throw new RevokeProofError('needs-reset')
+  const start = recorded.length === 0 ? Math.max(1, resetIndex) : 1
   let end = advancing.findIndex(
     ({ event }, index) =>
+      index >= start &&
       event.t === 'rev' &&
       'x' in event &&
       typeof event.x === 'string' &&
@@ -208,7 +210,6 @@ function proofFor(
     throw new RevokeProofError('no-rev')
   }
   if (recorded.length === 0) {
-    const start = resetIndex >= 0 && resetIndex <= end ? resetIndex : 1
     return [advancing[0] as SignedEvent, ...advancing.slice(start, end + 1)]
   }
   const headIndex = canonical.states.findIndex(({ digest }) => digest === recordedHead?.digest)

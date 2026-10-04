@@ -22,6 +22,7 @@ import { buildLedgerHeadExtension, computeHead } from '../../src/head.js'
 import { ledgerEntryDigest, signLedgerEntry } from '../../src/ledger.js'
 
 export function printTable(rows: Array<Record<string, unknown>>) {
+  if (process.env.KUMIAI_PROBE_REPORT !== '1') return
   const keys = [...new Set(rows.flatMap((row) => Object.keys(row)))]
   process.stdout.write(`| ${keys.join(' | ')} |\n| ${keys.map(() => '---').join(' | ')} |\n`)
   for (const row of rows)
@@ -534,6 +535,7 @@ export async function frameMeasurements() {
   }
   printTable(rows)
   printTable(ceilings)
-  process.stdout.write(`PROBE_JSON ${JSON.stringify({ rows, ceilings })}\n`)
+  if (process.env.KUMIAI_PROBE_REPORT === '1')
+    process.stdout.write(`PROBE_JSON ${JSON.stringify({ rows, ceilings })}\n`)
   return rows.length > 0 && ceilings.length > 0
 }

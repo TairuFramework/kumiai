@@ -1,3 +1,4 @@
+// Set KUMIAI_PROBE_REPORT=1 to print measurement tables.
 import { expect, test } from 'vitest'
 
 import { encodeCommitFrame } from '../src/commit-frame.js'
@@ -20,9 +21,10 @@ test('measures final base64 at the hub boundary', () => {
       fits: Buffer.from(frame).toString('base64').length <= 1048576,
     }
   })
-  process.stdout.write(
-    `rawBytes | base64Chars | fits\n${rows.map((row) => `${row.rawBytes} | ${row.base64Chars} | ${row.fits}`).join('\n')}\n`,
-  )
+  if (process.env.KUMIAI_PROBE_REPORT === '1')
+    process.stdout.write(
+      `rawBytes | base64Chars | fits\n${rows.map((row) => `${row.rawBytes} | ${row.base64Chars} | ${row.fits}`).join('\n')}\n`,
+    )
   expect(rows.map((row) => row.fits)).toEqual([true, true, false])
 })
 

@@ -1,3 +1,4 @@
+// Set KUMIAI_PROBE_REPORT=1 to print measurement tables.
 import { expect, test } from 'vitest'
 
 test('measures real MLS and sealed ledger-bearing frame sizes', async () => {

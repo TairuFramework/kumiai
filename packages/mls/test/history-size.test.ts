@@ -1,3 +1,4 @@
+// Set KUMIAI_PROBE_REPORT=1 to print measurement tables.
 import { createReset, createRevoke, createRotate } from '@kokuin/controller'
 import { expect, test } from 'vitest'
 
