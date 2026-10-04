@@ -8,6 +8,7 @@ import {
   type GroupContextExtension,
   isDefaultCredential,
   type KeyPackage,
+  type LeafIndex,
   mlsMessageEncoder,
 } from 'ts-mls'
 
@@ -30,8 +31,7 @@ import {
   type VerifiedLedgerEntry,
   verifyLedgerEntry,
 } from './ledger.js'
-import { verifyLifecycleProof } from './lifecycle-proof.js'
-import { defaultCommitPolicy } from './policy.js'
+import { prepareLifecycleGate, validateEntry } from './lifecycle.js'
 import { authority, controllerOf, DEVICE_ENTRY_TYPE, type DeviceValue } from './registry.js'
 import { type GroupPermission, ROLE_ENTRY_TYPE } from './roster.js'
 import type { Invite } from './types.js'
@@ -194,6 +194,7 @@ export async function commitWithEntries(
   // (register/add/revoke/label) are authorized by proofs, not a role, so they pass requireAdmin:false.
   if (
     requireAdmin &&
+    group.anchor.controller == null &&
     group.roster.roles.get(authority(group.registry, group.credential.id)) !== 'admin'
   ) {
     throw new Error('the committer must be an admin in the group roster')
@@ -242,7 +243,6 @@ export async function commitWithEntries(
       group.anchor.controller != null &&
       (input.verified.entry.value as DeviceValue).op !== 'beacon'
     ) {
-      await verifyLifecycleProof(group, input.verified as VerifiedLedgerEntry<DeviceValue>)
       continue
     }
     const ok = await verifyDeviceEntry(input.verified as VerifiedLedgerEntry<DeviceValue>, proofCtx)
@@ -253,30 +253,19 @@ export async function commitWithEntries(
 
   const entryIDs = enacted.map(ledgerEntryDigest)
 
-  // Filter the pending-proposal set the committer would otherwise absorb: ts-mls folds
-  // every unappliedProposal into the commit, so a non-admin's pending proposal would
-  // ride it and every peer would reject the whole thing — one member could stall the
-  // group. Judge each against the same defaultCommitPolicy and context receivers build,
-  // dropping any the group would reject.
   const enactedDeviceEntries = inputs
     .filter((i) => i.verified.entry.type === DEVICE_ENTRY_TYPE)
     .map((i) => ({
       subject: normalizeDID(i.verified.entry.subject),
       op: (i.verified.entry.value as DeviceValue).op,
     }))
-  const filterContext = buildCommitPolicyContext(group, {
+  const gateContext = buildCommitPolicyContext(group, {
     baseRoster: group.roster,
     candidateRoster: fold.roster,
     entryIDs,
     enactedDeviceEntries,
   })
-  const keptPending: typeof group.state.unappliedProposals = {}
-  for (const [ref, pws] of Object.entries(group.state.unappliedProposals)) {
-    if (defaultCommitPolicy({ kind: 'proposal', proposal: pws }, filterContext) !== 'reject') {
-      keptPending[ref] = pws
-    }
-  }
-  const commitState = { ...group.state, unappliedProposals: keptPending }
+  const commitState = { ...group.state, unappliedProposals: {} }
 
   const proposals = [...extraProposals]
   if (entryIDs.length > 0) {
@@ -286,7 +275,26 @@ export async function commitWithEntries(
     })
   }
 
-  return await createCommit({
+  const gate = await prepareLifecycleGate(
+    group,
+    inputs.map(({ verified }) => verified),
+    fold.registry,
+    gateContext,
+  )
+  const incoming = {
+    kind: 'commit' as const,
+    senderLeafIndex: group.state.privatePath.leafIndex as LeafIndex,
+    proposals: proposals.map((proposal) => ({
+      proposal,
+      senderLeafIndex: group.state.privatePath.leafIndex as LeafIndex,
+    })),
+  }
+  gate.check(incoming)
+  for (const proposal of proposals) {
+    if (proposal.proposalType === defaultProposalTypes.add)
+      await validateEntry(group, proposal.add.keyPackage.leafNode)
+  }
+  const result = await createCommit({
     context: group.context,
     state: commitState,
     extraProposals: proposals,
@@ -295,6 +303,8 @@ export async function commitWithEntries(
       authenticatedData: encodeControlEnvelope({ v: 1, entries: entryIDs }),
     }),
   })
+  await gate.postApply(result.newState)
+  return result
 }
 
 /**

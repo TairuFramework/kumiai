@@ -35,13 +35,9 @@ export type GroupOptions = {
    * 'reject' to refuse it (the handle stays at its pre-commit epoch and
    * processMessage throws CommitRejectedError). Overridable per call.
    *
-   * Providing this REPLACES the anchored defaultCommitPolicy entirely — it does
-   * not compose with it. A caller that sets this for any reason (e.g. to
-   * observe or add one extra rule) silently disables all default permission
-   * enforcement for the resulting handle; only the decode/fold hard-reject
-   * still applies. Callers who want to extend rather than replace the default
-   * policy must call defaultCommitPolicy themselves from within their own
-   * callback.
+   * Replaces the default role rules after mandatory credential and lifecycle gates accept.
+   * A caller policy cannot admit a change rejected by those gates. To extend the default
+   * role rules, call defaultCommitPolicy from the callback.
    */
   commitPolicy?: IncomingMessageCallback
   /**

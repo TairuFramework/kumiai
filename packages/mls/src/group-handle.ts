@@ -8,6 +8,7 @@ import {
   encode,
   type IncomingMessageAction,
   type IncomingMessageCallback,
+  type LeafNode,
   type MlsContext,
   type MlsFramedMessage,
   mlsExporter,
@@ -21,8 +22,10 @@ import {
 } from 'ts-mls'
 
 import { type GroupAnchor, readGroupAnchor } from './anchor.js'
+import { verifyLeafCredential } from './authentication.js'
 import { encodeClientState } from './codec.js'
 import {
+  didFromCredential,
   type GroupMember,
   type MemberCredential,
   parseMLSCredentialIdentity,
@@ -30,7 +33,7 @@ import {
 import { type LeafBinding, verifyDeviceEntry } from './device-proof.js'
 import { decodeControlEnvelope } from './envelope.js'
 import { foldEnvelope, GROUP_TYPE_PREFIX } from './envelope-fold.js'
-import { RevokeProofError } from './errors.js'
+import { LeafLapsedError, RevokeProofError } from './errors.js'
 import type { FoldInput } from './fold.js'
 import { deviceDenyHolderFor } from './group-context.js'
 import { readMessageEpoch } from './group-info.js'
@@ -45,7 +48,14 @@ import {
   readLedgerHeadExtension,
 } from './head.js'
 import { ledgerEntryDigest, type VerifiedLedgerEntry, verifyLedgerEntry } from './ledger.js'
-import { verifyLifecycleProof } from './lifecycle-proof.js'
+import {
+  assertSenderNotLapsed,
+  type CommitRejectionReason,
+  isLapsed,
+  leafAt,
+  prepareLifecycleGate,
+  rejectionReason,
+} from './lifecycle.js'
 import { createMutex, type Mutex } from './mutex.js'
 import {
   type CommitPolicyContext,
@@ -118,12 +128,22 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
 export class CommitRejectedError extends Error {
   #proposals: Array<ProposalWithSender>
   #senderLeafIndex?: number
+  #reason: CommitRejectionReason
 
-  constructor(proposals: Array<ProposalWithSender>, senderLeafIndex?: number) {
+  constructor(
+    proposals: Array<ProposalWithSender>,
+    senderLeafIndex?: number,
+    reason: CommitRejectionReason = 'policy',
+  ) {
     super('Commit rejected by group commit policy')
     this.name = 'CommitRejectedError'
+    this.#reason = reason
     this.#proposals = proposals
     this.#senderLeafIndex = senderLeafIndex
+  }
+
+  get reason(): CommitRejectionReason {
+    return this.#reason
   }
 
   get proposals(): Array<ProposalWithSender> {
@@ -140,7 +160,7 @@ type RejectedCommit = { proposals: Array<ProposalWithSender>; senderLeafIndex?: 
 /**
  * Wrap a consumer commit policy to capture a rejected commit's proposals for
  * CommitRejectedError. ts-mls does not surface them on its result, so record them
- * from the callback's own argument on the 'reject' path. Undefined when no policy.
+ * before either the proposal or path gate can reject. Undefined when no policy.
  */
 function wrapCommitPolicy(
   callback: IncomingMessageCallback | undefined,
@@ -149,7 +169,7 @@ function wrapCommitPolicy(
   if (callback == null) return undefined
   return (incoming) => {
     const action = callback(incoming)
-    if (action === 'reject' && incoming.kind === 'commit') {
+    if (incoming.kind === 'commit') {
       capture.rejected = {
         proposals: incoming.proposals,
         senderLeafIndex:
@@ -823,6 +843,8 @@ export class GroupHandle {
    */
   async encrypt(plaintext: Uint8Array, opts?: { aad?: Uint8Array }): Promise<Uint8Array> {
     return mutexFor(this).run(async () => {
+      const own = leafAt(this.#state.ratchetTree, this.#state.privatePath.leafIndex)
+      if (own != null && isLapsed(this, own)) throw new LeafLapsedError('lapsed')
       const { newState, message, consumed } = await createApplicationMessage({
         context: this.#context,
         state: this.#state,
@@ -878,10 +900,18 @@ export class GroupHandle {
       }
       // Read the sender BEFORE opening: the sender-data secret is epoch-level and this
       // consumes no ratchet key, so a frame that then fails to open has cost nothing.
+      const historical = this.#state.historicalReceiverData.get(pm.epoch)
+      const epochTree = historical?.ratchetTree ?? this.#state.ratchetTree
       const leafIndex = await readSenderLeafIndex(
         this.#context,
-        this.#state.keySchedule.senderDataSecret,
+        historical?.senderDataSecret ?? this.#state.keySchedule.senderDataSecret,
         pm,
+      )
+      assertSenderNotLapsed(
+        this,
+        epochTree,
+        leafIndex,
+        (historical?.groupContext ?? this.#state.groupContext).extensions,
       )
       const result = await mlsProcessMessage({
         context: this.#context,
@@ -893,7 +923,8 @@ export class GroupHandle {
       if (result.kind !== 'applicationMessage') {
         throw new Error('decrypt: frame was not an application message')
       }
-      const senderDID = leafIndex == null ? undefined : this.#didOfLeaf(leafIndex)
+      const senderLeaf = leafIndex == null ? undefined : leafAt(epochTree, leafIndex)
+      const senderDID = senderLeaf == null ? undefined : didFromCredential(senderLeaf.credential)
       return { payload: result.message, aad: result.aad, ...(senderDID != null && { senderDID }) }
     })
   }
@@ -920,10 +951,18 @@ export class GroupHandle {
       if (opts.expectedAAD != null && !bytesEqual(pm.authenticatedData, opts.expectedAAD)) {
         throw new Error('decryptStaged: frame authenticated data does not match expected AAD')
       }
+      const historical = this.#state.historicalReceiverData.get(pm.epoch)
+      const epochTree = historical?.ratchetTree ?? this.#state.ratchetTree
       const leafIndex = await readSenderLeafIndex(
         this.#context,
-        this.#state.keySchedule.senderDataSecret,
+        historical?.senderDataSecret ?? this.#state.keySchedule.senderDataSecret,
         pm,
+      )
+      assertSenderNotLapsed(
+        this,
+        epochTree,
+        leafIndex,
+        (historical?.groupContext ?? this.#state.groupContext).extensions,
       )
       const result = await mlsProcessMessage({
         context: this.#context,
@@ -933,7 +972,8 @@ export class GroupHandle {
       if (result.kind !== 'applicationMessage') {
         throw new Error('decryptStaged: frame was not an application message')
       }
-      const senderDID = leafIndex == null ? undefined : this.#didOfLeaf(leafIndex)
+      const senderLeaf = leafIndex == null ? undefined : leafAt(epochTree, leafIndex)
+      const senderDID = senderLeaf == null ? undefined : didFromCredential(senderLeaf.credential)
       if (senderDID == null) throw new Error('decryptStaged: unnamed sender')
       const opened = { payload: result.message, senderDID, aad: result.aad }
       await persist(encodeClientState(result.newState), opened)
@@ -943,30 +983,26 @@ export class GroupHandle {
     })
   }
 
-  /**
-   * The async pre-pass feeding the synchronous ts-mls commit callback, run before
-   * mlsProcessMessage. For anything that is not a PrivateMessage commit it just
-   * resolves the caller policy, wraps it for rejected-proposal capture, and applies
-   * nothing on accept.
-   *
-   * For a PrivateMessage commit it decodes the control envelope, resolves and
-   * verifies the entry bodies it names, folds a candidate roster off the pre-commit
-   * state, and precomputes the pure inputs the sync callback reads. That callback is
-   * a pure lookup: decode/fold failure is a hard reject; else a caller policy wins,
-   * and with none the anchored default policy runs. Missing entry bodies with no
-   * resolver throw MissingLedgerEntriesError HERE — before mlsProcessMessage — so the
-   * handle stays at its pre-commit epoch.
-   */
+  /** Resolve ledger inputs before MLS, then run mandatory gates before caller role policy. */
   async #prepareCommitPipeline(
     decoded: unknown,
     opts?: { commitPolicy?: IncomingMessageCallback },
   ): Promise<{
     callback: IncomingMessageCallback | undefined
-    capture: { rejected?: RejectedCommit; proofError?: RevokeProofError }
+    capture: {
+      rejected?: RejectedCommit
+      proofError?: RevokeProofError
+      reason?: CommitRejectionReason
+    }
     applyOnAccept: (notify?: boolean) => () => void
+    postApply: (state: ClientState) => Promise<void>
   }> {
     const callerPolicy = opts?.commitPolicy ?? this.#commitPolicy
-    const capture: { rejected?: RejectedCommit; proofError?: RevokeProofError } = {}
+    const capture: {
+      rejected?: RejectedCommit
+      proofError?: RevokeProofError
+      reason?: CommitRejectionReason
+    } = {}
 
     const commit = readPrivateCommit(decoded)
     let externalCommitDID: string | undefined
@@ -1071,13 +1107,6 @@ export class GroupHandle {
                 this.#anchor.controller != null &&
                 (verified.entry.value as DeviceValue).op !== 'beacon'
               ) {
-                try {
-                  await verifyLifecycleProof(this, verified as VerifiedLedgerEntry<DeviceValue>)
-                } catch (error) {
-                  precomputedReject = true
-                  if (error instanceof RevokeProofError) capture.proofError = error
-                  break
-                }
                 continue
               }
               const ok = await verifyDeviceEntry(
@@ -1108,12 +1137,44 @@ export class GroupHandle {
       ...(externalCommitDID !== undefined && { externalCommitDID }),
     })
 
+    let gate: Awaited<ReturnType<typeof prepareLifecycleGate>> | undefined
+    try {
+      const frame = decoded as MlsFramedMessage
+      const externalLeaf: LeafNode | undefined =
+        frame.wireformat === wireformats.mls_public_message &&
+        frame.publicMessage.content.contentType === contentTypes.commit &&
+        frame.publicMessage.senderType === senderTypes.new_member_commit
+          ? frame.publicMessage.content.commit.path?.leafNode
+          : undefined
+      gate = await prepareLifecycleGate(
+        this,
+        acceptedEntries.map(({ verified }) => verified),
+        candidateRegistry,
+        context,
+        externalLeaf,
+      )
+    } catch (error) {
+      precomputedReject = true
+      capture.reason = rejectionReason(error)
+      if (error instanceof RevokeProofError) capture.proofError = error
+    }
     const combined: IncomingMessageCallback = (incoming) => {
       // A decode/fold failure is a hard reject even under a caller policy: the
       // ledger the commit depends on is unresolvable or malformed.
-      if (precomputedReject) return 'reject'
+      if (precomputedReject) {
+        capture.reason ??=
+          capture.proofError == null ? 'invalid' : rejectionReason(capture.proofError)
+        return 'reject'
+      }
+      try {
+        gate?.check(incoming)
+      } catch (error) {
+        capture.reason = rejectionReason(error)
+        if (error instanceof RevokeProofError) capture.proofError = error
+        return 'reject'
+      }
       if (callerPolicy != null) return callerPolicy(incoming)
-      return defaultCommitPolicy(incoming, context)
+      return this.#anchor.controller == null ? defaultCommitPolicy(incoming, context) : 'accept'
     }
 
     const applyOnAccept = (notify = true): (() => void) => {
@@ -1141,6 +1202,9 @@ export class GroupHandle {
       callback: wrapCommitPolicy(combined, capture),
       capture,
       applyOnAccept,
+      postApply: async (state) => {
+        await gate?.postApply(state)
+      },
     }
   }
 
@@ -1357,24 +1421,91 @@ export class GroupHandle {
       decoded = parsed
     }
     return mutexFor(this).run(async () => {
-      const { callback, capture, applyOnAccept } = await this.#prepareCommitPipeline(decoded, opts)
+      const { callback, capture, applyOnAccept, postApply } = await this.#prepareCommitPipeline(
+        decoded,
+        opts,
+      )
       const previousState = this.#state
-      const result = await mlsProcessMessage({
-        context: this.#context,
-        state: this.#state,
-        message: decoded as Parameters<typeof mlsProcessMessage>[0]['message'],
-        ...(callback != null && { callback }),
-      })
-      this.#state = result.newState
-      if (result.kind === 'newState' && result.actionTaken === 'reject') {
-        zeroAll(result.consumed)
+      const application = readPrivateFrame(decoded, contentTypes.application)
+      if (application != null) {
+        const historical = this.#state.historicalReceiverData.get(application.epoch)
+        const index = await readSenderLeafIndex(
+          this.#context,
+          historical?.senderDataSecret ?? this.#state.keySchedule.senderDataSecret,
+          application,
+        )
+        assertSenderNotLapsed(
+          this,
+          historical?.ratchetTree ?? this.#state.ratchetTree,
+          index,
+          (historical?.groupContext ?? this.#state.groupContext).extensions,
+        )
+      }
+      let result: Awaited<ReturnType<typeof mlsProcessMessage>>
+      try {
+        result = await mlsProcessMessage({
+          context: {
+            ...this.#context,
+            authService: {
+              validateCredential: async (credential, key) => {
+                try {
+                  await verifyLeafCredential(credential, key, {
+                    deviceDenySet: () => this.currentDenySet(),
+                    leafLifetime: () =>
+                      this.#anchor.controller == null
+                        ? undefined
+                        : (this.#anchor.leafLifetime ?? 86_400),
+                    trustedGrantLifetime: () =>
+                      this.#anchor.controller == null
+                        ? undefined
+                        : (this.#anchor.trustedGrantLifetime ?? 2_592_000),
+                  })
+                  return true
+                } catch (error) {
+                  capture.reason = rejectionReason(error)
+                  return false
+                }
+              },
+            },
+          },
+          state: this.#state,
+          message: decoded as Parameters<typeof mlsProcessMessage>[0]['message'],
+          ...(callback != null && { callback }),
+        })
+      } catch (error) {
+        if (application != null) throw error
         const rejection = new CommitRejectedError(
           capture.rejected?.proposals ?? [],
           capture.rejected?.senderLeafIndex,
+          capture.reason ?? 'invalid',
+        )
+        rejection.cause = error
+        if (error instanceof Error) rejection.message += `: ${error.message}`
+        throw rejection
+      }
+      if (result.kind === 'newState' && result.actionTaken === 'reject') {
+        const rejection = new CommitRejectedError(
+          capture.rejected?.proposals ?? [],
+          capture.rejected?.senderLeafIndex,
+          capture.reason ?? 'policy',
         )
         if (capture.proofError != null) rejection.cause = capture.proofError
         throw rejection
       }
+      if (result.kind === 'newState') {
+        try {
+          await postApply(result.newState)
+        } catch (error) {
+          const rejection = new CommitRejectedError(
+            capture.rejected?.proposals ?? [],
+            capture.rejected?.senderLeafIndex,
+            rejectionReason(error),
+          )
+          rejection.cause = error
+          throw rejection
+        }
+      }
+      this.#state = result.newState
       if (result.kind === 'applicationMessage') {
         zeroAll(result.consumed)
         return result.message
@@ -1410,10 +1541,7 @@ export class GroupHandle {
   }
 }
 
-/** Build the CommitPolicyContext both the receive gate and the send-side pending
- *  filter judge against, so the two always agree. `entryIDs` are the ledger entry
- *  ids this commit enacts (drives the expected head); `candidateRoster` is the
- *  post-fold roster receivers install. */
+/** Build policy inputs shared by author and receiver gates. Entry ids drive the expected head. */
 export function buildCommitPolicyContext(
   handle: GroupHandle,
   args: {

@@ -3205,7 +3205,7 @@ describe('standalone proposals are judged by the same commit policy', () => {
   })
 })
 
-describe('the committer filters the pending set before authoring a commit', () => {
+describe('the committer excludes pending proposals when authoring a commit', () => {
   it("drops a non-admin's pending proposal from an admin's eviction commit", async () => {
     const { bob, bobGroup, aliceGroup, carolGroup } = await threeMemberGroup()
     const dave = randomIdentity()
@@ -3242,7 +3242,7 @@ describe('the committer filters the pending set before authoring a commit', () =
     )
   })
 
-  it("retains an admin's pending proposal and carries it into the commit", async () => {
+  it("excludes an admin's pending proposal from an unrelated commit", async () => {
     const { alice, bob, aliceGroup, carolGroup, tokens } = await threeMemberGroup()
     const dave = randomIdentity()
     const daveKP = await createKeyPackageBundle(dave)
@@ -3283,9 +3283,9 @@ describe('the committer filters the pending set before authoring a commit', () =
 
     await carolGroup.processMessage(removal.commitMessage)
 
-    // Dave, added by the retained admin proposal, is present on both sides; Bob is gone.
-    expect(removal.newGroup.listMembers().some((m) => normalizeDID(m.id) === daveNorm)).toBe(true)
-    expect(carolGroup.listMembers().some((m) => normalizeDID(m.id) === daveNorm)).toBe(true)
+    // The explicit Remove lands without admitting the pending Add.
+    expect(removal.newGroup.listMembers().some((m) => normalizeDID(m.id) === daveNorm)).toBe(false)
+    expect(carolGroup.listMembers().some((m) => normalizeDID(m.id) === daveNorm)).toBe(false)
     expect(carolGroup.findMemberLeafIndex(bob.id)).toBeUndefined()
     expect(carolGroup.epoch).toBe(removal.newGroup.epoch)
   })

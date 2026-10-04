@@ -20,6 +20,7 @@ import { makeMLSCredential } from './group-credential.js'
 import { GroupHandle } from './group-handle.js'
 import { assertHeadMatches, computeHead, readLedgerHead } from './head.js'
 import { ledgerEntryDigest, verifyLedgerEntry } from './ledger.js'
+import { validateWelcomeTree } from './lifecycle.js'
 import { ROLE_ENTRY_TYPE } from './roster.js'
 import type { GroupOptions, Invite, KeyPackageBundle } from './types.js'
 
@@ -118,6 +119,7 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
   // authority only to an admin-so-far, so a member-signed entry cannot promote anyone
   // even though applyLedgerEntries itself is the permissive primitive.
   await group.applyLedgerEntries(invite.ledgerEntries)
+  await validateWelcomeTree(group)
 
   return { group, credential }
 }

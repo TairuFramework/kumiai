@@ -11,7 +11,7 @@ import { describe, expect, test } from 'vitest'
 import { LEDGER_HEAD_EXTENSION_TYPE } from '../src/anchor.js'
 import type { MLSCredentialIdentity } from '../src/credential.js'
 import { encodeControlEnvelope } from '../src/envelope.js'
-import { CommitRejectedError, createKeyPackageBundle } from '../src/group.js'
+import { CommitRejectedError } from '../src/group.js'
 import { addDevice, registerDevice, revokeDevice } from '../src/group-device.js'
 import { buildLedgerHeadExtension, extendHead, readLedgerHead } from '../src/head.js'
 import { ledgerEntryDigest, signLedgerEntry } from '../src/ledger.js'
@@ -195,7 +195,8 @@ describe('receive-path acceptance (the symmetric device carve-out)', () => {
       ...createFullIdentity(targetSeed),
       privateKey: targetSeed,
     }
-    const targetKeyPackageBundle = await createKeyPackageBundle(targetIdentity)
+    const targetLeaf = await buildBoundLeaf({ deviceSeed: targetSeed })
+    const targetKeyPackageBundle = await buildBoundKeyPackageBundle(targetLeaf, targetSeed)
 
     const { commitMessage, newGroup } = await addDevice(deviceGroup, deviceIdentity, {
       keyPackage: targetKeyPackageBundle.publicPackage,

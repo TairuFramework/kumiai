@@ -121,7 +121,7 @@ function isAdmin(context: CommitPolicyContext, leafIndex: number | undefined): b
  * anything else, or moved by a commit enacting nothing, and it stops proving what the group
  * enacted.
  */
-function evaluateGroupContextExtensions(
+export function evaluateGroupContextExtensions(
   extensions: Array<{ extensionType: number; extensionData: unknown }>,
   context: CommitPolicyContext,
 ): IncomingMessageAction {

@@ -76,7 +76,8 @@ test('historyCountsUtf8AndEveryCopy', async () => {
     agent(51),
     await bindingFor(agent(51), resetPrefix),
   )
-  const recorded = await enact(renewed.group, tokens)
+  const revoked = await enact(renewed.group, [tokens[0] as string])
+  const recorded = await enact(revoked.group, [tokens[1] as string])
   expect(recorded.group.ledgerTokens).toEqual(tokens)
   expect(history.historySize(recorded.group.state.ratchetTree, entries)).toBe(
     historyBytes(resetPrefix) * 2 + proofUtf8Bytes,
