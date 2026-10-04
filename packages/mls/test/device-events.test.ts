@@ -11,6 +11,7 @@ import {
   registerDevice,
   revokeDevice,
 } from '../src/group-device.js'
+import { deriveGroup, type GroupHandle } from '../src/group-handle.js'
 import { renewLeaf, revokeWithProof } from '../src/group-lifecycle.js'
 import {
   beaconOf as _barrelBeaconOf,
@@ -39,6 +40,86 @@ import {
   timedBinding,
   welcomeBoundary,
 } from './fixtures/lifecycle-pipeline.js'
+
+async function speculativeRevoke(operation: 'processMessage' | 'bootstrapLedger') {
+  const g = await twoDeviceProfileGroup()
+  const live = g.creatorGroup
+  live.confirmAdopted()
+  const result = await revokeDevice(g.managerGroup, g.managerIdentity, {
+    device: g.targetDeviceID,
+    capability: g.capability,
+  })
+  publishTokens(g.tokens, result.newGroup)
+  let state = structuredClone(live.state)
+  if (operation === 'bootstrapLedger') {
+    const receiver = await restoreGroup({
+      state,
+      credential: live.credential,
+      ledgerEntries: live.ledgerTokens,
+      options: { resolveLedgerEntries: live.resolveLedgerEntries },
+    })
+    await receiver.processMessage(result.commitMessage)
+    state = receiver.state
+  }
+  const candidate = deriveGroup(live, state)
+  const receive = async (persist: (handle: GroupHandle) => Promise<void>) => {
+    if (operation === 'processMessage') {
+      await candidate.processMessage(result.commitMessage, { persist })
+    } else {
+      await candidate.bootstrapLedger(result.newGroup.ledgerTokens, { persist })
+    }
+  }
+  return { live, candidate, receive, result, target: normalizeDID(g.targetDeviceID) }
+}
+
+test.each(['processMessage', 'bootstrapLedger'] as const)(
+  '%s on a speculative handle waits for confirmation and queues only persisted new records',
+  async (operation) => {
+    const { live, candidate, receive, target, result } = await speculativeRevoke(operation)
+    const seen: Array<string> = []
+    live.events.on('deviceRevoked', (batch) => {
+      seen.push(...batch.map(({ device }) => device))
+    })
+    await expect(
+      receive(async () => {
+        throw new Error('disk failed')
+      }),
+    ).rejects.toThrow('disk failed')
+    expect(seen).toEqual([])
+    await receive(async () => {
+      expect(seen).toEqual([])
+    })
+    expect(candidate.revokedDevices().map(({ device }) => device)).toContain(target)
+    expect(live.revokedDevices().map(({ device }) => device)).not.toContain(target)
+    expect(seen).toEqual([])
+    if (operation === 'bootstrapLedger')
+      await candidate.bootstrapLedger(result.newGroup.ledgerTokens)
+    expect(seen).toEqual([])
+    candidate.confirmAdopted()
+    candidate.confirmAdopted()
+    expect(seen).toEqual([target])
+  },
+)
+
+test.each(['processMessage', 'bootstrapLedger'] as const)(
+  'discarding a speculative %s never notifies live subscribers',
+  async (operation) => {
+    const { live, receive, target, result } = await speculativeRevoke(operation)
+    const seen: Array<string> = []
+    live.events.on('deviceRevoked', (batch) => {
+      seen.push(...batch.map(({ device }) => device))
+    })
+    await receive(async () => {})
+    live.confirmAdopted()
+    expect(seen).toEqual([])
+    await live.processMessage(result.commitMessage, {
+      persist: async () => {
+        expect(seen).toEqual([])
+      },
+    })
+    expect(seen).toEqual([target])
+  },
+)
 
 test('lifecycle adoption emits the listed revocation and cascade once with their log positions', async () => {
   const { group } = await lifecycleGroup()

@@ -117,6 +117,7 @@ export async function joinBoundDevice(): Promise<{
     ratchetTree: updatedCreatorGroup.state.ratchetTree,
     options: { resolveLedgerEntries: mapResolver(tokens) },
   })
+  updatedCreatorGroup.confirmAdopted()
 
   return {
     deviceGroup,
@@ -196,6 +197,7 @@ export async function twoDeviceProfileGroup(): Promise<{
   // in good standing ready to receive the next write's commit (e.g. revokeDevice's) too.
   publishTokens(tokens, managerGroup)
   await creatorGroup.processMessage(addCommitMessage)
+  managerGroup.confirmAdopted()
 
   return {
     managerGroup,

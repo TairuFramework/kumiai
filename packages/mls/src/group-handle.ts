@@ -524,6 +524,10 @@ export class GroupHandle {
    * `fire`: a throwing listener is swallowed and cannot break the fold. Reads the post-fold registry.
    */
   emitControlEvents(enacted: ReadonlyArray<VerifiedLedgerEntry>): void {
+    if (this.#pendingControlEvents != null) {
+      this.#pendingControlEvents.push(...enacted)
+      return
+    }
     const emitter = emitterOf(this)
     const revoked: GroupHandleEvents['deviceRevoked'] = []
     for (const { entry } of enacted) {
@@ -598,9 +602,9 @@ export class GroupHandle {
       this.#roster = folded.roster
       this.#registry = folded.registry
       this.#admission = this.#computeAdmission()
-      this.#pendingControlEvents?.push(
-        ...appended.filter(({ entry }) => entry.type === DEVICE_ENTRY_TYPE),
-      )
+      if (this.#pendingControlEvents != null) {
+        this.emitControlEvents(appended.filter(({ entry }) => entry.type === DEVICE_ENTRY_TYPE))
+      }
       return appended
     })
   }

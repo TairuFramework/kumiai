@@ -45,6 +45,7 @@ test('discarding a trusted-issuer revoke leaves live authentication and subscrib
   const peer = agent(71)
   const fixture = await lowLevelWelcome(initial, peer, await bindingFor(peer))
   const group = fixture.author
+  group.confirmAdopted()
   const issuer = agent(51)
   const child = agent(61)
   const parent = await trustedGrant(issuer)
