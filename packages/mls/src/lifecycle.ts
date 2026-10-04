@@ -104,7 +104,7 @@ function credentialEqual(a: LeafNode, b: LeafNode): boolean {
   )
 }
 
-function checkEntry(group: GroupHandle, leaf: LeafNode, previous?: LeafNode): void {
+function checkBinding(group: GroupHandle, leaf: LeafNode, previous?: LeafNode): void {
   const parsed = identity(leaf)
   const binding = parsed.controller
   const controller = group.anchor.controller
@@ -151,7 +151,6 @@ function checkEntry(group: GroupHandle, leaf: LeafNode, previous?: LeafNode): vo
         ? MAX_TRUSTED_GRANT_LIFETIME
         : (group.anchor.trustedGrantLifetime ?? 2_592_000),
     )
-  if (payload.exp <= treeTime(group, binding.id)) throw new LeafLapsedError('lapsed')
   if (payload.cap != null && denied.has(normalizeDID(payload.iss)))
     throw new LeafBindingError('denied-issuer')
   const folded = foldLog(binding.id, binding.prefix)
@@ -164,12 +163,26 @@ function checkEntry(group: GroupHandle, leaf: LeafNode, previous?: LeafNode): vo
     throw new LeafBindingError('generation-floor')
 }
 
-export async function validateEntry(
+function checkAdmissionExpiry(group: GroupHandle, leaf: LeafNode): void {
+  const binding = identity(leaf).controller
+  if (
+    binding != null &&
+    readCapability(binding.capability).payload.exp <= treeTime(group, binding.id)
+  )
+    throw new LeafLapsedError('lapsed')
+}
+
+function checkEntry(group: GroupHandle, leaf: LeafNode, previous?: LeafNode): void {
+  checkBinding(group, leaf, previous)
+  checkAdmissionExpiry(group, leaf)
+}
+
+async function validateBoundLeaf(
   group: GroupHandle,
   leaf: LeafNode,
   previous?: LeafNode,
 ): Promise<void> {
-  checkEntry(group, leaf, previous)
+  checkBinding(group, leaf, previous)
   await verifyLeafCredential(leaf.credential, leaf.signaturePublicKey, {
     deviceDenySet: () => denySetOf(group.registry),
     leafLifetime: () =>
@@ -179,6 +192,15 @@ export async function validateEntry(
         ? undefined
         : (group.anchor.trustedGrantLifetime ?? 2_592_000),
   })
+}
+
+export async function validateEntry(
+  group: GroupHandle,
+  leaf: LeafNode,
+  previous?: LeafNode,
+): Promise<void> {
+  await validateBoundLeaf(group, leaf, previous)
+  checkAdmissionExpiry(group, leaf)
 }
 
 function checkSurvivors(
@@ -214,8 +236,10 @@ function checkSurvivors(
 }
 
 export async function validateWelcomeTree(group: GroupHandle): Promise<void> {
-  for (const node of group.state.ratchetTree) {
-    if (node?.nodeType === nodeTypes.leaf) await validateEntry(group, node.leaf)
+  for (const [index, node] of group.state.ratchetTree.entries()) {
+    if (node?.nodeType !== nodeTypes.leaf) continue
+    await validateBoundLeaf(group, node.leaf)
+    if (index === group.state.privatePath.leafIndex * 2) checkAdmissionExpiry(group, node.leaf)
   }
   checkSurvivors(group, group.state.ratchetTree, group.registry)
   if (
@@ -486,7 +510,8 @@ export async function prepareLifecycleGate(
         (!credentialEqual(next, old) ||
           !bytesEqual(next.signaturePublicKey, old.signaturePublicKey))
       ) {
-        if (controller != null && hasRemoves) throw new LeafBindingError('identity-change')
+        if (controller != null && (hasRemoves || proofs.length > 0))
+          throw new LeafBindingError('identity-change')
         await validateEntry(group, next, old)
       }
     }

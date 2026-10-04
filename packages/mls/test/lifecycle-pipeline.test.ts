@@ -17,6 +17,7 @@ import {
 } from 'ts-mls'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
+import { foldEnvelope } from '../src/envelope-fold.js'
 import { commitWithEntries } from '../src/group-commit.js'
 import { makeMLSCredential } from '../src/group-credential.js'
 import { addDevice } from '../src/group-device.js'
@@ -27,8 +28,9 @@ import {
   type GroupHandle,
 } from '../src/group-handle.js'
 import { HISTORY_HORIZON, historySize } from '../src/history.js'
-import { ledgerEntryDigest, signLedgerEntry } from '../src/ledger.js'
+import { ledgerEntryDigest, signLedgerEntry, verifyLedgerEntry } from '../src/ledger.js'
 import {
+  isLapsed,
   prepareLifecycleGate,
   treeTime,
   validateEntry,
@@ -59,6 +61,108 @@ beforeEach(() => {
 })
 afterEach(() => {
   vi.restoreAllMocks()
+})
+
+test.each(['author', 'receiver'] as const)(
+  '%s refuses an absent-target revoke with a renewing committer path',
+  async (side) => {
+    const { group, identity, tokens } = await pipelineGroup()
+    const bob = agent(61)
+    const { author, joined } = await lowLevelWelcome(group, bob, await timedBinding(bob, 90, 200))
+    const target = agent(81)
+    const revoke = createRevoke({
+      seed: controllerSeed,
+      profile: 0,
+      did: controllerID,
+      prior: inception.event,
+      target: target.id,
+      keyPosition: { gen: 0, seq: 0 },
+    })
+    const token = await signLedgerEntry(identity, {
+      type: DEVICE_ENTRY_TYPE,
+      groupID: author.groupID,
+      subject: target.id,
+      value: { op: 'revoke', proof: [inception, revoke], revoked: [{ did: target.id }] },
+    })
+    const entryID = ledgerEntryDigest(token)
+    tokens.set(entryID, token)
+    const result = await rawCommit(author, [], await timedBinding(identity, 100, 201), [token])
+    const previous = side === 'author' ? author.state : joined.state
+    if (side === 'receiver') {
+      await expect(
+        joined.processMessage(encode(mlsMessageEncoder, result.commit)),
+      ).rejects.toMatchObject({ reason: 'binding', cause: { reason: 'identity-change' } })
+      expect(joined.state).toBe(previous)
+      expect(joined.ledgerTokens).not.toContain(token)
+    } else {
+      const verified = await verifyLedgerEntry(token)
+      if (verified == null) throw new Error('Invalid revoke fixture')
+      const fold = foldEnvelope(
+        author.roster,
+        author.registry,
+        [{ verified, entryID }],
+        author.groupID,
+        {
+          controllerID,
+          memberController: (did) => author.bindingOfDID(did)?.controller,
+        },
+      )
+      if (!fold.ok) throw new Error(fold.reason)
+      const context = buildCommitPolicyContext(author, {
+        baseRoster: author.roster,
+        candidateRoster: fold.roster,
+        entryIDs: [entryID],
+        enactedDeviceEntries: [{ subject: target.id, op: 'revoke' }],
+      })
+      const gate = await prepareLifecycleGate(author, [verified], fold.registry, context)
+      gate.check({
+        kind: 'commit',
+        senderLeafIndex: author.state.privatePath.leafIndex as LeafIndex,
+        proposals: [
+          {
+            senderLeafIndex: author.state.privatePath.leafIndex as LeafIndex,
+            proposal: {
+              proposalType: defaultProposalTypes.group_context_extensions,
+              groupContextExtensions: { extensions: result.newState.groupContext.extensions },
+            },
+          },
+        ],
+      })
+      await expect(gate.postApply(result.newState)).rejects.toMatchObject({
+        reason: 'identity-change',
+      })
+      expect(author.state).toBe(previous)
+      expect(author.ledgerTokens).not.toContain(token)
+    }
+    const preserved = await commitWithEntries(author, [], [token], { requireAdmin: false })
+    expect(preserved.newState.groupContext.epoch).toBe(author.epoch + 1n)
+    if (side === 'receiver') {
+      await joined.processMessage(encode(mlsMessageEncoder, preserved.commit))
+      expect(joined.ledgerTokens).toContain(token)
+    }
+  },
+)
+
+test('processWelcome accepts existing lapsed leaves after admission advances tree time', async () => {
+  const { group, identity } = await pipelineGroup()
+  const bob = agent(61)
+  const fixture = await welcomeBoundary(group, bob, await timedBinding(bob, 201, 300))
+  const { group: joined } = await fixture.process()
+  expect(treeTime(joined, controllerID)).toBe(201)
+  const existing = joined.state.ratchetTree[0]
+  const admitted = joined.state.ratchetTree[joined.state.privatePath.leafIndex * 2]
+  if (existing?.nodeType !== nodeTypes.leaf || admitted?.nodeType !== nodeTypes.leaf)
+    throw new Error('Missing Welcome leaves')
+  expect(joined.bindingOfDID(identity.id)?.controller).toBe(controllerID)
+  expect(isLapsed(joined, existing.leaf)).toBe(true)
+  expect(isLapsed(joined, admitted.leaf)).toBe(false)
+})
+
+test.each([99, 100])('processWelcome refuses an admitted leaf expiring at %s', async (exp) => {
+  const { group } = await pipelineGroup()
+  const bob = agent(61)
+  const fixture = await welcomeBoundary(group, bob, await timedBinding(bob, 90, exp))
+  await expect(fixture.process()).rejects.toMatchObject({ reason: 'lapsed' })
 })
 
 describe('mandatory entry gates', () => {
