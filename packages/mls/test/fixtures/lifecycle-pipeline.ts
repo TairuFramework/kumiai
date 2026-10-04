@@ -192,6 +192,7 @@ export async function lowLevelExternal(
   group: GroupHandle,
   identity: OwnIdentity,
   binding?: ControllerBinding,
+  options: { resync?: boolean } = {},
 ) {
   const context = await resolveMlsContext()
   const bundle = await rawBundle(group, identity, binding)
@@ -205,7 +206,7 @@ export async function lowLevelExternal(
     groupInfo,
     keyPackage: bundle.publicPackage,
     privateKeys: bundle.privatePackage,
-    resync: true,
+    resync: options.resync ?? true,
   })
   return encode(mlsMessageEncoder, {
     version: protocolVersions.mls10,

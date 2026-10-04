@@ -37,8 +37,16 @@ export type CommitRejectionReason = 'binding' | 'lapse' | 'floor' | 'policy' | '
 export function rejectionReason(error: unknown): CommitRejectionReason {
   if (error instanceof LeafLapsedError) return 'lapse'
   if (error instanceof LeafBindingError)
-    return error.reason === 'generation-floor' ? 'floor' : 'binding'
-  if (error instanceof RevokeProofError && error.reason === 'generation-floor') return 'floor'
+    return error.reason === 'generation-floor'
+      ? 'floor'
+      : ['denied-id', 'identity-change'].includes(error.reason)
+        ? 'invalid'
+        : 'binding'
+  if (
+    error instanceof RevokeProofError &&
+    ['generation-floor', 'time-regression'].includes(error.reason)
+  )
+    return 'floor'
   return 'invalid'
 }
 
@@ -117,7 +125,7 @@ function checkBinding(group: GroupHandle, leaf: LeafNode, previous?: LeafNode): 
   )
     throw new LeafBindingError('controller-mismatch')
   const denied = denySetOf(group.registry)
-  if (denied.has(normalizeDID(parsed.id))) throw new LeafBindingError('denied-issuer')
+  if (denied.has(normalizeDID(parsed.id))) throw new LeafBindingError('denied-id')
   const record = group.registry.devices.get(normalizeDID(parsed.id))
   if (record != null && (binding == null || normalizeDID(binding.id) !== record.controller))
     throw new LeafBindingError('controller-mismatch')
@@ -136,7 +144,7 @@ function checkBinding(group: GroupHandle, leaf: LeafNode, previous?: LeafNode): 
       readCapability(binding.capability).payload.iat <
         readCapability(old.controller.capability).payload.iat
     )
-      throw new LeafBindingError('identity-change')
+      throw new LeafBindingError('renewal-order')
   }
   if (binding == null) return
   const payload = readCapability(binding.capability).payload
@@ -214,7 +222,7 @@ function checkSurvivors(
   for (const node of tree) {
     if (node?.nodeType !== nodeTypes.leaf) continue
     const parsed = identity(node.leaf)
-    if (denied.has(normalizeDID(parsed.id))) throw new LeafBindingError('denied-issuer')
+    if (denied.has(normalizeDID(parsed.id))) throw new LeafBindingError('denied-id')
     if (parsed.controller == null) {
       if (controller != null) throw new LeafBindingError('floating-refused')
       continue
@@ -316,7 +324,7 @@ export async function prepareLifecycleGate(
   function checkTime(tree: ClientState['ratchetTree']): void {
     if (controller == null) return
     const floor = candidateRegistry.controllers.get(normalizeDID(controller))?.timeFloor ?? 0
-    if (timeOf(tree, controller, floor) < beforeTime) throw new RevokeProofError('effects-mismatch')
+    if (timeOf(tree, controller, floor) < beforeTime) throw new RevokeProofError('time-regression')
   }
   function checkRegistryAdds(proposals: Array<ProposalWithSender>): void {
     for (const { entry } of entries) {

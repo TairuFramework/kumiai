@@ -224,7 +224,7 @@ export async function verifyLeafCredential(
   const parsed = parseMLSCredentialIdentity((credential as { identity: Uint8Array }).identity)
   if (!matchesLeafKey(parsed, signaturePublicKey)) throw new LeafBindingError('identity-change')
   const denySet = deps.deviceDenySet?.() ?? EMPTY_DENY
-  if (isDenied(denySet, parsed.id)) throw new LeafBindingError('denied-issuer')
+  if (isDenied(denySet, parsed.id)) throw new LeafBindingError('denied-id')
   if (parsed.controller == null) return
   await verifyPinnedCapability({
     capability: parsed.controller.capability,

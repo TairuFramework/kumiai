@@ -29,7 +29,25 @@ export type ConformanceCommitContext = {
 }
 
 /** The `PendingRecovery` of `@kumiai/rpc`, re-declared structurally. */
+export type ConformanceRecoveryRefusalReason = 'binding' | 'lapse' | 'floor' | 'policy' | 'invalid'
+export type ConformanceRecoveryVerdict = {
+  groupID: string
+  requestID: string
+  position: string
+  commitDigest: string
+} & (
+  | { verdict: 'confirmed'; epoch: number; tag: string }
+  | { verdict: 'superseded' }
+  | { verdict: 'refused'; reason: ConformanceRecoveryRefusalReason }
+)
+export type ConformanceOpenedRecoveryVerdict = {
+  signer: string
+  verdict: ConformanceRecoveryVerdict
+}
 export type ConformancePendingRecovery = {
+  epoch: number
+  confirmationKey: (position: string, commitDigest: string) => Promise<Uint8Array>
+  judgeVerdict: (opened: ConformanceOpenedRecoveryVerdict) => 'authoritative' | 'advisory'
   commit: Uint8Array
   onAccepted: () => Promise<void>
 }
@@ -51,6 +69,18 @@ export type ConformanceRosterEntry = {
  * passing bytes between two instances, which is all the clauses below do.
  */
 export type ConformanceGroupMLS = {
+  confirmationKey: (
+    position: string,
+    commitDigest: string,
+  ) => Promise<{ epoch: number; key: Uint8Array }>
+  sealRecoveryVerdict: (
+    request: Uint8Array,
+    verdict: ConformanceRecoveryVerdict,
+  ) => Promise<Uint8Array>
+  openRecoveryVerdict: (
+    sealed: Uint8Array,
+    requestID: string,
+  ) => Promise<ConformanceOpenedRecoveryVerdict | null>
   sendAdmission: () =>
     | { epoch: number; admissible: true }
     | { epoch: number; admissible: false; reason: 'lapsed' }
@@ -60,7 +90,12 @@ export type ConformanceGroupMLS = {
   processCommit: (
     commit: Uint8Array,
     context: ConformanceCommitContext,
-  ) => Promise<{ advanced: boolean; epochBefore: number; epochAfter: number }>
+  ) => Promise<{
+    advanced: boolean
+    epochBefore: number
+    epochAfter: number
+    refusal?: ConformanceRecoveryRefusalReason
+  }>
   exportRecoverySecret: () => Uint8Array | Promise<Uint8Array>
   prepareRecovery: () => Promise<'ready' | 'renewal-required'>
   createRecoveryRequest: (requestID: string) => Promise<Uint8Array>
@@ -88,6 +123,7 @@ export type ConformanceCommit = {
 }
 
 export type ConformanceMLSGroup = {
+  groupID: string
   /**
    * The ports under test. The COMMITTER is not among them: every Commit here is authored by a
    * member outside this list, so `processCommit` is only ever asked about a RECEIVED commit —
@@ -579,6 +615,11 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           expect(fake?.epoch).toBe(real?.epoch)
           // And the committer is what a forger does not get to choose.
           expect(fake?.committerDID).toBeUndefined()
+          const receiver = memberAt(group.members, 1)
+          expect(await receiver.mls.processCommit(forged, {})).toMatchObject({
+            advanced: false,
+            refusal: 'invalid',
+          })
         })
       })
     })
@@ -590,6 +631,70 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
      * being a way back in is the RESPONDER, and only the responder.
      */
     describe('the recovery round trip', () => {
+      test('pending exporter agrees with survivors without adopting, and acceptance is idempotent', async () => {
+        await withGroup(2, 'confirmation-exporter', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const bob = memberAt(group.members, 1)
+          const before = await bob.mls.readEpoch()
+          const request = await bob.mls.createRecoveryRequest('confirm')
+          const pending = await bob.mls.applyRecovery(
+            await alice.mls.sealGroupInfo(request),
+            'confirm',
+          )
+          if (pending == null || 'renewalRequired' in pending)
+            throw new Error('No pending recovery')
+          const deriving = pending.confirmationKey('position', 'digest')
+          await expect(pending.confirmationKey('other', 'digest')).rejects.toThrow()
+          const key = await deriving
+          expect(key).toHaveLength(32)
+          expect(await bob.mls.readEpoch()).toBe(before)
+          expect(pending.epoch).toBe((await alice.mls.readEpoch()) + 1)
+          const result = await alice.mls.processCommit(pending.commit, {})
+          expect(result.advanced).toBe(true)
+          expect(await alice.mls.confirmationKey('position', 'digest')).toEqual({
+            epoch: pending.epoch,
+            key,
+          })
+          expect((await alice.mls.confirmationKey('position', 'other')).key).not.toEqual(key)
+          await pending.onAccepted()
+          await pending.onAccepted()
+          expect(await bob.mls.readEpoch()).toBe(pending.epoch)
+        })
+      })
+      test('sealed verdicts retain request keys, separate domains and bind the complete tuple', async () => {
+        await withGroup(2, 'verdict-contract', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const bob = memberAt(group.members, 1)
+          const request = await bob.mls.createRecoveryRequest('verdict')
+          const reply = await alice.mls.sealGroupInfo(request)
+          const pending = await bob.mls.applyRecovery(reply, 'verdict')
+          if (pending == null || 'renewalRequired' in pending)
+            throw new Error('No pending recovery')
+          await pending.confirmationKey('position', 'digest')
+          const verdict: ConformanceRecoveryVerdict = {
+            groupID: group.groupID,
+            requestID: 'verdict',
+            position: 'position',
+            commitDigest: 'digest',
+            verdict: 'refused',
+            reason: 'policy',
+          }
+          const sealed = await alice.mls.sealRecoveryVerdict(request, verdict)
+          const opened = await bob.mls.openRecoveryVerdict(sealed, 'verdict')
+          expect(opened).toEqual({ signer: alice.did, verdict })
+          expect(await bob.mls.openRecoveryVerdict(sealed, 'verdict')).toEqual(opened)
+          expect(await bob.mls.openRecoveryVerdict(sealed, 'other')).toBeNull()
+          expect(await bob.mls.openRecoveryVerdict(reply, 'verdict')).toBeNull()
+          expect(await bob.mls.openSealedLedger(sealed, 'verdict')).toBeNull()
+          if (opened == null) throw new Error('No opened verdict')
+          expect(pending.judgeVerdict(opened)).toBe('authoritative')
+          expect(pending.judgeVerdict({ ...opened, signer: 'did:peer:unknown' })).toBe('advisory')
+          expect(
+            pending.judgeVerdict({ ...opened, verdict: { ...verdict, position: 'other' } }),
+          ).toBe('advisory')
+        })
+      })
+
       test('a member answers another member, and the reply rebuilds a rejoin', async () => {
         await withGroup(2, 'recovery-round-trip', async (group) => {
           const alice = memberAt(group.members, 0)

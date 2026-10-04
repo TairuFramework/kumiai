@@ -1,23 +1,30 @@
 import type { OwnIdentity } from '@kokuin/token'
 import {
+  confirmationKey,
   createRecoveryRequest,
   encodeGroupAnchor,
   type GroupHandle,
   ledgerEntryDigest,
   MissingLedgerEntriesError,
   openRecoveryGroupInfo,
+  openRecoveryVerdict,
   openSealedLedger,
   readCommitEntryIDs,
   readMessageEpoch,
+  recoverySignerEligible,
   sealGroupInfo,
   sealLedger,
+  sealRecoveryVerdict,
 } from '@kumiai/mls'
 import type {
   CommitContext,
   CommitHeader,
   GroupMLS,
+  OpenedRecoveryVerdict,
   PendingRecovery,
   ProcessCommitResult,
+  RecoveryRefusalReason,
+  RecoveryVerdict,
   RosterEntry,
 } from '@kumiai/rpc'
 
@@ -25,6 +32,7 @@ import type { HandleAccess } from './access.js'
 import { applyCommit } from './apply-commit.js'
 import {
   createRecoveryBindingState,
+  createVerdictJudge,
   knownRecoveryRegistry,
   type RecoveryBinding,
   type RecoveryCandidate,
@@ -198,6 +206,36 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
   const recovery = createRecoveryBindingState(identity, params.recoveryBinding)
 
   return {
+    async confirmationKey(position: string, commitDigest: string) {
+      return await access.read(async (group) => ({
+        epoch: Number(group.epoch),
+        key: await confirmationKey(group, position, commitDigest),
+      }))
+    },
+    async sealRecoveryVerdict(request: Uint8Array, verdict: RecoveryVerdict) {
+      return await access.read((group) =>
+        sealRecoveryVerdict({
+          group,
+          identity,
+          request: new TextDecoder().decode(request),
+          verdict,
+        }),
+      )
+    },
+    async openRecoveryVerdict(
+      sealed: Uint8Array,
+      requestID: string,
+    ): Promise<OpenedRecoveryVerdict | null> {
+      const held = pending.get(requestID)
+      if (held == null) return null
+      try {
+        return await access.read((group) =>
+          openRecoveryVerdict({ group, sealed, requestID, ephemeralPrivateKey: held }),
+        )
+      } catch {
+        return null
+      }
+    },
     async prepareRecovery(): Promise<'ready' | 'renewal-required'> {
       return await access.read((group) => recovery.prepare(group))
     },
@@ -243,6 +281,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       for (const token of tokens ?? []) resolved.set(ledgerEntryDigest(token), token)
       const ignored = Symbol('ignored commit')
       let refusedEpoch: number | undefined
+      let refusal: RecoveryRefusalReason | undefined
       try {
         return await access.mutate(async (group, persist) => {
           if (group.epoch !== frameEpoch) {
@@ -266,6 +305,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
           // Thrown so the adapter does not save a handle the commit left untouched.
           if (!result.applied) {
             refusedEpoch = result.epochBefore
+            refusal = result.refusal
             throw ignored
           }
           return {
@@ -276,7 +316,12 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
         })
       } catch (error) {
         if (error === ignored && refusedEpoch != null)
-          return { advanced: false, epochBefore: refusedEpoch, epochAfter: refusedEpoch }
+          return {
+            advanced: false,
+            epochBefore: refusedEpoch,
+            epochAfter: refusedEpoch,
+            ...(refusal == null ? {} : { refusal }),
+          }
         throw error
       }
     },
@@ -336,6 +381,18 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       })
       if (candidate == null || 'renewalRequired' in candidate) return candidate
       const rejoined = candidate
+      if (
+        rejoined.group.anchor.controller != null &&
+        !recoverySignerEligible(rejoined.group, rejoined.knownRegistry, reply.signer)
+      )
+        return null
+      const judge = createVerdictJudge(
+        rejoined.group,
+        rejoined.sourceTree,
+        rejoined.knownRegistry,
+        requestID,
+      )
+      let accepted: Promise<void> | undefined
       const result: RecoveryCandidate = {
         group: rejoined.group,
         sourceTree: rejoined.sourceTree,
@@ -344,11 +401,15 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
         replyLedger: reply.ledger,
         signer: reply.signer,
         commit: rejoined.commitMessage,
-        // Adopted ONLY if the hub accepts the commit. A peer that adopted first would sit
-        // on a branch of its own the moment it lost the compare-and-set.
-        onAccepted: async () => {
-          await access.replace(rejoined.group)
-          if (pending.get(requestID) === held) pending.delete(requestID)
+        epoch: Number(rejoined.group.epoch),
+        confirmationKey: judge.confirmationKey,
+        judgeVerdict: judge.judgeVerdict,
+        onAccepted: () => {
+          accepted ??= access.replace(rejoined.group).catch((error: unknown) => {
+            accepted = undefined
+            throw error
+          })
+          return accepted
         },
       }
       return result

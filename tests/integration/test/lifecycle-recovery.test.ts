@@ -65,14 +65,14 @@ async function setup(
     controllerID: string
     current: ControllerBinding
   }) => Promise<ControllerBinding | null>,
-  options: { bobIat?: number; clock?: number } = {},
+  options: { bobIat?: number; clock?: number; aliceExp?: number } = {},
 ) {
   vi.spyOn(Date, 'now').mockReturnValue((options.clock ?? 150) * 1000)
   const alice = fixture.agent(41)
   const bob = fixture.agent(61)
   let aliceGroup = (
     await createGroup(alice, 'lifecycle-recovery', {
-      controller: await fixture.timedBinding(alice, 100, 200),
+      controller: await fixture.timedBinding(alice, 100, options.aliceExp ?? 200),
     })
   ).group
   const cached = await fixture.timedBinding(bob, options.bobIat ?? 100, 200)
@@ -300,7 +300,7 @@ test.todo('an authoritative invalid refusal holds automatic recovery until expli
 test('renewal-required suppresses subsequent automatic triggers and explicit recover reopens one attempt', async () => {
   let fresh: ControllerBinding | null = null
   const host = vi.fn(async () => fresh)
-  const s = await setup(host)
+  const s = await setup(host, { aliceExp: 350 })
   const hub = createWireHub()
   const events: Array<RecoveryEvent> = []
   const aliceAccess = simpleHandleAccess({ handle: s.aliceGroup, adopt: s.installAlice })

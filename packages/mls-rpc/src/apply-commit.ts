@@ -1,11 +1,12 @@
 import { normalizeDID } from '@kokuin/token'
 import {
+  CommitRejectedError,
   type GroupHandle,
   MissingLedgerEntriesError,
   readMessageEpoch,
   type VerifiedLedgerEntry,
 } from '@kumiai/mls'
-import type { CommitContext, RosterEntry } from '@kumiai/rpc'
+import type { CommitContext, RecoveryRefusalReason, RosterEntry } from '@kumiai/rpc'
 
 import type { LedgerEntrySlot } from './mls.js'
 
@@ -23,6 +24,7 @@ export type ApplyCommitParams = CommitContext & {
 }
 
 export type ApplyCommitResult = {
+  refusal?: RecoveryRefusalReason
   /** The handle took the commit's state. A host keeps it even when `advanced` is false. */
   applied: boolean
   /** The epoch moved. A commit removing this member is applied without advancing it. */
@@ -60,7 +62,11 @@ export async function applyCommit(params: ApplyCommitParams): Promise<ApplyCommi
   const before = handle.epoch
   const rosterBefore = rosterOf(handle)
   const ledgerLengthBefore = handle.ledger.length
-  const refused = (committerDID?: string): ApplyCommitResult => ({
+  const refused = (
+    committerDID?: string,
+    refusal: RecoveryRefusalReason = 'invalid',
+  ): ApplyCommitResult => ({
+    refusal,
     applied: false,
     advanced: false,
     epochBefore: Number(before),
@@ -89,6 +95,7 @@ export async function applyCommit(params: ApplyCommitParams): Promise<ApplyCommi
   let persisted = false
   let resolverFailed = false
   let threw = false
+  let refusal: RecoveryRefusalReason = 'invalid'
   const resolve = params.resolveLedgerEntries
   entrySlot.install(
     resolve &&
@@ -119,6 +126,7 @@ export async function applyCommit(params: ApplyCommitParams): Promise<ApplyCommi
   } catch (error) {
     if (error instanceof MissingLedgerEntriesError || persistFailed || resolverFailed) throw error
     threw = true
+    if (error instanceof CommitRejectedError) refusal = error.reason
   } finally {
     entrySlot.install(undefined)
   }
@@ -129,8 +137,9 @@ export async function applyCommit(params: ApplyCommitParams): Promise<ApplyCommi
     const changed =
       rosterAfter.length !== rosterBefore.length ||
       rosterAfter.some((entry, index) => entry.did !== rosterBefore[index]?.did)
-    if (threw && !persisted && !changed) return refused(committerDID)
-    return { ...refused(committerDID), applied: true, rosterAfter, surfacedEntries: surfaced() }
+    if (threw && !persisted && !changed) return refused(committerDID, refusal)
+    const { refusal: _refusal, ...unchanged } = refused(committerDID)
+    return { ...unchanged, applied: true, rosterAfter, surfacedEntries: surfaced() }
   }
 
   return {

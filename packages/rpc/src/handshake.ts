@@ -1,3 +1,5 @@
+import { assertFrameFits } from './frame-size.js'
+
 /**
  * Framing for the raw MLS control lanes: un-`wrap`ped bytes on non-rotating topics (Commits on
  * the commit topic, recovery request/reply on the rendezvous topic). Self-identifying, so a
@@ -60,6 +62,8 @@ export const HANDSHAKE_KIND = {
   ledgerRequest: 3,
   /** A member's reply carrying its whole ordered ledger, for the requester to head-verify. */
   ledgerReply: 4,
+  recoveryConfirmRequest: 5,
+  recoveryVerdict: 6,
 } as const
 
 export type HandshakeKind = (typeof HANDSHAKE_KIND)[keyof typeof HANDSHAKE_KIND]
@@ -77,6 +81,9 @@ export function encodeHandshakeFrame(kind: HandshakeKind, payload: Uint8Array): 
   frame[HANDSHAKE_MAGIC.length] = HANDSHAKE_VERSION
   frame[HANDSHAKE_MAGIC.length + 1] = kind
   frame.set(payload, HEADER_LENGTH)
+  if (kind === HANDSHAKE_KIND.recoveryConfirmRequest || kind === HANDSHAKE_KIND.recoveryVerdict) {
+    assertFrameFits(frame)
+  }
   return frame
 }
 

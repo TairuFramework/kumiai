@@ -91,7 +91,7 @@ test.each(['author', 'receiver'] as const)(
     if (side === 'receiver') {
       await expect(
         joined.processMessage(encode(mlsMessageEncoder, result.commit)),
-      ).rejects.toMatchObject({ reason: 'binding', cause: { reason: 'identity-change' } })
+      ).rejects.toMatchObject({ reason: 'invalid', cause: { reason: 'identity-change' } })
       expect(joined.state).toBe(previous)
       expect(joined.ledgerTokens).not.toContain(token)
     } else {
@@ -831,7 +831,7 @@ test('a chained renewal that lowers tree time requires its preserving clock', as
   const previous = joined.state
   await expect(
     joined.processMessage(encode(mlsMessageEncoder, withoutClock.commit)),
-  ).rejects.toMatchObject({ reason: 'invalid' })
+  ).rejects.toMatchObject({ reason: 'floor' })
   expect(joined.state).toBe(previous)
   const clock = await signLedgerEntry(identity, {
     type: DEVICE_ENTRY_TYPE,
@@ -882,7 +882,7 @@ test('a lifecycle external replacement is refused when its subject is denied', a
   })
   // Seed a known revocation on the offered epoch to exercise admission independently of removal.
   await author.applyLedgerEntries([token])
-  await expect(author.processMessage(message)).rejects.toMatchObject({ reason: 'binding' })
+  await expect(author.processMessage(message)).rejects.toMatchObject({ reason: 'invalid' })
 })
 
 test('management capability expiry is judged against its controller tree time', async () => {

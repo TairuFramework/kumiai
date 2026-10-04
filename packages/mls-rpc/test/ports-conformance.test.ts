@@ -188,6 +188,7 @@ testGroupMLSConformance({
     const group = await createRealGroup(size, `mls-conformance-${id}`)
     let hintOffset = 0
     return {
+      groupID: group.committer.handle.groupID,
       setEpochHintOffset: (offset) => {
         hintOffset = offset
       },

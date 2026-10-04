@@ -1,16 +1,20 @@
-import type { OwnIdentity } from '@kokuin/token'
+import { normalizeDID, type OwnIdentity } from '@kokuin/token'
 import {
   assertRecoveryBinding,
   type ClientState,
   type ControllerBinding,
+  confirmationKey,
+  confirmationTag,
   type DeviceRegistry,
   type GroupHandle,
   joinGroupExternal,
   LeafBindingError,
   LeafLapsedError,
+  parseMLSCredentialIdentity,
   RevokeProofError,
+  recoverySignerEligible,
 } from '@kumiai/mls'
-import type { PendingRecovery } from '@kumiai/rpc'
+import type { OpenedRecoveryVerdict, PendingRecovery } from '@kumiai/rpc'
 
 export type RecoveryBinding = (request: {
   groupID: string
@@ -147,6 +151,57 @@ export function createRecoveryBindingState(identity: OwnIdentity, host?: Recover
             : null
         }
       }
+    },
+  }
+}
+
+export function createVerdictJudge(
+  group: GroupHandle,
+  sourceTree: ClientState['ratchetTree'],
+  known: DeviceRegistry,
+  requestID: string,
+) {
+  let tuple: { position: string; commitDigest: string; tag?: string } | undefined
+  return {
+    async confirmationKey(position: string, commitDigest: string) {
+      if (tuple != null && (tuple.position !== position || tuple.commitDigest !== commitDigest))
+        throw new Error('Pending recovery already bound to another commit')
+      tuple ??= { position, commitDigest }
+      const key = await confirmationKey(group, position, commitDigest)
+      tuple.tag = confirmationTag(key, requestID)
+      return key
+    },
+    judgeVerdict(opened: OpenedRecoveryVerdict): 'authoritative' | 'advisory' {
+      const { signer, verdict } = opened
+      if (
+        tuple == null ||
+        verdict.groupID !== group.groupID ||
+        verdict.requestID !== requestID ||
+        verdict.position !== tuple.position ||
+        verdict.commitDigest !== tuple.commitDigest
+      )
+        return 'advisory'
+      if (
+        verdict.verdict === 'confirmed' &&
+        (verdict.epoch !== Number(group.epoch) || verdict.tag !== tuple.tag)
+      )
+        return 'advisory'
+      if (group.anchor.controller != null)
+        return recoverySignerEligible(group, known, signer) ? 'authoritative' : 'advisory'
+      if (verdict.verdict === 'confirmed') return 'authoritative'
+      for (const node of sourceTree) {
+        if (node == null || !('leaf' in node)) continue
+        const credential = node.leaf.credential
+        if (!('identity' in credential)) continue
+        try {
+          if (
+            normalizeDID(parseMLSCredentialIdentity(credential.identity).id) ===
+            normalizeDID(signer)
+          )
+            return 'authoritative'
+        } catch {}
+      }
+      return 'advisory'
     },
   }
 }

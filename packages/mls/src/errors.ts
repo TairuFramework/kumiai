@@ -5,6 +5,8 @@ export type LeafBindingReason =
   | 'self-issued'
   | 'child-outlives-parent'
   | 'denied-issuer'
+  | 'denied-id'
+  | 'renewal-order'
   | 'lifetime-cap'
   | 'generation-floor'
   | 'identity-change'
@@ -50,6 +52,7 @@ export type RevokeProofReason =
   | 'too-large'
   | 'detached'
   | 'needs-reset'
+  | 'time-regression'
   | 'effects-mismatch'
   | 'removes-mismatch'
 

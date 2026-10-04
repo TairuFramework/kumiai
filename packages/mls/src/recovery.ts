@@ -60,7 +60,7 @@ const MIN_SEALED_LENGTH = 1 + KEM_OUTPUT_LENGTH + 16
  * `requestID`s for this separation — that is a caller property a reused id loses;
  * these labels carry it unconditionally.
  */
-type SealedReplyKind = {
+export type SealedReplyKind = {
   /** HPKE `info` — separates this use from MLS's own use of the same ciphersuite,
    *  and from the other reply kind. */
   hpkeInfo: Uint8Array
@@ -338,7 +338,7 @@ function recoveryAAD(
  * attacker-chosen. `embedLongForm` lets it verify offline — a responder needs no
  * DID resolver to answer.
  */
-async function verifyRecoveryRequest(token: string): Promise<VerifiedRecoveryRequest> {
+export async function verifyRecoveryRequest(token: string): Promise<VerifiedRecoveryRequest> {
   let verified: Awaited<ReturnType<typeof verifyToken<RecoveryRequest>>>
   try {
     verified = await verifyToken<RecoveryRequest>(token)
@@ -450,11 +450,12 @@ export async function createRecoveryRequest(
  * Throws {@link RecoveryRequestError} for every refusal — see
  * {@link RecoveryRequestRejection}.
  */
-async function sealToRequest(
+export async function sealToRequest(
   kind: SealedReplyKind,
   group: GroupHandle,
   request: string,
   plaintext: Uint8Array,
+  requireMember = true,
 ): Promise<Uint8Array> {
   const verified = await verifyRecoveryRequest(request)
 
@@ -464,7 +465,7 @@ async function sealToRequest(
       `recovery request names group ${verified.groupID}, not ${group.groupID}`,
     )
   }
-  if (group.findMemberLeafIndex(verified.requesterDID) === undefined) {
+  if (requireMember && group.findMemberLeafIndex(verified.requesterDID) === undefined) {
     throw new RecoveryRequestError(
       'not-a-member',
       `recovery requester ${verified.requesterDID} has no leaf in the current ratchet tree`,
@@ -495,7 +496,7 @@ async function sealToRequest(
  * reply for another member, another request, or another kind (kind is bound into
  * both AAD and HPKE `info`) fails as an AEAD failure, not a skippable comparison.
  */
-async function openSealedReply(
+export async function openSealedReply(
   kind: SealedReplyKind,
   group: GroupHandle,
   sealed: Uint8Array,
@@ -656,7 +657,11 @@ async function assertResponderIsMember(
       'responder attestation does not bind this group, request, and GroupInfo',
     )
   }
-  if (group.findMemberLeafIndex(normalizeDID(iss)) === undefined) {
+  // Lifecycle authority is judged against the derived pending tree and joined registry.
+  if (
+    group.anchor.controller == null &&
+    group.findMemberLeafIndex(normalizeDID(iss)) === undefined
+  ) {
     throw new SealedGroupInfoError(
       'unauthenticated',
       "responder holds no leaf in the requester's last-known ratchet tree",

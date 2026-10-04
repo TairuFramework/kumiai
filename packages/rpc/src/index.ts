@@ -50,10 +50,13 @@ export {
   type GroupUnwrapResult,
   isAppFrameStorageError,
   isMissingLedgerEntries,
+  type OpenedRecoveryVerdict,
   type PendingAppFrame,
   type PendingAppFrames,
   type PendingRecovery,
   type ProcessCommitResult,
+  type RecoveryRefusalReason,
+  type RecoveryVerdict,
   type RosterEntry,
   type SealEntriesResult,
   type SendAdmission,
@@ -107,12 +110,17 @@ export {
 export {
   decodeLedgerReply,
   decodeLedgerRequest,
+  decodeRecoveryConfirmRequest,
   decodeRecoveryReply,
   decodeRecoveryRequest,
+  decodeRecoveryVerdict,
   encodeLedgerReply,
   encodeLedgerRequest,
+  encodeRecoveryConfirmRequest,
   encodeRecoveryReply,
   encodeRecoveryRequest,
+  encodeRecoveryVerdict,
+  type RecoveryConfirmRequest,
 } from './recovery.js'
 export { detectRosterChange } from './roster.js'
 export {

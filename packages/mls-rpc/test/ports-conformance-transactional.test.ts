@@ -162,6 +162,7 @@ testGroupMLSConformance({
       ),
     )
     return {
+      groupID: group.committer.handle.groupID,
       setEpochHintOffset: (offset) => {
         hintOffset = offset
       },

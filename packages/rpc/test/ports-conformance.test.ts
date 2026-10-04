@@ -140,6 +140,7 @@ testGroupMLSConformance({
     const members = dids.map((did) => ({
       did,
       mls: createMemoryGroupMLS({
+        groupID: id,
         localDID: did,
         members: roster,
         epoch: 0,
@@ -171,6 +172,7 @@ testGroupMLSConformance({
     }
 
     return {
+      groupID: id,
       members: members.map((member) => ({
         did: member.did,
         mls: { ...member.mls, epoch: () => member.mls.epoch() + hintOffset },

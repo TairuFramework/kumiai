@@ -75,6 +75,9 @@ describe('host invocation boundary', () => {
       },
     })
     const receiver = Object.freeze({
+      epoch: 1,
+      confirmationKey: async () => new Uint8Array(32),
+      judgeVerdict: () => 'authoritative' as const,
       commit: bytes,
       bodies: [],
       kind: 'ledger' as const,
@@ -146,6 +149,9 @@ describe('host invocation boundary', () => {
     expect(peerHostFields.protocols).toBe('data')
     expect(peerHostFields.handlers).toBe('handlers')
     expect(pendingRecoveryHostMembers.onAccepted).toBe('host')
+    expect(pendingRecoveryHostMembers.epoch).toBe('data')
+    expect(pendingRecoveryHostMembers.confirmationKey).toBe('host')
+    expect(pendingRecoveryHostMembers.judgeVerdict).toBe('host')
     expect(pendingCommitHostMembers.onAccepted).toBe('host')
   })
 

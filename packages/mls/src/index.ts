@@ -197,6 +197,16 @@ export {
   type VerifiedRecoveryRequest,
 } from './recovery.js'
 export {
+  confirmationKey,
+  confirmationTag,
+  type OpenedRecoveryVerdict,
+  openRecoveryVerdict,
+  type RecoveryRefusalReason,
+  type RecoveryVerdict,
+  recoverySignerEligible,
+  sealRecoveryVerdict,
+} from './recovery-verdict.js'
+export {
   authority,
   beaconOf,
   type ControllerBeacon,

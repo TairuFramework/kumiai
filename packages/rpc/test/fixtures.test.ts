@@ -171,3 +171,30 @@ describe('fake hub', () => {
     expect(hub.subscriberCount('t')).toBe(1)
   })
 })
+
+test('memory recovery retains verdict keys after GroupInfo until their bounded lifetime expires', async () => {
+  const { vi } = await import('vitest')
+  const { createMemoryGroupMLS } = await import('./fixtures/memory-group-mls.js')
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(150_000)
+  try {
+    const members = ['did:key:alice', 'did:key:bob']
+    const alice = createMemoryGroupMLS({ localDID: members[0], members })
+    const bob = createMemoryGroupMLS({ localDID: members[1], members })
+    const request = await bob.createRecoveryRequest('expiry')
+    const pending = await bob.applyRecovery(await alice.sealGroupInfo(request), 'expiry')
+    expect(pending).not.toBeNull()
+    const sealed = await alice.sealRecoveryVerdict(request, {
+      groupID: 'memory-group',
+      requestID: 'expiry',
+      position: 'position',
+      commitDigest: 'digest',
+      verdict: 'superseded',
+    })
+    expect(await bob.openRecoveryVerdict(sealed, 'expiry')).not.toBeNull()
+    expect(await bob.openRecoveryVerdict(sealed, 'expiry')).not.toBeNull()
+    clock.mockReturnValue(270_000)
+    expect(await bob.openRecoveryVerdict(sealed, 'expiry')).toBeNull()
+  } finally {
+    clock.mockRestore()
+  }
+})

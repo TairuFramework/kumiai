@@ -116,7 +116,7 @@ describe('leaf renewal', () => {
   test('rejects a decreasing child issuance time and author-time invalid grants', async () => {
     const { group, identity } = await pipelineGroup()
     await expect(renewLeaf(group, await timedBinding(identity, 99, 200))).rejects.toMatchObject({
-      reason: 'identity-change',
+      reason: 'renewal-order',
     })
     await expect(renewLeaf(group, await timedBinding(identity, 151, 201))).rejects.toThrow(
       'authoring time',
@@ -303,7 +303,7 @@ test('direct-to-chain renewal installs a clock and child renewal cannot lower ia
       renewal.newGroup,
       await timedBinding(identity, 109, 220, { issuer: trusted, parent }),
     ),
-  ).rejects.toMatchObject({ reason: 'identity-change' })
+  ).rejects.toMatchObject({ reason: 'renewal-order' })
 })
 
 test('a lapsed member can renew itself and resume sending', async () => {

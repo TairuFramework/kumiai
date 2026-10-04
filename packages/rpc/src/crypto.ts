@@ -143,7 +143,24 @@ export type AppFrameRef = {
 
 export type ExportSecretResult = { secret: Uint8Array; epoch: number }
 export type SealEntriesResult = { sealed: Uint8Array; epoch: number }
-export type ProcessCommitResult = { advanced: boolean; epochBefore: number; epochAfter: number }
+export type RecoveryRefusalReason = 'binding' | 'lapse' | 'floor' | 'policy' | 'invalid'
+export type RecoveryVerdict = {
+  groupID: string
+  requestID: string
+  position: string
+  commitDigest: string
+} & (
+  | { verdict: 'confirmed'; epoch: number; tag: string }
+  | { verdict: 'superseded' }
+  | { verdict: 'refused'; reason: RecoveryRefusalReason }
+)
+export type OpenedRecoveryVerdict = { signer: string; verdict: RecoveryVerdict }
+export type ProcessCommitResult = {
+  advanced: boolean
+  epochBefore: number
+  epochAfter: number
+  refusal?: RecoveryRefusalReason
+}
 
 /** A frame refused against the locked handle epoch, before spending a decrypt key. */
 export class FrameEpochError extends Error {
@@ -331,24 +348,20 @@ export type CommitContext = {
 }
 
 /**
- * The external commit that rejoins a stranded peer, BUILT and not adopted — the recovery twin of
- * {@link "commit".PendingCommit}: the derived handle is adopted only if the hub accepts the
- * commit, since a peer that adopted first sits on its own branch the moment it loses the
- * compare-and-set.
- *
- * Carries no entries — a GroupInfo has nowhere to put an entry envelope — so a heal is TWO
- * commits: this one rejoins, and the entries the peer still owes ride an ordinary `commit()`
- * behind it.
+ * A speculative external rejoin. Publication alone never authorises adoption.
+ * The caller confirms the target epoch before accepting it.
  */
 export type PendingRecovery = {
+  epoch: number
+  /** Bind judgement to the published tuple and derive from the speculative epoch. */
+  confirmationKey(position: string, commitDigest: string): Promise<Uint8Array>
+  /** Call after confirmationKey resolves. Failed bindings or signer gates are advisory. */
+  judgeVerdict(opened: OpenedRecoveryVerdict): 'authoritative' | 'advisory'
   /** The external-commit bytes, framed at the epoch the sealed GroupInfo described. */
   commit: Uint8Array
   /**
-   * Adopt the rejoined handle. Runs only if the hub accepts the external commit — the ONLY place
-   * it may be adopted.
-   *
-   * The rejoined handle's ledger is EMPTY — a GroupInfo carries a head and no entries — so until
-   * bootstrapped the handle is internally inconsistent: a roster reset, not a neutral one.
+   * Adopt the confirmed handle once. Repeated calls share the same acceptance.
+   * Standard groups still need ledger bootstrap after adoption.
    */
   onAccepted: () => Promise<void>
 }
@@ -369,6 +382,12 @@ export type SendAdmission =
  * until the suite was made to cover the shape rather than a sample of it.
  */
 export type GroupMLS = {
+  confirmationKey(
+    position: string,
+    commitDigest: string,
+  ): Promise<{ epoch: number; key: Uint8Array }>
+  sealRecoveryVerdict(request: Uint8Array, verdict: RecoveryVerdict): Promise<Uint8Array>
+  openRecoveryVerdict(sealed: Uint8Array, requestID: string): Promise<OpenedRecoveryVerdict | null>
   /** Published with the epoch, without taking the handle lock. */
   sendAdmission(): SendAdmission
   /** Read the current handle epoch under the host's handle lock. */

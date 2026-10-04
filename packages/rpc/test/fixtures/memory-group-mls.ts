@@ -1,4 +1,6 @@
+import { encodeMultibase } from '@kokuin/token'
 import { x25519 } from '@noble/curves/ed25519.js'
+import { hmac } from '@noble/hashes/hmac.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { concatBytes } from '@noble/hashes/utils.js'
 import { fromB64U, fromUTF, toB64U, toUTF } from '@sozai/codec'
@@ -7,7 +9,9 @@ import type {
   CommitContext,
   CommitHeader,
   GroupMLS,
+  OpenedRecoveryVerdict,
   PendingRecovery,
+  RecoveryVerdict,
   RosterEntry,
 } from '../../src/crypto.js'
 
@@ -65,6 +69,7 @@ export type MemoryGroupMLS = GroupMLS & {
 }
 
 export type MemoryGroupMLSOptions = {
+  groupID?: string
   recoverySecret?: Uint8Array
   epoch?: number
   /** This member's DID — the committer stamped into the Commits it builds, and the modelled
@@ -253,14 +258,25 @@ export function decodeMemoryCommit(commit: Uint8Array): MemoryCommit | null {
 
 /** The sealed GroupInfo, modelled. It carries the group's epoch and its AUTHENTICATED
  *  ledger head — and no ledger, which is the whole reason bootstrap exists. */
-type MemoryGroupInfo = { to: string; requestID: string; epoch: number; head: string }
+type MemoryGroupInfo = {
+  to: string
+  requestID: string
+  epoch: number
+  head: string
+  members: Array<string>
+}
 
 /**
  * The request a peer publishes to ask the group for its state. The requester's DID and the
  * ephemeral PUBLIC key its reply must be sealed to ride inside it — modelling the signed
  * token the real port mints, whose signature covers both.
  */
-type MemoryRecoveryRequest = { requestID: string; requesterDID: string; ephemeralKey: string }
+type MemoryRecoveryRequest = {
+  groupID: string
+  requestID: string
+  requesterDID: string
+  ephemeralKey: string
+}
 
 /**
  * What a sealed reply answers. The two answers are NOT interchangeable, and the separation is
@@ -271,6 +287,7 @@ type MemoryRecoveryRequest = { requestID: string; requesterDID: string; ephemera
 const SEAL_DOMAIN = {
   groupInfo: 'kumiai/memory-recovery/group-info/v1',
   ledger: 'kumiai/memory-recovery/ledger/v1',
+  verdict: 'kumiai/memory-recovery/verdict/v1',
 } as const
 
 /** enc(32) + tag(16): the shortest well-formed sealed reply. */
@@ -407,7 +424,20 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
    * until the reply is opened, and never on the wire. It is the whole of what makes a reply
    * openable by this peer and by nobody else — the hub holds every other input.
    */
-  const ephemeralKeys = new Map<string, Uint8Array>()
+  const groupID = options.groupID ?? 'memory-group'
+  const confirmationKeyAt = (at: number, position: string, digest: string): Uint8Array =>
+    sha256(concatBytes(recoverySecret, fromUTF(JSON.stringify([groupID, at, position, digest]))))
+  const tagFor = (key: Uint8Array, requestID: string): string =>
+    encodeMultibase(hmac(sha256, key, fromUTF(requestID)))
+  const ephemeralKeys = new Map<string, { key: Uint8Array; expiresAt: number }>()
+  const sweepRecoveryKeys = (): void => {
+    for (const [requestID, held] of ephemeralKeys) {
+      if (held.expiresAt <= Date.now()) {
+        held.key.fill(0)
+        ephemeralKeys.delete(requestID)
+      }
+    }
+  }
   let failRecoveryAdopt = false
 
   const advance = (to: number): void => {
@@ -424,7 +454,11 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
    * It THROWS, and that is deliberate: a double that could not refuse could not model the one
    * question this rendezvous asks of a request, and every authorization test would pass.
    */
-  const authorize = (request: Uint8Array, label: string): MemoryRecoveryRequest => {
+  const authorize = (
+    request: Uint8Array,
+    label: string,
+    requireMember = true,
+  ): MemoryRecoveryRequest => {
     let parsed: MemoryRecoveryRequest
     try {
       parsed = JSON.parse(toUTF(request)) as MemoryRecoveryRequest
@@ -432,13 +466,14 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       throw new Error(`${label}: the request does not parse`, { cause })
     }
     if (
+      parsed?.groupID !== groupID ||
       typeof parsed?.requesterDID !== 'string' ||
       typeof parsed?.requestID !== 'string' ||
       typeof parsed?.ephemeralKey !== 'string'
     ) {
       throw new Error(`${label}: the request is malformed`)
     }
-    if (!slotHas(parsed.requesterDID)) {
+    if (requireMember && !slotHas(parsed.requesterDID)) {
       throw new Error(`${label}: ${parsed.requesterDID} has no leaf in the current tree`)
     }
     return parsed
@@ -452,7 +487,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     )
 
   const openReply = (domain: string, sealed: Uint8Array, requestID: string): Uint8Array | null => {
-    const privateKey = ephemeralKeys.get(requestID)
+    sweepRecoveryKeys()
+    const privateKey = ephemeralKeys.get(requestID)?.key
     if (privateKey == null) return null
     return openWithKey(privateKey, sealContext(domain, localDID ?? '', requestID), sealed)
   }
@@ -608,8 +644,16 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       }
       // Sender-data authorship and commit-content validity are separate in real MLS. A hub can
       // change ciphertext beyond the sampled prefix without breaking the sender-data read.
-      if (parsed.invalidContent === true) {
-        return { advanced: false, epochBefore: epoch, epochAfter: epoch }
+      if (
+        parsed.invalidContent === true ||
+        (parsed.signerDID ?? parsed.committerDID) !== parsed.committerDID
+      ) {
+        return {
+          advanced: false,
+          epochBefore: epoch,
+          epochAfter: epoch,
+          refusal: 'invalid' as const,
+        }
       }
       // A Commit that REMOVES this member is one it can never apply: the commit's path excludes
       // the leaf it drops, so the removed member is handed nothing to derive the new epoch's
@@ -643,7 +687,12 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       // committer. A refusal is NOT a throw — the peer read the commit, judged it, and
       // declined it, and there is nothing to retry.
       if (!acceptsCommitter(parsed.committerDID)) {
-        return { advanced: false, epochBefore: epoch, epochAfter: epoch }
+        return {
+          advanced: false,
+          epochBefore: epoch,
+          epochAfter: epoch,
+          refusal: 'policy' as const,
+        }
       }
       const missing = parsed.entryIDs.filter((id) => !bodies.has(id))
       if (missing.length > 0) {
@@ -694,14 +743,46 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       // two questions, and a second request format would be a second thing to get wrong.
       const requesterDID = localDID ?? ''
       const privateKey = x25519.utils.randomSecretKey()
-      ephemeralKeys.set(requestID, privateKey)
+      sweepRecoveryKeys()
+      ephemeralKeys.get(requestID)?.key.fill(0)
+      ephemeralKeys.set(requestID, { key: privateKey, expiresAt: Date.now() + 120_000 })
       return fromUTF(
         JSON.stringify({
+          groupID,
           requestID,
           requesterDID,
           ephemeralKey: toB64U(x25519.getPublicKey(privateKey)),
         } satisfies MemoryRecoveryRequest),
       )
+    },
+    async confirmationKey(position, commitDigest) {
+      return { epoch, key: confirmationKeyAt(epoch, position, commitDigest) }
+    },
+    async sealRecoveryVerdict(request, verdict: RecoveryVerdict) {
+      const to = authorize(request, 'sealRecoveryVerdict', false)
+      if (verdict.groupID !== groupID || verdict.requestID !== to.requestID)
+        throw new Error('Verdict does not bind request')
+      return sealReply(
+        SEAL_DOMAIN.verdict,
+        to,
+        fromUTF(JSON.stringify({ signer: localDID, verdict })),
+      )
+    },
+    async openRecoveryVerdict(sealed, requestID) {
+      const opened = openReply(SEAL_DOMAIN.verdict, sealed, requestID)
+      if (opened == null) return null
+      try {
+        const value = JSON.parse(toUTF(opened)) as OpenedRecoveryVerdict
+        if (
+          typeof value.signer !== 'string' ||
+          value.verdict?.groupID !== groupID ||
+          value.verdict.requestID !== requestID
+        )
+          return null
+        return value
+      } catch {
+        return null
+      }
     },
     async sealGroupInfo(request: Uint8Array) {
       const to = authorize(request, 'sealGroupInfo')
@@ -713,6 +794,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
             to: to.requesterDID,
             requestID: to.requestID,
             epoch,
+            members: occupiedDIDs(),
             // The AUTHENTICATED head, and no ledger with it. This is what the rejoined handle
             // will hold, and why its empty ledger reads incomplete rather than
             // complete-and-empty.
@@ -747,7 +829,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     async applyRecovery(sealed: Uint8Array, requestID: string): Promise<PendingRecovery | null> {
       const info = open(sealed, requestID)
       if (info == null) return null
-      ephemeralKeys.delete(requestID)
+      let accepted = false
+      let tuple: { position: string; commitDigest: string; tag: string } | undefined
       // The external commit is framed at the epoch the GroupInfo described — the epoch the
       // group is at, which is NOT the epoch this peer is at. Every member that can apply it
       // is at that epoch, so a GroupInfo the group has already moved past builds a commit
@@ -759,7 +842,31 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       })
       return {
         commit,
+        epoch: info.epoch + 1,
+        confirmationKey: async (position, commitDigest) => {
+          if (tuple != null && (tuple.position !== position || tuple.commitDigest !== commitDigest))
+            throw new Error('Pending recovery already bound to another commit')
+          const key = confirmationKeyAt(info.epoch + 1, position, commitDigest)
+          tuple = { position, commitDigest, tag: tagFor(key, requestID) }
+          return key
+        },
+        judgeVerdict: ({ signer, verdict }) => {
+          if (
+            tuple == null ||
+            verdict.groupID !== groupID ||
+            verdict.requestID !== requestID ||
+            verdict.position !== tuple.position ||
+            verdict.commitDigest !== tuple.commitDigest
+          )
+            return 'advisory'
+          if (verdict.verdict === 'confirmed')
+            return verdict.epoch === info.epoch + 1 && verdict.tag === tuple.tag
+              ? 'authoritative'
+              : 'advisory'
+          return info.members.includes(signer) ? 'authoritative' : 'advisory'
+        },
         onAccepted: async () => {
+          if (accepted) return
           if (failRecoveryAdopt) {
             failRecoveryAdopt = false
             throw new Error('the process died in the acceptance window')
@@ -774,6 +881,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
             slotAdd(localDID)
           }
           advance(info.epoch + 1)
+          accepted = true
         },
       }
     },

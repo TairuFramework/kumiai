@@ -247,7 +247,7 @@ describe('offline leaf credential verification', () => {
     }
     const deps = { deviceDenySet: () => new Set([f.device.id]) }
     await expect(verifyLeafCredential(credential, f.device.publicKey, deps)).rejects.toMatchObject({
-      reason: 'denied-issuer',
+      reason: 'denied-id',
     })
     expect(
       await createDIDAuthenticationService(deps).validateCredential(credential, f.device.publicKey),
