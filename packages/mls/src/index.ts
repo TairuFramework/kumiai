@@ -128,6 +128,12 @@ export {
   revokeDevice,
 } from './group.js'
 export {
+  type RevokeBuildResult,
+  removeLapsedLeaves,
+  renewLeaf,
+  revokeWithProof,
+} from './group-lifecycle.js'
+export {
   assertHeadMatches,
   buildLedgerHeadExtension,
   computeHead,

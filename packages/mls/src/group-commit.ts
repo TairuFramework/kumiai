@@ -1,5 +1,6 @@
 import { normalizeDID, type SigningIdentity } from '@kokuin/token'
 import {
+  type ClientState,
   createCommit,
   type DefaultProposal,
   defaultCredentialTypes,
@@ -184,7 +185,11 @@ export async function commitWithEntries(
   group: GroupHandle,
   extraProposals: Array<DefaultProposal>,
   enacted: Array<string>,
-  options: { ratchetTreeExtension?: boolean; requireAdmin?: boolean } = {},
+  options: {
+    ratchetTreeExtension?: boolean
+    requireAdmin?: boolean
+    commitState?: ClientState
+  } = {},
 ): Promise<Awaited<ReturnType<typeof createCommit>>> {
   const ratchetTreeExtension = options.ratchetTreeExtension ?? false
   const requireAdmin = options.requireAdmin ?? true
@@ -265,7 +270,7 @@ export async function commitWithEntries(
     entryIDs,
     enactedDeviceEntries,
   })
-  const commitState = { ...group.state, unappliedProposals: {} }
+  const commitState = { ...(options.commitState ?? group.state), unappliedProposals: {} }
 
   const proposals = [...extraProposals]
   if (entryIDs.length > 0) {
