@@ -1,8 +1,11 @@
+import type { SignedEvent } from '@kokuin/controller'
 import { normalizeDID } from '@kokuin/token'
 
 import type { GroupAnchor } from './anchor.js'
 import type { FoldDrop, FoldInput } from './fold.js'
+import type { GroupHandle } from './group-handle.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
+import { authenticateLifecycleProof } from './lifecycle-proof.js'
 import {
   adminCount,
   ROLE_ENTRY_TYPE,
@@ -15,7 +18,7 @@ import {
 export const DEVICE_ENTRY_TYPE = 'kumiai.device'
 
 /** The device lifecycle operations plus the advisory controller-log beacon. */
-export type DeviceOp = 'register' | 'add' | 'revoke' | 'label' | 'beacon'
+export type DeviceOp = 'register' | 'add' | 'revoke' | 'label' | 'beacon' | 'reset' | 'clock'
 
 /**
  * A `kumiai.device` entry's `value`. `controller` names the profile a register/add binds to;
@@ -27,14 +30,44 @@ export type DeviceValue = {
   controller?: string
   label?: string
   capability?: string
+  proof?: Array<SignedEvent>
+  revoked?: Array<RevokedEffect>
+  time?: number
   /** Beacon only: the length of the controller's FULL log at announcement time. */
   logLength?: number
   /** Beacon only: the head digest of the controller's FULL log at announcement time. */
   headDigest?: string
 }
 
-/** A folded device binding. `controller` is the profile DID; `status` gates the deny set. */
-export type DeviceRecord = { controller: string; status: 'active' | 'revoked'; label?: string }
+export type RevokedEffect = { did: string; cascadedFrom?: string }
+
+export type Revocation = {
+  controller: string
+  logPosition: number
+  reason?: 'reset'
+  cascadedFrom?: string
+}
+
+/** A folded device binding or permanent revocation. */
+export type DeviceRecord = {
+  controller: string
+  status: 'active' | 'revoked'
+  label?: string
+  logPosition?: number
+  reason?: 'reset'
+  cascadedFrom?: string
+}
+
+export type ControllerProjection = {
+  recordedLog: Array<SignedEvent>
+  genFloor: number
+  timeFloor: number
+  beacon?: ControllerBeacon
+}
+
+export function controllerProjection(): ControllerProjection {
+  return { recordedLog: [], genFloor: 0, timeFloor: 0 }
+}
 
 /** An advisory pointer to a controller's FULL log head. Never a validation input. */
 export type ControllerBeacon = { logLength: number; headDigest: string }
@@ -43,11 +76,11 @@ export type ControllerBeacon = { logLength: number; headDigest: string }
  * The group-folded device registry: `device DID -> record`, keyed by normalized DID. A pure
  * function of the accepted `kumiai.device` entries, folded beside {@link RosterState}. Two views
  * derive from `devices` and are never stored: {@link controllerOf} and {@link denySetOf}.
- * `controllers` is a second, independent per-controller projection fed by the `beacon` op.
+ * `controllers` records authenticated logs and floors, with an independent advisory beacon.
  */
 export type DeviceRegistry = {
   devices: ReadonlyMap<string, DeviceRecord>
-  controllers: ReadonlyMap<string, ControllerBeacon>
+  controllers: ReadonlyMap<string, ControllerProjection>
 }
 
 export function registrySeed(): DeviceRegistry {
@@ -63,7 +96,9 @@ export function isDeviceValue(value: unknown): value is DeviceValue {
     v.op !== 'add' &&
     v.op !== 'revoke' &&
     v.op !== 'label' &&
-    v.op !== 'beacon'
+    v.op !== 'beacon' &&
+    v.op !== 'reset' &&
+    v.op !== 'clock'
   ) {
     return false
   }
@@ -76,24 +111,90 @@ export function isDeviceValue(value: unknown): value is DeviceValue {
   if (v.capability !== undefined && typeof v.capability !== 'string') return false
   if (v.logLength !== undefined && typeof v.logLength !== 'number') return false
   if (v.headDigest !== undefined && typeof v.headDigest !== 'string') return false
+  if (v.time !== undefined && (typeof v.time !== 'number' || !Number.isFinite(v.time))) return false
+  if (v.proof !== undefined && !Array.isArray(v.proof)) return false
+  if (
+    v.revoked !== undefined &&
+    (!Array.isArray(v.revoked) ||
+      v.revoked.some((effect: unknown) => {
+        if (effect == null || typeof effect !== 'object') return true
+        const record = effect as Record<string, unknown>
+        return (
+          typeof record.did !== 'string' ||
+          (record.cascadedFrom !== undefined && typeof record.cascadedFrom !== 'string')
+        )
+      }))
+  )
+    return false
+  if (v.op === 'clock' && typeof v.time !== 'number') return false
+  if (
+    (v.op === 'reset' || v.proof !== undefined) &&
+    (!Array.isArray(v.proof) || !Array.isArray(v.revoked))
+  )
+    return false
   return true
+}
+
+export function isLifecycleDeviceValue(value: DeviceValue): boolean {
+  return (
+    value.op === 'beacon' ||
+    value.op === 'clock' ||
+    ((value.op === 'revoke' || value.op === 'reset') &&
+      value.proof !== undefined &&
+      value.revoked !== undefined &&
+      value.capability === undefined)
+  )
 }
 
 /**
  * The registry fold step. Pure, order-dependent, authorization-free — a device entry's authority
  * is the acceptance pipeline's job (a self-register leaf attestation, or a management capability),
- * never the fold's. On the trusted fold path a revoke/label always concerns a subject a prior
- * register bound, so an absent subject is a no-op guard rather than a real case.
+ * never the fold's. Lifecycle effects replay recorded DIDs without consulting a later tree.
  */
 export function registryApply(
   verified: VerifiedLedgerEntry<DeviceValue>,
   state: DeviceRegistry,
+  controllerID?: string,
 ): DeviceRegistry {
   const subject = normalizeDID(verified.entry.subject)
   const value = verified.entry.value
   const devices = new Map(state.devices)
   const controllers = new Map(state.controllers)
   const existing = devices.get(subject)
+  if (
+    controllerID != null &&
+    (value.op === 'reset' || value.op === 'revoke' || value.op === 'clock')
+  ) {
+    const controller = normalizeDID(controllerID)
+    const previous = controllers.get(controller) ?? controllerProjection()
+    if (value.op === 'clock') {
+      controllers.set(controller, {
+        ...previous,
+        timeFloor: Math.max(previous.timeFloor, value.time as number),
+      })
+    } else {
+      const effect = authenticateLifecycleProof(controller, verified, state)
+      controllers.set(controller, {
+        ...previous,
+        recordedLog: effect.recordedLog,
+        genFloor: effect.genFloor,
+      })
+      for (const revoked of value.revoked ?? []) {
+        const did = normalizeDID(revoked.did)
+        if (devices.get(did)?.status === 'revoked') continue
+        devices.set(did, {
+          controller,
+          status: 'revoked',
+          logPosition: effect.logPosition,
+          ...(value.op === 'reset' ? { reason: 'reset' } : {}),
+          ...(revoked.cascadedFrom == null
+            ? {}
+            : { cascadedFrom: normalizeDID(revoked.cascadedFrom) }),
+        })
+      }
+    }
+    return { devices, controllers }
+  }
   switch (value.op) {
     case 'register':
     case 'add': {
@@ -122,6 +223,9 @@ export function registryApply(
       devices.set(subject, { ...existing, status: 'revoked' })
       return { devices, controllers }
     }
+    case 'reset':
+    case 'clock':
+      return { devices, controllers }
     case 'label': {
       if (existing == null) return { devices, controllers }
       devices.set(subject, {
@@ -133,9 +237,10 @@ export function registryApply(
     case 'beacon': {
       // Advisory, self-scoped: `subject` is the CONTROLLER DID. Last-write-wins; never touches
       // `devices` or the deny set, never gates validation. Guarded present by isDeviceValue.
+      const previous = controllers.get(subject) ?? controllerProjection()
       controllers.set(subject, {
-        logLength: value.logLength as number,
-        headDigest: value.headDigest as string,
+        ...previous,
+        beacon: { logLength: value.logLength as number, headDigest: value.headDigest as string },
       })
       return { devices, controllers }
     }
@@ -152,7 +257,7 @@ export function beaconOf(
   registry: DeviceRegistry,
   controllerDID: string,
 ): ControllerBeacon | undefined {
-  return registry.controllers.get(normalizeDID(controllerDID))
+  return registry.controllers.get(normalizeDID(controllerDID))?.beacon
 }
 
 /**
@@ -213,10 +318,26 @@ export function foldControl(
         onDrop?.({ entryID, type: entry.type, reason: 'malformed kumiai.device value' })
         continue
       }
-      registry = registryApply({ issuer, entry: { ...entry, value: entry.value } }, registry)
+      if (anchor.controller != null && !isLifecycleDeviceValue(entry.value)) {
+        onDrop?.({
+          entryID,
+          type: entry.type,
+          reason: 'device operation is not allowed in a lifecycle group',
+        })
+        continue
+      }
+      try {
+        registry = registryApply(
+          { issuer, entry: { ...entry, value: entry.value } },
+          registry,
+          anchor.controller,
+        )
+      } catch {
+        onDrop?.({ entryID, type: entry.type, reason: 'invalid lifecycle proof' })
+      }
       continue
     }
-    if (entry.type !== ROLE_ENTRY_TYPE) {
+    if (anchor.controller != null || entry.type !== ROLE_ENTRY_TYPE) {
       onDrop?.({ entryID, type: entry.type, reason: `unrelated type '${entry.type}'` })
       continue
     }
@@ -244,4 +365,16 @@ export function foldControl(
     roster = next
   }
   return { roster, registry }
+}
+
+/** A permanent ledger revocation, independent of the controller's current log deny set. */
+export function revocationOf(group: GroupHandle, did: string): Revocation | null {
+  const record = group.registry.devices.get(normalizeDID(did))
+  if (record?.status !== 'revoked' || record.logPosition === undefined) return null
+  return {
+    controller: record.controller,
+    logPosition: record.logPosition,
+    ...(record.reason === undefined ? {} : { reason: record.reason }),
+    ...(record.cascadedFrom === undefined ? {} : { cascadedFrom: record.cascadedFrom }),
+  }
 }

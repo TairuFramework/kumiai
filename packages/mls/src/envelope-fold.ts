@@ -1,3 +1,5 @@
+import { normalizeDID } from '@kokuin/token'
+
 import type { FoldInput } from './fold.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
 import {
@@ -6,6 +8,7 @@ import {
   type DeviceRegistry,
   type DeviceValue,
   isDeviceValue,
+  isLifecycleDeviceValue,
   registryApply,
 } from './registry.js'
 import {
@@ -60,6 +63,7 @@ export function foldEnvelope(
   baseRegistry: DeviceRegistry,
   entries: Array<FoldInput>,
   groupID: string,
+  context?: { controllerID: string; memberController: (did: string) => string | undefined },
 ): EnvelopeFoldResult {
   let workingRoster: RosterState = { roles: new Map(baseRoster.roles) }
   let workingRegistry: DeviceRegistry = {
@@ -84,7 +88,34 @@ export function foldEnvelope(
         return { ok: false, reason: 'malformed kumiai.device value', entryID }
       }
       const value: DeviceValue = entry.value
-      workingRegistry = registryApply({ issuer, entry: { ...entry, value } }, workingRegistry)
+      if (
+        context != null
+          ? !isLifecycleDeviceValue(value)
+          : value.op === 'reset' || value.op === 'clock' || value.proof !== undefined
+      ) {
+        return { ok: false, reason: 'device operation is not allowed in this group', entryID }
+      }
+      try {
+        workingRegistry = registryApply(
+          { issuer, entry: { ...entry, value } },
+          workingRegistry,
+          context?.controllerID,
+        )
+      } catch {
+        return { ok: false, reason: 'invalid lifecycle proof', entryID }
+      }
+      continue
+    }
+
+    if (context != null) {
+      if (entry.type.startsWith(GROUP_TYPE_PREFIX)) {
+        return { ok: false, reason: 'reserved lifecycle entry type', entryID }
+      }
+      const bound = context.memberController(normalizeDID(issuer))
+      if (bound == null || normalizeDID(bound) !== normalizeDID(context.controllerID)) {
+        return { ok: false, reason: 'issuer has no pre-commit controller-bound leaf', entryID }
+      }
+      surfaced.push(verified)
       continue
     }
 

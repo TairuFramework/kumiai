@@ -6,7 +6,6 @@ import {
   commitInvite,
   createGroup,
   createInvite,
-  createKeyPackageBundle,
   type GroupHandle,
   processWelcome,
 } from '../../src/group.js'
@@ -179,7 +178,8 @@ export async function twoDeviceProfileGroup(): Promise<{
     ...createFullIdentity(targetSeed),
     privateKey: targetSeed,
   }
-  const targetKeyPackageBundle = await createKeyPackageBundle(targetIdentity)
+  const targetLeaf = await buildBoundLeaf({ deviceSeed: targetSeed })
+  const targetKeyPackageBundle = await buildBoundKeyPackageBundle(targetLeaf, targetSeed)
 
   const { newGroup: managerGroup, commitMessage: addCommitMessage } = await addDevice(
     deviceGroup,

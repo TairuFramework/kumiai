@@ -11,6 +11,7 @@ export type LeafBinding = {
   controller?: string
   /** The embedded controller log prefix (present iff bound), for resolving a capability signature. */
   prefix?: Array<SignedEvent>
+  capability?: string
   /** The leaf's MLS signature public key. */
   leafKey: Uint8Array
 }
@@ -53,29 +54,32 @@ export async function verifyDeviceEntry(
     return normalizeDID(binding.controller) === subject
   }
 
+  if (value.op === 'reset' || value.op === 'clock' || value.proof !== undefined) return false
+
+  const recordedController = ctx.controllerOf(subject)
+  const subjectBinding = ctx.bindingOfDID(subject)
+  const subjectController =
+    value.op === 'register' || value.op === 'add' ? value.controller : recordedController
+  if (subjectController == null) return false
+  if (
+    recordedController != null &&
+    normalizeDID(recordedController) !== normalizeDID(subjectController)
+  )
+    return false
+  if (
+    subjectBinding != null &&
+    (subjectBinding.controller == null ||
+      normalizeDID(subjectBinding.controller) !== normalizeDID(subjectController))
+  )
+    return false
+
   if (value.op === 'register' && subject === issuer) {
     const binding = ctx.bindingOfDID(issuer)
     if (binding?.controller == null || value.controller == null) return false
     return normalizeDID(binding.controller) === normalizeDID(value.controller)
   }
 
-  const authorizedProfile =
-    value.op === 'register' || value.op === 'add'
-      ? value.controller == null
-        ? undefined
-        : normalizeDID(value.controller)
-      : ctx.controllerOf(subject) // revoke / label — the registry already binds the subject
-  if (authorizedProfile == null) return false
-
-  // Cross-profile rebind guard: a register/add must never overwrite a subject already bound to a
-  // DIFFERENT controller. Without this, a manager of profile P could re-bind another profile Q's
-  // active device to P (flipping its authority), then revoke it — evicting Q's device in two
-  // commits. Self-register (subject === issuer) returned earlier; a brand-new subject
-  // (controllerOf undefined) and a same-controller re-register both stay allowed.
-  if (value.op === 'register' || value.op === 'add') {
-    const existingController = ctx.controllerOf(subject)
-    if (existingController != null && existingController !== authorizedProfile) return false
-  }
+  const authorizedProfile = normalizeDID(subjectController)
 
   const binding = ctx.bindingOfDID(issuer)
   if (binding?.controller == null || binding.prefix == null) return false

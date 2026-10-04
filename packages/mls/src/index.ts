@@ -190,6 +190,7 @@ export {
   authority,
   beaconOf,
   type ControllerBeacon,
+  type ControllerProjection,
   controllerOf,
   DEVICE_ENTRY_TYPE,
   type DeviceOp,
@@ -198,7 +199,10 @@ export {
   type DeviceValue,
   denySetOf,
   foldControl,
+  type Revocation,
+  type RevokedEffect,
   registrySeed,
+  revocationOf,
 } from './registry.js'
 export {
   adminCount,

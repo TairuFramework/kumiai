@@ -30,6 +30,7 @@ import {
   type VerifiedLedgerEntry,
   verifyLedgerEntry,
 } from './ledger.js'
+import { verifyLifecycleProof } from './lifecycle-proof.js'
 import { defaultCommitPolicy } from './policy.js'
 import { authority, controllerOf, DEVICE_ENTRY_TYPE, type DeviceValue } from './registry.js'
 import { type GroupPermission, ROLE_ENTRY_TYPE } from './roster.js'
@@ -212,7 +213,18 @@ export async function commitWithEntries(
     }
     inputs.push({ verified, entryID: ledgerEntryDigest(token) })
   }
-  const fold = foldEnvelope(group.roster, group.registry, inputs, group.groupID)
+  const fold = foldEnvelope(
+    group.roster,
+    group.registry,
+    inputs,
+    group.groupID,
+    group.anchor.controller == null
+      ? undefined
+      : {
+          controllerID: group.anchor.controller,
+          memberController: (did) => group.bindingOfDID(did)?.controller,
+        },
+  )
   if (!fold.ok) {
     throw new Error(`cannot enact ledger entry ${fold.entryID}: ${fold.reason}`)
   }
@@ -225,6 +237,13 @@ export async function commitWithEntries(
   }
   for (const input of inputs) {
     if (input.verified.entry.type !== DEVICE_ENTRY_TYPE) continue
+    if (
+      group.anchor.controller != null &&
+      (input.verified.entry.value as DeviceValue).op !== 'beacon'
+    ) {
+      await verifyLifecycleProof(group, input.verified as VerifiedLedgerEntry<DeviceValue>)
+      continue
+    }
     const ok = await verifyDeviceEntry(input.verified as VerifiedLedgerEntry<DeviceValue>, proofCtx)
     if (!ok) {
       throw new Error(`cannot enact device entry ${input.entryID}: proof verification failed`)

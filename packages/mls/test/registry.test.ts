@@ -1,3 +1,4 @@
+import { createInception, createRevoke, didFromInception } from '@kokuin/controller'
 import { normalizeDID } from '@kokuin/token'
 import { describe, expect, test } from 'vitest'
 
@@ -408,5 +409,77 @@ describe('beacon', () => {
     expect(isDeviceValue({ op: 'beacon', logLength: 1 })).toBe(false) // missing headDigest
     expect(isDeviceValue({ op: 'beacon', headDigest: 'z' })).toBe(false) // missing logLength
     expect(isDeviceValue({ op: 'beacon', logLength: '1', headDigest: 'z' })).toBe(false) // wrong type
+  })
+})
+
+describe('authenticated lifecycle projections', () => {
+  const seed = new Uint8Array(32).fill(31)
+  const inception = createInception(seed, 0)
+  const controller = didFromInception(inception.event)
+  const rev = createRevoke({
+    seed,
+    profile: 0,
+    did: controller,
+    prior: inception.event,
+    target: DEV_A,
+    keyPosition: { gen: 0, seq: 0 },
+  })
+  const anchor: GroupAnchor = { creatorDID: CREATOR, version: 1, controller }
+
+  test('records a leafless revocation from authenticated ledger data alone', () => {
+    const entries = [
+      deviceInput(
+        DEV_B,
+        DEV_A,
+        {
+          op: 'revoke',
+          proof: [inception, rev],
+          revoked: [{ did: DEV_A }],
+        },
+        'revoke',
+      ),
+    ]
+    const { registry } = foldControl(entries, anchor, GROUP)
+    expect(registry.devices.get(DEV_A)).toEqual({ controller, status: 'revoked', logPosition: 1 })
+    expect(registry.controllers.get(controller)).toEqual({
+      recordedLog: [inception, rev],
+      genFloor: 0,
+      timeFloor: 0,
+    })
+    expect(denySetOf(registry)).toEqual(new Set([DEV_A]))
+  })
+
+  test('replays clock floors and keeps beacons independent of recorded proof', () => {
+    const entries = [
+      deviceInput(
+        DEV_B,
+        DEV_A,
+        { op: 'revoke', proof: [inception, rev], revoked: [{ did: DEV_A }] },
+        'r',
+      ),
+      deviceInput(DEV_B, controller, { op: 'clock', time: 100 }, 'c'),
+      deviceInput(DEV_B, controller, { op: 'beacon', logLength: 999, headDigest: 'advisory' }, 'b'),
+    ]
+    const { registry } = foldControl(entries, anchor, GROUP)
+    expect(registry.controllers.get(controller)).toMatchObject({
+      recordedLog: [inception, rev],
+      genFloor: 0,
+      timeFloor: 100,
+    })
+    expect(beaconOf(registry, controller)).toEqual({ logLength: 999, headDigest: 'advisory' })
+    expect(denySetOf(registry)).toEqual(new Set([DEV_A]))
+  })
+
+  test('a lifecycle replay cannot add a discretionary role or device binding', () => {
+    const { roster, registry } = foldControl(
+      [
+        roleInput(controller, DEV_A, 'admin', 'role'),
+        deviceInput(DEV_A, DEV_A, { op: 'register', controller }, 'register'),
+      ],
+      anchor,
+      GROUP,
+    )
+    expect(roster.roles).toEqual(new Map([[controller, 'admin']]))
+    expect(registry.devices.size).toBe(0)
   })
 })

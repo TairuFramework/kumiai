@@ -44,6 +44,7 @@ import {
   readLedgerHeadExtension,
 } from './head.js'
 import { ledgerEntryDigest, type VerifiedLedgerEntry, verifyLedgerEntry } from './ledger.js'
+import { verifyLifecycleProof } from './lifecycle-proof.js'
 import { createMutex, type Mutex } from './mutex.js'
 import {
   type CommitPolicyContext,
@@ -1038,7 +1039,18 @@ export class GroupHandle {
             return input
           })
 
-          const foldResult = foldEnvelope(this.#roster, this.#registry, ordered, this.groupID)
+          const foldResult = foldEnvelope(
+            this.#roster,
+            this.#registry,
+            ordered,
+            this.groupID,
+            this.#anchor.controller == null
+              ? undefined
+              : {
+                  controllerID: this.#anchor.controller,
+                  memberController: (did) => this.bindingOfDID(did)?.controller,
+                },
+          )
           if (!foldResult.ok) {
             precomputedReject = true
           } else {
@@ -1053,6 +1065,18 @@ export class GroupHandle {
             }
             for (const { verified } of acceptedEntries) {
               if (verified.entry.type !== DEVICE_ENTRY_TYPE) continue
+              if (
+                this.#anchor.controller != null &&
+                (verified.entry.value as DeviceValue).op !== 'beacon'
+              ) {
+                try {
+                  await verifyLifecycleProof(this, verified as VerifiedLedgerEntry<DeviceValue>)
+                } catch {
+                  precomputedReject = true
+                  break
+                }
+                continue
+              }
               const ok = await verifyDeviceEntry(
                 verified as VerifiedLedgerEntry<DeviceValue>,
                 proofCtx,
@@ -1194,7 +1218,11 @@ export class GroupHandle {
       return {
         leafKey: node.leaf.signaturePublicKey,
         ...(parsed.controller != null
-          ? { controller: parsed.controller.id, prefix: parsed.controller.prefix }
+          ? {
+              controller: parsed.controller.id,
+              prefix: parsed.controller.prefix,
+              capability: parsed.controller.capability,
+            }
           : {}),
       }
     }
