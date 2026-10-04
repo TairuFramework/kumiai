@@ -242,14 +242,6 @@ export async function validateWelcomeTree(group: GroupHandle): Promise<void> {
     if (index === group.state.privatePath.leafIndex * 2) checkAdmissionExpiry(group, node.leaf)
   }
   checkSurvivors(group, group.state.ratchetTree, group.registry)
-  if (
-    group.anchor.controller != null &&
-    historySize(
-      group.state.ratchetTree,
-      group.ledger.map(({ verified }) => verified),
-    ) > HISTORY_HORIZON
-  )
-    throw new LeafBindingError('history-horizon')
 }
 
 /** The callback judges proposals; survivors check the path before any state is installed. */

@@ -1,4 +1,5 @@
-import { encode, mlsMessageEncoder, nodeTypes } from 'ts-mls'
+import { createRotate } from '@kokuin/controller'
+import { defaultProposalTypes, encode, mlsMessageEncoder, nodeTypes } from 'ts-mls'
 import { afterEach, expect, test, vi } from 'vitest'
 
 import {
@@ -8,12 +9,15 @@ import {
   joinGroupExternal,
   processWelcome,
 } from '../src/group.js'
+import { commitWithEntries } from '../src/group-commit.js'
 import { makeMLSCredential } from '../src/group-credential.js'
 import { addDevice } from '../src/group-device.js'
 import { deriveGroup } from '../src/group-handle.js'
+import { HISTORY_HORIZON, historySize } from '../src/history.js'
 import { ledgerEntryDigest, signLedgerEntry } from '../src/ledger.js'
 import { buildBoundLeaf } from './fixtures/bound-leaf.js'
 import { buildBoundKeyPackageBundle, joinBoundDevice } from './fixtures/device-harness.js'
+import { controllerSeed, inception } from './fixtures/lifecycle-ledger.js'
 import {
   agent,
   controllerID,
@@ -360,4 +364,102 @@ test.each([
     }),
   ).rejects.toThrow(/authoring time/)
   expect(setup.deviceGroup.state).toBe(previous)
+})
+
+async function oversizedJoinGroup() {
+  authorClock()
+  const setup = await pipelineGroup()
+  const rotation = createRotate({
+    seed: controllerSeed,
+    profile: 0,
+    did: controllerID,
+    prior: inception.event,
+    options: { seal: 'h'.repeat(210000) },
+  })
+  const prefix = [inception, rotation]
+  let group = setup.group
+  for (let index = 0; index < 3; index++) {
+    const identity = agent(80 + index)
+    const fixture = await lowLevelWelcome(
+      group,
+      identity,
+      await timedBinding(identity, index === 0 ? 102 : 100, index === 2 ? 101 : 300, { prefix }),
+    )
+    group = fixture.author
+  }
+  expect(historySize(group.state.ratchetTree, [])).toBeGreaterThan(HISTORY_HORIZON)
+  return { group, identity: setup.identity, target: agent(82) }
+}
+
+test('external replacement may shrink history while remaining above the horizon', async () => {
+  const { group, target } = await oversizedJoinGroup()
+  const sizeBefore = historySize(group.state.ratchetTree, [])
+  const { groupInfo } = await exportGroupInfo({ group })
+  const result = await joinGroupExternal({
+    identity: target,
+    groupInfo,
+    credential: { id: target.id, groupID: group.groupID },
+    resync: true,
+    controller: await timedBinding(target, 150, 300),
+  })
+  const sizeAfter = historySize(result.group.state.ratchetTree, [])
+  expect(sizeAfter).toBeGreaterThan(HISTORY_HORIZON)
+  expect(sizeAfter).toBeLessThan(sizeBefore)
+  await group.processMessage(result.commitMessage)
+  expect(group.epoch).toBe(result.group.epoch)
+  expect(group.state.groupContext.treeHash).toEqual(result.group.state.groupContext.treeHash)
+  expect(historySize(group.state.ratchetTree, [])).toBe(sizeAfter)
+})
+
+test('Welcome may join a shrinking Remove and Add above the horizon', async () => {
+  const { group, identity, target } = await oversizedJoinGroup()
+  const sizeBefore = historySize(group.state.ratchetTree, [])
+  const bob = agent(61)
+  const { invite } = await createInvite({ group, identity, recipientDID: bob.id })
+  const added = await rawAdd(group, bob, await timedBinding(bob, 102, 300))
+  const removed = group.findMemberLeafIndex(target.id)
+  if (removed == null) throw new Error('Missing target')
+  const result = await commitWithEntries(
+    group,
+    [
+      { proposalType: defaultProposalTypes.remove, remove: { removed } },
+      { proposalType: defaultProposalTypes.add, add: { keyPackage: added.bundle.publicPackage } },
+    ],
+    [],
+    { ratchetTreeExtension: true },
+  )
+  if (result.welcome == null) throw new Error('Missing Welcome')
+  const sizeAfter = historySize(result.newState.ratchetTree, [])
+  expect(sizeAfter).toBeGreaterThan(HISTORY_HORIZON)
+  expect(sizeAfter).toBeLessThan(sizeBefore)
+  const { group: joined } = await processWelcome({
+    identity: bob,
+    invite,
+    welcome: encode(mlsMessageEncoder, result.welcome),
+    keyPackageBundle: { ...added.bundle, ownerDID: bob.id },
+  })
+  expect(joined.state.groupContext.treeHash).toEqual(result.newState.groupContext.treeHash)
+  expect(joined.epoch).toBe(result.newState.groupContext.epoch)
+  expect(historySize(joined.state.ratchetTree, [])).toBe(sizeAfter)
+  expect(joined.findMemberLeafIndex(target.id)).toBeUndefined()
+  expect(joined.findMemberLeafIndex(bob.id)).toBeDefined()
+})
+
+test('the commit gate still refuses growing history above the horizon', async () => {
+  const { group } = await oversizedJoinGroup()
+  const added = await rawAdd(group, agent(61), await timedBinding(agent(61), 102, 300))
+  expect(historySize(added.result.newState.ratchetTree, [])).toBeGreaterThan(
+    historySize(group.state.ratchetTree, []),
+  )
+  const previous = group.state
+  await expect(group.processMessage(added.message)).rejects.toMatchObject({ reason: 'binding' })
+  expect(group.state).toBe(previous)
+  await expect(
+    commitWithEntries(
+      group,
+      [{ proposalType: defaultProposalTypes.add, add: { keyPackage: added.bundle.publicPackage } }],
+      [],
+    ),
+  ).rejects.toMatchObject({ reason: 'history-horizon' })
+  expect(group.state).toBe(previous)
 })
