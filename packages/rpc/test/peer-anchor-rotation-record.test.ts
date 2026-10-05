@@ -215,6 +215,35 @@ describe('recovery ordering', { concurrent: false }, () => {
     await Promise.all([alice.peer.dispose(), bob.peer.dispose()])
   })
 
+  test('a failed anchor save after capture never captures the same advance twice', async () => {
+    const hub = new DurableFakeHub()
+    const recovery = { timeoutMs: 100, deadlineMs: 10_000, getDelayMs: () => 0 }
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 4, members, recovery })
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { members, recovery })
+    await Promise.all([alice.peer.replay(), bob.peer.replay()])
+    let captured = 0
+    const exportSecret = bob.crypto.exportSecret
+    bob.crypto.exportSecret = async (label) => {
+      if (label === APP_TOPIC_LABEL) captured++
+      return exportSecret(label)
+    }
+    const save = bob.anchorStore.save
+    let failResolvedSave = true
+    bob.anchorStore.save = async (slot) => {
+      if (slot.pending == null && captured > 0 && failResolvedSave) {
+        failResolvedSave = false
+        throw new Error('anchor store unavailable')
+      }
+      await save(slot)
+    }
+    await expect(bob.peer.recover()).rejects.toThrow('anchor store unavailable')
+    expect(captured).toBe(1)
+    await bob.peer.replay()
+    expect(captured).toBe(1)
+    expect(bob.peer.anchorEpoch()).toBe(alice.peer.anchorEpoch())
+    await Promise.all([alice.peer.dispose(), bob.peer.dispose()])
+  })
+
   test('a refused external advance clears forced before an ordinary commit, including across restart', async () => {
     const hub = new DurableFakeHub()
     const seen: Array<unknown> = []

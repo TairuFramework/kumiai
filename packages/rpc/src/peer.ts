@@ -710,7 +710,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     releaseSealBarrier = undefined
   }
 
-  const captureAnchor = async (): Promise<void> => {
+  /** The advance whose anchor rotation was last captured, so a retry never captures it twice. */
+  let capturedAdvance: string | undefined
+  const captureAnchor = async (advance?: string): Promise<void> => {
     const { secret, epoch } = await crypto.exportSecret(APP_TOPIC_LABEL)
     if (disposed) return
     for (const name of Object.keys(protocols)) {
@@ -718,6 +720,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     }
     mux.retainTopic(inboxTopic(secret, epoch, localDID), { retention: appLogRetentionSeconds })
     anchor = { secret, epoch }
+    // Marked with the anchor, before persistence can fail, so a retry never captures it twice.
+    if (advance != null) capturedAdvance = advance
     anchorPending = undefined
     sealError = undefined
     finishSealBarrier()
@@ -725,8 +729,6 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     appLane.reset()
   }
 
-  /** The advance whose anchor rotation was last captured, so a retry never captures it twice. */
-  let capturedAdvance: string | undefined
   const resolveAnchorRotation = async (
     port: GroupMLS,
     knownUnlanded = false,
@@ -759,8 +761,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     } else if (epoch === record.epochAfter) {
       const roster = (await port.rosterEntries()).map((entry) => normalizeDID(entry.did))
       if (record.forced || detectRosterChange(record.rosterBefore, roster)) {
-        await captureAnchor()
-        capturedAdvance = record.advance
+        await captureAnchor(record.advance)
       } else {
         anchorPending = undefined
         sealError = undefined
