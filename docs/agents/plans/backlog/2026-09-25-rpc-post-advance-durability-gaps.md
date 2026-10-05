@@ -1,7 +1,9 @@
-# rpc: two durability gaps after a commit or recovery advance
+# rpc: durability gaps after a commit or recovery advance
 
-**Priority:** backlog. Both exist on `main`; found by a blind review of the strand-observability branch
-(PR #47), which kept them unchanged.
+**Priority:** backlog. Found by a blind review of the strand-observability branch (PR #47), which kept
+them unchanged. The bound-leaf lifecycle and log delivery work
+(`../completed/2026-10-05-bound-leaf-and-log-delivery.complete.md`) closed the anchor-capture half of the
+second gap; what remains is below.
 
 ## Re-enact entries are memory-only after an automatic heal
 
@@ -13,19 +15,21 @@ entries were computed from is gone and they cannot be rebuilt.
 Options: hand owed entries to the host at heal time (a callback or an `onRecovery` field), or persist
 the stash through a host port. Either needs a decision on who owns re-enactment across restarts.
 
-## Anchor capture and epoch rebuild are not retried after a durable advance
+## Epoch runtime rebuild is not retried after a received commit
 
-`processCommit` persists and advances the handle; `captureAnchor()` then writes the app anchor, and a
-walk that reports an advance rebuilds the epoch. If the capture or the rebuild fails, the walk leaves
-its cursor behind, but the next walk sees the commit as history and skips both. The handle is durable
-at the new epoch while the stored anchor (and the in-memory epoch runtime) stays at the old one.
+Anchor capture is now durable: every advance persists a one-advance rotation record in the
+`AnchorStore` slot before ratcheting, and the next advance or startup resolves it (capturing the landed
+anchor, or forcing confirmed recovery when the target secret is gone).
 
-The strand-observability branch added a repair step for the rejoin path only
-(`rejoinAnchorNeedsCapture` / `rejoinRuntimeNeedsBuild`). The same repair-on-next-walk pattern would
-cover received commits: mark "anchor or runtime owed" before the capture, clear it on success, and
-check it at the start of each walk.
+The in-memory epoch runtime has no equivalent outside the rejoin path. After a pull that applied
+commits, `reconcileCommits` calls `rebuildEpoch()`. If `teardownEpoch()` throws, `buildEpoch()` never
+runs, and the next walk sees the commits as history, so nothing rebuilds the protocol runtimes at the
+new anchor. The walk-failure path in `pullCommits` rebuilds only within the same call. The rejoin path
+already has the repair (`rejoinRuntimeNeedsBuild`): mark "runtime owed" before the rebuild, clear it on
+success, check it at the start of each walk. Extend it to received commits.
 
 ## Test hooks
 
 - Heal, dispose before draining, restart: the owed entries are still re-enacted (or reach the host).
-- Fail `captureAnchor` once after an applied commit: the next walk captures the anchor for that epoch.
+- Make `teardownEpoch` fail once after a pull applies a commit: the next walk rebuilds the runtimes at
+  the new anchor.
