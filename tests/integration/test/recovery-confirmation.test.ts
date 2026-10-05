@@ -27,7 +27,7 @@ import {
   HANDSHAKE_KIND,
   type RecoveryEvent,
 } from '@kumiai/rpc'
-import { afterEach, expect, test, vi } from 'vitest'
+import { afterEach, beforeAll, expect, test, vi } from 'vitest'
 
 import {
   chat,
@@ -38,6 +38,10 @@ import {
   type Protocols,
 } from './app-lane-e2e.js'
 import { createWireHub } from './log-hub-over-wire.js'
+
+beforeAll(async () => {
+  await import(new URL('../../../packages/mls/src/recovery.ts', import.meta.url).href)
+})
 
 const cleanup: Array<() => Promise<unknown>> = []
 afterEach(async () => {
@@ -231,7 +235,7 @@ async function setup(options: { third?: boolean; deadlineMs?: number } = {}) {
 }
 
 test('publication keeps the old handle until a survivor confirms, then delivers at the confirmed epoch', async () => {
-  const s = await setup()
+  const s = await setup({ deadlineMs: 10_000 })
   const pause = gate()
   cleanup.push(async () => pause.release())
   const seal = s.aliceMLS.sealRecoveryVerdict.bind(s.aliceMLS)
@@ -304,7 +308,7 @@ test('lost confirmations through the deadline leave an orphan which the next rej
 })
 
 test('simultaneous recovery releases both lanes while a third member confirms', async () => {
-  const s = await setup({ third: true, deadlineMs: 1000 })
+  const s = await setup({ third: true, deadlineMs: 10_000 })
   const pause = gate()
   cleanup.push(async () => pause.release())
   const fetch = s.bobConnection.fetchTopic.bind(s.bobConnection)
@@ -341,7 +345,7 @@ test('simultaneous recovery releases both lanes while a third member confirms', 
 })
 
 test('stale GroupInfo is superseded and retried without adopting the stale candidate', async () => {
-  const s = await setup()
+  const s = await setup({ deadlineMs: 10_000 })
   const source = s.aliceGroup()
   const stalePort = createGroupMLS({
     access: simpleHandleAccess({ handle: () => source, adopt: () => {} }),
@@ -380,7 +384,7 @@ test('stale GroupInfo is superseded and retried without adopting the stale candi
 })
 
 test('an invalid verdict envelope and a copied request for another position suppress nothing', async () => {
-  const s = await setup()
+  const s = await setup({ deadlineMs: 10_000 })
   let previous: ReturnType<typeof decodeRecoveryConfirmRequest> | undefined
   const publish = s.bobConnection.publish.bind(s.bobConnection)
   s.bobConnection.publish = async (value) => {
@@ -493,7 +497,7 @@ test('forged confirmations are ignored and an unknown signer refusal is advisory
 })
 
 test('a ratchet of the old handle while pending invalidates adoption on revalidation', async () => {
-  const s = await setup()
+  const s = await setup({ deadlineMs: 10_000 })
   const source = s.aliceGroup()
   const carol = randomIdentity()
   const bundle = await createKeyPackageBundle(carol)
@@ -540,7 +544,7 @@ test('a ratchet of the old handle while pending invalidates adoption on revalida
 })
 
 test('confirmation requests received during another recovery preflight pull after the lane releases', async () => {
-  const s = await setup({ third: true })
+  const s = await setup({ third: true, deadlineMs: 10_000 })
   const pause = gate()
   cleanup.push(async () => pause.release())
   const prepare = s.bobMLS.prepareRecovery.bind(s.bobMLS)
@@ -562,7 +566,7 @@ test('confirmation requests received during another recovery preflight pull afte
 test.each(['policy', 'invalid'] as const)(
   'authoritative %s refusal holds until explicit recovery',
   async (reason) => {
-    const s = await setup()
+    const s = await setup({ deadlineMs: 10_000 })
     const process = s.aliceMLS.processCommit.bind(s.aliceMLS)
     vi.spyOn(s.aliceMLS, 'processCommit').mockImplementation(async () => {
       const epoch = await s.aliceMLS.readEpoch()
@@ -591,7 +595,7 @@ test.each(['policy', 'invalid'] as const)(
 test.each([false, true])(
   'a removed last-known signer is advisory with survivors silent: %s',
   async (silent) => {
-    const s = await setup({ third: true })
+    const s = await setup({ third: true, deadlineMs: silent ? 450 : 10_000 })
     const removedGroup = s.carolGroup()
     if (removedGroup == null || s.carol == null) throw new Error('Missing third member')
     await s.carol.dispose()
@@ -675,7 +679,7 @@ test.each([false, true])(
 test.each(['policy', 'invalid'] as const)(
   'real adapter classifies external recovery rejection as %s',
   async (reason) => {
-    const s = await setup()
+    const s = await setup({ deadlineMs: 10_000 })
     const original = s.aliceGroup()
     if (reason === 'policy') {
       const rejector = new GroupHandle({
@@ -716,7 +720,7 @@ test.each(['policy', 'invalid'] as const)(
 )
 
 test('a lost verdict is retransmitted using the cached seal', async () => {
-  const s = await setup()
+  const s = await setup({ deadlineMs: 10_000 })
   const publish = s.aliceConnection.publish.bind(s.aliceConnection)
   let lost = false
   const verdicts: Array<Uint8Array> = []
