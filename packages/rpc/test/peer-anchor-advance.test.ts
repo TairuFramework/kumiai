@@ -238,6 +238,7 @@ describe('an ephemeral dispatch lands on the segment that contains its seal epoc
       ...written,
       save: async (next) => {
         await written.save(next)
+        if (next.pending != null) return
         const race = raceTheRotation
         raceTheRotation = null
         await race?.()
@@ -304,6 +305,7 @@ describe('a logged dispatch lands on the segment that contains its seal epoch', 
       ...written,
       save: async (next) => {
         await written.save(next)
+        if (next.pending != null) return
         const race = raceTheRotation
         raceTheRotation = null
         await race?.()

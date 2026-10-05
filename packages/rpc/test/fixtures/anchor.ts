@@ -1,10 +1,12 @@
-import type { Anchor, AnchorStore } from '../../src/anchor.js'
+import type { Anchor, AnchorSlot, AnchorStore } from '../../src/anchor.js'
 
 export type MemoryAnchorStore = AnchorStore & {
   /** What the store holds right now, or null. A restart keeps it: that is the whole point. */
   stored: () => Anchor | null
-  /** How many rotations were written. One per capture — genesis seed included. */
+  /** All durable slot writes, including rotation records. */
   saves: () => number
+  /** Saves carrying a newly captured anchor, genesis included. */
+  captures: () => number
 }
 
 export type MemoryAnchorStoreOptions = {
@@ -19,18 +21,21 @@ export type MemoryAnchorStoreOptions = {
  * the epoch the anchor sits at.
  */
 export function createMemoryAnchorStore(options: MemoryAnchorStoreOptions = {}): MemoryAnchorStore {
-  let anchor: Anchor | null = options.anchor ?? null
+  let slot: AnchorSlot | null = options.anchor == null ? null : { anchor: options.anchor }
   let saves = 0
+  let captures = 0
 
   return {
     async load() {
-      return anchor
+      return slot
     },
-    async save(next: Anchor) {
+    async save(next: AnchorSlot) {
+      if (next.anchor !== slot?.anchor) captures += 1
       saves += 1
-      anchor = next
+      slot = next
     },
-    stored: () => anchor,
+    stored: () => slot?.anchor ?? null,
     saves: () => saves,
+    captures: () => captures,
   }
 }

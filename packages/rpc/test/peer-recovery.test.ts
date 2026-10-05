@@ -189,9 +189,9 @@ describe('recovery rendezvous', () => {
     const bob = makeMLSPeer(hub, 'bob', secret, options)
     try {
       await bob.peer.resync()
-      const save = vi.spyOn(bob.anchorStore, 'save')
+      const before = bob.anchorStore.captures()
       expect((await bob.peer.recover()).advanced).toBe(true)
-      expect(save).toHaveBeenCalledTimes(1)
+      expect(bob.anchorStore.captures() - before).toBe(1)
     } finally {
       await Promise.all([alice.peer.dispose(), bob.peer.dispose()])
     }

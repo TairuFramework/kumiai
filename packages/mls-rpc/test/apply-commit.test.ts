@@ -181,16 +181,28 @@ test('a failed persist propagates and leaves the handle at its epoch', async () 
   expect(self.handle.epoch).toBe(before)
 })
 
-test('missing entry bodies propagate for the caller to classify', async () => {
-  const group = await createRealGroup(1, 'apply-commit-missing')
-  const self = member(group)
-  const commit = await noteCommit(group, ['x'])
-  const before = self.handle.epoch
-  await expect(
-    applyCommit({ handle: self.handle, commit, ...context(group, self, async () => []) }),
-  ).rejects.toBeInstanceOf(MissingLedgerEntriesError)
-  expect(self.handle.epoch).toBe(before)
-})
+test.each(['ledger', 'roster'])(
+  'missing %s bodies throw before persistence and leave the epoch and roster unchanged',
+  async (kind) => {
+    const group = await createRealGroup(1, `apply-commit-missing-${kind}`)
+    const self = member(group)
+    const commit = kind === 'ledger' ? await noteCommit(group, ['x']) : await buildRealCommit(group)
+    const before = self.handle.epoch
+    const rosterBefore = self.handle.listMembers()
+    const persist = vi.fn(async () => {})
+    await expect(
+      applyCommit({
+        handle: self.handle,
+        commit,
+        ...context(group, self, async () => []),
+        persist,
+      }),
+    ).rejects.toBeInstanceOf(MissingLedgerEntriesError)
+    expect(persist).not.toHaveBeenCalled()
+    expect(self.handle.epoch).toBe(before)
+    expect(self.handle.listMembers()).toEqual(rosterBefore)
+  },
+)
 
 test('a host callback throwing after durable acceptance still reports the advance', async () => {
   const group = await createRealGroup(1, 'apply-commit-callback')

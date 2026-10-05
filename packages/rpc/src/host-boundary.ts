@@ -1,5 +1,6 @@
 import type { GatherOptions } from '@kumiai/broadcast'
 
+import type { AnchorStore } from './anchor.js'
 import type { PendingCommit } from './commit.js'
 import type { GroupCrypto, GroupMLS, PendingAppFrames, PendingRecovery } from './crypto.js'
 import { PeerDisposedError } from './errors.js'
@@ -116,6 +117,11 @@ export const peerHostFields = {
   onSubscribeFailed: 'callback',
   onReceiveEnded: 'callback',
 } as const satisfies Record<keyof Params | keyof GroupPeerMLSParams, ParamKind>
+
+export const anchorStoreHostMembers = {
+  load: 'host',
+  save: 'host',
+} as const satisfies HostMembers<AnchorStore>
 
 export const gatherHostMembers = {
   quorum: 'data',
@@ -292,7 +298,9 @@ export function wrapPeerHost<TParams extends object>(
             ? undefined
             : selectHostMembers(boundary, crypto.pending, pendingFrameHostMembers),
       })
-    } else if (kind === 'mls')
+    } else if (key === 'anchorStore')
+      selected = selectHostMembers(boundary, value as AnchorStore, anchorStoreHostMembers)
+    else if (kind === 'mls')
       selected = selectHostMembers(boundary, value as GroupMLS, mlsHostMembers)
     else if (kind === 'handlers') {
       selected = Object.fromEntries(

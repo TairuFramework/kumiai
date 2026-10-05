@@ -4,7 +4,7 @@
  * @module rpc
  */
 
-export type { Anchor, AnchorStore } from './anchor.js'
+export type { Anchor, AnchorSlot, AnchorStore } from './anchor.js'
 export { type AppAAD, decodeAppAAD, encodeAppAAD } from './app-aad.js'
 export type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
 export type { AppDeliveryResumed, AppDeliveryStalled } from './app-lane.js'

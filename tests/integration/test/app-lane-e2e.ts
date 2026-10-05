@@ -27,6 +27,7 @@ import {
 } from '@kumiai/mls-rpc'
 import type {
   Anchor,
+  AnchorSlot,
   AnchorStore,
   AppCursorStore,
   AppOutbox,
@@ -66,13 +67,13 @@ export type Protocols = { chat: typeof chat }
 // ---------------------------------------------------------------------------
 
 export function createMemoryAnchorStore(): AnchorStore & { stored: () => Anchor | null } {
-  let anchor: Anchor | null = null
+  let slot: AnchorSlot | null = null
   return {
-    load: async () => anchor,
-    save: async (next: Anchor) => {
-      anchor = next
+    load: async () => slot,
+    save: async (next: AnchorSlot) => {
+      slot = next
     },
-    stored: () => anchor,
+    stored: () => slot?.anchor ?? null,
   }
 }
 
@@ -173,8 +174,10 @@ export type MakeMemberParams = {
   handlers?: Record<string, unknown>
   /** Carry a dead member's durable state forward — this is what a restart IS. */
   restartOf?: Member
+  beforeAdopt?: (next: GroupHandle) => void | Promise<void>
   durablePending?: boolean
   recoveryBinding?: GroupMLSParams['recoveryBinding']
+  recovery?: { timeoutMs?: number; deadlineMs?: number; getDelayMs?: () => number }
   onRecovery?: (event: RecoveryEvent) => void | Promise<void>
 }
 
@@ -190,7 +193,8 @@ export function makeMember(params: MakeMemberParams): Member {
     (params.durablePending ? new Map<string, PendingAppFrame>() : undefined)
 
   const getHandle = () => handle
-  const adoptHandle = (next: GroupHandle) => {
+  const adoptHandle = async (next: GroupHandle) => {
+    await params.beforeAdopt?.(next)
     handle = next
   }
   stateStore.save(handle)
@@ -227,6 +231,7 @@ export function makeMember(params: MakeMemberParams): Member {
   const peer = createGroupPeer<Protocols>({
     appOutboxLimit: 128,
     onRecovery: params.onRecovery,
+    recovery: params.recovery,
     hub: connection,
     crypto,
     mls,

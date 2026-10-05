@@ -19,6 +19,12 @@
  */
 
 export {
+  type AnchorStoreConformanceParams,
+  type ConformanceAnchorSlot,
+  type ConformanceAnchorStore,
+  testAnchorStoreConformance,
+} from './anchor-store.js'
+export {
   type AppOutboxConformanceParams,
   type ConformanceAppOutbox,
   type ConformanceAppOutboxEntry,

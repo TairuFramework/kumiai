@@ -20,11 +20,8 @@ const flush = () => new Promise((r) => setTimeout(r, 50))
  * without throwing, the epoch stays, and `listMembers()` has lost the member's own leaf. The
  * double models it that way for the same reason.
  *
- * Asserted on the anchor STORE rather than on the anchor's value, because a capture at an
- * unchanged epoch re-derives the value it already holds — the write is the only visible thing,
- * and it is not the only thing that happens. `captureAnchor` also clears the segment buffer, on
- * the reasoning that a rotation makes undelivered frames unopenable forever; true of a rotation,
- * false here, where the handle is still at the epoch those frames were sealed at.
+ * Count saves carrying a different anchor, excluding pre-advance records and their clears.
+ * A capture also clears the segment buffer, which must survive this non-ratcheting removal.
  */
 describe('a member removed by a commit it applies keeps its anchor', () => {
   test('the removal writes no new anchor, because nothing rotated', async () => {
@@ -47,8 +44,8 @@ describe('a member removed by a commit it applies keeps its anchor', () => {
     await flush()
 
     // The founding capture, and the baseline the removal is measured against.
-    const savesBefore = anchorStore.saves()
-    expect(savesBefore).toBeGreaterThan(0)
+    const capturesBefore = anchorStore.captures()
+    expect(capturesBefore).toBeGreaterThan(0)
     const anchoredAt = anchorStore.stored()
     expect(anchoredAt?.epoch).toBe(1)
 
@@ -76,7 +73,8 @@ describe('a member removed by a commit it applies keeps its anchor', () => {
     // And no anchor was written for it. A capture here would re-derive the value already stored
     // and clear the segment buffer on the way — a rotation's cleanup for something that did not
     // rotate.
-    expect(anchorStore.saves()).toBe(savesBefore)
+    expect(anchorStore.captures()).toBe(capturesBefore)
+    expect((await anchorStore.load())?.pending).toBeUndefined()
     expect(anchorStore.stored()?.epoch).toBe(1)
     expect(anchorStore.stored()?.secret).toEqual(anchoredAt?.secret)
 

@@ -45,7 +45,7 @@ overview: https://github.com/TairuFramework/kigu/blob/main/docs/stack.md
 | `GroupCrypto` | `epoch`, `exportSecret`, `wrap`, `unwrap`, `frameEpoch`, `frameAAD`, `sealEntries`, `openEntries`; optional `pending` for durable app delivery |
 | `GroupMLS` | commit lifecycle, `rosterEntries`, `readCommitHeader` (incl. `external`) |
 | `CommitJournal` | single slot; loses a commit whose process died in the acceptance window |
-| `AnchorStore` | the anchor; without it a restart partitions the peer from its own group |
+| `AnchorStore` | the anchor and one unresolved advance, repaired before another advance or startup delivery |
 | `AppCursorStore` | the read position; without it the drain re-reads history forever |
 
 `onAppWindowPruned` is **optional** — the line is whether omitting it loses messages. A host with no
@@ -70,9 +70,8 @@ Bounds this design has, on purpose, rather than hides:
 
 - **A member away beyond the retention window** loses those messages — surfaced as a pruned-window
   event, never silent.
-- **The `processCommit` → anchor-save window.** `processCommit` is durable; a crash before the anchor
-  is persisted restores a stale anchor and misses the new segment until the next roster change.
-  Closing it needs the anchor inside the same durable write as the handle, which rpc cannot reach.
+- **A host advancing outside the peer can lose a rotation secret.** The durable rotation record then
+  requires confirmed recovery before publishing or advancing again.
 - **A laggard publisher** — a member still at epoch E writing to segment E's topic after the group
   has rotated past it seals bytes nobody can open again. Inherent.
 - **A fresh joiner cannot drain pre-join frames** (its ts-mls history window is empty). Correct by

@@ -2,6 +2,7 @@ import {
   type ConformanceAppOutbox,
   type ConformanceCryptoMember,
   type ConformanceMLSMember,
+  testAnchorStoreConformance,
   testAppOutboxConformance,
   testGroupCryptoConformance,
   testGroupMLSConformance,
@@ -15,6 +16,7 @@ import {
   isAppFrameStorageError,
   type PendingAppFrame,
 } from '../src/crypto.js'
+import { createMemoryAnchorStore } from './fixtures/anchor.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import {
   createMemoryGroupMLS,
@@ -237,3 +239,8 @@ testGroupMLSConformance({
 
 testAppOutboxConformance({ label: 'createMemoryAppOutbox', createOutbox: createMemoryAppOutbox })
 const _outboxIsAPort = (outbox: AppOutbox): ConformanceAppOutbox => outbox
+
+testAnchorStoreConformance({
+  label: 'rpc memory anchor store',
+  createStore: createMemoryAnchorStore,
+})

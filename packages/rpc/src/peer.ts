@@ -23,7 +23,7 @@ import type { StoredMessage } from '@kumiai/hub-protocol'
 import type { LogHub } from '@kumiai/hub-tunnel'
 import { createRuntime, type Runtime } from '@sozai/runtime'
 
-import type { Anchor, AnchorStore } from './anchor.js'
+import type { Anchor, AnchorSlot, AnchorStore } from './anchor.js'
 import { decodeAppAAD, encodeAppAAD } from './app-aad.js'
 import type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
 import { type AppDeliveryResumed, type AppDeliveryStalled, createAppLane } from './app-lane.js'
@@ -210,7 +210,7 @@ export type GroupPeerMLSParams = {
   /** Durable single-slot journal. Written before every publish, cleared on both outcomes. */
   journal: CommitJournal
   /**
-   * Durable store for the app-lane anchor. Written on every rotation, read once at construction.
+   * Durable anchor slot. Records each advance before it runs and clears the record after resolution.
    * Persisted, not derived — see {@link anchor} for why it cannot be re-derived from the handle.
    */
   anchorStore: AnchorStore
@@ -664,6 +664,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
 
   let sealBarrier: Promise<void> | undefined
   let releaseSealBarrier: (() => void) | undefined
+  let anchorPending: AnchorSlot['pending']
+  let anchorRecoveryPending = false
   let sealError: Error | undefined
   const finishSealBarrier = (): void => {
     sealBarrier = undefined
@@ -671,27 +673,47 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     releaseSealBarrier = undefined
   }
 
-  /**
-   * Capture the anchor from the port's post-commit handle and persist it. The one place the
-   * anchor is written from the live epoch, and the one place it is saved.
-   *
-   * KNOWN BOUND: `processCommit` is durable before this runs, so a crash between the two leaves a
-   * persisted anchor one rotation stale, and the restarted peer stays off the group's topic until
-   * the next roster change rotates it again. Closing it needs the anchor inside the same durable
-   * write as the handle, which this layer cannot reach.
-   */
   const captureAnchor = async (): Promise<void> => {
-    // Secret and epoch from one export: a pair from two reads can straddle a handle move.
     const { secret, epoch } = await crypto.exportSecret(APP_TOPIC_LABEL)
     if (disposed) return
     anchor = { secret, epoch }
+    anchorPending = undefined
     sealError = undefined
     finishSealBarrier()
-    await anchorStore?.save(anchor)
-    if (disposed) return
-    // The anchor moving IS the segment boundary, so every capture ends the segment the buffer
-    // belongs to. AFTER the assignment above: the lane rebuilds its cursors off the live anchor.
     appLane.reset()
+    await anchorStore?.save({ anchor })
+  }
+
+  const resolveAnchorRotation = async (
+    port: GroupMLS,
+    knownUnlanded = false,
+    initial = false,
+  ): Promise<void> => {
+    const record = anchorPending
+    if (record == null) return
+    const epoch = await port.readEpoch()
+    assertLive()
+    if (epoch === record.epochBefore) {
+      if (!knownUnlanded && !initial) return
+      anchorPending = undefined
+      sealError = undefined
+      finishSealBarrier()
+      await anchorStore?.save({ anchor })
+    } else if (epoch === record.epochAfter) {
+      const roster = (await port.rosterEntries()).map((entry) => normalizeDID(entry.did))
+      if (record.forced || detectRosterChange(record.rosterBefore, roster)) {
+        await captureAnchor()
+      } else {
+        anchorPending = undefined
+        sealError = undefined
+        finishSealBarrier()
+        await anchorStore?.save({ anchor })
+      }
+    } else {
+      anchorRecoveryPending = true
+      healRequested = true
+      sealError = new Error('app anchor requires confirmed recovery')
+    }
   }
 
   /**
@@ -1021,6 +1043,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           held: () =>
             locallyRemoved ||
             stranded ||
+            anchorRecoveryPending ||
             sealBarrier != null ||
             sealError != null ||
             activeRecovery != null ||
@@ -1271,8 +1294,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * The ledger entries this peer held when it rejoined — snapshotted BEFORE the rejoined handle
    * replaces them, since a handle that rejoined by external commit holds an EMPTY ledger.
    *
-   * The peer's own LEDGER, not its journal (always settled by the time a heal runs). What a
-   * healing peer holds that the group may not is its ledger: entries enacted on a discarded
+   * A lost anchor secret also defers journal bodies into this set. Other entries come from the
+   * peer's ledger: entries enacted on a discarded
    * branch, or kept while the group moved on. Filtering that against the group's authenticated
    * ledger is the membership rule as a set-difference: re-enact iff the group's ledger does not
    * already contain it.
@@ -1286,7 +1309,6 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     trigger: RecoveryTrigger
     entries: Array<string>
   } | null = null
-  let rejoinAnchorNeedsCapture = false
   let rejoinRuntimeNeedsBuild = false
 
   /**
@@ -1614,81 +1636,78 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     ledgerWaiters.get(reply.requestID)?.(reply.sealed)
   }
 
-  /**
-   * THE ONE PATH THE HANDLE RATCHETS ON, and the invariant it holds: a handle does not ratchet
-   * past an epoch until that epoch's frames are read and its anchor is taken. Both are one-way
-   * doors — after the advance those frames are ciphertext forever, and that epoch's secret can
-   * never be exported again.
-   *
-   * A seam, not a rule: the peer ratchets in four far-apart places (applied from the log, authored
-   * by this peer, adopted from the journal on restart, and a rejoin), each free to uphold half of
-   * this or none of it. Routing them all through here means the fifth site cannot get it wrong.
-   * `advance` does the ratcheting and nothing else; everything around it is this function's.
-   *
-   * The ROSTER DIFF decides the rotation — see {@link anchor} for why. The before-read is
-   * unconditional, since whether the diff will be needed is not knowable until the advance has
-   * already destroyed the answer. `rotatesAnyway` is the one thing no diff can see: an
-   * external-commit rejoin by a member the roster still holds replaces that member's leaf and
-   * moves no DID, yet must rotate all the same (see {@link anchor}).
-   *
-   * The anchor is captured from the port's POST-advance handle — the epoch every member lands on
-   * by making this same advance — which is what makes it agreed rather than local.
-   */
+  /** Read the departing epoch's frames and persist its rotation record before ratcheting. */
   const advanceHandle = async <T>(
     port: GroupMLS,
     advance: () => Promise<T>,
-    rotatesAnyway: (advanced: T) => boolean = () => false,
-    appliedEpochs?: (advanced: T) => { epochBefore: number; epochAfter: number },
+    identity: { epochAfter: number; forced: boolean; advance: string; recovery?: boolean },
     floorPosition?: LogPosition,
   ): Promise<T> => {
-    // Read this epoch's app frames BEFORE the advance that leaves it — the last moment they can
-    // be read, since the advance ratchets the handle on and takes this epoch's key material with
-    // it. Per frame-epoch, not per rotation: a segment spanning five epochs is dispensed five
-    // times off the one pull.
-    await appLane.deliver()
+    await resolveAnchorRotation(port)
     assertLive()
-    // Normalized at this ingress so an MLS-recovered form flip between the two reads (never a
-    // real membership change) does not read as one — see {@link detectRosterChange}.
-    const rosterBefore = (await port.rosterEntries()).map((e) => normalizeDID(e.did))
+    const pending = anchorPending
+    const retry = pending?.advance === identity.advance
+    const confirmedRecovery = identity.recovery === true && anchorRecoveryPending
+    if (
+      (anchorRecoveryPending && !confirmedRecovery) ||
+      (anchorPending != null && !retry && !confirmedRecovery)
+    ) {
+      throw new RecoveryRequiredError('an earlier anchor rotation is unresolved')
+    }
+    if (!confirmedRecovery) await appLane.deliver()
     assertLive()
+    const rosterBefore =
+      retry && pending != null
+        ? pending.rosterBefore
+        : (await port.rosterEntries()).map((entry) => normalizeDID(entry.did))
     const epochBefore = await port.readEpoch()
     assertLive()
-    sealBarrier = new Promise<void>((resolve) => {
-      releaseSealBarrier = resolve
-    })
-    try {
-      const advanced = await advance()
-      const epochs = appliedEpochs?.(advanced)
-      const actualBefore = epochs?.epochBefore ?? epochBefore
-      const epochAfter = epochs?.epochAfter ?? (await port.readEpoch())
-      // GATED ON THE HANDLE ACTUALLY RATCHETING: a roster diff alone is not evidence that it did. A
-      // commit that REMOVES this member does not advance its handle (there is no epoch to move to,
-      // since the commit's path excludes the dropped leaf), yet real MLS still applies proposals to
-      // the tree — so the roster comes back WITHOUT this member at an epoch that did not move.
-      // (Measured against ts-mls: `processMessage` returns without throwing, epoch stays,
-      // `listMembers()` has lost the leaf.) Undiscriminated, that reads as a rotation.
-      //
-      // An ungated capture would clear the segment buffer while the handle still holds its epoch,
-      // dropping frames that can still be opened.
-      const ratcheted = epochAfter !== actualBefore
-      const rosterAfter = (await port.rosterEntries()).map((e) => normalizeDID(e.did))
-      if (rosterBefore.includes(localDID) && !rosterAfter.includes(localDID)) {
+    const record =
+      retry && pending != null
+        ? pending
+        : {
+            epochBefore,
+            epochAfter: identity.epochAfter,
+            rosterBefore,
+            forced: identity.forced,
+            advance: identity.advance,
+          }
+    await anchorStore?.save({ anchor, pending: record })
+    assertLive()
+    anchorPending = record
+    if (sealBarrier == null)
+      sealBarrier = new Promise<void>((resolve) => {
+        releaseSealBarrier = resolve
+      })
+    const observe = async (): Promise<void> => {
+      const epoch = await port.readEpoch()
+      const roster = (await port.rosterEntries()).map((entry) => normalizeDID(entry.did))
+      if (rosterBefore.includes(localDID) && !roster.includes(localDID)) {
         locallyRemoved = true
         logDelivery?.removed()
       }
-      if (ratcheted && floorPosition != null)
-        floor = { epoch: epochAfter, position: floorPosition, covered: true }
-      if (ratcheted && (detectRosterChange(rosterBefore, rosterAfter) || rotatesAnyway(advanced))) {
-        await captureAnchor()
-      }
+      if (epoch === identity.epochAfter && epoch !== record.epochBefore && floorPosition != null)
+        floor = { epoch, position: floorPosition, covered: true }
+    }
+    try {
+      const advanced = await advance()
+      await observe()
+      await resolveAnchorRotation(port, true)
+      if (confirmedRecovery && anchorPending == null) anchorRecoveryPending = false
       return advanced
     } catch (error) {
-      if ((await port.readEpoch()) !== epochBefore && sealBarrier != null) {
+      try {
+        await observe()
+        await resolveAnchorRotation(port)
+      } catch {
+        // The record keeps the exact epoch available for the next repair.
+      }
+      if (anchorPending != null) {
         sealError = new Error('app anchor unavailable after failed epoch advance', { cause: error })
       }
       throw error
     } finally {
-      finishSealBarrier()
+      if (anchorPending == null && !anchorRecoveryPending) finishSealBarrier()
     }
   }
 
@@ -1712,6 +1731,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * end, so it DOES record one — the `stranded` flag, not a withheld tip, then stops `commit()`.
    */
   const walkCommits = async (port: GroupMLS, topicID: string): Promise<boolean> => {
+    if (anchorRecoveryPending) return false
     let advancedEpoch = false
     const started = logDelivery?.beginWalk() ?? 0
     let covered = true
@@ -1988,8 +2008,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
               // A REJOIN rotates the anchor too, from a member the roster diff cannot see: an
               // external commit by a member the roster still holds leaves every DID where it was.
               // Only an APPLIED commit says anything about the group.
-              (result) => result.advanced && header?.external === true,
-              (result) => result,
+              {
+                epochAfter: (header?.epoch ?? framedEpoch) + 1,
+                forced: header?.external === true,
+                advance: commitDigest,
+              },
               position,
             )
           } catch (error) {
@@ -1999,6 +2022,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
               // a retry, and this is not an outcome it can name.
               throw error
             }
+            if ((await port.readEpoch()) !== framedEpoch) {
+              await resolveAnchorRotation(port)
+              throw error
+            }
+            await resolveAnchorRotation(port, true)
             // The commit names ledger entries whose bodies will not resolve. POISON: drop, advance,
             // do NOT heal. The bodies ride the commit sealed under its framed epoch, so a blob this
             // peer cannot open is one no member at this epoch can — nobody applies it, and the next
@@ -2183,6 +2211,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       retention: commitLogRetentionSeconds,
     })
     rendezvousUnsubscribe = mux.onInbound(rendezvousTopicID, onRendezvousMessage)
+    if (anchorRecoveryPending) return
     // Then seed the cursor by READING the log — commits published before this peer subscribed are
     // exactly the ones no push will bring it. A lane operation, so the journal replays AHEAD of
     // it. Neither step rebuilds the epoch — buildEpoch runs next.
@@ -2245,6 +2274,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    */
   const replayJournal = async (): Promise<boolean> => {
     journalReplayed = true
+    if (anchorRecoveryPending) return false
     if (mls == null || journal == null || commitTopicID == null) return false
     const entry = await journal.get()
     if (disposed || entry == null) return false
@@ -2267,7 +2297,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       })
       // Through the seam: the adopt ratchets the handle, so this epoch's app frames are read
       // first and the anchor is taken if the journalled commit moved the roster.
-      await advanceHandle(mls, adoptIfLive, undefined, undefined, accepted)
+      await advanceHandle(
+        mls,
+        adoptIfLive,
+        { epochAfter: entry.epoch + 1, forced: false, advance: digestAppliedCommit(entry.commit) },
+        accepted,
+      )
       if (disposed) return false
       await journal.clear(entry.publishID)
       return true
@@ -2333,7 +2368,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       sequenceID: accepted,
       digest: digestAppliedCommit(entry.commit),
     })
-    await advanceHandle(mls, adoptIfLive, undefined, undefined, accepted)
+    await advanceHandle(
+      mls,
+      adoptIfLive,
+      { epochAfter: entry.epoch + 1, forced: false, advance: digestAppliedCommit(entry.commit) },
+      accepted,
+    )
     if (disposed) return false
     await journal.clear(entry.publishID)
     return true
@@ -2358,11 +2398,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     if (disposed || awaitingBootstrap == null) return
     // Restore the subscription before gathering the ledger: responders may already have
     // rotated to the new app anchor. A failed repair remains pending for the next lane call.
-    if (rejoinAnchorNeedsCapture) {
-      await captureAnchor()
-      if (disposed) return
-      rejoinAnchorNeedsCapture = false
-    }
+    if (mls != null) await resolveAnchorRotation(mls)
+    if (disposed) return
     if (rejoinRuntimeNeedsBuild) {
       await rebuildEpoch()
       if (disposed) return
@@ -2497,6 +2534,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     const build = boundary.wrap(buildInput)
     await ready
     assertLive()
+    if (anchorRecoveryPending)
+      throw new RecoveryRequiredError('commit: app anchor requires confirmed recovery')
     if (activeRecovery != null) await activeRecovery
     if (mls == null || journal == null || commitTopicID == null) {
       throw new Error('commit: this peer has no MLS port, so it has no group to commit to')
@@ -2539,7 +2578,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         // pull already took the live tip, so a commit here would win at an epoch it never caught
         // up to. Gating on `stranded`, not `healRequested`, is what survives a heal that found no
         // responder.
-        if (stranded) {
+        if (stranded || anchorRecoveryPending) {
           throw new RecoveryRequiredError(
             'commit: the log holds a frame this peer cannot reconcile with — its own un-merged commit, or a commit from an epoch ahead of it. It must recover before it can commit again.',
           )
@@ -2629,7 +2668,16 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         // Remove keeps publishing to a topic the removed member still holds, and the author of an
         // Add sits on a topic the new member's handle cannot derive — silently, and no restart
         // heals it.
-        await advanceHandle(mls, () => pending.onAccepted(), undefined, undefined, accepted)
+        await advanceHandle(
+          mls,
+          () => pending.onAccepted(),
+          {
+            epochAfter: framedEpoch + 1,
+            forced: false,
+            advance: digestAppliedCommit(pending.commit),
+          },
+          accepted,
+        )
         assertLive()
         await slot.clear(publishID)
         assertLive()
@@ -2779,8 +2827,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           //    must NOT run: the external commit would rotate the tree for the whole group. Rebuild
           //    if it moved the epoch, before anything is framed: the peer that lost a heal race
           //    applies the winner's commit HERE.
-          healRequested = false
-          await reconcileCommits()
+          if (!anchorRecoveryPending) {
+            healRequested = false
+            await reconcileCommits()
+          }
           assertLive()
 
           // 2. The head to race at, from the store's own reply.
@@ -2833,6 +2883,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             ...new Set([
               ...(inFlightEntries ?? awaitingBootstrap?.entries ?? []),
               ...(await port.getLedger()),
+              ...(anchorRecoveryPending ? ((await journal?.get())?.bodies ?? []) : []),
             ]),
           ]
           assertLive()
@@ -2948,7 +2999,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           if (
             (await port.readEpoch()) !== epochBeforeRejoin ||
             reconciledHead !== headBeforeRejoin ||
-            (journal != null && (await journal.get()) != null)
+            (!anchorRecoveryPending && journal != null && (await journal.get()) != null) ||
+            (anchorPending != null && !anchorRecoveryPending)
           ) {
             pendingRecovery = null
             return failed('unconfirmed', { advisory: [] })
@@ -2958,7 +3010,6 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           const rejoinedAtEpoch = (await port.readCommitHeader(pending.commit))?.epoch
           assertLive()
           retryRecoveryAdoption = async () => {
-            const adoptionEpoch = await port.readEpoch()
             // Through the seam, like every other site that ratchets the handle — and it rotates
             // ANYWAY: this is the rejoin, which no roster diff can see (see {@link anchor}). The
             // anchor is the POST-commit epoch: the handle advances inside the seam and only then is
@@ -2969,8 +3020,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
                 try {
                   await pending.onAccepted()
                 } finally {
-                  // The adapter may adopt the handle and then fail to persist it. Observe the
-                  // ratchet itself: a pre-adoption failure leaves this snapshot with the retry.
+                  // A callback can throw after replacing the handle. Observe the ratchet so
+                  // bootstrap survives it, while a pre-adoption failure keeps the pending retry.
                   if ((await port.readEpoch()) !== epochBeforeRejoin) {
                     awaitingBootstrap = { attemptID, trigger, entries: inFlight }
                     // Adoption enacted these bytes even if persistence rejected afterward.
@@ -2981,21 +3032,24 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
                       })
                     }
                     stranded = false
-                    rejoinAnchorNeedsCapture = true
                     rejoinRuntimeNeedsBuild = true
                   }
                 }
               },
-              () => true,
-              () => ({ epochBefore: epochBeforeRejoin, epochAfter: pending.epoch }),
+              {
+                epochAfter: pending.epoch,
+                forced: true,
+                advance: digestAppliedCommit(pending.commit),
+                recovery: true,
+              },
               asLogPosition(sequenceID),
             )
-            if (rejoinAnchorNeedsCapture && adoptionEpoch === pending.epoch) await captureAnchor()
-            rejoinAnchorNeedsCapture = false
             assertLive()
             const accepted = asLogPosition(sequenceID)
             reconciledHead = accepted
             commitLogHead = accepted
+            const deferred = await journal?.get()
+            if (deferred != null) await journal?.clear(deferred.publishID)
             healRequested = false
             // The one place the commit gate is released: the rejoin landed, so this peer's leaf is
             // back in the tree and the stale-epoch fork it guards is closed. A bootstrap that still
@@ -3158,7 +3212,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     const stored = await anchorStore?.load()
     if (disposed) return
     if (stored != null) {
-      anchor = stored
+      anchor = stored.anchor
+      anchorPending = stored.pending
+      if (mls != null) await resolveAnchorRotation(mls, false, true)
     } else {
       await captureAnchor()
     }
@@ -3169,6 +3225,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     if (disposed) return
     await buildEpoch()
     if (disposed) return
+    if (anchorRecoveryPending) return
     // The seed pull precedes the app listeners. Read once more after registration to close
     // the publication gap; a failed read is retried on the same independent schedule.
     if (crypto.pending != null) {
