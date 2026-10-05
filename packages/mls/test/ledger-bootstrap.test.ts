@@ -440,12 +440,7 @@ async function promotedAdminWorld(groupID: string) {
 }
 
 describe("a rejoined peer's empty ledger is a roster reset", () => {
-  test('an empty-ledger peer rejects the promoted admin’s commit; a bootstrapped one applies it', async () => {
-    // Two worlds, because one handle cannot do both legs: processing a commit
-    // consumes its secret-tree key, so the same frame cannot be replayed into the
-    // same handle after a rejection. The worlds are built by one function and
-    // differ in exactly one act — whether Carol bootstraps.
-
+  test('an empty-ledger peer rejects the promoted admin’s commit', async () => {
     // Leg 1 — no bootstrap. The empty ledger folds to the anchor alone, so the
     // promoted admin is not an admin to this peer, and it REJECTS his commit. The
     // rejoined peer does not merely lack history: it rejects the live group's
@@ -457,7 +452,9 @@ describe("a rejoined peer's empty ledger is a roster reset", () => {
     await expect(stranded.carolRejoined.processMessage(stranded.bobCommit)).rejects.toThrow(
       CommitRejectedError,
     )
+  })
 
+  test('a bootstrapped peer applies the promoted admin’s commit', async () => {
     // Leg 2 — bootstrap first, from an honest responder. The ledger is complete,
     // the promoted admin is an admin again, and the same commit APPLIES.
     const healed = await promotedAdminWorld('bootstrap-liveness-healed')

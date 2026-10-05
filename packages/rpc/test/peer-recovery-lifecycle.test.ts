@@ -10,12 +10,13 @@ import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
+import { controlRecoveryClock, drainUntil } from './fixtures/recovery-clock.js'
 
 const members = ['alice', 'bob', 'carol']
 const secret = (byte: number) => new Uint8Array(32).fill(byte)
 const eventsOf = (events: Array<RecoveryEvent>) => events.map((event) => event.phase)
 
-describe('recovery lifecycle', () => {
+describe('recovery lifecycle', { concurrent: false }, () => {
   test.each([
     { timeoutMs: 10, deadlineMs: 100, reason: 'no-responder' },
     { timeoutMs: 100, deadlineMs: 10, reason: 'deadline' },
@@ -73,6 +74,7 @@ describe('recovery lifecycle', () => {
   })
 
   test('a responder makes one consumer attempt succeed', async () => {
+    controlRecoveryClock(40)
     const hub = new FakeHub()
     const rs = secret(0xb4)
     const carol = makeMLSPeer(hub, 'carol', rs, {
@@ -96,6 +98,7 @@ describe('recovery lifecycle', () => {
   })
 
   test('automatic heal emits its own trigger and closes the strand episode', async () => {
+    controlRecoveryClock(40)
     const hub = new FakeHub()
     const rs = secret(0xb5)
     const first = await publishCommit({ hub, senderDID: 'zoe', recoverySecret: rs, epoch: 3 })
@@ -117,7 +120,8 @@ describe('recovery lifecycle', () => {
         strands.push(o)
       },
     })
-    await vi.waitFor(() => expect(eventsOf(events)).toEqual(['started', 'succeeded']))
+    await drainUntil(() => eventsOf(events).includes('succeeded'))
+    expect(eventsOf(events)).toEqual(['started', 'succeeded'])
     expect(events[0]).toMatchObject({ trigger: 'automatic', groupID: commitTopic(rs) })
     expect(strands).toHaveLength(1)
     const next = await publishCommit({
@@ -126,7 +130,8 @@ describe('recovery lifecycle', () => {
       recoverySecret: rs,
       epoch: bob.mls.epoch() + 1,
     })
-    await vi.waitFor(() => expect(strands).toHaveLength(2))
+    await drainUntil(() => strands.length === 2)
+    expect(strands).toHaveLength(2)
     expect(strands[1]?.position).toBe(next.sequenceID)
     await bob.peer.dispose()
     await carol.peer.dispose()
@@ -385,6 +390,7 @@ describe('recovery lifecycle', () => {
   })
 
   test('throwing and rejecting observers cannot change the recovery result', async () => {
+    controlRecoveryClock(40)
     const hub = new FakeHub()
     const rs = secret(0xb9)
     const carol = makeMLSPeer(hub, 'carol', rs, {
@@ -409,6 +415,7 @@ describe('recovery lifecycle', () => {
   })
 
   test('bootstrap failure reports failed rather than succeeded', async () => {
+    controlRecoveryClock()
     const hub = new FakeHub()
     const rs = secret(0xba)
     const carolCrypto = createFakeCrypto({ epoch: 1, localDID: 'carol' })
@@ -435,7 +442,11 @@ describe('recovery lifecycle', () => {
         events.push(e)
       },
     })
-    expect(await bob.peer.recover()).toEqual({ advanced: false, reenact: [] })
+    const opened = vi.spyOn(bob.mls, 'openSealedLedger')
+    const recovery = bob.peer.recover()
+    await drainUntil(() => opened.mock.calls.length > 0)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(await recovery).toEqual({ advanced: false, reenact: [] })
     expect(eventsOf(events)).toEqual(['started', 'failed'])
     expect(events[1]).toMatchObject({ reason: 'bootstrap-failed' })
     await bob.peer.dispose()
@@ -443,11 +454,21 @@ describe('recovery lifecycle', () => {
   })
 
   test('a consumer joining automatic heal drains its owed entries once', async () => {
+    controlRecoveryClock(40)
     const hub = new FakeHub()
     const rs = secret(0xbb)
     const carol = makeMLSPeer(hub, 'carol', rs, {
       members,
       recovery: { timeoutMs: 200, deadlineMs: 400, getDelayMs: () => 40 },
+    })
+    let releaseReply = () => {}
+    const replyGate = new Promise<void>((resolve) => {
+      releaseReply = resolve
+    })
+    const seal = carol.mls.sealGroupInfo.bind(carol.mls)
+    vi.spyOn(carol.mls, 'sealGroupInfo').mockImplementation(async (...args) => {
+      await replyGate
+      return seal(...args)
     })
     await carol.peer.commit(buildLedgerCommit(carol, ['circle:x=Carol']))
     const ahead = await publishCommit({ hub, senderDID: 'zoe', recoverySecret: rs, epoch: 3 })
@@ -472,12 +493,12 @@ describe('recovery lifecycle', () => {
         events.push(e)
       },
     })
-    await vi.waitFor(() =>
-      expect(
-        hub.published.some((m) => m.topicID === rendezvousTopic(rs) && m.senderDID === 'bob'),
-      ).toBe(true),
+    await drainUntil(() =>
+      hub.published.some((m) => m.topicID === rendezvousTopic(rs) && m.senderDID === 'bob'),
     )
-    const result = await bob.peer.recover()
+    const recovery = bob.peer.recover()
+    releaseReply()
+    const result = await recovery
     expect(result).toEqual({ advanced: true, reenact: ['circle:x=Bob'] })
     expect(eventsOf(events)).toEqual(['started', 'succeeded'])
     expect(events[0]).toMatchObject({ trigger: 'automatic' })

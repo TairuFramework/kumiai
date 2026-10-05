@@ -12,11 +12,12 @@ import { createMemoryCommitJournal, type MemoryCommitJournal } from './fixtures/
 import { createMemoryGroupMLS, type MemoryGroupMLS } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, buildRemoveCommit, makeMLSPeer } from './fixtures/peer.js'
 import { createRecordingHub } from './fixtures/recording-hub.js'
+import { controlRecoveryClock, drainUntil } from './fixtures/recovery-clock.js'
 
 const flush = (ms = 40) => new Promise((r) => setTimeout(r, ms))
 const members = ['alice', 'bob']
 
-describe('dispose against an establishing directed session', () => {
+describe('dispose against an establishing directed session', { concurrent: false }, () => {
   test('to() queued behind init does not hand back a client after dispose', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x81)
@@ -69,7 +70,7 @@ describe('dispose against an establishing directed session', () => {
   })
 })
 
-describe('dispose against an in-flight subscribe', () => {
+describe('dispose against an in-flight subscribe', { concurrent: false }, () => {
   test('a subscribe still in flight when dispose returns does not report to the disposed host', async () => {
     const fake = new FakeHub()
     const rs = new Uint8Array(32).fill(0x84)
@@ -157,7 +158,7 @@ describe('dispose against an in-flight subscribe', () => {
   })
 })
 
-describe('dispose against a commit made afterwards', () => {
+describe('dispose against a commit made afterwards', { concurrent: false }, () => {
   test('commit() after dispose writes nothing to the hub', async () => {
     const fake = new FakeHub()
     const rs = new Uint8Array(32).fill(0x85)
@@ -218,8 +219,9 @@ describe('dispose against a commit made afterwards', () => {
   })
 })
 
-describe('dispose against a replay made afterwards', () => {
+describe('dispose against a replay made afterwards', { concurrent: false }, () => {
   test('replay() after dispose asks the group for nothing', async () => {
+    controlRecoveryClock(5)
     const fake = new FakeHub()
     const rs = new Uint8Array(32).fill(0x86)
     const healMembers = ['alice', 'bob', 'carol']
@@ -247,17 +249,21 @@ describe('dispose against a replay made afterwards', () => {
       members: healMembers,
       recovery: { timeoutMs: 100, getDelayMs: () => 5, deadlineMs: 400 },
     })
-    await flush()
+    await bob.peer.resync()
     await bob.peer.commit(buildLedgerCommit(bob, ['role:carol=admin', 'role:dave=admin']))
-    await flush()
+    await bob.peer.resync()
 
     const alice = makeMLSPeer(recorder.hub, 'alice', rs, {
       epoch: 1,
       members: healMembers,
       recovery: { timeoutMs: 100, getDelayMs: () => 5, deadlineMs: 400 },
     })
-    await flush()
-    await alice.peer.recover()
+    await alice.peer.resync()
+    const open = vi.spyOn(alice.mls, 'openSealedLedger')
+    const recovery = alice.peer.recover()
+    await drainUntil(() => open.mock.results.some((result) => result.type === 'return'))
+    await vi.advanceTimersByTimeAsync(400)
+    await recovery
     expect(await alice.mls.isLedgerComplete()).toBe(false)
 
     await alice.peer.dispose()
@@ -269,7 +275,7 @@ describe('dispose against a replay made afterwards', () => {
     // the group for the ledger" into a bare timeout that names nothing.
     const op = alice.peer.replay()
     const owned = op.catch(() => {})
-    await flush(150)
+    await vi.advanceTimersByTimeAsync(150)
 
     expect(recorder.calls()).toEqual([])
     await expect(op).rejects.toBeInstanceOf(PeerDisposedError)
@@ -279,7 +285,7 @@ describe('dispose against a replay made afterwards', () => {
   })
 })
 
-describe('dispose against a recover made afterwards', () => {
+describe('dispose against a recover made afterwards', { concurrent: false }, () => {
   test('recover() after dispose asks the group for nothing', async () => {
     const fake = new FakeHub()
     const rs = new Uint8Array(32).fill(0x87)
@@ -310,7 +316,9 @@ describe('dispose against a recover made afterwards', () => {
   })
 })
 
-describe('dispose against a commit delivery queued behind a lane operation', () => {
+describe('dispose against a commit delivery queued behind a lane operation', {
+  concurrent: false,
+}, () => {
   test('a delivery that resumes after dispose does not pull the commit log', async () => {
     const fake = new FakeHub()
     const rs = new Uint8Array(32).fill(0x88)
@@ -374,7 +382,7 @@ describe('dispose against a commit delivery queued behind a lane operation', () 
   })
 })
 
-describe('dispose against a ledger reply whose timer already fired', () => {
+describe('dispose against a ledger reply whose timer already fired', { concurrent: false }, () => {
   test('the sealed ledger is not published after dispose', async () => {
     const fake = new FakeHub()
     const rs = new Uint8Array(32).fill(0x89)
@@ -459,7 +467,9 @@ describe('dispose against a ledger reply whose timer already fired', () => {
   })
 })
 
-describe('dispose against a recovery reply whose timer already fired', () => {
+describe('dispose against a recovery reply whose timer already fired', {
+  concurrent: false,
+}, () => {
   test('the sealed group info is not published after dispose', async () => {
     const fake = new FakeHub()
     const rs = new Uint8Array(32).fill(0x8a)
@@ -534,7 +544,9 @@ describe('dispose against a recovery reply whose timer already fired', () => {
   })
 })
 
-describe('dispose against a requester ledger reply already in its IIFE', () => {
+describe('dispose against a requester ledger reply already in its IIFE', {
+  concurrent: false,
+}, () => {
   test('bootstrapLedger is not called after dispose', async () => {
     const fake = new FakeHub()
     const rs = new Uint8Array(32).fill(0x8b)
@@ -752,7 +764,9 @@ const hubHoldingLedgerReply = (fake: FakeHub, holderDID: string): HeldReceive =>
 // post-`await settled` continuation (the unsubscribe + clear). The waiter then fires with
 // `disposed === true` and the gather's own `settled === false`, and the early guard must return
 // without entering `openSealedLedger`.
-describe('dispose against a ledger reply delivered inside the dispose window', () => {
+describe('dispose against a ledger reply delivered inside the dispose window', {
+  concurrent: false,
+}, () => {
   test('the early guard drops the reply before openSealedLedger', async () => {
     const fake = new FakeHub()
     const rs = new Uint8Array(32).fill(0x8f)
@@ -836,7 +850,7 @@ describe('dispose against a ledger reply delivered inside the dispose window', (
 // closing that window would need draining the commit mutex in `dispose()`, which Task 4's brief
 // rejects as unsafe (`build()`/`onAccepted()` are host-supplied and unbounded; draining can hang
 // dispose or self-deadlock a host that calls dispose from its own callback).
-describe('dispose against a lane op already inside the commit mutex', () => {
+describe('dispose against a lane op already inside the commit mutex', { concurrent: false }, () => {
   test('an in-flight publish is refused, not written to the hub', async () => {
     const fake = new FakeHub()
     const rs = new Uint8Array(32).fill(0x8c)
@@ -874,7 +888,9 @@ describe('dispose against a lane op already inside the commit mutex', () => {
   })
 })
 
-describe('dispose against a lane op parked before the mux bus-publish route', () => {
+describe('dispose against a lane op parked before the mux bus-publish route', {
+  concurrent: false,
+}, () => {
   test('an in-flight broadcast parked on wrap before dispose is refused after dispose, not written to the hub', async () => {
     const fake = new FakeHub()
     const rs = new Uint8Array(32).fill(0x8d)
@@ -931,7 +947,9 @@ describe('dispose against a lane op parked before the mux bus-publish route', ()
   })
 })
 
-describe('dispose against a lane op parked before the mux mailbox-publish route', () => {
+describe('dispose against a lane op parked before the mux mailbox-publish route', {
+  concurrent: false,
+}, () => {
   test('an in-flight directed publish parked on wrap before dispose is refused after dispose, not written to the hub', async () => {
     const fake = new FakeHub()
     const rs = new Uint8Array(32).fill(0x8e)
@@ -1062,7 +1080,7 @@ function countClientDisposes(): { count: () => number; restore: () => void } {
   return { count: () => calls, restore: () => spy.mockRestore() }
 }
 
-describe('dispose reaches mux teardown and is idempotent', () => {
+describe('dispose reaches mux teardown and is idempotent', { concurrent: false }, () => {
   test('a child dispose failure still reaches mux teardown (Slice 1)', async () => {
     const { hub, returnCalls } = controllableReceiveHub()
     const rs = new Uint8Array(32).fill(0x90)

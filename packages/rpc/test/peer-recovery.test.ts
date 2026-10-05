@@ -1,3 +1,4 @@
+import { setImmediate } from 'node:timers/promises'
 import { describe, expect, test, vi } from 'vitest'
 
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
@@ -11,6 +12,7 @@ import { publishCommit, publishedCommitDigest } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
 import { makeMLSPeer } from './fixtures/peer.js'
+import { controlRecoveryClock, drainUntil } from './fixtures/recovery-clock.js'
 
 const flush = (ms = 30) => new Promise((r) => setTimeout(r, ms))
 
@@ -22,7 +24,7 @@ function recoveryReplyCount(hub: FakeHub, recoverySecret: Uint8Array): number {
   ).length
 }
 
-describe('recovery rendezvous', () => {
+describe('recovery rendezvous', { concurrent: false }, () => {
   test('a losing fork followed by an applicable external commit produces no confirmation', async () => {
     const hub = new FakeHub()
     const secret = new Uint8Array(32).fill(0x45)
@@ -86,6 +88,7 @@ describe('recovery rendezvous', () => {
     }
   })
   test('a failed verdict seal is retried and a successful seal is cached', async () => {
+    controlRecoveryClock()
     const hub = new FakeHub()
     const secret = new Uint8Array(32).fill(0x46)
     const options = {
@@ -107,7 +110,12 @@ describe('recovery rendezvous', () => {
       return publish(value)
     })
     try {
-      expect((await bob.peer.recover()).advanced).toBe(true)
+      const recovery = bob.peer.recover()
+      await drainUntil(() => seal.mock.calls.length === 1)
+      await vi.advanceTimersByTimeAsync(60)
+      await drainUntil(() => dropped)
+      await vi.advanceTimersByTimeAsync(60)
+      expect((await recovery).advanced).toBe(true)
       expect(dropped).toBe(true)
       expect(seal).toHaveBeenCalledTimes(2)
     } finally {
@@ -115,6 +123,7 @@ describe('recovery rendezvous', () => {
     }
   })
   test('a later historical reread preserves the originally applied confirmation outcome', async () => {
+    controlRecoveryClock()
     const hub = new FakeHub()
     const secret = new Uint8Array(32).fill(0x43)
     const options = {
@@ -140,7 +149,7 @@ describe('recovery rendezvous', () => {
         topicID: commitTopic(secret),
         payload: encodeHandshakeFrame(HANDSHAKE_KIND.recoveryRequest, new Uint8Array([0])),
       })
-      await flush(60)
+      await alice.peer.resync()
       const requestID = 'historical-retransmit'
       const request = await bob.mls.createRecoveryRequest(requestID)
       await hub.publish({
@@ -151,16 +160,14 @@ describe('recovery rendezvous', () => {
           encodeRecoveryConfirmRequest({ ...original, requestID, request }),
         ),
       })
-      await vi.waitFor(() =>
-        expect(
-          hub.published.some((message) => {
-            const frame = decodeHandshakeFrame(message.payload)
-            return (
-              frame.kind === HANDSHAKE_KIND.recoveryVerdict &&
-              decodeRecoveryVerdict(frame.payload).requestID === requestID
-            )
-          }),
-        ).toBe(true),
+      await drainUntil(() =>
+        hub.published.some((message) => {
+          const frame = decodeHandshakeFrame(message.payload)
+          return (
+            frame.kind === HANDSHAKE_KIND.recoveryVerdict &&
+            decodeRecoveryVerdict(frame.payload).requestID === requestID
+          )
+        }),
       )
       const response = hub.published.find((message) => {
         const frame = decodeHandshakeFrame(message.payload)
@@ -179,6 +186,7 @@ describe('recovery rendezvous', () => {
     }
   })
   test('a confirmed rejoin captures its anchor once', async () => {
+    controlRecoveryClock()
     const hub = new FakeHub()
     const secret = new Uint8Array(32).fill(0x42)
     const options = {
@@ -197,6 +205,7 @@ describe('recovery rendezvous', () => {
     }
   })
   test('an ambiguous confirmed adoption is retried before the next lane operation without another rejoin', async () => {
+    controlRecoveryClock()
     const hub = new FakeHub()
     const secret = new Uint8Array(32).fill(0x39)
     const options = {
@@ -221,6 +230,7 @@ describe('recovery rendezvous', () => {
   })
 
   test('a commit waits for the entire active recovery before building', async () => {
+    controlRecoveryClock()
     const hub = new FakeHub()
     const secret = new Uint8Array(32).fill(0x40)
     const options = {
@@ -246,10 +256,10 @@ describe('recovery rendezvous', () => {
     const recovery = bob.peer.recover()
     void recovery.catch(() => {})
     try {
-      await vi.waitFor(() => expect(sealing).toHaveBeenCalled())
+      await drainUntil(() => sealing.mock.calls.length > 0)
       const committing = bob.peer.commit(build)
       void committing.catch(() => {})
-      await flush()
+      await setImmediate()
       expect(build).not.toHaveBeenCalled()
       release()
       expect((await recovery).advanced).toBe(true)

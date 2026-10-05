@@ -7,6 +7,7 @@ import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { encodeMemoryCommit, memoryEntryID } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
+import { controlRecoveryClock } from './fixtures/recovery-clock.js'
 
 const flush = (ms = 30) => new Promise((r) => setTimeout(r, ms))
 
@@ -48,8 +49,9 @@ const fastRecovery = { timeoutMs: 100, getDelayMs: () => 5, deadlineMs: 300 }
  *  to be healed has to be in the group it is asking. */
 const members = ['alice', 'bob', 'carol']
 
-describe('a peer that meets its own un-merged commit', () => {
+describe('a peer that meets its own un-merged commit', { concurrent: false }, () => {
   test('heals, and its epoch advances — with no journal to repair it', async () => {
+    controlRecoveryClock(5)
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x41)
 
@@ -89,6 +91,7 @@ describe('a peer that meets its own un-merged commit', () => {
   })
 
   test('applies none of the commits it jumped over, and heals only once', async () => {
+    controlRecoveryClock(5)
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x42)
 
@@ -141,7 +144,9 @@ describe('a peer that meets its own un-merged commit', () => {
   })
 })
 
-describe('a hostile commit cannot make an honest peer do expensive work', () => {
+describe('a hostile commit cannot make an honest peer do expensive work', {
+  concurrent: false,
+}, () => {
   // Mallory was removed from the group. She keeps the commit topic and her subscription to
   // it forever — the topic is derived from a secret that does not rotate — and the hub is
   // blind and cannot judge a commit. So she can always publish one.
@@ -392,7 +397,7 @@ describe('a hostile commit cannot make an honest peer do expensive work', () => 
   })
 })
 
-describe('a peer that must recover before it can commit', () => {
+describe('a peer that must recover before it can commit', { concurrent: false }, () => {
   test('is told so, and the commit does not happen', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x48)
@@ -420,7 +425,7 @@ describe('a peer that must recover before it can commit', () => {
   })
 })
 
-describe('a peer the group left behind', () => {
+describe('a peer the group left behind', { concurrent: false }, () => {
   test('learns it from a later frame, not from the one it could not apply, and heals', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x46)

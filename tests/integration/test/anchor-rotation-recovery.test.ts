@@ -1,3 +1,4 @@
+import { setImmediate } from 'node:timers/promises'
 import { randomIdentity } from '@kokuin/token'
 import { commitInvite, commitLedgerEntries, signLedgerEntry } from '@kumiai/mls'
 import { createLedgerEntrySlot } from '@kumiai/mls-rpc'
@@ -11,7 +12,7 @@ import {
   RecoveryRequiredError,
 } from '@kumiai/rpc'
 import { testAnchorStoreConformance } from '@kumiai/rpc-conformance'
-import { afterEach, expect, test } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 
 import {
   buildLedgerCommit,
@@ -35,6 +36,8 @@ const { encodeEventFrame } = (await import(
 const cleanup: Array<() => Promise<unknown>> = []
 afterEach(async () => {
   for (const close of cleanup.splice(0).reverse()) await close()
+  vi.restoreAllMocks()
+  vi.useRealTimers()
 })
 
 async function setup({
@@ -372,6 +375,24 @@ test('a failed anchor save repairs before the restarted worker seals and reaches
 })
 
 test('losing the rotation secret in process forces automatic confirmed recovery before sealing', async () => {
+  const nativeTimeout = globalThis.setTimeout
+  vi.useFakeTimers({
+    toFake: ['Date', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
+    shouldClearNativeTimers: true,
+  })
+  const timedTimeout = globalThis.setTimeout
+  vi.spyOn(globalThis, 'setTimeout').mockImplementation((callback, delay, ...args) => {
+    return delay === 0
+      ? nativeTimeout(callback, delay, ...args)
+      : timedTimeout(callback, delay, ...args)
+  })
+  async function drainUntil(done: () => boolean | Promise<boolean>) {
+    while (!(await done())) {
+      await vi.advanceTimersByTimeAsync(0)
+      await setImmediate()
+    }
+  }
+
   const { alice, bob, carolID, received, events } = await setup({ deadlineMs: 10_000 })
   const epochBefore = Number(bob.handle().epoch)
   const handle = bob.handle()
@@ -385,10 +406,12 @@ test('losing the rotation secret in process forces automatic confirmed recovery 
     return exportSecret(label, context, length)
   }
   await alice.peer.commit(buildRemoveCommit(alice, carolID.id))
-  await expect
-    .poll(() => bob.anchorStore.load())
-    .toMatchObject({ pending: { epochAfter: epochBefore + 1 } })
-  await expect.poll(() => Number(bob.handle().epoch)).toBe(epochBefore + 1)
+  await drainUntil(
+    async () => (await bob.anchorStore.load())?.pending?.epochAfter === epochBefore + 1,
+  )
+  expect(await bob.anchorStore.load()).toMatchObject({ pending: { epochAfter: epochBefore + 1 } })
+  await drainUntil(() => Number(bob.handle().epoch) === epochBefore + 1)
+  expect(Number(bob.handle().epoch)).toBe(epochBefore + 1)
   // The host moves the handle outside the peer, making the recorded epoch's secret unavailable.
   const next = await buildLedgerCommit(alice, alice.identity, bob.identity.id, 'member')()
   await next.onAccepted()
@@ -397,10 +420,14 @@ test('losing the rotation secret in process forces automatic confirmed recovery 
   await bob.adopt(bob.handle())
   await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'in process repair' } })
   await alice.peer.commit(buildLedgerCommit(alice, alice.identity, bob.identity.id, 'member'))
-  await expect.poll(() => events.some((event) => event.phase === 'succeeded')).toBe(true)
+  await drainUntil(() => events.some((event) => event.phase === 'succeeded'))
+  expect(events.some((event) => event.phase === 'succeeded')).toBe(true)
   expect(events.find((event) => event.phase === 'started')?.trigger).toBe('automatic')
   expect(exported).not.toContain(epochBefore + 2)
   expect(topic(bob)).toBe(topic(alice))
   expect(bob.peer.anchorEpoch()).toBe(epochBefore + 4)
-  await expect.poll(() => received).toContainEqual({ text: 'in process repair' })
+  await drainUntil(() =>
+    received.some((message) => (message as { text: string }).text === 'in process repair'),
+  )
+  expect(received).toContainEqual({ text: 'in process repair' })
 })

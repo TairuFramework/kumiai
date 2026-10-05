@@ -28,6 +28,7 @@ import {
   memoryLedgerHead,
 } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer, type TestPeer } from './fixtures/peer.js'
+import { controlRecoveryClock, drainUntil } from './fixtures/recovery-clock.js'
 
 const flush = (ms = 40) => new Promise((r) => setTimeout(r, ms))
 
@@ -75,8 +76,9 @@ async function wakeLane(hub: FakeHub, rs: Uint8Array): Promise<void> {
   await flush(80)
 }
 
-describe('a heal re-enacts by ledger membership', () => {
+describe('a heal re-enacts by ledger membership', { concurrent: false }, () => {
   test('an entry the group already holds is not re-enacted, and a later admin is not reverted', async () => {
+    controlRecoveryClock(5)
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x51)
 
@@ -96,14 +98,14 @@ describe('a heal re-enacts by ledger membership', () => {
       },
     })
     const dead = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, journal, recovery })
-    await flush()
+    await bob.peer.resync()
 
     // Admin A commits `circle x -> Foo`. The hub ACCEPTS it — that is what defines this path —
     // and she dies before adopting it.
     await expect(dead.peer.commit(buildLedgerCommit(dead, ['circle:x=Foo']))).rejects.toThrow(
       /the process died/,
     )
-    await flush()
+    await bob.peer.resync()
     expect(bob.mls.fold().get('circle:x')).toBe('Foo')
     expect(dead.mls.epoch()).toBe(1) // she never adopted it
     await dead.peer.dispose()
@@ -119,12 +121,12 @@ describe('a heal re-enacts by ledger membership', () => {
         head: memoryLedgerHead([memoryEntryID('circle:x=Foo'), memoryEntryID(gap)]),
       }),
     })
-    await flush()
+    await bob.peer.resync()
     expect(bob.mls.epoch()).toBe(3)
 
     // ...and then admin B overwrites the same subject. Everyone applies it. The circle is "Bar".
     await bob.peer.commit(buildLedgerCommit(bob, ['circle:x=Bar']))
-    await flush()
+    await bob.peer.resync()
     expect(bob.mls.fold().get('circle:x')).toBe('Bar')
 
     // Alice restarts over the same handle and the same journal. Replay settles her commit — it
@@ -136,13 +138,14 @@ describe('a heal re-enacts by ledger membership', () => {
       members,
       recovery,
     })
-    await flush(500)
+    await drainUntil(() => alice.mls.epoch() === 5 && alice.mls.ledgerIDs().length === 3)
+    await alice.peer.resync()
 
     expect(alice.mls.epoch()).toBe(bob.mls.epoch())
     // The host does what a host does with a heal's leftovers: it re-enacts them.
     const { reenact = [] } = await alice.peer.replay()
     await reenactFrom(alice, reenact)
-    await flush()
+    await bob.peer.resync()
 
     // B's change STANDS. Re-enacting "Foo" would append it a second time, at the end of the
     // log, where the fold is last-write-wins by position — the ledger would read
@@ -161,6 +164,7 @@ describe('a heal re-enacts by ledger membership', () => {
   })
 
   test('an entry the group does not hold IS re-enacted, and lands in a later commit', async () => {
+    controlRecoveryClock(5)
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x52)
 
@@ -178,9 +182,9 @@ describe('a heal re-enacts by ledger membership', () => {
     aliceMLS.adopt(aliceMLS.buildCommit(['circle:x=Alice']))
 
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
-    await flush()
+    await bob.peer.resync()
     await bob.peer.commit(buildLedgerCommit(bob, ['circle:x=Bob']))
-    await flush()
+    await bob.peer.resync()
 
     const alice = makeMLSPeer(hub, 'alice', rs, {
       mls: aliceMLS,
@@ -188,10 +192,10 @@ describe('a heal re-enacts by ledger membership', () => {
       members,
       recovery,
     })
-    await flush()
+    await bob.peer.resync()
 
     const { advanced, reenact } = await alice.peer.recover()
-    await flush()
+    await bob.peer.resync()
 
     expect(advanced).toBe(true)
     // The entry is not in the group's ledger — it never landed there — so it comes back, and
@@ -202,7 +206,7 @@ describe('a heal re-enacts by ledger membership', () => {
     expect(bob.mls.fold().get('circle:x')).toBe('Bob')
 
     await reenactFrom(alice, reenact)
-    await flush()
+    await bob.peer.resync()
 
     expect(bob.mls.fold().get('circle:x')).toBe('Alice')
     expect(alice.mls.fold().get('circle:x')).toBe('Alice')
@@ -217,7 +221,7 @@ describe('a heal re-enacts by ledger membership', () => {
   })
 })
 
-describe('a hub that forked the log', () => {
+describe('a hub that forked the log', { concurrent: false }, () => {
   // The losing branch exists for ONE reason: a hub broke the compare-and-set, accepted two
   // commits at one head, and served divergent logs. A hub that will do that will also serve a
   // peer a frame its cursor has already passed — `after` is a contract, and the party it binds
@@ -359,12 +363,13 @@ describe('a hub that forked the log', () => {
   })
 })
 
-describe('recover() is a compare-and-set loop of its own', () => {
+describe('recover() is a compare-and-set loop of its own', { concurrent: false }, () => {
   test('losing the race discards the GroupInfo, not just the commit, and the rejoin still lands', async () => {
+    controlRecoveryClock(5)
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x53)
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 2, members, recovery })
-    await flush()
+    await bob.peer.resync()
 
     // A commit lands between Alice's GroupInfo and her external-commit publish — the ordinary
     // case, not the exotic one: a heal runs precisely when the group is under commit pressure.
@@ -379,16 +384,16 @@ describe('recover() is a compare-and-set loop of its own', () => {
         if (!raced && params.topicID === commitTopic(rs) && params.retain === 'log') {
           raced = true
           await bob.peer.commit(buildLedgerCommit(bob, ['role:carol=admin']))
-          await flush()
+          await bob.peer.resync()
         }
         return hub.publish(params)
       },
     }
     const alice = makeMLSPeer(racingHub, 'alice', rs, { epoch: 1, members, recovery })
-    await flush()
+    await bob.peer.resync()
 
     const { advanced } = await alice.peer.recover()
-    await flush(100)
+    await bob.peer.resync()
 
     expect(advanced).toBe(true)
     // She asked TWICE. The first GroupInfo described a ratchet tree the winning commit had
@@ -413,6 +418,7 @@ describe('recover() is a compare-and-set loop of its own', () => {
   })
 
   test('two peers healing at once both converge, and neither loses its entries', async () => {
+    controlRecoveryClock(5)
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x54)
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 2, members, recovery })
@@ -431,12 +437,12 @@ describe('recover() is a compare-and-set loop of its own', () => {
     }
     const alice = strand('alice', 'role:alice=admin')
     const dave = strand('dave', 'role:dave=admin')
-    await flush()
+    await bob.peer.resync()
 
     // Both hold a GroupInfo at the same epoch, and both publish an external commit at the same
     // head. One wins; the other takes the head mismatch, re-requests, and rebuilds.
     const [aliceResult, daveResult] = await Promise.all([alice.peer.recover(), dave.peer.recover()])
-    await flush(150)
+    await Promise.all([bob.peer.resync(), alice.peer.resync(), dave.peer.resync()])
 
     expect(aliceResult.advanced).toBe(true)
     expect(daveResult.advanced).toBe(true)
@@ -452,7 +458,7 @@ describe('recover() is a compare-and-set loop of its own', () => {
     expect(daveResult.reenact).toEqual(['role:dave=admin'])
     await reenactFrom(alice, aliceResult.reenact)
     await reenactFrom(dave, daveResult.reenact)
-    await flush(100)
+    await bob.peer.resync()
 
     expect(bob.mls.fold().get('role:alice')).toBe('admin')
     expect(bob.mls.fold().get('role:dave')).toBe('admin')
@@ -463,7 +469,7 @@ describe('recover() is a compare-and-set loop of its own', () => {
   })
 })
 
-describe('the lane is never re-entered', () => {
+describe('the lane is never re-entered', { concurrent: false }, () => {
   test('a heal triggered while commit() is pulling does not deadlock: it unwinds, then heals', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x55)
@@ -497,7 +503,7 @@ describe('the lane is never re-entered', () => {
   })
 })
 
-describe("a crash in recover()'s own acceptance window", () => {
+describe("a crash in recover()'s own acceptance window", { concurrent: false }, () => {
   test('converges by re-recovery, and the group holds exactly one leaf for the peer', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x56)
@@ -554,7 +560,9 @@ describe("a crash in recover()'s own acceptance window", () => {
   })
 })
 
-describe('a bootstrap that cannot complete is a degraded state, not a heal', () => {
+describe('a bootstrap that cannot complete is a degraded state, not a heal', {
+  concurrent: false,
+}, () => {
   test('recover() never reports advanced with an incomplete ledger, and the roster comes back later', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x57)
@@ -668,7 +676,7 @@ async function starveBootstrap(
   return { aliceMLS, aliceCrypto, bob }
 }
 
-describe('commit() refuses on an incomplete ledger', () => {
+describe('commit() refuses on an incomplete ledger', { concurrent: false }, () => {
   test('nothing is published and the epoch does not advance', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x5a)
@@ -710,7 +718,7 @@ describe('commit() refuses on an incomplete ledger', () => {
   })
 })
 
-describe('replay() on an incomplete ledger', () => {
+describe('replay() on an incomplete ledger', { concurrent: false }, () => {
   test('returns without throwing, publishes nothing, and leaves the peer degraded', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x5b)
@@ -743,7 +751,7 @@ describe('replay() on an incomplete ledger', () => {
   })
 })
 
-describe('the storm-collapse suppression set is bounded', () => {
+describe('the storm-collapse suppression set is bounded', { concurrent: false }, () => {
   test('a flood of distinct-id replies evicts stale suppressions, and a re-delivered request is answered again', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x60)

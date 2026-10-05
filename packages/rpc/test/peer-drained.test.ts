@@ -33,7 +33,7 @@ async function pausedDrain(peer: { drained(): Promise<void> }) {
   return { promise }
 }
 
-describe('peer host drain', () => {
+describe('peer host drain', { concurrent: false }, () => {
   test('drainedWaitsForInFlightJournalPut', async () => {
     for (const path of ['build', 'journal.put', 'onAccepted']) {
       const pause = gate()
