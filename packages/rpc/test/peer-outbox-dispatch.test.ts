@@ -348,3 +348,16 @@ test.each([1, 2])('listing handoff preserves call order with %i free slots', asy
     queue.close()
   }
 })
+
+test('removal refuses acceptance with a distinct error while disposal retains its error', async () => {
+  const queue = createAppOutboxAcceptance({
+    outbox: createMemoryAppOutbox(),
+    limit: 2,
+    admission: admissible,
+  })
+  await queue.ready()
+  queue.stop()
+  await expect(queue.accept(entry('removed'))).rejects.toMatchObject({ name: 'PeerRemovedError' })
+  queue.close()
+  await expect(queue.accept(entry('disposed'))).rejects.toMatchObject({ name: 'PeerDisposedError' })
+})

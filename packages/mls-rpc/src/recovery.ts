@@ -207,6 +207,7 @@ export function createVerdictJudge(
     judgeVerdict(opened: OpenedRecoveryVerdict): 'authoritative' | 'advisory' {
       const { signer, verdict } = opened
       if (
+        normalizeDID(signer) === normalizeDID(group.credential.id) ||
         tuple == null ||
         verdict.groupID !== group.groupID ||
         verdict.requestID !== requestID ||

@@ -378,7 +378,10 @@ export async function joinGroupExternal(
     credential,
     context: await resolveMlsContext(options, anchor),
   })
-  if (ledgerEntries != null) await before.bootstrapLedger(ledgerEntries)
+  if (ledgerEntries != null) {
+    await before.bootstrapLedger(ledgerEntries)
+    await group.bootstrapLedger(ledgerEntries)
+  }
   await params.beforeBinding?.(group, before)
   if (anchor.controller != null && controller == null)
     throw new LeafBindingError('floating-refused')

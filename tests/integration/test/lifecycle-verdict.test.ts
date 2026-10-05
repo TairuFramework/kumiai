@@ -128,7 +128,7 @@ test('pending verdicts bind the epoch, position, digest and tag, and adoption is
     epoch: pending.epoch,
     tag: confirmationTag(key, requestID),
   }
-  const sealed = await s.mls.sealRecoveryVerdict(request, verdict)
+  const sealed = await s.responder.sealRecoveryVerdict(request, verdict)
   const opened = await s.mls.openRecoveryVerdict(sealed, requestID)
   if (opened == null) throw new Error('No opened verdict')
   expect(pending.judgeVerdict(opened)).toBe('authoritative')
@@ -208,7 +208,7 @@ test('revocation in either registry is permanent in the union and stale refusals
           tag: confirmationTag(key, 'stale'),
         },
       }),
-    ).toBe('authoritative')
+    ).toBe('advisory')
   }
 })
 
@@ -379,4 +379,28 @@ test('caller rejection and a replacement without a prior leaf propagate policy a
     advanced: false,
     refusal: 'invalid',
   })
+})
+
+test('the rejoiner cannot count its own signed confirmation', async () => {
+  const s = await setup()
+  const requestID = 'self-verdict'
+  const request = await s.mls.createRecoveryRequest(requestID)
+  const pending = await s.mls.applyRecovery(await s.responder.sealGroupInfo(request), requestID)
+  if (pending == null || 'renewalRequired' in pending) throw new Error('Expected candidate')
+  const key = await pending.confirmationKey('position', 'digest')
+  const { confirmationTag } = await import('@kumiai/mls')
+  expect(
+    pending.judgeVerdict({
+      signer: s.identity.id,
+      verdict: {
+        groupID: s.group().groupID,
+        requestID,
+        position: 'position',
+        commitDigest: 'digest',
+        verdict: 'confirmed',
+        epoch: pending.epoch,
+        tag: confirmationTag(key, requestID),
+      },
+    }),
+  ).toBe('advisory')
 })

@@ -1,0 +1,129 @@
+import { afterEach, expect, test, vi } from 'vitest'
+
+import { digestAppliedCommit } from '../src/classify.js'
+import { decodeCommitFrame } from '../src/commit-frame.js'
+import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
+import { encodeRecoveryConfirmRequest } from '../src/recovery.js'
+import { commitTopic, rendezvousTopic } from '../src/topic.js'
+import { publishCommit } from './fixtures/commits.js'
+import { FakeHub } from './fixtures/fake-hub.js'
+import { createMemoryAppOutbox } from './fixtures/outbox.js'
+import { makeMLSPeer, type TestPeer } from './fixtures/peer.js'
+import { controlRecoveryClock, drainUntil } from './fixtures/recovery-clock.js'
+
+const secret = new Uint8Array(32).fill(19)
+const peers: Array<TestPeer> = []
+afterEach(async () => {
+  await Promise.all(
+    peers.splice(0).map(async ({ peer }) => {
+      await peer.dispose()
+      await peer.drained()
+    }),
+  )
+  vi.restoreAllMocks()
+})
+function member(hub: FakeHub, options: Parameters<typeof makeMLSPeer>[3] = {}) {
+  const peer = makeMLSPeer(hub, 'bob', secret, options)
+  peers.push(peer)
+  return peer
+}
+
+test('a mismatched durable commit cursor is discarded before the first fetch', async () => {
+  controlRecoveryClock()
+  const hub = new FakeHub()
+  const store = createMemoryAppOutbox()
+  await store.putCommitCursor({ position: 'stale-position', epoch: 8 })
+  const fetch = vi.spyOn(hub, 'fetchTopic')
+  const bob = member(hub, { appOutbox: store, epoch: 1 })
+  await bob.peer.resync()
+  const calls = fetch.mock.calls
+    .map(([params]) => params)
+    .filter((params) => params.topicID === commitTopic(secret))
+  expect(calls.length).toBeGreaterThan(0)
+  expect(calls[0]?.after).toBeUndefined()
+  expect(await store.getCommitCursor()).toBeNull()
+})
+
+test('incomplete ledgers skip commit processing and later wakeups can retry', async () => {
+  controlRecoveryClock()
+  const hub = new FakeHub()
+  const bob = member(hub, { recovery: { timeoutMs: 50, deadlineMs: 100, getDelayMs: () => 0 } })
+  await bob.peer.resync()
+  const requests = vi.spyOn(bob.mls, 'createRecoveryRequest')
+  const process = vi.spyOn(bob.mls, 'processCommit')
+  const complete = vi.spyOn(bob.mls, 'isLedgerComplete').mockResolvedValue(false)
+  vi.spyOn(bob.mls, 'openSealedLedger').mockResolvedValue(null)
+  await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+  const retry = bob.peer.resync()
+  await drainUntil(() => complete.mock.calls.length > 0, 'ledger check')
+  await vi.advanceTimersByTimeAsync(50)
+  await retry
+  expect(requests).toHaveBeenCalledWith(expect.any(String), 100)
+  expect(process).not.toHaveBeenCalled()
+  expect(await bob.mls.readEpoch()).toBe(1)
+  complete.mockResolvedValue(true)
+  // The next commit delivery is the later wakeup: its pull walks the skipped commit as well.
+  await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 2 })
+  await drainUntil(() => process.mock.calls.length === 2, 'retried commit processing')
+  expect(await bob.mls.readEpoch()).toBe(3)
+})
+
+test('a walker without an applied epoch record stays silent for an external history commit', async () => {
+  controlRecoveryClock()
+  const hub = new FakeHub()
+  const published = await publishCommit({
+    hub,
+    senderDID: 'alice',
+    recoverySecret: secret,
+    epoch: 1,
+    external: true,
+  })
+  const bob = member(hub, { epoch: 2, members: ['alice', 'bob'] })
+  await bob.peer.resync()
+  const verdict = vi.spyOn(bob.mls, 'sealRecoveryVerdict')
+  const request = new TextEncoder().encode('signed-request')
+  const verify = vi
+    .spyOn(bob.mls, 'verifyRecoveryRequest')
+    .mockResolvedValue({ groupID: 'group', requestID: 'history', requesterDID: 'alice' })
+  const message = hub.published[0]
+  if (message == null) throw new Error('Missing published commit')
+  const framed = decodeHandshakeFrame(message.payload)
+  if (framed == null) throw new Error('Missing frame')
+  const commit = decodeCommitFrame(framed.payload).commit
+  await hub.publish({
+    senderDID: 'alice',
+    topicID: rendezvousTopic(secret),
+    payload: encodeHandshakeFrame(
+      HANDSHAKE_KIND.recoveryConfirmRequest,
+      encodeRecoveryConfirmRequest({
+        requestID: 'history',
+        request,
+        position: published.sequenceID,
+        commitDigest: digestAppliedCommit(commit),
+      }),
+    ),
+  })
+  await drainUntil(() => verify.mock.calls.length > 0, 'confirmation request')
+  await bob.peer.resync()
+  await vi.advanceTimersByTimeAsync(0)
+  expect(verdict).not.toHaveBeenCalled()
+})
+
+test('a removed live peer refuses log dispatch with a removal error', async () => {
+  controlRecoveryClock()
+  const hub = new FakeHub()
+  const bob = member(hub, { members: ['alice', 'bob'] })
+  await bob.peer.resync()
+  await publishCommit({
+    hub,
+    senderDID: 'alice',
+    recoverySecret: secret,
+    epoch: 1,
+    removes: ['bob'],
+  })
+  await bob.peer.resync()
+  await expect(
+    bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'removed' } }),
+  ).rejects.toMatchObject({ name: 'PeerRemovedError' })
+  expect(await bob.appOutbox.list()).toEqual([])
+})

@@ -3,6 +3,7 @@ import type { ConformanceAppOutbox, ConformanceAppOutboxEntry } from './app-outb
 export type MemoryAppOutbox = ConformanceAppOutbox & { failNextPut(): void }
 
 export function createMemoryAppOutbox(): MemoryAppOutbox {
+  let cursor: { position: string; epoch: number } | null = null
   let refusePut = false
   const rows = new Map<number, ConformanceAppOutboxEntry>()
   const copy = (entry: ConformanceAppOutboxEntry): ConformanceAppOutboxEntry => ({
@@ -11,6 +12,10 @@ export function createMemoryAppOutbox(): MemoryAppOutbox {
     lastAttempt: entry.lastAttempt == null ? null : { ...entry.lastAttempt },
   })
   return {
+    getCommitCursor: async () => (cursor == null ? null : { ...cursor }),
+    putCommitCursor: async (value) => {
+      cursor = value == null ? null : { ...value }
+    },
     put: async (entry) => {
       if (refusePut) {
         refusePut = false

@@ -116,6 +116,7 @@ Hub acceptance alone never authorises recovery adoption.
 A valid confirmation wins over superseded and refusal. Superseded wins over refusal after a bounded settle round.
 Outside lifecycle groups, refusals and superseded require a source-tree signer. Confirmation uses the target-epoch tag.
 
+A verdict signed by the rejoiner never counts.
 Lifecycle attestations and verdicts count only from a bound leaf in the pending tree.
 The known registry combines the last-known and reply ledgers, uniting revocations and taking maximum floors.
 Neither the signer nor its chain issuer may be revoked, and its generation must meet the known floor.
@@ -144,7 +145,7 @@ Closing this residual requires an upstream MLS change.
 
 ## Errors
 
-`LeafBindingError.reason` includes issuer-mismatch, subject-mismatch, chain-depth, self-issued, child-outlives-parent, denied-issuer,
+`LeafBindingError.reason` includes issuer-mismatch, subject-mismatch, audience-mismatch, permission-denied, signature-invalid, confirmation-invalid, chain-depth, self-issued, child-outlives-parent, denied-issuer,
 lifetime-cap, generation-floor, identity-change, controller-mismatch, floating-refused and history-horizon.
 `LeafLapsedError` refuses sending or opening a lapsed leaf's traffic.
 `RevokeProofError.reason` includes no-rev, wrong-controller, not-authority-signed, generation-floor, too-large,

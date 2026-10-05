@@ -114,7 +114,7 @@ const MIN_RECOVERY_SECRET_BYTES = 16
 /** The private half of a recovery request, retained until the reply opens or the TTL passes. */
 type PendingRequest = {
   ephemeralPrivateKey: Uint8Array
-  mintedAt: number
+  expiresAt: number
   timer: ReturnType<typeof setTimeout>
 }
 
@@ -127,7 +127,7 @@ const REQUEST_TTL_MS = 120_000
 
 export type RecoveryPending = {
   get(requestID: string): Uint8Array | null
-  put(requestID: string, ephemeralPrivateKey: Uint8Array): void
+  put(requestID: string, ephemeralPrivateKey: Uint8Array, deadlineMs?: number): void
   delete(requestID: string): void
 }
 
@@ -140,9 +140,9 @@ export function createRecoveryPending(options?: { ttlMS?: number }): RecoveryPen
     requests.delete(requestID)
   }
   const sweep = (): void => {
-    const cutoff = Date.now() - ttlMS
+    const now = Date.now()
     for (const [id, request] of requests) {
-      if (request.mintedAt <= cutoff) remove(id, request)
+      if (request.expiresAt <= now) remove(id, request)
     }
   }
   return {
@@ -150,17 +150,18 @@ export function createRecoveryPending(options?: { ttlMS?: number }): RecoveryPen
       sweep()
       return requests.get(requestID)?.ephemeralPrivateKey ?? null
     },
-    put: (requestID, ephemeralPrivateKey) => {
+    put: (requestID, ephemeralPrivateKey, deadlineMs = 0) => {
+      const retentionMs = Math.max(ttlMS, deadlineMs)
       sweep()
       const previous = requests.get(requestID)
       if (previous != null) remove(requestID, previous)
       const timer = setTimeout(() => {
         const held = requests.get(requestID)
         if (held?.ephemeralPrivateKey === ephemeralPrivateKey) remove(requestID, held)
-      }, ttlMS)
+      }, retentionMs)
       const nodeTimer = timer as unknown as { unref?: () => void }
       nodeTimer.unref?.()
-      requests.set(requestID, { ephemeralPrivateKey, mintedAt: Date.now(), timer })
+      requests.set(requestID, { ephemeralPrivateKey, expiresAt: Date.now() + retentionMs, timer })
     },
     delete: (requestID) => {
       sweep()
@@ -346,7 +347,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       }
     },
 
-    async createRecoveryRequest(requestID: string): Promise<Uint8Array> {
+    async createRecoveryRequest(requestID: string, deadlineMs?: number): Promise<Uint8Array> {
       const { request, ephemeralPrivateKey } = await access.read((group) =>
         createRecoveryRequest({
           group,
@@ -354,7 +355,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
           requestID,
         }),
       )
-      pending.put(requestID, ephemeralPrivateKey)
+      pending.put(requestID, ephemeralPrivateKey, Math.max(REQUEST_TTL_MS, deadlineMs ?? 0))
       return utf8.encode(request)
     },
 

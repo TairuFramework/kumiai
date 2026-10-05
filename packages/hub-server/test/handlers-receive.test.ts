@@ -1,6 +1,6 @@
 import type { FetchParams, FetchResult, HubStore, StoredMessage } from '@kumiai/hub-protocol'
 import { HUB_ERROR_CODES } from '@kumiai/hub-protocol'
-import { describe, expect, test, vi } from 'vitest'
+import { describe, expect, onTestFinished, test, vi } from 'vitest'
 
 import { createHandlers } from '../src/handlers.js'
 import { createMemoryStore } from '../src/memoryStore.js'
@@ -103,6 +103,12 @@ describe('hub/v1/receive connect gate', () => {
 
 describe('hub/v1/receive ack loop', () => {
   test('a store.ack failure does not stop later acks from being applied', async () => {
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => {})
+    onTestFinished(() => {
+      const calls = diagnostic.mock.calls
+      diagnostic.mockRestore()
+      expect(calls.length).toBeGreaterThan(0)
+    })
     const store = createMemoryStore()
     const applied: Array<Array<string>> = []
     let calls = 0

@@ -204,6 +204,12 @@ The worker sets `healRequested` and calls `healIfRequested` once its pull has re
 
 **Recovery.** A restart runs the same sequence: catch up, seal at the current epoch, durable update, publish, probe. Acknowledged publications are in memory only, and a preliminary probe never certifies a later publication, so every entry left in the outbox is published again at least once. That costs at most one duplicate per entry, which at-least-once already allows.
 
+**Durable commit cursor.** The host persists `{ position, epoch }` through required `AppOutbox.getCommitCursor()` and `putCommitCursor()` methods.
+Cursor writes follow durable MLS state for that epoch. Entry clearing preserves the cursor. Group deletion clears it separately.
+On init, the peer seeds `reconciledHead` and the covered floor only if the stored epoch equals `port.readEpoch()`.
+An epoch mismatch discards the stored cursor and walks from the oldest retained frame.
+A restart with a matching cursor and an undelivered entry costs at most one duplicate and performs no heal or rejoin.
+
 ### 5. Ports
 
 **`AppOutbox`** is a new required member of `GroupPeerMLSParams`, together with a host-configured `appOutboxLimit`:
@@ -218,6 +224,8 @@ export type AppOutboxEntry = {
 }
 
 export type AppOutbox = {
+  getCommitCursor(): Promise<{ position: string; epoch: number } | null>
+  putCommitCursor(cursor: { position: string; epoch: number } | null): Promise<void>
   put(entry: AppOutboxEntry): Promise<void>       // insert or replace by seq; atomic; durable before it resolves
   list(): Promise<Array<AppOutboxEntry>>          // ascending seq
   remove(seq: number): Promise<void>              // durable before it resolves; unknown seq is a no-op
@@ -495,3 +503,6 @@ Existing init-race tests (`peer-delivery-before-ready.test.ts`, `hub-mux-ack-ref
   - encrypts the outbox at rest and clears it on group deletion;
   - makes its log handlers completion-safe on retry, starting with the share handler;
   - turns its reproducing test (`i6-epoch-change-broadcast.test.ts`) green.
+
+
+

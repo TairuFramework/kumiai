@@ -8,7 +8,7 @@ export const HISTORY_HORIZON = 393_216
 
 const utf8 = new TextEncoder()
 
-function eventBytes(events: ReadonlyArray<unknown>): number {
+export function controllerLogSize(events: ReadonlyArray<unknown>): number {
   return events.reduce<number>(
     (total, event) => total + utf8.encode(JSON.stringify(event)).length,
     0,
@@ -30,7 +30,7 @@ export function historySize(
     )
       continue
     const binding = parseMLSCredentialIdentity(credential.identity).controller
-    if (binding != null) size += eventBytes(binding.prefix)
+    if (binding != null) size += controllerLogSize(binding.prefix)
   }
   for (const { entry } of entries) {
     if (
@@ -41,7 +41,7 @@ export function historySize(
       continue
     }
     const proof = (entry.value as { proof?: unknown }).proof
-    if (Array.isArray(proof)) size += eventBytes(proof)
+    if (Array.isArray(proof)) size += controllerLogSize(proof)
   }
   return size
 }

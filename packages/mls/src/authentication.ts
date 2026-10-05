@@ -140,12 +140,12 @@ async function verifyPinnedCapability(params: {
     throw new LeafBindingError('subject-mismatch')
   }
   if (normalizeDID(payload.aud) !== normalizeDID(params.audience)) {
-    throw new LeafBindingError('identity-change')
+    throw new LeafBindingError('audience-mismatch')
   }
-  if (!hasPermission(params.permission, payload)) throw new Error('Capability permission denied')
+  if (!hasPermission(params.permission, payload)) throw new LeafBindingError('permission-denied')
   const leafKey = capabilityKey(payload)
   if (!constantTimeEqual(leafKey.publicKey, params.leafKey)) {
-    throw new LeafBindingError('identity-change')
+    throw new LeafBindingError('confirmation-invalid')
   }
   const denySet = params.denySet ?? EMPTY_DENY
   const resolver = createEmbeddedControllerResolver({
@@ -184,7 +184,7 @@ async function verifyPinnedCapability(params: {
   if (payload.exp > parent.payload.exp) throw new LeafBindingError('child-outlives-parent')
   if (isDenied(denySet, payload.iss)) throw new LeafBindingError('denied-issuer')
   const issuerKey = capabilityKey(parent.payload)
-  if (token.header.alg !== issuerKey.alg) throw new Error('Capability signature algorithm mismatch')
+  if (token.header.alg !== issuerKey.alg) throw new LeafBindingError('signature-invalid')
   if (
     !(await getVerifier(token.header.alg)(
       fromB64U(token.signature),
@@ -192,7 +192,7 @@ async function verifyPinnedCapability(params: {
       issuerKey.publicKey,
     ))
   ) {
-    throw new Error('Invalid capability signature')
+    throw new LeafBindingError('signature-invalid')
   }
   // checkCapability treats iss === sub as a root grant, so it does not walk that parent.
   if (normalizeDID(payload.iss) === normalizeDID(payload.sub)) {
@@ -226,17 +226,24 @@ export async function verifyLeafCredential(
   const denySet = deps.deviceDenySet?.() ?? EMPTY_DENY
   if (isDenied(denySet, parsed.id)) throw new LeafBindingError('denied-id')
   if (parsed.controller == null) return
-  await verifyPinnedCapability({
-    capability: parsed.controller.capability,
-    prefix: parsed.controller.prefix,
-    controllerID: parsed.controller.id,
-    audience: parsed.id,
-    permission: { act: MLS_LEAF_ACT, res: MLS_LEAF_RES },
-    leafKey: signaturePublicKey,
-    denySet,
-    leafLifetime: deps.leafLifetime?.(),
-    trustedGrantLifetime: deps.trustedGrantLifetime?.(),
-  })
+  try {
+    await verifyPinnedCapability({
+      capability: parsed.controller.capability,
+      prefix: parsed.controller.prefix,
+      controllerID: parsed.controller.id,
+      audience: parsed.id,
+      permission: { act: MLS_LEAF_ACT, res: MLS_LEAF_RES },
+      leafKey: signaturePublicKey,
+      denySet,
+      leafLifetime: deps.leafLifetime?.(),
+      trustedGrantLifetime: deps.trustedGrantLifetime?.(),
+    })
+  } catch (error) {
+    if (error instanceof LeafBindingError) throw error
+    const rejection = new LeafBindingError('signature-invalid')
+    rejection.cause = error
+    throw rejection
+  }
 }
 
 /** Management grants are direct controller grants, verified at their issuance time. */

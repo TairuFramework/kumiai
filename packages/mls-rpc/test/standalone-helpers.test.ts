@@ -173,3 +173,17 @@ test('pending timer is unrefed', () => {
   expect(timer.hasRef()).toBe(false)
   pending.delete('a')
 })
+
+test('a request key remains usable throughout a longer recovery deadline', () => {
+  vi.useFakeTimers()
+  const pending = createRecoveryPending()
+  const key = new Uint8Array([7])
+  pending.put('long-recovery', key, 180_000)
+  vi.advanceTimersByTime(120_001)
+  expect(pending.get('long-recovery')).toBe(key)
+  vi.advanceTimersByTime(59_998)
+  expect(pending.get('long-recovery')).toBe(key)
+  vi.advanceTimersByTime(1)
+  expect(pending.get('long-recovery')).toBeNull()
+  expect(key[0]).toBe(0)
+})

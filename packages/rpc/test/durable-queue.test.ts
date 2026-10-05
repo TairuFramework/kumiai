@@ -1,5 +1,5 @@
 import { fromUTF } from '@sozai/codec'
-import { describe, expect, test, vi } from 'vitest'
+import { describe, expect, onTestFinished, test, vi } from 'vitest'
 
 import { encodeAppAAD } from '../src/app-aad.js'
 import { createAppLane } from '../src/app-lane.js'
@@ -204,6 +204,12 @@ describe('durable delivery queue', () => {
   })
 
   test('unusable records are completed and do not block a later valid event', async () => {
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => {})
+    onTestFinished(() => {
+      const calls = diagnostic.mock.calls
+      diagnostic.mockRestore()
+      expect(calls.length).toBeGreaterThan(0)
+    })
     const seen: Array<string> = []
     const { lane, records, cursor, append, appendRaw } = fixture(({ data }) => {
       seen.push(data.text)

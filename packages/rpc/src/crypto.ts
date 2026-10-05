@@ -473,7 +473,7 @@ export type GroupMLS = {
    * off the mint time is the natural bound; it lives here rather than as a new lane release
    * method that would obligate every {@link GroupMLS}.
    */
-  createRecoveryRequest(requestID: string): Promise<Uint8Array>
+  createRecoveryRequest(requestID: string, deadlineMs?: number): Promise<Uint8Array>
   /**
    * Answer another member's request: verify the token, check the requester still holds a leaf in
    * THIS member's current ratchet tree, seal current GroupInfo to the ephemeral key inside the

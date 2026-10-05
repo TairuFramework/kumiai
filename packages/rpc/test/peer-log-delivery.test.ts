@@ -1046,6 +1046,7 @@ describe('recovery ordering', { concurrent: false }, () => {
   })
 
   test('restart delivers an entry acknowledged at an epoch overtaken before its walk', async () => {
+    controlRecoveryClock()
     const hub = new FakeHub()
     const received: Array<unknown> = []
     const alice = member(hub, 'alice', {
@@ -1053,13 +1054,13 @@ describe('recovery ordering', { concurrent: false }, () => {
     })
     const store = createMemoryAppOutbox()
     const bob = member(hub, 'bob', { appOutbox: store })
-    await flush()
+    await Promise.all([alice.peer.resync(), bob.peer.resync()])
     const old = bob.anchorStore.stored()
     if (old == null) throw new Error('Missing original anchor')
     const publish = hub.publish.bind(hub)
     const acknowledged = deferred<void>()
     const release = deferred<void>()
-    vi.spyOn(hub, 'publish').mockImplementation(async (params) => {
+    const publishSpy = vi.spyOn(hub, 'publish').mockImplementation(async (params) => {
       if (params.senderDID === 'bob' && params.topicID !== commitTopic(secret)) {
         await alice.peer.commit(buildLedgerCommit(alice, []))
         const result = await publish(params)
@@ -1076,10 +1077,13 @@ describe('recovery ordering', { concurrent: false }, () => {
     await bob.peer.drained()
     expect(received).toEqual([])
     expect(await store.list()).toHaveLength(1)
-    vi.restoreAllMocks()
+    publishSpy.mockRestore()
     const replacement = member(hub, 'bob', { restartOf: bob, appOutbox: store })
-    await vi.waitFor(async () => expect(await replacement.appOutbox.list()).toEqual([]))
-    expect(received).toEqual([{ text: 'at-risk restart' }, { text: 'at-risk restart' }])
+    await drainUntil(
+      async () => (await replacement.appOutbox.list()).length === 0,
+      'restart delivery',
+    )
+    expect(received).toEqual([{ text: 'at-risk restart' }])
     const current = replacement.anchorStore.stored()
     if (current == null) throw new Error('Missing replacement anchor')
     const topics = [
@@ -1087,7 +1091,8 @@ describe('recovery ordering', { concurrent: false }, () => {
       protocolTopic(current.secret, current.epoch, 'chat'),
     ]
     const apps = hub.published.filter((m) => m.senderDID === 'bob' && topics.includes(m.topicID))
-    expect(apps.map((m) => bob.crypto.frameEpoch(m.payload))).toEqual([1, 2, 3])
+    expect(apps.map((m) => bob.crypto.frameEpoch(m.payload))).toEqual([1, 2])
+    expect(await replacement.mls.readEpoch()).toBe(2)
   })
 
   test('retrying confirmed adoption repairs the floor after the host adopted then threw', async () => {

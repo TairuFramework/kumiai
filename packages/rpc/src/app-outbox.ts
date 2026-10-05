@@ -3,6 +3,7 @@ import {
   AppEntryTooLargeError,
   AppOutboxFullError,
   PeerDisposedError,
+  PeerRemovedError,
   SendNotAdmissibleError,
 } from './errors.js'
 
@@ -21,7 +22,12 @@ export type AppOutboxEntry = {
  * Owned by one live peer per group. Writes are durable before resolution.
  * Hosts encrypt plaintext at rest and clear it on leave/deletion, choosing physical erasure policy.
  */
+export type CommitCursor = { position: string; epoch: number }
+
 export type AppOutbox = {
+  getCommitCursor(): Promise<CommitCursor | null>
+  /** Durable after the paired MLS state. Null discards an unusable cursor. */
+  putCommitCursor(cursor: CommitCursor | null): Promise<void>
   /** Atomic insert or replace by seq. A rejection leaves storage unchanged. */
   put(entry: AppOutboxEntry): Promise<void>
   /** Ascending sequence order. */
@@ -83,7 +89,8 @@ export function createAppOutboxAcceptance(params: AppOutboxAcceptanceParams) {
         waiting--
       }
     }
-    if (closed || stopped) throw new PeerDisposedError('App outbox acceptance is closed')
+    if (closed) throw new PeerDisposedError('App outbox acceptance is closed')
+    if (stopped) throw new PeerRemovedError('App outbox sender was removed')
     const admission = params.admission()
     if (!admission.admissible) throw new SendNotAdmissibleError(admission.reason)
     if (input.data.byteLength > MAX_APP_ENTRY_BYTES) {

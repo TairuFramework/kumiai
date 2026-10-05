@@ -1,5 +1,9 @@
 export type LeafBindingReason =
   | 'issuer-mismatch'
+  | 'audience-mismatch'
+  | 'permission-denied'
+  | 'signature-invalid'
+  | 'confirmation-invalid'
   | 'subject-mismatch'
   | 'chain-depth'
   | 'self-issued'

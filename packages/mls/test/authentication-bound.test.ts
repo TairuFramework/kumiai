@@ -350,9 +350,9 @@ test('rejects a forged signature claiming the trusted issuer', async () => {
     JSON.stringify({ ...f.childPayload, iss: f.trusted.id }),
     new Uint8Array(32).fill(41),
   )
-  await expect(verifyLeafCredential(f.credential(raw), f.device.publicKey)).rejects.toThrow(
-    'Invalid capability signature',
-  )
+  await expect(verifyLeafCredential(f.credential(raw), f.device.publicKey)).rejects.toMatchObject({
+    reason: 'signature-invalid',
+  })
   expect(
     await createDIDAuthenticationService().validateCredential(
       f.credential(raw),
@@ -450,4 +450,30 @@ test('verifies direct and delegated grants under a rotated historical authority 
     }
     await expect(verifyLeafCredential(credential, f.device.publicKey)).resolves.toBeUndefined()
   }
+})
+
+test.each([{ act: 'manage' }, { aud: 'did:key:wrong-audience' }, { cnf: { kid: 'invalid' } }])(
+  'capability entry failures require a new binding: %j',
+  async (child) => {
+    const fixture = await leafCapabilityFixture({ child })
+    const { rejectionReason } = await import('../src/lifecycle.js')
+    const error = await verifyLeafCredential(fixture.credential(), fixture.device.publicKey).catch(
+      (error: unknown) => error,
+    )
+    expect(rejectionReason(error)).toBe('binding')
+  },
+)
+
+test('a bad capability signature requires a new binding', async () => {
+  const fixture = await leafCapabilityFixture()
+  const corrupted = fixture.rawChild(
+    JSON.stringify({ ...fixture.childPayload, iss: fixture.trusted.id }),
+    new Uint8Array(32).fill(41),
+  )
+  const { rejectionReason } = await import('../src/lifecycle.js')
+  const error = await verifyLeafCredential(
+    fixture.credential(corrupted),
+    fixture.device.publicKey,
+  ).catch((error: unknown) => error)
+  expect(rejectionReason(error)).toBe('binding')
 })

@@ -1270,6 +1270,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * (see `cursor.ts`). `null` means nothing processed — read the log from its oldest retained frame.
    */
   let reconciledHead: LogPosition | null = null
+  const saveCommitCursor = async (position: LogPosition): Promise<void> => {
+    if (mls == null) return
+    const epoch = await mls.readEpoch()
+    await params.appOutbox?.putCommitCursor({ position, epoch })
+    reconciledHead = position
+  }
 
   /**
    * The commit log's TIP as the last complete drain reported it — the anchor every commit
@@ -1760,6 +1766,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     }
     try {
       const advanced = await advance()
+      if (floorPosition != null) await saveCommitCursor(floorPosition)
       await observe()
       await resolveAnchorRotation(port, true)
       if (confirmedRecovery && anchorPending == null) anchorRecoveryPending = false
@@ -1868,7 +1875,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         try {
           frame = decodeHandshakeFrame(message.payload)
         } catch {
-          reconciledHead = position // malformed: dropped, and the cursor still steps over it
+          await saveCommitCursor(position) // malformed: dropped, and the cursor still steps over it
           continue
         }
         // A wire version this build does not know, settled BEFORE the kind byte: nothing behind
@@ -1885,7 +1892,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             commitDigest: null,
             state: { localDID, epoch: localEpoch, appliedByEpoch },
           })
-          reconciledHead = position
+          await saveCommitCursor(position)
           // Do what the classifier said, not what this branch assumes: it answers `ahead` today,
           // and any other answer just steps over the frame, matching the bare advance above.
           if (unreadable.row === 'ahead') {
@@ -1903,7 +1910,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           continue
         }
         if (frame.kind !== HANDSHAKE_KIND.commit) {
-          reconciledHead = position // the commit lane carries commits, and nothing else
+          await saveCommitCursor(position) // the commit lane carries commits, and nothing else
           continue
         }
         // Split the frame into the commit and the sealed blob of bodies it enacts. Reads bytes,
@@ -1925,7 +1932,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
               commitDigest: null,
               state: { localDID, epoch: localEpoch, appliedByEpoch },
             })
-            reconciledHead = position
+            await saveCommitCursor(position)
             // The classifier's answer, not this branch's assumption — as above.
             if (unreadable.row === 'ahead') {
               healRequested = true
@@ -1943,7 +1950,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           }
           // Too short, or a commit length running past the end: genuinely not a frame, and
           // nothing a future build would have written. Dropped, and the cursor steps over it.
-          reconciledHead = position
+          await saveCommitCursor(position)
           continue
         }
 
@@ -1995,7 +2002,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           if (disposition.row === 'ahead') {
             // The group advanced at an epoch this peer did not. Step over the frame — the heal
             // repairs this, not a re-read — and ask for one.
-            reconciledHead = position
+            await saveCommitCursor(position)
             healRequested = true
             stranded = true
             observeStrand({
@@ -2009,12 +2016,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             break
           }
           if (disposition.row === 'history') {
-            if (header?.external && !stranded)
-              recordCommitOutcome(position, { commitDigest, kind: 'superseded' })
             // A frame from an epoch below this peer's, with no record for it or a record naming
             // this same commit. Not a fork, not poison, not the port's business — its blob is never
             // touched.
-            reconciledHead = position
+            await saveCommitCursor(position)
             break
           }
           if (disposition.row === 'fork') {
@@ -2022,7 +2027,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
               recordCommitOutcome(position, { commitDigest, kind: 'superseded' })
             // Two commits at one epoch. The lower-sequenceID branch wins; the loser rejoins onto it
             // (a heal). The winner just steps over the frame.
-            reconciledHead = position
+            await saveCommitCursor(position)
             if (disposition.branch === 'losing') {
               healRequested = true
               stranded = true
@@ -2038,7 +2043,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             break
           }
           if (disposition.row === 'poison') {
-            reconciledHead = position // not a commit at all: stepped over, and never retried
+            await saveCommitCursor(position) // not a commit at all: stepped over, and never retried
             break
           }
 
@@ -2105,7 +2110,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             // Retrying only delays that. The one case where this peer really is the broken one
             // announces itself later: the next commit is then framed AHEAD of this peer's, which
             // heals it.
-            reconciledHead = position
+            await saveCommitCursor(position)
             break
           }
           if (disposed) return false
@@ -2127,7 +2132,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             })
           // `{ advanced: false }` here is the port REFUSING a well-formed commit at this peer's own
           // epoch from another member: poison on the same terms as an unresolvable one.
-          reconciledHead = position
+          await saveCommitCursor(position)
           break
         }
       }
@@ -2156,6 +2161,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       )
     }
     if (mls == null || commitTopicID == null) return false
+    if (!(await mls.isLedgerComplete())) return false
     const epochBefore = await mls.readEpoch()
     if (disposed) return false
     const anchorBefore = anchor
@@ -2286,6 +2292,15 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     // it. Neither step rebuilds the epoch — buildEpoch runs next.
     await runSerial(async () => {
       if (disposed) return
+      if (params.appOutbox != null) {
+        const cursor = await params.appOutbox.getCommitCursor()
+        if (cursor != null && cursor.epoch === (await mls.readEpoch())) {
+          reconciledHead = asLogPosition(cursor.position)
+          floor = { epoch: cursor.epoch, position: reconciledHead, covered: true }
+        } else if (cursor != null) {
+          await params.appOutbox.putCommitCursor(null)
+        }
+      }
       await replayJournal()
       if (disposed) return
       // A peer restored with an incomplete ledger was killed between rejoining and bootstrapping.
@@ -2535,7 +2550,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     // responder seals to) — without the first any stranger gets the group's whole authority state
     // for one publish; without the second, so does the hub.
     const requestID = newPublishID()
-    const request = await port.createRecoveryRequest(requestID)
+    const request = await port.createRecoveryRequest(
+      requestID,
+      Math.max(recoveryTimeoutMs, recoveryDeadlineMs),
+    )
     if (disposed) return false
     return await new Promise<boolean>((resolve) => {
       let settled = false
@@ -2936,7 +2954,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             assertLive()
           }
           const requestID = newPublishID()
-          const request = await port.createRecoveryRequest(requestID)
+          const request = await port.createRecoveryRequest(
+            requestID,
+            Math.max(0, deadline - Date.now()),
+          )
           assertLive()
           const outcome = await requestGroupInfo(request, requestID, rendezvous, deadline)
           if (outcome.kind === 'disposed' || disposed)

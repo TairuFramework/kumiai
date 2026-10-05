@@ -1,5 +1,5 @@
 import { EventEmitter } from '@sozai/event'
-import { describe, expect, test, vi } from 'vitest'
+import { describe, expect, onTestFinished, test, vi } from 'vitest'
 
 import { adaptBusHandlers } from '../src/handlers.js'
 
@@ -56,6 +56,12 @@ describe('adaptBusHandlers', () => {
   })
 
   test('drops an event whose data fails validation and never calls the handler', async () => {
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => {})
+    onTestFinished(() => {
+      const calls = diagnostic.mock.calls
+      diagnostic.mockRestore()
+      expect(calls.length).toBeGreaterThan(0)
+    })
     const handler = vi.fn()
     const { events } = adaptBusHandlers(protocol as never, { notify: handler })
     await events.emit('notify', { data: { id: 123 }, senderDID: 'did:x' }) // id must be a string

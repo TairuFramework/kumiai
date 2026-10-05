@@ -86,7 +86,7 @@ export function capabilityKey(payload: CapabilityPayload) {
     Object.keys(cnf).length !== 1 ||
     typeof cnf.kid !== 'string'
   ) {
-    throw new Error('Invalid capability confirmation')
+    throw new LeafBindingError('confirmation-invalid')
   }
   const key = tryDecodeKey(cnf.kid)
   if (key == null || key.alg !== 'EdDSA') throw new Error('Invalid capability confirmation key')

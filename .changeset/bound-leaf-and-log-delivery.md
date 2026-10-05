@@ -29,7 +29,7 @@ Every lifecycle peer must run the same release.
 - `kumiai.device` adds proven revoke suffixes against the recorded controller log, reset and clock.
   Lifecycle groups reject register, add, label, capability revokes and role entries. Ledger revocations are permanent and can cascade.
 - `renewLeaf`, `removeLapsedLeaves`, `revokeWithProof`, `revocationOf` and adoption-only events expose the lifecycle.
-  Helpers return speculative handles and absorb no pending proposals. `confirmAdopted()` emits their control events once.
+  Helpers return speculative handles and absorb no pending proposals, including in standard groups. `confirmAdopted()` emits their control events once.
   Revocation events include `logPosition`, `reason` and `cascadedFrom`. Restore and Welcome project silently.
 - `publishRevokeProof` runs one rebuilding lane commit with a log-send hold.
   Its fourth argument requires host-supplied `serializeJournal(derived)`, restoring MLS state AND derived ledger entries through `adoptJournalled`.
@@ -41,16 +41,18 @@ Every lifecycle peer must run the same release.
   Hosts publishing a Welcome through a hub preflight its final bytes inside `build()`, before returning `PendingCommit`.
   `FrameTooLargeError` journals and publishes nothing. Oversized whole-ledger replies can prevent joining and recovery.
 - New errors include `LeafBindingError`, `LeafLapsedError`, `RevokeProofError`, `InviteRecipientMismatchError` and `FrameTooLargeError`.
-  Binding reasons include issuer-mismatch, subject-mismatch, chain-depth, self-issued, child-outlives-parent, denied-issuer, lifetime-cap,
+  Binding reasons include issuer-mismatch, subject-mismatch, audience-mismatch, permission-denied, signature-invalid, confirmation-invalid, chain-depth, self-issued, child-outlives-parent, denied-issuer, lifetime-cap,
   generation-floor, identity-change, controller-mismatch, floating-refused and history-horizon.
   Proof reasons include no-rev, wrong-controller, not-authority-signed, generation-floor, too-large, detached, needs-reset,
-  effects-mismatch and removes-mismatch. `CommitRejectedError` carries the recovery refusal reason.
+  effects-mismatch and removes-mismatch. `CommitRejectedError` carries the recovery refusal reason. Every MLS throw while processing a commit is wrapped as `CommitRejectedError`.
 
 ## Delivery, recovery and host contracts
 
 - `GroupPeerMLSParams` requires `AppOutbox` and host-configured `appOutboxLimit`.
   Log dispatch resolves at durable acceptance, preserving per-sender order and at-least-once delivery across epoch changes and restarts.
-  `MAX_APP_ENTRY_BYTES = 524,288` bounds encoded plaintext. `SendNotAdmissibleError`, `AppOutboxFullError` and `AppEntryTooLargeError` reject acceptance.
+  `MAX_APP_ENTRY_BYTES = 524,288` bounds encoded plaintext. `PeerRemovedError`, `SendNotAdmissibleError`, `AppOutboxFullError` and `AppEntryTooLargeError` reject acceptance.
+  Breaking: hosts implement durable `getCommitCursor()` and `putCommitCursor()` alongside entries, storing `{ position, epoch }`.
+  Cursor writes follow durable MLS state. Startup discards epoch mismatches. Entry clearing preserves the cursor, and group deletion clears both.
   Reservations count at the cap. `lastAttempt` is prepared state, never publication evidence. Hosts encrypt plaintext and choose erasure policy.
 - `HandleAccess.admission()` and `GroupMLS.sendAdmission()` synchronously publish the same epoch-paired snapshot as `epoch()`, without acquiring a handle lock.
   Adoption callbacks read the pre-adoption snapshot. A dispatch awaited there can persist, but outbox put must not await that adoption transaction.

@@ -35,6 +35,7 @@ import {
   createMemoryAppCursorStore,
   createMemoryAppOutbox,
   createMemoryCommitJournal,
+  encodeJournal,
   type Protocols,
 } from './app-lane-e2e.js'
 import { drainUntil } from './fixtures/drain.js'
@@ -398,8 +399,18 @@ test('stale GroupInfo is superseded and retried without adopting the stale candi
     recipientDID: carol.id,
     permission: 'member',
   })
-  const rotated = await commitInvite(source, material.publicPackage, offered.invite)
-  await s.aliceAccess.replace(rotated.newGroup)
+  // Alice rotates through her lane, so her walker holds the applied record the stale external
+  // commit is judged against.
+  await s.alice.commit(async () => {
+    const rotated = await commitInvite(source, material.publicPackage, offered.invite)
+    return {
+      commit: rotated.commitMessage,
+      bodies: offered.invite.ledgerEntries,
+      kind: 'invite',
+      journal: encodeJournal(rotated.newGroup),
+      onAccepted: () => s.aliceAccess.replace(rotated.newGroup),
+    }
+  })
   const seal = s.aliceMLS.sealGroupInfo.bind(s.aliceMLS)
   vi.spyOn(s.aliceMLS, 'sealGroupInfo')
     .mockImplementationOnce((request) => stalePort.sealGroupInfo(request))

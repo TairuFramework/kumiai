@@ -8,7 +8,12 @@ export type { Anchor, AnchorSlot, AnchorStore } from './anchor.js'
 export { type AppAAD, decodeAppAAD, encodeAppAAD } from './app-aad.js'
 export type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
 export type { AppDeliveryResumed, AppDeliveryStalled } from './app-lane.js'
-export { type AppOutbox, type AppOutboxEntry, MAX_APP_ENTRY_BYTES } from './app-outbox.js'
+export {
+  type AppOutbox,
+  type AppOutboxEntry,
+  type CommitCursor,
+  MAX_APP_ENTRY_BYTES,
+} from './app-outbox.js'
 export {
   type AppliedCommit,
   type ClassifyCommitParams,
@@ -73,6 +78,7 @@ export {
   AppEntryTooLargeError,
   AppOutboxFullError,
   PeerDisposedError,
+  PeerRemovedError,
   SendNotAdmissibleError,
 } from './errors.js'
 export { assertFrameFits, FrameTooLargeError } from './frame-size.js'

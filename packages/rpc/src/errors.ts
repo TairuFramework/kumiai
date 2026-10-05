@@ -7,6 +7,10 @@ export class PeerDisposedError extends Error {
   override name = 'PeerDisposedError'
 }
 
+export class PeerRemovedError extends Error {
+  override name = 'PeerRemovedError'
+}
+
 export class AppOutboxFullError extends Error {
   override name = 'AppOutboxFullError'
 }

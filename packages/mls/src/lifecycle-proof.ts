@@ -9,10 +9,11 @@ import { normalizeDID } from '@kokuin/token'
 import { readCapability } from './capability.js'
 import { RevokeProofError } from './errors.js'
 import type { GroupHandle } from './group-handle.js'
+import { controllerLogSize, HISTORY_HORIZON, historySize } from './history.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
 import type { DeviceRegistry, DeviceValue, RevokedEffect } from './registry.js'
 
-export const HISTORY_HORIZON = 393216
+export { controllerLogSize, HISTORY_HORIZON } from './history.js'
 
 /** Derived from a proof and the pre-commit tree; proposal comparison belongs to the commit gate. */
 export type LifecycleProofEffects = {
@@ -29,11 +30,6 @@ type AuthenticatedProof = {
   recordedLog: Array<SignedEvent>
   genFloor: number
   logPosition: number
-}
-
-export function controllerLogSize(log: ReadonlyArray<SignedEvent>): number {
-  const encoder = new TextEncoder()
-  return log.reduce((size, event) => size + encoder.encode(JSON.stringify(event)).byteLength, 0)
 }
 
 /** Authenticate replayable log data without reading any membership state. */
@@ -226,13 +222,10 @@ export async function verifyLifecycleProof(
     throw new RevokeProofError('effects-mismatch')
   const affected = new Set(revoked.map(({ did }) => did))
   const removed = leaves.filter(({ did }) => affected.has(did))
-  const leafHistory = leaves.reduce((size, leaf) => size + controllerLogSize(leaf.prefix), 0)
-  const ledgerHistory = group.ledger.reduce((size, { verified: held }) => {
-    if (held.entry.type !== 'kumiai.device') return size
-    const proof = (held.entry.value as DeviceValue).proof
-    return size + (proof == null ? 0 : controllerLogSize(proof))
-  }, 0)
-  const before = leafHistory + ledgerHistory
+  const before = historySize(
+    group.state.ratchetTree,
+    group.ledger.map(({ verified }) => verified),
+  )
   const after =
     before +
     controllerLogSize(value.proof ?? []) -

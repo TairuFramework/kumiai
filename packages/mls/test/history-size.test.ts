@@ -98,3 +98,10 @@ test('historyCountsUtf8AndEveryCopy', async () => {
   const floating = await createGroup(agent(71), 'floating-history')
   expect(history.historySize(floating.group.state.ratchetTree, [consumer])).toBe(0)
 })
+
+test('history shares the UTF-8 log size primitive with proof accounting', async () => {
+  const proof = await import('../src/lifecycle-proof.js')
+  expect(history.HISTORY_HORIZON).toBe(proof.HISTORY_HORIZON)
+  expect(history.controllerLogSize).toBe(proof.controllerLogSize)
+  expect(history.controllerLogSize([inception])).toBe(historyBytes([inception]))
+})

@@ -102,7 +102,7 @@ export type ConformanceGroupMLS = {
   }>
   exportRecoverySecret: () => Uint8Array | Promise<Uint8Array>
   prepareRecovery: () => Promise<'ready' | 'renewal-required'>
-  createRecoveryRequest: (requestID: string) => Promise<Uint8Array>
+  createRecoveryRequest: (requestID: string, deadlineMs?: number) => Promise<Uint8Array>
   sealGroupInfo: (request: Uint8Array) => Promise<Uint8Array>
   applyRecovery: (
     sealed: Uint8Array,

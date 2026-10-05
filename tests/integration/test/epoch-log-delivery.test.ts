@@ -190,6 +190,9 @@ test.each([
     await commit('gap')
     hub.log.trim(topic, '999999999999')
     if (fresh) {
+      // The durable cursor survives the restart, so the restarted peer sees the trimmed gap at
+      // startup and recovers without waiting for a dispatch.
+      if (expired) now.mockReturnValue(250_000)
       await bob.peer.dispose()
       await bob.peer.drained()
       bob = makeMember({
@@ -205,9 +208,11 @@ test.each([
       })
       members.push(bob)
       await bob.peer.resync()
-      expect(events).toEqual([])
-    } else hub.log.subscribe(bob.identity.id, topic)
-    if (expired) now.mockReturnValue(250_000)
+      await vi.waitFor(() => expect(events.some((event) => event.phase === 'started')).toBe(true))
+    } else {
+      hub.log.subscribe(bob.identity.id, topic)
+      if (expired) now.mockReturnValue(250_000)
+    }
     await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'bound recovery' } })
     if (expired) {
       await vi.waitFor(
