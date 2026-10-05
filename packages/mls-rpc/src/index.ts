@@ -39,3 +39,8 @@ export {
   RECOVERY_LABEL,
   type RecoveryPending,
 } from './mls.js'
+export {
+  type PublishRevokeResult,
+  publishRevokeProof,
+  type RevokeJournalOptions,
+} from './revoke.js'

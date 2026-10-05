@@ -39,6 +39,8 @@ import {
   type RecoveryCandidate,
 } from './recovery.js'
 
+export const groupHandleAccess = new WeakMap<GroupMLS, HandleAccess>()
+
 const utf8 = new TextEncoder()
 
 /**
@@ -206,7 +208,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
   const pending = createRecoveryPending()
   const recovery = createRecoveryBindingState(identity, params.recoveryBinding)
 
-  return {
+  const port: GroupMLS = {
     async verifyRecoveryRequest(request: Uint8Array) {
       try {
         const verified = await verifyRecoveryRequest(new TextDecoder().decode(request))
@@ -499,4 +501,6 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       return secret
     },
   }
+  groupHandleAccess.set(port, access)
+  return port
 }

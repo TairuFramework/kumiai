@@ -314,3 +314,24 @@ export function wrapPeerHost<TParams extends object>(
   }
   return view
 }
+
+// Nested publisher callbacks, including serializeJournal, drain with the build invocation.
+// Journal bytes must restore the derived handle and its ledger through adoptJournalled.
+export const commitBuildHostMembers = { build: 'host' } as const satisfies HostMembers<{
+  build: () => Promise<PendingCommit>
+}>
+
+export function wrapCommitBuild(
+  boundary: HostBoundary,
+  build: () => Promise<PendingCommit>,
+): () => Promise<PendingCommit> {
+  return selectHostMembers(boundary, { build }, commitBuildHostMembers).build
+}
+
+// Invoked inside the wrapped build; the whole serializer promise belongs to that host call.
+// Its bytes must let adoptJournalled restore the derived state INCLUDING its ledger.
+export const journalSerializationHostMembers = {
+  serializeJournal: 'host',
+} as const satisfies HostMembers<{
+  serializeJournal: (derived: never) => Promise<Uint8Array> | Uint8Array
+}>

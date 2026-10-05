@@ -6,7 +6,6 @@ import {
   createGroup,
   createInvite,
   createKeyPackageBundle,
-  encodeClientState,
   signLedgerEntry,
 } from '@kumiai/mls'
 import { createLedgerEntrySlot, deriveRecoverySecret } from '@kumiai/mls-rpc'
@@ -18,6 +17,7 @@ import {
   buildRemoveCommit,
   createEntryBodies,
   createFoundingGroup,
+  encodeJournal,
   joinFromWelcome,
   type Member,
   makeMember,
@@ -180,7 +180,7 @@ test.each([
           commit: result.commitMessage,
           bodies: [token],
           kind: 'ledger',
-          journal: encodeClientState(result.newGroup.state),
+          journal: encodeJournal(result.newGroup),
           onAccepted: () => alice.adopt(result.newGroup),
         }
       })

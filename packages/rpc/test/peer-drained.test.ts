@@ -408,7 +408,45 @@ describe('peer host drain', () => {
     await replacement.peer.drained()
   })
 
-  test.todo('portCallAfterDisposeRejects: replacement replays the outbox entry')
+  test('portCallAfterDisposeRejects: replacement replays the outbox entry', async () => {
+    const pause = gate()
+    const hub = new FakeHub()
+    const secret = new Uint8Array(32).fill(0x76)
+    const journal = createMemoryCommitJournal()
+    const markAccepted = journal.markAccepted
+    let entered = false
+    journal.markAccepted = async (...args) => {
+      entered = true
+      await pause.promise
+      return markAccepted(...args)
+    }
+    const member = makeMLSPeer(hub, 'alice', secret, { journal })
+    await member.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'survived' } })
+    const operation = member.peer.commit(buildLedgerCommit(member, ['proof']), {
+      holdLogSends: true,
+    })
+    const observed = operation.catch(() => {})
+    await vi.waitFor(() => expect(entered).toBe(true))
+    await member.peer.dispose()
+    const drain = await pausedDrain(member.peer)
+    pause.release()
+    await expect(operation).rejects.toBeInstanceOf(PeerDisposedError)
+    await observed
+    await drain.promise
+    expect(await member.appOutbox.list()).toHaveLength(1)
+    expect(journal.slot()?.holdsLogSends).toBe(true)
+    const replacement = makeMLSPeer(hub, 'alice', secret, { restartOf: member })
+    try {
+      await replacement.peer.replay()
+      await vi.waitFor(async () => expect(await replacement.appOutbox.list()).toEqual([]))
+      expect(replacement.journal.slot()).toBeNull()
+      expect(hub.published.filter((frame) => frame.logPosition != null)).toHaveLength(2)
+      expect(replacement.mls.epoch()).toBe(2)
+    } finally {
+      await replacement.peer.dispose()
+      await replacement.peer.drained()
+    }
+  })
 
   test('a reply timer firing after disposal invokes no host port', async () => {
     const hub = new FakeHub()

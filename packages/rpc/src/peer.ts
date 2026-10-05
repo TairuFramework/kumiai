@@ -81,6 +81,7 @@ import {
 } from './handshake.js'
 import {
   createHostBoundary,
+  wrapCommitBuild,
   wrapGatherOptions,
   wrapPeerHost,
   wrapPendingCommit,
@@ -449,7 +450,10 @@ export type GroupPeer<Protocols extends Record<string, GroupProtocolDefinition>>
    * ({@link "commit".CommitDeadlineError}). Call {@link replay} after a throw to collect any
    * undrained `lost` / `reenact` work.
    */
-  commit: (build: () => Promise<PendingCommit>) => Promise<LaneResult>
+  commit: (
+    build: () => Promise<PendingCommit>,
+    options?: { holdLogSends?: true },
+  ) => Promise<LaneResult>
   /**
    * Replay the journal on its own, for startup: republish any pending commit under its original
    * idempotency key and hand back what did not survive. The host's collector to call before
@@ -523,7 +527,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     hub,
     crypto,
     mls,
-    journal,
+    journal: hostJournal,
     adoptJournalled,
     anchorStore,
     appCursorStore,
@@ -531,6 +535,33 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     handlers,
     suppress,
   } = params
+  let revokeHolds = 0
+  let heldJournalID: string | undefined
+  const logSubmissions = new Set<Promise<unknown>>()
+  const journal: CommitJournal | undefined =
+    hostJournal == null
+      ? undefined
+      : {
+          get: async () => {
+            const entry = await hostJournal.get()
+            heldJournalID = entry?.holdsLogSends === true ? entry.publishID : undefined
+            return entry
+          },
+          put: async (entry) => {
+            await hostJournal.put(entry)
+            heldJournalID = entry.holdsLogSends === true ? entry.publishID : undefined
+          },
+          markAccepted: (publishID, sequenceID) => hostJournal.markAccepted(publishID, sequenceID),
+          clear: async (publishID) => {
+            await hostJournal.clear(publishID)
+            if (heldJournalID === publishID) heldJournalID = undefined
+            logDelivery?.trigger()
+          },
+        }
+  const logSendsHeld = (): boolean => revokeHolds > 0 || heldJournalID != null
+  const settleLogSubmissions = async (): Promise<void> => {
+    await Promise.allSettled([...logSubmissions])
+  }
   if (crypto.pending != null && mls == null) {
     throw new Error('GroupCrypto.pending requires mls and the durable commit lane')
   }
@@ -1038,9 +1069,17 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       ? undefined
       : createLogDelivery({
           queue: appOutboxAcceptance,
-          ready: () => ready,
+          ready: async () => {
+            await ready
+            if (heldJournalID != null) {
+              await runSerial(async () => {
+                if (await replayJournal()) await rebuildEpoch()
+              })
+            }
+          },
           floor: () => floor,
           held: () =>
+            logSendsHeld() ||
             locallyRemoved ||
             stranded ||
             anchorRecoveryPending ||
@@ -1088,7 +1127,27 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             }
           },
           put: (entry) => params.appOutbox.put(entry),
-          publish: (frame) => mux.publish({ ...frame, retain: 'log' }),
+          publish: (frame) => {
+            // No await between the hold check, registration and transport handoff.
+            if (logSendsHeld()) return null
+            let settle = (): void => {}
+            const completion = new Promise<void>((resolve) => {
+              settle = resolve
+            })
+            logSubmissions.add(completion)
+            const finish = (): void => {
+              logSubmissions.delete(completion)
+              settle()
+            }
+            try {
+              const submission = mux.publish({ ...frame, retain: 'log' })
+              void submission.then(finish, finish)
+              return submission
+            } catch (error) {
+              finish()
+              throw error
+            }
+          },
           remove: (seq) => params.appOutbox.remove(seq),
           clear: () => params.appOutbox.clear(),
           cleared: (notice) => notifyHost(params.onAppOutboxCleared, notice),
@@ -2278,6 +2337,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     if (mls == null || journal == null || commitTopicID == null) return false
     const entry = await journal.get()
     if (disposed || entry == null) return false
+    if (entry.holdsLogSends === true) await settleLogSubmissions()
+    if (disposed) return false
     const adoptIfLive = async (): Promise<void> => {
       if (disposed) return
       await adoptJournalled(entry.journal)
@@ -2530,8 +2591,24 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * Commit to the group, rebasing until it lands or the deadline passes. Runs under the commit
    * mutex for its whole life, so `build()` never races another `build()` on this device.
    */
-  const commit = async (buildInput: () => Promise<PendingCommit>): Promise<LaneResult> => {
-    const build = boundary.wrap(buildInput)
+  const commit = async (
+    buildInput: () => Promise<PendingCommit>,
+    options?: { holdLogSends?: true },
+  ): Promise<LaneResult> => {
+    if (options?.holdLogSends === true) revokeHolds++
+    try {
+      return await commitHeld(buildInput, options)
+    } finally {
+      if (options?.holdLogSends === true) revokeHolds--
+      logDelivery?.trigger()
+    }
+  }
+
+  const commitHeld = async (
+    buildInput: () => Promise<PendingCommit>,
+    options?: { holdLogSends?: true },
+  ): Promise<LaneResult> => {
+    const build = wrapCommitBuild(boundary, buildInput)
     await ready
     assertLive()
     if (anchorRecoveryPending)
@@ -2602,6 +2679,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           crypto.frameEpoch(pending.commit),
         )
         assertLive()
+        if (options?.holdLogSends === true) await settleLogSubmissions()
+        assertLive()
         await slot.put({
           publishID,
           expectedHead,
@@ -2612,6 +2691,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           bodies: pending.bodies,
           kind: pending.kind,
           journal: pending.journal,
+          ...(options?.holdLogSends === true ? { holdsLogSends: true } : {}),
         })
         assertLive()
 
@@ -3209,6 +3289,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     // with no roster change yet must. A member booting over a handle it was just added to seeds
     // at its own add epoch — the same epoch every existing member rotates to on applying that
     // add, so the two agree with no exchange between them.
+    await journal?.get()
     const stored = await anchorStore?.load()
     if (disposed) return
     if (stored != null) {

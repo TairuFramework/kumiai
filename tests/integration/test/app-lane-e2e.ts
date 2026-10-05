@@ -32,6 +32,7 @@ import type {
   AppCursorStore,
   AppOutbox,
   CommitJournal,
+  GroupMLS,
   GroupPeer,
   GroupProtocolDefinition,
   JournalEntry,
@@ -96,6 +97,15 @@ export function createMemoryAppCursorStore(): AppCursorStore & {
   }
 }
 
+export function encodeJournal(derived: GroupHandle): Uint8Array {
+  return new TextEncoder().encode(
+    JSON.stringify({
+      state: Array.from(encodeClientState(derived.state)),
+      ledger: derived.ledgerTokens,
+    }),
+  )
+}
+
 export function createMemoryCommitJournal(): CommitJournal & { slot: () => JournalEntry | null } {
   let entry: JournalEntry | null = null
   return {
@@ -144,6 +154,7 @@ export function createMemoryStateStore(): StateStore {
 
 export type Member = {
   identity: OwnIdentity
+  mls: GroupMLS
   peer: GroupPeer<Protocols>
   handle: () => GroupHandle
   adopt: (handle: GroupHandle) => Promise<void>
@@ -246,13 +257,17 @@ export function makeMember(params: MakeMemberParams): Member {
       // The journalled blob is the serialized POST-commit handle. Adopting it is
       // idempotent, as the contract demands: a handle already past that commit's epoch
       // has adopted it, and a repeat is a no-op.
-      const state = decodeClientState(blob)
+      const journal = JSON.parse(new TextDecoder().decode(blob)) as {
+        state: Array<number>
+        ledger: Array<string>
+      }
+      const state = decodeClientState(new Uint8Array(journal.state))
       if (state == null || state.groupContext.epoch <= handle.epoch) return
       await adopt(
         await restoreGroup({
           state,
           credential: handle.credential,
-          ledgerEntries: handle.ledgerTokens,
+          ledgerEntries: journal.ledger,
           options: { resolveLedgerEntries: entrySlot.resolve },
         }),
       )
@@ -261,6 +276,7 @@ export function makeMember(params: MakeMemberParams): Member {
 
   return {
     identity,
+    mls,
     peer,
     handle: getHandle,
     adopt,
@@ -362,7 +378,7 @@ export function buildInviteCommit(
       commit: committed.commitMessage,
       bodies: material.invite.ledgerEntries,
       kind: 'invite',
-      journal: encodeClientState(committed.newGroup.state),
+      journal: encodeJournal(committed.newGroup),
       onAccepted: async () => {
         await member.adopt(committed.newGroup)
         deliverWelcome(committed.welcomeMessage)
@@ -381,7 +397,7 @@ export function buildRemoveCommit(member: Member, victimDID: string): () => Prom
       commit: committed.commitMessage,
       bodies: [],
       kind: 'remove',
-      journal: encodeClientState(committed.newGroup.state),
+      journal: encodeJournal(committed.newGroup),
       onAccepted: async () => {
         await member.adopt(committed.newGroup)
       },
@@ -422,7 +438,7 @@ export function buildLedgerCommit(
       commit: committed.commitMessage,
       bodies: [token],
       kind: 'ledger',
-      journal: encodeClientState(committed.newGroup.state),
+      journal: encodeJournal(committed.newGroup),
       onAccepted: async () => {
         await member.adopt(committed.newGroup)
       },

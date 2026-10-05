@@ -27,7 +27,7 @@ type DeliveryParams = {
     entry: AppOutboxEntry,
   ) => Promise<{ topicID: string; payload: Uint8Array; floor: EpochFloor }>
   put: (entry: AppOutboxEntry) => Promise<void>
-  publish: (frame: { topicID: string; payload: Uint8Array }) => Promise<unknown>
+  publish: (frame: { topicID: string; payload: Uint8Array }) => Promise<unknown> | null
   remove: (seq: number) => Promise<void>
   clear: () => Promise<void>
   cleared: (notice: AppOutboxCleared) => void
@@ -132,7 +132,9 @@ export function createLogDelivery(params: DeliveryParams) {
         immediate = true
         break
       }
-      await params.publish(frame)
+      const submission = params.publish(frame)
+      if (submission == null) return
+      await submission
       if (closed) return
       publications.set(entry.seq, {
         epoch: frame.floor.epoch,

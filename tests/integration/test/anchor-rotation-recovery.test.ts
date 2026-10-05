@@ -1,5 +1,5 @@
 import { randomIdentity } from '@kokuin/token'
-import { commitInvite, commitLedgerEntries, encodeClientState, signLedgerEntry } from '@kumiai/mls'
+import { commitInvite, commitLedgerEntries, signLedgerEntry } from '@kumiai/mls'
 import { createLedgerEntrySlot } from '@kumiai/mls-rpc'
 import {
   APP_TOPIC_LABEL,
@@ -19,6 +19,7 @@ import {
   createEntryBodies,
   createFoundingGroup,
   createMemoryAnchorStore,
+  encodeJournal,
   joinFromWelcome,
   type Member,
   makeMember,
@@ -237,7 +238,7 @@ test('fresh startup with a lost anchor secret resolves readiness before confirme
     kind: 'ledger',
     commit: abandoned.commitMessage,
     bodies: [deferredBody],
-    journal: encodeClientState(abandoned.newGroup.state),
+    journal: encodeJournal(abandoned.newGroup),
   })
   await bob.appOutbox.put({
     seq: 0,

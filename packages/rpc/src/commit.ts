@@ -71,6 +71,8 @@ export type JournalEntry = {
    * secret.
    */
   epoch: number
+  /** Holds log submissions until adoption or a known publication loss clears the slot. */
+  holdsLogSends?: true
   /**
    * The sequenceID the hub accepted this commit as. Present: it LANDED and this peer knows it
    * locally — replay adopts, no network. Absent: outcome UNKNOWN, replay must ask the store by

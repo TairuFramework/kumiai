@@ -31,6 +31,11 @@ export {
   testAppOutboxConformance,
 } from './app-outbox.js'
 export {
+  type ConformanceCommitJournal,
+  type ConformanceJournalEntry,
+  testCommitJournalConformance,
+} from './commit-journal.js'
+export {
   type ConformanceCryptoGroup,
   type ConformanceCryptoMember,
   type ConformanceGroupCrypto,
