@@ -39,6 +39,21 @@ export type EnvelopeFoldResult =
 
 export const GROUP_TYPE_PREFIX = 'kumiai.'
 
+/** Present for a lifecycle group: consumer entries must come from a controller-bound leaf. */
+export type FoldEnvelopeContext = {
+  controllerID: string
+  /** The controller bound to the issuer's pre-commit leaf, if any. */
+  memberController: (did: string) => string | undefined
+}
+
+export type FoldEnvelopeParams = {
+  baseRoster: RosterState
+  baseRegistry: DeviceRegistry
+  entries: Array<FoldInput>
+  groupID: string
+  context?: FoldEnvelopeContext
+}
+
 function isRoleValue(value: unknown): value is GroupPermission {
   return value === 'admin' || value === 'member'
 }
@@ -59,13 +74,8 @@ function isRoleValue(value: unknown): value is GroupPermission {
  * subsumes `kumiai.role`'s own authority rule. State-so-far, not a pre-commit
  * snapshot, so an envelope of `[promote Bob, entry-issued-by-Bob]` is accepted.
  */
-export function foldEnvelope(
-  baseRoster: RosterState,
-  baseRegistry: DeviceRegistry,
-  entries: Array<FoldInput>,
-  groupID: string,
-  context?: { controllerID: string; memberController: (did: string) => string | undefined },
-): EnvelopeFoldResult {
+export function foldEnvelope(params: FoldEnvelopeParams): EnvelopeFoldResult {
+  const { baseRoster, baseRegistry, entries, groupID, context } = params
   let workingRoster: RosterState = { roles: new Map(baseRoster.roles) }
   let workingRegistry: DeviceRegistry = {
     devices: new Map(baseRegistry.devices),

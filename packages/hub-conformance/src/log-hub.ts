@@ -43,19 +43,23 @@ export type ConformanceMailboxHub = {
   publish: (params: ConformancePublishParams) => Promise<{ sequenceID: string }>
 }
 
+export type ConformanceFetchTopicParams = {
+  subscriberDID: string
+  topicID: string
+  after?: string
+  limit?: number
+}
+
+export type ConformanceFetchTopicResult = {
+  messages: Array<StoredMessage>
+  head: string | null
+  oldest: string | null
+  gap: boolean
+}
+
 /** The subset of `LogHub` (`@kumiai/hub-tunnel`) this suite exercises. */
 export type ConformanceLogHub = ConformanceMailboxHub & {
-  fetchTopic: (params: {
-    subscriberDID: string
-    topicID: string
-    after?: string
-    limit?: number
-  }) => Promise<{
-    messages: Array<StoredMessage>
-    head: string | null
-    oldest: string | null
-    gap: boolean
-  }>
+  fetchTopic: (params: ConformanceFetchTopicParams) => Promise<ConformanceFetchTopicResult>
 }
 
 export type MailboxHubConformanceParams<Hub extends ConformanceMailboxHub> = {

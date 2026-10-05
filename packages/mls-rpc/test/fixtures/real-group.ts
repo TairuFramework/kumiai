@@ -37,16 +37,20 @@ export async function createRealBoundRecovery(
     new URL('../../../mls/test/fixtures/lifecycle-pipeline.ts', import.meta.url).href
   )) as {
     agent: (byte: number) => OwnIdentity
-    timedBinding: (identity: OwnIdentity, iat: number, exp: number) => Promise<ControllerBinding>
+    timedBinding: (params: {
+      identity: OwnIdentity
+      iat: number
+      exp: number
+    }) => Promise<ControllerBinding>
   }
   const now = Math.floor(Date.now() / 1000)
   const alice = fixture.agent(41)
   const bob = fixture.agent(61)
-  const cached = await fixture.timedBinding(bob, now - 20, now + 1000)
+  const cached = await fixture.timedBinding({ identity: bob, iat: now - 20, exp: now + 1000 })
   let offered = cached
   let source = (
     await createGroup(alice, 'bound-conformance', {
-      controller: await fixture.timedBinding(alice, now - 20, now + 1000),
+      controller: await fixture.timedBinding({ identity: alice, iat: now - 20, exp: now + 1000 }),
     })
   ).group
   const bundle = await createKeyPackageBundle(bob, { controller: cached })
@@ -87,7 +91,7 @@ export async function createRealBoundRecovery(
       await access.replace((await renewLeaf(current, cached)).newGroup)
     },
     replaceBinding: async () => {
-      offered = await fixture.timedBinding(bob, now - 10, now + 1000)
+      offered = await fixture.timedBinding({ identity: bob, iat: now - 10, exp: now + 1000 })
     },
   }
 }
@@ -270,16 +274,16 @@ export async function sealRealRecoveryVerdict(
     { ...verdict, type: 'kumiai.recovery-verdict' },
     { embedLongForm: true },
   )
-  return await sealToRequest(
-    {
+  return await sealToRequest({
+    kind: {
       hpkeInfo: new TextEncoder().encode('kumiai/mls/recovery-verdict/v1'),
       aadDomain: new TextEncoder().encode('kumiai/mls/recovery-verdict-aad/v1'),
       version: 1,
       fail: (_reason: unknown, message: string) => new Error(message),
     },
-    member.handle,
-    new TextDecoder().decode(request),
-    new TextEncoder().encode(stringifyToken(token)),
-    false,
-  )
+    group: member.handle,
+    request: new TextDecoder().decode(request),
+    plaintext: new TextEncoder().encode(stringifyToken(token)),
+    requireMember: false,
+  })
 }

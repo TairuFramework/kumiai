@@ -71,13 +71,20 @@ async function clockEntries(
   ]
 }
 
-async function buildResult(
-  group: GroupHandle,
-  proposals: Array<DefaultProposal>,
-  tokens: Array<string>,
-  commitState?: ClientState,
-): Promise<DeviceWriteResult> {
-  const result = await commitWithEntries(group, proposals, tokens, {
+type BuildResultParams = {
+  group: GroupHandle
+  proposals: Array<DefaultProposal>
+  tokens: Array<string>
+  /** Replacement state for a renewal, whose own leaf differs from the live tree. */
+  commitState?: ClientState
+}
+
+async function buildResult(params: BuildResultParams): Promise<DeviceWriteResult> {
+  const { group, proposals, tokens, commitState } = params
+  const result = await commitWithEntries({
+    group,
+    extraProposals: proposals,
+    enacted: tokens,
     requireAdmin: false,
     commitState,
   })
@@ -119,13 +126,22 @@ export async function renewLeaf(
       if (after > HISTORY_HORIZON && after > before) throw new LeafBindingError('history-horizon')
     }
     const tokens = await clockEntries(group, tree)
-    return buildResult(group, [], tokens, { ...group.state, ratchetTree: tree })
+    return buildResult({
+      group,
+      proposals: [],
+      tokens,
+      commitState: { ...group.state, ratchetTree: tree },
+    })
   })
 }
 
-export async function removeLapsedLeaves(
-  group: GroupHandle,
-): Promise<{ removed: Array<string>; result?: DeviceWriteResult }> {
+export type RemoveLapsedLeavesResult = {
+  removed: Array<string>
+  /** Absent when no leaf had lapsed. */
+  result?: DeviceWriteResult
+}
+
+export async function removeLapsedLeaves(group: GroupHandle): Promise<RemoveLapsedLeavesResult> {
   return mutexFor(group).run(async () => {
     const removed: Array<string> = []
     const proposals: Array<DefaultProposal> = []
@@ -141,16 +157,21 @@ export async function removeLapsedLeaves(
       })
     }
     if (removed.length === 0) return { removed }
-    return { removed, result: await buildResult(group, proposals, await clockEntries(group, tree)) }
+    const tokens = await clockEntries(group, tree)
+    return { removed, result: await buildResult({ group, proposals, tokens }) }
   })
 }
 
-function proofFor(
-  group: GroupHandle,
-  log: Array<SignedEvent>,
-  subject: string,
-  reset: boolean,
-): Array<SignedEvent> {
+type ProofForParams = {
+  group: GroupHandle
+  log: Array<SignedEvent>
+  subject: string
+  reset: boolean
+}
+
+/** The slice of `log` a receiver needs on top of the controller events it already recorded. */
+function proofFor(params: ProofForParams): Array<SignedEvent> {
+  const { group, log, subject, reset } = params
   const controller = group.anchor.controller
   if (controller == null) throw new RevokeProofError('wrong-controller')
   if (log.length === 0) throw new RevokeProofError('no-rev')
@@ -174,6 +195,7 @@ function proofFor(
     const detached = /sequence|digest|prior|inception must/.test(folded.reason)
     throw new RevokeProofError(detached ? 'detached' : 'not-authority-signed')
   }
+  // Drop events that leave the folded state unchanged.
   const advancing = log.filter(
     (_, index) => index === 0 || folded.states[index]?.digest !== folded.states[index - 1]?.digest,
   )
@@ -218,9 +240,23 @@ function proofFor(
   return advancing.slice(headIndex + 1, end + 1)
 }
 
+/** Revoked in the registry, with no leaf of its own and no leaf it issued left in the tree. */
+function isFullyRevoked(group: GroupHandle, subject: string): boolean {
+  if (group.registry.devices.get(subject)?.status !== 'revoked') return false
+  if (group.findMemberLeafIndex(subject) != null) return false
+  return !group.listMembers().some((member) => {
+    const capability = group.bindingOfDID(member.id)?.capability
+    return capability != null && normalizeDID(readCapability(capability).payload.iss) === subject
+  })
+}
+
+export type RevokeWithProofParams =
+  | { subject: string; log: Array<SignedEvent> }
+  | { reset: true; log: Array<SignedEvent> }
+
 export async function revokeWithProof(
   group: GroupHandle,
-  params: { subject: string; log: Array<SignedEvent> } | { reset: true; log: Array<SignedEvent> },
+  params: RevokeWithProofParams,
 ): Promise<RevokeBuildResult> {
   return mutexFor(group).run(async () => {
     try {
@@ -228,21 +264,10 @@ export async function revokeWithProof(
       if (controller == null) throw new RevokeProofError('wrong-controller')
       const reset = 'reset' in params
       const subject = normalizeDID(reset ? controller : params.subject)
-      if (
-        !reset &&
-        group.registry.devices.get(subject)?.status === 'revoked' &&
-        group.findMemberLeafIndex(subject) == null &&
-        !group.listMembers().some((member) => {
-          const capability = group.bindingOfDID(member.id)?.capability
-          return (
-            capability != null && normalizeDID(readCapability(capability).payload.iss) === subject
-          )
-        })
-      )
-        return { status: 'already-revoked' }
+      if (!reset && isFullyRevoked(group, subject)) return { status: 'already-revoked' }
       const value: DeviceValue = {
         op: reset ? 'reset' : 'revoke',
-        proof: proofFor(group, params.log, subject, reset),
+        proof: proofFor({ group, log: params.log, subject, reset }),
         revoked: [],
       }
       const verified: VerifiedLedgerEntry<DeviceValue> = {
@@ -285,7 +310,7 @@ export async function revokeWithProof(
         await signLedgerEntry(ownIdentity(group), verified.entry),
         ...(await clockEntries(group, tree)),
       ]
-      return { status: 'built', result: await buildResult(group, proposals, tokens) }
+      return { status: 'built', result: await buildResult({ group, proposals, tokens }) }
     } catch (error) {
       if (error instanceof RevokeProofError) return { status: 'not-provable', reason: error.reason }
       if (error instanceof LeafBindingError && error.reason === 'history-horizon')

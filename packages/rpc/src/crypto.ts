@@ -368,9 +368,22 @@ export type PendingRecovery = {
   onAccepted: () => Promise<void>
 }
 
+/** {@link GroupMLS.applyRecovery} result: a recovery to adopt, a renewal to run first, or nothing. */
+export type AppliedRecovery = PendingRecovery | { renewalRequired: true } | null
+
 export type SendAdmission =
   | { epoch: number; admissible: true }
   | { epoch: number; admissible: false; reason: 'lapsed' }
+
+/** The signed fields of a recovery ask that verified. */
+export type VerifiedRecoveryRequest = {
+  groupID: string
+  requestID: string
+  requesterDID: string
+}
+
+/** Confirmation key for an applied external commit, and the epoch it was derived at. */
+export type RecoveryConfirmationKey = { epoch: number; key: Uint8Array }
 
 /**
  * Consumer-supplied MLS lifecycle port. Sibling to {@link GroupCrypto}: this drives the
@@ -385,15 +398,8 @@ export type SendAdmission =
  */
 export type GroupMLS = {
   /** Verify the signed ask without requiring its issuer to remain in the current tree. */
-  verifyRecoveryRequest(request: Uint8Array): Promise<{
-    groupID: string
-    requestID: string
-    requesterDID: string
-  } | null>
-  confirmationKey(
-    position: string,
-    commitDigest: string,
-  ): Promise<{ epoch: number; key: Uint8Array }>
+  verifyRecoveryRequest(request: Uint8Array): Promise<VerifiedRecoveryRequest | null>
+  confirmationKey(position: string, commitDigest: string): Promise<RecoveryConfirmationKey>
   sealRecoveryVerdict(request: Uint8Array, verdict: RecoveryVerdict): Promise<Uint8Array>
   openRecoveryVerdict(sealed: Uint8Array, requestID: string): Promise<OpenedRecoveryVerdict | null>
   /** Published with the epoch, without taking the handle lock. */
@@ -500,10 +506,7 @@ export type GroupMLS = {
    * reply the AEAD refuses, or one that fails either check, is `null`; a throw is tolerated and
    * read the same way.
    */
-  applyRecovery(
-    sealed: Uint8Array,
-    requestID: string,
-  ): Promise<PendingRecovery | { renewalRequired: true } | null>
+  applyRecovery(sealed: Uint8Array, requestID: string): Promise<AppliedRecovery>
   /**
    * Whether the ledger this handle holds is the whole ledger its OWN GroupContext attests to: the
    * head folded from the entries it holds, against the authenticated head it carries. Purely

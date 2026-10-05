@@ -36,12 +36,10 @@ export type CommitRejectionReason = 'binding' | 'lapse' | 'floor' | 'policy' | '
 
 export function rejectionReason(error: unknown): CommitRejectionReason {
   if (error instanceof LeafLapsedError) return 'lapse'
-  if (error instanceof LeafBindingError)
-    return error.reason === 'generation-floor'
-      ? 'floor'
-      : ['denied-id', 'identity-change'].includes(error.reason)
-        ? 'invalid'
-        : 'binding'
+  if (error instanceof LeafBindingError) {
+    if (error.reason === 'generation-floor') return 'floor'
+    return ['denied-id', 'identity-change'].includes(error.reason) ? 'invalid' : 'binding'
+  }
   if (
     error instanceof RevokeProofError &&
     ['generation-floor', 'time-regression'].includes(error.reason)
@@ -253,14 +251,26 @@ export async function validateWelcomeTree(group: GroupHandle): Promise<void> {
   checkSurvivors(group, group.state.ratchetTree, group.registry)
 }
 
+type IncomingMessage = Parameters<IncomingMessageCallback>[0]
+
+export type PrepareLifecycleGateParams = {
+  group: GroupHandle
+  entries: Array<VerifiedLedgerEntry>
+  candidateRegistry: DeviceRegistry
+  context: CommitPolicyContext
+  externalLeaf?: LeafNode
+}
+
+export type LifecycleGate = {
+  check: (incoming: IncomingMessage) => void
+  postApply: (state: ClientState) => Promise<void>
+}
+
 /** The callback judges proposals; survivors check the path before any state is installed. */
 export async function prepareLifecycleGate(
-  group: GroupHandle,
-  entries: Array<VerifiedLedgerEntry>,
-  candidateRegistry: DeviceRegistry,
-  context: CommitPolicyContext,
-  externalLeaf?: LeafNode,
-) {
+  params: PrepareLifecycleGateParams,
+): Promise<LifecycleGate> {
+  const { group, entries, candidateRegistry, context, externalLeaf } = params
   const controller = group.anchor.controller
   if (controller == null) {
     for (const { entry, issuer } of entries) {
@@ -289,32 +299,29 @@ export async function prepareLifecycleGate(
         lapsed.add(index)
     }
   }
+  const opOf = ({ entry }: VerifiedLedgerEntry) => (entry.value as DeviceValue).op
   const lifecycleEntries = entries.filter(
-    ({ entry }) =>
-      entry.type === DEVICE_ENTRY_TYPE &&
-      ['revoke', 'reset', 'clock'].includes((entry.value as DeviceValue).op),
+    (verified) =>
+      verified.entry.type === DEVICE_ENTRY_TYPE &&
+      ['revoke', 'reset', 'clock'].includes(opOf(verified)),
   )
-  const proofs = lifecycleEntries.filter(({ entry }) => (entry.value as DeviceValue).op !== 'clock')
-  const clocks = lifecycleEntries.filter(({ entry }) => (entry.value as DeviceValue).op === 'clock')
-  if (
-    controller != null &&
-    (proofs.length > 1 ||
-      clocks.length > 1 ||
-      (proofs.length > 0 && entries.length !== proofs.length + clocks.length))
-  )
+  const proofs = lifecycleEntries.filter((verified) => opOf(verified) !== 'clock')
+  const clocks = lifecycleEntries.filter((verified) => opOf(verified) === 'clock')
+  // A proof commit enacts its proof and at most one clock, nothing else.
+  const proofCarriesOtherEntries =
+    proofs.length > 0 && entries.length !== proofs.length + clocks.length
+  if (controller != null && (proofs.length > 1 || clocks.length > 1 || proofCarriesOtherEntries))
     throw new RevokeProofError('effects-mismatch')
   const expectedRemoves = new Set<number>()
   if (controller != null) {
     for (const entry of lifecycleEntries) {
       const effects = await verifyLifecycleProof(group, entry as VerifiedLedgerEntry<DeviceValue>)
-      if ((entry.entry.value as DeviceValue).op !== 'clock')
+      if (opOf(entry) !== 'clock')
         for (const index of effects.removeLeafIndices) expectedRemoves.add(index)
     }
   }
   if (externalLeaf != null) await validateEntry(group, externalLeaf)
-  let incomingCommit:
-    | Extract<Parameters<IncomingMessageCallback>[0], { kind: 'commit' }>
-    | undefined
+  let incomingCommit: Extract<IncomingMessage, { kind: 'commit' }> | undefined
 
   function checkSize(tree: ClientState['ratchetTree']): void {
     if (controller == null) return
@@ -351,7 +358,7 @@ export async function prepareLifecycleGate(
       }
     }
   }
-  const check = (incoming: Parameters<IncomingMessageCallback>[0]): void => {
+  const check = (incoming: IncomingMessage): void => {
     const proposals = incoming.kind === 'commit' ? incoming.proposals : [incoming.proposal]
     if (incoming.kind === 'commit') incomingCommit = incoming
     checkRegistryAdds(proposals)
@@ -443,16 +450,12 @@ export async function prepareLifecycleGate(
         case defaultProposalTypes.remove: {
           const target = proposal.remove.removed
           const old = leafAt(before, target)
-          if (
-            controller != null &&
-            (old == null ||
-              (proofs.length === 0 &&
-                !lapsed.has(target) &&
-                !(
-                  proposalSender === target &&
-                  (incoming.kind === 'proposal' || incoming.senderLeafIndex !== target)
-                )))
-          )
+          // A self-removal proposal is honoured only when another member commits it.
+          const selfRemoval =
+            proposalSender === target &&
+            (incoming.kind === 'proposal' || incoming.senderLeafIndex !== target)
+          const authorised = proofs.length > 0 || lapsed.has(target) || selfRemoval
+          if (controller != null && (old == null || !authorised))
             throw new Error('Unauthorised Remove')
           tree[target * 2] = undefined
           break
@@ -478,16 +481,17 @@ export async function prepareLifecycleGate(
       throw new Error('Missing head move')
     if (controller != null && incoming.kind === 'commit' && incoming.senderLeafIndex != null) {
       const sender = leafAt(before, incoming.senderLeafIndex)
+      // A lapsed sender may only commit clock entries and the head move they need.
+      const changesMoreThanHead = proposals.some(
+        ({ proposal }) => proposal.proposalType !== defaultProposalTypes.group_context_extensions,
+      )
+      const enactsNonClock = entries.some(
+        (verified) => verified.entry.type !== DEVICE_ENTRY_TYPE || opOf(verified) !== 'clock',
+      )
       if (
         sender != null &&
         lapsed.has(incoming.senderLeafIndex) &&
-        (proposals.some(
-          ({ proposal }) => proposal.proposalType !== defaultProposalTypes.group_context_extensions,
-        ) ||
-          entries.some(
-            ({ entry }) =>
-              entry.type !== DEVICE_ENTRY_TYPE || (entry.value as DeviceValue).op !== 'clock',
-          ))
+        (changesMoreThanHead || enactsNonClock)
       )
         throw new LeafLapsedError('lapsed')
     }
@@ -535,13 +539,16 @@ export async function prepareLifecycleGate(
   return { check, postApply }
 }
 
+export type AssertSenderNotLapsedParams = {
+  group: GroupHandle
+  tree: ClientState['ratchetTree']
+  leafIndex: number | null | undefined
+  extensions: Array<GroupContextExtension>
+}
+
 /** Historical messages use the tree and clock floor authenticated in their own epoch. */
-export function assertSenderNotLapsed(
-  group: GroupHandle,
-  tree: ClientState['ratchetTree'],
-  leafIndex: number | null | undefined,
-  extensions: Array<GroupContextExtension>,
-): void {
+export function assertSenderNotLapsed(params: AssertSenderNotLapsedParams): void {
+  const { group, tree, leafIndex, extensions } = params
   const controller = group.anchor.controller
   if (controller == null || leafIndex == null) return
   const leaf = leafAt(tree, leafIndex)
@@ -557,8 +564,9 @@ export function assertSenderNotLapsed(
     if (headsMatch(head, expected.head)) break
     head = extendHead(head, [held.entryID])
     const { entry } = held.verified
-    if (entry.type === DEVICE_ENTRY_TYPE && (entry.value as DeviceValue).op === 'clock')
-      floor = Math.max(floor, (entry.value as DeviceValue).time ?? 0)
+    if (entry.type !== DEVICE_ENTRY_TYPE) continue
+    const value = entry.value as DeviceValue
+    if (value.op === 'clock') floor = Math.max(floor, value.time ?? 0)
   }
   if (!headsMatch(head, expected.head)) throw new Error('Unknown epoch ledger head')
   const binding = identity(leaf).controller
@@ -569,12 +577,14 @@ export function assertSenderNotLapsed(
     throw new LeafLapsedError('lapsed')
 }
 
-/** @internal Check a replacement against the complete external admission predicates. */
-export async function assertRecoveryBinding(params: {
+export type AssertRecoveryBindingParams = {
   group: GroupHandle
   identity: OwnIdentity
   controller: ControllerBinding
-}): Promise<void> {
+}
+
+/** @internal Check a replacement against the complete external admission predicates. */
+export async function assertRecoveryBinding(params: AssertRecoveryBindingParams): Promise<void> {
   const { group, identity: ownIdentity, controller } = params
   assertBindingAuthorTime(controller)
   const index = group.findMemberLeafIndex(normalizeDID(ownIdentity.id))

@@ -40,7 +40,11 @@ async function admission(entries: Array<string> = []) {
   const { group, identity } = await pipelineGroup()
   const bob = agent(61)
   const { invite } = await createInvite({ group, identity, recipientDID: bob.id, entries })
-  const { bundle } = await rawAdd(group, bob, await timedBinding(bob, 100, 200))
+  const { bundle } = await rawAdd(
+    group,
+    bob,
+    await timedBinding({ identity: bob, iat: 100, exp: 200 }),
+  )
   return { group, identity, bob, invite, bundle }
 }
 
@@ -90,10 +94,14 @@ test('consumer entries ride Add atomically and a concurrent consent loses the ep
   const { author: group, joined: receiver } = await lowLevelWelcome(
     setup.group,
     carol,
-    await timedBinding(carol, 100, 200),
+    await timedBinding({ identity: carol, iat: 100, exp: 200 }),
   )
   const bob = agent(61)
-  const { bundle } = await rawAdd(group, bob, await timedBinding(bob, 100, 200))
+  const { bundle } = await rawAdd(
+    group,
+    bob,
+    await timedBinding({ identity: bob, iat: 100, exp: 200 }),
+  )
   const token = await signLedgerEntry(setup.identity, {
     type: 'app.consumed',
     groupID: group.groupID,
@@ -154,11 +162,15 @@ test('Add refuses floating and malformed bindings and expired author capability'
     reason: 'floating-refused',
   })
   const malformed = await rawAdd(group, bob, {
-    ...(await timedBinding(bob, 100, 200)),
+    ...(await timedBinding({ identity: bob, iat: 100, exp: 200 })),
     id: 'did:key:wrong',
   })
   await expect(commitInvite(group, malformed.bundle.publicPackage, invite)).rejects.toThrow()
-  const expired = await rawAdd(group, bob, await timedBinding(bob, 100, 150))
+  const expired = await rawAdd(
+    group,
+    bob,
+    await timedBinding({ identity: bob, iat: 100, exp: 150 }),
+  )
   await expect(commitInvite(group, expired.bundle.publicPackage, invite)).rejects.toThrow(
     /authoring time/,
   )
@@ -166,7 +178,7 @@ test('Add refuses floating and malformed bindings and expired author capability'
 
 test('Welcome admits a live leaf while preserving a lapsed existing leaf', async () => {
   const { group, bob, invite } = await admission()
-  const added = await rawAdd(group, bob, await timedBinding(bob, 201, 300))
+  const added = await rawAdd(group, bob, await timedBinding({ identity: bob, iat: 201, exp: 300 }))
   if (added.result.welcome == null) throw new Error('Missing Welcome')
   const { group: joined } = await processWelcome({
     identity: bob,
@@ -181,7 +193,7 @@ test('Welcome admits a live leaf while preserving a lapsed existing leaf', async
 
 test.each([99, 100])('Welcome refuses admitted expiry %s at tree time 100', async (exp) => {
   const { group, bob, invite } = await admission()
-  const added = await rawAdd(group, bob, await timedBinding(bob, 90, exp))
+  const added = await rawAdd(group, bob, await timedBinding({ identity: bob, iat: 90, exp }))
   if (added.result.welcome == null) throw new Error('Missing Welcome')
   await expect(
     processWelcome({
@@ -206,13 +218,13 @@ test.each([
       const { group, identity } = await pipelineGroup({ leafLifetime: limit })
       const bob = agent(61)
       const trusted = agent(71)
-      const parent = (await timedBinding(trusted, 90, 2592090)).capability
-      const binding = await timedBinding(
-        bob,
-        100,
-        100 + lifetime,
-        chained ? { parent, issuer: trusted } : {},
-      )
+      const parent = (await timedBinding({ identity: trusted, iat: 90, exp: 2592090 })).capability
+      const binding = await timedBinding({
+        identity: bob,
+        iat: 100,
+        exp: 100 + lifetime,
+        ...(chained ? { parent, issuer: trusted } : {}),
+      })
       const { invite } = await createInvite({ group, identity, recipientDID: bob.id })
       const added = await rawAdd(group, bob, binding)
       if (added.result.welcome == null) throw new Error('Missing Welcome')
@@ -224,7 +236,11 @@ test.each([
       })
       if (accepted) await expect(welcome).resolves.toBeDefined()
       else await expect(welcome).rejects.toMatchObject({ reason: 'lifetime-cap' })
-      const { author, joined } = await lowLevelWelcome(group, bob, await timedBinding(bob, 90, 200))
+      const { author, joined } = await lowLevelWelcome(
+        group,
+        bob,
+        await timedBinding({ identity: bob, iat: 90, exp: 200 }),
+      )
       const { groupInfo } = await exportGroupInfo({ group: author })
       const external = joinGroupExternal({
         identity: bob,
@@ -253,8 +269,15 @@ test.each([
     const { group, identity } = await pipelineGroup({ trustedGrantLifetime: limit })
     const bob = agent(61)
     const trusted = agent(71)
-    const parent = (await timedBinding(trusted, 90, 90 + lifetime)).capability
-    const binding = await timedBinding(bob, 100, 200, { parent, issuer: trusted })
+    const parent = (await timedBinding({ identity: trusted, iat: 90, exp: 90 + lifetime }))
+      .capability
+    const binding = await timedBinding({
+      identity: bob,
+      iat: 100,
+      exp: 200,
+      parent,
+      issuer: trusted,
+    })
     const { invite } = await createInvite({ group, identity, recipientDID: bob.id })
     const added = await rawAdd(group, bob, binding)
     if (added.result.welcome == null) throw new Error('Missing Welcome')
@@ -266,7 +289,11 @@ test.each([
     })
     if (accepted) await expect(welcome).resolves.toBeDefined()
     else await expect(welcome).rejects.toMatchObject({ reason: 'lifetime-cap' })
-    const { author, joined } = await lowLevelWelcome(group, bob, await timedBinding(bob, 90, 200))
+    const { author, joined } = await lowLevelWelcome(
+      group,
+      bob,
+      await timedBinding({ identity: bob, iat: 90, exp: 200 }),
+    )
     const { groupInfo } = await exportGroupInfo({ group: author })
     const external = joinGroupExternal({
       identity: bob,
@@ -287,16 +314,20 @@ test.each(['floating', 'foreign', 'malformed'] as const)(
     const { group, identity } = await pipelineGroup()
     const own = group.state.ratchetTree[0]
     if (own?.nodeType !== nodeTypes.leaf) throw new Error('Missing creator')
-    const binding = await timedBinding(identity, 100, 200)
+    const binding = await timedBinding({ identity, iat: 100, exp: 200 })
     own.leaf.credential = makeMLSCredential(
       identity,
       kind === 'floating'
         ? undefined
         : { ...binding, id: kind === 'foreign' ? 'did:kokuin:foreign' : 'did:key:wrong' },
     )
-    const invalid = deriveGroup(group, (await rawCommit(group)).newState)
+    const invalid = deriveGroup(group, (await rawCommit({ group })).newState)
     const bob = agent(61)
-    const added = await rawAdd(invalid, bob, await timedBinding(bob, 100, 200))
+    const added = await rawAdd(
+      invalid,
+      bob,
+      await timedBinding({ identity: bob, iat: 100, exp: 200 }),
+    )
     if (added.result.welcome == null) throw new Error('Missing Welcome')
     const invite = {
       groupID: group.groupID,
@@ -328,7 +359,11 @@ test.each(['floating', 'foreign', 'malformed'] as const)(
 test("Welcome refuses a recipient using another member's joining key package", async () => {
   const { group, bob, invite } = await admission()
   const other = agent(62)
-  const added = await rawAdd(group, other, await timedBinding(other, 100, 200))
+  const added = await rawAdd(
+    group,
+    other,
+    await timedBinding({ identity: other, iat: 100, exp: 200 }),
+  )
   if (added.result.welcome == null) throw new Error('Missing Welcome')
   await expect(
     processWelcome({
@@ -383,7 +418,12 @@ async function oversizedJoinGroup() {
     const fixture = await lowLevelWelcome(
       group,
       identity,
-      await timedBinding(identity, index === 0 ? 102 : 100, index === 2 ? 101 : 300, { prefix }),
+      await timedBinding({
+        identity,
+        iat: index === 0 ? 102 : 100,
+        exp: index === 2 ? 101 : 300,
+        prefix,
+      }),
     )
     group = fixture.author
   }
@@ -400,7 +440,7 @@ test('external replacement may shrink history while remaining above the horizon'
     groupInfo,
     credential: { id: target.id, groupID: group.groupID },
     resync: true,
-    controller: await timedBinding(target, 150, 300),
+    controller: await timedBinding({ identity: target, iat: 150, exp: 300 }),
   })
   const sizeAfter = historySize(result.group.state.ratchetTree, [])
   expect(sizeAfter).toBeGreaterThan(HISTORY_HORIZON)
@@ -416,18 +456,18 @@ test('Welcome may join a shrinking Remove and Add above the horizon', async () =
   const sizeBefore = historySize(group.state.ratchetTree, [])
   const bob = agent(61)
   const { invite } = await createInvite({ group, identity, recipientDID: bob.id })
-  const added = await rawAdd(group, bob, await timedBinding(bob, 102, 300))
+  const added = await rawAdd(group, bob, await timedBinding({ identity: bob, iat: 102, exp: 300 }))
   const removed = group.findMemberLeafIndex(target.id)
   if (removed == null) throw new Error('Missing target')
-  const result = await commitWithEntries(
+  const result = await commitWithEntries({
     group,
-    [
+    extraProposals: [
       { proposalType: defaultProposalTypes.remove, remove: { removed } },
       { proposalType: defaultProposalTypes.add, add: { keyPackage: added.bundle.publicPackage } },
     ],
-    [],
-    { ratchetTreeExtension: true },
-  )
+    enacted: [],
+    ratchetTreeExtension: true,
+  })
   if (result.welcome == null) throw new Error('Missing Welcome')
   const sizeAfter = historySize(result.newState.ratchetTree, [])
   expect(sizeAfter).toBeGreaterThan(HISTORY_HORIZON)
@@ -447,7 +487,11 @@ test('Welcome may join a shrinking Remove and Add above the horizon', async () =
 
 test('the commit gate still refuses growing history above the horizon', async () => {
   const { group } = await oversizedJoinGroup()
-  const added = await rawAdd(group, agent(61), await timedBinding(agent(61), 102, 300))
+  const added = await rawAdd(
+    group,
+    agent(61),
+    await timedBinding({ identity: agent(61), iat: 102, exp: 300 }),
+  )
   expect(historySize(added.result.newState.ratchetTree, [])).toBeGreaterThan(
     historySize(group.state.ratchetTree, []),
   )
@@ -455,11 +499,13 @@ test('the commit gate still refuses growing history above the horizon', async ()
   await expect(group.processMessage(added.message)).rejects.toMatchObject({ reason: 'binding' })
   expect(group.state).toBe(previous)
   await expect(
-    commitWithEntries(
+    commitWithEntries({
       group,
-      [{ proposalType: defaultProposalTypes.add, add: { keyPackage: added.bundle.publicPackage } }],
-      [],
-    ),
+      extraProposals: [
+        { proposalType: defaultProposalTypes.add, add: { keyPackage: added.bundle.publicPackage } },
+      ],
+      enacted: [],
+    }),
   ).rejects.toMatchObject({ reason: 'history-horizon' })
   expect(group.state).toBe(previous)
 })

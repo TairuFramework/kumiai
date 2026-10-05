@@ -62,7 +62,12 @@ describe('foldEnvelope', () => {
       entryID: 'e1',
     })
 
-    const result = foldEnvelope(base, EMPTY_REGISTRY, [appEntry], GROUP_ID)
+    const result = foldEnvelope({
+      baseRoster: base,
+      baseRegistry: EMPTY_REGISTRY,
+      entries: [appEntry],
+      groupID: GROUP_ID,
+    })
 
     expect(result.ok).toBe(true)
     if (result.ok) {
@@ -83,7 +88,12 @@ describe('foldEnvelope', () => {
       entryID: 'bad',
     })
 
-    const result = foldEnvelope(base, EMPTY_REGISTRY, [memberEntry], GROUP_ID)
+    const result = foldEnvelope({
+      baseRoster: base,
+      baseRegistry: EMPTY_REGISTRY,
+      entries: [memberEntry],
+      groupID: GROUP_ID,
+    })
 
     expect(result.ok).toBe(false)
     if (!result.ok) {
@@ -108,7 +118,12 @@ describe('foldEnvelope', () => {
       entryID: 'bob-app',
     })
 
-    const result = foldEnvelope(base, EMPTY_REGISTRY, [promoteBob, bobEntry], GROUP_ID)
+    const result = foldEnvelope({
+      baseRoster: base,
+      baseRegistry: EMPTY_REGISTRY,
+      entries: [promoteBob, bobEntry],
+      groupID: GROUP_ID,
+    })
 
     expect(result.ok).toBe(true)
     if (result.ok) {
@@ -133,7 +148,12 @@ describe('foldEnvelope', () => {
       entryID: 'bob-app',
     })
 
-    const result = foldEnvelope(base, EMPTY_REGISTRY, [bobEntry, promoteBob], GROUP_ID)
+    const result = foldEnvelope({
+      baseRoster: base,
+      baseRegistry: EMPTY_REGISTRY,
+      entries: [bobEntry, promoteBob],
+      groupID: GROUP_ID,
+    })
 
     expect(result.ok).toBe(false)
     if (!result.ok) {
@@ -150,7 +170,12 @@ describe('foldEnvelope', () => {
       entryID: 'm1',
     })
 
-    const result = foldEnvelope(base, EMPTY_REGISTRY, [mystery], GROUP_ID)
+    const result = foldEnvelope({
+      baseRoster: base,
+      baseRegistry: EMPTY_REGISTRY,
+      entries: [mystery],
+      groupID: GROUP_ID,
+    })
 
     expect(result.ok).toBe(false)
     if (!result.ok) {
@@ -168,7 +193,12 @@ describe('foldEnvelope', () => {
       entryID: 'h1',
     })
 
-    const result = foldEnvelope(base, EMPTY_REGISTRY, [hostEntry], GROUP_ID)
+    const result = foldEnvelope({
+      baseRoster: base,
+      baseRegistry: EMPTY_REGISTRY,
+      entries: [hostEntry],
+      groupID: GROUP_ID,
+    })
 
     expect(result.ok).toBe(true)
     if (result.ok) {
@@ -186,7 +216,12 @@ describe('foldEnvelope', () => {
       entryID: 'a1',
     })
 
-    const result = foldEnvelope(base, EMPTY_REGISTRY, [arbitrary], GROUP_ID)
+    const result = foldEnvelope({
+      baseRoster: base,
+      baseRegistry: EMPTY_REGISTRY,
+      entries: [arbitrary],
+      groupID: GROUP_ID,
+    })
 
     expect(result.ok).toBe(true)
     if (result.ok) {
@@ -205,7 +240,12 @@ describe('foldEnvelope', () => {
       entryID: 'x1',
     })
 
-    const result = foldEnvelope(base, EMPTY_REGISTRY, [crossGroup], GROUP_ID)
+    const result = foldEnvelope({
+      baseRoster: base,
+      baseRegistry: EMPTY_REGISTRY,
+      entries: [crossGroup],
+      groupID: GROUP_ID,
+    })
 
     expect(result.ok).toBe(false)
     if (!result.ok) {
@@ -224,7 +264,12 @@ describe('foldEnvelope', () => {
       entryID: 'd1',
     })
 
-    const result = foldEnvelope(base, EMPTY_REGISTRY, [selfDemote], GROUP_ID)
+    const result = foldEnvelope({
+      baseRoster: base,
+      baseRegistry: EMPTY_REGISTRY,
+      entries: [selfDemote],
+      groupID: GROUP_ID,
+    })
 
     expect(result.ok).toBe(false)
     if (!result.ok) {
@@ -250,7 +295,12 @@ describe('foldEnvelope', () => {
       entryID: 'demote',
     })
 
-    const result = foldEnvelope(base, EMPTY_REGISTRY, [promoteBob, selfDemote], GROUP_ID)
+    const result = foldEnvelope({
+      baseRoster: base,
+      baseRegistry: EMPTY_REGISTRY,
+      entries: [promoteBob, selfDemote],
+      groupID: GROUP_ID,
+    })
 
     expect(result.ok).toBe(true)
     if (result.ok) {
@@ -269,7 +319,12 @@ describe('foldEnvelope', () => {
       entryID: 'r1',
     })
 
-    const result = foldEnvelope(base, EMPTY_REGISTRY, [bogus], GROUP_ID)
+    const result = foldEnvelope({
+      baseRoster: base,
+      baseRegistry: EMPTY_REGISTRY,
+      entries: [bogus],
+      groupID: GROUP_ID,
+    })
 
     expect(result.ok).toBe(false)
     if (!result.ok) {
@@ -281,7 +336,12 @@ describe('foldEnvelope', () => {
   test('an empty envelope changes no roster and surfaces nothing', () => {
     const base = roster([[CREATOR_DID, 'admin']])
 
-    const result = foldEnvelope(base, EMPTY_REGISTRY, [], GROUP_ID)
+    const result = foldEnvelope({
+      baseRoster: base,
+      baseRegistry: EMPTY_REGISTRY,
+      entries: [],
+      groupID: GROUP_ID,
+    })
 
     expect(result.ok).toBe(true)
     if (result.ok) {
@@ -308,7 +368,12 @@ describe('foldEnvelope', () => {
       entryID: 'relayed',
     })
 
-    const result = foldEnvelope(base, EMPTY_REGISTRY, [colluderEntry, relayed], GROUP_ID)
+    const result = foldEnvelope({
+      baseRoster: base,
+      baseRegistry: EMPTY_REGISTRY,
+      entries: [colluderEntry, relayed],
+      groupID: GROUP_ID,
+    })
 
     expect(result.ok).toBe(false)
     if (!result.ok) {
@@ -339,7 +404,14 @@ describe('foldEnvelope', () => {
       [input({ issuer: CREATOR_DID, type: 'x', value: null, groupID: OTHER_GROUP, entryID: 'c5' })],
     ]
     for (const entries of cases) {
-      expect(() => foldEnvelope(base, EMPTY_REGISTRY, entries, GROUP_ID)).not.toThrow()
+      expect(() =>
+        foldEnvelope({
+          baseRoster: base,
+          baseRegistry: EMPTY_REGISTRY,
+          entries: entries,
+          groupID: GROUP_ID,
+        }),
+      ).not.toThrow()
     }
   })
 })
@@ -359,7 +431,12 @@ describe('foldEnvelope — kumiai.device branch', () => {
       value: { op: 'register', controller: profile },
       entryID: 'd1',
     })
-    const result = foldEnvelope(base, EMPTY_REGISTRY, [register], GROUP_ID)
+    const result = foldEnvelope({
+      baseRoster: base,
+      baseRegistry: EMPTY_REGISTRY,
+      entries: [register],
+      groupID: GROUP_ID,
+    })
     expect(result.ok).toBe(true)
     if (result.ok) {
       expect(_authority(result.registry, dev)).toBe(normalizeDID(profile))
@@ -376,7 +453,12 @@ describe('foldEnvelope — kumiai.device branch', () => {
       value: { op: 'nope' },
       entryID: 'd-bad',
     })
-    const result = foldEnvelope(base, EMPTY_REGISTRY, [bad], GROUP_ID)
+    const result = foldEnvelope({
+      baseRoster: base,
+      baseRegistry: EMPTY_REGISTRY,
+      entries: [bad],
+      groupID: GROUP_ID,
+    })
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.entryID).toBe('d-bad')
   })
@@ -397,7 +479,12 @@ describe('foldEnvelope — kumiai.device branch', () => {
       value: 'member',
       entryID: 'r1',
     })
-    const result = foldEnvelope(base, EMPTY_REGISTRY, [register, grant], GROUP_ID)
+    const result = foldEnvelope({
+      baseRoster: base,
+      baseRegistry: EMPTY_REGISTRY,
+      entries: [register, grant],
+      groupID: GROUP_ID,
+    })
     expect(result.ok).toBe(true)
     if (result.ok) expect(result.roster.roles.get(normalizeDID('did:key:zNew'))).toBe('member')
   })
@@ -405,7 +492,12 @@ describe('foldEnvelope — kumiai.device branch', () => {
   test('an unknown kumiai.* type still fails closed', () => {
     const base = roster([[CREATOR_DID, 'admin']])
     const mystery = input({ issuer: CREATOR_DID, type: 'kumiai.mystery', value: {}, entryID: 'm1' })
-    const result = foldEnvelope(base, EMPTY_REGISTRY, [mystery], GROUP_ID)
+    const result = foldEnvelope({
+      baseRoster: base,
+      baseRegistry: EMPTY_REGISTRY,
+      entries: [mystery],
+      groupID: GROUP_ID,
+    })
     expect(result.ok).toBe(false)
   })
 })
@@ -424,7 +516,12 @@ describe('foldEnvelope beacon', () => {
       entryID: 'e1',
     })
 
-    const result = foldEnvelope(baseRoster, registrySeed(), [beacon], GROUP_ID)
+    const result = foldEnvelope({
+      baseRoster,
+      baseRegistry: registrySeed(),
+      entries: [beacon],
+      groupID: GROUP_ID,
+    })
 
     expect(result.ok).toBe(true)
     if (result.ok)
@@ -439,7 +536,12 @@ describe('foldEnvelope beacon', () => {
       value: { op: 'beacon', logLength: 2, headDigest: 'zOld' },
       entryID: 'b0',
     })
-    const seeded = foldEnvelope(baseRoster, registrySeed(), [seedBeacon], GROUP_ID)
+    const seeded = foldEnvelope({
+      baseRoster,
+      baseRegistry: registrySeed(),
+      entries: [seedBeacon],
+      groupID: GROUP_ID,
+    })
     expect(seeded.ok).toBe(true)
     if (!seeded.ok) return
 
@@ -450,7 +552,12 @@ describe('foldEnvelope beacon', () => {
       value: { op: 'register', controller: profile },
       entryID: 'r1',
     })
-    const next = foldEnvelope(baseRoster, seeded.registry, [registerDevice], GROUP_ID)
+    const next = foldEnvelope({
+      baseRoster,
+      baseRegistry: seeded.registry,
+      entries: [registerDevice],
+      groupID: GROUP_ID,
+    })
 
     expect(next.ok).toBe(true)
     if (next.ok)

@@ -10,12 +10,15 @@ import { encodeMemoryCommit, memoryEntryID } from './fixtures/memory-group-mls.j
 import { buildLedgerCommit, makeMLSPeer, type TestPeer } from './fixtures/peer.js'
 import { drainUntil } from './fixtures/recovery-clock.js'
 
-async function waitForHeal(
-  bob: TestPeer,
-  hub: FakeHub,
-  events: Array<RecoveryEvent>,
-  withResponder: boolean,
-) {
+type WaitForHealParams = {
+  bob: TestPeer
+  hub: FakeHub
+  events: Array<RecoveryEvent>
+  withResponder: boolean
+}
+
+async function waitForHeal(params: WaitForHealParams): Promise<void> {
+  const { bob, hub, events, withResponder } = params
   if (!withResponder) {
     await drainUntil(
       () =>
@@ -81,7 +84,7 @@ const armOwnUnmerged: Arm = async (hub, rs, withResponder) => {
       events.push(event)
     },
   })
-  await waitForHeal(bob, hub, events, withResponder)
+  await waitForHeal({ bob, hub, events, withResponder })
   return { bob, responder, staleEpoch: 1 }
 }
 
@@ -115,7 +118,7 @@ const armAhead: Arm = async (hub, rs, withResponder) => {
       events.push(event)
     },
   })
-  await waitForHeal(bob, hub, events, withResponder)
+  await waitForHeal({ bob, hub, events, withResponder })
   return { bob, responder, staleEpoch: 1 }
 }
 
@@ -165,7 +168,7 @@ const armForkLosing: Arm = async (hub, rs, withResponder) => {
   // Bob applied the loser branch (the winner was hidden). Now show him the branch he lost.
   hub.revealTo('bob', winnerSeq)
   await wakeLane(hub, rs)
-  await waitForHeal(bob, hub, events, withResponder)
+  await waitForHeal({ bob, hub, events, withResponder })
   return { bob, responder, staleEpoch: 2 }
 }
 

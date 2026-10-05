@@ -294,7 +294,9 @@ describe('attack: history hidden in advisory or clock entries', () => {
         subject: controllerID,
         value: { ...base, ...extra },
       })
-      await expect(commitWithEntries(group, [], [token], { requireAdmin: false })).rejects.toThrow()
+      await expect(
+        commitWithEntries({ group, extraProposals: [], enacted: [token], requireAdmin: false }),
+      ).rejects.toThrow()
       expect(group.ledgerTokens).toEqual([])
       expect(group.registry.controllers.size).toBe(0)
     }
@@ -474,9 +476,12 @@ describe('attack: invalid lifecycle proofs keep their classifications', () => {
           ...(controller == null ? {} : { controller }),
         },
       })
-      const rejection = await commitWithEntries(group, [], [token], { requireAdmin: false }).catch(
-        (error: unknown) => error,
-      )
+      const rejection = await commitWithEntries({
+        group,
+        extraProposals: [],
+        enacted: [token],
+        requireAdmin: false,
+      }).catch((error: unknown) => error)
       expect(rejection).toBeInstanceOf(RevokeProofError)
       expect(rejection).toMatchObject({ reason })
     },
@@ -561,7 +566,12 @@ describe('attack: reserved lifecycle entries', () => {
         value: 'admin',
       })
       await expect(
-        commitWithEntries(members.group, [], [token], { requireAdmin: false }),
+        commitWithEntries({
+          group: members.group,
+          extraProposals: [],
+          enacted: [token],
+          requireAdmin: false,
+        }),
       ).rejects.toThrow(/reserved/)
       publish(tokens, [token])
       const message = await rawEnact(members.group, [token])

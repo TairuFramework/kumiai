@@ -113,8 +113,7 @@ function isDenied(denied: ReadonlySet<string>, did: string): boolean {
   return denied.has(did) || denied.has(normalizeDID(did))
 }
 
-/** Authenticate only embedded proof, using the token's issuance as its reference time. */
-async function verifyPinnedCapability(params: {
+type VerifyPinnedCapabilityParams = {
   capability: string
   prefix: Array<SignedEvent>
   controllerID: string
@@ -124,8 +123,12 @@ async function verifyPinnedCapability(params: {
   denySet?: ReadonlySet<string>
   leafLifetime?: number
   trustedGrantLifetime?: number
+  /** Refuse a delegated (chained) capability. */
   directOnly?: boolean
-}): Promise<void> {
+}
+
+/** Authenticate only embedded proof, using the token's issuance as its reference time. */
+async function verifyPinnedCapability(params: VerifyPinnedCapabilityParams): Promise<void> {
   if (
     !params.controllerID.startsWith('did:kokuin:') ||
     !foldLog(params.controllerID, params.prefix).ok

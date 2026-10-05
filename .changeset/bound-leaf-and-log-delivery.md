@@ -32,6 +32,7 @@ Release order:
 - `HISTORY_HORIZON` is 393,216 bytes. A commit passes only when its size after the commit is within the horizon or no larger than before it.
 - `assertFrameFits` and `FrameTooLargeError` bound every final frame.
 - New typed errors: `LeafBindingError`, `LeafLapsedError`, `RevokeProofError` and `InviteRecipientMismatchError`.
+- `foldEnvelope` takes a single `FoldEnvelopeParams` object.
 
 **Recovery (`@kumiai/mls-rpc`, `@kumiai/rpc`)**
 
@@ -48,7 +49,7 @@ Release order:
 - `AnchorStore` holds `{ anchor, pending }`, a one-advance rotation record that is repaired at startup.
 - `HandleAccess.admission()` publishes a lock-free send snapshot.
 - `GroupPeer.commit` adds `holdLogSends`.
-- `publishRevokeProof` takes a host `serializeJournal`.
+- `publishRevokeProof` takes one `{ peer, mls, input, options }` object, with a host `serializeJournal` in `options`.
 - One live peer per group owns the outbox, the journal and the anchor store. To hand over, call `dispose()`, await `drained()`, then start the replacement.
 
 **Hub**

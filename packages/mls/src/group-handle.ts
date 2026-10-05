@@ -52,6 +52,7 @@ import {
   assertSenderNotLapsed,
   type CommitRejectionReason,
   isLapsed,
+  type LifecycleGate,
   leafAt,
   prepareLifecycleGate,
   rejectionReason,
@@ -167,6 +168,20 @@ export class CommitRejectedError extends Error {
 }
 
 type RejectedCommit = { proposals: Array<ProposalWithSender>; senderLeafIndex?: number }
+
+/** What the commit pipeline learned about a rejection, for the error it throws. */
+type CommitCapture = {
+  rejected?: RejectedCommit
+  proofError?: RevokeProofError
+  reason?: CommitRejectionReason
+}
+
+type CommitPipeline = {
+  callback: IncomingMessageCallback | undefined
+  capture: CommitCapture
+  applyOnAccept: (notify?: boolean) => () => void
+  postApply: (state: ClientState) => Promise<void>
+}
 
 /**
  * Wrap a consumer commit policy to capture a rejected commit's proposals for
@@ -958,12 +973,12 @@ export class GroupHandle {
         historical?.senderDataSecret ?? this.#state.keySchedule.senderDataSecret,
         pm,
       )
-      assertSenderNotLapsed(
-        this,
-        epochTree,
+      assertSenderNotLapsed({
+        group: this,
+        tree: epochTree,
         leafIndex,
-        (historical?.groupContext ?? this.#state.groupContext).extensions,
-      )
+        extensions: (historical?.groupContext ?? this.#state.groupContext).extensions,
+      })
       const result = await mlsProcessMessage({
         context: this.#context,
         state: this.#state,
@@ -1009,12 +1024,12 @@ export class GroupHandle {
         historical?.senderDataSecret ?? this.#state.keySchedule.senderDataSecret,
         pm,
       )
-      assertSenderNotLapsed(
-        this,
-        epochTree,
+      assertSenderNotLapsed({
+        group: this,
+        tree: epochTree,
         leafIndex,
-        (historical?.groupContext ?? this.#state.groupContext).extensions,
-      )
+        extensions: (historical?.groupContext ?? this.#state.groupContext).extensions,
+      })
       const result = await mlsProcessMessage({
         context: this.#context,
         state: this.#state,
@@ -1038,22 +1053,9 @@ export class GroupHandle {
   async #prepareCommitPipeline(
     decoded: unknown,
     opts?: { commitPolicy?: IncomingMessageCallback },
-  ): Promise<{
-    callback: IncomingMessageCallback | undefined
-    capture: {
-      rejected?: RejectedCommit
-      proofError?: RevokeProofError
-      reason?: CommitRejectionReason
-    }
-    applyOnAccept: (notify?: boolean) => () => void
-    postApply: (state: ClientState) => Promise<void>
-  }> {
+  ): Promise<CommitPipeline> {
     const callerPolicy = opts?.commitPolicy ?? this.#commitPolicy
-    const capture: {
-      rejected?: RejectedCommit
-      proofError?: RevokeProofError
-      reason?: CommitRejectionReason
-    } = {}
+    const capture: CommitCapture = {}
 
     const commit = readPrivateCommit(decoded)
     let externalCommitDID: string | undefined
@@ -1127,18 +1129,19 @@ export class GroupHandle {
             return input
           })
 
-          const foldResult = foldEnvelope(
-            this.#roster,
-            this.#registry,
-            ordered,
-            this.groupID,
-            this.#anchor.controller == null
-              ? undefined
-              : {
-                  controllerID: this.#anchor.controller,
-                  memberController: (did) => this.bindingOfDID(did)?.controller,
-                },
-          )
+          const foldResult = foldEnvelope({
+            baseRoster: this.#roster,
+            baseRegistry: this.#registry,
+            entries: ordered,
+            groupID: this.groupID,
+            context:
+              this.#anchor.controller == null
+                ? undefined
+                : {
+                    controllerID: this.#anchor.controller,
+                    memberController: (did) => this.bindingOfDID(did)?.controller,
+                  },
+          })
           if (!foldResult.ok) {
             precomputedReject = true
             capture.proofError = foldResult.error
@@ -1188,7 +1191,7 @@ export class GroupHandle {
       ...(externalCommitDID !== undefined && { externalCommitDID }),
     })
 
-    let gate: Awaited<ReturnType<typeof prepareLifecycleGate>> | undefined
+    let gate: LifecycleGate | undefined
     try {
       const frame = decoded as MlsFramedMessage
       const externalLeaf: LeafNode | undefined =
@@ -1197,13 +1200,13 @@ export class GroupHandle {
         frame.publicMessage.senderType === senderTypes.new_member_commit
           ? frame.publicMessage.content.commit.path?.leafNode
           : undefined
-      gate = await prepareLifecycleGate(
-        this,
-        acceptedEntries.map(({ verified }) => verified),
+      gate = await prepareLifecycleGate({
+        group: this,
+        entries: acceptedEntries.map(({ verified }) => verified),
         candidateRegistry,
         context,
         externalLeaf,
-      )
+      })
     } catch (error) {
       precomputedReject = true
       capture.reason = rejectionReason(error)
@@ -1487,12 +1490,12 @@ export class GroupHandle {
           historical?.senderDataSecret ?? this.#state.keySchedule.senderDataSecret,
           application,
         )
-        assertSenderNotLapsed(
-          this,
-          historical?.ratchetTree ?? this.#state.ratchetTree,
-          index,
-          (historical?.groupContext ?? this.#state.groupContext).extensions,
-        )
+        assertSenderNotLapsed({
+          group: this,
+          tree: historical?.ratchetTree ?? this.#state.ratchetTree,
+          leafIndex: index,
+          extensions: (historical?.groupContext ?? this.#state.groupContext).extensions,
+        })
       }
       let result: Awaited<ReturnType<typeof mlsProcessMessage>>
       try {

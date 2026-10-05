@@ -192,13 +192,20 @@ test('admission is an epoch snapshot of lapse, independent of the wall clock', a
   try {
     const { group, identity } = await pipelineGroup()
     const peer = agent(51)
-    const fixture = await lowLevelWelcome(group, peer, await timedBinding(peer, 100, 110))
+    const fixture = await lowLevelWelcome(
+      group,
+      peer,
+      await timedBinding({ identity: peer, iat: 100, exp: 110 }),
+    )
     const before = fixture.joined.sendAdmission()
     expect(before).toEqual({ epoch: Number(fixture.joined.epoch), admissible: true })
     clock.mockReturnValue(999_000)
     expect(fixture.joined.sendAdmission()).toEqual(before)
     clock.mockReturnValue(150_000)
-    const renewed = await renewLeaf(fixture.author, await timedBinding(identity, 150, 250))
+    const renewed = await renewLeaf(
+      fixture.author,
+      await timedBinding({ identity, iat: 150, exp: 250 }),
+    )
     await expect(
       fixture.joined.processMessage(renewed.commitMessage, {
         persist: async () => {
@@ -213,7 +220,10 @@ test('admission is an epoch snapshot of lapse, independent of the wall clock', a
       admissible: false,
       reason: 'lapsed',
     })
-    const own = await renewLeaf(fixture.joined, await timedBinding(peer, 150, 250))
+    const own = await renewLeaf(
+      fixture.joined,
+      await timedBinding({ identity: peer, iat: 150, exp: 250 }),
+    )
     expect(own.newGroup.sendAdmission()).toEqual({ epoch: Number(own.epoch), admissible: true })
     expect(fixture.joined.sendAdmission().admissible).toBe(false)
   } finally {
@@ -351,11 +361,11 @@ describe('device events', () => {
     })
     const removed = g.creatorGroup.findMemberLeafIndex(g.targetDeviceID)
     if (removed == null) throw new Error('missing target leaf')
-    const combined = await commitWithEntries(
-      g.creatorGroup,
-      [{ proposalType: defaultProposalTypes.remove, remove: { removed } }],
-      [revokeToken, note],
-    )
+    const combined = await commitWithEntries({
+      group: g.creatorGroup,
+      extraProposals: [{ proposalType: defaultProposalTypes.remove, remove: { removed } }],
+      enacted: [revokeToken, note],
+    })
     g.tokens.set(ledgerEntryDigest(revokeToken), revokeToken)
     g.tokens.set(ledgerEntryDigest(note), note)
     const before = receiver.epoch

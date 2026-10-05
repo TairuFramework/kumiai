@@ -91,16 +91,24 @@ test('external replacement reports denied subjects as invalid and tree-time regr
   const { signLedgerEntry } = await import('../src/ledger.js')
   const initial = await pipelineGroup()
   const bob = agent(61)
-  const { author } = await lowLevelWelcome(initial.group, bob, await timedBinding(bob, 110, 200))
-  const issuer = agent(81)
-  const parent = (await timedBinding(issuer, 100, 200)).capability
-  const regression = await lowLevelExternal(
-    author,
+  const { author } = await lowLevelWelcome(
+    initial.group,
     bob,
-    await timedBinding(bob, 110, 200, { issuer, parent }),
+    await timedBinding({ identity: bob, iat: 110, exp: 200 }),
   )
+  const issuer = agent(81)
+  const parent = (await timedBinding({ identity: issuer, iat: 100, exp: 200 })).capability
+  const regression = await lowLevelExternal({
+    group: author,
+    identity: bob,
+    binding: await timedBinding({ identity: bob, iat: 110, exp: 200, issuer, parent }),
+  })
   await expect(author.processMessage(regression)).rejects.toMatchObject({ reason: 'floor' })
-  const message = await lowLevelExternal(author, bob, await timedBinding(bob, 110, 200))
+  const message = await lowLevelExternal({
+    group: author,
+    identity: bob,
+    binding: await timedBinding({ identity: bob, iat: 110, exp: 200 }),
+  })
   const revoke = createRevoke({
     seed: controllerSeed,
     profile: 0,
@@ -150,7 +158,12 @@ test('opening checks signature, token kind and signed bindings even inside a val
     const token = stringifyToken(
       await identity.signToken({ ...base, ...change }, { embedLongForm: true }),
     )
-    const sealed = await sealToRequest(kind, group, held.request, new TextEncoder().encode(token))
+    const sealed = await sealToRequest({
+      kind,
+      group,
+      request: held.request,
+      plaintext: new TextEncoder().encode(token),
+    })
     await expect(
       openRecoveryVerdict({
         group,
@@ -165,12 +178,12 @@ test('opening checks signature, token kind and signed bindings even inside a val
   const signature = Buffer.from(parts[2] as string, 'base64url')
   signature[0] = (signature[0] as number) ^ 1
   parts[2] = signature.toString('base64url')
-  const sealed = await sealToRequest(
+  const sealed = await sealToRequest({
     kind,
     group,
-    held.request,
-    new TextEncoder().encode(parts.join('.')),
-  )
+    request: held.request,
+    plaintext: new TextEncoder().encode(parts.join('.')),
+  })
   await expect(
     openRecoveryVerdict({
       group,

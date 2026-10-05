@@ -125,6 +125,20 @@ export function authenticateLifecycleProof(
   throw new RevokeProofError(belowFloor ? 'generation-floor' : 'no-rev')
 }
 
+/** The entry must declare exactly the derived effects, in derivation order. */
+function effectsMatch(
+  declared: Array<RevokedEffect> | undefined,
+  derived: Array<RevokedEffect>,
+): boolean {
+  if (declared?.length !== derived.length) return false
+  return derived.every((effect, index) => {
+    const held = declared[index]
+    if (held == null || normalizeDID(held.did) !== effect.did) return false
+    const cascadedFrom = held.cascadedFrom == null ? undefined : normalizeDID(held.cascadedFrom)
+    return cascadedFrom === effect.cascadedFrom
+  })
+}
+
 /** Verify live effects while all leaves still describe the epoch before the commit. */
 export async function verifyLifecycleProof(
   group: GroupHandle,
@@ -207,19 +221,7 @@ export async function verifyLifecycleProof(
       revoked.push({ did: leaf.did, cascadedFrom: leaf.issuer })
     }
   }
-  if (
-    value.revoked?.length !== revoked.length ||
-    revoked.some((effect, index) => {
-      const declared = value.revoked?.[index]
-      return (
-        declared == null ||
-        normalizeDID(declared.did) !== effect.did ||
-        (declared.cascadedFrom == null ? undefined : normalizeDID(declared.cascadedFrom)) !==
-          effect.cascadedFrom
-      )
-    })
-  )
-    throw new RevokeProofError('effects-mismatch')
+  if (!effectsMatch(value.revoked, revoked)) throw new RevokeProofError('effects-mismatch')
   const affected = new Set(revoked.map(({ did }) => did))
   const removed = leaves.filter(({ did }) => affected.has(did))
   const before = historySize(

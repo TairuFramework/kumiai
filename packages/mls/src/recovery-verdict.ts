@@ -90,12 +90,15 @@ function isRecoveryVerdict(value: unknown): value is RecoveryVerdict {
   )
 }
 
-export async function sealRecoveryVerdict(params: {
+export type SealRecoveryVerdictParams = {
   group: GroupHandle
   identity: SigningIdentity
+  /** The signed recovery request token being answered. */
   request: string
   verdict: RecoveryVerdict
-}): Promise<Uint8Array> {
+}
+
+export async function sealRecoveryVerdict(params: SealRecoveryVerdictParams): Promise<Uint8Array> {
   const { group, identity, request, verdict } = params
   const verified = await verifyRecoveryRequest(request)
   if (
@@ -111,26 +114,26 @@ export async function sealRecoveryVerdict(params: {
     { embedLongForm: true },
   )
   // A refusal can answer an agent whose leaf the responder no longer holds.
-  return await sealToRequest(
-    VERDICT_REPLY,
+  return await sealToRequest({
+    kind: VERDICT_REPLY,
     group,
     request,
-    utf8.encode(stringifyToken(token)),
-    false,
-  )
+    plaintext: utf8.encode(stringifyToken(token)),
+    requireMember: false,
+  })
 }
 
 export async function openRecoveryVerdict(
   params: OpenSealedGroupInfoParams,
 ): Promise<OpenedRecoveryVerdict> {
   const { group, sealed, requestID, ephemeralPrivateKey } = params
-  const plaintext = await openSealedReply(
-    VERDICT_REPLY,
+  const plaintext = await openSealedReply({
+    kind: VERDICT_REPLY,
     group,
     sealed,
     requestID,
     ephemeralPrivateKey,
-  )
+  })
   const token = await verifyToken(new TextDecoder().decode(plaintext))
   if (
     !isVerifiedToken(token) ||
@@ -151,12 +154,16 @@ export async function openRecoveryVerdict(
   return { signer: normalizeDID(token.payload.iss), verdict }
 }
 
-export function recoverySignerEligible(
-  group: GroupHandle,
-  known: DeviceRegistry,
-  signer: string,
-  now = Date.now() / 1000,
-): boolean {
+export type RecoverySignerEligibleParams = {
+  group: GroupHandle
+  known: DeviceRegistry
+  signer: string
+  /** Seconds since epoch; defaults to the current time. */
+  now?: number
+}
+
+export function recoverySignerEligible(params: RecoverySignerEligibleParams): boolean {
+  const { group, known, signer, now = Date.now() / 1000 } = params
   const controller = group.anchor.controller
   if (controller == null) return false
   try {

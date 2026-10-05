@@ -56,10 +56,10 @@ export function readCapability(raw: string): SignedToken<LeafCapabilityPayload> 
   return token as SignedToken<LeafCapabilityPayload>
 }
 
-export function assertCapabilityLifetime(
-  payload: { iat?: unknown; exp?: unknown; nbf?: unknown },
-  maximum: number,
-): void {
+/** Unvalidated time claims, as read from a decoded token. */
+export type CapabilityTimeClaims = { iat?: unknown; exp?: unknown; nbf?: unknown }
+
+export function assertCapabilityLifetime(payload: CapabilityTimeClaims, maximum: number): void {
   const { iat, exp, nbf } = payload
   if (
     typeof iat !== 'number' ||

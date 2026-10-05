@@ -18,10 +18,12 @@ export type ConformanceCommitJournal = {
   clear(publishID: string): Promise<void>
 }
 
-export function testCommitJournalConformance(params: {
+export type CommitJournalConformanceParams = {
   label: string
   createJournal(): ConformanceCommitJournal
-}): void {
+}
+
+export function testCommitJournalConformance(params: CommitJournalConformanceParams): void {
   describe(`CommitJournal conformance — ${params.label}`, () => {
     test('a flagged entry retains its hold through acceptance and unrelated clears', async () => {
       const journal = params.createJournal()

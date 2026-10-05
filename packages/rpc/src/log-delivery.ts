@@ -15,7 +15,10 @@ export function checkedFetchResult(result: HubFetchTopicResult): CoveredFetchRes
 }
 
 type Publication = { epoch: number; floor: LogPosition | null; acknowledged: number }
-type DeliveryParams = {
+type LogFrame = { topicID: string; payload: Uint8Array }
+/** A sealed frame with the floor snapshot its admission was checked against. */
+type SealedLogFrame = LogFrame & { floor: EpochFloor }
+export type LogDeliveryParams = {
   queue: ReturnType<typeof createAppOutboxAcceptance>
   ready: () => Promise<void>
   floor: () => EpochFloor
@@ -23,18 +26,16 @@ type DeliveryParams = {
   probe: () => Promise<CoveredFetchResult>
   pull: () => Promise<void>
   heal: () => Promise<void>
-  seal: (
-    entry: AppOutboxEntry,
-  ) => Promise<{ topicID: string; payload: Uint8Array; floor: EpochFloor }>
+  seal: (entry: AppOutboxEntry) => Promise<SealedLogFrame>
   put: (entry: AppOutboxEntry) => Promise<void>
-  publish: (frame: { topicID: string; payload: Uint8Array }) => Promise<unknown> | null
+  publish: (frame: LogFrame) => Promise<unknown> | null
   remove: (seq: number) => Promise<void>
   clear: () => Promise<void>
   cleared: (notice: AppOutboxCleared) => void
 }
 
 /** Publication evidence stays in memory. A prepared durable attempt proves nothing. */
-export function createLogDelivery(params: DeliveryParams) {
+export function createLogDelivery(params: LogDeliveryParams) {
   const publications = new Map<number, Publication>()
   const proven = new Set<number>()
   let acknowledgements = 0
@@ -46,6 +47,20 @@ export function createLogDelivery(params: DeliveryParams) {
   let retrying = false
   let timer: ReturnType<typeof setTimeout> | undefined
   let backoff = 1000
+
+  const headPastFloor = (head: string | null, floor: EpochFloor): boolean =>
+    head != null && (floor.position == null || head > floor.position)
+
+  const removeProven = async (): Promise<boolean> => {
+    for (const seq of proven) {
+      await params.remove(seq)
+      params.queue.remove(seq)
+      publications.delete(seq)
+      proven.delete(seq)
+      if (closed) return false
+    }
+    return true
+  }
 
   const certify = (epoch: number, started: number): void => {
     for (const [seq, publication] of publications) {
@@ -65,17 +80,11 @@ export function createLogDelivery(params: DeliveryParams) {
       params.queue.clear()
       publications.clear()
       proven.clear()
-      if (!closed && seqs.length > 0) params.cleared({ reason: 'removed', seqs })
+      if (!closed) params.cleared({ reason: 'removed', seqs })
       return
     }
     // A failed durable removal retries alone, even after another epoch arrives.
-    for (const seq of proven) {
-      await params.remove(seq)
-      params.queue.remove(seq)
-      publications.delete(seq)
-      proven.delete(seq)
-      if (closed) return
-    }
+    if (!(await removeProven())) return
     if (params.queue.entries().length === 0) return
     let count = 0
     for (const entry of params.queue.entries()) {
@@ -88,13 +97,7 @@ export function createLogDelivery(params: DeliveryParams) {
       }
       if (proven.has(entry.seq)) continue
       const before = await params.probe()
-      const floorBefore = params.floor()
-      if (
-        before.head != null &&
-        (floorBefore.position == null || before.head > floorBefore.position)
-      ) {
-        await params.pull()
-      }
+      if (headPastFloor(before.head, params.floor())) await params.pull()
       if (closed || removed) {
         immediate = removed && params.queue.lowestUnresolvedSeq() == null
         return
@@ -154,8 +157,7 @@ export function createLogDelivery(params: DeliveryParams) {
         proven.add(seq)
       }
     }
-    const at = params.floor()
-    if (result.head != null && (at.position == null || result.head > at.position)) {
+    if (headPastFloor(result.head, params.floor())) {
       await params.pull()
       if (!params.floor().covered && !params.held() && publications.size > 0) await params.heal()
     }
@@ -163,13 +165,7 @@ export function createLogDelivery(params: DeliveryParams) {
       [...publications.values()].some((publication) => publication.epoch !== params.floor().epoch)
     )
       immediate = true
-    for (const seq of proven) {
-      await params.remove(seq)
-      params.queue.remove(seq)
-      publications.delete(seq)
-      proven.delete(seq)
-      if (closed) return
-    }
+    await removeProven()
   }
 
   const schedule = (delay: number): void => {

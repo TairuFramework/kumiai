@@ -39,15 +39,20 @@ import { agent, controllerID, controllerSeed, inception } from './lifecycle-ledg
 
 export { agent, controllerID, inception }
 
-export async function timedBinding(
-  identity: OwnIdentity,
-  iat: number,
-  exp: number,
-  options: { parent?: string; issuer?: ReturnType<typeof agent>; prefix?: Array<SignedEvent> } = {},
-): Promise<ControllerBinding> {
-  const prefix = options.prefix ?? [inception]
+export type TimedBindingParams = {
+  identity: OwnIdentity
+  iat: number
+  exp: number
+  parent?: string
+  issuer?: ReturnType<typeof agent>
+  prefix?: Array<SignedEvent>
+}
+
+export async function timedBinding(params: TimedBindingParams): Promise<ControllerBinding> {
+  const { identity, iat, exp } = params
+  const prefix = params.prefix ?? [inception]
   const signer =
-    options.issuer ?? createControllerIdentity({ seed: controllerSeed, profile: 0, log: prefix })
+    params.issuer ?? createControllerIdentity({ seed: controllerSeed, profile: 0, log: prefix })
   return {
     id: controllerID,
     prefix,
@@ -60,19 +65,26 @@ export async function timedBinding(
         cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: identity.publicKey }),
         iat,
         exp,
-        ...(options.parent == null ? {} : { cap: options.parent }),
+        ...(params.parent == null ? {} : { cap: params.parent }),
       }),
     ),
   }
 }
 
-export async function pipelineGroup(
-  options: { leafLifetime?: number; trustedGrantLifetime?: number; standard?: boolean } = {},
-) {
+export type PipelineGroupOptions = {
+  leafLifetime?: number
+  trustedGrantLifetime?: number
+  /** Create a group with no lifecycle controller. */
+  standard?: boolean
+}
+
+export async function pipelineGroup(options: PipelineGroupOptions = {}) {
   const identity = agent(41)
   const tokens = new Map<string, string>()
   const { group } = await createGroup(identity, 'lifecycle-pipeline', {
-    ...(options.standard ? {} : { controller: await timedBinding(identity, 100, 200) }),
+    ...(options.standard
+      ? {}
+      : { controller: await timedBinding({ identity, iat: 100, exp: 200 }) }),
     leafLifetime: options.leafLifetime,
     trustedGrantLifetime: options.trustedGrantLifetime,
     commitPolicy: () => 'accept',
@@ -102,12 +114,17 @@ export async function rawBundle(
   })
 }
 
-export async function rawCommit(
-  group: GroupHandle,
-  proposals: Array<DefaultProposal> = [],
-  binding?: ControllerBinding,
-  tokens: Array<string> = [],
-) {
+export type RawCommitParams = {
+  group: GroupHandle
+  proposals?: Array<DefaultProposal>
+  /** Rebinds the committer's own leaf in the committed state. */
+  binding?: ControllerBinding
+  /** Ledger entries enacted through the control envelope and head move. */
+  tokens?: Array<string>
+}
+
+export async function rawCommit(params: RawCommitParams) {
+  const { group, proposals = [], binding, tokens = [] } = params
   const state = structuredClone(group.state)
   const extraProposals = [...proposals]
   if (binding != null) {
@@ -155,9 +172,12 @@ export async function rawAdd(
   binding?: ControllerBinding,
 ) {
   const bundle = await rawBundle(group, identity, binding)
-  const result = await rawCommit(group, [
-    { proposalType: defaultProposalTypes.add, add: { keyPackage: bundle.publicPackage } },
-  ])
+  const result = await rawCommit({
+    group,
+    proposals: [
+      { proposalType: defaultProposalTypes.add, add: { keyPackage: bundle.publicPackage } },
+    ],
+  })
   return { bundle, result, message: encode(mlsMessageEncoder, result.commit) }
 }
 
@@ -188,12 +208,16 @@ export async function lowLevelWelcome(
 }
 
 /** Real external resync carrying a caller-selected bound replacement. */
-export async function lowLevelExternal(
-  group: GroupHandle,
-  identity: OwnIdentity,
-  binding?: ControllerBinding,
-  options: { resync?: boolean } = {},
-) {
+export type LowLevelExternalParams = {
+  group: GroupHandle
+  identity: OwnIdentity
+  binding?: ControllerBinding
+  /** Defaults to true. */
+  resync?: boolean
+}
+
+export async function lowLevelExternal(params: LowLevelExternalParams) {
+  const { group, identity, binding, resync = true } = params
   const context = await resolveMlsContext()
   const bundle = await rawBundle(group, identity, binding)
   const groupInfo = await createGroupInfoWithExternalPubAndRatchetTree(
@@ -206,7 +230,7 @@ export async function lowLevelExternal(
     groupInfo,
     keyPackage: bundle.publicPackage,
     privateKeys: bundle.privatePackage,
-    resync: options.resync ?? true,
+    resync,
   })
   return encode(mlsMessageEncoder, {
     version: protocolVersions.mls10,
@@ -246,9 +270,12 @@ export async function welcomeBoundary(
   binding: ControllerBinding,
 ) {
   const bundle = await rawBundle(group, identity, binding)
-  const result = await rawCommit(group, [
-    { proposalType: defaultProposalTypes.add, add: { keyPackage: bundle.publicPackage } },
-  ])
+  const result = await rawCommit({
+    group,
+    proposals: [
+      { proposalType: defaultProposalTypes.add, add: { keyPackage: bundle.publicPackage } },
+    ],
+  })
   if (result.welcome == null) throw new Error('Missing Welcome')
   const welcome = result.welcome.welcome
   return {
@@ -292,7 +319,7 @@ export async function oversizedBinding(identity: OwnIdentity, iat: number, exp: 
     prior: inception.event,
     options: { keyPosition: { gen: 0, seq: 0 }, seal: 's'.repeat(393216) },
   })
-  return timedBinding(identity, iat, exp, { prefix: [inception, rotation] })
+  return timedBinding({ identity, iat, exp, prefix: [inception, rotation] })
 }
 
 export function resetPrefix(): Array<SignedEvent> {

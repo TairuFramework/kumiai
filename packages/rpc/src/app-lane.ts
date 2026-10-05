@@ -66,6 +66,13 @@ function frameID(topicID: string, bytes: Uint8Array): string {
  */
 type AppCursor = { topicID: string; position: LogPosition | null; fetched: LogPosition | null }
 
+type ReportPrunedWindowParams = {
+  name: string
+  topicID: string
+  cursor: LogPosition
+  oldest: string | null
+}
+
 export type AppLaneParams = {
   mux: HubMux
   crypto: GroupCrypto
@@ -321,12 +328,8 @@ export function createAppLane(params: AppLaneParams): AppLane {
   }
 
   /** Tell the host once when a fetch with a cursor confirms unread frames were removed. */
-  const reportPrunedWindow = async (
-    name: string,
-    topicID: string,
-    cursor: LogPosition,
-    oldest: string | null,
-  ): Promise<void> => {
+  const reportPrunedWindow = async (report: ReportPrunedWindowParams): Promise<void> => {
+    const { name, topicID, cursor, oldest } = report
     const group = groupID()
     if (onAppWindowPruned == null || group == null) return
     let positions = reportedPruned.get(topicID)
@@ -417,7 +420,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
         })
         assertForwardPage(after, result.messages)
         if (after != null && result.gap)
-          await reportPrunedWindow(name, topicID, after, result.oldest)
+          await reportPrunedWindow({ name, topicID, cursor: after, oldest: result.oldest })
         for (const message of result.messages) {
           const position = asLogPosition(message.sequenceID)
           const restored = pendingRecords.find(

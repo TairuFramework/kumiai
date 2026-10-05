@@ -16,11 +16,24 @@ import {
 } from '@kumiai/mls'
 import type { OpenedRecoveryVerdict, PendingRecovery } from '@kumiai/rpc'
 
-export type RecoveryBinding = (request: {
+export type RecoveryBindingRequest = {
   groupID: string
   controllerID: string
   current: ControllerBinding
-}) => Promise<ControllerBinding | null>
+}
+
+export type RecoveryBinding = (request: RecoveryBindingRequest) => Promise<ControllerBinding | null>
+
+export type RecoveryReply = { groupInfo: Uint8Array; ledger: Array<string>; signer: string }
+
+export type VerdictJudgeParams = {
+  group: GroupHandle
+  sourceTree: ClientState['ratchetTree']
+  known: DeviceRegistry
+  requestID: string
+}
+
+type BoundRecoveryCommit = { position: string; commitDigest: string; tag?: string }
 
 /** Retained with the speculative handle for subsequent signer judgement. */
 export type RecoveryCandidate = PendingRecovery & {
@@ -112,10 +125,7 @@ export function createRecoveryBindingState(identity: OwnIdentity, host?: Recover
       binding = await request(group)
       return binding != null && (await usable(group, binding)) ? 'ready' : 'renewal-required'
     },
-    async join(
-      group: GroupHandle,
-      reply: { groupInfo: Uint8Array; ledger: Array<string>; signer: string },
-    ) {
+    async join(group: GroupHandle, reply: RecoveryReply) {
       if (!prepared) {
         prepared = true
         binding = current(group)
@@ -132,11 +142,11 @@ export function createRecoveryBindingState(identity: OwnIdentity, host?: Recover
           beforeBinding: async (pending, source) => {
             if (group.anchor.controller == null) return
             if (
-              !recoverySignerEligible(
-                pending,
-                knownRecoveryRegistry(group.registry, source.registry),
-                reply.signer,
-              )
+              !recoverySignerEligible({
+                group: pending,
+                known: knownRecoveryRegistry(group.registry, source.registry),
+                signer: reply.signer,
+              })
             )
               throw new Error('Ineligible recovery attestation signer')
             signerEligible = true
@@ -188,13 +198,9 @@ export function createRecoveryBindingState(identity: OwnIdentity, host?: Recover
   }
 }
 
-export function createVerdictJudge(
-  group: GroupHandle,
-  sourceTree: ClientState['ratchetTree'],
-  known: DeviceRegistry,
-  requestID: string,
-) {
-  let tuple: { position: string; commitDigest: string; tag?: string } | undefined
+export function createVerdictJudge(params: VerdictJudgeParams) {
+  const { group, sourceTree, known, requestID } = params
+  let tuple: BoundRecoveryCommit | undefined
   return {
     async confirmationKey(position: string, commitDigest: string) {
       if (tuple != null && (tuple.position !== position || tuple.commitDigest !== commitDigest))
@@ -221,7 +227,7 @@ export function createVerdictJudge(
       )
         return 'advisory'
       if (group.anchor.controller != null)
-        return recoverySignerEligible(group, known, signer) ? 'authoritative' : 'advisory'
+        return recoverySignerEligible({ group, known, signer }) ? 'authoritative' : 'advisory'
       if (verdict.verdict === 'confirmed') return 'authoritative'
       for (const node of sourceTree) {
         if (node == null || !('leaf' in node)) continue

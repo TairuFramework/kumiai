@@ -88,7 +88,11 @@ describe('leaf renewal', () => {
     const setup = await pipelineGroup()
     const identity = setup.identity
     const candidate = agent(61)
-    const bundle = await rawBundle(setup.group, candidate, await timedBinding(candidate, 100, 200))
+    const bundle = await rawBundle(
+      setup.group,
+      candidate,
+      await timedBinding({ identity: candidate, iat: 100, exp: 200 }),
+    )
     const pending = await createProposal({
       context: setup.group.context,
       state: setup.group.state,
@@ -102,7 +106,7 @@ describe('leaf renewal', () => {
     const own = group.state.ratchetTree[0]
     const snapshot = structuredClone(group.state)
     vi.spyOn(Date, 'now').mockReturnValue(250_000)
-    const result = await renewLeaf(group, await timedBinding(identity, 250, 350))
+    const result = await renewLeaf(group, await timedBinding({ identity, iat: 250, exp: 350 }))
     expect(result.epoch).toBe(group.epoch + 1n)
     expect(group.state).toEqual(snapshot)
     expect(group.state.ratchetTree[0]).toBe(own)
@@ -115,23 +119,32 @@ describe('leaf renewal', () => {
 
   test('rejects a decreasing child issuance time and author-time invalid grants', async () => {
     const { group, identity } = await pipelineGroup()
-    await expect(renewLeaf(group, await timedBinding(identity, 99, 200))).rejects.toMatchObject({
+    await expect(
+      renewLeaf(group, await timedBinding({ identity, iat: 99, exp: 200 })),
+    ).rejects.toMatchObject({
       reason: 'renewal-order',
     })
-    await expect(renewLeaf(group, await timedBinding(identity, 151, 201))).rejects.toThrow(
-      'authoring time',
-    )
-    await expect(renewLeaf(group, await timedBinding(identity, 100, 150))).rejects.toThrow(
-      'authoring time',
-    )
+    await expect(
+      renewLeaf(group, await timedBinding({ identity, iat: 151, exp: 201 })),
+    ).rejects.toThrow('authoring time')
+    await expect(
+      renewLeaf(group, await timedBinding({ identity, iat: 100, exp: 150 })),
+    ).rejects.toThrow('authoring time')
   })
 
   test('old epoch messages still decrypt after renewal', async () => {
     const { group, identity } = await pipelineGroup()
     const peer = agent(51)
-    const fixture = await lowLevelWelcome(group, peer, await timedBinding(peer, 90, 190))
+    const fixture = await lowLevelWelcome(
+      group,
+      peer,
+      await timedBinding({ identity: peer, iat: 90, exp: 190 }),
+    )
     const delayed = await rawApplication(fixture.joined)
-    const result = await renewLeaf(fixture.author, await timedBinding(identity, 150, 250))
+    const result = await renewLeaf(
+      fixture.author,
+      await timedBinding({ identity, iat: 150, exp: 250 }),
+    )
     expect(await result.newGroup.decrypt(delayed)).toBeDefined()
   })
 })
@@ -145,8 +158,15 @@ describe('lapse removal', () => {
   test('any active member removes every lapsed leaf in one epoch', async () => {
     const { group, identity } = await pipelineGroup()
     const peer = agent(51)
-    const fixture = await lowLevelWelcome(group, peer, await timedBinding(peer, 90, 110))
-    const advanced = await renewLeaf(fixture.author, await timedBinding(identity, 150, 250))
+    const fixture = await lowLevelWelcome(
+      group,
+      peer,
+      await timedBinding({ identity: peer, iat: 90, exp: 110 }),
+    )
+    const advanced = await renewLeaf(
+      fixture.author,
+      await timedBinding({ identity, iat: 150, exp: 250 }),
+    )
     const snapshot = structuredClone(advanced.newGroup.state)
     const removed = await removeLapsedLeaves(advanced.newGroup)
     expect(removed.removed).toEqual([peer.id])
@@ -160,7 +180,11 @@ describe('proof builders', () => {
   test('evicts a leaf once, records a leafless subject and returns already-revoked for a winning proof', async () => {
     const { group, identity, tokens } = await pipelineGroup()
     const target = agent(51)
-    const fixture = await lowLevelWelcome(group, target, await timedBinding(target, 90, 190))
+    const fixture = await lowLevelWelcome(
+      group,
+      target,
+      await timedBinding({ identity: target, iat: 90, exp: 190 }),
+    )
     const log = [inception, revoke([inception], target.id)]
     const snapshot = structuredClone(fixture.author.state)
     const built = await revokeWithProof(fixture.author, { subject: target.id, log })
@@ -211,7 +235,10 @@ describe('proof builders', () => {
   test('reset after renewal raises the floor without evicting a retained member', async () => {
     const { group, identity } = await pipelineGroup()
     const log = [inception, createReset(controllerSeed, 0, 1)]
-    const renewal = await renewLeaf(group, await timedBinding(identity, 150, 250, { prefix: log }))
+    const renewal = await renewLeaf(
+      group,
+      await timedBinding({ identity, iat: 150, exp: 250, prefix: log }),
+    )
     const reset = await revokeWithProof(renewal.newGroup, { reset: true, log })
     expect(reset.status).toBe('built')
     if (reset.status !== 'built') throw new Error('Missing reset')
@@ -224,11 +251,14 @@ test('renewal and proof growth fail at the exact history horizon boundary, while
   const { group, identity } = await pipelineGroup()
   const base = historySize(group.state.ratchetTree, [])
   const large = [inception, rotation([inception], HISTORY_HORIZON - 1_024 - base)]
-  const near = await renewLeaf(group, await timedBinding(identity, 150, 250, { prefix: large }))
+  const near = await renewLeaf(
+    group,
+    await timedBinding({ identity, iat: 150, exp: 250, prefix: large }),
+  )
   expect(historySize(near.newGroup.state.ratchetTree, [])).toBe(HISTORY_HORIZON - 1_024)
   const grown = [...large, rotation(large, 2_048)]
   await expect(
-    renewLeaf(near.newGroup, await timedBinding(identity, 150, 250, { prefix: grown })),
+    renewLeaf(near.newGroup, await timedBinding({ identity, iat: 150, exp: 250, prefix: grown })),
   ).rejects.toMatchObject({ reason: 'history-horizon' })
   const target = agent(51).id
   const resetLog = [inception, createReset(controllerSeed, 0, 1)]
@@ -251,7 +281,7 @@ test('renewal and proof growth fail at the exact history horizon boundary, while
   })
   const shrunk = await renewLeaf(
     near.newGroup,
-    await timedBinding(identity, 150, 250, { prefix: resetLog }),
+    await timedBinding({ identity, iat: 150, exp: 250, prefix: resetLog }),
   )
   const reset = await revokeWithProof(shrunk.newGroup, { reset: true, log: resetLog })
   expect(reset.status).toBe('built')
@@ -287,11 +317,15 @@ async function parentGrant(
 test('direct-to-chain renewal installs a clock and child renewal cannot lower iat', async () => {
   const { group, identity, tokens } = await pipelineGroup()
   const trusted = agent(61)
-  const fixture = await lowLevelWelcome(group, trusted, await timedBinding(trusted, 80, 200))
+  const fixture = await lowLevelWelcome(
+    group,
+    trusted,
+    await timedBinding({ identity: trusted, iat: 80, exp: 200 }),
+  )
   const parent = await parentGrant(trusted, [inception], 90)
   const renewal = await renewLeaf(
     fixture.author,
-    await timedBinding(identity, 110, 210, { issuer: trusted, parent }),
+    await timedBinding({ identity, iat: 110, exp: 210, issuer: trusted, parent }),
   )
   expect(renewal.newGroup.registry.controllers.get(controllerID)?.timeFloor).toBe(100)
   expect(treeTime(renewal.newGroup, controllerID)).toBe(100)
@@ -301,7 +335,7 @@ test('direct-to-chain renewal installs a clock and child renewal cannot lower ia
   await expect(
     renewLeaf(
       renewal.newGroup,
-      await timedBinding(identity, 109, 220, { issuer: trusted, parent }),
+      await timedBinding({ identity, iat: 109, exp: 220, issuer: trusted, parent }),
     ),
   ).rejects.toMatchObject({ reason: 'renewal-order' })
 })
@@ -309,11 +343,18 @@ test('direct-to-chain renewal installs a clock and child renewal cannot lower ia
 test('a lapsed member can renew itself and resume sending', async () => {
   const { group } = await pipelineGroup()
   const child = agent(61)
-  const fixture = await lowLevelWelcome(group, child, await timedBinding(child, 90, 99))
+  const fixture = await lowLevelWelcome(
+    group,
+    child,
+    await timedBinding({ identity: child, iat: 90, exp: 99 }),
+  )
   const old = leafAt(fixture.joined.state.ratchetTree, fixture.joined.state.privatePath.leafIndex)
   if (old == null) throw new Error('Missing own leaf')
   expect(isLapsed(fixture.joined, old)).toBe(true)
-  const renewal = await renewLeaf(fixture.joined, await timedBinding(child, 100, 200))
+  const renewal = await renewLeaf(
+    fixture.joined,
+    await timedBinding({ identity: child, iat: 100, exp: 200 }),
+  )
   const next = leafAt(
     renewal.newGroup.state.ratchetTree,
     renewal.newGroup.state.privatePath.leafIndex,
@@ -332,7 +373,14 @@ test('reset identifies the author through a cascade from an older trusted issuer
   const fixture = await lowLevelWelcome(
     group,
     child,
-    await timedBinding(child, 110, 210, { prefix: reset, issuer: agent(41), parent }),
+    await timedBinding({
+      identity: child,
+      iat: 110,
+      exp: 210,
+      prefix: reset,
+      issuer: agent(41),
+      parent,
+    }),
   )
   expect(await revokeWithProof(fixture.joined, { reset: true, log: reset })).toEqual({
     status: 'self-affected',
@@ -380,41 +428,55 @@ test('strips skipped events, and rejects wrong-controller, detached and higher-g
 test('exact-size Add and external replacement growth reject on author and receive paths', async () => {
   const { group, identity } = await pipelineGroup()
   const peer = agent(51)
-  const fixture = await lowLevelWelcome(group, peer, await timedBinding(peer, 100, 200))
+  const fixture = await lowLevelWelcome(
+    group,
+    peer,
+    await timedBinding({ identity: peer, iat: 100, exp: 200 }),
+  )
   const base = historySize(fixture.author.state.ratchetTree, [])
   const prefix = [inception, rotation([inception], HISTORY_HORIZON - 1_024 - base)]
-  const near = (await renewLeaf(fixture.author, await timedBinding(identity, 150, 250, { prefix })))
-    .newGroup
+  const near = (
+    await renewLeaf(fixture.author, await timedBinding({ identity, iat: 150, exp: 250, prefix }))
+  ).newGroup
   const newDevice = agent(61)
   const small = [inception, rotation([inception], 2_048 - historySize(group.state.ratchetTree, []))]
   const bundle = await rawBundle(
     near,
     newDevice,
-    await timedBinding(newDevice, 150, 250, { prefix: small }),
+    await timedBinding({ identity: newDevice, iat: 150, exp: 250, prefix: small }),
   )
   const proposals = [
     { proposalType: defaultProposalTypes.add, add: { keyPackage: bundle.publicPackage } },
   ] as const
   await expect(
-    commitWithEntries(near, [...proposals], [], { requireAdmin: false }),
+    commitWithEntries({
+      group: near,
+      extraProposals: [...proposals],
+      enacted: [],
+      requireAdmin: false,
+    }),
   ).rejects.toMatchObject({ reason: 'history-horizon' })
-  const hostile = await rawCommit(near, [...proposals])
+  const hostile = await rawCommit({ group: near, proposals: [...proposals] })
   await expect(
     near.processMessage(encode(mlsMessageEncoder, hostile.commit)),
   ).rejects.toMatchObject({ reason: 'binding' })
   const longer = [...prefix, rotation(prefix, 2_048)]
-  const external = await lowLevelExternal(
-    near,
+  const external = await lowLevelExternal({
+    group: near,
     identity,
-    await timedBinding(identity, 150, 250, { prefix: longer }),
-  )
+    binding: await timedBinding({ identity, iat: 150, exp: 250, prefix: longer }),
+  })
   await expect(near.processMessage(external)).rejects.toMatchObject({ reason: 'binding' })
 })
 
 test('a proof removing the newest leaf preserves tree time for the removed receiver', async () => {
   const { group, tokens } = await pipelineGroup()
   const target = agent(61)
-  const fixture = await lowLevelWelcome(group, target, await timedBinding(target, 150, 250))
+  const fixture = await lowLevelWelcome(
+    group,
+    target,
+    await timedBinding({ identity: target, iat: 150, exp: 250 }),
+  )
   const built = await revokeWithProof(fixture.author, {
     subject: target.id,
     log: [inception, revoke([inception], target.id)],
@@ -431,10 +493,13 @@ test('a proof removing the newest leaf preserves tree time for the removed recei
 test('renewal can shorten history while the group is already above the horizon', async () => {
   const { group, identity } = await pipelineGroup()
   const prefix = [inception, rotation([inception], HISTORY_HORIZON + 2_048)]
-  const inflated = await rawCommit(group, [], await timedBinding(identity, 150, 250, { prefix }))
+  const inflated = await rawCommit({
+    group,
+    binding: await timedBinding({ identity, iat: 150, exp: 250, prefix }),
+  })
   const oversized = deriveGroup(group, inflated.newState)
   expect(historySize(oversized.state.ratchetTree, [])).toBeGreaterThan(HISTORY_HORIZON)
-  const shrunk = await renewLeaf(oversized, await timedBinding(identity, 150, 250))
+  const shrunk = await renewLeaf(oversized, await timedBinding({ identity, iat: 150, exp: 250 }))
   expect(historySize(shrunk.newGroup.state.ratchetTree, [])).toBe(
     historySize(group.state.ratchetTree, []),
   )
@@ -447,7 +512,7 @@ test('an empty suffix can prove a revocation already held by the recorded reset 
   current.push(revoke(current, target))
   const renewed = await renewLeaf(
     group,
-    await timedBinding(identity, 150, 250, { prefix: current }),
+    await timedBinding({ identity, iat: 150, exp: 250, prefix: current }),
   )
   const reset = await revokeWithProof(renewed.newGroup, { reset: true, log: current })
   if (reset.status !== 'built') throw new Error('Missing reset')
@@ -476,7 +541,10 @@ test('invalid signatures, missing resets and old generations return proof reason
     reason: 'not-authority-signed',
   })
   const log = [inception, createReset(controllerSeed, 0, 1)]
-  const renewed = await renewLeaf(group, await timedBinding(identity, 150, 250, { prefix: log }))
+  const renewed = await renewLeaf(
+    group,
+    await timedBinding({ identity, iat: 150, exp: 250, prefix: log }),
+  )
   const reset = await revokeWithProof(renewed.newGroup, { reset: true, log })
   if (reset.status !== 'built') throw new Error('Missing reset')
   expect(
@@ -494,19 +562,19 @@ test('a member without a role builds a cascading proof and observes another memb
   const first = await lowLevelWelcome(
     group,
     child,
-    await timedBinding(child, 110, 210, { issuer: identity, parent }),
+    await timedBinding({ identity: child, iat: 110, exp: 210, issuer: identity, parent }),
   )
   const publisher = agent(71)
   const second = await lowLevelWelcome(
     first.author,
     publisher,
-    await timedBinding(publisher, 100, 200),
+    await timedBinding({ identity: publisher, iat: 100, exp: 200 }),
   )
   const competitor = agent(81)
   const third = await lowLevelWelcome(
     second.author,
     competitor,
-    await timedBinding(competitor, 100, 200),
+    await timedBinding({ identity: competitor, iat: 100, exp: 200 }),
   )
   await second.joined.processMessage(third.message)
   const log = [inception, revoke([inception], identity.id)]
@@ -535,7 +603,7 @@ test('peer:4 members sign self-verifying proof entries using their leaf long for
     keys: [{ purpose: 'sig', alg: 'EdDSA', privateKey: new Uint8Array(32).fill(121) }],
   })
   const { group } = await createGroup(identity, 'peer-proof', {
-    controller: await timedBinding(identity, 100, 200),
+    controller: await timedBinding({ identity, iat: 100, exp: 200 }),
   })
   const target = agent(61).id
   const built = await revokeWithProof(group, {
@@ -559,7 +627,7 @@ test.each(['revoke', 'reset'] as const)(
     const log = [inception, oldRevoke, reset, currentRevoke]
     const renewed = await renewLeaf(
       group,
-      await timedBinding(identity, 150, 250, { prefix: current }),
+      await timedBinding({ identity, iat: 150, exp: 250, prefix: current }),
     )
     const before = structuredClone(renewed.newGroup.state)
     const originalLog = structuredClone(log)

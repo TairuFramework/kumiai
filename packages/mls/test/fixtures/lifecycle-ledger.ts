@@ -28,10 +28,13 @@ export function agent(seedByte: number) {
   return { ...createFullIdentity(privateKey), privateKey }
 }
 
+/** A delegating device and the trusted grant it holds. */
+export type BindingIssuer = { identity: ReturnType<typeof agent>; parent: string }
+
 export async function bindingFor(
   identity: ReturnType<typeof agent>,
   prefix: Array<SignedEvent> = [inception],
-  issuer?: { identity: ReturnType<typeof agent>; parent: string },
+  issuer?: BindingIssuer,
 ): Promise<ControllerBinding> {
   const signer =
     issuer?.identity ?? createControllerIdentity({ seed: controllerSeed, profile: 0, log: prefix })
@@ -111,7 +114,12 @@ export async function addMember(
 }
 
 export async function enact(group: GroupHandle, tokens: Array<string>) {
-  const result = await commitWithEntries(group, [], tokens, { requireAdmin: false })
+  const result = await commitWithEntries({
+    group,
+    extraProposals: [],
+    enacted: tokens,
+    requireAdmin: false,
+  })
   const derived = deriveGroup(group, result.newState)
   await derived.applyLedgerEntries(tokens)
   return { group: derived, message: encode(mlsMessageEncoder, result.commit) }

@@ -155,6 +155,17 @@ function extensionsWithHead(
   )
 }
 
+export type CommitWithEntriesParams = {
+  group: GroupHandle
+  extraProposals: Array<DefaultProposal>
+  enacted: Array<string>
+  ratchetTreeExtension?: boolean
+  /** Defaults to true; device and lifecycle entries carry their own authority. */
+  requireAdmin?: boolean
+  /** State to commit from instead of the live one, e.g. a tree with a renewed own leaf. */
+  commitState?: ClientState
+}
+
 /**
  * The one place a commit carrying control-ledger entries is built: `commitInvite`,
  * `removeMember`, and `commitLedgerEntries` all route through it, so envelope and
@@ -175,20 +186,14 @@ function extensionsWithHead(
  * moves no head and carries no envelope.
  */
 export async function commitWithEntries(
-  group: GroupHandle,
-  extraProposals: Array<DefaultProposal>,
-  enacted: Array<string>,
-  options: {
-    ratchetTreeExtension?: boolean
-    requireAdmin?: boolean
-    commitState?: ClientState
-  } = {},
+  params: CommitWithEntriesParams,
 ): Promise<Awaited<ReturnType<typeof createCommit>>> {
+  const { group, extraProposals, enacted } = params
   if (group.anchor.controller != null && group.findMemberLeafIndex(group.credential.id) == null) {
     throw new Error('the committer must hold a leaf')
   }
-  const ratchetTreeExtension = options.ratchetTreeExtension ?? false
-  const requireAdmin = options.requireAdmin ?? true
+  const ratchetTreeExtension = params.ratchetTreeExtension ?? false
+  const requireAdmin = params.requireAdmin ?? true
   // Same reason createInvite guards the inviter: a non-admin's commit is rejected by
   // every receiver, so fail here rather than emitting a commit nobody will apply.
   // Authority-aware: a device of an admin profile commits as that profile. Device-only commits
@@ -215,18 +220,19 @@ export async function commitWithEntries(
     }
     inputs.push({ verified, entryID: ledgerEntryDigest(token) })
   }
-  const fold = foldEnvelope(
-    group.roster,
-    group.registry,
-    inputs,
-    group.groupID,
-    group.anchor.controller == null
-      ? undefined
-      : {
-          controllerID: group.anchor.controller,
-          memberController: (did) => group.bindingOfDID(did)?.controller,
-        },
-  )
+  const fold = foldEnvelope({
+    baseRoster: group.roster,
+    baseRegistry: group.registry,
+    entries: inputs,
+    groupID: group.groupID,
+    context:
+      group.anchor.controller == null
+        ? undefined
+        : {
+            controllerID: group.anchor.controller,
+            memberController: (did) => group.bindingOfDID(did)?.controller,
+          },
+  })
   if (!fold.ok) {
     if (fold.error != null) throw fold.error
     throw new Error(`cannot enact ledger entry ${fold.entryID}: ${fold.reason}`)
@@ -266,7 +272,7 @@ export async function commitWithEntries(
     entryIDs,
     enactedDeviceEntries,
   })
-  const commitState = { ...(options.commitState ?? group.state), unappliedProposals: {} }
+  const commitState = { ...(params.commitState ?? group.state), unappliedProposals: {} }
 
   const proposals = [...extraProposals]
   if (entryIDs.length > 0) {
@@ -276,12 +282,12 @@ export async function commitWithEntries(
     })
   }
 
-  const gate = await prepareLifecycleGate(
+  const gate = await prepareLifecycleGate({
     group,
-    inputs.map(({ verified }) => verified),
-    fold.registry,
-    gateContext,
-  )
+    entries: inputs.map(({ verified }) => verified),
+    candidateRegistry: fold.registry,
+    context: gateContext,
+  })
   const incoming = {
     kind: 'commit' as const,
     senderLeafIndex: group.state.privatePath.leafIndex as LeafIndex,
@@ -370,7 +376,7 @@ export async function commitLedgerEntries(
     if (tokens.length === 0) {
       throw new Error('commitLedgerEntries: no ledger entries to commit')
     }
-    const result = await commitWithEntries(group, [], tokens)
+    const result = await commitWithEntries({ group, extraProposals: [], enacted: tokens })
     const newGroup = deriveGroup(group, result.newState)
     await newGroup.applyLedgerEntries(tokens)
     return {
@@ -479,7 +485,10 @@ export async function commitInvite(
       proposalType: defaultProposalTypes.add,
       add: { keyPackage },
     }
-    const result = await commitWithEntries(group, [addProposal], enacted, {
+    const result = await commitWithEntries({
+      group,
+      extraProposals: [addProposal],
+      enacted,
       ratchetTreeExtension: true,
     })
 

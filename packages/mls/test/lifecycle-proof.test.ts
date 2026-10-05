@@ -82,9 +82,15 @@ describe('lifecycle envelope authority', () => {
       capability: 'manage',
     })
     expect(
-      foldEnvelope(group.roster, group.registry, [{ verified, entryID: 'entry' }], group.groupID, {
-        controllerID,
-        memberController: (did) => group.bindingOfDID(did)?.controller,
+      foldEnvelope({
+        baseRoster: group.roster,
+        baseRegistry: group.registry,
+        entries: [{ verified, entryID: 'entry' }],
+        groupID: group.groupID,
+        context: {
+          controllerID,
+          memberController: (did) => group.bindingOfDID(did)?.controller,
+        },
       }).ok,
     ).toBe(false)
   })
@@ -96,9 +102,15 @@ describe('lifecycle envelope authority', () => {
       entry: { type, groupID: group.groupID, subject: target, value: 'admin' },
     }
     expect(
-      foldEnvelope(group.roster, group.registry, [{ verified, entryID: 'entry' }], group.groupID, {
-        controllerID,
-        memberController: (did) => group.bindingOfDID(did)?.controller,
+      foldEnvelope({
+        baseRoster: group.roster,
+        baseRegistry: group.registry,
+        entries: [{ verified, entryID: 'entry' }],
+        groupID: group.groupID,
+        context: {
+          controllerID,
+          memberController: (did) => group.bindingOfDID(did)?.controller,
+        },
       }).ok,
     ).toBe(false)
   })
@@ -114,16 +126,16 @@ describe('lifecycle envelope authority', () => {
         issuer,
         entry: { type: 'consumer.event', groupID: group.groupID, subject: target, value: 1 },
       }
-      const result = foldEnvelope(
-        group.roster,
-        group.registry,
-        [{ verified, entryID: 'entry' }],
-        group.groupID,
-        {
+      const result = foldEnvelope({
+        baseRoster: group.roster,
+        baseRegistry: group.registry,
+        entries: [{ verified, entryID: 'entry' }],
+        groupID: group.groupID,
+        context: {
           controllerID,
           memberController: (did) => group.bindingOfDID(did)?.controller,
         },
-      )
+      })
       expect(result.ok).toBe(expected)
     }
   })

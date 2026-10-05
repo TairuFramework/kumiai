@@ -44,6 +44,31 @@ export type ConformanceOpenedRecoveryVerdict = {
   signer: string
   verdict: ConformanceRecoveryVerdict
 }
+export type ConformanceVerifiedRecoveryRequest = {
+  groupID: string
+  requestID: string
+  requesterDID: string
+}
+export type ConformanceConfirmationKey = { epoch: number; key: Uint8Array }
+export type ConformanceSendAdmission =
+  | { epoch: number; admissible: true }
+  | { epoch: number; admissible: false; reason: 'lapsed' }
+export type ConformanceProcessCommitResult = {
+  advanced: boolean
+  epochBefore: number
+  epochAfter: number
+  refusal?: ConformanceRecoveryRefusalReason
+}
+export type ConformanceAppliedRecovery =
+  | ConformancePendingRecovery
+  | { renewalRequired: true }
+  | null
+export type ConformanceBoundRecovery = {
+  requester: ConformanceGroupMLS
+  responder: ConformanceGroupMLS
+  ratchet: () => Promise<void>
+  replaceBinding: () => Promise<void>
+}
 export type ConformancePendingRecovery = {
   epoch: number
   markBindingUnusable: () => void
@@ -70,13 +95,8 @@ export type ConformanceRosterEntry = {
  * passing bytes between two instances, which is all the clauses below do.
  */
 export type ConformanceGroupMLS = {
-  verifyRecoveryRequest: (
-    request: Uint8Array,
-  ) => Promise<{ groupID: string; requestID: string; requesterDID: string } | null>
-  confirmationKey: (
-    position: string,
-    commitDigest: string,
-  ) => Promise<{ epoch: number; key: Uint8Array }>
+  verifyRecoveryRequest: (request: Uint8Array) => Promise<ConformanceVerifiedRecoveryRequest | null>
+  confirmationKey: (position: string, commitDigest: string) => Promise<ConformanceConfirmationKey>
   sealRecoveryVerdict: (
     request: Uint8Array,
     verdict: ConformanceRecoveryVerdict,
@@ -85,29 +105,19 @@ export type ConformanceGroupMLS = {
     sealed: Uint8Array,
     requestID: string,
   ) => Promise<ConformanceOpenedRecoveryVerdict | null>
-  sendAdmission: () =>
-    | { epoch: number; admissible: true }
-    | { epoch: number; admissible: false; reason: 'lapsed' }
+  sendAdmission: () => ConformanceSendAdmission
   readEpoch: () => Promise<number>
   rosterEntries: () => Promise<Array<ConformanceRosterEntry>>
   readCommitHeader: (commit: Uint8Array) => Promise<ConformanceCommitHeader | null>
   processCommit: (
     commit: Uint8Array,
     context: ConformanceCommitContext,
-  ) => Promise<{
-    advanced: boolean
-    epochBefore: number
-    epochAfter: number
-    refusal?: ConformanceRecoveryRefusalReason
-  }>
+  ) => Promise<ConformanceProcessCommitResult>
   exportRecoverySecret: () => Uint8Array | Promise<Uint8Array>
   prepareRecovery: () => Promise<'ready' | 'renewal-required'>
   createRecoveryRequest: (requestID: string, deadlineMs?: number) => Promise<Uint8Array>
   sealGroupInfo: (request: Uint8Array) => Promise<Uint8Array>
-  applyRecovery: (
-    sealed: Uint8Array,
-    requestID: string,
-  ) => Promise<ConformancePendingRecovery | { renewalRequired: true } | null>
+  applyRecovery: (sealed: Uint8Array, requestID: string) => Promise<ConformanceAppliedRecovery>
   isLedgerComplete: () => Promise<boolean>
   getLedger: () => Promise<Array<string>>
   sealLedger: (request: Uint8Array) => Promise<Uint8Array>
@@ -179,12 +189,7 @@ export type GroupMLSConformanceParams = {
   label: string
   /** A fresh group of `size` ports plus an outside committer. `id` is unique per case. */
   createGroup: (size: number, id: string) => Promise<ConformanceMLSGroup>
-  createBoundRecovery: () => Promise<{
-    requester: ConformanceGroupMLS
-    responder: ConformanceGroupMLS
-    ratchet: () => Promise<void>
-    replaceBinding: () => Promise<void>
-  }>
+  createBoundRecovery: () => Promise<ConformanceBoundRecovery>
 }
 
 /** The member at `index`, with the assertion the suite would otherwise repeat everywhere. */

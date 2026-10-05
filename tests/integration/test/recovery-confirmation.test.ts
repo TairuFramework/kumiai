@@ -773,7 +773,11 @@ test.each(['policy', 'invalid'] as const)(
       const { lowLevelExternal } = await import(
         new URL('../../../packages/mls/test/fixtures/lifecycle-pipeline.ts', import.meta.url).href
       )
-      const malformed = await lowLevelExternal(original, s.bobID, undefined, { resync: false })
+      const malformed = await lowLevelExternal({
+        group: original,
+        identity: s.bobID,
+        resync: false,
+      })
       const apply = s.bobMLS.applyRecovery.bind(s.bobMLS)
       vi.spyOn(s.bobMLS, 'applyRecovery').mockImplementation(async (...args) => {
         const pending = await apply(...args)

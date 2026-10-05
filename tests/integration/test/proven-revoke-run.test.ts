@@ -22,7 +22,11 @@ const fixture = (await import(
 )) as {
   agent(byte: number): OwnIdentity
   inception: ControllerBinding['prefix'][number]
-  timedBinding(identity: OwnIdentity, iat: number, exp: number): Promise<ControllerBinding>
+  timedBinding(params: {
+    identity: OwnIdentity
+    iat: number
+    exp: number
+  }): Promise<ControllerBinding>
 }
 const controller = (await import(
   new URL('../../../packages/mls/test/fixtures/lifecycle-ledger.ts', import.meta.url).href
@@ -53,18 +57,18 @@ async function setup() {
   const entrySlot = createLedgerEntrySlot()
   let group = (
     await createGroup(identity, 'proven-revoke', {
-      controller: await fixture.timedBinding(identity, 100, 200),
+      controller: await fixture.timedBinding({ identity: identity, iat: 100, exp: 200 }),
       resolveLedgerEntries: entrySlot.resolve,
     })
   ).group
   const subjectBundle = await createKeyPackageBundle(subjectIdentity, {
-    controller: await fixture.timedBinding(subjectIdentity, 100, 200),
+    controller: await fixture.timedBinding({ identity: subjectIdentity, iat: 100, exp: 200 }),
   })
   const subjectInvite = await createInvite({ group, identity, recipientDID: subject })
   group = (await commitInvite(group, subjectBundle.publicPackage, subjectInvite.invite)).newGroup
   const carol = fixture.agent(81)
   const bundle = await createKeyPackageBundle(carol, {
-    controller: await fixture.timedBinding(carol, 100, 200),
+    controller: await fixture.timedBinding({ identity: carol, iat: 100, exp: 200 }),
   })
   const { invite } = await createInvite({ group, identity, recipientDID: carol.id })
   const added = await commitInvite(group, bundle.publicPackage, invite)
@@ -97,22 +101,22 @@ test('publisher lands one proof commit and a duplicate is already revoked', asyn
   const s = await setup()
   try {
     const epoch = Number(s.member.handle().epoch)
-    const result = await adapter.publishRevokeProof(
-      s.member.peer,
-      s.mls,
-      { subject: s.subject, log: s.log },
-      { serializeJournal: encodeJournal },
-    )
+    const result = await adapter.publishRevokeProof({
+      peer: s.member.peer,
+      mls: s.mls,
+      input: { subject: s.subject, log: s.log },
+      options: { serializeJournal: encodeJournal },
+    })
     expect(result).toEqual({ status: 'committed', epoch: epoch + 1 })
     expect(s.member.handle().registry.devices.get(s.subject)?.status).toBe('revoked')
     expect(s.member.handle().findMemberLeafIndex(s.subject)).toBeUndefined()
     expect(
-      await adapter.publishRevokeProof(
-        s.member.peer,
-        s.mls,
-        { subject: s.subject, log: s.log },
-        { serializeJournal: encodeJournal },
-      ),
+      await adapter.publishRevokeProof({
+        peer: s.member.peer,
+        mls: s.mls,
+        input: { subject: s.subject, log: s.log },
+        options: { serializeJournal: encodeJournal },
+      }),
     ).toEqual({ status: 'already-revoked' })
     expect(Number(s.member.handle().epoch)).toBe(epoch + 1)
   } finally {
@@ -152,12 +156,12 @@ test('restart adopts the journalled derived state with its proof ledger entries'
       entrySlot: s.member.entrySlot,
     })
     await expect(
-      adapter.publishRevokeProof(
-        s.member.peer,
-        mls,
-        { subject: s.subject, log: s.log },
-        { serializeJournal: encodeJournal },
-      ),
+      adapter.publishRevokeProof({
+        peer: s.member.peer,
+        mls: mls,
+        input: { subject: s.subject, log: s.log },
+        options: { serializeJournal: encodeJournal },
+      }),
     ).rejects.toThrow('crash before adoption')
     expect(s.member.journal.slot()?.holdsLogSends).toBe(true)
     await s.member.peer.dispose()
@@ -204,25 +208,25 @@ test('a lost epoch race rebuilds and serialises the proof against the winning re
   const derived: Array<GroupHandle> = []
   try {
     const epoch = Number(s.member.handle().epoch)
-    const result = await adapter.publishRevokeProof(
-      s.member.peer,
-      s.mls,
-      { subject: target, log: [...s.log, nextRev] },
-      {
+    const result = await adapter.publishRevokeProof({
+      peer: s.member.peer,
+      mls: s.mls,
+      input: { subject: target, log: [...s.log, nextRev] },
+      options: {
         serializeJournal: async (candidate) => {
           derived.push(candidate)
           if (derived.length === 1) {
-            await adapter.publishRevokeProof(
-              s.other.peer,
-              s.other.mls,
-              { subject: s.subject, log: s.log },
-              { serializeJournal: encodeJournal },
-            )
+            await adapter.publishRevokeProof({
+              peer: s.other.peer,
+              mls: s.other.mls,
+              input: { subject: s.subject, log: s.log },
+              options: { serializeJournal: encodeJournal },
+            })
           }
           return encodeJournal(candidate)
         },
       },
-    )
+    })
     expect(result).toEqual({ status: 'committed', epoch: epoch + 2 })
     expect(derived).toHaveLength(2)
     expect(derived[0]?.registry.devices.get(s.subject)?.status).not.toBe('revoked')
@@ -247,23 +251,23 @@ test('a winning duplicate proof returns already revoked after the race', async (
   let builds = 0
   try {
     expect(
-      await adapter.publishRevokeProof(
-        s.member.peer,
-        s.mls,
-        { subject: s.subject, log: s.log },
-        {
+      await adapter.publishRevokeProof({
+        peer: s.member.peer,
+        mls: s.mls,
+        input: { subject: s.subject, log: s.log },
+        options: {
           serializeJournal: async (candidate) => {
             builds++
-            await adapter.publishRevokeProof(
-              s.other.peer,
-              s.other.mls,
-              { subject: s.subject, log: s.log },
-              { serializeJournal: encodeJournal },
-            )
+            await adapter.publishRevokeProof({
+              peer: s.other.peer,
+              mls: s.other.mls,
+              input: { subject: s.subject, log: s.log },
+              options: { serializeJournal: encodeJournal },
+            })
             return encodeJournal(candidate)
           },
         },
-      ),
+      }),
     ).toEqual({ status: 'already-revoked' })
     expect(builds).toBe(1)
   } finally {
@@ -292,12 +296,12 @@ test('non-building outcomes do not serialize or advance', async () => {
   try {
     const epoch = s.member.handle().epoch
     expect(
-      await adapter.publishRevokeProof(
-        s.member.peer,
-        s.mls,
-        { subject: s.subject, log: [fixture.inception] },
-        options,
-      ),
+      await adapter.publishRevokeProof({
+        peer: s.member.peer,
+        mls: s.mls,
+        input: { subject: s.subject, log: [fixture.inception] },
+        options: options,
+      }),
     ).toMatchObject({ status: 'not-provable', reason: 'no-rev' })
     const selfRev = events.createRevoke({
       seed: controller.controllerSeed,
@@ -308,23 +312,23 @@ test('non-building outcomes do not serialize or advance', async () => {
       keyPosition: { gen: 0, seq: 0 },
     })
     expect(
-      await adapter.publishRevokeProof(
-        s.member.peer,
-        s.mls,
-        { subject: s.member.identity.id, log: [fixture.inception, selfRev] },
-        options,
-      ),
+      await adapter.publishRevokeProof({
+        peer: s.member.peer,
+        mls: s.mls,
+        input: { subject: s.member.identity.id, log: [fixture.inception, selfRev] },
+        options: options,
+      }),
     ).toEqual({ status: 'self-affected', subject: s.member.identity.id })
     expect(serializations).toBe(0)
     expect(s.member.handle().epoch).toBe(epoch)
     expect(s.member.journal.slot()).toBeNull()
     await expect(
-      adapter.publishRevokeProof(
-        s.member.peer,
-        { ...s.mls },
-        { subject: s.subject, log: s.log },
-        options,
-      ),
+      adapter.publishRevokeProof({
+        peer: s.member.peer,
+        mls: { ...s.mls },
+        input: { subject: s.subject, log: s.log },
+        options: options,
+      }),
     ).rejects.toThrow('adapter-created GroupMLS')
   } finally {
     await s.member.peer.dispose()
@@ -340,26 +344,26 @@ test('a serializer failure publishes nothing and the caller can rerun', async ()
   try {
     const epoch = s.member.handle().epoch
     await expect(
-      adapter.publishRevokeProof(
-        s.member.peer,
-        s.mls,
-        { subject: s.subject, log: s.log },
-        {
+      adapter.publishRevokeProof({
+        peer: s.member.peer,
+        mls: s.mls,
+        input: { subject: s.subject, log: s.log },
+        options: {
           serializeJournal: () => {
             throw new Error('cannot persist journal')
           },
         },
-      ),
+      }),
     ).rejects.toThrow('cannot persist journal')
     expect(s.member.journal.slot()).toBeNull()
     expect(s.member.handle().epoch).toBe(epoch)
     expect(
-      await adapter.publishRevokeProof(
-        s.member.peer,
-        s.mls,
-        { subject: s.subject, log: s.log },
-        { serializeJournal: encodeJournal },
-      ),
+      await adapter.publishRevokeProof({
+        peer: s.member.peer,
+        mls: s.mls,
+        input: { subject: s.subject, log: s.log },
+        options: { serializeJournal: encodeJournal },
+      }),
     ).toEqual({ status: 'committed', epoch: Number(epoch) + 1 })
   } finally {
     await s.member.peer.dispose()

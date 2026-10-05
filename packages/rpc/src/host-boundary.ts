@@ -4,19 +4,19 @@ import type { AnchorStore } from './anchor.js'
 import type { PendingCommit } from './commit.js'
 import type { GroupCrypto, GroupMLS, PendingAppFrames, PendingRecovery } from './crypto.js'
 import { PeerDisposedError } from './errors.js'
-import type { GroupPeerMLSParams, GroupPeerParams } from './peer.js'
+import type { GroupPeerMLSParams, GroupPeerParams } from './peer-types.js'
 import type { GroupProtocolDefinition } from './protocol.js'
 
 type Callable = (...args: Array<unknown>) => unknown
 export type HostBoundary = {
-  wrap<T extends object>(value: T): T
+  wrap<TValue extends object>(value: TValue): TValue
   close(): void
   drained(teardown: Promise<unknown>): Promise<void>
 }
 
 type MemberKind = 'host' | 'data' | 'port'
-type HostMembers<T extends object> = {
-  [K in keyof T]-?: NonNullable<T[K]> extends (...args: Array<never>) => unknown
+type HostMembers<TValue extends object> = {
+  [TKey in keyof TValue]-?: NonNullable<TValue[TKey]> extends (...args: Array<never>) => unknown
     ? 'host'
     : 'data' | 'port'
 }
@@ -170,9 +170,9 @@ export function createHostBoundary(): HostBoundary {
     }
   }
 
-  function wrap<T extends object>(value: T): T {
+  function wrap<TValue extends object>(value: TValue): TValue {
     const cached = views.get(value)
-    if (cached != null) return cached as T
+    if (cached != null) return cached as TValue
     let view: object
     if (typeof value === 'function') {
       view = new Proxy(value, {
@@ -224,7 +224,7 @@ export function createHostBoundary(): HostBoundary {
     }
     views.set(value, view)
     views.set(view, view)
-    return view as T
+    return view as TValue
   }
 
   return {
@@ -243,11 +243,11 @@ export function createHostBoundary(): HostBoundary {
   }
 }
 
-function selectHostMembers<T extends object>(
+function selectHostMembers<TValue extends object>(
   boundary: HostBoundary,
-  value: T,
-  members: Record<keyof T, MemberKind>,
-): T {
+  value: TValue,
+  members: Record<keyof TValue, MemberKind>,
+): TValue {
   const wrapped = boundary.wrap(value)
   const view = {}
   for (const [key, kind] of Object.entries(members)) {
@@ -257,7 +257,7 @@ function selectHostMembers<T extends object>(
       get: () => Reflect.get(kind === 'host' ? wrapped : value, key),
     })
   }
-  return view as T
+  return view as TValue
 }
 
 export function wrapPendingCommit(boundary: HostBoundary, value: PendingCommit): PendingCommit {

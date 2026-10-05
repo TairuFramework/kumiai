@@ -152,10 +152,12 @@ type EntrySeal = {
   sealEntries: (key: Uint8Array, bytes: Uint8Array) => Uint8Array
 }
 
-export async function frameMeasurements(options?: {
+export type FrameMeasurementsOptions = {
   onlyHorizon?: boolean
   onHorizonFrames?: (frames: Record<string, Uint8Array>, delta: number) => Promise<void>
-}) {
+}
+
+export async function frameMeasurements(options?: FrameMeasurementsOptions) {
   // Runtime loading keeps the probe outside each sibling package's TypeScript rootDir.
   const rpcPath = new URL('../../../rpc/src/index.ts', import.meta.url).href
   const sealPath = new URL('../../../mls-rpc/src/crypto.ts', import.meta.url).href
@@ -216,13 +218,16 @@ export async function frameMeasurements(options?: {
     count: number
     distribution: string
   }
+  type MeasureParams = {
+    count: number
+    distribution: 'tree' | 'proof'
+    consumer: boolean
+    /** Pad the last rotation so the tree history lands exactly on the horizon. */
+    exactHorizon?: boolean
+  }
   const cache = new Map<string, Measurement>()
-  async function measure(
-    count: number,
-    distribution: 'tree' | 'proof',
-    consumer: boolean,
-    exactHorizon = false,
-  ): Promise<Measurement> {
+  async function measure(params: MeasureParams): Promise<Measurement> {
+    const { count, distribution, consumer, exactHorizon = false } = params
     const key = `${count}/${distribution}/${consumer}/${exactHorizon}`
     const cached = cache.get(key)
     if (cached != null) return cached
@@ -483,7 +488,7 @@ export async function frameMeasurements(options?: {
           : 2 * jsonBytes(inception).length + (sums[near + 1] ?? 0) + 337) <= 393216
       )
         near++
-      const horizon = await measure(near, distribution, consumer, true)
+      const horizon = await measure({ count: near, distribution, consumer, exactHorizon: true })
       if (horizon.history !== 393216) throw new Error('Horizon sample is not exact')
       for (const [frame, size] of Object.entries(horizon.frames))
         rows.push({
@@ -522,7 +527,7 @@ export async function frameMeasurements(options?: {
           })
           continue
         }
-        const sample = await measure(near, distribution, consumer)
+        const sample = await measure({ count: near, distribution, consumer })
         const slope = distribution === 'tree' ? 912 : 608
         let low = Math.min(
           1998,
@@ -531,8 +536,8 @@ export async function frameMeasurements(options?: {
         let high = low + 1
         let bracketed = false
         for (let attempt = 0; attempt < 12; attempt++) {
-          const lower = await measure(low, distribution, consumer)
-          const upper = await measure(high, distribution, consumer)
+          const lower = await measure({ count: low, distribution, consumer })
+          const upper = await measure({ count: high, distribution, consumer })
           if (
             (lower.frames[frame]?.rawBytes ?? Number.POSITIVE_INFINITY) <= 786432 &&
             (upper.frames[frame]?.rawBytes ?? 0) > 786432
@@ -549,8 +554,8 @@ export async function frameMeasurements(options?: {
           }
         }
         if (!bracketed) throw new Error(`No empirical ceiling bracket for ${distribution}/${frame}`)
-        const fits = await measure(low, distribution, consumer)
-        const fails = await measure(high, distribution, consumer)
+        const fits = await measure({ count: low, distribution, consumer })
+        const fails = await measure({ count: high, distribution, consumer })
         if (
           (fits.frames[frame]?.base64Chars ?? Number.POSITIVE_INFINITY) > 1048576 ||
           (fails.frames[frame]?.base64Chars ?? 0) <= 1048576

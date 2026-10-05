@@ -68,7 +68,11 @@ test.each(['author', 'receiver'] as const)(
   async (side) => {
     const { group, identity, tokens } = await pipelineGroup()
     const bob = agent(61)
-    const { author, joined } = await lowLevelWelcome(group, bob, await timedBinding(bob, 90, 200))
+    const { author, joined } = await lowLevelWelcome(
+      group,
+      bob,
+      await timedBinding({ identity: bob, iat: 90, exp: 200 }),
+    )
     const target = agent(81)
     const revoke = createRevoke({
       seed: controllerSeed,
@@ -86,7 +90,11 @@ test.each(['author', 'receiver'] as const)(
     })
     const entryID = ledgerEntryDigest(token)
     tokens.set(entryID, token)
-    const result = await rawCommit(author, [], await timedBinding(identity, 100, 201), [token])
+    const result = await rawCommit({
+      group: author,
+      binding: await timedBinding({ identity, iat: 100, exp: 201 }),
+      tokens: [token],
+    })
     const previous = side === 'author' ? author.state : joined.state
     if (side === 'receiver') {
       await expect(
@@ -97,16 +105,16 @@ test.each(['author', 'receiver'] as const)(
     } else {
       const verified = await verifyLedgerEntry(token)
       if (verified == null) throw new Error('Invalid revoke fixture')
-      const fold = foldEnvelope(
-        author.roster,
-        author.registry,
-        [{ verified, entryID }],
-        author.groupID,
-        {
+      const fold = foldEnvelope({
+        baseRoster: author.roster,
+        baseRegistry: author.registry,
+        entries: [{ verified, entryID }],
+        groupID: author.groupID,
+        context: {
           controllerID,
           memberController: (did) => author.bindingOfDID(did)?.controller,
         },
-      )
+      })
       if (!fold.ok) throw new Error(fold.reason)
       const context = buildCommitPolicyContext(author, {
         baseRoster: author.roster,
@@ -114,7 +122,12 @@ test.each(['author', 'receiver'] as const)(
         entryIDs: [entryID],
         enactedDeviceEntries: [{ subject: target.id, op: 'revoke' }],
       })
-      const gate = await prepareLifecycleGate(author, [verified], fold.registry, context)
+      const gate = await prepareLifecycleGate({
+        group: author,
+        entries: [verified],
+        candidateRegistry: fold.registry,
+        context,
+      })
       gate.check({
         kind: 'commit',
         senderLeafIndex: author.state.privatePath.leafIndex as LeafIndex,
@@ -134,7 +147,12 @@ test.each(['author', 'receiver'] as const)(
       expect(author.state).toBe(previous)
       expect(author.ledgerTokens).not.toContain(token)
     }
-    const preserved = await commitWithEntries(author, [], [token], { requireAdmin: false })
+    const preserved = await commitWithEntries({
+      group: author,
+      extraProposals: [],
+      enacted: [token],
+      requireAdmin: false,
+    })
     expect(preserved.newState.groupContext.epoch).toBe(author.epoch + 1n)
     if (side === 'receiver') {
       await joined.processMessage(encode(mlsMessageEncoder, preserved.commit))
@@ -146,7 +164,11 @@ test.each(['author', 'receiver'] as const)(
 test('processWelcome accepts existing lapsed leaves after admission advances tree time', async () => {
   const { group, identity } = await pipelineGroup()
   const bob = agent(61)
-  const fixture = await welcomeBoundary(group, bob, await timedBinding(bob, 201, 300))
+  const fixture = await welcomeBoundary(
+    group,
+    bob,
+    await timedBinding({ identity: bob, iat: 201, exp: 300 }),
+  )
   const { group: joined } = await fixture.process()
   expect(treeTime(joined, controllerID)).toBe(201)
   const existing = joined.state.ratchetTree[0]
@@ -161,7 +183,11 @@ test('processWelcome accepts existing lapsed leaves after admission advances tre
 test.each([99, 100])('processWelcome refuses an admitted leaf expiring at %s', async (exp) => {
   const { group } = await pipelineGroup()
   const bob = agent(61)
-  const fixture = await welcomeBoundary(group, bob, await timedBinding(bob, 90, exp))
+  const fixture = await welcomeBoundary(
+    group,
+    bob,
+    await timedBinding({ identity: bob, iat: 90, exp }),
+  )
   await expect(fixture.process()).rejects.toMatchObject({ reason: 'lapsed' })
 })
 
@@ -177,7 +203,7 @@ describe('mandatory entry gates', () => {
   test.each([100, 99])('an Add with expiry %s does not pass strict tree time', async (exp) => {
     const { group } = await pipelineGroup()
     const identity = agent(61)
-    const added = await rawAdd(group, identity, await timedBinding(identity, 90, exp))
+    const added = await rawAdd(group, identity, await timedBinding({ identity, iat: 90, exp }))
     await expect(group.processMessage(added.message)).rejects.toBeInstanceOf(CommitRejectedError)
   })
 
@@ -200,7 +226,7 @@ describe('mandatory entry gates', () => {
     const added = await rawAdd(
       group,
       identity,
-      await timedBinding(identity, 5000, 6000, { parent, issuer: trusted }),
+      await timedBinding({ identity, iat: 5000, exp: 6000, parent, issuer: trusted }),
     )
     const before = treeTime(group, controllerID)
     expect(before).toBe(100)
@@ -216,7 +242,7 @@ describe('mandatory entry gates', () => {
       const { joined } = await lowLevelWelcome(
         group,
         identity,
-        await timedBinding(identity, 100, 100 + lifetime),
+        await timedBinding({ identity, iat: 100, exp: 100 + lifetime }),
       )
       const result = validateWelcomeTree(joined)
       if (lifetime === 86400) await expect(result).resolves.toBeUndefined()
@@ -227,8 +253,12 @@ describe('mandatory entry gates', () => {
   test('external replacement cannot float under an accepting caller', async () => {
     const { group } = await pipelineGroup()
     const identity = agent(61)
-    const { author } = await lowLevelWelcome(group, identity, await timedBinding(identity, 90, 200))
-    const message = await lowLevelExternal(author, identity)
+    const { author } = await lowLevelWelcome(
+      group,
+      identity,
+      await timedBinding({ identity, iat: 90, exp: 200 }),
+    )
+    const message = await lowLevelExternal({ group: author, identity })
     await expect(author.processMessage(message)).rejects.toBeInstanceOf(CommitRejectedError)
   })
 
@@ -238,19 +268,28 @@ describe('mandatory entry gates', () => {
     const { author } = await lowLevelWelcome(
       group,
       identity,
-      await timedBinding(identity, 110, 200),
+      await timedBinding({ identity, iat: 110, exp: 200 }),
     )
-    const message = await lowLevelExternal(author, identity, await timedBinding(identity, 105, 200))
+    const message = await lowLevelExternal({
+      group: author,
+      identity,
+      binding: await timedBinding({ identity, iat: 105, exp: 200 }),
+    })
     await expect(author.processMessage(message)).rejects.toBeInstanceOf(CommitRejectedError)
   })
 
   test('a member Remove cannot be authorised by an accepting caller', async () => {
     const { group } = await pipelineGroup()
     const identity = agent(61)
-    const { author } = await lowLevelWelcome(group, identity, await timedBinding(identity, 90, 200))
-    const result = await rawCommit(author, [
-      { proposalType: defaultProposalTypes.remove, remove: { removed: 1 } },
-    ])
+    const { author } = await lowLevelWelcome(
+      group,
+      identity,
+      await timedBinding({ identity, iat: 90, exp: 200 }),
+    )
+    const result = await rawCommit({
+      group: author,
+      proposals: [{ proposalType: defaultProposalTypes.remove, remove: { removed: 1 } }],
+    })
     await expect(
       author.processMessage(encode(mlsMessageEncoder, result.commit)),
     ).rejects.toBeInstanceOf(CommitRejectedError)
@@ -272,17 +311,17 @@ describe('mandatory entry gates', () => {
     const { group } = await pipelineGroup()
     const added = await rawAdd(group, agent(61))
     await expect(
-      commitWithEntries(
+      commitWithEntries({
         group,
-        [
+        extraProposals: [
           {
             proposalType: defaultProposalTypes.add,
             add: { keyPackage: added.bundle.publicPackage },
           },
         ],
-        [],
-        { requireAdmin: false },
-      ),
+        enacted: [],
+        requireAdmin: false,
+      }),
     ).rejects.toThrow()
   })
 })
@@ -290,9 +329,17 @@ describe('mandatory entry gates', () => {
 async function threeMembers() {
   const { group, identity } = await pipelineGroup()
   const bob = agent(61)
-  const first = await lowLevelWelcome(group, bob, await timedBinding(bob, 90, 99))
+  const first = await lowLevelWelcome(
+    group,
+    bob,
+    await timedBinding({ identity: bob, iat: 90, exp: 99 }),
+  )
   const carol = agent(71)
-  const second = await lowLevelWelcome(first.author, carol, await timedBinding(carol, 95, 200))
+  const second = await lowLevelWelcome(
+    first.author,
+    carol,
+    await timedBinding({ identity: carol, iat: 95, exp: 200 }),
+  )
   await first.joined.processMessage(second.message)
   return {
     author: second.author,
@@ -320,11 +367,14 @@ describe('path, clock and lapse gates', () => {
 
   test('a lapsed sender can only commit a renewal of its own leaf', async () => {
     const setup = await threeMembers()
-    const stale = await rawCommit(setup.bob)
+    const stale = await rawCommit({ group: setup.bob })
     await expect(
       setup.survivor.processMessage(encode(mlsMessageEncoder, stale.commit)),
     ).rejects.toMatchObject({ reason: 'lapse' })
-    const renewal = await rawCommit(setup.bob, [], await timedBinding(setup.bobIdentity, 100, 200))
+    const renewal = await rawCommit({
+      group: setup.bob,
+      binding: await timedBinding({ identity: setup.bobIdentity, iat: 100, exp: 200 }),
+    })
     await expect(
       setup.survivor.processMessage(encode(mlsMessageEncoder, renewal.commit)),
     ).resolves.toBeNull()
@@ -333,11 +383,11 @@ describe('path, clock and lapse gates', () => {
   test('a Remove keeps the committer credential and rejection leaves delayed decrypt usable', async () => {
     const setup = await threeMembers()
     const delayed = await rawApplication(setup.author)
-    const result = await rawCommit(
-      setup.author,
-      [{ proposalType: defaultProposalTypes.remove, remove: { removed: 1 } }],
-      await timedBinding(setup.identity, 100, 201),
-    )
+    const result = await rawCommit({
+      group: setup.author,
+      proposals: [{ proposalType: defaultProposalTypes.remove, remove: { removed: 1 } }],
+      binding: await timedBinding({ identity: setup.identity, iat: 100, exp: 201 }),
+    })
     const previous = setup.survivor.state
     const message = encode(mlsMessageEncoder, result.commit)
     await expect(setup.survivor.processMessage(message)).rejects.toBeInstanceOf(CommitRejectedError)
@@ -352,9 +402,16 @@ describe('path, clock and lapse gates', () => {
   test('a path cannot renew under a different controller even with an accepting caller', async () => {
     const { group, identity } = await pipelineGroup()
     const bob = agent(61)
-    const { author, joined } = await lowLevelWelcome(group, bob, await timedBinding(bob, 90, 200))
-    const binding = await timedBinding(identity, 100, 201)
-    const result = await rawCommit(author, [], { ...binding, id: 'did:kokuin:foreign' })
+    const { author, joined } = await lowLevelWelcome(
+      group,
+      bob,
+      await timedBinding({ identity: bob, iat: 90, exp: 200 }),
+    )
+    const binding = await timedBinding({ identity, iat: 100, exp: 201 })
+    const result = await rawCommit({
+      group: author,
+      binding: { ...binding, id: 'did:kokuin:foreign' },
+    })
     const previous = joined.state
     await expect(joined.processMessage(encode(mlsMessageEncoder, result.commit))).rejects.toThrow()
     expect(joined.state).toBe(previous)
@@ -363,26 +420,38 @@ describe('path, clock and lapse gates', () => {
   test('Update keeps identity under an accepting caller', async () => {
     const { group } = await pipelineGroup()
     const bob = agent(61)
-    const { author, joined } = await lowLevelWelcome(group, bob, await timedBinding(bob, 90, 200))
+    const { author, joined } = await lowLevelWelcome(
+      group,
+      bob,
+      await timedBinding({ identity: bob, iat: 90, exp: 200 }),
+    )
     const replacement = await createIdentity({
       didMethod: 'peer:4',
       keys: [{ purpose: 'sig', alg: 'EdDSA', privateKey: agent(61).privateKey }],
     })
-    const update = await rawUpdate(joined, replacement, await timedBinding(replacement, 100, 200))
+    const update = await rawUpdate(
+      joined,
+      replacement,
+      await timedBinding({ identity: replacement, iat: 100, exp: 200 }),
+    )
     await expect(author.processMessage(update)).rejects.toBeInstanceOf(CommitRejectedError)
   })
 
   test('removing time 100 requires a clock and preserves floor through a renewal at 95', async () => {
     const { group, tokens } = await pipelineGroup()
     const bob = agent(61)
-    const { author, joined } = await lowLevelWelcome(group, bob, await timedBinding(bob, 90, 200))
+    const { author, joined } = await lowLevelWelcome(
+      group,
+      bob,
+      await timedBinding({ identity: bob, iat: 90, exp: 200 }),
+    )
     const proposal = await createProposal({
       context: author.context,
       state: author.state,
       proposal: { proposalType: defaultProposalTypes.remove, remove: { removed: 0 } },
     })
     await joined.processMessage(proposal.message)
-    const withoutClock = await rawCommit(joined)
+    const withoutClock = await rawCommit({ group: joined })
     const receiver = deriveGroup(author, proposal.newState)
     await expect(
       receiver.processMessage(encode(mlsMessageEncoder, withoutClock.commit)),
@@ -394,14 +463,17 @@ describe('path, clock and lapse gates', () => {
       value: { op: 'clock', time: 100 },
     })
     tokens.set(ledgerEntryDigest(clock), clock)
-    const result = await rawCommit(joined, [], undefined, [clock])
+    const result = await rawCommit({ group: joined, tokens: [clock] })
     await receiver.processMessage(encode(mlsMessageEncoder, result.commit))
     expect(receiver.state.groupActiveState.kind).toBe('removedFromGroup')
     const next = deriveGroup(joined, result.newState)
     await next.applyLedgerEntries([clock])
     expect(next.registry.controllers.get(controllerID)?.timeFloor).toBe(100)
     expect(treeTime(next, controllerID)).toBe(100)
-    const renewal = await rawCommit(next, [], await timedBinding(bob, 95, 200))
+    const renewal = await rawCommit({
+      group: next,
+      binding: await timedBinding({ identity: bob, iat: 95, exp: 200 }),
+    })
     expect(treeTime(deriveGroup(next, renewal.newState), controllerID)).toBe(100)
   })
 
@@ -422,14 +494,19 @@ describe('path, clock and lapse gates', () => {
       value: { op: 'revoke', proof: [inception, revoke], revoked: [{ did: setup.bobIdentity.id }] },
     })
     await expect(
-      commitWithEntries(setup.author, [], [token], { requireAdmin: false }),
+      commitWithEntries({
+        group: setup.author,
+        extraProposals: [],
+        enacted: [token],
+        requireAdmin: false,
+      }),
     ).rejects.toMatchObject({ reason: 'removes-mismatch' })
-    const result = await commitWithEntries(
-      setup.author,
-      [{ proposalType: defaultProposalTypes.remove, remove: { removed: 1 } }],
-      [token],
-      { requireAdmin: false },
-    )
+    const result = await commitWithEntries({
+      group: setup.author,
+      extraProposals: [{ proposalType: defaultProposalTypes.remove, remove: { removed: 1 } }],
+      enacted: [token],
+      requireAdmin: false,
+    })
     expect(result.newState.ratchetTree[2]).toBeUndefined()
   })
 
@@ -449,14 +526,20 @@ describe('path, clock and lapse gates', () => {
       subject: agent(81).id,
       value: { op: 'revoke', proof: [inception, revoke], revoked: [{ did: agent(81).id }] },
     })
-    const add = await rawAdd(group, agent(61), await timedBinding(agent(61), 100, 200))
+    const add = await rawAdd(
+      group,
+      agent(61),
+      await timedBinding({ identity: agent(61), iat: 100, exp: 200 }),
+    )
     await expect(
-      commitWithEntries(
+      commitWithEntries({
         group,
-        [{ proposalType: defaultProposalTypes.add, add: { keyPackage: add.bundle.publicPackage } }],
-        [token],
-        { requireAdmin: false },
-      ),
+        extraProposals: [
+          { proposalType: defaultProposalTypes.add, add: { keyPackage: add.bundle.publicPackage } },
+        ],
+        enacted: [token],
+        requireAdmin: false,
+      }),
     ).rejects.toMatchObject({ reason: 'effects-mismatch' })
     const clocks = await Promise.all(
       [90, 95].map((time) =>
@@ -469,7 +552,7 @@ describe('path, clock and lapse gates', () => {
       ),
     )
     await expect(
-      commitWithEntries(group, [], clocks, { requireAdmin: false }),
+      commitWithEntries({ group, extraProposals: [], enacted: clocks, requireAdmin: false }),
     ).rejects.toMatchObject({ reason: 'effects-mismatch' })
   })
 })
@@ -486,7 +569,7 @@ describe('lifetime and admission boundaries', () => {
       for (const boundary of ['add', 'update', 'external', 'welcome']) {
         const { group } = await pipelineGroup({ leafLifetime })
         const bob = agent(61)
-        const binding = await timedBinding(bob, 100, 100 + lifetime)
+        const binding = await timedBinding({ identity: bob, iat: 100, exp: 100 + lifetime })
         let result: Promise<unknown>
         if (boundary === 'add') {
           const added = await rawAdd(group, bob, binding)
@@ -498,12 +581,12 @@ describe('lifetime and admission boundaries', () => {
           const { author, joined } = await lowLevelWelcome(
             group,
             bob,
-            await timedBinding(bob, 90, 200),
+            await timedBinding({ identity: bob, iat: 90, exp: 200 }),
           )
           result = author.processMessage(
             boundary === 'update'
               ? await rawUpdate(joined, bob, binding)
-              : await lowLevelExternal(author, bob, binding),
+              : await lowLevelExternal({ group: author, identity: bob, binding }),
           )
         }
         if (accepted) await expect(result).resolves.toBeDefined()
@@ -524,8 +607,15 @@ describe('lifetime and admission boundaries', () => {
         const { group } = await pipelineGroup({ trustedGrantLifetime: limit })
         const bob = agent(61)
         const trusted = agent(71)
-        const parent = (await timedBinding(trusted, 90, 90 + lifetime)).capability
-        const binding = await timedBinding(bob, 100, 200, { parent, issuer: trusted })
+        const parent = (await timedBinding({ identity: trusted, iat: 90, exp: 90 + lifetime }))
+          .capability
+        const binding = await timedBinding({
+          identity: bob,
+          iat: 100,
+          exp: 200,
+          parent,
+          issuer: trusted,
+        })
         let result: Promise<unknown>
         if (boundary === 'add') {
           const added = await rawAdd(group, bob, binding)
@@ -537,12 +627,12 @@ describe('lifetime and admission boundaries', () => {
           const { author, joined } = await lowLevelWelcome(
             group,
             bob,
-            await timedBinding(bob, 90, 200),
+            await timedBinding({ identity: bob, iat: 90, exp: 200 }),
           )
           result = author.processMessage(
             boundary === 'update'
               ? await rawUpdate(joined, bob, binding)
-              : await lowLevelExternal(author, bob, binding),
+              : await lowLevelExternal({ group: author, identity: bob, binding }),
           )
         }
         if (accepted) await expect(result).resolves.toBeDefined()
@@ -562,7 +652,11 @@ describe('lifetime and admission boundaries', () => {
   test('expiry equal to tree time is live for sending but cannot enter', async () => {
     const { group } = await pipelineGroup()
     const bob = agent(61)
-    const { author, joined } = await lowLevelWelcome(group, bob, await timedBinding(bob, 90, 100))
+    const { author, joined } = await lowLevelWelcome(
+      group,
+      bob,
+      await timedBinding({ identity: bob, iat: 90, exp: 100 }),
+    )
     const message = await joined.encrypt(new Uint8Array([7]))
     expect((await author.decrypt(message)).payload).toEqual(new Uint8Array([7]))
   })
@@ -570,9 +664,16 @@ describe('lifetime and admission boundaries', () => {
   test('a renewal preserves delayed traffic from its old epoch', async () => {
     const { group, identity } = await pipelineGroup()
     const bob = agent(61)
-    const { author, joined } = await lowLevelWelcome(group, bob, await timedBinding(bob, 90, 200))
+    const { author, joined } = await lowLevelWelcome(
+      group,
+      bob,
+      await timedBinding({ identity: bob, iat: 90, exp: 200 }),
+    )
     const delayed = await rawApplication(author)
-    const renewal = await rawCommit(author, [], await timedBinding(identity, 101, 201))
+    const renewal = await rawCommit({
+      group: author,
+      binding: await timedBinding({ identity, iat: 101, exp: 201 }),
+    })
     await joined.processMessage(encode(mlsMessageEncoder, renewal.commit))
     const opened = await joined.decrypt(delayed)
     expect(new TextDecoder().decode(opened.payload)).toBe('delayed')
@@ -585,7 +686,7 @@ describe('lifetime and admission boundaries', () => {
     if (leaf?.nodeType !== nodeTypes.leaf) throw new Error('Missing leaf')
     const bound = {
       ...leaf.leaf,
-      credential: makeMLSCredential(identity, await timedBinding(identity, 90, 200)),
+      credential: makeMLSCredential(identity, await timedBinding({ identity, iat: 90, exp: 200 })),
     }
     ;(
       group.registry.controllers as Map<
@@ -627,7 +728,7 @@ describe('consensus history and composition', () => {
       const fixture = await lowLevelWelcome(
         current,
         identity,
-        await timedBinding(identity, 100, index === 10 ? 101 : 200, { prefix }),
+        await timedBinding({ identity, iat: 100, exp: index === 10 ? 101 : 200, prefix }),
       )
       current = fixture.author
       removedReceiver = fixture.joined
@@ -635,7 +736,11 @@ describe('consensus history and composition', () => {
     const beforeSize = historySize(current.state.ratchetTree, [])
     expect(beforeSize).toBeLessThan(HISTORY_HORIZON)
     const identity = agent(111)
-    const add = await rawAdd(current, identity, await timedBinding(identity, 102, 200, { prefix }))
+    const add = await rawAdd(
+      current,
+      identity,
+      await timedBinding({ identity, iat: 102, exp: 200, prefix }),
+    )
     await expect(current.processMessage(add.message)).rejects.toMatchObject({ reason: 'binding' })
     const oversized = deriveGroup(current, add.result.newState)
     expect(historySize(oversized.state.ratchetTree, [])).toBeGreaterThan(HISTORY_HORIZON)
@@ -651,24 +756,32 @@ describe('consensus history and composition', () => {
     const extra = await rawAdd(
       oversized,
       agent(112),
-      await timedBinding(agent(112), 102, 200, { prefix: [inception, longerRotation] }),
+      await timedBinding({
+        identity: agent(112),
+        iat: 102,
+        exp: 200,
+        prefix: [inception, longerRotation],
+      }),
     )
-    const malformed = await rawCommit(oversized, [
-      { proposalType: defaultProposalTypes.remove, remove: { removed: target } },
-      { proposalType: defaultProposalTypes.add, add: { keyPackage: extra.bundle.publicPackage } },
-    ])
+    const malformed = await rawCommit({
+      group: oversized,
+      proposals: [
+        { proposalType: defaultProposalTypes.remove, remove: { removed: target } },
+        { proposalType: defaultProposalTypes.add, add: { keyPackage: extra.bundle.publicPackage } },
+      ],
+    })
     const removed = await lowLevelApply(removedReceiver, add.message)
     const previous = removed.state
     await expect(
       removed.processMessage(encode(mlsMessageEncoder, malformed.commit)),
     ).rejects.toMatchObject({ reason: 'binding' })
     expect(removed.state).toBe(previous)
-    const shrink = await commitWithEntries(
-      oversized,
-      [{ proposalType: defaultProposalTypes.remove, remove: { removed: target } }],
-      [],
-      { requireAdmin: false },
-    )
+    const shrink = await commitWithEntries({
+      group: oversized,
+      extraProposals: [{ proposalType: defaultProposalTypes.remove, remove: { removed: target } }],
+      enacted: [],
+      requireAdmin: false,
+    })
     expect(historySize(shrink.newState.ratchetTree, [])).toBeLessThan(
       historySize(oversized.state.ratchetTree, []),
     )
@@ -691,13 +804,18 @@ describe('consensus history and composition', () => {
     const bundle = await rawAdd(
       group,
       identity,
-      await timedBinding(identity, 100, 200, { prefix: [inception, rotation] }),
+      await timedBinding({ identity, iat: 100, exp: 200, prefix: [inception, rotation] }),
     )
     for (let index = 0; index < 12; index++)
       tree.push({ nodeType: nodeTypes.leaf, leaf: bundle.bundle.publicPackage.leafNode })
     const large = deriveGroup(group, { ...group.state, ratchetTree: tree })
     expect(historySize(tree, [])).toBeGreaterThan(HISTORY_HORIZON)
-    const gate = await prepareLifecycleGate(large, [], large.registry, policyContext(large))
+    const gate = await prepareLifecycleGate({
+      group: large,
+      entries: [],
+      candidateRegistry: large.registry,
+      context: policyContext(large),
+    })
     expect(() =>
       gate.check({ kind: 'commit', senderLeafIndex: 0 as LeafIndex, proposals: [] }),
     ).not.toThrow()
@@ -707,13 +825,16 @@ describe('consensus history and composition', () => {
     const { group, identity } = await pipelineGroup()
     const reset = createReset(controllerSeed, 0, 1)
     const prefix = [inception, reset]
-    const renewal = await rawCommit(group, [], await timedBinding(identity, 100, 200, { prefix }))
+    const renewal = await rawCommit({
+      group,
+      binding: await timedBinding({ identity, iat: 100, exp: 200, prefix }),
+    })
     const renewed = deriveGroup(group, renewal.newState)
     const bob = agent(61)
     const { author } = await lowLevelWelcome(
       renewed,
       bob,
-      await timedBinding(bob, 100, 200, { prefix }),
+      await timedBinding({ identity: bob, iat: 100, exp: 200, prefix }),
     )
     const token = await signLedgerEntry(identity, {
       type: DEVICE_ENTRY_TYPE,
@@ -721,12 +842,25 @@ describe('consensus history and composition', () => {
       subject: controllerID,
       value: { op: 'reset', proof: prefix, revoked: [] },
     })
-    const result = await commitWithEntries(author, [], [token], { requireAdmin: false })
+    const result = await commitWithEntries({
+      group: author,
+      extraProposals: [],
+      enacted: [token],
+      requireAdmin: false,
+    })
     const installed = deriveGroup(author, result.newState)
     await installed.applyLedgerEntries([token])
-    const message = await lowLevelExternal(installed, bob, await timedBinding(bob, 100, 200))
+    const message = await lowLevelExternal({
+      group: installed,
+      identity: bob,
+      binding: await timedBinding({ identity: bob, iat: 100, exp: 200 }),
+    })
     await expect(installed.processMessage(message)).rejects.toMatchObject({ reason: 'floor' })
-    const stale = await rawAdd(installed, agent(71), await timedBinding(agent(71), 100, 200))
+    const stale = await rawAdd(
+      installed,
+      agent(71),
+      await timedBinding({ identity: agent(71), iat: 100, exp: 200 }),
+    )
     await expect(installed.processMessage(stale.message)).rejects.toMatchObject({ reason: 'floor' })
   })
 
@@ -759,7 +893,7 @@ describe('consensus history and composition', () => {
         ],
       },
     }
-    const result = await rawCommit(group, [proposal])
+    const result = await rawCommit({ group, proposals: [proposal] })
     await expect(
       group.processMessage(encode(mlsMessageEncoder, result.commit)),
     ).rejects.toMatchObject({ reason: 'invalid' })
@@ -783,13 +917,18 @@ test('bound members can author consumer entries without a registry-derived admin
     subject: identity.id,
     value: 'note',
   })
-  const result = await commitWithEntries(group, [], [token])
+  const result = await commitWithEntries({ group, extraProposals: [], enacted: [token] })
   expect(result.newState.groupContext.epoch).toBe(group.epoch + 1n)
 })
 
 test.each(['psk', 'reinit'] as const)('mandatory composition refuses %s', async (kind) => {
   const { group } = await pipelineGroup()
-  const gate = await prepareLifecycleGate(group, [], group.registry, policyContext(group))
+  const gate = await prepareLifecycleGate({
+    group,
+    entries: [],
+    candidateRegistry: group.registry,
+    context: policyContext(group),
+  })
   const proposal =
     kind === 'psk'
       ? {
@@ -823,11 +962,15 @@ test.each(['psk', 'reinit'] as const)('mandatory composition refuses %s', async 
 test('a chained renewal that lowers tree time requires its preserving clock', async () => {
   const { group, identity, tokens } = await pipelineGroup()
   const bob = agent(61)
-  const { author, joined } = await lowLevelWelcome(group, bob, await timedBinding(bob, 90, 200))
+  const { author, joined } = await lowLevelWelcome(
+    group,
+    bob,
+    await timedBinding({ identity: bob, iat: 90, exp: 200 }),
+  )
   const trusted = agent(71)
-  const parent = (await timedBinding(trusted, 90, 300)).capability
-  const binding = await timedBinding(identity, 100, 201, { parent, issuer: trusted })
-  const withoutClock = await rawCommit(author, [], binding)
+  const parent = (await timedBinding({ identity: trusted, iat: 90, exp: 300 })).capability
+  const binding = await timedBinding({ identity, iat: 100, exp: 201, parent, issuer: trusted })
+  const withoutClock = await rawCommit({ group: author, binding })
   const previous = joined.state
   await expect(
     joined.processMessage(encode(mlsMessageEncoder, withoutClock.commit)),
@@ -840,7 +983,7 @@ test('a chained renewal that lowers tree time requires its preserving clock', as
     value: { op: 'clock', time: 100 },
   })
   tokens.set(ledgerEntryDigest(clock), clock)
-  const withClock = await rawCommit(author, [], binding, [clock])
+  const withClock = await rawCommit({ group: author, binding, tokens: [clock] })
   await joined.processMessage(encode(mlsMessageEncoder, withClock.commit))
   expect(treeTime(joined, controllerID)).toBe(100)
   expect(joined.registry.controllers.get(controllerID)?.timeFloor).toBe(100)
@@ -849,14 +992,19 @@ test('a chained renewal that lowers tree time requires its preserving clock', as
 test('a newer direct grant advances tree time and any member can remove a lapsed target', async () => {
   const { group } = await pipelineGroup()
   const bob = agent(61)
-  const fixture = await lowLevelWelcome(group, bob, await timedBinding(bob, 201, 300))
+  const fixture = await lowLevelWelcome(
+    group,
+    bob,
+    await timedBinding({ identity: bob, iat: 201, exp: 300 }),
+  )
   expect(treeTime(fixture.author, controllerID)).toBe(201)
   await expect(fixture.author.encrypt(new Uint8Array([1]))).rejects.toMatchObject({
     reason: 'lapsed',
   })
-  const result = await rawCommit(fixture.joined, [
-    { proposalType: defaultProposalTypes.remove, remove: { removed: 0 } },
-  ])
+  const result = await rawCommit({
+    group: fixture.joined,
+    proposals: [{ proposalType: defaultProposalTypes.remove, remove: { removed: 0 } }],
+  })
   await fixture.author.processMessage(encode(mlsMessageEncoder, result.commit))
   expect(fixture.author.state.groupActiveState.kind).toBe('removedFromGroup')
 })
@@ -864,8 +1012,16 @@ test('a newer direct grant advances tree time and any member can remove a lapsed
 test('a lifecycle external replacement is refused when its subject is denied', async () => {
   const { group, identity } = await pipelineGroup()
   const bob = agent(61)
-  const { author } = await lowLevelWelcome(group, bob, await timedBinding(bob, 90, 200))
-  const message = await lowLevelExternal(author, bob, await timedBinding(bob, 100, 200))
+  const { author } = await lowLevelWelcome(
+    group,
+    bob,
+    await timedBinding({ identity: bob, iat: 90, exp: 200 }),
+  )
+  const message = await lowLevelExternal({
+    group: author,
+    identity: bob,
+    binding: await timedBinding({ identity: bob, iat: 100, exp: 200 }),
+  })
   const revoke = createRevoke({
     seed: controllerSeed,
     profile: 0,
@@ -899,7 +1055,12 @@ test('management capability expiry is judged against its controller tree time', 
     value: { op: 'add', controller: controllerID, capability },
   })
   await expect(
-    commitWithEntries(deviceGroup, [], [token], { requireAdmin: false }),
+    commitWithEntries({
+      group: deviceGroup,
+      extraProposals: [],
+      enacted: [token],
+      requireAdmin: false,
+    }),
   ).rejects.toThrow()
 })
 
@@ -925,8 +1086,14 @@ test.each([
       const { group } = await pipelineGroup({ leafLifetime: limit })
       const bob = agent(61)
       const trusted = agent(71)
-      const parent = (await timedBinding(trusted, 100, 2592100)).capability
-      const binding = await timedBinding(bob, 100, 100 + lifetime, { parent, issuer: trusted })
+      const parent = (await timedBinding({ identity: trusted, iat: 100, exp: 2592100 })).capability
+      const binding = await timedBinding({
+        identity: bob,
+        iat: 100,
+        exp: 100 + lifetime,
+        parent,
+        issuer: trusted,
+      })
       let result: Promise<unknown>
       if (boundary === 'add') {
         const fixture = await rawAdd(group, bob, binding)
@@ -934,11 +1101,15 @@ test.each([
       } else if (boundary === 'welcome') {
         result = (await welcomeBoundary(group, bob, binding)).process()
       } else {
-        const fixture = await lowLevelWelcome(group, bob, await timedBinding(bob, 90, 200))
+        const fixture = await lowLevelWelcome(
+          group,
+          bob,
+          await timedBinding({ identity: bob, iat: 90, exp: 200 }),
+        )
         result = fixture.author.processMessage(
           boundary === 'update'
             ? await rawUpdate(fixture.joined, bob, binding)
-            : await lowLevelExternal(fixture.author, bob, binding),
+            : await lowLevelExternal({ group: fixture.author, identity: bob, binding }),
         )
       }
       if (accepted) await expect(result).resolves.toBeDefined()
@@ -981,7 +1152,7 @@ test('two revoke proofs cannot share a commit', async () => {
       value: { op: 'revoke', proof: [next], revoked: [{ did: second.id }] },
     }),
   ])
-  await expect(commitWithEntries(group, [], tokens, { requireAdmin: false })).rejects.toMatchObject(
-    { reason: 'effects-mismatch' },
-  )
+  await expect(
+    commitWithEntries({ group, extraProposals: [], enacted: tokens, requireAdmin: false }),
+  ).rejects.toMatchObject({ reason: 'effects-mismatch' })
 })

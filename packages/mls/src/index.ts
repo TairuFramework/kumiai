@@ -61,7 +61,12 @@ export {
   decodeControlEnvelope,
   encodeControlEnvelope,
 } from './envelope.js'
-export { type EnvelopeFoldResult, foldEnvelope } from './envelope-fold.js'
+export {
+  type EnvelopeFoldResult,
+  type FoldEnvelopeContext,
+  type FoldEnvelopeParams,
+  foldEnvelope,
+} from './envelope-fold.js'
 export {
   LeafBindingError,
   type LeafBindingReason,
@@ -129,7 +134,9 @@ export {
   type SendAdmission,
 } from './group.js'
 export {
+  type RemoveLapsedLeavesResult,
   type RevokeBuildResult,
+  type RevokeWithProofParams,
   removeLapsedLeaves,
   renewLeaf,
   revokeWithProof,
@@ -164,7 +171,7 @@ export {
   type VerifiedLedgerEntry,
   verifyLedgerEntry,
 } from './ledger.js'
-export { assertRecoveryBinding } from './lifecycle.js'
+export { type AssertRecoveryBindingParams, assertRecoveryBinding } from './lifecycle.js'
 export {
   type CommitPolicyContext,
   defaultCommitPolicy,
@@ -180,6 +187,7 @@ export {
   openSealedGroupInfo,
   openSealedLedger,
   RECOVERY_REQUEST_TYPE,
+  type RecoveryGroupInfo,
   type RecoveryRequest,
   RecoveryRequestError,
   type RecoveryRequestRejection,
@@ -203,8 +211,10 @@ export {
   type OpenedRecoveryVerdict,
   openRecoveryVerdict,
   type RecoveryRefusalReason,
+  type RecoverySignerEligibleParams,
   type RecoveryVerdict,
   recoverySignerEligible,
+  type SealRecoveryVerdictParams,
   sealRecoveryVerdict,
 } from './recovery-verdict.js'
 export {

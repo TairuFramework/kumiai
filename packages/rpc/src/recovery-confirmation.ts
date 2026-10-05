@@ -19,11 +19,13 @@ export function confirmationTag(key: Uint8Array, requestID: string): string {
   return encodeMultibase(hmac(sha256, key, new TextEncoder().encode(requestID)))
 }
 
+export type RecoveryCacheEntry<TValue> = { value: TValue; expiresAt: number }
+
 /** Expiry releases exporter keys even when the peer receives no further traffic. */
-export function createRecoveryCache<T>(release: (value: T) => void = () => {}) {
+export function createRecoveryCache<TValue>(release: (value: TValue) => void = () => {}) {
   const entries = new Map<
     string,
-    { value: T; expiresAt: number; timer: ReturnType<typeof setTimeout> }
+    RecoveryCacheEntry<TValue> & { timer: ReturnType<typeof setTimeout> }
   >()
   const remove = (key: string): void => {
     const held = entries.get(key)
@@ -34,7 +36,7 @@ export function createRecoveryCache<T>(release: (value: T) => void = () => {}) {
   }
   return {
     delete: remove,
-    get(key: string): { value: T; expiresAt: number } | undefined {
+    get(key: string): RecoveryCacheEntry<TValue> | undefined {
       const held = entries.get(key)
       if (held != null && held.expiresAt <= Date.now()) {
         remove(key)
@@ -42,7 +44,7 @@ export function createRecoveryCache<T>(release: (value: T) => void = () => {}) {
       }
       return held
     },
-    set(key: string, value: T, expiresAt: number): void {
+    set(key: string, value: TValue, expiresAt: number): void {
       remove(key)
       if (expiresAt <= Date.now()) {
         release(value)
@@ -72,7 +74,10 @@ export type ConfirmationOutcome =
   | { kind: 'disposed' }
   | { kind: 'error'; error: unknown }
 
-export function waitForRecoveryConfirmation(params: {
+/** Routes verdicts for one requestID to its waiting attempt. */
+export type ConfirmationWaiter = { receive: (sealed: Uint8Array) => void; dispose: () => void }
+
+export type WaitForRecoveryConfirmationParams = {
   port: GroupMLS
   pending: PendingRecovery
   groupID: string
@@ -83,8 +88,12 @@ export function waitForRecoveryConfirmation(params: {
   deadline: number
   timeoutMs: number
   send: () => Promise<unknown>
-  waiters: Map<string, { receive: (sealed: Uint8Array) => void; dispose: () => void }>
-}): Promise<ConfirmationOutcome> {
+  waiters: Map<string, ConfirmationWaiter>
+}
+
+export function waitForRecoveryConfirmation(
+  params: WaitForRecoveryConfirmationParams,
+): Promise<ConfirmationOutcome> {
   const {
     port,
     pending,
@@ -118,10 +127,10 @@ export function waitForRecoveryConfirmation(params: {
       if (finished) return
       void send().catch((error: unknown) => finish({ kind: 'error', error }))
     }
-    const end = setTimeout(
-      () => finish(best ?? { kind: 'unconfirmed', advisory: [...advisory.values()] }),
-      Math.max(0, deadline - Date.now()),
-    )
+    const finishWithBest = (): void => {
+      finish(best ?? { kind: 'unconfirmed', advisory: [...advisory.values()] })
+    }
+    const end = setTimeout(finishWithBest, Math.max(0, deadline - Date.now()))
     const repeat = setInterval(ask, timeoutMs)
     waiters.set(requestID, {
       dispose: () => finish({ kind: 'disposed' }),
@@ -132,13 +141,12 @@ export function waitForRecoveryConfirmation(params: {
             const opened = await port.openRecoveryVerdict(sealed, requestID)
             if (finished || opened == null) return
             const verdict = opened.verdict
-            if (
-              verdict.groupID !== groupID ||
-              verdict.requestID !== requestID ||
-              verdict.position !== position ||
-              verdict.commitDigest !== commitDigest
-            )
-              return
+            const boundToAttempt =
+              verdict.groupID === groupID &&
+              verdict.requestID === requestID &&
+              verdict.position === position &&
+              verdict.commitDigest === commitDigest
+            if (!boundToAttempt) return
             if (
               verdict.verdict === 'confirmed' &&
               (verdict.epoch !== pending.epoch || verdict.tag !== confirmationTag(key, requestID))
@@ -162,7 +170,7 @@ export function waitForRecoveryConfirmation(params: {
             if (settle == null) {
               clearInterval(repeat)
               settle = setTimeout(
-                () => finish(best ?? { kind: 'unconfirmed', advisory: [...advisory.values()] }),
+                finishWithBest,
                 Math.min(timeoutMs, Math.max(0, deadline - Date.now())),
               )
               ask()

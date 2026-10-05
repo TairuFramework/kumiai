@@ -19,18 +19,20 @@ const fixture = (await import(
 )) as {
   agent: (byte: number) => OwnIdentity
   controllerID: string
-  lowLevelExternal: (
-    group: GroupHandle,
-    identity: OwnIdentity,
-    binding?: ControllerBinding,
-    options?: { resync?: boolean },
-  ) => Promise<Uint8Array>
-  timedBinding: (
-    identity: OwnIdentity,
-    iat: number,
-    exp: number,
-    options?: { parent?: string; issuer?: OwnIdentity },
-  ) => Promise<ControllerBinding>
+  lowLevelExternal: (params: {
+    group: GroupHandle
+    identity: OwnIdentity
+    binding?: ControllerBinding
+    resync?: boolean
+  }) => Promise<Uint8Array>
+  timedBinding: (params: {
+    identity: OwnIdentity
+    iat: number
+    exp: number
+
+    parent?: string
+    issuer?: OwnIdentity
+  }) => Promise<ControllerBinding>
 }
 afterEach(() => vi.restoreAllMocks())
 
@@ -41,12 +43,14 @@ async function setup(
   const identity = fixture.agent(41)
   let group = (
     await createGroup(identity, 'lifecycle-verdict', {
-      ...(options.standard ? {} : { controller: await fixture.timedBinding(identity, 100, 200) }),
+      ...(options.standard
+        ? {}
+        : { controller: await fixture.timedBinding({ identity: identity, iat: 100, exp: 200 }) }),
     })
   ).group
   const bob = fixture.agent(61)
   const bundle = await createKeyPackageBundle(bob, {
-    controller: await fixture.timedBinding(bob, 100, 200, options),
+    controller: await fixture.timedBinding({ identity: bob, iat: 100, exp: 200, ...options }),
   })
   const { invite } = await createInvite({
     group,
@@ -93,19 +97,36 @@ test('known revocations, floors, lapse and absent pending leaves cannot authoris
     devices: new Map(registrySeed().devices),
     controllers: new Map(registrySeed().controllers),
   }
-  expect(recoverySignerEligible(s.group(), known, s.identity.id, 500)).toBe(true)
-  expect(recoverySignerEligible(s.group(), known, s.identity.id, 500.001)).toBe(false)
-  expect(recoverySignerEligible(s.group(), known, fixture.agent(81).id, 150)).toBe(false)
+  expect(
+    recoverySignerEligible({ group: s.group(), known: known, signer: s.identity.id, now: 500 }),
+  ).toBe(true)
+  expect(
+    recoverySignerEligible({ group: s.group(), known: known, signer: s.identity.id, now: 500.001 }),
+  ).toBe(false)
+  expect(
+    recoverySignerEligible({
+      group: s.group(),
+      known: known,
+      signer: fixture.agent(81).id,
+      now: 150,
+    }),
+  ).toBe(false)
   known.controllers.set(fixture.controllerID, { recordedLog: [], genFloor: 1, timeFloor: 0 })
-  expect(recoverySignerEligible(s.group(), known, s.identity.id, 150)).toBe(false)
+  expect(
+    recoverySignerEligible({ group: s.group(), known: known, signer: s.identity.id, now: 150 }),
+  ).toBe(false)
   known.controllers.set(fixture.controllerID, { recordedLog: [], genFloor: 0, timeFloor: 201 })
-  expect(recoverySignerEligible(s.group(), known, s.identity.id, 150)).toBe(false)
+  expect(
+    recoverySignerEligible({ group: s.group(), known: known, signer: s.identity.id, now: 150 }),
+  ).toBe(false)
   known.devices.set(s.identity.id, {
     controller: fixture.controllerID,
     status: 'revoked',
     logPosition: 1,
   })
-  expect(recoverySignerEligible(s.group(), known, s.identity.id, 150)).toBe(false)
+  expect(
+    recoverySignerEligible({ group: s.group(), known: known, signer: s.identity.id, now: 150 }),
+  ).toBe(false)
 })
 
 test('pending verdicts bind the epoch, position, digest and tag, and adoption is idempotent', async () => {
@@ -172,7 +193,12 @@ test('revocation in either registry is permanent in the union and stale refusals
     knownRecoveryRegistry(known, registrySeed()),
     knownRecoveryRegistry(registrySeed(), known),
   ]) {
-    const judge = createVerdictJudge(current.group, current.sourceTree, union, 'stale')
+    const judge = createVerdictJudge({
+      group: current.group,
+      sourceTree: current.sourceTree,
+      known: union,
+      requestID: 'stale',
+    })
     const key = await judge.confirmationKey('position', 'digest')
     const { confirmationTag } = await import('@kumiai/mls')
     const binding = {
@@ -214,7 +240,7 @@ test('revocation in either registry is permanent in the union and stale refusals
 
 test('a revoked trusted issuer makes its child advisory and unknown revocation respects the expiry boundary', async () => {
   const issuer = fixture.agent(81)
-  const parent = (await fixture.timedBinding(issuer, 100, 200)).capability
+  const parent = (await fixture.timedBinding({ identity: issuer, iat: 100, exp: 200 })).capability
   const s = await setup({ issuer, parent })
   const known = {
     devices: new Map([
@@ -222,9 +248,20 @@ test('a revoked trusted issuer makes its child advisory and unknown revocation r
     ]),
     controllers: new Map(),
   }
-  expect(recoverySignerEligible(s.group(), known, s.bob.id, 150)).toBe(false)
-  expect(recoverySignerEligible(s.group(), registrySeed(), s.bob.id, 500)).toBe(true)
-  expect(recoverySignerEligible(s.group(), registrySeed(), s.bob.id, 500.001)).toBe(false)
+  expect(
+    recoverySignerEligible({ group: s.group(), known: known, signer: s.bob.id, now: 150 }),
+  ).toBe(false)
+  expect(
+    recoverySignerEligible({ group: s.group(), known: registrySeed(), signer: s.bob.id, now: 500 }),
+  ).toBe(true)
+  expect(
+    recoverySignerEligible({
+      group: s.group(),
+      known: registrySeed(),
+      signer: s.bob.id,
+      now: 500.001,
+    }),
+  ).toBe(false)
 })
 
 test('a lifecycle GroupInfo signer revoked in the known ledger is refused', async () => {
@@ -259,7 +296,7 @@ test('a lifecycle GroupInfo signer revoked in the known ledger is refused', asyn
 
 test('a chained GroupInfo signer with a denied issuer is refused', async () => {
   const issuer = fixture.agent(81)
-  const parent = (await fixture.timedBinding(issuer, 100, 200)).capability
+  const parent = (await fixture.timedBinding({ identity: issuer, iat: 100, exp: 200 })).capability
   const s = await setup({ issuer, parent })
   const request = await s.mls.createRecoveryRequest('issuer-attestation')
   const reply = await s.responder.sealGroupInfo(request)
@@ -330,9 +367,13 @@ test('the real commit port propagates binding and lapse refusals without advanci
   const before = await s.mls.readEpoch()
   for (const [binding, refusal] of [
     [undefined, 'binding'],
-    [await fixture.timedBinding(s.bob, 50, 90), 'lapse'],
+    [await fixture.timedBinding({ identity: s.bob, iat: 50, exp: 90 }), 'lapse'],
   ] as const) {
-    const commit = await fixture.lowLevelExternal(s.group(), s.bob, binding)
+    const commit = await fixture.lowLevelExternal({
+      group: s.group(),
+      identity: s.bob,
+      binding,
+    })
     expect(await s.mls.processCommit(commit, {})).toEqual({
       advanced: false,
       epochBefore: before,
@@ -362,19 +403,19 @@ test('caller rejection and a replacement without a prior leaf propagate policy a
       },
     }),
   })
-  const valid = await fixture.lowLevelExternal(
-    s.group(),
-    s.bob,
-    await fixture.timedBinding(s.bob, 100, 200),
-  )
+  const valid = await fixture.lowLevelExternal({
+    group: s.group(),
+    identity: s.bob,
+    binding: await fixture.timedBinding({ identity: s.bob, iat: 100, exp: 200 }),
+  })
   expect(await mls.processCommit(valid, {})).toMatchObject({ advanced: false, refusal: 'policy' })
   const outsider = fixture.agent(81)
-  const invalid = await fixture.lowLevelExternal(
-    s.group(),
-    outsider,
-    await fixture.timedBinding(outsider, 100, 200),
-    { resync: false },
-  )
+  const invalid = await fixture.lowLevelExternal({
+    group: s.group(),
+    identity: outsider,
+    binding: await fixture.timedBinding({ identity: outsider, iat: 100, exp: 200 }),
+    resync: false,
+  })
   expect(await s.mls.processCommit(invalid, {})).toMatchObject({
     advanced: false,
     refusal: 'invalid',

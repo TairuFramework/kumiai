@@ -50,12 +50,15 @@ const fixture = (await import(
   controllerID: string
   resetPrefix: () => ControllerBinding['prefix']
   oversizedBinding: (identity: OwnIdentity, iat: number, exp: number) => Promise<ControllerBinding>
-  timedBinding: (
-    identity: OwnIdentity,
-    iat: number,
-    exp: number,
-    options?: { parent?: string; issuer?: OwnIdentity; prefix?: ControllerBinding['prefix'] },
-  ) => Promise<ControllerBinding>
+  timedBinding: (params: {
+    identity: OwnIdentity
+    iat: number
+    exp: number
+
+    parent?: string
+    issuer?: OwnIdentity
+    prefix?: ControllerBinding['prefix']
+  }) => Promise<ControllerBinding>
 }
 
 afterEach(() => vi.restoreAllMocks())
@@ -73,10 +76,14 @@ async function setup(
   const bob = fixture.agent(61)
   let aliceGroup = (
     await createGroup(alice, 'lifecycle-recovery', {
-      controller: await fixture.timedBinding(alice, 100, options.aliceExp ?? 200),
+      controller: await fixture.timedBinding({
+        identity: alice,
+        iat: 100,
+        exp: options.aliceExp ?? 200,
+      }),
     })
   ).group
-  const cached = await fixture.timedBinding(bob, options.bobIat ?? 100, 200)
+  const cached = await fixture.timedBinding({ identity: bob, iat: options.bobIat ?? 100, exp: 200 })
   const bundle = await createKeyPackageBundle(bob, { controller: cached })
   const { invite } = await createInvite({
     group: aliceGroup,
@@ -133,11 +140,14 @@ async function installFloor(
 ): Promise<GroupHandle> {
   const elevated = await renewLeaf(
     s.aliceGroup(),
-    await fixture.timedBinding(s.alice, time, time + 100),
+    await fixture.timedBinding({ identity: s.alice, iat: time, exp: time + 100 }),
   )
   const trusted = fixture.agent(65)
-  const parent = await fixture.timedBinding(trusted, 90, time + 200)
-  const delegated = await fixture.timedBinding(s.alice, time, time + 100, {
+  const parent = await fixture.timedBinding({ identity: trusted, iat: 90, exp: time + 200 })
+  const delegated = await fixture.timedBinding({
+    identity: s.alice,
+    iat: time,
+    exp: time + 100,
     parent: parent.capability,
     issuer: trusted,
   })
@@ -199,12 +209,14 @@ test('binding invalidation remembers the replacement leaf rather than a subseque
   const host = vi.fn(async () => offered)
   const s = await setup(host, { aliceExp: 500 })
   vi.spyOn(Date, 'now').mockReturnValue(250_000)
-  offered = await fixture.timedBinding(s.bob, 250, 350)
+  offered = await fixture.timedBinding({ identity: s.bob, iat: 250, exp: 350 })
   expect(await s.mls.prepareRecovery()).toBe('ready')
   const pending = await buildRecovery(s)
   if (pending == null || 'renewalRequired' in pending) throw new Error('No bound candidate')
   vi.spyOn(Date, 'now').mockReturnValue(270_000)
-  offered.capability = (await fixture.timedBinding(s.bob, 260, 360)).capability
+  offered.capability = (
+    await fixture.timedBinding({ identity: s.bob, iat: 260, exp: 360 })
+  ).capability
   pending.markBindingUnusable()
   expect(await s.mls.prepareRecovery()).toBe('ready')
   expect(host).toHaveBeenCalledTimes(2)
@@ -215,7 +227,7 @@ test('recovery replaces an expired cached binding with one host call', async () 
   const host = vi.fn(async () => fresh)
   const s = await setup(host)
   vi.spyOn(Date, 'now').mockReturnValue(250_000)
-  fresh = await fixture.timedBinding(s.bob, 250, 350)
+  fresh = await fixture.timedBinding({ identity: s.bob, iat: 250, exp: 350 })
   expect(await s.mls.prepareRecovery()).toBe('ready')
   s.installAlice(await installFloor(s, 250))
   const pending = await buildRecovery(s)
@@ -258,11 +270,12 @@ test.each(['absent', 'null', 'expired', 'foreign', 'lower-time', 'horizon'] as c
     const host = vi.fn(async () => replacement)
     const s = await setup(kind === 'absent' ? undefined : host)
     vi.spyOn(Date, 'now').mockReturnValue(250_000)
-    replacement = await fixture.timedBinding(s.bob, 250, 350)
+    replacement = await fixture.timedBinding({ identity: s.bob, iat: 250, exp: 350 })
     if (kind === 'null') replacement = null
     if (kind === 'expired') replacement = s.cached
     if (kind === 'foreign') replacement = { ...s.cached, id: 'did:kokuin:foreign' }
-    if (kind === 'lower-time') replacement = await fixture.timedBinding(s.bob, 90, 350)
+    if (kind === 'lower-time')
+      replacement = await fixture.timedBinding({ identity: s.bob, iat: 90, exp: 350 })
     if (kind === 'horizon') replacement = await fixture.oversizedBinding(s.bob, 250, 350)
     const requests = vi.spyOn(s.mls, 'createRecoveryRequest')
     expect(await s.mls.prepareRecovery()).toBe('renewal-required')
@@ -276,11 +289,14 @@ test('a tree-lapsed present leaf can external-renew with a fresh binding', async
   const host = vi.fn(async () => fresh)
   const s = await setup(host)
   vi.spyOn(Date, 'now').mockReturnValue(250_000)
-  const renewed = await renewLeaf(s.aliceGroup(), await fixture.timedBinding(s.alice, 250, 350))
+  const renewed = await renewLeaf(
+    s.aliceGroup(),
+    await fixture.timedBinding({ identity: s.alice, iat: 250, exp: 350 }),
+  )
   s.installAlice(renewed.newGroup)
   await s.bobGroup().processMessage(renewed.commitMessage)
   expect(s.bobGroup().sendAdmission()).toMatchObject({ admissible: false, reason: 'lapsed' })
-  fresh = await fixture.timedBinding(s.bob, 250, 350)
+  fresh = await fixture.timedBinding({ identity: s.bob, iat: 250, exp: 350 })
   await expect(
     commitLedgerEntries(s.bobGroup(), [
       await signLedgerEntry(s.bob, {
@@ -346,7 +362,7 @@ test('a responder floor refusal discards the candidate, requires renewal and inv
     offered = s.cached
     expect(await s.mls.prepareRecovery()).toBe('renewal-required')
     expect(host).toHaveBeenCalledTimes(1)
-    offered = await fixture.timedBinding(s.bob, 150, 250)
+    offered = await fixture.timedBinding({ identity: s.bob, iat: 150, exp: 250 })
     expect(await s.mls.prepareRecovery()).toBe('ready')
     expect(host).toHaveBeenCalledTimes(2)
   } finally {
@@ -485,7 +501,7 @@ test('renewal-required suppresses subsequent automatic triggers and explicit rec
     await bobPeer.resync()
     await vi.waitFor(() => expect(host).toHaveBeenCalledTimes(2))
     expect(requests).toHaveBeenCalledTimes(0)
-    fresh = await fixture.timedBinding(s.bob, 250, 350)
+    fresh = await fixture.timedBinding({ identity: s.bob, iat: 250, exp: 350 })
     expect(await bobPeer.recover()).toMatchObject({ advanced: true })
     expect(host).toHaveBeenCalledTimes(3)
     expect(
@@ -539,7 +555,7 @@ test('a fresh binding supplied in preflight is not replaced a second time for a 
   const host = vi.fn(async () => fresh)
   const s = await setup(host)
   vi.spyOn(Date, 'now').mockReturnValue(250_000)
-  fresh = await fixture.timedBinding(s.bob, 250, 350)
+  fresh = await fixture.timedBinding({ identity: s.bob, iat: 250, exp: 350 })
   expect(await s.mls.prepareRecovery()).toBe('ready')
   vi.spyOn(Date, 'now').mockReturnValue(400_000)
   s.installAlice(await installFloor(s, 400))
@@ -554,18 +570,22 @@ test('a delegated replacement that lowers tree time requires renewal before requ
   const host = vi.fn(async () => replacement)
   const s = await setup(host, { bobIat: 180, clock: 190 })
   const trusted = fixture.agent(65)
-  const parent = await fixture.timedBinding(trusted, 90, 400)
+  const parent = await fixture.timedBinding({ identity: trusted, iat: 90, exp: 400 })
   const pipeline = (await import(
     new URL('../../../packages/mls/test/fixtures/lifecycle-pipeline.ts', import.meta.url).href
   )) as {
-    timedBinding: (
-      identity: OwnIdentity,
-      iat: number,
-      exp: number,
-      options: { parent: string; issuer: OwnIdentity },
-    ) => Promise<ControllerBinding>
+    timedBinding: (params: {
+      identity: OwnIdentity
+      iat: number
+      exp: number
+      parent: string
+      issuer: OwnIdentity
+    }) => Promise<ControllerBinding>
   }
-  replacement = await pipeline.timedBinding(s.bob, 250, 350, {
+  replacement = await pipeline.timedBinding({
+    identity: s.bob,
+    iat: 250,
+    exp: 350,
     parent: parent.capability,
     issuer: trusted,
   })
@@ -583,12 +603,16 @@ test('a generation floor in the reply ledger prevents publication of a cached pr
     groupInfo: (await exportGroupInfo({ group: s.aliceGroup() })).groupInfo,
     credential: s.bobGroup().credential,
     resync: true,
-    controller: await fixture.timedBinding(s.bob, 100, 200, { prefix }),
+    controller: await fixture.timedBinding({ identity: s.bob, iat: 100, exp: 200, prefix }),
   })
   await s.aliceGroup().processMessage(replacement.commitMessage)
   s.installAlice(
-    (await renewLeaf(s.aliceGroup(), await fixture.timedBinding(s.alice, 100, 200, { prefix })))
-      .newGroup,
+    (
+      await renewLeaf(
+        s.aliceGroup(),
+        await fixture.timedBinding({ identity: s.alice, iat: 100, exp: 200, prefix }),
+      )
+    ).newGroup,
   )
   const reset = await revokeWithProof(s.aliceGroup(), { reset: true, log: prefix })
   if (reset.status !== 'built') throw new Error('Expected reset commit')
@@ -608,8 +632,8 @@ test.each(['expired', 'future', 'malformed'] as const)(
     const s = await setup(host)
     replacement =
       kind === 'expired'
-        ? await fixture.timedBinding(s.bob, 100, 140)
-        : await fixture.timedBinding(s.bob, 250, 350)
+        ? await fixture.timedBinding({ identity: s.bob, iat: 100, exp: 140 })
+        : await fixture.timedBinding({ identity: s.bob, iat: 250, exp: 350 })
     if (kind === 'malformed') replacement = { ...s.cached, capability: 'malformed' }
     expect(await s.mls.prepareRecovery()).toBe('ready')
     vi.spyOn(Date, 'now').mockReturnValue(250_000)
@@ -625,7 +649,7 @@ test('a lifecycle GroupInfo reply requires a requester leaf in the responder tre
   const outsider = fixture.agent(66)
   const group = (
     await createGroup(outsider, 'lifecycle-recovery', {
-      controller: await fixture.timedBinding(outsider, 100, 200),
+      controller: await fixture.timedBinding({ identity: outsider, iat: 100, exp: 200 }),
     })
   ).group
   const mls = createGroupMLS({
@@ -703,7 +727,7 @@ test('a reply-ledger floor ends peer recovery without publication and holds late
     expect(host).toHaveBeenCalledTimes(1)
     expect(requests).toHaveBeenCalledTimes(1)
     expect(s.bobGroup().epoch).toBe(1n)
-    replacement = await fixture.timedBinding(s.bob, 150, 350)
+    replacement = await fixture.timedBinding({ identity: s.bob, iat: 150, exp: 350 })
     expect(await bobPeer.recover()).toMatchObject({ advanced: true })
     expect(host).toHaveBeenCalledTimes(2)
   } finally {

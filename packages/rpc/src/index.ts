@@ -47,6 +47,7 @@ export {
 export {
   type AppFrameRef,
   AppFrameStorageError,
+  type AppliedRecovery,
   type CommitContext,
   type CommitHeader,
   type ExportSecretResult,
@@ -61,12 +62,14 @@ export {
   type PendingAppFrames,
   type PendingRecovery,
   type ProcessCommitResult,
+  type RecoveryConfirmationKey,
   type RecoveryRefusalReason,
   type RecoveryVerdict,
   type RosterEntry,
   type SealEntriesResult,
   type SendAdmission,
   sortPendingAppFrames,
+  type VerifiedRecoveryRequest,
 } from './crypto.js'
 export {
   asDeliveryPosition,
@@ -106,6 +109,7 @@ export {
   type GroupPeerParams,
   type ProtocolSurface,
   type RecoveryEvent,
+  type RecoveryFailureDetails,
   type RecoveryFailureReason,
   type RecoveryTrigger,
   type StrandConfidence,
@@ -134,6 +138,7 @@ export {
   encodeRecoveryRequest,
   encodeRecoveryVerdict,
   type RecoveryConfirmRequest,
+  type RecoveryVerdictFrame,
 } from './recovery.js'
 export { detectRosterChange } from './roster.js'
 export {

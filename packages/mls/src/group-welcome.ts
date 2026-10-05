@@ -386,18 +386,18 @@ export async function joinGroupExternal(
   if (anchor.controller != null && controller == null)
     throw new LeafBindingError('floating-refused')
   assertBindingAuthorTime(controller)
-  const gate = await prepareLifecycleGate(
-    before,
-    [],
-    before.registry,
-    buildCommitPolicyContext(before, {
+  const gate = await prepareLifecycleGate({
+    group: before,
+    entries: [],
+    candidateRegistry: before.registry,
+    context: buildCommitPolicyContext(before, {
       baseRoster: before.roster,
       candidateRoster: before.roster,
       entryIDs: [],
       enactedDeviceEntries: [],
     }),
-    own.leaf,
-  )
+    externalLeaf: own.leaf,
+  })
   gate.check({ kind: 'commit', senderLeafIndex: undefined, proposals })
   await gate.postApply(newState)
   await validateWelcomeTree(group)

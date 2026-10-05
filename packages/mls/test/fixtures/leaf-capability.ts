@@ -6,14 +6,14 @@ import { b64uFromJSON, fromUTF, toB64U } from '@sozai/codec'
 import type { Credential } from 'ts-mls'
 import { defaultCredentialTypes } from 'ts-mls'
 
-export async function leafCapabilityFixture(
-  options: {
-    child?: Record<string, unknown>
-    parent?: Record<string, unknown>
-    wrongSigner?: boolean
-    depth?: boolean
-  } = {},
-) {
+export type LeafCapabilityFixtureOptions = {
+  child?: Record<string, unknown>
+  parent?: Record<string, unknown>
+  wrongSigner?: boolean
+  depth?: boolean
+}
+
+export async function leafCapabilityFixture(options: LeafCapabilityFixtureOptions = {}) {
   const seed = new Uint8Array(32).fill(31)
   const inception = createInception(seed, 0)
   const controller = createControllerIdentity({ seed, profile: 0, log: [inception] })

@@ -538,17 +538,23 @@ test('public external join requires a bound replacement and survivors refuse a f
   try {
     const { group } = await pipelineGroup()
     const bob = agent(61)
-    const { author, joined } = await lowLevelWelcome(group, bob, await timedBinding(bob, 100, 200))
+    const { author, joined } = await lowLevelWelcome(
+      group,
+      bob,
+      await timedBinding({ identity: bob, iat: 100, exp: 200 }),
+    )
     const { groupInfo } = await exportGroupInfo({ group: author })
     await expect(
       joinGroupExternal({ identity: bob, groupInfo, credential: joined.credential, resync: true }),
     ).rejects.toMatchObject({ reason: 'floating-refused' })
-    await expect(author.processMessage(await lowLevelExternal(author, bob))).rejects.toThrow()
+    await expect(
+      author.processMessage(await lowLevelExternal({ group: author, identity: bob })),
+    ).rejects.toThrow()
     const result = await joinGroupExternal({
       identity: bob,
       groupInfo,
       credential: joined.credential,
-      controller: await timedBinding(bob, 150, 250),
+      controller: await timedBinding({ identity: bob, iat: 150, exp: 250 }),
       resync: true,
     })
     expect(result.group.bindingOfDID(bob.id)?.controller).toBe(controllerID)
@@ -565,13 +571,17 @@ test('an external join authentication context follows the returned handle ledger
   try {
     const { group, identity } = await pipelineGroup()
     const bob = agent(61)
-    const { author, joined } = await lowLevelWelcome(group, bob, await timedBinding(bob, 100, 200))
+    const { author, joined } = await lowLevelWelcome(
+      group,
+      bob,
+      await timedBinding({ identity: bob, iat: 100, exp: 200 }),
+    )
     const { groupInfo } = await exportGroupInfo({ group: author })
     const result = await joinGroupExternal({
       identity: bob,
       groupInfo,
       credential: joined.credential,
-      controller: await timedBinding(bob, 150, 250),
+      controller: await timedBinding({ identity: bob, iat: 150, exp: 250 }),
       resync: true,
     })
     const revoke = createRevoke({

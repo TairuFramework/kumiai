@@ -15,13 +15,20 @@ import { fromUTF, toUTF } from '@sozai/codec'
 
 /** Cap on decoded ID lengths — these become attacker-controlled map keys. */
 const MAX_REQUEST_ID_BYTES = 128
+/** Confirmation position and digest prefixes are bounded only by the u16 length field. */
+const MAX_CONFIRMATION_FIELD_BYTES = 0xffff
 
-function encodeWithRequestID(
-  requestID: string,
-  payload: Uint8Array,
-  label: string,
-  maxBytes = MAX_REQUEST_ID_BYTES,
-): Uint8Array {
+type EncodeWithRequestIDParams = {
+  requestID: string
+  payload: Uint8Array
+  label: string
+  maxBytes?: number
+}
+
+type RequestIDPrefixed = { requestID: string; rest: Uint8Array }
+
+function encodeWithRequestID(params: EncodeWithRequestIDParams): Uint8Array {
+  const { requestID, payload, label, maxBytes = MAX_REQUEST_ID_BYTES } = params
   const rid = fromUTF(requestID)
   if (rid.length > maxBytes) {
     throw new Error(`${label} requestID is too long`)
@@ -37,7 +44,7 @@ function decodeWithRequestID(
   payload: Uint8Array,
   label: string,
   maxBytes = MAX_REQUEST_ID_BYTES,
-): { requestID: string; rest: Uint8Array } {
+): RequestIDPrefixed {
   if (payload.length < 2) {
     throw new Error(`${label} is too short`)
   }
@@ -58,7 +65,7 @@ function decodeWithRequestID(
 }
 
 export function encodeRecoveryRequest(requestID: string, request: Uint8Array): Uint8Array {
-  return encodeWithRequestID(requestID, request, 'recovery request')
+  return encodeWithRequestID({ requestID, payload: request, label: 'recovery request' })
 }
 
 export function decodeRecoveryRequest(payload: Uint8Array): {
@@ -70,7 +77,7 @@ export function decodeRecoveryRequest(payload: Uint8Array): {
 }
 
 export function encodeRecoveryReply(requestID: string, groupInfo: Uint8Array): Uint8Array {
-  return encodeWithRequestID(requestID, groupInfo, 'recovery reply')
+  return encodeWithRequestID({ requestID, payload: groupInfo, label: 'recovery reply' })
 }
 
 export function decodeRecoveryReply(payload: Uint8Array): {
@@ -87,7 +94,7 @@ export function decodeRecoveryReply(payload: Uint8Array): {
  * is from nobody, and every responder refuses it.
  */
 export function encodeLedgerRequest(requestID: string, request: Uint8Array): Uint8Array {
-  return encodeWithRequestID(requestID, request, 'ledger request')
+  return encodeWithRequestID({ requestID, payload: request, label: 'ledger request' })
 }
 
 export function decodeLedgerRequest(payload: Uint8Array): {
@@ -106,7 +113,7 @@ export function decodeLedgerRequest(payload: Uint8Array): {
  * the same tokens folds to a different head and the requester rejects it.
  */
 export function encodeLedgerReply(requestID: string, sealed: Uint8Array): Uint8Array {
-  return encodeWithRequestID(requestID, sealed, 'ledger reply')
+  return encodeWithRequestID({ requestID, payload: sealed, label: 'ledger reply' })
 }
 
 export function decodeLedgerReply(payload: Uint8Array): {
@@ -125,22 +132,34 @@ export type RecoveryConfirmRequest = {
 }
 
 export function encodeRecoveryConfirmRequest(value: RecoveryConfirmRequest): Uint8Array {
-  return encodeWithRequestID(
-    value.requestID,
-    encodeWithRequestID(
-      value.position,
-      encodeWithRequestID(value.commitDigest, value.request, 'recovery confirmation', 0xffff),
-      'recovery confirmation',
-      0xffff,
-    ),
-    'recovery confirmation',
-  )
+  const label = 'recovery confirmation'
+  const digestPrefixed = encodeWithRequestID({
+    requestID: value.commitDigest,
+    payload: value.request,
+    label,
+    maxBytes: MAX_CONFIRMATION_FIELD_BYTES,
+  })
+  const positionPrefixed = encodeWithRequestID({
+    requestID: value.position,
+    payload: digestPrefixed,
+    label,
+    maxBytes: MAX_CONFIRMATION_FIELD_BYTES,
+  })
+  return encodeWithRequestID({ requestID: value.requestID, payload: positionPrefixed, label })
 }
 
 export function decodeRecoveryConfirmRequest(payload: Uint8Array): RecoveryConfirmRequest {
   const outer = decodeWithRequestID(payload, 'recovery confirmation')
-  const position = decodeWithRequestID(outer.rest, 'recovery confirmation', 0xffff)
-  const digest = decodeWithRequestID(position.rest, 'recovery confirmation', 0xffff)
+  const position = decodeWithRequestID(
+    outer.rest,
+    'recovery confirmation',
+    MAX_CONFIRMATION_FIELD_BYTES,
+  )
+  const digest = decodeWithRequestID(
+    position.rest,
+    'recovery confirmation',
+    MAX_CONFIRMATION_FIELD_BYTES,
+  )
   if (digest.rest.length === 0) throw new Error('recovery confirmation has no signed request')
   return {
     requestID: outer.requestID,
@@ -151,13 +170,12 @@ export function decodeRecoveryConfirmRequest(payload: Uint8Array): RecoveryConfi
 }
 
 export function encodeRecoveryVerdict(requestID: string, sealed: Uint8Array): Uint8Array {
-  return encodeWithRequestID(requestID, sealed, 'recovery verdict')
+  return encodeWithRequestID({ requestID, payload: sealed, label: 'recovery verdict' })
 }
 
-export function decodeRecoveryVerdict(payload: Uint8Array): {
-  requestID: string
-  sealed: Uint8Array
-} {
+export type RecoveryVerdictFrame = { requestID: string; sealed: Uint8Array }
+
+export function decodeRecoveryVerdict(payload: Uint8Array): RecoveryVerdictFrame {
   const { requestID, rest } = decodeWithRequestID(payload, 'recovery verdict')
   return { requestID, sealed: rest }
 }

@@ -12,12 +12,17 @@ export type PublishRevokeResult =
   | { status: 'committed'; epoch: number }
   | Exclude<RevokeBuildResult, { status: 'built' }>
 
+export type PublishRevokeProofParams<Protocols extends Record<string, GroupProtocolDefinition>> = {
+  peer: GroupPeer<Protocols>
+  mls: GroupMLS
+  input: Parameters<typeof revokeWithProof>[1]
+  options: RevokeJournalOptions
+}
+
 export async function publishRevokeProof<Protocols extends Record<string, GroupProtocolDefinition>>(
-  peer: GroupPeer<Protocols>,
-  mls: GroupMLS,
-  input: Parameters<typeof revokeWithProof>[1],
-  options: RevokeJournalOptions,
+  params: PublishRevokeProofParams<Protocols>,
 ): Promise<PublishRevokeResult> {
+  const { peer, mls, input, options } = params
   const access = groupHandleAccess.get(mls)
   if (access == null) throw new Error('publishRevokeProof requires an adapter-created GroupMLS')
   const finished = Symbol('proof needs no commit')

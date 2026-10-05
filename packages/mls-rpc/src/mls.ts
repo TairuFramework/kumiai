@@ -18,11 +18,11 @@ import {
   verifyRecoveryRequest,
 } from '@kumiai/mls'
 import type {
+  AppliedRecovery,
   CommitContext,
   CommitHeader,
   GroupMLS,
   OpenedRecoveryVerdict,
-  PendingRecovery,
   ProcessCommitResult,
   RecoveryRefusalReason,
   RecoveryVerdict,
@@ -371,10 +371,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       )
     },
 
-    async applyRecovery(
-      sealed: Uint8Array,
-      requestID: string,
-    ): Promise<PendingRecovery | { renewalRequired: true } | null> {
+    async applyRecovery(sealed: Uint8Array, requestID: string): Promise<AppliedRecovery> {
       const held = pending.get(requestID)
       if (held == null) return null
       let reply: Awaited<ReturnType<typeof openRecoveryGroupInfo>>
@@ -404,15 +401,19 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
       const rejoined = candidate
       if (
         rejoined.group.anchor.controller != null &&
-        !recoverySignerEligible(rejoined.group, rejoined.knownRegistry, reply.signer)
+        !recoverySignerEligible({
+          group: rejoined.group,
+          known: rejoined.knownRegistry,
+          signer: reply.signer,
+        })
       )
         return null
-      const judge = createVerdictJudge(
-        rejoined.group,
-        rejoined.sourceTree,
-        rejoined.knownRegistry,
+      const judge = createVerdictJudge({
+        group: rejoined.group,
+        sourceTree: rejoined.sourceTree,
+        known: rejoined.knownRegistry,
         requestID,
-      )
+      })
       let accepted: Promise<void> | undefined
       const result: RecoveryCandidate = {
         group: rejoined.group,

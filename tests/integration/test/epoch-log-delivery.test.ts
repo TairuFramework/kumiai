@@ -39,11 +39,11 @@ afterEach(async () => {
 const lifecycle = (await import(
   new URL('../../../packages/mls/test/fixtures/lifecycle-pipeline.ts', import.meta.url).href
 )) as {
-  timedBinding(
-    identity: ReturnType<typeof randomIdentity>,
-    iat: number,
-    exp: number,
-  ): Promise<ControllerBinding>
+  timedBinding(params: {
+    identity: ReturnType<typeof randomIdentity>
+    iat: number
+    exp: number
+  }): Promise<ControllerBinding>
 }
 
 async function setup(
@@ -70,7 +70,7 @@ async function setup(
   const group = options.lifecycle
     ? (
         await createGroup(aliceID, 'delivery-integration', {
-          controller: await lifecycle.timedBinding(aliceID, 100, 500),
+          controller: await lifecycle.timedBinding({ identity: aliceID, iat: 100, exp: 500 }),
         })
       ).group
     : await createFoundingGroup(aliceID, 'delivery-integration', aliceSlot)
@@ -78,7 +78,7 @@ async function setup(
     ? {
         invite: (await createInvite({ group, identity: aliceID, recipientDID: bobID.id })).invite,
         bundle: await createKeyPackageBundle(bobID, {
-          controller: await lifecycle.timedBinding(bobID, 100, 200),
+          controller: await lifecycle.timedBinding({ identity: bobID, iat: 100, exp: 200 }),
         }),
       }
     : await mintInvite({ admin: group, adminIdentity: aliceID, invitee: bobID, bodies })
@@ -227,7 +227,7 @@ test.each([
       const starts = events.filter((event) => event.phase === 'started').length
       await new Promise((resolve) => setTimeout(resolve, 1100))
       expect(events.filter((event) => event.phase === 'started')).toHaveLength(starts)
-      replacement = await lifecycle.timedBinding(bob.identity, 250, 400)
+      replacement = await lifecycle.timedBinding({ identity: bob.identity, iat: 250, exp: 400 })
       await bob.peer.recover()
     }
     await vi.waitFor(() => expect(received).toEqual([{ text: 'bound recovery' }]), {
