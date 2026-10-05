@@ -5,9 +5,10 @@ import {
   createGroup,
   createInvite,
   createKeyPackageBundle,
-  type GroupHandle,
+  GroupHandle,
   ledgerEntryDigest,
   processWelcome,
+  removeMember,
 } from '@kumiai/mls'
 import {
   createGroupCrypto,
@@ -208,6 +209,8 @@ async function setup(options: { third?: boolean; deadlineMs?: number } = {}) {
     aliceMLS,
     bobMLS,
     carolMLS,
+    carolID,
+    carolGroup: () => carolGroup,
     aliceAccess,
     bobAccess,
     aliceID,
@@ -579,6 +582,133 @@ test.each(['policy', 'invalid'] as const)(
     )
     vi.spyOn(s.aliceMLS, 'processCommit').mockImplementation(process)
     expect((await s.bob.recover()).advanced).toBe(true)
+  },
+)
+
+test.each([false, true])(
+  'a removed last-known signer is advisory with survivors silent: %s',
+  async (silent) => {
+    const s = await setup({ third: true })
+    const removedGroup = s.carolGroup()
+    if (removedGroup == null || s.carol == null) throw new Error('Missing third member')
+    await s.carol.dispose()
+    const leaf = s.aliceGroup().findMemberLeafIndex(s.carolID.id)
+    if (leaf == null) throw new Error('Missing removed leaf')
+    const removal = await removeMember(s.aliceGroup(), leaf)
+    await s.aliceAccess.replace(removal.newGroup)
+    expect(s.bobGroup().findMemberLeafIndex(s.carolID.id)).toBeDefined()
+    expect(s.aliceGroup().findMemberLeafIndex(s.carolID.id)).toBeUndefined()
+    const { sealRealRecoveryVerdict } = await import(
+      new URL('../../../packages/mls-rpc/test/fixtures/real-group.ts', import.meta.url).href
+    )
+    const publish = s.bobConnection.publish.bind(s.bobConnection)
+    let injected = false
+    s.bobConnection.publish = async (value) => {
+      const frame = decodeHandshakeFrame(value.payload)
+      if (frame.kind === HANDSHAKE_KIND.recoveryConfirmRequest && !injected) {
+        injected = true
+        const request = decodeRecoveryConfirmRequest(frame.payload)
+        const sealed = await sealRealRecoveryVerdict(
+          { identity: s.carolID, handle: removedGroup },
+          request.request,
+          {
+            groupID: removedGroup.groupID,
+            requestID: request.requestID,
+            position: request.position,
+            commitDigest: request.commitDigest,
+            verdict: 'refused',
+            reason: 'policy',
+          },
+        )
+        await s.aliceConnection.publish({
+          senderDID: s.aliceID.id,
+          topicID: value.topicID,
+          payload: encodeHandshakeFrame(
+            HANDSHAKE_KIND.recoveryVerdict,
+            encodeRecoveryVerdict(request.requestID, sealed),
+          ),
+        })
+      }
+      return publish(value)
+    }
+    if (silent) {
+      const publishVerdict = s.aliceConnection.publish.bind(s.aliceConnection)
+      s.aliceConnection.publish = async (value) => {
+        const frame = decodeHandshakeFrame(value.payload)
+        if (frame.kind === HANDSHAKE_KIND.recoveryVerdict) {
+          const { sealed, requestID } = (await import('@kumiai/rpc')).decodeRecoveryVerdict(
+            frame.payload,
+          )
+          const opened = await s.bobMLS.openRecoveryVerdict(sealed, requestID)
+          if (opened?.signer === s.aliceID.id)
+            return publishVerdict({ ...value, payload: new Uint8Array([0]) })
+        }
+        return publishVerdict(value)
+      }
+    }
+    expect((await s.bob.recover()).advanced).toBe(!silent)
+    expect(injected).toBe(true)
+    if (silent) {
+      expect(s.bobGroup()).toBe(s.initial)
+      expect(s.events).toContainEqual(
+        expect.objectContaining({
+          phase: 'failed',
+          reason: 'unconfirmed',
+          advisory: [
+            expect.objectContaining({
+              signer: s.carolID.id,
+              verdict: expect.objectContaining({ verdict: 'refused', reason: 'policy' }),
+            }),
+          ],
+        }),
+      )
+    } else {
+      expect(s.bobGroup().epoch).toBe(s.aliceGroup().epoch)
+      expect(s.events.some((event) => event.phase === 'failed')).toBe(false)
+    }
+  },
+)
+
+test.each(['policy', 'invalid'] as const)(
+  'real adapter classifies external recovery rejection as %s',
+  async (reason) => {
+    const s = await setup()
+    const original = s.aliceGroup()
+    if (reason === 'policy') {
+      const rejector = new GroupHandle({
+        state: original.state,
+        context: original.context,
+        credential: original.credential,
+        commitPolicy: () => 'reject',
+      })
+      await rejector.bootstrapLedger(original.ledgerTokens)
+      await s.aliceAccess.replace(rejector)
+    } else {
+      const { lowLevelExternal } = await import(
+        new URL('../../../packages/mls/test/fixtures/lifecycle-pipeline.ts', import.meta.url).href
+      )
+      const malformed = await lowLevelExternal(original, s.bobID, undefined, { resync: false })
+      const apply = s.bobMLS.applyRecovery.bind(s.bobMLS)
+      vi.spyOn(s.bobMLS, 'applyRecovery').mockImplementation(async (...args) => {
+        const pending = await apply(...args)
+        if (pending == null || 'renewalRequired' in pending) return pending
+        return { ...pending, commit: malformed }
+      })
+    }
+    const process = vi.spyOn(s.aliceMLS, 'processCommit')
+    expect((await s.bob.recover()).advanced).toBe(false)
+    expect(process).toHaveReturned()
+    expect(await process.mock.results[0]?.value).toMatchObject({ advanced: false, refusal: reason })
+    expect(s.events).toContainEqual(
+      expect.objectContaining({
+        phase: 'failed',
+        reason: 'refused',
+        refusal: reason,
+        responder: s.aliceID.id,
+      }),
+    )
+    expect(s.bobGroup()).toBe(s.initial)
+    expect(s.aliceGroup().epoch).toBe(original.epoch)
   },
 )
 

@@ -7,7 +7,9 @@ import {
   encodeRecoveryConfirmRequest,
 } from '../src/recovery.js'
 import { APP_TOPIC_LABEL, commitTopic, protocolTopic, rendezvousTopic } from '../src/topic.js'
+import { publishCommit, publishedCommitDigest } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
+import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
 import { makeMLSPeer } from './fixtures/peer.js'
 
 const flush = (ms = 30) => new Promise((r) => setTimeout(r, ms))
@@ -21,6 +23,97 @@ function recoveryReplyCount(hub: FakeHub, recoverySecret: Uint8Array): number {
 }
 
 describe('recovery rendezvous', () => {
+  test('a losing fork followed by an applicable external commit produces no confirmation', async () => {
+    const hub = new FakeHub()
+    const secret = new Uint8Array(32).fill(0x45)
+    const winning = await publishCommit({
+      hub,
+      senderDID: 'carol',
+      recoverySecret: secret,
+      epoch: 1,
+    })
+    hub.hideFrom('alice', winning.sequenceID)
+    const alice = makeMLSPeer(hub, 'alice', secret, {
+      members: ['alice', 'bob', 'carol'],
+      recovery: { timeoutMs: 60, deadlineMs: 1000, getDelayMs: () => 0 },
+    })
+    const bob = createMemoryGroupMLS({
+      localDID: 'bob',
+      members: ['alice', 'bob', 'carol'],
+      recoverySecret: secret,
+    })
+    try {
+      await alice.peer.resync()
+      await publishCommit({ hub, senderDID: 'bob', recoverySecret: secret, epoch: 1 })
+      await vi.waitFor(() => expect(alice.mls.epoch()).toBe(2))
+      const key = vi.spyOn(alice.mls, 'confirmationKey')
+      const seal = vi.spyOn(alice.mls, 'sealRecoveryVerdict')
+      hub.revealTo('alice', winning.sequenceID)
+      const external = await publishCommit({
+        hub,
+        senderDID: 'bob',
+        recoverySecret: secret,
+        epoch: 2,
+        external: true,
+      })
+      await vi.waitFor(() => expect(alice.mls.epoch()).toBe(3))
+      const requestID = 'stranded-confirm'
+      const request = await bob.createRecoveryRequest(requestID)
+      await hub.publish({
+        senderDID: 'bob',
+        topicID: rendezvousTopic(secret),
+        payload: encodeHandshakeFrame(
+          HANDSHAKE_KIND.recoveryConfirmRequest,
+          encodeRecoveryConfirmRequest({
+            requestID,
+            request,
+            position: external.sequenceID,
+            commitDigest: publishedCommitDigest(hub, external.sequenceID),
+          }),
+        ),
+      })
+      await flush(100)
+      expect(key).not.toHaveBeenCalled()
+      expect(seal).not.toHaveBeenCalled()
+      expect(
+        hub.published.filter(
+          (message) =>
+            decodeHandshakeFrame(message.payload).kind === HANDSHAKE_KIND.recoveryVerdict,
+        ),
+      ).toHaveLength(0)
+    } finally {
+      await alice.peer.dispose()
+    }
+  })
+  test('a failed verdict seal is retried and a successful seal is cached', async () => {
+    const hub = new FakeHub()
+    const secret = new Uint8Array(32).fill(0x46)
+    const options = {
+      members: ['alice', 'bob'],
+      recovery: { timeoutMs: 60, deadlineMs: 500, getDelayMs: () => 0 },
+    }
+    const alice = makeMLSPeer(hub, 'alice', secret, options)
+    const bob = makeMLSPeer(hub, 'bob', secret, options)
+    const seal = vi
+      .spyOn(alice.mls, 'sealRecoveryVerdict')
+      .mockRejectedValueOnce(new Error('transient seal failure'))
+    const publish = hub.publish.bind(hub)
+    let dropped = false
+    vi.spyOn(hub, 'publish').mockImplementation(async (value) => {
+      if (!dropped && decodeHandshakeFrame(value.payload).kind === HANDSHAKE_KIND.recoveryVerdict) {
+        dropped = true
+        return publish({ ...value, payload: new Uint8Array([0]) })
+      }
+      return publish(value)
+    })
+    try {
+      expect((await bob.peer.recover()).advanced).toBe(true)
+      expect(dropped).toBe(true)
+      expect(seal).toHaveBeenCalledTimes(2)
+    } finally {
+      await Promise.all([alice.peer.dispose(), bob.peer.dispose()])
+    }
+  })
   test('a later historical reread preserves the originally applied confirmation outcome', async () => {
     const hub = new FakeHub()
     const secret = new Uint8Array(32).fill(0x43)

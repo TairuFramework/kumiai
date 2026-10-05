@@ -1372,7 +1372,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             : outcome.kind === 'superseded'
               ? { ...binding, verdict: 'superseded' as const }
               : { ...binding, verdict: 'refused' as const, reason: outcome.reason }
-        const sealed = port.sealRecoveryVerdict(request.request, verdict)
+        const sealed = port
+          .sealRecoveryVerdict(request.request, verdict)
+          .catch((error: unknown) => {
+            if (verdictCache.get(cacheKey)?.value === sealed) verdictCache.delete(cacheKey)
+            throw error
+          })
         verdictCache.set(cacheKey, sealed, record.expiresAt)
         held = { value: sealed, expiresAt: record.expiresAt }
       }
@@ -1848,7 +1853,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
                     crypto.openEntries,
                   ),
                 })
-                if (header?.external && result.advanced) {
+                if (header?.external && result.advanced && !stranded) {
                   const derived = await port.confirmationKey(position, commitDigest)
                   recordCommitOutcome(position, { kind: 'applied', commitDigest, ...derived })
                 }

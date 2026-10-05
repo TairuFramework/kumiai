@@ -33,6 +33,7 @@ export function createRecoveryCache<T>(release: (value: T) => void = () => {}) {
     entries.delete(key)
   }
   return {
+    delete: remove,
     get(key: string): { value: T; expiresAt: number } | undefined {
       const held = entries.get(key)
       if (held != null && held.expiresAt <= Date.now()) {
