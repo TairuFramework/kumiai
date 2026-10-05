@@ -33,6 +33,9 @@ Authoring checks additionally require `iat <= now < exp`, including creation, ke
 Tree time is the maximum of the ledger time floor and H-signed times in the tree.
 A direct leaf attests its capability's `iat`. A chained leaf attests its parent's `iat`, never T's child timestamp.
 A leaf is lapsed when its `exp` is below tree time.
+A leaf that enters or changes needs a strictly later `exp`: `exp > treeTime(H)` of the pre-commit epoch.
+This entry check applies to an Add, an external commit's new leaf, an Update, and a committer's path leaf whose credential changed.
+At `exp == treeTime(H)` an installed leaf is not lapsed, but the same leaf cannot enter or change.
 Wall-clock expiry alone does not stop an installed member sending.
 H must sign something newer that reaches the group to advance lapse.
 A `clock` entry preserves the pre-commit tree time whenever a removal or renewal would lower it.
