@@ -725,17 +725,33 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     appLane.reset()
   }
 
+  /** The advance whose anchor rotation was last captured, so a retry never captures it twice. */
+  let capturedAdvance: string | undefined
   const resolveAnchorRotation = async (
     port: GroupMLS,
     knownUnlanded = false,
     initial = false,
+    landed = false,
   ): Promise<void> => {
     const record = anchorPending
     if (record == null) return
     const epoch = await port.readEpoch()
     assertLive()
-    if (epoch === record.epochBefore) {
+    // A rejoin from a losing branch can land on its old epoch number, so the number alone cannot
+    // say whether it landed. Only the advance that resolved knows — unless that advance already
+    // captured its anchor, and this record is a retry opened at the epoch it landed on.
+    const sameNumber = record.epochAfter === record.epochBefore
+    const landedHere = sameNumber && landed && record.advance !== capturedAdvance
+    if (epoch === record.epochBefore && !landedHere) {
       if (!knownUnlanded && !initial) return
+      if (sameNumber && !knownUnlanded) {
+        // Found at startup with nothing to tell the two states apart: recover rather than keep an
+        // anchor that may belong to the losing branch.
+        anchorRecoveryPending = true
+        healRequested = true
+        sealError = new Error('app anchor requires confirmed recovery')
+        return
+      }
       anchorPending = undefined
       sealError = undefined
       finishSealBarrier()
@@ -744,6 +760,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       const roster = (await port.rosterEntries()).map((entry) => normalizeDID(entry.did))
       if (record.forced || detectRosterChange(record.rosterBefore, roster)) {
         await captureAnchor()
+        capturedAdvance = record.advance
       } else {
         anchorPending = undefined
         sealError = undefined
@@ -1790,7 +1807,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       const advanced = await advance()
       if (floorPosition != null) await saveCommitCursor(floorPosition)
       await observe()
-      await resolveAnchorRotation(port, true)
+      await resolveAnchorRotation(port, true, false, true)
       if (confirmedRecovery && anchorPending == null) anchorRecoveryPending = false
       return advanced
     } catch (error) {

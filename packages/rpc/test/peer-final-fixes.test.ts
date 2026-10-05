@@ -5,7 +5,7 @@ import { decodeCommitFrame } from '../src/commit-frame.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import type { RecoveryEvent, StrandObservation } from '../src/peer.js'
 import { encodeRecoveryConfirmRequest } from '../src/recovery.js'
-import { commitTopic, rendezvousTopic } from '../src/topic.js'
+import { APP_TOPIC_LABEL, commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryAppOutbox } from './fixtures/outbox.js'
@@ -169,6 +169,23 @@ test('a rejoin that lands on the stranded epoch number clears the strand', async
   expect((await store.getCommitCursor())?.stranded).toBeUndefined()
   await bob.peer.commit(buildLedgerCommit(bob, []))
   expect(await bob.mls.readEpoch()).toBe(4)
+})
+
+test('a rejoin that lands on the same epoch number captures a new app anchor', async () => {
+  controlRecoveryClock(5)
+  const hub = new FakeHub()
+  const members = ['alice', 'bob', 'carol']
+  const recovery = { timeoutMs: 60, deadlineMs: 250, getDelayMs: () => 5 }
+  const carol = makeMLSPeer(hub, 'carol', secret, { epoch: 2, members, recovery })
+  peers.push(carol)
+  await carol.peer.resync()
+  const bob = member(hub, { epoch: 3, members, recovery })
+  await bob.peer.resync()
+  const exportSecret = vi.spyOn(bob.crypto, 'exportSecret')
+  expect((await bob.peer.recover()).advanced).toBe(true)
+  expect(await bob.mls.readEpoch()).toBe(3)
+  // The forced rotation landed on the same number: the app anchor is captured again, not kept.
+  expect(exportSecret).toHaveBeenCalledWith(APP_TOPIC_LABEL)
 })
 
 test('incomplete ledgers skip commit processing and later wakeups can retry', async () => {
