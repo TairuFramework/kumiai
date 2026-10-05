@@ -13,7 +13,7 @@ import {
   DEFAULT_COMMIT_LOG_RETENTION_SECONDS,
 } from '../src/peer.js'
 import { defineGroupProtocol } from '../src/protocol.js'
-import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
+import { APP_TOPIC_LABEL, inboxTopic, protocolTopic } from '../src/topic.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { DEFAULT_MAX_RETENTION, FakeHub } from './fixtures/fake-hub.js'
@@ -442,8 +442,12 @@ describe('a peer whose app-topic subscribe is refused', () => {
     const topicID = protocolTopic(secret, 1, 'room')
 
     expect(hub.subscriberCount(topicID)).toBe(0)
-    expect(failures.map((f) => f.topicID)).toEqual([topicID])
-    expect(failures[0]?.error).toBeInstanceOf(RetentionExceededError)
+    const selfInbox = inboxTopic(secret, 1, 'bob')
+    expect(hub.subscriberCount(selfInbox)).toBe(0)
+    expect(failures.map((f) => f.topicID)).toEqual([topicID, selfInbox])
+    for (const failure of failures) {
+      expect(failure.error).toBeInstanceOf(RetentionExceededError)
+    }
 
     // And a host that wired no callback still cannot mistake this peer for a working one: the
     // lane it cannot receive on is a lane it cannot transmit on either.

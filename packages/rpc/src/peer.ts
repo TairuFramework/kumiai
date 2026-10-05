@@ -707,12 +707,16 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   const captureAnchor = async (): Promise<void> => {
     const { secret, epoch } = await crypto.exportSecret(APP_TOPIC_LABEL)
     if (disposed) return
+    for (const name of Object.keys(protocols)) {
+      mux.retainTopic(protocolTopic(secret, epoch, name), { retention: appLogRetentionSeconds })
+    }
+    mux.retainTopic(inboxTopic(secret, epoch, localDID), { retention: appLogRetentionSeconds })
     anchor = { secret, epoch }
     anchorPending = undefined
     sealError = undefined
     finishSealBarrier()
-    appLane.reset()
     await anchorStore?.save({ anchor })
+    appLane.reset()
   }
 
   const resolveAnchorRotation = async (

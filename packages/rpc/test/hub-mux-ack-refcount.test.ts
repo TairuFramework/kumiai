@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 import { createHubMux } from '../src/hub-mux.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
@@ -8,6 +8,97 @@ const flush = () => new Promise((r) => setTimeout(r, 30))
 const payload = () => new Uint8Array([1])
 
 describe('the mux refcounts acks across its holders', () => {
+  test('hands an unmatched frame to only the first listener and waits for its ack', async () => {
+    const hub = new DurableFakeHub()
+    const upstreamAcks: Array<string> = []
+    const mux = createHubMux({
+      hub: hubWithAckOverride(hub, (subscription, sequenceID) => {
+        upstreamAcks.push(sequenceID)
+        return subscription.ack?.(sequenceID)
+      }),
+      localDID: 'bob',
+    })
+    mux.retainTopic('topic:early')
+    await hub.publish({ senderDID: 'alice', topicID: 'topic:early', payload: payload() })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    let deliveriesWithinTTL = 0
+    let listenerAck: (() => void) | undefined
+    try {
+      const remove = mux.onInbound('topic:early', (_message, ack) => {
+        deliveriesWithinTTL += 1
+        listenerAck = ack
+      })
+      mux.onInbound('topic:early', () => {
+        deliveriesWithinTTL += 1
+      })
+      expect(deliveriesWithinTTL).toBe(1)
+      const upstreamAcksBeforeListenerAck = upstreamAcks.length
+      expect(upstreamAcksBeforeListenerAck).toBe(0)
+      remove()
+      listenerAck?.()
+      listenerAck?.()
+      expect(hub.ackedCount('bob')).toBe(1)
+      expect(upstreamAcks).toHaveLength(1)
+      hub.redeliver('bob')
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(deliveriesWithinTTL).toBe(1)
+      expect(upstreamAcks).toHaveLength(1)
+    } finally {
+      await mux.dispose()
+    }
+  })
+
+  test('the first listener owns every unmatched frame even when registration re-enters', async () => {
+    const hub = new DurableFakeHub()
+    const mux = createHubMux({ hub, localDID: 'bob' })
+    try {
+      mux.retainTopic('topic:early')
+      await hub.publish({ senderDID: 'alice', topicID: 'topic:early', payload: payload() })
+      await hub.publish({ senderDID: 'alice', topicID: 'topic:early', payload: payload() })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      let firstDeliveries = 0
+      let secondDeliveries = 0
+      mux.onInbound('topic:early', (_message, ack) => {
+        firstDeliveries += 1
+        mux.onInbound('topic:early', () => {
+          secondDeliveries += 1
+        })
+        ack()
+      })
+      expect(firstDeliveries).toBe(2)
+      expect(secondDeliveries).toBe(0)
+      expect(hub.ackedCount('bob')).toBe(2)
+    } finally {
+      await mux.dispose()
+    }
+  })
+
+  test('a listener registering at the TTL cutoff does not claim an unmatched frame', async () => {
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(1000)
+    const hub = new DurableFakeHub()
+    const mux = createHubMux({ hub, localDID: 'bob', ackTTLMs: 60_000 })
+    try {
+      mux.retainTopic('topic:early')
+      await hub.publish({ senderDID: 'alice', topicID: 'topic:early', payload: payload() })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      clock.mockReturnValue(61_000)
+      let intermediateEpochDeliveries = 0
+      mux.onInbound('topic:early', (_message, ack) => {
+        intermediateEpochDeliveries += 1
+        ack()
+      })
+      expect(intermediateEpochDeliveries).toBe(0)
+      expect(hub.ackedCount('bob')).toBe(0)
+      hub.redeliver('bob')
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(intermediateEpochDeliveries).toBe(1)
+      expect(hub.ackedCount('bob')).toBe(1)
+    } finally {
+      clock.mockRestore()
+      await mux.dispose()
+    }
+  })
+
   test('one holder acking does not ack upstream while another still holds the message', async () => {
     const hub = new DurableFakeHub()
     const mux = createHubMux({ hub, localDID: 'bob', onSubscribeFailed: () => {} })
@@ -98,16 +189,12 @@ describe('the mux refcounts acks across its holders', () => {
     await flush()
     expect(hub.ackedCount('bob')).toBe(0)
 
-    // A listener registers afterward — the ordering the regression missed — and must still see
-    // the frame once the hub redelivers it again.
+    // Registration hands off the backlog without waiting for another hub delivery.
     const received: Array<Uint8Array> = []
     mux.onInbound('topic:inbox', (message, ack) => {
       received.push(message.payload)
       ack()
     })
-    await flush()
-
-    hub.redeliver('bob')
     await flush()
     expect(received).toHaveLength(1)
     expect(hub.ackedCount('bob')).toBe(1)

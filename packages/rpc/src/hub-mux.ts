@@ -218,6 +218,7 @@ type PendingAck = {
   holders: Set<Holder>
   position: DeliveryPosition
   claimedAt: number
+  unmatched?: StoredMessage
 }
 
 /**
@@ -302,10 +303,8 @@ function isPermanentSubscribeFailure(error: unknown): boolean {
  * ## The init-race window
  *
  * The drain starts synchronously in this constructor, before the caller registers the first
- * listener. A frame arriving in that window matches no holder, is left pending, and is pruned
- * unacked at the TTL — so it returns on the next reconnect rather than being lost. Acking it would
- * be the exact false success this relay exists to prevent. Options for closing the window itself:
- * `docs/agents/plans/backlog/2026-07-07-rpc-peer-lifecycle-hardening.md`.
+ * listener. A frame arriving in that window is handed to the first topic listener within the ack
+ * TTL. Expiry drops it unacked so it returns on redelivery rather than reporting false success.
  */
 export function createHubMux(params: HubMuxParams): HubMux {
   const { hub, localDID } = params
@@ -507,6 +506,25 @@ export function createHubMux(params: HubMuxParams): HubMux {
     }
     set.add(listener)
     retain(topicID, options)
+    sweepPending(Date.now())
+    const handoffs: Array<{ sequenceID: string; entry: PendingAck; message: StoredMessage }> = []
+    for (const [sequenceID, entry] of pending) {
+      const message = entry.unmatched
+      if (message?.topicID !== topicID) continue
+      // Claim the whole backlog before callbacks can register another listener.
+      entry.unmatched = undefined
+      entry.holders.clear()
+      entry.holders.add(listener)
+      handoffs.push({ sequenceID, entry, message })
+    }
+    for (const { sequenceID, entry, message } of handoffs) {
+      if (disposed || pending.get(sequenceID) !== entry) continue
+      try {
+        listener(message, () => releaseClaim(sequenceID, listener))
+      } catch {
+        // listener errors must not break registration
+      }
+    }
     let removed = false
     return () => {
       if (removed) return
@@ -565,7 +583,7 @@ export function createHubMux(params: HubMuxParams): HubMux {
 
   /**
    * Drop claims older than the TTL, WITHOUT acking — the mirror of `memoryStore.purge`. Swept on
-   * each inbound message, not on a timer: the drain is the only thing that adds entries.
+   * inbound messages and listener registration, not on a timer.
    *
    * BREAKS at the first entry within the cutoff instead of scanning the whole map. Relies on
    * `pending` (a `Map`) iterating in insertion order with `claimedAt` non-decreasing — held by the
@@ -651,15 +669,11 @@ export function createHubMux(params: HubMuxParams): HubMux {
       )
       for (const sink of matchedSinks) entry.holders.add(sink)
 
-      // An empty interested set is the shape of a frame that arrived before its listener registered
-      // (a returning member's backlog lands the instant the channel opens, ahead of
-      // `initControlLanes`). Acking here would report a frame nobody read as durably handled —
-      // permanent loss, since `memoryStore` keys `deliveries` by DID and redelivers an unacked frame
-      // but not an acked one. So the drain releases its own claim (which may ack) ONLY when something
-      // matched; otherwise the entry is pruned unacked at the TTL and the frame returns on the next
-      // redelivery (see "The init-race window" above).
+      // Keep unmatched frames for the first topic listener, without acknowledging unread mail.
       if (matchedListeners.length > 0 || matchedSinks.length > 0) {
         releaseClaim(message.sequenceID, drainClaim)
+      } else {
+        entry.unmatched = message
       }
 
       for (const sink of matchedSinks) {
