@@ -77,21 +77,9 @@ export function createLogDelivery(params: DeliveryParams) {
       if (closed) return
     }
     if (params.queue.entries().length === 0) return
-    const before = await params.probe()
-    const floorBefore = params.floor()
-    if (
-      before.head != null &&
-      (floorBefore.position == null || before.head > floorBefore.position)
-    ) {
-      await params.pull()
-    }
-    if (closed || removed) {
-      immediate = removed && params.queue.lowestUnresolvedSeq() == null
-      return
-    }
     let count = 0
     for (const entry of params.queue.entries()) {
-      if (closed || params.held()) return
+      if (closed) return
       const fence = params.queue.lowestUnresolvedSeq()
       if (fence != null && entry.seq >= fence) return
       if (count++ === 64) {
@@ -99,10 +87,36 @@ export function createLogDelivery(params: DeliveryParams) {
         break
       }
       if (proven.has(entry.seq)) continue
+      const before = await params.probe()
+      const floorBefore = params.floor()
+      if (
+        before.head != null &&
+        (floorBefore.position == null || before.head > floorBefore.position)
+      ) {
+        await params.pull()
+      }
+      if (closed || removed) {
+        immediate = removed && params.queue.lowestUnresolvedSeq() == null
+        return
+      }
+      if (params.held()) return
       const floor = params.floor()
       if (publications.get(entry.seq)?.epoch === floor.epoch) continue
       const frame = await params.seal(entry)
       if (closed || params.held()) return
+      const needsEarlierPublication = (): boolean =>
+        params.queue
+          .entries()
+          .some(
+            (earlier) =>
+              earlier.seq < entry.seq &&
+              !proven.has(earlier.seq) &&
+              publications.get(earlier.seq)?.epoch !== frame.floor.epoch,
+          )
+      if (needsEarlierPublication()) {
+        immediate = true
+        break
+      }
       const updated: AppOutboxEntry = {
         ...entry,
         lastAttempt: {
@@ -114,6 +128,10 @@ export function createLogDelivery(params: DeliveryParams) {
       await params.put(updated)
       params.queue.replace(updated)
       if (closed || params.held()) return
+      if (needsEarlierPublication()) {
+        immediate = true
+        break
+      }
       await params.publish(frame)
       if (closed) return
       publications.set(entry.seq, {

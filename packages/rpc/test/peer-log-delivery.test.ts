@@ -1,4 +1,4 @@
-import { encodeEventFrame } from '@kumiai/broadcast'
+import { decodeFrame, encodeEventFrame } from '@kumiai/broadcast'
 import { afterEach, expect, test, vi } from 'vitest'
 
 import type { AppOutboxCleared } from '../src/log-delivery.js'
@@ -1108,3 +1108,75 @@ test('retrying confirmed adoption repairs the floor after the host adopted then 
   expect(await bob.appOutbox.list()).toEqual([])
   expect(seals).toBe(1)
 })
+
+test.each(['seal', 'catch-up'] as const)(
+  'later entries preserve per-epoch order when a ratchet lands during %s',
+  async (during) => {
+    const hub = new DurableFakeHub()
+    const received: Array<{ epoch: number; seq: number }> = []
+    const alice = member(hub, 'alice', {
+      handlers: {
+        'chat/posted': (ctx: { data: { seq: number } }) => {
+          received.push({ epoch: alice.mls.epoch(), seq: ctx.data.seq })
+        },
+      },
+    })
+    const bob = member(hub, 'bob')
+    await flush()
+    const anchor = bob.anchorStore.stored()
+    if (anchor == null) throw new Error('Missing anchor')
+    const appTopic = protocolTopic(anchor.secret, anchor.epoch, 'chat')
+    const wrap = bob.crypto.wrap.bind(bob.crypto)
+    const sealed = new Map<string, { seq: number; epoch: number | null }>()
+    let seals = 0
+    vi.spyOn(bob.crypto, 'wrap').mockImplementation(async (...args) => {
+      if (++seals === 2 && during === 'seal') {
+        await bob.peer.commit(buildLedgerCommit(bob, []))
+        await flush()
+      }
+      const payload = await wrap(...args)
+      const message = decodeFrame(args[0]) as { payload: { data: { seq: number } } }
+      sealed.set(Array.from(payload).join(','), {
+        seq: message.payload.data.seq,
+        epoch: bob.crypto.frameEpoch(payload),
+      })
+      return payload
+    })
+    if (during === 'catch-up') {
+      hub.detach('bob')
+      const publish = hub.publish.bind(hub)
+      let injected = false
+      vi.spyOn(hub, 'publish').mockImplementation(async (params) => {
+        const result = await publish(params)
+        if (!injected && params.senderDID === 'bob' && params.topicID === appTopic) {
+          injected = true
+          await alice.peer.commit(buildLedgerCommit(alice, []))
+        }
+        return result
+      })
+    }
+    await Promise.all([
+      bob.peer.protocol('chat').dispatch('chat/posted', { data: { seq: 0 } }),
+      bob.peer.protocol('chat').dispatch('chat/posted', { data: { seq: 1 } }),
+    ])
+    await vi.waitFor(async () => expect(await bob.appOutbox.list()).toEqual([]))
+    const published = hub.published
+      .filter((frame) => frame.senderDID === 'bob' && frame.topicID === appTopic)
+      .map((frame) => sealed.get(Array.from(frame.payload).join(',')))
+    expect(published).toEqual([
+      { epoch: 1, seq: 0 },
+      { epoch: 2, seq: 0 },
+      { epoch: 2, seq: 1 },
+    ])
+    await vi.waitFor(() =>
+      expect(received.filter((entry) => entry.epoch === 2).map((entry) => entry.seq)).toEqual([
+        0, 1,
+      ]),
+    )
+    if (during === 'catch-up') {
+      expect(
+        [...sealed.values()].filter((entry) => entry.seq === 1).map((entry) => entry.epoch),
+      ).toEqual([2, 2])
+    }
+  },
+)
