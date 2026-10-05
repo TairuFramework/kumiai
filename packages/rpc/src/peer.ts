@@ -1283,9 +1283,17 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
 
   const rebuildEpoch = async (): Promise<void> => {
     if (disposed) return
-    await teardownEpoch()
+    // Teardown empties the runtimes before it reports a failed child, and a later walk sees the
+    // advance as history. Build anyway, then report the failure.
+    let failure: { error: unknown } | undefined
+    try {
+      await teardownEpoch()
+    } catch (error) {
+      failure = { error }
+    }
     if (disposed) return
     await buildEpoch()
+    if (failure != null) throw failure.error
   }
 
   /**

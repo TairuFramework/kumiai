@@ -1,5 +1,5 @@
-import { encodeEventFrame } from '@kumiai/broadcast'
-import { describe, expect, test } from 'vitest'
+import { BroadcastClient, encodeEventFrame } from '@kumiai/broadcast'
+import { describe, expect, test, vi } from 'vitest'
 
 import { encodeAppAAD } from '../src/app-aad.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
@@ -355,5 +355,47 @@ describe('a logged dispatch lands on the segment that contains its seal epoch', 
 
     await alice.peer.dispose()
     await restarted.peer.dispose()
+  })
+})
+
+describe('a failed epoch teardown still leaves a lane at the new anchor', () => {
+  /**
+   * `teardownEpoch` empties the runtimes before it reports a child's failed dispose. Without a
+   * build after it, the peer keeps publishing log events through the outbox and never hears one
+   * again: nothing listens on the new segment, and the next walk sees the commit as history.
+   */
+  test('a received commit whose teardown rejects still builds the new segment', async () => {
+    const hub = new DurableFakeHub()
+    const recoverySecret = new Uint8Array(32).fill(0x9a)
+    const aliceSaw: Array<unknown> = []
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, {
+      epoch: 1,
+      members: MEMBERS,
+      handlers: { 'chat/posted': (ctx: { data: unknown }) => void aliceSaw.push(ctx.data) },
+    })
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, members: MEMBERS })
+    await flush()
+
+    let rejected = 0
+    const spy = vi.spyOn(BroadcastClient.prototype, 'dispose').mockImplementation(() => {
+      rejected += 1
+      return Promise.reject(new Error('client dispose failed'))
+    })
+    try {
+      await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, removes: ['carol'] })
+      await flush()
+    } finally {
+      spy.mockRestore()
+    }
+    expect(rejected).toBe(2)
+    expect(alice.peer.anchorEpoch()).toBe(2)
+    expect(bob.peer.anchorEpoch()).toBe(2)
+
+    await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'after' } })
+    await flush()
+    expect(aliceSaw).toEqual([{ text: 'after' }])
+
+    await alice.peer.dispose()
+    await bob.peer.dispose()
   })
 })
