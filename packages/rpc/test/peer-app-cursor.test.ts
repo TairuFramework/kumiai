@@ -260,9 +260,17 @@ describe('the app-lane drain reads from a durable position and reports what aged
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'read' } })
     await flush()
     const cursor = hub.published.find((message) => message.topicID === topicID)?.sequenceID
-    expect(cursor).toBeDefined()
+    if (cursor == null) throw new Error('expected the peer to have read the first app frame')
     hub.detach('bob')
-    hub.trim(topicID, '999999999999')
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'retained' } })
+    await flush()
+    const appFrames = hub.published.filter((message) => message.topicID === topicID)
+    const retained = appFrames[1]?.sequenceID
+    if (retained == null) throw new Error('expected the later app frame to remain retained')
+    hub.trim(topicID, retained)
+    const fetch = await hub.fetchTopic({ subscriberDID: 'bob', topicID, after: cursor })
+    expect(fetch.oldest).toBe(retained)
+    expect(fetch.gap).toBe(false)
 
     hub.reattach('bob')
     await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
