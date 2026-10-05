@@ -98,6 +98,7 @@ export const peerHostFields = {
   appCursorStore: 'port',
   appOutbox: 'port',
   appOutboxLimit: 'data',
+  onAppOutboxCleared: 'callback',
   adoptJournalled: 'callback',
   handlers: 'handlers',
   recovery: 'recovery',

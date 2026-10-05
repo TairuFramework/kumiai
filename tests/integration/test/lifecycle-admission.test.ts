@@ -3,6 +3,7 @@ import {
   commitLedgerEntries,
   createGroup,
   decodeClientState,
+  encodeClientState,
   type GroupHandle,
   restoreGroup,
   signLedgerEntry,
@@ -24,7 +25,7 @@ import {
   createMemoryCommitJournal,
   type Protocols,
 } from './app-lane-e2e.js'
-import { createWireHub } from './log-hub-over-wire.js'
+import { createGapHub } from './gap-hub.js'
 
 test('real MLS publishes paired snapshots only after an awaited adoption callback', async () => {
   const identity = randomIdentity()
@@ -54,8 +55,8 @@ test('real MLS publishes paired snapshots only after an awaited adoption callbac
   expect(crypto.epoch()).toBe(mls.sendAdmission().epoch)
 })
 
-test('dispatch awaited inside adoption durably accepts at the pre-adoption admission without sealing', async () => {
-  const hub = createWireHub()
+test('accepted adoption entries seal at the matching admission epoch once the delivery worker publishes them', async () => {
+  const hub = createGapHub()
   const identity = randomIdentity()
   const appOutbox = createMemoryAppOutbox()
   let releasePut: () => void = () => {}
@@ -107,9 +108,11 @@ test('dispatch awaited inside adoption durably accepts at the pre-adoption admis
     appOutbox: {
       ...appOutbox,
       put: async (entry) => {
-        expect(mls.sendAdmission()).toEqual({ epoch: epochBefore, admissible: true })
-        enteredPut()
-        await putGate
+        if (entry.lastAttempt == null) {
+          expect(mls.sendAdmission()).toEqual({ epoch: epochBefore, admissible: true })
+          enteredPut()
+          await putGate
+        }
         await appOutbox.put(entry)
       },
     },
@@ -146,9 +149,17 @@ test('dispatch awaited inside adoption durably accepts at the pre-adoption admis
     })
     const result = await commitLedgerEntries(handle, [token])
     let adopted = false
-    const adoption = access.replace(result.newGroup).then(() => {
-      adopted = true
-    })
+    const adoption = peer
+      .commit(async () => ({
+        commit: result.commitMessage,
+        bodies: [token],
+        kind: 'ledger',
+        journal: encodeClientState(result.newGroup.state),
+        onAccepted: () => access.replace(result.newGroup),
+      }))
+      .then(() => {
+        adopted = true
+      })
     await putEntered
     expect(adopted).toBe(false)
     expect(await appOutbox.list()).toEqual([])
@@ -159,12 +170,10 @@ test('dispatch awaited inside adoption durably accepts at the pre-adoption admis
     expect(seals).toEqual([])
     expect(await appOutbox.list()).toHaveLength(1)
     expect((await appOutbox.list())[0]?.lastAttempt).toBeNull()
+    await vi.waitFor(() => expect(seals).toEqual([epochBefore + 1]))
+    await vi.waitFor(async () => expect(await appOutbox.list()).toEqual([]))
   } finally {
     await peer.dispose()
     await hub.dispose()
   }
 })
-
-test.todo(
-  'accepted adoption entries seal at the matching admission epoch once the delivery worker publishes them',
-)

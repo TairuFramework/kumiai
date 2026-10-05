@@ -41,6 +41,7 @@ export function createAppOutboxAcceptance(params: AppOutboxAcceptanceParams) {
   let listed = false
   let waiting = 0
   let closed = false
+  let stopped = false
   let retry: ReturnType<typeof setTimeout> | undefined
   let resolveReady: () => void = () => {}
   const ready = new Promise<void>((resolve) => {
@@ -79,7 +80,7 @@ export function createAppOutboxAcceptance(params: AppOutboxAcceptanceParams) {
         waiting--
       }
     }
-    if (closed) throw new PeerDisposedError('App outbox acceptance is closed')
+    if (closed || stopped) throw new PeerDisposedError('App outbox acceptance is closed')
     const admission = params.admission()
     if (!admission.admissible) throw new SendNotAdmissibleError(admission.reason)
     if (input.data.byteLength > MAX_APP_ENTRY_BYTES) {
@@ -106,6 +107,18 @@ export function createAppOutboxAcceptance(params: AppOutboxAcceptanceParams) {
     lowestUnresolvedSeq: (): number | null => {
       const first = reservations.values().next()
       return first.done ? null : first.value
+    },
+    replace: (entry: AppOutboxEntry): void => {
+      accepted.set(entry.seq, entry)
+    },
+    remove: (seq: number): void => {
+      accepted.delete(seq)
+    },
+    clear: (): void => {
+      accepted.clear()
+    },
+    stop: (): void => {
+      stopped = true
     },
     close: (): void => {
       closed = true

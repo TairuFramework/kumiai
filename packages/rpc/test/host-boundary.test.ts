@@ -153,6 +153,7 @@ describe('host invocation boundary', () => {
     expect(peerHostFields.handlers).toBe('handlers')
     expect(peerHostFields.appOutbox).toBe('port')
     expect(peerHostFields.appOutboxLimit).toBe('data')
+    expect(peerHostFields.onAppOutboxCleared).toBe('callback')
     expect(pendingRecoveryHostMembers.onAccepted).toBe('host')
     expect(pendingRecoveryHostMembers.epoch).toBe('data')
     expect(pendingRecoveryHostMembers.confirmationKey).toBe('host')

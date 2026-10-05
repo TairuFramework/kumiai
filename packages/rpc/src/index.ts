@@ -92,6 +92,7 @@ export {
   encodeLedgerEntries,
   LEDGER_ENTRIES_VERSION,
 } from './ledger-entries.js'
+export type { AppOutboxCleared, EpochFloor } from './log-delivery.js'
 export {
   createGroupPeer,
   type GroupPeer,

@@ -10,7 +10,7 @@ import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { buildLedgerCommit, chat, makeMLSPeer } from './fixtures/peer.js'
 
 describe('durable app rotation', () => {
-  test('a failed anchor export refuses a new-epoch dispatch', async () => {
+  test('a failed anchor export holds an accepted new-epoch dispatch', async () => {
     const hub = new DurableFakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x94)
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
@@ -27,11 +27,13 @@ describe('durable app rotation', () => {
     })
     await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, removes: ['carol'] })
     await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toThrow('export failed')
-    await expect(
-      bob.peer.protocol('chat').dispatch('chat/posted', {
-        data: { text: 'must not leave' },
-      }),
-    ).rejects.toThrow('anchor')
+    const before = hub.published.length
+    await bob.peer.protocol('chat').dispatch('chat/posted', {
+      data: { text: 'must not leave' },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    expect(await bob.appOutbox.list()).toMatchObject([{ lastAttempt: null }])
+    expect(hub.published.length).toBe(before)
     await bob.peer.dispose()
   })
 
@@ -63,7 +65,7 @@ describe('durable app rotation', () => {
     await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, removes: ['carol'] })
     const oldTopic = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
     const newTopic = protocolTopic(fakeEpochSecret(2, APP_TOPIC_LABEL), 2, 'chat')
-    const committing = bob.peer.commit(buildLedgerCommit(bob, []))
+    const committing = bob.peer.retryAppDelivery()
     await exporting
     const dispatching = bob.peer.protocol('chat').dispatch('chat/posted', {
       data: { text: 'new segment' },
@@ -71,6 +73,9 @@ describe('durable app rotation', () => {
     release()
     await committing
     await dispatching
+    await vi.waitFor(() =>
+      expect(hub.published.some((message) => message.topicID === newTopic)).toBe(true),
+    )
     const appPublications = hub.published.filter(
       (message) => message.topicID === oldTopic || message.topicID === newTopic,
     )

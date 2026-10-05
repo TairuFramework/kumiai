@@ -61,6 +61,7 @@ describe('the drain retains future claims and passes no epoch it failed to read'
     hub.detach('bob')
 
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at epoch one' } })
+    await flush()
     // The injected frame claims epoch 65535 while the group is still at epoch 1.
     const forged = createFakeCrypto({ epoch: 65535, localDID: 'mallory' })
     await hub.publish({
@@ -110,6 +111,7 @@ describe('the drain retains future claims and passes no epoch it failed to read'
     // One frame at epoch 1, then two commits carrying the group to epoch 3 — no roster change, so
     // one anchor and one topic throughout — and a frame sealed at 3. Bob is still at 1.
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at epoch one' } })
+    await flush()
     await alice.peer.commit(buildLedgerCommit(alice, []))
     await flush()
     await alice.peer.commit(buildLedgerCommit(alice, []))
@@ -117,6 +119,7 @@ describe('the drain retains future claims and passes no epoch it failed to read'
     expect(alice.mls.epoch()).toBe(3)
     expect(alice.peer.anchorEpoch()).toBe(1)
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at epoch three' } })
+    await flush()
     await flush()
 
     const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob, handlers })
@@ -163,6 +166,7 @@ describe('the drain retains future claims and passes no epoch it failed to read'
     hub.detach('bob')
 
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at epoch one' } })
+    await flush()
     // `03 00` little-endian is epoch 3. Only the shape of the rest can refuse it.
     await hub.publish({
       senderDID: 'mallory',
@@ -216,9 +220,11 @@ describe('the drain retains future claims and passes no epoch it failed to read'
     hub.detach('bob')
 
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at epoch one' } })
+    await flush()
     await alice.peer.commit(buildLedgerCommit(alice, []))
     await flush()
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at epoch two' } })
+    await flush()
     await flush()
     expect(alice.mls.epoch()).toBe(2)
 
@@ -272,6 +278,7 @@ describe('the drain retains future claims and passes no epoch it failed to read'
     hub.detach('bob')
 
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'at epoch one' } })
+    await flush()
     await alice.peer.commit(buildLedgerCommit(alice, []))
     await flush()
     expect(alice.mls.epoch()).toBe(2)
@@ -349,6 +356,7 @@ describe('the drain delivers only what the live lane would', () => {
     hub.detach('bob')
 
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'a logged event' } })
+    await flush()
     // Alice's dispatch would never retain this one, so it is published around her peer: same
     // topic, same epoch key, same sender, `retain: 'log'` on a procedure that never declared it.
     const atOne = createFakeCrypto({ epoch: 1, localDID: 'alice' })
@@ -457,11 +465,13 @@ describe('the drain delivers only what the live lane would', () => {
     await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'bob said this' } })
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'alice said this' } })
     await flush()
+    await flush()
     expect(seen).toEqual([{ text: 'alice said this' }])
 
     await bob.peer.dispose()
     hub.detach('bob')
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'alice said more' } })
+    await flush()
     await flush()
 
     // The restart drains the whole topic from the cursor — his own frame included, because the

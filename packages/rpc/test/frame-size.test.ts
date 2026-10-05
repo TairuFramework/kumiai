@@ -1,5 +1,5 @@
 // Set KUMIAI_PROBE_REPORT=1 to print measurement tables.
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
 
 import { encodeCommitFrame } from '../src/commit-frame.js'
 import { encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
@@ -85,12 +85,12 @@ test('app sizing uses the sealed payload', async () => {
   const member = makeMLSPeer(hub, 'did:key:alice', new Uint8Array(32).fill(31))
   try {
     await member.peer.replay()
-    member.crypto.wrap = async () => new Uint8Array(786_433)
+    const wrap = vi.spyOn(member.crypto, 'wrap').mockResolvedValue(new Uint8Array(786_433))
     const before = hub.published.length
-    await expect(
-      member.peer.protocol('chat').dispatch('chat/posted', { data: { label: '組合' } }),
-    ).rejects.toMatchObject({ name: 'FrameTooLargeError' })
+    await member.peer.protocol('chat').dispatch('chat/posted', { data: { label: '組合' } })
+    await vi.waitFor(() => expect(wrap).toHaveBeenCalled())
     expect(hub.published.length).toBe(before)
+    expect(await member.appOutbox.list()).toMatchObject([{ lastAttempt: null }])
     expect(member.journal.puts()).toBe(0)
   } finally {
     await member.peer.dispose()

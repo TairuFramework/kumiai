@@ -21,6 +21,7 @@ import {
 import {
   createGroupCrypto,
   createGroupMLS,
+  type GroupMLSParams,
   type LedgerEntrySlot,
   simpleHandleAccess,
 } from '@kumiai/mls-rpc'
@@ -35,6 +36,7 @@ import type {
   JournalEntry,
   PendingAppFrame,
   PendingCommit,
+  RecoveryEvent,
 } from '@kumiai/rpc'
 import { createGroupPeer } from '@kumiai/rpc'
 import { createMemoryAppOutbox } from '@kumiai/rpc-conformance'
@@ -172,6 +174,8 @@ export type MakeMemberParams = {
   /** Carry a dead member's durable state forward — this is what a restart IS. */
   restartOf?: Member
   durablePending?: boolean
+  recoveryBinding?: GroupMLSParams['recoveryBinding']
+  onRecovery?: (event: RecoveryEvent) => void | Promise<void>
 }
 
 export function makeMember(params: MakeMemberParams): Member {
@@ -215,12 +219,14 @@ export function makeMember(params: MakeMemberParams): Member {
     access,
     identity,
     entrySlot,
+    recoveryBinding: params.recoveryBinding,
   })
 
   const connection = hub.connect(identity)
   const appOutbox = restartOf?.appOutbox ?? createMemoryAppOutbox()
   const peer = createGroupPeer<Protocols>({
     appOutboxLimit: 128,
+    onRecovery: params.onRecovery,
     hub: connection,
     crypto,
     mls,

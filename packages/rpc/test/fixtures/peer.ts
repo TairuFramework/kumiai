@@ -5,6 +5,7 @@ import type { AppDeliveryResumed, AppDeliveryStalled } from '../../src/app-lane.
 import type { AppOutbox } from '../../src/app-outbox.js'
 import type { PendingCommit } from '../../src/commit.js'
 import type { SubscribeFailure } from '../../src/hub-mux.js'
+import type { AppOutboxCleared } from '../../src/log-delivery.js'
 import {
   createGroupPeer,
   type GroupPeer,
@@ -66,6 +67,7 @@ export type TestPeer = {
 export type MakeMLSPeerOptions = {
   appOutbox?: AppOutbox
   appOutboxLimit?: number
+  onAppOutboxCleared?: (notice: AppOutboxCleared) => void | Promise<void>
   epoch?: number
   /** Entry bodies this member already holds — a Welcome carries them. Not an enacted ledger. */
   bodies?: Array<string>
@@ -169,6 +171,9 @@ export function makeMLSPeer(
     appCursorStore,
     appOutbox,
     appOutboxLimit: options.appOutboxLimit ?? 128,
+    ...(options.onAppOutboxCleared != null
+      ? { onAppOutboxCleared: options.onAppOutboxCleared }
+      : {}),
     ...(options.onAppWindowPruned != null ? { onAppWindowPruned: options.onAppWindowPruned } : {}),
     ...(options.onStrand != null ? { onStrand: options.onStrand } : {}),
     ...(options.onRecovery != null ? { onRecovery: options.onRecovery } : {}),

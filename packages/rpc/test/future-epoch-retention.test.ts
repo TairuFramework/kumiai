@@ -42,7 +42,7 @@ describe('future-epoch app retention', () => {
           params.subscriberDID === 'bob' &&
           params.topicID === commitTopic(secret)
         ) {
-          return { messages: [], head: null, oldest: null }
+          return { messages: [], head: null, oldest: null, ...{ gap: false } }
         }
         return super.fetchTopic(params)
       }
@@ -58,6 +58,9 @@ describe('future-epoch app retention', () => {
 
     await alice.peer.commit(buildLedgerCommit(alice, []))
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'epoch two' } })
+    await vi.waitFor(() =>
+      expect(hub.published.some((item) => item.topicID === topicID)).toBe(true),
+    )
     const frame = hub.published.find((item) => item.topicID === topicID)
     expect(frame).toBeDefined()
     hub.omitForBob = true
