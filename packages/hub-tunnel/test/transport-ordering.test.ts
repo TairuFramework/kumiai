@@ -1,3 +1,4 @@
+import { setImmediate } from 'node:timers/promises'
 import type { TransportType } from '@enkaku/transport'
 import { describe, expect, test } from 'vitest'
 
@@ -13,21 +14,29 @@ import { FakeHub, type FakeHubPublishParams } from './fixtures/fake-hub.js'
 
 type Msg = HubFrameMessageBody
 
+function gate() {
+  let release = () => {}
+  const promise = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  return { promise, release }
+}
+
 /**
- * Hub double whose `subscribe` resolves on a delayed macrotask, standing in for a real wire where
+ * Hub double whose `subscribe` waits for an explicit gate, standing in for a real wire where
  * the subscribe roundtrip has not landed yet. Delegates everything else to a wrapped {@link FakeHub}.
  * Records subscribe/unsubscribe/publish call order and every publish, so a test can assert both
  * "did the subscription end up live" and "in what order did the calls happen".
  */
 class DelayedSubscribeHub implements MailboxHub {
   #inner = new FakeHub()
-  #delayMs: number
+  #subscribeGate: Promise<void>
   #live = new Set<string>()
   #publishCalls: Array<FakeHubPublishParams> = []
   order: Array<'subscribe' | 'unsubscribe' | 'publish'> = []
 
-  constructor(delayMs = 20) {
-    this.#delayMs = delayMs
+  constructor(params: { subscribeGate: Promise<void> }) {
+    this.#subscribeGate = params.subscribeGate
   }
 
   get events(): MailboxHubEvents {
@@ -39,7 +48,7 @@ class DelayedSubscribeHub implements MailboxHub {
     topicID: string,
     options?: HubSubscribeOptions,
   ): Promise<void> {
-    await new Promise<void>((resolve) => setTimeout(resolve, this.#delayMs))
+    await this.#subscribeGate
     this.#inner.subscribe(subscriberDID, topicID, options)
     this.#live.add(`${subscriberDID}::${topicID}`)
     this.order.push('subscribe')
@@ -97,7 +106,8 @@ async function readFirstInbound(transport: TransportType<Msg, Msg>, timeoutMs = 
 
 describe('createHubTunnelTransport ordering', () => {
   test('first send waits for the subscription to land', async () => {
-    const hub = new DelayedSubscribeHub()
+    const subscription = gate()
+    const hub = new DelayedSubscribeHub({ subscribeGate: subscription.promise })
     const sessionID = 's1'
     const localDID = 'did:peer:local'
     const peerDID = 'did:peer:remote'
@@ -113,9 +123,11 @@ describe('createHubTunnelTransport ordering', () => {
     })
 
     try {
-      // With the gate in place this resolves only once `hub.subscribe` has landed. Without it,
-      // it resolves immediately, racing ahead of the delayed subscribe below.
-      await transport.write({ header: {}, payload: { typ: 'test', msg: 'req' } })
+      const writing = transport.write({ header: {}, payload: { typ: 'test', msg: 'req' } })
+      await setImmediate()
+      expect(hub.publishCalls()).toEqual([])
+      subscription.release()
+      await writing
 
       const replyBody: Msg = { header: {}, payload: { typ: 'test', msg: 'reply' } }
       const replyFrame: HubFrame = { v: 1, sessionID, kind: 'message', seq: 0, body: replyBody }
@@ -137,7 +149,8 @@ describe('createHubTunnelTransport ordering', () => {
   })
 
   test('teardown unsubscribe is ordered after an in-flight subscribe', async () => {
-    const hub = new DelayedSubscribeHub()
+    const subscription = gate()
+    const hub = new DelayedSubscribeHub({ subscribeGate: subscription.promise })
     const localDID = 'did:peer:local'
     const sendTopicID = 'topic:a'
     const receiveTopicID = 'topic:b'
@@ -152,19 +165,19 @@ describe('createHubTunnelTransport ordering', () => {
       receiveTopicID,
     })
 
-    // Tear down while the subscribe (20ms delay) is still in flight. `dispose()` closes the
-    // writable with nothing queued ahead of it, so it settles well before the subscribe does.
+    // Hold subscribe until teardown has ordered its unsubscribe.
     await transport.dispose()
 
-    // Let the delayed subscribe land and its chained unsubscribe run.
-    await new Promise((resolve) => setTimeout(resolve, 60))
+    subscription.release()
+    await setImmediate()
 
     expect(hub.liveSubscriptions()).toEqual([])
     expect(hub.order).toEqual(['subscribe', 'unsubscribe'])
   })
 
   test('a write parked on a delayed subscribe does not publish after teardown', async () => {
-    const hub = new DelayedSubscribeHub()
+    const subscription = gate()
+    const hub = new DelayedSubscribeHub({ subscribeGate: subscription.promise })
     const controller = new AbortController()
     const localDID = 'did:peer:local'
     const sessionID = 's1'
@@ -182,16 +195,12 @@ describe('createHubTunnelTransport ordering', () => {
 
     const pendingWrite = transport.write({ header: {}, payload: { typ: 'test', msg: 'parked' } })
 
-    // Give the write a moment to reach and park on `await subscribed` (well before the 20ms
-    // subscribe delay elapses), then tear down via the abort signal — a path independent of the
-    // writable stream's write queue, so it can run while the write is still parked.
-    await new Promise((resolve) => setTimeout(resolve, 5))
+    // Drain the write's microtasks while subscribe is held, then abort before releasing it.
+    await setImmediate()
     controller.abort()
+    subscription.release()
 
     await expect(pendingWrite).rejects.toThrow(/torn down/i)
-
-    // Let the delayed subscribe settle: an unguarded write would resume here and publish.
-    await new Promise((resolve) => setTimeout(resolve, 60))
 
     expect(hub.publishCalls()).toEqual([])
   })

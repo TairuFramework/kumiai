@@ -1,3 +1,4 @@
+import { setImmediate } from 'node:timers/promises'
 import { type OwnIdentity, randomIdentity } from '@kokuin/token'
 import {
   commitInvite,
@@ -47,6 +48,7 @@ const cleanup: Array<() => Promise<unknown>> = []
 afterEach(async () => {
   await Promise.all(cleanup.splice(0).map((close) => close()))
   vi.restoreAllMocks()
+  vi.useRealTimers()
 })
 
 function gate() {
@@ -55,6 +57,39 @@ function gate() {
     release = resolve
   })
   return { promise, release }
+}
+
+function controlRecoveryClock() {
+  const immediateTimeout = globalThis.setTimeout
+  vi.useFakeTimers({
+    toFake: ['Date', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
+    shouldClearNativeTimers: true,
+  })
+  const timedTimeout = globalThis.setTimeout
+  // Zero-delay replies remain live while deadline timers wait for explicit clock advances.
+  vi.spyOn(globalThis, 'setTimeout').mockImplementation((callback, delay, ...args) => {
+    return delay === 0
+      ? immediateTimeout(callback, delay, ...args)
+      : timedTimeout(callback, delay, ...args)
+  })
+}
+
+// Let real cryptography and wire delivery finish without spending the recovery deadline.
+async function drainUntil(done: () => boolean) {
+  while (!done()) {
+    await vi.advanceTimersByTimeAsync(0)
+    await setImmediate()
+  }
+}
+
+async function completeRecovery(peer: Awaited<ReturnType<typeof setup>>['bob']) {
+  let settled = false
+  const recovery = peer.recover().finally(() => {
+    settled = true
+  })
+  void recovery.catch(() => {})
+  await drainUntil(() => settled)
+  return recovery
 }
 
 async function setup(options: { third?: boolean; deadlineMs?: number } = {}) {
@@ -274,16 +309,23 @@ test('publication keeps the old handle until a survivor confirms, then delivers 
 })
 
 test('lost confirmations through the deadline leave an orphan which the next rejoin collects', async () => {
+  controlRecoveryClock()
   const s = await setup()
   const publish = s.aliceConnection.publish.bind(s.aliceConnection)
   let dropping = true
-  s.aliceConnection.publish = async (value) =>
-    publish(
-      dropping && decodeHandshakeFrame(value.payload).kind === HANDSHAKE_KIND.recoveryVerdict
-        ? { ...value, payload: new Uint8Array([0]) }
-        : value,
-    )
-  expect((await s.bob.recover()).advanced).toBe(false)
+  let dropped = false
+  s.aliceConnection.publish = async (value) => {
+    if (dropping && decodeHandshakeFrame(value.payload).kind === HANDSHAKE_KIND.recoveryVerdict) {
+      dropped = true
+      return publish({ ...value, payload: new Uint8Array([0]) })
+    }
+    return publish(value)
+  }
+  const recovery = s.bob.recover()
+  void recovery.catch(() => {})
+  await drainUntil(() => dropped)
+  await vi.advanceTimersByTimeAsync(450)
+  expect((await recovery).advanced).toBe(false)
   expect(s.events).toContainEqual(
     expect.objectContaining({ phase: 'failed', reason: 'unconfirmed', advisory: [] }),
   )
@@ -295,10 +337,10 @@ test('lost confirmations through the deadline leave an orphan which the next rej
       .filter((member) => member.id === s.bobID.id),
   ).toHaveLength(1)
   dropping = false
-  await vi.waitFor(() => expect(s.bobGroup().epoch).toBe(s.aliceGroup().epoch), { timeout: 2500 })
-  await vi.waitFor(() =>
-    expect(s.events).toContainEqual(expect.objectContaining({ phase: 'succeeded' })),
-  )
+  await vi.advanceTimersByTimeAsync(1000)
+  await drainUntil(() => s.events.some((event) => event.phase === 'succeeded'))
+  expect(s.bobGroup().epoch).toBe(s.aliceGroup().epoch)
+  expect(s.events).toContainEqual(expect.objectContaining({ phase: 'succeeded' }))
   expect(
     s
       .aliceGroup()
@@ -345,6 +387,7 @@ test('simultaneous recovery releases both lanes while a third member confirms', 
 })
 
 test('stale GroupInfo is superseded and retried without adopting the stale candidate', async () => {
+  controlRecoveryClock()
   const s = await setup({ deadlineMs: 10_000 })
   const source = s.aliceGroup()
   const stalePort = createGroupMLS({
@@ -372,7 +415,22 @@ test('stale GroupInfo is superseded and retried without adopting the stale candi
     adopted.push(Number(group.epoch))
     await replace(group)
   })
-  expect((await s.bob.recover()).advanced).toBe(true)
+  let supersededOpened = false
+  const open = s.bobMLS.openRecoveryVerdict.bind(s.bobMLS)
+  vi.spyOn(s.bobMLS, 'openRecoveryVerdict').mockImplementation(async (...args) => {
+    const opened = await open(...args)
+    if (opened?.verdict.verdict === 'superseded') supersededOpened = true
+    return opened
+  })
+  let settled = false
+  const recovery = s.bob.recover().finally(() => {
+    settled = true
+  })
+  void recovery.catch(() => {})
+  await drainUntil(() => supersededOpened)
+  await vi.advanceTimersByTimeAsync(60)
+  await drainUntil(() => settled)
+  expect((await recovery).advanced).toBe(true)
   expect(adopted).toEqual([3])
   expect(s.published.filter((kind) => kind === HANDSHAKE_KIND.commit)).toHaveLength(2)
   expect(
@@ -437,6 +495,7 @@ test('an invalid verdict envelope and a copied request for another position supp
 })
 
 test('forged confirmations are ignored and an unknown signer refusal is advisory', async () => {
+  controlRecoveryClock()
   const s = await setup()
   const outsider = randomIdentity()
   const { sealRealRecoveryVerdict } = (await import(
@@ -448,6 +507,15 @@ test('forged confirmations are ignored and an unknown signer refusal is advisory
       verdict: Record<string, unknown>,
     ) => Promise<Uint8Array>
   }
+  let refusalOpened = false
+  const open = s.bobMLS.openRecoveryVerdict.bind(s.bobMLS)
+  vi.spyOn(s.bobMLS, 'openRecoveryVerdict').mockImplementation(async (...args) => {
+    const opened = await open(...args)
+    if (opened?.signer === outsider.id && opened.verdict.verdict === 'refused') {
+      refusalOpened = true
+    }
+    return opened
+  })
   const seal = s.aliceMLS.sealRecoveryVerdict.bind(s.aliceMLS)
   vi.spyOn(s.aliceMLS, 'sealRecoveryVerdict').mockImplementation(async (request, verdict) => {
     if (verdict.verdict !== 'confirmed') return seal(request, verdict)
@@ -479,7 +547,11 @@ test('forged confirmations are ignored and an unknown signer refusal is advisory
     }
     return publish(value)
   }
-  expect((await s.bob.recover()).advanced).toBe(false)
+  const recovery = s.bob.recover()
+  void recovery.catch(() => {})
+  await drainUntil(() => refusalOpened)
+  await vi.advanceTimersByTimeAsync(450)
+  expect((await recovery).advanced).toBe(false)
   const outcome = s.events.find(
     (event) => event.phase === 'failed' && event.reason === 'unconfirmed',
   )
@@ -492,8 +564,9 @@ test('forged confirmations are ignored and an unknown signer refusal is advisory
     ],
   })
   expect(s.bobGroup()).toBe(s.initial)
-  vi.restoreAllMocks()
-  expect((await s.bob.recover()).advanced).toBe(true)
+  vi.mocked(s.aliceMLS.sealRecoveryVerdict).mockRestore()
+  vi.mocked(s.bobMLS.openRecoveryVerdict).mockRestore()
+  expect((await completeRecovery(s.bob)).advanced).toBe(true)
 })
 
 test('a ratchet of the old handle while pending invalidates adoption on revalidation', async () => {

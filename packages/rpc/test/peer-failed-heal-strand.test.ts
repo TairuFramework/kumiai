@@ -1,13 +1,46 @@
-import { describe, expect, test } from 'vitest'
+import { setImmediate } from 'node:timers/promises'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { RecoveryRequiredError } from '../src/commit.js'
+import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
+import type { RecoveryEvent } from '../src/peer.js'
 import { commitTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { encodeMemoryCommit, memoryEntryID } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer, type TestPeer } from './fixtures/peer.js'
 
-const flush = (ms = 40) => new Promise((r) => setTimeout(r, ms))
+async function drainUntil(done: () => boolean) {
+  while (!done()) {
+    await vi.advanceTimersByTimeAsync(0)
+    await setImmediate()
+  }
+}
+
+async function waitForHeal(
+  bob: TestPeer,
+  hub: FakeHub,
+  events: Array<RecoveryEvent>,
+  withResponder: boolean,
+) {
+  if (!withResponder) {
+    await drainUntil(() =>
+      hub.published.some((message) => {
+        if (message.senderDID !== 'bob') return false
+        try {
+          return decodeHandshakeFrame(message.payload).kind === HANDSHAKE_KIND.recoveryRequest
+        } catch {
+          return false
+        }
+      }),
+    )
+    await vi.advanceTimersByTimeAsync(recovery.timeoutMs)
+  }
+  await drainUntil(() =>
+    events.some((event) => event.phase === (withResponder ? 'succeeded' : 'failed')),
+  )
+  await bob.peer.resync()
+}
 
 /** Fast rendezvous, so a heal that is going to happen happens inside a test — and a heal that
  *  will find nobody gives up inside one too. */
@@ -19,7 +52,6 @@ const members = ['alice', 'bob', 'carol', 'dave']
 /** Wake the commit lane without writing to the log: a mailbox frame is a wakeup, nothing more. */
 async function wakeLane(hub: FakeHub, rs: Uint8Array): Promise<void> {
   await hub.publish({ senderDID: 'zoe', topicID: commitTopic(rs), payload: new Uint8Array([0]) })
-  await flush(80)
 }
 
 /** The host's answer to a heal: re-enact whatever came back, with an ordinary commit. */
@@ -42,10 +74,18 @@ const armOwnUnmerged: Arm = async (hub, rs, withResponder) => {
     // Carol applies Bob's commit and carries the group forward — a live member that can answer
     // the rendezvous and seal a GroupInfo that takes Bob's leaf.
     responder = makeMLSPeer(hub, 'carol', rs, { epoch: 1, members, recovery })
-    await flush()
+    await responder.peer.resync()
   }
-  const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
-  await flush(withResponder ? 500 : 220)
+  const events: Array<RecoveryEvent> = []
+  const bob = makeMLSPeer(hub, 'bob', rs, {
+    epoch: 1,
+    members,
+    recovery,
+    onRecovery: (event) => {
+      events.push(event)
+    },
+  })
+  await waitForHeal(bob, hub, events, withResponder)
   return { bob, responder, staleEpoch: 1 }
 }
 
@@ -68,10 +108,18 @@ const armAhead: Arm = async (hub, rs, withResponder) => {
   let responder: TestPeer | undefined
   if (withResponder) {
     responder = makeMLSPeer(hub, 'carol', rs, { epoch: 3, members, recovery })
-    await flush()
+    await responder.peer.resync()
   }
-  const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
-  await flush(withResponder ? 500 : 220)
+  const events: Array<RecoveryEvent> = []
+  const bob = makeMLSPeer(hub, 'bob', rs, {
+    epoch: 1,
+    members,
+    recovery,
+    onRecovery: (event) => {
+      events.push(event)
+    },
+  })
+  await waitForHeal(bob, hub, events, withResponder)
   return { bob, responder, staleEpoch: 1 }
 }
 
@@ -106,14 +154,22 @@ const armForkLosing: Arm = async (hub, rs, withResponder) => {
   if (withResponder) {
     hub.hideFrom('carol', loserSeq)
     responder = makeMLSPeer(hub, 'carol', rs, { epoch: 1, members, recovery })
-    await flush(80)
+    await responder.peer.resync()
   }
-  const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
-  await flush(80)
+  const events: Array<RecoveryEvent> = []
+  const bob = makeMLSPeer(hub, 'bob', rs, {
+    epoch: 1,
+    members,
+    recovery,
+    onRecovery: (event) => {
+      events.push(event)
+    },
+  })
+  await bob.peer.resync()
   // Bob applied the loser branch (the winner was hidden). Now show him the branch he lost.
   hub.revealTo('bob', winnerSeq)
   await wakeLane(hub, rs)
-  await flush(withResponder ? 500 : 220)
+  await waitForHeal(bob, hub, events, withResponder)
   return { bob, responder, staleEpoch: 2 }
 }
 
@@ -126,87 +182,112 @@ const triggers: Array<{ name: string; arm: Arm }> = [
 const commitFrames = (hub: FakeHub, rs: Uint8Array): number =>
   hub.published.filter((m) => m.topicID === commitTopic(rs)).length
 
-describe('a heal trigger under a failed heal', () => {
-  for (const trigger of triggers) {
-    test(`${trigger.name}: no responder — commit() refuses, and nothing lands`, async () => {
-      const hub = new FakeHub()
-      const rs = new Uint8Array(32).fill(0x61)
-      const { bob, staleEpoch } = await trigger.arm(hub, rs, false)
-
-      // The heal has already run and found nobody. Its only evidence it is off the group's line
-      // is now this in-memory strand — the frame that raised it is behind the cursor, and
-      // `commitLogHead` is the live tip. A peer that forgot it would race the compare-and-set at
-      // a stale epoch and WIN, landing a commit on a branch of one.
-      const headBefore = hub.head(commitTopic(rs))
-      const framesBefore = commitFrames(hub, rs)
-
-      await expect(bob.peer.commit(buildLedgerCommit(bob, ['role:zoe=admin']))).rejects.toThrow(
-        RecoveryRequiredError,
-      )
-
-      // Belief, not the absence of an error: nothing was published to the log, the head did not
-      // move, the peer did not advance onto its own branch, and nothing was journalled.
-      expect(commitFrames(hub, rs)).toBe(framesBefore)
-      expect(hub.head(commitTopic(rs))).toBe(headBefore)
-      expect(bob.mls.epoch()).toBe(staleEpoch)
-      expect(bob.journal.slot()).toBeNull()
-
-      await bob.peer.dispose()
+describe('heal strand', { concurrent: false }, () => {
+  beforeEach(() => {
+    const immediateTimeout = globalThis.setTimeout
+    vi.useFakeTimers({
+      toFake: ['Date', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
+      shouldClearNativeTimers: true,
     })
+    const timedTimeout = globalThis.setTimeout
+    // Reply jitter stays live while recovery deadlines wait for explicit clock advances.
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation((callback, delay, ...args) => {
+      return delay != null && delay <= recovery.getDelayMs()
+        ? immediateTimeout(callback, delay, ...args)
+        : timedTimeout(callback, delay, ...args)
+    })
+  })
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.useRealTimers()
+  })
 
-    test(`${trigger.name}: a responder answers — the peer heals, then commits`, async () => {
+  describe('a heal trigger under a failed heal', () => {
+    for (const trigger of triggers) {
+      test(`${trigger.name}: no responder — commit() refuses, and nothing lands`, async () => {
+        const hub = new FakeHub()
+        const rs = new Uint8Array(32).fill(0x61)
+        const { bob, staleEpoch } = await trigger.arm(hub, rs, false)
+
+        // The heal has already run and found nobody. Its only evidence it is off the group's line
+        // is now this in-memory strand — the frame that raised it is behind the cursor, and
+        // `commitLogHead` is the live tip. A peer that forgot it would race the compare-and-set at
+        // a stale epoch and WIN, landing a commit on a branch of one.
+        const headBefore = hub.head(commitTopic(rs))
+        const framesBefore = commitFrames(hub, rs)
+
+        await expect(bob.peer.commit(buildLedgerCommit(bob, ['role:zoe=admin']))).rejects.toThrow(
+          RecoveryRequiredError,
+        )
+
+        // Belief, not the absence of an error: nothing was published to the log, the head did not
+        // move, the peer did not advance onto its own branch, and nothing was journalled.
+        expect(commitFrames(hub, rs)).toBe(framesBefore)
+        expect(hub.head(commitTopic(rs))).toBe(headBefore)
+        expect(bob.mls.epoch()).toBe(staleEpoch)
+        expect(bob.journal.slot()).toBeNull()
+
+        await bob.peer.dispose()
+      })
+
+      test(`${trigger.name}: a responder answers — the peer heals, then commits`, async () => {
+        const hub = new FakeHub()
+        const rs = new Uint8Array(32).fill(0x62)
+        const { bob, responder, staleEpoch } = await trigger.arm(hub, rs, true)
+
+        // The control column: with a responder the heal lands, the strand clears, and the very
+        // commit that was refused above now goes through.
+        expect(responder).toBeDefined()
+        const carol = responder as TestPeer
+        expect(bob.mls.epoch()).toBeGreaterThan(staleEpoch)
+        expect(bob.mls.epoch()).toBe(carol.mls.epoch())
+
+        const { reenact = [] } = await bob.peer.replay()
+        await reenactFrom(bob, reenact)
+        await carol.peer.resync()
+        await bob.peer.commit(buildLedgerCommit(bob, ['role:zoe=admin']))
+        await carol.peer.resync()
+        expect(bob.mls.fold().get('role:zoe')).toBe('admin')
+
+        await bob.peer.dispose()
+        await carol.peer.dispose()
+      })
+    }
+  })
+
+  describe('poison is not evidence of being stranded', () => {
+    test('a peer that has only stepped over poison still commits', async () => {
       const hub = new FakeHub()
-      const rs = new Uint8Array(32).fill(0x62)
-      const { bob, responder, staleEpoch } = await trigger.arm(hub, rs, true)
+      const rs = new Uint8Array(32).fill(0x63)
 
-      // The control column: with a responder the heal lands, the strand clears, and the very
-      // commit that was refused above now goes through.
-      expect(responder).toBeDefined()
-      const carol = responder as TestPeer
-      expect(bob.mls.epoch()).toBeGreaterThan(staleEpoch)
-      expect(bob.mls.epoch()).toBe(carol.mls.epoch())
+      // A frame framed at Bob's own epoch, naming a body no member holds — the case the Q3.4
+      // decision log fears. Nobody can apply it, so the group never moves past this epoch: it is
+      // dead in the log, not a peer moving on without Bob. He steps over it and is NOT stranded.
+      const orphan = memoryEntryID('a body nobody can supply')
+      await publishCommit({
+        hub,
+        senderDID: 'mallory',
+        recoverySecret: rs,
+        epoch: 1,
+        commit: encodeMemoryCommit(1, 'mallory', [orphan]),
+      })
+      const bob = makeMLSPeer(hub, 'bob', rs, {
+        epoch: 1,
+        members,
+        recovery,
+      })
+      await bob.peer.resync()
 
-      const { reenact = [] } = await bob.peer.replay()
-      await reenactFrom(bob, reenact)
-      await flush(80)
+      // He is the honest next commit: framed at the same epoch, landing behind the dead frame.
+      // Gating him here — refusing on poison rather than on positive `ahead` evidence — would be
+      // the group-death hazard rebuilt: every honest member would refuse, and no one could publish
+      // the commit that unsticks the group.
       await bob.peer.commit(buildLedgerCommit(bob, ['role:zoe=admin']))
-      await flush(80)
+      await bob.peer.resync()
+      expect(bob.mls.epoch()).toBe(2)
       expect(bob.mls.fold().get('role:zoe')).toBe('admin')
 
       await bob.peer.dispose()
-      await carol.peer.dispose()
     })
-  }
-})
-
-describe('poison is not evidence of being stranded', () => {
-  test('a peer that has only stepped over poison still commits', async () => {
-    const hub = new FakeHub()
-    const rs = new Uint8Array(32).fill(0x63)
-
-    // A frame framed at Bob's own epoch, naming a body no member holds — the case the Q3.4
-    // decision log fears. Nobody can apply it, so the group never moves past this epoch: it is
-    // dead in the log, not a peer moving on without Bob. He steps over it and is NOT stranded.
-    const orphan = memoryEntryID('a body nobody can supply')
-    await publishCommit({
-      hub,
-      senderDID: 'mallory',
-      recoverySecret: rs,
-      epoch: 1,
-      commit: encodeMemoryCommit(1, 'mallory', [orphan]),
-    })
-    const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
-    await flush(200)
-
-    // He is the honest next commit: framed at the same epoch, landing behind the dead frame.
-    // Gating him here — refusing on poison rather than on positive `ahead` evidence — would be
-    // the group-death hazard rebuilt: every honest member would refuse, and no one could publish
-    // the commit that unsticks the group.
-    await bob.peer.commit(buildLedgerCommit(bob, ['role:zoe=admin']))
-    await flush(80)
-    expect(bob.mls.epoch()).toBe(2)
-    expect(bob.mls.fold().get('role:zoe')).toBe('admin')
-
-    await bob.peer.dispose()
   })
 })

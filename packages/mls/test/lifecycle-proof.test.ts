@@ -6,7 +6,7 @@ import {
   type SignedEvent,
 } from '@kokuin/controller'
 import { normalizeDID } from '@kokuin/token'
-import { describe, expect, test } from 'vitest'
+import { beforeAll, describe, expect, test } from 'vitest'
 
 import { verifyLeafCredential } from '../src/authentication.js'
 import { readCapability } from '../src/capability.js'
@@ -314,65 +314,84 @@ describe('authenticated proof attachment', () => {
 })
 
 describe('recorded log replay', () => {
-  test('appends a 51-event suffix identically on receive, derivation, restore and Welcome', async () => {
-    const initial = await lifecycleGroup()
-    const second = agent(51)
-    const members = await addMember(initial.group, second, await bindingFor(second))
+  describe('long signed suffix', () => {
     const firstLog = [inception, revoke([inception], otherTarget)]
-    const firstToken = await signLedgerEntry(
-      initial.identity,
-      proofEntry(initial.identity.id, otherTarget, {
-        op: 'revoke',
-        proof: firstLog,
-        revoked: [{ did: otherTarget }],
-      }).entry,
-    )
-    const first = await enact(members.group, [firstToken])
-    publish(initial.tokens, [firstToken])
-    await members.joined.processMessage(first.message)
-    const log = [...firstLog]
-    for (let index = 0; index < 50; index++) {
-      const prior = log.at(-1)
-      if (prior == null) throw new Error('Missing rotation head')
-      log.push(
-        createRotate({
-          seed: controllerSeed,
-          profile: 0,
-          did: controllerID,
-          prior: prior.event,
-          options: { keyPosition: { gen: 0, seq: index } },
-        }),
-      )
-    }
-    log.push(revoke(log, target))
-    const proofSuffix = log.slice(2)
-    expect(proofSuffix).toHaveLength(51)
-    const secondToken = await signLedgerEntry(
-      initial.identity,
-      proofEntry(initial.identity.id, target, {
-        op: 'revoke',
-        proof: proofSuffix,
-        revoked: [{ did: target }],
-      }).entry,
-    )
-    const live = await enact(first.group, [secondToken])
-    publish(initial.tokens, [secondToken])
-    await members.joined.processMessage(live.message)
-    expect(members.joined.registry).toEqual(live.group.registry)
-    expect(live.group.registry.controllers.get(controllerID)?.recordedLog).toEqual(log)
-    expect(revocationOf(live.group, target)).toEqual({ controller: controllerID, logPosition: 52 })
-    const restored = await restoreGroup({
-      state: live.group.state,
-      credential: live.group.credential,
-      ledgerEntries: live.group.ledgerTokens,
+    let log: Array<SignedEvent>
+
+    // Signing the fixture is independent of the replay behaviour under test.
+    beforeAll(() => {
+      log = [...firstLog]
+      for (let index = 0; index < 50; index++) {
+        const prior = log.at(-1)
+        if (prior == null) throw new Error('Missing rotation head')
+        log.push(
+          createRotate({
+            seed: controllerSeed,
+            profile: 0,
+            did: controllerID,
+            prior: prior.event,
+            options: { keyPosition: { gen: 0, seq: index } },
+          }),
+        )
+      }
+      log.push(revoke(log, target))
     })
-    expect(restored.registry).toEqual(live.group.registry)
-    expect(deriveGroup(live.group, live.group.state).registry).toEqual(live.group.registry)
-    const newcomer = agent(81)
-    const welcome = await addMember(live.group, newcomer, await bindingFor(newcomer))
-    expect(welcome.joined.registry).toEqual(live.group.registry)
-    expect(welcome.joined.currentDenySet()).toEqual(new Set([otherTarget, target]))
-    expect(first.group.registry.devices.has(target)).toBe(false)
+
+    test.each(['receive', 'derivation', 'restore', 'Welcome'] as const)(
+      'appends a 51-event suffix identically on %s',
+      async (path) => {
+        const initial = await lifecycleGroup()
+        const second = agent(51)
+        const members = await addMember(initial.group, second, await bindingFor(second))
+        const firstToken = await signLedgerEntry(
+          initial.identity,
+          proofEntry(initial.identity.id, otherTarget, {
+            op: 'revoke',
+            proof: firstLog,
+            revoked: [{ did: otherTarget }],
+          }).entry,
+        )
+        const first = await enact(members.group, [firstToken])
+        publish(initial.tokens, [firstToken])
+        await members.joined.processMessage(first.message)
+        const proofSuffix = log.slice(2)
+        expect(proofSuffix).toHaveLength(51)
+        const secondToken = await signLedgerEntry(
+          initial.identity,
+          proofEntry(initial.identity.id, target, {
+            op: 'revoke',
+            proof: proofSuffix,
+            revoked: [{ did: target }],
+          }).entry,
+        )
+        const live = await enact(first.group, [secondToken])
+        publish(initial.tokens, [secondToken])
+        expect(live.group.registry.controllers.get(controllerID)?.recordedLog).toEqual(log)
+        expect(revocationOf(live.group, target)).toEqual({
+          controller: controllerID,
+          logPosition: 52,
+        })
+        if (path === 'receive') {
+          await members.joined.processMessage(live.message)
+          expect(members.joined.registry).toEqual(live.group.registry)
+        } else if (path === 'derivation') {
+          expect(deriveGroup(live.group, live.group.state).registry).toEqual(live.group.registry)
+        } else if (path === 'restore') {
+          const restored = await restoreGroup({
+            state: live.group.state,
+            credential: live.group.credential,
+            ledgerEntries: live.group.ledgerTokens,
+          })
+          expect(restored.registry).toEqual(live.group.registry)
+        } else {
+          const newcomer = agent(81)
+          const welcome = await addMember(live.group, newcomer, await bindingFor(newcomer))
+          expect(welcome.joined.registry).toEqual(live.group.registry)
+          expect(welcome.joined.currentDenySet()).toEqual(new Set([otherTarget, target]))
+        }
+        expect(first.group.registry.devices.has(target)).toBe(false)
+      },
+    )
   })
 
   test('an empty suffix proves another rev already in the recorded log', async () => {
