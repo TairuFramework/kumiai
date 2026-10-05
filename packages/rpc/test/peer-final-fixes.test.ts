@@ -188,6 +188,43 @@ test('a rejoin that lands on the same epoch number captures a new app anchor', a
   expect(exportSecret).toHaveBeenCalledWith(APP_TOPIC_LABEL)
 })
 
+test('an ambiguous same-number anchor record found at startup asks for confirmed recovery', async () => {
+  controlRecoveryClock()
+  const hub = new FakeHub()
+  const recovery = { timeoutMs: 50, deadlineMs: 100, getDelayMs: () => 60_000 }
+  const bob = member(hub, { members: ['alice', 'bob'], recovery })
+  await bob.peer.resync()
+  await bob.peer.dispose()
+  await bob.peer.drained()
+  peers.splice(peers.indexOf(bob), 1)
+  const slot = await bob.anchorStore.load()
+  if (slot == null) throw new Error('Missing anchor')
+  // A forced rejoin that would land on its old epoch number, interrupted before it resolved.
+  await bob.anchorStore.save({
+    anchor: slot.anchor,
+    pending: {
+      epochBefore: 1,
+      epochAfter: 1,
+      rosterBefore: ['alice', 'bob'],
+      forced: true,
+      advance: 'same-number-rejoin',
+    },
+  })
+  const events: Array<RecoveryEvent> = []
+  const again = member(hub, {
+    restartOf: bob,
+    members: ['alice', 'bob'],
+    recovery,
+    onRecovery: (event) => {
+      events.push(event)
+    },
+  })
+  await drainUntil(() => events.some((event) => event.phase === 'started'), 'recovery start')
+  await expect(again.peer.commit(buildLedgerCommit(again, []))).rejects.toThrow(
+    'app anchor requires confirmed recovery',
+  )
+})
+
 test('incomplete ledgers skip commit processing and later wakeups can retry', async () => {
   controlRecoveryClock()
   const hub = new FakeHub()
@@ -210,6 +247,25 @@ test('incomplete ledgers skip commit processing and later wakeups can retry', as
   await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 2 })
   await drainUntil(() => process.mock.calls.length === 2, 'retried commit processing')
   expect(await bob.mls.readEpoch()).toBe(3)
+})
+
+test('an incomplete ledger retries the skipped commit on its own backoff in a quiet group', async () => {
+  controlRecoveryClock()
+  const hub = new FakeHub()
+  const bob = member(hub, { recovery: { timeoutMs: 50, deadlineMs: 100, getDelayMs: () => 0 } })
+  await bob.peer.resync()
+  const process = vi.spyOn(bob.mls, 'processCommit')
+  const complete = vi.spyOn(bob.mls, 'isLedgerComplete').mockResolvedValue(false)
+  vi.spyOn(bob.mls, 'openSealedLedger').mockResolvedValue(null)
+  await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+  await drainUntil(() => complete.mock.calls.length > 0, 'ledger check')
+  await vi.advanceTimersByTimeAsync(100)
+  expect(process).not.toHaveBeenCalled()
+  // No later delivery: the responder comes back and only the retry timer can find it.
+  complete.mockResolvedValue(true)
+  await vi.advanceTimersByTimeAsync(1000)
+  await drainUntil(() => process.mock.calls.length === 1, 'retried commit processing')
+  expect(await bob.mls.readEpoch()).toBe(2)
 })
 
 test('a walker without an applied epoch record stays silent for an external history commit', async () => {

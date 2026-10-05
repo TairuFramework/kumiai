@@ -109,6 +109,7 @@ The cached binding must pass wall-clock expiry, known tree time, generation floo
 It must return promptly without waiting for user interaction.
 `applyRecovery` returns `PendingRecovery | { renewalRequired: true } | null`.
 Lifecycle GroupInfo replies include a ledger covered by the attestation digest and checked against the authenticated head.
+A handle with an incomplete ledger processes no commits. It re-requests the ledger at every lane operation and on its own 1 to 60 second backoff.
 
 Hub acceptance alone never authorises recovery adoption.
 `PendingRecovery.epoch` names the target epoch, and `confirmationKey(position, commitDigest)` binds its speculative exporter key.

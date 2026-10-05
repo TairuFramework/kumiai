@@ -840,6 +840,36 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     appPullNeeded = true
     armAppPull(0)
   }
+  // An incomplete ledger skips the commit pull without failing it. In a quiet group no later
+  // delivery would retry, so the skip arms its own backoff. Each retry is a commit wakeup without
+  // the heal: heals keep their own triggers and backoff.
+  let ledgerRetryTimer: ReturnType<typeof setTimeout> | undefined
+  let ledgerRetryBackoff = 1000
+  const armLedgerRetry = (): void => {
+    if (disposed || ledgerRetryTimer != null) return
+    ledgerRetryTimer = setTimeout(() => {
+      ledgerRetryTimer = undefined
+      if (disposed) return
+      void ready
+        .then(() => {
+          if (disposed) return
+          return runSerial(async () => {
+            if (disposed) return
+            const replayed = await replayJournal()
+            if (mls != null && (await ensureLedger(Date.now() + recoveryTimeoutMs))) {
+              await finalizeBootstrap(mls)
+            }
+            if (disposed) return
+            const pulled = await pullCommits()
+            if (!disposed && (replayed || pulled)) await rebuildEpoch()
+          })
+        })
+        .catch(() => {
+          // a failed retry leaves the cursor put; pullCommits re-arms while the ledger is incomplete
+        })
+    }, ledgerRetryBackoff)
+    ledgerRetryBackoff = Math.min(ledgerRetryBackoff * 2, 60_000)
+  }
   const retryAppPull = (): void => {
     if (disposed) return
     appPullBackoff = 1000
@@ -2203,7 +2233,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       )
     }
     if (mls == null || commitTopicID == null) return false
-    if (!(await mls.isLedgerComplete())) return false
+    if (!(await mls.isLedgerComplete())) {
+      armLedgerRetry()
+      return false
+    }
+    ledgerRetryBackoff = 1000
     const epochBefore = await mls.readEpoch()
     if (disposed) return false
     const anchorBefore = anchor
@@ -3540,6 +3574,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       if (pendingRestoreTimer != null) clearTimeout(pendingRestoreTimer)
       appLane.dispose()
       if (appPullTimer != null) clearTimeout(appPullTimer)
+      if (ledgerRetryTimer != null) clearTimeout(ledgerRetryTimer)
+      ledgerRetryTimer = undefined
       appPullTimer = undefined
       // Synchronous and FIRST, before anything is awaited: a lane op that already passed its own
       // `assertLive` can be running inside `runSerial`, past the point this `dispose()` can reach
