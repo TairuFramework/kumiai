@@ -1272,8 +1272,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   let reconciledHead: LogPosition | null = null
   const saveCommitCursor = async (position: LogPosition): Promise<void> => {
     if (mls == null) return
-    const epoch = await mls.readEpoch()
-    await params.appOutbox?.putCommitCursor({ position, epoch })
+    // A stranded peer keeps its durable cursor before the evidence: the strand is memory-only,
+    // and a restart at the same epoch must re-read the frame that raised it.
+    if (!stranded) {
+      const epoch = await mls.readEpoch()
+      await params.appOutbox?.putCommitCursor({ position, epoch })
+    }
     reconciledHead = position
   }
 
@@ -1892,12 +1896,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             commitDigest: null,
             state: { localDID, epoch: localEpoch, appliedByEpoch },
           })
+          if (unreadable.row === 'ahead') stranded = true
           await saveCommitCursor(position)
           // Do what the classifier said, not what this branch assumes: it answers `ahead` today,
           // and any other answer just steps over the frame, matching the bare advance above.
           if (unreadable.row === 'ahead') {
             healRequested = true
-            stranded = true
             observeStrand({
               position,
               commitDigest: null,
@@ -1932,11 +1936,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
               commitDigest: null,
               state: { localDID, epoch: localEpoch, appliedByEpoch },
             })
+            if (unreadable.row === 'ahead') stranded = true
             await saveCommitCursor(position)
             // The classifier's answer, not this branch's assumption — as above.
             if (unreadable.row === 'ahead') {
               healRequested = true
-              stranded = true
               observeStrand({
                 position,
                 commitDigest: null,
@@ -2002,9 +2006,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           if (disposition.row === 'ahead') {
             // The group advanced at an epoch this peer did not. Step over the frame — the heal
             // repairs this, not a re-read — and ask for one.
+            stranded = true
             await saveCommitCursor(position)
             healRequested = true
-            stranded = true
             observeStrand({
               position,
               commitDigest,
@@ -2027,10 +2031,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
               recordCommitOutcome(position, { commitDigest, kind: 'superseded' })
             // Two commits at one epoch. The lower-sequenceID branch wins; the loser rejoins onto it
             // (a heal). The winner just steps over the frame.
+            if (disposition.branch === 'losing') stranded = true
             await saveCommitCursor(position)
             if (disposition.branch === 'losing') {
               healRequested = true
-              stranded = true
               observeStrand({
                 position,
                 commitDigest,

@@ -3,6 +3,7 @@ import { afterEach, expect, test, vi } from 'vitest'
 import { digestAppliedCommit } from '../src/classify.js'
 import { decodeCommitFrame } from '../src/commit-frame.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
+import type { StrandObservation } from '../src/peer.js'
 import { encodeRecoveryConfirmRequest } from '../src/recovery.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
@@ -42,6 +43,44 @@ test('a mismatched durable commit cursor is discarded before the first fetch', a
   expect(calls.length).toBeGreaterThan(0)
   expect(calls[0]?.after).toBeUndefined()
   expect(await store.getCommitCursor()).toBeNull()
+})
+
+test('a restart at the same epoch rediscovers a strand the durable cursor never stepped over', async () => {
+  controlRecoveryClock()
+  const hub = new FakeHub()
+  const store = createMemoryAppOutbox()
+  const recovery = { timeoutMs: 50, deadlineMs: 100, getDelayMs: () => 60_000 }
+  const strands: Array<StrandObservation> = []
+  const bob = member(hub, {
+    appOutbox: store,
+    members: ['alice', 'bob'],
+    recovery,
+    onStrand: (observation) => {
+      strands.push(observation)
+    },
+  })
+  await bob.peer.resync()
+  const applied = await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+  await drainUntil(async () => (await bob.mls.readEpoch()) === 2, 'applied commit')
+  expect(await store.getCommitCursor()).toEqual({ position: applied.sequenceID, epoch: 2 })
+  const ahead = await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 5 })
+  await drainUntil(() => strands.length === 1, 'ahead strand')
+  expect(strands[0]).toMatchObject({ position: ahead.sequenceID, kind: 'ahead' })
+  expect(await store.getCommitCursor()).toEqual({ position: applied.sequenceID, epoch: 2 })
+  await bob.peer.dispose()
+  await bob.peer.drained()
+  peers.splice(peers.indexOf(bob), 1)
+  const restarted: Array<StrandObservation> = []
+  const again = member(hub, {
+    restartOf: bob,
+    recovery,
+    onStrand: (observation) => {
+      restarted.push(observation)
+    },
+  })
+  await again.peer.resync()
+  await drainUntil(() => restarted.length === 1, 'rediscovered strand')
+  expect(restarted[0]).toMatchObject({ position: ahead.sequenceID, kind: 'ahead' })
 })
 
 test('incomplete ledgers skip commit processing and later wakeups can retry', async () => {
