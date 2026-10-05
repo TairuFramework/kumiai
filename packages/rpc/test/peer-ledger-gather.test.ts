@@ -103,7 +103,16 @@ describe('the ledger gather does not hand the group to the relay', { concurrent:
     const first = alice.peer.recover()
     await drainUntil(() => opens === 1, 'first ledger open')
     expect(opens).toBe(1)
-    await vi.advanceTimersByTimeAsync(15_000)
+    let firstSettled = false
+    const markFirst = () => {
+      firstSettled = true
+    }
+    void first.then(markFirst, markFirst)
+    // Live reply jitter can land after one advance and arm fresh deadline timers; keep advancing.
+    await drainUntil(async () => {
+      await vi.advanceTimersByTimeAsync(1000)
+      return firstSettled
+    }, 'first recovery settlement')
     expect(await first).toEqual({ advanced: false, reenact: [] })
     const second = alice.peer.recover()
     await drainUntil(() => opens > 1, 'retry ledger open')
@@ -112,7 +121,15 @@ describe('the ledger gather does not hand the group to the relay', { concurrent:
     await drainUntil(() => staleOpenReturned, 'stale ledger open return')
     expect(staleOpenReturned).toBe(true)
     expect(bootstrap).toHaveBeenCalledTimes(0)
-    await vi.advanceTimersByTimeAsync(15_000)
+    let secondSettled = false
+    const markSecond = () => {
+      secondSettled = true
+    }
+    void second.then(markSecond, markSecond)
+    await drainUntil(async () => {
+      await vi.advanceTimersByTimeAsync(1000)
+      return secondSettled
+    }, 'second recovery settlement')
     await second
     expect(bootstrap).toHaveBeenCalledTimes(0)
 

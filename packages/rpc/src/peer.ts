@@ -850,6 +850,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     ledgerRetryTimer = setTimeout(() => {
       ledgerRetryTimer = undefined
       if (disposed) return
+      let ledgerReady = false
       void ready
         .then(() => {
           if (disposed) return
@@ -857,6 +858,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             if (disposed) return
             const replayed = await replayJournal()
             if (mls != null && (await ensureLedger(Date.now() + recoveryTimeoutMs))) {
+              ledgerReady = true
               await finalizeBootstrap(mls)
             }
             if (disposed) return
@@ -867,6 +869,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         .catch(() => {
           // a failed retry leaves the cursor put; pullCommits re-arms while the ledger is incomplete
         })
+        // A strand the completed pull found heals outside the lane. An incomplete ledger does not
+        // heal here: the gather that failed is the repair, and the backoff re-runs it.
+        .then(() => (ledgerReady ? healIfRequested() : undefined))
     }, ledgerRetryBackoff)
     ledgerRetryBackoff = Math.min(ledgerRetryBackoff * 2, 60_000)
   }

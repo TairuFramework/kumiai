@@ -268,6 +268,28 @@ test('an incomplete ledger retries the skipped commit on its own backoff in a qu
   expect(await bob.mls.readEpoch()).toBe(2)
 })
 
+test('a strand found by the ledger retry starts a heal', async () => {
+  controlRecoveryClock()
+  const hub = new FakeHub()
+  const events: Array<RecoveryEvent> = []
+  const bob = member(hub, {
+    recovery: { timeoutMs: 50, deadlineMs: 100, getDelayMs: () => 0 },
+    onRecovery: (event) => {
+      events.push(event)
+    },
+  })
+  await bob.peer.resync()
+  const complete = vi.spyOn(bob.mls, 'isLedgerComplete').mockResolvedValue(false)
+  vi.spyOn(bob.mls, 'openSealedLedger').mockResolvedValue(null)
+  await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 5 })
+  await drainUntil(() => complete.mock.calls.length > 0, 'ledger check')
+  await vi.advanceTimersByTimeAsync(100)
+  expect(events).toEqual([])
+  complete.mockResolvedValue(true)
+  await vi.advanceTimersByTimeAsync(1000)
+  await drainUntil(() => events.some((event) => event.phase === 'started'), 'heal start')
+})
+
 test('a walker without an applied epoch record stays silent for an external history commit', async () => {
   controlRecoveryClock()
   const hub = new FakeHub()
