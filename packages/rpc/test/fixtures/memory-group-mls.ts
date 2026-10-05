@@ -68,7 +68,10 @@ export type MemoryGroupMLS = GroupMLS & {
   failNextRecoveryAdopt: () => void
 }
 
+export type MemoryRecoveryBinding = { id: string; prefix: Array<unknown>; capability: string }
 export type MemoryGroupMLSOptions = {
+  binding?: MemoryRecoveryBinding
+  recoveryBinding?: () => Promise<MemoryRecoveryBinding | null>
   groupID?: string
   recoverySecret?: Uint8Array
   epoch?: number
@@ -473,6 +476,29 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     }
   }
   let failRecoveryAdopt = false
+  let binding = options.binding
+  let preparedBinding = binding
+  let prepared = false
+  let asked = false
+  const unusable = new Set<string>()
+  const bindingID = (value: MemoryRecoveryBinding): string =>
+    JSON.stringify([value.id, value.prefix, value.capability])
+  const usable = (value?: MemoryRecoveryBinding): boolean =>
+    value != null && !unusable.has(bindingID(value))
+  const askBinding = async (): Promise<MemoryRecoveryBinding | undefined> => {
+    if (asked) return
+    asked = true
+    const offered = await options.recoveryBinding?.()
+    return offered != null && usable(offered) ? offered : undefined
+  }
+  const prepare = async (): Promise<'ready' | 'renewal-required'> => {
+    prepared = true
+    asked = false
+    preparedBinding = binding
+    if (binding == null || usable(preparedBinding)) return 'ready'
+    preparedBinding = await askBinding()
+    return usable(preparedBinding) ? 'ready' : 'renewal-required'
+  }
 
   const advance = (to: number): void => {
     epoch = to
@@ -622,7 +648,15 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     async readEpoch(): Promise<number> {
       return epoch
     },
-    prepareRecovery: async () => 'ready',
+    prepareRecovery: prepare,
+    async verifyRecoveryRequest(request) {
+      try {
+        const verified = authorize(request, 'verifyRecoveryRequest', false)
+        return { groupID, requestID: verified.requestID, requesterDID: verified.requesterDID }
+      } catch {
+        return null
+      }
+    },
     sendAdmission: () => ({ epoch, admissible: true }),
     async readCommitHeader(commit: Uint8Array): Promise<CommitHeader | null> {
       // Two facts, two availabilities — the whole point of the port's contract, modelled exactly.
@@ -865,9 +899,20 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         return null
       }
     },
-    async applyRecovery(sealed: Uint8Array, requestID: string): Promise<PendingRecovery | null> {
+    async applyRecovery(
+      sealed: Uint8Array,
+      requestID: string,
+    ): Promise<PendingRecovery | { renewalRequired: true } | null> {
       const info = open(sealed, requestID)
       if (info == null) return null
+      if (!prepared) await prepare()
+      if (binding != null && !usable(preparedBinding)) {
+        preparedBinding = await askBinding()
+        if (!usable(preparedBinding)) return { renewalRequired: true }
+      }
+      const candidateBinding =
+        preparedBinding == null ? undefined : structuredClone(preparedBinding)
+      const candidateBindingID = candidateBinding == null ? undefined : bindingID(candidateBinding)
       let accepted = false
       let tuple: { position: string; commitDigest: string; tag: string } | undefined
       // The external commit is framed at the epoch the GroupInfo described — the epoch the
@@ -882,6 +927,16 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       return {
         commit,
         epoch: info.epoch + 1,
+        markBindingUnusable: () => {
+          if (candidateBindingID == null) return
+          const id = candidateBindingID
+          unusable.delete(id)
+          unusable.add(id)
+          while (unusable.size > 16) {
+            const oldest = unusable.values().next().value
+            if (oldest != null) unusable.delete(oldest)
+          }
+        },
         confirmationKey: async (position, commitDigest) => {
           if (tuple != null && (tuple.position !== position || tuple.commitDigest !== commitDigest))
             throw new Error('Pending recovery already bound to another commit')
@@ -921,6 +976,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
             slotAdd(localDID)
           }
           advance(info.epoch + 1)
+          binding = candidateBinding
           accepted = true
         },
       }

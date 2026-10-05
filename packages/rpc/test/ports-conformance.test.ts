@@ -129,6 +129,23 @@ const COMMITTER_DID = 'did:key:committer'
 
 testGroupMLSConformance({
   label: 'createMemoryGroupMLS',
+  createBoundRecovery: async () => {
+    const binding = { id: 'controller', prefix: [], capability: 'initial-capability' }
+    let offered = binding
+    const options = { binding, recoveryBinding: async () => offered, members: ['alice', 'bob'] }
+    const requester = createMemoryGroupMLS({ ...options, localDID: 'bob' })
+    const responder = createMemoryGroupMLS({ ...options, localDID: 'alice' })
+    return {
+      requester,
+      responder,
+      ratchet: async () => {
+        requester.adopt(requester.buildCommit())
+      },
+      replaceBinding: async () => {
+        offered = { ...binding, capability: 'renewed-capability' }
+      },
+    }
+  },
   createGroup: async (size, id) => {
     let hintOffset = 0
     const dids = Array.from({ length: size }, (_, index) => didAt(index))

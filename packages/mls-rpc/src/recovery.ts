@@ -61,8 +61,21 @@ export function createRecoveryBindingState(identity: OwnIdentity, host?: Recover
   let binding: ControllerBinding | undefined
   let asked = false
   let prepared = false
+  const unusable = new Set<string>()
+  const bindingID = (value: ControllerBinding): string =>
+    JSON.stringify([value.id, value.prefix, value.capability])
+  function markBindingUnusable(id?: string): void {
+    if (id == null) return
+    unusable.delete(id)
+    unusable.add(id)
+    while (unusable.size > 16) {
+      const oldest = unusable.values().next().value
+      if (oldest != null) unusable.delete(oldest)
+    }
+  }
 
   async function usable(group: GroupHandle, candidate: ControllerBinding): Promise<boolean> {
+    if (unusable.has(bindingID(candidate))) return false
     try {
       await assertRecoveryBinding({ group, identity, controller: candidate })
       return true
@@ -138,8 +151,14 @@ export function createRecoveryBindingState(identity: OwnIdentity, host?: Recover
           ...(group.anchor.controller == null ? {} : { ledgerEntries: reply.ledger }),
         })
       }
+      const candidate = async (controller?: ControllerBinding) => {
+        const result = await build(controller)
+        const carried = current(result.group)
+        const id = carried == null ? undefined : bindingID(carried)
+        return { ...result, markBindingUnusable: () => markBindingUnusable(id) }
+      }
       try {
-        return await build(binding)
+        return await candidate(binding)
       } catch (error) {
         if (
           !signerEligible ||
@@ -155,7 +174,7 @@ export function createRecoveryBindingState(identity: OwnIdentity, host?: Recover
         if (binding == null || !(await usable(group, binding)))
           return { renewalRequired: true } as const
         try {
-          return await build(binding)
+          return await candidate(binding)
         } catch (replacementError) {
           if (!signerEligible) return null
           return replacementError instanceof LeafBindingError ||

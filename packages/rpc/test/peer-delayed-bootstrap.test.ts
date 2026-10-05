@@ -109,10 +109,10 @@ describe('delayed ledger bootstrap', () => {
     })
     const { hub, rs, alice, bob, events, recoveryRequests } = state
     hub.acceptAtAnyHead()
-    vi.spyOn(bob.mls, 'processCommit').mockResolvedValue({
-      advanced: false,
-      epochBefore: bob.mls.epoch(),
-      epochAfter: bob.mls.epoch(),
+    const process = bob.mls.processCommit.bind(bob.mls)
+    vi.spyOn(bob.mls, 'processCommit').mockImplementation(async (commit, context) => {
+      if ((await bob.mls.readCommitHeader(commit))?.external) return process(commit, context)
+      return { advanced: false, epochBefore: bob.mls.epoch(), epochAfter: bob.mls.epoch() }
     })
     const competing = await publishCommit({
       hub,
@@ -124,6 +124,7 @@ describe('delayed ledger bootstrap', () => {
     hub.hideFrom('bob', competing.sequenceID)
     state.stopLying()
     const error = new Error('persist failed after adoption')
+    let rejectionPending = true
     const applyRecovery = alice.mls.applyRecovery.bind(alice.mls)
     const spy = vi.spyOn(alice.mls, 'applyRecovery').mockImplementation(async (...args) => {
       const pending = await applyRecovery(...args)
@@ -132,7 +133,10 @@ describe('delayed ledger bootstrap', () => {
         ...pending,
         onAccepted: async () => {
           await pending.onAccepted()
-          throw error
+          if (rejectionPending) {
+            rejectionPending = false
+            throw error
+          }
         },
       }
     })
@@ -161,6 +165,7 @@ describe('delayed ledger bootstrap', () => {
     const { alice, bob, events } = state
     state.stopLying()
     const error = new Error('persist failed after adoption')
+    let rejectionPending = true
     const applyRecovery = alice.mls.applyRecovery.bind(alice.mls)
     vi.spyOn(alice.mls, 'applyRecovery').mockImplementation(async (...args) => {
       const pending = await applyRecovery(...args)
@@ -169,7 +174,10 @@ describe('delayed ledger bootstrap', () => {
         ...pending,
         onAccepted: async () => {
           await pending.onAccepted()
-          throw error
+          if (rejectionPending) {
+            rejectionPending = false
+            throw error
+          }
         },
       }
     })
@@ -249,15 +257,27 @@ describe('delayed ledger bootstrap', () => {
     const { alice, bob, events } = state
     state.stopLying()
     const error = new Error('transient epoch teardown')
-    const spy = vi
-      .spyOn(BroadcastClient.prototype, 'dispose')
-      .mockImplementationOnce(() => Promise.reject(error))
+    const apply = alice.mls.applyRecovery.bind(alice.mls)
+    let spy: ReturnType<typeof vi.spyOn> | undefined
+    vi.spyOn(alice.mls, 'applyRecovery').mockImplementation(async (...args) => {
+      const pending = await apply(...args)
+      if (pending == null || 'renewalRequired' in pending) return pending
+      return {
+        ...pending,
+        onAccepted: async () => {
+          spy ??= vi
+            .spyOn(BroadcastClient.prototype, 'dispose')
+            .mockImplementationOnce(() => Promise.reject(error))
+          await pending.onAccepted()
+        },
+      }
+    })
 
     await expect(alice.peer.recover()).rejects.toMatchObject({
       message: 'Group epoch teardown failed',
       errors: [error],
     })
-    spy.mockRestore()
+    spy?.mockRestore()
     expect(events.map((event) => event.phase)).toEqual(['started', 'failed'])
     expect(events[1]).toMatchObject({ reason: 'error' })
     expect(await alice.peer.replay()).toEqual({ reenact: [owed] })

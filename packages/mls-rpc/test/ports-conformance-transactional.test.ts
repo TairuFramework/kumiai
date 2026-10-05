@@ -14,6 +14,7 @@ import { createGroupMLS } from '../src/mls.js'
 import {
   buildRealCommit,
   buildRealExternalCommit,
+  createRealBoundRecovery,
   createRealGroup,
   sealRealRecoveryVerdict,
 } from './fixtures/real-group.js'
@@ -157,6 +158,11 @@ testPendingGroupCryptoConformance({
 })
 
 testGroupMLSConformance({
+  createBoundRecovery: () =>
+    createRealBoundRecovery(async (member) => {
+      const host = await createTransactionalAccess(member, createTransactionalStore(member.handle))
+      return host.access
+    }),
   label: 'createGroupMLS over a transactional HandleAccess',
   createGroup: async (size, id) => {
     const group = await createRealGroup(size, `tx-mls-conformance-${id}`)

@@ -353,6 +353,8 @@ export type CommitContext = {
  */
 export type PendingRecovery = {
   epoch: number
+  /** Remember the replacement binding after an authoritative lifecycle refusal. */
+  markBindingUnusable(): void
   /** Bind judgement to the published tuple and derive from the speculative epoch. */
   confirmationKey(position: string, commitDigest: string): Promise<Uint8Array>
   /** Call after confirmationKey resolves. Failed bindings or signer gates are advisory. */
@@ -382,6 +384,12 @@ export type SendAdmission =
  * until the suite was made to cover the shape rather than a sample of it.
  */
 export type GroupMLS = {
+  /** Verify the signed ask without requiring its issuer to remain in the current tree. */
+  verifyRecoveryRequest(request: Uint8Array): Promise<{
+    groupID: string
+    requestID: string
+    requesterDID: string
+  } | null>
   confirmationKey(
     position: string,
     commitDigest: string,

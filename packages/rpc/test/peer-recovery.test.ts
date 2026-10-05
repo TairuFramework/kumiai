@@ -1,6 +1,11 @@
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
-import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
+import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
+import {
+  decodeRecoveryConfirmRequest,
+  decodeRecoveryVerdict,
+  encodeRecoveryConfirmRequest,
+} from '../src/recovery.js'
 import { APP_TOPIC_LABEL, commitTopic, protocolTopic, rendezvousTopic } from '../src/topic.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { makeMLSPeer } from './fixtures/peer.js'
@@ -16,6 +21,152 @@ function recoveryReplyCount(hub: FakeHub, recoverySecret: Uint8Array): number {
 }
 
 describe('recovery rendezvous', () => {
+  test('a later historical reread preserves the originally applied confirmation outcome', async () => {
+    const hub = new FakeHub()
+    const secret = new Uint8Array(32).fill(0x43)
+    const options = {
+      members: ['alice', 'bob'],
+      recovery: { timeoutMs: 60, deadlineMs: 1000, getDelayMs: () => 0 },
+    }
+    const alice = makeMLSPeer(hub, 'alice', secret, options)
+    const bob = makeMLSPeer(hub, 'bob', secret, options)
+    try {
+      expect((await bob.peer.recover()).advanced).toBe(true)
+      const publication = hub.published.find(
+        (message) =>
+          decodeHandshakeFrame(message.payload).kind === HANDSHAKE_KIND.recoveryConfirmRequest,
+      )
+      if (publication == null) throw new Error('No confirmation request')
+      const original = decodeRecoveryConfirmRequest(
+        decodeHandshakeFrame(publication.payload).payload,
+      )
+      expect((await bob.peer.recover()).advanced).toBe(true)
+      hub.revealTo('alice', original.position)
+      await hub.publish({
+        senderDID: 'observer',
+        topicID: commitTopic(secret),
+        payload: encodeHandshakeFrame(HANDSHAKE_KIND.recoveryRequest, new Uint8Array([0])),
+      })
+      await flush(60)
+      const requestID = 'historical-retransmit'
+      const request = await bob.mls.createRecoveryRequest(requestID)
+      await hub.publish({
+        senderDID: 'bob',
+        topicID: rendezvousTopic(secret),
+        payload: encodeHandshakeFrame(
+          HANDSHAKE_KIND.recoveryConfirmRequest,
+          encodeRecoveryConfirmRequest({ ...original, requestID, request }),
+        ),
+      })
+      await vi.waitFor(() =>
+        expect(
+          hub.published.some((message) => {
+            const frame = decodeHandshakeFrame(message.payload)
+            return (
+              frame.kind === HANDSHAKE_KIND.recoveryVerdict &&
+              decodeRecoveryVerdict(frame.payload).requestID === requestID
+            )
+          }),
+        ).toBe(true),
+      )
+      const response = hub.published.find((message) => {
+        const frame = decodeHandshakeFrame(message.payload)
+        return (
+          frame.kind === HANDSHAKE_KIND.recoveryVerdict &&
+          decodeRecoveryVerdict(frame.payload).requestID === requestID
+        )
+      })
+      if (response == null) throw new Error('No historical verdict')
+      const { sealed } = decodeRecoveryVerdict(decodeHandshakeFrame(response.payload).payload)
+      expect(await bob.mls.openRecoveryVerdict(sealed, requestID)).toMatchObject({
+        verdict: { verdict: 'confirmed' },
+      })
+    } finally {
+      await Promise.all([alice.peer.dispose(), bob.peer.dispose()])
+    }
+  })
+  test('a confirmed rejoin captures its anchor once', async () => {
+    const hub = new FakeHub()
+    const secret = new Uint8Array(32).fill(0x42)
+    const options = {
+      members: ['alice', 'bob'],
+      recovery: { timeoutMs: 60, deadlineMs: 500, getDelayMs: () => 0 },
+    }
+    const alice = makeMLSPeer(hub, 'alice', secret, options)
+    const bob = makeMLSPeer(hub, 'bob', secret, options)
+    try {
+      await bob.peer.resync()
+      const save = vi.spyOn(bob.anchorStore, 'save')
+      expect((await bob.peer.recover()).advanced).toBe(true)
+      expect(save).toHaveBeenCalledTimes(1)
+    } finally {
+      await Promise.all([alice.peer.dispose(), bob.peer.dispose()])
+    }
+  })
+  test('an ambiguous confirmed adoption is retried before the next lane operation without another rejoin', async () => {
+    const hub = new FakeHub()
+    const secret = new Uint8Array(32).fill(0x39)
+    const options = {
+      members: ['alice', 'bob'],
+      recovery: { timeoutMs: 60, deadlineMs: 500, getDelayMs: () => 0 },
+    }
+    const alice = makeMLSPeer(hub, 'alice', secret, options)
+    const bob = makeMLSPeer(hub, 'bob', secret, options)
+    bob.mls.failNextRecoveryAdopt()
+    try {
+      const before = bob.mls.epoch()
+      await expect(bob.peer.recover()).rejects.toThrow('the process died in the acceptance window')
+      expect(bob.mls.epoch()).toBe(before)
+      await bob.peer.replay()
+      expect(bob.mls.epoch()).toBe(alice.mls.epoch())
+      expect(
+        hub.published.filter((message) => message.topicID === commitTopic(secret)),
+      ).toHaveLength(1)
+    } finally {
+      await Promise.all([alice.peer.dispose(), bob.peer.dispose()])
+    }
+  })
+
+  test('a commit waits for the entire active recovery before building', async () => {
+    const hub = new FakeHub()
+    const secret = new Uint8Array(32).fill(0x40)
+    const options = {
+      members: ['alice', 'bob'],
+      recovery: { timeoutMs: 60, deadlineMs: 500, getDelayMs: () => 0 },
+    }
+    const alice = makeMLSPeer(hub, 'alice', secret, options)
+    const bob = makeMLSPeer(hub, 'bob', secret, options)
+    let release = () => {}
+    const pause = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const seal = alice.mls.sealRecoveryVerdict.bind(alice.mls)
+    const sealing = vi
+      .spyOn(alice.mls, 'sealRecoveryVerdict')
+      .mockImplementation(async (...args) => {
+        await pause
+        return seal(...args)
+      })
+    const build = vi.fn(async () => {
+      throw new Error('build reached')
+    })
+    const recovery = bob.peer.recover()
+    void recovery.catch(() => {})
+    try {
+      await vi.waitFor(() => expect(sealing).toHaveBeenCalled())
+      const committing = bob.peer.commit(build)
+      void committing.catch(() => {})
+      await flush()
+      expect(build).not.toHaveBeenCalled()
+      release()
+      expect((await recovery).advanced).toBe(true)
+      await expect(committing).rejects.toThrow('build reached')
+      expect(build).toHaveBeenCalledTimes(1)
+    } finally {
+      release()
+      await Promise.all([alice.peer.dispose(), bob.peer.dispose()])
+    }
+  })
   test('a stranded peer rejoins by external commit, and one responder wins', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x77)

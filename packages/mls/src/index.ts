@@ -195,6 +195,7 @@ export {
   sealGroupInfo,
   sealLedger,
   type VerifiedRecoveryRequest,
+  verifyRecoveryRequest,
 } from './recovery.js'
 export {
   confirmationKey,

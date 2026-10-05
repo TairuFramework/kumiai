@@ -1,5 +1,6 @@
 import { type OwnIdentity, randomIdentity, stringifyToken } from '@kokuin/token'
 import {
+  type ControllerBinding,
   commitInvite,
   createGroup,
   createInvite,
@@ -10,15 +11,85 @@ import {
   ledgerEntryDigest,
   processWelcome,
   removeMember,
+  renewLeaf,
 } from '@kumiai/mls'
 import { decode, encode, mlsMessageDecoder, mlsMessageEncoder, wireformats } from 'ts-mls'
 
-import { createLedgerEntrySlot, type LedgerEntrySlot } from '../../src/mls.js'
+import { type HandleAccess, simpleHandleAccess } from '../../src/access.js'
+import { createGroupMLS, createLedgerEntrySlot, type LedgerEntrySlot } from '../../src/mls.js'
 
 export type RealMember = {
   identity: OwnIdentity
   handle: GroupHandle
   slot: LedgerEntrySlot
+}
+
+export async function createRealBoundRecovery(
+  makeAccess: (member: RealMember) => Promise<HandleAccess> = async (member) =>
+    simpleHandleAccess({
+      handle: () => member.handle,
+      adopt: (next) => {
+        member.handle = next
+      },
+    }),
+) {
+  const fixture = (await import(
+    new URL('../../../mls/test/fixtures/lifecycle-pipeline.ts', import.meta.url).href
+  )) as {
+    agent: (byte: number) => OwnIdentity
+    timedBinding: (identity: OwnIdentity, iat: number, exp: number) => Promise<ControllerBinding>
+  }
+  const now = Math.floor(Date.now() / 1000)
+  const alice = fixture.agent(41)
+  const bob = fixture.agent(61)
+  const cached = await fixture.timedBinding(bob, now - 20, now + 1000)
+  let offered = cached
+  let source = (
+    await createGroup(alice, 'bound-conformance', {
+      controller: await fixture.timedBinding(alice, now - 20, now + 1000),
+    })
+  ).group
+  const bundle = await createKeyPackageBundle(bob, { controller: cached })
+  const { invite } = await createInvite({ group: source, identity: alice, recipientDID: bob.id })
+  const added = await commitInvite(source, bundle.publicPackage, invite)
+  source = added.newGroup
+  const group = (
+    await processWelcome({
+      identity: bob,
+      invite,
+      welcome: added.welcomeMessage,
+      keyPackageBundle: bundle,
+    })
+  ).group
+  const member = { identity: bob, handle: group, slot: createLedgerEntrySlot() }
+  const access = await makeAccess(member)
+  const requester = createGroupMLS({
+    identity: bob,
+    access,
+    entrySlot: member.slot,
+    recoveryBinding: async () => offered,
+  })
+  const responder = createGroupMLS({
+    identity: alice,
+    access: simpleHandleAccess({
+      handle: () => source,
+      adopt: (next) => {
+        source = next
+      },
+    }),
+    entrySlot: createLedgerEntrySlot(),
+  })
+  return {
+    requester,
+    responder,
+    ratchet: async () => {
+      const current = await access.read((handle) => handle)
+      await access.replace((await renewLeaf(current, cached)).newGroup)
+    },
+    replaceBinding: async () => {
+      offered = await fixture.timedBinding(bob, now - 10, now + 1000)
+    },
+  }
 }
 
 /**

@@ -15,6 +15,7 @@ import {
   sealGroupInfo,
   sealLedger,
   sealRecoveryVerdict,
+  verifyRecoveryRequest,
 } from '@kumiai/mls'
 import type {
   CommitContext,
@@ -206,6 +207,22 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
   const recovery = createRecoveryBindingState(identity, params.recoveryBinding)
 
   return {
+    async verifyRecoveryRequest(request: Uint8Array) {
+      try {
+        const verified = await verifyRecoveryRequest(new TextDecoder().decode(request))
+        return await access.read((group) =>
+          verified.groupID === group.groupID
+            ? {
+                groupID: verified.groupID,
+                requestID: verified.requestID,
+                requesterDID: verified.requesterDID,
+              }
+            : null,
+        )
+      } catch {
+        return null
+      }
+    },
     async confirmationKey(position: string, commitDigest: string) {
       return await access.read(async (group) => ({
         epoch: Number(group.epoch),
@@ -402,6 +419,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
         signer: reply.signer,
         commit: rejoined.commitMessage,
         epoch: Number(rejoined.group.epoch),
+        markBindingUnusable: rejoined.markBindingUnusable,
         confirmationKey: judge.confirmationKey,
         judgeVerdict: judge.judgeVerdict,
         onAccepted: () => {

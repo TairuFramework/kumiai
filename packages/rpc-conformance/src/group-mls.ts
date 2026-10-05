@@ -46,6 +46,7 @@ export type ConformanceOpenedRecoveryVerdict = {
 }
 export type ConformancePendingRecovery = {
   epoch: number
+  markBindingUnusable: () => void
   confirmationKey: (position: string, commitDigest: string) => Promise<Uint8Array>
   judgeVerdict: (opened: ConformanceOpenedRecoveryVerdict) => 'authoritative' | 'advisory'
   commit: Uint8Array
@@ -69,6 +70,9 @@ export type ConformanceRosterEntry = {
  * passing bytes between two instances, which is all the clauses below do.
  */
 export type ConformanceGroupMLS = {
+  verifyRecoveryRequest: (
+    request: Uint8Array,
+  ) => Promise<{ groupID: string; requestID: string; requesterDID: string } | null>
   confirmationKey: (
     position: string,
     commitDigest: string,
@@ -175,6 +179,12 @@ export type GroupMLSConformanceParams = {
   label: string
   /** A fresh group of `size` ports plus an outside committer. `id` is unique per case. */
   createGroup: (size: number, id: string) => Promise<ConformanceMLSGroup>
+  createBoundRecovery: () => Promise<{
+    requester: ConformanceGroupMLS
+    responder: ConformanceGroupMLS
+    ratchet: () => Promise<void>
+    replaceBinding: () => Promise<void>
+  }>
 }
 
 /** The member at `index`, with the assertion the suite would otherwise repeat everywhere. */
@@ -637,6 +647,38 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
      * being a way back in is the RESPONDER, and only the responder.
      */
     describe('the recovery round trip', () => {
+      test('verified requests name their signed identity, group and request without disclosing a private key', async () => {
+        await withGroup(2, 'verify-recovery-request', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const bob = memberAt(group.members, 1)
+          const request = await bob.mls.createRecoveryRequest('verified-ask')
+          expect(await alice.mls.verifyRecoveryRequest(request)).toEqual({
+            groupID: group.groupID,
+            requestID: 'verified-ask',
+            requesterDID: bob.did,
+          })
+          expect(await alice.mls.verifyRecoveryRequest(new Uint8Array([0]))).toBeNull()
+        })
+      })
+      test('a marked replacement binding is not reused after a ratchet or returned again by the host', async () => {
+        const { requester, responder, ratchet, replaceBinding } = await params.createBoundRecovery()
+        expect(await requester.prepareRecovery()).toBe('ready')
+        const request = await requester.createRecoveryRequest('mark-binding')
+        const pending = await requester.applyRecovery(
+          await responder.sealGroupInfo(request),
+          'mark-binding',
+        )
+        if (pending == null || 'renewalRequired' in pending) throw new Error('No bound candidate')
+        const before = await requester.readEpoch()
+        expect(pending.markBindingUnusable()).toBeUndefined()
+        expect(pending.markBindingUnusable()).toBeUndefined()
+        expect(await requester.readEpoch()).toBe(before)
+        expect(await requester.prepareRecovery()).toBe('renewal-required')
+        await ratchet()
+        expect(await requester.prepareRecovery()).toBe('renewal-required')
+        await replaceBinding()
+        expect(await requester.prepareRecovery()).toBe('ready')
+      })
       test('pending exporter agrees with survivors without adopting, and acceptance is idempotent', async () => {
         await withGroup(2, 'confirmation-exporter', async (group) => {
           const alice = memberAt(group.members, 0)
@@ -650,6 +692,8 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           if (pending == null || 'renewalRequired' in pending)
             throw new Error('No pending recovery')
           const deriving = pending.confirmationKey('position', 'digest')
+          pending.markBindingUnusable()
+          expect(await bob.mls.prepareRecovery()).toBe('ready')
           await expect(pending.confirmationKey('other', 'digest')).rejects.toThrow()
           const key = await deriving
           expect(key).toHaveLength(32)

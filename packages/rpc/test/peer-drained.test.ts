@@ -237,7 +237,41 @@ describe('peer host drain', () => {
     await bob.peer.dispose()
   })
 
-  test.todo('drainedWaitsForReturnedRecoveryAdoption')
+  test('drainedWaitsForReturnedRecoveryAdoption', async () => {
+    const hub = new FakeHub()
+    const secret = new Uint8Array(32).fill(0x36)
+    const pause = gate()
+    const members = ['alice', 'bob']
+    const recovery = { timeoutMs: 60, deadlineMs: 600, getDelayMs: () => 0 }
+    const alice = makeMLSPeer(hub, 'alice', secret, { members, recovery })
+    const bob = makeMLSPeer(hub, 'bob', secret, { members, recovery })
+    const apply = bob.mls.applyRecovery.bind(bob.mls)
+    let accepting = false
+    bob.mls.applyRecovery = async (...args) => {
+      const pending = await apply(...args)
+      if (pending == null || 'renewalRequired' in pending) return pending
+      return {
+        ...pending,
+        onAccepted: async () => {
+          accepting = true
+          await pause.promise
+          await pending.onAccepted()
+        },
+      }
+    }
+    const recovering = bob.peer.recover().catch(() => {})
+    try {
+      await vi.waitFor(() => expect(accepting).toBe(true))
+      await bob.peer.dispose()
+      const drain = await pausedDrain(bob.peer)
+      pause.release()
+      await drain.promise
+      await recovering
+    } finally {
+      pause.release()
+      await Promise.all([alice.peer.dispose(), bob.peer.dispose()])
+    }
+  })
 
   test.each(['crypto.unwrap', 'handler', 'gather.onReply'])(
     'drains paused %s and refuses a later reply observer',

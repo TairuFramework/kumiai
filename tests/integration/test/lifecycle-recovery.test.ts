@@ -191,6 +191,22 @@ test('recovery reuses a valid cached binding without consulting the host', async
   expect(host).toHaveBeenCalledTimes(0)
 })
 
+test('binding invalidation remembers the replacement leaf rather than a subsequently mutated host object', async () => {
+  let offered: ControllerBinding
+  const host = vi.fn(async () => offered)
+  const s = await setup(host, { aliceExp: 500 })
+  vi.spyOn(Date, 'now').mockReturnValue(250_000)
+  offered = await fixture.timedBinding(s.bob, 250, 350)
+  expect(await s.mls.prepareRecovery()).toBe('ready')
+  const pending = await buildRecovery(s)
+  if (pending == null || 'renewalRequired' in pending) throw new Error('No bound candidate')
+  vi.spyOn(Date, 'now').mockReturnValue(270_000)
+  offered.capability = (await fixture.timedBinding(s.bob, 260, 360)).capability
+  pending.markBindingUnusable()
+  expect(await s.mls.prepareRecovery()).toBe('ready')
+  expect(host).toHaveBeenCalledTimes(2)
+})
+
 test('recovery replaces an expired cached binding with one host call', async () => {
   let fresh: ControllerBinding
   const host = vi.fn(async () => fresh)
@@ -293,10 +309,88 @@ test('a reply time floor prevents an external commit and asks the host at most o
   expect(host).toHaveBeenCalledTimes(1)
 })
 
-test.todo(
-  'a responder floor refusal discards the candidate, requires renewal and invalidates the refused binding',
-)
-test.todo('an authoritative invalid refusal holds automatic recovery until explicit recover')
+test('a responder floor refusal discards the candidate, requires renewal and invalidates the refused binding', async () => {
+  let offered: ControllerBinding | null = null
+  const host = vi.fn(async () => offered)
+  const s = await setup(host)
+  const hub = createWireHub()
+  const events: Array<RecoveryEvent> = []
+  const aliceAccess = simpleHandleAccess({ handle: s.aliceGroup, adopt: s.installAlice })
+  const alice = recoveryPeer({ hub, identity: s.alice, access: aliceAccess, mls: s.responder })
+  const bob = recoveryPeer({
+    hub,
+    identity: s.bob,
+    access: s.access,
+    mls: s.mls,
+    onRecovery: (event) => {
+      events.push(event)
+    },
+  })
+  const before = s.bobGroup()
+  vi.spyOn(s.responder, 'processCommit').mockResolvedValue({
+    advanced: false,
+    epochBefore: 1,
+    epochAfter: 1,
+    refusal: 'floor',
+  })
+  try {
+    await Promise.all([alice.resync(), bob.resync()])
+    expect((await bob.recover()).advanced).toBe(false)
+    expect(events).toContainEqual(
+      expect.objectContaining({ phase: 'failed', reason: 'renewal-required' }),
+    )
+    expect(s.bobGroup()).toBe(before)
+    offered = s.cached
+    expect(await s.mls.prepareRecovery()).toBe('renewal-required')
+    expect(host).toHaveBeenCalledTimes(1)
+    offered = await fixture.timedBinding(s.bob, 150, 250)
+    expect(await s.mls.prepareRecovery()).toBe('ready')
+    expect(host).toHaveBeenCalledTimes(2)
+  } finally {
+    await Promise.all([alice.dispose(), bob.dispose()])
+    await hub.dispose()
+  }
+})
+
+test('an authoritative invalid refusal holds automatic recovery until explicit recover', async () => {
+  const s = await setup()
+  const hub = createWireHub()
+  const events: Array<RecoveryEvent> = []
+  const alice = recoveryPeer({
+    hub,
+    identity: s.alice,
+    access: simpleHandleAccess({ handle: s.aliceGroup, adopt: s.installAlice }),
+    mls: s.responder,
+  })
+  const bob = recoveryPeer({
+    hub,
+    identity: s.bob,
+    access: s.access,
+    mls: s.mls,
+    onRecovery: (event) => {
+      events.push(event)
+    },
+  })
+  const process = vi
+    .spyOn(s.responder, 'processCommit')
+    .mockResolvedValue({ advanced: false, epochBefore: 1, epochAfter: 1, refusal: 'invalid' })
+  const requests = vi.spyOn(s.mls, 'createRecoveryRequest')
+  try {
+    await Promise.all([alice.resync(), bob.resync()])
+    expect((await bob.recover()).advanced).toBe(false)
+    expect(events).toContainEqual(
+      expect.objectContaining({ phase: 'failed', reason: 'refused', refusal: 'invalid' }),
+    )
+    const count = requests.mock.calls.length
+    await bob.resync()
+    expect(requests).toHaveBeenCalledTimes(count)
+    process.mockRestore()
+    expect((await bob.recover()).advanced).toBe(true)
+  } finally {
+    await Promise.all([alice.dispose(), bob.dispose()])
+    await hub.dispose()
+  }
+})
 
 test('renewal-required suppresses subsequent automatic triggers and explicit recover reopens one attempt', async () => {
   let fresh: ControllerBinding | null = null

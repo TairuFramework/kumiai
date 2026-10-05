@@ -20,6 +20,7 @@ import { createGroupMLS } from '../src/mls.js'
 import {
   buildRealCommit,
   buildRealExternalCommit,
+  createRealBoundRecovery,
   createRealGroup,
   sealRealRecoveryVerdict,
 } from './fixtures/real-group.js'
@@ -189,6 +190,7 @@ testPendingGroupCryptoConformance({
 
 testGroupMLSConformance({
   label: 'createGroupMLS over a real GroupHandle',
+  createBoundRecovery: createRealBoundRecovery,
   createGroup: async (size, id) => {
     const group = await createRealGroup(size, `mls-conformance-${id}`)
     let hintOffset = 0
