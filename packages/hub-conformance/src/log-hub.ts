@@ -239,7 +239,9 @@ export function testLogHubConformance<Hub extends ConformanceLogHub>(
       const other = `${TOPIC}:other`
       await subscribing(hub, BOB, TOPIC)
       await subscribing(hub, BOB, other)
+      const counts = new Map<string, number>()
       for (const topicID of [TOPIC, other, TOPIC, other]) {
+        counts.set(topicID, (counts.get(topicID) ?? 0) + 1)
         const published = await hub.publish({
           senderDID: ALICE,
           topicID,
@@ -249,7 +251,7 @@ export function testLogHubConformance<Hub extends ConformanceLogHub>(
         const result = await hub.fetchTopic({ subscriberDID: BOB, topicID })
         expect(result.head).toBe(published.sequenceID)
         expect(result.messages.at(-1)?.sequenceID).toBe(published.sequenceID)
-        expect(result.gap).toBe(false)
+        expect(result.gap).toBe((counts.get(topicID) ?? 0) > maxDepth)
       }
     })
 
