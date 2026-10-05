@@ -39,6 +39,7 @@ export function createAppOutboxAcceptance(params: AppOutboxAcceptanceParams) {
   const reservations = new Set<number>()
   let nextSeq = 0
   let listed = false
+  let waiting = 0
   let closed = false
   let retry: ReturnType<typeof setTimeout> | undefined
   let resolveReady: () => void = () => {}
@@ -69,7 +70,15 @@ export function createAppOutboxAcceptance(params: AppOutboxAcceptanceParams) {
   const accept = async (
     input: Pick<AppOutboxEntry, 'protocol' | 'prc' | 'data'>,
   ): Promise<void> => {
-    if (!listed) await ready
+    // Later calls must join the handoff until earlier waiters have resumed.
+    if (!listed || waiting > 0) {
+      waiting++
+      try {
+        await ready
+      } finally {
+        waiting--
+      }
+    }
     if (closed) throw new PeerDisposedError('App outbox acceptance is closed')
     const admission = params.admission()
     if (!admission.admissible) throw new SendNotAdmissibleError(admission.reason)

@@ -29,7 +29,6 @@ import type {
   AnchorStore,
   AppCursorStore,
   AppOutbox,
-  AppOutboxEntry,
   CommitJournal,
   GroupPeer,
   GroupProtocolDefinition,
@@ -38,8 +37,11 @@ import type {
   PendingCommit,
 } from '@kumiai/rpc'
 import { createGroupPeer } from '@kumiai/rpc'
+import { createMemoryAppOutbox } from '@kumiai/rpc-conformance'
 
 import type { WireHub } from './log-hub-over-wire.js'
+
+export { createMemoryAppOutbox }
 
 /**
  * The app protocol under test: one logged procedure, one ephemeral one beside it, and one
@@ -60,35 +62,6 @@ export type Protocols = { chat: typeof chat }
 // component under test: the peer, the hub, the MLS handles and the crypto are
 // all real, and a host has to put its anchor, cursor and journal somewhere.
 // ---------------------------------------------------------------------------
-
-export function createMemoryAppOutbox(): AppOutbox & { failNextPut(): void } {
-  let refusePut = false
-  const rows = new Map<number, AppOutboxEntry>()
-  const copy = (entry: AppOutboxEntry): AppOutboxEntry => ({
-    ...entry,
-    data: entry.data.slice(),
-    lastAttempt: entry.lastAttempt == null ? null : { ...entry.lastAttempt },
-  })
-  return {
-    put: async (entry) => {
-      if (refusePut) {
-        refusePut = false
-        throw new Error('Outbox write refused')
-      }
-      rows.set(entry.seq, copy(entry))
-    },
-    list: async () => [...rows.values()].sort((a, b) => a.seq - b.seq).map(copy),
-    remove: async (seq) => {
-      rows.delete(seq)
-    },
-    clear: async () => {
-      rows.clear()
-    },
-    failNextPut: () => {
-      refusePut = true
-    },
-  }
-}
 
 export function createMemoryAnchorStore(): AnchorStore & { stored: () => Anchor | null } {
   let anchor: Anchor | null = null

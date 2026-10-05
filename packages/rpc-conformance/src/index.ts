@@ -42,6 +42,7 @@ export {
   type GroupMLSConformanceParams,
   testGroupMLSConformance,
 } from './group-mls.js'
+export { createMemoryAppOutbox, type MemoryAppOutbox } from './memory-app-outbox.js'
 export {
   type ConformanceAppFrameRef,
   type ConformancePendingAppFrame,

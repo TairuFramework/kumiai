@@ -318,3 +318,33 @@ test('disposal rejects pre-list callers and cancels listing retries', async () =
     vi.useRealTimers()
   }
 })
+
+test.each([1, 2])('listing handoff preserves call order with %i free slots', async (limit) => {
+  const store = createMemoryAppOutbox()
+  const listing = deferred<Awaited<ReturnType<typeof store.list>>>()
+  const queue = createAppOutboxAcceptance({
+    outbox: { ...store, list: () => listing.promise },
+    limit,
+    admission: admissible,
+  })
+  try {
+    const first = queue.accept(entry('first'))
+    listing.resolve([])
+    const second = Promise.resolve().then(() => queue.accept(entry('second')))
+    const results = await Promise.allSettled([first, second])
+    expect(results[0]?.status).toBe('fulfilled')
+    if (limit === 1) {
+      expect(results[1]).toMatchObject({
+        status: 'rejected',
+        reason: { name: 'AppOutboxFullError' },
+      })
+    } else {
+      expect(results[1]?.status).toBe('fulfilled')
+    }
+    const rows = await store.list()
+    expect(rows[0]).toMatchObject({ seq: 0, data: entry('first').data })
+    if (limit === 2) expect(rows[1]).toMatchObject({ seq: 1, data: entry('second').data })
+  } finally {
+    queue.close()
+  }
+})
