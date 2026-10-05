@@ -104,6 +104,7 @@ export type GroupMLSParams = {
    * here for every restore of that group: the commit and rendezvous topics follow the choice.
    */
   recoverySecret?: (handle: GroupHandle) => Promise<Uint8Array>
+  /** Fresh own-leaf binding, at most once per attempt. Return null without waiting on the user. */
   recoveryBinding?: RecoveryBinding
 }
 

@@ -128,7 +128,11 @@ export type FetchTopicResult = {
   head: string | null
   /** The earliest retained log position, or null. Sparse positions cannot establish coverage. */
   oldest: string | null
-  /** Removed log frames after the exclusive cursor, from the same snapshot as messages and head. */
+  /**
+   * Removed log frames after the exclusive cursor and before the first returned frame, or through head if empty.
+   * With no cursor, any log removal counts. Shares one snapshot with messages and head.
+   * Cursor-only and mailbox removal never count. The removal watermark survives empty pages.
+   */
   gap: boolean
   // No `hasMore`/paging cursor by design: a reader draining by `after` terminates once its
   // last-seen sequenceID equals `head` (both `head`/`oldest` survive a trim); against a

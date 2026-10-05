@@ -4,7 +4,9 @@ import type { PendingAppFrame, SendAdmission } from '@kumiai/rpc'
 type PersistOpened = (stagedState: Uint8Array, record: PendingAppFrame) => Promise<void>
 
 export type HandleAccess = {
+  /** Published with admission after mutation/open and after replacement adoption resolves. */
   epoch(): number
+  /** Lock-free snapshot. During adoption it describes the epoch being left. */
   admission(): SendAdmission
   read<TValue>(fn: (handle: GroupHandle) => TValue | Promise<TValue>): Promise<TValue>
   mutate<TValue>(

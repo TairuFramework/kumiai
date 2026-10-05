@@ -353,7 +353,7 @@ export type CommitContext = {
  */
 export type PendingRecovery = {
   epoch: number
-  /** Remember the replacement binding after an authoritative lifecycle refusal. */
+  /** Mark an authoritative binding/lapse/floor refusal. Bounded memory survives ratchets, not restart. */
   markBindingUnusable(): void
   /** Bind judgement to the published tuple and derive from the speculative epoch. */
   confirmationKey(position: string, commitDigest: string): Promise<Uint8Array>
@@ -490,7 +490,7 @@ export type GroupMLS = {
    * Open a sealed reply with the key minted for `requestID` and BUILD the external commit that
    * rejoins this peer. Non-mutating: the rejoined handle is adopted only in
    * {@link PendingRecovery.onAccepted}, because the commit still has to win a compare-and-set at
-   * the head.
+   * the head AND obtain a counted member confirmation.
    *
    * `null` for bytes this peer cannot open OR cannot trust. HPKE base mode needs only the
    * requester's public ephemeral key, which rides the public request in the clear — so a

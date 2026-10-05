@@ -397,6 +397,7 @@ type ProtocolSurfaceOf<
   Events extends GroupEventDefs<Protocol> = GroupEventDefs<Protocol>,
   Requests extends GroupRequestDefs<Protocol> = GroupRequestDefs<Protocol>,
 > = {
+  /** Log dispatch resolves at durable acceptance, with ordered at-least-once delivery and completion-safe retries. */
   dispatch: <P extends keyof Events & string, T extends Events[P] = Events[P]>(
     prc: P,
     ...args: T['Data'] extends never ? [config?: { data?: never }] : [config: { data: T['Data'] }]
@@ -444,6 +445,8 @@ export type GroupPeer<Protocols extends Record<string, GroupProtocolDefinition>>
    * until `onAccepted` runs, since a losing attempt is discarded whole.
    *
    * Holds the commit mutex for its whole run, so two `build()` calls never race one handle.
+   * `holdLogSends` blocks submissions immediately, including prepared frames, until landing or known loss.
+   * Existing log submissions settle before the held commit is journalled or published.
    *
    * A RESULT means it landed and `onAccepted` ran; a THROW means it did not — stranded, ledger
    * incomplete ({@link "commit".RecoveryRequiredError}), or deadline lost
@@ -501,7 +504,10 @@ export type GroupPeer<Protocols extends Record<string, GroupProtocolDefinition>>
    */
   reauthorize: () => void
   dispose: () => Promise<void>
-  /** Wait for disposal and all host effects. Never await this from a host callback. */
+  /**
+   * After dispose(), wait for teardown and every invoked host effect, including abandoned promises.
+   * Never await from this peer's counted callbacks or port calls. Drain before replacing its owner.
+   */
   drained: () => Promise<void>
 }
 

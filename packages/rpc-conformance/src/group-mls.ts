@@ -706,6 +706,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
             key,
           })
           expect((await alice.mls.confirmationKey('position', 'other')).key).not.toEqual(key)
+          expect((await alice.mls.confirmationKey('other', 'digest')).key).not.toEqual(key)
           await pending.onAccepted()
           await pending.onAccepted()
           expect(await bob.mls.readEpoch()).toBe(pending.epoch)

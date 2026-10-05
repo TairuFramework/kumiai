@@ -33,24 +33,32 @@ overview: https://github.com/TairuFramework/kigu/blob/main/docs/stack.md
 | [The app lane](../reference/app-lane.md) | The anchor and why it is per-epoch, segments, the returning-member drain, the cursor and `frameEpoch`. |
 | [Defining a group protocol](../reference/group-protocols.md) | Procedure kind × retention, and why only events may be `log`. |
 | [Two seals](../reference/sealing.md) | `wrap`/`unwrap` vs `sealEntries`/`openEntries`, and where the version byte sits. |
+| [Bound-leaf lifecycle](../reference/mls-lifecycle.md) | Genesis, membership, proofs, renewal, recovery and security residuals. |
 | [Wake notifications](../reference/wake-notifications.md) | The push doorbell: the sealed hint, leading-edge debouncing, sender verdicts, and the iOS limits. |
 
 ## What a host wires
 
-`createGroupPeer` takes two ports and three durable stores. **The stores are required alongside the
-`mls` port and the type enforces it**, because every one of them fails *silently* when absent:
+`createGroupPeer` takes two ports and four durable stores, plus `appOutboxLimit`.
+The type requires these stores alongside the `mls` port because they preserve commit, rotation, cursor and send state.
 
 | | |
 | --- | --- |
 | `GroupCrypto` | `epoch`, `exportSecret`, `wrap`, `unwrap`, `frameEpoch`, `frameAAD`, `sealEntries`, `openEntries`; optional `pending` for durable app delivery |
-| `GroupMLS` | commit lifecycle, `rosterEntries`, `readCommitHeader` (incl. `external`) |
-| `CommitJournal` | single slot; loses a commit whose process died in the acceptance window |
+| `GroupMLS` | commit lifecycle, synchronous `sendAdmission`, recovery preparation and confirmed adoption, verdicts, roster and commit headers |
+| `CommitJournal` | single slot preserving commits and revoke holds across the acceptance crash window |
 | `AnchorStore` | the anchor and one unresolved advance, repaired before another advance or startup delivery |
+| `AppOutbox` | durable ordered log acceptance, encrypted by the host, bounded by `appOutboxLimit` |
 | `AppCursorStore` | the read position; without it the drain re-reads history forever |
 
-`onAppWindowPruned` is **optional** — the line is whether omitting it loses messages. A host with no
-cursor store partitions or re-reads; a host ignoring the pruned signal loses nothing it would not
-have lost anyway. It is merely not told.
+`onAppWindowPruned` is optional and reports the fetch's `gap` on every page with a cursor.
+The notice carries that fetch's exclusive cursor and `oldest: string | null`, null for an empty retained window.
+Notices deduplicate per topic and cursor in memory. Surviving frames still deliver, and a restart can repeat a notice.
+Removing only the cursor frame reports no gap. Sparse `oldest` positions cannot establish coverage.
+
+Log dispatch resolves at durable outbox acceptance, with at-least-once delivery and per-sender order.
+Hosts encrypt the outbox, make handlers completion-safe, and give each group's stores to one designated-hub peer.
+Ownership handover disposes that peer and awaits `drained()` before starting its replacement.
+The [app lane](../reference/app-lane.md) defines retries, rotation repair, callback safety and notice loss.
 
 **A host implementing the ports itself owes the conformance suites.** `GroupCrypto.exportSecret` is
 the method whose only failure mode is silent: get it wrong and the group still works, members still
@@ -69,11 +77,11 @@ opens those fetched frames and the delivery worker runs outside the commit and a
 Bounds this design has, on purpose, rather than hides:
 
 - **A member away beyond the retention window** loses those messages — surfaced as a pruned-window
-  event, never silent.
+  notice from each cursor-bearing fetch, including an empty retained window. Notices can be lost on crash or disposal.
 - **A host advancing outside the peer can lose a rotation secret.** The durable rotation record then
   requires confirmed recovery before publishing or advancing again.
-- **A laggard publisher** — a member still at epoch E writing to segment E's topic after the group
-  has rotated past it seals bytes nobody can open again. Inherent.
+- **A laggard publisher retains its accepted log entries.** The worker catches up or obtains confirmed recovery, then re-seals at the current epoch.
+  Sustained commit pressure can delay certification. Ephemeral traffic remains best-effort.
 - **A fresh joiner cannot drain pre-join frames** (its ts-mls history window is empty). Correct by
   design: forward secrecy.
 - **Durable log delivery depends on the hub and the peer's epoch.** A hub can withhold or omit

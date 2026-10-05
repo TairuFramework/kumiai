@@ -17,7 +17,10 @@ export type AppOutboxEntry = {
   lastAttempt: { epoch: number; floor: string | null; attempts: number } | null
 }
 
-/** Owned by one live peer per group. Writes are durable before resolution. */
+/**
+ * Owned by one live peer per group. Writes are durable before resolution.
+ * Hosts encrypt plaintext at rest and clear it on leave/deletion, choosing physical erasure policy.
+ */
 export type AppOutbox = {
   /** Atomic insert or replace by seq. A rejection leaves storage unchanged. */
   put(entry: AppOutboxEntry): Promise<void>

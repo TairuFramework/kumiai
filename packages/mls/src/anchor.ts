@@ -38,8 +38,11 @@ const decoder = new TextDecoder()
 export type GroupAnchor = {
   creatorDID: string
   version: number
+  /** Immutable lifecycle controller. All peers must understand the same release's lifecycle rules. */
   controller?: string
+  /** Seconds, default 86,400, maximum 604,800. */
   leafLifetime?: number
+  /** Seconds, default 2,592,000, maximum 31,536,000. */
   trustedGrantLifetime?: number
   /**
    * Opaque consumer payload written once at creation; `@kumiai/mls` never reads or interprets

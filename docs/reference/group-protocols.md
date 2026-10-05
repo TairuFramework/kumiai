@@ -32,3 +32,17 @@ also throws on one at definition time, for the caller who reached it with types 
 
 See [lanes and retention](./lanes-and-retention.md) for what `log` and ephemeral mean at the hub,
 and [reserved namespaces](./reserved-namespaces.md) for the prefixes a procedure name may not use.
+
+## Dispatch and retry
+
+`retentionOf` follows the declaration, so callers cannot choose retention per call.
+Log `dispatch` resolves after durable outbox insertion. It does not wait for publication or certification.
+A rejection accepts nothing. Per-sender log order includes unresolved insert reservations and re-seals after epoch changes.
+Delivery is at least once across epoch changes and restart. Handlers must be completion-safe on retry, including after partial failure.
+A duplicate must finish remaining effects. No envelope message ID provides deduplication.
+
+The host supplies `AppOutbox` and `appOutboxLimit` alongside the MLS port.
+Dispatch rejects with `SendNotAdmissibleError`, `AppOutboxFullError` or `AppEntryTooLargeError` before accepting the event.
+The encoded plaintext limit is `MAX_APP_ENTRY_BYTES = 524,288`.
+The [app lane](./app-lane.md#durable-log-dispatch) defines storage, encryption, ordering and recovery obligations.
+Ephemeral events and directed calls never enter the outbox and retain the [narrowed delivery promise](./lanes-and-retention.md#ephemeral-delivery).

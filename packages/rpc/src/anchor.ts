@@ -20,7 +20,10 @@ export type AnchorSlot = {
   }
 }
 
-/** The host saves this slot before advancing and clears pending after resolving that advance. */
+/**
+ * Durable single slot, owned by one live peer. Each record spans one advance and resolves before another.
+ * Only the same advance retries an ambiguous record. Known-unlanded advances clear pending.
+ */
 export type AnchorStore = {
   load(): Promise<AnchorSlot | null>
   save(slot: AnchorSlot): Promise<void>

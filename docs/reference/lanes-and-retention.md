@@ -83,8 +83,34 @@ throws the hub's own error. A host that wires no callback therefore still cannot
 for a healthy one — a peer that cannot receive on a topic does not go on transmitting there. The
 callback exists because a peer that only *reads* a topic calls nothing that could throw.
 
-When the drain finds the hub's oldest retained frame is newer than its cursor, the peer fires
-`onAppWindowPruned` — a **notice**, not an error (surviving frames are delivered anyway), naming the
-group and the gap's edges. It carries **no wall-clock**: "messages since \<date\>" is the host's own
-sentence, from the host's own HLC. It over-reports, because a peer whose cursor frame has aged out
-cannot prove nothing followed it — that is the side to be wrong on.
+## Fetch coverage and pruning
+
+Every fetch result requires a boolean `gap`, sharing one snapshot with `messages` and stored `head`.
+It reports a removed log frame after the exclusive `after` cursor and before the first returned message.
+For an empty page, it covers removals at or before `head`. With no cursor, it covers any removed log frame.
+Removal of the cursor frame alone is no gap. Mailbox removal never counts.
+Missing or non-boolean `gap` fails the fetch and retries the pull.
+`oldest` names the earliest retained log frame or is null. Positions are sparse per topic, so `oldest` cannot detect gaps.
+
+Log head and the `removedThrough` watermark are monotonic stored state, surviving trim, purge and empty pages.
+Log removal is prefix-only per topic, ordered by position rather than timestamp.
+Age purge stops at the first log frame it must retain, even under a backward clock.
+Mailbox expiry remains independent. Depth eviction retains the head frame, so it cannot produce an empty-page gap below head.
+A fetch after head is empty with `gap: false` when nothing after it was removed.
+
+The app lane checks every page of every pull with an `after` cursor.
+On `gap: true`, `onAppWindowPruned` reports that fetch's own cursor and `oldest: string | null`.
+Null means the retained window is empty. Surviving frames still deliver.
+Notices deduplicate per topic and cursor in memory. A restart may repeat a notice, and no cursor produces no notice.
+The notice contains no wall-clock time. Hosts derive any date description from their own state.
+Persisted notices can be lost on crash or disposal, so hosts recover required state from stores.
+
+A commit-topic gap strands the peer as `retention-gap` and starts confirmed recovery after the lane releases.
+Removing only its cursor frame leaves coverage intact. A fresh joiner rejoins only when an uncovered floor leaves a publication at risk.
+
+## Ephemeral delivery
+
+An ephemeral frame reaches a receiver when the hub accepted it after that receiver's topic subscription was acknowledged.
+Its listeners must register within the acknowledgement TTL, while the receiver still holds the frame's epoch.
+Early subscription on anchor capture and pending-frame handover cover the single-epoch walk window.
+Before subscription acknowledgement, beyond the TTL, or across further epoch advances, ephemeral delivery remains best-effort.
