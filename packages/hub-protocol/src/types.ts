@@ -237,9 +237,9 @@ export type HubStoreEvents = {
  *   a floor no transient gap can lower must set the hub default high enough, or not `purge` topics
  *   whose readers reconnect.
  *
+ * Log removal is prefix-only by position. Head and the removal watermark are monotonic stored state.
  * Verified by the conformance suite in `@kumiai/hub-conformance`.
  */
-/** Log removal is prefix-only by position. Head and the removal watermark are monotonic stored state. */
 export type HubStore = {
   events: EventEmitter<HubStoreEvents>
   publish(params: PublishParams): Promise<PublishResult>
