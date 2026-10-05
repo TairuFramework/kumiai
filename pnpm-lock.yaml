@@ -681,6 +681,9 @@ importers:
       '@kumiai/rpc':
         specifier: workspace:^
         version: link:../../packages/rpc
+      '@kumiai/rpc-conformance':
+        specifier: workspace:^
+        version: link:../../packages/rpc-conformance
       '@sozai/codec':
         specifier: 'catalog:'
         version: 0.4.0

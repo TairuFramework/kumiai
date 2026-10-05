@@ -33,6 +33,7 @@ import {
   chat,
   createMemoryAnchorStore,
   createMemoryAppCursorStore,
+  createMemoryAppOutbox,
   createMemoryCommitJournal,
   type Protocols,
 } from './app-lane-e2e.js'
@@ -144,6 +145,8 @@ async function setup(options: { third?: boolean; deadlineMs?: number } = {}) {
     connection: typeof aliceConnection,
   ) {
     return createGroupPeer<Protocols>({
+      appOutbox: createMemoryAppOutbox(),
+      appOutboxLimit: 128,
       hub: connection,
       crypto: createGroupCrypto({ access }),
       mls,

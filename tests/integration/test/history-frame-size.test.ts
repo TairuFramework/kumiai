@@ -13,6 +13,7 @@ import {
   chat,
   createMemoryAnchorStore,
   createMemoryAppCursorStore,
+  createMemoryAppOutbox,
   createMemoryCommitJournal,
   type Protocols,
 } from './app-lane-e2e.js'
@@ -80,6 +81,8 @@ test('a final frame one byte above the hub cap is rejected before journalling or
   const journal = createMemoryCommitJournal()
   const put = vi.spyOn(journal, 'put')
   const peer = createGroupPeer<Protocols>({
+    appOutbox: createMemoryAppOutbox(),
+    appOutboxLimit: 128,
     hub: connection,
     crypto,
     mls,

@@ -28,6 +28,8 @@ import type {
   Anchor,
   AnchorStore,
   AppCursorStore,
+  AppOutbox,
+  AppOutboxEntry,
   CommitJournal,
   GroupPeer,
   GroupProtocolDefinition,
@@ -58,6 +60,35 @@ export type Protocols = { chat: typeof chat }
 // component under test: the peer, the hub, the MLS handles and the crypto are
 // all real, and a host has to put its anchor, cursor and journal somewhere.
 // ---------------------------------------------------------------------------
+
+export function createMemoryAppOutbox(): AppOutbox & { failNextPut(): void } {
+  let refusePut = false
+  const rows = new Map<number, AppOutboxEntry>()
+  const copy = (entry: AppOutboxEntry): AppOutboxEntry => ({
+    ...entry,
+    data: entry.data.slice(),
+    lastAttempt: entry.lastAttempt == null ? null : { ...entry.lastAttempt },
+  })
+  return {
+    put: async (entry) => {
+      if (refusePut) {
+        refusePut = false
+        throw new Error('Outbox write refused')
+      }
+      rows.set(entry.seq, copy(entry))
+    },
+    list: async () => [...rows.values()].sort((a, b) => a.seq - b.seq).map(copy),
+    remove: async (seq) => {
+      rows.delete(seq)
+    },
+    clear: async () => {
+      rows.clear()
+    },
+    failNextPut: () => {
+      refusePut = true
+    },
+  }
+}
 
 export function createMemoryAnchorStore(): AnchorStore & { stored: () => Anchor | null } {
   let anchor: Anchor | null = null
@@ -141,6 +172,7 @@ export type Member = {
   handle: () => GroupHandle
   adopt: (handle: GroupHandle) => Promise<void>
   anchorStore: ReturnType<typeof createMemoryAnchorStore>
+  appOutbox: AppOutbox
   appCursorStore: ReturnType<typeof createMemoryAppCursorStore>
   journal: ReturnType<typeof createMemoryCommitJournal>
   stateStore: StateStore
@@ -213,13 +245,16 @@ export function makeMember(params: MakeMemberParams): Member {
   })
 
   const connection = hub.connect(identity)
+  const appOutbox = restartOf?.appOutbox ?? createMemoryAppOutbox()
   const peer = createGroupPeer<Protocols>({
+    appOutboxLimit: 128,
     hub: connection,
     crypto,
     mls,
     journal,
     anchorStore,
     appCursorStore,
+    appOutbox,
     localDID: identity.id,
     protocols: { chat },
     handlers: { chat: params.handlers ?? {} } as never,
@@ -247,6 +282,7 @@ export function makeMember(params: MakeMemberParams): Member {
     adopt,
     anchorStore,
     appCursorStore,
+    appOutbox,
     journal,
     stateStore,
     pendingStore,

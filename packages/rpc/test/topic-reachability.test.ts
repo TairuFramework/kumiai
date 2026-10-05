@@ -8,6 +8,7 @@ import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryCommitJournal } from './fixtures/journal.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
+import { createMemoryAppOutbox } from './fixtures/outbox.js'
 import { adoptJournalledBlob } from './fixtures/peer.js'
 
 const room = defineGroupProtocol({
@@ -38,6 +39,8 @@ async function startPeerWithLocalDID(localDID: string) {
   const anchorStore = createMemoryAnchorStore()
   const appCursorStore = createMemoryAppCursorStore()
   const peer = createGroupPeer<Protocols>({
+    appOutbox: createMemoryAppOutbox(),
+    appOutboxLimit: 128,
     hub,
     crypto,
     mls,

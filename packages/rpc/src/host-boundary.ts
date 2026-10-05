@@ -96,6 +96,8 @@ export const peerHostFields = {
   journal: 'port',
   anchorStore: 'port',
   appCursorStore: 'port',
+  appOutbox: 'port',
+  appOutboxLimit: 'data',
   adoptJournalled: 'callback',
   handlers: 'handlers',
   recovery: 'recovery',

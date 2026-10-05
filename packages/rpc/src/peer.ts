@@ -27,6 +27,7 @@ import type { Anchor, AnchorStore } from './anchor.js'
 import { decodeAppAAD, encodeAppAAD } from './app-aad.js'
 import type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
 import { type AppDeliveryResumed, type AppDeliveryStalled, createAppLane } from './app-lane.js'
+import { type AppOutbox, createAppOutboxAcceptance } from './app-outbox.js'
 import {
   type AppliedCommit,
   classifyCommit,
@@ -194,6 +195,10 @@ const CONFIDENCE_RANK: Record<StrandConfidence, number> = {
 export type GroupPeerMLSParams = {
   /** MLS lifecycle port. When provided, the peer runs the commit lane. */
   mls: GroupMLS
+  /** Durable log plaintext. The host owns encryption at rest and erasure. */
+  appOutbox: AppOutbox
+  /** Accepted entries plus unresolved inserts. At the cap, new log events are refused. */
+  appOutboxLimit: number
   /** Durable single-slot journal. Written before every publish, cleared on both outcomes. */
   journal: CommitJournal
   /**
@@ -345,6 +350,8 @@ export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefini
   | GroupPeerMLSParams
   | {
       mls?: undefined
+      appOutbox?: undefined
+      appOutboxLimit?: undefined
       journal?: undefined
       adoptJournalled?: undefined
       anchorStore?: undefined
@@ -978,6 +985,15 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       if (anchor === at) return { topicID, payload }
     }
   }
+
+  const appOutboxAcceptance =
+    mls == null
+      ? undefined
+      : createAppOutboxAcceptance({
+          outbox: params.appOutbox,
+          limit: params.appOutboxLimit,
+          admission: () => mls.sendAdmission(),
+        })
 
   const surfaceFor = (name: string): InternalSurface => {
     const runtime = runtimes.get(name)
@@ -3095,7 +3111,20 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   const protocolMethod: GroupPeer<Protocols>['protocol'] = (name) => {
     const key = String(name)
     return {
-      dispatch: (prc, config) => withReady(() => surfaceFor(key).dispatch(prc, config)),
+      dispatch: async (prc, config) => {
+        assertLive()
+        const protocol = protocols[key]
+        if (protocol == null) throw new Error(`Unknown protocol: ${key}`)
+        if (appOutboxAcceptance != null && retentionOf(protocol, prc) === 'log') {
+          await appOutboxAcceptance.accept({
+            protocol: key,
+            prc,
+            data: encodeEventFrame(prc, config?.data ?? {}),
+          })
+          return
+        }
+        return withReady(() => surfaceFor(key).dispatch(prc, config))
+      },
       request: (prc, config) => withReady(() => surfaceFor(key).request(prc, config)),
       gather: async (prc, config) => {
         const outcome = await readyOrAbort(config?.signal)
@@ -3161,6 +3190,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     dispose: () => {
       if (disposePromise != null) return disposePromise
       disposed = true
+      appOutboxAcceptance?.close()
       clearRecoveryRetry()
       boundary.close()
       abortPendingRestore?.()

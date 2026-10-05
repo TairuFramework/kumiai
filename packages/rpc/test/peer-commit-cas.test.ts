@@ -15,6 +15,7 @@ import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryCommitJournal } from './fixtures/journal.js'
 import { createMemoryGroupMLS, memoryEntryID } from './fixtures/memory-group-mls.js'
+import { createMemoryAppOutbox } from './fixtures/outbox.js'
 import {
   buildInviteCommit,
   buildLedgerCommit,
@@ -388,6 +389,8 @@ describe('the commit loop converges, serializes and journals', () => {
     const wire = (): void => {
       // @ts-expect-error an MLS port arrives with its journal, or it does not arrive
       createGroupPeer<Protocols>({
+        appOutbox: createMemoryAppOutbox(),
+        appOutboxLimit: 128,
         hub,
         crypto: createFakeCrypto({ epoch: 1, localDID: 'bob' }),
         mls,

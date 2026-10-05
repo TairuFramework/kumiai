@@ -1,11 +1,14 @@
 import {
+  type ConformanceAppOutbox,
   type ConformanceCryptoMember,
   type ConformanceMLSMember,
+  testAppOutboxConformance,
   testGroupCryptoConformance,
   testGroupMLSConformance,
   testPendingGroupCryptoConformance,
 } from '@kumiai/rpc-conformance'
 
+import type { AppOutbox } from '../src/app-outbox.js'
 import {
   type GroupCrypto,
   type GroupMLS,
@@ -19,6 +22,7 @@ import {
   memoryEntryID,
   sealMemoryRecoveryVerdict,
 } from './fixtures/memory-group-mls.js'
+import { createMemoryAppOutbox } from './fixtures/outbox.js'
 
 /**
  * The two doubles the whole rpc suite executes against, run against the port contracts
@@ -230,3 +234,6 @@ testGroupMLSConformance({
     }
   },
 })
+
+testAppOutboxConformance({ label: 'createMemoryAppOutbox', createOutbox: createMemoryAppOutbox })
+const _outboxIsAPort = (outbox: AppOutbox): ConformanceAppOutbox => outbox

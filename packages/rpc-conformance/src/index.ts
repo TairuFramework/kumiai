@@ -17,6 +17,13 @@
  *
  * @module rpc-conformance
  */
+
+export {
+  type AppOutboxConformanceParams,
+  type ConformanceAppOutbox,
+  type ConformanceAppOutboxEntry,
+  testAppOutboxConformance,
+} from './app-outbox.js'
 export {
   type ConformanceCryptoGroup,
   type ConformanceCryptoMember,

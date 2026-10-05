@@ -13,6 +13,7 @@ import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryCommitJournal } from './fixtures/journal.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
+import { createMemoryAppOutbox } from './fixtures/outbox.js'
 import {
   adoptJournalledBlob,
   buildLedgerCommit,
@@ -36,6 +37,8 @@ describe('control lane lifecycle', () => {
       onAdvance: (e) => crypto.setEpoch(e),
     })
     const peer = createGroupPeer<Protocols>({
+      appOutbox: createMemoryAppOutbox(),
+      appOutboxLimit: 128,
       hub,
       crypto,
       mls,
@@ -100,6 +103,8 @@ describe('control lane lifecycle', () => {
     const crypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
     const mls = createMemoryGroupMLS({ recoverySecret })
     const peer = createGroupPeer<Protocols>({
+      appOutbox: createMemoryAppOutbox(),
+      appOutboxLimit: 128,
       hub,
       crypto,
       mls,
@@ -129,6 +134,8 @@ describe('control lane lifecycle', () => {
     const crypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
     const mls = createMemoryGroupMLS({ recoverySecret })
     const peer = createGroupPeer<Protocols>({
+      appOutbox: createMemoryAppOutbox(),
+      appOutboxLimit: 128,
       hub,
       crypto,
       mls,
@@ -165,6 +172,8 @@ describe('control lane lifecycle', () => {
     const crypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
     const mls = createMemoryGroupMLS({ recoverySecret })
     const peer = createGroupPeer<Protocols>({
+      appOutbox: createMemoryAppOutbox(),
+      appOutboxLimit: 128,
       hub,
       crypto,
       mls,
@@ -205,6 +214,8 @@ describe('control lane lifecycle', () => {
       onAdvance: (e) => crypto.setEpoch(e),
     })
     const peer = createGroupPeer<Protocols>({
+      appOutbox: createMemoryAppOutbox(),
+      appOutboxLimit: 128,
       hub,
       crypto,
       mls,

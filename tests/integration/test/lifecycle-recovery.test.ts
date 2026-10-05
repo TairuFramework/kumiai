@@ -37,6 +37,7 @@ import {
   chat,
   createMemoryAnchorStore,
   createMemoryAppCursorStore,
+  createMemoryAppOutbox,
   createMemoryCommitJournal,
   type Protocols,
 } from './app-lane-e2e.js'
@@ -155,6 +156,8 @@ function recoveryPeer(params: {
 }) {
   const { hub, identity, access, mls, onRecovery } = params
   return createGroupPeer<Protocols>({
+    appOutbox: createMemoryAppOutbox(),
+    appOutboxLimit: 128,
     hub: hub.connect(identity),
     crypto: createGroupCrypto({ access }),
     mls,

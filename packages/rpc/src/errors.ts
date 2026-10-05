@@ -6,3 +6,25 @@
 export class PeerDisposedError extends Error {
   override name = 'PeerDisposedError'
 }
+
+export class AppOutboxFullError extends Error {
+  override name = 'AppOutboxFullError'
+}
+
+export class AppEntryTooLargeError extends Error {
+  override name = 'AppEntryTooLargeError'
+}
+
+export class SendNotAdmissibleError extends Error {
+  override name = 'SendNotAdmissibleError'
+  #reason: 'lapsed'
+
+  constructor(reason: 'lapsed') {
+    super(`Send is not admissible: ${reason}`)
+    this.#reason = reason
+  }
+
+  get reason(): 'lapsed' {
+    return this.#reason
+  }
+}
