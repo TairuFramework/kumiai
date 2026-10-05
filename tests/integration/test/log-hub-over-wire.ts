@@ -174,6 +174,7 @@ export function createWireHub(options: { retentionSeconds?: number } = {}): Wire
           ),
           head: result.head ?? null,
           oldest: result.oldest ?? null,
+          gap: result.gap,
         }
       },
       receive: () => {

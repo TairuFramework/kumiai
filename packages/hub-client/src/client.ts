@@ -46,6 +46,8 @@ export type FetchTopicResult = {
   }>
   head: string | null
   oldest: string | null
+  /** Removed log frames after the exclusive cursor, from the same snapshot as messages and head. */
+  gap: boolean
 }
 
 export type ReceiveOptions = {
@@ -113,9 +115,22 @@ export class HubClient {
 
   /** Pull a topic's log. The hub gates this on the caller's own subscription. */
   fetchTopic(params: FetchTopicParams): RequestCall<FetchTopicResult> {
-    return this.#client.request('hub/v1/topic/fetch', {
+    const call = this.#client.request('hub/v1/topic/fetch', {
       param: { topicID: params.topicID, after: params.after, limit: params.limit },
     })
+    return Object.assign(
+      call.then((result) => {
+        if (typeof result.gap !== 'boolean') throw new Error('Topic fetch requires a boolean gap')
+        return result
+      }),
+      {
+        id: call.id,
+        abort: call.abort,
+        signal: call.signal,
+        type: call.type,
+        procedure: call.procedure,
+      },
+    )
   }
 
   unsubscribe(params: UnsubscribeParams): RequestCall<{ unsubscribed: boolean }> {

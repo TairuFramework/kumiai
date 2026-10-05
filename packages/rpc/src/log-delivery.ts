@@ -5,13 +5,13 @@ import type { LogPosition } from './cursor.js'
 
 export type EpochFloor = { epoch: number; position: LogPosition | null; covered: boolean }
 export type AppOutboxCleared = { reason: 'removed'; seqs: Array<number> }
-export type CoveredFetchResult = HubFetchTopicResult & { gap: boolean }
+export type CoveredFetchResult = HubFetchTopicResult
 
 export function checkedFetchResult(result: HubFetchTopicResult): CoveredFetchResult {
-  if (!('gap' in result) || typeof result.gap !== 'boolean') {
+  if (typeof result.gap !== 'boolean') {
     throw new Error('Commit fetch requires a boolean gap')
   }
-  return result as CoveredFetchResult
+  return result
 }
 
 type Publication = { epoch: number; floor: LogPosition | null; acknowledged: number }

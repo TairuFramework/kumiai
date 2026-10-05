@@ -587,7 +587,9 @@ test.each([undefined, 'false'])(
     const fetch = hub.fetchTopic.bind(hub)
     const spy = vi.spyOn(hub, 'fetchTopic').mockImplementation(async (params) => {
       const result = await fetch(params)
-      return params.topicID === commitTopic(secret) ? { ...result, gap } : result
+      return params.topicID === commitTopic(secret)
+        ? ({ ...result, gap } as unknown as Awaited<ReturnType<typeof fetch>>)
+        : result
     })
     await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'checked' } })
     await flush()

@@ -126,8 +126,10 @@ export type FetchTopicResult = {
    * `expectedHead: null`, wins, and forks the group.
    */
   head: string | null
-  /** The oldest sequenceID still retained for this topic, or null if the log is empty. */
+  /** The earliest retained log position, or null. Sparse positions cannot establish coverage. */
   oldest: string | null
+  /** Removed log frames after the exclusive cursor, from the same snapshot as messages and head. */
+  gap: boolean
   // No `hasMore`/paging cursor by design: a reader draining by `after` terminates once its
   // last-seen sequenceID equals `head` (both `head`/`oldest` survive a trim); against a
   // fully-trimmed topic it reads forward from null.
@@ -237,6 +239,7 @@ export type HubStoreEvents = {
  *
  * Verified by the conformance suite in `@kumiai/hub-conformance`.
  */
+/** Log removal is prefix-only by position. Head and the removal watermark are monotonic stored state. */
 export type HubStore = {
   events: EventEmitter<HubStoreEvents>
   publish(params: PublishParams): Promise<PublishResult>

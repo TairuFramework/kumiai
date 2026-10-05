@@ -29,6 +29,9 @@
  * CONNECTIONS — the only version that proves the head comparison, sequence mint, append and head
  * advance happen in one transaction.
  *
+ * SQL release runners MUST supply `setTime` and run SQLite and PostgreSQL with separate
+ * publisher and reader connections. The backward-clock clause must run on both engines.
+ *
  * @module hub-conformance
  */
 import type { HubStore } from '@kumiai/hub-protocol'
@@ -49,6 +52,8 @@ export type HubStoreConformanceParams = {
    * allow. Must be greater than zero — a hub that retains nothing has nothing to serve.
    */
   maxRetention: number
+  /** Controls the store clock. Required for SQL release conformance on both database engines. */
+  setTime?: (milliseconds: number) => void
   /**
    * The per-topic log depth `createStore` is configured to keep before evicting the oldest log
    * frame. Omit it and the depth clause is skipped. When present it counts LOG frames only: the
@@ -89,6 +94,149 @@ export function testHubStoreConformance(params: HubStoreConformanceParams): void
     params
 
   describe('HubStore conformance', () => {
+    test.skipIf(params.setTime == null)(
+      'age purge retains a log suffix when the clock moves backwards',
+      async () => {
+        const store = await createStore()
+        await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+        params.setTime?.(100_000)
+        const a = await store.publish({
+          senderDID: ALICE,
+          topicID: TOPIC,
+          payload: payload(1),
+          retain: 'log',
+        })
+        params.setTime?.(50_000)
+        const b = await store.publish({
+          senderDID: ALICE,
+          topicID: TOPIC,
+          payload: payload(2),
+          retain: 'log',
+        })
+        const mailbox = await store.publish({
+          senderDID: ALICE,
+          topicID: TOPIC,
+          payload: payload(3),
+          retain: 'mailbox',
+        })
+        params.setTime?.(110_000)
+        expect(await store.purge({ olderThan: 30 })).toEqual([mailbox.sequenceID])
+        const result = await store.fetchTopic({ subscriberDID: BOB, topicID: TOPIC })
+        expect(result).toMatchObject({ head: b.sequenceID, oldest: a.sequenceID, gap: false })
+        expect(result.messages.map((message) => message.sequenceID)).toEqual([
+          a.sequenceID,
+          b.sequenceID,
+        ])
+        expect(
+          (await store.fetch({ recipientDID: BOB })).messages.map((message) => message.sequenceID),
+        ).toEqual([a.sequenceID, b.sequenceID])
+      },
+    )
+
+    test('acknowledged publishes are visible across topics to another reader', async () => {
+      const store = await createStore()
+      const other = `${TOPIC}:other`
+      await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+      await store.subscribe({ subscriberDID: BOB, topicID: other })
+      for (const topicID of [TOPIC, other, TOPIC, other]) {
+        const published = await store.publish({
+          senderDID: ALICE,
+          topicID,
+          payload: payload(1),
+          retain: 'log',
+        })
+        const result = await store.fetchTopic({ subscriberDID: BOB, topicID })
+        expect(result.head).toBe(published.sequenceID)
+        expect(result.messages.at(-1)?.sequenceID).toBe(published.sequenceID)
+        expect(result.gap).toBe(false)
+      }
+    })
+
+    for (const deleter of ['trim', 'purge', 'depth'] as const) {
+      for (const scenario of [
+        'behind cursor',
+        'cursor only',
+        'empty page',
+        'no cursor',
+        'mailbox',
+        'stored state',
+      ] as const) {
+        if (deleter === 'depth' && scenario === 'empty page') continue
+        test.skipIf(
+          (deleter === 'purge' && params.setTime == null) ||
+            (deleter === 'depth' && maxDepth == null),
+        )(`${deleter} reports gap for ${scenario}`, async () => {
+          const store = await createStore()
+          await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })
+          const publish = async (topicID = TOPIC, retain: 'log' | 'mailbox' = 'log') => {
+            return (await store.publish({ senderDID: ALICE, topicID, payload: payload(1), retain }))
+              .sequenceID
+          }
+          const fetch = (after?: string) =>
+            store.fetchTopic({
+              subscriberDID: BOB,
+              topicID: TOPIC,
+              ...(after != null && { after }),
+            })
+          params.setTime?.(100_000)
+          if (scenario === 'mailbox') {
+            const mailbox = await publish(TOPIC, 'mailbox')
+            await store.ack({ recipientDID: BOB, sequenceIDs: [mailbox] })
+            params.setTime?.(101_000)
+            await publish(TOPIC, 'mailbox')
+            params.setTime?.(102_000)
+            await store.purge({ olderThan: 0 })
+            expect(await fetch()).toMatchObject({
+              gap: false,
+              head: null,
+              oldest: null,
+              messages: [],
+            })
+            return
+          }
+          const ids: Array<string> = [await publish()]
+          expect((await fetch()).gap).toBe(false)
+          if (scenario === 'cursor only') {
+            await publish(`${TOPIC}:other`)
+            await publish(TOPIC, 'mailbox')
+          }
+          params.setTime?.(101_000)
+          ids.push(await publish())
+          params.setTime?.(102_000)
+          if (scenario !== 'empty page') ids.push(await publish())
+          const count = scenario === 'cursor only' || scenario === 'no cursor' ? 1 : 2
+          if (deleter === 'depth') {
+            while (ids.length < (maxDepth as number) + count) ids.push(await publish())
+          } else if (deleter === 'trim') {
+            await store.trim({ topicID: TOPIC, before: ids[count] ?? `${ids.at(-1)}~` })
+          } else {
+            params.setTime?.(100_000 + (count - 1) * 1000)
+            await store.purge({ olderThan: 0 })
+          }
+          const retained = ids.slice(count)
+          const after = scenario === 'no cursor' ? undefined : ids[0]
+          const result = await fetch(after)
+          expect(result.messages.map((message) => message.sequenceID)).toEqual(retained)
+          expect(result.oldest).toBe(retained[0] ?? null)
+          expect(result.head).toBe(ids.at(-1))
+          expect(result.gap).toBe(scenario !== 'cursor only')
+          expect((await fetch(ids[count - 1])).gap).toBe(false)
+          expect((await fetch()).gap).toBe(true)
+          if (scenario === 'empty page') expect((await fetch(ids.at(-1))).gap).toBe(false)
+          if (scenario === 'stored state') {
+            const next = await publish()
+            if (deleter === 'depth') retained.shift()
+            retained.push(next)
+            const later = await fetch(ids[0])
+            expect(later.gap).toBe(true)
+            expect(later.head).toBe(next)
+            expect(later.oldest).toBe(retained[0])
+            expect(later.messages.map((message) => message.sequenceID)).toEqual(retained)
+          }
+        })
+      }
+    }
+
     test('the retention class governs deletion: an acked mailbox frame is gone, an acked log frame is not', async () => {
       const store = await createStore()
       await store.subscribe({ subscriberDID: BOB, topicID: TOPIC })

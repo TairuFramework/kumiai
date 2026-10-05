@@ -136,8 +136,9 @@ export const hubProtocol = {
         head: { type: ['string', 'null'] },
         /** The oldest sequenceID still retained, or null if the log is empty. */
         oldest: { type: ['string', 'null'] },
+        gap: { type: 'boolean' },
       },
-      required: ['messages', 'head', 'oldest'],
+      required: ['messages', 'head', 'oldest', 'gap'],
       additionalProperties: false,
     },
   },

@@ -59,6 +59,29 @@ function createTestClient(testHub: ReturnType<typeof createTestHub>, identity = 
 }
 
 describe('HubClient', () => {
+  test.each([undefined, 'false', 0, null])(
+    'fetch refuses a wire result without boolean coverage (%s)',
+    async (gap) => {
+      const testHub = createTestHub()
+      const { client, transports } = createTestClient(testHub)
+      testHub.store.fetchTopic = async () =>
+        ({ messages: [], head: null, oldest: null, gap }) as unknown as Awaited<
+          ReturnType<typeof testHub.store.fetchTopic>
+        >
+      try {
+        const call = client.fetchTopic({ topicID: TOPIC })
+        expect(call.id).toEqual(expect.any(String))
+        expect(call.abort).toEqual(expect.any(Function))
+        expect(call.signal).toBeInstanceOf(AbortSignal)
+        await expect(call).rejects.toThrow('Topic fetch requires a boolean gap')
+      } finally {
+        await testHub.hub.server.dispose()
+        await transports.dispose()
+        await testHub.transports.dispose()
+      }
+    },
+  )
+
   test('publish to a topic and receive', async () => {
     const testHub = createTestHub()
     const { client: alice, transports: aliceT } = createTestClient(testHub)
