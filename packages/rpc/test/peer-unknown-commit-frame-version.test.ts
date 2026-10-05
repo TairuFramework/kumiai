@@ -90,7 +90,7 @@ describe('a frame whose commit-frame version this build does not know', {
     expect(carol.mls.epoch()).toBe(1)
 
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
-    await drainUntil(() => bob.mls.epoch() > 1)
+    await drainUntil(() => bob.mls.epoch() > 1, 'Bob epoch advance')
     await bob.peer.resync()
     await carol.peer.resync()
 

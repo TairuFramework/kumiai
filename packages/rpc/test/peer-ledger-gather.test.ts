@@ -101,15 +101,15 @@ describe('the ledger gather does not hand the group to the relay', { concurrent:
     const bootstrap = vi.spyOn(alice.mls, 'bootstrapLedger')
     controlRecoveryClock(60)
     const first = alice.peer.recover()
-    await drainUntil(() => opens === 1)
+    await drainUntil(() => opens === 1, 'first ledger open')
     expect(opens).toBe(1)
     await vi.advanceTimersByTimeAsync(15_000)
     expect(await first).toEqual({ advanced: false, reenact: [] })
     const second = alice.peer.recover()
-    await drainUntil(() => opens > 1)
+    await drainUntil(() => opens > 1, 'retry ledger open')
     expect(opens).toBeGreaterThan(1)
     releaseOpen()
-    await drainUntil(() => staleOpenReturned)
+    await drainUntil(() => staleOpenReturned, 'stale ledger open return')
     expect(staleOpenReturned).toBe(true)
     expect(bootstrap).toHaveBeenCalledTimes(0)
     await vi.advanceTimersByTimeAsync(15_000)
@@ -160,7 +160,10 @@ describe('the ledger gather does not hand the group to the relay', { concurrent:
     const first = alice.peer.recover().finally(() => {
       firstSettled = true
     })
-    await drainUntil(() => vi.mocked(alice.mls.bootstrapLedger).mock.calls.length > 0)
+    await drainUntil(
+      () => vi.mocked(alice.mls.bootstrapLedger).mock.calls.length > 0,
+      'ledger bootstrap call',
+    )
     // Expire the gather deadline while bootstrap is held at the port boundary.
     await vi.advanceTimersByTimeAsync(300)
     expect(firstSettled).toBe(false)
@@ -514,7 +517,7 @@ describe('the ledger gather does not hand the group to the relay', { concurrent:
     const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, recovery })
     controlRecoveryClock(60)
     const attempt = alice.peer.recover()
-    await drainUntil(() => ledgerReplies(hub, rs).length === 2)
+    await drainUntil(() => ledgerReplies(hub, rs).length === 2, 'two ledger replies')
     const result = await attempt
 
     // Both responders answered, and only one of them was folded.

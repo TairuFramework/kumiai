@@ -138,7 +138,10 @@ describe('a heal re-enacts by ledger membership', { concurrent: false }, () => {
       members,
       recovery,
     })
-    await drainUntil(() => alice.mls.epoch() === 5 && alice.mls.ledgerIDs().length === 3)
+    await drainUntil(
+      () => alice.mls.epoch() === 5 && alice.mls.ledgerIDs().length === 3,
+      'Alice ledger catch-up',
+    )
     await alice.peer.resync()
 
     expect(alice.mls.epoch()).toBe(bob.mls.epoch())

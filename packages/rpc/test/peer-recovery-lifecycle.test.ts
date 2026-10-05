@@ -120,7 +120,7 @@ describe('recovery lifecycle', { concurrent: false }, () => {
         strands.push(o)
       },
     })
-    await drainUntil(() => eventsOf(events).includes('succeeded'))
+    await drainUntil(() => eventsOf(events).includes('succeeded'), 'recovery success event')
     expect(eventsOf(events)).toEqual(['started', 'succeeded'])
     expect(events[0]).toMatchObject({ trigger: 'automatic', groupID: commitTopic(rs) })
     expect(strands).toHaveLength(1)
@@ -130,7 +130,7 @@ describe('recovery lifecycle', { concurrent: false }, () => {
       recoverySecret: rs,
       epoch: bob.mls.epoch() + 1,
     })
-    await drainUntil(() => strands.length === 2)
+    await drainUntil(() => strands.length === 2, 'two recovery strands')
     expect(strands).toHaveLength(2)
     expect(strands[1]?.position).toBe(next.sequenceID)
     await bob.peer.dispose()
@@ -444,7 +444,7 @@ describe('recovery lifecycle', { concurrent: false }, () => {
     })
     const opened = vi.spyOn(bob.mls, 'openSealedLedger')
     const recovery = bob.peer.recover()
-    await drainUntil(() => opened.mock.calls.length > 0)
+    await drainUntil(() => opened.mock.calls.length > 0, 'ledger open call')
     await vi.advanceTimersByTimeAsync(100)
     expect(await recovery).toEqual({ advanced: false, reenact: [] })
     expect(eventsOf(events)).toEqual(['started', 'failed'])
@@ -493,8 +493,9 @@ describe('recovery lifecycle', { concurrent: false }, () => {
         events.push(e)
       },
     })
-    await drainUntil(() =>
-      hub.published.some((m) => m.topicID === rendezvousTopic(rs) && m.senderDID === 'bob'),
+    await drainUntil(
+      () => hub.published.some((m) => m.topicID === rendezvousTopic(rs) && m.senderDID === 'bob'),
+      'Bob rendezvous publication',
     )
     const recovery = bob.peer.recover()
     releaseReply()

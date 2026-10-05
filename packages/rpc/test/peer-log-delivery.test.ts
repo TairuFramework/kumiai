@@ -336,7 +336,7 @@ describe('recovery ordering', { concurrent: false }, () => {
         return publish(params)
       })
       await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'rejoined' } })
-      await drainUntil(() => received.length === 1)
+      await drainUntil(() => received.length === 1, 'delivered log message')
       expect(received).toEqual([{ text: 'rejoined' }])
       expect(notices[0]).toMatchObject({
         kind: 'retention-gap',

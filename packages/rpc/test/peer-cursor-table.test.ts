@@ -18,9 +18,9 @@ const flush = (ms = 30) => new Promise((r) => setTimeout(r, ms))
  *  both race-free and faster (it returns the instant the state settles). Used only for POSITIVE
  *  outcomes — a non-event (nobody heals) has no condition to wait on and keeps a bounded sleep. */
 async function waitFor(condition: () => boolean, description: string, timeoutMs = 3000) {
-  const start = Date.now()
+  const start = performance.now()
   while (!condition()) {
-    if (Date.now() - start > timeoutMs) {
+    if (performance.now() - start > timeoutMs) {
       throw new Error(`Timeout waiting for ${description} after ${timeoutMs}ms`)
     }
     await new Promise((r) => setTimeout(r, 5))

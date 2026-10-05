@@ -111,9 +111,9 @@ describe('recovery rendezvous', { concurrent: false }, () => {
     })
     try {
       const recovery = bob.peer.recover()
-      await drainUntil(() => seal.mock.calls.length === 1)
+      await drainUntil(() => seal.mock.calls.length === 1, 'first recovery seal')
       await vi.advanceTimersByTimeAsync(60)
-      await drainUntil(() => dropped)
+      await drainUntil(() => dropped, 'recovery request drop')
       await vi.advanceTimersByTimeAsync(60)
       expect((await recovery).advanced).toBe(true)
       expect(dropped).toBe(true)
@@ -160,14 +160,16 @@ describe('recovery rendezvous', { concurrent: false }, () => {
           encodeRecoveryConfirmRequest({ ...original, requestID, request }),
         ),
       })
-      await drainUntil(() =>
-        hub.published.some((message) => {
-          const frame = decodeHandshakeFrame(message.payload)
-          return (
-            frame.kind === HANDSHAKE_KIND.recoveryVerdict &&
-            decodeRecoveryVerdict(frame.payload).requestID === requestID
-          )
-        }),
+      await drainUntil(
+        () =>
+          hub.published.some((message) => {
+            const frame = decodeHandshakeFrame(message.payload)
+            return (
+              frame.kind === HANDSHAKE_KIND.recoveryVerdict &&
+              decodeRecoveryVerdict(frame.payload).requestID === requestID
+            )
+          }),
+        'confirmation verdict publication',
       )
       const response = hub.published.find((message) => {
         const frame = decodeHandshakeFrame(message.payload)
@@ -256,7 +258,7 @@ describe('recovery rendezvous', { concurrent: false }, () => {
     const recovery = bob.peer.recover()
     void recovery.catch(() => {})
     try {
-      await drainUntil(() => sealing.mock.calls.length > 0)
+      await drainUntil(() => sealing.mock.calls.length > 0, 'recovery seal call')
       const committing = bob.peer.commit(build)
       void committing.catch(() => {})
       await setImmediate()

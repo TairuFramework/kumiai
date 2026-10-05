@@ -261,7 +261,10 @@ describe('dispose against a replay made afterwards', { concurrent: false }, () =
     await alice.peer.resync()
     const open = vi.spyOn(alice.mls, 'openSealedLedger')
     const recovery = alice.peer.recover()
-    await drainUntil(() => open.mock.results.some((result) => result.type === 'return'))
+    await drainUntil(
+      () => open.mock.results.some((result) => result.type === 'return'),
+      'ledger open return',
+    )
     await vi.advanceTimersByTimeAsync(400)
     await recovery
     expect(await alice.mls.isLedgerComplete()).toBe(false)

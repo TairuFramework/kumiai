@@ -1,4 +1,3 @@
-import { setImmediate } from 'node:timers/promises'
 import { type OwnIdentity, randomIdentity } from '@kokuin/token'
 import {
   commitInvite,
@@ -38,6 +37,7 @@ import {
   createMemoryCommitJournal,
   type Protocols,
 } from './app-lane-e2e.js'
+import { drainUntil } from './fixtures/drain.js'
 import { createWireHub } from './log-hub-over-wire.js'
 
 beforeAll(async () => {
@@ -74,21 +74,13 @@ function controlRecoveryClock() {
   })
 }
 
-// Let real cryptography and wire delivery finish without spending the recovery deadline.
-async function drainUntil(done: () => boolean) {
-  while (!done()) {
-    await vi.advanceTimersByTimeAsync(0)
-    await setImmediate()
-  }
-}
-
 async function completeRecovery(peer: Awaited<ReturnType<typeof setup>>['bob']) {
   let settled = false
   const recovery = peer.recover().finally(() => {
     settled = true
   })
   void recovery.catch(() => {})
-  await drainUntil(() => settled)
+  await drainUntil(() => settled, 'recovery settlement')
   return recovery
 }
 
@@ -323,7 +315,7 @@ test('lost confirmations through the deadline leave an orphan which the next rej
   }
   const recovery = s.bob.recover()
   void recovery.catch(() => {})
-  await drainUntil(() => dropped)
+  await drainUntil(() => dropped, 'recovery request drop')
   await vi.advanceTimersByTimeAsync(450)
   expect((await recovery).advanced).toBe(false)
   expect(s.events).toContainEqual(
@@ -338,7 +330,10 @@ test('lost confirmations through the deadline leave an orphan which the next rej
   ).toHaveLength(1)
   dropping = false
   await vi.advanceTimersByTimeAsync(1000)
-  await drainUntil(() => s.events.some((event) => event.phase === 'succeeded'))
+  await drainUntil(
+    () => s.events.some((event) => event.phase === 'succeeded'),
+    'recovery success event',
+  )
   expect(s.bobGroup().epoch).toBe(s.aliceGroup().epoch)
   expect(s.events).toContainEqual(expect.objectContaining({ phase: 'succeeded' }))
   expect(
@@ -427,9 +422,9 @@ test('stale GroupInfo is superseded and retried without adopting the stale candi
     settled = true
   })
   void recovery.catch(() => {})
-  await drainUntil(() => supersededOpened)
+  await drainUntil(() => supersededOpened, 'superseded ledger open')
   await vi.advanceTimersByTimeAsync(60)
-  await drainUntil(() => settled)
+  await drainUntil(() => settled, 'recovery settlement')
   expect((await recovery).advanced).toBe(true)
   expect(adopted).toEqual([3])
   expect(s.published.filter((kind) => kind === HANDSHAKE_KIND.commit)).toHaveLength(2)
@@ -549,7 +544,7 @@ test('forged confirmations are ignored and an unknown signer refusal is advisory
   }
   const recovery = s.bob.recover()
   void recovery.catch(() => {})
-  await drainUntil(() => refusalOpened)
+  await drainUntil(() => refusalOpened, 'refusal ledger open')
   await vi.advanceTimersByTimeAsync(450)
   expect((await recovery).advanced).toBe(false)
   const outcome = s.events.find(

@@ -1,4 +1,3 @@
-import { setImmediate } from 'node:timers/promises'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { RecoveryRequiredError } from '../src/commit.js'
@@ -9,13 +8,7 @@ import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { encodeMemoryCommit, memoryEntryID } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer, type TestPeer } from './fixtures/peer.js'
-
-async function drainUntil(done: () => boolean) {
-  while (!done()) {
-    await vi.advanceTimersByTimeAsync(0)
-    await setImmediate()
-  }
-}
+import { drainUntil } from './fixtures/recovery-clock.js'
 
 async function waitForHeal(
   bob: TestPeer,
@@ -24,20 +17,23 @@ async function waitForHeal(
   withResponder: boolean,
 ) {
   if (!withResponder) {
-    await drainUntil(() =>
-      hub.published.some((message) => {
-        if (message.senderDID !== 'bob') return false
-        try {
-          return decodeHandshakeFrame(message.payload).kind === HANDSHAKE_KIND.recoveryRequest
-        } catch {
-          return false
-        }
-      }),
+    await drainUntil(
+      () =>
+        hub.published.some((message) => {
+          if (message.senderDID !== 'bob') return false
+          try {
+            return decodeHandshakeFrame(message.payload).kind === HANDSHAKE_KIND.recoveryRequest
+          } catch {
+            return false
+          }
+        }),
+      'Bob recovery request publication',
     )
     await vi.advanceTimersByTimeAsync(recovery.timeoutMs)
   }
-  await drainUntil(() =>
-    events.some((event) => event.phase === (withResponder ? 'succeeded' : 'failed')),
+  await drainUntil(
+    () => events.some((event) => event.phase === (withResponder ? 'succeeded' : 'failed')),
+    `recovery ${withResponder ? 'success' : 'failure'} event`,
   )
   await bob.peer.resync()
 }
