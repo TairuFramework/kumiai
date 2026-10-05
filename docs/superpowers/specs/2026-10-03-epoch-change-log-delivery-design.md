@@ -204,11 +204,12 @@ The worker sets `healRequested` and calls `healIfRequested` once its pull has re
 
 **Recovery.** A restart runs the same sequence: catch up, seal at the current epoch, durable update, publish, probe. Acknowledged publications are in memory only, and a preliminary probe never certifies a later publication, so every entry left in the outbox is published again at least once. That costs at most one duplicate per entry, which at-least-once already allows.
 
-**Durable commit cursor.** The host persists `{ position, epoch }` through required `AppOutbox.getCommitCursor()` and `putCommitCursor()` methods.
+**Durable commit cursor.** The host persists `{ position, epoch, stranded? }` through required `AppOutbox.getCommitCursor()` and `putCommitCursor()` methods. `position` is null when none is durable yet.
 Cursor writes follow durable MLS state for that epoch. Entry clearing preserves the cursor. Group deletion clears it separately.
 On init, the peer seeds `reconciledHead` and the covered floor only if the stored epoch equals `port.readEpoch()`.
 An epoch mismatch discards the stored cursor and walks from the oldest retained frame.
 A restart with a matching cursor and an undelivered entry costs at most one duplicate and performs no heal or rejoin.
+A strand is persisted, not just held in memory: the durable position stays before the stranding frame and the record carries `stranded: true`, so a restart at the same epoch re-raises the strand and heals. A rejoin clears the strand on confirmed adoption, even when it lands on the same epoch number.
 
 ### 5. Ports
 
@@ -224,8 +225,10 @@ export type AppOutboxEntry = {
 }
 
 export type AppOutbox = {
-  getCommitCursor(): Promise<{ position: string; epoch: number } | null>
-  putCommitCursor(cursor: { position: string; epoch: number } | null): Promise<void>
+  getCommitCursor(): Promise<{ position: string | null; epoch: number; stranded?: true } | null>
+  putCommitCursor(
+    cursor: { position: string | null; epoch: number; stranded?: true } | null,
+  ): Promise<void>
   put(entry: AppOutboxEntry): Promise<void>       // insert or replace by seq; atomic; durable before it resolves
   list(): Promise<Array<AppOutboxEntry>>          // ascending seq
   remove(seq: number): Promise<void>              // durable before it resolves; unknown seq is a no-op

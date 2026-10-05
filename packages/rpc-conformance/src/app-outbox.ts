@@ -8,9 +8,11 @@ export type ConformanceAppOutboxEntry = {
   lastAttempt: { epoch: number; floor: string | null; attempts: number } | null
 }
 
+export type ConformanceCommitCursor = { position: string | null; epoch: number; stranded?: true }
+
 export type ConformanceAppOutbox = {
-  getCommitCursor(): Promise<{ position: string; epoch: number } | null>
-  putCommitCursor(cursor: { position: string; epoch: number } | null): Promise<void>
+  getCommitCursor(): Promise<ConformanceCommitCursor | null>
+  putCommitCursor(cursor: ConformanceCommitCursor | null): Promise<void>
   put(entry: ConformanceAppOutboxEntry): Promise<void>
   list(): Promise<Array<ConformanceAppOutboxEntry>>
   remove(seq: number): Promise<void>
@@ -35,6 +37,8 @@ export function testAppOutboxConformance(params: AppOutboxConformanceParams): vo
       if (read != null) read.epoch = 10
       await outbox.clear()
       expect(await outbox.getCommitCursor()).toEqual({ position: '000000000004', epoch: 3 })
+      await outbox.putCommitCursor({ position: null, epoch: 3, stranded: true })
+      expect(await outbox.getCommitCursor()).toEqual({ position: null, epoch: 3, stranded: true })
       await outbox.putCommitCursor(null)
       expect(await outbox.getCommitCursor()).toBeNull()
     })

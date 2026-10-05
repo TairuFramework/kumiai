@@ -27,7 +27,7 @@ import type { Anchor, AnchorSlot, AnchorStore } from './anchor.js'
 import { decodeAppAAD, encodeAppAAD } from './app-aad.js'
 import type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
 import { type AppDeliveryResumed, type AppDeliveryStalled, createAppLane } from './app-lane.js'
-import { type AppOutbox, createAppOutboxAcceptance } from './app-outbox.js'
+import { type AppOutbox, type CommitCursor, createAppOutboxAcceptance } from './app-outbox.js'
 import {
   type AppliedCommit,
   classifyCommit,
@@ -1270,13 +1270,31 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * (see `cursor.ts`). `null` means nothing processed — read the log from its oldest retained frame.
    */
   let reconciledHead: LogPosition | null = null
+  let durableCursor: CommitCursor | null = null
+  /**
+   * Persist the strand before anything steps past its evidence. The durable position stays where
+   * it was, so a restart re-reads an ahead frame; a losing fork was applied before its winner was
+   * seen, so only the flag carries it across a restart.
+   */
+  const persistStrand = async (): Promise<void> => {
+    if (mls == null || params.appOutbox == null) return
+    const epoch = await mls.readEpoch()
+    if (durableCursor?.stranded === true && durableCursor.epoch === epoch) return
+    const cursor: CommitCursor = {
+      position: durableCursor?.epoch === epoch ? durableCursor.position : null,
+      epoch,
+      stranded: true,
+    }
+    await params.appOutbox.putCommitCursor(cursor)
+    durableCursor = cursor
+  }
   const saveCommitCursor = async (position: LogPosition): Promise<void> => {
     if (mls == null) return
-    // A stranded peer keeps its durable cursor before the evidence: the strand is memory-only,
-    // and a restart at the same epoch must re-read the frame that raised it.
-    if (!stranded) {
-      const epoch = await mls.readEpoch()
-      await params.appOutbox?.putCommitCursor({ position, epoch })
+    if (stranded) await persistStrand()
+    else if (params.appOutbox != null) {
+      const cursor: CommitCursor = { position, epoch: await mls.readEpoch() }
+      await params.appOutbox.putCommitCursor(cursor)
+      durableCursor = cursor
     }
     reconciledHead = position
   }
@@ -1849,6 +1867,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         floor = { ...floor, covered: false }
         stranded = true
         healRequested = true
+        await persistStrand()
         observeStrand({
           position: pageAfter,
           commitDigest: null,
@@ -1993,6 +2012,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             // so the drain stops here and it heals.
             healRequested = true
             stranded = true
+            await persistStrand()
             observeStrand({
               position,
               commitDigest,
@@ -2299,8 +2319,15 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       if (params.appOutbox != null) {
         const cursor = await params.appOutbox.getCommitCursor()
         if (cursor != null && cursor.epoch === (await mls.readEpoch())) {
-          reconciledHead = asLogPosition(cursor.position)
-          floor = { epoch: cursor.epoch, position: reconciledHead, covered: true }
+          durableCursor = cursor
+          if (cursor.position != null) {
+            reconciledHead = asLogPosition(cursor.position)
+            floor = { epoch: cursor.epoch, position: reconciledHead, covered: true }
+          }
+          if (cursor.stranded === true) {
+            stranded = true
+            healRequested = true
+          }
         } else if (cursor != null) {
           await params.appOutbox.putCommitCursor(null)
         }
@@ -3132,12 +3159,16 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             await advanceHandle(
               port,
               async () => {
+                let accepted = false
                 try {
                   await pending.onAccepted()
+                  accepted = true
                 } finally {
                   // A callback can throw after replacing the handle. Observe the ratchet so
                   // bootstrap survives it, while a pre-adoption failure keeps the pending retry.
-                  if ((await port.readEpoch()) !== epochBeforeRejoin) {
+                  // A rejoin from a losing branch can land on its old epoch number, so a resolved
+                  // adoption counts even when the number did not move.
+                  if (accepted || (await port.readEpoch()) !== epochBeforeRejoin) {
                     awaitingBootstrap = { attemptID, trigger, entries: inFlight }
                     // Adoption enacted these bytes even if persistence rejected afterward.
                     if (rejoinedAtEpoch != null) {

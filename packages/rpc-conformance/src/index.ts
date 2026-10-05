@@ -28,6 +28,7 @@ export {
   type AppOutboxConformanceParams,
   type ConformanceAppOutbox,
   type ConformanceAppOutboxEntry,
+  type ConformanceCommitCursor,
   testAppOutboxConformance,
 } from './app-outbox.js'
 export {

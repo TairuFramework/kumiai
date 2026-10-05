@@ -51,7 +51,8 @@ Every lifecycle peer must run the same release.
 - `GroupPeerMLSParams` requires `AppOutbox` and host-configured `appOutboxLimit`.
   Log dispatch resolves at durable acceptance, preserving per-sender order and at-least-once delivery across epoch changes and restarts.
   `MAX_APP_ENTRY_BYTES = 524,288` bounds encoded plaintext. `PeerRemovedError`, `SendNotAdmissibleError`, `AppOutboxFullError` and `AppEntryTooLargeError` reject acceptance.
-  Breaking: hosts implement durable `getCommitCursor()` and `putCommitCursor()` alongside entries, storing `{ position, epoch }`.
+  Breaking: hosts implement durable `getCommitCursor()` and `putCommitCursor()` alongside entries, storing `{ position, epoch, stranded? }` (`position` may be null).
+  A strand persists through the cursor, so a restart at the same epoch heals instead of continuing on a losing fork. A rejoin that lands on the stranded epoch number clears the strand.
   Cursor writes follow durable MLS state. Startup discards epoch mismatches. Entry clearing preserves the cursor, and group deletion clears both.
   Reservations count at the cap. `lastAttempt` is prepared state, never publication evidence. Hosts encrypt plaintext and choose erasure policy.
 - `HandleAccess.admission()` and `GroupMLS.sendAdmission()` synchronously publish the same epoch-paired snapshot as `epoch()`, without acquiring a handle lock.

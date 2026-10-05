@@ -3,13 +3,13 @@ import { afterEach, expect, test, vi } from 'vitest'
 import { digestAppliedCommit } from '../src/classify.js'
 import { decodeCommitFrame } from '../src/commit-frame.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
-import type { StrandObservation } from '../src/peer.js'
+import type { RecoveryEvent, StrandObservation } from '../src/peer.js'
 import { encodeRecoveryConfirmRequest } from '../src/recovery.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryAppOutbox } from './fixtures/outbox.js'
-import { makeMLSPeer, type TestPeer } from './fixtures/peer.js'
+import { buildLedgerCommit, makeMLSPeer, type TestPeer } from './fixtures/peer.js'
 import { controlRecoveryClock, drainUntil } from './fixtures/recovery-clock.js'
 
 const secret = new Uint8Array(32).fill(19)
@@ -66,7 +66,11 @@ test('a restart at the same epoch rediscovers a strand the durable cursor never 
   const ahead = await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 5 })
   await drainUntil(() => strands.length === 1, 'ahead strand')
   expect(strands[0]).toMatchObject({ position: ahead.sequenceID, kind: 'ahead' })
-  expect(await store.getCommitCursor()).toEqual({ position: applied.sequenceID, epoch: 2 })
+  expect(await store.getCommitCursor()).toEqual({
+    position: applied.sequenceID,
+    epoch: 2,
+    stranded: true,
+  })
   await bob.peer.dispose()
   await bob.peer.drained()
   peers.splice(peers.indexOf(bob), 1)
@@ -81,6 +85,90 @@ test('a restart at the same epoch rediscovers a strand the durable cursor never 
   await again.peer.resync()
   await drainUntil(() => restarted.length === 1, 'rediscovered strand')
   expect(restarted[0]).toMatchObject({ position: ahead.sequenceID, kind: 'ahead' })
+})
+
+test('a losing fork strand survives a restart through the durable cursor', async () => {
+  const hub = new FakeHub()
+  hub.acceptAtAnyHead()
+  const members = ['alice', 'bob', 'carol']
+  const recovery = { timeoutMs: 10, deadlineMs: 30, getDelayMs: () => 60_000 }
+  const winner = await publishCommit({
+    hub,
+    senderDID: 'carol',
+    recoverySecret: secret,
+    epoch: 1,
+    entries: ['role:carol=admin'],
+  })
+  const loser = await publishCommit({
+    hub,
+    senderDID: 'alice',
+    recoverySecret: secret,
+    epoch: 1,
+    entries: ['role:alice=admin'],
+  })
+  hub.hideFrom('bob', winner.sequenceID)
+  const store = createMemoryAppOutbox()
+  const strands: Array<StrandObservation> = []
+  const bob = member(hub, {
+    appOutbox: store,
+    members,
+    recovery,
+    onStrand: (observation) => {
+      strands.push(observation)
+    },
+  })
+  await vi.waitFor(() => expect(bob.mls.epoch()).toBe(2))
+  expect(await store.getCommitCursor()).toEqual({ position: loser.sequenceID, epoch: 2 })
+  hub.revealTo('bob', winner.sequenceID)
+  await hub.publish({
+    senderDID: 'zoe',
+    topicID: commitTopic(secret),
+    payload: new Uint8Array([0]),
+  })
+  await vi.waitFor(() => expect(strands.map((strand) => strand.kind)).toEqual(['fork-losing']))
+  expect(await store.getCommitCursor()).toMatchObject({ epoch: 2, stranded: true })
+  await bob.peer.dispose()
+  await bob.peer.drained()
+  peers.splice(peers.indexOf(bob), 1)
+  const recoveries: Array<RecoveryEvent> = []
+  const again = member(hub, {
+    restartOf: bob,
+    members,
+    recovery,
+    onRecovery: (event) => {
+      recoveries.push(event)
+    },
+  })
+  await again.peer.resync()
+  await vi.waitFor(() => expect(recoveries.some((event) => event.phase === 'started')).toBe(true))
+})
+
+test('a rejoin that lands on the stranded epoch number clears the strand', async () => {
+  controlRecoveryClock(5)
+  const hub = new FakeHub()
+  const members = ['alice', 'bob', 'carol']
+  const recovery = { timeoutMs: 60, deadlineMs: 250, getDelayMs: () => 5 }
+  const carol = makeMLSPeer(hub, 'carol', secret, { epoch: 2, members, recovery })
+  peers.push(carol)
+  await carol.peer.resync()
+  // Bob stranded on a losing branch one epoch past the group: the rejoin lands on epoch 3 again.
+  const store = createMemoryAppOutbox()
+  await store.putCommitCursor({ position: null, epoch: 3, stranded: true })
+  const events: Array<RecoveryEvent> = []
+  const bob = member(hub, {
+    appOutbox: store,
+    epoch: 3,
+    members,
+    recovery,
+    onRecovery: (event) => {
+      events.push(event)
+    },
+  })
+  await drainUntil(() => events.some((event) => event.phase === 'succeeded'), 'rejoin')
+  expect(await bob.mls.readEpoch()).toBe(3)
+  expect((await store.getCommitCursor())?.stranded).toBeUndefined()
+  await bob.peer.commit(buildLedgerCommit(bob, []))
+  expect(await bob.mls.readEpoch()).toBe(4)
 })
 
 test('incomplete ledgers skip commit processing and later wakeups can retry', async () => {

@@ -209,11 +209,14 @@ Persisted notices can be lost on crash or dispose. Notices are not replayed, so 
 
 ## Durable commit cursor
 
-`AppOutbox.getCommitCursor()` and `putCommitCursor()` store `{ position, epoch }` separately from queued entries.
+`AppOutbox.getCommitCursor()` and `putCommitCursor()` store `{ position, epoch, stranded? }` separately from queued entries.
+`position` is null when no position is durable yet. The host stores the record as given.
 Each write must be durable before resolution. Clearing entries preserves the cursor. Group deletion clears both.
 The peer writes a cursor only after MLS state for its paired epoch is durable.
 Hosts must finish MLS persistence before successful commit processing or adoption returns.
 Startup seeds the commit walk only when the stored epoch equals `GroupMLS.readEpoch()`.
 An epoch mismatch discards the cursor and starts from the oldest retained frame.
 A matching cursor lets undelivered entries resume without a recovery rejoin, costing at most one duplicate per entry.
+A stranded peer keeps the durable position before the frame that stranded it and records `stranded: true`.
+A restart at the same epoch then re-raises the strand and heals, including after a losing fork it had already stepped past.
 Recovery request keys remain available for at least the configured recovery or ledger deadline, with a 120-second minimum.
