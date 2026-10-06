@@ -1,5 +1,11 @@
 # @kumiai/rpc
 
+## 0.10.4
+
+### Patch Changes
+
+- Wait for an in-flight epoch rebuild before serving `dispatch`, `request`, `gather` and `to()`. A call that lands between teardown and the next epoch's build is now served on the new epoch instead of throwing `Unknown protocol`. A peer disposed during the wait rejects the call with `PeerDisposedError`, and an aborted `gather` resolves empty.
+
 ## 0.10.3
 
 ### Patch Changes

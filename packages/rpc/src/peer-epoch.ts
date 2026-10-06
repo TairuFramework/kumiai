@@ -74,6 +74,8 @@ export type EpochRuntime = {
   teardownEpoch: () => Promise<void>
   /** Teardown then build; a teardown failure still builds, then rethrows. */
   rebuildEpoch: () => Promise<void>
+  /** Resolves once no rebuild is in flight; never rejects. */
+  epochSettled: () => Promise<void>
   surfaceFor: (name: string) => InternalSurface
   sealForSegment: (
     name: string,
@@ -439,7 +441,20 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
     }
   }
 
-  const rebuildEpoch = async (): Promise<void> => {
+  // Teardown empties the runtimes before build fills them, so `surfaceFor` must not run between.
+  const rebuilding = new Set<Promise<void>>()
+
+  const epochSettled = async (): Promise<void> => {
+    while (rebuilding.size > 0) await Promise.allSettled(rebuilding)
+  }
+
+  const rebuildEpoch = (): Promise<void> => {
+    const run = rebuildOnce().finally(() => rebuilding.delete(run))
+    rebuilding.add(run)
+    return run
+  }
+
+  const rebuildOnce = async (): Promise<void> => {
     if (isDisposed()) return
     // Teardown empties the runtimes before it reports a failed child, and a later walk sees the
     // advance as history. Build anyway, then report the failure.
@@ -458,6 +473,7 @@ export function createEpochRuntime<Protocols extends Record<string, ProtocolDefi
     buildEpoch,
     teardownEpoch,
     rebuildEpoch,
+    epochSettled,
     surfaceFor,
     sealForSegment,
     hasInboxLane: () => inboxLane != null,

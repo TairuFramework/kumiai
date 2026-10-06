@@ -555,7 +555,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     note: (name, topicID, message, failure) => appLane.note(name, topicID, message, failure),
     requestAppPull,
   })
-  const { buildEpoch, teardownEpoch, rebuildEpoch, surfaceFor, sealForSegment } = epochRuntime
+  const { buildEpoch, teardownEpoch, rebuildEpoch, epochSettled, surfaceFor, sealForSegment } =
+    epochRuntime
 
   const appOutboxAcceptance =
     mls == null
@@ -2819,19 +2820,29 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     assertLive()
     return fn()
   }
-  const readyOrAbort = async (signal: AbortSignal | undefined): Promise<'ready' | 'aborted'> => {
+  // Ready, and past any epoch rebuild in flight: the protocol surfaces are torn down mid-rebuild.
+  const withEpoch = <T>(fn: () => T | Promise<T>): Promise<T> =>
+    withReady(async () => {
+      await epochSettled()
+      assertLive()
+      return fn()
+    })
+  /** {@link withEpoch}'s wait, abandoned when `signal` aborts. */
+  const epochOrAbort = async (signal: AbortSignal | undefined): Promise<'ready' | 'aborted'> => {
     if (signal == null) {
       await ready
+      await epochSettled()
       return 'ready'
     }
     if (signal.aborted) return 'aborted'
+    const live = ready.then(() => epochSettled())
     let onAbort: (() => void) | undefined
     const aborted = new Promise<'aborted'>((resolve) => {
       onAbort = () => resolve('aborted')
       signal.addEventListener('abort', onAbort, { once: true })
     })
     try {
-      return await Promise.race([ready.then(() => 'ready' as const), aborted])
+      return await Promise.race([live.then(() => 'ready' as const), aborted])
     } finally {
       if (onAbort != null) signal.removeEventListener('abort', onAbort)
     }
@@ -2858,16 +2869,16 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           logDelivery?.trigger()
           return
         }
-        return withReady(() => surfaceFor(key).dispatch(prc, config))
+        return withEpoch(() => surfaceFor(key).dispatch(prc, config))
       },
-      request: (prc, config) => withReady(() => surfaceFor(key).request(prc, config)),
+      request: (prc, config) => withEpoch(() => surfaceFor(key).request(prc, config)),
       gather: async (prc, config) => {
-        const outcome = await readyOrAbort(config?.signal)
+        const outcome = await epochOrAbort(config?.signal)
         assertLive()
         if (outcome === 'aborted') return []
         return surfaceFor(key).gather(prc, config)
       },
-      to: (memberDID) => withReady(() => surfaceFor(key).to(memberDID)),
+      to: (memberDID) => withEpoch(() => surfaceFor(key).to(memberDID)),
     } as ProtocolSurface<Protocols[typeof name]>
   }
 
