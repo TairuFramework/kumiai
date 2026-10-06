@@ -1,6 +1,6 @@
 import type { HubFetchTopicResult } from '@kumiai/hub-tunnel'
 
-import type { AppOutboxEntry, createAppOutboxAcceptance } from './app-outbox.js'
+import type { AppOutboxAcceptance, AppOutboxEntry } from './app-outbox.js'
 import type { LogPosition } from './cursor.js'
 
 export type EpochFloor = { epoch: number; position: LogPosition | null; covered: boolean }
@@ -19,7 +19,7 @@ type LogFrame = { topicID: string; payload: Uint8Array }
 /** A sealed frame with the floor snapshot its admission was checked against. */
 type SealedLogFrame = LogFrame & { floor: EpochFloor }
 export type LogDeliveryParams = {
-  queue: ReturnType<typeof createAppOutboxAcceptance>
+  queue: AppOutboxAcceptance
   ready: () => Promise<void>
   floor: () => EpochFloor
   held: () => boolean

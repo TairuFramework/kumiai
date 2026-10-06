@@ -5,6 +5,7 @@ import {
   createGroup,
   createInvite,
   createKeyPackageBundle,
+  type DeviceRegistry,
   GroupHandle,
   processWelcome,
   recoverySignerEligible,
@@ -187,7 +188,7 @@ test('revocation in either registry is permanent in the union and stale refusals
   const current = candidate as typeof candidate & {
     group: GroupHandle
     sourceTree: GroupHandle['state']['ratchetTree']
-    knownRegistry: ReturnType<typeof registrySeed>
+    knownRegistry: DeviceRegistry
   }
   for (const union of [
     knownRecoveryRegistry(known, registrySeed()),

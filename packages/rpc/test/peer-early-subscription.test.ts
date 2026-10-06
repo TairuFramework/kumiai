@@ -1,5 +1,5 @@
 import type { LogHub } from '@kumiai/hub-tunnel'
-import { expect, test, vi } from 'vitest'
+import { expect, type MockInstance, test, vi } from 'vitest'
 
 import { APP_TOPIC_LABEL, inboxTopic, protocolTopic } from '../src/topic.js'
 import { createMemoryAnchorStore } from './fixtures/anchor.js'
@@ -60,7 +60,7 @@ for (const scenario of ['acknowledged', 'delayed', 'two epochs', 'expired'] as c
       handlers: { 'chat/changed': (event: { data: unknown }) => void deliveries.push(event.data) },
     })
     const alice = makeMLSPeer(hub, 'alice', recoverySecret, { members })
-    let clock: ReturnType<typeof vi.spyOn> | undefined
+    let clock: MockInstance | undefined
     try {
       await Promise.all([alice.peer.replay(), bob.peer.replay()])
       fake.detach('bob')

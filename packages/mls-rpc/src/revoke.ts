@@ -1,4 +1,9 @@
-import { type GroupHandle, type RevokeBuildResult, revokeWithProof } from '@kumiai/mls'
+import {
+  type GroupHandle,
+  type RevokeBuildResult,
+  type RevokeWithProofParams,
+  revokeWithProof,
+} from '@kumiai/mls'
 import type { GroupMLS, GroupPeer, GroupProtocolDefinition } from '@kumiai/rpc'
 
 import { groupHandleAccess } from './mls.js'
@@ -15,7 +20,7 @@ export type PublishRevokeResult =
 export type PublishRevokeProofParams<Protocols extends Record<string, GroupProtocolDefinition>> = {
   peer: GroupPeer<Protocols>
   mls: GroupMLS
-  input: Parameters<typeof revokeWithProof>[1]
+  input: RevokeWithProofParams
   options: RevokeJournalOptions
 }
 

@@ -16,6 +16,7 @@ import {
   mlsMessageEncoder,
   processMessage as mlsProcessMessage,
   nodeTypes,
+  type ProcessMessageResult,
   type ProposalWithSender,
   senderTypes,
   wireformats,
@@ -982,7 +983,7 @@ export class GroupHandle {
       const result = await mlsProcessMessage({
         context: this.#context,
         state: this.#state,
-        message: decoded as Parameters<typeof mlsProcessMessage>[0]['message'],
+        message: decoded as MlsFramedMessage,
       })
       this.#state = result.newState
       zeroAll(result.consumed)
@@ -1033,7 +1034,7 @@ export class GroupHandle {
       const result = await mlsProcessMessage({
         context: this.#context,
         state: this.#state,
-        message: decoded as Parameters<typeof mlsProcessMessage>[0]['message'],
+        message: decoded as MlsFramedMessage,
       })
       if (result.kind !== 'applicationMessage') {
         throw new Error('decryptStaged: frame was not an application message')
@@ -1298,7 +1299,7 @@ export class GroupHandle {
       const result = await mlsProcessMessage({
         context: this.#context,
         state: this.#state,
-        message: decoded as Parameters<typeof mlsProcessMessage>[0]['message'],
+        message: decoded as MlsFramedMessage,
         callback: (): IncomingMessageAction => 'reject',
       })
       // Zeroed rather than assumed empty: the refusal path hands back nothing to retire today,
@@ -1497,7 +1498,7 @@ export class GroupHandle {
           extensions: (historical?.groupContext ?? this.#state.groupContext).extensions,
         })
       }
-      let result: Awaited<ReturnType<typeof mlsProcessMessage>>
+      let result: ProcessMessageResult
       try {
         result = await mlsProcessMessage({
           context: {
@@ -1525,7 +1526,7 @@ export class GroupHandle {
             },
           },
           state: this.#state,
-          message: decoded as Parameters<typeof mlsProcessMessage>[0]['message'],
+          message: decoded as MlsFramedMessage,
           ...(callback != null && { callback }),
         })
       } catch (error) {

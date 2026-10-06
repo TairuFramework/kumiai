@@ -7,7 +7,7 @@ import {
   foldLog,
   type SignedEvent,
 } from '@kokuin/controller'
-import { createIdentity } from '@kokuin/token'
+import { createIdentity, type OwnIdentity } from '@kokuin/token'
 import { createProposal, defaultProposalTypes, encode, mlsMessageEncoder, nodeTypes } from 'ts-mls'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
@@ -297,11 +297,7 @@ test('renewal and proof growth fail at the exact history horizon boundary, while
     )
 })
 
-async function parentGrant(
-  identity: ReturnType<typeof agent>,
-  prefix: Array<SignedEvent>,
-  iat: number,
-) {
+async function parentGrant(identity: OwnIdentity, prefix: Array<SignedEvent>, iat: number) {
   vi.spyOn(Date, 'now').mockReturnValue(iat * 1000)
   const grant = await mintTrustedGrant({
     signer: createControllerIdentity({ seed: controllerSeed, profile: 0, log: prefix }),

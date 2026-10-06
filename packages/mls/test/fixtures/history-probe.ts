@@ -16,7 +16,7 @@ import { mintLeafCapability, mintTrustedGrant } from '../../src/capability.js'
 import { encodeControlEnvelope } from '../../src/envelope.js'
 import { createGroup } from '../../src/group-create.js'
 import { createKeyPackageBundle } from '../../src/group-credential.js'
-import { deriveGroup } from '../../src/group-handle.js'
+import { deriveGroup, type GroupHandle } from '../../src/group-handle.js'
 import { exportGroupInfo } from '../../src/group-info.js'
 import { processWelcome } from '../../src/group-welcome.js'
 import { buildLedgerHeadExtension, computeHead } from '../../src/head.js'
@@ -148,7 +148,7 @@ type RpcCodecs = {
   encodeRecoveryReply: (id: string, bytes: Uint8Array) => Uint8Array
 }
 type EntrySeal = {
-  deriveEntryKey: (group: Awaited<ReturnType<typeof createGroup>>['group']) => Promise<Uint8Array>
+  deriveEntryKey: (group: GroupHandle) => Promise<Uint8Array>
   sealEntries: (key: Uint8Array, bytes: Uint8Array) => Uint8Array
 }
 

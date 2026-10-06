@@ -14,7 +14,12 @@ import { commitTopic } from '@kumiai/rpc'
 import { testCommitJournalConformance } from '@kumiai/rpc-conformance'
 import { afterEach, expect, test, vi } from 'vitest'
 
-import { createMemoryCommitJournal, encodeJournal, makeMember } from './app-lane-e2e.js'
+import {
+  createMemoryCommitJournal,
+  encodeJournal,
+  type Member,
+  makeMember,
+} from './app-lane-e2e.js'
 import { createWireHub } from './log-hub-over-wire.js'
 
 const fixture = (await import(
@@ -131,7 +136,7 @@ test('publisher lands one proof commit and a duplicate is already revoked', asyn
 test('restart adopts the journalled derived state with its proof ledger entries', async () => {
   expect(adapter).toHaveProperty('publishRevokeProof')
   const s = await setup()
-  let replacement: ReturnType<typeof makeMember> | undefined
+  let replacement: Member | undefined
   try {
     const before = [...s.member.handle().ledgerTokens]
     await s.member.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'after revoke' } })

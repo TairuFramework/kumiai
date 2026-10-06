@@ -1,7 +1,11 @@
 import { encodeEventFrame } from '@kumiai/broadcast'
 import { expect, test, vi } from 'vitest'
 
-import { createAppOutboxAcceptance, MAX_APP_ENTRY_BYTES } from '../src/app-outbox.js'
+import {
+  type AppOutboxEntry,
+  createAppOutboxAcceptance,
+  MAX_APP_ENTRY_BYTES,
+} from '../src/app-outbox.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryAppOutbox } from './fixtures/outbox.js'
 import { makeMLSPeer } from './fixtures/peer.js'
@@ -216,7 +220,7 @@ test('a live listing failure cannot erase accepted entries or pending reservatio
       if (failList) throw new Error('listing unavailable')
       return store.list()
     },
-    put: async (row: Parameters<typeof store.put>[0]) => {
+    put: async (row: AppOutboxEntry) => {
       if (row.seq === 0) await gate.promise
       await store.put(row)
     },
@@ -321,7 +325,7 @@ test('disposal rejects pre-list callers and cancels listing retries', async () =
 
 test.each([1, 2])('listing handoff preserves call order with %i free slots', async (limit) => {
   const store = createMemoryAppOutbox()
-  const listing = deferred<Awaited<ReturnType<typeof store.list>>>()
+  const listing = deferred<Array<AppOutboxEntry>>()
   const queue = createAppOutboxAcceptance({
     outbox: { ...store, list: () => listing.promise },
     limit,

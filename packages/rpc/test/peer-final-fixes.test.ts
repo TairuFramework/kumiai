@@ -9,7 +9,12 @@ import { APP_TOPIC_LABEL, commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryAppOutbox } from './fixtures/outbox.js'
-import { buildLedgerCommit, makeMLSPeer, type TestPeer } from './fixtures/peer.js'
+import {
+  buildLedgerCommit,
+  type MakeMLSPeerOptions,
+  makeMLSPeer,
+  type TestPeer,
+} from './fixtures/peer.js'
 import { controlRecoveryClock, drainUntil } from './fixtures/recovery-clock.js'
 
 const secret = new Uint8Array(32).fill(19)
@@ -23,7 +28,7 @@ afterEach(async () => {
   )
   vi.restoreAllMocks()
 })
-function member(hub: FakeHub, options: Parameters<typeof makeMLSPeer>[3] = {}) {
+function member(hub: FakeHub, options: MakeMLSPeerOptions = {}) {
   const peer = makeMLSPeer(hub, 'bob', secret, options)
   peers.push(peer)
   return peer

@@ -24,7 +24,9 @@ import {
   encodeHandshakeFrame,
   encodeRecoveryConfirmRequest,
   encodeRecoveryVerdict,
+  type GroupPeer,
   HANDSHAKE_KIND,
+  type RecoveryConfirmRequest,
   type RecoveryEvent,
 } from '@kumiai/rpc'
 import { afterEach, beforeAll, expect, test, vi } from 'vitest'
@@ -75,7 +77,7 @@ function controlRecoveryClock() {
   })
 }
 
-async function completeRecovery(peer: Awaited<ReturnType<typeof setup>>['bob']) {
+async function completeRecovery(peer: GroupPeer<Protocols>) {
   let settled = false
   const recovery = peer.recover().finally(() => {
     settled = true
@@ -449,7 +451,7 @@ test('stale GroupInfo is superseded and retried without adopting the stale candi
 
 test('an invalid verdict envelope and a copied request for another position suppress nothing', async () => {
   const s = await setup({ deadlineMs: 10_000 })
-  let previous: ReturnType<typeof decodeRecoveryConfirmRequest> | undefined
+  let previous: RecoveryConfirmRequest | undefined
   const publish = s.bobConnection.publish.bind(s.bobConnection)
   s.bobConnection.publish = async (value) => {
     const frame = decodeHandshakeFrame(value.payload)

@@ -21,6 +21,7 @@ import {
   createGroupCrypto,
   createGroupMLS,
   createLedgerEntrySlot,
+  type HandleAccess,
   simpleHandleAccess,
 } from '@kumiai/mls-rpc'
 import {
@@ -28,6 +29,7 @@ import {
   createGroupPeer,
   encodeCommitFrame,
   encodeHandshakeFrame,
+  type GroupMLS,
   HANDSHAKE_KIND,
   type RecoveryEvent,
 } from '@kumiai/rpc'
@@ -41,7 +43,7 @@ import {
   createMemoryCommitJournal,
   type Protocols,
 } from './app-lane-e2e.js'
-import { createWireHub } from './log-hub-over-wire.js'
+import { createWireHub, type WireHub } from './log-hub-over-wire.js'
 
 const fixture = (await import(
   new URL('../../../packages/mls/test/fixtures/lifecycle-pipeline.ts', import.meta.url).href
@@ -63,6 +65,18 @@ const fixture = (await import(
 
 afterEach(() => vi.restoreAllMocks())
 
+type Setup = {
+  alice: OwnIdentity
+  bob: OwnIdentity
+  cached: ControllerBinding
+  mls: GroupMLS
+  responder: GroupMLS
+  access: HandleAccess
+  aliceGroup: () => GroupHandle
+  bobGroup: () => GroupHandle
+  installAlice: (next: GroupHandle) => void
+}
+
 async function setup(
   host?: (request: {
     groupID: string
@@ -70,7 +84,7 @@ async function setup(
     current: ControllerBinding
   }) => Promise<ControllerBinding | null>,
   options: { bobIat?: number; clock?: number; aliceExp?: number } = {},
-) {
+): Promise<Setup> {
   vi.spyOn(Date, 'now').mockReturnValue((options.clock ?? 150) * 1000)
   const alice = fixture.agent(41)
   const bob = fixture.agent(61)
@@ -134,10 +148,7 @@ async function setup(
   }
 }
 
-async function installFloor(
-  s: Awaited<ReturnType<typeof setup>>,
-  time: number,
-): Promise<GroupHandle> {
+async function installFloor(s: Setup, time: number): Promise<GroupHandle> {
   const elevated = await renewLeaf(
     s.aliceGroup(),
     await fixture.timedBinding({ identity: s.alice, iat: time, exp: time + 100 }),
@@ -157,10 +168,10 @@ async function installFloor(
 }
 
 function recoveryPeer(params: {
-  hub: ReturnType<typeof createWireHub>
+  hub: WireHub
   identity: OwnIdentity
-  access: ReturnType<typeof simpleHandleAccess>
-  mls: ReturnType<typeof createGroupMLS>
+  access: HandleAccess
+  mls: GroupMLS
   onRecovery?: (event: RecoveryEvent) => void
   deadlineMs?: number
 }) {
@@ -185,7 +196,7 @@ function recoveryPeer(params: {
   })
 }
 
-async function buildRecovery(s: Awaited<ReturnType<typeof setup>>) {
+async function buildRecovery(s: Setup) {
   const request = await s.mls.createRecoveryRequest('bound-recovery')
   return s.mls.applyRecovery(await s.responder.sealGroupInfo(request), 'bound-recovery')
 }
@@ -737,10 +748,7 @@ test('a reply-ledger floor ends peer recovery without publication and holds late
   }
 }, 10_000)
 
-async function ineligibleReply(
-  s: Awaited<ReturnType<typeof setup>>,
-  kind: 'leafless' | 'revoked' | 'issuer',
-) {
+async function ineligibleReply(s: Setup, kind: 'leafless' | 'revoked' | 'issuer') {
   vi.spyOn(Date, 'now').mockReturnValue(250_000)
   s.installAlice(await installFloor(s, 250))
   vi.spyOn(Date, 'now').mockReturnValue(150_000)

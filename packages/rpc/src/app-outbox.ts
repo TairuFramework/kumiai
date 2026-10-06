@@ -47,8 +47,20 @@ export type AppOutboxAcceptanceParams = {
   admission: () => SendAdmission
 }
 
+export type AppOutboxAcceptance = {
+  ready: () => Promise<void>
+  accept: (input: Pick<AppOutboxEntry, 'protocol' | 'prc' | 'data'>) => Promise<void>
+  entries: () => Array<AppOutboxEntry>
+  lowestUnresolvedSeq: () => number | null
+  replace: (entry: AppOutboxEntry) => void
+  remove: (seq: number) => void
+  clear: () => void
+  stop: () => void
+  close: () => void
+}
+
 /** Accepted entries below the unresolved fence are available to the delivery worker. */
-export function createAppOutboxAcceptance(params: AppOutboxAcceptanceParams) {
+export function createAppOutboxAcceptance(params: AppOutboxAcceptanceParams): AppOutboxAcceptance {
   const accepted = new Map<number, AppOutboxEntry>()
   const reservations = new Set<number>()
   let nextSeq = 0

@@ -1,5 +1,5 @@
 import { BroadcastClient } from '@kumiai/broadcast'
-import { describe, expect, test, vi } from 'vitest'
+import { describe, expect, type MockInstance, test, vi } from 'vitest'
 
 import { PeerDisposedError } from '../src/errors.js'
 import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
@@ -258,7 +258,7 @@ describe('delayed ledger bootstrap', () => {
     state.stopLying()
     const error = new Error('transient epoch teardown')
     const apply = alice.mls.applyRecovery.bind(alice.mls)
-    let spy: ReturnType<typeof vi.spyOn> | undefined
+    let spy: MockInstance | undefined
     vi.spyOn(alice.mls, 'applyRecovery').mockImplementation(async (...args) => {
       const pending = await apply(...args)
       if (pending == null || 'renewalRequired' in pending) return pending

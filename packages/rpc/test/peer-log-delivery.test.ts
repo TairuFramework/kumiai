@@ -1,4 +1,5 @@
 import { decodeFrame, encodeEventFrame } from '@kumiai/broadcast'
+import type { HubFetchTopicResult } from '@kumiai/hub-tunnel'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import type { AppOutboxCleared } from '../src/log-delivery.js'
@@ -11,6 +12,7 @@ import { createMemoryAppOutbox } from './fixtures/outbox.js'
 import {
   buildLedgerCommit,
   buildRemoveCommit,
+  type MakeMLSPeerOptions,
   makeMLSPeer,
   type TestPeer,
 } from './fixtures/peer.js'
@@ -30,11 +32,7 @@ describe('recovery ordering', { concurrent: false }, () => {
     vi.restoreAllMocks()
   })
   const flush = () => new Promise((resolve) => setTimeout(resolve, 60))
-  function member(
-    hub: FakeHub | DurableFakeHub,
-    did: string,
-    options: Parameters<typeof makeMLSPeer>[3] = {},
-  ) {
+  function member(hub: FakeHub | DurableFakeHub, did: string, options: MakeMLSPeerOptions = {}) {
     const result = makeMLSPeer(hub, did, secret, { members: ['alice', 'bob', 'carol'], ...options })
     cleanup.push(result)
     return result
@@ -594,7 +592,7 @@ describe('recovery ordering', { concurrent: false }, () => {
       const spy = vi.spyOn(hub, 'fetchTopic').mockImplementation(async (params) => {
         const result = await fetch(params)
         return params.topicID === commitTopic(secret)
-          ? ({ ...result, gap } as unknown as Awaited<ReturnType<typeof fetch>>)
+          ? ({ ...result, gap } as unknown as HubFetchTopicResult)
           : result
       })
       await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'checked' } })

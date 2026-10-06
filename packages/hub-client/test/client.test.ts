@@ -2,7 +2,7 @@ import { Client } from '@enkaku/client'
 import type { AnyClientMessageOf, AnyServerMessageOf } from '@enkaku/protocol'
 import { DirectTransports } from '@enkaku/transport'
 import { randomIdentity } from '@kokuin/token'
-import type { HubProtocol } from '@kumiai/hub-protocol'
+import type { FetchTopicResult, HubProtocol } from '@kumiai/hub-protocol'
 import { keyPackageDigest } from '@kumiai/hub-protocol'
 import { createHub, createMemoryStore } from '@kumiai/hub-server'
 import { fromUTF, toB64, toB64U } from '@sozai/codec'
@@ -65,9 +65,7 @@ describe('HubClient', () => {
       const testHub = createTestHub()
       const { client, transports } = createTestClient(testHub)
       testHub.store.fetchTopic = async () =>
-        ({ messages: [], head: null, oldest: null, gap }) as unknown as Awaited<
-          ReturnType<typeof testHub.store.fetchTopic>
-        >
+        ({ messages: [], head: null, oldest: null, gap }) as unknown as FetchTopicResult
       try {
         const call = client.fetchTopic({ topicID: TOPIC })
         expect(call.id).toEqual(expect.any(String))

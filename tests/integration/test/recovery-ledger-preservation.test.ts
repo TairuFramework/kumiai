@@ -19,9 +19,10 @@ import {
   createGroupCrypto,
   createGroupMLS,
   createLedgerEntrySlot,
+  type HandleAccess,
   simpleHandleAccess,
 } from '@kumiai/mls-rpc'
-import { createGroupPeer, type RecoveryEvent } from '@kumiai/rpc'
+import { createGroupPeer, type GroupMLS, type RecoveryEvent } from '@kumiai/rpc'
 import { afterEach, expect, test, vi } from 'vitest'
 
 import {
@@ -33,7 +34,7 @@ import {
   type Protocols,
 } from './app-lane-e2e.js'
 import { drainUntil } from './fixtures/drain.js'
-import { createWireHub } from './log-hub-over-wire.js'
+import { createWireHub, type WireHub } from './log-hub-over-wire.js'
 
 const fixture = (await import(
   new URL('../../../packages/mls/test/fixtures/lifecycle-pipeline.ts', import.meta.url).href
@@ -127,10 +128,10 @@ async function setup(
 }
 
 function recoveryPeer(params: {
-  hub: ReturnType<typeof createWireHub>
+  hub: WireHub
   identity: OwnIdentity
-  access: ReturnType<typeof simpleHandleAccess>
-  mls: ReturnType<typeof createGroupMLS>
+  access: HandleAccess
+  mls: GroupMLS
   onRecovery?: (event: RecoveryEvent) => void
   deadlineMs?: number
 }) {

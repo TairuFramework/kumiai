@@ -9,6 +9,7 @@ import {
   openRecoveryGroupInfo,
   openRecoveryVerdict,
   openSealedLedger,
+  type RecoveryGroupInfo,
   readCommitEntryIDs,
   readMessageEpoch,
   recoverySignerEligible,
@@ -374,7 +375,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
     async applyRecovery(sealed: Uint8Array, requestID: string): Promise<AppliedRecovery> {
       const held = pending.get(requestID)
       if (held == null) return null
-      let reply: Awaited<ReturnType<typeof openRecoveryGroupInfo>>
+      let reply: RecoveryGroupInfo
       try {
         reply = await access.read((group) =>
           openRecoveryGroupInfo({

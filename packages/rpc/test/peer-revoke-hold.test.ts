@@ -3,7 +3,7 @@ import { expect, test, vi } from 'vitest'
 
 import { commitTopic } from '../src/topic.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
+import { buildLedgerCommit, makeMLSPeer, type TestPeer } from './fixtures/peer.js'
 
 function gate() {
   let release = () => {}
@@ -18,7 +18,7 @@ const topic = commitTopic(secret)
 const apps = (hub: FakeHub) =>
   hub.published.filter((frame) => frame.topicID !== topic && frame.logPosition != null)
 
-async function close(member: ReturnType<typeof makeMLSPeer>) {
+async function close(member: TestPeer) {
   await member.peer.dispose()
   await member.peer.drained()
 }

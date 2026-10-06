@@ -1,4 +1,4 @@
-import { randomIdentity } from '@kokuin/token'
+import { type OwnIdentity, randomIdentity } from '@kokuin/token'
 import {
   type ControllerBinding,
   commitInvite,
@@ -40,7 +40,7 @@ const lifecycle = (await import(
   new URL('../../../packages/mls/test/fixtures/lifecycle-pipeline.ts', import.meta.url).href
 )) as {
   timedBinding(params: {
-    identity: ReturnType<typeof randomIdentity>
+    identity: OwnIdentity
     iat: number
     exp: number
   }): Promise<ControllerBinding>

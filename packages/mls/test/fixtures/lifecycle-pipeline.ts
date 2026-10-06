@@ -44,7 +44,7 @@ export type TimedBindingParams = {
   iat: number
   exp: number
   parent?: string
-  issuer?: ReturnType<typeof agent>
+  issuer?: OwnIdentity
   prefix?: Array<SignedEvent>
 }
 

@@ -5,7 +5,7 @@ import {
   didFromInception,
   type SignedEvent,
 } from '@kokuin/controller'
-import { createFullIdentity } from '@kokuin/token'
+import { createFullIdentity, type OwnIdentity } from '@kokuin/token'
 import { createCommit, defaultProposalTypes, encode, joinGroup, mlsMessageEncoder } from 'ts-mls'
 
 import { mintLeafCapability, mintTrustedGrant } from '../../src/capability.js'
@@ -23,16 +23,16 @@ export const controllerSeed = new Uint8Array(32).fill(31)
 export const inception = createInception(controllerSeed, 0)
 export const controllerID = didFromInception(inception.event)
 
-export function agent(seedByte: number) {
+export function agent(seedByte: number): OwnIdentity {
   const privateKey = new Uint8Array(32).fill(seedByte)
   return { ...createFullIdentity(privateKey), privateKey }
 }
 
 /** A delegating device and the trusted grant it holds. */
-export type BindingIssuer = { identity: ReturnType<typeof agent>; parent: string }
+export type BindingIssuer = { identity: OwnIdentity; parent: string }
 
 export async function bindingFor(
-  identity: ReturnType<typeof agent>,
+  identity: OwnIdentity,
   prefix: Array<SignedEvent> = [inception],
   issuer?: BindingIssuer,
 ): Promise<ControllerBinding> {
@@ -50,7 +50,7 @@ export async function bindingFor(
 }
 
 export async function trustedGrant(
-  identity: ReturnType<typeof agent>,
+  identity: OwnIdentity,
   prefix: Array<SignedEvent> = [inception],
 ) {
   return mintTrustedGrant({
@@ -82,7 +82,7 @@ export async function lifecycleGroup(prefix: Array<SignedEvent> = [inception]) {
 /** Exercise real Add and Welcome crypto without relying on the role-based invite API. */
 export async function addMember(
   group: GroupHandle,
-  identity: ReturnType<typeof agent>,
+  identity: OwnIdentity,
   binding: ControllerBinding,
 ) {
   const bundle = await createKeyPackageBundle(identity, { controller: binding })

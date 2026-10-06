@@ -30,6 +30,7 @@ import {
   isUnsupportedCommitFrameVersion,
 } from './commit-frame.js'
 import {
+  type AppliedRecovery,
   type GroupMLS,
   isMissingLedgerEntries,
   type PendingAppFrame,
@@ -90,6 +91,7 @@ import {
   encodeRecoveryReply,
   encodeRecoveryRequest,
   encodeRecoveryVerdict,
+  type RecoveryConfirmRequest,
 } from './recovery.js'
 import {
   type ConfirmationWaiter,
@@ -945,9 +947,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   const ledgerGatherFinishes = new Set<() => void>()
   const pendingLedgerReplies = new Set<ReturnType<typeof setTimeout>>()
 
-  const handleRecoveryConfirmRequest = (
-    request: ReturnType<typeof decodeRecoveryConfirmRequest>,
-  ): void => {
+  const handleRecoveryConfirmRequest = (request: RecoveryConfirmRequest): void => {
     if (mls == null || rendezvousTopicID == null || disposed) return
     const port = mls
     const topicID = rendezvousTopicID
@@ -2417,7 +2417,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           // The reply may include an advance that landed between the pull and the head read.
           await reconcileCommits()
           assertLive()
-          let pending: Awaited<ReturnType<typeof port.applyRecovery>>
+          let pending: AppliedRecovery
           try {
             pending = await port.applyRecovery(outcome.sealed, requestID)
             if (pending != null && !('renewalRequired' in pending)) {
