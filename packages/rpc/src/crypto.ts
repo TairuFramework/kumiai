@@ -143,7 +143,24 @@ export type AppFrameRef = {
 
 export type ExportSecretResult = { secret: Uint8Array; epoch: number }
 export type SealEntriesResult = { sealed: Uint8Array; epoch: number }
-export type ProcessCommitResult = { advanced: boolean; epochBefore: number; epochAfter: number }
+export type RecoveryRefusalReason = 'binding' | 'lapse' | 'floor' | 'policy' | 'invalid'
+export type RecoveryVerdict = {
+  groupID: string
+  requestID: string
+  position: string
+  commitDigest: string
+} & (
+  | { verdict: 'confirmed'; epoch: number; tag: string }
+  | { verdict: 'superseded' }
+  | { verdict: 'refused'; reason: RecoveryRefusalReason }
+)
+export type OpenedRecoveryVerdict = { signer: string; verdict: RecoveryVerdict }
+export type ProcessCommitResult = {
+  advanced: boolean
+  epochBefore: number
+  epochAfter: number
+  refusal?: RecoveryRefusalReason
+}
 
 /** A frame refused against the locked handle epoch, before spending a decrypt key. */
 export class FrameEpochError extends Error {
@@ -331,27 +348,42 @@ export type CommitContext = {
 }
 
 /**
- * The external commit that rejoins a stranded peer, BUILT and not adopted — the recovery twin of
- * {@link "commit".PendingCommit}: the derived handle is adopted only if the hub accepts the
- * commit, since a peer that adopted first sits on its own branch the moment it loses the
- * compare-and-set.
- *
- * Carries no entries — a GroupInfo has nowhere to put an entry envelope — so a heal is TWO
- * commits: this one rejoins, and the entries the peer still owes ride an ordinary `commit()`
- * behind it.
+ * A speculative external rejoin. Publication alone never authorises adoption.
+ * The caller confirms the target epoch before accepting it.
  */
 export type PendingRecovery = {
+  epoch: number
+  /** Mark an authoritative binding/lapse/floor refusal. Bounded memory survives ratchets, not restart. */
+  markBindingUnusable(): void
+  /** Bind judgement to the published tuple and derive from the speculative epoch. */
+  confirmationKey(position: string, commitDigest: string): Promise<Uint8Array>
+  /** Call after confirmationKey resolves. Failed bindings or signer gates are advisory. */
+  judgeVerdict(opened: OpenedRecoveryVerdict): 'authoritative' | 'advisory'
   /** The external-commit bytes, framed at the epoch the sealed GroupInfo described. */
   commit: Uint8Array
   /**
-   * Adopt the rejoined handle. Runs only if the hub accepts the external commit — the ONLY place
-   * it may be adopted.
-   *
-   * The rejoined handle's ledger is EMPTY — a GroupInfo carries a head and no entries — so until
-   * bootstrapped the handle is internally inconsistent: a roster reset, not a neutral one.
+   * Adopt the confirmed handle once. Repeated calls share the same acceptance.
+   * Standard groups still need ledger bootstrap after adoption.
    */
   onAccepted: () => Promise<void>
 }
+
+/** {@link GroupMLS.applyRecovery} result: a recovery to adopt, a renewal to run first, or nothing. */
+export type AppliedRecovery = PendingRecovery | { renewalRequired: true } | null
+
+export type SendAdmission =
+  | { epoch: number; admissible: true }
+  | { epoch: number; admissible: false; reason: 'lapsed' }
+
+/** The signed fields of a recovery ask that verified. */
+export type VerifiedRecoveryRequest = {
+  groupID: string
+  requestID: string
+  requesterDID: string
+}
+
+/** Confirmation key for an applied external commit, and the epoch it was derived at. */
+export type RecoveryConfirmationKey = { epoch: number; key: Uint8Array }
 
 /**
  * Consumer-supplied MLS lifecycle port. Sibling to {@link GroupCrypto}: this drives the
@@ -365,6 +397,13 @@ export type PendingRecovery = {
  * until the suite was made to cover the shape rather than a sample of it.
  */
 export type GroupMLS = {
+  /** Verify the signed ask without requiring its issuer to remain in the current tree. */
+  verifyRecoveryRequest(request: Uint8Array): Promise<VerifiedRecoveryRequest | null>
+  confirmationKey(position: string, commitDigest: string): Promise<RecoveryConfirmationKey>
+  sealRecoveryVerdict(request: Uint8Array, verdict: RecoveryVerdict): Promise<Uint8Array>
+  openRecoveryVerdict(sealed: Uint8Array, requestID: string): Promise<OpenedRecoveryVerdict | null>
+  /** Published with the epoch, without taking the handle lock. */
+  sendAdmission(): SendAdmission
   /** Read the current handle epoch under the host's handle lock. */
   readEpoch(): Promise<number>
   /**
@@ -424,6 +463,8 @@ export type GroupMLS = {
    * {@link isMissingLedgerEntries}.
    */
   processCommit(commit: Uint8Array, context: CommitContext): Promise<ProcessCommitResult>
+  /** Check lifecycle binding availability once before a recovery attempt requests GroupInfo. */
+  prepareRecovery(): Promise<'ready' | 'renewal-required'>
   /**
    * Mint the rendezvous request this peer publishes to ask the group for its state: an HPKE
    * keypair for this one request, public half in a token signed by this member's identity key.
@@ -438,7 +479,7 @@ export type GroupMLS = {
    * off the mint time is the natural bound; it lives here rather than as a new lane release
    * method that would obligate every {@link GroupMLS}.
    */
-  createRecoveryRequest(requestID: string): Promise<Uint8Array>
+  createRecoveryRequest(requestID: string, deadlineMs?: number): Promise<Uint8Array>
   /**
    * Answer another member's request: verify the token, check the requester still holds a leaf in
    * THIS member's current ratchet tree, seal current GroupInfo to the ephemeral key inside the
@@ -455,7 +496,7 @@ export type GroupMLS = {
    * Open a sealed reply with the key minted for `requestID` and BUILD the external commit that
    * rejoins this peer. Non-mutating: the rejoined handle is adopted only in
    * {@link PendingRecovery.onAccepted}, because the commit still has to win a compare-and-set at
-   * the head.
+   * the head AND obtain a counted member confirmation.
    *
    * `null` for bytes this peer cannot open OR cannot trust. HPKE base mode needs only the
    * requester's public ephemeral key, which rides the public request in the clear — so a
@@ -465,7 +506,7 @@ export type GroupMLS = {
    * reply the AEAD refuses, or one that fails either check, is `null`; a throw is tolerated and
    * read the same way.
    */
-  applyRecovery(sealed: Uint8Array, requestID: string): Promise<PendingRecovery | null>
+  applyRecovery(sealed: Uint8Array, requestID: string): Promise<AppliedRecovery>
   /**
    * Whether the ledger this handle holds is the whole ledger its OWN GroupContext attests to: the
    * head folded from the entries it holds, against the authenticated head it carries. Purely

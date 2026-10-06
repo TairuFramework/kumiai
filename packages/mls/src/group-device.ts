@@ -45,7 +45,12 @@ export async function registerDevice(
         ...(params.capability != null ? { capability: params.capability } : {}),
       },
     })
-    const result = await commitWithEntries(group, [], [token], { requireAdmin: false })
+    const result = await commitWithEntries({
+      group,
+      extraProposals: [],
+      enacted: [token],
+      requireAdmin: false,
+    })
     const newGroup = deriveGroup(group, result.newState)
     await newGroup.applyLedgerEntries([token])
     return {
@@ -72,7 +77,12 @@ export async function labelDevice(
       subject: params.device,
       value: { op: 'label', label: params.label, capability: params.capability },
     })
-    const result = await commitWithEntries(group, [], [token], { requireAdmin: false })
+    const result = await commitWithEntries({
+      group,
+      extraProposals: [],
+      enacted: [token],
+      requireAdmin: false,
+    })
     const newGroup = deriveGroup(group, result.newState)
     await newGroup.applyLedgerEntries([token])
     return {
@@ -122,7 +132,10 @@ export async function addDevice(
       proposalType: defaultProposalTypes.add,
       add: { keyPackage: params.keyPackage },
     }
-    const result = await commitWithEntries(group, [addProposal], [token], {
+    const result = await commitWithEntries({
+      group,
+      extraProposals: [addProposal],
+      enacted: [token],
       ratchetTreeExtension: true,
       requireAdmin: false,
     })
@@ -165,12 +178,14 @@ export async function revokeDevice(
       leafIndex === undefined
         ? []
         : [{ proposalType: defaultProposalTypes.remove, remove: { removed: leafIndex } }]
-    const result = await commitWithEntries(group, proposals, [token], {
+    const result = await commitWithEntries({
+      group,
+      extraProposals: proposals,
+      enacted: [token],
       requireAdmin: false,
     })
     const newGroup = deriveGroup(group, result.newState)
-    const enacted = await newGroup.applyLedgerEntries([token])
-    newGroup.emitControlEvents(enacted)
+    await newGroup.applyLedgerEntries([token])
     return {
       commitMessage: encode(mlsMessageEncoder, result.commit),
       newGroup,
@@ -197,10 +212,14 @@ export async function announceControllerBeacon(
       subject: params.controller,
       value: { op: 'beacon', logLength: params.logLength, headDigest: params.headDigest },
     })
-    const result = await commitWithEntries(group, [], [token], { requireAdmin: false })
+    const result = await commitWithEntries({
+      group,
+      extraProposals: [],
+      enacted: [token],
+      requireAdmin: false,
+    })
     const newGroup = deriveGroup(group, result.newState)
-    const enacted = await newGroup.applyLedgerEntries([token])
-    newGroup.emitControlEvents(enacted)
+    await newGroup.applyLedgerEntries([token])
     return {
       commitMessage: encode(mlsMessageEncoder, result.commit),
       newGroup,

@@ -24,12 +24,16 @@ export type PendingCommit = {
    * Opaque host blob holding everything needed to adopt this commit after a restart: the
    * serialized post-commit handle and any Welcome to deliver. Written to the journal BEFORE the
    * peer publishes, handed straight back to `adoptJournalled` on replay. The peer never inspects it.
+   * Since the Welcome is opaque to the peer, the host must check its final hub frame with
+   * `assertFrameFits` inside `build()`, before returning this PendingCommit.
    */
   journal: Uint8Array
   /**
    * Runs only if the hub accepts. Adopt the post-commit handle here and send any Welcome. The
    * ONLY place the host may adopt: adopting earlier rotates past the epoch the bodies must be
    * sealed under, adopting later leaves the handle behind the group.
+   * Any frame this callback sends through a hub must already have passed `assertFrameFits` inside
+   * `build()`. This callback runs after the Add commit is journalled and accepted.
    *
    * ENFORCED: the peer records acceptance in the journal BEFORE this runs, so a restart can tell
    * a commit that landed from one whose fate is unknown. An entry with no recorded acceptance,
@@ -67,6 +71,8 @@ export type JournalEntry = {
    * secret.
    */
   epoch: number
+  /** Holds log submissions until adoption or a known publication loss clears the slot. */
+  holdsLogSends?: true
   /**
    * The sequenceID the hub accepted this commit as. Present: it LANDED and this peer knows it
    * locally — replay adopts, no network. Absent: outcome UNKNOWN, replay must ask the store by

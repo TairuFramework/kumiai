@@ -1,23 +1,32 @@
 import {
+  type ConformanceAppOutbox,
   type ConformanceCryptoMember,
   type ConformanceMLSMember,
+  testAnchorStoreConformance,
+  testAppOutboxConformance,
+  testCommitJournalConformance,
   testGroupCryptoConformance,
   testGroupMLSConformance,
   testPendingGroupCryptoConformance,
 } from '@kumiai/rpc-conformance'
 
+import type { AppOutbox } from '../src/app-outbox.js'
 import {
   type GroupCrypto,
   type GroupMLS,
   isAppFrameStorageError,
   type PendingAppFrame,
 } from '../src/crypto.js'
+import { createMemoryAnchorStore } from './fixtures/anchor.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
+import { createMemoryCommitJournal } from './fixtures/journal.js'
 import {
   createMemoryGroupMLS,
   encodeMemoryCommit,
   memoryEntryID,
+  sealMemoryRecoveryVerdict,
 } from './fixtures/memory-group-mls.js'
+import { createMemoryAppOutbox } from './fixtures/outbox.js'
 
 /**
  * The two doubles the whole rpc suite executes against, run against the port contracts
@@ -128,6 +137,23 @@ const COMMITTER_DID = 'did:key:committer'
 
 testGroupMLSConformance({
   label: 'createMemoryGroupMLS',
+  createBoundRecovery: async () => {
+    const binding = { id: 'controller', prefix: [], capability: 'initial-capability' }
+    let offered = binding
+    const options = { binding, recoveryBinding: async () => offered, members: ['alice', 'bob'] }
+    const requester = createMemoryGroupMLS({ ...options, localDID: 'bob' })
+    const responder = createMemoryGroupMLS({ ...options, localDID: 'alice' })
+    return {
+      requester,
+      responder,
+      ratchet: async () => {
+        requester.adopt(requester.buildCommit())
+      },
+      replaceBinding: async () => {
+        offered = { ...binding, capability: 'renewed-capability' }
+      },
+    }
+  },
   createGroup: async (size, id) => {
     let hintOffset = 0
     const dids = Array.from({ length: size }, (_, index) => didAt(index))
@@ -140,6 +166,7 @@ testGroupMLSConformance({
     const members = dids.map((did) => ({
       did,
       mls: createMemoryGroupMLS({
+        groupID: id,
         localDID: did,
         members: roster,
         epoch: 0,
@@ -171,6 +198,12 @@ testGroupMLSConformance({
     }
 
     return {
+      groupID: id,
+      sealVerdictPayload: async (index, request, verdict) => {
+        const member = members[index]
+        if (member == null) throw new Error('missing member')
+        return sealMemoryRecoveryVerdict(request, member.did, verdict)
+      },
       members: members.map((member) => ({
         did: member.did,
         mls: { ...member.mls, epoch: () => member.mls.epoch() + hintOffset },
@@ -204,4 +237,17 @@ testGroupMLSConformance({
       }),
     }
   },
+})
+
+testAppOutboxConformance({ label: 'createMemoryAppOutbox', createOutbox: createMemoryAppOutbox })
+const _outboxIsAPort = (outbox: AppOutbox): ConformanceAppOutbox => outbox
+
+testAnchorStoreConformance({
+  label: 'rpc memory anchor store',
+  createStore: createMemoryAnchorStore,
+})
+
+testCommitJournalConformance({
+  label: 'createMemoryCommitJournal',
+  createJournal: createMemoryCommitJournal,
 })

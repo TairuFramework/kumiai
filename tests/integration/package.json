@@ -21,6 +21,7 @@
     "@kumiai/mls": "workspace:^",
     "@kumiai/mls-rpc": "workspace:^",
     "@kumiai/rpc": "workspace:^",
+    "@kumiai/rpc-conformance": "workspace:^",
     "@sozai/codec": "catalog:",
     "vitest": "catalog:"
   }

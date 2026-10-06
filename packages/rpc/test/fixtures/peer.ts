@@ -2,8 +2,10 @@ import type { LogHub } from '@kumiai/hub-tunnel'
 
 import type { AppWindowPruned } from '../../src/app-cursor.js'
 import type { AppDeliveryResumed, AppDeliveryStalled } from '../../src/app-lane.js'
+import type { AppOutbox } from '../../src/app-outbox.js'
 import type { PendingCommit } from '../../src/commit.js'
 import type { SubscribeFailure } from '../../src/hub-mux.js'
+import type { AppOutboxCleared } from '../../src/log-delivery.js'
 import {
   createGroupPeer,
   type GroupPeer,
@@ -20,6 +22,7 @@ import {
   decodeMemoryCommit,
   type MemoryGroupMLS,
 } from './memory-group-mls.js'
+import { createMemoryAppOutbox } from './outbox.js'
 
 /**
  * `chat/changed` is EPHEMERAL — live push, nothing retained, nothing drainable — and every test
@@ -55,12 +58,16 @@ export type TestPeer = {
   mls: MemoryGroupMLS
   journal: MemoryCommitJournal
   anchorStore: MemoryAnchorStore
+  appOutbox: AppOutbox
   appCursorStore: MemoryAppCursorStore
   /** Every Welcome this host delivered, in order. Records the at-least-once repeats too. */
   welcomes: Array<string>
 }
 
 export type MakeMLSPeerOptions = {
+  appOutbox?: AppOutbox
+  appOutboxLimit?: number
+  onAppOutboxCleared?: (notice: AppOutboxCleared) => void | Promise<void>
   epoch?: number
   /** Entry bodies this member already holds — a Welcome carries them. Not an enacted ledger. */
   bodies?: Array<string>
@@ -153,6 +160,7 @@ export function makeMLSPeer(
   const anchorStore = options.anchorStore ?? restartOf?.anchorStore ?? createMemoryAnchorStore()
   const appCursorStore =
     options.appCursorStore ?? restartOf?.appCursorStore ?? createMemoryAppCursorStore()
+  const appOutbox = options.appOutbox ?? restartOf?.appOutbox ?? createMemoryAppOutbox()
   const welcomes = options.welcomes ?? restartOf?.welcomes ?? []
   const peer = createGroupPeer<Protocols>({
     hub,
@@ -161,6 +169,11 @@ export function makeMLSPeer(
     journal,
     anchorStore,
     appCursorStore,
+    appOutbox,
+    appOutboxLimit: options.appOutboxLimit ?? 128,
+    ...(options.onAppOutboxCleared != null
+      ? { onAppOutboxCleared: options.onAppOutboxCleared }
+      : {}),
     ...(options.onAppWindowPruned != null ? { onAppWindowPruned: options.onAppWindowPruned } : {}),
     ...(options.onStrand != null ? { onStrand: options.onStrand } : {}),
     ...(options.onRecovery != null ? { onRecovery: options.onRecovery } : {}),
@@ -185,7 +198,7 @@ export function makeMLSPeer(
     ...(options.commitDeadlineMs != null ? { commitDeadlineMs: options.commitDeadlineMs } : {}),
     ...(options.recovery != null ? { recovery: options.recovery } : {}),
   })
-  return { peer, crypto, mls, journal, anchorStore, appCursorStore, welcomes }
+  return { peer, crypto, mls, journal, anchorStore, appCursorStore, appOutbox, welcomes }
 }
 
 export type LedgerCommitOptions = {

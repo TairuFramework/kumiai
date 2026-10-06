@@ -3,6 +3,7 @@ import { describe, expect, test } from 'vitest'
 
 import { encodeAppAAD } from '../src/app-aad.js'
 import type { AppWindowPruned } from '../src/app-cursor.js'
+import { createAppLane } from '../src/app-lane.js'
 import { APP_TOPIC_LABEL, commitTopic, protocolTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
@@ -241,5 +242,190 @@ describe('the app-lane drain reads from a durable position and reports what aged
 
     await alice.peer.dispose()
     await second.peer.dispose()
+  })
+
+  test('a removed cursor alone is not a pruned window', async () => {
+    const hub = new DurableFakeHub()
+    const recoverySecret = new Uint8Array(32).fill(0x84)
+    const pruned: Array<AppWindowPruned> = []
+    const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
+      epoch: 1,
+      handlers: { 'chat/posted': () => {} },
+      onAppWindowPruned: (event) => void pruned.push(event),
+    })
+    await flush()
+
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'read' } })
+    await flush()
+    const cursor = hub.published.find((message) => message.topicID === topicID)?.sequenceID
+    if (cursor == null) throw new Error('expected the peer to have read the first app frame')
+    hub.detach('bob')
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'retained' } })
+    await flush()
+    const appFrames = hub.published.filter((message) => message.topicID === topicID)
+    const retained = appFrames[1]?.sequenceID
+    if (retained == null) throw new Error('expected the later app frame to remain retained')
+    hub.trim(topicID, retained)
+    const fetch = await hub.fetchTopic({ subscriberDID: 'bob', topicID, after: cursor })
+    expect(fetch.oldest).toBe(retained)
+    expect(fetch.gap).toBe(false)
+
+    hub.reattach('bob')
+    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
+    await flush()
+
+    expect(pruned).toHaveLength(0)
+    await alice.peer.dispose()
+    await bob.peer.dispose()
+  })
+
+  test('an empty pruned window is reported once with a null oldest position', async () => {
+    const hub = new DurableFakeHub()
+    const recoverySecret = new Uint8Array(32).fill(0x85)
+    const pruned: Array<AppWindowPruned> = []
+    const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
+      epoch: 1,
+      handlers: { 'chat/posted': () => {} },
+      onAppWindowPruned: (event) => void pruned.push(event),
+    })
+    await flush()
+
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'read' } })
+    await flush()
+    hub.detach('bob')
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'removed' } })
+    await flush()
+    hub.trim(topicID, '999999999999')
+
+    hub.reattach('bob')
+    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
+    await flush()
+
+    expect(pruned).toHaveLength(1)
+    expect(pruned[0]?.oldest).toBeNull()
+    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
+    await flush()
+    expect(pruned).toHaveLength(1)
+    await alice.peer.dispose()
+    await bob.peer.dispose()
+  })
+
+  test('a fetch without a cursor never reports a pruned window', async () => {
+    const hub = new DurableFakeHub()
+    const recoverySecret = new Uint8Array(32).fill(0x86)
+    const pruned: Array<AppWindowPruned> = []
+    const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'removed' } })
+    await flush()
+    hub.trim(topicID, '999999999999')
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
+      epoch: 1,
+      handlers: { 'chat/posted': () => {} },
+      onAppWindowPruned: (event) => void pruned.push(event),
+    })
+    await flush()
+
+    expect(pruned).toHaveLength(0)
+    await alice.peer.dispose()
+    await bob.peer.dispose()
+  })
+
+  test('a gap reported by a later page uses that page cursor', async () => {
+    const cursor = '000000000001'
+    const pageOne = Array.from({ length: 100 }, (_, index) => ({
+      sequenceID: String(index + 2).padStart(12, '0'),
+      payload: new Uint8Array(),
+      senderDID: 'alice',
+    }))
+    const pageTwo = [{ sequenceID: '000000000102', payload: new Uint8Array(), senderDID: 'alice' }]
+    const fetches: Array<string | undefined> = []
+    const notices: Array<AppWindowPruned> = []
+    const mux = {
+      retainTopic: () => {},
+      fetchTopic: async (params: { after?: string }) => {
+        fetches.push(params.after)
+        const secondPage = params.after === '000000000101'
+        return {
+          messages: secondPage ? pageTwo : pageOne,
+          head: '000000000102',
+          oldest: secondPage ? '000000000102' : '000000000002',
+          gap: secondPage,
+        }
+      },
+    }
+    const lane = createAppLane({
+      mux: mux as never,
+      crypto: { pending: null, frameEpoch: () => null } as never,
+      localDID: 'bob',
+      protocols: { chat: {} as never },
+      eventHandlers: new Map(),
+      retentionSeconds: 60,
+      appCursorStore: { load: async () => cursor, save: async () => {} },
+      onAppWindowPruned: (event) => void notices.push(event),
+      anchor: () => ({ secret: new Uint8Array(), epoch: 1 }),
+      groupID: () => 'group',
+    })
+
+    await lane.deliver()
+
+    expect(fetches).toEqual([cursor, '000000000101'])
+    expect(notices).toEqual([
+      {
+        groupID: 'group',
+        protocol: 'chat',
+        cursor: '000000000101',
+        oldest: '000000000102',
+      },
+    ])
+    lane.dispose()
+  })
+
+  test('a retained suffix after a gap is reported with the fetch cursor and oldest position', async () => {
+    const hub = new DurableFakeHub()
+    const recoverySecret = new Uint8Array(32).fill(0x87)
+    const pruned: Array<AppWindowPruned> = []
+    const topicID = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
+    const first = makeMLSPeer(hub, 'bob', recoverySecret, {
+      epoch: 1,
+      handlers: { 'chat/posted': () => {} },
+    })
+    await flush()
+
+    await first.peer.dispose()
+    hub.detach('bob')
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'cursor' } })
+    await flush()
+    const cursor = hub.published.find((message) => message.topicID === topicID)?.sequenceID
+    expect(cursor).toBeDefined()
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
+      restartOf: first,
+      handlers: { 'chat/posted': () => {} },
+      onAppWindowPruned: (event) => void pruned.push(event),
+    })
+    hub.reattach('bob')
+    await flush()
+    expect(bob.appCursorStore.stored(topicID)).toBe(cursor)
+    hub.detach('bob')
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'removed' } })
+    await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'survivor' } })
+    await flush()
+    const appFrames = hub.published.filter((message) => message.topicID === topicID)
+    hub.trim(topicID, appFrames[2]?.sequenceID ?? '999999999999')
+
+    hub.reattach('bob')
+    await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1 })
+    await flush()
+
+    expect(pruned).toHaveLength(1)
+    expect(pruned[0]?.cursor).toBe(cursor)
+    expect(pruned[0]?.oldest).toBe(appFrames[2]?.sequenceID)
+    await alice.peer.dispose()
+    await bob.peer.dispose()
   })
 })

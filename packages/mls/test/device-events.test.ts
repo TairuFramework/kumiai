@@ -1,6 +1,7 @@
+import { createReset, createRevoke } from '@kokuin/controller'
 import { normalizeDID } from '@kokuin/token'
 import { defaultProposalTypes, encode, mlsMessageEncoder } from 'ts-mls'
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 import { restoreGroup } from '../src/group.js'
 import { commitWithEntries } from '../src/group-commit.js'
@@ -10,6 +11,8 @@ import {
   registerDevice,
   revokeDevice,
 } from '../src/group-device.js'
+import { deriveGroup, type GroupHandle } from '../src/group-handle.js'
+import { renewLeaf, revokeWithProof } from '../src/group-lifecycle.js'
 import {
   beaconOf as _barrelBeaconOf,
   type ControllerBeacon as _CB,
@@ -22,6 +25,231 @@ import {
 import { ledgerEntryDigest, signLedgerEntry } from '../src/ledger.js'
 import { beaconOf } from '../src/registry.js'
 import { publishTokens, twoDeviceProfileGroup } from './fixtures/device-harness.js'
+import {
+  agent,
+  bindingFor,
+  controllerID,
+  controllerSeed,
+  inception,
+  lifecycleGroup,
+  trustedGrant,
+} from './fixtures/lifecycle-ledger.js'
+import {
+  lowLevelWelcome,
+  pipelineGroup,
+  timedBinding,
+  welcomeBoundary,
+} from './fixtures/lifecycle-pipeline.js'
+
+async function speculativeRevoke(operation: 'processMessage' | 'bootstrapLedger') {
+  const g = await twoDeviceProfileGroup()
+  const live = g.creatorGroup
+  live.confirmAdopted()
+  const result = await revokeDevice(g.managerGroup, g.managerIdentity, {
+    device: g.targetDeviceID,
+    capability: g.capability,
+  })
+  publishTokens(g.tokens, result.newGroup)
+  let state = structuredClone(live.state)
+  if (operation === 'bootstrapLedger') {
+    const receiver = await restoreGroup({
+      state,
+      credential: live.credential,
+      ledgerEntries: live.ledgerTokens,
+      options: { resolveLedgerEntries: live.resolveLedgerEntries },
+    })
+    await receiver.processMessage(result.commitMessage)
+    state = receiver.state
+  }
+  const candidate = deriveGroup(live, state)
+  const receive = async (persist: (handle: GroupHandle) => Promise<void>) => {
+    if (operation === 'processMessage') {
+      await candidate.processMessage(result.commitMessage, { persist })
+    } else {
+      await candidate.bootstrapLedger(result.newGroup.ledgerTokens, { persist })
+    }
+  }
+  return { live, candidate, receive, result, target: normalizeDID(g.targetDeviceID) }
+}
+
+test.each(['processMessage', 'bootstrapLedger'] as const)(
+  '%s on a speculative handle waits for confirmation and queues only persisted new records',
+  async (operation) => {
+    const { live, candidate, receive, target, result } = await speculativeRevoke(operation)
+    const seen: Array<string> = []
+    live.events.on('deviceRevoked', (batch) => {
+      seen.push(...batch.map(({ device }) => device))
+    })
+    await expect(
+      receive(async () => {
+        throw new Error('disk failed')
+      }),
+    ).rejects.toThrow('disk failed')
+    expect(seen).toEqual([])
+    await receive(async () => {
+      expect(seen).toEqual([])
+    })
+    expect(candidate.revokedDevices().map(({ device }) => device)).toContain(target)
+    expect(live.revokedDevices().map(({ device }) => device)).not.toContain(target)
+    expect(seen).toEqual([])
+    if (operation === 'bootstrapLedger')
+      await candidate.bootstrapLedger(result.newGroup.ledgerTokens)
+    expect(seen).toEqual([])
+    candidate.confirmAdopted()
+    candidate.confirmAdopted()
+    expect(seen).toEqual([target])
+  },
+)
+
+test.each(['processMessage', 'bootstrapLedger'] as const)(
+  'discarding a speculative %s never notifies live subscribers',
+  async (operation) => {
+    const { live, receive, target, result } = await speculativeRevoke(operation)
+    const seen: Array<string> = []
+    live.events.on('deviceRevoked', (batch) => {
+      seen.push(...batch.map(({ device }) => device))
+    })
+    await receive(async () => {})
+    live.confirmAdopted()
+    expect(seen).toEqual([])
+    await live.processMessage(result.commitMessage, {
+      persist: async () => {
+        expect(seen).toEqual([])
+      },
+    })
+    expect(seen).toEqual([target])
+  },
+)
+
+test('lifecycle adoption emits the listed revocation and cascade once with their log positions', async () => {
+  const { group } = await lifecycleGroup()
+  const issuer = agent(51)
+  const child = agent(61)
+  const first = await lowLevelWelcome(group, issuer, await bindingFor(issuer))
+  const parent = await trustedGrant(issuer)
+  const fixture = await lowLevelWelcome(
+    first.author,
+    child,
+    await bindingFor(child, [inception], { identity: issuer, parent }),
+  )
+  const seen: Array<unknown> = []
+  fixture.author.events.on('deviceRevoked', (batch) => {
+    seen.push(batch)
+  })
+  const log = [
+    inception,
+    createRevoke({
+      seed: controllerSeed,
+      profile: 0,
+      did: controllerID,
+      prior: inception.event,
+      target: issuer.id,
+      keyPosition: { gen: 0, seq: 0 },
+    }),
+  ]
+  const built = await revokeWithProof(fixture.author, { subject: issuer.id, log })
+  if (built.status !== 'built') throw new Error('Missing revoke candidate')
+  expect(seen).toHaveLength(0)
+  built.result.newGroup.confirmAdopted()
+  built.result.newGroup.confirmAdopted()
+  expect(seen).toEqual([
+    [
+      { device: issuer.id, controller: controllerID, logPosition: 1 },
+      { device: child.id, controller: controllerID, logPosition: 1, cascadedFrom: issuer.id },
+    ],
+  ])
+  const restored = await restoreGroup({
+    state: built.result.newGroup.state,
+    credential: built.result.newGroup.credential,
+    ledgerEntries: built.result.newGroup.ledgerTokens,
+  })
+  const replayed = vi.fn()
+  restored.events.on('deviceRevoked', replayed)
+  restored.confirmAdopted()
+  await restored.bootstrapLedger(restored.ledgerTokens)
+  expect(replayed).not.toHaveBeenCalled()
+  const fresh = await restoreGroup({
+    state: built.result.newGroup.state,
+    credential: built.result.newGroup.credential,
+  })
+  fresh.events.on('deviceRevoked', replayed)
+  await fresh.bootstrapLedger(built.result.newGroup.ledgerTokens)
+  expect(replayed).toHaveBeenCalledOnce()
+  await fresh.bootstrapLedger(built.result.newGroup.ledgerTokens)
+  expect(replayed).toHaveBeenCalledOnce()
+  replayed.mockClear()
+  const newcomer = agent(81)
+  const welcome = await welcomeBoundary(built.result.newGroup, newcomer, await bindingFor(newcomer))
+  const joined = (await welcome.process()).group
+  joined.events.on('deviceRevoked', replayed)
+  joined.confirmAdopted()
+  expect(joined.revokedDevices().map(({ device }) => device)).toContain(issuer.id)
+  expect(replayed).not.toHaveBeenCalled()
+})
+
+test('admission is an epoch snapshot of lapse, independent of the wall clock', async () => {
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(150_000)
+  try {
+    const { group, identity } = await pipelineGroup()
+    const peer = agent(51)
+    const fixture = await lowLevelWelcome(
+      group,
+      peer,
+      await timedBinding({ identity: peer, iat: 100, exp: 110 }),
+    )
+    const before = fixture.joined.sendAdmission()
+    expect(before).toEqual({ epoch: Number(fixture.joined.epoch), admissible: true })
+    clock.mockReturnValue(999_000)
+    expect(fixture.joined.sendAdmission()).toEqual(before)
+    clock.mockReturnValue(150_000)
+    const renewed = await renewLeaf(
+      fixture.author,
+      await timedBinding({ identity, iat: 150, exp: 250 }),
+    )
+    await expect(
+      fixture.joined.processMessage(renewed.commitMessage, {
+        persist: async () => {
+          throw new Error('disk failed')
+        },
+      }),
+    ).rejects.toThrow('disk failed')
+    expect(fixture.joined.sendAdmission()).toEqual(before)
+    await fixture.joined.processMessage(renewed.commitMessage)
+    expect(fixture.joined.sendAdmission()).toEqual({
+      epoch: Number(renewed.epoch),
+      admissible: false,
+      reason: 'lapsed',
+    })
+    const own = await renewLeaf(
+      fixture.joined,
+      await timedBinding({ identity: peer, iat: 150, exp: 250 }),
+    )
+    expect(own.newGroup.sendAdmission()).toEqual({ epoch: Number(own.epoch), admissible: true })
+    expect(fixture.joined.sendAdmission().admissible).toBe(false)
+  } finally {
+    clock.mockRestore()
+  }
+})
+
+test('an adopted reset reports its reason and log position only once', async () => {
+  const { group, identity } = await lifecycleGroup()
+  const peer = agent(51)
+  const fixture = await lowLevelWelcome(group, peer, await bindingFor(peer))
+  const log = [inception, createReset(controllerSeed, 0, 1)]
+  const renewed = await renewLeaf(fixture.author, await bindingFor(identity, log))
+  const seen: Array<unknown> = []
+  renewed.newGroup.events.on('deviceRevoked', (batch) => {
+    seen.push(batch)
+  })
+  const built = await revokeWithProof(renewed.newGroup, { reset: true, log })
+  if (built.status !== 'built') throw new Error('Missing reset candidate')
+  expect(seen).toHaveLength(0)
+  built.result.newGroup.confirmAdopted()
+  built.result.newGroup.confirmAdopted()
+  expect(seen).toEqual([
+    [{ device: peer.id, controller: controllerID, logPosition: 1, reason: 'reset' }],
+  ])
+})
 
 // Reachability (Step 7): prove the Slice-3 write API and its supporting types resolve from the
 // public entry point, not just the internal module.
@@ -133,11 +361,11 @@ describe('device events', () => {
     })
     const removed = g.creatorGroup.findMemberLeafIndex(g.targetDeviceID)
     if (removed == null) throw new Error('missing target leaf')
-    const combined = await commitWithEntries(
-      g.creatorGroup,
-      [{ proposalType: defaultProposalTypes.remove, remove: { removed } }],
-      [revokeToken, note],
-    )
+    const combined = await commitWithEntries({
+      group: g.creatorGroup,
+      extraProposals: [{ proposalType: defaultProposalTypes.remove, remove: { removed } }],
+      enacted: [revokeToken, note],
+    })
     g.tokens.set(ledgerEntryDigest(revokeToken), revokeToken)
     g.tokens.set(ledgerEntryDigest(note), note)
     const before = receiver.epoch
@@ -175,6 +403,9 @@ describe('device events', () => {
     expect(fresh.ledgerTokens).toEqual([])
     expect(seen).toEqual([])
     await fresh.bootstrapLedger(res.newGroup.ledgerTokens, { persist: async () => {} })
+    expect(seen).toEqual([normalizeDID(g.targetDeviceID)])
+    await fresh.bootstrapLedger(res.newGroup.ledgerTokens, { persist: async () => {} })
+    fresh.confirmAdopted()
     expect(seen).toEqual([normalizeDID(g.targetDeviceID)])
   })
 
@@ -279,6 +510,8 @@ describe('controller beacon', () => {
       logLength: 12,
       headDigest: 'zFullHead',
     })
+    expect(beaconEvent).toBeUndefined()
+    res.newGroup.confirmAdopted()
     expect(beaconEvent).toEqual({
       controller: normalizeDID(g.controllerID),
       logLength: 12,
@@ -319,11 +552,14 @@ describe('controller beacon', () => {
       seen.push(...batch)
     })
 
-    await revokeDevice(g.managerGroup, g.managerIdentity, {
+    const res = await revokeDevice(g.managerGroup, g.managerIdentity, {
       device: g.targetDeviceID,
       capability: g.capability,
     })
-
+    expect(seen).toHaveLength(0)
+    res.newGroup.confirmAdopted()
+    res.newGroup.confirmAdopted()
+    expect(seen).toHaveLength(1)
     expect(seen.map((r) => r.device)).toContain(normalizeDID(g.targetDeviceID))
   })
 })

@@ -33,17 +33,14 @@ export type AppCursorStore = {
 }
 
 /**
- * A gap below the retention floor: the hub's oldest retained frame on an app topic is NEWER than
- * the position this peer had read to, so whatever sat between them aged out unread.
+ * A gap below retention: the hub confirms that a frame after this peer's read position aged out.
  *
  * Reported rather than silent, which is the whole point — a peer back from a long absence is
  * otherwise handed a partial history it cannot tell from a complete one, and neither it nor its
  * host can say so. It is a NOTICE and not an error: the frames that survived are delivered anyway.
  *
- * It is the conservative side of a question the hub cannot answer exactly: a peer whose own cursor
- * frame has aged out cannot prove that nothing was published between it and the floor, so this
- * fires whenever the floor has passed the cursor. It over-reports; it never stays quiet about a
- * real gap.
+ * The hub reports the gap from its removal watermark, so removal of the cursor's own frame alone
+ * does not count. Notices are deduplicated per topic and cursor for this process.
  *
  * NO WALL-CLOCK, deliberately: rpc has no clock worth handing a host, and "messages since <date>"
  * is the host's own sentence to write from its own HLC. What is carried is what rpc knows.
@@ -59,6 +56,6 @@ export type AppWindowPruned = {
   protocol: string
   /** The last position this peer read to: the older edge of the gap, exclusive. */
   cursor: string
-  /** The hub's oldest retained frame on the topic now: the newer edge of the gap, inclusive. */
-  oldest: string
+  /** The hub's oldest retained frame after the gap, or null when the window is empty. */
+  oldest: string | null
 }

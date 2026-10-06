@@ -1,5 +1,5 @@
-import { encodeEventFrame } from '@kumiai/broadcast'
-import { describe, expect, test } from 'vitest'
+import { BroadcastClient, encodeEventFrame } from '@kumiai/broadcast'
+import { describe, expect, test, vi } from 'vitest'
 
 import { encodeAppAAD } from '../src/app-aad.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
@@ -238,6 +238,7 @@ describe('an ephemeral dispatch lands on the segment that contains its seal epoc
       ...written,
       save: async (next) => {
         await written.save(next)
+        if (next.pending != null) return
         const race = raceTheRotation
         raceTheRotation = null
         await race?.()
@@ -304,6 +305,7 @@ describe('a logged dispatch lands on the segment that contains its seal epoch', 
       ...written,
       save: async (next) => {
         await written.save(next)
+        if (next.pending != null) return
         const race = raceTheRotation
         raceTheRotation = null
         await race?.()
@@ -335,9 +337,12 @@ describe('a logged dispatch lands on the segment that contains its seal epoch', 
     expect(raceTheRotation).toBeNull() // the race did run
 
     // The frame is sealed at epoch 2 and it is on the segment anchored at 2 — the segment that
-    // CONTAINS epoch 2. The segment the group just left holds nothing.
-    const landed = await hub.fetchTopic({ subscriberDID: 'alice', topicID: chatTopic(2) })
-    expect(landed.messages).toHaveLength(1)
+    // CONTAINS epoch 2. The segment the group just left holds nothing. Delivery publishes after
+    // the rotation settles, so poll for it.
+    await vi.waitFor(async () => {
+      const landed = await hub.fetchTopic({ subscriberDID: 'alice', topicID: chatTopic(2) })
+      expect(landed.messages).toHaveLength(1)
+    })
     const abandoned = await hub.fetchTopic({ subscriberDID: 'alice', topicID: chatTopic(1) })
     expect(abandoned.messages).toHaveLength(0)
 
@@ -345,13 +350,54 @@ describe('a logged dispatch lands on the segment that contains its seal epoch', 
     // the same segment and drains it. Landing anywhere else is a frame nobody ever opens.
     const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob, handlers })
     hub.reattach('bob')
-    await flush()
+    await vi.waitFor(() => expect(seen).toEqual([{ text: 'mid-rotation' }]))
 
     expect(restarted.mls.epoch()).toBe(2)
     expect(restarted.peer.anchorEpoch()).toBe(2)
-    expect(seen).toEqual([{ text: 'mid-rotation' }])
 
     await alice.peer.dispose()
     await restarted.peer.dispose()
+  })
+})
+
+describe('a failed epoch teardown still leaves a lane at the new anchor', () => {
+  /**
+   * `teardownEpoch` empties the runtimes before it reports a child's failed dispose. Without a
+   * build after it, the peer keeps publishing log events through the outbox and never hears one
+   * again: nothing listens on the new segment, and the next walk sees the commit as history.
+   */
+  test('a received commit whose teardown rejects still builds the new segment', async () => {
+    const hub = new DurableFakeHub()
+    const recoverySecret = new Uint8Array(32).fill(0x9a)
+    const aliceSaw: Array<unknown> = []
+    const alice = makeMLSPeer(hub, 'alice', recoverySecret, {
+      epoch: 1,
+      members: MEMBERS,
+      handlers: { 'chat/posted': (ctx: { data: unknown }) => void aliceSaw.push(ctx.data) },
+    })
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { epoch: 1, members: MEMBERS })
+    await flush()
+
+    let rejected = 0
+    const spy = vi.spyOn(BroadcastClient.prototype, 'dispose').mockImplementation(() => {
+      rejected += 1
+      return Promise.reject(new Error('client dispose failed'))
+    })
+    try {
+      await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, removes: ['carol'] })
+      await flush()
+    } finally {
+      spy.mockRestore()
+    }
+    expect(rejected).toBe(2)
+    expect(alice.peer.anchorEpoch()).toBe(2)
+    expect(bob.peer.anchorEpoch()).toBe(2)
+
+    await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'after' } })
+    await flush()
+    expect(aliceSaw).toEqual([{ text: 'after' }])
+
+    await alice.peer.dispose()
+    await bob.peer.dispose()
   })
 })

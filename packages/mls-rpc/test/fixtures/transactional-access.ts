@@ -117,7 +117,7 @@ export async function createTransactionalAccess(
   }
 
   let live = await restore(store.snapshot())
-  let publishedEpoch = Number(live.epoch)
+  let publishedAdmission = live.sendAdmission()
   let liveRevision = store.snapshot().revision
   let tail: Promise<void> = Promise.resolve()
   const locked = async <TValue>(fn: () => Promise<TValue>): Promise<TValue> => {
@@ -139,7 +139,7 @@ export async function createTransactionalAccess(
     if (revision <= liveRevision) return
     live = next
     liveRevision = revision
-    publishedEpoch = Number(next.epoch)
+    publishedAdmission = next.sendAdmission()
   }
 
   // Opens are serialised among themselves, so the revision below belongs to the one in flight.
@@ -147,7 +147,8 @@ export async function createTransactionalAccess(
   let openRevision = -1
 
   const access: HandleAccess = {
-    epoch: () => publishedEpoch,
+    epoch: () => publishedAdmission.epoch,
+    admission: () => publishedAdmission,
     read: (fn) => locked(async () => await fn(live)),
     mutate: (fn) =>
       locked(async () => {
@@ -170,6 +171,7 @@ export async function createTransactionalAccess(
         const row = store.snapshot()
         await store.save(row.revision, encodeClientState(next.state), next.ledgerTokens)
         publish(next, row.revision + 1)
+        next.confirmAdopted()
       }),
     open: (fn, persistOpened) => {
       const run = openTail.then(async () => {

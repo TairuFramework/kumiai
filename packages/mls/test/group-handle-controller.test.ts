@@ -7,7 +7,7 @@ import { twoDeviceProfileGroup } from './fixtures/device-harness.js'
 // handle's listMembers() (the production #iterateMembers generator), not a local reimplementation:
 // a bound leaf surfaces its controller DID, a floating (id-only) leaf surfaces none. The harness
 // gives both in one group — the manager joined with a bound-leaf credential (controller = P),
-// the target joined via an id-only key package (no controller binding on its leaf).
+// the creator has an id-only leaf (no controller binding).
 describe('GroupMember controller surfacing', () => {
   test('a bound leaf surfaces the controller DID; a floating leaf surfaces none', async () => {
     const g = await twoDeviceProfileGroup()
@@ -18,8 +18,8 @@ describe('GroupMember controller surfacing', () => {
     expect(manager?.controller).toBeDefined()
     expect(normalizeDID(manager?.controller as string)).toBe(normalizeDID(g.controllerID))
 
-    const target = members.find((m) => normalizeDID(m.id) === normalizeDID(g.targetDeviceID))
-    expect(target).toBeDefined()
-    expect(target).not.toHaveProperty('controller')
+    const creator = members.find((m) => normalizeDID(m.id) === normalizeDID(g.creatorIdentity.id))
+    expect(creator).toBeDefined()
+    expect(creator).not.toHaveProperty('controller')
   })
 })

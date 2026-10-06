@@ -101,6 +101,8 @@ export type HubFetchTopicResult = {
   head: string | null
   /** The oldest sequenceID still retained, or null if the log is empty. */
   oldest: string | null
+  /** Removed log frames after the exclusive cursor, from the same snapshot as messages and head. */
+  gap: boolean
 }
 
 /**

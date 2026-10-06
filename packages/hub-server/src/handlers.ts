@@ -541,6 +541,7 @@ export function createHandlers(params: CreateHandlersParams): ProcedureHandlers<
           })),
           head: result.head,
           oldest: result.oldest,
+          gap: result.gap,
         }
       } catch (error) {
         rethrowAsHandlerError(error)

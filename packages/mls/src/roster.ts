@@ -32,7 +32,7 @@ export function adminCount(state: RosterState): number {
 
 /**
  * Self-referential role reducer. Authority is rooted at the genesis anchor (the
- * creator is the epoch-0 admin) and grows only through admins-so-far: every
+ * controller or creator is the epoch-0 admin) and grows only through admins-so-far: every
  * grant or demotion must be issued by a DID already an admin in the state
  * accumulated from strictly-earlier entries. That state-so-far check is what
  * makes rotation sound — an admin can demote the very admin that promoted them
@@ -44,7 +44,9 @@ export function adminCount(state: RosterState): number {
  */
 export const roleReducer: LedgerReducer<RoleValue, RosterState> = {
   type: ROLE_ENTRY_TYPE,
-  seed: (anchor) => ({ roles: new Map([[normalizeDID(anchor.creatorDID), 'admin']]) }),
+  seed: (anchor) => ({
+    roles: new Map([[normalizeDID(anchor.controller ?? anchor.creatorDID), 'admin']]),
+  }),
   verifyAuthority: (verified, stateSoFar) =>
     stateSoFar.roles.get(normalizeDID(verified.issuer)) === 'admin',
   apply: (verified, stateSoFar) => {

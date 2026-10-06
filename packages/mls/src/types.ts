@@ -7,9 +7,16 @@ import type {
   PrivateKeyPackage,
 } from 'ts-mls'
 
+import type { ControllerBinding } from './credential.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
 
 export type GroupOptions = {
+  /** Creator or key-package leaf binding. Creates a lifecycle group when passed to createGroup. */
+  controller?: ControllerBinding
+  /** Lifecycle leaf lifetime in seconds. Defaults to 86,400; maximum 604,800. */
+  leafLifetime?: number
+  /** Lifecycle trusted grant lifetime in seconds. Defaults to 2,592,000; maximum 31,536,000. */
+  trustedGrantLifetime?: number
   /** Custom CryptoProvider for ts-mls. Defaults to nobleCryptoProvider. */
   cryptoProvider?: CryptoProvider
   /** Ciphersuite name. Defaults to MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519. */
@@ -28,13 +35,9 @@ export type GroupOptions = {
    * 'reject' to refuse it (the handle stays at its pre-commit epoch and
    * processMessage throws CommitRejectedError). Overridable per call.
    *
-   * Providing this REPLACES the anchored defaultCommitPolicy entirely — it does
-   * not compose with it. A caller that sets this for any reason (e.g. to
-   * observe or add one extra rule) silently disables all default permission
-   * enforcement for the resulting handle; only the decode/fold hard-reject
-   * still applies. Callers who want to extend rather than replace the default
-   * policy must call defaultCommitPolicy themselves from within their own
-   * callback.
+   * Replaces the default role rules after mandatory credential and lifecycle gates accept.
+   * A caller policy cannot admit a change rejected by those gates. To extend the default
+   * role rules, call defaultCommitPolicy from the callback.
    */
   commitPolicy?: IncomingMessageCallback
   /**
@@ -57,10 +60,12 @@ export type GroupOptions = {
 export type Invite = {
   /** Group ID the invite is for */
   groupID: string
+  /** Intended recipient DID. */
+  recipientDID: string
   /** Inviter's DID */
   inviterID: string
   /** The group's whole signed control ledger, in application order, so the joiner
-   *  folds the same roster as everyone else. The invitee's own role entry is last. */
+   *  folds the same control state as everyone else. */
   ledgerEntries: Array<string>
 }
 

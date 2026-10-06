@@ -19,6 +19,7 @@ describe('handshake frame codec', () => {
   })
 
   test('frames lead with magic, version, then the kind tag', () => {
+    expect(HANDSHAKE_VERSION).toBe(1)
     const frame = encodeHandshakeFrame(HANDSHAKE_KIND.commit, new Uint8Array([9]))
     expect(frame[0]).toBe(HANDSHAKE_MAGIC[0])
     expect(frame[1]).toBe(HANDSHAKE_MAGIC[1])

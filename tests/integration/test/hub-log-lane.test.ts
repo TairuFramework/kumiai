@@ -99,6 +99,41 @@ function payloadOf(text: string): Uint8Array {
 }
 
 describe('Topic log over the wire', () => {
+  test('removal coverage crosses the wire from the same store snapshot', async () => {
+    const store = createMemoryStore()
+    const ctx = createTestHub(store)
+    const { client: alice } = ctx.connect()
+    const { client: bob, identity } = ctx.connect()
+    try {
+      await bob.subscribe({ topicID: TOPIC })
+      const a = await alice.publish({ topicID: TOPIC, payload: payloadOf('a'), retain: 'log' })
+      const b = await alice.publish({ topicID: TOPIC, payload: payloadOf('b'), retain: 'log' })
+      const c = await alice.publish({ topicID: TOPIC, payload: payloadOf('c'), retain: 'log' })
+      expect((await bob.fetchTopic({ topicID: TOPIC })).gap).toBe(false)
+      await store.trim({ topicID: TOPIC, before: c.sequenceID })
+      const wire = await bob.fetchTopic({ topicID: TOPIC, after: a.sequenceID })
+      const snapshot = await store.fetchTopic({
+        subscriberDID: identity.id,
+        topicID: TOPIC,
+        after: a.sequenceID,
+      })
+      expect(wire.gap).toBe(true)
+      expect(wire.gap).toBe(snapshot.gap)
+      expect(wire.head).toBe(c.sequenceID)
+      expect(wire.messages.map((message) => message.sequenceID)).toEqual([c.sequenceID])
+      expect((await bob.fetchTopic({ topicID: TOPIC, after: b.sequenceID })).gap).toBe(false)
+      await store.trim({ topicID: TOPIC, before: `${c.sequenceID}~` })
+      expect(await bob.fetchTopic({ topicID: TOPIC, after: a.sequenceID })).toMatchObject({
+        messages: [],
+        head: c.sequenceID,
+        oldest: null,
+        gap: true,
+      })
+    } finally {
+      await ctx.dispose()
+    }
+  })
+
   test('a peer subscribing after the fact pulls frames published with zero subscribers', async () => {
     const { store } = recordingStore()
     const ctx = createTestHub(store)

@@ -29,7 +29,51 @@ export type ConformanceCommitContext = {
 }
 
 /** The `PendingRecovery` of `@kumiai/rpc`, re-declared structurally. */
+export type ConformanceRecoveryRefusalReason = 'binding' | 'lapse' | 'floor' | 'policy' | 'invalid'
+export type ConformanceRecoveryVerdict = {
+  groupID: string
+  requestID: string
+  position: string
+  commitDigest: string
+} & (
+  | { verdict: 'confirmed'; epoch: number; tag: string }
+  | { verdict: 'superseded' }
+  | { verdict: 'refused'; reason: ConformanceRecoveryRefusalReason }
+)
+export type ConformanceOpenedRecoveryVerdict = {
+  signer: string
+  verdict: ConformanceRecoveryVerdict
+}
+export type ConformanceVerifiedRecoveryRequest = {
+  groupID: string
+  requestID: string
+  requesterDID: string
+}
+export type ConformanceConfirmationKey = { epoch: number; key: Uint8Array }
+export type ConformanceSendAdmission =
+  | { epoch: number; admissible: true }
+  | { epoch: number; admissible: false; reason: 'lapsed' }
+export type ConformanceProcessCommitResult = {
+  advanced: boolean
+  epochBefore: number
+  epochAfter: number
+  refusal?: ConformanceRecoveryRefusalReason
+}
+export type ConformanceAppliedRecovery =
+  | ConformancePendingRecovery
+  | { renewalRequired: true }
+  | null
+export type ConformanceBoundRecovery = {
+  requester: ConformanceGroupMLS
+  responder: ConformanceGroupMLS
+  ratchet: () => Promise<void>
+  replaceBinding: () => Promise<void>
+}
 export type ConformancePendingRecovery = {
+  epoch: number
+  markBindingUnusable: () => void
+  confirmationKey: (position: string, commitDigest: string) => Promise<Uint8Array>
+  judgeVerdict: (opened: ConformanceOpenedRecoveryVerdict) => 'authoritative' | 'advisory'
   commit: Uint8Array
   onAccepted: () => Promise<void>
 }
@@ -51,20 +95,29 @@ export type ConformanceRosterEntry = {
  * passing bytes between two instances, which is all the clauses below do.
  */
 export type ConformanceGroupMLS = {
+  verifyRecoveryRequest: (request: Uint8Array) => Promise<ConformanceVerifiedRecoveryRequest | null>
+  confirmationKey: (position: string, commitDigest: string) => Promise<ConformanceConfirmationKey>
+  sealRecoveryVerdict: (
+    request: Uint8Array,
+    verdict: ConformanceRecoveryVerdict,
+  ) => Promise<Uint8Array>
+  openRecoveryVerdict: (
+    sealed: Uint8Array,
+    requestID: string,
+  ) => Promise<ConformanceOpenedRecoveryVerdict | null>
+  sendAdmission: () => ConformanceSendAdmission
   readEpoch: () => Promise<number>
   rosterEntries: () => Promise<Array<ConformanceRosterEntry>>
   readCommitHeader: (commit: Uint8Array) => Promise<ConformanceCommitHeader | null>
   processCommit: (
     commit: Uint8Array,
     context: ConformanceCommitContext,
-  ) => Promise<{ advanced: boolean; epochBefore: number; epochAfter: number }>
+  ) => Promise<ConformanceProcessCommitResult>
   exportRecoverySecret: () => Uint8Array | Promise<Uint8Array>
-  createRecoveryRequest: (requestID: string) => Promise<Uint8Array>
+  prepareRecovery: () => Promise<'ready' | 'renewal-required'>
+  createRecoveryRequest: (requestID: string, deadlineMs?: number) => Promise<Uint8Array>
   sealGroupInfo: (request: Uint8Array) => Promise<Uint8Array>
-  applyRecovery: (
-    sealed: Uint8Array,
-    requestID: string,
-  ) => Promise<ConformancePendingRecovery | null>
+  applyRecovery: (sealed: Uint8Array, requestID: string) => Promise<ConformanceAppliedRecovery>
   isLedgerComplete: () => Promise<boolean>
   getLedger: () => Promise<Array<string>>
   sealLedger: (request: Uint8Array) => Promise<Uint8Array>
@@ -84,6 +137,13 @@ export type ConformanceCommit = {
 }
 
 export type ConformanceMLSGroup = {
+  groupID: string
+  /** Authenticated malformed payloads bypass the sender port's shape guard. */
+  sealVerdictPayload: (
+    member: number,
+    request: Uint8Array,
+    verdict: Record<string, unknown>,
+  ) => Promise<Uint8Array>
   /**
    * The ports under test. The COMMITTER is not among them: every Commit here is authored by a
    * member outside this list, so `processCommit` is only ever asked about a RECEIVED commit —
@@ -129,6 +189,7 @@ export type GroupMLSConformanceParams = {
   label: string
   /** A fresh group of `size` ports plus an outside committer. `id` is unique per case. */
   createGroup: (size: number, id: string) => Promise<ConformanceMLSGroup>
+  createBoundRecovery: () => Promise<ConformanceBoundRecovery>
 }
 
 /** The member at `index`, with the assertion the suite would otherwise repeat everywhere. */
@@ -165,6 +226,20 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
   }
 
   describe(`GroupMLS conformance — ${label}`, () => {
+    test('send admission is synchronous and follows only accepted epoch advances', async () => {
+      await withGroup(1, 'send-admission', async (group) => {
+        const member = memberAt(group.members, 0)
+        const epoch = await member.mls.readEpoch()
+        group.setEpochHintOffset(1)
+        expect(member.mls.sendAdmission()).toEqual({ epoch, admissible: true })
+        const commit = await group.buildCommit()
+        expect(member.mls.sendAdmission()).toEqual({ epoch, admissible: true })
+        await member.mls.processCommit(commit.commit, commit.context)
+        expect(member.mls.sendAdmission()).toEqual({ epoch: epoch + 1, admissible: true })
+        await member.mls.processCommit(commit.commit, commit.context)
+        expect(member.mls.sendAdmission()).toEqual({ epoch: epoch + 1, admissible: true })
+      })
+    })
     // Three passes (hint offsets 0, -1, 1) over a real MLS group: slow on CI runners.
     test('commit results and refusals ignore a lagging or leading epoch hint', async () => {
       await withGroup(3, 'lying-epoch-hint', async (group) => {
@@ -561,6 +636,11 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           expect(fake?.epoch).toBe(real?.epoch)
           // And the committer is what a forger does not get to choose.
           expect(fake?.committerDID).toBeUndefined()
+          const receiver = memberAt(group.members, 1)
+          expect(await receiver.mls.processCommit(forged, {})).toMatchObject({
+            advanced: false,
+            refusal: 'invalid',
+          })
         })
       })
     })
@@ -572,18 +652,150 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
      * being a way back in is the RESPONDER, and only the responder.
      */
     describe('the recovery round trip', () => {
+      test('verified requests name their signed identity, group and request without disclosing a private key', async () => {
+        await withGroup(2, 'verify-recovery-request', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const bob = memberAt(group.members, 1)
+          const request = await bob.mls.createRecoveryRequest('verified-ask')
+          expect(await alice.mls.verifyRecoveryRequest(request)).toEqual({
+            groupID: group.groupID,
+            requestID: 'verified-ask',
+            requesterDID: bob.did,
+          })
+          expect(await alice.mls.verifyRecoveryRequest(new Uint8Array([0]))).toBeNull()
+        })
+      })
+      test('a marked replacement binding is not reused after a ratchet or returned again by the host', async () => {
+        const { requester, responder, ratchet, replaceBinding } = await params.createBoundRecovery()
+        expect(await requester.prepareRecovery()).toBe('ready')
+        const request = await requester.createRecoveryRequest('mark-binding')
+        const pending = await requester.applyRecovery(
+          await responder.sealGroupInfo(request),
+          'mark-binding',
+        )
+        if (pending == null || 'renewalRequired' in pending) throw new Error('No bound candidate')
+        const before = await requester.readEpoch()
+        expect(pending.markBindingUnusable()).toBeUndefined()
+        expect(pending.markBindingUnusable()).toBeUndefined()
+        expect(await requester.readEpoch()).toBe(before)
+        expect(await requester.prepareRecovery()).toBe('renewal-required')
+        await ratchet()
+        expect(await requester.prepareRecovery()).toBe('renewal-required')
+        await replaceBinding()
+        expect(await requester.prepareRecovery()).toBe('ready')
+      })
+      test('pending exporter agrees with survivors without adopting, and acceptance is idempotent', async () => {
+        await withGroup(2, 'confirmation-exporter', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const bob = memberAt(group.members, 1)
+          const before = await bob.mls.readEpoch()
+          const request = await bob.mls.createRecoveryRequest('confirm')
+          const pending = await bob.mls.applyRecovery(
+            await alice.mls.sealGroupInfo(request),
+            'confirm',
+          )
+          if (pending == null || 'renewalRequired' in pending)
+            throw new Error('No pending recovery')
+          const deriving = pending.confirmationKey('position', 'digest')
+          pending.markBindingUnusable()
+          expect(await bob.mls.prepareRecovery()).toBe('ready')
+          await expect(pending.confirmationKey('other', 'digest')).rejects.toThrow()
+          const key = await deriving
+          expect(key).toHaveLength(32)
+          expect(await bob.mls.readEpoch()).toBe(before)
+          expect(pending.epoch).toBe((await alice.mls.readEpoch()) + 1)
+          const result = await alice.mls.processCommit(pending.commit, {})
+          expect(result.advanced).toBe(true)
+          expect(await alice.mls.confirmationKey('position', 'digest')).toEqual({
+            epoch: pending.epoch,
+            key,
+          })
+          expect((await alice.mls.confirmationKey('position', 'other')).key).not.toEqual(key)
+          expect((await alice.mls.confirmationKey('other', 'digest')).key).not.toEqual(key)
+          await pending.onAccepted()
+          await pending.onAccepted()
+          expect(await bob.mls.readEpoch()).toBe(pending.epoch)
+        })
+      })
+      test('sealed verdicts retain request keys, separate domains and bind the complete tuple', async () => {
+        await withGroup(2, 'verdict-contract', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const bob = memberAt(group.members, 1)
+          const request = await bob.mls.createRecoveryRequest('verdict')
+          const reply = await alice.mls.sealGroupInfo(request)
+          const pending = await bob.mls.applyRecovery(reply, 'verdict')
+          if (pending == null || 'renewalRequired' in pending)
+            throw new Error('No pending recovery')
+          await pending.confirmationKey('position', 'digest')
+          const verdict: ConformanceRecoveryVerdict = {
+            groupID: group.groupID,
+            requestID: 'verdict',
+            position: 'position',
+            commitDigest: 'digest',
+            verdict: 'refused',
+            reason: 'policy',
+          }
+          const sealed = await alice.mls.sealRecoveryVerdict(request, verdict)
+          const opened = await bob.mls.openRecoveryVerdict(sealed, 'verdict')
+          expect(opened).toEqual({ signer: alice.did, verdict })
+          expect(await bob.mls.openRecoveryVerdict(sealed, 'verdict')).toEqual(opened)
+          expect(await bob.mls.openRecoveryVerdict(sealed, 'other')).toBeNull()
+          expect(await bob.mls.openRecoveryVerdict(reply, 'verdict')).toBeNull()
+          expect(await bob.mls.openSealedLedger(sealed, 'verdict')).toBeNull()
+          if (opened == null) throw new Error('No opened verdict')
+          expect(pending.judgeVerdict(opened)).toBe('authoritative')
+          expect(pending.judgeVerdict({ ...opened, signer: 'did:peer:unknown' })).toBe('advisory')
+          expect(
+            pending.judgeVerdict({ ...opened, verdict: { ...verdict, position: 'other' } }),
+          ).toBe('advisory')
+        })
+      })
+
+      test.each([
+        { verdict: 'unknown' },
+        { verdict: 'refused', reason: 'unknown' },
+        { verdict: 'refused' },
+        { verdict: 'confirmed', epoch: -1, tag: 'tag' },
+        { verdict: 'confirmed', epoch: 1.5, tag: 'tag' },
+        { verdict: 'confirmed', epoch: 0, tag: 42 },
+        { verdict: 'superseded', position: '' },
+        { verdict: 'superseded', commitDigest: 42 },
+      ])('malformed sealed verdicts are refused: %j', async (change) => {
+        await withGroup(2, 'malformed-verdict', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const bob = memberAt(group.members, 1)
+          const request = await bob.mls.createRecoveryRequest('malformed')
+          const verdict = {
+            groupID: group.groupID,
+            requestID: 'malformed',
+            position: 'position',
+            commitDigest: 'digest',
+            ...change,
+          }
+          const sealed = await group.sealVerdictPayload(0, request, verdict)
+          expect(await bob.mls.openRecoveryVerdict(sealed, 'malformed')).toBeNull()
+          await expect(
+            alice.mls.sealRecoveryVerdict(request, verdict as ConformanceRecoveryVerdict),
+          ).rejects.toThrow()
+        })
+      })
+
       test('a member answers another member, and the reply rebuilds a rejoin', async () => {
         await withGroup(2, 'recovery-round-trip', async (group) => {
           const alice = memberAt(group.members, 0)
           const bob = memberAt(group.members, 1)
 
+          const epochBefore = await bob.mls.readEpoch()
+          expect(await bob.mls.prepareRecovery()).toBe('ready')
+          expect(await bob.mls.readEpoch()).toBe(epochBefore)
           const request = await bob.mls.createRecoveryRequest('req-1')
           const sealed = await alice.mls.sealGroupInfo(request)
           const pending = await bob.mls.applyRecovery(sealed, 'req-1')
 
           // Narrowed rather than optional-chained: `expect` does not narrow, and a chain that
           // short-circuits would TypeError on `.length` instead of failing this assertion.
-          if (pending == null) throw new Error('applyRecovery returned no pending commit')
+          if (pending == null || 'renewalRequired' in pending)
+            throw new Error('applyRecovery returned no pending commit')
           expect(pending.commit).toBeInstanceOf(Uint8Array)
           expect(pending.commit.length).toBeGreaterThan(0)
         })

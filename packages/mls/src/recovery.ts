@@ -9,14 +9,17 @@ import {
   verifyToken,
 } from '@kokuin/token'
 import { sha256 } from '@noble/hashes/sha2.js'
+import { decode, mlsMessageDecoder, wireformats } from 'ts-mls'
 
-import { readGroupAnchorExtension } from './anchor.js'
+import { LEDGER_HEAD_EXTENSION_TYPE, readGroupAnchorExtension } from './anchor.js'
 import {
   exportGroupInfo,
   type GroupHandle,
   inspectGroupInfo,
   readGroupInfoBinding,
 } from './group.js'
+import { assertHeadMatches, computeHead, decodeLedgerHead } from './head.js'
+import { ledgerEntryDigest } from './ledger.js'
 
 const utf8 = new TextEncoder()
 
@@ -57,7 +60,7 @@ const MIN_SEALED_LENGTH = 1 + KEM_OUTPUT_LENGTH + 16
  * `requestID`s for this separation — that is a caller property a reused id loses;
  * these labels carry it unconditionally.
  */
-type SealedReplyKind = {
+export type SealedReplyKind = {
   /** HPKE `info` — separates this use from MLS's own use of the same ciphersuite,
    *  and from the other reply kind. */
   hpkeInfo: Uint8Array
@@ -249,15 +252,28 @@ type ResponderAttestation = {
   type: typeof RECOVERY_GROUPINFO_TYPE
   groupID: string
   requestID: string
-  /** Multibase-encoded SHA-256 of the framed `MLSMessage(GroupInfo)` this attests. */
+  /** Multibase-encoded SHA-256 of the framed GroupInfo bytes. */
   groupInfoDigest: string
+  ledgerDigest?: string
 }
 
-/** The sealed GroupInfo plaintext: `[len(4)][attestation token][GroupInfo bytes]`,
- *  big-endian length. Proof and vouched-for GroupInfo are sealed under one AEAD;
- *  neither can be lifted from the other. */
-function frameAttestedGroupInfo(attestation: string, groupInfo: Uint8Array): Uint8Array {
+/** Lifecycle replies length-frame GroupInfo too, followed by the authenticated ledger. */
+function frameAttestedGroupInfo(
+  attestation: string,
+  groupInfo: Uint8Array,
+  ledger?: Uint8Array,
+): Uint8Array {
   const token = utf8.encode(attestation)
+  if (ledger != null) {
+    const out = new Uint8Array(8 + token.length + groupInfo.length + ledger.length)
+    const view = new DataView(out.buffer)
+    view.setUint32(0, token.length, false)
+    out.set(token, 4)
+    view.setUint32(4 + token.length, groupInfo.length, false)
+    out.set(groupInfo, 8 + token.length)
+    out.set(ledger, 8 + token.length + groupInfo.length)
+    return out
+  }
   const out = new Uint8Array(4 + token.length + groupInfo.length)
   new DataView(out.buffer).setUint32(0, token.length, false)
   out.set(token, 4)
@@ -265,18 +281,25 @@ function frameAttestedGroupInfo(attestation: string, groupInfo: Uint8Array): Uin
   return out
 }
 
-function unframeAttestedGroupInfo(bytes: Uint8Array): {
+type AttestedGroupInfo = {
   attestation: string
   groupInfo: Uint8Array
-} {
+  /** Present only in a lifecycle reply. */
+  ledger?: Uint8Array
+}
+
+function unframeAttestedGroupInfo(bytes: Uint8Array, lifecycle: boolean): AttestedGroupInfo {
   if (bytes.length < 4) throw new Error('attested GroupInfo frame is truncated')
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   const length = view.getUint32(0, false)
   if (4 + length > bytes.length) throw new Error('attested GroupInfo frame is truncated')
-  return {
-    attestation: new TextDecoder().decode(bytes.subarray(4, 4 + length)),
-    groupInfo: bytes.slice(4 + length),
-  }
+  const attestation = new TextDecoder().decode(bytes.subarray(4, 4 + length))
+  if (!lifecycle) return { attestation, groupInfo: bytes.slice(4 + length) }
+  if (8 + length > bytes.length) throw new Error('attested GroupInfo frame is truncated')
+  const groupInfoLength = view.getUint32(4 + length, false)
+  const end = 8 + length + groupInfoLength
+  if (end > bytes.length) throw new Error('attested GroupInfo frame is truncated')
+  return { attestation, groupInfo: bytes.slice(8 + length, end), ledger: bytes.slice(end) }
 }
 
 /**
@@ -306,7 +329,7 @@ function recoveryAAD(
  * attacker-chosen. `embedLongForm` lets it verify offline — a responder needs no
  * DID resolver to answer.
  */
-async function verifyRecoveryRequest(token: string): Promise<VerifiedRecoveryRequest> {
+export async function verifyRecoveryRequest(token: string): Promise<VerifiedRecoveryRequest> {
   let verified: Awaited<ReturnType<typeof verifyToken<RecoveryRequest>>>
   try {
     verified = await verifyToken<RecoveryRequest>(token)
@@ -418,12 +441,17 @@ export async function createRecoveryRequest(
  * Throws {@link RecoveryRequestError} for every refusal — see
  * {@link RecoveryRequestRejection}.
  */
-async function sealToRequest(
-  kind: SealedReplyKind,
-  group: GroupHandle,
-  request: string,
-  plaintext: Uint8Array,
-): Promise<Uint8Array> {
+export type SealToRequestParams = {
+  kind: SealedReplyKind
+  group: GroupHandle
+  request: string
+  plaintext: Uint8Array
+  /** Require the requester to hold a leaf in the current tree. Defaults to true. */
+  requireMember?: boolean
+}
+
+export async function sealToRequest(params: SealToRequestParams): Promise<Uint8Array> {
+  const { kind, group, request, plaintext, requireMember = true } = params
   const verified = await verifyRecoveryRequest(request)
 
   if (verified.groupID !== group.groupID) {
@@ -432,7 +460,7 @@ async function sealToRequest(
       `recovery request names group ${verified.groupID}, not ${group.groupID}`,
     )
   }
-  if (group.findMemberLeafIndex(verified.requesterDID) === undefined) {
+  if (requireMember && group.findMemberLeafIndex(verified.requesterDID) === undefined) {
     throw new RecoveryRequestError(
       'not-a-member',
       `recovery requester ${verified.requesterDID} has no leaf in the current ratchet tree`,
@@ -463,13 +491,8 @@ async function sealToRequest(
  * reply for another member, another request, or another kind (kind is bound into
  * both AAD and HPKE `info`) fails as an AEAD failure, not a skippable comparison.
  */
-async function openSealedReply(
-  kind: SealedReplyKind,
-  group: GroupHandle,
-  sealed: Uint8Array,
-  requestID: string,
-  ephemeralPrivateKey: Uint8Array,
-): Promise<Uint8Array> {
+export async function openSealedReply(params: OpenSealedReplyParams): Promise<Uint8Array> {
+  const { kind, group, sealed, requestID, ephemeralPrivateKey } = params
   if (sealed.length < MIN_SEALED_LENGTH || sealed[0] !== kind.version) {
     throw kind.fail('malformed', 'sealed reply frame is truncated or carries an unknown version')
   }
@@ -537,6 +560,8 @@ export async function sealGroupInfo(params: SealGroupInfoParams): Promise<Uint8A
 
   const verified = await verifyRecoveryRequest(request)
   const { groupInfo } = await exportGroupInfo({ group })
+  const ledger =
+    group.anchor.controller == null ? undefined : encodeLedgerTokens(await group.getLedger())
 
   const signed = await identity.signToken<ResponderAttestation>(
     {
@@ -544,14 +569,15 @@ export async function sealGroupInfo(params: SealGroupInfoParams): Promise<Uint8A
       groupID: verified.groupID,
       requestID: verified.requestID,
       groupInfoDigest: encodeMultibase(sha256(groupInfo)),
+      ...(ledger == null ? {} : { ledgerDigest: encodeMultibase(sha256(ledger)) }),
     },
     // Self-verifying offline: the healing peer must check the signature without
     // resolving the responder.
     { embedLongForm: true },
   )
 
-  const plaintext = frameAttestedGroupInfo(stringifyToken(signed), groupInfo)
-  return await sealToRequest(GROUP_INFO_REPLY, group, request, plaintext)
+  const plaintext = frameAttestedGroupInfo(stringifyToken(signed), groupInfo, ledger)
+  return await sealToRequest({ kind: GROUP_INFO_REPLY, group, request, plaintext })
 }
 
 export type OpenSealedGroupInfoParams = {
@@ -563,6 +589,17 @@ export type OpenSealedGroupInfoParams = {
   requestID: string
   /** The private half retained since {@link createRecoveryRequest}. */
   ephemeralPrivateKey: Uint8Array
+}
+
+export type OpenSealedReplyParams = OpenSealedGroupInfoParams & { kind: SealedReplyKind }
+
+type AssertResponderIsMemberParams = {
+  attestation: string
+  group: GroupHandle
+  requestID: string
+  groupInfo: Uint8Array
+  /** The framed ledger of a lifecycle reply, bound by the attestation's `ledgerDigest`. */
+  ledger?: Uint8Array
 }
 
 /**
@@ -578,12 +615,8 @@ export type OpenSealedGroupInfoParams = {
  * joined, or removed before the requester's last-known epoch) is refused; one still
  * in it (including one removed AFTER that epoch) is accepted.
  */
-async function assertResponderIsMember(
-  attestation: string,
-  group: GroupHandle,
-  requestID: string,
-  groupInfo: Uint8Array,
-): Promise<void> {
+async function assertResponderIsMember(params: AssertResponderIsMemberParams): Promise<string> {
+  const { attestation, group, requestID, groupInfo, ledger } = params
   let verified: Awaited<ReturnType<typeof verifyToken<ResponderAttestation>>>
   try {
     verified = await verifyToken<ResponderAttestation>(attestation)
@@ -599,25 +632,38 @@ async function assertResponderIsMember(
     throw new SealedGroupInfoError('unauthenticated', 'responder attestation is not signed')
   }
 
-  const { iss, type, groupID, requestID: attestedRequestID, groupInfoDigest } = verified.payload
+  const {
+    iss,
+    type,
+    groupID,
+    requestID: attestedRequestID,
+    groupInfoDigest,
+    ledgerDigest,
+  } = verified.payload
   if (
     type !== RECOVERY_GROUPINFO_TYPE ||
     groupID !== group.groupID ||
     attestedRequestID !== requestID ||
     typeof groupInfoDigest !== 'string' ||
-    groupInfoDigest !== encodeMultibase(sha256(groupInfo))
+    groupInfoDigest !== encodeMultibase(sha256(groupInfo)) ||
+    (ledger != null && ledgerDigest !== encodeMultibase(sha256(ledger)))
   ) {
     throw new SealedGroupInfoError(
       'unauthenticated',
       'responder attestation does not bind this group, request, and GroupInfo',
     )
   }
-  if (group.findMemberLeafIndex(normalizeDID(iss)) === undefined) {
+  // Lifecycle authority is judged against the derived pending tree and joined registry.
+  if (
+    group.anchor.controller == null &&
+    group.findMemberLeafIndex(normalizeDID(iss)) === undefined
+  ) {
     throw new SealedGroupInfoError(
       'unauthenticated',
       "responder holds no leaf in the requester's last-known ratchet tree",
     )
   }
+  return normalizeDID(iss)
 }
 
 /**
@@ -659,19 +705,38 @@ function assertGroupInfoBoundToGroup(groupInfo: Uint8Array, group: GroupHandle):
  * GroupInfo's group id and genesis anchor must match the group being healed.
  */
 export async function openSealedGroupInfo(params: OpenSealedGroupInfoParams): Promise<Uint8Array> {
+  return (await openRecoveryGroupInfo(params)).groupInfo
+}
+
+export type RecoveryGroupInfo = {
+  groupInfo: Uint8Array
+  /** The responder's ledger tokens; empty outside lifecycle groups. */
+  ledger: Array<string>
+  /** The responder's normalized DID. */
+  signer: string
+}
+
+/** @internal The authenticated recovery inputs retained for candidate judgement. */
+export async function openRecoveryGroupInfo(
+  params: OpenSealedGroupInfoParams,
+): Promise<RecoveryGroupInfo> {
   const { group, sealed, requestID, ephemeralPrivateKey } = params
-  const plaintext = await openSealedReply(
-    GROUP_INFO_REPLY,
+  const plaintext = await openSealedReply({
+    kind: GROUP_INFO_REPLY,
     group,
     sealed,
     requestID,
     ephemeralPrivateKey,
-  )
+  })
 
   let attestation: string
   let groupInfo: Uint8Array
+  let ledger: Uint8Array | undefined
   try {
-    ;({ attestation, groupInfo } = unframeAttestedGroupInfo(plaintext))
+    ;({ attestation, groupInfo, ledger } = unframeAttestedGroupInfo(
+      plaintext,
+      group.anchor.controller != null,
+    ))
   } catch (cause) {
     // biome-ignore lint/style/useErrorCause: cause IS passed; the rule only reads argument 1, and these take (reason, message, options).
     throw new SealedGroupInfoError(
@@ -694,10 +759,39 @@ export async function openSealedGroupInfo(params: OpenSealedGroupInfoParams): Pr
   }
 
   // Authenticate the responder, then bind the GroupInfo to this group.
-  await assertResponderIsMember(attestation, group, requestID, groupInfo)
+  const signer = await assertResponderIsMember({
+    attestation,
+    group,
+    requestID,
+    groupInfo,
+    ledger,
+  })
   assertGroupInfoBoundToGroup(groupInfo, group)
+  if (ledger == null) return { groupInfo, ledger: [], signer }
 
-  return groupInfo
+  let tokens: Array<string>
+  try {
+    tokens = decodeLedgerTokens(ledger)
+    const message = decode(mlsMessageDecoder, groupInfo)
+    if (message?.wireformat !== wireformats.mls_group_info) throw new Error('Invalid GroupInfo')
+    const extension = message.groupInfo.groupContext.extensions.find(
+      (held) => held.extensionType === LEDGER_HEAD_EXTENSION_TYPE,
+    )
+    const head =
+      extension?.extensionData instanceof Uint8Array
+        ? decodeLedgerHead(extension.extensionData)
+        : null
+    if (head == null) throw new SealedGroupInfoError('malformed', 'GroupInfo has no ledger head')
+    assertHeadMatches(head.head, computeHead(group.groupID, tokens.map(ledgerEntryDigest)))
+  } catch (cause) {
+    // biome-ignore lint/style/useErrorCause: cause is passed in the third argument.
+    throw new SealedGroupInfoError(
+      'malformed',
+      'recovery ledger does not reproduce the GroupInfo head',
+      { cause },
+    )
+  }
+  return { groupInfo, ledger: tokens, signer }
 }
 
 /**
@@ -779,7 +873,12 @@ export type SealLedgerParams = {
 export async function sealLedger(params: SealLedgerParams): Promise<Uint8Array> {
   const { group, request } = params
   const entries = await group.getLedger()
-  return await sealToRequest(LEDGER_REPLY, group, request, encodeLedgerTokens(entries))
+  return await sealToRequest({
+    kind: LEDGER_REPLY,
+    group,
+    request,
+    plaintext: encodeLedgerTokens(entries),
+  })
 }
 
 export type OpenSealedLedgerParams = {
@@ -808,13 +907,13 @@ export type OpenSealedLedgerParams = {
  */
 export async function openSealedLedger(params: OpenSealedLedgerParams): Promise<Array<string>> {
   const { group, sealed, requestID, ephemeralPrivateKey } = params
-  const plaintext = await openSealedReply(
-    LEDGER_REPLY,
+  const plaintext = await openSealedReply({
+    kind: LEDGER_REPLY,
     group,
     sealed,
     requestID,
     ephemeralPrivateKey,
-  )
+  })
   try {
     return decodeLedgerTokens(plaintext)
   } catch (cause) {

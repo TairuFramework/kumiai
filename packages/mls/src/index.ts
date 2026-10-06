@@ -30,6 +30,12 @@ export {
   verifyManagementCapability,
 } from './authentication.js'
 export {
+  type MintLeafCapabilityParams,
+  type MintTrustedGrantParams,
+  mintLeafCapability,
+  mintTrustedGrant,
+} from './capability.js'
+export {
   type ClientState,
   decodeClientState,
   encodeClientState,
@@ -55,7 +61,20 @@ export {
   decodeControlEnvelope,
   encodeControlEnvelope,
 } from './envelope.js'
-export { type EnvelopeFoldResult, foldEnvelope } from './envelope-fold.js'
+export {
+  type EnvelopeFoldResult,
+  type FoldEnvelopeContext,
+  type FoldEnvelopeParams,
+  foldEnvelope,
+} from './envelope-fold.js'
+export {
+  LeafBindingError,
+  type LeafBindingReason,
+  LeafLapsedError,
+  type LeafLapsedReason,
+  RevokeProofError,
+  type RevokeProofReason,
+} from './errors.js'
 export {
   type FoldDrop,
   type FoldInput,
@@ -112,7 +131,16 @@ export {
   removeMember,
   restoreGroup,
   revokeDevice,
+  type SendAdmission,
 } from './group.js'
+export {
+  type RemoveLapsedLeavesResult,
+  type RevokeBuildResult,
+  type RevokeWithProofParams,
+  removeLapsedLeaves,
+  renewLeaf,
+  revokeWithProof,
+} from './group-lifecycle.js'
 export {
   assertHeadMatches,
   buildLedgerHeadExtension,
@@ -128,6 +156,7 @@ export {
   readLedgerHead,
   readLedgerHeadExtension,
 } from './head.js'
+export { HISTORY_HORIZON, historySize } from './history.js'
 export {
   decodeKeyPackage,
   decodePrivateKeyPackage,
@@ -142,6 +171,7 @@ export {
   type VerifiedLedgerEntry,
   verifyLedgerEntry,
 } from './ledger.js'
+export { type AssertRecoveryBindingParams, assertRecoveryBinding } from './lifecycle.js'
 export {
   type CommitPolicyContext,
   defaultCommitPolicy,
@@ -153,9 +183,11 @@ export {
   createRecoveryRequest,
   type OpenSealedGroupInfoParams,
   type OpenSealedLedgerParams,
+  openRecoveryGroupInfo,
   openSealedGroupInfo,
   openSealedLedger,
   RECOVERY_REQUEST_TYPE,
+  type RecoveryGroupInfo,
   type RecoveryRequest,
   RecoveryRequestError,
   type RecoveryRequestRejection,
@@ -171,11 +203,25 @@ export {
   sealGroupInfo,
   sealLedger,
   type VerifiedRecoveryRequest,
+  verifyRecoveryRequest,
 } from './recovery.js'
+export {
+  confirmationKey,
+  confirmationTag,
+  type OpenedRecoveryVerdict,
+  openRecoveryVerdict,
+  type RecoveryRefusalReason,
+  type RecoverySignerEligibleParams,
+  type RecoveryVerdict,
+  recoverySignerEligible,
+  type SealRecoveryVerdictParams,
+  sealRecoveryVerdict,
+} from './recovery-verdict.js'
 export {
   authority,
   beaconOf,
   type ControllerBeacon,
+  type ControllerProjection,
   controllerOf,
   DEVICE_ENTRY_TYPE,
   type DeviceOp,
@@ -184,7 +230,10 @@ export {
   type DeviceValue,
   denySetOf,
   foldControl,
+  type Revocation,
+  type RevokedEffect,
   registrySeed,
+  revocationOf,
 } from './registry.js'
 export {
   adminCount,

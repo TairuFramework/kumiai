@@ -111,3 +111,112 @@ sealed-ahead (opens later) and sealed-below (never opens again) are the same exc
 untrusted hub. It decides only what to try and what to pass — **never** what is authentic. `unwrap`
 is the only authority on opening, and a frame claiming this epoch that will not open is treated as
 any other frame that will not open.
+
+## Durable log dispatch
+
+A resolved log `dispatch` means durable acceptance into the required `AppOutbox`, not publication.
+A rejected dispatch accepts nothing and publishes nothing.
+`retentionOf` follows the procedure declaration. Only log events enter this queue.
+The host supplies `appOutboxLimit`. Admission rejects lapsed senders with `SendNotAdmissibleError`.
+Encoded plaintext above `MAX_APP_ENTRY_BYTES = 524,288` throws `AppEntryTooLargeError`.
+Outstanding entries and unresolved reservations count towards the cap, which throws `AppOutboxFullError` rather than blocking.
+Reservations preserve call order even when puts settle out of order.
+The worker cannot pass an unresolved reservation or an earlier unresolved entry.
+
+Log delivery is at least once across epoch changes and sender restarts, with per-sender order.
+The peer retains each accepted event until it proves a publication readable by every member at that publication's epoch.
+Removal, host outbox clearing or permanent disposal ends this promise without delivery, with host-visible outcomes.
+Handlers must be completion-safe on retry: after partial failure, a duplicate must finish all remaining effects.
+An upsert alone does not guarantee completion. No new envelope message ID suppresses duplicates.
+The host's atomic `put` resolves only after durability and leaves no row on rejection.
+`list` returns ascending sequence order. `remove` and `clear` are durable, and removing an unknown sequence is harmless.
+Sequences identify outstanding entries and may recur after a drained queue restarts.
+`lastAttempt` records preparation only, never acknowledged publication.
+
+The outbox contains arbitrary event plaintext, potentially indefinitely during strand or lapse.
+The host encrypts it at rest and clears it on group deletion or leave.
+Row deletion does not establish physical erasure. The host chooses an erasure policy.
+
+`HandleAccess.admission()` and `GroupMLS.sendAdmission()` publish one lock-free snapshot alongside `epoch()`.
+They never acquire the handle lock or wait on read, mutate, replace or open.
+The snapshot updates after mutate/open and after replace's adoption callback resolves.
+Dispatch inside adoption reads the epoch being left and can await durable insertion without taking the lane.
+The host's outbox put must not wait on that same adoption transaction.
+Dispatch inside one's own renewal can still be refused by the old lapsed snapshot. The host dispatches after adoption.
+
+The worker catches up, checks admission, seals, persists preparation, publishes, then probes the commit head.
+Ciphertext epoch, admission epoch and the captured floor epoch must agree.
+Only an acknowledged publication is eligible for certification.
+A safe probe proves no commit head beyond its floor. A covered, complete walk begun after acknowledgement also certifies at that epoch.
+A gap, strand or uncovered walk cannot certify. The worker holds and re-seals after a ratchet.
+A fresh joiner with an uncovered floor rejoins only when an acknowledged entry remains at risk after a non-ratcheting walk.
+Failures retain entries and retry with exponential backoff from one to sixty seconds.
+A failed remove retries removal alone. Sustained commit pressure can delay delivery until a seal-to-probe interval has no intervening commit.
+
+A commit removing the local member clears queued entries and reports `onAppOutboxCleared({ reason: 'removed', seqs })`.
+A sender removed behind a retention gap cannot learn its removal or obtain GroupInfo from current members.
+Its entries remain durable and unpublished, with strand and recovery-failure reports, until the host clears them or disposes the peer.
+Lapse after enqueue holds entries until renewal or removal.
+Every final frame passes the whole-frame guard. `FrameTooLargeError` keeps an outbox entry for host inspection, without publishing it.
+
+## The rotation slot and recovery
+
+`AnchorStore` holds `{ anchor, pending?: { epochBefore, epochAfter, rosterBefore, forced, advance } }` atomically.
+One rotation record spans exactly one handle advance and is saved before that advance starts.
+`advance` identifies its digest. A recovery records `PendingRecovery.epoch`, never its header epoch or the old handle's epoch plus one.
+The next advance resolves the previous record while the target epoch's exporter secret remains available.
+A landed record rotates on roster change or forced external rejoin and saves `{ anchor }`.
+A known-unlanded refusal clears the record.
+`MissingLedgerEntriesError` with port epoch equal to `epochBefore` also clears it, while the walk retains poison classification.
+An ambiguous throw at `epochBefore` keeps the record. Only the same advance may retry it.
+A throw after landing still resolves and repairs the anchor before another advance.
+
+At startup, repair runs before replay, seed advances and delivery.
+At `epochBefore`, no durable replacement landed, so startup drops the record.
+At another epoch beyond the target, the secret is gone. The peer requires a confirmed forced rejoin instead of inventing a topic.
+Minimal readiness installs control lanes and holds sealing, commits and walk advances until that recovery lands.
+Ordinary peer-owned advances close the anchor crash gap. Hosts that advance outside the peer can still require coordinated recovery.
+
+Recovery adopts only after a member confirms the published external commit.
+A retention gap strands immediately as `retention-gap`, leaving the cursor and queued entries unchanged.
+`renewal-required` and `refused` hold recovery until the host changes inputs and calls `recover()`.
+A ratchet also clears renewal-required. `unconfirmed`, no-responder and deadline retry on backoff.
+The [lifecycle contract](./mls-lifecycle.md#recovery-and-trust-residuals) defines bound signer gates and refused-binding handling.
+
+## Revoke hold and peer ownership
+
+`commit(build, { holdLogSends: true })` takes a synchronous hold until landing or known-unlanded resolution.
+No queued log frame is submitted during the hold, even if sealed or durably prepared earlier.
+The held commit waits for already submitted log publications to settle before journalling or publishing.
+`JournalEntry.holdsLogSends` preserves this ordering across restart. Hosts must store and return the flag unchanged.
+Ephemeral and directed sends remain outside this hold.
+
+One live `GroupPeer` owns the group's outbox, commit journal and anchor slot on one designated commit hub.
+Other hubs are failover candidates. Shared stores across simultaneous peers can overwrite sequences and rotation records.
+All log sends, commits, recovery and revoke runs use the owning peer.
+A host switches ownership by calling `dispose()`, awaiting `drained()`, then constructing the replacement.
+Calling `drained()` before disposal rejects. Disposal remains non-blocking with respect to host callbacks.
+
+`drained()` waits for disposal teardown and every already invoked host effect to settle, including abandoned promises and returned callbacks.
+New host calls after disposal reject synchronously. Parked hub receive/close work and runtime work do not hold the drain.
+WARNING: never await `drained()` inside that peer's counted callback or port invocation, because it would wait on itself.
+
+Acceptance effects must be recoverable from the current durable handle, including effects missed after a crash or rejected callback.
+Journal replay alone cannot restore them once adoption cleared the journal.
+The host can persist a dirty mark with handle advances and reconcile effects from current state.
+Persisted notices can be lost on crash or dispose. Notices are not replayed, so hosts recover required state from stores at startup.
+
+
+## Durable commit cursor
+
+`AppOutbox.getCommitCursor()` and `putCommitCursor()` store `{ position, epoch, stranded? }` separately from queued entries.
+`position` is null when no position is durable yet. The host stores the record as given.
+Each write must be durable before resolution. Clearing entries preserves the cursor. Group deletion clears both.
+The peer writes a cursor only after MLS state for its paired epoch is durable.
+Hosts must finish MLS persistence before successful commit processing or adoption returns.
+Startup seeds the commit walk only when the stored epoch equals `GroupMLS.readEpoch()`.
+An epoch mismatch discards the cursor and starts from the oldest retained frame.
+A matching cursor lets undelivered entries resume without a recovery rejoin, costing at most one duplicate per entry.
+A stranded peer keeps the durable position before the frame that stranded it and records `stranded: true`.
+A restart at the same epoch then re-raises the strand and heals, including after a losing fork it had already stepped past.
+Recovery request keys remain available for at least the configured recovery or ledger deadline, with a 120-second minimum.

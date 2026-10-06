@@ -61,6 +61,7 @@ describe('hub log paging', () => {
           messages: repeated as HubFetchTopicResult['messages'],
           head: repeated.at(-1)?.sequenceID ?? null,
           oldest: repeated[0]?.sequenceID ?? null,
+          ...{ gap: false },
         }
       }
     }

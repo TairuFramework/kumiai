@@ -17,7 +17,13 @@ import { nodeTypes } from 'ts-mls'
 import { simpleHandleAccess } from '../src/access.js'
 import { createGroupCrypto } from '../src/crypto.js'
 import { createGroupMLS } from '../src/mls.js'
-import { buildRealCommit, buildRealExternalCommit, createRealGroup } from './fixtures/real-group.js'
+import {
+  buildRealCommit,
+  buildRealExternalCommit,
+  createRealBoundRecovery,
+  createRealGroup,
+  sealRealRecoveryVerdict,
+} from './fixtures/real-group.js'
 
 /**
  * The port contracts, against real MLS. The identical suites run in `@kumiai/rpc` over the test
@@ -184,10 +190,17 @@ testPendingGroupCryptoConformance({
 
 testGroupMLSConformance({
   label: 'createGroupMLS over a real GroupHandle',
+  createBoundRecovery: createRealBoundRecovery,
   createGroup: async (size, id) => {
     const group = await createRealGroup(size, `mls-conformance-${id}`)
     let hintOffset = 0
     return {
+      groupID: group.committer.handle.groupID,
+      sealVerdictPayload: async (index, request, verdict) => {
+        const member = group.members[index]
+        if (member == null) throw new Error('missing member')
+        return await sealRealRecoveryVerdict(member, request, verdict)
+      },
       setEpochHintOffset: (offset) => {
         hintOffset = offset
       },

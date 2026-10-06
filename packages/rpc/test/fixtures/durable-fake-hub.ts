@@ -39,6 +39,7 @@ export class DurableFakeHub implements LogHub {
   #seq = 0
   #log: Array<StoredMessage> = []
   #heads = new Map<string, string>()
+  #removedThrough = new Map<string, string>()
   #topics = new Map<string, Set<string>>()
   #sinks = new Map<string, Sink>()
   #live = new Map<string, boolean>()
@@ -121,6 +122,7 @@ export class DurableFakeHub implements LogHub {
       )
       const excess = topicLog.length - this.#maxDepth
       if (excess > 0) {
+        for (const message of topicLog.slice(0, excess)) this.#noteRemoval(params.topicID, message)
         const evicted = new Set(topicLog.slice(0, excess).map((m) => m.sequenceID))
         this.#log = this.#log.filter((m) => !evicted.has(m.sequenceID))
       }
@@ -151,6 +153,11 @@ export class DurableFakeHub implements LogHub {
       messages,
       head: this.#heads.get(params.topicID) ?? null,
       oldest: log[0]?.sequenceID ?? null,
+      ...{
+        gap:
+          this.#removedThrough.has(params.topicID) &&
+          (after == null || (this.#removedThrough.get(params.topicID) as string) > after),
+      },
     }
   }
 
@@ -200,6 +207,10 @@ export class DurableFakeHub implements LogHub {
    * one whose own backlog is the OLDEST thing left here.
    */
   trim(topicID: string, before: string): void {
+    for (const message of this.#log) {
+      if (message.topicID === topicID && message.sequenceID < before)
+        this.#noteRemoval(topicID, message)
+    }
     this.#log = this.#log.filter((m) => m.topicID !== topicID || m.sequenceID >= before)
   }
 
@@ -207,6 +218,13 @@ export class DurableFakeHub implements LogHub {
   oldest(topicID: string): string | null {
     const log = this.#log.filter((m) => m.topicID === topicID && this.#logClass.has(m.sequenceID))
     return log.length > 0 ? (log[0] as StoredMessage).sequenceID : null
+  }
+
+  #noteRemoval(topicID: string, message: StoredMessage): void {
+    if (!this.#logClass.has(message.sequenceID)) return
+    const held = this.#removedThrough.get(topicID)
+    if (held == null || message.sequenceID > held)
+      this.#removedThrough.set(topicID, message.sequenceID)
   }
 
   /** The topic's head: the last accepted log publish, or null. It survives a trim. */

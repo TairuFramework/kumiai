@@ -1,10 +1,13 @@
 import type { GroupHandle } from '@kumiai/mls'
-import type { PendingAppFrame } from '@kumiai/rpc'
+import type { PendingAppFrame, SendAdmission } from '@kumiai/rpc'
 
 type PersistOpened = (stagedState: Uint8Array, record: PendingAppFrame) => Promise<void>
 
 export type HandleAccess = {
+  /** Published with admission after mutation/open and after replacement adoption resolves. */
   epoch(): number
+  /** Lock-free snapshot. During adoption it describes the epoch being left. */
+  admission(): SendAdmission
   read<TValue>(fn: (handle: GroupHandle) => TValue | Promise<TValue>): Promise<TValue>
   mutate<TValue>(
     fn: (handle: GroupHandle, persist: (handle: GroupHandle) => Promise<void>) => Promise<TValue>,
@@ -23,7 +26,7 @@ export type SimpleHandleAccessParams = {
 }
 
 export function simpleHandleAccess(params: SimpleHandleAccessParams): HandleAccess {
-  let publishedEpoch = Number(params.handle().epoch)
+  let publishedAdmission = params.handle().sendAdmission()
   let tail: Promise<void> = Promise.resolve()
   const serialise = async <TValue>(fn: () => Promise<TValue>): Promise<TValue> => {
     const previous = tail
@@ -43,7 +46,8 @@ export function simpleHandleAccess(params: SimpleHandleAccessParams): HandleAcce
   }
 
   return {
-    epoch: () => publishedEpoch,
+    epoch: () => publishedAdmission.epoch,
+    admission: () => publishedAdmission,
     read: (fn) => serialise(async () => await fn(params.handle())),
     mutate: (fn) =>
       serialise(async () => {
@@ -55,20 +59,21 @@ export function simpleHandleAccess(params: SimpleHandleAccessParams): HandleAcce
         }
         const result = await fn(handle, persist)
         if (!saved) await save(handle)
-        publishedEpoch = Number(handle.epoch)
+        publishedAdmission = handle.sendAdmission()
         return result
       }),
     replace: (next) =>
       serialise(async () => {
         await save(next)
         await params.adopt(next)
-        publishedEpoch = Number(next.epoch)
+        publishedAdmission = next.sendAdmission()
+        next.confirmAdopted()
       }),
     open: (fn, persistOpened) =>
       serialise(async () => {
         const handle = params.handle()
         const result = await fn(handle, persistOpened)
-        publishedEpoch = Number(handle.epoch)
+        publishedAdmission = handle.sendAdmission()
         return result
       }),
   }

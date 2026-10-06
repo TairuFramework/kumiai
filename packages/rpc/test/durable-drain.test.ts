@@ -194,6 +194,7 @@ describe('durable retained drain', () => {
     await flush()
     hub.detach('bob')
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'first' } })
+    await flush()
     await alice.peer.commit(buildLedgerCommit(alice, []))
     store.setFail(true)
     await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toSatisfy(
@@ -228,6 +229,7 @@ describe('durable retained drain', () => {
     await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, removes: ['carol'] })
     await flush()
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'new topic' } })
+    await flush()
     store.setFail(true)
     await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toSatisfy(
       isAppFrameStorageError,

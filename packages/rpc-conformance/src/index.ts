@@ -17,6 +17,25 @@
  *
  * @module rpc-conformance
  */
+
+export {
+  type AnchorStoreConformanceParams,
+  type ConformanceAnchorSlot,
+  type ConformanceAnchorStore,
+  testAnchorStoreConformance,
+} from './anchor-store.js'
+export {
+  type AppOutboxConformanceParams,
+  type ConformanceAppOutbox,
+  type ConformanceAppOutboxEntry,
+  type ConformanceCommitCursor,
+  testAppOutboxConformance,
+} from './app-outbox.js'
+export {
+  type ConformanceCommitJournal,
+  type ConformanceJournalEntry,
+  testCommitJournalConformance,
+} from './commit-journal.js'
 export {
   type ConformanceCryptoGroup,
   type ConformanceCryptoMember,
@@ -35,6 +54,7 @@ export {
   type GroupMLSConformanceParams,
   testGroupMLSConformance,
 } from './group-mls.js'
+export { createMemoryAppOutbox, type MemoryAppOutbox } from './memory-app-outbox.js'
 export {
   type ConformanceAppFrameRef,
   type ConformancePendingAppFrame,

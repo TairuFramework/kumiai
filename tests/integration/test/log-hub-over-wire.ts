@@ -1,9 +1,9 @@
-import { Client } from '@enkaku/client'
+import { Client, RequestError } from '@enkaku/client'
 import type { AnyClientMessageOf, AnyServerMessageOf } from '@enkaku/protocol'
 import { DirectTransports } from '@enkaku/transport'
 import { type OwnIdentity, randomIdentity } from '@kokuin/token'
 import { HubClient } from '@kumiai/hub-client'
-import type { HubProtocol, StoredMessage } from '@kumiai/hub-protocol'
+import { type HubProtocol, hubErrorFromCode, type StoredMessage } from '@kumiai/hub-protocol'
 import { createHub, createMemoryStore } from '@kumiai/hub-server'
 import type { HubReceiveSubscription, LogHub } from '@kumiai/hub-tunnel'
 
@@ -142,13 +142,19 @@ export function createWireHub(options: { retentionSeconds?: number } = {}): Wire
         await client.unsubscribe({ topicID })
       },
       publish: async (params) => {
-        return await client.publish({
-          topicID: params.topicID,
-          payload: params.payload,
-          ...(params.retain != null && { retain: params.retain }),
-          ...('expectedHead' in params && { expectedHead: params.expectedHead }),
-          ...(params.publishID != null && { publishID: params.publishID }),
-        })
+        try {
+          return await client.publish({
+            topicID: params.topicID,
+            payload: params.payload,
+            ...(params.retain != null && { retain: params.retain }),
+            ...('expectedHead' in params && { expectedHead: params.expectedHead }),
+            ...(params.publishID != null && { publishID: params.publishID }),
+          })
+        } catch (error) {
+          if (error instanceof RequestError)
+            throw hubErrorFromCode(error.code, error.message) ?? error
+          throw error
+        }
       },
       fetchTopic: async (params) => {
         const result = await client.fetchTopic({
@@ -168,6 +174,7 @@ export function createWireHub(options: { retentionSeconds?: number } = {}): Wire
           ),
           head: result.head ?? null,
           oldest: result.oldest ?? null,
+          gap: result.gap,
         }
       },
       receive: () => {

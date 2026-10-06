@@ -86,7 +86,7 @@ async function runCase(kind: Case, offset: number) {
   return { result, sequenceID }
 }
 
-describe('commit decisions use the handle epoch', () => {
+describe('commit decisions use the handle epoch', { concurrent: false }, () => {
   test.each<Case>(['applicable', 'past', 'future', 'own', 'unknown-handshake', 'unknown-commit'])(
     '%s has the same result with lagging and leading hints',
     async (kind) => {

@@ -43,14 +43,23 @@ export type ConformanceMailboxHub = {
   publish: (params: ConformancePublishParams) => Promise<{ sequenceID: string }>
 }
 
+export type ConformanceFetchTopicParams = {
+  subscriberDID: string
+  topicID: string
+  after?: string
+  limit?: number
+}
+
+export type ConformanceFetchTopicResult = {
+  messages: Array<StoredMessage>
+  head: string | null
+  oldest: string | null
+  gap: boolean
+}
+
 /** The subset of `LogHub` (`@kumiai/hub-tunnel`) this suite exercises. */
 export type ConformanceLogHub = ConformanceMailboxHub & {
-  fetchTopic: (params: {
-    subscriberDID: string
-    topicID: string
-    after?: string
-    limit?: number
-  }) => Promise<{ messages: Array<StoredMessage>; head: string | null; oldest: string | null }>
+  fetchTopic: (params: ConformanceFetchTopicParams) => Promise<ConformanceFetchTopicResult>
 }
 
 export type MailboxHubConformanceParams<Hub extends ConformanceMailboxHub> = {
@@ -147,8 +156,8 @@ export function testMailboxHubConformance<Hub extends ConformanceMailboxHub>(
   describe(`${label}: MailboxHub conformance`, () => {
     test('a publish is not echoed to its sender', async () => {
       const hub = await createHub({ maxRetention, maxDepth })
-      hub.subscribe(ALICE, TOPIC)
-      hub.subscribe(BOB, TOPIC)
+      await subscribing(hub, ALICE, TOPIC)
+      await subscribing(hub, BOB, TOPIC)
       const toAlice = hub.receive(ALICE)
       const toBob = hub.receive(BOB)
 
@@ -166,7 +175,7 @@ export function testMailboxHubConformance<Hub extends ConformanceMailboxHub>(
 
     test('sequenceIDs are lexicographically ordered across the 9 to 10 boundary', async () => {
       const hub = await createHub({ maxRetention, maxDepth })
-      hub.subscribe(BOB, TOPIC)
+      await subscribing(hub, BOB, TOPIC)
 
       const minted: Array<string> = []
       for (let index = 0; index < 11; index++) {
@@ -229,9 +238,63 @@ export function testLogHubConformance<Hub extends ConformanceLogHub>(
   testMailboxHubConformance(params)
 
   describe(`${label}: LogHub conformance`, () => {
+    test('publishes become visible across topics before acknowledgement returns', async () => {
+      const hub = await createHub({ maxRetention, maxDepth })
+      const other = `${TOPIC}:other`
+      await subscribing(hub, BOB, TOPIC)
+      await subscribing(hub, BOB, other)
+      const counts = new Map<string, number>()
+      for (const topicID of [TOPIC, other, TOPIC, other]) {
+        counts.set(topicID, (counts.get(topicID) ?? 0) + 1)
+        const published = await hub.publish({
+          senderDID: ALICE,
+          topicID,
+          payload: payload(1),
+          retain: 'log',
+        })
+        const result = await hub.fetchTopic({ subscriberDID: BOB, topicID })
+        expect(result.head).toBe(published.sequenceID)
+        expect(result.messages.at(-1)?.sequenceID).toBe(published.sequenceID)
+        expect(result.gap).toBe((counts.get(topicID) ?? 0) > maxDepth)
+      }
+    })
+
+    test('depth removal distinguishes the exclusive cursor and preserves a retained head', async () => {
+      const hub = await createHub({ maxRetention, maxDepth })
+      await subscribing(hub, BOB, TOPIC)
+      const publish = async (topicID = TOPIC, retain: 'log' | 'mailbox' = 'log') => {
+        return (await hub.publish({ senderDID: ALICE, topicID, payload: payload(1), retain }))
+          .sequenceID
+      }
+      const fetch = (after?: string) =>
+        hub.fetchTopic({ subscriberDID: BOB, topicID: TOPIC, ...(after != null && { after }) })
+      const ids = [await publish()]
+      expect((await fetch()).gap).toBe(false)
+      await publish(`${TOPIC}:other`)
+      await publish(TOPIC, 'mailbox')
+      while (ids.length <= maxDepth) ids.push(await publish())
+      const cursorOnly = await fetch(ids[0])
+      expect(cursorOnly.gap).toBe(false)
+      expect(cursorOnly.oldest).toBe(ids[1])
+      expect(cursorOnly.messages.map((message) => message.sequenceID)).toEqual(ids.slice(1))
+      ids.push(await publish())
+      const behind = await fetch(ids[0])
+      expect(behind.gap).toBe(true)
+      expect(behind.oldest).toBe(ids[2])
+      expect(behind.messages.map((message) => message.sequenceID)).toEqual(ids.slice(2))
+      expect((await fetch()).gap).toBe(true)
+      for (const cursor of ids.slice(0, -1)) {
+        const result = await fetch(cursor)
+        expect(result.messages.length).toBeGreaterThan(0)
+        expect(result.messages.at(-1)?.sequenceID).toBe(ids.at(-1))
+        expect(result.head).toBe(ids.at(-1))
+      }
+      expect(await fetch(ids.at(-1))).toMatchObject({ messages: [], head: ids.at(-1), gap: false })
+    })
+
     test('fetchTopic refuses a non-subscriber', async () => {
       const hub = await createHub({ maxRetention, maxDepth })
-      hub.subscribe(ALICE, TOPIC)
+      await subscribing(hub, ALICE, TOPIC)
       await hub.publish({
         senderDID: ALICE,
         topicID: TOPIC,
@@ -263,7 +326,7 @@ export function testLogHubConformance<Hub extends ConformanceLogHub>(
 
     test('a mailbox publish is delivered, stays out of the log, and does not move the head', async () => {
       const hub = await createHub({ maxRetention, maxDepth })
-      hub.subscribe(BOB, TOPIC)
+      await subscribing(hub, BOB, TOPIC)
       const { sequenceID: logged } = await hub.publish({
         senderDID: ALICE,
         topicID: TOPIC,
@@ -281,7 +344,7 @@ export function testLogHubConformance<Hub extends ConformanceLogHub>(
 
     test('two publishes at the same head: one accepted, one refused, nothing stored for the loser', async () => {
       const hub = await createHub({ maxRetention, maxDepth })
-      hub.subscribe(BOB, TOPIC)
+      await subscribing(hub, BOB, TOPIC)
       const { sequenceID: first } = await hub.publish({
         senderDID: ALICE,
         topicID: TOPIC,
@@ -309,7 +372,7 @@ export function testLogHubConformance<Hub extends ConformanceLogHub>(
 
     test('a replayed publishID returns the original sequenceID and appends nothing', async () => {
       const hub = await createHub({ maxRetention, maxDepth })
-      hub.subscribe(BOB, TOPIC)
+      await subscribing(hub, BOB, TOPIC)
       const { sequenceID: first } = await hub.publish({
         senderDID: ALICE,
         topicID: TOPIC,
@@ -338,7 +401,7 @@ export function testLogHubConformance<Hub extends ConformanceLogHub>(
 
     test('a re-published payload under a fresh publishID never lands below the original', async () => {
       const hub = await createHub({ maxRetention, maxDepth })
-      hub.subscribe(BOB, TOPIC)
+      await subscribing(hub, BOB, TOPIC)
 
       const { sequenceID: original } = await hub.publish({
         senderDID: ALICE,
@@ -368,8 +431,8 @@ export function testLogHubConformance<Hub extends ConformanceLogHub>(
 
     test('a pushed log frame names its place in the log, and a pushed mailbox frame names none', async () => {
       const hub = await createHub({ maxRetention, maxDepth })
-      hub.subscribe(ALICE, TOPIC)
-      hub.subscribe(BOB, TOPIC)
+      await subscribing(hub, ALICE, TOPIC)
+      await subscribing(hub, BOB, TOPIC)
       const toBob = hub.receive(BOB)
 
       const { sequenceID: first } = await hub.publish({
@@ -408,7 +471,7 @@ export function testLogHubConformance<Hub extends ConformanceLogHub>(
 
     test('a log topic trims itself once its depth bound is exceeded', async () => {
       const hub = await createHub({ maxRetention, maxDepth })
-      hub.subscribe(BOB, TOPIC)
+      await subscribing(hub, BOB, TOPIC)
 
       const minted: Array<string> = []
       for (let index = 0; index <= maxDepth; index++) {
@@ -466,7 +529,7 @@ export function testMailboxAckConformance<Hub extends ConformanceMailboxHub>(
   describe(`${label}: mailbox ack conformance`, () => {
     test('an acked mailbox frame is not redelivered to a fresh receive', async () => {
       const hub = await createHub({ maxRetention, maxDepth })
-      hub.subscribe(BOB, TOPIC)
+      await subscribing(hub, BOB, TOPIC)
       const subscription = hub.receive(BOB, { topicID: TOPIC })
       await hub.publish({ senderDID: ALICE, topicID: TOPIC, payload: payload(1) })
       // Unacked control, published alongside the acked frame: without it, a redeliver that does
@@ -501,7 +564,7 @@ export function testLogAckConformance<Hub extends ConformanceLogHub>(
   describe(`${label}: log ack conformance`, () => {
     test('a log frame survives every ack', async () => {
       const hub = await createHub({ maxRetention, maxDepth })
-      hub.subscribe(BOB, TOPIC)
+      await subscribing(hub, BOB, TOPIC)
       const subscription = hub.receive(BOB, { topicID: TOPIC })
       const { sequenceID: logged } = await hub.publish({
         senderDID: ALICE,

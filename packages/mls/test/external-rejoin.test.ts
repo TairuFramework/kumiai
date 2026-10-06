@@ -1,4 +1,5 @@
-import { createIdentity, randomIdentity } from '@kokuin/token'
+import { createRevoke } from '@kokuin/controller'
+import { createIdentity, now, randomIdentity } from '@kokuin/token'
 import {
   decode,
   defaultExtensionTypes,
@@ -10,7 +11,7 @@ import {
   protocolVersions,
   wireformats,
 } from 'ts-mls'
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 import { controlCapabilities } from '../src/anchor.js'
 import {
@@ -24,8 +25,17 @@ import {
   readMessageEpoch,
   removeMember,
 } from '../src/group.js'
-import { ledgerEntryDigest } from '../src/ledger.js'
+import { ledgerEntryDigest, signLedgerEntry } from '../src/ledger.js'
 import type { GroupOptions, Invite } from '../src/types.js'
+import { controllerSeed, inception } from './fixtures/lifecycle-ledger.js'
+import {
+  agent,
+  controllerID,
+  lowLevelExternal,
+  lowLevelWelcome,
+  pipelineGroup,
+  timedBinding,
+} from './fixtures/lifecycle-pipeline.js'
 
 describe('external rejoin codec round-trip', () => {
   test('mlsMessage(GroupInfo) encode → decode preserves version + wireformat', async () => {
@@ -521,4 +531,84 @@ describe('public API', () => {
     expect(typeof mod.exportGroupInfo).toBe('function')
     expect(typeof mod.joinGroupExternal).toBe('function')
   })
+})
+
+test('public external join requires a bound replacement and survivors refuse a floating one', async () => {
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(150000)
+  try {
+    const { group } = await pipelineGroup()
+    const bob = agent(61)
+    const { author, joined } = await lowLevelWelcome(
+      group,
+      bob,
+      await timedBinding({ identity: bob, iat: 100, exp: 200 }),
+    )
+    const { groupInfo } = await exportGroupInfo({ group: author })
+    await expect(
+      joinGroupExternal({ identity: bob, groupInfo, credential: joined.credential, resync: true }),
+    ).rejects.toMatchObject({ reason: 'floating-refused' })
+    await expect(
+      author.processMessage(await lowLevelExternal({ group: author, identity: bob })),
+    ).rejects.toThrow()
+    const result = await joinGroupExternal({
+      identity: bob,
+      groupInfo,
+      credential: joined.credential,
+      controller: await timedBinding({ identity: bob, iat: 150, exp: 250 }),
+      resync: true,
+    })
+    expect(result.group.bindingOfDID(bob.id)?.controller).toBe(controllerID)
+    await author.processMessage(result.commitMessage)
+    expect(author.epoch).toBe(result.group.epoch)
+    expect(now()).toBe(150)
+  } finally {
+    clock.mockRestore()
+  }
+})
+
+test('an external join authentication context follows the returned handle ledger', async () => {
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(150000)
+  try {
+    const { group, identity } = await pipelineGroup()
+    const bob = agent(61)
+    const { author, joined } = await lowLevelWelcome(
+      group,
+      bob,
+      await timedBinding({ identity: bob, iat: 100, exp: 200 }),
+    )
+    const { groupInfo } = await exportGroupInfo({ group: author })
+    const result = await joinGroupExternal({
+      identity: bob,
+      groupInfo,
+      credential: joined.credential,
+      controller: await timedBinding({ identity: bob, iat: 150, exp: 250 }),
+      resync: true,
+    })
+    const revoke = createRevoke({
+      seed: controllerSeed,
+      profile: 0,
+      did: controllerID,
+      prior: inception.event,
+      target: bob.id,
+      keyPosition: { gen: 0, seq: 0 },
+    })
+    const token = await signLedgerEntry(identity, {
+      type: 'kumiai.device',
+      groupID: group.groupID,
+      subject: bob.id,
+      value: { op: 'revoke', proof: [inception, revoke], revoked: [{ did: bob.id }] },
+    })
+    await result.group.applyLedgerEntries([token])
+    const own = result.group.state.ratchetTree[result.group.state.privatePath.leafIndex * 2]
+    if (own?.nodeType !== nodeTypes.leaf) throw new Error('Missing own leaf')
+    expect(result.group.currentDenySet().has(bob.id)).toBe(true)
+    await expect(
+      result.group.context.authService.validateCredential(
+        own.leaf.credential,
+        own.leaf.signaturePublicKey,
+      ),
+    ).resolves.toBe(false)
+  } finally {
+    clock.mockRestore()
+  }
 })

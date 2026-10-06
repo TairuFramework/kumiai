@@ -125,6 +125,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
   const entries = new Map<string, LogEntry>()
   const topicLogs = new Map<string, Array<string>>()
   const heads = new Map<string, string>()
+  const removedThrough = new Map<string, string>()
   const deliveries = new Map<string, Array<string>>()
   /**
    * publishID -> the sequenceID it was accepted as. Not a log entry and not reachable from one: no
@@ -163,6 +164,10 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
   function removeEntry(sequenceID: string): void {
     const entry = entries.get(sequenceID)
     if (entry == null) return
+    if (entry.retain === 'log') {
+      const removed = removedThrough.get(entry.topicID)
+      if (removed == null || sequenceID > removed) removedThrough.set(entry.topicID, sequenceID)
+    }
     for (const recipientDID of entry.pendingFor) {
       const list = deliveries.get(recipientDID)
       if (list != null) {
@@ -388,6 +393,9 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
         messages,
         head: heads.get(params.topicID) ?? null,
         oldest: log[0] ?? null,
+        gap:
+          removedThrough.has(params.topicID) &&
+          (after == null || (removedThrough.get(params.topicID) as string) > after),
       }
     },
 
@@ -411,14 +419,17 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): HubStore {
     },
 
     async purge(params: PurgeParams): Promise<Array<string>> {
-      // The age bound, for both classes: the same removal path, the same invariants — head is
-      // untouched.
       const now = Date.now()
       const purgedIDs: Array<string> = []
+      const retainedTopics = new Set<string>()
+      // Insertion order is log-position order, even if the clock moves backwards.
       for (const [sequenceID, entry] of entries) {
+        if (entry.retain === 'log' && retainedTopics.has(entry.topicID)) continue
         const retention = retentionOf(entry.topicID, params.olderThan)
         if (entry.storedAt <= now - retention * 1000) {
           purgedIDs.push(sequenceID)
+        } else if (entry.retain === 'log') {
+          retainedTopics.add(entry.topicID)
         }
       }
       for (const sequenceID of purgedIDs) {

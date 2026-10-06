@@ -1,4 +1,4 @@
-import { isPeer4, type OwnIdentity } from '@kokuin/token'
+import { isPeer4, now, type OwnIdentity } from '@kokuin/token'
 import {
   type Credential,
   type CustomExtension,
@@ -10,11 +10,16 @@ import {
 } from 'ts-mls'
 
 import { controlCapabilities } from './anchor.js'
-import type { MLSCredentialIdentity } from './credential.js'
+import { verifyLeafCredential } from './authentication.js'
+import { readCapability } from './capability.js'
+import type { ControllerBinding, MLSCredentialIdentity } from './credential.js'
 import { resolveMlsContext } from './group-context.js'
 import type { GroupOptions, KeyPackageBundle } from './types.js'
 
-export function makeMLSCredential(identity: OwnIdentity): Credential {
+export function makeMLSCredential(
+  identity: OwnIdentity,
+  controller?: ControllerBinding,
+): Credential {
   const id = identity.id
   const isPeer = isPeer4(id)
   if (
@@ -26,12 +31,22 @@ export function makeMLSCredential(identity: OwnIdentity): Credential {
     )
   }
   const payload: MLSCredentialIdentity = { v: 1, id }
+  if (controller != null) payload.controller = controller
   if (isPeer) {
     payload.longForm = (identity as unknown as { longForm: string }).longForm
   }
   return {
     credentialType: defaultCredentialTypes.basic,
     identity: new TextEncoder().encode(JSON.stringify(payload)),
+  }
+}
+
+export function assertBindingAuthorTime(controller?: ControllerBinding): void {
+  if (controller == null) return
+  const { iat, exp } = readCapability(controller.capability).payload
+  const timestamp = now()
+  if (exp <= timestamp || iat > timestamp) {
+    throw new Error('Leaf capability is not valid at authoring time')
   }
 }
 
@@ -49,9 +64,12 @@ async function buildBundle(
   options?: GroupOptions,
   overrides: { extensions?: Array<CustomExtension>; lifetime?: Lifetime } = {},
 ): Promise<KeyPackageBundle> {
+  assertBindingAuthorTime(options?.controller)
+  const credential = makeMLSCredential(identity, options?.controller)
+  if (options?.controller != null) await verifyLeafCredential(credential, identity.publicKey)
   const { cipherSuite } = await resolveMlsContext(options)
   const result = await generateKeyPackageWithKey({
-    credential: makeMLSCredential(identity),
+    credential,
     signatureKeyPair: { signKey: identity.privateKey, publicKey: identity.publicKey },
     cipherSuite,
     capabilities: options?.capabilities ?? controlCapabilities(),

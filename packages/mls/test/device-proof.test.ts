@@ -233,3 +233,83 @@ describe('verifyDeviceEntry — beacon (self-scoped, no capability)', () => {
     expect(await verifyDeviceEntry(entry('did:key:zFloating', PROFILE, value), c)).toBe(false)
   })
 })
+
+describe('registry and current-tree agreement', () => {
+  test('self-register cannot overwrite a different recorded controller', async () => {
+    const c = ctx({
+      bindings: {
+        [manager.id]: { controller: PROFILE, prefix: PREFIX, leafKey: manager.publicKey },
+      },
+      controllerOf: () => 'did:kokuin:otherProfile',
+    })
+    expect(
+      await verifyDeviceEntry(
+        entry(manager.id, manager.id, {
+          op: 'register',
+          controller: PROFILE,
+        }),
+        c,
+      ),
+    ).toBe(false)
+  })
+
+  test.each(['register', 'add', 'revoke', 'label'] as const)(
+    '%s rejects a current subject leaf bound to a different controller',
+    async (op) => {
+      const cap = await buildManagementCapability({
+        managerDID: manager.id,
+        managerKey: manager.publicKey,
+        controllerSeed: CONTROLLER_SEED,
+      })
+      const c = ctx({
+        bindings: {
+          [manager.id]: { controller: PROFILE, prefix: PREFIX, leafKey: manager.publicKey },
+          [other.id]: {
+            controller: 'did:kokuin:otherProfile',
+            prefix: PREFIX,
+            leafKey: other.publicKey,
+          },
+        },
+        controllerOf: () => PROFILE,
+      })
+      expect(
+        await verifyDeviceEntry(
+          entry(manager.id, other.id, {
+            op,
+            controller: PROFILE,
+            capability: cap.capability,
+          }),
+          c,
+        ),
+      ).toBe(false)
+    },
+  )
+
+  test.each(['register', 'add', 'revoke', 'label'] as const)(
+    '%s rejects a floating current subject',
+    async (op) => {
+      const cap = await buildManagementCapability({
+        managerDID: manager.id,
+        managerKey: manager.publicKey,
+        controllerSeed: CONTROLLER_SEED,
+      })
+      const c = ctx({
+        bindings: {
+          [manager.id]: { controller: PROFILE, prefix: PREFIX, leafKey: manager.publicKey },
+          [other.id]: { leafKey: other.publicKey },
+        },
+        controllerOf: () => PROFILE,
+      })
+      expect(
+        await verifyDeviceEntry(
+          entry(manager.id, other.id, {
+            op,
+            controller: PROFILE,
+            capability: cap.capability,
+          }),
+          c,
+        ),
+      ).toBe(false)
+    },
+  )
+})

@@ -1,8 +1,9 @@
-import { randomIdentity } from '@kokuin/token'
+import { createIdentity, randomIdentity } from '@kokuin/token'
 import { makeCustomExtension } from 'ts-mls'
 import { describe, expect, test } from 'vitest'
 
 import {
+  buildCurrentGroupAnchorExtension,
   buildGroupAnchorExtension,
   controlCapabilities,
   decodeGroupAnchor,
@@ -14,6 +15,7 @@ import {
   readGroupAnchor,
   readGroupAnchorExtension,
 } from '../src/anchor.js'
+import { parseMLSCredentialIdentity } from '../src/credential.js'
 import {
   commitInvite,
   createGroup,
@@ -21,6 +23,7 @@ import {
   createKeyPackageBundle,
   processWelcome,
 } from '../src/group.js'
+import { buildBoundLeaf } from './fixtures/bound-leaf.js'
 
 describe('group anchor', () => {
   test('an anchor with a structured app survives createGroup → readGroupAnchor', async () => {
@@ -275,4 +278,164 @@ describe('group anchor', () => {
     // The re-encode is available but is not what the wire comparison relies on.
     expect(reEncoded).toBeInstanceOf(Uint8Array)
   })
+})
+
+test('strictLifecycleAnchorNumbers', () => {
+  const base = { creatorDID: 'did:key:zCreator', version: 1, controller: 'did:kokuin:profile' }
+  for (const [field, maximum] of [
+    ['leafLifetime', 604_800],
+    ['trustedGrantLifetime', 31_536_000],
+  ] as const) {
+    for (const value of [
+      0,
+      -1,
+      maximum + 1,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      Number.NaN,
+      1.5,
+      '3600',
+      null,
+    ]) {
+      expect(
+        decodeGroupAnchor(new TextEncoder().encode(JSON.stringify({ ...base, [field]: value }))),
+      ).toBeNull()
+    }
+    for (const value of [1, maximum]) {
+      expect(
+        decodeGroupAnchor(new TextEncoder().encode(JSON.stringify({ ...base, [field]: value }))),
+      ).toMatchObject({ [field]: value })
+    }
+  }
+  for (const controller of [null, 42, '', 'did:key:zForeign']) {
+    expect(
+      decodeGroupAnchor(new TextEncoder().encode(JSON.stringify({ ...base, controller }))),
+    ).toBeNull()
+  }
+})
+
+async function suppliedAnchorFixture() {
+  const leaf = await buildBoundLeaf()
+  const identity = await createIdentity({
+    keys: [{ purpose: 'sig', alg: 'EdDSA', privateKey: new Uint8Array(32).fill(41) }],
+    didMethod: 'key',
+  })
+  const controller = parseMLSCredentialIdentity(leaf.identity).controller
+  if (controller == null) throw new Error('fixture has no controller binding')
+  return { identity, controller }
+}
+
+test('a binding enriches an app-bearing supplied anchor with explicit lifecycle defaults', async () => {
+  const { identity, controller } = await suppliedAnchorFixture()
+  const app = { recoverySecret: 'c2VjcmV0', nested: { label: 'agents' } }
+  const supplied = buildCurrentGroupAnchorExtension(identity.id, app)
+  const { group } = await createGroup(identity, 'supplied-lifecycle', {
+    controller,
+    extensions: [supplied],
+  })
+  expect(readGroupAnchor(group)).toEqual({
+    creatorDID: identity.id,
+    version: 1,
+    app,
+    controller: controller.id,
+    leafLifetime: 86_400,
+    trustedGrantLifetime: 2_592_000,
+  })
+  expect(decodeGroupAnchor(supplied.extensionData as Uint8Array)?.controller).toBeUndefined()
+})
+
+test('enrichment preserves a supplied version and app while materialising missing lifetimes', async () => {
+  const { identity, controller } = await suppliedAnchorFixture()
+  const app = { recoverySecret: 'future-seed' }
+  const { group } = await createGroup(identity, 'supplied-partial-lifecycle', {
+    controller,
+    leafLifetime: 7200,
+    trustedGrantLifetime: 86_400,
+    extensions: [
+      buildGroupAnchorExtension({
+        creatorDID: identity.id,
+        version: 2,
+        app,
+        controller: controller.id,
+      }),
+    ],
+  })
+  const bytes = readGroupAnchorExtension(group)?.extensionData
+  if (!(bytes instanceof Uint8Array)) throw new Error('expected anchor bytes')
+  expect(JSON.parse(new TextDecoder().decode(bytes))).toEqual({
+    creatorDID: identity.id,
+    version: 2,
+    app,
+    controller: controller.id,
+    leafLifetime: 7200,
+    trustedGrantLifetime: 86_400,
+  })
+})
+
+test.each([
+  { controller: 'did:kokuin:foreign' },
+  { leafLifetime: 7200 },
+  { trustedGrantLifetime: 86_400 },
+])('supplied lifecycle fields must agree with creation defaults: %j', async (fields) => {
+  const { identity, controller } = await suppliedAnchorFixture()
+  await expect(
+    createGroup(identity, 'supplied-default-conflict', {
+      controller,
+      extensions: [buildGroupAnchorExtension({ creatorDID: identity.id, version: 1, ...fields })],
+    }),
+  ).rejects.toThrow()
+})
+
+test.each([{ leafLifetime: 86_400 }, { trustedGrantLifetime: 2_592_000 }])(
+  'supplied lifecycle fields must agree with explicit options: %j',
+  async (fields) => {
+    const { identity, controller } = await suppliedAnchorFixture()
+    await expect(
+      createGroup(identity, 'supplied-option-conflict', {
+        controller,
+        leafLifetime: 7200,
+        trustedGrantLifetime: 86_400,
+        extensions: [
+          buildGroupAnchorExtension({
+            creatorDID: identity.id,
+            version: 1,
+            controller: controller.id,
+            ...fields,
+          }),
+        ],
+      }),
+    ).rejects.toThrow()
+  },
+)
+
+test('a supplied controller refuses creation without a binding', async () => {
+  const { identity, controller } = await suppliedAnchorFixture()
+  await expect(
+    createGroup(identity, 'supplied-floating-creator', {
+      extensions: [
+        buildGroupAnchorExtension({
+          creatorDID: identity.id,
+          version: 1,
+          controller: controller.id,
+        }),
+      ],
+    }),
+  ).rejects.toThrow('floating-refused')
+})
+
+test('a supplied standard anchor keeps its exact bytes without a binding', async () => {
+  const identity = randomIdentity()
+  const bytes = new TextEncoder().encode(
+    JSON.stringify(
+      { app: { recoverySecret: 'seed' }, version: 1, creatorDID: identity.id },
+      null,
+      2,
+    ),
+  )
+  const { group } = await createGroup(identity, 'supplied-standard-bytes', {
+    extensions: [
+      makeCustomExtension({ extensionType: GROUP_ANCHOR_EXTENSION_TYPE, extensionData: bytes }),
+    ],
+  })
+  expect(readGroupAnchorExtension(group)?.extensionData).toEqual(bytes)
 })

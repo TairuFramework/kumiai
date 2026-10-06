@@ -8,21 +8,23 @@ export type Anchor = {
   epoch: number
 }
 
+/** One durable anchor and the advance whose rotation is still unresolved. */
+export type AnchorSlot = {
+  anchor: Anchor
+  pending?: {
+    epochBefore: number
+    epochAfter: number
+    rosterBefore: Array<string>
+    forced: boolean
+    advance: string
+  }
+}
+
 /**
- * The host's durable store for the app-lane anchor. One slot, overwritten on every rotation and
- * never cleared: the anchor is state a peer holds for its whole life in the group, not a record
- * of something in flight.
- *
- * It exists because the anchor is PERSISTED STATE and cannot be re-derived. The anchor sits at
- * the last roster change, the live handle runs ahead of it, and MLS ratchets forward: a rebooted
- * handle can never re-export an earlier epoch's secret. A peer that re-seeded from its live
- * handle at construction would derive different topic IDs from every member that did not restart
- * — neither would see the other's app traffic, with nothing anywhere to report it.
- *
- * `load` returning `null` means first boot and only first boot: the peer seeds the anchor from
- * its handle, as a group with no roster change yet must, and saves it.
+ * Durable single slot, owned by one live peer. Each record spans one advance and resolves before another.
+ * Only the same advance retries an ambiguous record. Known-unlanded advances clear pending.
  */
 export type AnchorStore = {
-  load(): Promise<Anchor | null>
-  save(anchor: Anchor): Promise<void>
+  load(): Promise<AnchorSlot | null>
+  save(slot: AnchorSlot): Promise<void>
 }

@@ -33,7 +33,7 @@ describe('hubProtocol', () => {
     // else. The server takes it from the verified issuer of the signed message instead.
     expect(fetchTopic.param.properties).not.toHaveProperty('subscriberDID')
     expect(fetchTopic.param.additionalProperties).toBe(false)
-    expect(fetchTopic.result.required).toEqual(['messages', 'head', 'oldest'])
+    expect(fetchTopic.result.required).toEqual(['messages', 'head', 'oldest', 'gap'])
   })
 
   test('hub/v1/publish carries the retention class, the CAS head and the idempotency key', () => {

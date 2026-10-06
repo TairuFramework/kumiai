@@ -752,10 +752,8 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     await flush()
     expect(alice.handle().epoch).toBe(2n)
 
-    // It seals at the epoch it just adopted. Dispatch resolves only once the hub has accepted the
-    // publish (`chat/posted` is `retain: 'log'`, sent via `mux.publish`, awaited), so the frame is
-    // already durably on the wire the instant this returns — checking it does not need to wait on
-    // Bob at all, and unlike Bob's open, it does not depend on Bob's decrypt succeeding either.
+    // Dispatch resolves after the durable outbox put. The delivery worker publishes afterwards,
+    // so the observer waits for the frame before checking its sealing epoch.
     await alice.peer
       .protocol('chat')
       .dispatch('chat/posted', { data: { text: 'authored after a restart' } })
@@ -773,7 +771,17 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     // serves the topic's retained LOG (`chat/posted` is `retain: 'log'`, see the `chat` protocol
     // definition in `app-lane-e2e.ts`), which subscribing does not gate.
     await observer.subscribe(observerID.id, appTopic)
-    const observed = await observer.fetchTopic({ subscriberDID: observerID.id, topicID: appTopic })
+    const observed = await vi.waitFor(
+      async () => {
+        const result = await observer.fetchTopic({
+          subscriberDID: observerID.id,
+          topicID: appTopic,
+        })
+        expect(result.messages.length).toBeGreaterThan(0)
+        return result
+      },
+      { timeout: 3000 },
+    )
     expect(observed.messages.map((message) => readMessageEpoch(message.payload))).toEqual([2n])
 
     // And Bob, who applied the same commit, actually opens it.

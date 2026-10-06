@@ -6,6 +6,7 @@ import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../s
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
+import { controlRecoveryClock, drainUntil } from './fixtures/recovery-clock.js'
 
 const flush = (ms = 40) => new Promise((r) => setTimeout(r, ms))
 
@@ -71,8 +72,11 @@ const commitFrames = (hub: FakeHub, rs: Uint8Array): number =>
  * A unit test on `decodeCommitFrame` cannot see any of that: it proves only that the throw
  * happens, and the throw happened all along. These are lane-level for that reason.
  */
-describe('a frame whose commit-frame version this build does not know', () => {
+describe('a frame whose commit-frame version this build does not know', {
+  concurrent: false,
+}, () => {
   test('on the commit topic: the peer heals, and its epoch moves', async () => {
+    controlRecoveryClock(5)
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x81)
 
@@ -82,11 +86,13 @@ describe('a frame whose commit-frame version this build does not know', () => {
     // frame out of her log, since a fixture cannot run two builds at once.
     hub.hideFrom('carol', sequenceID)
     const carol = makeMLSPeer(hub, 'carol', rs, { epoch: 1, members, recovery })
-    await flush()
+    await carol.peer.resync()
     expect(carol.mls.epoch()).toBe(1)
 
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
-    await flush(500)
+    await drainUntil(() => bob.mls.epoch() > 1, 'Bob epoch advance')
+    await bob.peer.resync()
+    await carol.peer.resync()
 
     // The heal ACTUALLY happening — a rendezvous Bob asked for, and an epoch that moved. A peer
     // that drops the frame as malformed throws nothing at all, which is why the assertion cannot

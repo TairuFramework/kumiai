@@ -1,3 +1,4 @@
+import { createRevoke } from '@kokuin/controller'
 import { createFullIdentity, normalizeDID, type OwnIdentity } from '@kokuin/token'
 import {
   createCommit,
@@ -11,8 +12,12 @@ import { describe, expect, test } from 'vitest'
 import { LEDGER_HEAD_EXTENSION_TYPE } from '../src/anchor.js'
 import type { MLSCredentialIdentity } from '../src/credential.js'
 import { encodeControlEnvelope } from '../src/envelope.js'
-import { CommitRejectedError, createKeyPackageBundle } from '../src/group.js'
+import { CommitRejectedError } from '../src/group.js'
+import { deviceDenyHolderFor } from '../src/group-context.js'
+import { makeMLSCredential } from '../src/group-credential.js'
 import { addDevice, registerDevice, revokeDevice } from '../src/group-device.js'
+import { deriveGroup } from '../src/group-handle.js'
+import { revokeWithProof } from '../src/group-lifecycle.js'
 import { buildLedgerHeadExtension, extendHead, readLedgerHead } from '../src/head.js'
 import { ledgerEntryDigest, signLedgerEntry } from '../src/ledger.js'
 import { controllerOf, DEVICE_ENTRY_TYPE } from '../src/registry.js'
@@ -23,7 +28,95 @@ import {
   publishTokens,
   twoDeviceProfileGroup,
 } from './fixtures/device-harness.js'
+import {
+  agent,
+  bindingFor,
+  controllerID,
+  controllerSeed,
+  inception,
+  lifecycleGroup,
+  trustedGrant,
+} from './fixtures/lifecycle-ledger.js'
+import { lowLevelWelcome } from './fixtures/lifecycle-pipeline.js'
 import { buildManagementCapability } from './fixtures/management-capability.js'
+
+test('discarding a trusted-issuer revoke leaves live authentication and subscribers untouched', async () => {
+  const { group: initial, tokens } = await lifecycleGroup()
+  const peer = agent(71)
+  const fixture = await lowLevelWelcome(initial, peer, await bindingFor(peer))
+  const group = fixture.author
+  group.confirmAdopted()
+  const issuer = agent(51)
+  const child = agent(61)
+  const parent = await trustedGrant(issuer)
+  const binding = await bindingFor(child, [inception], { identity: issuer, parent })
+  const credential = makeMLSCredential(child, binding)
+  expect(await group.context.authService.validateCredential(credential, child.publicKey)).toBe(true)
+  const seen: Array<unknown> = []
+  group.events.on('deviceRevoked', (batch) => {
+    seen.push(batch)
+  })
+  const log = [
+    inception,
+    createRevoke({
+      seed: controllerSeed,
+      profile: 0,
+      did: controllerID,
+      prior: inception.event,
+      target: issuer.id,
+      keyPosition: { gen: 0, seq: 0 },
+    }),
+  ]
+  const discarded = await revokeWithProof(group, { subject: issuer.id, log })
+  if (discarded.status !== 'built') throw new Error('Missing revoke candidate')
+  expect(await group.context.authService.validateCredential(credential, child.publicKey)).toBe(true)
+  expect(seen).toHaveLength(0)
+  expect(discarded.result.newGroup.context).not.toBe(group.context)
+  expect(discarded.result.newGroup.context.cipherSuite).toBe(group.context.cipherSuite)
+  expect(discarded.result.newGroup.context.authService).not.toBe(group.context.authService)
+  expect(deviceDenyHolderFor(discarded.result.newGroup.context)).not.toBe(
+    deviceDenyHolderFor(group.context),
+  )
+  expect(
+    await discarded.result.newGroup.context.authService.validateCredential(
+      credential,
+      child.publicKey,
+    ),
+  ).toBe(false)
+  const winner = await revokeWithProof(fixture.joined, { subject: issuer.id, log })
+  if (winner.status !== 'built') throw new Error('Missing winning revoke')
+  publishTokens(tokens, winner.result.newGroup)
+  await group.processMessage(winner.result.commitMessage, { persist: async () => {} })
+  expect(await group.context.authService.validateCredential(credential, child.publicKey)).toBe(
+    false,
+  )
+  expect(seen).toHaveLength(1)
+})
+
+test.each(['leafLifetime', 'trustedGrantLifetime'] as const)(
+  'derived authentication owns its %s provider',
+  async (limit) => {
+    const { group } = await lifecycleGroup()
+    const candidate = deriveGroup(group, structuredClone(group.state))
+    const issuer = agent(51)
+    const child = agent(61)
+    const parent = await trustedGrant(issuer)
+    const binding = await bindingFor(child, [inception], { identity: issuer, parent })
+    const credential = makeMLSCredential(child, binding)
+    const holder = deviceDenyHolderFor(candidate.context)
+    if (holder == null) throw new Error('Missing candidate auth holder')
+    expect(
+      await candidate.context.authService.validateCredential(credential, child.publicKey),
+    ).toBe(true)
+    holder[limit] = 1
+    expect(
+      await candidate.context.authService.validateCredential(credential, child.publicKey),
+    ).toBe(false)
+    expect(await group.context.authService.validateCredential(credential, child.publicKey)).toBe(
+      true,
+    )
+  },
+)
 
 describe('addDevice / revokeDevice', () => {
   test('addDevice brings a bound co-device into the group without an admin', async () => {
@@ -111,10 +204,8 @@ describe('deny seam', () => {
     expect(g.creatorGroup.currentDenySet().has(normalizeDID(g.targetDeviceID))).toBe(true)
   })
 
-  test('a revoked device cannot re-authenticate on the bound path; a floating leaf is unaffected', async () => {
-    // A second BOUND device of P (not the floating target twoDeviceProfileGroup builds), added
-    // and then revoked, so the deny check inside validateBoundLeaf actually has something to bite:
-    // a floating credential of the SAME DID never reaches that check at all (no `.controller`).
+  test('a revoked device cannot re-authenticate with a bound or floating credential', async () => {
+    // Both credential forms name the same revoked device in the group's deny set.
     const { deviceGroup, deviceIdentity, controllerID, creatorGroup, tokens } =
       await joinBoundDevice()
     const { capability } = await buildManagementCapability({
@@ -157,7 +248,7 @@ describe('deny seam', () => {
 
     expect(await authService.validateCredential(boundCredential, targetLeaf.deviceKey)).toBe(false)
     expect(await authService.validateCredential(floatingCredential, targetLeaf.deviceKey)).toBe(
-      true,
+      false,
     )
   })
 })
@@ -197,7 +288,8 @@ describe('receive-path acceptance (the symmetric device carve-out)', () => {
       ...createFullIdentity(targetSeed),
       privateKey: targetSeed,
     }
-    const targetKeyPackageBundle = await createKeyPackageBundle(targetIdentity)
+    const targetLeaf = await buildBoundLeaf({ deviceSeed: targetSeed })
+    const targetKeyPackageBundle = await buildBoundKeyPackageBundle(targetLeaf, targetSeed)
 
     const { commitMessage, newGroup } = await addDevice(deviceGroup, deviceIdentity, {
       keyPackage: targetKeyPackageBundle.publicPackage,

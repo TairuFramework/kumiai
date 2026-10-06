@@ -2,7 +2,7 @@ import { Client } from '@enkaku/client'
 import type { AnyClientMessageOf, AnyServerMessageOf } from '@enkaku/protocol'
 import { DirectTransports } from '@enkaku/transport'
 import { randomIdentity } from '@kokuin/token'
-import type { HubProtocol } from '@kumiai/hub-protocol'
+import type { FetchTopicResult, HubProtocol } from '@kumiai/hub-protocol'
 import { keyPackageDigest } from '@kumiai/hub-protocol'
 import { createHub, createMemoryStore } from '@kumiai/hub-server'
 import { fromUTF, toB64, toB64U } from '@sozai/codec'
@@ -59,6 +59,27 @@ function createTestClient(testHub: ReturnType<typeof createTestHub>, identity = 
 }
 
 describe('HubClient', () => {
+  test.each([undefined, 'false', 0, null])(
+    'fetch refuses a wire result without boolean coverage (%s)',
+    async (gap) => {
+      const testHub = createTestHub()
+      const { client, transports } = createTestClient(testHub)
+      testHub.store.fetchTopic = async () =>
+        ({ messages: [], head: null, oldest: null, gap }) as unknown as FetchTopicResult
+      try {
+        const call = client.fetchTopic({ topicID: TOPIC })
+        expect(call.id).toEqual(expect.any(String))
+        expect(call.abort).toEqual(expect.any(Function))
+        expect(call.signal).toBeInstanceOf(AbortSignal)
+        await expect(call).rejects.toThrow('Topic fetch requires a boolean gap')
+      } finally {
+        await testHub.hub.server.dispose()
+        await transports.dispose()
+        await testHub.transports.dispose()
+      }
+    },
+  )
+
   test('publish to a topic and receive', async () => {
     const testHub = createTestHub()
     const { client: alice, transports: aliceT } = createTestClient(testHub)

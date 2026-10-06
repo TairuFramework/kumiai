@@ -41,3 +41,17 @@ end. It opens outside a group entirely, in a device's push extension, against a 
 sees and MLS never issues. It carries no version *byte* at all: its version is a field inside the
 sealed JSON, unreadable and untamperable by the push provider, which is the point. It follows the
 same never-best-effort-parse rule as the two above, but that is where the kinship ends.
+
+## Recovery verdicts and frame bounds
+
+Recovery verdicts use a separate HPKE information and AAD domain from GroupInfo and ledger replies.
+Their signed plaintext binds group, request, publication position and commit digest.
+A confirmation adds the target epoch and an HMAC tag from the speculative target-epoch exporter key.
+Opening alone authenticates no sealer. The MLS port judges signer authority before recovery adoption.
+Lifecycle GroupInfo attestations also cover the included ledger, whose fold must match the authenticated head.
+
+Whole-frame checks run before RPC journalling and publication, including recovery replies and verdicts.
+`assertFrameFits` requires `4 * ceil(byteLength / 3) <= 1,048,576`.
+`FrameTooLargeError` publishes and journals nothing.
+A host carrying a Welcome through a hub preflights its final framed bytes inside the commit build callback.
+Consumer ledger entries have only this frame bound. The fixed history horizon cannot bound arbitrary consumer data.

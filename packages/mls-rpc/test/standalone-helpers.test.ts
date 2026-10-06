@@ -44,6 +44,7 @@ test('standalone entry helpers preserve the factory blob format in both directio
 
   const handle = {
     epoch: 0n,
+    sendAdmission: () => ({ epoch: 0, admissible: true }),
     exportSecret: async () => Uint8Array.from(key),
   } as unknown as import('@kumiai/mls').GroupHandle
   const crypto = createGroupCrypto({
@@ -71,6 +72,7 @@ test('factory seals after releasing access and wipes the derived key on a seal e
   let failRandom = false
   const handle = {
     epoch: 0n,
+    sendAdmission: () => ({ epoch: 0, admissible: true }),
     exportSecret: async () => {
       const key = new Uint8Array(32).fill(7)
       keys.push(key)
@@ -170,4 +172,18 @@ test('pending timer is unrefed', () => {
   const timer = timeout.mock.results.at(-1)?.value as NodeJS.Timeout
   expect(timer.hasRef()).toBe(false)
   pending.delete('a')
+})
+
+test('a request key remains usable throughout a longer recovery deadline', () => {
+  vi.useFakeTimers()
+  const pending = createRecoveryPending()
+  const key = new Uint8Array([7])
+  pending.put('long-recovery', key, 180_000)
+  vi.advanceTimersByTime(120_001)
+  expect(pending.get('long-recovery')).toBe(key)
+  vi.advanceTimersByTime(59_998)
+  expect(pending.get('long-recovery')).toBe(key)
+  vi.advanceTimersByTime(1)
+  expect(pending.get('long-recovery')).toBeNull()
+  expect(key[0]).toBe(0)
 })

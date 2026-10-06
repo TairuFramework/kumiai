@@ -1,9 +1,10 @@
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 import { APP_TOPIC_LABEL, commitTopic, protocolTopic } from '../src/topic.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
+import { deferred } from './fixtures/single-connection-host.js'
 
 const flush = () => new Promise((r) => setTimeout(r, 50))
 
@@ -133,18 +134,33 @@ describe('app frames outlive the commits that leave their epoch', () => {
     const carol = makeMLSPeer(hub, 'carol', recoverySecret, { epoch: 1 })
     await flush()
 
-    // Alice's connection is behind, so the commit that takes the group off epoch 1 lands in the
-    // log while she is still at epoch 1 and has not applied it.
+    const submitted = deferred<void>()
+    const release = deferred<void>()
+    const landed = deferred<void>()
+    const acknowledge = deferred<void>()
+    const publish = hub.publish.bind(hub)
+    const appTopic = protocolTopic(fakeEpochSecret(1, APP_TOPIC_LABEL), 1, 'chat')
+    vi.spyOn(hub, 'publish').mockImplementation(async (params) => {
+      if (params.senderDID !== 'alice' || params.topicID !== appTopic) return publish(params)
+      submitted.resolve()
+      await release.promise
+      const result = await publish(params)
+      landed.resolve()
+      await acknowledge.promise
+      return result
+    })
     hub.detach('alice')
+    await alice.peer
+      .protocol('chat')
+      .dispatch('chat/posted', { data: { text: 'raced the commit' } })
+    await submitted.promise
     await carol.peer.commit(buildLedgerCommit(carol, []))
     await flush()
     expect(carol.mls.epoch()).toBe(2)
     expect(alice.mls.epoch()).toBe(1)
 
-    // So she posts at epoch 1, and the frame enters the log behind the commit that left epoch 1.
-    await alice.peer
-      .protocol('chat')
-      .dispatch('chat/posted', { data: { text: 'raced the commit' } })
+    release.resolve()
+    await landed.promise
 
     const commits = hub.published.filter((m) => m.topicID === commitTopic(recoverySecret))
     const posted = hub.published.filter(
@@ -173,6 +189,7 @@ describe('app frames outlive the commits that leave their epoch', () => {
     expect(seen).toEqual([{ text: 'raced the commit' }])
 
     await alice.peer.dispose()
+    acknowledge.resolve()
     await carol.peer.dispose()
     await bob.peer.dispose()
   })

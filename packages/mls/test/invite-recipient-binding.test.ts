@@ -153,6 +153,7 @@ describe('commitInvite refuses an invite it cannot bind', () => {
     const invite: Invite = {
       groupID: 'g-no-role',
       inviterID: alice.id,
+      recipientDID: bob.id,
       ledgerEntries: [...group.ledgerTokens, noteToken],
     }
 
@@ -239,6 +240,7 @@ describe('commitInvite refuses an invite it cannot bind', () => {
     const invite: Invite = {
       groupID: 'g-empty-enacted',
       inviterID: alice.id,
+      recipientDID: bob.id,
       ledgerEntries: [...group.ledgerTokens],
     }
 
@@ -247,11 +249,7 @@ describe('commitInvite refuses an invite it cannot bind', () => {
     )
   })
 
-  // This is the documented residual, not an endorsement of it: the design is explicit that
-  // last-position is load-bearing on a hand-built invite, and that violating it binds to the
-  // trailing grant's subject instead of the intended invitee. Pinning it here keeps it a known
-  // behaviour rather than an undiscovered one.
-  test('an invite whose invitee grant is not last binds to the trailing grant instead', async () => {
+  test('the explicit recipient must match the standard invite role grant', async () => {
     const alice = randomIdentity()
     const carol = randomIdentity()
     const dave = randomIdentity()
@@ -269,15 +267,23 @@ describe('commitInvite refuses an invite it cannot bind', () => {
       subject: dave.id,
       value: 'member',
     })
-    // Carol's grant is not last, so the guard binds to Dave's — the trailing one.
     const invite: Invite = {
       groupID: 'g-grant-order',
       inviterID: alice.id,
+      recipientDID: carol.id,
       ledgerEntries: [...group.ledgerTokens, carolToken, daveToken],
     }
     const daveBundle = await createKeyPackageBundle(dave, { capabilities: controlCapabilities() })
 
-    const { newGroup } = await commitInvite(group, daveBundle.publicPackage, invite)
+    await expect(commitInvite(group, daveBundle.publicPackage, invite)).rejects.toMatchObject({
+      name: 'InviteRecipientMismatchError',
+      expectedDID: carol.id,
+      actualDID: dave.id,
+    })
+    const { newGroup } = await commitInvite(group, daveBundle.publicPackage, {
+      ...invite,
+      recipientDID: dave.id,
+    })
 
     expect(newGroup.roster.roles.get(normalizeDID(dave.id))).toBe('member')
     // Carol holds a roster role — the ledger entry enacted and folded — but never joined:

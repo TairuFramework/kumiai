@@ -7,7 +7,12 @@ import type {
 } from 'ts-mls'
 import { defaultProposalTypes, isDefaultProposal } from 'ts-mls'
 
-import { LEDGER_HEAD_EXTENSION_TYPE, RESERVED_EXTENSION_TYPE } from './anchor.js'
+import {
+  decodeGroupAnchor,
+  GROUP_ANCHOR_EXTENSION_TYPE,
+  LEDGER_HEAD_EXTENSION_TYPE,
+  RESERVED_EXTENSION_TYPE,
+} from './anchor.js'
 import { didFromCredential } from './credential.js'
 import type { DeviceOp } from './registry.js'
 import type { RosterState } from './roster.js'
@@ -103,7 +108,8 @@ function isAdmin(context: CommitPolicyContext, leafIndex: number | undefined): b
 /**
  * The group-context-extensions rule: an admin may replace the extension list only to move the
  * ledger-head to the head this commit's envelope accounts for, or to also install
- * {@link RESERVED_EXTENSION_TYPE} empty. A GCE proposal replaces the *entire* list, so the
+ * {@link RESERVED_EXTENSION_TYPE} empty in a standard group. Lifecycle groups permit only the
+ * head move. A GCE proposal replaces the *entire* list, so the
  * proposed list must positionally equal the current one — same length, types, positions,
  * byte-identical data — except the ledger_head entry (must equal the expected head) and at
  * most one added `RESERVED_EXTENSION_TYPE` entry with empty data. This pins every other
@@ -115,7 +121,7 @@ function isAdmin(context: CommitPolicyContext, leafIndex: number | undefined): b
  * anything else, or moved by a commit enacting nothing, and it stops proving what the group
  * enacted.
  */
-function evaluateGroupContextExtensions(
+export function evaluateGroupContextExtensions(
   extensions: Array<{ extensionType: number; extensionData: unknown }>,
   context: CommitPolicyContext,
 ): IncomingMessageAction {
@@ -135,7 +141,12 @@ function evaluateGroupContextExtensions(
   const reservedAlreadyInstalled = expected.some(
     (ext) => ext.extensionType === RESERVED_EXTENSION_TYPE,
   )
-  if (!reservedAlreadyInstalled && extensions.length === expected.length + 1) {
+  const anchorData = expected.find(
+    (ext) => ext.extensionType === GROUP_ANCHOR_EXTENSION_TYPE,
+  )?.extensionData
+  const lifecycle =
+    anchorData instanceof Uint8Array && decodeGroupAnchor(anchorData)?.controller != null
+  if (!lifecycle && !reservedAlreadyInstalled && extensions.length === expected.length + 1) {
     const reservedIndex = extensions.findIndex((ext) => {
       return (
         ext.extensionType === RESERVED_EXTENSION_TYPE &&

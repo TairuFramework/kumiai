@@ -4,10 +4,16 @@
  * @module rpc
  */
 
-export type { Anchor, AnchorStore } from './anchor.js'
+export type { Anchor, AnchorSlot, AnchorStore } from './anchor.js'
 export { type AppAAD, decodeAppAAD, encodeAppAAD } from './app-aad.js'
 export type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
 export type { AppDeliveryResumed, AppDeliveryStalled } from './app-lane.js'
+export {
+  type AppOutbox,
+  type AppOutboxEntry,
+  type CommitCursor,
+  MAX_APP_ENTRY_BYTES,
+} from './app-outbox.js'
 export {
   type AppliedCommit,
   type ClassifyCommitParams,
@@ -41,6 +47,7 @@ export {
 export {
   type AppFrameRef,
   AppFrameStorageError,
+  type AppliedRecovery,
   type CommitContext,
   type CommitHeader,
   type ExportSecretResult,
@@ -50,13 +57,19 @@ export {
   type GroupUnwrapResult,
   isAppFrameStorageError,
   isMissingLedgerEntries,
+  type OpenedRecoveryVerdict,
   type PendingAppFrame,
   type PendingAppFrames,
   type PendingRecovery,
   type ProcessCommitResult,
+  type RecoveryConfirmationKey,
+  type RecoveryRefusalReason,
+  type RecoveryVerdict,
   type RosterEntry,
   type SealEntriesResult,
+  type SendAdmission,
   sortPendingAppFrames,
+  type VerifiedRecoveryRequest,
 } from './crypto.js'
 export {
   asDeliveryPosition,
@@ -64,7 +77,14 @@ export {
   type DeliveryPosition,
   type LogPosition,
 } from './cursor.js'
-export { PeerDisposedError } from './errors.js'
+export {
+  AppEntryTooLargeError,
+  AppOutboxFullError,
+  PeerDisposedError,
+  PeerRemovedError,
+  SendNotAdmissibleError,
+} from './errors.js'
+export { assertFrameFits, FrameTooLargeError } from './frame-size.js'
 export type { GroupProcedureHandlers } from './handlers.js'
 export {
   decodeHandshakeFrame,
@@ -81,6 +101,7 @@ export {
   encodeLedgerEntries,
   LEDGER_ENTRIES_VERSION,
 } from './ledger-entries.js'
+export type { AppOutboxCleared, EpochFloor } from './log-delivery.js'
 export {
   createGroupPeer,
   type GroupPeer,
@@ -88,6 +109,7 @@ export {
   type GroupPeerParams,
   type ProtocolSurface,
   type RecoveryEvent,
+  type RecoveryFailureDetails,
   type RecoveryFailureReason,
   type RecoveryTrigger,
   type StrandConfidence,
@@ -105,12 +127,18 @@ export {
 export {
   decodeLedgerReply,
   decodeLedgerRequest,
+  decodeRecoveryConfirmRequest,
   decodeRecoveryReply,
   decodeRecoveryRequest,
+  decodeRecoveryVerdict,
   encodeLedgerReply,
   encodeLedgerRequest,
+  encodeRecoveryConfirmRequest,
   encodeRecoveryReply,
   encodeRecoveryRequest,
+  encodeRecoveryVerdict,
+  type RecoveryConfirmRequest,
+  type RecoveryVerdictFrame,
 } from './recovery.js'
 export { detectRosterChange } from './roster.js'
 export {

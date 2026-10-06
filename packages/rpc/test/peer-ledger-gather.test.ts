@@ -10,6 +10,7 @@ import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS, memoryEntryID } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, buildRemoveCommit, makeMLSPeer } from './fixtures/peer.js'
+import { controlRecoveryClock, drainUntil } from './fixtures/recovery-clock.js'
 
 const flush = (ms = 40) => new Promise((r) => setTimeout(r, ms))
 
@@ -75,7 +76,7 @@ async function askForTheLedger(
   })
 }
 
-describe('the ledger gather does not hand the group to the relay', () => {
+describe('the ledger gather does not hand the group to the relay', { concurrent: false }, () => {
   test('a timed-out reply cannot bootstrap during a later recovery', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x65)
@@ -98,23 +99,40 @@ describe('the ledger gather does not hand the group to the relay', () => {
       return tokens
     })
     const bootstrap = vi.spyOn(alice.mls, 'bootstrapLedger')
-    vi.useFakeTimers()
-    try {
-      const first = alice.peer.recover()
-      await vi.waitFor(() => expect(opens).toBe(1))
-      await vi.advanceTimersByTimeAsync(15_000)
-      expect(await first).toEqual({ advanced: false, reenact: [] })
-      const second = alice.peer.recover()
-      await vi.waitFor(() => expect(opens).toBeGreaterThan(1))
-      releaseOpen()
-      await vi.waitFor(() => expect(staleOpenReturned).toBe(true))
-      expect(bootstrap).toHaveBeenCalledTimes(0)
-      await vi.advanceTimersByTimeAsync(15_000)
-      await second
-      expect(bootstrap).toHaveBeenCalledTimes(0)
-    } finally {
-      vi.useRealTimers()
+    controlRecoveryClock(60)
+    const first = alice.peer.recover()
+    await drainUntil(() => opens === 1, 'first ledger open')
+    expect(opens).toBe(1)
+    let firstSettled = false
+    const markFirst = () => {
+      firstSettled = true
     }
+    void first.then(markFirst, markFirst)
+    // Live reply jitter can land after one advance and arm fresh deadline timers; keep advancing.
+    await drainUntil(async () => {
+      await vi.advanceTimersByTimeAsync(1000)
+      return firstSettled
+    }, 'first recovery settlement')
+    expect(await first).toEqual({ advanced: false, reenact: [] })
+    const second = alice.peer.recover()
+    await drainUntil(() => opens > 1, 'retry ledger open')
+    expect(opens).toBeGreaterThan(1)
+    releaseOpen()
+    await drainUntil(() => staleOpenReturned, 'stale ledger open return')
+    expect(staleOpenReturned).toBe(true)
+    expect(bootstrap).toHaveBeenCalledTimes(0)
+    let secondSettled = false
+    const markSecond = () => {
+      secondSettled = true
+    }
+    void second.then(markSecond, markSecond)
+    await drainUntil(async () => {
+      await vi.advanceTimersByTimeAsync(1000)
+      return secondSettled
+    }, 'second recovery settlement')
+    await second
+    expect(bootstrap).toHaveBeenCalledTimes(0)
+
     await alice.peer.dispose()
     await bob.peer.dispose()
   })
@@ -154,24 +172,24 @@ describe('the ledger gather does not hand the group to the relay', () => {
       await bootstrapGate
       await bootstrap(tokens)
     })
-    vi.useFakeTimers()
-    try {
-      let firstSettled = false
-      const first = alice.peer.recover().finally(() => {
-        firstSettled = true
-      })
-      await vi.waitFor(() => expect(alice.mls.bootstrapLedger).toHaveBeenCalled())
-      // Expire the gather deadline while bootstrap is held at the port boundary.
-      await vi.advanceTimersByTimeAsync(300)
-      expect(firstSettled).toBe(false)
-      const second = alice.peer.recover()
-      releaseBootstrap()
-      const [firstResult, secondResult] = await Promise.all([first, second])
-      expect(firstResult).toEqual({ advanced: true, reenact: [owed] })
-      expect(secondResult).toEqual({ advanced: true, reenact: [] })
-    } finally {
-      vi.useRealTimers()
-    }
+    controlRecoveryClock(60)
+    let firstSettled = false
+    const first = alice.peer.recover().finally(() => {
+      firstSettled = true
+    })
+    await drainUntil(
+      () => vi.mocked(alice.mls.bootstrapLedger).mock.calls.length > 0,
+      'ledger bootstrap call',
+    )
+    // Expire the gather deadline while bootstrap is held at the port boundary.
+    await vi.advanceTimersByTimeAsync(300)
+    expect(firstSettled).toBe(false)
+    const second = alice.peer.recover()
+    releaseBootstrap()
+    const [firstResult, secondResult] = await Promise.all([first, second])
+    expect(firstResult).toEqual({ advanced: true, reenact: [owed] })
+    expect(secondResult).toEqual({ advanced: true, reenact: [] })
+
     expect(events.map((event) => event.phase)).toEqual(['started', 'succeeded'])
     expect(await alice.mls.isLedgerComplete()).toBe(true)
     expect((await alice.peer.replay()).reenact).toBeUndefined()
@@ -266,8 +284,8 @@ describe('the ledger gather does not hand the group to the relay', () => {
     ])
     clearTimeout(promptTimer)
     expect(outcome).toBeInstanceOf(PeerDisposedError)
-    expect(events.map((event) => event.phase)).toEqual(['started', 'failed'])
-    expect(events[1]).toMatchObject({ reason: 'disposed' })
+    await alice.peer.drained()
+    expect(events.map((event) => event.phase)).toEqual(['started'])
     expect(
       setTimer.mock.calls.filter((call) => (call[1] ?? 0) > 8000 && (call[1] ?? 0) <= 10000),
     ).toHaveLength(gatherTimersBeforeDispose)
@@ -514,15 +532,10 @@ describe('the ledger gather does not hand the group to the relay', () => {
     await bob.peer.commit(buildLedgerCommit(bob, entries))
 
     const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, recovery })
-    vi.useFakeTimers()
-    let result: Awaited<ReturnType<typeof alice.peer.recover>>
-    try {
-      const attempt = alice.peer.recover()
-      await vi.waitFor(() => expect(ledgerReplies(hub, rs)).toHaveLength(2))
-      result = await attempt
-    } finally {
-      vi.useRealTimers()
-    }
+    controlRecoveryClock(60)
+    const attempt = alice.peer.recover()
+    await drainUntil(() => ledgerReplies(hub, rs).length === 2, 'two ledger replies')
+    const result = await attempt
 
     // Both responders answered, and only one of them was folded.
     expect(ledgerReplies(hub, rs)).toHaveLength(2)

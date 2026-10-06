@@ -29,6 +29,10 @@
   dir: packages/hub-client
   intents:
     - durable-app-delivery
+"@kumiai/hub-client@0.10.1":
+  dir: packages/hub-client
+  intents:
+    - bound-leaf-and-log-delivery
 "@kumiai/hub-client@0.5.0":
   dir: packages/hub-client
   intents:
@@ -54,6 +58,10 @@
   dir: packages/hub-conformance
   intents:
     - durable-app-delivery
+"@kumiai/hub-conformance@0.10.1":
+  dir: packages/hub-conformance
+  intents:
+    - bound-leaf-and-log-delivery
 "@kumiai/hub-conformance@0.5.0":
   dir: packages/hub-conformance
   intents:
@@ -80,6 +88,10 @@
   dir: packages/hub-protocol
   intents:
     - durable-app-delivery
+"@kumiai/hub-protocol@0.10.1":
+  dir: packages/hub-protocol
+  intents:
+    - bound-leaf-and-log-delivery
 "@kumiai/hub-protocol@0.5.0":
   dir: packages/hub-protocol
   intents:
@@ -110,6 +122,10 @@
   dir: packages/hub-server
   intents:
     - hub-server-replay-option
+"@kumiai/hub-server@0.10.2":
+  dir: packages/hub-server
+  intents:
+    - bound-leaf-and-log-delivery
 "@kumiai/hub-server@0.5.0":
   dir: packages/hub-server
   intents:
@@ -140,6 +156,10 @@
   dir: packages/hub-tunnel
   intents:
     - hub-tunnel-ack-on-decrypt
+"@kumiai/hub-tunnel@0.10.2":
+  dir: packages/hub-tunnel
+  intents:
+    - bound-leaf-and-log-delivery
 "@kumiai/hub-tunnel@0.5.0":
   dir: packages/hub-tunnel
   intents:
@@ -210,6 +230,10 @@
     - mls-rpc-host-handle-access
     - roster-leaf-identity
     - strand-observability
+"@kumiai/mls-rpc@0.10.1":
+  dir: packages/mls-rpc
+  intents:
+    - bound-leaf-and-log-delivery
 "@kumiai/mls-rpc@0.5.0":
   dir: packages/mls-rpc
   intents:
@@ -237,6 +261,10 @@
     - durable-app-delivery
     - mls-input-typing
     - strand-observability
+"@kumiai/mls@0.10.1":
+  dir: packages/mls
+  intents:
+    - bound-leaf-and-log-delivery
 "@kumiai/mls@0.5.0":
   dir: packages/mls
   intents:
@@ -265,6 +293,10 @@
     - durable-app-delivery
     - mls-rpc-host-handle-access
     - roster-leaf-identity
+"@kumiai/rpc-conformance@0.10.1":
+  dir: packages/rpc-conformance
+  intents:
+    - bound-leaf-and-log-delivery
 "@kumiai/rpc-conformance@0.5.0":
   dir: packages/rpc-conformance
   intents:
@@ -301,6 +333,10 @@
   dir: packages/rpc
   intents:
     - quiet-pandas-wait
+"@kumiai/rpc@0.10.3":
+  dir: packages/rpc
+  intents:
+    - bound-leaf-and-log-delivery
 "@kumiai/rpc@0.5.0":
   dir: packages/rpc
   intents:

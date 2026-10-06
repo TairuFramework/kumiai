@@ -64,6 +64,7 @@ export async function buildBoundLeaf(options: BuildBoundLeafOptions = {}): Promi
     aud: device.id,
     act: 'authenticate',
     res: 'kumiai/mls-leaf',
+    iat: now(),
     exp: now() + 3600,
     cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: device.publicKey }),
     ...options.capabilityOverrides,

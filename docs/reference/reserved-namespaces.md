@@ -9,7 +9,12 @@ yours, including `group.` — reserved until 2026-07-20, now application space.
 
 ## `kumiai.` — control-ledger entry types
 
-`kumiai.role`, `kumiai.recovery-request`, `kumiai.recovery-groupinfo`.
+`kumiai.role`, `kumiai.device`, `kumiai.recovery-request`, `kumiai.recovery-groupinfo` and `kumiai.recovery-verdict`.
+
+`kumiai.device` operations are `register`, `add`, `revoke` with or without proof, `reset`, `clock`, `label` and `beacon`.
+Lifecycle groups accept only proven revoke, reset, clock and advisory beacon, and reject role entries.
+Other groups retain the management operations with registry/tree agreement.
+See [bound-leaf lifecycle](./mls-lifecycle.md) for proof authority, immutable anchor fields and exact-release peers.
 
 The envelope fold **fails closed** on an unknown `kumiai.*` type: it rejects the whole commit rather
 than surfacing the entry unread. An entry in a reserved, authority-bearing namespace that no one
@@ -47,6 +52,9 @@ not its to hold.
 (`packages/mls-rpc/src/crypto.ts:130-135`) — a caller passing it would otherwise be handed the
 ledger-entry key.
 
+Recovery confirmation also uses the reserved exporter label `kumiai.rejoin-confirm`, despite its historical dotted spelling.
+Its framed context binds group, publication position and commit digest at the speculative target epoch.
+
 ### Derivation domain separators
 
 Internal to the derivation they name; never passed by a caller. Listed because they occupy the
@@ -59,6 +67,8 @@ reserved prefix and a host must not collide with them.
 | `kumiai/mls/recovery/v1` | `packages/mls/src/recovery.ts:73` | Recovery HPKE `info` |
 | `kumiai/mls/recovery-aad/v1` | `packages/mls/src/recovery.ts:74` | Recovery AAD domain |
 | `kumiai/mls/recovery-ledger/v1` | `packages/mls/src/recovery.ts:80` | Recovery-ledger HPKE `info` |
+| `kumiai/mls/recovery-verdict/v1` | `packages/mls/src/recovery-verdict.ts` | Recovery-verdict HPKE `info` |
+| `kumiai/mls/recovery-verdict-aad/v1` | `packages/mls/src/recovery-verdict.ts` | Recovery-verdict AAD domain |
 | `kumiai/mls/recovery-ledger-aad/v1` | `packages/mls/src/recovery.ts:81` | Recovery-ledger AAD domain |
 
 > `kumiai/topic/v1` was previously documented as a topic label. It is not one — it is the HKDF `info`

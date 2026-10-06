@@ -337,7 +337,7 @@ test('a bootstrap whose host callback throws after the write still publishes the
     await responder.sealGroupInfo(request),
     'tx-bootstrap',
   )
-  if (recovered == null) throw new Error('expected recovery')
+  if (recovered == null || 'renewalRequired' in recovered) throw new Error('expected recovery')
   await recovered.onAccepted()
 
   const store = createTransactionalStore(member.handle)

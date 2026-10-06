@@ -66,6 +66,13 @@ function frameID(topicID: string, bytes: Uint8Array): string {
  */
 type AppCursor = { topicID: string; position: LogPosition | null; fetched: LogPosition | null }
 
+type ReportPrunedWindowParams = {
+  name: string
+  topicID: string
+  cursor: LogPosition
+  oldest: string | null
+}
+
 export type AppLaneParams = {
   mux: HubMux
   crypto: GroupCrypto
@@ -186,6 +193,7 @@ export function createAppLane(params: AppLaneParams): AppLane {
    */
   let segment = new Map<string, Array<AppFrame>>()
   const pendingRecords: Array<PendingAppFrame> = []
+  const reportedPruned = new Map<string, Set<string>>()
   const blockingFrames = new Map<string, AppDeliveryResumed>()
   let disposed = false
   const reportedUnknown = new Map<string, AppDeliveryResumed>()
@@ -319,24 +327,18 @@ export function createAppLane(params: AppLaneParams): AppLane {
     return op
   }
 
-  /**
-   * Tell the host that a topic's retention floor has passed this peer's read position: the frames
-   * between the two aged out unread, and a returning member is holding a partial history it has no
-   * other way to know is partial. A gap below retention is REPORTED, never silent.
-   *
-   * `oldest > cursor` is the whole test and the only one available: nothing anywhere records which
-   * frames used to sit between them, so this over-reports (a cursor frame aging out with nothing
-   * behind it reads the same) rather than ever under-reporting. With no cursor there is no gap to
-   * speak of.
-   */
-  const reportPrunedWindow = async (
-    name: string,
-    cursor: LogPosition | null,
-    oldest: string | null,
-  ): Promise<void> => {
+  /** Tell the host once when a fetch with a cursor confirms unread frames were removed. */
+  const reportPrunedWindow = async (report: ReportPrunedWindowParams): Promise<void> => {
+    const { name, topicID, cursor, oldest } = report
     const group = groupID()
     if (onAppWindowPruned == null || group == null) return
-    if (cursor == null || oldest == null || oldest <= cursor) return
+    let positions = reportedPruned.get(topicID)
+    if (positions == null) {
+      positions = new Set()
+      reportedPruned.set(topicID, positions)
+    }
+    if (positions.has(cursor)) return
+    positions.add(cursor)
     try {
       await onAppWindowPruned({ groupID: group, protocol: name, cursor, oldest })
     } catch {
@@ -409,10 +411,6 @@ export function createAppLane(params: AppLaneParams): AppLane {
       }
       staged.delete(name)
 
-      // The gap question is asked on the segment's FIRST pull only: it compares where this peer
-      // had read to against where the hub's retention now begins, and every later pull starts
-      // from a position this peer reached itself.
-      let reported = cursor.fetched != null
       let after: LogPosition | null = cursor.fetched ?? cursor.position
       while (true) {
         const result = await mux.fetchTopic({
@@ -421,12 +419,8 @@ export function createAppLane(params: AppLaneParams): AppLane {
           limit: APP_FETCH_LIMIT,
         })
         assertForwardPage(after, result.messages)
-        if (!reported) {
-          // `result.oldest` is where the hub's retention begins, and only the FIRST page's reply is
-          // asked: every later page reports the same floor, and a gap is one gap.
-          reported = true
-          await reportPrunedWindow(name, cursor.position, result.oldest)
-        }
+        if (after != null && result.gap)
+          await reportPrunedWindow({ name, topicID, cursor: after, oldest: result.oldest })
         for (const message of result.messages) {
           const position = asLogPosition(message.sequenceID)
           const restored = pendingRecords.find(

@@ -21,23 +21,31 @@ import {
 import {
   createGroupCrypto,
   createGroupMLS,
+  type GroupMLSParams,
   type LedgerEntrySlot,
   simpleHandleAccess,
 } from '@kumiai/mls-rpc'
 import type {
   Anchor,
+  AnchorSlot,
   AnchorStore,
   AppCursorStore,
+  AppOutbox,
   CommitJournal,
+  GroupMLS,
   GroupPeer,
   GroupProtocolDefinition,
   JournalEntry,
   PendingAppFrame,
   PendingCommit,
+  RecoveryEvent,
 } from '@kumiai/rpc'
 import { createGroupPeer } from '@kumiai/rpc'
+import { createMemoryAppOutbox } from '@kumiai/rpc-conformance'
 
 import type { WireHub } from './log-hub-over-wire.js'
+
+export { createMemoryAppOutbox }
 
 /**
  * The app protocol under test: one logged procedure, one ephemeral one beside it, and one
@@ -60,13 +68,13 @@ export type Protocols = { chat: typeof chat }
 // ---------------------------------------------------------------------------
 
 export function createMemoryAnchorStore(): AnchorStore & { stored: () => Anchor | null } {
-  let anchor: Anchor | null = null
+  let slot: AnchorSlot | null = null
   return {
-    load: async () => anchor,
-    save: async (next: Anchor) => {
-      anchor = next
+    load: async () => slot,
+    save: async (next: AnchorSlot) => {
+      slot = next
     },
-    stored: () => anchor,
+    stored: () => slot?.anchor ?? null,
   }
 }
 
@@ -87,6 +95,15 @@ export function createMemoryAppCursorStore(): AppCursorStore & {
     },
     stored: (topicID) => positions.get(topicID) ?? null,
   }
+}
+
+export function encodeJournal(derived: GroupHandle): Uint8Array {
+  return new TextEncoder().encode(
+    JSON.stringify({
+      state: Array.from(encodeClientState(derived.state)),
+      ledger: derived.ledgerTokens,
+    }),
+  )
 }
 
 export function createMemoryCommitJournal(): CommitJournal & { slot: () => JournalEntry | null } {
@@ -137,10 +154,12 @@ export function createMemoryStateStore(): StateStore {
 
 export type Member = {
   identity: OwnIdentity
+  mls: GroupMLS
   peer: GroupPeer<Protocols>
   handle: () => GroupHandle
   adopt: (handle: GroupHandle) => Promise<void>
   anchorStore: ReturnType<typeof createMemoryAnchorStore>
+  appOutbox: AppOutbox
   appCursorStore: ReturnType<typeof createMemoryAppCursorStore>
   journal: ReturnType<typeof createMemoryCommitJournal>
   stateStore: StateStore
@@ -166,7 +185,11 @@ export type MakeMemberParams = {
   handlers?: Record<string, unknown>
   /** Carry a dead member's durable state forward — this is what a restart IS. */
   restartOf?: Member
+  beforeAdopt?: (next: GroupHandle) => void | Promise<void>
   durablePending?: boolean
+  recoveryBinding?: GroupMLSParams['recoveryBinding']
+  recovery?: { timeoutMs?: number; deadlineMs?: number; getDelayMs?: () => number }
+  onRecovery?: (event: RecoveryEvent) => void | Promise<void>
 }
 
 export function makeMember(params: MakeMemberParams): Member {
@@ -181,7 +204,8 @@ export function makeMember(params: MakeMemberParams): Member {
     (params.durablePending ? new Map<string, PendingAppFrame>() : undefined)
 
   const getHandle = () => handle
-  const adoptHandle = (next: GroupHandle) => {
+  const adoptHandle = async (next: GroupHandle) => {
+    await params.beforeAdopt?.(next)
     handle = next
   }
   stateStore.save(handle)
@@ -210,16 +234,22 @@ export function makeMember(params: MakeMemberParams): Member {
     access,
     identity,
     entrySlot,
+    recoveryBinding: params.recoveryBinding,
   })
 
   const connection = hub.connect(identity)
+  const appOutbox = restartOf?.appOutbox ?? createMemoryAppOutbox()
   const peer = createGroupPeer<Protocols>({
+    appOutboxLimit: 128,
+    onRecovery: params.onRecovery,
+    recovery: params.recovery,
     hub: connection,
     crypto,
     mls,
     journal,
     anchorStore,
     appCursorStore,
+    appOutbox,
     localDID: identity.id,
     protocols: { chat },
     handlers: { chat: params.handlers ?? {} } as never,
@@ -227,13 +257,17 @@ export function makeMember(params: MakeMemberParams): Member {
       // The journalled blob is the serialized POST-commit handle. Adopting it is
       // idempotent, as the contract demands: a handle already past that commit's epoch
       // has adopted it, and a repeat is a no-op.
-      const state = decodeClientState(blob)
+      const journal = JSON.parse(new TextDecoder().decode(blob)) as {
+        state: Array<number>
+        ledger: Array<string>
+      }
+      const state = decodeClientState(new Uint8Array(journal.state))
       if (state == null || state.groupContext.epoch <= handle.epoch) return
       await adopt(
         await restoreGroup({
           state,
           credential: handle.credential,
-          ledgerEntries: handle.ledgerTokens,
+          ledgerEntries: journal.ledger,
           options: { resolveLedgerEntries: entrySlot.resolve },
         }),
       )
@@ -242,11 +276,13 @@ export function makeMember(params: MakeMemberParams): Member {
 
   return {
     identity,
+    mls,
     peer,
     handle: getHandle,
     adopt,
     anchorStore,
     appCursorStore,
+    appOutbox,
     journal,
     stateStore,
     pendingStore,
@@ -342,7 +378,7 @@ export function buildInviteCommit(
       commit: committed.commitMessage,
       bodies: material.invite.ledgerEntries,
       kind: 'invite',
-      journal: encodeClientState(committed.newGroup.state),
+      journal: encodeJournal(committed.newGroup),
       onAccepted: async () => {
         await member.adopt(committed.newGroup)
         deliverWelcome(committed.welcomeMessage)
@@ -361,7 +397,7 @@ export function buildRemoveCommit(member: Member, victimDID: string): () => Prom
       commit: committed.commitMessage,
       bodies: [],
       kind: 'remove',
-      journal: encodeClientState(committed.newGroup.state),
+      journal: encodeJournal(committed.newGroup),
       onAccepted: async () => {
         await member.adopt(committed.newGroup)
       },
@@ -402,7 +438,7 @@ export function buildLedgerCommit(
       commit: committed.commitMessage,
       bodies: [token],
       kind: 'ledger',
-      journal: encodeClientState(committed.newGroup.state),
+      journal: encodeJournal(committed.newGroup),
       onAccepted: async () => {
         await member.adopt(committed.newGroup)
       },

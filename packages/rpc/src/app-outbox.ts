@@ -1,0 +1,156 @@
+import type { SendAdmission } from './crypto.js'
+import {
+  AppEntryTooLargeError,
+  AppOutboxFullError,
+  PeerDisposedError,
+  PeerRemovedError,
+  SendNotAdmissibleError,
+} from './errors.js'
+
+export const MAX_APP_ENTRY_BYTES = 524_288
+
+/** Encoded app plaintext and the latest prepared publication attempt. */
+export type AppOutboxEntry = {
+  seq: number
+  protocol: string
+  prc: string
+  data: Uint8Array
+  lastAttempt: { epoch: number; floor: string | null; attempts: number } | null
+}
+
+/**
+ * The last processed commit-log position at `epoch`. `stranded` records that the peer must rejoin:
+ * the strand that raised it is otherwise memory-only, and a restart at the same epoch could not
+ * rediscover a fork it already stepped past. `position` is null when no position is durable yet.
+ */
+export type CommitCursor = { position: string | null; epoch: number; stranded?: true }
+
+/**
+ * Owned by one live peer per group. Writes are durable before resolution.
+ * Hosts encrypt plaintext at rest and clear it on leave/deletion, choosing physical erasure policy.
+ */
+export type AppOutbox = {
+  getCommitCursor(): Promise<CommitCursor | null>
+  /** Durable after the paired MLS state. Null discards an unusable cursor. */
+  putCommitCursor(cursor: CommitCursor | null): Promise<void>
+  /** Atomic insert or replace by seq. A rejection leaves storage unchanged. */
+  put(entry: AppOutboxEntry): Promise<void>
+  /** Ascending sequence order. */
+  list(): Promise<Array<AppOutboxEntry>>
+  remove(seq: number): Promise<void>
+  clear(): Promise<void>
+}
+
+export type AppOutboxAcceptanceParams = {
+  outbox: AppOutbox
+  limit: number
+  admission: () => SendAdmission
+}
+
+export type AppOutboxAcceptance = {
+  ready: () => Promise<void>
+  accept: (input: Pick<AppOutboxEntry, 'protocol' | 'prc' | 'data'>) => Promise<void>
+  entries: () => Array<AppOutboxEntry>
+  lowestUnresolvedSeq: () => number | null
+  replace: (entry: AppOutboxEntry) => void
+  remove: (seq: number) => void
+  clear: () => void
+  stop: () => void
+  close: () => void
+}
+
+/** Accepted entries below the unresolved fence are available to the delivery worker. */
+export function createAppOutboxAcceptance(params: AppOutboxAcceptanceParams): AppOutboxAcceptance {
+  const accepted = new Map<number, AppOutboxEntry>()
+  const reservations = new Set<number>()
+  let nextSeq = 0
+  let listed = false
+  let waiting = 0
+  let closed = false
+  let stopped = false
+  let retry: ReturnType<typeof setTimeout> | undefined
+  let resolveReady: () => void = () => {}
+  const ready = new Promise<void>((resolve) => {
+    resolveReady = resolve
+  })
+
+  const load = async (): Promise<void> => {
+    try {
+      const entries = await params.outbox.list()
+      if (closed) return
+      for (const entry of entries) {
+        accepted.set(entry.seq, entry)
+        nextSeq = Math.max(nextSeq, entry.seq + 1)
+      }
+      listed = true
+      resolveReady()
+    } catch {
+      // No allocation happens until the durable inventory is known.
+      if (!closed)
+        retry = setTimeout(() => {
+          void load()
+        }, 1000)
+    }
+  }
+  void load()
+
+  const accept = async (
+    input: Pick<AppOutboxEntry, 'protocol' | 'prc' | 'data'>,
+  ): Promise<void> => {
+    // Later calls must join the handoff until earlier waiters have resumed.
+    if (!listed || waiting > 0) {
+      waiting++
+      try {
+        await ready
+      } finally {
+        waiting--
+      }
+    }
+    if (closed) throw new PeerDisposedError('App outbox acceptance is closed')
+    if (stopped) throw new PeerRemovedError('App outbox sender was removed')
+    const admission = params.admission()
+    if (!admission.admissible) throw new SendNotAdmissibleError(admission.reason)
+    if (input.data.byteLength > MAX_APP_ENTRY_BYTES) {
+      throw new AppEntryTooLargeError('App entry exceeds the plaintext bound')
+    }
+    if (accepted.size + reservations.size >= params.limit) {
+      throw new AppOutboxFullError('App outbox is full')
+    }
+    const seq = nextSeq++
+    const entry: AppOutboxEntry = { ...input, data: input.data.slice(), seq, lastAttempt: null }
+    reservations.add(seq)
+    try {
+      await params.outbox.put(entry)
+      accepted.set(seq, entry)
+    } finally {
+      reservations.delete(seq)
+    }
+  }
+
+  return {
+    ready: () => ready,
+    accept,
+    entries: (): Array<AppOutboxEntry> => [...accepted.values()].sort((a, b) => a.seq - b.seq),
+    lowestUnresolvedSeq: (): number | null => {
+      const first = reservations.values().next()
+      return first.done ? null : first.value
+    },
+    replace: (entry: AppOutboxEntry): void => {
+      accepted.set(entry.seq, entry)
+    },
+    remove: (seq: number): void => {
+      accepted.delete(seq)
+    },
+    clear: (): void => {
+      accepted.clear()
+    },
+    stop: (): void => {
+      stopped = true
+    },
+    close: (): void => {
+      closed = true
+      clearTimeout(retry)
+      resolveReady()
+    },
+  }
+}

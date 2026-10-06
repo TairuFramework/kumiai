@@ -11,6 +11,7 @@ import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryCommitJournal } from './fixtures/journal.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
+import { createMemoryAppOutbox } from './fixtures/outbox.js'
 import { adoptJournalledBlob } from './fixtures/peer.js'
 
 const flush = () => new Promise((r) => setTimeout(r, 50))
@@ -76,6 +77,8 @@ function makeRoomPeer(
   const anchorStore = createMemoryAnchorStore()
   const appCursorStore = createMemoryAppCursorStore()
   const peer = createGroupPeer<Protocols>({
+    appOutbox: createMemoryAppOutbox(),
+    appOutboxLimit: 128,
     hub,
     crypto,
     mls,

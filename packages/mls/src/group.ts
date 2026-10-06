@@ -38,6 +38,7 @@ export {
   type GroupHandleParams,
   type HeldLedgerEntry,
   type LedgerLogEntry,
+  type SendAdmission,
 } from './group-handle.js'
 export {
   type ExportGroupInfoParams,
@@ -51,6 +52,12 @@ export {
   readMessageAAD,
   readMessageEpoch,
 } from './group-info.js'
+export {
+  type RevokeBuildResult,
+  removeLapsedLeaves,
+  renewLeaf,
+  revokeWithProof,
+} from './group-lifecycle.js'
 export { type RemoveMemberResult, removeMember } from './group-membership.js'
 export {
   type JoinGroupExternalParams,

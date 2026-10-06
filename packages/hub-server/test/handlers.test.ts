@@ -6,7 +6,7 @@ import {
   keyPackageDigest,
   NotSubscribedError,
 } from '@kumiai/hub-protocol'
-import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, onTestFinished, test, vi } from 'vitest'
 
 import type { AuthorizeRequest } from '../src/handlers.js'
 import { createHandlers } from '../src/handlers.js'
@@ -497,6 +497,12 @@ describe('store errors on the key-package fetch path keep their wire code', () =
    * every fetch against it silently drain the target: the exact drain this feature exists to close.
    */
   test('a broken slot read does not discard packages the pool already gave up', async () => {
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => {})
+    onTestFinished(() => {
+      const calls = diagnostic.mock.calls
+      diagnostic.mockRestore()
+      expect(calls.length).toBeGreaterThan(0)
+    })
     const store = {
       ...createMemoryStore(),
       fetchLastResortKeyPackage: undefined as never,
@@ -510,6 +516,12 @@ describe('store errors on the key-package fetch path keep their wire code', () =
   })
 
   test('a named store error from the top-up read is swallowed once the pool has answered', async () => {
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => {})
+    onTestFinished(() => {
+      const calls = diagnostic.mock.calls
+      diagnostic.mockRestore()
+      expect(calls.length).toBeGreaterThan(0)
+    })
     const store = storeThatFailsOn(
       'fetchLastResortKeyPackage',
       new KeyPackageQuotaExceededError('store unavailable'),
