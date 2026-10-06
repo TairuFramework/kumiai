@@ -23,7 +23,9 @@ describe('durable peer configuration', () => {
         crypto,
         localDID: 'bob',
         protocols: { chat },
-        handlers: { chat: { 'chat/changed': () => {}, 'chat/posted': () => {} } },
+        handlers: {
+          chat: { 'chat/changed': () => {}, 'chat/posted': () => {}, 'chat/echo': () => ({}) },
+        },
       }),
     ).toThrow(/pending.*mls/i)
   })

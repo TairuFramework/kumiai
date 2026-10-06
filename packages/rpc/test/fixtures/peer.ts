@@ -33,6 +33,7 @@ import { createMemoryAppOutbox } from './outbox.js'
 export const chat = {
   'chat/changed': { type: 'event', data: { type: 'object' } },
   'chat/posted': { type: 'event', retain: 'log', data: { type: 'object' } },
+  'chat/echo': { type: 'request', param: { type: 'object' }, result: { type: 'object' } },
 } as const satisfies GroupProtocolDefinition
 
 export type Protocols = { chat: typeof chat }
