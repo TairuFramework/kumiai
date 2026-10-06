@@ -1265,10 +1265,13 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           result.head != null &&
           pageAfter != null &&
           result.head > pageAfter)
-      if (pageAfter == null) {
+      // With no cursor the hub flags ANY log removal as a gap, so an unflagged read from the
+      // oldest frame holds the whole log: a fresh member's floor stays covered, and its first
+      // publication must not request a heal.
+      if (pageAfter == null && result.gap) {
         covered = false
         floor = { ...floor, covered: false }
-      } else if (gap) {
+      } else if (pageAfter != null && gap) {
         floor = { ...floor, covered: false }
         stranded = true
         healRequested = true

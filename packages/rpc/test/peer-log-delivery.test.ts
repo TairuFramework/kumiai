@@ -738,6 +738,38 @@ describe('recovery ordering', { concurrent: false }, () => {
     expect(received).toEqual([{ text: 'fresh' }, { text: 'fresh' }])
   })
 
+  test('a fresh joiner holding the whole log publishes without requesting recovery', async () => {
+    const hub = new FakeHub()
+    await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+    const received: Array<unknown> = []
+    member(hub, 'alice', {
+      epoch: 2,
+      handlers: { 'chat/posted': (ctx: { data: unknown }) => received.push(ctx.data) },
+      recovery: { timeoutMs: 25, deadlineMs: 400, getDelayMs: () => 0 },
+    })
+    const events: Array<RecoveryEvent> = []
+    const strands: Array<StrandObservation> = []
+    const bob = member(hub, 'bob', {
+      epoch: 2,
+      onRecovery: (event) => {
+        events.push(event)
+      },
+      onStrand: (notice) => {
+        strands.push(notice)
+      },
+      recovery: { timeoutMs: 25, deadlineMs: 400, getDelayMs: () => 0 },
+    })
+    await flush()
+    const head = hub.head(commitTopic(secret))
+    await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'fresh' } })
+    await vi.waitFor(async () => expect(await bob.appOutbox.list()).toEqual([]), { timeout: 1200 })
+    await flush()
+    expect(events).toEqual([])
+    expect(strands).toEqual([])
+    expect(hub.head(commitTopic(secret))).toBe(head)
+    expect(received).toEqual([{ text: 'fresh' }])
+  })
+
   test('failed gap recovery retries on backoff and delivers when a responder returns', async () => {
     const hub = new DurableFakeHub()
     const events: Array<RecoveryEvent> = []
@@ -1146,19 +1178,32 @@ describe('recovery ordering', { concurrent: false }, () => {
     expect(seals).toBe(1)
   })
 
-  test.each(['seal', 'catch-up'] as const)(
-    'later entries preserve per-epoch order when a ratchet lands during %s',
-    async (during) => {
+  test.each([
+    ['seal', 'covered'],
+    ['catch-up', 'covered'],
+    ['seal', 'uncovered'],
+    ['catch-up', 'uncovered'],
+  ] as const)(
+    'later entries preserve per-epoch order when a ratchet lands during %s (%s floor)',
+    async (during, coverage) => {
       const hub = new DurableFakeHub()
+      // A trimmed history prefix leaves a fresh joiner's floor uncovered, so it re-seals at the
+      // new epoch instead of certifying the earlier publication.
+      const base = coverage === 'uncovered' ? 2 : 1
+      if (coverage === 'uncovered') {
+        await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+        hub.trim(commitTopic(secret), '999999999999')
+      }
       const received: Array<{ epoch: number; seq: number }> = []
       const alice = member(hub, 'alice', {
+        epoch: base,
         handlers: {
           'chat/posted': (ctx: { data: { seq: number } }) => {
             received.push({ epoch: alice.mls.epoch(), seq: ctx.data.seq })
           },
         },
       })
-      const bob = member(hub, 'bob')
+      const bob = member(hub, 'bob', { epoch: base })
       await flush()
       const anchor = bob.anchorStore.stored()
       if (anchor == null) throw new Error('Missing anchor')
@@ -1200,20 +1245,37 @@ describe('recovery ordering', { concurrent: false }, () => {
       const published = hub.published
         .filter((frame) => frame.senderDID === 'bob' && frame.topicID === appTopic)
         .map((frame) => sealed.get(Array.from(frame.payload).join(',')))
+      const next = base + 1
+      if (during === 'seal' && coverage === 'covered') {
+        // Its own commit lands after the first publication, and a covered floor certifies that
+        // publication, so nothing is re-sealed or delivered twice. A missed commit (catch-up) or
+        // an uncovered floor still re-seals at the new epoch.
+        expect(published).toEqual([
+          { epoch: base, seq: 0 },
+          { epoch: next, seq: 1 },
+        ])
+        await vi.waitFor(() =>
+          expect(received).toEqual([
+            { epoch: base, seq: 0 },
+            { epoch: next, seq: 1 },
+          ]),
+        )
+        return
+      }
       expect(published).toEqual([
-        { epoch: 1, seq: 0 },
-        { epoch: 2, seq: 0 },
-        { epoch: 2, seq: 1 },
+        { epoch: base, seq: 0 },
+        { epoch: next, seq: 0 },
+        { epoch: next, seq: 1 },
       ])
       await vi.waitFor(() =>
-        expect(received.filter((entry) => entry.epoch === 2).map((entry) => entry.seq)).toEqual([
+        expect(received.filter((entry) => entry.epoch === next).map((entry) => entry.seq)).toEqual([
           0, 1,
         ]),
       )
       if (during === 'catch-up') {
         expect(
           [...sealed.values()].filter((entry) => entry.seq === 1).map((entry) => entry.epoch),
-        ).toEqual([2, 2])
+        ).toEqual([next, next])
       }
     },
   )

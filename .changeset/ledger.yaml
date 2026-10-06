@@ -341,6 +341,10 @@
   dir: packages/rpc
   intents:
     - calm-epochs-wait
+"@kumiai/rpc@0.10.5":
+  dir: packages/rpc
+  intents:
+    - clever-geckos-shop
 "@kumiai/rpc@0.5.0":
   dir: packages/rpc
   intents:

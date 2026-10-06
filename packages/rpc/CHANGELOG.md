@@ -1,5 +1,11 @@
 # @kumiai/rpc
 
+## 0.10.5
+
+### Patch Changes
+
+- A fresh member whose first commit-log read holds the whole log (no hub gap) keeps its epoch floor covered, so its first log publication no longer triggers an automatic recovery and an extra epoch.
+
 ## 0.10.4
 
 ### Patch Changes
