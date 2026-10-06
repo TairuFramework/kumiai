@@ -228,7 +228,8 @@ describe('peer host drain', { concurrent: false }, () => {
     }
     const alice = makeMLSPeer(hub, 'alice', secret, { crypto, mls, members, recovery })
     const recovering = alice.peer.recover().catch(() => {})
-    await vi.waitFor(() => expect(entered).toBe(true))
+    // Bounded by the gather deadline, not the 1s waitFor default.
+    await vi.waitFor(() => expect(entered).toBe(true), { timeout: recovery.deadlineMs })
     await alice.peer.dispose()
     await recovering
     const drain = await pausedDrain(alice.peer)

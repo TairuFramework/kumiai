@@ -757,9 +757,14 @@ describe('recovery ordering', { concurrent: false }, () => {
     // Recovery deadlines advance only on request, so a slow host cannot fail the retried attempt.
     controlRecoveryClock()
     await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'retry' } })
+    // Step past the deadline in small slices, so a slow host overshoots the retry backoff by
+    // one slice at most once the attempt fails.
     const failed = () => events.some((event) => event.phase === 'failed')
-    for (let step = 0; step < 50 && !failed(); step++) await vi.advanceTimersByTimeAsync(20)
-    expect(failed()).toBe(true)
+    const startedAt = performance.now()
+    while (!failed()) {
+      if (performance.now() - startedAt >= 4000) throw new Error('Recovery never failed')
+      await vi.advanceTimersByTimeAsync(20)
+    }
     expect(await bob.appOutbox.list()).toMatchObject([{ lastAttempt: null }])
     const received: Array<unknown> = []
     member(hub, 'alice', {
