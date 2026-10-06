@@ -97,6 +97,59 @@ describe('recovery lifecycle', { concurrent: false }, () => {
     await carol.peer.dispose()
   })
 
+  test('a failed attempt retries on a doubling backoff with no further trigger', async () => {
+    controlRecoveryClock()
+    const hub = new FakeHub()
+    const rs = secret(0xb6)
+    const events: Array<RecoveryEvent> = []
+    const bob = makeMLSPeer(hub, 'bob', rs, {
+      members,
+      recovery: { timeoutMs: 10, deadlineMs: 100, getDelayMs: () => 0 },
+      onRecovery: (e) => {
+        events.push(e)
+      },
+    })
+    const count = (phase: RecoveryEvent['phase']) => eventsOf(events).filter((p) => p === phase)
+    // Small slices past each deadline overshoot the armed backoff by one slice at most.
+    const stepUntil = async (done: () => boolean, description: string) => {
+      const startedAt = performance.now()
+      while (!done()) {
+        if (performance.now() - startedAt >= 4000) throw new Error(`Timed out: ${description}`)
+        await vi.advanceTimersByTimeAsync(5)
+      }
+    }
+
+    const first = bob.peer.recover()
+    await stepUntil(() => count('failed').length === 1, 'first failure')
+    expect(await first).toEqual({ advanced: false, reenact: [] })
+    await vi.advanceTimersByTimeAsync(900)
+    expect(count('started')).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(100)
+    await drainUntil(() => count('started').length === 2, 'first retry')
+    expect(events.at(-1)).toMatchObject({ phase: 'started', trigger: 'automatic' })
+
+    await stepUntil(() => count('failed').length === 2, 'second failure')
+    const carol = makeMLSPeer(hub, 'carol', rs, {
+      epoch: 2,
+      members,
+      recovery: { getDelayMs: () => 0 },
+    })
+    await vi.advanceTimersByTimeAsync(1900)
+    expect(count('started')).toHaveLength(2)
+    await vi.advanceTimersByTimeAsync(100)
+    await drainUntil(() => count('succeeded').length === 1, 'retried recovery success')
+    expect(eventsOf(events)).toEqual([
+      'started',
+      'failed',
+      'started',
+      'failed',
+      'started',
+      'succeeded',
+    ])
+    await bob.peer.dispose()
+    await carol.peer.dispose()
+  })
+
   test('automatic heal emits its own trigger and closes the strand episode', async () => {
     controlRecoveryClock(40)
     const hub = new FakeHub()
