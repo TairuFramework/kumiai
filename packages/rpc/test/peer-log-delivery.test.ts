@@ -754,8 +754,12 @@ describe('recovery ordering', { concurrent: false }, () => {
     hub.detach('bob')
     await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 2 })
     hub.trim(commitTopic(secret), '999999999999')
+    // Recovery deadlines advance only on request, so a slow host cannot fail the retried attempt.
+    controlRecoveryClock()
     await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'retry' } })
-    await vi.waitFor(() => expect(events.some((event) => event.phase === 'failed')).toBe(true))
+    const failed = () => events.some((event) => event.phase === 'failed')
+    for (let step = 0; step < 50 && !failed(); step++) await vi.advanceTimersByTimeAsync(20)
+    expect(failed()).toBe(true)
     expect(await bob.appOutbox.list()).toMatchObject([{ lastAttempt: null }])
     const received: Array<unknown> = []
     member(hub, 'alice', {
@@ -763,7 +767,11 @@ describe('recovery ordering', { concurrent: false }, () => {
       recovery: { timeoutMs: 20, deadlineMs: 100, getDelayMs: () => 0 },
       handlers: { 'chat/posted': (ctx: { data: unknown }) => received.push(ctx.data) },
     })
-    await vi.waitFor(() => expect(received).toEqual([{ text: 'retry' }]), { timeout: 2000 })
+    await drainUntil(() => true, 'responder start')
+    expect(received).toEqual([])
+    await vi.advanceTimersByTimeAsync(1000)
+    await drainUntil(() => received.length === 1, 'delivery after the recovery retry')
+    expect(received).toEqual([{ text: 'retry' }])
     expect(events.some((event) => event.phase === 'succeeded')).toBe(true)
   })
 

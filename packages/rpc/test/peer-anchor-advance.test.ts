@@ -337,9 +337,12 @@ describe('a logged dispatch lands on the segment that contains its seal epoch', 
     expect(raceTheRotation).toBeNull() // the race did run
 
     // The frame is sealed at epoch 2 and it is on the segment anchored at 2 — the segment that
-    // CONTAINS epoch 2. The segment the group just left holds nothing.
-    const landed = await hub.fetchTopic({ subscriberDID: 'alice', topicID: chatTopic(2) })
-    expect(landed.messages).toHaveLength(1)
+    // CONTAINS epoch 2. The segment the group just left holds nothing. Delivery publishes after
+    // the rotation settles, so poll for it.
+    await vi.waitFor(async () => {
+      const landed = await hub.fetchTopic({ subscriberDID: 'alice', topicID: chatTopic(2) })
+      expect(landed.messages).toHaveLength(1)
+    })
     const abandoned = await hub.fetchTopic({ subscriberDID: 'alice', topicID: chatTopic(1) })
     expect(abandoned.messages).toHaveLength(0)
 
@@ -347,11 +350,10 @@ describe('a logged dispatch lands on the segment that contains its seal epoch', 
     // the same segment and drains it. Landing anywhere else is a frame nobody ever opens.
     const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob, handlers })
     hub.reattach('bob')
-    await flush()
+    await vi.waitFor(() => expect(seen).toEqual([{ text: 'mid-rotation' }]))
 
     expect(restarted.mls.epoch()).toBe(2)
     expect(restarted.peer.anchorEpoch()).toBe(2)
-    expect(seen).toEqual([{ text: 'mid-rotation' }])
 
     await alice.peer.dispose()
     await restarted.peer.dispose()
