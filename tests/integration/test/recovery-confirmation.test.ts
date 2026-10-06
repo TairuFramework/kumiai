@@ -382,7 +382,8 @@ test('simultaneous recovery releases both lanes while a third member confirms', 
   ).toHaveLength(1)
   await s.alice.protocol('chat').dispatch('chat/posted', { data: { text: 'both confirmed' } })
   await vi.waitFor(() => expect(s.received).toContain('both confirmed'))
-})
+  // Three members and two real recoveries: CPU-bound, 7-11s on shared CI runners.
+}, 30_000)
 
 test('stale GroupInfo is superseded and retried without adopting the stale candidate', async () => {
   controlRecoveryClock()
