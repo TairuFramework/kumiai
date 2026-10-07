@@ -21,7 +21,8 @@ export type WakeDispatcher = {
   notify(params: WakeNotifyParams): void
   /** The device bound a receive channel: drop any pending trailing ping. */
   online(did: string): void
-  dispose(): void
+  /** Stops accepting frames, drops pending windows, and waits for every in-flight send to settle. */
+  dispose(): Promise<void>
 }
 
 type Pending = {
@@ -43,6 +44,7 @@ const DEFAULT_DEBOUNCE_MS = 10_000
 export function createWakeDispatcher(params: WakeDispatcherParams): WakeDispatcher {
   const debounceMs = params.debounceMs ?? DEFAULT_DEBOUNCE_MS
   const pending = new Map<string, Pending>()
+  const inFlight = new Set<Promise<void>>()
   let disposed = false
 
   function report(did: string, error: unknown): void {
@@ -56,7 +58,7 @@ export function createWakeDispatcher(params: WakeDispatcherParams): WakeDispatch
   function send(did: string, topicID: string, sequenceID: string, count: number): void {
     // Deliberately not awaited: a slow or hanging provider must never delay the publish fan-out
     // this is called from.
-    void (async () => {
+    const task = (async () => {
       try {
         const registration = await params.registry.get(did)
         if (registration == null) return
@@ -72,7 +74,8 @@ export function createWakeDispatcher(params: WakeDispatcherParams): WakeDispatch
           case 'delivered':
             break
           case 'gone':
-            await params.registry.delete(did)
+            // A hub being torn down must not write to a registry its host may already be closing.
+            if (!disposed) await params.registry.delete(did)
             break
           case 'retry':
             report(did, new Error('Wake send failed transiently'))
@@ -86,6 +89,8 @@ export function createWakeDispatcher(params: WakeDispatcherParams): WakeDispatch
         report(did, error)
       }
     })()
+    inFlight.add(task)
+    void task.finally(() => inFlight.delete(task))
   }
 
   function openWindow(did: string): Pending {
@@ -129,10 +134,11 @@ export function createWakeDispatcher(params: WakeDispatcherParams): WakeDispatch
       clearTimeout(entry.timer)
       pending.delete(did)
     },
-    dispose(): void {
+    async dispose(): Promise<void> {
       disposed = true
       for (const entry of pending.values()) clearTimeout(entry.timer)
       pending.clear()
+      await Promise.all(inFlight)
     },
   }
 }

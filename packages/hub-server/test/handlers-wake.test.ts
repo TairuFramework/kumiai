@@ -881,7 +881,7 @@ describe('a throwing wake dispatcher', () => {
         throw new Error('dispatcher exploded')
       },
       online: () => {},
-      dispose: () => {},
+      dispose: async () => {},
     }
     const storeErrors: Array<{ method: string; did?: string }> = []
     const handlers = createHandlers({

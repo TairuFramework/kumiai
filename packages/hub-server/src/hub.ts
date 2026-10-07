@@ -1,6 +1,7 @@
 import type { ServerTransportOf } from '@enkaku/protocol'
 import type { AccessRules, ReplayOptions, ResourceLimits, Server } from '@enkaku/server'
 import { serve } from '@enkaku/server'
+import type { VerifyTokenHook } from '@kokuin/capability'
 import type { Identity } from '@kokuin/token'
 import type { HubProtocol, HubStore, WakeRegistry, WakeSender } from '@kumiai/hub-protocol'
 import { hubProtocol } from '@kumiai/hub-protocol'
@@ -58,6 +59,12 @@ export type CreateHubParams = {
    * allow-any-authed.
    */
   authorize?: AuthorizeHook
+  /**
+   * Called for each capability in a delegation chain after it verifies; throw to reject. This is
+   * where a host plugs in revocation. Forwarded to `serve()`, which only consults it for
+   * delegated capabilities.
+   */
+  verifyToken?: VerifyTokenHook
   /** Publish rate limits. Merged over {@link DEFAULT_RATE_LIMITS}. */
   rateLimits?: Partial<HubRateLimits>
   /**
@@ -99,6 +106,11 @@ export type CreateHubParams = {
 export type HubInstance = {
   registry: HubClientRegistry
   server: Server<HubProtocol>
+  /**
+   * Stops the purge timer, waits for an in-flight purge and in-flight wake sends, then disposes the
+   * server. Idempotent: every call returns the same promise.
+   */
+  dispose(): Promise<void>
 }
 
 export function createHub(params: CreateHubParams): HubInstance {
@@ -141,22 +153,49 @@ export function createHub(params: CreateHubParams): HubInstance {
     transport: params.transport,
     identity: params.identity,
     accessRules: params.accessRules ?? DEFAULT_HUB_ACCESS_RULES,
+    verifyToken: params.verifyToken,
     replay: { ...params.replay, enabled: true, rejectStale: true },
     limits,
   })
+  let purgeTimer: ReturnType<typeof setInterval> | undefined
+  let purgeInFlight: Promise<void> | undefined
   if (params.purge !== false) {
     const interval = params.purge?.interval ?? 3_600_000
     const olderThan = params.purge?.olderThan ?? 604_800
-    const purgeTimer = setInterval(() => {
-      params.store.purge({ olderThan }).catch((error: unknown) => {
-        // Purge failures are non-fatal; retried on the next interval
-        storeErrorReporter({ method: 'purge', error })
+    purgeTimer = setInterval(() => {
+      const run = params.store
+        .purge({ olderThan })
+        .then(() => {})
+        .catch((error: unknown) => {
+          // Purge failures are non-fatal; retried on the next interval
+          storeErrorReporter({ method: 'purge', error })
+        })
+      purgeInFlight = run
+      void run.finally(() => {
+        if (purgeInFlight === run) purgeInFlight = undefined
       })
     }, interval)
-    server.disposed.then(() => clearInterval(purgeTimer))
   }
-  if (wakeDispatcher != null) {
-    server.disposed.then(() => wakeDispatcher.dispose())
+
+  // Stop background work first so nothing new starts, then drain what already did, then the server.
+  let teardown: Promise<void> | undefined
+  function stopBackground(): Promise<void> {
+    teardown ??= (async () => {
+      if (purgeTimer != null) clearInterval(purgeTimer)
+      await purgeInFlight
+      await wakeDispatcher?.dispose()
+    })()
+    return teardown
   }
-  return { registry, server }
+  let disposing: Promise<void> | undefined
+  function dispose(): Promise<void> {
+    disposing ??= (async () => {
+      await stopBackground()
+      await server.dispose()
+    })()
+    return disposing
+  }
+  // Disposing the server directly must still stop purge and wake.
+  void server.disposed.then(stopBackground)
+  return { registry, server, dispose }
 }

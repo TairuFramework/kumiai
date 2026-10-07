@@ -37,6 +37,7 @@
   "dependencies": {
     "@enkaku/protocol": "catalog:",
     "@enkaku/server": "catalog:",
+    "@kokuin/capability": "catalog:",
     "@kokuin/token": "catalog:",
     "@kumiai/hub-protocol": "workspace:^",
     "@sozai/codec": "catalog:",
