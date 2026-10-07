@@ -37,14 +37,14 @@ catalog:
   '@sozai/stream': ^0.2.0
   '@kokuin/expo': ^0.3.2
   '@sozai/runtime-expo': ^0.2.2
-  'expo': ^57.0.26
+  'expo': ^57.0.27
   'expo-status-bar': ^57.0.1
   'react': 19.2.3
   'react-native': ^0.86.0
   '@types/react': ^19.2.18
   'typescript': ^6.0.3
   '@hozon/adapter': ^0.1.0
-  '@hozon/db': ^0.2.0
+  '@hozon/db': ^0.2.1
   '@hozon/node-sqlite': ^0.1.0
   '@hozon/postgres': ^0.1.0
   '@hozon/provider': ^0.1.1
