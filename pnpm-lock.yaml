@@ -788,6 +788,9 @@ importers:
       '@enkaku/client':
         specifier: 'catalog:'
         version: 0.21.3(@logtape/logtape@2.3.11)
+      '@enkaku/http-fetch':
+        specifier: 'catalog:'
+        version: 0.21.4(@logtape/logtape@2.3.11)
       '@enkaku/protocol':
         specifier: 'catalog:'
         version: 0.21.4(@logtape/logtape@2.3.11)
@@ -797,12 +800,24 @@ importers:
       '@enkaku/transport':
         specifier: 'catalog:'
         version: 0.21.3(@logtape/logtape@2.3.11)
+      '@hozon/db':
+        specifier: 'catalog:'
+        version: 0.2.0(@logtape/logtape@2.3.11)
+      '@hozon/node-sqlite':
+        specifier: 'catalog:'
+        version: 0.1.0
+      '@hozon/postgres':
+        specifier: 'catalog:'
+        version: 0.1.0
       '@kokuin/token':
         specifier: 'catalog:'
         version: 0.5.0(@logtape/logtape@2.3.11)
       '@kumiai/hub-client':
         specifier: workspace:^
         version: link:../../packages/hub-client
+      '@kumiai/hub-http':
+        specifier: workspace:^
+        version: link:../../packages/hub-http
       '@kumiai/hub-protocol':
         specifier: workspace:^
         version: link:../../packages/hub-protocol
@@ -827,6 +842,9 @@ importers:
       '@sozai/codec':
         specifier: 'catalog:'
         version: 0.4.2
+      '@testcontainers/postgresql':
+        specifier: 'catalog:'
+        version: 12.2.0(supports-color@8.1.1)
       vitest:
         specifier: 'catalog:'
         version: 5.0.3(@opentelemetry/api@1.9.1)(@types/node@26.4.1)(@vitest/ui@5.0.3)(vite@8.0.16(@types/node@26.4.1)(esbuild@0.28.2)(terser@5.51.2)(tsx@4.23.15)(yaml@2.9.0))
