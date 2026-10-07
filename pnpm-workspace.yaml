@@ -12,6 +12,14 @@ allowBuilds:
 nodeLinker: hoisted
 
 catalog:
+  '@hozon/provider': ^0.1.1
+  '@enkaku/http-serve': ^0.21.4
+  '@sozai/http-server': ^0.1.1
+  '@teikyo/hozon': ^0.1.0
+  '@teikyo/access': ^0.1.0
+  '@teikyo/enkaku': ^0.1.0
+  '@teikyo/rate-limit': ^0.1.0
+  '@enkaku/http-fetch': ^0.21.4
   '@noble/ciphers': ^2.4.0
   '@noble/curves': ^2.4.0
   '@noble/hashes': ^2.4.0
@@ -19,9 +27,9 @@ catalog:
   'vitest': ^5.0.3
   '@enkaku/client': ^0.21.3
   '@enkaku/protocol': ^0.21.4
-  '@enkaku/server': ^0.21.3
+  '@enkaku/server': ^0.21.4
   '@enkaku/transport': ^0.21.3
-  '@kokuin/capability': ^0.3.1
+  '@kokuin/capability': ^0.4.0
   '@kokuin/controller': ^0.1.0
   '@kokuin/token': ^0.5.0
   '@sozai/async': ^0.4.0
@@ -66,6 +74,10 @@ minimumReleaseAgeExclude:
   - expo-constants@57.0.2
   - expo-modules-autolinking@57.0.2
   - expo@57.0.0
+  - '@teikyo/access@0.1.0'
+  - '@teikyo/enkaku@0.1.0'
+  - '@teikyo/hozon@0.1.0'
+  - '@teikyo/rate-limit@0.1.0'
 
 versioning:
   # e2e-expo takes @kumiai/mls as a runtime dependency, so bump propagation reaches it and it

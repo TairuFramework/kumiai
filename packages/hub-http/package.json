@@ -1,0 +1,60 @@
+{
+  "name": "@kumiai/hub-http",
+  "version": "0.10.0",
+  "description": "Production HTTP server for Kumiai hubs",
+  "keywords": [
+    "hub",
+    "http"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TairuFramework/kumiai",
+    "directory": "packages/hub-http"
+  },
+  "license": "MIT",
+  "sideEffects": false,
+  "type": "module",
+  "exports": {
+    ".": "./lib/index.js"
+  },
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "files": [
+    "lib/*"
+  ],
+  "scripts": {
+    "build": "pnpm run build:clean && pnpm run build:js && pnpm run build:types",
+    "build:clean": "del lib",
+    "build:js": "del 'lib/**/*.js' && swc src -d ./lib --config-file ../../node_modules/@kigu/dev/swc.json --strip-leading-paths",
+    "build:types": "del 'lib/**/*.d.ts' 'lib/**/*.d.ts.map' && tsc --emitDeclarationOnly --skipLibCheck",
+    "prepublishOnly": "pnpm run build",
+    "test": "pnpm run test:types && pnpm run test:unit",
+    "test:types": "tsc --noEmit --skipLibCheck -p tsconfig.test.json",
+    "test:unit": "vitest run"
+  },
+  "dependencies": {
+    "@enkaku/http-serve": "catalog:",
+    "@enkaku/server": "catalog:",
+    "@hozon/provider": "catalog:",
+    "@kumiai/hub-protocol": "workspace:^",
+    "@kumiai/hub-server": "workspace:^",
+    "@kumiai/hub-store": "workspace:^",
+    "@sozai/http-server": "catalog:",
+    "@teikyo/access": "catalog:",
+    "@teikyo/enkaku": "catalog:",
+    "@teikyo/hozon": "catalog:",
+    "@teikyo/rate-limit": "catalog:"
+  },
+  "devDependencies": {
+    "@enkaku/client": "catalog:",
+    "@enkaku/http-fetch": "catalog:",
+    "@kokuin/capability": "catalog:",
+    "@kokuin/token": "catalog:"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
