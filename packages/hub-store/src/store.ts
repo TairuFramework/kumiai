@@ -37,12 +37,12 @@ export type HubStoreOptions = {
   defaultRetention?: number
   /**
    * Maximum retention in seconds a subscribe may request. A request above it is refused with
-   * `RetentionExceededError`, never clamped. Absent: no maximum.
+   * `RetentionExceededError`, never clamped. Default 30 days; Infinity disables the maximum.
    */
   maxRetention?: number
   /**
    * Maximum retained LOG frames per topic, oldest evicted first. Counts log frames only, so a
-   * mailbox flood cannot evict the commit log. Absent: unbounded.
+   * mailbox flood cannot evict the commit log. Default 1000; Infinity disables the bound.
    */
   maxDepth?: number
   /**
@@ -89,8 +89,8 @@ export type CreateHubStoreParams = {
 export function createHubStore(params: CreateHubStoreParams): HubStore {
   const { db, adapter, options = {} } = params
   const defaultRetention = options.defaultRetention ?? 0
-  const maxRetention = options.maxRetention
-  const maxDepth = options.maxDepth
+  const maxRetention = options.maxRetention ?? 30 * 24 * 60 * 60
+  const maxDepth = options.maxDepth ?? 1000
   const maxKeyPackagesPerDID = options.maxKeyPackagesPerDID ?? DEFAULT_MAX_KEY_PACKAGES_PER_DID
   const maxSubscriptionsPerDID = options.maxSubscriptionsPerDID ?? DEFAULT_MAX_SUBSCRIPTIONS_PER_DID
 
@@ -156,7 +156,7 @@ export function createHubStore(params: CreateHubStoreParams): HubStore {
   // Fixed-width zero-padded so lexicographic order matches numeric order (`"10" > "9"`).
   //
   // One row, so every publish on every topic serialises behind it: the cost of a single total
-  // order. It deadlocks nothing: every writer takes this row FIRST and per-topic rows after.
+  // order. It deadlocks nothing: writers claim publish IDs first, then this row, then per-topic rows.
   async function nextSequenceID(trx: Kysely<HubTables>): Promise<string> {
     const row = await trx
       .updateTable('hub_sequence')
@@ -170,7 +170,7 @@ export function createHubStore(params: CreateHubStoreParams): HubStore {
   // Depth eviction runs inside the publishing transaction. Counts LOG frames only. Silent: it is a
   // synchronous consequence of the caller's own publish.
   async function evictDepth(trx: Kysely<HubTables>, topicID: string): Promise<void> {
-    if (maxDepth == null) return
+    if (maxDepth === Number.POSITIVE_INFINITY) return
     const logRows = await trx
       .selectFrom('hub_messages')
       .select('sequence_id')
@@ -192,16 +192,26 @@ export function createHubStore(params: CreateHubStoreParams): HubStore {
     // advance all happen in ONE transaction, in that order. A read-then-write CAS split across
     // statements is the exact race the head exists to eliminate.
     return await withStoreTransaction(db, async (trx) => {
-      // 1. Dedup, BEFORE the CAS. A replay carries a stale expectedHead by construction, so
-      // comparing first would report a lost commit that actually landed.
+      // Claim before minting or CAS: a concurrent retry waits for the holder to commit.
       if (publishParams.publishID != null) {
-        const existing = await trx
-          .selectFrom('hub_publish_ids')
-          .select('sequence_id')
-          .where('topic_id', '=', topicID)
-          .where('publish_id', '=', publishParams.publishID)
+        const claimed = await trx
+          .insertInto('hub_publish_ids')
+          .values({
+            topic_id: topicID,
+            publish_id: publishParams.publishID,
+            sequence_id: null,
+            recorded_at: Date.now(),
+          })
+          .onConflict((oc) => oc.columns(['topic_id', 'publish_id']).doNothing())
           .executeTakeFirst()
-        if (existing != null) {
+        if (Number(claimed.numInsertedOrUpdatedRows ?? 0n) === 0) {
+          const existing = await trx
+            .selectFrom('hub_publish_ids')
+            .select('sequence_id')
+            .where('topic_id', '=', topicID)
+            .where('publish_id', '=', publishParams.publishID)
+            .executeTakeFirstOrThrow()
+          if (existing.sequence_id == null) throw new Error('Incomplete publish-id record')
           return { sequenceID: existing.sequence_id, deduped: true }
         }
       }
@@ -298,16 +308,13 @@ export function createHubStore(params: CreateHubStoreParams): HubStore {
         await evictDepth(trx, topicID)
       }
 
-      // 8. Record the idempotency key in its own table.
+      // Complete the claim before committing; failed publishes roll the claim back.
       if (publishParams.publishID != null) {
         await trx
-          .insertInto('hub_publish_ids')
-          .values({
-            topic_id: topicID,
-            publish_id: publishParams.publishID,
-            sequence_id: sequenceID,
-            recorded_at: Date.now(),
-          })
+          .updateTable('hub_publish_ids')
+          .set({ sequence_id: sequenceID })
+          .where('topic_id', '=', topicID)
+          .where('publish_id', '=', publishParams.publishID)
           .execute()
       }
 

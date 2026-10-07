@@ -19,6 +19,11 @@ export function hubStoreMigrations(ctx: MigrationContext): Record<string, Migrat
           .addColumn('stored_at', t.bigint, (col) => col.notNull())
           .addColumn('retain', t.text, (col) => col.notNull().defaultTo('mailbox'))
           .execute()
+        await db.schema
+          .createIndex(`${p}_hub_messages_topic`)
+          .on('hub_messages')
+          .columns(['topic_id', 'retain', 'sequence_id'])
+          .execute()
 
         await db.schema
           .createTable('hub_deliveries')
@@ -60,6 +65,11 @@ export function hubStoreMigrations(ctx: MigrationContext): Record<string, Migrat
           .addColumn('retention', t.bigint, (col) => col.notNull().defaultTo(0))
           .addPrimaryKeyConstraint(`${p}_hub_subscriptions_pk`, ['topic_id', 'subscriber_did'])
           .execute()
+        await db.schema
+          .createIndex(`${p}_hub_subscriptions_subscriber`)
+          .on('hub_subscriptions')
+          .columns(['subscriber_did'])
+          .execute()
 
         await db.schema
           .createTable('hub_topics')
@@ -86,9 +96,14 @@ export function hubStoreMigrations(ctx: MigrationContext): Record<string, Migrat
           .createTable('hub_publish_ids')
           .addColumn('topic_id', t.text, (col) => col.notNull())
           .addColumn('publish_id', t.text, (col) => col.notNull())
-          .addColumn('sequence_id', t.text, (col) => col.notNull())
+          .addColumn('sequence_id', t.text)
           .addColumn('recorded_at', t.bigint, (col) => col.notNull().defaultTo(0))
           .addPrimaryKeyConstraint(`${p}_hub_publish_ids_pk`, ['topic_id', 'publish_id'])
+          .execute()
+        await db.schema
+          .createIndex(`${p}_hub_publish_ids_recorded`)
+          .on('hub_publish_ids')
+          .columns(['recorded_at'])
           .execute()
       },
       async down(db) {

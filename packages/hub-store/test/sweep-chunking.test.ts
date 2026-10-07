@@ -47,7 +47,7 @@ describe('hub store sweeps over a backlog larger than one statement can bind', (
 
   beforeEach(async () => {
     db = new HozonDB({ adapter: new NodeSQLiteAdapter({ database: ':memory:' }) })
-    db.register(createHubStoreDefinition())
+    db.register(createHubStoreDefinition({ maxDepth: Number.POSITIVE_INFINITY }))
     store = await getHubStore(db)
     tables = await hubTables(db)
   })

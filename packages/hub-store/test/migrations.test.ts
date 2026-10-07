@@ -1,6 +1,6 @@
 import { HozonDB } from '@hozon/db'
 import { NodeSQLiteAdapter } from '@hozon/node-sqlite'
-import type { Kysely } from 'kysely'
+import { type Kysely, sql } from 'kysely'
 import { describe, expect, test } from 'vitest'
 
 import { createHubStoreDefinition, getHubStore } from '../src/index.js'
@@ -45,6 +45,25 @@ describe('hub migrations', () => {
     const rows = await tables.selectFrom('hub_key_packages').selectAll().execute()
     expect(rows[0]?.not_after).toBe(42)
     await db.close()
+  })
+
+  test('indexes support topic scans, subscriber quotas and publish-id expiry', async () => {
+    const { db, tables } = await migrated()
+    try {
+      const indexes = [
+        ['hozon_hub_messages_topic', ['topic_id', 'retain', 'sequence_id']],
+        ['hozon_hub_subscriptions_subscriber', ['subscriber_did']],
+        ['hozon_hub_publish_ids_recorded', ['recorded_at']],
+      ] as const
+      for (const [name, columns] of indexes) {
+        const result = await sql<{ name: string }>`PRAGMA index_info(${sql.lit(name)})`.execute(
+          tables,
+        )
+        expect(result.rows.map((row) => row.name)).toEqual(columns)
+      }
+    } finally {
+      await db.close()
+    }
   })
 
   test('the last-resort slot holds one package per owner', async () => {

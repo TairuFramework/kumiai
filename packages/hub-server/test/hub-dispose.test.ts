@@ -78,6 +78,31 @@ describe('createHub dispose', () => {
     await transports.dispose()
   })
 
+  test('dispose waits for older purges after the latest finishes', async () => {
+    const store = createMemoryStore()
+    const older = createDeferred()
+    const latest = createDeferred()
+    vi.spyOn(store, 'purge')
+      .mockImplementationOnce(async () => {
+        await older.promise
+        return []
+      })
+      .mockImplementationOnce(async () => {
+        await latest.promise
+        return []
+      })
+    const { hub, transports } = setup(store)
+    await vi.advanceTimersByTimeAsync(PURGE_INTERVAL * 2)
+    latest.resolve()
+    await vi.advanceTimersByTimeAsync(0)
+    const disposing = hub.dispose()
+    await vi.advanceTimersByTimeAsync(PURGE_INTERVAL * 3)
+    expect(await isSettled(disposing)).toBe(false)
+    older.resolve()
+    await disposing
+    await transports.dispose()
+  })
+
   test('no purge starts after dispose', async () => {
     const store = createMemoryStore()
     const purge = vi.spyOn(store, 'purge')

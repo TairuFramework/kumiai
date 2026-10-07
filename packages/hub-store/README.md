@@ -31,16 +31,21 @@ definition. Close the `HozonDB` when the host shuts down.
 | Option | Default | Meaning |
 |--------|---------|---------|
 | `defaultRetention` | `0` | Floor, in seconds, on how long a topic's frames are kept. |
-| `maxRetention` | none | Ceiling, in seconds, a subscribe may request. Above it the subscribe is refused. |
-| `maxDepth` | none | Retained log frames per topic. The oldest log frames are evicted first. |
+| `maxRetention` | `2592000` (30 days) | Ceiling, in seconds, a subscribe may request. Above it the subscribe is refused. |
+| `maxDepth` | `1000` | Retained log frames per topic. The oldest log frames are evicted first. |
 | `maxKeyPackagesPerDID` | `100` | Ordinary key packages one DID may hold. An upload past it is refused. |
 | `maxSubscriptionsPerDID` | `1000` | Distinct topics one DID may subscribe to. |
+
+Set `maxRetention` or `maxDepth` to `Infinity` to disable that bound explicitly.
+These defaults match the memory store. Periodic purge applies the age policy.
 
 ## Storage
 
 The migrations name tables without a prefix (`hub_messages`, `hub_topics`, ...). `HozonDB` applies
 its `tablePrefix`, so several hubs can share one database under different prefixes.
 
-`publish` runs the dedup check, the head compare-and-set, the sequence mint, the append and the
+`publish` claims the publish ID, then runs the head compare-and-set, sequence mint, append and the
 head advance in one transaction. The head advance is a conditional write, so two hub processes on
 one Postgres database cannot both accept a publish at the same head.
+
+Concurrent retries of one publish ID wait for the accepting transaction and return its sequence ID with `deduped: true`.

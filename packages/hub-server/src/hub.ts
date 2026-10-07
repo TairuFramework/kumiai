@@ -158,7 +158,7 @@ export function createHub(params: CreateHubParams): HubInstance {
     limits,
   })
   let purgeTimer: ReturnType<typeof setInterval> | undefined
-  let purgeInFlight: Promise<void> | undefined
+  const purgesInFlight = new Set<Promise<void>>()
   if (params.purge !== false) {
     const interval = params.purge?.interval ?? 3_600_000
     const olderThan = params.purge?.olderThan ?? 604_800
@@ -170,9 +170,9 @@ export function createHub(params: CreateHubParams): HubInstance {
           // Purge failures are non-fatal; retried on the next interval
           storeErrorReporter({ method: 'purge', error })
         })
-      purgeInFlight = run
+      purgesInFlight.add(run)
       void run.finally(() => {
-        if (purgeInFlight === run) purgeInFlight = undefined
+        purgesInFlight.delete(run)
       })
     }, interval)
   }
@@ -182,7 +182,7 @@ export function createHub(params: CreateHubParams): HubInstance {
   function stopBackground(): Promise<void> {
     teardown ??= (async () => {
       if (purgeTimer != null) clearInterval(purgeTimer)
-      await purgeInFlight
+      await Promise.all(purgesInFlight)
       await wakeDispatcher?.dispose()
     })()
     return teardown

@@ -89,6 +89,42 @@ describe.skipIf(postgres == null)('HubStore CAS atomicity (separate Postgres con
     expect(topic.messages[1]?.sequenceID).toBe(winnerSeq)
   }, 30000)
 
+  test.each([true, false])('concurrent retries resolve with one append (CAS %s)', async (cas) => {
+    const stores = await freshStores(8)
+    const reader = stores[0]
+    if (reader == null) throw new Error('expected a reader store')
+    const topicID = 'topic:dedup-race'
+    const seed = await reader.publish({
+      senderDID: 'did:sender',
+      topicID,
+      payload: new Uint8Array([0]),
+      retain: 'log',
+    })
+    const results = await Promise.allSettled(
+      stores.map((store) =>
+        store.publish({
+          senderDID: 'did:sender',
+          topicID,
+          payload: new Uint8Array([1]),
+          retain: 'log',
+          publishID: 'same-publish',
+          expectedHead: cas ? seed.sequenceID : undefined,
+        }),
+      ),
+    )
+    expect(results.filter((result) => result.status === 'rejected')).toEqual([])
+    const accepted = results.flatMap((result) =>
+      result.status === 'fulfilled' ? [result.value] : [],
+    )
+    expect(accepted.filter((result) => !result.deduped)).toHaveLength(1)
+    expect(accepted.filter((result) => result.deduped)).toHaveLength(7)
+    expect(new Set(accepted.map((result) => result.sequenceID)).size).toBe(1)
+    await reader.subscribe({ subscriberDID: 'did:reader', topicID })
+    const fetched = await reader.fetchTopic({ subscriberDID: 'did:reader', topicID })
+    expect(fetched.messages).toHaveLength(2)
+    expect(fetched.head).toBe(accepted[0]?.sequenceID)
+  })
+
   // Publish locks the topic row (head write) and then evicts frames; trim and purge used to delete
   // frames and then write the topic row, the opposite order, which Postgres aborts as a deadlock.
   test('log publishes with depth eviction run alongside trim and purge without deadlock', async () => {

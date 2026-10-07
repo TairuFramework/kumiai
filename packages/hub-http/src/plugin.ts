@@ -5,11 +5,20 @@ import { type CreateHubParams, createHub, type HubClientRegistry } from '@kumiai
 import { createHubStoreDefinition, getHubStore, type HubStoreOptions } from '@kumiai/hub-store'
 import type { AnyHTTPPlugin, AnyPluginName, PluginName } from '@sozai/http-server'
 import { pluginName } from '@sozai/http-server'
-import { ACCESS_GRANTS, ACCESS_REVOCATION } from '@teikyo/access'
+import {
+  ACCESS_GRANTS,
+  ACCESS_REVOCATION,
+  type AccessGrants,
+  type AccessGrantsPluginParams,
+  type AccessRevocation,
+  type AccessRevocationPluginParams,
+} from '@teikyo/access'
 import { buildAccessRules, mountTransport } from '@teikyo/enkaku'
 import { HOZON_DB } from '@teikyo/hozon'
 
 export type KumiaiHub = {
+  grants?: AccessGrants
+  revocation?: AccessRevocation
   registry: HubClientRegistry
   server: Server<HubProtocol>
 }
@@ -21,7 +30,10 @@ export type HubPluginParams = Omit<CreateHubParams, 'transport' | 'store' | 'ver
   path?: string
   store?: HubStoreOptions
   transport?: ServerTransportOptions
-  access?: { grants?: true | Array<string>; revocation?: true }
+  access?: {
+    grants?: true | Array<string> | (AccessGrantsPluginParams & { patterns?: Array<string> })
+    revocation?: true | AccessRevocationPluginParams
+  }
 }
 
 export function hubPlugin(params: HubPluginParams): AnyHTTPPlugin {
@@ -32,7 +44,12 @@ export function hubPlugin(params: HubPluginParams): AnyHTTPPlugin {
     access = {},
     ...hubParams
   } = params
-  const gated = access.grants === true ? ['hub/*'] : access.grants
+  const gated =
+    access.grants === true
+      ? ['hub/*']
+      : Array.isArray(access.grants)
+        ? access.grants
+        : (access.grants?.patterns ?? (access.grants == null ? undefined : ['hub/*']))
   if (gated != null) {
     if (gated.length === 0) throw new Error('access.grants must not be empty')
     // Reject overlaps at the factory, before allocating database or transport resources.
@@ -49,6 +66,8 @@ export function hubPlugin(params: HubPluginParams): AnyHTTPPlugin {
       const db = ctx.use(HOZON_DB)
       db.register(createHubStoreDefinition(storeOptions))
       const store = await getHubStore(db)
+      const grants = gated == null ? undefined : ctx.use(ACCESS_GRANTS)
+      const revocation = access.revocation == null ? undefined : ctx.use(ACCESS_REVOCATION)
       const accessRules =
         gated == null
           ? hubParams.accessRules
@@ -57,8 +76,7 @@ export function hubPlugin(params: HubPluginParams): AnyHTTPPlugin {
               gated,
               allow: ctx.use(ACCESS_GRANTS).allow(),
             })
-      const verifyToken =
-        access.revocation == null ? undefined : ctx.use(ACCESS_REVOCATION).verifyToken
+      const verifyToken = revocation?.verifyToken
       const transport = mountTransport<HubProtocol>(ctx, path, transportOptions)
       const hub = createHub({ ...hubParams, store, transport, accessRules, verifyToken })
       let disposing: Promise<void> | undefined
@@ -73,7 +91,7 @@ export function hubPlugin(params: HubPluginParams): AnyHTTPPlugin {
         },
         { timeoutMs: params.limits?.cleanupTimeoutMs ?? 30_000 },
       )
-      return { registry: hub.registry, server: hub.server }
+      return { registry: hub.registry, server: hub.server, grants, revocation }
     },
   }
 }

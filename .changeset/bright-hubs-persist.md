@@ -1,5 +1,5 @@
 ---
-"@kumiai/hub-store": minor
+"@kumiai/hub-store": patch
 ---
 
 Add the durable Hozon-backed hub store.

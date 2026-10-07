@@ -1,3 +1,7 @@
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { Client } from '@enkaku/client'
 import { ClientTransport } from '@enkaku/http-fetch'
 import { createCapability, createRevocationRecord } from '@kokuin/capability'
@@ -53,6 +57,86 @@ describe('hub HTTP server', () => {
     })
     const fetched = await client.request('hub/v1/topic/fetch', { param: { topicID: TOPIC } })
     expect(fetched.messages).toMatchObject([{ sequenceID: published.sequenceID, payload: PAYLOAD }])
+  })
+
+  test.each([true, { cacheTTLMs: 0 }] as const)(
+    'factory exposes access stores and accepts plugin options (%s)',
+    async (grantOptions) => {
+      const identity = randomIdentity()
+      const server = await start({
+        db: ':memory:',
+        identity,
+        access: { grants: grantOptions, revocation: { requireJTI: false } },
+      })
+      const { client, identity: caller } = connect(server.url, identity.id)
+      await expect(
+        client.request('hub/v1/subscribe', { param: { topicID: TOPIC } }),
+      ).rejects.toThrow('Access denied')
+      const grants = server.hub.grants
+      const revocation = server.hub.revocation
+      if (grants == null || revocation == null) throw new Error('access stores unavailable')
+      await grants.store.grant({ subject: caller.id, pattern: 'hub/*', createdBy: identity.id })
+      await expect(
+        client.request('hub/v1/subscribe', { param: { topicID: TOPIC } }),
+      ).resolves.toEqual({ subscribed: true })
+      await grants.store.revoke({ subject: caller.id, pattern: 'hub/*' })
+      await expect(
+        client.request('hub/v1/subscribe', { param: { topicID: TOPIC } }),
+      ).rejects.toThrow('Access denied')
+      const jti = crypto.randomUUID()
+      const record = await createRevocationRecord(identity, jti)
+      await revocation.backend.add(record)
+      expect(await revocation.backend.get(jti, identity.id)).toEqual(record)
+      await grants.store.grant({ subject: identity.id, pattern: 'hub/*', createdBy: identity.id })
+      const capability = await createCapability(identity, {
+        sub: identity.id,
+        aud: caller.id,
+        act: '*',
+        res: '*',
+      })
+      const transport = new ClientTransport<HubProtocol>({ url: `${server.url}/hub` })
+      cleanups.push(() => transport.dispose())
+      await transport.write(
+        await caller.signToken({
+          typ: 'request',
+          prc: 'hub/v1/subscribe',
+          rid: 'optional-jti',
+          prm: { topicID: TOPIC },
+          aud: identity.id,
+          sub: identity.id,
+          cap: stringifyToken(capability),
+          iat: Math.floor(Date.now() / 1000),
+        } as const),
+      )
+      expect((await transport.read()).value?.payload).toMatchObject({
+        typ: 'result',
+        val: { subscribed: true },
+      })
+    },
+  )
+
+  test('factory applies the table prefix to hub and access tables', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'kumiai-http-prefix-'))
+    cleanups.push(() => rm(directory, { recursive: true, force: true }))
+    const database = join(directory, 'hub.sqlite')
+    const server = await start({
+      db: database,
+      tablePrefix: 'isolated',
+      identity: randomIdentity(),
+      access: { grants: true, revocation: true },
+    })
+    const db = new DatabaseSync(database)
+    try {
+      const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all()
+      const names = tables.map((row) => row.name)
+      expect(names).toContain('isolated_hub_messages')
+      expect(names).toContain('isolated_grants')
+      expect(names).toContain('isolated_revocations')
+      expect(names).not.toContain('hozon_hub_messages')
+    } finally {
+      db.close()
+      await server.dispose()
+    }
   })
 
   test('readiness reflects the database', async () => {

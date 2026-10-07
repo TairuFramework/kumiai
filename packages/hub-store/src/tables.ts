@@ -53,7 +53,7 @@ export type HubTables = {
   hub_publish_ids: {
     topic_id: string
     publish_id: string
-    sequence_id: string
+    sequence_id: string | null
     recorded_at: number
   }
 }
