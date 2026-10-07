@@ -38,8 +38,7 @@
     "@hozon/adapter": "catalog:",
     "@hozon/db": "catalog:",
     "@kumiai/hub-protocol": "workspace:^",
-    "@sozai/event": "catalog:",
-    "kysely": "catalog:"
+    "@sozai/event": "catalog:"
   },
   "devDependencies": {
     "@enkaku/client": "catalog:",

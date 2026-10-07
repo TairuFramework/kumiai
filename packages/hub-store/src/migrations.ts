@@ -1,6 +1,4 @@
-import type { MigrationContext } from '@hozon/db'
-import type { Kysely } from 'kysely'
-import type { Migration } from 'kysely/migration'
+import type { Kysely, Migration, MigrationContext } from '@hozon/db'
 
 import type { HubTables } from './tables.js'
 

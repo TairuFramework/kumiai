@@ -1,7 +1,6 @@
-import { HozonDB } from '@hozon/db'
+import { HozonDB, type Kysely } from '@hozon/db'
 import { NodeSQLiteAdapter } from '@hozon/node-sqlite'
 import type { HubStore } from '@kumiai/hub-protocol'
-import type { Kysely } from 'kysely'
 import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 
 import { createHubStoreDefinition, getHubStore } from '../src/index.js'

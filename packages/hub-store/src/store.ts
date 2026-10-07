@@ -1,5 +1,5 @@
 import type { Adapter } from '@hozon/adapter'
-import { withStoreTransaction } from '@hozon/db'
+import { type Kysely, withStoreTransaction } from '@hozon/db'
 import {
   type AckParams,
   type CountKeyPackagesParams,
@@ -28,7 +28,6 @@ import {
   type UnsubscribeParams,
 } from '@kumiai/hub-protocol'
 import { EventEmitter } from '@sozai/event'
-import type { Kysely } from 'kysely'
 
 import type { HubTables } from './tables.js'
 

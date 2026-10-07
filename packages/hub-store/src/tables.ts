@@ -1,4 +1,4 @@
-import type { ColumnType } from 'kysely'
+import type { ColumnType } from '@hozon/db'
 
 export type HubTables = {
   hub_messages: {

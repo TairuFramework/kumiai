@@ -269,9 +269,6 @@ catalogs:
     expo-status-bar:
       specifier: ^57.0.1
       version: 57.0.1
-    kysely:
-      specifier: ^0.29.6
-      version: 0.29.6
     react:
       specifier: 19.2.3
       version: 19.2.3
@@ -502,9 +499,6 @@ importers:
       '@sozai/event':
         specifier: 'catalog:'
         version: 0.1.5(@logtape/logtape@2.3.11)
-      kysely:
-        specifier: 'catalog:'
-        version: 0.29.6
     devDependencies:
       '@enkaku/client':
         specifier: 'catalog:'
