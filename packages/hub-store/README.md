@@ -3,6 +3,9 @@
 A SQL `HubStore` for Kumiai hubs, registered as a Hozon store. It runs on any Hozon adapter
 (node:sqlite, Postgres) and passes the `@kumiai/hub-conformance` suites on both.
 
+Use `@kumiai/hub-http` to host a hub over HTTP. Use this package directly when composing a hub
+server with a custom transport or when you need the store API separately.
+
 ## Exports
 
 - `createHubStoreDefinition(options?)` -- the Hozon `StoreDefinition`, named `'kumiai-hub'`
@@ -19,6 +22,9 @@ const db = new HozonDB({ adapter: new NodeSQLiteAdapter({ database: 'hub.db' }) 
 db.register(createHubStoreDefinition({ maxRetention: 30 * 24 * 60 * 60, maxDepth: 1000 }))
 const store = await getHubStore(db)
 ```
+
+The database applies the store migrations when `getHubStore` first resolves the registered
+definition. Close the `HozonDB` when the host shuts down.
 
 ## Options
 

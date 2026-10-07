@@ -83,6 +83,17 @@ type ConnectedClient = {
 const availableBackends = backends()
 const postgresBackend = availableBackends.find(({ name }) => name === 'postgres')
 
+/** Error codes along an error's cause chain. */
+function causeCodes(error: unknown): Array<unknown> {
+  const codes: Array<unknown> = []
+  let current: unknown = error
+  while (current instanceof Error) {
+    codes.push((current as { code?: unknown }).code)
+    current = current.cause
+  }
+  return codes
+}
+
 describe.each(availableBackends)('hub HTTP deployment ($name)', (backend) => {
   const running: Array<RunningServer> = []
   const clients: Array<ConnectedClient> = []
@@ -147,6 +158,7 @@ describe.each(availableBackends)('hub HTTP deployment ($name)', (backend) => {
     })
 
     await server1.dispose()
+    await db1.close()
     const db2 = open()
     const { server: server2 } = await start(db2, identity)
     const reconnectedRecipient = connect(server2.url, identity.id, recipientIdentity)
@@ -163,15 +175,19 @@ describe.each(availableBackends)('hub HTTP deployment ($name)', (backend) => {
     let timer: ReturnType<typeof setTimeout> | undefined
     const outcome = await Promise.race([
       request.then(
-        () => 'resolved' as const,
-        () => 'rejected' as const,
+        () => ({ status: 'resolved' as const }),
+        (error: unknown) => ({ status: 'rejected' as const, error }),
       ),
-      new Promise<'timeout'>((resolve) => {
-        timer = setTimeout(() => resolve('timeout'), 1000)
+      new Promise<{ status: 'timeout' }>((resolve) => {
+        timer = setTimeout(() => resolve({ status: 'timeout' as const }), 1000)
       }),
     ])
     clearTimeout(timer)
-    expect(outcome).toBe('rejected')
+    expect(outcome.status).toBe('rejected')
+    if (outcome.status === 'rejected') {
+      // The listener stops accepting connections as soon as shutdown starts.
+      expect(causeCodes(outcome.error)).toContain('ECONNREFUSED')
+    }
     await disposal
   })
 })
