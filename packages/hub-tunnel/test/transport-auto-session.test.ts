@@ -127,6 +127,92 @@ describe('createHubTunnelTransport auto-sessionID', () => {
     }
   })
 
+  describe('after lock, a frame from another session is dropped with a reason that names its kind', () => {
+    async function dropOtherSessionFrame(
+      suffix: string,
+      wrongFrame: HubFrame,
+    ): Promise<Array<ObservabilityEvent>> {
+      const hub = new FakeHub()
+      const localDID = `did:peer:auto-local-${suffix}`
+      const peerDID = `did:peer:auto-remote-${suffix}`
+      const topicA = `topic:auto-${suffix}-a`
+      const topicB = `topic:auto-${suffix}-b`
+      const events: Array<ObservabilityEvent> = []
+
+      const receiver = createHubTunnelTransport<Msg, Msg>({
+        hub,
+        sessionID: { auto: true },
+        localDID,
+        sendTopicID: topicB,
+        receiveTopicID: topicA,
+        onEvent: (event) => {
+          events.push(event)
+        },
+      })
+      const sender = createHubTunnelTransport<Msg, Msg>({
+        hub,
+        sessionID: `s-auto-${suffix}`,
+        localDID: peerDID,
+        sendTopicID: topicA,
+        receiveTopicID: topicB,
+      })
+
+      try {
+        await sender.write({ header: {}, payload: { typ: 'test', msg: 'lock-me' } })
+        const first = await receiver.read()
+        expect((first.value as Msg).payload.msg).toBe('lock-me')
+
+        hub.subscribe(localDID, topicA)
+        await hub.publish({ senderDID: peerDID, topicID: topicA, payload: encodeFrame(wrongFrame) })
+
+        // The dropped frame does not end or disturb the locked session.
+        await sender.write({ header: {}, payload: { typ: 'test', msg: 'after-drop' } })
+        const next = await receiver.read()
+        expect(next.done).toBe(false)
+        expect((next.value as Msg).payload.msg).toBe('after-drop')
+        return events
+      } finally {
+        try {
+          await receiver.dispose()
+        } catch {
+          // ignore
+        }
+        try {
+          await sender.dispose()
+        } catch {
+          // ignore
+        }
+        hub.disconnect(localDID)
+        hub.disconnect(peerDID)
+      }
+    }
+
+    function droppedReasons(events: Array<ObservabilityEvent>): Array<string> {
+      return events.flatMap((e) => (e.type === 'frame-dropped' ? [e.reason] : []))
+    }
+
+    test('a session-end from a previous session reports stale-session-end', async () => {
+      const events = await dropOtherSessionFrame('stale-end', {
+        v: 1,
+        sessionID: 'previous-session',
+        kind: 'session-end',
+        seq: 0,
+      })
+      expect(droppedReasons(events)).toEqual(['stale-session-end'])
+    })
+
+    test('a message from another session still reports session-mismatch', async () => {
+      const events = await dropOtherSessionFrame('foreign-msg', {
+        v: 1,
+        sessionID: 'other-session',
+        kind: 'message',
+        seq: 0,
+        body: { header: {}, payload: { typ: 'test', msg: 'should-be-dropped' } },
+      })
+      expect(droppedReasons(events)).toEqual(['session-mismatch'])
+    })
+  })
+
   test('outbound write before session is locked rejects with SessionNotEstablishedError', async () => {
     const hub = new FakeHub()
     const localDID = 'did:peer:auto-local-3'
