@@ -64,6 +64,7 @@ export function hubPlugin(params: HubPluginParams): AnyHTTPPlugin {
       let disposing: Promise<void> | undefined
       ctx.onShutdown(async () => {
         disposing = hub.dispose()
+        void disposing.catch(() => {})
         await transport.dispose()
       })
       ctx.onClose(

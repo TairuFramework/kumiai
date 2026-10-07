@@ -235,14 +235,15 @@ describe('hub HTTP server', () => {
     expect(response.headers.get('RateLimit')).toBeNull()
   })
 
-  test('rejects caller access rules overlapping the gated hub patterns', () => {
-    expect(() =>
-      hubPlugin({
+  test('rejects caller access rules overlapping the gated hub patterns', async () => {
+    await expect(
+      createHubServer({
+        db: ':memory:',
         identity: randomIdentity(),
         access: { grants: true },
         accessRules: { 'hub/v1/publish': { allow: true } },
       }),
-    ).toThrow(/overlaps/)
+    ).rejects.toThrow(/overlaps/)
   })
 
   test('shuts down gracefully with subscribed clients', async () => {
