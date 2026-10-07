@@ -405,7 +405,13 @@ export function createHubTunnelTransport<R, W>(
               if (lockedSessionID == null) {
                 lockedSessionID = frame.sessionID
               } else if (frame.sessionID !== lockedSessionID) {
-                onEvent?.({ type: 'frame-dropped', reason: 'session-mismatch' })
+                // A peer that ends a session and at once dials again can receive the other side's
+                // session-end for the old session after the new one has locked. That is benign and
+                // distinct from frames of a foreign session reaching this consumer.
+                onEvent?.({
+                  type: 'frame-dropped',
+                  reason: frame.kind === 'session-end' ? 'stale-session-end' : 'session-mismatch',
+                })
                 continue
               }
               if (frame.kind === 'session-end') {

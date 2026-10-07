@@ -6,6 +6,7 @@ export type FrameDroppedReason =
   | 'group-mismatch'
   | 'topic-mismatch'
   | 'session-mismatch'
+  | 'stale-session-end'
   | 'dedup'
 
 export type ObservabilityEvent =

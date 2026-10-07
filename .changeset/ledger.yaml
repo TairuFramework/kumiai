@@ -160,6 +160,10 @@
   dir: packages/hub-tunnel
   intents:
     - bound-leaf-and-log-delivery
+"@kumiai/hub-tunnel@0.10.3":
+  dir: packages/hub-tunnel
+  intents:
+    - hub-tunnel-stale-session-end
 "@kumiai/hub-tunnel@0.5.0":
   dir: packages/hub-tunnel
   intents:
