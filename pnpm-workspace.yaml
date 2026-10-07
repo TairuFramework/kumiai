@@ -4,7 +4,10 @@ packages:
 
 allowBuilds:
   '@swc/core': true
+  cpu-features: false
   esbuild: false
+  protobufjs: false
+  ssh2: false
 
 nodeLinker: hoisted
 
@@ -37,9 +40,17 @@ catalog:
   'react-native': ^0.86.0
   '@types/react': ^19.2.18
   'typescript': ^6.0.3
+  '@hozon/adapter': ^0.1.0
+  '@hozon/db': ^0.2.0
+  '@hozon/node-sqlite': ^0.1.0
+  '@hozon/postgres': ^0.1.0
+  '@testcontainers/postgresql': ^12.1.0
+  'kysely': ^0.29.6
+  'testcontainers': ^12.1.0
 
 minimumReleaseAgeExclude:
   - '@enkaku/*'
+  - '@hozon/*'
   - '@kigu/*'
   - '@kokuin/*'
   - '@sozai/*'
