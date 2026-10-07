@@ -2,7 +2,7 @@ import type { HozonDB } from '@hozon/db'
 import { HeadMismatchError, type HubStore } from '@kumiai/hub-protocol'
 import { afterEach, describe, expect, test } from 'vitest'
 
-import { createHubStoreDefinition, getHubStore } from '../src/index.js'
+import { createHubStoreDefinition, getHubStore, type HubStoreOptions } from '../src/index.js'
 import { backends } from './databases.js'
 
 // The atomicity clause the in-process conformance suite cannot prove: a single-connection SQLite
@@ -18,10 +18,13 @@ describe.skipIf(postgres == null)('HubStore CAS atomicity (separate Postgres con
   })
 
   // N stores on one fresh database, each on its own pool.
-  async function freshStores(count: number): Promise<Array<HubStore>> {
+  async function freshStores(
+    count: number,
+    options: HubStoreOptions = {},
+  ): Promise<Array<HubStore>> {
     if (postgres == null) throw new Error('Postgres is unavailable')
     const open = await postgres.createReopenable()
-    const definition = createHubStoreDefinition({ maxRetention: 3600 })
+    const definition = createHubStoreDefinition({ maxRetention: 3600, ...options })
     const dbs: Array<HozonDB> = []
     for (let i = 0; i < count; i++) {
       const db = open()
@@ -85,4 +88,50 @@ describe.skipIf(postgres == null)('HubStore CAS atomicity (separate Postgres con
     expect(topic.head).toBe(winnerSeq)
     expect(topic.messages[1]?.sequenceID).toBe(winnerSeq)
   }, 30000)
+
+  // Publish locks the topic row (head write) and then evicts frames; trim and purge used to delete
+  // frames and then write the topic row, the opposite order, which Postgres aborts as a deadlock.
+  test('log publishes with depth eviction run alongside trim and purge without deadlock', async () => {
+    const [publisher, sweeper] = await freshStores(2, { maxDepth: 2 })
+    if (publisher == null || sweeper == null) throw new Error('expected two stores')
+    const topicID = 'topic:sweep'
+    const publishCount = 1500
+
+    let publishing = true
+    const sweeping = (async () => {
+      const failures: Array<unknown> = []
+      while (publishing) {
+        try {
+          await sweeper.trim({ topicID, before: '999999999999' })
+          await sweeper.purge({ olderThan: 0 })
+        } catch (error) {
+          failures.push(error)
+          if (failures.length >= 5) break
+        }
+        await new Promise((resolve) => setTimeout(resolve, 2))
+      }
+      return failures
+    })()
+
+    const publishFailures: Array<unknown> = []
+    for (let start = 0; start < publishCount; start += 25) {
+      const batch = await Promise.allSettled(
+        Array.from({ length: 25 }, (_, i) => {
+          return publisher.publish({
+            senderDID: 'did:publisher',
+            topicID,
+            payload: new Uint8Array([(start + i) % 256]),
+            retain: 'log',
+          })
+        }),
+      )
+      for (const result of batch) {
+        if (result.status === 'rejected') publishFailures.push(result.reason)
+      }
+    }
+    publishing = false
+
+    expect(publishFailures).toEqual([])
+    expect(await sweeping).toEqual([])
+  }, 120000)
 })

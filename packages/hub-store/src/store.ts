@@ -80,11 +80,14 @@ function nowSeconds(): number {
   return Math.floor(Date.now() / 1000)
 }
 
-export function createHubStore(
-  db: Kysely<HubTables>,
-  adapter: Adapter,
-  options: HubStoreOptions = {},
-): HubStore {
+export type CreateHubStoreParams = {
+  db: Kysely<HubTables>
+  adapter: Adapter
+  options?: HubStoreOptions
+}
+
+export function createHubStore(params: CreateHubStoreParams): HubStore {
+  const { db, adapter, options = {} } = params
   const defaultRetention = options.defaultRetention ?? 0
   const maxRetention = options.maxRetention
   const maxDepth = options.maxDepth
@@ -133,6 +136,19 @@ export function createHubStore(
       .where((eb) => {
         return eb.or([eb('removed_through', 'is', null), eb('removed_through', '<', sequenceID)])
       })
+      .execute()
+  }
+
+  // Take the topic's row lock before touching its frames. `publish` locks the row (head write)
+  // and only then evicts frames, so a sweep that deleted frames first and wrote the row after
+  // would take the same two locks in the opposite order and deadlock on Postgres.
+  async function lockTopic(trx: Kysely<HubTables>, topicID: string): Promise<void> {
+    await trx
+      .selectFrom('hub_topics')
+      .select('topic_id')
+      .where('topic_id', '=', topicID)
+      // SQLite has no row locks (and rejects the clause); its one writer already serialises.
+      .$if(adapter.kind === 'postgres', (qb) => qb.forUpdate())
       .execute()
   }
 
@@ -446,6 +462,7 @@ export function createHubStore(
     // LOG frames strictly below the bound, and only those. The head and the publishID records are
     // never touched.
     await withStoreTransaction(db, async (trx) => {
+      await lockTopic(trx, trimParams.topicID)
       const logRows = await trx
         .selectFrom('hub_messages')
         .select('sequence_id')
@@ -467,31 +484,40 @@ export function createHubStore(
     const now = Date.now()
     const olderThan = purgeParams.olderThan
 
-    const removed = await withStoreTransaction(db, async (trx) => {
-      // Idempotency records outlive the frames they dedup, on their own clock. Without this sweep
-      // the table is the fastest-growing on a long-lived hub.
-      await trx
-        .deleteFrom('hub_publish_ids')
-        .where('recorded_at', '<=', now - PUBLISH_ID_RETENTION_SECONDS * 1000)
-        .execute()
+    // Idempotency records outlive the frames they dedup, on their own clock. Without this sweep
+    // the table is the fastest-growing on a long-lived hub.
+    await db
+      .deleteFrom('hub_publish_ids')
+      .where('recorded_at', '<=', now - PUBLISH_ID_RETENTION_SECONDS * 1000)
+      .execute()
 
-      const topicRows = await trx.selectFrom('hub_messages').select('topic_id').distinct().execute()
+    const topicRows = await db
+      .selectFrom('hub_messages')
+      .select('topic_id')
+      .distinct()
+      .orderBy('topic_id', 'asc')
+      .execute()
 
-      // Every topic's longest CURRENT subscriber retention in one grouped read.
-      const retentionRows = await trx
-        .selectFrom('hub_subscriptions')
-        .select((eb) => ['topic_id', eb.fn.max('retention').as('maxRetention')])
-        .groupBy('topic_id')
-        .execute()
-      const retentionByTopic = new Map(
-        retentionRows.map((row) => [row.topic_id, Number(row.maxRetention ?? 0)]),
-      )
+    // Every topic's longest CURRENT subscriber retention in one grouped read.
+    const retentionRows = await db
+      .selectFrom('hub_subscriptions')
+      .select((eb) => ['topic_id', eb.fn.max('retention').as('maxRetention')])
+      .groupBy('topic_id')
+      .execute()
+    const retentionByTopic = new Map(
+      retentionRows.map((row) => [row.topic_id, Number(row.maxRetention ?? 0)]),
+    )
 
-      const removedIDs: Array<string> = []
-      for (const { topic_id } of topicRows) {
-        const subscriberRetention = retentionByTopic.get(topic_id) ?? 0
-        const effective = Math.max(olderThan, subscriberRetention, defaultRetention)
-        const threshold = now - effective * 1000
+    // One transaction per topic: frames and that topic's watermark commit together, and row locks
+    // are held for one topic at a time, in topic_id order.
+    const removed: Array<string> = []
+    for (const { topic_id } of topicRows) {
+      const subscriberRetention = retentionByTopic.get(topic_id) ?? 0
+      const effective = Math.max(olderThan, subscriberRetention, defaultRetention)
+      const threshold = now - effective * 1000
+
+      const ids = await withStoreTransaction(db, async (trx) => {
+        await lockTopic(trx, topic_id)
 
         // Log removal is prefix-only by position. A clock that moved backwards can leave a due
         // frame above one that is not; removing it would punch a hole a cursor cannot see.
@@ -518,18 +544,19 @@ export function createHubStore(
           })
           .orderBy('sequence_id', 'asc')
           .execute()
-        if (frames.length === 0) continue
+        if (frames.length === 0) return []
 
-        const ids = frames.map((frame) => frame.sequence_id)
-        removedIDs.push(...ids)
-        await deleteFrames(trx, ids)
+        const frameIDs = frames.map((frame) => frame.sequence_id)
+        await deleteFrames(trx, frameIDs)
         const lastLog = frames.findLast((frame) => frame.retain === 'log')
         if (lastLog != null) {
           await advanceRemovedThrough(trx, topic_id, lastLog.sequence_id)
         }
-      }
-      return removedIDs.sort()
-    })
+        return frameIDs
+      })
+      removed.push(...ids)
+    }
+    removed.sort()
 
     if (removed.length === 0) return []
     await events.emit('purge', { sequenceIDs: removed })

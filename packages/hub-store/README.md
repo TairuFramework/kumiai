@@ -8,9 +8,7 @@ A SQL `HubStore` for Kumiai hubs, registered as a Hozon store. It runs on any Ho
 - `createHubStoreDefinition(options?)` -- the Hozon `StoreDefinition`, named `'kumiai-hub'`
   (`HUB_STORE`).
 - `getHubStore(provider)` -- the `HubStore` from a `HozonDB` or any Hozon `StoreProvider`.
-- `createHubStore(db, adapter, options?)` -- the store over a Kysely instance, for a host that runs
-  its own migrations.
-- `HubStoreOptions`, `HubTables`.
+- `HubStoreOptions`.
 
 ```ts
 import { HozonDB } from '@hozon/db'

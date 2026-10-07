@@ -13,7 +13,7 @@ export function createHubStoreDefinition(
   return {
     name: HUB_STORE,
     migrations: hubStoreMigrations,
-    createAPI: (db, adapter) => createHubStore(db, adapter, options),
+    createAPI: (db, adapter) => createHubStore({ db, adapter, options }),
   }
 }
 
