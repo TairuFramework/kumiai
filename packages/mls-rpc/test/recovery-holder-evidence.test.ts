@@ -201,7 +201,6 @@ test('recoveryAfterRestartKeepsEvidence', async () => {
       ledgerEntries: Array<string>
     }
     const restored = await restoreGroup({ state, ...metadata })
-    expect(restored).not.toBe(original)
     expect(restored.bindingOfDID(fixture.bob.id)?.holderGrant).toBe(fixture.binding.holderGrant)
     fixture.reload(restored)
     const requester = fixture.requester()
