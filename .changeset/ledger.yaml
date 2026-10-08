@@ -84,6 +84,10 @@
   dir: packages/hub-conformance
   intents:
     - band-align-0-9
+"@kumiai/hub-http@0.10.1":
+  dir: packages/hub-http
+  intents:
+    - quiet-hubs-host
 "@kumiai/hub-protocol@0.10.0":
   dir: packages/hub-protocol
   intents:
@@ -126,6 +130,10 @@
   dir: packages/hub-server
   intents:
     - bound-leaf-and-log-delivery
+"@kumiai/hub-server@0.10.3":
+  dir: packages/hub-server
+  intents:
+    - warm-hub-lifecycle
 "@kumiai/hub-server@0.5.0":
   dir: packages/hub-server
   intents:
@@ -148,6 +156,10 @@
   dir: packages/hub-server
   intents:
     - band-align-0-9
+"@kumiai/hub-store@0.10.1":
+  dir: packages/hub-store
+  intents:
+    - bright-hubs-persist
 "@kumiai/hub-tunnel@0.10.0":
   dir: packages/hub-tunnel
   intents:
@@ -238,6 +250,10 @@
   dir: packages/mls-rpc
   intents:
     - bound-leaf-and-log-delivery
+"@kumiai/mls-rpc@0.10.2":
+  dir: packages/mls-rpc
+  intents:
+    - recovery-holder-evidence
 "@kumiai/mls-rpc@0.5.0":
   dir: packages/mls-rpc
   intents:
@@ -269,6 +285,14 @@
   dir: packages/mls
   intents:
     - bound-leaf-and-log-delivery
+"@kumiai/mls@0.10.2":
+  dir: packages/mls
+  intents:
+    - bound-holder-evidence
+    - cascade-exemption
+    - clean-mls-catalog
+    - export-mls-helpers
+    - self-removal
 "@kumiai/mls@0.5.0":
   dir: packages/mls
   intents:
@@ -349,6 +373,10 @@
   dir: packages/rpc
   intents:
     - clever-geckos-shop
+"@kumiai/rpc@0.10.7":
+  dir: packages/rpc
+  intents:
+    - clean-rpc-catalog
 "@kumiai/rpc@0.5.0":
   dir: packages/rpc
   intents:

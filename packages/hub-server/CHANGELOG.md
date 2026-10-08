@@ -1,5 +1,11 @@
 # @kumiai/hub-server
 
+## 0.10.3
+
+### Patch Changes
+
+- Add a `verifyToken` hook to `createHub` and await hub teardown. `WakeDispatcher.dispose()` now returns `Promise<void>`.
+
 ## 0.10.2
 
 ### Patch Changes

@@ -1,5 +1,11 @@
 # @kumiai/mls-rpc
 
+## 0.10.2
+
+### Patch Changes
+
+- Preserve controller-signed holder evidence through recovery and distinguish bindings with refreshed evidence when retrying an unusable binding.
+
 ## 0.10.1
 
 ### Patch Changes

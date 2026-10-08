@@ -1,5 +1,11 @@
 # @kumiai/rpc
 
+## 0.10.7
+
+### Patch Changes
+
+- Update the `@enkaku/server` dependency range to `^0.21.4`.
+
 ## 0.10.5
 
 ### Patch Changes

@@ -1,5 +1,21 @@
 # @kumiai/mls
 
+## 0.10.2
+
+### Patch Changes
+
+- Require controller-signed holder evidence for chained leaf capabilities and preserve it through credential parsing and renewal. Evidence must be valid when the leaf capability is issued. Refuse empty invite recipient credential IDs.
+
+  Chained leaves without holder evidence are now refused in every group, including lifecycle and non-lifecycle groups. An existing member with such a leaf has its next commit refused, and a Welcome containing such a leaf fails. Members must renew their chained leaves with evidence before upgrading.
+
+- In lifecycle groups, revoking a trusted agent no longer cascades to a child leaf that carries its holder's own valid controller grant. Such a child stays valid for commits and Welcomes with its unchanged credential, while new capabilities from the revoked agent are still refused. A direct controller capability may replace a leaf issued by an agent the group recorded revoked, even when the current leaf's capability is newer.
+
+- Update the `@kokuin/capability` dependency range to `^0.4.0`.
+
+- Export didFromCredential and mergeReceiveSecretTree.
+
+- Add self-removal proposal and commit helpers that preserve authenticated proposal senders and ignore stale proposals.
+
 ## 0.10.1
 
 ### Patch Changes
