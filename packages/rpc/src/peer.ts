@@ -656,6 +656,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           remove: (seq) => params.appOutbox.remove(seq),
           clear: () => params.appOutbox.clear(),
           cleared: (notice) => notifyHost(params.onAppOutboxCleared, notice),
+          deliveredWindowMs: appLogRetentionSeconds * 1000,
+          deliveredLimit: params.appOutboxLimit,
         })
 
   /**
@@ -1483,6 +1485,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           // the port's answer to it.
           if (disposed) return false
           const framedEpoch = localEpoch
+          const anchorEpochBefore = anchor.epoch
           let applied: ProcessCommitResult
           try {
             // Through the seam, like every other site that ratchets the handle: it reads this
@@ -1555,6 +1558,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             advancedEpoch = true
             // The fork check's record; the only place it is written from the log.
             appliedByEpoch.set(framedEpoch, { sequenceID: position, digest: commitDigest })
+            if (header?.external) logDelivery?.rejoined(anchorEpochBefore)
           }
           if (header?.external && !applied.advanced && !stranded)
             recordCommitOutcome(position, {
@@ -1962,6 +1966,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     }
     recoveryGeneration += 1
     closeEpisode()
+    // As on a rejoin that bootstraps at once: frames sent before the subscription woke nothing.
+    requestAppPull()
     if (commitTopicID != null) {
       emitRecovery({ phase: 'bootstrapped', groupID: commitTopicID, attemptID, trigger })
     }
@@ -2652,6 +2658,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           clearRecoveryRetry()
           recoveryBackoff = 1000
           closeEpisode()
+          // A push only wakes a pull, and frames published to the rejoined segment before its
+          // subscription existed woke nothing.
+          requestAppPull()
           emitRecovery({ ...base, phase: 'succeeded' })
           return { advanced: true }
         })
