@@ -27,6 +27,7 @@ describe('the two storage ports are not interchangeable', () => {
     const lastResort: LastResortStore = createMemoryLastResortStore()
     const wire = (): void => {
       createKeyPackagePool({
+        sourceID: 'ordinary',
         identity,
         client: {} as never,
         // @ts-expect-error a LastResortStore is not a KeyPackagePoolStore: the records differ in kind
@@ -40,6 +41,7 @@ describe('the two storage ports are not interchangeable', () => {
     const pool: KeyPackagePoolStore = createMemoryKeyPackagePoolStore()
     const wire = (): void => {
       createLastResortProvisioner({
+        sourceID: 'last-resort',
         identity,
         client: {} as never,
         // @ts-expect-error a KeyPackagePoolStore is not a LastResortStore: the records differ in kind
@@ -85,7 +87,12 @@ describe('a foreign record is refused at the store boundary', () => {
   test('the provisioner refuses an ordinary record', async () => {
     const store = createMemoryLastResortStore()
     await store.put(identity.id, await foreignRecord('ordinary', 'from-the-pool'))
-    const provisioner = createLastResortProvisioner({ identity, client, store })
+    const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
+      identity,
+      client,
+      store,
+    })
 
     await expect(provisioner.ensureProvisioned()).rejects.toThrow(
       /from-the-pool.*last-resort.*ordinary/,
@@ -95,7 +102,7 @@ describe('a foreign record is refused at the store boundary', () => {
   test('the pool refuses a last-resort record', async () => {
     const store = createMemoryKeyPackagePoolStore()
     await store.put(identity.id, await foreignRecord('last-resort', 'from-the-slot'))
-    const pool = createKeyPackagePool({ identity, client, store })
+    const pool = createKeyPackagePool({ sourceID: 'ordinary', identity, client, store })
 
     await expect(pool.ensureStocked()).rejects.toThrow(/from-the-slot.*ordinary.*last-resort/)
   })
@@ -103,7 +110,7 @@ describe('a foreign record is refused at the store boundary', () => {
   test('bundles() refuses one too, so a join cannot read across the ports', async () => {
     const store = createMemoryKeyPackagePoolStore()
     await store.put(identity.id, await foreignRecord('last-resort', 'from-the-slot'))
-    const pool = createKeyPackagePool({ identity, client, store })
+    const pool = createKeyPackagePool({ sourceID: 'ordinary', identity, client, store })
 
     await expect(pool.bundles()).rejects.toThrow(/from-the-slot.*ordinary.*last-resort/)
   })

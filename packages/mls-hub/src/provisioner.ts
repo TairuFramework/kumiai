@@ -21,6 +21,8 @@ const DEFAULT_ROTATE_WITHIN_DAYS = 30
 const DEFAULT_RETAIN_AFTER_EXPIRY_DAYS = 7
 
 export type LastResortProvisionerParams = {
+  /** Stable across restarts. Give each source its own receipt-store namespace. */
+  sourceID: string
   /** The identity the package is minted for; also the store's owner key. */
   identity: OwnIdentity
   client: Pick<HubClient, 'uploadLastResortKeyPackage' | 'keyPackageStatus'>
@@ -37,7 +39,7 @@ export type ProvisionResult = Result<{ rotated: boolean; ref: string }, HubRetry
 
 /**
  * Satisfies `BundleSource` (`./join.js`) structurally, which is how it reaches
- * `processWelcomeFromSources`. Narrowing `bundles` or `release` breaks that at every call site
+ * `openWelcome`. Narrowing `bundles`, `consume` or `receipt` breaks that at every call site
  * passing a provisioner as a source, so the relationship needs no separate declaration to be
  * enforced.
  */
@@ -60,10 +62,13 @@ export type LastResortProvisioner = {
    * @throws {Error} a stored record belongs to the other port, or does not round-trip.
    */
   ensureProvisioned(): AsyncResult<{ rotated: boolean; ref: string }, HubRetryableError>
-  /** Every retained bundle, `notAfter` descending, for `processWelcome`. */
+  sourceID: string
+  /** Every retained bundle, `notAfter` descending, for `openWelcome`. */
   bundles(): Promise<Array<KeyPackageBundle>>
+  consume(ref: string, groupID: string): Promise<void>
+  receipt(ref: string): Promise<{ groupID: string } | null>
   /**
-   * A no-op, so a provisioner can stand in as a `BundleSource`. A last-resort package is reusable by
+   * A no-op retained for manual callers. A last-resort package is reusable by
    * design — the same one is handed to every inviter until it rotates — so a Welcome must not
    * consume it. Deleting it here would make the owner silently unaddable forever.
    */
@@ -74,6 +79,7 @@ export function createLastResortProvisioner(
   params: LastResortProvisionerParams,
 ): LastResortProvisioner {
   const {
+    sourceID,
     identity,
     client,
     store,
@@ -101,6 +107,8 @@ export function createLastResortProvisioner(
       `mls-hub: retainAfterExpiryDays must be a finite number of 0 or more, got ${retainAfterExpiryDays}`,
     )
   }
+
+  if (sourceID.length === 0) throw new Error('mls-hub: sourceID must be non-empty')
 
   const ownerDID = identity.id
   let inFlight: Promise<ProvisionResult> | null = null
@@ -240,6 +248,12 @@ export function createLastResortProvisioner(
   }
 
   return {
+    sourceID,
+    // A ref receipt would suppress later Welcomes for this reusable package.
+    async consume(_ref: string, _groupID: string): Promise<void> {},
+    async receipt(_ref: string): Promise<null> {
+      return null
+    },
     ensureProvisioned(): AsyncResult<{ rotated: boolean; ref: string }, HubRetryableError> {
       // Single-flight: a second caller joins the first instead of minting a competing package.
       // Cross-process overlap is undefended by design — it yields one occupied slot and two valid

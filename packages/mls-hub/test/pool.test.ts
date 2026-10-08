@@ -28,6 +28,7 @@ describe('option validation', () => {
   ])('rejects an out-of-range %s', (_name, overrides) => {
     expect(() =>
       createKeyPackagePool({
+        sourceID: 'ordinary',
         identity: hub.identity,
         client: hub.client,
         store: createMemoryKeyPackagePoolStore(),
@@ -42,6 +43,7 @@ describe('ensureStocked', () => {
     const store = createMemoryKeyPackagePoolStore()
     const upload = vi.spyOn(hub.client, 'uploadKeyPackages')
     const pool = createKeyPackagePool({
+      sourceID: 'ordinary',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -71,6 +73,7 @@ describe('ensureStocked', () => {
     const store = createMemoryKeyPackagePoolStore()
     const upload = vi.spyOn(hub.client, 'uploadKeyPackages')
     const pool = createKeyPackagePool({
+      sourceID: 'ordinary',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -98,6 +101,7 @@ describe('ensureStocked', () => {
   test('does nothing while depth is at or above lowWater', async () => {
     const store = createMemoryKeyPackagePoolStore()
     const pool = createKeyPackagePool({
+      sourceID: 'ordinary',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -116,6 +120,7 @@ describe('ensureStocked', () => {
   test('does nothing while depth sits between lowWater and target', async () => {
     const store = createMemoryKeyPackagePoolStore()
     const pool = createKeyPackagePool({
+      sourceID: 'ordinary',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -138,6 +143,7 @@ describe('ensureStocked', () => {
   test('tops up only the deficit once consumption drops depth below lowWater', async () => {
     const store = createMemoryKeyPackagePoolStore()
     const pool = createKeyPackagePool({
+      sourceID: 'ordinary',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -158,6 +164,7 @@ describe('ensureStocked', () => {
     const store = { ...inner, put: vi.fn(inner.put) }
     const upload = vi.spyOn(hub.client, 'uploadKeyPackages')
     const pool = createKeyPackagePool({
+      sourceID: 'ordinary',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -177,6 +184,7 @@ describe('ensureStocked', () => {
   test('abandons an un-uploaded record instead of re-uploading it', async () => {
     const store = createMemoryKeyPackagePoolStore()
     const pool = createKeyPackagePool({
+      sourceID: 'ordinary',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -206,6 +214,7 @@ describe('ensureStocked', () => {
   test('prunes a record past its expiry plus the grace, including on the no-op path', async () => {
     const store = createMemoryKeyPackagePoolStore()
     const pool = createKeyPackagePool({
+      sourceID: 'ordinary',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -271,6 +280,7 @@ describe('ensureStocked', () => {
 
     try {
       const pool = createKeyPackagePool({
+        sourceID: 'ordinary',
         identity: hub.identity,
         client: hub.client,
         store,
@@ -295,6 +305,7 @@ describe('ensureStocked', () => {
     const store = createMemoryKeyPackagePoolStore()
     const upload = vi.spyOn(hub.client, 'uploadKeyPackages')
     const pool = createKeyPackagePool({
+      sourceID: 'ordinary',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -316,6 +327,7 @@ describe('bundles', () => {
   test('returns every retained bundle, newest first', async () => {
     const store = createMemoryKeyPackagePoolStore()
     const pool = createKeyPackagePool({
+      sourceID: 'ordinary',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -339,6 +351,7 @@ describe('bundles', () => {
   test('throws on a record that does not round-trip, rather than skipping it', async () => {
     const store = createMemoryKeyPackagePoolStore()
     const pool = createKeyPackagePool({
+      sourceID: 'ordinary',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -370,11 +383,13 @@ describe('a store failure minting a record', () => {
     const inner = createMemoryKeyPackagePoolStore()
     const storeError = new Error('disk full')
     const store: KeyPackagePoolStore = {
+      ...inner,
       list: (ownerDID) => inner.list(ownerDID),
       delete: (ownerDID, ref) => inner.delete(ownerDID, ref),
       put: () => Promise.reject(storeError),
     }
     const pool = createKeyPackagePool({
+      sourceID: 'ordinary',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -398,7 +413,12 @@ describe('ensureStocked failure paths', () => {
       notAfter: Math.floor(Date.now() / 1000) - 30 * 86_400,
     })
     vi.spyOn(hub.client, 'keyPackageStatus').mockRejectedValue(new Error('socket closed'))
-    const pool = createKeyPackagePool({ identity: hub.identity, client: hub.client, store })
+    const pool = createKeyPackagePool({
+      sourceID: 'ordinary',
+      identity: hub.identity,
+      client: hub.client,
+      store,
+    })
 
     const result = await pool.ensureStocked()
 
@@ -431,6 +451,7 @@ describe('ensureStocked failure paths', () => {
     })
 
     const pool = createKeyPackagePool({
+      sourceID: 'ordinary',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -459,6 +480,7 @@ describe('ensureStocked failure paths', () => {
     const denying = createTestHub(hub.identity, (req) => req.action !== 'keypackage/status')
     try {
       const pool = createKeyPackagePool({
+        sourceID: 'ordinary',
         identity: denying.identity,
         client: denying.client,
         store: createMemoryKeyPackagePoolStore(),
@@ -485,7 +507,12 @@ describe('ensureStocked failure paths', () => {
     vi.spyOn(hub.client, 'keyPackageStatus').mockRejectedValue(
       Object.assign(new Error('denied'), { code: 'HUB_AUTHORIZATION_DENIED' }),
     )
-    const pool = createKeyPackagePool({ identity: hub.identity, client: hub.client, store })
+    const pool = createKeyPackagePool({
+      sourceID: 'ordinary',
+      identity: hub.identity,
+      client: hub.client,
+      store,
+    })
 
     await expect(pool.ensureStocked()).rejects.toThrow(HubRefusedError)
 
@@ -496,6 +523,7 @@ describe('ensureStocked failure paths', () => {
     const denying = createTestHub(hub.identity, (req) => req.action !== 'keypackage/status')
     try {
       const pool = createKeyPackagePool({
+        sourceID: 'ordinary',
         identity: denying.identity,
         client: denying.client,
         store: createMemoryKeyPackagePoolStore(),
@@ -519,6 +547,7 @@ describe('ensureStocked failure paths', () => {
     // 51 is the smallest deficit that trips the schema's `maxItems: 50`. Keep it at the minimum:
     // every extra package is real key generation.
     const pool = createKeyPackagePool({
+      sourceID: 'ordinary',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -548,6 +577,7 @@ describe('ensureStocked failure paths', () => {
     const store = createMemoryKeyPackagePoolStore()
     // The hub reports 100 live packages, so force a top-up by raising the floor above it.
     const pool = createKeyPackagePool({
+      sourceID: 'ordinary',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -568,6 +598,7 @@ describe('ensureStocked failure paths', () => {
       .spyOn(hub.client, 'uploadKeyPackages')
       .mockRejectedValueOnce(new Error('socket closed'))
     const pool = createKeyPackagePool({
+      sourceID: 'ordinary',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -600,7 +631,12 @@ describe('ensureStocked failure paths', () => {
     const status = vi
       .spyOn(hub.client, 'keyPackageStatus')
       .mockRejectedValue(new Error('socket closed'))
-    const pool = createKeyPackagePool({ identity: hub.identity, client: hub.client, store })
+    const pool = createKeyPackagePool({
+      sourceID: 'ordinary',
+      identity: hub.identity,
+      client: hub.client,
+      store,
+    })
 
     const [first, second] = await Promise.all([pool.ensureStocked(), pool.ensureStocked()])
 

@@ -57,6 +57,10 @@ export type LastResortStore = {
   list(ownerDID: string): Promise<Array<LastResortRecord>>
   put(ownerDID: string, record: LastResortRecord): Promise<void>
   delete(ownerDID: string, ref: string): Promise<void>
+  /** No-op: reusable packages never acquire consumption receipts. */
+  consume(ref: string, groupID: string): Promise<void>
+  /** Always null. Repeated Welcomes must reach epoch admission. */
+  receipt(ref: string): Promise<{ groupID: string } | null>
 }
 
 /**
@@ -66,5 +70,5 @@ export type LastResortStore = {
  * use it is gone, leaving the owner silently unaddable. Tests and throwaway processes only.
  */
 export function createMemoryLastResortStore(): LastResortStore {
-  return createMemoryRecordStore<LastResortRecord>()
+  return createMemoryRecordStore<LastResortRecord>(true)
 }

@@ -47,6 +47,7 @@ describe('bundles', () => {
   test('returns the retained bundles newest first', async () => {
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -83,6 +84,7 @@ describe('bundles', () => {
   test('a notAfter tie breaks on ref, agreeing with which record holds the slot', async () => {
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -129,6 +131,7 @@ describe('bundles', () => {
   test('throws on a record whose private package will not decode', async () => {
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -146,6 +149,7 @@ describe('bundles', () => {
   test('throws on a record whose public package will not decode', async () => {
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -162,6 +166,7 @@ describe('bundles', () => {
 
   test('an owner with no records returns an empty array', async () => {
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store: createMemoryLastResortStore(),
@@ -180,6 +185,7 @@ describe('a provisioned bundle against real MLS', () => {
   test('joins a group using only what the store gave back', async () => {
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -224,6 +230,7 @@ describe('a provisioned bundle against real MLS', () => {
   test('the same provisioned bundle joins two different groups', async () => {
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,

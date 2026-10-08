@@ -12,7 +12,7 @@ import { AsyncResult, Result } from '@sozai/result'
 
 import { attempt, type HubRetryableError } from './errors.js'
 import type { KeyPackagePoolStore, KeyPackageRecord } from './pool-store.js'
-import { assertKind, toBundles } from './records.js'
+import { assertKind, consumeWithReceipt, toBundles } from './records.js'
 
 const DAY_SECONDS = 86_400
 const DEFAULT_TARGET = 20
@@ -20,6 +20,8 @@ const DEFAULT_LOW_WATER = 10
 const DEFAULT_RETAIN_AFTER_EXPIRY_DAYS = 7
 
 export type KeyPackagePoolParams = {
+  /** Stable across restarts. Give each source its own receipt-store namespace. */
+  sourceID: string
   /** The identity packages are minted for; also the store's owner key. */
   identity: OwnIdentity
   client: Pick<HubClient, 'uploadKeyPackages' | 'keyPackageStatus'>
@@ -38,7 +40,7 @@ export type StockResult = Result<{ minted: number; depth: number }, HubRetryable
 
 /**
  * Satisfies `BundleSource` (`./join.js`) structurally, which is how it reaches
- * `processWelcomeFromSources`. Narrowing `bundles` or `release` breaks that at every call site
+ * `openWelcome`. Narrowing `bundles`, `consume` or `receipt` breaks that at every call site
  * passing a pool as a source, so the relationship needs no separate declaration to be enforced.
  */
 export type KeyPackagePool = {
@@ -60,14 +62,18 @@ export type KeyPackagePool = {
    * @throws {Error} a stored record belongs to the other port, or does not round-trip.
    */
   ensureStocked(): AsyncResult<{ minted: number; depth: number }, HubRetryableError>
-  /** Every retained bundle, `notAfter` descending, for `processWelcome`. */
+  sourceID: string
+  /** Every retained bundle, `notAfter` descending, for `openWelcome`. */
   bundles(): Promise<Array<KeyPackageBundle>>
-  /** Drop a record once its Welcome has been processed. An ordinary package is single-use. */
+  consume(ref: string, groupID: string): Promise<void>
+  receipt(ref: string): Promise<{ groupID: string } | null>
+  /** Drop a package without a receipt. Use `consume` after saving a joined group. */
   release(ref: string): Promise<void>
 }
 
 export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePool {
   const {
+    sourceID,
     identity,
     client,
     store,
@@ -98,6 +104,8 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
       `mls-hub: retainAfterExpiryDays must be a finite number of 0 or more, got ${retainAfterExpiryDays}`,
     )
   }
+
+  if (sourceID.length === 0) throw new Error('mls-hub: sourceID must be non-empty')
 
   const ownerDID = identity.id
   let inFlight: Promise<StockResult> | null = null
@@ -186,6 +194,13 @@ export function createKeyPackagePool(params: KeyPackagePoolParams): KeyPackagePo
   }
 
   return {
+    sourceID,
+    async consume(ref: string, groupID: string): Promise<void> {
+      await consumeWithReceipt(store, ref, groupID, () => store.consume(ref, groupID))
+    },
+    receipt(ref: string): Promise<{ groupID: string } | null> {
+      return store.receipt(ref)
+    },
     ensureStocked(): AsyncResult<{ minted: number; depth: number }, HubRetryableError> {
       // Single-flight: a second caller joins the first rather than minting a competing batch against
       // the same reported depth. Cross-process overlap is undefended by design — it overshoots the
