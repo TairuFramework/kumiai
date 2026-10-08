@@ -1,7 +1,7 @@
 # Client host, messaging protocol and multi-device e2e — design
 
 Date: 2026-10-08
-Status: draft r3 (two Codex reviews folded in), awaiting review
+Status: draft r4 (three Codex reviews folded in), awaiting review
 
 This is the umbrella design. Three sub-specs must be written and approved before the phases that
 depend on them:
@@ -66,8 +66,14 @@ Checked against source on 2026-10-08 by two Codex reviews (file:line evidence in
   echo. The sender learns neither its log position nor publication success today.
 - Handlers see the MLS-authenticated sender at `ctx.message.payload.iss`. The opened epoch is not
   exposed to handlers consistently.
-- Ephemeral (mailbox) publications queue for existing subscribers whether or not they are online;
-  they are dropped only when no subscriber exists.
+- Ephemeral (mailbox) publications queue for existing subscribers other than the publisher, whether
+  or not they are online, and expire after the hub's mailbox TTL.
+- App-lane epoch retries and external-rejoin resends republish the same plaintext; publication
+  evidence is in memory and app publishes carry no `publishID`, so the hub does not deduplicate
+  them.
+- Pending decrypted records (`frame`, plaintext, sender) carry no opened epoch.
+- Hozon combines stores in one transaction only when they come from the same transaction provider.
+- Welcome and key-package traffic uses the public, secretless `discoveryTopic(memberDID)`.
 - `hub-server` `createHub` `authorize` defaults to allow-any-authenticated. The hook sees the
   authenticated DID and topic, never bodies; coarse `receive` gets only the DID, `receive/deliver`
   gets DID and topic. Receive authorization is cached 5 s by default. `hubPlugin`/`createHubServer`
@@ -182,7 +188,8 @@ await device.dispose()
 Identity details are settled in Spec I; this section fixes the shape.
 
 - **Invite.** A group admin fetches the invitee's key packages from the hub (`mls-hub` pool),
-  commits, and sends welcomes through the hub directed inbox. Each invitee device joins via
+  commits, and publishes each welcome to the invitee device's public discovery topic
+  (`discoveryTopic(deviceDID)`, the existing pre-group path). Each invitee device joins via
   `processWelcomeFromSources`, idempotently. Inviting a controller adds every device it currently
   grants.
 - **Device link.** The controller issues the new device a leaf-binding capability and, if it may
@@ -193,6 +200,14 @@ Identity details are settled in Spec I; this section fixes the shape.
   messages (see [Deferred](#deferred)).
 - **Device revoke.** The controller publishes the revocation. In each group, a device of the same
   controller holding `manage` commits `revokeDevice`. The hub refuses the revoked device (Spec H).
+- **Revocation guarantees.** Management grants authenticate against embedded proofs, and unanchored
+  groups skip lapse checks, so a controller revocation does not by itself stop a revoked manager in
+  MLS. The umbrella guarantees: (1) after the hub adopts the revocation, the revoked device is
+  refused within the cache bound; (2) members validating an `addDevice`/`revokeDevice` commit also
+  check the issuer's grant against `store-delegation` revocations they hold, and reject a revoked
+  manager's commit; (3) the revoked device is excluded from MLS at the next commit by a remaining
+  manager. Spec I specifies (2) and owns grant expiry/renewal, controller key rotation/reset and
+  loss of the last manager device.
 - **Two resolution paths, kept separate.** External controller resolution: fetch, guard against
   truncation, and store controller logs (`store-controller`) and grants/revocations
   (`store-delegation`). Embedded leaf proofs: built at link time, carried in the leaf, verified by
@@ -212,8 +227,16 @@ Coded errors: `NOT_GROUP_ADMIN`, `LAST_GROUP_ADMIN`, `NOT_DEVICE_MANAGER`, `DEVI
 The hub's allow-any default is not acceptable for this stack. Spec H designs a membership
 `authorize` policy and must answer:
 
-- **Gates.** Coarse `receive` is a global device gate (revoked devices refused). Publish, subscribe,
-  fetch and `receive/deliver` require current membership of the topic's group.
+- **Action/topic matrix.** One row per action (publish, subscribe, fetch, `receive`,
+  `receive/deliver`, key packages, wake) and topic kind (public discovery, commit, rendezvous, app
+  topics across rotation, inbox topics). Discovery topics carry pre-group traffic (key packages,
+  Welcome) and are gated by device validity only, not membership. Group-derived topics require
+  current membership.
+- **Device validity on every delivery.** `receive` is checked only at channel open, so
+  `receive/deliver` checks device validity as well as membership; an open channel of a revoked
+  device stops within the stated bound.
+- **Ingestion-to-delivery ordering.** A newly admitted member's first frames must not be refused
+  because the hub has not adopted the new roster yet: define the order, or a bounded retry.
 - **Genesis trust and topic binding.** How the hub learns that a topic belongs to a group and who
   its founding authority is.
 - **Membership evidence.** What a member presents so the hub can adopt a new roster: accepted-commit
@@ -242,7 +265,12 @@ Two protocols attach per group via `device.peer(groupID)`, so they derive two to
   scope.
 - **Message identity** is `(groupID, author, id)`. Content is fixed at `send()`; re-sealing after an
   epoch change re-encrypts the same plaintext.
-- **Epoch.** The handler records the authenticated epoch the frame opened in (rpc change).
+- **Epoch.** The handler records the authenticated epoch the frame opened in. Pending decrypted
+  records persist that epoch so a durable restore keeps it (Spec P; `frame.segment` is the app
+  anchor epoch, not the opened epoch).
+- **Authorship holds on every delivery path** (Codex r3): live delivery refuses unnamed senders,
+  catch-up uses the opened sender, durable restore uses the atomically persisted sender, and
+  cross-topic replay fails AAD binding.
 
 ### API
 
@@ -257,22 +285,36 @@ messenger.events                                        // message | message:sta
 
 ### Semantics
 
-- **Order.** By hub `(segment, position)` on the messages topic, persisted with each message; topic
-  rotation orders by segment. Pending local messages sort last until their position is known.
+- **Order.** Per device, a message's position is the hub `(segment, position)` of the **first
+  occurrence that device observes**, persisted with the message; topic rotation orders by segment.
+  Epoch retries and rejoin resends can publish the same plaintext more than once; later occurrences
+  are deduplicated by `(groupID, author, id)` and never move the message. Devices may therefore
+  disagree on the relative order of a message that was published twice; accepted (chat apps order
+  per device). Spec P minimizes duplicates with a durable attempt identity. Pending local messages
+  sort last until their own position is known.
 - **Publish status.** `message:status` goes `pending → accepted → published (position known)`.
-  `MessageStore` and the outbox stay consistent across crashes: the message row is written in the
-  same transaction as outbox acceptance, and position/status is persisted durably once the hub
-  acknowledges (Spec P).
+  Acceptance writes the message row and the outbox entry in one transaction; this requires
+  `MessageStore` and `rpc-store` on the same Hozon transaction provider (the memory doubles share
+  one in-memory transaction). Spec P defines the coordinated acceptance adapter, message/outbox
+  correlation, rollback and after-commit visibility. Position/status is persisted durably after the
+  hub acknowledges; an acknowledgement lost to a crash is recovered as Spec P specifies.
 - **Ingestion.** At-least-once handler execution; `MessageStore.put` is idempotent on
   `(groupID, author, id)` and durable before the handler resolves, so rows are never lost or
-  duplicated.
-- **Receipts.** `upTo` names a message; receipts compare by that message's `(segment, position)`.
-  Monotonic per `(member device, group)`: an `upTo` at or before the stored one is ignored. An
-  unknown `upTo` is held until the message arrives, then dropped after a bound. Per-user read state
-  is the maximum over that controller's devices. A member can misreport its own receipts; accepted.
-  Receipts are not in the pullable log; queued mailbox delivery may arrive after reconnect.
-- **Typing.** Expires locally 5 s after `at`. Arrival with `at` older than 5 s, or more than 5 s in
-  the future, is ignored. Senders rate-limit to one per 2 s.
+  duplicated. Content is immutable: a second put with the same key and different content is
+  rejected and logged as a conflict, and the first row stays.
+- **Receipts.** `upTo` names a message; receipts compare by that message's position on the
+  receiving device. Two watermarks per `(member device, group)`, `delivered` and `read`, each
+  monotonic; `read` implies `delivered`. A receipt whose `upTo` is unknown or still pending is held
+  until the message has a position: at most 100 held receipts per group, each dropped after 10
+  minutes. Per-user state is the maximum over that controller's devices. A member can misreport its
+  own receipts; accepted.
+- **Typing.** State per `(member device, group)` keeps the latest `at`; an update with an older
+  `at` is ignored, so a stale `active: false` cannot clear a newer `active: true`. Expires locally
+  5 s after `at`. Arrival with `at` older than 5 s, or more than 5 s in the future, is ignored.
+  Senders rate-limit to one per 2 s.
+- **Retention.** Receipts and typing are not in the pullable log. Mailbox frames queue for
+  subscribers other than the publisher and expire after the hub's mailbox TTL; an offline member
+  may get them after reconnect or not at all. No-loss criteria apply to messages only.
 - **Removed members.** Their past messages stay attributed to them.
 
 ### Wake
@@ -298,8 +340,12 @@ interface DeviceDriver {
 ```
 
 - **In-process**: the agent shares the test process, over `DirectTransports`.
-- **Child-process**: a node child process, over the Enkaku stdio transport. Named crash points are
-  test hooks compiled into the agent only.
+- **Child-process**: a node child process, over the Enkaku stdio transport.
+- **Crash points** follow arm → trigger → boundary reached → SIGKILL. The test arms a named point,
+  triggers the action, the process blocks at the boundary and reports it, and the driver kills it.
+  Boundaries inside `rpc` and `mls-rpc` (pending completion, cursor advance, acknowledgement
+  bookkeeping, journal put) need injectable seams: optional test-only hooks on the ports or a
+  wrapping store that pauses before or after a named write. Spec P lists each seam.
 - **Simulator (future)**: the Expo app in `tests/e2e-expo` embeds the same agent over HTTP. Scenarios
   run unchanged.
 
@@ -330,16 +376,21 @@ existing testcontainers setup), a capturing `WakeSender`, a mock Expo push endpo
    - a replayed frame in the same group: deduplicated;
    - a truncated controller log offered for a known controller: refused;
    - a false controller binding in a leaf: refused;
+   - a revoked manager device attempting `addDevice`: rejected by members;
+   - same author reusing an `id` with different content: first row kept, conflict logged;
    - hub (phase 4): authentic-but-unauthorized membership statement, stale statement, revoked
-     device: all refused.
+     device on an already-open channel: all refused.
 8. Child-process crash points, each followed by restart and a no-loss, no-duplicate assertion:
-   - after decrypt, before message persist;
+   - after decrypt, before the atomic ratchet-plus-pending save;
+   - after that save, before message persist;
    - after message persist, before pending-frame completion;
    - after pending completion, before cursor advance;
    - after outbox accept, before publish;
    - after hub acknowledgement, before status persist and outbox removal;
    - mid-commit, after journal put.
-   Plus hub restart (durable delivery) and device restart (groups restored).
+   Plus hub restart (durable delivery), device restart (groups restored), and a message published
+   twice (epoch retry) observed by two receivers, including across topic rotation: each keeps one
+   row.
 
 ### Rules
 
@@ -358,11 +409,17 @@ Each phase gets its own plan and branch. The e2e suite grows with each phase.
    sender-generation reservation, atomic state plus pending decrypted frame, pending list/complete,
    transaction visibility, recovery from an ambiguous write, inventory and deletion. The persisted
    inventory includes credentials and ordered signed ledger tokens. Idempotent Welcome and commit
-   adoption; journal `lost/reenact` recovery. `MessageStore`↔outbox atomic acceptance and durable
-   publication status. The conformance cases added to `rpc-conformance`.
+   adoption; journal `lost/reenact` recovery. Pending decrypted records persist the authenticated
+   opened epoch. Outgoing side: durable attempt identity for app publishes, recovery of an
+   ambiguous publication (acknowledged by the hub but not recorded), the coordinated
+   `MessageStore`↔outbox acceptance adapter (shared transaction provider, correlation, rollback,
+   after-commit visibility) and durable publication status. The list of crash-point seams. The
+   conformance cases added to `rpc-conformance`.
 1. **Lift audit (probe).** Confirm the classification table file by file and fix port signatures
    against Spec P. BLOCKED is a valid outcome for any candidate.
-2. **`hub-client` and `mls-rpc` additions,** on memory doubles that pass the conformance suites.
+2. **`hub-client` and `mls-rpc` additions,** plus the `rpc` port changes Spec P requires (opened
+   epoch on pending records, attempt identity, crash-point seams), on memory doubles that pass the
+   conformance suites.
    e2e: hub fixture (allow-any), in-process driver, a two-device group-peer smoke test over the real
    HTTP hub.
 3. **`rpc-store`.** Passes `rpc-conformance` on sqlite and postgres, real impls and doubles. e2e:
@@ -370,7 +427,7 @@ Each phase gets its own plan and branch. The e2e suite grows with each phase.
 4. **Spec I and Spec H, then `mls` changes, `client` and the hub policy.** Implementation is gated
    on the kokuin stores being published. e2e: scenarios 2, 3, 4, 6, and the identity and hub cases
    of 7.
-5. **`messaging`,** including the rpc epoch and publish-status plumbing. e2e: scenarios 1, 5, and
+5. **`messaging`,** including handler exposure of the opened epoch and the publish-status events. e2e: scenarios 1, 5, and
    the messaging cases of 7. The Expo bundle check joins CI.
 6. **Child-process driver and scenario 8.**
 
