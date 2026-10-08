@@ -1,7 +1,7 @@
 # Client host, messaging protocol and multi-device e2e — design
 
 Date: 2026-10-08
-Status: draft r4 (three Codex reviews folded in), awaiting review
+Status: draft r5 (four Codex reviews folded in), awaiting review
 
 This is the umbrella design. Three sub-specs must be written and approved before the phases that
 depend on them:
@@ -69,8 +69,12 @@ Checked against source on 2026-10-08 by two Codex reviews (file:line evidence in
 - Ephemeral (mailbox) publications queue for existing subscribers other than the publisher, whether
   or not they are online, and expire after the hub's mailbox TTL.
 - App-lane epoch retries and external-rejoin resends republish the same plaintext; publication
-  evidence is in memory and app publishes carry no `publishID`, so the hub does not deduplicate
-  them.
+  evidence is in memory. The hub deduplicates publications by a supplied `publishID`, but app
+  publishes omit it today.
+- `verifyManagementCapability` takes no deny set and has no revocation hook; `bindingOfDID` reads
+  the tree and returns an externally revoked device while its leaf remains. Survivor checks use
+  only revocations folded from the group ledger. A synchronous `commitPolicy` can veto with
+  preloaded state.
 - Pending decrypted records (`frame`, plaintext, sender) carry no opened epoch.
 - Hozon combines stores in one transaction only when they come from the same transaction provider.
 - Welcome and key-package traffic uses the public, secretless `discoveryTopic(memberDID)`.
@@ -200,14 +204,24 @@ Identity details are settled in Spec I; this section fixes the shape.
   messages (see [Deferred](#deferred)).
 - **Device revoke.** The controller publishes the revocation. In each group, a device of the same
   controller holding `manage` commits `revokeDevice`. The hub refuses the revoked device (Spec H).
-- **Revocation guarantees.** Management grants authenticate against embedded proofs, and unanchored
-  groups skip lapse checks, so a controller revocation does not by itself stop a revoked manager in
-  MLS. The umbrella guarantees: (1) after the hub adopts the revocation, the revoked device is
-  refused within the cache bound; (2) members validating an `addDevice`/`revokeDevice` commit also
-  check the issuer's grant against `store-delegation` revocations they hold, and reject a revoked
-  manager's commit; (3) the revoked device is excluded from MLS at the next commit by a remaining
-  manager. Spec I specifies (2) and owns grant expiry/renewal, controller key rotation/reset and
-  loss of the last manager device.
+- **Revocation guarantees.** Management grants authenticate against embedded proofs at issuance;
+  unanchored groups keep a tree-time expiry check but no wall-clock freshness. A controller
+  revocation therefore does not by itself stop a revoked manager in MLS, and checking each member's
+  local `store-delegation` state at commit validation would be nondeterministic (members hold
+  different revocation sets and could fork). The umbrella guarantees:
+  1. Revocation enters a group only as **evidence in the ordered group ledger** (authenticated
+     controller-log deny events, or equivalent verified revoke entries). Validation of device and
+     management entries rejects denied issuers using the agreed pre-commit state, so every member
+     decides identically. This is an mls change; existing lifecycle proofs are the starting point
+     but require an anchored controller today.
+  2. The revoked device is excluded from MLS **once the explicit revocation/removal commit is
+     adopted**. Before that commit, a revoked manager's commits are still accepted; this window is
+     accepted and bounded by how fast a remaining manager or admin commits.
+  3. External stores (`store-delegation`, `store-controller`) only trigger that commit and feed hub
+     refusal (Spec H); they never gate commit validation directly.
+
+  Spec I specifies the ledger evidence format, the pre-commit validation, grant expiry/renewal,
+  controller key rotation/reset and loss of the last manager device.
 - **Two resolution paths, kept separate.** External controller resolution: fetch, guard against
   truncation, and store controller logs (`store-controller`) and grants/revocations
   (`store-delegation`). Embedded leaf proofs: built at link time, carried in the leaf, verified by
@@ -229,14 +243,24 @@ The hub's allow-any default is not acceptable for this stack. Spec H designs a m
 
 - **Action/topic matrix.** One row per action (publish, subscribe, fetch, `receive`,
   `receive/deliver`, key packages, wake) and topic kind (public discovery, commit, rendezvous, app
-  topics across rotation, inbox topics). Discovery topics carry pre-group traffic (key packages,
-  Welcome) and are gated by device validity only, not membership. Group-derived topics require
-  current membership.
-- **Device validity on every delivery.** `receive` is checked only at channel open, so
-  `receive/deliver` checks device validity as well as membership; an open channel of a revoked
-  device stops within the stated bound.
-- **Ingestion-to-delivery ordering.** A newly admitted member's first frames must not be refused
-  because the hub has not adopted the new roster yet: define the order, or a bounded retry.
+  topics across rotation, inbox topics). Group-derived topics require current membership.
+- **Discovery topics.** They carry pre-group Welcome rendezvous and are enumerable by design.
+  Subscribe, fetch and delivery on `discoveryTopic(did)` are restricted to the device owning `did`.
+  Publishing needs sender and target quotas or invitation authorization (Welcome spam). The hub's
+  key-package RPCs are a separate path with their own target-aware authorization and destructive
+  consumption; Spec H states their quotas, relying on the existing requester/target limits and the
+  last-resort fallback against exhaustion.
+- **Unseen devices.** Authentication proves only control of a DID; the authorize request carries no
+  controller binding or grant. Spec H defines how a new device registers its controller evidence
+  with the hub, and how that evidence stays fresh.
+- **Device validity on every delivery.** `receive` is checked only at channel open, so validity is
+  checked again immediately before each frame is transmitted, after any backpressure wait
+  (`writer.ready`), not only when the frame is queued. Spec H states what happens to queued and
+  in-flight frames, and the exact bound from policy update to the last frame sent.
+- **Admission ordering.** Denied frames are not retried when policy changes; the hub requires a
+  reconnect. A newly admitted member therefore waits for the hub to acknowledge roster adoption
+  before subscribing and publishing, or reconnects and refetches after adoption and after the
+  deny-cache expiry. Spec H picks one.
 - **Genesis trust and topic binding.** How the hub learns that a topic belongs to a group and who
   its founding authority is.
 - **Membership evidence.** What a member presents so the hub can adopt a new roster: accepted-commit
@@ -285,31 +309,40 @@ messenger.events                                        // message | message:sta
 
 ### Semantics
 
-- **Order.** Per device, a message's position is the hub `(segment, position)` of the **first
-  occurrence that device observes**, persisted with the message; topic rotation orders by segment.
-  Epoch retries and rejoin resends can publish the same plaintext more than once; later occurrences
-  are deduplicated by `(groupID, author, id)` and never move the message. Devices may therefore
-  disagree on the relative order of a message that was published twice; accepted (chat apps order
-  per device). Spec P minimizes duplicates with a durable attempt identity. Pending local messages
-  sort last until their own position is known.
+- **Order.** Per device, a message's position is the hub `(segment, position)` of the occurrence
+  whose **durable acceptance into `MessageStore` came first** on that device; topic rotation orders
+  by segment. Later occurrences are deduplicated by `(groupID, author, id)` and never move it. Live
+  delivery can precede an older retained pull, and epoch retries or rejoin resends can publish the
+  same plaintext twice, so devices may disagree on the relative order of such a message; accepted
+  (chat apps order per device). Pending local messages sort last until their own position is known.
+- **Attempt identity.** Each publication attempt carries a durable `publishID`; the hub already
+  deduplicates by it, so no hub change is needed. Spec P persists each attempt's ID, topic,
+  ciphertext and acknowledgement, and replays the **same** attempt after an ambiguous crash.
+  Re-sealing after an epoch change or a deliberate rejoin resend creates a **new** attempt ID under
+  the same message identity.
 - **Publish status.** `message:status` goes `pending → accepted → published (position known)`.
-  Acceptance writes the message row and the outbox entry in one transaction; this requires
-  `MessageStore` and `rpc-store` on the same Hozon transaction provider (the memory doubles share
-  one in-memory transaction). Spec P defines the coordinated acceptance adapter, message/outbox
-  correlation, rollback and after-commit visibility. Position/status is persisted durably after the
-  hub acknowledges; an acknowledgement lost to a crash is recovered as Spec P specifies.
+  rpc reserves the outbox sequence inside acceptance, then calls `AppOutbox.put`. A coordinated
+  `put(entry)` adapter writes the outbox entry, the message row and their correlation using stores
+  obtained from the **same transaction**, and resolves only after the outer transaction commits;
+  sharing a database with ordinary store instances is not enough, and a nested transactional
+  callback resolves before the outer commit. The reservation is held until then. No `AppOutbox`
+  signature change is needed. The memory doubles share one in-memory transaction. Position/status
+  is persisted after the hub acknowledges; an acknowledgement lost to a crash is recovered by
+  replaying the same attempt.
 - **Ingestion.** At-least-once handler execution; `MessageStore.put` is idempotent on
   `(groupID, author, id)` and durable before the handler resolves, so rows are never lost or
-  duplicated. Content is immutable: a second put with the same key and different content is
-  rejected and logged as a conflict, and the first row stays.
+  duplicated. A duplicate resolves successfully so pending completion and the cursor advance.
+  Content is immutable: a second put with the same key and different content keeps the first row,
+  logs the conflict and **consumes the frame successfully**. Throwing would block the durable
+  worker, which retries its first failed record.
 - **Receipts.** `upTo` names a message; receipts compare by that message's position on the
   receiving device. Two watermarks per `(member device, group)`, `delivered` and `read`, each
   monotonic; `read` implies `delivered`. A receipt whose `upTo` is unknown or still pending is held
-  until the message has a position: at most 100 held receipts per group, each dropped after 10
-  minutes. Per-user state is the maximum over that controller's devices. A member can misreport its
+  until the message has a position: at most 100 held receipts per group (on overflow the oldest
+  held receipt is evicted), each dropped after 10 minutes. Per-user state is the maximum over that controller's devices. A member can misreport its
   own receipts; accepted.
 - **Typing.** State per `(member device, group)` keeps the latest `at`; an update with an older
-  `at` is ignored, so a stale `active: false` cannot clear a newer `active: true`. Expires locally
+  `at` is ignored and an equal `at` replaces (last arrival wins), so a stale `active: false` cannot clear a newer `active: true`. Expires locally
   5 s after `at`. Arrival with `at` older than 5 s, or more than 5 s in the future, is ignored.
   Senders rate-limit to one per 2 s.
 - **Retention.** Receipts and typing are not in the pullable log. Mailbox frames queue for
@@ -376,13 +409,16 @@ existing testcontainers setup), a capturing `WakeSender`, a mock Expo push endpo
    - a replayed frame in the same group: deduplicated;
    - a truncated controller log offered for a known controller: refused;
    - a false controller binding in a leaf: refused;
-   - a revoked manager device attempting `addDevice`: rejected by members;
+   - a revoked manager device attempting `addDevice` after the revocation evidence is enacted in the
+     group ledger: rejected identically by every member;
+   - Welcome spam to another device's discovery topic and subscribing to it (phase 4): refused;
    - same author reusing an `id` with different content: first row kept, conflict logged;
    - hub (phase 4): authentic-but-unauthorized membership statement, stale statement, revoked
      device on an already-open channel: all refused.
 8. Child-process crash points, each followed by restart and a no-loss, no-duplicate assertion:
    - after decrypt, before the atomic ratchet-plus-pending save;
-   - after that save, before message persist;
+   - after that save has committed, before message persist ("after" a save always means after its
+     transaction commits, not after the write call returns);
    - after message persist, before pending-frame completion;
    - after pending completion, before cursor advance;
    - after outbox accept, before publish;
