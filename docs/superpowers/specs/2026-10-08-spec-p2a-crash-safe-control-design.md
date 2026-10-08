@@ -709,14 +709,15 @@ integration suites green, and repo-wide `turbo run test:types`.
    8. rejoin records.
 
    Each module lands with its crash rows green.
-3. **Band move and Kubun.** The band moves from 0.10 to 0.11. Kubun's `store-p2p` implements
-   `ControlStore` and `deliverWelcome`, commits an `AdoptionWrite` in its state-save transaction, and drops the commit cursor from `AppOutbox`. `plugin-p2p`
-   moves to `enqueue` and `outcomes`, and its registry merge extends to every retained epoch
-   (`kubun/packages/plugin-p2p/src/groups/group-handle-registry.ts:570`).
+3. **Band move.** The band moves from 0.10 to 0.11. Kubun adoption is out of scope here, as in the
+   parent: when it happens, `store-p2p` implements `ControlStore` and `deliverWelcome`, commits an
+   `AdoptionWrite` in its state-save transaction and drops the commit cursor from `AppOutbox`;
+   `plugin-p2p` moves to `enqueue` and `outcomes`, and its registry merge extends to every retained
+   epoch (`kubun/packages/plugin-p2p/src/groups/group-handle-registry.ts:570`).
 
 ## Spec P amendments
 
-Reconciled API by API:
+Applied in Spec P r5. Reconciled API by API:
 
 - D5 (commits, intents, adoption, Welcome) is removed. P2a's D3, D4 and D6 replace it. Its Welcome
   admission rules, tombstone floor included, move to P2a D4.
@@ -748,7 +749,8 @@ Reconciled API by API:
 
 - **Work inside `peer.ts`.** It is about 2,900 lines with crossing concerns. D1's module rule keeps
   the new code out of the closure. The phase 1 probe maps every touched site first.
-- **Kubun breakage.** Phase 3 is one coordinated change.
+- **Kubun breakage.** The band move breaks Kubun's `CommitJournal`, `takeLost` and cursor use; its
+  adoption is a separate change.
 - **Hosts must share one database** for state, anchor and control. A host that cannot loses the
   crash guarantees; the conformance suite's co-commit case is the gate.
 - **Responder confirmation window.** Resumed confirmation works only while some member is still at
