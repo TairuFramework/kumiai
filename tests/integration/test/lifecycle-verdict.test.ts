@@ -133,8 +133,12 @@ test('known revocations, floors, lapse and absent pending leaves cannot authoris
 test('pending verdicts bind the epoch, position, digest and tag, and adoption is idempotent', async () => {
   const s = await setup()
   const requestID = 'verdict-request'
-  const request = await s.mls.createRecoveryRequest(requestID)
-  const pending = await s.mls.applyRecovery(await s.responder.sealGroupInfo(request), requestID)
+  const { request, requestKey } = await s.mls.createRecoveryRequest(requestID)
+  const pending = await s.mls.applyRecovery(
+    await s.responder.sealGroupInfo(request),
+    requestID,
+    requestKey,
+  )
   if (pending == null || 'renewalRequired' in pending) throw new Error('No pending recovery')
   const before = await s.mls.readEpoch()
   const key = await pending.confirmationKey('position', 'digest')
@@ -151,7 +155,7 @@ test('pending verdicts bind the epoch, position, digest and tag, and adoption is
     tag: confirmationTag(key, requestID),
   }
   const sealed = await s.responder.sealRecoveryVerdict(request, verdict)
-  const opened = await s.mls.openRecoveryVerdict(sealed, requestID)
+  const opened = await s.mls.openRecoveryVerdict(sealed, requestID, requestKey)
   if (opened == null) throw new Error('No opened verdict')
   expect(pending.judgeVerdict(opened)).toBe('authoritative')
   for (const change of [
@@ -172,8 +176,12 @@ test('pending verdicts bind the epoch, position, digest and tag, and adoption is
 
 test('revocation in either registry is permanent in the union and stale refusals are advisory', async () => {
   const s = await setup()
-  const request = await s.mls.createRecoveryRequest('stale')
-  const candidate = await s.mls.applyRecovery(await s.responder.sealGroupInfo(request), 'stale')
+  const { request, requestKey } = await s.mls.createRecoveryRequest('stale')
+  const candidate = await s.mls.applyRecovery(
+    await s.responder.sealGroupInfo(request),
+    'stale',
+    requestKey,
+  )
   if (candidate == null || 'renewalRequired' in candidate) throw new Error('No pending recovery')
   await candidate.confirmationKey('position', 'digest')
   const { knownRecoveryRegistry, createVerdictJudge } = await import(
@@ -289,9 +297,13 @@ test('a lifecycle GroupInfo signer revoked in the known ledger is refused', asyn
     },
   })
   const mls = createGroupMLS({ identity: s.identity, access, entrySlot: createLedgerEntrySlot() })
-  const request = await mls.createRecoveryRequest('revoked-attestation')
+  const { request, requestKey } = await mls.createRecoveryRequest('revoked-attestation')
   expect(
-    await mls.applyRecovery(await s.responder.sealGroupInfo(request), 'revoked-attestation'),
+    await mls.applyRecovery(
+      await s.responder.sealGroupInfo(request),
+      'revoked-attestation',
+      requestKey,
+    ),
   ).toBeNull()
 })
 
@@ -299,12 +311,12 @@ test('a chained GroupInfo signer with a denied issuer is refused', async () => {
   const issuer = fixture.agent(81)
   const parent = (await fixture.timedBinding({ identity: issuer, iat: 100, exp: 200 })).capability
   const s = await setup({ issuer, parent })
-  const request = await s.mls.createRecoveryRequest('issuer-attestation')
+  const { request, requestKey } = await s.mls.createRecoveryRequest('issuer-attestation')
   const reply = await s.responder.sealGroupInfo(request)
   // A folded registry is the sole input to signer trust.
   const known = s.group().registry.devices as Map<string, { controller: string; status: 'revoked' }>
   known.set(issuer.id, { controller: fixture.controllerID, status: 'revoked' })
-  expect(await s.mls.applyRecovery(reply, 'issuer-attestation')).toBeNull()
+  expect(await s.mls.applyRecovery(reply, 'issuer-attestation', requestKey)).toBeNull()
 })
 
 test('a GroupInfo attestation re-signed by a DID absent from the pending tree is refused', async () => {
@@ -317,20 +329,24 @@ test('a GroupInfo attestation re-signed by a DID absent from the pending tree is
   })
   await impostor.bootstrapLedger(s.responderGroup.ledgerTokens)
   const { sealGroupInfo } = await import('@kumiai/mls')
-  const request = await s.mls.createRecoveryRequest('leafless-attestation')
+  const { request, requestKey } = await s.mls.createRecoveryRequest('leafless-attestation')
   const sealed = await sealGroupInfo({
     group: impostor,
     identity: outsider,
     request: new TextDecoder().decode(request),
   })
-  expect(await s.mls.applyRecovery(sealed, 'leafless-attestation')).toBeNull()
+  expect(await s.mls.applyRecovery(sealed, 'leafless-attestation', requestKey)).toBeNull()
 })
 
 test('outside lifecycle groups a valid confirmed tag needs no known leaf, while refusals require the source tree', async () => {
   const s = await setup({ standard: true })
   const requestID = 'standard-verdict'
-  const request = await s.mls.createRecoveryRequest(requestID)
-  const candidate = await s.mls.applyRecovery(await s.responder.sealGroupInfo(request), requestID)
+  const { request, requestKey } = await s.mls.createRecoveryRequest(requestID)
+  const candidate = await s.mls.applyRecovery(
+    await s.responder.sealGroupInfo(request),
+    requestID,
+    requestKey,
+  )
   if (candidate == null || 'renewalRequired' in candidate) throw new Error('No pending recovery')
   const key = await candidate.confirmationKey('position', 'digest')
   const { confirmationTag } = await import('@kumiai/mls')
@@ -427,8 +443,12 @@ test('caller rejection and a replacement without a prior leaf propagate policy a
 test('the rejoiner cannot count its own signed confirmation', async () => {
   const s = await setup()
   const requestID = 'self-verdict'
-  const request = await s.mls.createRecoveryRequest(requestID)
-  const pending = await s.mls.applyRecovery(await s.responder.sealGroupInfo(request), requestID)
+  const { request, requestKey } = await s.mls.createRecoveryRequest(requestID)
+  const pending = await s.mls.applyRecovery(
+    await s.responder.sealGroupInfo(request),
+    requestID,
+    requestKey,
+  )
   if (pending == null || 'renewalRequired' in pending) throw new Error('Expected candidate')
   const key = await pending.confirmationKey('position', 'digest')
   const { confirmationTag } = await import('@kumiai/mls')

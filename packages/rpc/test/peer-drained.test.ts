@@ -476,7 +476,7 @@ describe('peer host drain', { concurrent: false }, () => {
       })
       for (const kind of [HANDSHAKE_KIND.recoveryRequest, HANDSHAKE_KIND.ledgerRequest]) {
         const id = crypto.randomUUID()
-        const request = await sender.createRecoveryRequest(id)
+        const { request } = await sender.createRecoveryRequest(id)
         const payload =
           kind === HANDSHAKE_KIND.recoveryRequest
             ? encodeRecoveryRequest(id, request)

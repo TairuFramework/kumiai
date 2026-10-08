@@ -372,7 +372,7 @@ describe('the ledger gather does not hand the group to the relay', { concurrent:
       rs,
       'mallory',
       'anon-2',
-      await mallory.createRecoveryRequest('anon-2'),
+      (await mallory.createRecoveryRequest('anon-2')).request,
     )
     await flush(120)
     expect(ledgerReplies(hub, rs, 'anon-2')).toHaveLength(0)
@@ -385,7 +385,7 @@ describe('the ledger gather does not hand the group to the relay', { concurrent:
       rs,
       'alice',
       'member-1',
-      await aliceMLS.createRecoveryRequest('member-1'),
+      (await aliceMLS.createRecoveryRequest('member-1')).request,
     )
     await vi.waitFor(() => expect(ledgerReplies(hub, rs, 'member-1')).toHaveLength(2), {
       timeout: 10_000,
@@ -405,7 +405,13 @@ describe('the ledger gather does not hand the group to the relay', { concurrent:
 
     // Carol is still in bob's tree, so bob answers her.
     const carol = createMemoryGroupMLS({ recoverySecret: rs, localDID: 'carol' })
-    await askForTheLedger(hub, rs, 'carol', 'carol-1', await carol.createRecoveryRequest('carol-1'))
+    await askForTheLedger(
+      hub,
+      rs,
+      'carol',
+      'carol-1',
+      (await carol.createRecoveryRequest('carol-1')).request,
+    )
     await vi.waitFor(() => expect(ledgerReplies(hub, rs, 'carol-1')).toHaveLength(1), {
       timeout: 10_000,
       interval: 10,
@@ -417,7 +423,13 @@ describe('the ledger gather does not hand the group to the relay', { concurrent:
     await bob.peer.commit(buildRemoveCommit(bob, 'carol'))
     expect(bob.mls.leaves()).not.toContain('carol')
 
-    await askForTheLedger(hub, rs, 'carol', 'carol-2', await carol.createRecoveryRequest('carol-2'))
+    await askForTheLedger(
+      hub,
+      rs,
+      'carol',
+      'carol-2',
+      (await carol.createRecoveryRequest('carol-2')).request,
+    )
     await flush(120)
     expect(ledgerReplies(hub, rs, 'carol-2')).toHaveLength(0)
 

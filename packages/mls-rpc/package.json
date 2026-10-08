@@ -39,11 +39,11 @@
     "@kumiai/mls": "workspace:^",
     "@kumiai/rpc": "workspace:^",
     "@noble/ciphers": "catalog:",
-    "@sozai/runtime": "catalog:"
+    "@sozai/runtime": "catalog:",
+    "ts-mls": "catalog:"
   },
   "devDependencies": {
     "@kumiai/rpc-conformance": "workspace:^",
-    "ts-mls": "catalog:",
     "vitest": "catalog:"
   },
   "publishConfig": {

@@ -2012,7 +2012,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     // responder seals to) — without the first any stranger gets the group's whole authority state
     // for one publish; without the second, so does the hub.
     const requestID = newPublishID()
-    const request = await port.createRecoveryRequest(
+    const { request, requestKey } = await port.createRecoveryRequest(
       requestID,
       Math.max(recoveryTimeoutMs, recoveryDeadlineMs),
     )
@@ -2045,7 +2045,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             // Bytes this peer cannot open: another member's reply to another request, or a
             // hub-injected forgery. Dropped, gather waits — the per-request key is NOT consumed
             // here, since the next responder's reply is sealed to the same key.
-            const tokens = await port.openSealedLedger(sealed, requestID)
+            const tokens = await port.openSealedLedger(sealed, requestID, requestKey)
             if (tokens == null) return
             // Timeout or disposal can settle the gather while opening the reply.
             if (settled || disposed) return
@@ -2412,7 +2412,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             assertLive()
           }
           const requestID = newPublishID()
-          const request = await port.createRecoveryRequest(
+          const { request, requestKey } = await port.createRecoveryRequest(
             requestID,
             Math.max(0, deadline - Date.now()),
           )
@@ -2434,7 +2434,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           assertLive()
           let pending: AppliedRecovery
           try {
-            pending = await port.applyRecovery(outcome.sealed, requestID)
+            pending = await port.applyRecovery(outcome.sealed, requestID, requestKey)
             if (pending != null && !('renewalRequired' in pending)) {
               pending = wrapPendingRecovery(boundary, pending)
             }
@@ -2497,6 +2497,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             key,
             requestID,
             request,
+            requestKey,
             groupID: verified.groupID,
             epochBeforeRejoin,
             headBeforeRejoin,
@@ -2512,6 +2513,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           key,
           requestID,
           request,
+          requestKey,
           groupID,
           epochBeforeRejoin,
           headBeforeRejoin,
@@ -2522,6 +2524,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           pending,
           groupID,
           requestID,
+          requestKey,
           position: sequenceID,
           commitDigest,
           key,

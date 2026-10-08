@@ -69,7 +69,12 @@ export type MemoryGroupMLS = GroupMLS & {
   failNextRecoveryAdopt: () => void
 }
 
-export type MemoryRecoveryBinding = { id: string; prefix: Array<unknown>; capability: string }
+export type MemoryRecoveryBinding = {
+  id: string
+  prefix: Array<unknown>
+  capability: string
+  holderGrant?: string
+}
 export type MemoryGroupMLSOptions = {
   hostDB?: MemoryHostDatabase
   binding?: MemoryRecoveryBinding
@@ -469,15 +474,6 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     sha256(concatBytes(recoverySecret, fromUTF(JSON.stringify([groupID, at, position, digest]))))
   const tagFor = (key: Uint8Array, requestID: string): string =>
     encodeMultibase(hmac(sha256, key, fromUTF(requestID)))
-  const ephemeralKeys = new Map<string, { key: Uint8Array; expiresAt: number }>()
-  const sweepRecoveryKeys = (): void => {
-    for (const [requestID, held] of ephemeralKeys) {
-      if (held.expiresAt <= Date.now()) {
-        held.key.fill(0)
-        ephemeralKeys.delete(requestID)
-      }
-    }
-  }
   let failRecoveryAdopt = false
   let binding = options.binding
   let preparedBinding = binding
@@ -485,7 +481,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   let asked = false
   const unusable = new Set<string>()
   const bindingID = (value: MemoryRecoveryBinding): string =>
-    JSON.stringify([value.id, value.prefix, value.capability])
+    JSON.stringify([value.id, value.prefix, value.capability, value.holderGrant])
   const usable = (value?: MemoryRecoveryBinding): boolean =>
     value != null && !unusable.has(bindingID(value))
   const askBinding = async (): Promise<MemoryRecoveryBinding | undefined> => {
@@ -549,15 +545,21 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       payload,
     )
 
-  const openReply = (domain: string, sealed: Uint8Array, requestID: string): Uint8Array | null => {
-    sweepRecoveryKeys()
-    const privateKey = ephemeralKeys.get(requestID)?.key
-    if (privateKey == null) return null
-    return openWithKey(privateKey, sealContext(domain, localDID ?? '', requestID), sealed)
+  const openReply = (
+    domain: string,
+    sealed: Uint8Array,
+    requestID: string,
+    requestKey: Uint8Array,
+  ): Uint8Array | null => {
+    return openWithKey(requestKey, sealContext(domain, localDID ?? '', requestID), sealed)
   }
 
-  const open = (sealed: Uint8Array, requestID: string): MemoryGroupInfo | null => {
-    const opened = openReply(SEAL_DOMAIN.groupInfo, sealed, requestID)
+  const open = (
+    sealed: Uint8Array,
+    requestID: string,
+    requestKey: Uint8Array,
+  ): MemoryGroupInfo | null => {
+    const opened = openReply(SEAL_DOMAIN.groupInfo, sealed, requestID, requestKey)
     if (opened == null) return null
     let info: MemoryGroupInfo
     try {
@@ -601,6 +603,114 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       const token = bodies.get(id)
       return token == null ? [] : [token]
     })
+
+  function makePending(
+    info: MemoryGroupInfo,
+    requestID: string,
+    requestKey: Uint8Array,
+    candidateBinding?: MemoryRecoveryBinding,
+    boundCommit?: { position: string; commitDigest: string; tag: string },
+  ): PendingRecovery {
+    const candidateBindingID = candidateBinding == null ? undefined : bindingID(candidateBinding)
+    let accepted: Promise<void> | undefined
+    let tuple = boundCommit == null ? undefined : { ...boundCommit }
+    // The external commit is framed at the epoch the GroupInfo described — the epoch the
+    // group is at, which is NOT the epoch this peer is at. Every member that can apply it
+    // is at that epoch, so a GroupInfo the group has already moved past builds a commit
+    // nobody will apply, which is why losing the compare-and-set discards the GroupInfo
+    // and not merely the commit.
+    const commit = encodeMemoryCommit(info.epoch, localDID ?? '', [], {
+      head: info.head,
+      external: true,
+    })
+    return {
+      serialize: () =>
+        sealToKey(
+          x25519.getPublicKey(requestKey),
+          sealContext('candidate', localDID ?? '', groupID),
+          fromUTF(JSON.stringify({ info, requestID, candidateBinding, tuple })),
+        ),
+      commit,
+      epoch: info.epoch + 1,
+      markBindingUnusable: () => {
+        if (candidateBindingID == null) return
+        const id = candidateBindingID
+        unusable.delete(id)
+        unusable.add(id)
+        while (unusable.size > 16) {
+          const oldest = unusable.values().next().value
+          if (oldest != null) unusable.delete(oldest)
+        }
+      },
+      confirmationKey: async (position, commitDigest) => {
+        if (tuple != null && (tuple.position !== position || tuple.commitDigest !== commitDigest))
+          throw new Error('Pending recovery already bound to another commit')
+        const key = confirmationKeyAt(info.epoch + 1, position, commitDigest)
+        tuple = { position, commitDigest, tag: tagFor(key, requestID) }
+        return key
+      },
+      judgeVerdict: ({ signer, verdict }) => {
+        if (
+          tuple == null ||
+          !isRecoveryVerdict(verdict) ||
+          verdict.groupID !== groupID ||
+          verdict.requestID !== requestID ||
+          verdict.position !== tuple.position ||
+          verdict.commitDigest !== tuple.commitDigest
+        )
+          return 'advisory'
+        if (verdict.verdict === 'confirmed')
+          return verdict.epoch === info.epoch + 1 && verdict.tag === tuple.tag
+            ? 'authoritative'
+            : 'advisory'
+        return info.members.includes(signer) ? 'authoritative' : 'advisory'
+      },
+      onAccepted: (factory) => {
+        accepted ??= (async () => {
+          const authenticator = sha256(concatBytes(requestKey, commit))
+          const stored = await hostDB.loadState(groupID)
+          if (stored != null) {
+            const value = JSON.parse(toUTF(stored)) as { recoveryAuthenticator?: string }
+            if (value.recoveryAuthenticator === toB64U(authenticator)) return
+          }
+          if (failRecoveryAdopt) {
+            failRecoveryAdopt = false
+            throw new Error('the process died in the acceptance window')
+          }
+          const nextSlots = new Map(slots)
+          if (localDID != null) {
+            slotRemoveDID(localDID, nextSlots)
+            slotAdd(localDID, nextSlots)
+          }
+          const state = fromUTF(
+            JSON.stringify({
+              epoch: info.epoch + 1,
+              slots: [...nextSlots],
+              ledger: [],
+              ledgerHead: info.head,
+              bodies: [...bodies],
+              recoveryAuthenticator: toB64U(authenticator),
+            }),
+          )
+          const write = factory?.({
+            epochAfter: info.epoch + 1,
+            removed: false,
+            epochAuthenticator: authenticator,
+          })
+          await hostDB.saveState(groupID, state, write)
+          ledger = []
+          ledgerHead = info.head
+          slots = nextSlots
+          advance(info.epoch + 1)
+          binding = candidateBinding
+        })().catch((error: unknown) => {
+          accepted = undefined
+          throw error
+        })
+        return accepted
+      },
+    }
+  }
 
   return {
     epoch: () => epoch,
@@ -819,26 +929,19 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       ledger = entryIDs
     },
     async createRecoveryRequest(requestID: string) {
-      // The ephemeral keypair, minted per request: the private half is retained here and the
-      // public half goes on the wire. It is the only key a reply is ever sealed to, and it is
-      // nothing this peer's leaf can be read out of — the peers that most need a heal no
-      // longer hold the leaf key the group can see.
-      //
-      // ONE mint serves both gathers. A rejoin and a bootstrap are the same rendezvous asking
-      // two questions, and a second request format would be a second thing to get wrong.
       const requesterDID = localDID ?? ''
       const privateKey = x25519.utils.randomSecretKey()
-      sweepRecoveryKeys()
-      ephemeralKeys.get(requestID)?.key.fill(0)
-      ephemeralKeys.set(requestID, { key: privateKey, expiresAt: Date.now() + 120_000 })
-      return fromUTF(
-        JSON.stringify({
-          groupID,
-          requestID,
-          requesterDID,
-          ephemeralKey: toB64U(x25519.getPublicKey(privateKey)),
-        } satisfies MemoryRecoveryRequest),
-      )
+      return {
+        requestKey: privateKey,
+        request: fromUTF(
+          JSON.stringify({
+            groupID,
+            requestID,
+            requesterDID,
+            ephemeralKey: toB64U(x25519.getPublicKey(privateKey)),
+          } satisfies MemoryRecoveryRequest),
+        ),
+      }
     },
     async confirmationKey(position, commitDigest) {
       return { epoch, key: confirmationKeyAt(epoch, position, commitDigest) }
@@ -857,8 +960,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         fromUTF(JSON.stringify({ signer: localDID, verdict })),
       )
     },
-    async openRecoveryVerdict(sealed, requestID) {
-      const opened = openReply(SEAL_DOMAIN.verdict, sealed, requestID)
+    async openRecoveryVerdict(sealed, requestID, requestKey) {
+      const opened = openReply(SEAL_DOMAIN.verdict, sealed, requestID, requestKey)
       if (opened == null) return null
       try {
         const value = JSON.parse(toUTF(opened)) as OpenedRecoveryVerdict
@@ -903,10 +1006,10 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       // is a peer left stranded with an empty ledger, reporting itself healthy.
       return sealReply(SEAL_DOMAIN.ledger, to, fromUTF(JSON.stringify(serveLedger(ledgerTokens()))))
     },
-    async openSealedLedger(sealed: Uint8Array, requestID: string) {
+    async openSealedLedger(sealed: Uint8Array, requestID: string, requestKey: Uint8Array) {
       // The key is NOT consumed: every responder answers a gather, and a requester that drops
       // a lying responder's reply must still be able to open the next honest one.
-      const opened = openReply(SEAL_DOMAIN.ledger, sealed, requestID)
+      const opened = openReply(SEAL_DOMAIN.ledger, sealed, requestID, requestKey)
       if (opened == null) return null
       try {
         const tokens = JSON.parse(toUTF(opened)) as Array<string>
@@ -919,84 +1022,44 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     async applyRecovery(
       sealed: Uint8Array,
       requestID: string,
+      requestKey: Uint8Array,
     ): Promise<PendingRecovery | { renewalRequired: true } | null> {
-      const info = open(sealed, requestID)
+      const info = open(sealed, requestID, requestKey)
       if (info == null) return null
       if (!prepared) await prepare()
       if (binding != null && !usable(preparedBinding)) {
         preparedBinding = await askBinding()
         if (!usable(preparedBinding)) return { renewalRequired: true }
       }
-      const candidateBinding =
-        preparedBinding == null ? undefined : structuredClone(preparedBinding)
-      const candidateBindingID = candidateBinding == null ? undefined : bindingID(candidateBinding)
-      let accepted = false
-      let tuple: { position: string; commitDigest: string; tag: string } | undefined
-      // The external commit is framed at the epoch the GroupInfo described — the epoch the
-      // group is at, which is NOT the epoch this peer is at. Every member that can apply it
-      // is at that epoch, so a GroupInfo the group has already moved past builds a commit
-      // nobody will apply, which is why losing the compare-and-set discards the GroupInfo
-      // and not merely the commit.
-      const commit = encodeMemoryCommit(info.epoch, localDID ?? '', [], {
-        head: info.head,
-        external: true,
-      })
-      return {
-        commit,
-        epoch: info.epoch + 1,
-        markBindingUnusable: () => {
-          if (candidateBindingID == null) return
-          const id = candidateBindingID
-          unusable.delete(id)
-          unusable.add(id)
-          while (unusable.size > 16) {
-            const oldest = unusable.values().next().value
-            if (oldest != null) unusable.delete(oldest)
-          }
-        },
-        confirmationKey: async (position, commitDigest) => {
-          if (tuple != null && (tuple.position !== position || tuple.commitDigest !== commitDigest))
-            throw new Error('Pending recovery already bound to another commit')
-          const key = confirmationKeyAt(info.epoch + 1, position, commitDigest)
-          tuple = { position, commitDigest, tag: tagFor(key, requestID) }
-          return key
-        },
-        judgeVerdict: ({ signer, verdict }) => {
-          if (
-            tuple == null ||
-            !isRecoveryVerdict(verdict) ||
-            verdict.groupID !== groupID ||
-            verdict.requestID !== requestID ||
-            verdict.position !== tuple.position ||
-            verdict.commitDigest !== tuple.commitDigest
-          )
-            return 'advisory'
-          if (verdict.verdict === 'confirmed')
-            return verdict.epoch === info.epoch + 1 && verdict.tag === tuple.tag
-              ? 'authoritative'
-              : 'advisory'
-          return info.members.includes(signer) ? 'authoritative' : 'advisory'
-        },
-        onAccepted: async () => {
-          if (accepted) return
-          if (failRecoveryAdopt) {
-            failRecoveryAdopt = false
-            throw new Error('the process died in the acceptance window')
-          }
-          // The rejoined handle: at the group's next epoch, holding the group's
-          // authenticated ledger head — and an EMPTY ledger. That is a roster reset, and it
-          // stands until the ledger is bootstrapped.
-          ledger = []
-          ledgerHead = info.head
-          if (localDID != null) {
-            slotRemoveDID(localDID)
-            slotAdd(localDID)
-          }
-          advance(info.epoch + 1)
-          binding = candidateBinding
-          accepted = true
-        },
+      return makePending(
+        info,
+        requestID,
+        requestKey,
+        preparedBinding == null ? undefined : structuredClone(preparedBinding),
+      )
+    },
+    async restoreRecovery(bytes, requestKey) {
+      const opened = openWithKey(
+        requestKey,
+        sealContext('candidate', localDID ?? '', groupID),
+        bytes,
+      )
+      if (opened == null) throw new Error('Invalid recovery candidate')
+      const snapshot = JSON.parse(toUTF(opened)) as {
+        info: MemoryGroupInfo
+        requestID: string
+        candidateBinding?: MemoryRecoveryBinding
+        tuple?: { position: string; commitDigest: string; tag: string }
       }
+      if (snapshot.info?.to !== (localDID ?? '') || snapshot.info.requestID !== snapshot.requestID)
+        throw new Error('Invalid recovery candidate')
+      return makePending(
+        snapshot.info,
+        snapshot.requestID,
+        requestKey,
+        snapshot.candidateBinding,
+        snapshot.tuple,
+      )
     },
     exportRecoverySecret() {
       return recoverySecret

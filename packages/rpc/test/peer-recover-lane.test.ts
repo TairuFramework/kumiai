@@ -827,7 +827,7 @@ describe('the storm-collapse suppression set is bounded', { concurrent: false },
     // Bob sees a reply for "R": storm-collapse records it, and he will not answer a request for it.
     await inject(HANDSHAKE_KIND.recoveryReply, encodeRecoveryReply('R', new Uint8Array([1])))
     await flush()
-    const req1 = await requester.createRecoveryRequest('R')
+    const { request: req1 } = await requester.createRecoveryRequest('R')
     await inject(HANDSHAKE_KIND.recoveryRequest, encodeRecoveryRequest('R', req1))
     await flush(60)
     expect(bobRepliesTo('R')).toBe(0)
@@ -846,7 +846,7 @@ describe('the storm-collapse suppression set is bounded', { concurrent: false },
     // exactly why the bound is safe: eviction can only ever cost a redundant, roster-authorized
     // reply — never a leak, and never the loss of a LIVE suppression (a live one is far too
     // recent to be the oldest).
-    const req2 = await requester.createRecoveryRequest('R')
+    const { request: req2 } = await requester.createRecoveryRequest('R')
     await inject(HANDSHAKE_KIND.recoveryRequest, encodeRecoveryRequest('R', req2))
     await flush(60)
     expect(bobRepliesTo('R')).toBe(1)

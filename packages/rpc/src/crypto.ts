@@ -371,7 +371,9 @@ export type PendingRecovery = {
    * Adopt the confirmed handle once. Repeated calls share the same acceptance.
    * Standard groups still need ledger bootstrap after adoption.
    */
-  onAccepted: () => Promise<void>
+  onAccepted(write?: AdoptionWriteFactory): Promise<void>
+  /** Sealed restorable candidate, including verdict and binding evidence. */
+  serialize(): Uint8Array
 }
 
 /** {@link GroupMLS.applyRecovery} result: a recovery to adopt, a renewal to run first, or nothing. */
@@ -407,7 +409,11 @@ export type GroupMLS = {
   verifyRecoveryRequest(request: Uint8Array): Promise<VerifiedRecoveryRequest | null>
   confirmationKey(position: string, commitDigest: string): Promise<RecoveryConfirmationKey>
   sealRecoveryVerdict(request: Uint8Array, verdict: RecoveryVerdict): Promise<Uint8Array>
-  openRecoveryVerdict(sealed: Uint8Array, requestID: string): Promise<OpenedRecoveryVerdict | null>
+  openRecoveryVerdict(
+    sealed: Uint8Array,
+    requestID: string,
+    requestKey: Uint8Array,
+  ): Promise<OpenedRecoveryVerdict | null>
   /** Published with the epoch, without taking the handle lock. */
   sendAdmission(): SendAdmission
   /** Read the current handle epoch under the host's handle lock. */
@@ -474,18 +480,13 @@ export type GroupMLS = {
   /**
    * Mint the rendezvous request this peer publishes to ask the group for its state: an HPKE
    * keypair for this one request, public half in a token signed by this member's identity key.
-   * The private half is retained by the port keyed by `requestID`, making the reply openable by
-   * this peer alone. Minted per request, not from the leaf, because the peers that most need a
-   * heal (commit accepted and lost, on a discarded branch) no longer hold a leaf key the group
-   * can see.
-   *
-   * The port MUST bound retention of the private half itself — the lane has no release hook. A
-   * timed-out gather/rejoin or a failed `recover()` drops its `requestID` on the rpc side without
-   * telling the port, so a port that only evicts on reply-open leaks one key per timeout. A TTL
-   * off the mint time is the natural bound; it lives here rather than as a new lane release
-   * method that would obligate every {@link GroupMLS}.
+   * The private half is returned as `requestKey`. Every reader takes it explicitly, and the
+   * caller retains it for the attempt (durably for a recorded rejoin).
    */
-  createRecoveryRequest(requestID: string, deadlineMs?: number): Promise<Uint8Array>
+  createRecoveryRequest(
+    requestID: string,
+    deadlineMs?: number,
+  ): Promise<{ request: Uint8Array; requestKey: Uint8Array }>
   /**
    * Answer another member's request: verify the token, check the requester still holds a leaf in
    * THIS member's current ratchet tree, seal current GroupInfo to the ephemeral key inside the
@@ -512,7 +513,13 @@ export type GroupMLS = {
    * reply the AEAD refuses, or one that fails either check, is `null`; a throw is tolerated and
    * read the same way.
    */
-  applyRecovery(sealed: Uint8Array, requestID: string): Promise<AppliedRecovery>
+  applyRecovery(
+    sealed: Uint8Array,
+    requestID: string,
+    requestKey: Uint8Array,
+  ): Promise<AppliedRecovery>
+  /** Restore the sealed candidate without adopting, rebuilding host callbacks and verdict judgement. */
+  restoreRecovery(candidate: Uint8Array, requestKey: Uint8Array): Promise<PendingRecovery>
   /**
    * Whether the ledger this handle holds is the whole ledger its OWN GroupContext attests to: the
    * head folded from the entries it holds, against the authenticated head it carries. Purely
@@ -559,7 +566,11 @@ export type GroupMLS = {
    * a forged, lying, reordered or truncated one fails and is dropped — withhold, never rewrite. A
    * forged reply that merely decrypts costs one gather attempt: denial of service, not compromise.
    */
-  openSealedLedger(sealed: Uint8Array, requestID: string): Promise<Array<string> | null>
+  openSealedLedger(
+    sealed: Uint8Array,
+    requestID: string,
+    requestKey: Uint8Array,
+  ): Promise<Array<string> | null>
   /**
    * Install a gathered ledger, verified against the authenticated head BEFORE a single entry is
    * folded. REPLACES the ledger this handle holds — sound because a list reproducing the head

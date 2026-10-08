@@ -31,9 +31,10 @@ export type VerdictJudgeParams = {
   sourceTree: ClientState['ratchetTree']
   known: DeviceRegistry
   requestID: string
+  boundCommit?: BoundRecoveryCommit
 }
 
-type BoundRecoveryCommit = { position: string; commitDigest: string; tag?: string }
+export type BoundRecoveryCommit = { position: string; commitDigest: string; tag?: string }
 
 /** Retained with the speculative handle for subsequent signer judgement. */
 export type RecoveryCandidate = PendingRecovery & {
@@ -121,6 +122,10 @@ export function createRecoveryBindingState(identity: OwnIdentity, host?: Recover
     )
   }
   return {
+    markCandidateBindingUnusable(group: GroupHandle): void {
+      const carried = current(group)
+      markBindingUnusable(carried == null ? undefined : bindingID(carried))
+    },
     async prepare(group: GroupHandle): Promise<'ready' | 'renewal-required'> {
       asked = false
       prepared = true
@@ -205,8 +210,10 @@ export function createRecoveryBindingState(identity: OwnIdentity, host?: Recover
 
 export function createVerdictJudge(params: VerdictJudgeParams) {
   const { group, sourceTree, known, requestID } = params
-  let tuple: BoundRecoveryCommit | undefined
+  let tuple: BoundRecoveryCommit | undefined =
+    params.boundCommit == null ? undefined : { ...params.boundCommit }
   return {
+    boundCommit: () => (tuple == null ? undefined : { ...tuple }),
     async confirmationKey(position: string, commitDigest: string) {
       if (tuple != null && (tuple.position !== position || tuple.commitDigest !== commitDigest))
         throw new Error('Pending recovery already bound to another commit')

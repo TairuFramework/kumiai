@@ -197,8 +197,8 @@ function recoveryPeer(params: {
 }
 
 async function buildRecovery(s: Setup) {
-  const request = await s.mls.createRecoveryRequest('bound-recovery')
-  return s.mls.applyRecovery(await s.responder.sealGroupInfo(request), 'bound-recovery')
+  const { request, requestKey } = await s.mls.createRecoveryRequest('bound-recovery')
+  return s.mls.applyRecovery(await s.responder.sealGroupInfo(request), 'bound-recovery', requestKey)
 }
 
 test('recovery reuses a valid cached binding without consulting the host', async () => {
@@ -673,7 +673,7 @@ test('a lifecycle GroupInfo reply requires a requester leaf in the responder tre
     identity: outsider,
     entrySlot: createLedgerEntrySlot(),
   })
-  const request = await mls.createRecoveryRequest('outsider-request')
+  const { request } = await mls.createRecoveryRequest('outsider-request')
   await expect(s.responder.sealGroupInfo(request)).rejects.toMatchObject({ reason: 'not-a-member' })
 })
 
@@ -793,10 +793,11 @@ test.each(['leafless', 'revoked', 'issuer'] as const)(
     const s = await setup(host)
     expect(await s.mls.prepareRecovery()).toBe('ready')
     const responder = await ineligibleReply(s, kind)
-    const request = await s.mls.createRecoveryRequest('ineligible-binding')
+    const { request, requestKey } = await s.mls.createRecoveryRequest('ineligible-binding')
     const result = await s.mls.applyRecovery(
       await responder.sealGroupInfo(request),
       'ineligible-binding',
+      requestKey,
     )
     expect({ result, hostCalls: host.mock.calls.length }).toEqual({ result: null, hostCalls: 0 })
     expect(s.bobGroup().epoch).toBe(1n)

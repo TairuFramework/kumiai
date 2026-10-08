@@ -82,6 +82,7 @@ export type WaitForRecoveryConfirmationParams = {
   pending: PendingRecovery
   groupID: string
   requestID: string
+  requestKey: Uint8Array
   position: string
   commitDigest: string
   key: Uint8Array
@@ -99,6 +100,7 @@ export function waitForRecoveryConfirmation(
     pending,
     groupID,
     requestID,
+    requestKey,
     position,
     commitDigest,
     key,
@@ -138,7 +140,7 @@ export function waitForRecoveryConfirmation(
         opening = opening
           .then(async () => {
             if (finished) return
-            const opened = await port.openRecoveryVerdict(sealed, requestID)
+            const opened = await port.openRecoveryVerdict(sealed, requestID, requestKey)
             if (finished || opened == null) return
             const verdict = opened.verdict
             const boundToAttempt =
