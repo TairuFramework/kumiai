@@ -1,17 +1,15 @@
 {
-  "name": "@kumiai/hub-server",
-  "version": "0.10.2",
-  "description": "Hub server for Enkaku E2EE group message routing",
+  "name": "@kumiai/hub-http",
+  "version": "0.10.0",
+  "description": "Production HTTP server for Kumiai hubs",
   "keywords": [
     "hub",
-    "server",
-    "e2ee",
-    "routing"
+    "http"
   ],
   "repository": {
     "type": "git",
     "url": "https://github.com/TairuFramework/kumiai",
-    "directory": "packages/hub-server"
+    "directory": "packages/hub-http"
   },
   "license": "MIT",
   "sideEffects": false,
@@ -35,20 +33,26 @@
     "test:unit": "vitest run"
   },
   "dependencies": {
-    "@enkaku/protocol": "catalog:",
+    "@enkaku/http-serve": "catalog:",
     "@enkaku/server": "catalog:",
-    "@kokuin/capability": "catalog:",
-    "@kokuin/token": "catalog:",
+    "@hozon/provider": "catalog:",
     "@kumiai/hub-protocol": "workspace:^",
-    "@sozai/codec": "catalog:",
-    "@sozai/event": "catalog:",
-    "@sozai/log": "catalog:"
+    "@kumiai/hub-server": "workspace:^",
+    "@kumiai/hub-store": "workspace:^",
+    "@sozai/http-server": "catalog:",
+    "@teikyo/access": "catalog:",
+    "@teikyo/enkaku": "catalog:",
+    "@teikyo/hozon": "catalog:",
+    "@teikyo/rate-limit": "catalog:"
   },
   "devDependencies": {
     "@enkaku/client": "catalog:",
-    "@enkaku/transport": "catalog:",
-    "@kumiai/hub-conformance": "workspace:^",
-    "@kumiai/hub-wake": "workspace:^"
+    "@enkaku/http-fetch": "catalog:",
+    "@kokuin/capability": "catalog:",
+    "@kokuin/token": "catalog:"
+  },
+  "engines": {
+    "node": ">=24"
   },
   "publishConfig": {
     "access": "public"

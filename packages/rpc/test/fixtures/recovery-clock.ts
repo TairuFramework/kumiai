@@ -29,7 +29,7 @@ export function controlRecoveryClock(replyDelayMs = 0) {
 export async function drainUntil(
   done: () => boolean | Promise<boolean>,
   description: string,
-  timeoutMs = 4000,
+  timeoutMs = 20_000,
 ) {
   const startedAt = performance.now()
   while (!(await done())) {

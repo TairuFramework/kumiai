@@ -10,11 +10,16 @@
   },
   "devDependencies": {
     "@enkaku/client": "catalog:",
+    "@enkaku/http-fetch": "catalog:",
     "@enkaku/protocol": "catalog:",
     "@enkaku/server": "catalog:",
     "@enkaku/transport": "catalog:",
+    "@hozon/db": "catalog:",
+    "@hozon/node-sqlite": "catalog:",
+    "@hozon/postgres": "catalog:",
     "@kokuin/token": "catalog:",
     "@kumiai/hub-client": "workspace:^",
+    "@kumiai/hub-http": "workspace:^",
     "@kumiai/hub-protocol": "workspace:^",
     "@kumiai/hub-server": "workspace:^",
     "@kumiai/hub-tunnel": "workspace:^",
@@ -23,6 +28,7 @@
     "@kumiai/rpc": "workspace:^",
     "@kumiai/rpc-conformance": "workspace:^",
     "@sozai/codec": "catalog:",
+    "@testcontainers/postgresql": "catalog:",
     "vitest": "catalog:"
   }
 }

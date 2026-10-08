@@ -8,8 +8,12 @@ promise. The domain detail lives in [`docs/reference/`](../reference/), indexed 
 ## Packages
 
 mls (E2EE identity + membership via MLS -- the crypto core), broadcast (generic fan-out),
-the hub subsystem (hub-protocol, hub-client, hub-server, hub-tunnel, hub-wake), and rpc. One
-version band while pre-1.0 (young, tightly coupled).
+the hub subsystem (hub-protocol, hub-client, hub-server, hub-store, hub-http, hub-tunnel,
+hub-wake), and rpc. One version band while pre-1.0 (young, tightly coupled).
+
+`hub-store` provides durable SQL storage through Hozon adapters. `hub-http` composes that store
+with the Teikyo database, access and rate-limit plugins, and the Sozai HTTP server. The hub stack
+therefore depends downward on hozon for persistence and teikyo for HTTP hosting integrations.
 
 Alongside them: **mls-rpc**, the real implementation of rpc's two consumer ports over a live MLS
 handle — until it existed nothing had ever run the ports outside fixtures — **mls-hub**, which owns

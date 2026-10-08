@@ -300,4 +300,58 @@ describe('createWakeDispatcher', () => {
     await vi.waitFor(() => expect(sent).toHaveLength(2))
     dispatcher.dispose()
   })
+
+  test('dispose waits for in-flight sends', async () => {
+    const registry = createMemoryWakeRegistry()
+    await registry.put(registration)
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const sender: WakeSender = {
+      async send() {
+        await gate
+        return 'delivered'
+      },
+    }
+    const dispatcher = createWakeDispatcher({ registry, sender, debounceMs: 60_000 })
+    dispatcher.notify({ did: 'did:key:alice', topicID: 'topic-a', sequenceID: '001' })
+    await vi.advanceTimersByTimeAsync(0)
+
+    let disposed = false
+    const disposing = dispatcher.dispose().then(() => {
+      disposed = true
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(disposed).toBe(false)
+
+    release()
+    await disposing
+    expect(disposed).toBe(true)
+  })
+
+  test('no registry write after dispose', async () => {
+    const registry = createMemoryWakeRegistry()
+    await registry.put(registration)
+    const remove = vi.spyOn(registry, 'delete')
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const sender: WakeSender = {
+      async send() {
+        await gate
+        return 'gone'
+      },
+    }
+    const dispatcher = createWakeDispatcher({ registry, sender, debounceMs: 60_000 })
+    dispatcher.notify({ did: 'did:key:alice', topicID: 'topic-a', sequenceID: '001' })
+    await vi.advanceTimersByTimeAsync(0)
+
+    const disposing = dispatcher.dispose()
+    release()
+    await disposing
+
+    expect(remove).not.toHaveBeenCalled()
+  })
 })

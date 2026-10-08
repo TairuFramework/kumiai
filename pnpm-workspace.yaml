@@ -4,7 +4,10 @@ packages:
 
 allowBuilds:
   '@swc/core': true
+  cpu-features: false
   esbuild: false
+  protobufjs: false
+  ssh2: false
 
 nodeLinker: hoisted
 
@@ -15,15 +18,18 @@ catalog:
   'ts-mls': 2.0.0-rc.13
   'vitest': ^5.0.3
   '@enkaku/client': ^0.21.3
+  '@enkaku/http-fetch': ^0.21.4
+  '@enkaku/http-serve': ^0.21.4
   '@enkaku/protocol': ^0.21.4
-  '@enkaku/server': ^0.21.3
+  '@enkaku/server': ^0.21.4
   '@enkaku/transport': ^0.21.3
-  '@kokuin/capability': ^0.3.1
+  '@kokuin/capability': ^0.4.0
   '@kokuin/controller': ^0.1.0
   '@kokuin/token': ^0.5.0
   '@sozai/async': ^0.4.0
   '@sozai/codec': ^0.4.2
   '@sozai/event': ^0.1.5
+  '@sozai/http-server': ^0.1.1
   '@sozai/log': ^0.4.0
   '@sozai/result': ^0.2.2
   '@sozai/runtime': ^0.1.0
@@ -31,15 +37,27 @@ catalog:
   '@sozai/stream': ^0.2.0
   '@kokuin/expo': ^0.3.2
   '@sozai/runtime-expo': ^0.2.2
-  'expo': ^57.0.26
+  'expo': ^57.0.27
   'expo-status-bar': ^57.0.1
   'react': 19.2.3
   'react-native': ^0.86.0
   '@types/react': ^19.2.18
   'typescript': ^6.0.3
+  '@hozon/adapter': ^0.1.0
+  '@hozon/db': ^0.2.2
+  '@hozon/node-sqlite': ^0.1.0
+  '@hozon/postgres': ^0.1.0
+  '@hozon/provider': ^0.1.1
+  '@teikyo/access': ^0.1.0
+  '@teikyo/enkaku': ^0.1.0
+  '@teikyo/hozon': ^0.1.0
+  '@teikyo/rate-limit': ^0.1.0
+  '@testcontainers/postgresql': ^12.1.0
+  'testcontainers': ^12.1.0
 
 minimumReleaseAgeExclude:
   - '@enkaku/*'
+  - '@hozon/*'
   - '@kigu/*'
   - '@kokuin/*'
   - '@sozai/*'
@@ -55,6 +73,10 @@ minimumReleaseAgeExclude:
   - expo-constants@57.0.2
   - expo-modules-autolinking@57.0.2
   - expo@57.0.0
+  - '@teikyo/access@0.1.0'
+  - '@teikyo/enkaku@0.1.0'
+  - '@teikyo/hozon@0.1.0'
+  - '@teikyo/rate-limit@0.1.0'
 
 versioning:
   # e2e-expo takes @kumiai/mls as a runtime dependency, so bump propagation reaches it and it

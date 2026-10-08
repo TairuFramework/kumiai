@@ -1,0 +1,10 @@
+{
+  "extends": "@kigu/dev/tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "lib": ["es2025", "dom"],
+    "rootDir": "./src",
+    "outDir": "./lib"
+  },
+  "include": ["./src/**/*"]
+}
