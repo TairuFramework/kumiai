@@ -73,7 +73,6 @@ async function wakeLane(hub: FakeHub, rs: Uint8Array): Promise<void> {
     topicID: commitTopic(rs),
     payload: new Uint8Array([0]),
   })
-  await flush(80)
 }
 
 describe('a heal re-enacts by ledger membership', { concurrent: false }, () => {
@@ -268,13 +267,17 @@ describe('a hub that forked the log', { concurrent: false }, () => {
   }
 
   test('the losing branch rejoins the winner, and re-enacts the entries the winner never had', async () => {
+    controlRecoveryClock(5)
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x58)
     const { winner, loser, winnerSeq } = await setUpFork(hub, rs)
 
     const carol = makeMLSPeer(hub, 'carol', rs, { epoch: 1, members, recovery })
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
-    await flush(80)
+    await drainUntil(
+      () => carol.mls.epoch() === 2 && bob.mls.epoch() === 2,
+      'each branch applies its commit',
+    )
 
     // Each applied the only commit it was shown, at epoch 1, and each holds a ledger the other
     // has never heard of. Nobody has done anything wrong, and the group has two histories.
@@ -287,7 +290,13 @@ describe('a hub that forked the log', { concurrent: false }, () => {
     // has a record for, with a sequenceID that is not the one he applied there.
     hub.revealTo('bob', winnerSeq)
     await wakeLane(hub, rs)
-    await flush(400)
+    await drainUntil(
+      () =>
+        bob.mls.epoch() === carol.mls.epoch() &&
+        carol.mls.leaves().filter((did) => did === 'bob').length === 1 &&
+        bob.mls.fold().get('role:carol') === 'admin',
+      'bob rejoins the winning branch',
+    )
 
     // He heals: he is on the higher-sequenceID branch, so he is the loser, and he rejoins onto
     // the winner's. Carol, on the winning branch, does nothing.
@@ -305,7 +314,10 @@ describe('a hub that forked the log', { concurrent: false }, () => {
     const { reenact = [] } = await bob.peer.replay()
     expect(reenact).toEqual([loser])
     await reenactFrom(bob, reenact)
-    await flush(80)
+    await drainUntil(
+      () => carol.mls.ledgerIDs().length === 2 && carol.mls.fold().get('role:bob') === 'admin',
+      'carol applies the re-enacted entry',
+    )
 
     // Both branches' entries are now in one ledger, once each, and both peers agree.
     expect(bob.mls.fold().get('role:bob')).toBe('admin')
@@ -333,7 +345,7 @@ describe('a hub that forked the log', { concurrent: false }, () => {
     // both sides would rejoin the two halves of the group onto each other forever.
     hub.revealTo('carol', loserSeq)
     await wakeLane(hub, rs)
-    await flush(200)
+    await flush(280)
 
     expect(recoveryRequests(hub, rs)).toHaveLength(0)
     expect(carol.mls.epoch()).toBe(2)
@@ -474,6 +486,7 @@ describe('recover() is a compare-and-set loop of its own', { concurrent: false }
 
 describe('the lane is never re-entered', { concurrent: false }, () => {
   test('a heal triggered while commit() is pulling does not deadlock: it unwinds, then heals', async () => {
+    controlRecoveryClock(5)
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x55)
 
@@ -481,7 +494,7 @@ describe('the lane is never re-entered', { concurrent: false }, () => {
     // INSIDE commit(), which is holding the very mutex the heal needs.
     await publishCommit({ hub, senderDID: 'alice', recoverySecret: rs, epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
-    await flush()
+    await bob.peer.resync()
 
     const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, recovery })
     // The commit unwinds rather than waiting: the trigger RECORDS, the pull finishes, the lane
@@ -490,7 +503,12 @@ describe('the lane is never re-entered', { concurrent: false }, () => {
     await expect(alice.peer.commit(buildLedgerCommit(alice, ['circle:x=Alice']))).rejects.toThrow(
       RecoveryRequiredError,
     )
-    await flush(400)
+    await drainUntil(
+      () =>
+        alice.mls.epoch() === bob.mls.epoch() &&
+        bob.mls.leaves().filter((did) => did === 'alice').length === 1,
+      'alice heals behind the unwound commit',
+    )
 
     // The heal ran, on its own lane operation, after commit() let go.
     expect(alice.mls.epoch()).toBe(bob.mls.epoch())
@@ -498,7 +516,7 @@ describe('the lane is never re-entered', { concurrent: false }, () => {
 
     // And the host's re-issued commit — the SECOND commit of the heal — lands.
     await alice.peer.commit(buildLedgerCommit(alice, ['circle:x=Alice']))
-    await flush()
+    await bob.peer.resync()
     expect(bob.mls.fold().get('circle:x')).toBe('Alice')
 
     await alice.peer.dispose()
@@ -508,12 +526,13 @@ describe('the lane is never re-entered', { concurrent: false }, () => {
 
 describe("a crash in recover()'s own acceptance window", { concurrent: false }, () => {
   test('converges by re-recovery, and the group holds exactly one leaf for the peer', async () => {
+    controlRecoveryClock(5)
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x56)
 
     await publishCommit({ hub, senderDID: 'alice', recoverySecret: rs, epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
-    await flush()
+    await bob.peer.resync()
 
     const aliceCrypto = createFakeCrypto({ epoch: 1, localDID: 'alice' })
     const aliceMLS = createMemoryGroupMLS({
@@ -526,13 +545,23 @@ describe("a crash in recover()'s own acceptance window", { concurrent: false }, 
     // The window `recover()` leaves open on purpose: the hub takes the external commit, and the
     // process dies before the rejoined handle is adopted. It is deliberately unjournalled.
     aliceMLS.failNextRecoveryAdopt()
+    let died = false
     const dead = makeMLSPeer(hub, 'alice', rs, {
       mls: aliceMLS,
       crypto: aliceCrypto,
       members,
       recovery,
+      onRecovery: (event) => {
+        if (event.phase === 'failed') died = true
+      },
     })
-    await flush(400)
+    await drainUntil(
+      () =>
+        died &&
+        rejoins(hub, rs).length >= 2 &&
+        bob.mls.leaves().filter((did) => did === 'alice').length === 1,
+      'the orphaned rejoin lands for the group',
+    )
 
     // The orphan is in the log, and the group applied it: Bob's tree carries the leaf it added,
     // and Alice's handle knows nothing about it.
@@ -551,7 +580,12 @@ describe("a crash in recover()'s own acceptance window", { concurrent: false }, 
       members,
       recovery,
     })
-    await flush(500)
+    await drainUntil(
+      () =>
+        alice.mls.epoch() === bob.mls.epoch() &&
+        bob.mls.leaves().filter((did) => did === 'alice').length === 1,
+      'the restarted peer re-recovers',
+    )
 
     expect(alice.mls.epoch()).toBe(bob.mls.epoch())
     // EXACTLY ONE LEAF. The rejoin removes the prior leaf for the same identity, so the second

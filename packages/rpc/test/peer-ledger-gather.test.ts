@@ -222,7 +222,10 @@ describe('the ledger gather does not hand the group to the relay', { concurrent:
       await bootstrap(tokens)
     })
     const attempt = alice.peer.recover().catch((error: unknown) => error)
-    await vi.waitFor(() => expect(alice.mls.bootstrapLedger).toHaveBeenCalled())
+    await vi.waitFor(() => expect(alice.mls.bootstrapLedger).toHaveBeenCalled(), {
+      timeout: 10_000,
+      interval: 10,
+    })
     let disposed = false
     const disposal = alice.peer.dispose().then(() => {
       disposed = true
@@ -268,7 +271,7 @@ describe('the ledger gather does not hand the group to the relay', { concurrent:
       () => 'resolved',
       (error: unknown) => error,
     )
-    await vi.waitFor(() => expect(requests).toBe(2))
+    await vi.waitFor(() => expect(requests).toBe(2), { timeout: 10_000, interval: 10 })
     const gatherTimersBeforeDispose = setTimer.mock.calls.filter(
       (call) => (call[1] ?? 0) > 8000 && (call[1] ?? 0) <= 10000,
     ).length
@@ -384,7 +387,10 @@ describe('the ledger gather does not hand the group to the relay', { concurrent:
       'member-1',
       await aliceMLS.createRecoveryRequest('member-1'),
     )
-    await vi.waitFor(() => expect(ledgerReplies(hub, rs, 'member-1')).toHaveLength(2))
+    await vi.waitFor(() => expect(ledgerReplies(hub, rs, 'member-1')).toHaveLength(2), {
+      timeout: 10_000,
+      interval: 10,
+    })
 
     await bob.peer.dispose()
     await carol.peer.dispose()
@@ -400,7 +406,10 @@ describe('the ledger gather does not hand the group to the relay', { concurrent:
     // Carol is still in bob's tree, so bob answers her.
     const carol = createMemoryGroupMLS({ recoverySecret: rs, localDID: 'carol' })
     await askForTheLedger(hub, rs, 'carol', 'carol-1', await carol.createRecoveryRequest('carol-1'))
-    await vi.waitFor(() => expect(ledgerReplies(hub, rs, 'carol-1')).toHaveLength(1))
+    await vi.waitFor(() => expect(ledgerReplies(hub, rs, 'carol-1')).toHaveLength(1), {
+      timeout: 10_000,
+      interval: 10,
+    })
 
     // Bob commits her removal and adopts the post-commit handle: her leaf is gone from the
     // tree he authorizes against. Authorization is roster-intrinsic — nothing was configured,
@@ -484,7 +493,10 @@ describe('the ledger gather does not hand the group to the relay', { concurrent:
       crypto: aliceCrypto,
       recovery,
     })
-    await vi.waitFor(async () => expect(await aliceMLS.isLedgerComplete()).toBe(true))
+    await vi.waitFor(async () => expect(await aliceMLS.isLedgerComplete()).toBe(true), {
+      timeout: 10_000,
+      interval: 10,
+    })
 
     // The ephemeral seal is epoch-independent, and here is the proof: she opened a reply
     // sealed by a responder two epochs ahead of the epoch she was at when she opened it.

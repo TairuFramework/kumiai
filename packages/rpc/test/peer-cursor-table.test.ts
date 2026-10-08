@@ -7,7 +7,7 @@ import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { encodeMemoryCommit, memoryEntryID } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
-import { controlRecoveryClock } from './fixtures/recovery-clock.js'
+import { controlRecoveryClock, drainUntil } from './fixtures/recovery-clock.js'
 
 const flush = (ms = 30) => new Promise((r) => setTimeout(r, ms))
 
@@ -427,6 +427,7 @@ describe('a peer that must recover before it can commit', { concurrent: false },
 
 describe('a peer the group left behind', { concurrent: false }, () => {
   test('learns it from a later frame, not from the one it could not apply, and heals', async () => {
+    controlRecoveryClock(5)
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x46)
 
@@ -445,14 +446,14 @@ describe('a peer the group left behind', { concurrent: false }, () => {
 
     // A live member, to answer a rendezvous.
     const carol = makeMLSPeer(hub, 'carol', rs, { epoch: 3, members, recovery: fastRecovery })
-    await flush()
+    await carol.peer.resync()
 
     // Bob comes to the log at epoch 1, without that body. He drops the frame he cannot
     // resolve — in silence, because as far as he can tell nobody else could resolve it
     // either — and then meets the NEXT frame, framed at epoch 2, ahead of him. That is the
     // observation that says the fault was his alone.
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery: fastRecovery })
-    await waitFor(
+    await drainUntil(
       () => bob.mls.epoch() === 4 && carol.mls.epoch() === 4,
       'bob heals and the group advances to epoch 4',
     )

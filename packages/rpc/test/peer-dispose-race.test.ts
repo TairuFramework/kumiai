@@ -387,6 +387,7 @@ describe('dispose against a commit delivery queued behind a lane operation', {
 
 describe('dispose against a ledger reply whose timer already fired', { concurrent: false }, () => {
   test('the sealed ledger is not published after dispose', async () => {
+    controlRecoveryClock(0)
     const fake = new FakeHub()
     const rs = new Uint8Array(32).fill(0x89)
 
@@ -427,11 +428,11 @@ describe('dispose against a ledger reply whose timer already fired', { concurren
       // Delay 0 so the reply timer fires within the test rather than under jitter.
       recovery: { timeoutMs: 120, getDelayMs: () => 0, deadlineMs: 600 },
     })
-    await flush()
+    await bob.peer.resync()
     // `handleLedgerRequest` checks `isLedgerComplete()` BEFORE sealing, so without an entry bob
     // returns early and never reaches the gate.
     await bob.peer.commit(buildLedgerCommit(bob, ['circle:x=Bob']))
-    await flush()
+    await bob.peer.resync()
 
     // Alice takes the bare hub: only the peer under test is recorded. Built plainly, exactly as
     // `peer-dispose-heal.test.ts:79-85` builds its rejoining peer — she needs no pre-adopted
@@ -441,12 +442,15 @@ describe('dispose against a ledger reply whose timer already fired', { concurren
       members,
       recovery: { timeoutMs: 120, getDelayMs: () => 0, deadlineMs: 600 },
     })
-    await flush()
+    await alice.peer.resync()
 
     // Her rejoin publishes a recoveryRequest (bob answers it — sealGroupInfo is NOT gated), then
     // gathers the ledger, which is the request bob parks on. It resolves once that gather times
     // out, so by the time it returns bob's timer has long since fired.
-    await alice.peer.recover()
+    const rejoin = alice.peer.recover()
+    await drainUntil(() => sealEntered, 'bob parks on the seal')
+    await vi.advanceTimersByTimeAsync(600)
+    await rejoin
 
     // The proof the window is open. Without it, a delivery that stopped arriving would leave the
     // recording empty and this test would pass for nothing.
@@ -456,7 +460,8 @@ describe('dispose against a ledger reply whose timer already fired', { concurren
     recorder.start()
 
     openGate()
-    await flush(80)
+    await drainUntil(() => sealResumed, 'the parked seal resumes')
+    await vi.advanceTimersByTimeAsync(80)
 
     // The parked IIFE resumed and reached the guard. Without this, a continuation that never ran
     // would leave the recording empty and the assertion below would pass for nothing.
@@ -551,6 +556,7 @@ describe('dispose against a requester ledger reply already in its IIFE', {
   concurrent: false,
 }, () => {
   test('bootstrapLedger is not called after dispose', async () => {
+    controlRecoveryClock(0)
     const fake = new FakeHub()
     const rs = new Uint8Array(32).fill(0x8b)
 
@@ -595,9 +601,9 @@ describe('dispose against a requester ledger reply already in its IIFE', {
       members,
       recovery: { timeoutMs: 120, getDelayMs: () => 0, deadlineMs: 600 },
     })
-    await flush()
+    await bob.peer.resync()
     await bob.peer.commit(buildLedgerCommit(bob, ['circle:x=Bob']))
-    await flush()
+    await bob.peer.resync()
 
     const alice = makeMLSPeer(fake, 'alice', rs, {
       mls: aliceMLS,
@@ -605,7 +611,7 @@ describe('dispose against a requester ledger reply already in its IIFE', {
       members,
       recovery: { timeoutMs: 120, getDelayMs: () => 0, deadlineMs: 600 },
     })
-    await flush()
+    await alice.peer.resync()
 
     // Not awaited: alice's own gather is the thing being held, so `recover()` settles only once
     // its local ledger-gather timeout fires. The `.catch` owns whichever way it settles — an
@@ -616,10 +622,12 @@ describe('dispose against a requester ledger reply already in its IIFE', {
     // gather's round-trip to Bob and back can exceed any fixed budget, leaving `openEntered` false
     // for timing reasons alone. Without reaching here, a gather that never entered
     // `openSealedLedger` would leave `bootstrapCalls` at 0 for nothing.
-    await vi.waitFor(() => expect(openEntered).toBe(true), { timeout: 2000, interval: 10 })
+    await drainUntil(() => openEntered, 'alice parks on the open')
 
     await alice.peer.dispose()
     openGate()
+    await drainUntil(() => openResumed, 'the parked open resumes')
+    await vi.advanceTimersByTimeAsync(600)
     // Await the recovery flow's own settlement rather than a fixed delay — deterministic, and it
     // guarantees the parked IIFE resumed AND reached its post-open bootstrap decision before the
     // assertions below.

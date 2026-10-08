@@ -44,7 +44,7 @@ catalog:
   '@types/react': ^19.2.18
   'typescript': ^6.0.3
   '@hozon/adapter': ^0.1.0
-  '@hozon/db': ^0.2.1
+  '@hozon/db': ^0.2.2
   '@hozon/node-sqlite': ^0.1.0
   '@hozon/postgres': ^0.1.0
   '@hozon/provider': ^0.1.1
