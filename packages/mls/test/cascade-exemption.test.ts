@@ -14,27 +14,32 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { mintTrustedGrant, readCapability } from '../src/capability.js'
 import type { ControllerBinding } from '../src/credential.js'
 import { LeafBindingError, RevokeProofError } from '../src/errors.js'
-import { commitLedgerEntries } from '../src/group-commit.js'
+import { commitLedgerEntries, commitWithEntries } from '../src/group-commit.js'
 import { CommitRejectedError, deriveGroup, type GroupHandle } from '../src/group-handle.js'
 import { renewLeaf, revokeWithProof } from '../src/group-lifecycle.js'
 import { signLedgerEntry, type VerifiedLedgerEntry } from '../src/ledger.js'
 import { leafAt } from '../src/lifecycle.js'
 import { verifyLifecycleProof } from '../src/lifecycle-proof.js'
 import { DEVICE_ENTRY_TYPE, type DeviceValue } from '../src/registry.js'
+import { ROLE_ENTRY_TYPE } from '../src/roster.js'
 import { controllerSeed } from './fixtures/lifecycle-ledger.js'
 import {
   agent,
   controllerID,
   inception,
+  lowLevelApply,
+  lowLevelExternal,
   lowLevelWelcome,
   pipelineGroup,
   rawAdd,
+  rawBundle,
   rawCommit,
   rawUpdate,
   timedBinding,
   welcomeBoundary,
   withoutHolderEvidence,
 } from './fixtures/lifecycle-pipeline.js'
+import { buildManagementCapability } from './fixtures/management-capability.js'
 
 function revoke(log: Array<SignedEvent>, subject: string): SignedEvent {
   const folded = foldLog(controllerID, log)
@@ -395,6 +400,133 @@ describe('commit authentication of evidenced children', () => {
       'binding',
       'denied-issuer',
     )
+    // Nor can the revoked issuer bring in a new device or a replacement leaf.
+    const newcomer = agent(91)
+    const bundle = await rawBundle(
+      childHandle,
+      newcomer,
+      await timedBinding({ identity: newcomer, iat: 120, exp: 200, issuer, parent }),
+    )
+    const add = await rawCommit({
+      group: childHandle,
+      proposals: [
+        { proposalType: defaultProposalTypes.add, add: { keyPackage: bundle.publicPackage } },
+      ],
+    })
+    await expectRejected(
+      publisher.processMessage(encode(mlsMessageEncoder, add.commit)),
+      'binding',
+      'denied-issuer',
+    )
+    await expectRejected(
+      publisher.processMessage(
+        await lowLevelExternal({ group: publisher, identity: child, binding: fresh }),
+      ),
+      'binding',
+      'denied-issuer',
+    )
+    expect(publisher.findMemberLeafIndex(newcomer.id)).toBeUndefined()
+    expect(publisher.epoch).toBe(childHandle.epoch)
+  })
+})
+
+describe('groups whose anchor names no controller', () => {
+  test('evidencedChildOfRevokedDeviceRefusedInStandardGroup', async () => {
+    const { group, identity, tokens } = await pipelineGroup({ standard: true })
+    const manager = agent(52)
+    const issuer = agent(51)
+    const child = agent(61)
+    const withManager = await lowLevelWelcome(
+      group,
+      manager,
+      await timedBinding({ identity: manager, iat: 90, exp: 200 }),
+    )
+    const withIssuer = await lowLevelWelcome(
+      withManager.author,
+      issuer,
+      await timedBinding({ identity: issuer, iat: 90, exp: 200 }),
+    )
+    const parent = await parentGrant(issuer, 95)
+    const withChild = await lowLevelWelcome(
+      withIssuer.author,
+      child,
+      await timedBinding({ identity: child, iat: 110, exp: 200, issuer, parent }),
+    )
+    const { capability } = await buildManagementCapability({
+      managerDID: manager.id,
+      managerKey: manager.publicKey,
+    })
+    const register = await signLedgerEntry(manager, {
+      type: DEVICE_ENTRY_TYPE,
+      groupID: group.groupID,
+      subject: issuer.id,
+      value: { op: 'register', controller: controllerID, capability },
+    })
+    const registered = await commitWithEntries({
+      group: withChild.author,
+      extraProposals: [],
+      enacted: [register],
+      requireAdmin: false,
+    })
+    const publisher = deriveGroup(withChild.author, registered.newState)
+    await publisher.applyLedgerEntries([register])
+    await publishLedger(tokens, publisher)
+    await withChild.joined.processMessage(encode(mlsMessageEncoder, registered.commit))
+
+    // The device revocation, applied below the gate: an honest member refuses to keep the child.
+    const joiner = agent(81)
+    const entries = [
+      await signLedgerEntry(manager, {
+        type: DEVICE_ENTRY_TYPE,
+        groupID: group.groupID,
+        subject: issuer.id,
+        value: { op: 'revoke', capability },
+      }),
+      await signLedgerEntry(identity, {
+        type: ROLE_ENTRY_TYPE,
+        groupID: group.groupID,
+        subject: joiner.id,
+        value: 'member',
+      }),
+    ]
+    const issuerIndex = publisher.findMemberLeafIndex(issuer.id)
+    if (issuerIndex == null) throw new Error('Missing issuer')
+    const revoked = await rawCommit({
+      group: publisher,
+      proposals: [{ proposalType: defaultProposalTypes.remove, remove: { removed: issuerIndex } }],
+      tokens: entries,
+    })
+    const after = deriveGroup(publisher, revoked.newState)
+    await after.applyLedgerEntries(entries)
+    const childAfter = await lowLevelApply(
+      withChild.joined,
+      encode(mlsMessageEncoder, revoked.commit),
+    )
+    await childAfter.applyLedgerEntries(entries)
+    expect(after.anchor.controller).toBeUndefined()
+    expect(after.registry.devices.get(issuer.id)?.status).toBe('revoked')
+    expect(after.findMemberLeafIndex(child.id)).toBeDefined()
+    expect(childAfter.epoch).toBe(after.epoch)
+
+    // The child's unchanged commit is refused.
+    const unchanged = await rawCommit({ group: childAfter })
+    await expectRejected(
+      after.processMessage(encode(mlsMessageEncoder, unchanged.commit)),
+      'binding',
+      'denied-issuer',
+    )
+    // A Welcome whose tree holds the child is refused.
+    const welcome = await welcomeBoundary(
+      after,
+      joiner,
+      await timedBinding({ identity: joiner, iat: 100, exp: 200 }),
+    )
+    const error = await welcome.process().then(
+      () => undefined,
+      (thrown: unknown) => thrown,
+    )
+    expect(error).toBeInstanceOf(LeafBindingError)
+    expect((error as LeafBindingError).reason).toBe('denied-issuer')
   })
 })
 
