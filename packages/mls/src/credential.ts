@@ -126,12 +126,12 @@ export function parseMLSCredentialIdentity(identity: Uint8Array): MLSCredentialI
 }
 
 /**
- * The normalized DID an MLS leaf credential names, or `undefined` when it names none.
+ * The normalized DID an MLS leaf credential names, or `null` when it names none.
  *
  * Total by contract. The receive-side commit policy calls this on a leaf inside an untrusted
  * commit, and `defaultCommitPolicy` is pure and total — a malformed credential must read as
  * "no DID", never throw past the policy boundary. Every rejection `parseMLSCredentialIdentity`
- * raises collapses to `undefined` here: non-JSON bytes, a non-object value, an unsupported `v`, a
+ * raises collapses to `null` here: non-JSON bytes, a non-object value, an unsupported `v`, a
  * non-string `id`, a non-string `longForm`.
  *
  * `credentialType !== basic` does not narrow on its own: `CredentialCustom.credentialType` is a
@@ -139,20 +139,17 @@ export function parseMLSCredentialIdentity(identity: Uint8Array): MLSCredentialI
  *
  * Syntax is not validated. An identity naming an arbitrary string returns that string, which no
  * roster grants — a lookup miss, and deliberately distinct from a credential that names nothing.
- *
- * Not re-exported from the package index: `policy.ts` is the only consumer today, and widening the
- * surface is cheap to do later and impossible to undo.
  */
-export function didFromCredential(credential: Credential): string | undefined {
+export function didFromCredential(credential: Credential): string | null {
   if (
     !isDefaultCredential(credential) ||
     credential.credentialType !== defaultCredentialTypes.basic
   ) {
-    return undefined
+    return null
   }
   try {
     return normalizeDID(parseMLSCredentialIdentity(credential.identity).id)
   } catch {
-    return undefined
+    return null
   }
 }

@@ -43,6 +43,7 @@ export {
 } from './codec.js'
 export {
   type ControllerBinding,
+  didFromCredential,
   type GroupMember,
   type MemberCredential,
   type MLSCredentialIdentity,
@@ -244,5 +245,6 @@ export {
   type RosterState,
   roleReducer,
 } from './roster.js'
+export { mergeReceiveSecretTree } from './secret-tree.js'
 export type { GroupOptions, Invite, KeyPackageBundle } from './types.js'
 export { welcomeKeyPackageRefs } from './welcome-refs.js'
