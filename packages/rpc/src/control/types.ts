@@ -1,0 +1,160 @@
+import type { RecoveryRefusalReason } from '../crypto.js'
+import type { LogPosition } from '../cursor.js'
+
+export type ControlSnapshot = {
+  operations: Array<Operation> // FIFO by `seq`
+  rejoin: RejoinRecord | null
+  outcomes: Array<Outcome>
+  welcomes: Array<WelcomeObligation>
+  applied: Array<AppliedCommit> // newest 64 epochs
+  responses: Array<ExternalResponse> // responder outcomes, newest 64 epochs
+  cursor: CommitCursor | null // {position, epoch, stranded?, fork?}
+}
+/**
+ * Durable with the strand. A detected conflict, not a proven divergence point: the framed epoch is
+ * unauthenticated below the current epoch, and divergence may lie lower (D5).
+ */
+export type ForkEvidence = {
+  conflictEpoch: number
+  sharedPosition: LogPosition | null
+  frameDigest: string
+}
+export type ControlChanges = {
+  putOperations?: Array<Operation>
+  deleteOperations?: Array<string>
+  putRejoin?: RejoinRecord
+  deleteRejoin?: true
+  putOutcomes?: Array<Outcome>
+  deleteOutcomes?: Array<string>
+  putWelcomes?: Array<WelcomeObligation>
+  deleteWelcomes?: Array<string>
+  putApplied?: Array<AppliedCommit>
+  deleteAppliedFrom?: number // drops rows at epoch >= n, before puts
+  putResponses?: Array<ExternalResponse>
+  deleteResponsesBelow?: number // by `epoch`
+  cursor?: CommitCursor | null
+}
+/** Control changes committed with an adoption's state save (D5). */
+export type AdoptionWrite = {
+  changes: ControlChanges
+  mutationID: string
+  /** The `advance` of the pending anchor rotation this adoption lands, marked in the same transaction. */
+  anchorLanded?: string
+}
+export type ControlStore = {
+  load(): Promise<ControlSnapshot>
+  /** All or nothing. On an ambiguous commit, rejects with `StorageOutcomeUnknownError`. */
+  apply(changes: ControlChanges, mutationID: string): Promise<void>
+  /** The `mutationID` of the last committed `apply`. */
+  lastMutation(): Promise<string | null>
+}
+
+export type OperationRequest = {
+  /** Random 128-bit; the host's handle for outcomes. */
+  id: string
+  kind: 'invite' | 'remove' | 'ledger' | 'rotation'
+  /** Holds app sends (the revoke hold, below) from enqueue until the operation settles. */
+  revokes: boolean
+  /** Host-opaque; everything `build` needs, such as targets, role and signed tokens. */
+  body: Uint8Array
+}
+/** The operation deadline is `enqueuedAt + operationTimeoutMs`, so a restart keeps it. */
+export type Operation = OperationRequest & { seq: number; enqueuedAt: number } & (
+    | { stage: 'intent' }
+    | { stage: 'built'; built: BuiltCommit }
+    | { stage: 'accepted'; built: BuiltCommit; acceptedAs: LogPosition }
+  )
+export type BuiltCommit = {
+  publishID: string
+  expectedHead: LogPosition | null
+  /** Identity of the state the commit was built from. */
+  epoch: number
+  authenticatorBefore: Uint8Array
+  lineage: number
+  /** The exact framed hub payload, with bodies sealed once. Replay publishes these bytes. */
+  payload: Uint8Array
+  /** SHA-256 of `payload`: acceptance discovery matches this. */
+  payloadDigest: string
+  /** Digest of the MLS commit alone (`digestAppliedCommit`): fork classification only. */
+  digest: string
+  bodies: Array<string>
+  /** Host blob: the post-commit candidate state and anything needed to adopt it. */
+  journal: Uint8Array
+  /** The complete host-encoded invitation artifact (D4), or null. */
+  welcome: { bytes: Uint8Array; recipients: Array<string> } | null
+}
+
+export type Outcome = { id: string; opID: string | null; at: number } & (
+  | { kind: 'landed'; position: LogPosition }
+  | { kind: 'lost' } // absent from the branch this device follows
+  | { kind: 'unknown' } // absence not provable, or touched by a fork (D5)
+  | { kind: 'reenact'; tokens: Array<string> } // ledger tokens missing after a rejoin
+  | { kind: 'rejected'; reason: string } // build refused, e.g. not authorised
+  | { kind: 'refused'; reason: RecoveryRefusal } // a rejoin refused by policy (D6)
+)
+
+export type RejoinRecord = {
+  /** Random per rejoin. */
+  id: string
+  stage: 'built' | 'published' | 'confirmed' | 'adopted' | 'refused'
+  publishID: string
+  expectedHead: LogPosition | null
+  /** The exact framed external-commit payload. Framing seals with a random nonce, so it cannot be
+   *  re-derived (`rpc/src/peer.ts:1781`, `mls-rpc/src/crypto.ts:64`). */
+  payload: Uint8Array
+  payloadDigest: string
+  requestID: string
+  request: Uint8Array
+  /** Secret. Today it lives in a 120 s memory map (`mls-rpc/src/mls.ts:135-173`). */
+  requestKey: Uint8Array
+  /**
+   * `PendingRecovery.serialize()`: the candidate state plus everything verdict judgment reads, the
+   * source tree, the known registry and the confirmation tuple (`mls-rpc/src/recovery.ts:206-207`),
+   * and the binding's `holderGrant`, which is part of the binding identity
+   * (`mls-rpc/src/recovery.ts:99-108`). Secret.
+   */
+  candidate: Uint8Array
+  /** Identity of the state the rejoin replaces; re-checked before adoption. */
+  source: { epoch: number; authenticator: Uint8Array; lineage: number; head: LogPosition | null }
+  digest: string
+  epochAfter: number
+  /** Ledger tokens held before the rejoin, for `reenact`. */
+  ledgerBefore: Array<string>
+  /** `ForkEvidence.conflictEpoch`, when the rejoin heals a detected fork (D5). */
+  conflictEpoch: number | null
+  position?: LogPosition
+  verdict?: Uint8Array
+  /** Set with stage `refused`. */
+  refusal?: RecoveryRefusal
+}
+export type RecoveryRefusal = RecoveryRefusalReason
+export type WelcomeObligation = { opID: string; welcome: Uint8Array; recipients: Array<string> }
+export type AppliedCommit = {
+  epoch: number
+  digest: string
+  payloadDigest: string
+  sequenceID: string
+  opID: string | null
+  removed: boolean
+}
+export type ExternalResponse = {
+  position: LogPosition
+  digest: string
+  kind: 'applied' | 'refused' | 'superseded'
+  epoch: number
+  reason?: RecoveryRefusal
+  epochAfter?: number
+}
+export type CommitCursor = {
+  position: LogPosition
+  epoch: number
+  stranded?: true
+  fork?: ForkEvidence
+}
+
+export type StagedAdoption = {
+  epochAfter: number
+  removed: boolean
+  epochAuthenticator: Uint8Array
+}
+export type AdoptionWriteFactory = (staged: StagedAdoption) => AdoptionWrite
