@@ -1,7 +1,7 @@
 # Spec P2a: crash-safe group control — design
 
 Date: 2026-10-08
-Status: draft r2
+Status: draft r3
 Parent: [client host, messaging protocol and multi-device e2e](2026-10-08-client-messaging-e2e-design.md)
 Siblings:
 - [Spec P, transactional persistence](2026-10-08-spec-p-transactional-persistence.md) (its D5 moves
@@ -115,14 +115,17 @@ export type ControlSnapshot = {
   receiptAck: string | null             // `adoptionID` of the last reconciled receipt (D5)
   cursor: CommitCursor | null           // {position, epoch, stranded?, fork?}
 }
-/** Durable with the strand: the evidence fork settlement needs after a restart. */
-export type ForkEvidence = { forkEpoch: number; sharedPosition: LogPosition | null; frameDigest: string }
+/**
+ * Durable with the strand. A detected conflict, not a proven divergence point: the framed epoch is
+ * unauthenticated below the current epoch, and divergence may lie lower (D5).
+ */
+export type ForkEvidence = { conflictEpoch: number; sharedPosition: LogPosition | null; frameDigest: string }
 export type ControlChanges = {
   putOperations?: Array<Operation>; deleteOperations?: Array<string>
   putRejoin?: RejoinRecord; deleteRejoin?: true
   putOutcomes?: Array<Outcome>; deleteOutcomes?: Array<string>
   putWelcomes?: Array<WelcomeObligation>; deleteWelcomes?: Array<string>
-  putApplied?: Array<AppliedCommit>; deleteAppliedFrom?: number   // drops rows at epoch >= n
+  putApplied?: Array<AppliedCommit>; deleteAppliedFrom?: number   // drops rows at epoch >= n, before puts
   putResponses?: Array<ExternalResponse>
   receiptAck?: string
   cursor?: CommitCursor | null
@@ -246,8 +249,7 @@ Each operation moves through its stages as follows. Every arrow is one `apply` u
        operation;
      - a different digest, or a log that does not show the commit on this device's branch: fork
        evidence. The operation stays `accepted`, the device strands (D5), and the rejoin's final
-       `apply` (D6) resolves it against the winning branch (D5): `landed`, `reverted` or
-       `unknown`.
+       `apply` (D6) settles it as `unknown` (D5).
 
 **Revoke hold.** While any stored operation with `revokes: true` is unsettled, the peer hands no
 retained log submission to the hub (`rpc/src/peer.ts:635`). This is today's `holdLogSends`
@@ -281,8 +283,7 @@ always re-sealed, since publication evidence is memory-only today.
 export type Outcome = { id: string; opID: string | null; at: number } & (
   | { kind: 'landed'; position: LogPosition }
   | { kind: 'lost' }                       // absent from the branch this device follows
-  | { kind: 'unknown' }                    // absence not provable
-  | { kind: 'reverted'; position: LogPosition }   // accepted on a losing fork branch
+  | { kind: 'unknown' }                    // absence not provable, or touched by a fork (D5)
   | { kind: 'reenact'; tokens: Array<string> }    // ledger tokens missing after a rejoin
   | { kind: 'rejected'; reason: string }          // build refused, e.g. not authorised
   | { kind: 'refused'; reason: RecoveryRefusal }  // a rejoin refused by policy (D6)
@@ -297,6 +298,11 @@ export type Outcome = { id: string; opID: string | null; at: number } & (
   up later as fork evidence on this device. So a host may re-enact a `lost` operation, and its
   `build` must refuse a target that is already in the wanted state (already a member, already
   removed) as `rejected`.
+- **`landed` and "lands once" are branch-relative too.** Against an honest hub, rebuild-and-retry
+  (step 3) never lands one intent twice. Against a hostile hub, a hidden first acceptance on another
+  branch and the rebuilt commit here can both land. The target guard covers invites and removals; a
+  ledger operation, where enacting twice is meaningful (`mls/src/group-commit.ts:174-177`), has no
+  such guard. The crash rows assert "lands once" against an honest hub only.
 
 ### D4. Welcome obligations
 
@@ -377,48 +383,69 @@ export type Outcome = { id: string; opID: string | null; at: number } & (
   - the peer then writes the `applied` row, the cursor and `receiptAck = adoptionID` in one
     `apply`, and adopts nothing else until that `apply` has committed. At most one adoption is ever
     unrecorded;
-  - **reconciliation** runs at `start`, before anchor resolution, classification or replay, and
-    also before the next adoption whenever a live bookkeeping `apply` failed. It compares the
-    receipt's `adoptionID` with `receiptAck`. Epoch numbers are not compared: a self-removal keeps its epoch,
-    and a fork-healing rejoin can land on an epoch number already recorded
-    (`rpc/src/peer.ts:2591-2592`). If they differ:
-    - `commit`: in one `apply`, write the row, the cursor and `receiptAck`; turn an `accepted`
-      operation with the same `payloadDigest` into `landed`; for `external: true`, write the
-      `ExternalResponse` `applied` with `epochAfter`, which confirmation requests need and which a
-      later pull cannot rebuild once the cursor has passed the frame (`rpc/src/peer.ts:968, 1511`).
-      Then rebuild the runtime, and for `removed: true` run today's removal path;
-    - `recovery`: the rejoin record named by `rejoinID`, still at `confirmed`, moves to `adopted` in
-      the same `apply`, before D6 replay can run its source re-check. The pending anchor rotation is
-      then completed as landed (`resolveAnchorRotation`, as `advanceHandle` does today,
-      `rpc/src/peer.ts:1197`), clearing `anchorRecoveryPending`, and the runtime is rebuilt, all
-      before bootstrap.
-  - **Startup order:** load control and the receipt; reconcile; resolve the anchor
-    (`rpc/src/peer.ts:2783`); restore the holds; replay operations and the rejoin; start delivery.
-    Today startup resolves the anchor first, which would call `requireAnchorRecovery` for a
-    same-number rejoin whose save had in fact committed (`rpc/src/peer.ts:425`).
+  - **reconciliation** has two parts.
+    - **Bookkeeping** runs at `start`, and at the beginning of every lane task, before
+      classification, skips, replay, adoption or any cursor write. A pull that adopts nothing still
+      classifies frames and moves the cursor (`rpc/src/peer.ts:1452-1484`), so "before the next
+      adoption" is too late: a missing row hides a competitor at that epoch, and a cursor already
+      past the receipt's position would regress. It compares the receipt's `adoptionID` with
+      `receiptAck`; epoch numbers are not compared, since a self-removal keeps its epoch and a
+      fork-healing rejoin can land on an epoch number already recorded (`rpc/src/peer.ts:2591-2592`).
+      If they differ, one `apply` writes the `applied` row, the cursor and `receiptAck`, plus:
+      - `commit`: an `accepted` operation with the same `payloadDigest` becomes `landed`; for
+        `external: true`, the `ExternalResponse` `applied` with `epochAfter`, which confirmation
+        requests need and which a later pull cannot rebuild once the cursor has passed the frame
+        (`rpc/src/peer.ts:968, 1511`);
+      - `recovery`: the rejoin record named by `rejoinID`, still at `confirmed`, moves to `adopted`,
+        before D6 replay can run its source re-check.
+    - **Effects** are keyed on the receipt and on their own state, never on `receiptAck`, so a crash
+      after the bookkeeping `apply` and before the effect repeats the effect on restart:
+      - `removed: true` and the group still held: run today's removal path. Removal is detected live
+        by a roster transition (`rpc/src/peer.ts:1186-1191`), which a restart no longer sees;
+      - `kind: 'recovery'` and an anchor rotation still pending for that rejoin: complete it as
+        landed (`resolveAnchorRotation`, as `advanceHandle` does, `rpc/src/peer.ts:1197`), clearing
+        `anchorRecoveryPending`;
+      - then rebuild the runtime.
+  - **Startup order:**
+    1. load the anchor store, `ControlStore` and the receipt;
+    2. reconcile (bookkeeping, then effects);
+    3. resolve the anchor (`rpc/src/peer.ts:2783`). Today this runs first, and would call
+       `requireAnchorRecovery` for a same-number rejoin whose save had in fact committed
+       (`rpc/src/peer.ts:425`);
+    4. restore pending app records (`restorePending`), so replay drains them;
+    5. initialise and subscribe the control topics (`rpc/src/peer.ts:1723-1756`);
+    6. restore the holds;
+    7. replay operations and the rejoin. Rejoin replay is exempt from the anchor-recovery gate that
+       `initControlLanes` and `walkCommits` apply today (`rpc/src/peer.ts:1239, 1729`);
+    8. start background delivery. The synchronous drain inside `advanceHandle`
+       (`rpc/src/peer.ts:1161`) is unchanged.
 - **Fork window.**
   - The window covers 64 epochs.
   - A forked frame older than the window classifies as `history`. That is an accepted blind spot: the
     device stays on its branch until other evidence (`ahead`, a gap) strands it.
 - **Stranding** writes `cursor.stranded = true`, and for a lost fork `cursor.fork` (the
-  `ForkEvidence`: the losing frame's epoch, the last shared position and the competing frame's
-  digest), in one `apply` with the durable position unchanged, as `persistStrand` does today (`rpc/src/peer.ts:704-715`). It holds sends, as today's strand hold
-  in `held()` (`rpc/src/peer.ts:586-594`), and requests a heal.
-- **Losing a fork at epoch `E`** (`forkEpoch` from `cursor.fork`) is resolved by a rejoin (D6).
-  Settlement needs no winner history, which the recovery candidate does not carry
-  (`mls-rpc/src/recovery.ts:39-46`) and log presence cannot establish (refused, poison and superseded
-  frames share framed epochs, `rpc/src/peer.ts:1539, 1563`). It rests on MLS binding every commit to
-  its parent state: a commit built on one branch is rejected by every member on another, through the
-  sender-data AEAD or membership tag, the `GroupContext`-bound signature, and the confirmation tag
-  (`ts-mls/dist/src/messageProtection.js:102, 122`, `messageProtectionPublic.js:87-93`,
-  `processMessages.js:192-199`). The rejoin's final `apply`:
-  - every losing `applied` row (framed epoch at or above `E`) that carries an `opID`, and every
-    operation still `accepted` whose `built.epoch` is at or above `E`: `reverted`. Its parent state
-    is on the losing branch, so no winning member can have applied it;
-  - every operation still `accepted` whose `built.epoch` is below `E`: `landed` if an `applied` row
-    on the current chain carries its `digest`, otherwise `unknown`;
-  - `deleteAppliedFrom: E`. No winner rows are written; rows resume with the rejoin's own adoption.
-    Fork classification below the rejoin epoch is lost for that range, as for the 64-epoch window.
+  `ForkEvidence`: the conflicting frame's epoch, the last shared position and the competing frame's
+  digest), in one `apply` with the durable position unchanged, as `persistStrand` does today
+  (`rpc/src/peer.ts:704-715`). It holds sends, as today's strand hold in `held()`
+  (`rpc/src/peer.ts:586-594`), and requests a heal.
+- **Fork evidence triggers a heal; it proves nothing.** Below the current epoch the classifier rests
+  on a cleartext framed epoch, a digest of hub-supplied bytes and sequence order, with no
+  authenticated committer (`rpc/src/classify.ts:259-283`, `mls/src/group-handle.ts:1363-1381`). A
+  hostile hub can forge it. The conflict epoch `E` is where a competitor was seen, not where the
+  branches diverged: the classifier flags whichever epoch has a row, and divergence may lie lower.
+  At the divergence epoch both commits share a parent, so a commit this device built there may be
+  the winner. Neither MLS parent binding nor a log scan settles which commits won.
+- **Fork settlement**, in the rejoin's final `apply` (D6), therefore asserts nothing it cannot prove:
+  - every operation still `accepted`, and every `applied` row at or above `E` that carries an
+    `opID`: `unknown`. For a row, this follows the `landed` written at adoption, which was relative
+    to the branch then followed (D3);
+  - `deleteAppliedFrom: E`, then the rejoin's own row is put back. Deletes run before puts in one
+    `apply` (D2), so the rejoin row survives even when its framed epoch is at or above `E`.
+    Rows below `E` are kept and not re-reported. Divergence below the detected epoch is the same
+    accepted blind spot as the 64-epoch window;
+  - the authoritative answer is the rejoined state itself: its authenticated roster for invites and
+    removals, and `reenact` (D6) for ledger tokens. A host re-enacts an `unknown` operation, and the
+    `build` target guard (D3) refuses one that already holds.
 - **Cursor.** The commit cursor moves into `ControlStore` and advances in the same `apply` as the
   `applied` row or skip it records. Only a recorded adoption or skip moves it, so it never regresses.
 
@@ -448,8 +475,8 @@ export type RejoinRecord = {
   digest: string; epochAfter: number
   /** Ledger tokens held before the rejoin, for `reenact`. */
   ledgerBefore: Array<string>
-  /** The lowest losing-branch epoch, when the rejoin heals a fork. */
-  forkEpoch: number | null
+  /** `ForkEvidence.conflictEpoch`, when the rejoin heals a detected fork (D5). */
+  conflictEpoch: number | null
   position?: LogPosition
   verdict?: Uint8Array
   /** Set with stage `refused`. */
@@ -464,8 +491,8 @@ export type RejoinRecord = {
 | (none) | — | start a rejoin only when evidence calls for one |
 | `built` | before publishing the external commit | republish the stored `payload` under the same ID. Accepted or deduplicated: `published`. Head mismatch: search the log for `payloadDigest`; found means `published` at that position; absent from the branch served means delete the record and start afresh (relative to that branch, as `lost` in D3) |
 | `published` | publish accepted | re-send the confirmation request with the stored `request`, and open verdicts with `requestKey`. Authoritative confirm: `confirmed`. Authoritative refusal requiring renewal: delete the record and start a fresh rejoin with renewal. Refusal by policy or as invalid: write stage `refused` with its reason and a `refused` outcome in one `apply`. Authoritative `superseded`: discard the candidate, delete the record and start a fresh rejoin from fresh GroupInfo, as today (`rpc/src/peer.ts:2550-2551`, `tests/integration/test/recovery-confirmation.test.ts:438`). `unconfirmed` or deadline: delete the record and start a fresh rejoin; the orphan leaf is replaced, as today (`tests/integration/test/recovery-confirmation.test.ts:306`) |
-| `confirmed` | verdict verified | D5 receipt reconciliation runs first, and moves the record to `adopted` if its adoption already committed. Otherwise **re-check**: the current state must still equal `source` (epoch, authenticator, lineage), no adoption may be pending, and the log must show no adoptable commit after `source.head`. `source.head` is the in-memory reconciled head at rejoin build (`rpc/src/peer.ts:2460`), persisted because a strand keeps the durable cursor behind it (`rpc/src/peer.ts:716`). After a restart the peer pulls from `source.head`: frames this rejoin's own external commit, and frames the reader skips without adoption (malformed, refused, superseded, `rpc/src/peer.ts:1539, 1563`), do not fail the check. Any other commit frame does, as today's equality check (`rpc/src/peer.ts:2563-2571`). A retention gap after `source.head` also fails it. If not, the candidate is **invalidated**: delete the record and start a fresh rejoin only if evidence still calls for one. Otherwise `restoreRecovery(candidate, requestKey).onAccepted()`, idempotent by `epochAuthenticator`. Adoption uses the recovery identity (`epochAfter`, `forced: true`, `recovery: true`, `rpc/src/peer.ts:2607`) and writes the D5 receipt. Then `adopted` |
-| `adopted` | host replace done, or receipt reconciled (D5) | bootstrap the ledger, then one `apply`: `reenact` outcomes for `ledgerBefore` tokens missing from the group ledger; fork settlement from `forkEpoch` (D5); clear `stranded`; delete the record |
+| `confirmed` | verdict verified | D5 receipt reconciliation runs first, and moves the record to `adopted` if its adoption already committed. Otherwise **re-check**, read-only and exempt from the anchor-recovery gate: the current state must still equal `source` (epoch, authenticator, lineage), and no adoption may be pending. `source.head` is the in-memory reconciled head at rejoin build (`rpc/src/peer.ts:2460`), persisted because a strand keeps the durable cursor behind it (`rpc/src/peer.ts:716`). The peer then scans the log from `source.head` without adopting, and the check **fails iff** it finds a retention gap, or a commit frame framed at `source.epoch` that is neither this rejoin's own external commit, nor unparseable, nor covered by a recorded `ExternalResponse`. Frames framed above `source.epoch` cannot move the source and pass. This is conservative: a parseable frame that MLS would later refuse still fails the check, which costs one fresh rejoin, never an unsafe install, as today's equality check (`rpc/src/peer.ts:2563-2571`). On failure, the candidate is **invalidated**: delete the record and start a fresh rejoin only if evidence still calls for one. Otherwise `restoreRecovery(candidate, requestKey).onAccepted()`, idempotent by `epochAuthenticator`. Adoption uses the recovery identity (`epochAfter`, `forced: true`, `recovery: true`, `rpc/src/peer.ts:2607`) and writes the D5 receipt. Then `adopted` |
+| `adopted` | host replace done, or receipt reconciled (D5) | bootstrap the ledger, then one `apply`: `reenact` outcomes for `ledgerBefore` tokens missing from the group ledger; fork settlement from `conflictEpoch` (D5), its row deletion and the rejoin row's re-put in this same `apply`; clear `stranded`; delete the record |
 | `refused` | policy or invalid refusal | terminal and durable: sends stay held and no automatic rejoin starts, across restarts and after the outcome is acked. Cleared only by the host calling `recover()`, which deletes the record and starts a fresh rejoin. Today's latch is memory-only (`rpc/src/peer.ts:758, 2356`) |
 
 **Rules:**
@@ -517,13 +544,13 @@ drops all memory.
 | incoming adoption saved, before `applied` apply | MLS state save (state and receipt) | after | receipt reconciled: `applied` row and cursor written before classification; a competing frame at that epoch classifies as a fork |
 | same-number adoption saved, before `applied` apply | MLS state save after a self-removal, or a fork-healing rejoin to a recorded epoch number | after | `adoptionID` differs from `receiptAck`: reconciled, never skipped |
 | responder refusal, before cursor skip | MLS verdict sent | after | the refusal is judged again and recorded once with its reason |
-| strand and fork evidence written, before rejoin `built` | `apply` with `stranded` and `fork` | after | rejoin starts from the stored evidence; settlement uses `forkEpoch` even if the competing frame is never served again |
+| strand and fork evidence written, before rejoin `built` | `apply` with `stranded` and `fork` | after | rejoin starts from the stored evidence; settlement uses `conflictEpoch` even if the competing frame is never served again |
 | external commit adopted, before responder bookkeeping | MLS state save (receipt `external: true`) | after | reconciliation writes `applied`, cursor and the `ExternalResponse` together; a confirmation request is answered |
 | same-number rejoin saved, before anchor resolution | host replace (state and receipt) | after | reconciliation completes the anchor rotation; no `requireAnchorRecovery`, sends resume |
 | self-removal saved, before host deletion | MLS state save (receipt `removed: true`) | after | removal path runs once |
 | ledger bootstrapped, before final rejoin `apply` | `bootstrapLedger` | after | bootstrap is idempotent; `reenact` and settlement written once |
 | Welcome accepted by transport, before obligation deletion | `deliverWelcome` | after | delivered again (at least once); the invitee answers `alreadyJoined` |
-| bookkeeping `apply` fails live, no restart | `apply` after an adoption | failure injected | the next lane task reconciles before adopting again |
+| bookkeeping `apply` fails live, no restart | `apply` after an adoption | failure injected | the next lane task reconciles before anything else |
 | ambiguous `apply` at acceptance and at receipt ack | `apply` | commit then reject | `lastMutation()` resolves it; one `accepted`, one row |
 | Welcome obligation, before delivery | `apply` with `putWelcomes` | after | delivered |
 | invitee joined, before consume | host save of the joined group | after | consumed on start; repeat Welcome is `alreadyJoined` |
@@ -536,7 +563,11 @@ drops all memory.
 | rejoin state saved, before `adopted` | host replace (state and receipt) | after | receipt moves the record to `adopted`; bootstrap, `reenact` and fork settlement run; never invalidated |
 | rejoin refused by policy, restart, outcome acked | `apply` with `refused` | after | sends stay held and no rejoin starts until `recover()` |
 | rejoin adopted, before bootstrap | host replace | after | bootstrap, `reenact` computed from `ledgerBefore` |
-| fork loser, restart, winner shown | `applied` rows on disk | — | fork detected; `reverted` and `reenact` outcomes |
+| fork loser, restart, winner shown | `applied` rows on disk | — | fork detected; `unknown` and `reenact` outcomes |
+| receipt acked, removal unfinished | bookkeeping `apply` after a self-removal | after | `removed: true` with the group still held: removal path runs |
+| recovery receipt acked, anchor unfinished | bookkeeping `apply` for a same-number rejoin | after | the pending rotation completes from the receipt; no `requireAnchorRecovery` |
+| rejoin final `apply`, rejoin row at or above `E` | final rejoin `apply` | after | losing rows deleted, the rejoin's own row kept |
+| bookkeeping `apply` fails live, then a pull that adopts nothing | `apply` after an adoption | failure injected | reconciled before classification; a competitor at the receipt's epoch classifies as a fork; the cursor never regresses |
 
 ## Conformance and tests
 
@@ -552,12 +583,16 @@ drops all memory.
 | `mls-hub` | `consume` atomic (pool store and bundle source) | failure mid-`consume`: the package survives and no receipt exists |
 | | re-admission | a held group at `E`, a last-resort Welcome at `E + 3`: replaced; a Welcome at `E`: `alreadyJoined` |
 | peer crash tests | every row of the crash-seam table | as stated |
-| | Codex r4 blockers | a hub that re-wraps our commit with corrupted bodies never clears an operation; a hub fork accepting our invite on the losing branch gives `reverted`; a crash after rejoin publish never adopts without confirmation; a `built` operation at a moved epoch resolves instead of throwing |
-| | `moved` | an operation accepted on a losing branch while the state follows the winner: no `applied` row, no cursor move, outcome `reverted` after the rejoin |
+| | Codex r4 blockers | a hub that re-wraps our commit with corrupted bodies never clears an operation; a hub fork accepting our invite on the losing branch gives `unknown`, and the rejoined roster decides; a crash after rejoin publish never adopts without confirmation; a `built` operation at a moved epoch resolves instead of throwing |
+| | `moved` | an operation accepted on a losing branch while the state follows the winner: no `applied` row, no cursor move, outcome `unknown` after the rejoin |
 | | rejected revoke | a revoke whose `build` is refused lifts the hold; queued entries publish |
 | | revoke hold | no retained log submission is handed to the hub between a revoke's enqueue and its outcome, across restart, except those already handed off before the hold, which `settleLogSubmissions` drains first |
 | | two revokes | settling the first keeps the hold while the second is unsettled |
-| | fork settlement | an operation built at or above `forkEpoch` gives `reverted` without reading the log; one built below it and absent from the current chain gives `unknown` |
+| | fork settlement | every `accepted` operation and every row at or above `conflictEpoch` with an `opID` gives `unknown`; no `reverted` exists |
+| | winner at divergence | our commit wins at `E` while a competitor is adopted: never reported as reverted |
+| | late-revealed divergence | divergence at `E`, competitor first seen at `E + 3`: rows below `E + 3` are not re-reported (documented blind spot) |
+| | forged conflict | a hub serves a parseable fake commit at a lower position: the device heals, and no outcome is asserted from the evidence |
+| | source re-check | a winner's successor framed above `source.epoch` passes; a parseable unrecorded frame at `source.epoch` fails |
 | | refused rejoin | a policy refusal writes `refused` and keeps sends held; a renewal refusal starts a fresh rejoin |
 | integration | `recovery-confirmation` suite unchanged and green | |
 | | requester restart | restart between external publish and confirmation: one leaf, adoption after confirmation |
@@ -621,7 +656,10 @@ Reconciled API by API:
 - **Responder confirmation window.** Resumed confirmation works only while some member is still at
   the candidate's epoch. Past that it degrades to today's orphan-and-rejoin.
 - **64-epoch fork window.** An older fork goes undetected until other evidence strands the device.
-- **`lost` against a hostile hub** is relative to the branch served; global absence is not provable.
+- **`lost`, `landed` and "lands once" against a hostile hub** are relative to the branch served.
+  Global absence or uniqueness is not provable; a ledger operation can land on two branches.
+- **Fork outcomes are `unknown`.** Hosts read the rejoined roster and `reenact` for the truth. A
+  forged conflict costs a heal, never a false outcome.
 - **Revoke publish window.** A publish already in flight when the hold is set can still reach the
   member being removed, as today.
 
@@ -651,3 +689,20 @@ Reconciled API by API:
     - every request-key reader moves to the record;
     - one head-mismatch rule;
     - eight crash seams added.
+- **r2, Codex (blind), 2026-10-08.** Five blockers and one high finding. A Claude agent confirmed
+  the five and found the sixth partial, refuting none.
+  - Blockers:
+    - fork settlement could mark the winner `reverted`. At the divergence epoch both commits share a
+      parent, and the conflict epoch is not the divergence point. `reverted` is gone; fork-touched
+      operations settle as `unknown`, and the rejoined state is the authority;
+    - a hostile hub could forge fork evidence below the current epoch. Evidence now triggers a heal
+      only, never an outcome;
+    - an acked receipt skipped unfinished removal or anchor repair. Effects now key on the receipt
+      and their own state, not on `receiptAck`;
+    - the recovery branch skipped the row, cursor and ack, and `deleteAppliedFrom` would delete the
+      rejoin's row. Both branches share one bookkeeping `apply`; deletes run before puts;
+    - live reconciliation ran too late. It now runs at the start of every lane task.
+  - The source re-check now has an exact, read-only predicate; conservative invalidation is an
+    accepted cost.
+  - Notes: explicit startup order (anchor load, `restorePending`, subscribe, gate exemption);
+    "lands once" is honest-hub only; six crash and test rows added.
