@@ -6,14 +6,16 @@ import {
   createKeyPackageBundle,
   decodeKeyPackage,
   encodeKeyPackage,
+  type GroupHandle,
   type Invite,
   keyPackageRef,
   ledgerEntryDigest,
   welcomeKeyPackageRefs,
 } from '@kumiai/mls'
-import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 
-import { processWelcomeFromSources } from '../src/join.js'
+import { judgeWelcomeAdmission } from '../src/admission.js'
+import { openWelcome } from '../src/join.js'
 import { createKeyPackagePool } from '../src/pool.js'
 import { createMemoryKeyPackagePoolStore } from '../src/pool-store.js'
 import { createLastResortProvisioner } from '../src/provisioner.js'
@@ -104,10 +106,11 @@ async function inviteAStranger(): Promise<InviteAndCommit> {
   return await inviteWith(stranger.id, encodeKeyPackage(bundle.publicPackage))
 }
 
-describe('processWelcomeFromSources', () => {
-  test('joins with the ordinary bundle the Welcome names, and releases it', async () => {
+describe('openWelcome', () => {
+  test('opens without consuming, then the host saves before consume', async () => {
     const store = createMemoryKeyPackagePoolStore()
     const pool = createKeyPackagePool({
+      sourceID: 'ordinary',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -116,83 +119,33 @@ describe('processWelcomeFromSources', () => {
     })
     await pool.ensureStocked().value
     const { welcome, invite, ratchetTree, usedRef } = await inviteFromPool()
-
-    const result = await processWelcomeFromSources({
+    const result = await openWelcome([pool], {
       identity: hub.identity,
       invite,
       welcome,
       ratchetTree,
-      sources: [pool],
     })
+    if (!('joined' in result)) throw new Error('Expected a new join')
+    expect(result.joined.group.groupID).toBe(invite.groupID)
+    expect(result.joinRef).toEqual({ sourceID: 'ordinary', ref: usedRef })
+    expect((await store.list(hub.identity.id)).map((entry) => entry.ref)).toContain(usedRef)
+    expect(await pool.receipt(usedRef)).toBeNull()
 
-    expect(result.group).toBeDefined()
-    expect(result.releaseError).toBeUndefined()
-    // A single-use private half is gone once its Welcome is processed. That deletion is the whole
-    // forward-secrecy point of replenishing the pool at all.
+    const saved = new Map<string, { group: GroupHandle; joinRef: typeof result.joinRef }>()
+    saved.set(result.joined.group.groupID, { group: result.joined.group, joinRef: result.joinRef })
+    await pool.consume(result.joinRef.ref, result.joined.group.groupID)
+    expect(saved.get(invite.groupID)?.joinRef).toEqual(result.joinRef)
     expect((await store.list(hub.identity.id)).map((entry) => entry.ref)).not.toContain(usedRef)
-  })
-
-  test('retains a last-resort bundle after its Welcome', async () => {
-    const store = createMemoryLastResortStore()
-    const provisioner = createLastResortProvisioner({
-      identity: hub.identity,
-      client: hub.client,
-      store,
-    })
-    const { ref } = await provisioner.ensureProvisioned().value
-    const { welcome, invite, ratchetTree } = await inviteFromLastResortSlot()
-
-    await processWelcomeFromSources({
-      identity: hub.identity,
-      invite,
-      welcome,
-      ratchetTree,
-      sources: [provisioner],
-    })
-
-    // Deleting it would make the owner silently unaddable forever — the outage the slot exists to
-    // prevent.
-    expect((await store.list(hub.identity.id)).map((entry) => entry.ref)).toContain(ref)
-  })
-
-  test('throws naming the refs sought when nothing matches', async () => {
-    const pool = createKeyPackagePool({
-      identity: hub.identity,
-      client: hub.client,
-      store: createMemoryKeyPackagePoolStore(),
-      target: 1,
-      lowWater: 1,
-    })
-    await pool.ensureStocked().value
-    const { welcome, invite, ratchetTree } = await inviteAStranger()
-
-    // Trying every bundle until one decrypts would turn "wrong Welcome" into a crypto error with no
-    // diagnosis; naming the refs says which package the sender expected. Pinning only the fixed
-    // wording would let the interpolated refs silently be dropped from the message, so this also
-    // requires the Welcome's own sought ref to actually appear in it.
-    const [sought] = welcomeKeyPackageRefs(welcome)
-    if (sought == null) throw new Error('test setup: the Welcome names no refs')
-
+    expect(await pool.receipt(usedRef)).toEqual({ groupID: invite.groupID })
     await expect(
-      processWelcomeFromSources({
-        identity: hub.identity,
-        invite,
-        welcome,
-        ratchetTree,
-        sources: [pool],
-      }),
-    ).rejects.toThrow(new RegExp(`no retained key package matches.*${escapeRegExp(sought)}`))
+      openWelcome([pool], { identity: hub.identity, invite, welcome, ratchetTree }),
+    ).resolves.toEqual({ alreadyJoined: invite.groupID })
   })
 
-  test('a failed release surfaces on the result rather than failing the join', async () => {
-    const inner = createMemoryKeyPackagePoolStore()
-    const store = {
-      ...inner,
-      delete: vi.fn(async () => {
-        throw new Error('store offline')
-      }),
-    }
+  test('a failed host save leaves a Welcome retryable', async () => {
+    const store = createMemoryKeyPackagePoolStore()
     const pool = createKeyPackagePool({
+      sourceID: 'ordinary',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -200,57 +153,50 @@ describe('processWelcomeFromSources', () => {
       lowWater: 1,
     })
     await pool.ensureStocked().value
-    const { welcome, invite, ratchetTree } = await inviteFromPool()
-
-    const result = await processWelcomeFromSources({
-      identity: hub.identity,
-      invite,
-      welcome,
-      ratchetTree,
-      sources: [pool],
-    })
-
-    // The join succeeded and the caller must get their group; the undeleted private half is a real
-    // problem they still need told about, so it rides a separate channel.
-    expect(result.group).toBeDefined()
-    expect(result.releaseError?.message).toMatch(/store offline/)
+    const welcome = await inviteFromPool()
+    const result = await openWelcome([pool], { identity: hub.identity, ...welcome })
+    if (!('joined' in result)) throw new Error('Expected a new join')
+    const save = async () => {
+      throw new Error('host save failed')
+    }
+    await expect(save()).rejects.toThrow('host save failed')
+    expect(await pool.receipt(result.joinRef.ref)).toBeNull()
+    const retry = await openWelcome([pool], { identity: hub.identity, ...welcome })
+    expect('joined' in retry && retry.joined.group.groupID).toBe(result.joined.group.groupID)
   })
 
-  test('a release rejecting with a non-Error value is still wrapped as an Error', async () => {
+  test('a consume failure propagates after the group is saved', async () => {
     const inner = createMemoryKeyPackagePoolStore()
-    const store = {
-      ...inner,
-      // A store implementation is free to reject with anything; the wrapper must not assume Error.
-      delete: vi.fn(async () => {
-        throw 'store offline: not an Error instance'
-      }),
-    }
     const pool = createKeyPackagePool({
+      sourceID: 'ordinary',
       identity: hub.identity,
       client: hub.client,
-      store,
+      store: {
+        ...inner,
+        consume: async () => {
+          throw new Error('store offline')
+        },
+      },
       target: 1,
       lowWater: 1,
     })
     await pool.ensureStocked().value
-    const { welcome, invite, ratchetTree } = await inviteFromPool()
-
-    const result = await processWelcomeFromSources({
-      identity: hub.identity,
-      invite,
-      welcome,
-      ratchetTree,
-      sources: [pool],
-    })
-
-    expect(result.group).toBeDefined()
-    expect(result.releaseError).toBeInstanceOf(Error)
-    expect(result.releaseError?.message).toMatch(/store offline: not an Error instance/)
+    const welcome = await inviteFromPool()
+    const result = await openWelcome([pool], { identity: hub.identity, ...welcome })
+    if (!('joined' in result)) throw new Error('Expected a new join')
+    const saved = { group: result.joined.group, joinRef: result.joinRef }
+    await expect(pool.consume(saved.joinRef.ref, saved.group.groupID)).rejects.toThrow(
+      'store offline',
+    )
+    expect(saved.group.groupID).toBe(welcome.invite.groupID)
+    expect(await pool.receipt(saved.joinRef.ref)).toBeNull()
+    expect(await inner.list(hub.identity.id)).toHaveLength(1)
   })
 
-  test('scans past a source that does not match before checking one that does', async () => {
+  test('scans past an unmatched source before opening the last-resort Welcome', async () => {
     const poolStore = createMemoryKeyPackagePoolStore()
     const pool = createKeyPackagePool({
+      sourceID: 'ordinary',
       identity: hub.identity,
       client: hub.client,
       store: poolStore,
@@ -258,108 +204,106 @@ describe('processWelcomeFromSources', () => {
       lowWater: 2,
     })
     await pool.ensureStocked().value
-    const lastResortStore = createMemoryLastResortStore()
+    const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      sourceID: 'fallback',
       identity: hub.identity,
       client: hub.client,
-      store: lastResortStore,
+      store,
     })
     const { ref } = await provisioner.ensureProvisioned().value
-    const poolRefsBefore = (await poolStore.list(hub.identity.id)).map((entry) => entry.ref)
+    const before = await poolStore.list(hub.identity.id)
+    const welcome = await inviteFromLastResortSlot()
+    const result = await openWelcome([pool, provisioner], { identity: hub.identity, ...welcome })
+    if (!('joined' in result)) throw new Error('Expected a new join')
+    expect(result.joinRef).toEqual({ sourceID: 'fallback', ref })
+    expect(result.joined.group.groupID).toBe(welcome.invite.groupID)
+    await provisioner.consume(ref, result.joined.group.groupID)
+    expect((await store.list(hub.identity.id)).map((entry) => entry.ref)).toContain(ref)
+    expect(await poolStore.list(hub.identity.id)).toEqual(before)
+  })
 
-    // The Welcome names the PROVISIONER's bundle, not any of the pool's. A `[x].slice(0, 1)`-style
-    // regression that only ever checks the first source would report no match here.
-    const { welcome, invite, ratchetTree } = await inviteFromLastResortSlot()
-
-    const result = await processWelcomeFromSources({
+  test('last-resort repeats reopen for admission after consume', async () => {
+    const store = createMemoryLastResortStore()
+    const provisioner = createLastResortProvisioner({
+      sourceID: 'fallback',
       identity: hub.identity,
-      invite,
-      welcome,
-      ratchetTree,
-      sources: [pool, provisioner],
+      client: hub.client,
+      store,
     })
+    const { ref } = await provisioner.ensureProvisioned().value
+    const welcome = await inviteFromLastResortSlot()
+    const first = await openWelcome([provisioner], { identity: hub.identity, ...welcome })
+    if (!('joined' in first)) throw new Error('Expected a new join')
+    await provisioner.consume(ref, first.joined.group.groupID)
+    const repeated = await openWelcome([provisioner], { identity: hub.identity, ...welcome })
+    if (!('joined' in repeated)) throw new Error('Expected a repeat to reach admission')
+    expect(
+      judgeWelcomeAdmission(
+        { epoch: Number(first.joined.group.epoch), deleted: false },
+        Number(repeated.joined.group.epoch),
+      ),
+    ).toBe('alreadyJoined')
+    const later = await inviteFromLastResortSlot()
+    const reopened = await openWelcome([provisioner], { identity: hub.identity, ...later })
+    if (!('joined' in reopened)) throw new Error('Expected another Welcome to open')
+    expect(reopened.joined.group.groupID).toBe(later.invite.groupID)
+    expect(await provisioner.receipt(ref)).toBeNull()
+  })
 
-    expect(result.group).toBeDefined()
-    expect(result.releaseError).toBeUndefined()
-    // Retained: the match came from the provisioner, whose release is a no-op.
-    expect((await lastResortStore.list(hub.identity.id)).map((entry) => entry.ref)).toContain(ref)
-    // Untouched: the pool was scanned (and skipped) but nothing in it matched, so nothing released.
-    expect((await poolStore.list(hub.identity.id)).map((entry) => entry.ref)).toEqual(
-      poolRefsBefore,
+  test('a corrupt pool does not block an independent fallback', async () => {
+    const poolStore = createMemoryKeyPackagePoolStore()
+    await poolStore.put(hub.identity.id, {
+      kind: 'ordinary',
+      ref: 'corrupt',
+      keyPackage: 'bad',
+      privatePackage: 'bad',
+      notAfter: 100,
+    })
+    const pool = createKeyPackagePool({
+      sourceID: 'ordinary',
+      identity: hub.identity,
+      client: hub.client,
+      store: poolStore,
+    })
+    const store = createMemoryLastResortStore()
+    const provisioner = createLastResortProvisioner({
+      sourceID: 'fallback',
+      identity: hub.identity,
+      client: hub.client,
+      store,
+    })
+    await provisioner.ensureProvisioned().value
+    const welcome = await inviteFromLastResortSlot()
+    const result = await openWelcome([pool, provisioner], { identity: hub.identity, ...welcome })
+    if (!('joined' in result)) throw new Error('Expected a new join')
+    expect(result.joined.sourceErrors).toHaveLength(1)
+    expect(result.joined.sourceErrors?.[0]?.message).toMatch(/did not decode/)
+    expect(result.joined.group.groupID).toBe(welcome.invite.groupID)
+  })
+
+  test('names sought refs and unreadable sources when nothing matches', async () => {
+    const store = createMemoryKeyPackagePoolStore()
+    await store.put(hub.identity.id, {
+      kind: 'ordinary',
+      ref: 'corrupt',
+      keyPackage: 'bad',
+      privatePackage: 'bad',
+      notAfter: 100,
+    })
+    const pool = createKeyPackagePool({
+      sourceID: 'ordinary',
+      identity: hub.identity,
+      client: hub.client,
+      store,
+    })
+    const welcome = await inviteAStranger()
+    const [sought] = welcomeKeyPackageRefs(welcome.welcome)
+    if (sought == null) throw new Error('Welcome names no refs')
+    await expect(openWelcome([pool], { identity: hub.identity, ...welcome })).rejects.toThrow(
+      new RegExp(
+        `no retained key package matches.*${escapeRegExp(sought)}.*source\\(s\\) could not be read.*did not decode`,
+      ),
     )
-  })
-
-  test('a corrupt pool record does not block a join via the provisioner fallback', async () => {
-    const poolStore = createMemoryKeyPackagePoolStore()
-    // A record that fails to round-trip: `pool.bundles()` throws loudly for it, same as
-    // `pool.test.ts`'s "throws on a record that does not round-trip" case.
-    await poolStore.put(hub.identity.id, {
-      kind: 'ordinary',
-      ref: 'corrupt',
-      keyPackage: 'not-a-key-package',
-      privatePackage: 'not-a-private-package',
-      notAfter: Math.floor(Date.now() / 1000) + 86_400,
-    })
-    const pool = createKeyPackagePool({
-      identity: hub.identity,
-      client: hub.client,
-      store: poolStore,
-      target: 1,
-      lowWater: 1,
-    })
-    const lastResortStore = createMemoryLastResortStore()
-    const provisioner = createLastResortProvisioner({
-      identity: hub.identity,
-      client: hub.client,
-      store: lastResortStore,
-    })
-    const { ref } = await provisioner.ensureProvisioned().value
-    const { welcome, invite, ratchetTree } = await inviteFromLastResortSlot()
-
-    const result = await processWelcomeFromSources({
-      identity: hub.identity,
-      invite,
-      welcome,
-      ratchetTree,
-      sources: [pool, provisioner],
-    })
-
-    // The corrupt record aborted only the pool's own scan; the provisioner was still reached and
-    // the join went through — the whole point of isolating each source.
-    expect(result.group).toBeDefined()
-    expect(result.sourceErrors).toHaveLength(1)
-    expect(result.sourceErrors?.[0]?.message).toMatch(/did not decode/)
-    expect((await lastResortStore.list(hub.identity.id)).map((entry) => entry.ref)).toContain(ref)
-  })
-
-  test('names a source that could not be read when nothing matches at all', async () => {
-    const poolStore = createMemoryKeyPackagePoolStore()
-    await poolStore.put(hub.identity.id, {
-      kind: 'ordinary',
-      ref: 'corrupt',
-      keyPackage: 'not-a-key-package',
-      privatePackage: 'not-a-private-package',
-      notAfter: Math.floor(Date.now() / 1000) + 86_400,
-    })
-    const pool = createKeyPackagePool({
-      identity: hub.identity,
-      client: hub.client,
-      store: poolStore,
-      target: 1,
-      lowWater: 1,
-    })
-    const { welcome, invite, ratchetTree } = await inviteAStranger()
-
-    // "No bundle matched" and "a store could not be read" are different problems; hiding the
-    // second would send the caller looking for a Welcome mismatch that does not exist.
-    await expect(
-      processWelcomeFromSources({
-        identity: hub.identity,
-        invite,
-        welcome,
-        ratchetTree,
-        sources: [pool],
-      }),
-    ).rejects.toThrow(/source\(s\) could not be read.*did not decode/)
   })
 })

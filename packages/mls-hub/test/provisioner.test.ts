@@ -27,6 +27,7 @@ describe('ensureProvisioned', () => {
     const store = createMemoryLastResortStore()
     const upload = vi.spyOn(hub.client, 'uploadLastResortKeyPackage')
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -59,6 +60,7 @@ describe('ensureProvisioned', () => {
   test('a second call inside the validity window uploads nothing', async () => {
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -82,6 +84,7 @@ describe('ensureProvisioned', () => {
     const store = createMemoryLastResortStore()
     const upload = vi.spyOn(hub.client, 'uploadLastResortKeyPackage')
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -116,6 +119,7 @@ describe('ensureProvisioned', () => {
       uploadedAt: null,
     })
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -139,6 +143,7 @@ describe('ensureProvisioned', () => {
   test('repairs a slot the hub lost', async () => {
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -170,6 +175,7 @@ describe('an interrupted provision', () => {
   test('is resumed by uploading the pending record, not by minting', async () => {
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -210,6 +216,7 @@ describe('an interrupted provision', () => {
   test('re-uploading an already-served package is a no-op on the slot', async () => {
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -241,6 +248,7 @@ describe('an interrupted provision', () => {
     const store = createMemoryLastResortStore()
     vi.spyOn(hub.client, 'uploadLastResortKeyPackage').mockRejectedValue(new Error('hub refused'))
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -263,6 +271,7 @@ describe('an interrupted provision', () => {
       .spyOn(hub.client, 'uploadLastResortKeyPackage')
       .mockRejectedValueOnce(new Error('offline'))
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -289,6 +298,7 @@ describe('a store failure on the confirming write', () => {
     const inner = createMemoryLastResortStore()
     const storeError = new Error('disk full')
     const store: LastResortStore = {
+      ...inner,
       list: (ownerDID) => inner.list(ownerDID),
       delete: (ownerDID, ref) => inner.delete(ownerDID, ref),
       // The mint's put has `uploadedAt: null`; only the confirming write that follows a successful
@@ -297,6 +307,7 @@ describe('a store failure on the confirming write', () => {
         record.uploadedAt == null ? inner.put(ownerDID, record) : Promise.reject(storeError),
     }
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -320,6 +331,7 @@ describe('rotation and retention', () => {
   test('a package inside the rotation window is replaced, and the old one is kept', async () => {
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -361,6 +373,7 @@ describe('rotation and retention', () => {
   test('a package one day inside the rotation window is rotated', async () => {
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -382,6 +395,7 @@ describe('rotation and retention', () => {
   test('a package just outside the rotation window is left alone', async () => {
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -401,6 +415,7 @@ describe('rotation and retention', () => {
   test('rotateWithinDays is honoured when overridden', async () => {
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -424,6 +439,7 @@ describe('rotation and retention', () => {
   test('a record past its lifetime plus the grace is pruned', async () => {
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -457,6 +473,7 @@ describe('rotation and retention', () => {
   test('a record six days past its lifetime is kept', async () => {
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -487,6 +504,7 @@ describe('rotation and retention', () => {
   test('a record inside the retention grace is kept', async () => {
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -516,6 +534,7 @@ describe('rotation and retention', () => {
   test('retainAfterExpiryDays is honoured when overridden', async () => {
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -547,6 +566,7 @@ describe('rotation and retention', () => {
   test('an expired package is rotated rather than reported as fine', async () => {
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -607,6 +627,7 @@ describe('rotation and retention', () => {
 
     try {
       const provisioner = createLastResortProvisioner({
+        sourceID: 'last-resort',
         identity: hub.identity,
         client: hub.client,
         store,
@@ -679,6 +700,7 @@ describe('the options passthrough', () => {
     const calls: Array<number> = []
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -710,6 +732,7 @@ describe('option validation', () => {
   test('rotateWithinDays of 0 is rejected', () => {
     expect(() =>
       createLastResortProvisioner({
+        sourceID: 'last-resort',
         identity: hub.identity,
         client: hub.client,
         store: createMemoryLastResortStore(),
@@ -728,6 +751,7 @@ describe('option validation', () => {
   test('a negative rotateWithinDays is rejected', () => {
     expect(() =>
       createLastResortProvisioner({
+        sourceID: 'last-resort',
         identity: hub.identity,
         client: hub.client,
         store: createMemoryLastResortStore(),
@@ -742,6 +766,7 @@ describe('option validation', () => {
   test('a NaN rotateWithinDays is rejected', () => {
     expect(() =>
       createLastResortProvisioner({
+        sourceID: 'last-resort',
         identity: hub.identity,
         client: hub.client,
         store: createMemoryLastResortStore(),
@@ -762,6 +787,7 @@ describe('option validation', () => {
   test('a rotateWithinDays equal to the package lifetime is rejected', () => {
     expect(() =>
       createLastResortProvisioner({
+        sourceID: 'last-resort',
         identity: hub.identity,
         client: hub.client,
         store: createMemoryLastResortStore(),
@@ -775,6 +801,7 @@ describe('option validation', () => {
   test('a rotateWithinDays beyond the package lifetime is rejected', () => {
     expect(() =>
       createLastResortProvisioner({
+        sourceID: 'last-resort',
         identity: hub.identity,
         client: hub.client,
         store: createMemoryLastResortStore(),
@@ -794,6 +821,7 @@ describe('option validation', () => {
   test('a rotateWithinDays one day under the package lifetime is accepted and still no-ops', async () => {
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -816,6 +844,7 @@ describe('option validation', () => {
   test('a negative retainAfterExpiryDays is rejected', () => {
     expect(() =>
       createLastResortProvisioner({
+        sourceID: 'last-resort',
         identity: hub.identity,
         client: hub.client,
         store: createMemoryLastResortStore(),
@@ -827,6 +856,7 @@ describe('option validation', () => {
   test('a NaN retainAfterExpiryDays is rejected', () => {
     expect(() =>
       createLastResortProvisioner({
+        sourceID: 'last-resort',
         identity: hub.identity,
         client: hub.client,
         store: createMemoryLastResortStore(),
@@ -843,6 +873,7 @@ describe('option validation', () => {
   test('retainAfterExpiryDays of 0 is accepted and prunes at the lifetime boundary', async () => {
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -883,6 +914,7 @@ describe('ensureProvisioned failure paths', () => {
   test('a status failure leaves the local record intact and returns a retryable error', async () => {
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -931,6 +963,7 @@ describe('ensureProvisioned failure paths', () => {
     })
     vi.spyOn(hub.client, 'keyPackageStatus').mockRejectedValue(new Error('socket closed'))
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -949,6 +982,7 @@ describe('ensureProvisioned failure paths', () => {
   test('a status failure does not suppress the readback on the next call', async () => {
     const store = createMemoryLastResortStore()
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -974,6 +1008,7 @@ describe('ensureProvisioned failure paths', () => {
     const store = createMemoryLastResortStore()
     vi.spyOn(hub.client, 'uploadLastResortKeyPackage').mockRejectedValue(new Error('socket closed'))
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -1008,6 +1043,7 @@ describe('ensureProvisioned failure paths', () => {
     })
     vi.spyOn(hub.client, 'uploadLastResortKeyPackage').mockRejectedValue(new Error('socket closed'))
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -1030,6 +1066,7 @@ describe('ensureProvisioned failure paths', () => {
       .spyOn(hub.client, 'uploadLastResortKeyPackage')
       .mockRejectedValueOnce(new Error('socket closed'))
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -1053,6 +1090,7 @@ describe('ensureProvisioned failure paths', () => {
       Object.assign(new Error('denied'), { code: 'HUB_AUTHORIZATION_DENIED' }),
     )
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -1080,6 +1118,7 @@ describe('ensureProvisioned failure paths', () => {
       Object.assign(new Error('denied'), { code: 'HUB_AUTHORIZATION_DENIED' }),
     )
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -1106,6 +1145,7 @@ describe('ensureProvisioned failure paths', () => {
     })
     vi.spyOn(hub.client, 'uploadLastResortKeyPackage').mockRejectedValue(new Error('socket closed'))
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -1126,6 +1166,7 @@ describe('ensureProvisioned failure paths', () => {
       .spyOn(hub.client, 'uploadLastResortKeyPackage')
       .mockRejectedValue(new Error('socket closed'))
     const provisioner = createLastResortProvisioner({
+      sourceID: 'last-resort',
       identity: hub.identity,
       client: hub.client,
       store,
@@ -1169,6 +1210,7 @@ describe('ensureProvisioned failure paths', () => {
 
     try {
       const provisioner = createLastResortProvisioner({
+        sourceID: 'last-resort',
         identity: hub.identity,
         client: hub.client,
         store,

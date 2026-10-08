@@ -24,28 +24,86 @@ export type StoredRecord<Kind extends RecordKind = RecordKind> = {
  * Shared mechanics only: `LastResortStore` and `KeyPackagePoolStore` remain separate public ports,
  * because their records and their lifecycles differ.
  */
-export function createMemoryRecordStore<R extends StoredRecord>(): {
+export function createMemoryRecordStore<R extends StoredRecord>(
+  reusable = false,
+): {
   list(ownerDID: string): Promise<Array<R>>
   put(ownerDID: string, record: R): Promise<void>
   delete(ownerDID: string, ref: string): Promise<void>
+  consume(ref: string, groupID: string): Promise<void>
+  receipt(ref: string): Promise<{ groupID: string } | null>
 } {
-  const byOwner = new Map<string, Map<string, R>>()
-  return {
+  type Snapshot = {
+    byOwner: Map<string, Map<string, R>>
+    receipts: Map<string, { groupID: string }>
+  }
+  const state = new Map<string, Snapshot>([
+    ['current', { byOwner: new Map(), receipts: new Map() }],
+  ])
+  const current = (): Snapshot => state.get('current') as Snapshot
+  const store = {
     async list(ownerDID: string): Promise<Array<R>> {
-      const records = byOwner.get(ownerDID)
+      const records = current().byOwner.get(ownerDID)
       return records == null ? [] : [...records.values()].map((record) => ({ ...record }))
     },
     async put(ownerDID: string, record: R): Promise<void> {
-      let records = byOwner.get(ownerDID)
+      let records = current().byOwner.get(ownerDID)
       if (records == null) {
         records = new Map()
-        byOwner.set(ownerDID, records)
+        current().byOwner.set(ownerDID, records)
       }
       records.set(record.ref, { ...record })
     },
     async delete(ownerDID: string, ref: string): Promise<void> {
-      byOwner.get(ownerDID)?.delete(ref)
+      current().byOwner.get(ownerDID)?.delete(ref)
     },
+    async consume(ref: string, groupID: string): Promise<void> {
+      if (reusable) return
+      await consumeWithReceipt(store, ref, groupID, async () => {
+        const held = current()
+        const receipt = held.receipts.get(ref)
+        if (receipt != null) {
+          if (receipt.groupID !== groupID)
+            throw new Error('mls-hub: key package already consumed for another group')
+          return
+        }
+        const owners = [...held.byOwner].filter(([, records]) => records.has(ref))
+        if (owners.length !== 1) {
+          throw new Error(
+            'mls-hub: consume requires a ref held by exactly one owner in this source',
+          )
+        }
+        const [ownerDID, records] = owners[0] as [string, Map<string, R>]
+        const byOwner = new Map(held.byOwner)
+        const stagedRecords = new Map(records)
+        stagedRecords.delete(ref)
+        byOwner.set(ownerDID, stagedRecords)
+        const receipts = new Map(held.receipts)
+        receipts.set(ref, { groupID })
+        // Publish the staged deletion and receipt together, with no intervening await.
+        state.set('current', { byOwner, receipts })
+      })
+    },
+    async receipt(ref: string): Promise<{ groupID: string } | null> {
+      const receipt = current().receipts.get(ref)
+      return receipt == null ? null : { ...receipt }
+    },
+  }
+  return store
+}
+
+/** Resolve an adapter's ambiguous acknowledgement through its durable receipt. */
+export async function consumeWithReceipt(
+  store: { receipt(ref: string): Promise<{ groupID: string } | null> },
+  ref: string,
+  groupID: string,
+  consume: () => Promise<void>,
+): Promise<void> {
+  try {
+    await consume()
+  } catch (error) {
+    if ((error as { name?: unknown } | null)?.name !== 'StorageOutcomeUnknownError') throw error
+    if ((await store.receipt(ref))?.groupID !== groupID) throw error
   }
 }
 

@@ -647,9 +647,24 @@ importers:
       '@enkaku/transport':
         specifier: 'catalog:'
         version: 0.21.3(@logtape/logtape@2.4.0)
+      '@kokuin/capability':
+        specifier: 'catalog:'
+        version: 0.4.1(@logtape/logtape@2.4.0)
+      '@kokuin/controller':
+        specifier: 'catalog:'
+        version: 0.1.0(@logtape/logtape@2.4.0)
       '@kumiai/hub-server':
         specifier: workspace:^
         version: link:../hub-server
+      '@noble/ciphers':
+        specifier: 'catalog:'
+        version: 2.4.0
+      '@noble/curves':
+        specifier: 'catalog:'
+        version: 2.4.0
+      ts-mls:
+        specifier: 'catalog:'
+        version: 2.0.0-rc.13(@noble/ciphers@2.4.0)(@noble/curves@2.4.0)
 
   packages/mls-rpc:
     dependencies:

@@ -7,7 +7,7 @@ nothing decided anything.
 
 ## Exports
 
-- `createKeyPackagePool` — `ensureStocked()`, `bundles()`, and `release(ref)`. Takes `identity`,
+- `createKeyPackagePool` — `ensureStocked()`, `bundles()`, `consume(ref, groupID)`, and `receipt(ref)`. Takes `sourceID`, `identity`,
   `client` (`uploadKeyPackages` and `keyPackageStatus`), `store`, and optional `target` (default 20,
   integer `> 0`), `lowWater` (default 10, integer in `[1, target]`), and `retainAfterExpiryDays`
   (default 7, `>= 0`). `ensureStocked()` tops the hub's reported depth back up to `target` once it
@@ -19,8 +19,8 @@ nothing decided anything.
 - `KeyPackagePoolStore`, `KeyPackageRecord` — the storage port the host implements.
 - `createMemoryKeyPackagePoolStore` — the strict reference implementation. In-memory; see the
   warning below.
-- `createLastResortProvisioner` — `ensureProvisioned()`, `bundles()`, and `release(ref)`. Takes
-  `identity`, `client` (`uploadLastResortKeyPackage` and `keyPackageStatus`), `store`, and optional
+- `createLastResortProvisioner` — `ensureProvisioned()`, `bundles()`, `consume(ref, groupID)`, and `receipt(ref)`. Takes
+  `sourceID`, `identity`, `client` (`uploadLastResortKeyPackage` and `keyPackageStatus`), `store`, and optional
   `rotateWithinDays` (default 30, must be `0 < n < 90`) and `retainAfterExpiryDays` (default 7, must
   be `>= 0`; zero means "prune the moment the lifetime ends"). Both are validated at construction —
   out of range they invert a guard rather than fail, so a bad value silently accumulates or destroys
@@ -32,19 +32,19 @@ nothing decided anything.
 - `LastResortStore`, `LastResortRecord` — the storage port the host implements.
 - `createMemoryLastResortStore` — the strict reference implementation. In-memory; see the warning
   below.
-- `processWelcomeFromSources` — joins a Welcome against a list of `BundleSource`s (a pool, a
-  provisioner, or anything shaped like one), each queried in order. It selects the bundle the
-  Welcome names by `KeyPackageRef` rather than by trial decryption, calls `processWelcome` with it,
-  then releases it from whichever source it came from. One source failing to read does not abort the
-  scan of the rest; both a source read failure and a release failure are reported on the result
-  rather than thrown, so a storage problem never costs the caller a group it already joined.
+- `openWelcome(sources, welcome)` validates and opens using the retained bundle the Welcome names.
+  It returns `{joined, joinRef: {sourceID, ref}}` without consuming the package.
+  A receipted ref returns `{alreadyJoined: groupID}` before decryption.
+  Independent source read failures appear as `joined.sourceErrors` on a successful fallback.
+- `judgeWelcomeAdmission(held, welcomeEpoch)` compares the authenticated epoch with live or deleted state.
+  It returns `join`, `alreadyJoined`, `replace`, or `refused`.
 - `HubRetryableError`, `HubRefusedError`, `HubCallStage` — the two outcomes of a failed hub call.
 
 ```ts
-import { createKeyPackagePool, createLastResortProvisioner, processWelcomeFromSources } from '@kumiai/mls-hub'
+import { createKeyPackagePool, createLastResortProvisioner, judgeWelcomeAdmission, openWelcome } from '@kumiai/mls-hub'
 
-const pool = createKeyPackagePool({ identity, client: hubClient, store: poolStore })
-const lastResort = createLastResortProvisioner({ identity, client: hubClient, store: lastResortStore })
+const pool = createKeyPackagePool({ sourceID: 'ordinary', identity, client: hubClient, store: poolStore })
+const lastResort = createLastResortProvisioner({ sourceID: 'fallback', identity, client: hubClient, store: lastResortStore })
 
 // At startup and on whatever cadence the host already has. Idempotent and cheap when nothing is due.
 const stocked = await pool.ensureStocked()
@@ -59,19 +59,30 @@ if (provisioned.isError()) {
 // Terser, if the host would rather crash than carry on: `await pool.ensureStocked().value`.
 
 // When a Welcome arrives, try the ordinary pool before the last-resort slot.
-const { group } = await processWelcomeFromSources({
-  identity,
-  invite,
-  welcome,
-  ratchetTree,
-  sources: [pool, lastResort],
-})
+const sources = [pool, lastResort]
+const opened = await openWelcome(sources, { identity, invite, welcome, ratchetTree })
+if ('joined' in opened) {
+  const { group } = opened.joined
+  const admission = judgeWelcomeAdmission(await host.held(group.groupID), Number(group.epoch))
+  if (admission === 'join' || admission === 'replace') {
+    await host.save(group, opened.joinRef, { replace: admission === 'replace' })
+  } else if (admission === 'alreadyJoined') {
+    await host.saveJoinRef(group.groupID, opened.joinRef)
+  }
+  if (admission !== 'refused') {
+    const source = sources.find((source) => source.sourceID === opened.joinRef.sourceID)
+    if (source == null) throw new Error('Missing Welcome source')
+    await source.consume(opened.joinRef.ref, group.groupID)
+    await host.clearJoinRef(group.groupID)
+  }
+}
+
 ```
 
 `bundles()` throws if any retained record fails to decode, rather than skipping it and serving the
 rest — so one corrupt retired record blocks every join from that source. Deliberate within a single
 store: one that breaks its round-trip contract once is not trusted for its live record either.
-`processWelcomeFromSources` isolates that rule per source, so a corrupt pool record cannot deny the
+`openWelcome` isolates that rule per source, so a corrupt pool record cannot deny the
 last-resort fallback.
 
 ## Retryable and refused
@@ -123,7 +134,13 @@ where the host stores private keys, never log it, and never publish it.
 hub keeps serving packages whose private halves are gone, leaving the owner silently unaddable —
 the exact outage these stores exist to prevent. Tests and throwaway processes only.
 
-### One store per port
+### One store namespace per source
+
+Give each source a stable, distinct `sourceID` and a dedicated receipt-store namespace.
+At startup, consume each saved `joinRef` through its named source, then clear that reference.
+Ordinary consumption atomically deletes the package and writes the receipt. Last-resort consumption is a no-op and `receipt(ref)` always returns `null`.
+Repeated last-resort Welcomes reopen and pass through epoch admission.
+Receipts survive package pruning. Ambiguous writes reject with `StorageOutcomeUnknownError`, prompting receipt read-back.
 
 The two ports are not interchangeable, and wiring one store to both mixes secret material held
 under different lifecycles: an ordinary package is single-use and released on join, a last-resort

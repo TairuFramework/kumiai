@@ -48,12 +48,19 @@ export type KeyPackageRecord = {
  *   prunes a batch concurrently, so a store that reads its whole record set, edits it, and writes it
  *   back will lose writes here — per-`ref` writes are the contract, not a whole-collection swap.
  *
+ * Give each source its own store namespace for `consume` and `receipt`.
+ * An adapter rejects ambiguous writes with `StorageOutcomeUnknownError`.
+ * Receipts outlive package pruning and must not alias stored state.
+ *
  * `list` need not order: the pool sorts what it gets.
  */
 export type KeyPackagePoolStore = {
   list(ownerDID: string): Promise<Array<KeyPackageRecord>>
   put(ownerDID: string, record: KeyPackageRecord): Promise<void>
   delete(ownerDID: string, ref: string): Promise<void>
+  /** Source-scoped transaction: package deletion and receipt, all or nothing. */
+  consume(ref: string, groupID: string): Promise<void>
+  receipt(ref: string): Promise<{ groupID: string } | null>
 }
 
 /**
