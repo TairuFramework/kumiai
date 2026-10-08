@@ -14,6 +14,7 @@ import type {
   RecoveryVerdict,
   RosterEntry,
 } from '../../src/crypto.js'
+import { ControlWriteNotCommittedError } from '../../src/errors.js'
 import { createMemoryHostDatabase, type MemoryHostDatabase } from './host-db.js'
 
 export type MemoryGroupMLS = GroupMLS & {
@@ -610,6 +611,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     requestKey: Uint8Array,
     candidateBinding?: MemoryRecoveryBinding,
     boundCommit?: { position: string; commitDigest: string; tag: string },
+    requireWrite = false,
   ): PendingRecovery {
     const candidateBindingID = candidateBinding == null ? undefined : bindingID(candidateBinding)
     let accepted: Promise<void> | undefined
@@ -666,12 +668,35 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         return info.members.includes(signer) ? 'authoritative' : 'advisory'
       },
       onAccepted: (factory) => {
+        if (requireWrite && typeof factory !== 'function') {
+          return Promise.reject(
+            new ControlWriteNotCommittedError(
+              'Restored recovery requires an adoption write factory',
+            ),
+          )
+        }
         accepted ??= (async () => {
           const authenticator = sha256(concatBytes(requestKey, commit))
           const stored = await hostDB.loadState(groupID)
           if (stored != null) {
-            const value = JSON.parse(toUTF(stored)) as { recoveryAuthenticator?: string }
-            if (value.recoveryAuthenticator === toB64U(authenticator)) return
+            const value = JSON.parse(toUTF(stored)) as {
+              epoch: number
+              slots: Array<[number, string]>
+              ledger: Array<string>
+              ledgerHead: string
+              bodies: Array<[string, string]>
+              recoveryAuthenticator?: string
+            }
+            // This marker is saved only together with the adoption write in one transaction.
+            if (value.recoveryAuthenticator === toB64U(authenticator)) {
+              ledger = value.ledger
+              ledgerHead = value.ledgerHead
+              slots = new Map(value.slots)
+              bodies = new Map(value.bodies)
+              advance(value.epoch)
+              binding = candidateBinding
+              return
+            }
           }
           if (failRecoveryAdopt) {
             failRecoveryAdopt = false
@@ -682,6 +707,11 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
             slotRemoveDID(localDID, nextSlots)
             slotAdd(localDID, nextSlots)
           }
+          const write = factory?.({
+            epochAfter: info.epoch + 1,
+            removed: false,
+            epochAuthenticator: authenticator,
+          })
           const state = fromUTF(
             JSON.stringify({
               epoch: info.epoch + 1,
@@ -689,14 +719,9 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
               ledger: [],
               ledgerHead: info.head,
               bodies: [...bodies],
-              recoveryAuthenticator: toB64U(authenticator),
+              recoveryAuthenticator: write == null ? undefined : toB64U(authenticator),
             }),
           )
-          const write = factory?.({
-            epochAfter: info.epoch + 1,
-            removed: false,
-            epochAuthenticator: authenticator,
-          })
           await hostDB.saveState(groupID, state, write)
           ledger = []
           ledgerHead = info.head
@@ -1059,6 +1084,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         requestKey,
         snapshot.candidateBinding,
         snapshot.tuple,
+        true,
       )
     },
     exportRecoverySecret() {

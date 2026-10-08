@@ -31,6 +31,7 @@ import type {
   RecoveryVerdict,
   RosterEntry,
 } from '@kumiai/rpc'
+import { ControlWriteNotCommittedError } from '@kumiai/rpc'
 import { ciphersuites } from 'ts-mls'
 
 import type { HandleAccess } from './access.js'
@@ -171,6 +172,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
     requestID: string,
     requestKey: Uint8Array,
     boundCommit?: BoundRecoveryCommit,
+    requireWrite = false,
   ): RecoveryCandidate {
     const judge = createVerdictJudge({
       group: data.group,
@@ -193,10 +195,18 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
           requestKey,
         ),
       onAccepted: (write?: AdoptionWriteFactory) => {
+        if (requireWrite && typeof write !== 'function') {
+          return Promise.reject(
+            new ControlWriteNotCommittedError(
+              'Restored recovery requires an adoption write factory',
+            ),
+          )
+        }
         if (accepted == null) {
           let adoption = accepting.get(id)
           if (adoption == null) {
             adoption = (async () => {
+              // Restored adoption co-commits this authenticator and its control write before publication.
               if (
                 await access.read((current) =>
                   sameBytes(current.state.keySchedule.epochAuthenticator, authenticator),
@@ -477,6 +487,7 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
         snapshot.requestID,
         requestKey,
         snapshot.boundCommit,
+        true,
       )
       if (snapshot.boundCommit?.tag != null) {
         await candidate.confirmationKey(

@@ -1,11 +1,15 @@
 import { confirmationTag, encodeClientState } from '@kumiai/mls'
-import type { AdoptionWrite } from '@kumiai/rpc'
-import { expect, test } from 'vitest'
+import type { AdoptionWrite, AdoptionWriteFactory } from '@kumiai/rpc'
+import { expect, expectTypeOf, test } from 'vitest'
 
 import { simpleHandleAccess } from '../src/access.js'
 import { createGroupMLS } from '../src/mls.js'
 import type { RecoveryCandidate } from '../src/recovery.js'
 import { createRealGroup } from './fixtures/real-group.js'
+import {
+  createTransactionalAccess,
+  createTransactionalStore,
+} from './fixtures/transactional-access.js'
 
 async function setup() {
   const group = await createRealGroup(2, 'candidate-codec')
@@ -96,6 +100,7 @@ test('restored acceptance persists the adoption write once, including after anot
   const s = await setup()
   const bytes = s.pending.serialize()
   const restored = await s.requester().restoreRecovery(bytes, s.requestKey)
+  expectTypeOf(restored.onAccepted).parameters.toEqualTypeOf<[AdoptionWriteFactory]>()
   const write: AdoptionWrite = { mutationID: 'adoption-1', changes: { deleteRejoin: true } }
   await restored.onAccepted(() => write)
   await restored.onAccepted(() => write)
@@ -176,4 +181,43 @@ test('concurrent restored acceptances through the same access adopt only once', 
   await Promise.all([first.onAccepted(write), second.onAccepted(write)])
   expect(s.adoptions()).toBe(1)
   expect(s.writes).toHaveLength(1)
+})
+
+test('restored adoption survives a crash with its control changes and no second save', async () => {
+  const s = await setup()
+  const store = createTransactionalStore(s.member.handle)
+  const first = await createTransactionalAccess(s.member, store)
+  const port = createGroupMLS({
+    access: first.access,
+    identity: s.member.identity,
+    entrySlot: s.member.slot,
+  })
+  const bytes = s.pending.serialize()
+  const restored = await port.restoreRecovery(bytes, s.requestKey)
+  await restored.onAccepted(() => ({
+    mutationID: 'crash-adoption',
+    changes: {
+      putOutcomes: [
+        { id: 'rejoin-result', kind: 'reenact', opID: null, at: 123, tokens: ['before'] },
+      ],
+    },
+  }))
+  expect(store.snapshot().revision).toBe(1)
+  const restartedStore = await store.fork()
+  const restartedAccess = await createTransactionalAccess(s.member, restartedStore)
+  const restarted = createGroupMLS({
+    access: restartedAccess.access,
+    identity: s.member.identity,
+    entrySlot: s.member.slot,
+  })
+  const again = await restarted.restoreRecovery(bytes, s.requestKey)
+  await again.onAccepted(() => {
+    throw new Error('Already co-committed')
+  })
+  expect(await restarted.readEpoch()).toBe(restored.epoch)
+  expect(restartedStore.snapshot().revision).toBe(1)
+  expect(restartedStore.snapshot().mutationID).toBe('crash-adoption')
+  expect(restartedStore.snapshot().control.outcomes).toEqual([
+    { id: 'rejoin-result', kind: 'reenact', opID: null, at: 123, tokens: ['before'] },
+  ])
 })

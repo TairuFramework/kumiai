@@ -19,6 +19,7 @@ import { expect, test, vi } from 'vitest'
 import { simpleHandleAccess } from '../src/access.js'
 import { createGroupMLS, createLedgerEntrySlot } from '../src/mls.js'
 import type { RecoveryBinding, RecoveryBindingRequest } from '../src/recovery.js'
+import { createTransactionalStore } from './fixtures/transactional-access.js'
 
 async function chainedRecovery() {
   const fixture = (await import(
@@ -80,6 +81,7 @@ async function chainedRecovery() {
     recipientDID: newcomer.id,
   })
   source = (await commitInvite(source, nextBundle.publicPackage, nextInvite.invite)).newGroup
+  const store = createTransactionalStore(member)
   const requester = (recoveryBinding?: RecoveryBinding) =>
     createGroupMLS({
       identity: bob,
@@ -88,6 +90,14 @@ async function chainedRecovery() {
         adopt: (next) => {
           member = next
         },
+        persist: (handle, write) =>
+          store.save(
+            store.snapshot().revision,
+            encodeClientState(handle.state),
+            handle.ledgerTokens,
+            undefined,
+            write,
+          ),
       }),
       entrySlot: createLedgerEntrySlot(),
       recoveryBinding,
@@ -182,7 +192,10 @@ test('evidenceRefreshMakesNewBindingID', async () => {
   await expect(
     fixture.responder.processCommit(refreshed.commit, { senderDID: fixture.bob.id }),
   ).resolves.toMatchObject({ advanced: true })
-  await refreshed.onAccepted()
+  await refreshed.onAccepted(() => ({
+    mutationID: 'holder-evidence-adoption',
+    changes: { deleteRejoin: true },
+  }))
   expect(fixture.member().bindingOfDID(fixture.bob.id)?.holderGrant).toBe(offered.holderGrant)
   await expect(restarted.prepareRecovery()).resolves.toBe('ready')
   const plaintext = new TextEncoder().encode('restored holder evidence')

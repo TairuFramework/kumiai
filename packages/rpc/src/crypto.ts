@@ -376,6 +376,11 @@ export type PendingRecovery = {
   serialize(): Uint8Array
 }
 
+/** Restored adoption must co-commit its control changes with the candidate state. */
+export type RestoredPendingRecovery = Omit<PendingRecovery, 'onAccepted'> & {
+  onAccepted(write: AdoptionWriteFactory): Promise<void>
+}
+
 /** {@link GroupMLS.applyRecovery} result: a recovery to adopt, a renewal to run first, or nothing. */
 export type AppliedRecovery = PendingRecovery | { renewalRequired: true } | null
 
@@ -519,7 +524,7 @@ export type GroupMLS = {
     requestKey: Uint8Array,
   ): Promise<AppliedRecovery>
   /** Restore the sealed candidate without adopting, rebuilding host callbacks and verdict judgement. */
-  restoreRecovery(candidate: Uint8Array, requestKey: Uint8Array): Promise<PendingRecovery>
+  restoreRecovery(candidate: Uint8Array, requestKey: Uint8Array): Promise<RestoredPendingRecovery>
   /**
    * Whether the ledger this handle holds is the whole ledger its OWN GroupContext attests to: the
    * head folded from the entries it holds, against the authenticated head it carries. Purely

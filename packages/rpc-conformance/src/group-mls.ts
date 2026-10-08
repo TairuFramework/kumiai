@@ -88,6 +88,10 @@ export type ConformancePendingRecovery = {
   onAccepted(write?: ConformanceCommitContext['adoption']): Promise<void>
 }
 
+export type ConformanceRestoredPendingRecovery = Omit<ConformancePendingRecovery, 'onAccepted'> & {
+  onAccepted(write: NonNullable<ConformanceCommitContext['adoption']>): Promise<void>
+}
+
 /** The `RosterEntry` of `@kumiai/rpc`, re-declared structurally. */
 export type ConformanceRosterEntry = {
   did: string
@@ -139,7 +143,7 @@ export type ConformanceGroupMLS = {
   restoreRecovery: (
     candidate: Uint8Array,
     requestKey: Uint8Array,
-  ) => Promise<ConformancePendingRecovery>
+  ) => Promise<ConformanceRestoredPendingRecovery>
   isLedgerComplete: () => Promise<boolean>
   getLedger: () => Promise<Array<string>>
   sealLedger: (request: Uint8Array) => Promise<Uint8Array>
@@ -781,10 +785,39 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           expect(restored.judgeVerdict(opened)).toBe('authoritative')
           await expect(restored.confirmationKey('other', 'digest')).rejects.toThrow()
           expect(await bob.mls.readEpoch()).toBe(before)
-          await restored.onAccepted()
-          await restored.onAccepted()
-          await (await bob.mls.restoreRecovery(bytes, requestKey)).onAccepted()
+          const write = () => ({
+            mutationID: 'restored-adoption',
+            changes: { deleteRejoin: true as const },
+          })
+          await restored.onAccepted(write)
+          await restored.onAccepted(write)
+          await (await bob.mls.restoreRecovery(bytes, requestKey)).onAccepted(write)
           expect(await bob.mls.readEpoch()).toBe(pending.epoch)
+        })
+      })
+      test('restored acceptance requires an adoption factory before changing state or returning cached success', async () => {
+        await withGroup(2, 'restored-requires-write', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const bob = memberAt(group.members, 1)
+          const { request, requestKey } = await bob.mls.createRecoveryRequest('required-write')
+          const reply = await alice.mls.sealGroupInfo(request)
+          const pending = await bob.mls.applyRecovery(reply, 'required-write', requestKey)
+          if (pending == null || 'renewalRequired' in pending) throw new Error('No candidate')
+          const bytes = pending.serialize()
+          const restored = await bob.mls.restoreRecovery(bytes, requestKey)
+          const before = await bob.mls.readEpoch()
+          await expect(Reflect.apply(restored.onAccepted, restored, [])).rejects.toThrow()
+          expect(await bob.mls.readEpoch()).toBe(before)
+          const write = () => ({
+            mutationID: 'required-write',
+            changes: { deleteRejoin: true as const },
+          })
+          await restored.onAccepted(write)
+          expect(await bob.mls.readEpoch()).toBe(pending.epoch)
+          await expect(Reflect.apply(restored.onAccepted, restored, [])).rejects.toThrow()
+          const again = await bob.mls.restoreRecovery(bytes, requestKey)
+          await expect(Reflect.apply(again.onAccepted, again, [])).rejects.toThrow()
+          await again.onAccepted(write)
         })
       })
       test('readers need the explicit key, including after a new request with the same ID', async () => {

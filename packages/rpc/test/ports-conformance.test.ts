@@ -9,6 +9,8 @@ import {
   testGroupMLSConformance,
   testPendingGroupCryptoConformance,
 } from '@kumiai/rpc-conformance'
+import { toUTF } from '@sozai/codec'
+import { expect, test } from 'vitest'
 
 import type { AppOutbox } from '../src/app-outbox.js'
 import {
@@ -19,6 +21,7 @@ import {
 } from '../src/crypto.js'
 import { createMemoryAnchorStore } from './fixtures/anchor.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
+import { createMemoryHostDatabase } from './fixtures/host-db.js'
 import { createMemoryCommitJournal } from './fixtures/journal.js'
 import {
   createMemoryGroupMLS,
@@ -241,6 +244,79 @@ testGroupMLSConformance({
 
 testAppOutboxConformance({ label: 'createMemoryAppOutbox', createOutbox: createMemoryAppOutbox })
 const _outboxIsAPort = (outbox: AppOutbox): ConformanceAppOutbox => outbox
+
+test('ambiguous recovery save publishes committed state on retry without another write', async () => {
+  const groupID = 'ambiguous-recovery'
+  const hostDB = createMemoryHostDatabase()
+  let saves = 0
+  const countedDB = {
+    ...hostDB,
+    saveState: async (...args: Parameters<typeof hostDB.saveState>) => {
+      saves += 1
+      await hostDB.saveState(...args)
+    },
+  }
+  const requester = createMemoryGroupMLS({
+    groupID,
+    localDID: 'bob',
+    members: ['alice', 'bob', 'carol'],
+    hostDB: countedDB,
+    bodies: ['before'],
+  })
+  requester.adopt(requester.buildCommit(['before']))
+  const responder = createMemoryGroupMLS({
+    groupID,
+    localDID: 'alice',
+    members: ['alice', 'bob', 'carol'],
+    epoch: 5,
+    bodies: ['after'],
+  })
+  responder.adopt(responder.buildCommit(['after']))
+  const { request, requestKey } = await requester.createRecoveryRequest('ambiguous')
+  const pending = await requester.applyRecovery(
+    await responder.sealGroupInfo(request),
+    'ambiguous',
+    requestKey,
+  )
+  if (pending == null || 'renewalRequired' in pending) throw new Error('No candidate')
+  const restored = await requester.restoreRecovery(pending.serialize(), requestKey)
+  const factory = () => ({
+    mutationID: 'ambiguous-adoption',
+    changes: {
+      putOutcomes: [
+        { id: 'rejoin-result', kind: 'reenact' as const, opID: null, at: 123, tokens: ['before'] },
+      ],
+    },
+  })
+  hostDB.commitThenRejectNext('save')
+  await expect(restored.onAccepted(factory)).rejects.toThrow('outcome unknown')
+  expect(await requester.readEpoch()).toBe(1)
+  const stored = await hostDB.loadState(groupID)
+  if (stored == null) throw new Error('Missing committed state')
+  expect(JSON.parse(toUTF(stored)).epoch).toBe(7)
+  await restored.onAccepted(factory)
+  expect(await requester.readEpoch()).toBe(7)
+  expect(requester.epoch()).toBe(7)
+  expect(await requester.getLedger()).toEqual([])
+  expect(await requester.isLedgerComplete()).toBe(false)
+  expect(requester.leaves()).toEqual(['alice', 'bob', 'carol'])
+  expect(saves).toBe(1)
+  expect(await hostDB.control(groupID).lastMutation()).toBe('ambiguous-adoption')
+  expect((await hostDB.control(groupID).load()).outcomes).toEqual([
+    { id: 'rejoin-result', kind: 'reenact', opID: null, at: 123, tokens: ['before'] },
+  ])
+  const restarted = createMemoryGroupMLS({
+    groupID,
+    localDID: 'bob',
+    members: ['alice', 'bob'],
+    hostDB: countedDB,
+  })
+  await (await restarted.restoreRecovery(pending.serialize(), requestKey)).onAccepted(factory)
+  expect(await restarted.readEpoch()).toBe(7)
+  expect(restarted.leaves()).toEqual(['alice', 'bob', 'carol'])
+  expect(await restarted.isLedgerComplete()).toBe(false)
+  expect(saves).toBe(1)
+})
 
 testAnchorStoreConformance({
   label: 'rpc memory anchor store',
