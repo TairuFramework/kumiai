@@ -1,7 +1,7 @@
 # Spec P2a: crash-safe group control — design
 
 Date: 2026-10-08
-Status: draft r5
+Status: draft r6
 Parent: [client host, messaging protocol and multi-device e2e](2026-10-08-client-messaging-e2e-design.md)
 Siblings:
 - [Spec P, transactional persistence](2026-10-08-spec-p-transactional-persistence.md) (its D5 moves
@@ -94,6 +94,9 @@ Checked against source on 2026-10-08 (branch `design/client-messaging-e2e`). Pat
     pull, `ensureLedger` (today `pullCommits` returns early on an incomplete ledger,
     `rpc/src/peer.ts:1600`), the strand and anchor-recovery holds. A durable rejoin record replaces
     `activeRecovery` as the restart-visible gate on the queue and on sends.
+  - `abandon()` is new: one `apply` turns open operations and a rejoin record into `unknown`
+    outcomes and deletes them, and deletes Welcome obligations. It is the way out before host
+    deletion (D5).
   - `takeLost` goes (D7).
 - **Ports.**
   - `ControlStore` (D2) is new in rpc, and `rpc-conformance` re-declares it.
@@ -161,10 +164,14 @@ export type ControlStore = {
   P D1, D2). That transaction writes the new state, `changes`, `mutationID` as the last mutation, and
   `pending.landed` on the anchor slot when `anchorLanded` matches its `advance`. A write with no
   state change uses `apply`. A failed save leaves the state, the live handle and control untouched.
-- **Writers.** The peer is the only writer and serialises every `apply` and adoption. On
-  `StorageOutcomeUnknownError` from either it reads `lastMutation()`, with backoff capped at 15 s:
-  equal means committed, anything else means not. The peer stays paused until that read succeeds.
-  An adoption found committed reloads the handle from storage (Spec P D3) before anything else.
+- **Writers.** The peer is the only writer and serialises every `apply` and adoption.
+- **Ambiguous outcomes have one owner each.** An adoption save goes through the host state save, so
+  the registry owns its ambiguity, as for every state save (Spec P D2, D3): `mutationID` is its
+  `writeID`, the group is marked uncertain, opens, seals and bootstrap wait, and the registry
+  reloads the handle and hands the peer a settled committed-or-not result. The peer resolves only a
+  state-free `apply`: on `StorageOutcomeUnknownError` it reads `lastMutation()`, with backoff capped
+  at 15 s; equal means committed, anything else means not. It stays paused until that read
+  succeeds.
 - **`applied` and `responses` windows.** The peer keeps the newest 64 epochs of each, by framed
   epoch, and prunes older rows (`deleteResponsesBelow` for responses) in the same `apply`.
 - **Secrets.** `RejoinRecord.requestKey` and the candidate blob are secrets: the Hozon implementation
@@ -290,7 +297,7 @@ always re-sealed, since publication evidence is memory-only today.
 - `publishRevokeProof` moves to `enqueue` with `revokes: true`.
 - A publish already in flight when the hold is set may still land, as today.
 
-**Replay at `start`** works per stage, after the D5 startup steps:
+**Replay at `start`** works per stage, at the D5 startup steps 7 and 10:
 
 - `intent`: as step 2.
 - `built`: republish the stored `payload` under the same ID, whatever the current epoch. This
@@ -409,7 +416,11 @@ export type Outcome = { id: string; opID: string | null; at: number } & (
     confirmation requests need and which a later pull cannot rebuild once the cursor has passed the
     frame (`rpc/src/peer.ts:968, 1511`);
   - a rejoin: its record's move to `adopted` (D6);
-  - a pending anchor rotation: `anchorLanded`.
+  - a pending anchor rotation: `anchorLanded`, except for a `removed: true` adoption. A
+    self-removal keeps epoch `E` while the identity predicts `E + 1` (`rpc/src/peer.ts:1520`,
+    `mls-rpc/src/apply-commit.ts:133-143`), and its live resolution stays `keepAnchor`
+    (`rpc/src/peer.ts:427-437`);
+  - a rejoin that heals a fork: fork settlement (below).
 
   So no adoption is ever unrecorded, and nothing needs reconciling.
   `GroupMLS.processCommit(frame, write)` reports `applied` separately from epoch advancement. Today
@@ -423,9 +434,11 @@ export type Outcome = { id: string; opID: string | null; at: number } & (
     rejoin record remain, one `apply` turns them into `unknown` outcomes and deletes them. Then
     today's removal path runs: `locallyRemoved` and outbox clearing (`rpc/src/log-delivery.ts:272-278`);
     it does not delete the group. The group stays **terminal**: startup on it runs only Welcome
-    delivery and outcome serving. When the host later deletes the group (Spec P `delete`), the
-    deletion removes operations, rejoin, `applied`, `responses` and the cursor, and keeps outcomes
-    until acked and Welcome obligations until delivered;
+    delivery and outcome serving;
+  - **host deletion** (Spec P `delete`) is refused while the control store holds an operation, a
+    rejoin record, an unacked outcome or an undelivered Welcome obligation. So a tombstone never
+    carries control records, and no worker has to serve one. A host that must delete anyway calls
+    `abandon()` (D1) first and acks the outcomes;
   - **anchor:** a pending rotation with `landed` resolves as landed. One without it provably did not
     land, so the anchor is kept. Today a same-number record found at startup cannot be told apart
     and forces `requireAnchorRecovery` (`rpc/src/peer.ts:425-432`); with the mark that case is gone.
@@ -447,13 +460,19 @@ export type Outcome = { id: string; opID: string | null; at: number } & (
      cursor, replays the journal, runs `ensureLedger` and pulls (`rpc/src/peer.ts:1733-1756`); those
      move to the steps below;
   6. restore the holds, including the rejoin barrier (D6);
-  7. the seed pull and `ensureLedger`;
-  8. build the epoch (`buildEpoch`, `rpc/src/peer.ts:2798`), which an idle restart needs since no
+  7. **settle before the walk**, as today's "replay ahead of the pull" (`rpc/src/peer.ts:1594-1599,
+     1788-1794`): republish or search each `built` operation and adopt each `accepted` one (D3); move
+     a `built` rejoin whose publish is found to `published` with its position, so its barrier is up.
+     Otherwise the walker meets our own accepted commit unadopted, strands on it
+     (`rpc/src/peer.ts:1419-1433`) and asks for a recovery nobody may answer;
+  8. the seed pull and `ensureLedger`;
+  9. build the epoch (`buildEpoch`, `rpc/src/peer.ts:2798`), which an idle restart needs since no
      adoption triggers it;
-  9. replay operations and the rejoin. Rejoin replay is exempt from the anchor-recovery gate that
-     `initControlLanes` and `walkCommits` apply today (`rpc/src/peer.ts:1239, 1729`). Confirmation
-     waits stay outside `runSerial`, as today (`rpc/src/peer.ts:2515`);
-  10. start background delivery. The synchronous drain inside `advanceHandle`
+  10. replay the rest: `intent` operations and the rejoin's later stages. Rejoin replay is exempt
+      from the anchor-recovery gate that `initControlLanes` and `walkCommits` apply today
+      (`rpc/src/peer.ts:1239, 1729`). Confirmation waits stay outside `runSerial`, as today
+      (`rpc/src/peer.ts:2515`);
+  11. start background delivery. The synchronous drain inside `advanceHandle`
       (`rpc/src/peer.ts:1161`) is unchanged.
 - **Fork window.**
   - The window covers 64 epochs.
@@ -471,12 +490,14 @@ export type Outcome = { id: string; opID: string | null; at: number } & (
   branches diverged: the classifier flags whichever epoch has a row, and divergence may lie lower.
   At the divergence epoch both commits share a parent, so a commit this device built there may be
   the winner. Neither MLS parent binding nor a log scan settles which commits won.
-- **Fork settlement**, in the rejoin's final `apply` (D6), therefore asserts nothing it cannot prove:
+- **Fork settlement** runs in the rejoin's adoption transaction (D6), before the rejoin's own row can
+  overwrite a row at the same framed epoch, and asserts nothing it cannot prove:
   - every operation still `accepted`, and every `applied` row at or above `E` that carries an
     `opID`: `unknown`. For a row, this follows the `landed` written at adoption, which was relative
     to the branch then followed (D3);
-  - `deleteAppliedFrom: E`, then the rejoin's own row is put back. Deletes run before puts in one
-    `apply` (D2), so the rejoin row survives even when its framed epoch is at or above `E`.
+  - `deleteAppliedFrom: E`, then the rejoin's own row is put. Deletes run before puts in one
+    transaction (D2), so the rejoin row survives even when its framed epoch is at or above `E`,
+    and an older row it would overwrite has been read first.
     Rows below `E` are kept and not re-reported. Divergence below the detected epoch is the same
     accepted blind spot as the 64-epoch window;
   - the authoritative answer is the rejoined state itself: its authenticated roster for invites and
@@ -527,8 +548,8 @@ export type RejoinRecord = {
 | (none) | — | start a rejoin only when evidence calls for one |
 | `built` | before publishing the external commit | republish the stored `payload` under the same ID. Accepted or deduplicated: `published`. Head mismatch: search the log for `payloadDigest`; found means `published` at that position; absent from the branch served means delete the record and start afresh (relative to that branch, as `lost` in D3) |
 | `published` | publish accepted | re-send the confirmation request with the stored `request`, and open verdicts with `requestKey`. Authoritative confirm: `confirmed`. Authoritative refusal requiring renewal: delete the record and start a fresh rejoin with renewal. Refusal by policy or as invalid: write stage `refused` with its reason and a `refused` outcome in one `apply`. Authoritative `superseded`: discard the candidate, delete the record and start a fresh rejoin from fresh GroupInfo, as today (`rpc/src/peer.ts:2550-2551`, `tests/integration/test/recovery-confirmation.test.ts:438`). `unconfirmed` or deadline: delete the record and start a fresh rejoin; the orphan leaf is replaced, as today (`tests/integration/test/recovery-confirmation.test.ts:306`) |
-| `confirmed` | verdict verified | The adoption moves the record to `adopted` in its own transaction, so a record still `confirmed` was not adopted. **Re-check**, read-only and exempt from the anchor-recovery gate: the current state must still equal `source` (epoch, authenticator, lineage). `source.head` is the in-memory reconciled head at rejoin build (`rpc/src/peer.ts:2460`), persisted because a strand keeps the durable cursor behind it (`rpc/src/peer.ts:716`). The peer then scans the log from `source.head` without adopting, and the check **fails iff** it finds a retention gap, or a commit frame framed at `source.epoch` that is neither this rejoin's own external commit, nor unparseable, nor covered by a recorded `ExternalResponse`. Frames framed above `source.epoch` cannot move the source and pass. This is conservative: a parseable frame that MLS would later refuse still fails the check, which costs one fresh rejoin, never an unsafe install, as today's equality check (`rpc/src/peer.ts:2563-2571`). On failure, the candidate is **invalidated**: delete the record and start a fresh rejoin only if evidence still calls for one. Otherwise `restoreRecovery(candidate, requestKey).onAccepted(write)`, idempotent by `epochAuthenticator`. Adoption uses the recovery identity (`epochAfter`, `forced: true`, `recovery: true`, `rpc/src/peer.ts:2607`), and `write` (D5) moves the record to `adopted` |
-| `adopted` | in the rejoin's adoption transaction (D5) | bootstrap the ledger, then one `apply`: `reenact` outcomes for `ledgerBefore` tokens missing from the group ledger; fork settlement from `conflictEpoch` (D5), its row deletion and the rejoin row's re-put in this same `apply`; clear `stranded`; delete the record |
+| `confirmed` | verdict verified | The adoption moves the record to `adopted` in its own transaction, so a record still `confirmed` was not adopted. **Re-check**, read-only and exempt from the anchor-recovery gate: the current state must still equal `source` (epoch, authenticator, lineage). `source.head` is the in-memory reconciled head at rejoin build (`rpc/src/peer.ts:2460`), persisted because a strand keeps the durable cursor behind it (`rpc/src/peer.ts:716`). The peer then scans the log over `[source.head, record.position)` without adopting; the barrier guarantees nothing after the rejoin's position touched the source state, and the check **fails iff** it finds a retention gap, or a commit frame framed at `source.epoch` that is neither this rejoin's own external commit, nor unparseable, nor covered by a recorded `ExternalResponse`. Frames framed above `source.epoch` cannot move the source and pass. This is conservative: a parseable frame that MLS would later refuse still fails the check, which costs one fresh rejoin, never an unsafe install, as today's equality check (`rpc/src/peer.ts:2563-2571`). On failure, the candidate is **invalidated**: delete the record and start a fresh rejoin only if evidence still calls for one. Otherwise `restoreRecovery(candidate, requestKey).onAccepted(write)`, idempotent by `epochAuthenticator`. Adoption uses the recovery identity (`epochAfter`, `forced: true`, `recovery: true`, `rpc/src/peer.ts:2607`), and `write` (D5) moves the record to `adopted` |
+| `adopted` | in the rejoin's adoption transaction, with fork settlement from `conflictEpoch` (D5) | bootstrap the ledger, then one `apply`: `reenact` outcomes for `ledgerBefore` tokens missing from the group ledger; clear `stranded`; delete the record |
 | `refused` | policy or invalid refusal | terminal and durable: sends stay held and no automatic rejoin starts, across restarts and after the outcome is acked. Cleared only by the host calling `recover()`, which deletes the record and starts a fresh rejoin. Today's latch is memory-only (`rpc/src/peer.ts:758, 2356`) |
 
 **Rules:**
@@ -597,13 +618,18 @@ drops all memory.
 | same-number rejoin committed, before anchor resolution | host replace | after | the landed mark resolves the rotation; no `requireAnchorRecovery`, sends resume |
 | same-number rejoin save fails | host replace | failure injected | no mark: anchor kept, record still `confirmed`, re-check then adoption retried |
 | self-removal committed, before host deletion | MLS state save (`removed: true` row) | after | open operations `unknown`; removal path runs; group terminal |
-| removed group deleted by the host | host `delete` | after | unacked outcomes and undelivered Welcome obligations survive |
+| host deletes a group with unsettled control | host `delete` | — | refused; after `abandon()` and acks, deletion succeeds and the tombstone carries no control records |
+| hub accepted, before `accepted`, restart | hub `publish` on the commit topic | after | step 7 adopts it before the seed walk; never stranded on our own commit |
+| rejoin published, before `published` write, restart | hub `publish` (external) | after | step 7 finds it and moves the record to `published` before the seed walk; its barrier holds |
+| rejoin row at the framed epoch of an own `landed` row | rejoin adoption | after | settlement reads the old row first: its `opID` gets `unknown` |
+| ambiguous anchor save | `AnchorStore` save | commit then reject | `anchorPending` kept until the save is known; resolution repeats idempotently |
+| live self-removal with a pending rotation | MLS state save (`removed: true`) | after | no landed mark; `keepAnchor`; group terminal |
 | Welcome re-admission committed | host `seed({replace: true})` | after | operations and rejoin `unknown`; rows, cursor and anchor reset; anchor captured at the joined epoch |
 | anchor capture save fails live | `AnchorStore` save at capture | failure injected | `anchorPending` kept; retry resolves it; the epoch is rebuilt |
 | anchor keep save fails live | `AnchorStore` save at keep | failure injected | as above, anchor unchanged |
 | anchor resolved, before `rebuildEpoch` | `AnchorStore` save | after | startup builds the epoch |
-| same-number rejoin, external successor | `apply` with `published`, then an external commit at `source.epoch` | after | the barrier holds the walker at the rejoin position; the successor is judged under the candidate after adoption, never skipped |
-| restart with an operation past its deadline | `apply` with `built` | after, clock moved | the deadline from `enqueuedAt` applies; `lost` or `unknown` per D3 |
+| same-number rejoin, external successor | `apply` with `published`, then an external commit at `source.epoch` | after | the barrier holds the walker at the rejoin position; the re-check scans only below it and passes; the successor is judged under the candidate after adoption, never skipped |
+| restart with an operation past its deadline | `apply` with `built` | after, clock moved | the deadline from `enqueuedAt` applies: `landed` if dedup or the search finds it, else `lost` or `unknown` per D3 |
 | rejoin state committed | host replace | after | record is `adopted`; bootstrap, `reenact` and fork settlement run; never invalidated |
 | responder refusal, before cursor skip | MLS verdict sent | after | the refusal is judged again and recorded once with its reason |
 | strand and fork evidence written, before rejoin `built` | `apply` with `stranded` and `fork` | after | rejoin starts from the stored evidence; settlement uses `conflictEpoch` even if the competing frame is never served again |
@@ -695,9 +721,10 @@ Reconciled API by API:
   and its state save gains the `AdoptionWrite` (P2a D2): control changes and the anchor landed mark,
   committed in the same root transaction as the state.
 - Removed from `GroupStateStore`: intents, `WelcomeObligation`, `putWelcome` / `listWelcomes` /
-  `clearWelcome`, and `GroupStateWrite.putWelcome`. `delete` removes the group's
-  operations, rejoin, `applied`, `responses` and cursor, and keeps outcomes and Welcome
-  obligations (P2a D5).
+  `clearWelcome`, and `GroupStateWrite.putWelcome`. `delete` (Spec P D3,
+  `GroupStateStore.delete`) is refused while the group's control store holds unsettled records,
+  and then removes its `applied` rows, `responses` and cursor (P2a D5). It no longer deletes Welcome
+  obligations itself.
 - The commit cursor leaves `AppOutbox` for `ControlStore`.
 - The crash seams and conformance rows for D5 (intents, Welcome obligations, `onJoined`) move here.
   Spec P's tombstone-floor row stays, and P2a's `mls-hub` re-admission row covers the Welcome side.
@@ -791,3 +818,14 @@ Reconciled API by API:
   - Medium: the write factory runs on the staged handle; startup separates subscription, holds,
     the seed pull and `buildEpoch`; `ExternalResponse.epoch`, response pruning, and a deadline that
     survives restart.
+- **r5, Codex (blind), 2026-10-08.** One blocker, three high and three medium. A Claude agent
+  confirmed six and found one partial, refuting none. Three came from text added in r5.
+  - Blocker: r5's startup pulled before replay, so the device stranded on its own accepted commit.
+    Settling `built` and `accepted` work, and the rejoin's barrier, now come before the seed walk.
+  - High:
+    - the rejoin's row could overwrite an own row before settlement read it. Settlement now runs in
+      the rejoin's adoption transaction;
+    - host deletion dropped unsettled work, and nothing served a tombstone's records. Deletion is now
+      refused while control is unsettled, with `abandon()` as the way out.
+  - Medium: the source re-check is bounded by the rejoin's position; the registry owns adoption
+    ambiguity; self-removal writes no landed mark; crash rows narrowed and six added.
