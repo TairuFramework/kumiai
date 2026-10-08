@@ -11,6 +11,7 @@ import {
   type KeyPackage,
   type LeafIndex,
   mlsMessageEncoder,
+  type UnappliedProposals,
 } from 'ts-mls'
 
 import { LEDGER_HEAD_EXTENSION_TYPE } from './anchor.js'
@@ -22,6 +23,7 @@ import type { FoldInput } from './fold.js'
 import { assertBindingAuthorTime } from './group-credential.js'
 import {
   buildCommitPolicyContext,
+  CommitRejectedError,
   deriveGroup,
   type GroupHandle,
   mutexFor,
@@ -33,7 +35,7 @@ import {
   type VerifiedLedgerEntry,
   verifyLedgerEntry,
 } from './ledger.js'
-import { prepareLifecycleGate, validateEntry } from './lifecycle.js'
+import { prepareLifecycleGate, rejectionReason, validateEntry } from './lifecycle.js'
 import { authority, controllerOf, DEVICE_ENTRY_TYPE, type DeviceValue } from './registry.js'
 import { type GroupPermission, ROLE_ENTRY_TYPE } from './roster.js'
 import type { Invite } from './types.js'
@@ -158,6 +160,8 @@ function extensionsWithHead(
 export type CommitWithEntriesParams = {
   group: GroupHandle
   extraProposals: Array<DefaultProposal>
+  /** Pending proposals to commit by reference, retaining their authenticated senders. */
+  pendingProposals?: UnappliedProposals
   enacted: Array<string>
   ratchetTreeExtension?: boolean
   /** Defaults to true; device and lifecycle entries carry their own authority. */
@@ -272,7 +276,10 @@ export async function commitWithEntries(
     entryIDs,
     enactedDeviceEntries,
   })
-  const commitState = { ...(params.commitState ?? group.state), unappliedProposals: {} }
+  const commitState = {
+    ...(params.commitState ?? group.state),
+    unappliedProposals: params.pendingProposals ?? {},
+  }
 
   const proposals = [...extraProposals]
   if (entryIDs.length > 0) {
@@ -291,12 +298,26 @@ export async function commitWithEntries(
   const incoming = {
     kind: 'commit' as const,
     senderLeafIndex: group.state.privatePath.leafIndex as LeafIndex,
-    proposals: proposals.map((proposal) => ({
-      proposal,
-      senderLeafIndex: group.state.privatePath.leafIndex as LeafIndex,
-    })),
+    proposals: [
+      ...Object.values(commitState.unappliedProposals),
+      ...proposals.map((proposal) => ({
+        proposal,
+        senderLeafIndex: group.state.privatePath.leafIndex as LeafIndex,
+      })),
+    ],
   }
-  gate.check(incoming)
+  try {
+    gate.check(incoming)
+  } catch (cause) {
+    if (params.pendingProposals == null) throw cause
+    const error = new CommitRejectedError(
+      incoming.proposals,
+      incoming.senderLeafIndex,
+      rejectionReason(cause),
+    )
+    error.cause = cause
+    throw error
+  }
   for (const proposal of proposals) {
     if (proposal.proposalType === defaultProposalTypes.add) {
       const leaf = proposal.add.keyPackage.leafNode

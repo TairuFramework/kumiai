@@ -135,6 +135,9 @@ export {
   type SendAdmission,
 } from './group.js'
 export {
+  type CommitResult,
+  commitSelfRemovals,
+  proposeSelfRemoval,
   type RemoveLapsedLeavesResult,
   type RevokeBuildResult,
   type RevokeWithProofParams,

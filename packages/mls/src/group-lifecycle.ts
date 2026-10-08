@@ -10,6 +10,7 @@ import {
   type DefaultProposal,
   defaultProposalTypes,
   encode,
+  isDefaultProposal,
   mlsMessageEncoder,
   nodeTypes,
 } from 'ts-mls'
@@ -30,6 +31,50 @@ import {
   verifyLifecycleProof,
 } from './lifecycle-proof.js'
 import { DEVICE_ENTRY_TYPE, type DeviceValue, type RevokedEffect } from './registry.js'
+
+export type CommitResult = DeviceWriteResult
+
+/** Author a by-reference Remove for this handle's own leaf at its current epoch. */
+export async function proposeSelfRemoval(
+  group: GroupHandle,
+): Promise<{ frame: Uint8Array; epoch: bigint }> {
+  return group.proposeSelfRemoval()
+}
+
+/** Commit pending self-removals without absorbing other pending proposals. */
+export async function commitSelfRemovals(group: GroupHandle): Promise<CommitResult | null> {
+  return mutexFor(group).run(async () => {
+    const pendingProposals = Object.fromEntries(
+      Object.entries(group.state.unappliedProposals).filter(
+        ([, { proposal, senderLeafIndex }]) =>
+          isDefaultProposal(proposal) &&
+          proposal.proposalType === defaultProposalTypes.remove &&
+          proposal.remove.removed === senderLeafIndex,
+      ),
+    )
+    if (Object.keys(pendingProposals).length === 0) return null
+    const tree = group.state.ratchetTree.slice()
+    for (const { proposal } of Object.values(pendingProposals)) {
+      if (isDefaultProposal(proposal) && proposal.proposalType === defaultProposalTypes.remove)
+        tree[proposal.remove.removed * 2] = undefined
+    }
+    const tokens = await clockEntries(group, tree)
+    const result = await commitWithEntries({
+      group,
+      extraProposals: [],
+      pendingProposals,
+      enacted: tokens,
+      requireAdmin: false,
+    })
+    const newGroup = deriveGroup(group, result.newState)
+    await newGroup.applyLedgerEntries(tokens)
+    return {
+      commitMessage: encode(mlsMessageEncoder, result.commit),
+      newGroup,
+      epoch: newGroup.epoch,
+    }
+  })
+}
 
 export type RevokeBuildResult =
   | { status: 'built'; result: DeviceWriteResult }

@@ -4,7 +4,9 @@ import {
   type ClientState,
   contentTypes,
   createApplicationMessage,
+  createProposal,
   decode,
+  defaultProposalTypes,
   encode,
   type IncomingMessageAction,
   type IncomingMessageCallback,
@@ -900,6 +902,33 @@ export class GroupHandle {
     )
   }
 
+  /** Author and retain an authenticated self-removal proposal under the handle mutex. */
+  async proposeSelfRemoval(): Promise<{ frame: Uint8Array; epoch: bigint }> {
+    return mutexFor(this).run(async () => {
+      const senderLeafIndex = this.#state.privatePath.leafIndex
+      const proposal = {
+        proposalType: defaultProposalTypes.remove,
+        remove: { removed: senderLeafIndex },
+      }
+      const gate = await prepareLifecycleGate({
+        group: this,
+        entries: [],
+        candidateRegistry: this.#registry,
+        context: buildCommitPolicyContext(this, {
+          baseRoster: this.#roster,
+          candidateRoster: this.#roster,
+          entryIDs: [],
+          enactedDeviceEntries: [],
+        }),
+      })
+      gate.check({ kind: 'proposal', proposal: { proposal, senderLeafIndex } })
+      const result = await createProposal({ context: this.#context, state: this.#state, proposal })
+      this.#state = result.newState
+      zeroAll(result.consumed)
+      return { frame: encode(mlsMessageEncoder, result.message), epoch: this.epoch }
+    })
+  }
+
   /**
    * Encrypt an application message for the group at this handle's current epoch,
    * returning framed wire bytes. A handle a commit has already superseded (see
@@ -1485,6 +1514,16 @@ export class GroupHandle {
       decoded = parsed
     }
     return mutexFor(this).run(async () => {
+      const privateProposal = readPrivateFrame(decoded, contentTypes.proposal)
+      const frame = decoded as MlsFramedMessage
+      const proposalEpoch =
+        privateProposal?.epoch ??
+        (frame.wireformat === wireformats.mls_public_message &&
+        frame.publicMessage.content.contentType === contentTypes.proposal
+          ? frame.publicMessage.content.epoch
+          : undefined)
+      // Past proposals cannot be enacted at this epoch and need no ratchet or ledger work.
+      if (proposalEpoch != null && proposalEpoch < this.epoch) return null
       const { callback, capture, applyOnAccept, postApply } = await this.#prepareCommitPipeline(
         decoded,
         opts,
