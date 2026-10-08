@@ -1,7 +1,7 @@
 # Client host, messaging protocol and multi-device e2e — design
 
 Date: 2026-10-08
-Status: draft r6 (five Codex reviews folded in), awaiting review
+Status: approved r6 (2026-10-08)
 
 This is the umbrella design. Three sub-specs must be written and approved before the phases that
 depend on them:
