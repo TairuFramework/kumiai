@@ -1,7 +1,7 @@
 # Client host, messaging protocol and multi-device e2e — design
 
 Date: 2026-10-08
-Status: draft r5 (four Codex reviews folded in), awaiting review
+Status: draft r6 (five Codex reviews folded in), awaiting review
 
 This is the umbrella design. Three sub-specs must be written and approved before the phases that
 depend on them:
@@ -117,7 +117,7 @@ tests/e2e  (new, private) DeviceDriver, hub fixture, scenarios
 
 | Package | Change |
 |---|---|
-| `mls` | Group-model changes from Spec I: bound creator in an unanchored group, Welcome admission for co-devices, role bootstrap/migration, structured policy errors. |
+| `mls` | Group-model changes from Spec I: bound creator in an unanchored group, Welcome admission for co-devices, role bootstrap/migration, revocation as ordered ledger evidence in unanchored groups, structured policy errors. |
 | `rpc` | Expose the authenticated epoch to handlers; report a publication's log position and status to the publisher. |
 | `hub-client` | Reconnecting `LogHub`/`MailboxHub` over HTTP, peer- and sender-scoped views, ack backoff, hub server-DID discovery fetch. The buffered peer view takes injected epoch inspection and change notifications; `hub-client` never imports `mls` or the registry. |
 | `mls-rpc` | `GroupHandleRegistry` core (per-group mutex, epoch cache with change events, restore, displacement/lineage tracking, receive-tree merge) over the `GroupStateStore` port; `MLSEncryptor`; mls-state codec. Storage and projections are adapters. |
@@ -159,7 +159,9 @@ All paths under `kubun/packages/plugin-p2p/src/`.
     device-revoke carve-out today);
   - controller removal versus leaf removal, and whether surviving co-devices may restore a removed
     device;
-  - roles of removed subjects (they persist today).
+  - roles of removed subjects (they persist today);
+  - revocation as ordered ledger evidence, with its enactment authority (see Revocation
+    guarantees).
 - **Personal device-sync groups** (`anchor.controller` set) are out of scope for messaging.
 
 ## `@kumiai/client`
@@ -212,16 +214,32 @@ Identity details are settled in Spec I; this section fixes the shape.
   1. Revocation enters a group only as **evidence in the ordered group ledger** (authenticated
      controller-log deny events, or equivalent verified revoke entries). Validation of device and
      management entries rejects denied issuers using the agreed pre-commit state, so every member
-     decides identically. This is an mls change; existing lifecycle proofs are the starting point
-     but require an anchored controller today.
-  2. The revoked device is excluded from MLS **once the explicit revocation/removal commit is
-     adopted**. Before that commit, a revoked manager's commits are still accepted; this window is
-     accepted and bounded by how fast a remaining manager or admin commits.
+     decides identically. This is an mls change: today envelope folding rejects proof-bearing
+     device entries without lifecycle context, and live proof verification requires an anchored
+     controller and a same-controller issuer. The cryptographic verification of a named
+     controller's chain needs no anchor.
+  2. The revoked device is excluded from MLS when a commit **atomically adopts the verified
+     revocation and the removals it requires** (today `revokeDevice` already pairs the deny entry
+     with the Remove; an ordinary admin removal does not create a permanent deny). Revocation alone
+     does not reject the revoked device's other otherwise-valid commits before that; tree-time
+     expiry still applies. There is **no unconditional time bound**: if no authorized survivor is
+     online, exclusion waits.
   3. External stores (`store-delegation`, `store-controller`) only trigger that commit and feed hub
      refusal (Spec H); they never gate commit validation directly.
 
-  Spec I specifies the ledger evidence format, the pre-commit validation, grant expiry/renewal,
-  controller key rotation/reset and loss of the last manager device.
+  Spec I specifies, for unanchored multi-controller groups:
+  - the ledger evidence format and the pre-commit validation;
+  - **enactment authority**: who may relay revocation evidence into a group (today ordinary
+    `revokeDevice` needs a same-controller manager, anchored proof enactment a same-controller bound
+    device; cross-controller members cannot). Any-member relay is acceptable only with the checks
+    below;
+  - binding the evidence to the target's pre-commit controller, per-controller authenticated history
+    and generation floors, and deriving the exact removals;
+  - deterministic rejection of forged, detached, superseded and duplicate evidence. A signature
+    alone does not prove freshness: kokuin permits deny replacement and cannot detect unseen later
+    history on first encounter;
+  - whether a group revocation is terminal even if the controller later re-authorizes the device;
+  - grant expiry/renewal, controller key rotation/reset and loss of the last manager device.
 - **Two resolution paths, kept separate.** External controller resolution: fetch, guard against
   truncation, and store controller logs (`store-controller`) and grants/revocations
   (`store-delegation`). Embedded leaf proofs: built at link time, carried in the leaf, verified by
@@ -254,20 +272,33 @@ The hub's allow-any default is not acceptable for this stack. Spec H designs a m
   controller binding or grant. Spec H defines how a new device registers its controller evidence
   with the hub, and how that evidence stays fresh.
 - **Device validity on every delivery.** `receive` is checked only at channel open, so validity is
-  checked again immediately before each frame is transmitted, after any backpressure wait
-  (`writer.ready`), not only when the frame is queued. Spec H states what happens to queued and
-  in-flight frames, and the exact bound from policy update to the last frame sent.
+  checked again immediately before each frame is written, after any backpressure wait
+  (`writer.ready`), not only when the frame is queued. The bound is defined at write initiation:
+  no frame **starts** being written later than the bound after the policy update. Data already
+  handed to the transport is accounted for separately and may still arrive.
 - **Admission ordering.** Denied frames are not retried when policy changes; the hub requires a
-  reconnect. A newly admitted member therefore waits for the hub to acknowledge roster adoption
-  before subscribing and publishing, or reconnects and refetches after adoption and after the
-  deny-cache expiry. Spec H picks one.
+  reconnect, which also discards the channel-local deny cache. A newly admitted member reconnects
+  and refetches after the hub adopts the new roster (client-side only), or waits for an adoption
+  acknowledgement (needs an ingestion/ack contract). Spec H picks one.
+- **Responsibilities.** Spec H lists, per requirement, what is `authorize` policy and what needs a
+  hub change:
+
+  | Requirement | Where |
+  |---|---|
+  | Discovery owner restriction | Policy: compare the DID against `discoveryTopic(did)`; topic classification is policy state. |
+  | Unseen-device registration | New evidence-ingestion path: a host endpoint, or a hub RPC (protocol and server change). |
+  | Validity after `writer.ready` | `hub-server` change: the gate runs before backpressure today. |
+  | Admission by reconnect | Client only. |
+  | Admission by acknowledgement | Ingestion/ack contract. |
 - **Genesis trust and topic binding.** How the hub learns that a topic belongs to a group and who
   its founding authority is.
 - **Membership evidence.** What a member presents so the hub can adopt a new roster: accepted-commit
   evidence, not merely an authentic statement. Authentic-but-unauthorized and stale statements are
   rejected; forks and revisions have a defined outcome.
 - **Revocations.** How controller revocations reach the hub and when they take effect. The 5 s
-  receive cache bound starts when the policy state updates, not when the revocation is published.
+  receive cache bound starts when the policy state updates, not when the revocation is published,
+  and it bounds write initiation only (see above); backpressure can delay an already-authorized
+  frame indefinitely.
 - **Durability.** Policy state survives a hub restart (`hub-store`).
 
 Until phase 4 the e2e hub fixture runs with allow-any and the gap is documented in the suite.
@@ -316,7 +347,9 @@ messenger.events                                        // message | message:sta
   same plaintext twice, so devices may disagree on the relative order of such a message; accepted
   (chat apps order per device). Pending local messages sort last until their own position is known.
 - **Attempt identity.** Each publication attempt carries a durable `publishID`; the hub already
-  deduplicates by it, so no hub change is needed. Spec P persists each attempt's ID, topic,
+  deduplicates by `(topicID, publishID)`, so no hub change is needed. That dedup record expires
+  after 365 days in `hub-store`; an attempt still ambiguous past that horizon is abandoned and the
+  message is re-sent under a new attempt ID (receivers dedup it by message identity). Spec P persists each attempt's ID, topic,
   ciphertext and acknowledgement, and replays the **same** attempt after an ambiguous crash.
   Re-sealing after an epoch change or a deliberate rejoin resend creates a **new** attempt ID under
   the same message identity.
@@ -397,8 +430,8 @@ existing testcontainers setup), a capturing `WakeSender`, a mock Expo push endpo
 3. Roles: promote/demote; a non-admin remove fails with `NOT_GROUP_ADMIN`; demoting the last admin
    fails with `LAST_GROUP_ADMIN`.
 4. Multi-device: a group created by a controller-bound device; link a second device, which joins at
-   its admission epoch and receives new messages; revoke a lost device, which is excluded at the
-   next epoch and refused by the hub.
+   its admission epoch and receives new messages; revoke a lost device, which is excluded once the
+   revocation-and-removal commit is adopted, and refused by the hub.
 5. Offline device: a publication wakes it (captured sender and mock Expo endpoint); it reconnects and
    catches up with no duplicates.
 6. Concurrent admin commits converge to the same epoch and roster on all devices; a losing
@@ -460,7 +493,7 @@ Each phase gets its own plan and branch. The e2e suite grows with each phase.
    HTTP hub.
 3. **`rpc-store`.** Passes `rpc-conformance` on sqlite and postgres, real impls and doubles. e2e:
    devices on sqlite; restart restores groups.
-4. **Spec I and Spec H, then `mls` changes, `client` and the hub policy.** Implementation is gated
+4. **Spec I and Spec H, then `mls` changes, `client`, the hub policy and the `hub-server` changes Spec H lists.** Implementation is gated
    on the kokuin stores being published. e2e: scenarios 2, 3, 4, 6, and the identity and hub cases
    of 7.
 5. **`messaging`,** including handler exposure of the opened epoch and the publish-status events. e2e: scenarios 1, 5, and
