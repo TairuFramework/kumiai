@@ -620,6 +620,19 @@ describe('defaultCommitPolicy', () => {
     )
   })
 
+  test('an add with an empty identity is rejected even if the roster grants it', () => {
+    const granted = roster([
+      [ADMIN_DID, 'admin'],
+      ['', 'member'],
+    ])
+    expect(
+      defaultCommitPolicy(
+        commit(ADMIN_LEAF, [withSender(addProposal(''), undefined)]),
+        context({ candidateRoster: granted }),
+      ),
+    ).toBe('reject')
+  })
+
   test('an add carrying a non-basic credential is rejected', () => {
     const add = addProposalWithCredential({
       credentialType: defaultCredentialTypes.x509,

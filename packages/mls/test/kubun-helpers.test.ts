@@ -22,6 +22,14 @@ test('didFromCredentialNullForOtherTypes', () => {
   }
 })
 
+test('didFromCredentialNullForEmptyId', () => {
+  const credential: Credential = {
+    credentialType: defaultCredentialTypes.basic,
+    identity: new TextEncoder().encode(JSON.stringify({ id: '' })),
+  }
+  expect(didFromCredential(credential)).toBeNull()
+})
+
 function ratchet(generation: number, unused: Array<number>): GenerationSecret {
   return {
     generation,

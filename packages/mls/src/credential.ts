@@ -137,7 +137,8 @@ export function parseMLSCredentialIdentity(identity: Uint8Array): MLSCredentialI
  * `credentialType !== basic` does not narrow on its own: `CredentialCustom.credentialType` is a
  * bare `number`, so the compiler cannot rule it out. ts-mls's own guard can.
  *
- * Syntax is not validated. An identity naming an arbitrary string returns that string, which no
+ * An empty `id` names no DID and returns `null`.
+ * Syntax is not validated. An identity naming an arbitrary non-empty string returns that string, which no
  * roster grants — a lookup miss, and deliberately distinct from a credential that names nothing.
  */
 export function didFromCredential(credential: Credential): string | null {
@@ -148,7 +149,8 @@ export function didFromCredential(credential: Credential): string | null {
     return null
   }
   try {
-    return normalizeDID(parseMLSCredentialIdentity(credential.identity).id)
+    const id = parseMLSCredentialIdentity(credential.identity).id
+    return id === '' ? null : normalizeDID(id)
   } catch {
     return null
   }

@@ -13,6 +13,7 @@ function mergeGenerationSecrets(a: GenerationSecret, b: GenerationSecret): Gener
   return { ...ahead, unusedGenerations }
 }
 
+/** Merge same-epoch trees without mutating inputs. The result takes `leafWidth` from `target`. */
 export function mergeReceiveSecretTree(target: SecretTree, source: SecretTree): SecretTree {
   // Each side can expand a different part of the tree. Keep the most-expanded
   // representation of every branch: an ancestor secret must disappear when
