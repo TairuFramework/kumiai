@@ -56,6 +56,11 @@ export async function timedBinding(params: TimedBindingParams): Promise<Controll
   return {
     id: controllerID,
     prefix,
+    ...(params.parent == null
+      ? {}
+      : {
+          holderGrant: (await timedBinding({ identity, iat, exp: iat + 1000, prefix })).capability,
+        }),
     capability: stringifyToken(
       await signer.signToken({
         sub: controllerID,

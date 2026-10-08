@@ -1,4 +1,6 @@
 export type LeafBindingReason =
+  | 'missing-holder-evidence'
+  | 'holder-evidence-mismatch'
   | 'issuer-mismatch'
   | 'audience-mismatch'
   | 'permission-denied'

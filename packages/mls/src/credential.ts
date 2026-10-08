@@ -37,6 +37,8 @@ export type ControllerBinding = {
   id: string
   prefix: Array<SignedEvent>
   capability: string
+  /** The leaf holder's direct controller grant, required for chained capabilities. */
+  holderGrant?: string
 }
 
 export type MLSCredentialIdentity = {
@@ -114,12 +116,16 @@ export function parseMLSCredentialIdentity(identity: Uint8Array): MLSCredentialI
     if (!Array.isArray(cc.prefix)) {
       throw new Error('Invalid MLS credential: controller.prefix must be an array')
     }
+    if ('holderGrant' in cc && typeof cc.holderGrant !== 'string') {
+      throw new Error('Invalid MLS credential: controller.holderGrant must be a string')
+    }
     // Structural only — the prefix events are validated cryptographically by the fold in
     // validateCredential, never here (parse stays pure/structural, like longForm).
     result.controller = {
       id: cc.id,
       prefix: cc.prefix as Array<SignedEvent>,
       capability: cc.capability,
+      ...(typeof cc.holderGrant === 'string' ? { holderGrant: cc.holderGrant } : {}),
     }
   }
   return result

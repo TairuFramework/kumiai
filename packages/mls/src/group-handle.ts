@@ -34,7 +34,7 @@ import {
 import { type LeafBinding, verifyDeviceEntry } from './device-proof.js'
 import { decodeControlEnvelope } from './envelope.js'
 import { foldEnvelope, GROUP_TYPE_PREFIX } from './envelope-fold.js'
-import { LeafLapsedError, RevokeProofError } from './errors.js'
+import { LeafBindingError, LeafLapsedError, RevokeProofError } from './errors.js'
 import type { FoldInput } from './fold.js'
 import { createMlsContext, deviceDenyHolderFor } from './group-context.js'
 import { readMessageEpoch } from './group-info.js'
@@ -174,6 +174,7 @@ type RejectedCommit = { proposals: Array<ProposalWithSender>; senderLeafIndex?: 
 type CommitCapture = {
   rejected?: RejectedCommit
   proofError?: RevokeProofError
+  bindingError?: LeafBindingError
   reason?: CommitRejectionReason
 }
 
@@ -1345,6 +1346,9 @@ export class GroupHandle {
               controller: parsed.controller.id,
               prefix: parsed.controller.prefix,
               capability: parsed.controller.capability,
+              ...(parsed.controller.holderGrant == null
+                ? {}
+                : { holderGrant: parsed.controller.holderGrant }),
             }
           : {}),
       }
@@ -1520,6 +1524,7 @@ export class GroupHandle {
                   return true
                 } catch (error) {
                   capture.reason = rejectionReason(error)
+                  if (error instanceof LeafBindingError) capture.bindingError = error
                   return false
                 }
               },
@@ -1536,7 +1541,7 @@ export class GroupHandle {
           capture.rejected?.senderLeafIndex,
           capture.reason ?? 'invalid',
         )
-        rejection.cause = error
+        rejection.cause = capture.bindingError ?? error
         if (error instanceof Error) rejection.message += `: ${error.message}`
         throw rejection
       }

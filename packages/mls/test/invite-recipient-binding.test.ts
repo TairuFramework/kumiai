@@ -356,3 +356,23 @@ describe('commitInvite normalizes both DIDs before comparing', () => {
     expect(newGroup.roster.roles.get(normalizeDID(bob.longForm))).toBe('member')
   })
 })
+
+test('commitInvite refuses an empty recipient credential ID', async () => {
+  const identity = randomIdentity()
+  const recipient = randomIdentity()
+  const { group } = await createGroup(identity, 'empty-recipient')
+  const { invite } = await createInvite({
+    group,
+    identity,
+    recipientDID: recipient.id,
+    permission: 'member',
+  })
+  const bundle = await createKeyPackageBundle(recipient)
+  bundle.publicPackage.leafNode.credential = {
+    credentialType: defaultCredentialTypes.basic,
+    identity: new TextEncoder().encode(JSON.stringify({ id: '' })),
+  }
+  await expect(commitInvite(group, bundle.publicPackage, invite)).rejects.toThrow(
+    'recipient credential names no DID',
+  )
+})

@@ -14,7 +14,7 @@ import {
 } from 'ts-mls'
 
 import { LEDGER_HEAD_EXTENSION_TYPE } from './anchor.js'
-import { verifyLeafCredential } from './authentication.js'
+import { checkHolderEvidence, verifyLeafCredential } from './authentication.js'
 import {
   assertCapabilityLifetime,
   MAX_LEAF_LIFETIME,
@@ -146,6 +146,13 @@ function checkBinding(group: GroupHandle, leaf: LeafNode, previous?: LeafNode): 
   }
   if (binding == null) return
   const payload = readCapability(binding.capability).payload
+  checkHolderEvidence(
+    parsed,
+    leaf.signaturePublicKey,
+    controller == null
+      ? MAX_TRUSTED_GRANT_LIFETIME
+      : (group.anchor.trustedGrantLifetime ?? 2_592_000),
+  )
   assertCapabilityLifetime(
     payload,
     controller == null ? MAX_LEAF_LIFETIME : (group.anchor.leafLifetime ?? 86_400),

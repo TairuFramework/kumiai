@@ -47,12 +47,23 @@ export async function leafCapabilityFixture(options: LeafCapabilityFixtureOption
   }
   const signer = options.wrongSigner ? device : trusted
   const token = stringifyToken(await signer.signToken(childPayload))
+  const holderGrant = stringifyToken(
+    await controller.signToken({
+      sub: controller.id,
+      aud: device.id,
+      act: 'authenticate',
+      res: 'kumiai/mls-leaf',
+      cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: device.publicKey }),
+      iat: 1000,
+      exp: 2000,
+    }),
+  )
   const credential = (capability = token, id: string = device.id): Credential => ({
     credentialType: defaultCredentialTypes.basic,
     identity: new TextEncoder().encode(
       JSON.stringify({
         id,
-        controller: { id: controller.id, prefix: [inception], capability },
+        controller: { id: controller.id, prefix: [inception], capability, holderGrant },
       }),
     ),
   })

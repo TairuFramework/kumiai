@@ -470,7 +470,9 @@ export async function commitInvite(
         'commitInvite: the key package carries a non-basic credential, which names no DID to bind',
       )
     }
-    const actualDID = normalizeDID(parseMLSCredentialIdentity(credential.identity).id)
+    const recipientID = parseMLSCredentialIdentity(credential.identity).id
+    if (recipientID === '') throw new Error('commitInvite: the recipient credential names no DID')
+    const actualDID = normalizeDID(recipientID)
     if (actualDID !== expectedDID) {
       throw new InviteRecipientMismatchError({
         groupID: group.groupID,

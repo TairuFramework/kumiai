@@ -125,6 +125,7 @@ type VerifyPinnedCapabilityParams = {
   trustedGrantLifetime?: number
   /** Refuse a delegated (chained) capability. */
   directOnly?: boolean
+  trustedGrant?: boolean
 }
 
 /** Authenticate only embedded proof, using the token's issuance as its reference time. */
@@ -137,7 +138,8 @@ async function verifyPinnedCapability(params: VerifyPinnedCapabilityParams): Pro
   }
   const token = readCapability(params.capability)
   const payload = token.payload
-  const leafLifetime = Math.min(params.leafLifetime ?? MAX_LEAF_LIFETIME, MAX_LEAF_LIFETIME)
+  const ceiling = params.trustedGrant ? MAX_TRUSTED_GRANT_LIFETIME : MAX_LEAF_LIFETIME
+  const leafLifetime = Math.min(params.leafLifetime ?? ceiling, ceiling)
   assertCapabilityLifetime(payload, leafLifetime)
   if (normalizeDID(payload.sub) !== normalizeDID(params.controllerID)) {
     throw new LeafBindingError('subject-mismatch')
@@ -215,6 +217,34 @@ async function verifyPinnedCapability(params: VerifyPinnedCapabilityParams): Pro
   })
 }
 
+/** Structural evidence gate also used before MLS invokes its boolean authentication adapter. */
+export function checkHolderEvidence(
+  parsed: MLSCredentialIdentity,
+  signaturePublicKey: Uint8Array,
+  trustedGrantLifetime = MAX_TRUSTED_GRANT_LIFETIME,
+): string | undefined {
+  const binding = parsed.controller
+  if (binding == null || readCapability(binding.capability).payload.cap === undefined) return
+  if (binding.holderGrant == null) throw new LeafBindingError('missing-holder-evidence')
+  try {
+    const grant = readCapability(binding.holderGrant).payload
+    assertControllerGrant(grant, binding.id)
+    assertCapabilityLifetime(grant, Math.min(trustedGrantLifetime, MAX_TRUSTED_GRANT_LIFETIME))
+    if (
+      grant.cap !== undefined ||
+      normalizeDID(grant.aud) !== normalizeDID(parsed.id) ||
+      !constantTimeEqual(capabilityKey(grant).publicKey, signaturePublicKey) ||
+      !hasPermission({ act: MLS_LEAF_ACT, res: MLS_LEAF_RES }, grant)
+    )
+      throw new LeafBindingError('holder-evidence-mismatch')
+  } catch (cause) {
+    const error = new LeafBindingError('holder-evidence-mismatch')
+    error.cause = cause
+    throw error
+  }
+  return binding.holderGrant
+}
+
 /** Internal throwing boundary for entry gates; ts-mls consumes the boolean adapter below. */
 export async function verifyLeafCredential(
   credential: Credential,
@@ -241,6 +271,31 @@ export async function verifyLeafCredential(
       leafLifetime: deps.leafLifetime?.(),
       trustedGrantLifetime: deps.trustedGrantLifetime?.(),
     })
+    const holderGrant = checkHolderEvidence(
+      parsed,
+      signaturePublicKey,
+      deps.trustedGrantLifetime?.(),
+    )
+    if (holderGrant != null) {
+      try {
+        await verifyPinnedCapability({
+          capability: holderGrant,
+          prefix: parsed.controller.prefix,
+          controllerID: parsed.controller.id,
+          audience: parsed.id,
+          permission: { act: MLS_LEAF_ACT, res: MLS_LEAF_RES },
+          leafKey: signaturePublicKey,
+          denySet,
+          leafLifetime: deps.trustedGrantLifetime?.() ?? MAX_TRUSTED_GRANT_LIFETIME,
+          directOnly: true,
+          trustedGrant: true,
+        })
+      } catch (cause) {
+        const error = new LeafBindingError('holder-evidence-mismatch')
+        error.cause = cause
+        throw error
+      }
+    }
   } catch (error) {
     if (error instanceof LeafBindingError) throw error
     const rejection = new LeafBindingError('signature-invalid')

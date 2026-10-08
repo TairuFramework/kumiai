@@ -12,6 +12,7 @@ export type LeafBinding = {
   /** The embedded controller log prefix (present iff bound), for resolving a capability signature. */
   prefix?: Array<SignedEvent>
   capability?: string
+  holderGrant?: string
   /** The leaf's MLS signature public key. */
   leafKey: Uint8Array
 }

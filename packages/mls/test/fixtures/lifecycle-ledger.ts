@@ -46,7 +46,12 @@ export async function bindingFor(
     exp: now() + 3600,
     ...(issuer == null ? {} : { parent: issuer.parent }),
   })
-  return { id: controllerID, prefix, capability }
+  return {
+    id: controllerID,
+    prefix,
+    capability,
+    ...(issuer == null ? {} : { holderGrant: await trustedGrant(identity, prefix) }),
+  }
 }
 
 export async function trustedGrant(
