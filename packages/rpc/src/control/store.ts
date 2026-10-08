@@ -32,7 +32,9 @@ export function applyChanges(snapshot: ControlSnapshot, changes: ControlChanges)
     ),
     applied: putRows(
       snapshot.applied.filter(
-        (row) => changes.deleteAppliedFrom == null || row.epoch < changes.deleteAppliedFrom,
+        (row) =>
+          (changes.deleteAppliedFrom == null || row.epoch < changes.deleteAppliedFrom) &&
+          (changes.deleteAppliedBelow == null || row.epoch >= changes.deleteAppliedBelow),
       ),
       changes.putApplied,
       (row) => row.epoch,
@@ -94,9 +96,7 @@ export function pruneWindow(snapshot: ControlSnapshot, newestEpoch: number): Con
   const oldestEpoch = newestEpoch - 63
   const changes: ControlChanges = {}
   if (snapshot.applied.some((row) => row.epoch < oldestEpoch)) {
-    // The port deletes an upper range, so replace the retained window in one apply.
-    changes.deleteAppliedFrom = 0
-    changes.putApplied = snapshot.applied.filter((row) => row.epoch >= oldestEpoch)
+    changes.deleteAppliedBelow = oldestEpoch
   }
   if (snapshot.responses.some((row) => row.epoch < oldestEpoch)) {
     changes.deleteResponsesBelow = oldestEpoch

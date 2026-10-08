@@ -15,54 +15,54 @@ export type MemoryControlStore<Position extends string = string> =
     commitThenRejectNext(point: 'apply' | 'save'): void
   }
 
-function putRows<Row, Key>(
+function removeRows<Row>(rows: Array<Row>, remove: (row: Row) => boolean): void {
+  for (let index = rows.length - 1; index >= 0; index--) {
+    const row = rows[index]
+    if (row !== undefined && remove(row)) rows.splice(index, 1)
+  }
+}
+
+function upsertRows<Row, Key>(
   rows: Array<Row>,
   puts: Array<Row> | undefined,
   key: (row: Row) => Key,
-): Array<Row> {
-  const result = new Map(rows.map((row) => [key(row), row]))
-  for (const row of puts ?? []) result.set(key(row), row)
-  return [...result.values()]
+): void {
+  for (const put of puts ?? []) {
+    const index = rows.findIndex((row) => key(row) === key(put))
+    if (index < 0) rows.push(put)
+    else rows[index] = put
+  }
 }
 
-/** Deletes precede puts so a replacement at the fork epoch survives settlement. */
-function applyChanges<Position extends string>(
+/** Mutates the transaction's private copy, independently of the RPC reducer. */
+function mutateControl<Position extends string>(
   snapshot: ConformanceControlSnapshot<Position>,
   changes: ConformanceControlChanges<Position>,
-): ConformanceControlSnapshot<Position> {
-  return structuredClone({
-    operations: putRows(
-      snapshot.operations.filter((row) => !changes.deleteOperations?.includes(row.id)),
-      changes.putOperations,
-      (row) => row.id,
-    ).sort((a, b) => a.seq - b.seq),
-    rejoin: changes.putRejoin ?? (changes.deleteRejoin ? null : snapshot.rejoin),
-    outcomes: putRows(
-      snapshot.outcomes.filter((row) => !changes.deleteOutcomes?.includes(row.id)),
-      changes.putOutcomes,
-      (row) => row.id,
-    ),
-    welcomes: putRows(
-      snapshot.welcomes.filter((row) => !changes.deleteWelcomes?.includes(row.opID)),
-      changes.putWelcomes,
-      (row) => row.opID,
-    ),
-    applied: putRows(
-      snapshot.applied.filter(
-        (row) => changes.deleteAppliedFrom == null || row.epoch < changes.deleteAppliedFrom,
-      ),
-      changes.putApplied,
-      (row) => row.epoch,
-    ).sort((a, b) => a.epoch - b.epoch),
-    responses: putRows(
-      snapshot.responses.filter(
-        (row) => changes.deleteResponsesBelow == null || row.epoch >= changes.deleteResponsesBelow,
-      ),
-      changes.putResponses,
-      (row) => row.position,
-    ),
-    cursor: changes.cursor === undefined ? snapshot.cursor : changes.cursor,
+): void {
+  const owned = structuredClone(changes)
+  removeRows(snapshot.operations, (row) => owned.deleteOperations?.includes(row.id) === true)
+  removeRows(snapshot.outcomes, (row) => owned.deleteOutcomes?.includes(row.id) === true)
+  removeRows(snapshot.welcomes, (row) => owned.deleteWelcomes?.includes(row.opID) === true)
+  removeRows(snapshot.applied, (row) => {
+    return (
+      (owned.deleteAppliedFrom != null && row.epoch >= owned.deleteAppliedFrom) ||
+      (owned.deleteAppliedBelow != null && row.epoch < owned.deleteAppliedBelow)
+    )
   })
+  removeRows(snapshot.responses, (row) => {
+    return owned.deleteResponsesBelow != null && row.epoch < owned.deleteResponsesBelow
+  })
+  if (owned.deleteRejoin) snapshot.rejoin = null
+
+  upsertRows(snapshot.operations, owned.putOperations, (row) => row.id)
+  upsertRows(snapshot.outcomes, owned.putOutcomes, (row) => row.id)
+  upsertRows(snapshot.welcomes, owned.putWelcomes, (row) => row.opID)
+  upsertRows(snapshot.applied, owned.putApplied, (row) => row.epoch)
+  upsertRows(snapshot.responses, owned.putResponses, (row) => row.position)
+  if (owned.putRejoin !== undefined) snapshot.rejoin = owned.putRejoin
+  if (owned.cursor !== undefined) snapshot.cursor = owned.cursor
+  snapshot.operations.sort((a, b) => a.seq - b.seq)
+  snapshot.applied.sort((a, b) => a.epoch - b.epoch)
 }
 
 export function createMemoryControlStore<
@@ -107,7 +107,7 @@ export function createMemoryControlStore<
     lastMutation: async () => record.mutationID,
     apply: async (changes, mutationID) => {
       const next = structuredClone(record)
-      next.control = applyChanges(next.control, changes)
+      mutateControl(next.control, changes)
       next.mutationID = mutationID
       finish(next, 'apply')
     },
@@ -116,7 +116,7 @@ export function createMemoryControlStore<
       const next = structuredClone(record)
       next.state = state.slice()
       if (write != null) {
-        next.control = applyChanges(next.control, write.changes)
+        mutateControl(next.control, write.changes)
         next.mutationID = write.mutationID
         if (write.anchorLanded != null && next.anchor?.pending?.advance === write.anchorLanded) {
           next.anchor.pending.landed = true

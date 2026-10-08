@@ -117,7 +117,25 @@ describe('control changes', () => {
     expect(applyChanges(result, { cursor: null }).cursor).toBeNull()
   })
 
-  test('pruning retains exactly the newest 64 epochs including every response at the boundary', () => {
+  test('applied range deletions precede puts and preserve the retained interval', () => {
+    const snapshot = {
+      ...empty(),
+      applied: [applied(0), applied(1), applied(2), applied(3), applied(4)],
+    }
+    const result = applyChanges(snapshot, {
+      deleteAppliedBelow: 2,
+      deleteAppliedFrom: 4,
+      putApplied: [{ ...applied(0), digest: 'replacement' }],
+    })
+    expect(result.applied).toEqual([
+      { ...applied(0), digest: 'replacement' },
+      applied(2),
+      applied(3),
+    ])
+    expect(snapshot.applied).toEqual([applied(0), applied(1), applied(2), applied(3), applied(4)])
+  })
+
+  test('pruning retains exactly the newest 64 epochs without rewriting applied rows', () => {
     const snapshot = {
       ...empty(),
       applied: Array.from({ length: 65 }, (_, epoch) => applied(epoch)),
@@ -127,7 +145,10 @@ describe('control changes', () => {
         { position: asLogPosition('two'), epoch: 1, digest: 'two', kind: 'refused' as const },
       ],
     }
-    const pruned = applyChanges(snapshot, pruneWindow(snapshot, 64))
+    const changes = pruneWindow(snapshot, 64)
+    expect(changes).toEqual({ deleteAppliedBelow: 1, deleteResponsesBelow: 1 })
+    expect(changes.putApplied).toBeUndefined()
+    const pruned = applyChanges(snapshot, changes)
     expect(pruned.applied.map((row) => row.epoch)).toEqual(
       Array.from({ length: 64 }, (_, i) => i + 1),
     )

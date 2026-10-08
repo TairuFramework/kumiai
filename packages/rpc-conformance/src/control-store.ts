@@ -31,6 +31,7 @@ export type ConformanceControlChanges<Position extends string = string> = {
   deleteWelcomes?: Array<string>
   putApplied?: Array<ConformanceAppliedCommit>
   deleteAppliedFrom?: number // drops rows at epoch >= n, before puts
+  deleteAppliedBelow?: number // drops rows at epoch < n, before puts
   putResponses?: Array<ConformanceExternalResponse<Position>>
   deleteResponsesBelow?: number // by `epoch`
   cursor?: ConformanceCommitCursor<Position> | null
@@ -432,6 +433,72 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
       expect(snapshot.cursor).toBeNull()
       await host.control.apply({ deleteRejoin: true }, 'clear-rejoin')
       expect((await host.control.load()).rejoin).toBeNull()
+    })
+
+    test('epoch range deletions precede puts in apply and adoption saves', async () => {
+      const host = await params.open()
+      const applied = (epoch: number): ConformanceAppliedCommit => ({
+        epoch,
+        digest: `commit-${epoch}`,
+        payloadDigest: `payload-${epoch}`,
+        sequenceID: String(epoch),
+        opID: null,
+        removed: false,
+      })
+      await host.control.apply(
+        {
+          putApplied: [applied(0), applied(1), applied(2), applied(3), applied(4)],
+          putResponses: [
+            { position: 'old', epoch: 0, digest: 'old', kind: 'refused' },
+            { position: 'boundary', epoch: 2, digest: 'boundary', kind: 'refused' },
+            { position: 'new', epoch: 3, digest: 'new', kind: 'refused' },
+          ],
+        },
+        'baseline',
+      )
+      await host.control.apply(
+        {
+          deleteAppliedBelow: 2,
+          deleteAppliedFrom: 4,
+          putApplied: [
+            { ...applied(0), digest: 'reinserted' },
+            { ...applied(3), digest: 'replacement' },
+            applied(4),
+            { ...applied(4), digest: 'last-put' },
+          ],
+          deleteResponsesBelow: 2,
+          putResponses: [{ position: 'old', epoch: 0, digest: 'reinserted', kind: 'applied' }],
+        },
+        'prune-and-put',
+      )
+      const reopened = await params.reopen()
+      const snapshot = await reopened.control.load()
+      expect(snapshot.applied).toEqual([
+        { ...applied(0), digest: 'reinserted' },
+        applied(2),
+        { ...applied(3), digest: 'replacement' },
+        { ...applied(4), digest: 'last-put' },
+      ])
+      expect(snapshot.responses).toEqual([
+        { position: 'boundary', epoch: 2, digest: 'boundary', kind: 'refused' },
+        { position: 'new', epoch: 3, digest: 'new', kind: 'refused' },
+        { position: 'old', epoch: 0, digest: 'reinserted', kind: 'applied' },
+      ])
+      await reopened.saveState(new Uint8Array([2]), {
+        changes: { deleteAppliedBelow: 3, deleteResponsesBelow: 3, putApplied: [applied(1)] },
+        mutationID: 'adoption-prune',
+      })
+      const committed = await params.reopen()
+      expect((await committed.control.load()).applied).toEqual([
+        applied(1),
+        { ...applied(3), digest: 'replacement' },
+        { ...applied(4), digest: 'last-put' },
+      ])
+      expect((await committed.control.load()).responses).toEqual([
+        { position: 'new', epoch: 3, digest: 'new', kind: 'refused' },
+      ])
+      expect(await committed.loadState()).toEqual(new Uint8Array([2]))
+      expect(await committed.control.lastMutation()).toBe('adoption-prune')
     })
 
     test('secrets round-trip byte-exact and callers cannot mutate stored bytes', async () => {

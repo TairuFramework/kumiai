@@ -30,6 +30,7 @@ export type ControlChanges = {
   deleteWelcomes?: Array<string>
   putApplied?: Array<AppliedCommit>
   deleteAppliedFrom?: number // drops rows at epoch >= n, before puts
+  deleteAppliedBelow?: number // drops rows at epoch < n, before puts
   putResponses?: Array<ExternalResponse>
   deleteResponsesBelow?: number // by `epoch`
   cursor?: CommitCursor | null
