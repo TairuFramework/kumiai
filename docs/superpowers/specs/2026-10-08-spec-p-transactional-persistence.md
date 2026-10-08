@@ -1,7 +1,7 @@
 # Spec P: transactional persistence — design
 
 Date: 2026-10-08
-Status: draft r3 (Codex r1, r2 folded in)
+Status: draft r4 (Codex r1–r3 folded in)
 Parent: [client host, messaging protocol and multi-device e2e](2026-10-08-client-messaging-e2e-design.md)
 (phase 0)
 
@@ -230,16 +230,27 @@ export type GroupStateRecord = {
   ledger: Array<string>
   /** Sender generations at `epoch` are reserved below this. */
   senderHWM: number
+  /** ts-mls `keySchedule.epochAuthenticator` of `state`; empty when deleted. Tells two states at
+   * one epoch number apart (a rejoin can land on its old number, `rpc/src/peer.ts:422`). */
+  epochAuthenticator: Uint8Array
+  /** Bumped by every `seed({replace})` and recovery adoption; never decreases, tombstones included. */
+  lineage: number
+  /** KeyPackageRef this state joined with, until its private key is released (D5). */
+  joinRef: string | null
 }
 
-/** A host operation recorded before its commit and cleared only by the adopting save. */
+/** A host operation recorded before its commit. `id` is the operation ID carried in the commit. */
 export type GroupIntent = { id: string; groupID: string; body: Uint8Array }
+
+/** A Welcome owed to invitees of a commit the hub accepted. */
+export type WelcomeObligation = { id: string; groupID: string; welcome: Uint8Array }
 
 export type GroupStateWrite = {
   /** The version the caller read; `null` only when no record exists at all. */
   expected: { version: number } | null
   putIntent?: GroupIntent
   clearIntent?: string
+  putWelcome?: WelcomeObligation
 }
 
 export type GroupStateStore = {
@@ -251,8 +262,9 @@ export type GroupStateStore = {
   save(record: GroupStateRecord, write: GroupStateWrite): Promise<void>
   /** `save` plus an insert of `pending` that is a no-op if `pending.frame.id` exists. */
   saveOpened(record: GroupStateRecord, write: GroupStateWrite, pending: PendingAppFrame): Promise<void>
-  /** Saves a tombstone (`deleted: true`), deleting the group's pending records, intents and every
-   * rpc-store row keyed by the group, in one transaction. */
+  /** Saves a tombstone (`deleted: true`), deleting the group's pending records, intents, Welcome
+   * obligations and every rpc-store row keyed by the group, and running the host's `onDelete`
+   * hook, in one transaction. */
   delete(record: GroupStateRecord, write: GroupStateWrite): Promise<void>
   /** Uncompleted records of one group in `(segment, position)` order. */
   listPending(groupID: string): Promise<Array<PendingAppFrame>>
@@ -262,6 +274,11 @@ export type GroupStateStore = {
   putIntent(intent: GroupIntent): Promise<void>
   listIntents(groupID: string): Promise<Array<GroupIntent>>
   clearIntent(groupID: string, id: string): Promise<void>
+  /** Standalone obligation write; `id` is the commit's operation ID, so a repeat is a no-op. */
+  putWelcome(obligation: WelcomeObligation): Promise<void>
+  listWelcomes(groupID: string): Promise<Array<WelcomeObligation>>
+  /** Unknown IDs resolve. */
+  clearWelcome(groupID: string, id: string): Promise<void>
 }
 
 /** A CAS miss. Storage is unchanged. */
@@ -274,7 +291,7 @@ Rules:
 
 - **CAS.** A write succeeds iff the stored version equals `expected.version` (or `expected` is
   `null` and no record exists) and `record.version` exceeds it. Within one epoch the store keeps
-  `senderHWM` at the maximum of stored and written. A miss throws `GroupStateConflictError` and
+  `senderHWM` at the maximum of stored and written. A write with a lower `lineage` conflicts. A miss throws `GroupStateConflictError` and
   writes nothing. On postgres a serialization failure under a stricter isolation level is a
   conflict.
 - **Ambiguous write.** On `StorageOutcomeUnknownError` the registry marks the group uncertain (every
@@ -295,24 +312,38 @@ Rules:
     (application and handshake chains) as Kubun does, and never lowers sender progress.
   - Same-epoch adoption never reinstalls an older sender state.
 - **Key retention.** `mls` makes key retention configurable on `MlsContext` (today
-  `group-context.ts:59` takes ts-mls's defaults of 10 retained generations and 200 forward steps).
-  `client` sets `retainKeysForGenerations: 1000` and `maximumForwardRatchetSteps: 1000`.
+  `group-context.ts:59` takes ts-mls's defaults of 10 retained generations and 200 forward steps;
+  ts-mls accepts a per-context `clientConfig`, `ts-mls/dist/src/mlsContext.d.ts:9`). `client` sets
+  `retainKeysForGenerations: 1000` and `maximumForwardRatchetSteps: 1000`. Every handle constructor
+  carries the source context's configuration: create, restore, Welcome join, external join,
+  `deriveGroup` (today it builds a fresh default context, `mls/src/group-handle.ts:1652`) and clone.
 - **Sender lease.** Every sealing path reserves first. Before sealing, the registry needs a
   reservation at the current epoch with at least 4 generations left; otherwise it saves `senderHWM`
   raised by 16 (state unchanged). On restore the registry burns generations up to `senderHWM` before
   any seal. No generation is sealed twice.
-- **Rotation.** When the next sender generation at the current epoch would reach 500
-  (`ROTATE_AT`), the registry reports `SendAdmission` not admissible with reason
+- **Rotation.** Every sealing path goes through the registry's admission and lease: retained sends,
+  directed replies and ephemeral frames alike. When the next sender generation at the current epoch
+  would reach 500 (`ROTATE_AT`), the registry reports `SendAdmission` not admissible with reason
   `rotation-required`. rpc then holds app sends as it does for any inadmissible reason, and
   `client` commits a key rotation (D5). The new epoch resets every ratchet. This bounds:
   - any receiver's forward gap to 500 steps, under the 1000 limit, however many generations were
     burned by restores or consumed by seals that never landed;
   - skipped keys: fewer than 1000 generations exist per epoch, so live ephemeral frames can never
     push a retained frame out of the retention window.
-- **Displacement.** A per-group lineage counter; a `GroupCrypto` built before a `seed({replace})`
-  rejects `wrap` with `DisplacedGroupHandleError`. Replacement is epoch-monotonic.
+
+  Both bounds hold within one lineage; a replacement or rejoin starts a new epoch, and frames
+  sealed on the old lineage are covered only by message identity and re-sealing (D6).
+  `client` commits the rotation through rpc's commit lane, never while holding the registry's
+  per-group mutex.
+- **Displacement.** The record's `lineage`; a `GroupCrypto` built before a `seed({replace})` or a
+  recovery adoption rejects `wrap` with `DisplacedGroupHandleError`. Replacement is epoch-monotonic.
+- **Deletion hook.** The Hozon `GroupStateStore` takes `onDelete(tx, groupID)` from the host;
+  `client` wires `messaging`'s "unpublished rows of this group become `failed`", so deletion and the
+  message status change commit together (the outbox rows `onClear` would have seen are deleted in
+  the same transaction).
 - **Restore.** `list()` drives restore: each live record goes through `restoreGroup`, its pending
-  records to its peer, and its intents to `client` (D5).
+  records to its peer, its intents and Welcome obligations to `client`, and a non-null `joinRef` to
+  the key-package release (D5).
 
 ### D4. Opened epoch on pending records and handlers
 
@@ -333,53 +364,97 @@ contract suites and every double, including `rpc/test/fixtures/fake-crypto.ts:36
 `mls-rpc/test/handle-access.test.ts:194` and `tests/integration`, verified with repo-wide
 `turbo run test:types`.
 
-### D5. Commits: journal, intents, adoption, Welcome
+### D5. Commits: operation identity, journal, adoption, Welcome, recovery
 
 - **Operations.** `client`'s group operations (invite, remove, setRole, device add/revoke, leave,
   key rotation) each become one intent and one rpc `commit()`. Ledger operations sign their tokens
   **before** the intent is written.
-- **Intent body.** `{kind, targets, role?, tokens?}`: the exact signed tokens for ledger
-  operations, the target DIDs for invite/remove, nothing else for rotation. Written with `putIntent`
-  before `commit()`.
-- **Journal blob.** `encodeJournal({state, ledger, epochBefore, welcome?, intentID})`: the
-  post-commit MLS state and ledger tokens, the epoch the commit was framed at, the Welcome with its
-  recipients, and the intent it fulfils. No storage version is journalled.
-- **Adoption** (`onAccepted` and `adoptJournalled`). The registry loads the current record:
-  - `current.epoch === epochBefore`: save the journalled state as `version = current.version + 1`
-    with `expected: current.version` and `clearIntent: intentID`. Durable opens at the departing
-    epoch since the build (rpc delivers before adopting, `rpc/src/peer.ts:1161, 2236`) only bumped the
-    version; their plaintext is already in pending records.
-  - `current.epoch > epochBefore`: already adopted. The hub's head CAS lets only one commit land at
-    `epochBefore`, and acceptance is journalled, so that commit is ours. Clear the intent if still
-    present.
-  - In both cases publish the Welcome, then rpc clears the journal. Welcome delivery is
-    at-least-once; joining is idempotent.
-- **Rotation commits** use a new `mls` builder, `commitKeyRotation(group)`: a proposal-free commit
-  with an update path. Any member may issue one; receiving policy already accepts it
+- **Operation ID.** Each intent has a random 128-bit `id`. The commit carries it in its control
+  envelope's `app` field (`mls/src/envelope.ts:16`; authenticated, cleartext on the wire,
+  `mls/src/group-handle.ts:211`) as `{op: id}`. Every `mls` builder routes through
+  `commitWithEntries`, which writes the envelope (`mls/src/group-commit.ts:171-188, 318`); it gains
+  an optional `app` value that `commitInvite`, `removeMember`, `commitLedgerEntries` and
+  `commitKeyRotation` pass through. The ID is the operation's **occurrence** identity: a repeated token or an equivalent
+  operation by another admin or a linked device never matches it. Only this device knows the ID
+  until its own commit publishes it, and the hub fans out no rejected publish.
+- **Intent body.** `{kind, targets, role?, tokens?, epochAt, lineage}`: the exact signed tokens for
+  ledger operations, the target DIDs for invite/remove, and the record's `epoch` and `lineage` when
+  the intent was written. Written with `putIntent` before `commit()`.
+- **Observed operations.** `GroupMLS` reads every commit frame's envelope before processing it, own
+  commits included (a member never processes its own commit, `rpc/src/peer.ts:315`, but its
+  envelope is cleartext). An `app.op` equal to a stored intent's ID clears that intent: in the
+  adopting save for a processed commit, standalone for an own commit the peer heals from.
+- **Journal blob.** `encodeJournal({state, ledger, epochBefore, authenticatorBefore, welcome?,
+  intentID})`: the post-commit MLS state and ledger tokens, the epoch and `epochAuthenticator` of the
+  state the commit was built from, the Welcome with its recipients, and the operation ID. No storage
+  version is journalled.
+- **Acceptance means landed.** The hub's head CAS appends one linear log, so an accepted commit is
+  canonical whatever the local state does later. Every path that learns of acceptance
+  (`onAccepted`, `adoptJournalled`) first saves, in one transaction, `putWelcome` for its Welcome
+  (keyed by the operation ID) and `clearIntent`. The obligation outlives the journal.
+- **Adoption** of the journalled state. The registry loads the current record:
+  - `epoch === epochBefore` and `epochAuthenticator` equals `authenticatorBefore`: save the
+    journalled state as `version = current.version + 1` with `expected: current.version`. Durable
+    opens at the departing epoch since the build (rpc delivers before adopting,
+    `rpc/src/peer.ts:1161, 2236`) only bumped the version; their plaintext is already in pending
+    records. Sender progress is not lowered (D3).
+  - anything else: no state write. A higher epoch on the same lineage is our commit already adopted
+    (the log is linear and our commit is in it); a different authenticator or lineage is a
+    replacement or recovery that rejoined the canonical log after it. Either way the group's
+    current state is the one to keep.
+
+  Then rpc clears the journal.
+- **Welcome delivery.** `client` publishes each obligation to its recipients' mailboxes and clears it
+  once the hub accepts. At-least-once; restart lists obligations and resends.
+- **Lost work.** On restart, and on rpc's lost-commit notice, `client` lists intents. An intent with
+  a journal entry is left to rpc's replay. For the rest, `client` first waits until the peer has
+  pulled the commit log to its head with the ledger complete; a stale or incomplete state cannot
+  prove an operation absent. Then:
+  - rotation: done if `record.epoch > epochAt` on any lineage (every new epoch resets the ratchets),
+    cleared;
+  - other kinds, `record.lineage === intent.lineage`: every commit since the intent was written has
+    been read on this lineage and none carried its ID, so it did not land. Re-enacted under the
+    **same** ID while the actor is still authorised, else reported as `commit:lost` and cleared;
+  - other kinds, lineage changed: a replacement or recovery skipped part of the log, so the outcome
+    is unknown. Reported as `commit:lost` with `fate: 'unknown'` and cleared; never re-enacted
+    automatically.
+
+  The hub's 365-day `publishID` horizon no longer matters: a landed operation is recognised by its
+  ID, not by dedup. This closes rpc's clear-before-notice window (`rpc/src/peer.ts:1883-1888`)
+  without changing rpc's ordinary commit path.
+- **Recovery** (external rejoin, `rpc/src/peer.ts:2440-2625`) enters the commit journal like any
+  commit:
+  - Before rejoining, rpc resolves a deferred ordinary journal entry by republishing it under its
+    original `publishID`. The hub claims the ID before its head CAS
+    (`hub-store/src/store.ts:195-215`), so a landed entry returns its acceptance and runs the
+    acceptance save above (obligation plus intent clear); a head mismatch means it did not land, and
+    its intent stays for reconciliation. Only then is the slot cleared.
+  - The external commit is journalled as `CommitKind` `'rejoin'`, with its `publishID` and a blob
+    holding the candidate state, before publishing. Replay reuses the ID, so a crash after the hub
+    accepted it adopts the journalled candidate instead of rejoining again.
+  - Adoption is `seed({replace: true})`: CAS on the current version, `lineage + 1`.
+- **Rotation commits** use a new `mls` builder, `commitKeyRotation(group, {app})`: a proposal-free
+  commit with an update path. Any member may issue one; receiving policy already accepts it
   (`mls/src/policy.ts:317-342`). `commitLedgerEntries` refuses empty token lists and requires admin
   rights by default (`mls/src/group-commit.ts:196, 375`), so it is not reused. It travels as rpc kind
-  `ledger` with empty `bodies`.
-- **Lost work.** On restart, and on rpc's lost-commit notice, `client` lists intents. An intent with
-  a journal entry is left to rpc's replay. An intent without one is reconciled against the group's
-  **authenticated state**, never against the actor's authorization:
-  - invite: done if every target device is a member;
-  - remove: done if no target device is a member;
-  - ledger: done if every token is already in `handle.ledgerTokens` (by token identity);
-  - rotation: done if the sender generation is below `ROTATE_AT`.
-
-  Done intents are cleared. Others are re-enacted while the actor is still authorised, or reported
-  as `commit:lost` and then cleared (at-least-once). A landed operation is never re-enacted, even
-  past the hub's 365-day `publishID` horizon: its effect is visible in authenticated state. This
-  closes rpc's clear-before-notice window (`rpc/src/peer.ts:1883-1888`) without changing rpc.
-- **Welcome join.** The registry checks the stored record first:
-  - none: save with `expected: null`;
+  `ledger` with empty `bodies`, and leaves the app anchor unchanged (`resolveAnchorRotation` rotates
+  it only for roster changes and forced rejoin, `rpc/src/peer.ts:442`).
+- **Welcome join.** Decrypting a Welcome and releasing the key package are split. `mls-hub`'s join
+  helper today releases before returning (`mls-hub/src/join.ts:77-89`); it gains an `onJoined(result)`
+  callback awaited before `release`, and a rejected callback keeps the key. The registry's callback:
+  - none stored: save with `expected: null` and `joinRef` set;
   - live, at or above the Welcome's epoch: no-op success;
   - live, below: replaced only by `seed({replace: true})` (rejoin), CAS on its version;
   - tombstone: accepted only if the Welcome's epoch exceeds the tombstone's epoch, so a replayed old
     Welcome cannot resurrect a deleted group.
-  
-  A real re-invite is a new commit, so its epoch is higher. Key-package private keys are deleted on
-  use; phase 1 confirms `mls-hub` does this.
+
+  After `release` resolves, the registry saves `joinRef: null`; restore releases any `joinRef` still
+  set. A repeated Welcome naming a `joinRef` the registry holds is acknowledged without decrypting.
+  Last-resort packages are never released (`mls-hub/src/provisioner.ts:65`), so `joinRef` is not
+  set for them. A real re-invite is a new commit, so its epoch is higher.
+- **Leave.** A leave is an intent and a removal commit like any other. The local `delete` runs only
+  after the device observes its own removal (or the user forces it), and clears every intent and
+  obligation in its transaction (D3).
 - **Others' commits.** Adoption is a CAS save from the version read. A replayed older commit returns
   `advanced: false` from `GroupMLS` as today, and nothing is written.
 
@@ -390,9 +465,12 @@ contract suites and every double, including `rpc/test/fixtures/fake-crypto.ts:36
   identity absorbs; with D3's retention bounds, at least one occurrence decrypts.
 - **Attempt identity.** Each seal gets a fresh `publishID`; an in-process retry of the same bytes
   reuses it, so the hub appends it once. `AppOutboxEntry.lastAttempt` gains `publishID` and
-  `segment`. No ciphertext is stored.
+  `segment`, the **app anchor's** epoch at sealing (the topic the frame goes to), not the MLS epoch:
+  a key rotation advances MLS without rotating the topic. No ciphertext is stored.
 - **Publication record.** rpc's in-memory `Publication` (`rpc/src/log-delivery.ts:17`) gains
-  `{publishID, segment, sequenceID}`, filled from the hub's acknowledgement. `publish` returns the
+  `{publishID, segment, sequenceID}`: `segment` from the seal, `sequenceID` from `mux.publish()`'s
+  result (`rpc/src/hub-mux.ts:777`), which delivery already awaits before recording the publication
+  (`rpc/src/log-delivery.ts:179`). `publish` returns the
   `PublishResult` instead of `unknown`.
 - **Acknowledgement is not proof.** rpc's proof logic is unchanged: an acknowledged entry from an
   older epoch is re-sealed until proof.
@@ -429,10 +507,20 @@ export function createCoordinatedOutbox(params: {
 - `put`, `remove`, `clear` and `putCommitCursor` each run one root transaction: read the affected
   entries from the `tx` outbox, write the outbox, await the hook, and write a fresh `mutationID` to
   the group's outbox meta row.
+- **Serialised.** The adapter runs one mutation at a time per outbox, from transaction entry through
+  outcome resolution. rpc does call it concurrently (`accept` reservations,
+  `rpc/src/app-outbox.ts:119-128`, and delivery's replacements and removals,
+  `rpc/src/log-delivery.ts:170`), and an overlapping write would replace the `mutationID` an
+  ambiguous attempt must read back.
+- **Unknown and replaced sequences.** `remove` of a sequence not in the outbox skips the hook and
+  resolves (the port requires it harmless, `rpc-conformance/src/app-outbox.ts:63`); its status was
+  written by the removal that deleted it. A `put` replacing an existing sequence with different
+  `data` rejects with `OutboxReplacementError`: rpc replaces only `lastAttempt`, and a stricter
+  implementation is allowed.
 - **Ambiguous commit.** The adapter reads the meta row in a fresh transaction. Its `mutationID`
   equal to the attempt's means committed and the call resolves; otherwise it did not commit and the
-  call rejects. Only this adapter writes the outbox (D1), so no later write can hide the
-  attempt. If the read itself fails, the adapter retries with backoff (cap 15 s), keeps the call
+  call rejects. Only this adapter writes the outbox (D1) and it is serialised, so no later write can
+  hide the attempt. If the read itself fails, the adapter retries with backoff (cap 15 s), keeps the call
   pending, and refuses other calls on that outbox until it settles. rpc's sequence reservation stays
   held meanwhile.
 - rpc's `accept` holds the sequence reservation until `put` resolves
@@ -442,7 +530,8 @@ export function createCoordinatedOutbox(params: {
   which restarts at 0 once the outbox empties (`rpc/src/app-outbox.ts:66-81`):
   - `onPut` inserts the row as `accepted` once and ignores later puts of the same message;
   - `onRemove` with an outcome sets `published` and the position unless one is already set;
-  - `onClear` sets unpublished rows `failed`.
+  - `onClear` sets unpublished rows `failed`;
+  - group deletion does the same through the `GroupStateStore`'s `onDelete` hook (D3).
 - Memory doubles: `createMemoryTransaction()` gives a shared in-memory store set with snapshot and
   rollback, used by the memory outbox and the memory `MessageStore`.
 
@@ -479,9 +568,14 @@ for every wrapped store method is after its transaction committed.
 | After adoption, before journal clear | `CommitJournal.clear` | before |
 | After journal clear on a lost commit, before the intent is reconciled | `CommitJournal.clear` with no adoption | after |
 | After a lease reservation, before the first seal | `GroupStateStore.save` raising `senderHWM` | after |
+| After the Welcome join save, before key release | `GroupStateStore.save` with `joinRef` set | after |
+| After acceptance save, before Welcome publish | `GroupStateStore.save` with `putWelcome` | after |
+| After the rejoin journal put, before its publish | `CommitJournal.put` of kind `'rejoin'` | after |
+| After the rejoin is accepted, before adoption | `CommitJournal.markAccepted` of kind `'rejoin'` | after |
+| After deletion, before restart | `GroupStateStore.delete` | after |
 
 The first seven are the umbrella's scenario-8 points (its acknowledgement point now has two seams,
-acknowledgement and proof); the rest cover D3 and D5.
+acknowledgement and proof); the rest cover D3, D5 and D7.
 
 ## Conformance additions
 
@@ -502,7 +596,9 @@ inside a transaction for the postgres isolation case (the only D2 exception).
 | | `saveOpened` is atomic | failure injected in the pending insert: neither record nor pending row changes |
 | | `saveOpened` retry keeps one row | a second call for the same `frame.id`, CAS from the current version, succeeds with one pending row |
 | | pending order, epoch and completion | after reopen, `listPending` is `(segment, position)` ordered, keeps `epoch`; `completePending` twice resolves |
-| | delete is one transaction | after `delete`, pending rows, intents and group-keyed rows are gone; the tombstone keeps its epoch; a stale CAS fails |
+| | delete is one transaction | after `delete`, pending rows, intents, obligations and group-keyed rows are gone, and the `onDelete` hook's writes landed; the tombstone keeps its epoch and lineage; a stale CAS fails |
+| | obligations | `putWelcome` twice with one ID keeps one row; `clearWelcome` of an unknown ID resolves; obligations survive reopen |
+| | lineage never decreases | a write with lower `lineage`, tombstone included, conflicts |
 | | per provider | the suite runs on node-sqlite, postgres and expo |
 | `testCommitJournalConformance` (extended) | durable across reopen | `put`, `markAccepted`, reopen: `get` returns the entry with `acceptedAs` |
 | `testAppOutboxConformance` (extended) | attempt round-trip | `lastAttempt.publishID` and `segment` read back |
@@ -510,7 +606,9 @@ inside a transaction for the postgres isolation case (the only D2 exception).
 | | resolves after commit | an `onCommit` hook registered inside `onPut` has fired before `put` resolves |
 | | isolation (postgres) | while `onPut` is held at a test barrier, a reader on another connection sees neither row |
 | | ambiguous commit | commit-then-reject on `put` (including an attempt replacement with the same `seq` and `data`), `remove`, `clear`: resolves iff the write committed |
-| | outcome reaches the hook | `remove(seq, outcome)` passes `outcome` to `onRemove`; a retried remove passes it again |
+| | outcome reaches the hook | `remove(seq, outcome)` passes `outcome` to `onRemove`; a retried remove after reopen skips the hook and resolves |
+| | overlapping ambiguous writes | `put` A commits then rejects, while `put` B is issued: B starts only after A resolves, and A resolves |
+| | replacement with different data | rejects with `OutboxReplacementError`; storage unchanged |
 | | nested transaction refused | constructing over a transaction-scoped provider throws |
 | `testAppCursorStoreConformance` (new) | durable, per topic | `save` then reopen: `load(topicID)` returns it; other topics stay `null` |
 | `testPendingGroupCryptoConformance` (extended) | opened epoch | the durable record's `epoch` equals the epoch `unwrap` returned |
@@ -521,8 +619,20 @@ inside a transaction for the postgres isolation case (the only D2 exception).
 | | adoption after intervening opens | durable opens at the departing epoch between build and acceptance: adoption succeeds |
 | | adoption is recognised later | adopt, more writes, crash before journal clear: replay skips the save and resends the Welcome |
 | | tombstone floor | after delete, a replayed Welcome at or below the tombstone epoch is refused; a higher one joins |
-| `client` tests | lost ledger operation | head mismatch on replay, crash after journal clear: the intent's tokens are re-issued exactly |
-| | landed operation is not re-enacted | a promotion landed, a later demotion landed, the promotion's journal is gone: reconciliation clears the intent and the demotion stands |
+| | same-number recovery | journal at epoch E, recovery lands a different state at E, replay: no state write (authenticators differ), the Welcome obligation is kept |
+| | replacement past the journal | journal at E accepted, `seed({replace})` installs E+2: no state write, obligation kept, intent cleared |
+| | join before key release | crash after the join save: restart has the group and releases `joinRef`; crash before it: the key is kept and the Welcome reprocesses |
+| | duplicate Welcome | a second Welcome for a held `joinRef` resolves without decrypting |
+| | last-resort join | a last-resort package joins; `joinRef` stays null and the package remains |
+| | retention survives derivation | configure 1000/1000, adopt an invite, removal and rotation via `deriveGroup`: a receiver still opens generation 600 after a gap of 600 |
+| `client` tests | lost ledger operation | head mismatch on replay, crash after journal clear: the intent's tokens are re-issued exactly, under the same operation ID |
+| | landed operation is not re-enacted | a promotion landed, a later demotion landed, the promotion's journal is gone: the observed ID clears the intent and the demotion stands |
+| | repeated token | a grant re-issued with a token identical to a historical one, journal lost before publish: reconciliation re-enacts it |
+| | invite then remove by another admin | invite landed with its journal lost, another admin removed the invitee: no re-invite |
+| | equivalent op by a linked device | a linked device enacts the same grant; this device's intent did not land: it is re-enacted, not cleared |
+| | unknown fate after recovery | intent written, recovery rejoins past it: `commit:lost` with `fate: 'unknown'`, no re-enactment |
+| | explicit rotation | rotation intent at generation 10, crash before journal: restart rotates |
+| | deletion with accepted messages | accept a message, delete the group, crash: after restart the message row is `failed` |
 | | rotation | `rotation-required` leads to a key-rotation commit by a non-admin member, and sends resume at the new epoch |
 | rpc peer tests | restart re-seals | an unproven entry after restart is sealed under a new `publishID`, never republished as stored bytes |
 | | acknowledged but unproven | acknowledgement at E, epoch moves to E+1 before proof, restart: re-sealed at E+1, removed only at proof |
@@ -541,7 +651,13 @@ Applied to the parent in phase 1's reconciliation step:
 - [Package layout → `mls`]: configurable key retention on `MlsContext`; `commitKeyRotation`.
 - Scenario 8: the acknowledgement point splits into acknowledgement and proof; add the D3 and D5
   seams.
-- [Flows]: group operations go through durable intents (D5).
+- [Flows]: group operations go through durable intents with operation IDs (D5); Welcome obligations
+  are durable; Welcome join persists before key release.
+- [Package layout → `rpc`]: `CommitKind` gains `'rejoin'`; recovery resolves a deferred journal by
+  republishing it, then journals its external commit (D5).
+- [Package layout → `mls-hub`]: the join helper's `onJoined` callback runs before `release`.
+- [Package layout → `mls`]: `commitWithEntries` takes an optional envelope `app`; every handle
+  constructor carries the context's key-retention configuration.
 
 ## Review log
 
@@ -565,3 +681,17 @@ Applied to the parent in phase 1's reconciliation step:
   an old Welcome resurrect a group — epoch floor. D2 and D3 disagreed on who resolves ambiguity —
   named per port. Medium/low: expo `RETURNING` counts, `saveOpened` retry semantics, test barrier
   exception, missing cases. All verified in source and folded.
+- **Codex r3** (blockers): Welcome processing released the key package before the joined state was
+  saved (`mls-hub/src/join.ts:77`) — `onJoined` before `release`, `joinRef` swept on restore,
+  last-resort exempt. "Higher epoch means adopted" and the equality branch both fail under
+  same-number recovery and replacement (`rpc/src/peer.ts:422, 2591`) — acceptance alone clears the
+  intent and records a Welcome obligation; the journalled state is adopted only onto the exact
+  pre-commit state (epoch authenticator). High: reconciliation by current effects and token presence
+  confused occurrences (repeated tokens, other admins, linked devices, explicit rotation) — operation
+  IDs in the commit envelope, lineage-gated reconciliation, `fate: 'unknown'` after recovery,
+  rotation by `epochAt`. Recovery was unjournalled and could clear a Welcome obligation — `'rejoin'`
+  journal kind, deferred entry resolved by republish first, obligations stored apart. `deriveGroup`
+  drops retention configuration — carried through every constructor. Overlapping outbox calls hid
+  `mutationID` — adapter serialised. Deletion bypassed message status — `onDelete` hook. Medium:
+  retried/unknown remove and different-data replacement — hook skipped, replacement rejected. Also:
+  `segment` is the app anchor's. All verified in source and folded.
