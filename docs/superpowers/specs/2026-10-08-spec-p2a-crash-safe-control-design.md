@@ -105,8 +105,9 @@ Checked against source on 2026-10-08 (branch `design/client-messaging-e2e`). Pat
   - **The host state save carries control.** Every adoption path, the host `adopt` (D3),
     `GroupMLS.processCommit` (D5) and `restoreRecovery(...).onAccepted` (D6), takes an
     `AdoptionWrite` (D2) and passes it to the host's `persist`, which commits it with the new state.
-    Today `persist` runs before the handle adopts and leaves it untouched on failure
-    (`mls-rpc/src/apply-commit.ts:55`, `mls/src/group-handle.ts:1569-1585`). The write context is
+    Today the handle assigns the new state tentatively, runs `persist`, and restores state, ledger,
+    roster, registry and admission if it rejects; notification follows a successful `persist`
+    (`mls-rpc/src/apply-commit.ts:55`, `mls/src/group-handle.ts:1629-1656`). The write context is
     threaded as a factory `(staged: GroupHandle) => AdoptionWrite` through `HandleAccess.mutate`,
     `replace` and `SimpleHandleAccessParams.persist` (`mls-rpc/src/access.ts:12-25, 65-70`), all of
     which lack it today; recovery adopts through `replace` (`mls-rpc/src/mls.ts:431`). The factory
@@ -236,7 +237,7 @@ The host supplies `build(op)` and `adopt(journal, expected, write)`.
   error keeps it `built`, and replay after a restart adopts what an earlier process built. Opens
   advance the secret tree, and so do seals (`ts-mls/dist/src/createMessage.js:100-101`). The candidate holds the trees
   snapshotted at build (`ts-mls/dist/src/createCommit.js:84`). After the identity check and before
-  saving, and under the handle's own write gate (`mls/src/group-handle.ts:82`) so no open or seal
+  saving, and under the handle's own write gate (`mls/src/group-handle.ts:85`) so no open or seal
   interleaves, `adopt` copies the current state's whole `secretTree`, sender and receive progress alike,
   into the candidate's history at `E`, and the current historical tree of every earlier epoch the
   candidate also retains. It keeps the candidate's `E + 1` state, and resurrects no epoch the
@@ -332,7 +333,7 @@ export type Outcome = { id: string; opID: string | null; at: number } & (
 - **`landed` and "lands once" are branch-relative too.** Against an honest hub, rebuild-and-retry
   (step 3) never lands one intent twice. Against a hostile hub, a hidden first acceptance on another
   branch and the rebuilt commit here can both land. The target guard covers invites and removals; a
-  ledger operation, where enacting twice is meaningful (`mls/src/group-commit.ts:174-177`), has no
+  ledger operation, where enacting twice is meaningful (`mls/src/group-commit.ts:178-181`), has no
   such guard. The crash rows assert "lands once" against an honest hub only.
 
 ### D4. Welcome obligations
@@ -341,7 +342,7 @@ export type Outcome = { id: string; opID: string | null; at: number } & (
 
 - A `WelcomeObligation` is `{opID, welcome, recipients}`. It is written with `accepted` (D3 step 3).
 - `welcome` is the **complete host-encoded invitation artifact**: the MLS Welcome plus the invite and,
-  when needed, the ratchet tree (`mls/src/group-welcome.ts:50-55`). Raw Welcome bytes are not
+  when needed, the ratchet tree (`mls/src/group-welcome.ts:50-58`). Raw Welcome bytes are not
   enough: once the operation and its journal are deleted, nothing else can rebuild the artifact.
   Kubun already persists the encoded invitation for this reason
   (`kubun/packages/plugin-p2p/src/groups/manager.ts:894-899`).
@@ -394,7 +395,7 @@ export type Outcome = { id: string; opID: string | null; at: number } & (
   This moves from Spec P's deleted D5.
 - **Last-resort packages** are never consumed (`mls-hub/src/provisioner.ts:65`). Their repeats go
   through the same admission rules. `processWelcomeOnce` dedups by group ID alone
-  (`mls/src/group-welcome.ts:176-186`) and would discard a genuine re-admission, so it is not used,
+  (`mls/src/group-welcome.ts:184-194`) and would discard a genuine re-admission, so it is not used,
   as Kubun already avoids it (`kubun/packages/plugin-p2p/src/groups/manager.ts:690-704`).
 
 ### D5. Commit log, forks and strands
@@ -485,7 +486,7 @@ export type Outcome = { id: string; opID: string | null; at: number } & (
   (`rpc/src/peer.ts:586-594`), and requests a heal.
 - **Fork evidence triggers a heal; it proves nothing.** Below the current epoch the classifier rests
   on a cleartext framed epoch, a digest of hub-supplied bytes and sequence order, with no
-  authenticated committer (`rpc/src/classify.ts:259-283`, `mls/src/group-handle.ts:1363-1381`). A
+  authenticated committer (`rpc/src/classify.ts:259-283`, `mls/src/group-handle.ts:1404-1422`). A
   hostile hub can forge it. The conflict epoch `E` is where a competitor was seen, not where the
   branches diverged: the classifier flags whichever epoch has a row, and divergence may lie lower.
   At the divergence epoch both commits share a parent, so a commit this device built there may be
@@ -523,8 +524,9 @@ export type RejoinRecord = {
   requestKey: Uint8Array
   /**
    * `PendingRecovery.serialize()`: the candidate state plus everything verdict judgment reads, the
-   * source tree, the known registry and the confirmation tuple (`mls-rpc/src/recovery.ts:201-202`).
-   * Secret.
+   * source tree, the known registry and the confirmation tuple (`mls-rpc/src/recovery.ts:206-207`),
+   * and the binding's `holderGrant`, which is part of the binding identity
+   * (`mls-rpc/src/recovery.ts:99-108`). Secret.
    */
   candidate: Uint8Array
   /** Identity of the state the rejoin replaces; re-checked before adoption. */
@@ -579,7 +581,7 @@ export type RejoinRecord = {
   and can run with no rejoin (`rpc/src/peer.ts:1752, 2009-2013, 2043`): its key stays in memory,
   and a restart starts a new gather.
 - **Responders confirm at their current epoch only.** A responder re-derives `confirmationKey` from
-  `exportSecret`, which reads the current key schedule only (`mls/src/group-handle.ts:890-891`); ts-mls
+  `exportSecret`, which reads the current key schedule only (`mls/src/group-handle.ts:895-896`); ts-mls
   retains no exporter secret for past epochs (`ts-mls/dist/src/epochReceiverData.d.ts:11-17`). So a
   responder confirms only while its current epoch equals the candidate's, and stores no secret. Once
   every responder has moved past it, the requester times out and rejoins again. Persisting the
@@ -675,6 +677,7 @@ drops all memory.
 | | removal effect | a self-removal committed, crash before deletion: removal runs at start from the row |
 | | source re-check | a winner's successor framed above `source.epoch` passes; a parseable unrecorded frame at `source.epoch` fails |
 | | refused rejoin | a policy refusal writes `refused` and keeps sends held; a renewal refusal starts a fresh rejoin |
+| | holder evidence | a chained leaf without holder evidence: `build` gives `rejected`; a rejoin binding refreshed with evidence round-trips its `holderGrant` and is usable; a Welcome to such a leaf leaves its obligation delivered and the invitee unjoined |
 | integration | `recovery-confirmation` suite unchanged and green | |
 | | requester restart | restart between external publish and confirmation: one leaf, adoption after confirmation |
 | | Welcome after crash | inviter crashes after `accepted`: the invitee joins after restart |
@@ -735,6 +738,11 @@ Reconciled API by API:
 - Removing deliver-before-ratchet, the shared lock, `rebuildEpoch` and `runExclusive`.
 - The `@kumiai/group-lifecycle` package and the `host-boundary` split.
 - Configurable key retention.
+- Voluntary departure through `proposeSelfRemoval` / `commitSelfRemovals` (mls 0.10.2,
+  `mls/src/group-lifecycle.ts:42-54`). The proposal mutates the live handle without `persist` and
+  blocks application encryption until committed; neither rpc nor mls-rpc calls these today. Adopting
+  them needs a durable operation kind of its own. Being removed by another member's commit, which
+  this spec covers, is unchanged.
 
 ## Risks
 
@@ -752,6 +760,11 @@ Reconciled API by API:
   forged conflict costs a heal, never a false outcome.
 - **Revoke publish window.** A publish already in flight when the hold is set can still reach the
   member being removed, as today.
+- **Holder evidence (mls 0.10.2).** A chained leaf without valid controller-signed holder evidence
+  refuses `build`, incoming commits and Welcome joins (`mls/src/authentication.ts:233`,
+  `mls/src/group-welcome.ts:84`). These surface as `rejected` outcomes, rejoin refusal or a failed
+  Welcome admission; no new outcome kind is needed, the `holder evidence` test row covers each. A
+  delivered Welcome obligation still does not prove admission.
 
 ## Review log
 

@@ -68,15 +68,15 @@ Checked against source on 2026-10-08. Paths are relative to `packages/` unless r
 
 ### Handle state in kumiai
 
-- `GroupHandle` state is memory only (`mls/src/group-handle.ts:356-374`). `restoreGroup({state,
+- `GroupHandle` state is memory only (`mls/src/group-handle.ts:361-379`). `restoreGroup({state,
   credential, ledgerEntries})` rebuilds a handle and re-verifies the ledger tokens
-  (`mls/src/group-create.ts:155-176`, `mls/src/group-handle.ts:483-490`). `ClientState` includes the
-  leaf signing key (`mls/src/group-lifecycle.ts:43`); `MemberCredential` is `{id, groupID}`
+  (`mls/src/group-create.ts:155-176`, `mls/src/group-handle.ts:488-495`). `ClientState` includes the
+  leaf signing key (`mls/src/group-lifecycle.ts:102`); `MemberCredential` is `{id, groupID}`
   (`mls/src/credential.ts:11-14`). Ordered tokens come from `handle.ledgerTokens`.
 - `encodeClientState`/`decodeClientState` exist with a 1-byte version prefix
   (`mls/src/codec.ts:25-54`). No codec exists for credential or ledger tokens.
 - Not persisted and re-supplied by the host on restore: `MlsContext`, `commitPolicy`, ledger
-  resolvers (`mls/src/group-handle.ts:343-348`), the mls-rpc `LedgerEntrySlot`, own signing identity
+  resolvers (`mls/src/group-handle.ts:348-353`), the mls-rpc `LedgerEntrySlot`, own signing identity
   and recovery config (`mls-rpc/src/mls.ts:62-109`). Recovery-request ephemeral keys live in a
   120 s in-memory map (`mls-rpc/src/mls.ts:135-173`).
 - `simpleHandleAccess` serialises calls in memory and calls an optional host `persist` after every
@@ -85,7 +85,7 @@ Checked against source on 2026-10-08. Paths are relative to `packages/` unless r
   returned only after the advanced sender ratchet is saved.
 - Durable open: `mls-rpc` takes `pending: {persistOpened(stagedState, record), list, complete}`
   (`mls-rpc/src/crypto.ts:96-101`). `decryptStaged` decrypts against a staged state, awaits
-  `persistOpened`, and only then adopts it (`mls/src/group-handle.ts:1015-1048`). A persist failure
+  `persistOpened`, and only then adopts it (`mls/src/group-handle.ts:1051-1084`). A persist failure
   leaves the key unspent (`mls-rpc/src/crypto.ts:192-224`). mls-rpc writes nothing durable itself.
 
 ### Commit journal and key retention
@@ -316,7 +316,7 @@ Rules:
   ts-mls accepts a per-context `clientConfig`, `ts-mls/dist/src/mlsContext.d.ts:9`). `client` sets
   `retainKeysForGenerations: 1000` and `maximumForwardRatchetSteps: 1000`. Every handle constructor
   carries the source context's configuration: create, restore, Welcome join, external join,
-  `deriveGroup` (today it builds a fresh default context, `mls/src/group-handle.ts:1652`) and clone.
+  `deriveGroup` (today it builds a fresh default context, `mls/src/group-handle.ts:1716`) and clone.
 - **Sender lease.** Every sealing path reserves first. Before sealing, the registry needs a
   reservation at the current epoch with at least 4 generations left; otherwise it saves `senderHWM`
   raised by 16 (state unchanged). On restore the registry burns generations up to `senderHWM` before
@@ -371,8 +371,8 @@ contract suites and every double, including `rpc/test/fixtures/fake-crypto.ts:36
   **before** the intent is written.
 - **Operation ID.** Each intent has a random 128-bit `id`. The commit carries it in its control
   envelope's `app` field (`mls/src/envelope.ts:16`; authenticated, cleartext on the wire,
-  `mls/src/group-handle.ts:211`) as `{op: id}`. Every `mls` builder routes through
-  `commitWithEntries`, which writes the envelope (`mls/src/group-commit.ts:171-188, 318`); it gains
+  `mls/src/group-handle.ts:216`) as `{op: id}`. Every `mls` builder routes through
+  `commitWithEntries`, which writes the envelope (`mls/src/group-commit.ts:175-192, 339`); it gains
   an optional `app` value that `commitInvite`, `removeMember`, `commitLedgerEntries` and
   `commitKeyRotation` pass through. The ID is the operation's **occurrence** identity: a repeated token or an equivalent
   operation by another admin or a linked device never matches it. Only this device knows the ID
@@ -436,7 +436,7 @@ contract suites and every double, including `rpc/test/fixtures/fake-crypto.ts:36
 - **Rotation commits** use a new `mls` builder, `commitKeyRotation(group, {app})`: a proposal-free
   commit with an update path. Any member may issue one; receiving policy already accepts it
   (`mls/src/policy.ts:317-342`). `commitLedgerEntries` refuses empty token lists and requires admin
-  rights by default (`mls/src/group-commit.ts:196, 375`), so it is not reused. It travels as rpc kind
+  rights by default (`mls/src/group-commit.ts:200, 397-400`), so it is not reused. It travels as rpc kind
   `ledger` with empty `bodies`, and leaves the app anchor unchanged (`resolveAnchorRotation` rotates
   it only for roster changes and forced rejoin, `rpc/src/peer.ts:442`).
 - **Welcome join.** Decrypting a Welcome and releasing the key package are split. `mls-hub`'s join
