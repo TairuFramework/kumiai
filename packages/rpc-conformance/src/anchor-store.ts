@@ -8,6 +8,7 @@ export type ConformanceAnchorSlot = {
     rosterBefore: Array<string>
     forced: boolean
     advance: string
+    landed?: true
   }
 }
 

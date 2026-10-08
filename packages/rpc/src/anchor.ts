@@ -17,6 +17,7 @@ export type AnchorSlot = {
     rosterBefore: Array<string>
     forced: boolean
     advance: string
+    landed?: true
   }
 }
 

@@ -37,6 +37,25 @@ export {
   testCommitJournalConformance,
 } from './commit-journal.js'
 export {
+  type ConformanceAdoptionWrite,
+  type ConformanceAppliedCommit,
+  type ConformanceBuiltCommit,
+  type ConformanceControlChanges,
+  type ConformanceControlHost,
+  type ConformanceControlSnapshot,
+  type ConformanceControlStore,
+  type ConformanceExternalResponse,
+  type ConformanceForkEvidence,
+  type ConformanceOperation,
+  type ConformanceOperationRequest,
+  type ConformanceOutcome,
+  type ConformanceRecoveryRefusal,
+  type ConformanceRejoinRecord,
+  type ConformanceWelcomeObligation,
+  type ControlStoreConformanceParams,
+  testControlStoreConformance,
+} from './control-store.js'
+export {
   type ConformanceCryptoGroup,
   type ConformanceCryptoMember,
   type ConformanceGroupCrypto,
@@ -55,6 +74,7 @@ export {
   testGroupMLSConformance,
 } from './group-mls.js'
 export { createMemoryAppOutbox, type MemoryAppOutbox } from './memory-app-outbox.js'
+export { createMemoryControlStore, type MemoryControlStore } from './memory-control-store.js'
 export {
   type ConformanceAppFrameRef,
   type ConformancePendingAppFrame,
