@@ -1,9 +1,10 @@
 import type { GroupHandle } from '@kumiai/mls'
-import type {
-  AdoptionWrite,
-  AdoptionWriteFactory,
-  PendingAppFrame,
-  SendAdmission,
+import {
+  type AdoptionWrite,
+  type AdoptionWriteFactory,
+  ControlWriteNotCommittedError,
+  type PendingAppFrame,
+  type SendAdmission,
 } from '@kumiai/rpc'
 
 type PersistOpened = (stagedState: Uint8Array, record: PendingAppFrame) => Promise<void>
@@ -64,6 +65,9 @@ export function simpleHandleAccess(params: SimpleHandleAccessParams): HandleAcce
     read: (fn) => serialise(async () => await fn(params.handle())),
     mutate: (fn, adoption) =>
       serialise(async () => {
+        if (adoption != null && params.persist == null) {
+          throw new ControlWriteNotCommittedError('adoption requires a persist callback')
+        }
         const handle = params.handle()
         let saved = false
         const persist = async (current: GroupHandle): Promise<void> => {
@@ -77,6 +81,9 @@ export function simpleHandleAccess(params: SimpleHandleAccessParams): HandleAcce
       }),
     replace: (next, adoption) =>
       serialise(async () => {
+        if (adoption != null && params.persist == null) {
+          throw new ControlWriteNotCommittedError('adoption requires a persist callback')
+        }
         await save(next, adoption)
         await params.adopt(next)
         publishedAdmission = next.sendAdmission()

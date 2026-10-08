@@ -7,6 +7,7 @@ import {
 } from '@kumiai/mls'
 import {
   type AdoptionWrite,
+  type AnchorSlot,
   applyChanges,
   type ControlSnapshot,
   type PendingAppFrame,
@@ -28,6 +29,7 @@ export type StoredRow = {
   revision: number
   control: ControlSnapshot
   mutationID: string | null
+  anchorSlot: AnchorSlot | null
 }
 
 /**
@@ -58,13 +60,17 @@ export type TransactionalStore = {
   beforeWrite?: (() => void | Promise<void>) | undefined
 }
 
-export function createTransactionalStore(handle: GroupHandle): TransactionalStore {
+export function createTransactionalStore(
+  handle: GroupHandle,
+  anchorSlot: AnchorSlot | null = null,
+): TransactionalStore {
   return storeOver(
     {
       state: encodeClientState(handle.state),
       ledger: handle.ledgerTokens,
       revision: 0,
       mutationID: null,
+      anchorSlot: structuredClone(anchorSlot),
       control: {
         operations: [],
         rejoin: null,
@@ -91,21 +97,32 @@ function storeOver(initial: StoredRow, records: Map<string, PendingAppFrame>): T
     },
     fork: async () => {
       await tail
-      return storeOver({ ...row, state: row.state.slice() }, records)
+      return storeOver(
+        { ...row, state: row.state.slice(), anchorSlot: structuredClone(row.anchorSlot) },
+        records,
+      )
     },
     save: (expected, state, ledger, record, write) => {
       const saving = tail.then(async () => {
-        await store.beforeWrite?.()
-        if (row.revision !== expected) throw new RevisionConflictError(expected, row.revision)
         // One transaction: the state row and the pending row together. A duplicate frame ID keeps
         // its first record; the key is still consumed once, by this state.
-        row = {
+        const next: StoredRow = {
           state: state.slice(),
           ledger,
           revision: expected + 1,
           control: write == null ? row.control : applyChanges(row.control, write.changes),
           mutationID: write?.mutationID ?? row.mutationID,
+          anchorSlot: structuredClone(row.anchorSlot),
         }
+        if (
+          write?.anchorLanded != null &&
+          next.anchorSlot?.pending?.advance === write.anchorLanded
+        ) {
+          next.anchorSlot.pending.landed = true
+        }
+        await store.beforeWrite?.()
+        if (row.revision !== expected) throw new RevisionConflictError(expected, row.revision)
+        row = next
         if (record != null && !store.records.has(record.frame.id)) {
           store.records.set(record.frame.id, record)
         }

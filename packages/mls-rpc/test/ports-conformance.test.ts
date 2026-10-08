@@ -24,6 +24,7 @@ import {
   createRealGroup,
   sealRealRecoveryVerdict,
 } from './fixtures/real-group.js'
+import { createTransactionalStore } from './fixtures/transactional-access.js'
 
 /**
  * The port contracts, against real MLS. The identical suites run in `@kumiai/rpc` over the test
@@ -209,11 +210,20 @@ testGroupMLSConformance({
         did: member.identity.id,
         mls: createGroupMLS({
           access: (() => {
+            const store = createTransactionalStore(member.handle)
             const base = simpleHandleAccess({
               handle: () => member.handle,
               adopt: (next) => {
                 member.handle = next
               },
+              persist: (handle, write) =>
+                store.save(
+                  store.snapshot().revision,
+                  encodeClientState(handle.state),
+                  handle.ledgerTokens,
+                  undefined,
+                  write,
+                ),
             })
             return { ...base, epoch: () => base.epoch() + hintOffset }
           })(),
