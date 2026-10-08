@@ -139,32 +139,32 @@ describe('didFromCredential', () => {
     expect(didFromCredential(basicCredential(bytes))).toBe('did:key:z6MkABC')
   })
 
-  it('returns undefined for an x509 credential, which names no DID', () => {
+  it('returns null for an x509 credential, which names no DID', () => {
     const x509: Credential = { credentialType: defaultCredentialTypes.x509, certificates: [] }
-    expect(didFromCredential(x509)).toBeUndefined()
+    expect(didFromCredential(x509)).toBeNull()
   })
 
-  it('returns undefined for a custom credential type', () => {
+  it('returns null for a custom credential type', () => {
     const custom: Credential = { credentialType: 0xbeef, data: new Uint8Array([1, 2, 3]) }
-    expect(didFromCredential(custom)).toBeUndefined()
+    expect(didFromCredential(custom)).toBeNull()
   })
 
-  it('returns undefined instead of throwing on non-JSON identity bytes', () => {
+  it('returns null instead of throwing on non-JSON identity bytes', () => {
     const bytes = new TextEncoder().encode('not json at all')
     expect(() => didFromCredential(basicCredential(bytes))).not.toThrow()
-    expect(didFromCredential(basicCredential(bytes))).toBeUndefined()
+    expect(didFromCredential(basicCredential(bytes))).toBeNull()
   })
 
-  it('returns undefined instead of throwing on JSON with no id', () => {
+  it('returns null instead of throwing on JSON with no id', () => {
     const bytes = new TextEncoder().encode(JSON.stringify({ longForm: 'did:peer:4zABC:eyJ' }))
     expect(() => didFromCredential(basicCredential(bytes))).not.toThrow()
-    expect(didFromCredential(basicCredential(bytes))).toBeUndefined()
+    expect(didFromCredential(basicCredential(bytes))).toBeNull()
   })
 
-  it('returns undefined instead of throwing on an unsupported identity version', () => {
+  it('returns null instead of throwing on an unsupported identity version', () => {
     const bytes = new TextEncoder().encode(JSON.stringify({ v: 2, id: 'did:key:z6MkABC' }))
     expect(() => didFromCredential(basicCredential(bytes))).not.toThrow()
-    expect(didFromCredential(basicCredential(bytes))).toBeUndefined()
+    expect(didFromCredential(basicCredential(bytes))).toBeNull()
   })
 
   it('returns an arbitrary id string unchanged rather than rejecting it', () => {

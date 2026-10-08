@@ -82,7 +82,15 @@ export async function processWelcome(params: ProcessWelcomeParams): Promise<Proc
 
   const sanitizedTree = Array.isArray(ratchetTree) ? sanitizeRatchetTree(ratchetTree) : ratchetTree
   const state = await mlsJoinGroup({
-    context,
+    context: {
+      ...context,
+      authService: {
+        async validateCredential(credential: Credential, signaturePublicKey: Uint8Array) {
+          await verifyLeafCredential(credential, signaturePublicKey)
+          return true
+        },
+      },
+    },
     welcome: resolvedWelcome as JoinGroupParams['welcome'],
     keyPackage: keyPackageBundle.publicPackage as JoinGroupParams['keyPackage'],
     privateKeys: keyPackageBundle.privatePackage as JoinGroupParams['privateKeys'],

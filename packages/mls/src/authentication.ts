@@ -107,6 +107,12 @@ export type DIDAuthenticationDependencies = {
   deviceDenySet?: () => ReadonlySet<string>
   leafLifetime?: () => number | undefined
   trustedGrantLifetime?: () => number | undefined
+  /**
+   * Whether this leaf may keep an issuer the deny set names, on its holder evidence. The caller
+   * answers for the group (its anchor names a controller) and for the leaf (it is the credential
+   * already in the tree at that index, or it arrives in a Welcome tree). Absent: never.
+   */
+  mayKeepDeniedIssuer?: (credential: Credential, signaturePublicKey: Uint8Array) => boolean
 }
 
 function isDenied(denied: ReadonlySet<string>, did: string): boolean {
@@ -125,6 +131,8 @@ type VerifyPinnedCapabilityParams = {
   trustedGrantLifetime?: number
   /** Refuse a delegated (chained) capability. */
   directOnly?: boolean
+  /** Verify as a trusted grant, using its configured lifetime and maximum. */
+  trustedGrant?: boolean
 }
 
 /** Authenticate only embedded proof, using the token's issuance as its reference time. */
@@ -137,8 +145,9 @@ async function verifyPinnedCapability(params: VerifyPinnedCapabilityParams): Pro
   }
   const token = readCapability(params.capability)
   const payload = token.payload
-  const leafLifetime = Math.min(params.leafLifetime ?? MAX_LEAF_LIFETIME, MAX_LEAF_LIFETIME)
-  assertCapabilityLifetime(payload, leafLifetime)
+  const ceiling = params.trustedGrant ? MAX_TRUSTED_GRANT_LIFETIME : MAX_LEAF_LIFETIME
+  const lifetime = params.trustedGrant ? params.trustedGrantLifetime : params.leafLifetime
+  assertCapabilityLifetime(payload, Math.min(lifetime ?? ceiling, ceiling))
   if (normalizeDID(payload.sub) !== normalizeDID(params.controllerID)) {
     throw new LeafBindingError('subject-mismatch')
   }
@@ -215,6 +224,65 @@ async function verifyPinnedCapability(params: VerifyPinnedCapabilityParams): Pro
   })
 }
 
+function withoutIssuer(denied: ReadonlySet<string>, capability: string): ReadonlySet<string> {
+  const issuer = normalizeDID(readCapability(capability).payload.iss)
+  return new Set([...denied].filter((did) => normalizeDID(did) !== issuer))
+}
+
+/** Structural evidence gate also used before MLS invokes its boolean authentication adapter. */
+export function checkHolderEvidence(
+  parsed: MLSCredentialIdentity,
+  signaturePublicKey: Uint8Array,
+  trustedGrantLifetime = MAX_TRUSTED_GRANT_LIFETIME,
+): string | undefined {
+  const binding = parsed.controller
+  if (binding == null) return
+  const leafPayload = readCapability(binding.capability).payload
+  if (leafPayload.cap === undefined) return
+  if (binding.holderGrant == null) throw new LeafBindingError('missing-holder-evidence')
+  try {
+    const grant = readCapability(binding.holderGrant).payload
+    assertControllerGrant(grant, binding.id)
+    assertCapabilityLifetime(grant, Math.min(trustedGrantLifetime, MAX_TRUSTED_GRANT_LIFETIME))
+    if (
+      grant.cap !== undefined ||
+      grant.iat > leafPayload.iat ||
+      grant.exp <= leafPayload.iat ||
+      (grant.nbf != null && grant.nbf > leafPayload.iat) ||
+      normalizeDID(grant.aud) !== normalizeDID(parsed.id) ||
+      !constantTimeEqual(capabilityKey(grant).publicKey, signaturePublicKey) ||
+      !hasPermission({ act: MLS_LEAF_ACT, res: MLS_LEAF_RES }, grant)
+    )
+      throw new LeafBindingError('holder-evidence-mismatch')
+  } catch (cause) {
+    const error = new LeafBindingError('holder-evidence-mismatch')
+    error.cause = cause
+    throw error
+  }
+  return binding.holderGrant
+}
+
+/**
+ * A chained leaf carrying its holder's own valid controller grant, for a holder the deny set does
+ * not name. Such a leaf names a device the controller bound itself, so denying the device that
+ * issued its capability does not take that binding away.
+ */
+export function hasHolderEvidence(
+  parsed: MLSCredentialIdentity,
+  signaturePublicKey: Uint8Array,
+  denied: ReadonlySet<string>,
+  trustedGrantLifetime?: number,
+): boolean {
+  const binding = parsed.controller
+  if (binding == null || isDenied(denied, parsed.id)) return false
+  try {
+    if (readCapability(binding.capability).payload.cap === undefined) return false
+    return checkHolderEvidence(parsed, signaturePublicKey, trustedGrantLifetime) != null
+  } catch {
+    return false
+  }
+}
+
 /** Internal throwing boundary for entry gates; ts-mls consumes the boolean adapter below. */
 export async function verifyLeafCredential(
   credential: Credential,
@@ -230,6 +298,12 @@ export async function verifyLeafCredential(
   if (isDenied(denySet, parsed.id)) throw new LeafBindingError('denied-id')
   if (parsed.controller == null) return
   try {
+    // The holder grant below is still verified against the full deny set.
+    const leafDenySet =
+      deps.mayKeepDeniedIssuer?.(credential, signaturePublicKey) &&
+      hasHolderEvidence(parsed, signaturePublicKey, denySet, deps.trustedGrantLifetime?.())
+        ? withoutIssuer(denySet, parsed.controller.capability)
+        : denySet
     await verifyPinnedCapability({
       capability: parsed.controller.capability,
       prefix: parsed.controller.prefix,
@@ -237,10 +311,35 @@ export async function verifyLeafCredential(
       audience: parsed.id,
       permission: { act: MLS_LEAF_ACT, res: MLS_LEAF_RES },
       leafKey: signaturePublicKey,
-      denySet,
+      denySet: leafDenySet,
       leafLifetime: deps.leafLifetime?.(),
       trustedGrantLifetime: deps.trustedGrantLifetime?.(),
     })
+    const holderGrant = checkHolderEvidence(
+      parsed,
+      signaturePublicKey,
+      deps.trustedGrantLifetime?.(),
+    )
+    if (holderGrant != null) {
+      try {
+        await verifyPinnedCapability({
+          capability: holderGrant,
+          prefix: parsed.controller.prefix,
+          controllerID: parsed.controller.id,
+          audience: parsed.id,
+          permission: { act: MLS_LEAF_ACT, res: MLS_LEAF_RES },
+          leafKey: signaturePublicKey,
+          denySet,
+          trustedGrantLifetime: deps.trustedGrantLifetime?.(),
+          directOnly: true,
+          trustedGrant: true,
+        })
+      } catch (cause) {
+        const error = new LeafBindingError('holder-evidence-mismatch')
+        error.cause = cause
+        throw error
+      }
+    }
   } catch (error) {
     if (error instanceof LeafBindingError) throw error
     const rejection = new LeafBindingError('signature-invalid')

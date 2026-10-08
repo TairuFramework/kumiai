@@ -203,7 +203,7 @@ function evaluateProposal(
       // A credential that names no DID (non-`basic`, or malformed) is rejected rather than
       // trusted. `didFromCredential` is total, so nothing here can throw past this boundary.
       const addedDID = didFromCredential(proposal.add.keyPackage.leafNode.credential)
-      if (addedDID === undefined) {
+      if (addedDID === null) {
         return 'reject'
       }
       // Bind the leaf that joins to the roster this commit produces, mirroring the binding

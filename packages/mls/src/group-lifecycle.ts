@@ -10,6 +10,7 @@ import {
   type DefaultProposal,
   defaultProposalTypes,
   encode,
+  isDefaultProposal,
   mlsMessageEncoder,
   nodeTypes,
 } from 'ts-mls'
@@ -24,8 +25,66 @@ import { deriveGroup, type GroupHandle, mutexFor } from './group-handle.js'
 import { HISTORY_HORIZON, historySize } from './history.js'
 import { signLedgerEntry, type VerifiedLedgerEntry } from './ledger.js'
 import { isLapsed, leafAt, treeTime, validateEntry } from './lifecycle.js'
-import { authenticateLifecycleProof, verifyLifecycleProof } from './lifecycle-proof.js'
+import {
+  authenticateLifecycleProof,
+  isExemptMember,
+  verifyLifecycleProof,
+} from './lifecycle-proof.js'
 import { DEVICE_ENTRY_TYPE, type DeviceValue, type RevokedEffect } from './registry.js'
+
+export type CommitResult = DeviceWriteResult
+
+/**
+ * Author a by-reference Remove for this handle's own leaf at its current epoch.
+ * Once a member processes a pending self-removal, application encrypt throws until
+ * a commit lands. Callers should commit pending self-removals promptly.
+ */
+export async function proposeSelfRemoval(
+  group: GroupHandle,
+): Promise<{ frame: Uint8Array; epoch: bigint }> {
+  return group.proposeSelfRemoval()
+}
+
+/**
+ * Commit other members' pending self-removals without absorbing other pending proposals.
+ * Returns null when only the committer's own self-removal (or none) is pending.
+ * Once a member processes a pending self-removal, application encrypt throws until
+ * a commit lands. Callers should commit pending self-removals promptly.
+ */
+export async function commitSelfRemovals(group: GroupHandle): Promise<CommitResult | null> {
+  return mutexFor(group).run(async () => {
+    const pendingProposals = Object.fromEntries(
+      Object.entries(group.state.unappliedProposals).filter(
+        ([, { proposal, senderLeafIndex }]) =>
+          isDefaultProposal(proposal) &&
+          proposal.proposalType === defaultProposalTypes.remove &&
+          proposal.remove.removed === senderLeafIndex &&
+          senderLeafIndex !== group.state.privatePath.leafIndex,
+      ),
+    )
+    if (Object.keys(pendingProposals).length === 0) return null
+    const tree = group.state.ratchetTree.slice()
+    for (const { proposal } of Object.values(pendingProposals)) {
+      if (isDefaultProposal(proposal) && proposal.proposalType === defaultProposalTypes.remove)
+        tree[proposal.remove.removed * 2] = undefined
+    }
+    const tokens = await clockEntries(group, tree)
+    const result = await commitWithEntries({
+      group,
+      extraProposals: [],
+      pendingProposals,
+      enacted: tokens,
+      requireAdmin: false,
+    })
+    const newGroup = deriveGroup(group, result.newState)
+    await newGroup.applyLedgerEntries(tokens)
+    return {
+      commitMessage: encode(mlsMessageEncoder, result.commit),
+      newGroup,
+      epoch: newGroup.epoch,
+    }
+  })
+}
 
 export type RevokeBuildResult =
   | { status: 'built'; result: DeviceWriteResult }
@@ -240,13 +299,20 @@ function proofFor(params: ProofForParams): Array<SignedEvent> {
   return advancing.slice(headIndex + 1, end + 1)
 }
 
-/** Revoked in the registry, with no leaf of its own and no leaf it issued left in the tree. */
+/**
+ * Revoked in the registry, with no leaf of its own and no leaf it issued left in the tree, apart
+ * from evidenced children, which its revocation never removes.
+ */
 function isFullyRevoked(group: GroupHandle, subject: string): boolean {
   if (group.registry.devices.get(subject)?.status !== 'revoked') return false
   if (group.findMemberLeafIndex(subject) != null) return false
   return !group.listMembers().some((member) => {
     const capability = group.bindingOfDID(member.id)?.capability
-    return capability != null && normalizeDID(readCapability(capability).payload.iss) === subject
+    return (
+      capability != null &&
+      normalizeDID(readCapability(capability).payload.iss) === subject &&
+      !isExemptMember(group, member.leafIndex)
+    )
   })
 }
 
@@ -285,6 +351,7 @@ export async function revokeWithProof(
           ...member,
           issuer: payload?.cap == null ? undefined : normalizeDID(payload.iss),
           generation: folded?.ok ? folded.states.at(-1)?.gen : undefined,
+          exempt: isExemptMember(group, member.leafIndex),
         }
       })
       if (reset)
@@ -294,7 +361,12 @@ export async function revokeWithProof(
         }
       const direct = new Set(revoked.map(({ did }) => did))
       for (const leaf of leaves) {
-        if (leaf.issuer != null && direct.has(leaf.issuer) && !direct.has(normalizeDID(leaf.id)))
+        if (
+          leaf.issuer != null &&
+          direct.has(leaf.issuer) &&
+          !direct.has(normalizeDID(leaf.id)) &&
+          !leaf.exempt
+        )
           revoked.push({ did: normalizeDID(leaf.id), cascadedFrom: leaf.issuer })
       }
       value.revoked = revoked

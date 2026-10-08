@@ -11,6 +11,7 @@ import {
   type KeyPackage,
   type LeafIndex,
   mlsMessageEncoder,
+  type UnappliedProposals,
 } from 'ts-mls'
 
 import { LEDGER_HEAD_EXTENSION_TYPE } from './anchor.js'
@@ -22,6 +23,7 @@ import type { FoldInput } from './fold.js'
 import { assertBindingAuthorTime } from './group-credential.js'
 import {
   buildCommitPolicyContext,
+  CommitRejectedError,
   deriveGroup,
   type GroupHandle,
   mutexFor,
@@ -33,7 +35,7 @@ import {
   type VerifiedLedgerEntry,
   verifyLedgerEntry,
 } from './ledger.js'
-import { prepareLifecycleGate, validateEntry } from './lifecycle.js'
+import { prepareLifecycleGate, rejectionReason, validateEntry } from './lifecycle.js'
 import { authority, controllerOf, DEVICE_ENTRY_TYPE, type DeviceValue } from './registry.js'
 import { type GroupPermission, ROLE_ENTRY_TYPE } from './roster.js'
 import type { Invite } from './types.js'
@@ -158,6 +160,8 @@ function extensionsWithHead(
 export type CommitWithEntriesParams = {
   group: GroupHandle
   extraProposals: Array<DefaultProposal>
+  /** Pending proposals to commit by reference, retaining their authenticated senders. */
+  pendingProposals?: UnappliedProposals
   enacted: Array<string>
   ratchetTreeExtension?: boolean
   /** Defaults to true; device and lifecycle entries carry their own authority. */
@@ -272,7 +276,10 @@ export async function commitWithEntries(
     entryIDs,
     enactedDeviceEntries,
   })
-  const commitState = { ...(params.commitState ?? group.state), unappliedProposals: {} }
+  const commitState = {
+    ...(params.commitState ?? group.state),
+    unappliedProposals: params.pendingProposals ?? {},
+  }
 
   const proposals = [...extraProposals]
   if (entryIDs.length > 0) {
@@ -291,12 +298,26 @@ export async function commitWithEntries(
   const incoming = {
     kind: 'commit' as const,
     senderLeafIndex: group.state.privatePath.leafIndex as LeafIndex,
-    proposals: proposals.map((proposal) => ({
-      proposal,
-      senderLeafIndex: group.state.privatePath.leafIndex as LeafIndex,
-    })),
+    proposals: [
+      ...Object.values(commitState.unappliedProposals),
+      ...proposals.map((proposal) => ({
+        proposal,
+        senderLeafIndex: group.state.privatePath.leafIndex as LeafIndex,
+      })),
+    ],
   }
-  gate.check(incoming)
+  try {
+    gate.check(incoming)
+  } catch (cause) {
+    if (params.pendingProposals == null) throw cause
+    const error = new CommitRejectedError(
+      incoming.proposals,
+      incoming.senderLeafIndex,
+      rejectionReason(cause),
+    )
+    error.cause = cause
+    throw error
+  }
   for (const proposal of proposals) {
     if (proposal.proposalType === defaultProposalTypes.add) {
       const leaf = proposal.add.keyPackage.leafNode
@@ -458,11 +479,9 @@ export async function commitInvite(
     // `credentialType !== basic` does not narrow on its own: CredentialCustom.credentialType is a
     // bare `number`, so the compiler cannot rule it out. ts-mls's own guard can.
     //
-    // This inlines the same credential->DID chain `didFromCredential` (credential.ts) implements
-    // for the receive-side policy, kept separate deliberately: this path needs to distinguish a
-    // non-basic credential from a malformed-JSON failure for its error messages, and that helper
-    // is deliberately unexported. The two must stay in agreement — if they diverge, the committer
-    // authors a commit every receiver rejects, a liveness failure rather than a security one.
+    // The exported `didFromCredential` collapses absent identities to null. This inlined variant
+    // distinguishes non-basic credentials from malformed JSON for its error messages.
+    // DID normalisation must agree with the helper, or receivers reject the authored commit.
     const credential = keyPackage.leafNode.credential
     if (
       !isDefaultCredential(credential) ||
@@ -472,7 +491,9 @@ export async function commitInvite(
         'commitInvite: the key package carries a non-basic credential, which names no DID to bind',
       )
     }
-    const actualDID = normalizeDID(parseMLSCredentialIdentity(credential.identity).id)
+    const recipientID = parseMLSCredentialIdentity(credential.identity).id
+    if (recipientID === '') throw new Error('commitInvite: the recipient credential names no DID')
+    const actualDID = normalizeDID(recipientID)
     if (actualDID !== expectedDID) {
       throw new InviteRecipientMismatchError({
         groupID: group.groupID,

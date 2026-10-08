@@ -140,25 +140,46 @@ describe('GroupHandle.decryptStaged', () => {
     })
   })
 
-  test('an unnamed sender fails before persistence and does not consume the frame', async () => {
-    const { alice, receiver, sealed } = await fixture('staged-unnamed')
-    const tree = receiver.state.ratchetTree
+  test.each(['not-json-garbage', JSON.stringify({ id: '' })])(
+    'an unnamed sender fails before persistence and does not consume the frame (%s)',
+    async (identity) => {
+      const { alice, receiver, sealed } = await fixture('staged-unnamed')
+      const tree = receiver.state.ratchetTree
+      const aliceLeaf = receiver.listMembers().find((member) => member.id === alice.id)?.leafIndex
+      if (aliceLeaf == null) throw new Error('missing sender leaf')
+      const node = tree[aliceLeaf * 2]
+      if (
+        node == null ||
+        node.nodeType !== nodeTypes.leaf ||
+        !('identity' in node.leaf.credential)
+      ) {
+        throw new Error('missing sender credential')
+      }
+      const credential = node.leaf.credential
+      const originalIdentity = credential.identity
+      credential.identity = utf8.encode(identity)
+      const persist = vi.fn(async () => {})
+      const before = encodeClientState(receiver.state)
+
+      await expect(receiver.decryptStaged(sealed, {}, persist)).rejects.toThrow('sender')
+      expect(persist).not.toHaveBeenCalled()
+      expect(encodeClientState(receiver.state)).toEqual(before)
+      credential.identity = originalIdentity
+      await expect(receiver.decrypt(sealed)).resolves.toMatchObject({ senderDID: alice.id })
+    },
+  )
+
+  test('decrypt omits the sender DID for an empty identity', async () => {
+    const { alice, receiver, sealed } = await fixture('empty-sender')
     const aliceLeaf = receiver.listMembers().find((member) => member.id === alice.id)?.leafIndex
     if (aliceLeaf == null) throw new Error('missing sender leaf')
-    const node = tree[aliceLeaf * 2]
+    const node = receiver.state.ratchetTree[aliceLeaf * 2]
     if (node == null || node.nodeType !== nodeTypes.leaf || !('identity' in node.leaf.credential)) {
       throw new Error('missing sender credential')
     }
-    const credential = node.leaf.credential
-    const originalIdentity = credential.identity
-    credential.identity = utf8.encode('not-json-garbage')
-    const persist = vi.fn(async () => {})
-    const before = encodeClientState(receiver.state)
-
-    await expect(receiver.decryptStaged(sealed, {}, persist)).rejects.toThrow('sender')
-    expect(persist).not.toHaveBeenCalled()
-    expect(encodeClientState(receiver.state)).toEqual(before)
-    credential.identity = originalIdentity
-    await expect(receiver.decrypt(sealed)).resolves.toMatchObject({ senderDID: alice.id })
+    node.leaf.credential.identity = utf8.encode(JSON.stringify({ id: '' }))
+    const opened = await receiver.decrypt(sealed)
+    expect(opened.payload).toEqual(utf8.encode('staged payload'))
+    expect(opened).not.toHaveProperty('senderDID')
   })
 })

@@ -4,7 +4,9 @@ import {
   type ClientState,
   contentTypes,
   createApplicationMessage,
+  createProposal,
   decode,
+  defaultProposalTypes,
   encode,
   type IncomingMessageAction,
   type IncomingMessageCallback,
@@ -34,7 +36,7 @@ import {
 import { type LeafBinding, verifyDeviceEntry } from './device-proof.js'
 import { decodeControlEnvelope } from './envelope.js'
 import { foldEnvelope, GROUP_TYPE_PREFIX } from './envelope-fold.js'
-import { LeafLapsedError, RevokeProofError } from './errors.js'
+import { LeafBindingError, LeafLapsedError, RevokeProofError } from './errors.js'
 import type { FoldInput } from './fold.js'
 import { createMlsContext, deviceDenyHolderFor } from './group-context.js'
 import { readMessageEpoch } from './group-info.js'
@@ -53,6 +55,7 @@ import {
   assertSenderNotLapsed,
   type CommitRejectionReason,
   isLapsed,
+  isUnchangedLeaf,
   type LifecycleGate,
   leafAt,
   prepareLifecycleGate,
@@ -173,7 +176,10 @@ type RejectedCommit = { proposals: Array<ProposalWithSender>; senderLeafIndex?: 
 /** What the commit pipeline learned about a rejection, for the error it throws. */
 type CommitCapture = {
   rejected?: RejectedCommit
+  /** The member leaf that framed the commit, known once its proposals were judged. */
+  committerLeafIndex?: number
   proofError?: RevokeProofError
+  bindingError?: LeafBindingError
   reason?: CommitRejectionReason
 }
 
@@ -191,17 +197,16 @@ type CommitPipeline = {
  */
 function wrapCommitPolicy(
   callback: IncomingMessageCallback | undefined,
-  capture: { rejected?: RejectedCommit },
+  capture: { rejected?: RejectedCommit; committerLeafIndex?: number },
 ): IncomingMessageCallback | undefined {
   if (callback == null) return undefined
   return (incoming) => {
     const action = callback(incoming)
     if (incoming.kind === 'commit') {
-      capture.rejected = {
-        proposals: incoming.proposals,
-        senderLeafIndex:
-          incoming.senderLeafIndex == null ? undefined : Number(incoming.senderLeafIndex),
-      }
+      const senderLeafIndex =
+        incoming.senderLeafIndex == null ? undefined : Number(incoming.senderLeafIndex)
+      capture.rejected = { proposals: incoming.proposals, senderLeafIndex }
+      capture.committerLeafIndex = senderLeafIndex
     }
     return action
   }
@@ -898,6 +903,37 @@ export class GroupHandle {
   }
 
   /**
+   * Author and retain an authenticated self-removal proposal under the handle mutex.
+   * Once a member processes a pending self-removal, application encrypt throws until
+   * a commit lands. Callers should commit pending self-removals promptly.
+   */
+  async proposeSelfRemoval(): Promise<{ frame: Uint8Array; epoch: bigint }> {
+    return mutexFor(this).run(async () => {
+      const senderLeafIndex = this.#state.privatePath.leafIndex
+      const proposal = {
+        proposalType: defaultProposalTypes.remove,
+        remove: { removed: senderLeafIndex },
+      }
+      const gate = await prepareLifecycleGate({
+        group: this,
+        entries: [],
+        candidateRegistry: this.#registry,
+        context: buildCommitPolicyContext(this, {
+          baseRoster: this.#roster,
+          candidateRoster: this.#roster,
+          entryIDs: [],
+          enactedDeviceEntries: [],
+        }),
+      })
+      gate.check({ kind: 'proposal', proposal: { proposal, senderLeafIndex } })
+      const result = await createProposal({ context: this.#context, state: this.#state, proposal })
+      this.#state = result.newState
+      zeroAll(result.consumed)
+      return { frame: encode(mlsMessageEncoder, result.message), epoch: this.epoch }
+    })
+  }
+
+  /**
    * Encrypt an application message for the group at this handle's current epoch,
    * returning framed wire bytes. A handle a commit has already superseded (see
    * {@link commitInvite}, {@link removeMember}, {@link commitLedgerEntries}) must not
@@ -1212,6 +1248,7 @@ export class GroupHandle {
       precomputedReject = true
       capture.reason = rejectionReason(error)
       if (error instanceof RevokeProofError) capture.proofError = error
+      if (error instanceof LeafBindingError) capture.bindingError = error
     }
     const combined: IncomingMessageCallback = (incoming) => {
       // A decode/fold failure is a hard reject even under a caller policy: the
@@ -1226,6 +1263,7 @@ export class GroupHandle {
       } catch (error) {
         capture.reason = rejectionReason(error)
         if (error instanceof RevokeProofError) capture.proofError = error
+        if (error instanceof LeafBindingError) capture.bindingError = error
         return 'reject'
       }
       if (callerPolicy != null) return callerPolicy(incoming)
@@ -1345,6 +1383,9 @@ export class GroupHandle {
               controller: parsed.controller.id,
               prefix: parsed.controller.prefix,
               capability: parsed.controller.capability,
+              ...(parsed.controller.holderGrant == null
+                ? {}
+                : { holderGrant: parsed.controller.holderGrant }),
             }
           : {}),
       }
@@ -1456,6 +1497,7 @@ export class GroupHandle {
    * Process a received MLS message (Commit, Proposal, or application). Accepts
    * wire-form bytes (preferred, e.g. from commitInvite/removeMember) or a pre-decoded
    * ts-mls framed message (legacy). The runtime `instanceof` selects the decode path.
+   * A proposal from a past epoch is ignored (returns null, nothing persisted).
    * `persist` covers accepted commits and proposals, not application messages or their
    * receive ratchet. It runs under this handle's mutex and must not call back into it.
    * It must write atomically: rejection means nothing was stored. Host callbacks run
@@ -1477,6 +1519,16 @@ export class GroupHandle {
       decoded = parsed
     }
     return mutexFor(this).run(async () => {
+      const privateProposal = readPrivateFrame(decoded, contentTypes.proposal)
+      const frame = decoded as MlsFramedMessage
+      const proposalEpoch =
+        privateProposal?.epoch ??
+        (frame.wireformat === wireformats.mls_public_message &&
+        frame.publicMessage.content.contentType === contentTypes.proposal
+          ? frame.publicMessage.content.epoch
+          : undefined)
+      // Past proposals cannot be enacted at this epoch and need no ratchet or ledger work.
+      if (proposalEpoch != null && proposalEpoch < this.epoch) return null
       const { callback, capture, applyOnAccept, postApply } = await this.#prepareCommitPipeline(
         decoded,
         opts,
@@ -1508,6 +1560,16 @@ export class GroupHandle {
                 try {
                   await verifyLeafCredential(credential, key, {
                     deviceDenySet: () => this.currentDenySet(),
+                    // MLS re-validates the committer's path leaf after its proposals are judged:
+                    // an evidenced child keeps a denied issuer only with the credential it
+                    // already holds at that leaf.
+                    mayKeepDeniedIssuer: (leafCredential, leafKey) =>
+                      this.#anchor.controller != null &&
+                      capture.committerLeafIndex != null &&
+                      isUnchangedLeaf(this.#state.ratchetTree, capture.committerLeafIndex, {
+                        credential: leafCredential,
+                        signaturePublicKey: leafKey,
+                      }),
                     leafLifetime: () =>
                       this.#anchor.controller == null
                         ? undefined
@@ -1520,6 +1582,7 @@ export class GroupHandle {
                   return true
                 } catch (error) {
                   capture.reason = rejectionReason(error)
+                  if (error instanceof LeafBindingError) capture.bindingError = error
                   return false
                 }
               },
@@ -1536,7 +1599,7 @@ export class GroupHandle {
           capture.rejected?.senderLeafIndex,
           capture.reason ?? 'invalid',
         )
-        rejection.cause = error
+        rejection.cause = capture.bindingError ?? error
         if (error instanceof Error) rejection.message += `: ${error.message}`
         throw rejection
       }
@@ -1546,7 +1609,8 @@ export class GroupHandle {
           capture.rejected?.senderLeafIndex,
           capture.reason ?? 'policy',
         )
-        if (capture.proofError != null) rejection.cause = capture.proofError
+        const cause = capture.proofError ?? capture.bindingError
+        if (cause != null) rejection.cause = cause
         throw rejection
       }
       if (result.kind === 'newState') {
