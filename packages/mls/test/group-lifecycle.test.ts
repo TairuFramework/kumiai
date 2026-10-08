@@ -23,6 +23,7 @@ import { revocationOf } from '../src/registry.js'
 import { controllerSeed } from './fixtures/lifecycle-ledger.js'
 import {
   agent,
+  belowGateWelcome,
   controllerID,
   inception,
   lowLevelExternal,
@@ -32,6 +33,7 @@ import {
   rawBundle,
   rawCommit,
   timedBinding,
+  withoutHolderEvidence,
 } from './fixtures/lifecycle-pipeline.js'
 
 function revoke(log: Array<SignedEvent>, subject: string) {
@@ -366,22 +368,25 @@ test('reset identifies the author through a cascade from an older trusted issuer
   const reset = [inception, createReset(controllerSeed, 0, 1)]
   const child = agent(61)
   const parent = await parentGrant(agent(41), reset, 100)
-  const fixture = await lowLevelWelcome(
-    group,
-    child,
-    await timedBinding({
-      identity: child,
-      iat: 110,
-      exp: 210,
-      prefix: reset,
-      issuer: agent(41),
-      parent,
-    }),
-  )
-  expect(await revokeWithProof(fixture.joined, { reset: true, log: reset })).toEqual({
+  const binding = await timedBinding({
+    identity: child,
+    iat: 110,
+    exp: 210,
+    prefix: reset,
+    issuer: agent(41),
+    parent,
+  })
+  const unevidenced = await belowGateWelcome(group, child, withoutHolderEvidence(binding))
+  expect(await revokeWithProof(unevidenced.joined, { reset: true, log: reset })).toEqual({
     status: 'self-affected',
     subject: child.id,
   })
+  // A child carrying its holder's evidence is not cascaded, so it publishes the reset itself.
+  const evidenced = await lowLevelWelcome(group, child, binding)
+  const built = await revokeWithProof(evidenced.joined, { reset: true, log: reset })
+  expect(built.status).toBe('built')
+  if (built.status !== 'built') throw new Error('Missing reset')
+  expect(built.result.newGroup.listMembers().map(({ id }) => id)).toEqual([child.id])
 })
 
 test('strips skipped events, and rejects wrong-controller, detached and higher-generation proofs', async () => {
@@ -555,19 +560,22 @@ test('a member without a role builds a cascading proof and observes another memb
   const { group, identity, tokens } = await pipelineGroup()
   const child = agent(61)
   const parent = await parentGrant(identity, [inception], 100)
-  const first = await lowLevelWelcome(
+  // Only a child without its holder's evidence cascades, so every join here skips the gate.
+  const first = await belowGateWelcome(
     group,
     child,
-    await timedBinding({ identity: child, iat: 110, exp: 210, issuer: identity, parent }),
+    withoutHolderEvidence(
+      await timedBinding({ identity: child, iat: 110, exp: 210, issuer: identity, parent }),
+    ),
   )
   const publisher = agent(71)
-  const second = await lowLevelWelcome(
+  const second = await belowGateWelcome(
     first.author,
     publisher,
     await timedBinding({ identity: publisher, iat: 100, exp: 200 }),
   )
   const competitor = agent(81)
-  const third = await lowLevelWelcome(
+  const third = await belowGateWelcome(
     second.author,
     competitor,
     await timedBinding({ identity: competitor, iat: 100, exp: 200 }),

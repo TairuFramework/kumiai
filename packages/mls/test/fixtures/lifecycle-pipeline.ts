@@ -212,6 +212,41 @@ export async function lowLevelWelcome(
   return { ...added, joined, author: deriveGroup(group, added.result.newState) }
 }
 
+/**
+ * Real Welcome crypto for a leaf the acceptance gate would refuse, such as a chained leaf without
+ * its holder's evidence: neither the author nor the joiner authenticates the tree.
+ */
+export async function belowGateWelcome(
+  group: GroupHandle,
+  identity: OwnIdentity,
+  binding: ControllerBinding,
+) {
+  const added = await rawAdd(group, identity, binding)
+  if (added.result.welcome == null) throw new Error('Missing Welcome')
+  const context = await resolveMlsContext()
+  const state = await joinGroup({
+    context: { ...context, authService: { validateCredential: async () => true } },
+    welcome: added.result.welcome.welcome,
+    keyPackage: added.bundle.publicPackage,
+    privateKeys: added.bundle.privatePackage,
+  })
+  const joined = new GroupHandle({
+    state,
+    context,
+    credential: { id: identity.id, groupID: group.groupID },
+    commitPolicy: () => 'accept',
+    resolveLedgerEntries: group.resolveLedgerEntries,
+  })
+  await joined.bootstrapLedger(group.ledgerTokens)
+  return { ...added, joined, author: deriveGroup(group, added.result.newState) }
+}
+
+/** A chained binding stripped of its holder's evidence. */
+export function withoutHolderEvidence(binding: ControllerBinding): ControllerBinding {
+  const { holderGrant: _, ...rest } = binding
+  return rest
+}
+
 /** Real external resync carrying a caller-selected bound replacement. */
 export type LowLevelExternalParams = {
   group: GroupHandle

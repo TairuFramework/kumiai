@@ -44,6 +44,9 @@ A `clock` entry preserves the pre-commit tree time whenever a removal or renewal
 Receivers reject a lapsed sender before opening its application message, preserving the ratchet generation.
 An empty renewal commit can renew the sender out of lapse.
 `renewLeaf` preserves the agent DID, long form, signature key and controller, and never lowers capability `iat`.
+One exception: a direct H capability may replace a leaf whose capability has a newer `iat` when the group registry records that leaf's issuer T as revoked.
+T denied only in a later H log, not yet recorded by the group, does not qualify.
+Every other check still applies: same agent and key, same controller, lifetime, lapse and monotonic tree time.
 Every agent renews in every group at least once per `leafLifetime`.
 H renews T's trusted grant at least once per `trustedGrantLifetime`.
 
@@ -59,6 +62,13 @@ A proven revoke verifies authority-signed controller events against the group's 
 The first proof carries a chain. Later proofs carry a suffix after its recorded head, possibly empty.
 A reset carries a chain re-parented on inception and raises the generation floor.
 Revoking T cascades to its current child leaves. Effects and exact Removes are authenticated in the entry.
+In a lifecycle group, the cascade skips an evidenced child: a chained leaf carrying its holder's own valid H grant, for a holder that is not denied.
+H bound that agent directly, so revoking T removes only T. Builder and receivers derive the same effects from the pre-commit tree.
+A repeat proof for T reports `already-revoked` while only evidenced children of T remain.
+An evidenced child keeps T as its issuer until it renews:
+- On the commit path, including survivor checks and authentication of the committer's path leaf, it passes only with the credential and key already in the tree at that leaf.
+- A Welcome or external joiner has no earlier tree, so it accepts any evidenced child in the tree it receives. A denied-issuer leaf without valid evidence is still refused.
+- Entry checks keep refusing a denied T: no Add, update or external replacement may carry a new capability T issued.
 A revoked record is permanent, including for a subject without a leaf.
 An un-revoke in H's log cannot remove it. A replacement agent needs a new DID.
 

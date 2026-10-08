@@ -53,6 +53,7 @@ import {
   assertSenderNotLapsed,
   type CommitRejectionReason,
   isLapsed,
+  isUnchangedLeaf,
   type LifecycleGate,
   leafAt,
   prepareLifecycleGate,
@@ -173,6 +174,8 @@ type RejectedCommit = { proposals: Array<ProposalWithSender>; senderLeafIndex?: 
 /** What the commit pipeline learned about a rejection, for the error it throws. */
 type CommitCapture = {
   rejected?: RejectedCommit
+  /** The member leaf that framed the commit, known once its proposals were judged. */
+  committerLeafIndex?: number
   proofError?: RevokeProofError
   bindingError?: LeafBindingError
   reason?: CommitRejectionReason
@@ -192,17 +195,16 @@ type CommitPipeline = {
  */
 function wrapCommitPolicy(
   callback: IncomingMessageCallback | undefined,
-  capture: { rejected?: RejectedCommit },
+  capture: { rejected?: RejectedCommit; committerLeafIndex?: number },
 ): IncomingMessageCallback | undefined {
   if (callback == null) return undefined
   return (incoming) => {
     const action = callback(incoming)
     if (incoming.kind === 'commit') {
-      capture.rejected = {
-        proposals: incoming.proposals,
-        senderLeafIndex:
-          incoming.senderLeafIndex == null ? undefined : Number(incoming.senderLeafIndex),
-      }
+      const senderLeafIndex =
+        incoming.senderLeafIndex == null ? undefined : Number(incoming.senderLeafIndex)
+      capture.rejected = { proposals: incoming.proposals, senderLeafIndex }
+      capture.committerLeafIndex = senderLeafIndex
     }
     return action
   }
@@ -1514,6 +1516,16 @@ export class GroupHandle {
                 try {
                   await verifyLeafCredential(credential, key, {
                     deviceDenySet: () => this.currentDenySet(),
+                    // MLS re-validates the committer's path leaf after its proposals are judged:
+                    // an evidenced child keeps a denied issuer only with the credential it
+                    // already holds at that leaf.
+                    mayKeepDeniedIssuer: (leafCredential, leafKey) =>
+                      this.#anchor.controller != null &&
+                      capture.committerLeafIndex != null &&
+                      isUnchangedLeaf(this.#state.ratchetTree, capture.committerLeafIndex, {
+                        credential: leafCredential,
+                        signaturePublicKey: leafKey,
+                      }),
                     leafLifetime: () =>
                       this.#anchor.controller == null
                         ? undefined

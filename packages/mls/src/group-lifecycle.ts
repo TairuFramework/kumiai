@@ -24,7 +24,11 @@ import { deriveGroup, type GroupHandle, mutexFor } from './group-handle.js'
 import { HISTORY_HORIZON, historySize } from './history.js'
 import { signLedgerEntry, type VerifiedLedgerEntry } from './ledger.js'
 import { isLapsed, leafAt, treeTime, validateEntry } from './lifecycle.js'
-import { authenticateLifecycleProof, verifyLifecycleProof } from './lifecycle-proof.js'
+import {
+  authenticateLifecycleProof,
+  isExemptMember,
+  verifyLifecycleProof,
+} from './lifecycle-proof.js'
 import { DEVICE_ENTRY_TYPE, type DeviceValue, type RevokedEffect } from './registry.js'
 
 export type RevokeBuildResult =
@@ -240,13 +244,20 @@ function proofFor(params: ProofForParams): Array<SignedEvent> {
   return advancing.slice(headIndex + 1, end + 1)
 }
 
-/** Revoked in the registry, with no leaf of its own and no leaf it issued left in the tree. */
+/**
+ * Revoked in the registry, with no leaf of its own and no leaf it issued left in the tree, apart
+ * from evidenced children, which its revocation never removes.
+ */
 function isFullyRevoked(group: GroupHandle, subject: string): boolean {
   if (group.registry.devices.get(subject)?.status !== 'revoked') return false
   if (group.findMemberLeafIndex(subject) != null) return false
   return !group.listMembers().some((member) => {
     const capability = group.bindingOfDID(member.id)?.capability
-    return capability != null && normalizeDID(readCapability(capability).payload.iss) === subject
+    return (
+      capability != null &&
+      normalizeDID(readCapability(capability).payload.iss) === subject &&
+      !isExemptMember(group, member.leafIndex)
+    )
   })
 }
 
@@ -285,6 +296,7 @@ export async function revokeWithProof(
           ...member,
           issuer: payload?.cap == null ? undefined : normalizeDID(payload.iss),
           generation: folded?.ok ? folded.states.at(-1)?.gen : undefined,
+          exempt: isExemptMember(group, member.leafIndex),
         }
       })
       if (reset)
@@ -294,7 +306,12 @@ export async function revokeWithProof(
         }
       const direct = new Set(revoked.map(({ did }) => did))
       for (const leaf of leaves) {
-        if (leaf.issuer != null && direct.has(leaf.issuer) && !direct.has(normalizeDID(leaf.id)))
+        if (
+          leaf.issuer != null &&
+          direct.has(leaf.issuer) &&
+          !direct.has(normalizeDID(leaf.id)) &&
+          !leaf.exempt
+        )
           revoked.push({ did: normalizeDID(leaf.id), cascadedFrom: leaf.issuer })
       }
       value.revoked = revoked

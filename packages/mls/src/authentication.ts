@@ -107,6 +107,12 @@ export type DIDAuthenticationDependencies = {
   deviceDenySet?: () => ReadonlySet<string>
   leafLifetime?: () => number | undefined
   trustedGrantLifetime?: () => number | undefined
+  /**
+   * Whether this leaf may keep an issuer the deny set names, on its holder evidence. The caller
+   * answers for the group (its anchor names a controller) and for the leaf (it is the credential
+   * already in the tree at that index, or it arrives in a Welcome tree). Absent: never.
+   */
+  mayKeepDeniedIssuer?: (credential: Credential, signaturePublicKey: Uint8Array) => boolean
 }
 
 function isDenied(denied: ReadonlySet<string>, did: string): boolean {
@@ -218,6 +224,11 @@ async function verifyPinnedCapability(params: VerifyPinnedCapabilityParams): Pro
   })
 }
 
+function withoutIssuer(denied: ReadonlySet<string>, capability: string): ReadonlySet<string> {
+  const issuer = normalizeDID(readCapability(capability).payload.iss)
+  return new Set([...denied].filter((did) => normalizeDID(did) !== issuer))
+}
+
 /** Structural evidence gate also used before MLS invokes its boolean authentication adapter. */
 export function checkHolderEvidence(
   parsed: MLSCredentialIdentity,
@@ -251,6 +262,27 @@ export function checkHolderEvidence(
   return binding.holderGrant
 }
 
+/**
+ * A chained leaf carrying its holder's own valid controller grant, for a holder the deny set does
+ * not name. Such a leaf names a device the controller bound itself, so denying the device that
+ * issued its capability does not take that binding away.
+ */
+export function hasHolderEvidence(
+  parsed: MLSCredentialIdentity,
+  signaturePublicKey: Uint8Array,
+  denied: ReadonlySet<string>,
+  trustedGrantLifetime?: number,
+): boolean {
+  const binding = parsed.controller
+  if (binding == null || isDenied(denied, parsed.id)) return false
+  try {
+    if (readCapability(binding.capability).payload.cap === undefined) return false
+    return checkHolderEvidence(parsed, signaturePublicKey, trustedGrantLifetime) != null
+  } catch {
+    return false
+  }
+}
+
 /** Internal throwing boundary for entry gates; ts-mls consumes the boolean adapter below. */
 export async function verifyLeafCredential(
   credential: Credential,
@@ -266,6 +298,12 @@ export async function verifyLeafCredential(
   if (isDenied(denySet, parsed.id)) throw new LeafBindingError('denied-id')
   if (parsed.controller == null) return
   try {
+    // The holder grant below is still verified against the full deny set.
+    const leafDenySet =
+      deps.mayKeepDeniedIssuer?.(credential, signaturePublicKey) &&
+      hasHolderEvidence(parsed, signaturePublicKey, denySet, deps.trustedGrantLifetime?.())
+        ? withoutIssuer(denySet, parsed.controller.capability)
+        : denySet
     await verifyPinnedCapability({
       capability: parsed.controller.capability,
       prefix: parsed.controller.prefix,
@@ -273,7 +311,7 @@ export async function verifyLeafCredential(
       audience: parsed.id,
       permission: { act: MLS_LEAF_ACT, res: MLS_LEAF_RES },
       leafKey: signaturePublicKey,
-      denySet,
+      denySet: leafDenySet,
       leafLifetime: deps.leafLifetime?.(),
       trustedGrantLifetime: deps.trustedGrantLifetime?.(),
     })

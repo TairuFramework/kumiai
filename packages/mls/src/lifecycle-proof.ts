@@ -5,13 +5,16 @@ import {
   type SignedEvent,
 } from '@kokuin/controller'
 import { normalizeDID } from '@kokuin/token'
+import { defaultCredentialTypes, isDefaultCredential, type LeafNode, nodeTypes } from 'ts-mls'
 
+import { hasHolderEvidence } from './authentication.js'
 import { readCapability } from './capability.js'
+import { parseMLSCredentialIdentity } from './credential.js'
 import { RevokeProofError } from './errors.js'
 import type { GroupHandle } from './group-handle.js'
 import { controllerLogSize, HISTORY_HORIZON, historySize } from './history.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
-import type { DeviceRegistry, DeviceValue, RevokedEffect } from './registry.js'
+import { type DeviceRegistry, type DeviceValue, denySetOf, type RevokedEffect } from './registry.js'
 
 export { controllerLogSize, HISTORY_HORIZON } from './history.js'
 
@@ -125,6 +128,45 @@ export function authenticateLifecycleProof(
   throw new RevokeProofError(belowFloor ? 'generation-floor' : 'no-rev')
 }
 
+/**
+ * A leaf that stays when its issuer is denied: in a group whose anchor names a controller, a
+ * chained leaf of that controller carrying its holder's own valid grant from it, for a holder that
+ * is not denied. The cascade skips it and survivor checks keep it.
+ */
+export function isEvidencedChild(
+  group: GroupHandle,
+  leaf: LeafNode,
+  denied: ReadonlySet<string> = denySetOf(group.registry),
+): boolean {
+  const controller = group.anchor.controller
+  if (
+    controller == null ||
+    !isDefaultCredential(leaf.credential) ||
+    leaf.credential.credentialType !== defaultCredentialTypes.basic
+  )
+    return false
+  let parsed: ReturnType<typeof parseMLSCredentialIdentity>
+  try {
+    parsed = parseMLSCredentialIdentity(leaf.credential.identity)
+  } catch {
+    return false
+  }
+  if (parsed.controller == null || normalizeDID(parsed.controller.id) !== normalizeDID(controller))
+    return false
+  return hasHolderEvidence(
+    parsed,
+    leaf.signaturePublicKey,
+    denied,
+    group.anchor.trustedGrantLifetime ?? 2_592_000,
+  )
+}
+
+/** Whether the member at `leafIndex` is an evidenced child that a cascade leaves in place. */
+export function isExemptMember(group: GroupHandle, leafIndex: number): boolean {
+  const node = group.state.ratchetTree[leafIndex * 2]
+  return node?.nodeType === nodeTypes.leaf && isEvidencedChild(group, node.leaf)
+}
+
 /** The entry must declare exactly the derived effects, in derivation order. */
 function effectsMatch(
   declared: Array<RevokedEffect> | undefined,
@@ -172,6 +214,7 @@ export async function verifyLifecycleProof(
       did: normalizeDID(member.id),
       leafIndex: member.leafIndex,
       issuer,
+      exempt: isExemptMember(group, member.leafIndex),
       generation: folded?.ok ? folded.states.at(-1)?.gen : undefined,
       attested:
         binding?.controller != null && normalizeDID(binding.controller) === controller
@@ -217,7 +260,7 @@ export async function verifyLifecycleProof(
   }
   const direct = new Set(revoked.map(({ did }) => did))
   for (const leaf of leaves) {
-    if (leaf.issuer != null && direct.has(leaf.issuer) && !direct.has(leaf.did)) {
+    if (leaf.issuer != null && direct.has(leaf.issuer) && !direct.has(leaf.did) && !leaf.exempt) {
       revoked.push({ did: leaf.did, cascadedFrom: leaf.issuer })
     }
   }

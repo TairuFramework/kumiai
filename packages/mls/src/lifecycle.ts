@@ -28,7 +28,7 @@ import type { GroupHandle } from './group-handle.js'
 import { decodeLedgerHead, extendHead, genesisHead, headsMatch } from './head.js'
 import { HISTORY_HORIZON, historySize } from './history.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
-import { verifyLifecycleProof } from './lifecycle-proof.js'
+import { isEvidencedChild, verifyLifecycleProof } from './lifecycle-proof.js'
 import { type CommitPolicyContext, evaluateGroupContextExtensions } from './policy.js'
 import { DEVICE_ENTRY_TYPE, type DeviceRegistry, type DeviceValue, denySetOf } from './registry.js'
 
@@ -101,7 +101,10 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   return a.length === b.length && a.every((byte, index) => byte === b[index])
 }
 
-function credentialEqual(a: LeafNode, b: LeafNode): boolean {
+function credentialEqual(
+  a: Pick<LeafNode, 'credential'>,
+  b: Pick<LeafNode, 'credential'>,
+): boolean {
   return (
     isDefaultCredential(a.credential) &&
     isDefaultCredential(b.credential) &&
@@ -111,7 +114,33 @@ function credentialEqual(a: LeafNode, b: LeafNode): boolean {
   )
 }
 
-function checkBinding(group: GroupHandle, leaf: LeafNode, previous?: LeafNode): void {
+/**
+ * Whether a direct capability from the anchor's controller replaces a leaf whose issuer the group
+ * recorded revoked. Such a replacement only trades a revoked issuer's credential for the
+ * controller's own, so it need not be newer.
+ */
+function replacesRevokedIssuer(
+  group: GroupHandle,
+  binding: ControllerBinding,
+  old: ControllerBinding,
+): boolean {
+  const controller = group.anchor.controller
+  if (controller == null || normalizeDID(binding.id) !== normalizeDID(controller)) return false
+  if (readCapability(binding.capability).payload.cap !== undefined) return false
+  const current = readCapability(old.capability).payload
+  return (
+    current.cap !== undefined &&
+    group.registry.devices.get(normalizeDID(current.iss))?.status === 'revoked'
+  )
+}
+
+function checkBinding(
+  group: GroupHandle,
+  leaf: LeafNode,
+  previous?: LeafNode,
+  /** The leaf arrives in a Welcome tree rather than as an entry. */
+  welcome = false,
+): void {
   const parsed = identity(leaf)
   const binding = parsed.controller
   const controller = group.anchor.controller
@@ -140,7 +169,8 @@ function checkBinding(group: GroupHandle, leaf: LeafNode, previous?: LeafNode): 
       binding != null &&
       old.controller != null &&
       readCapability(binding.capability).payload.iat <
-        readCapability(old.controller.capability).payload.iat
+        readCapability(old.controller.capability).payload.iat &&
+      !replacesRevokedIssuer(group, binding, old.controller)
     )
       throw new LeafBindingError('renewal-order')
   }
@@ -165,7 +195,11 @@ function checkBinding(group: GroupHandle, leaf: LeafNode, previous?: LeafNode): 
         ? MAX_TRUSTED_GRANT_LIFETIME
         : (group.anchor.trustedGrantLifetime ?? 2_592_000),
     )
-  if (payload.cap != null && denied.has(normalizeDID(payload.iss)))
+  if (
+    payload.cap != null &&
+    denied.has(normalizeDID(payload.iss)) &&
+    !(welcome && isEvidencedChild(group, leaf, denied))
+  )
     throw new LeafBindingError('denied-issuer')
   const folded = foldLog(binding.id, binding.prefix)
   if (!folded.ok) throw new LeafBindingError('controller-mismatch')
@@ -195,10 +229,12 @@ async function validateBoundLeaf(
   group: GroupHandle,
   leaf: LeafNode,
   previous?: LeafNode,
+  welcome = false,
 ): Promise<void> {
-  checkBinding(group, leaf, previous)
+  checkBinding(group, leaf, previous, welcome)
   await verifyLeafCredential(leaf.credential, leaf.signaturePublicKey, {
     deviceDenySet: () => denySetOf(group.registry),
+    mayKeepDeniedIssuer: () => welcome && group.anchor.controller != null,
     leafLifetime: () =>
       group.anchor.controller == null ? undefined : (group.anchor.leafLifetime ?? 86_400),
     trustedGrantLifetime: () =>
@@ -217,14 +253,36 @@ export async function validateEntry(
   checkAdmissionExpiry(group, leaf)
 }
 
+/** The same credential and key a tree already holds at that leaf index. */
+export function isUnchangedLeaf(
+  tree: ClientState['ratchetTree'],
+  index: number,
+  leaf: Pick<LeafNode, 'credential' | 'signaturePublicKey'>,
+): boolean {
+  const held = leafAt(tree, index)
+  return (
+    held != null &&
+    credentialEqual(held, leaf) &&
+    bytesEqual(held.signaturePublicKey, leaf.signaturePublicKey)
+  )
+}
+
+/**
+ * Survivors of a commit are judged against the tree before it: an evidenced child keeps a denied
+ * issuer only with the credential it already held there. A Welcome joiner has no earlier tree, so
+ * it keeps any evidenced child the tree it received holds.
+ */
+type SurvivorOrigin = { kind: 'commit'; before: ClientState['ratchetTree'] } | { kind: 'welcome' }
+
 function checkSurvivors(
   group: GroupHandle,
   tree: ClientState['ratchetTree'],
   registry: DeviceRegistry,
+  origin: SurvivorOrigin,
 ): void {
   const denied = denySetOf(registry)
   const controller = group.anchor.controller
-  for (const node of tree) {
+  for (const [position, node] of tree.entries()) {
     if (node?.nodeType !== nodeTypes.leaf) continue
     const parsed = identity(node.leaf)
     if (denied.has(normalizeDID(parsed.id))) throw new LeafBindingError('denied-id')
@@ -234,7 +292,15 @@ function checkSurvivors(
     }
     const binding = parsed.controller
     const payload = readCapability(binding.capability).payload
-    if (payload.cap != null && denied.has(normalizeDID(payload.iss)))
+    if (
+      payload.cap != null &&
+      denied.has(normalizeDID(payload.iss)) &&
+      !(
+        (origin.kind === 'welcome' ||
+          (position % 2 === 0 && isUnchangedLeaf(origin.before, position / 2, node.leaf))) &&
+        isEvidencedChild(group, node.leaf, denied)
+      )
+    )
       throw new LeafBindingError('denied-issuer')
     if (controller != null) {
       const folded = foldLog(binding.id, binding.prefix)
@@ -252,10 +318,10 @@ function checkSurvivors(
 export async function validateWelcomeTree(group: GroupHandle): Promise<void> {
   for (const [index, node] of group.state.ratchetTree.entries()) {
     if (node?.nodeType !== nodeTypes.leaf) continue
-    await validateBoundLeaf(group, node.leaf)
+    await validateBoundLeaf(group, node.leaf, undefined, true)
     if (index === group.state.privatePath.leafIndex * 2) checkAdmissionExpiry(group, node.leaf)
   }
-  checkSurvivors(group, group.state.ratchetTree, group.registry)
+  checkSurvivors(group, group.state.ratchetTree, group.registry, { kind: 'welcome' })
 }
 
 type IncomingMessage = Parameters<IncomingMessageCallback>[0]
@@ -504,7 +570,7 @@ export async function prepareLifecycleGate(
     }
     if (incoming.kind === 'commit') checkTime(tree)
     checkSize(tree)
-    checkSurvivors(group, tree, candidateRegistry)
+    checkSurvivors(group, tree, candidateRegistry, { kind: 'commit', before })
   }
   const postApply = async (state: ClientState): Promise<void> => {
     if (incomingCommit == null || state.groupActiveState.kind === 'removedFromGroup') return
@@ -541,7 +607,7 @@ export async function prepareLifecycleGate(
     }
     checkTime(state.ratchetTree)
     checkSize(state.ratchetTree)
-    checkSurvivors(group, state.ratchetTree, candidateRegistry)
+    checkSurvivors(group, state.ratchetTree, candidateRegistry, { kind: 'commit', before })
   }
   return { check, postApply }
 }

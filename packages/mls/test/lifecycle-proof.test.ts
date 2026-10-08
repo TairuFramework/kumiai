@@ -32,6 +32,17 @@ import {
   rawEnact,
   trustedGrant,
 } from './fixtures/lifecycle-ledger.js'
+import { rawAdd, withoutHolderEvidence } from './fixtures/lifecycle-pipeline.js'
+
+/** Add a chained leaf without its holder's evidence, below the acceptance gate. */
+async function addUnevidenced(
+  group: Parameters<typeof rawAdd>[0],
+  identity: Parameters<typeof rawAdd>[1],
+  binding: Parameters<typeof withoutHolderEvidence>[0],
+) {
+  const added = await rawAdd(group, identity, withoutHolderEvidence(binding))
+  return { group: deriveGroup(group, added.result.newState) }
+}
 
 const target = agent(61).id
 const otherTarget = agent(71).id
@@ -467,7 +478,7 @@ describe('recorded log replay', () => {
 })
 
 describe('live effect derivation', () => {
-  test('revoking a trusted issuer includes children and their exact pre-commit leaf indices', async () => {
+  test('revoking a trusted issuer includes unevidenced children and their exact pre-commit leaf indices', async () => {
     const initial = await lifecycleGroup()
     const trusted = agent(51)
     const withTrusted = await addMember(initial.group, trusted, await bindingFor(trusted))
@@ -476,7 +487,7 @@ describe('live effect derivation', () => {
       identity: trusted,
       parent: await trustedGrant(trusted),
     })
-    const withChild = await addMember(withTrusted.group, child, binding)
+    const withChild = await addUnevidenced(withTrusted.group, child, binding)
     const revoked = [{ did: trusted.id }, { did: child.id, cascadedFrom: trusted.id }]
     const verified = proofEntry(initial.identity.id, trusted.id, {
       op: 'revoke',
@@ -662,14 +673,14 @@ describe('proof boundary cases', () => {
     expect(group.registry.devices.size).toBe(0)
   })
 
-  test('reset cascades from an old trusted leaf to a child with a newer prefix', async () => {
+  test('reset cascades from an old trusted leaf to an unevidenced child with a newer prefix', async () => {
     const reset = createReset(controllerSeed, 0, 1)
     const current = [inception, reset]
     const { group, identity } = await lifecycleGroup(current)
     const trusted = agent(51)
     const withTrusted = await addMember(group, trusted, await bindingFor(trusted))
     const child = agent(61)
-    const withChild = await addMember(
+    const withChild = await addUnevidenced(
       withTrusted.group,
       child,
       await bindingFor(child, current, {

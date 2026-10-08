@@ -35,10 +35,12 @@ import {
   trustedGrant,
 } from './fixtures/lifecycle-ledger.js'
 import {
+  belowGateWelcome,
   lowLevelWelcome,
   pipelineGroup,
   timedBinding,
   welcomeBoundary,
+  withoutHolderEvidence,
 } from './fixtures/lifecycle-pipeline.js'
 
 async function speculativeRevoke(operation: 'processMessage' | 'bootstrapLedger') {
@@ -127,10 +129,11 @@ test('lifecycle adoption emits the listed revocation and cascade once with their
   const child = agent(61)
   const first = await lowLevelWelcome(group, issuer, await bindingFor(issuer))
   const parent = await trustedGrant(issuer)
-  const fixture = await lowLevelWelcome(
+  // Only a child without its holder's evidence cascades.
+  const fixture = await belowGateWelcome(
     first.author,
     child,
-    await bindingFor(child, [inception], { identity: issuer, parent }),
+    withoutHolderEvidence(await bindingFor(child, [inception], { identity: issuer, parent })),
   )
   const seen: Array<unknown> = []
   fixture.author.events.on('deviceRevoked', (batch) => {
