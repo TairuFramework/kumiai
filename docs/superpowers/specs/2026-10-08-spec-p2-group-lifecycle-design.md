@@ -1,10 +1,10 @@
-# Spec P2: group lifecycle — epoch views and crash-safe control — design
+# Spec P2b: epoch views and the group lifecycle package — design
 
 Date: 2026-10-08
-Status: draft r3
+Status: draft r3, parked. Re-scoped after [Spec P2a](2026-10-08-spec-p2a-crash-safe-control-design.md)
+lands: its D3 to D7 (control store, operations, Welcome, forks, rejoin) moved to P2a, and are kept
+below only as context for how views interact with them.
 Parent: [client host, messaging protocol and multi-device e2e](2026-10-08-client-messaging-e2e-design.md)
-Sibling: [Spec P, transactional persistence](2026-10-08-spec-p-transactional-persistence.md) (its D5
-moves here)
 
 P2 separates group lifecycle from the app lane, and makes the lifecycle crash-safe. "Lifecycle" here
 means commits, recovery, forks and Welcomes. Today both concerns share one closure in
