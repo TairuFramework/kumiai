@@ -1,3 +1,10 @@
+export class CarryIdentityError extends Error {
+  constructor() {
+    super('Receive progress candidate does not retain the current epoch identity')
+    this.name = 'CarryIdentityError'
+  }
+}
+
 export type LeafBindingReason =
   | 'missing-holder-evidence'
   | 'holder-evidence-mismatch'

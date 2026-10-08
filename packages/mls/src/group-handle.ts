@@ -36,7 +36,12 @@ import {
 import { type LeafBinding, verifyDeviceEntry } from './device-proof.js'
 import { decodeControlEnvelope } from './envelope.js'
 import { foldEnvelope, GROUP_TYPE_PREFIX } from './envelope-fold.js'
-import { LeafBindingError, LeafLapsedError, RevokeProofError } from './errors.js'
+import {
+  CarryIdentityError,
+  LeafBindingError,
+  LeafLapsedError,
+  RevokeProofError,
+} from './errors.js'
 import type { FoldInput } from './fold.js'
 import { createMlsContext, deviceDenyHolderFor } from './group-context.js'
 import { readMessageEpoch } from './group-info.js'
@@ -900,6 +905,39 @@ export class GroupHandle {
       length,
       this.#context.cipherSuite,
     )
+  }
+
+  /** Snapshot live ratchet progress into a candidate's retained history under the write gate. */
+  async carryReceiveProgress(candidate: GroupHandle): Promise<void> {
+    return mutexFor(this).run(async () => {
+      const epoch = this.epoch
+      const retained = candidate.#state.historicalReceiverData.get(epoch)
+      // ts-mls retains the resumption PSK, not the epoch authenticator. Both identify the epoch secret.
+      const identity = this.#state.keySchedule.resumptionPsk
+      if (retained == null || retained.resumptionPsk.length !== identity.length) {
+        throw new CarryIdentityError()
+      }
+      let difference = 0
+      for (let i = 0; i < identity.length; i++) {
+        // biome-ignore lint/style/noNonNullAssertion: equal lengths and index is within bounds
+        difference |= identity[i]! ^ retained.resumptionPsk[i]!
+      }
+      if (difference !== 0) throw new CarryIdentityError()
+
+      const history = new Map(candidate.#state.historicalReceiverData)
+      // Independent buffers survive subsequent ratchets zeroing consumed secrets on the live handle.
+      history.set(epoch, { ...retained, secretTree: structuredClone(this.#state.secretTree) })
+      for (const [earlierEpoch, receiver] of this.#state.historicalReceiverData) {
+        const target = history.get(earlierEpoch)
+        if (earlierEpoch < epoch && target != null) {
+          history.set(earlierEpoch, {
+            ...target,
+            secretTree: structuredClone(receiver.secretTree),
+          })
+        }
+      }
+      candidate.#state = { ...candidate.#state, historicalReceiverData: history }
+    })
   }
 
   /**
