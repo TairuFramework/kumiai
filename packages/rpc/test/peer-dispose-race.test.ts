@@ -579,11 +579,11 @@ describe('dispose against a requester ledger reply already in its IIFE', {
     })
     const aliceMLS: MemoryGroupMLS = {
       ...aliceInner,
-      async openSealedLedger(sealed: Uint8Array, requestID: string) {
+      async openSealedLedger(sealed: Uint8Array, requestID: string, requestKey: Uint8Array) {
         openEntered = true
         await gate
         openResumed = true
-        return await aliceInner.openSealedLedger(sealed, requestID)
+        return await aliceInner.openSealedLedger(sealed, requestID, requestKey)
       },
       async bootstrapLedger(tokens: Array<string>) {
         bootstrapCalls++
@@ -791,11 +791,11 @@ describe('dispose against a ledger reply delivered inside the dispose window', {
     })
     const aliceMLS: MemoryGroupMLS = {
       ...aliceInner,
-      async openSealedLedger(sealed: Uint8Array, requestID: string) {
+      async openSealedLedger(sealed: Uint8Array, requestID: string, requestKey: Uint8Array) {
         // Flipped BEFORE the first await: if the early guard returns, this is never reached and the
         // flag stays false. Removing the early `disposed` term flips it true — the mutation bite.
         openEntered = true
-        return await aliceInner.openSealedLedger(sealed, requestID)
+        return await aliceInner.openSealedLedger(sealed, requestID, requestKey)
       },
     }
 

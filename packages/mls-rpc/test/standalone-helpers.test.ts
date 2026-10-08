@@ -6,7 +6,6 @@ import type { HandleAccess } from '../src/access.js'
 import { simpleHandleAccess } from '../src/access.js'
 import {
   createGroupCrypto,
-  createRecoveryPending,
   deriveEntryKey,
   deriveRecoverySecret,
   ENTRY_SEAL_LABEL,
@@ -128,62 +127,4 @@ test('entry and recovery derivation use the existing labels, context and bytes',
       32,
     ),
   )
-})
-
-test('pending recovery keys expire at 120,000 ms and sweep on access', () => {
-  vi.useFakeTimers()
-  const pending = createRecoveryPending()
-  const key = new Uint8Array([1, 2, 3])
-  pending.put('a', key)
-  vi.advanceTimersByTime(119_999)
-  expect(pending.get('a')).toBe(key)
-  vi.advanceTimersByTime(1)
-  expect(pending.get('a')).toBeNull()
-  expect(key).toEqual(new Uint8Array(3))
-
-  const custom = createRecoveryPending({ ttlMS: 10 })
-  const stale = new Uint8Array([9])
-  custom.put('stale', stale)
-  vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 11)
-  expect(custom.get('stale')).toBeNull()
-  expect(stale[0]).toBe(0)
-})
-
-test('pending replacement and deletion zero keys and cancel old timers', () => {
-  vi.useFakeTimers()
-  const pending = createRecoveryPending({ ttlMS: 20 })
-  const first = new Uint8Array([1])
-  const second = new Uint8Array([2])
-  pending.put('same', first)
-  vi.advanceTimersByTime(5)
-  pending.put('same', second)
-  expect(first[0]).toBe(0)
-  vi.advanceTimersByTime(15)
-  expect(pending.get('same')).toBe(second)
-  pending.delete('same')
-  expect(second[0]).toBe(0)
-  expect(pending.get('same')).toBeNull()
-})
-
-test('pending timer is unrefed', () => {
-  const timeout = vi.spyOn(globalThis, 'setTimeout')
-  const pending = createRecoveryPending()
-  pending.put('a', new Uint8Array([1]))
-  const timer = timeout.mock.results.at(-1)?.value as NodeJS.Timeout
-  expect(timer.hasRef()).toBe(false)
-  pending.delete('a')
-})
-
-test('a request key remains usable throughout a longer recovery deadline', () => {
-  vi.useFakeTimers()
-  const pending = createRecoveryPending()
-  const key = new Uint8Array([7])
-  pending.put('long-recovery', key, 180_000)
-  vi.advanceTimersByTime(120_001)
-  expect(pending.get('long-recovery')).toBe(key)
-  vi.advanceTimersByTime(59_998)
-  expect(pending.get('long-recovery')).toBe(key)
-  vi.advanceTimersByTime(1)
-  expect(pending.get('long-recovery')).toBeNull()
-  expect(key[0]).toBe(0)
 })

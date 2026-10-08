@@ -19,6 +19,7 @@ import { expect, test, vi } from 'vitest'
 import { simpleHandleAccess } from '../src/access.js'
 import { createGroupMLS, createLedgerEntrySlot } from '../src/mls.js'
 import type { RecoveryBinding, RecoveryBindingRequest } from '../src/recovery.js'
+import { createTransactionalStore } from './fixtures/transactional-access.js'
 
 async function chainedRecovery() {
   const fixture = (await import(
@@ -80,6 +81,7 @@ async function chainedRecovery() {
     recipientDID: newcomer.id,
   })
   source = (await commitInvite(source, nextBundle.publicPackage, nextInvite.invite)).newGroup
+  const store = createTransactionalStore(member)
   const requester = (recoveryBinding?: RecoveryBinding) =>
     createGroupMLS({
       identity: bob,
@@ -88,6 +90,14 @@ async function chainedRecovery() {
         adopt: (next) => {
           member = next
         },
+        persist: (handle, write) =>
+          store.save(
+            store.snapshot().revision,
+            encodeClientState(handle.state),
+            handle.ledgerTokens,
+            undefined,
+            write,
+          ),
       }),
       entrySlot: createLedgerEntrySlot(),
       recoveryBinding,
@@ -121,21 +131,21 @@ async function recover(
   requester: ReturnType<typeof createGroupMLS>,
   requestID: string,
 ) {
-  const request = await requester.createRecoveryRequest(requestID)
+  const { request, requestKey } = await requester.createRecoveryRequest(requestID)
   const reply = await fixture.responder.sealGroupInfo(request)
-  const pending = await requester.applyRecovery(reply, requestID)
+  const pending = await requester.applyRecovery(reply, requestID, requestKey)
   expect(pending).not.toBeNull()
   expect(pending).not.toHaveProperty('renewalRequired')
   if (pending == null || 'renewalRequired' in pending)
     throw new Error('Expected recovery candidate')
-  return pending
+  return { pending, requestKey }
 }
 
 async function acceptRecovery(
   fixture: Awaited<ReturnType<typeof chainedRecovery>>,
   requester: ReturnType<typeof createGroupMLS>,
 ) {
-  const pending = await recover(fixture, requester, 'chained-recovery')
+  const { pending } = await recover(fixture, requester, 'chained-recovery')
   await expect(
     fixture.responder.processCommit(pending.commit, { senderDID: fixture.bob.id }),
   ).resolves.toMatchObject({ advanced: true })
@@ -166,7 +176,7 @@ test('evidenceRefreshMakesNewBindingID', async () => {
   let offered = fixture.binding
   const host = vi.fn(async (_request: RecoveryBindingRequest) => offered)
   const requester = fixture.requester(host)
-  const first = await recover(fixture, requester, 'unusable-binding')
+  const { pending: first } = await recover(fixture, requester, 'unusable-binding')
   first.markBindingUnusable()
   await expect(requester.prepareRecovery()).resolves.toBe('renewal-required')
   expect(host.mock.calls.at(-1)?.[0]).toMatchObject({
@@ -176,12 +186,23 @@ test('evidenceRefreshMakesNewBindingID', async () => {
   expect(offered.capability).toBe(fixture.binding.capability)
   expect(offered.holderGrant).not.toBe(fixture.binding.holderGrant)
   await expect(requester.prepareRecovery()).resolves.toBe('ready')
-  const refreshed = await recover(fixture, requester, 'refreshed-evidence')
+  const { pending, requestKey } = await recover(fixture, requester, 'refreshed-evidence')
+  const restarted = fixture.requester(host)
+  const refreshed = await restarted.restoreRecovery(pending.serialize(), requestKey)
   await expect(
     fixture.responder.processCommit(refreshed.commit, { senderDID: fixture.bob.id }),
   ).resolves.toMatchObject({ advanced: true })
-  await refreshed.onAccepted()
+  await refreshed.onAccepted(() => ({
+    mutationID: 'holder-evidence-adoption',
+    changes: { deleteRejoin: true },
+  }))
   expect(fixture.member().bindingOfDID(fixture.bob.id)?.holderGrant).toBe(offered.holderGrant)
+  await expect(restarted.prepareRecovery()).resolves.toBe('ready')
+  const plaintext = new TextEncoder().encode('restored holder evidence')
+  const sealed = await fixture.member().encrypt(plaintext)
+  await expect(fixture.source().decrypt(sealed)).resolves.toMatchObject({ payload: plaintext })
+  refreshed.markBindingUnusable()
+  await expect(restarted.prepareRecovery()).resolves.toBe('renewal-required')
 })
 
 test('recoveryAfterRestartKeepsEvidence', async () => {

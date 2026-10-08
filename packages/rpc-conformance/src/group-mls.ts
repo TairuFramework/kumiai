@@ -84,7 +84,12 @@ export type ConformancePendingRecovery = {
   confirmationKey: (position: string, commitDigest: string) => Promise<Uint8Array>
   judgeVerdict: (opened: ConformanceOpenedRecoveryVerdict) => 'authoritative' | 'advisory'
   commit: Uint8Array
-  onAccepted: () => Promise<void>
+  serialize: () => Uint8Array
+  onAccepted(write?: ConformanceCommitContext['adoption']): Promise<void>
+}
+
+export type ConformanceRestoredPendingRecovery = Omit<ConformancePendingRecovery, 'onAccepted'> & {
+  onAccepted(write: NonNullable<ConformanceCommitContext['adoption']>): Promise<void>
 }
 
 /** The `RosterEntry` of `@kumiai/rpc`, re-declared structurally. */
@@ -113,6 +118,7 @@ export type ConformanceGroupMLS = {
   openRecoveryVerdict: (
     sealed: Uint8Array,
     requestID: string,
+    requestKey: Uint8Array,
   ) => Promise<ConformanceOpenedRecoveryVerdict | null>
   sendAdmission: () => ConformanceSendAdmission
   readEpoch: () => Promise<number>
@@ -124,13 +130,28 @@ export type ConformanceGroupMLS = {
   ) => Promise<ConformanceProcessCommitResult>
   exportRecoverySecret: () => Uint8Array | Promise<Uint8Array>
   prepareRecovery: () => Promise<'ready' | 'renewal-required'>
-  createRecoveryRequest: (requestID: string, deadlineMs?: number) => Promise<Uint8Array>
+  createRecoveryRequest: (
+    requestID: string,
+    deadlineMs?: number,
+  ) => Promise<{ request: Uint8Array; requestKey: Uint8Array }>
   sealGroupInfo: (request: Uint8Array) => Promise<Uint8Array>
-  applyRecovery: (sealed: Uint8Array, requestID: string) => Promise<ConformanceAppliedRecovery>
+  applyRecovery: (
+    sealed: Uint8Array,
+    requestID: string,
+    requestKey: Uint8Array,
+  ) => Promise<ConformanceAppliedRecovery>
+  restoreRecovery: (
+    candidate: Uint8Array,
+    requestKey: Uint8Array,
+  ) => Promise<ConformanceRestoredPendingRecovery>
   isLedgerComplete: () => Promise<boolean>
   getLedger: () => Promise<Array<string>>
   sealLedger: (request: Uint8Array) => Promise<Uint8Array>
-  openSealedLedger: (sealed: Uint8Array, requestID: string) => Promise<Array<string> | null>
+  openSealedLedger: (
+    sealed: Uint8Array,
+    requestID: string,
+    requestKey: Uint8Array,
+  ) => Promise<Array<string> | null>
   bootstrapLedger: (tokens: Array<string>) => Promise<void>
 }
 
@@ -725,7 +746,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
         await withGroup(2, 'verify-recovery-request', async (group) => {
           const alice = memberAt(group.members, 0)
           const bob = memberAt(group.members, 1)
-          const request = await bob.mls.createRecoveryRequest('verified-ask')
+          const { request } = await bob.mls.createRecoveryRequest('verified-ask')
           expect(await alice.mls.verifyRecoveryRequest(request)).toEqual({
             groupID: group.groupID,
             requestID: 'verified-ask',
@@ -734,13 +755,104 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           expect(await alice.mls.verifyRecoveryRequest(new Uint8Array([0]))).toBeNull()
         })
       })
+      test('a serialized candidate restores bound judgement and accepts once', async () => {
+        await withGroup(2, 'restorable-recovery', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const bob = memberAt(group.members, 1)
+          const { request, requestKey } = await bob.mls.createRecoveryRequest('restorable')
+          const reply = await alice.mls.sealGroupInfo(request)
+          const pending = await bob.mls.applyRecovery(reply, 'restorable', requestKey)
+          if (pending == null || 'renewalRequired' in pending) throw new Error('No candidate')
+          await pending.confirmationKey('position', 'digest')
+          const verdict: ConformanceRecoveryVerdict = {
+            groupID: group.groupID,
+            requestID: 'restorable',
+            position: 'position',
+            commitDigest: 'digest',
+            verdict: 'refused',
+            reason: 'policy',
+          }
+          const sealed = await alice.mls.sealRecoveryVerdict(request, verdict)
+          const opened = await bob.mls.openRecoveryVerdict(sealed, 'restorable', requestKey)
+          if (opened == null) throw new Error('No verdict')
+          const before = await bob.mls.readEpoch()
+          const bytes = pending.serialize()
+          await expect(bob.mls.restoreRecovery(bytes, new Uint8Array(32))).rejects.toThrow()
+          await expect(alice.mls.restoreRecovery(bytes, requestKey)).rejects.toThrow()
+          const restored = await bob.mls.restoreRecovery(bytes, requestKey)
+          expect(restored.commit).toEqual(pending.commit)
+          expect(restored.epoch).toBe(pending.epoch)
+          expect(restored.judgeVerdict(opened)).toBe('authoritative')
+          await expect(restored.confirmationKey('other', 'digest')).rejects.toThrow()
+          expect(await bob.mls.readEpoch()).toBe(before)
+          const write = () => ({
+            mutationID: 'restored-adoption',
+            changes: { deleteRejoin: true as const },
+          })
+          await restored.onAccepted(write)
+          await restored.onAccepted(write)
+          await (await bob.mls.restoreRecovery(bytes, requestKey)).onAccepted(write)
+          expect(await bob.mls.readEpoch()).toBe(pending.epoch)
+        })
+      })
+      test('restored acceptance requires an adoption factory before changing state or returning cached success', async () => {
+        await withGroup(2, 'restored-requires-write', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const bob = memberAt(group.members, 1)
+          const { request, requestKey } = await bob.mls.createRecoveryRequest('required-write')
+          const reply = await alice.mls.sealGroupInfo(request)
+          const pending = await bob.mls.applyRecovery(reply, 'required-write', requestKey)
+          if (pending == null || 'renewalRequired' in pending) throw new Error('No candidate')
+          const bytes = pending.serialize()
+          const restored = await bob.mls.restoreRecovery(bytes, requestKey)
+          const before = await bob.mls.readEpoch()
+          await expect(Reflect.apply(restored.onAccepted, restored, [])).rejects.toThrow()
+          expect(await bob.mls.readEpoch()).toBe(before)
+          const write = () => ({
+            mutationID: 'required-write',
+            changes: { deleteRejoin: true as const },
+          })
+          await restored.onAccepted(write)
+          expect(await bob.mls.readEpoch()).toBe(pending.epoch)
+          await expect(Reflect.apply(restored.onAccepted, restored, [])).rejects.toThrow()
+          const again = await bob.mls.restoreRecovery(bytes, requestKey)
+          await expect(Reflect.apply(again.onAccepted, again, [])).rejects.toThrow()
+          await again.onAccepted(write)
+        })
+      })
+      test('readers need the explicit key, including after a new request with the same ID', async () => {
+        await withGroup(2, 'explicit-recovery-key', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const bob = memberAt(group.members, 1)
+          const { request, requestKey } = await bob.mls.createRecoveryRequest('explicit')
+          const info = await alice.mls.sealGroupInfo(request)
+          const ledger = await alice.mls.sealLedger(request)
+          const verdict = await alice.mls.sealRecoveryVerdict(request, {
+            groupID: group.groupID,
+            requestID: 'explicit',
+            position: 'position',
+            commitDigest: 'digest',
+            verdict: 'superseded',
+          })
+          const next = await bob.mls.createRecoveryRequest('explicit')
+          expect(await bob.mls.applyRecovery(info, 'explicit', next.requestKey)).toBeNull()
+          expect(await bob.mls.openSealedLedger(ledger, 'explicit', next.requestKey)).toBeNull()
+          expect(await bob.mls.openRecoveryVerdict(verdict, 'explicit', next.requestKey)).toBeNull()
+          expect(await bob.mls.applyRecovery(info, 'explicit', requestKey)).not.toBeNull()
+          expect(await bob.mls.openSealedLedger(ledger, 'explicit', requestKey)).toEqual(
+            await alice.mls.getLedger(),
+          )
+          expect(await bob.mls.openRecoveryVerdict(verdict, 'explicit', requestKey)).not.toBeNull()
+        })
+      })
       test('a marked replacement binding is not reused after a ratchet or returned again by the host', async () => {
         const { requester, responder, ratchet, replaceBinding } = await params.createBoundRecovery()
         expect(await requester.prepareRecovery()).toBe('ready')
-        const request = await requester.createRecoveryRequest('mark-binding')
+        const { request, requestKey } = await requester.createRecoveryRequest('mark-binding')
         const pending = await requester.applyRecovery(
           await responder.sealGroupInfo(request),
           'mark-binding',
+          requestKey,
         )
         if (pending == null || 'renewalRequired' in pending) throw new Error('No bound candidate')
         const before = await requester.readEpoch()
@@ -758,10 +870,11 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const alice = memberAt(group.members, 0)
           const bob = memberAt(group.members, 1)
           const before = await bob.mls.readEpoch()
-          const request = await bob.mls.createRecoveryRequest('confirm')
+          const { request, requestKey } = await bob.mls.createRecoveryRequest('confirm')
           const pending = await bob.mls.applyRecovery(
             await alice.mls.sealGroupInfo(request),
             'confirm',
+            requestKey,
           )
           if (pending == null || 'renewalRequired' in pending)
             throw new Error('No pending recovery')
@@ -790,9 +903,9 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
         await withGroup(2, 'verdict-contract', async (group) => {
           const alice = memberAt(group.members, 0)
           const bob = memberAt(group.members, 1)
-          const request = await bob.mls.createRecoveryRequest('verdict')
+          const { request, requestKey } = await bob.mls.createRecoveryRequest('verdict')
           const reply = await alice.mls.sealGroupInfo(request)
-          const pending = await bob.mls.applyRecovery(reply, 'verdict')
+          const pending = await bob.mls.applyRecovery(reply, 'verdict', requestKey)
           if (pending == null || 'renewalRequired' in pending)
             throw new Error('No pending recovery')
           await pending.confirmationKey('position', 'digest')
@@ -805,12 +918,12 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
             reason: 'policy',
           }
           const sealed = await alice.mls.sealRecoveryVerdict(request, verdict)
-          const opened = await bob.mls.openRecoveryVerdict(sealed, 'verdict')
+          const opened = await bob.mls.openRecoveryVerdict(sealed, 'verdict', requestKey)
           expect(opened).toEqual({ signer: alice.did, verdict })
-          expect(await bob.mls.openRecoveryVerdict(sealed, 'verdict')).toEqual(opened)
-          expect(await bob.mls.openRecoveryVerdict(sealed, 'other')).toBeNull()
-          expect(await bob.mls.openRecoveryVerdict(reply, 'verdict')).toBeNull()
-          expect(await bob.mls.openSealedLedger(sealed, 'verdict')).toBeNull()
+          expect(await bob.mls.openRecoveryVerdict(sealed, 'verdict', requestKey)).toEqual(opened)
+          expect(await bob.mls.openRecoveryVerdict(sealed, 'other', requestKey)).toBeNull()
+          expect(await bob.mls.openRecoveryVerdict(reply, 'verdict', requestKey)).toBeNull()
+          expect(await bob.mls.openSealedLedger(sealed, 'verdict', requestKey)).toBeNull()
           if (opened == null) throw new Error('No opened verdict')
           expect(pending.judgeVerdict(opened)).toBe('authoritative')
           expect(pending.judgeVerdict({ ...opened, signer: 'did:peer:unknown' })).toBe('advisory')
@@ -833,7 +946,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
         await withGroup(2, 'malformed-verdict', async (group) => {
           const alice = memberAt(group.members, 0)
           const bob = memberAt(group.members, 1)
-          const request = await bob.mls.createRecoveryRequest('malformed')
+          const { request, requestKey } = await bob.mls.createRecoveryRequest('malformed')
           const verdict = {
             groupID: group.groupID,
             requestID: 'malformed',
@@ -842,7 +955,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
             ...change,
           }
           const sealed = await group.sealVerdictPayload(0, request, verdict)
-          expect(await bob.mls.openRecoveryVerdict(sealed, 'malformed')).toBeNull()
+          expect(await bob.mls.openRecoveryVerdict(sealed, 'malformed', requestKey)).toBeNull()
           await expect(
             alice.mls.sealRecoveryVerdict(request, verdict as ConformanceRecoveryVerdict),
           ).rejects.toThrow()
@@ -857,9 +970,9 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const epochBefore = await bob.mls.readEpoch()
           expect(await bob.mls.prepareRecovery()).toBe('ready')
           expect(await bob.mls.readEpoch()).toBe(epochBefore)
-          const request = await bob.mls.createRecoveryRequest('req-1')
+          const { request, requestKey } = await bob.mls.createRecoveryRequest('req-1')
           const sealed = await alice.mls.sealGroupInfo(request)
-          const pending = await bob.mls.applyRecovery(sealed, 'req-1')
+          const pending = await bob.mls.applyRecovery(sealed, 'req-1', requestKey)
 
           // Narrowed rather than optional-chained: `expect` does not narrow, and a chain that
           // short-circuits would TypeError on `.length` instead of failing this assertion.
@@ -893,7 +1006,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           })
           expect(dids(await alice.mls.rosterEntries())).not.toContain(bob.did)
 
-          const request = await bob.mls.createRecoveryRequest('req-removed')
+          const { request } = await bob.mls.createRecoveryRequest('req-removed')
           await expect(alice.mls.sealGroupInfo(request)).rejects.toThrow()
         })
       })
@@ -903,12 +1016,14 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const alice = memberAt(group.members, 0)
           const bob = memberAt(group.members, 1)
 
-          const request = await bob.mls.createRecoveryRequest('req-a')
+          const { request, requestKey } = await bob.mls.createRecoveryRequest('req-a')
           const sealed = await alice.mls.sealGroupInfo(request)
 
           // The same bytes, opened against a different request's key. `null` or a throw — the lane
           // reads both the same way — but never a PendingRecovery.
-          await expect(bob.mls.applyRecovery(sealed, 'req-b').catch(() => null)).resolves.toBeNull()
+          await expect(
+            bob.mls.applyRecovery(sealed, 'req-b', requestKey).catch(() => null),
+          ).resolves.toBeNull()
         })
       })
 
@@ -939,9 +1054,9 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const alice = memberAt(group.members, 0)
           const bob = memberAt(group.members, 1)
 
-          const request = await bob.mls.createRecoveryRequest('gather-1')
+          const { request, requestKey } = await bob.mls.createRecoveryRequest('gather-1')
           const sealed = await alice.mls.sealLedger(request)
-          const opened = await bob.mls.openSealedLedger(sealed, 'gather-1')
+          const opened = await bob.mls.openSealedLedger(sealed, 'gather-1', requestKey)
 
           expect(opened).toEqual(await alice.mls.getLedger())
         })
@@ -961,7 +1076,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const removal = await group.buildCommit({ removes: 1 })
           await alice.mls.processCommit(removal.commit, removal.context)
 
-          const request = await bob.mls.createRecoveryRequest('gather-removed')
+          const { request } = await bob.mls.createRecoveryRequest('gather-removed')
           await expect(alice.mls.sealLedger(request)).rejects.toThrow()
         })
       })
@@ -978,12 +1093,16 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const bob = memberAt(group.members, 1)
           const carol = memberAt(group.members, 2)
 
-          const request = await carol.mls.createRecoveryRequest('gather-many')
+          const { request, requestKey } = await carol.mls.createRecoveryRequest('gather-many')
           const fromAlice = await alice.mls.sealLedger(request)
           const fromBob = await bob.mls.sealLedger(request)
 
-          expect(await carol.mls.openSealedLedger(fromAlice, 'gather-many')).not.toBeNull()
-          expect(await carol.mls.openSealedLedger(fromBob, 'gather-many')).not.toBeNull()
+          expect(
+            await carol.mls.openSealedLedger(fromAlice, 'gather-many', requestKey),
+          ).not.toBeNull()
+          expect(
+            await carol.mls.openSealedLedger(fromBob, 'gather-many', requestKey),
+          ).not.toBeNull()
         })
       })
 
@@ -992,10 +1111,10 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const alice = memberAt(group.members, 0)
           const bob = memberAt(group.members, 1)
 
-          const request = await bob.mls.createRecoveryRequest('gather-a')
+          const { request, requestKey } = await bob.mls.createRecoveryRequest('gather-a')
           const sealed = await alice.mls.sealLedger(request)
           await expect(
-            bob.mls.openSealedLedger(sealed, 'gather-b').catch(() => null),
+            bob.mls.openSealedLedger(sealed, 'gather-b', requestKey).catch(() => null),
           ).resolves.toBeNull()
         })
       })

@@ -35,8 +35,12 @@ describe('recovery ordering', { concurrent: false }, () => {
       const alice = createMemoryGroupMLS({ ...options, localDID: 'alice' })
       const bob = createMemoryGroupMLS({ ...options, localDID: 'bob' })
       const requestID = 'precedence-ask'
-      const request = await bob.createRecoveryRequest(requestID)
-      const pending = await bob.applyRecovery(await alice.sealGroupInfo(request), requestID)
+      const { request, requestKey } = await bob.createRecoveryRequest(requestID)
+      const pending = await bob.applyRecovery(
+        await alice.sealGroupInfo(request),
+        requestID,
+        requestKey,
+      )
       if (pending == null || 'renewalRequired' in pending) throw new Error('No pending recovery')
       const position = 'position'
       const commitDigest = 'digest'
@@ -53,6 +57,7 @@ describe('recovery ordering', { concurrent: false }, () => {
         pending,
         groupID: 'precedence',
         requestID,
+        requestKey,
         position,
         commitDigest,
         key,

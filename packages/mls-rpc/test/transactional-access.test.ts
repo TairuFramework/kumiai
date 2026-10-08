@@ -332,10 +332,11 @@ test('a bootstrap whose host callback throws after the write still publishes the
     identity: group.committer.identity,
     entrySlot: group.committer.slot,
   })
-  const request = await requester.createRecoveryRequest('tx-bootstrap')
+  const { request, requestKey } = await requester.createRecoveryRequest('tx-bootstrap')
   const recovered = await requester.applyRecovery(
     await responder.sealGroupInfo(request),
     'tx-bootstrap',
+    requestKey,
   )
   if (recovered == null || 'renewalRequired' in recovered) throw new Error('expected recovery')
   await recovered.onAccepted()

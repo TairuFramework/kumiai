@@ -734,6 +734,13 @@ test.each([false, true])(
       return publish(value)
     }
     if (silent) {
+      let requestKey: Uint8Array = new Uint8Array()
+      const createRequest = s.bobMLS.createRecoveryRequest.bind(s.bobMLS)
+      vi.spyOn(s.bobMLS, 'createRecoveryRequest').mockImplementation(async (...args) => {
+        const minted = await createRequest(...args)
+        requestKey = minted.requestKey
+        return minted
+      })
       const publishVerdict = s.aliceConnection.publish.bind(s.aliceConnection)
       s.aliceConnection.publish = async (value) => {
         const frame = decodeHandshakeFrame(value.payload)
@@ -741,7 +748,7 @@ test.each([false, true])(
           const { sealed, requestID } = (await import('@kumiai/rpc')).decodeRecoveryVerdict(
             frame.payload,
           )
-          const opened = await s.bobMLS.openRecoveryVerdict(sealed, requestID)
+          const opened = await s.bobMLS.openRecoveryVerdict(sealed, requestID, requestKey)
           if (opened?.signer === s.aliceID.id)
             return publishVerdict({ ...value, payload: new Uint8Array([0]) })
         }

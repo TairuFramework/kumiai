@@ -60,7 +60,7 @@ describe('recovery rendezvous', { concurrent: false }, () => {
       })
       await vi.waitFor(() => expect(alice.mls.epoch()).toBe(3))
       const requestID = 'stranded-confirm'
-      const request = await bob.createRecoveryRequest(requestID)
+      const { request } = await bob.createRecoveryRequest(requestID)
       await hub.publish({
         senderDID: 'bob',
         topicID: rendezvousTopic(secret),
@@ -151,7 +151,7 @@ describe('recovery rendezvous', { concurrent: false }, () => {
       })
       await alice.peer.resync()
       const requestID = 'historical-retransmit'
-      const request = await bob.mls.createRecoveryRequest(requestID)
+      const { request, requestKey } = await bob.mls.createRecoveryRequest(requestID)
       await hub.publish({
         senderDID: 'bob',
         topicID: rendezvousTopic(secret),
@@ -180,7 +180,7 @@ describe('recovery rendezvous', { concurrent: false }, () => {
       })
       if (response == null) throw new Error('No historical verdict')
       const { sealed } = decodeRecoveryVerdict(decodeHandshakeFrame(response.payload).payload)
-      expect(await bob.mls.openRecoveryVerdict(sealed, requestID)).toMatchObject({
+      expect(await bob.mls.openRecoveryVerdict(sealed, requestID, requestKey)).toMatchObject({
         verdict: { verdict: 'confirmed' },
       })
     } finally {

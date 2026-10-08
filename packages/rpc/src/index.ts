@@ -77,6 +77,7 @@ export {
   type RecoveryConfirmationKey,
   type RecoveryRefusalReason,
   type RecoveryVerdict,
+  type RestoredPendingRecovery,
   type RosterEntry,
   type SealEntriesResult,
   type SendAdmission,

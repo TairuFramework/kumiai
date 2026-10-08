@@ -23,6 +23,7 @@ type HostMembers<TValue extends object> = {
 // New recovery methods must be classified alongside the existing acceptance callback.
 export const pendingRecoveryHostMembers = {
   epoch: 'data',
+  serialize: 'host',
   markBindingUnusable: 'host',
   confirmationKey: 'host',
   judgeVerdict: 'host',
@@ -61,6 +62,7 @@ export const mlsHostMembers = {
   createRecoveryRequest: 'host',
   sealGroupInfo: 'host',
   applyRecovery: 'host',
+  restoreRecovery: 'host',
   isLedgerComplete: 'host',
   sealLedger: 'host',
   openSealedLedger: 'host',

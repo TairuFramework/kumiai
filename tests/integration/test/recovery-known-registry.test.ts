@@ -149,8 +149,12 @@ test('the adapter judge retains own-ledger revocations when the reply offers a s
   s.install(removed.result.newGroup)
   expect(s.group().registry.devices.get(mallory.id)?.status).toBe('revoked')
   const requestID = 'known-revoked-verdict'
-  const request = await s.mls.createRecoveryRequest(requestID)
-  const pending = await s.mls.applyRecovery(await s.responder.sealGroupInfo(request), requestID)
+  const { request, requestKey } = await s.mls.createRecoveryRequest(requestID)
+  const pending = await s.mls.applyRecovery(
+    await s.responder.sealGroupInfo(request),
+    requestID,
+    requestKey,
+  )
   if (pending == null || 'renewalRequired' in pending) throw new Error('Expected stale candidate')
   const key = await pending.confirmationKey('position', 'digest')
   await malloryGroup.processMessage(pending.commit)
@@ -171,10 +175,13 @@ test('the adapter judge retains own-ledger revocations when the reply offers a s
   const opened = await s.mls.openRecoveryVerdict(
     await malloryMLS.sealRecoveryVerdict(request, verdict),
     requestID,
+    requestKey,
   )
   if (opened == null) throw new Error('No authenticated stale verdict')
   expect(opened.signer).toBe(mallory.id)
   expect(pending.judgeVerdict(opened)).toBe('advisory')
+  const restored = await s.mls.restoreRecovery(pending.serialize(), requestKey)
+  expect(restored.judgeVerdict(opened)).toBe('advisory')
   const { createVerdictJudge } = await import(
     new URL('../../../packages/mls-rpc/src/recovery.ts', import.meta.url).href
   )

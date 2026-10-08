@@ -32,12 +32,10 @@ export {
 export {
   createGroupMLS,
   createLedgerEntrySlot,
-  createRecoveryPending,
   deriveRecoverySecret,
   type GroupMLSParams,
   type LedgerEntrySlot,
   RECOVERY_LABEL,
-  type RecoveryPending,
 } from './mls.js'
 export {
   buildRevokeProofOperation,

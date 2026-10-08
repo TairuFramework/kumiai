@@ -683,13 +683,13 @@ importers:
       '@sozai/runtime':
         specifier: 'catalog:'
         version: 0.1.0
+      ts-mls:
+        specifier: 'catalog:'
+        version: 2.0.0-rc.13(@noble/ciphers@2.4.0)(@noble/curves@2.4.0)
     devDependencies:
       '@kumiai/rpc-conformance':
         specifier: workspace:^
         version: link:../rpc-conformance
-      ts-mls:
-        specifier: 'catalog:'
-        version: 2.0.0-rc.13(@noble/ciphers@2.4.0)(@noble/curves@2.4.0)
       vitest:
         specifier: 'catalog:'
         version: 5.0.3(@opentelemetry/api@1.9.1)(@types/node@26.6.4)(@vitest/ui@5.0.3)(vite@8.3.3(@types/node@26.6.4)(esbuild@0.28.2)(terser@5.51.2)(tsx@4.23.15)(yaml@2.9.1))

@@ -122,9 +122,9 @@ test('recovery persists before adoption and bootstrap retries after a failed per
     entrySlot: group.committer.slot,
   })
   const requestID = 'persist-recovery-request'
-  const request = await requester.createRecoveryRequest(requestID)
+  const { request, requestKey } = await requester.createRecoveryRequest(requestID)
   const sealed = await responder.sealGroupInfo(request)
-  const pending = await requester.applyRecovery(sealed, requestID)
+  const pending = await requester.applyRecovery(sealed, requestID, requestKey)
   if (pending == null || 'renewalRequired' in pending) throw new Error('expected recovery')
   await expect(pending.onAccepted()).rejects.toThrow('disk failed')
   expect(adopt).not.toHaveBeenCalled()
@@ -148,7 +148,7 @@ test('recovery persists before adoption and bootstrap retries after a failed per
   expect(member.handle.ledgerTokens).toEqual(tokens)
 })
 
-test('a recovery key expires without another request', async () => {
+test('an explicit recovery key remains usable after the former retention deadline', async () => {
   const group = await createRealGroup(1, 'rpc-recovery-ttl')
   const member = group.members[0]
   if (member == null) throw new Error('missing member')
@@ -170,10 +170,12 @@ test('a recovery key expires without another request', async () => {
   vi.useFakeTimers()
   try {
     const requestID = 'expires-without-sweep'
-    const request = await requester.createRecoveryRequest(requestID)
+    const { request, requestKey } = await requester.createRecoveryRequest(requestID)
     const sealed = await responder.sealGroupInfo(request)
     await vi.advanceTimersByTimeAsync(120_001)
-    expect(await requester.applyRecovery(sealed, requestID)).toBeNull()
+    const pending = await requester.applyRecovery(sealed, requestID, requestKey)
+    expect(pending).not.toBeNull()
+    expect(pending).not.toHaveProperty('renewalRequired')
   } finally {
     vi.useRealTimers()
   }
@@ -199,12 +201,17 @@ test('accepting an older recovery cannot delete a replacement request key', asyn
     entrySlot: group.committer.slot,
   })
   const id = 'reused-request-id'
-  const first = await requester.createRecoveryRequest(id)
-  const firstPending = await requester.applyRecovery(await responder.sealGroupInfo(first), id)
+  const { request: first, requestKey: firstKey } = await requester.createRecoveryRequest(id)
+  const firstPending = await requester.applyRecovery(
+    await responder.sealGroupInfo(first),
+    id,
+    firstKey,
+  )
   if (firstPending == null || 'renewalRequired' in firstPending)
     throw new Error('expected first recovery')
-  const replacement = await requester.createRecoveryRequest(id)
+  const { request: replacement, requestKey: replacementKey } =
+    await requester.createRecoveryRequest(id)
   const replacementReply = await responder.sealGroupInfo(replacement)
   await firstPending.onAccepted()
-  expect(await requester.applyRecovery(replacementReply, id)).not.toBeNull()
+  expect(await requester.applyRecovery(replacementReply, id, replacementKey)).not.toBeNull()
 })

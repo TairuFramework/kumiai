@@ -128,9 +128,9 @@ describe('GroupMLS port', () => {
       localDID: 'stranded',
     })
 
-    const request = await stranded.createRecoveryRequest('req-1')
+    const { request, requestKey } = await stranded.createRecoveryRequest('req-1')
     const sealed = await live.sealGroupInfo(request)
-    const pending = await stranded.applyRecovery(sealed, 'req-1')
+    const pending = await stranded.applyRecovery(sealed, 'req-1', requestKey)
 
     // BUILT, not adopted: the commit still has to win a compare-and-set at the head, and a
     // peer that adopted first would be alone on a branch the moment it lost.
@@ -182,8 +182,12 @@ describe('GroupMLS port', () => {
       recoverySecret: new Uint8Array(32).fill(1),
       localDID: 'stranded',
     })
-    const request = await stranded.createRecoveryRequest('req-1')
-    const pending = await stranded.applyRecovery(await live.sealGroupInfo(request), 'req-1')
+    const { request, requestKey } = await stranded.createRecoveryRequest('req-1')
+    const pending = await stranded.applyRecovery(
+      await live.sealGroupInfo(request),
+      'req-1',
+      requestKey,
+    )
     if (pending == null || 'renewalRequired' in pending)
       throw new Error('Expected pending recovery')
     await pending.onAccepted()
@@ -217,14 +221,14 @@ describe('GroupMLS port', () => {
       recoverySecret: new Uint8Array(32).fill(1),
       localDID: 'stranded',
     })
-    const sealed = await live.sealGroupInfo(await stranded.createRecoveryRequest('req-1'))
+    const sealed = await live.sealGroupInfo((await stranded.createRecoveryRequest('req-1')).request)
 
     // Eve has a leaf and could have asked for herself; this reply is not hers to open.
-    await eve.createRecoveryRequest('req-1')
-    expect(await eve.applyRecovery(sealed, 'req-1')).toBeNull()
+    const { requestKey: eveKey } = await eve.createRecoveryRequest('req-1')
+    expect(await eve.applyRecovery(sealed, 'req-1', eveKey)).toBeNull()
     // And the requester cannot open it under another request id: the key is minted per request.
-    await stranded.createRecoveryRequest('req-2')
-    expect(await stranded.applyRecovery(sealed, 'req-2')).toBeNull()
+    const { requestKey: secondKey } = await stranded.createRecoveryRequest('req-2')
+    expect(await stranded.applyRecovery(sealed, 'req-2', secondKey)).toBeNull()
   })
 
   test('a sealed ledger answers one question, and the key survives a reply that is dropped', async () => {
@@ -242,15 +246,17 @@ describe('GroupMLS port', () => {
     // ONE request, so the two replies differ in nothing but the question they answer: same
     // member, same request id, same ephemeral key. A GroupInfo is not a ledger and a ledger is
     // not a GroupInfo, and neither opens as the other.
-    const request = await stranded.createRecoveryRequest('req-1')
+    const { request, requestKey } = await stranded.createRecoveryRequest('req-1')
     const sealedGroupInfo = await live.sealGroupInfo(request)
     const sealedLedger = await live.sealLedger(request)
-    expect(await stranded.openSealedLedger(sealedGroupInfo, 'req-1')).toBeNull()
-    expect(await stranded.applyRecovery(sealedLedger, 'req-1')).toBeNull()
+    expect(await stranded.openSealedLedger(sealedGroupInfo, 'req-1', requestKey)).toBeNull()
+    expect(await stranded.applyRecovery(sealedLedger, 'req-1', requestKey)).toBeNull()
 
     // And a reply the requester drops does not cost it the key: every responder answers a
     // gather, and the next one's reply is sealed to the same ephemeral key.
-    expect(await stranded.openSealedLedger(sealedLedger, 'req-1')).toEqual(['role:live=admin'])
+    expect(await stranded.openSealedLedger(sealedLedger, 'req-1', requestKey)).toEqual([
+      'role:live=admin',
+    ])
   })
 
   test('a member with no leaf in the responder tree is refused the ledger, as well as the group', async () => {
@@ -267,9 +273,9 @@ describe('GroupMLS port', () => {
     // The ledger is the group's whole authority state, and the topic it is asked for on is
     // public. Sealing without authorizing would answer this — and encrypt every role neatly to
     // the stranger's own key.
-    await expect(live.sealLedger(await mallory.createRecoveryRequest('req-1'))).rejects.toThrow(
-      /no leaf/,
-    )
+    await expect(
+      live.sealLedger((await mallory.createRecoveryRequest('req-1')).request),
+    ).rejects.toThrow(/no leaf/)
   })
 
   test('a member with no leaf in the responder tree is refused', async () => {
@@ -284,9 +290,9 @@ describe('GroupMLS port', () => {
     })
     // Authorization is roster-intrinsic: the responder can only answer DIDs its own tree still
     // carries a leaf for, so a removed member gets nothing from anyone who applied its removal.
-    await expect(live.sealGroupInfo(await removed.createRecoveryRequest('req-1'))).rejects.toThrow(
-      /no leaf/,
-    )
+    await expect(
+      live.sealGroupInfo((await removed.createRecoveryRequest('req-1')).request),
+    ).rejects.toThrow(/no leaf/)
   })
 
   test('exportRecoverySecret is stable and epoch-independent', async () => {

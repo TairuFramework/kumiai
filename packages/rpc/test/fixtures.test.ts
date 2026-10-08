@@ -172,7 +172,7 @@ describe('fake hub', () => {
   })
 })
 
-test('memory recovery retains verdict keys after GroupInfo until their bounded lifetime expires', async () => {
+test('memory recovery uses the explicit verdict key across elapsed request deadlines', async () => {
   const { vi } = await import('vitest')
   const { createMemoryGroupMLS } = await import('./fixtures/memory-group-mls.js')
   const clock = vi.spyOn(Date, 'now').mockReturnValue(150_000)
@@ -180,8 +180,12 @@ test('memory recovery retains verdict keys after GroupInfo until their bounded l
     const members = ['did:key:alice', 'did:key:bob']
     const alice = createMemoryGroupMLS({ localDID: members[0], members })
     const bob = createMemoryGroupMLS({ localDID: members[1], members })
-    const request = await bob.createRecoveryRequest('expiry')
-    const pending = await bob.applyRecovery(await alice.sealGroupInfo(request), 'expiry')
+    const { request, requestKey } = await bob.createRecoveryRequest('expiry')
+    const pending = await bob.applyRecovery(
+      await alice.sealGroupInfo(request),
+      'expiry',
+      requestKey,
+    )
     expect(pending).not.toBeNull()
     const sealed = await alice.sealRecoveryVerdict(request, {
       groupID: 'memory-group',
@@ -190,10 +194,11 @@ test('memory recovery retains verdict keys after GroupInfo until their bounded l
       commitDigest: 'digest',
       verdict: 'superseded',
     })
-    expect(await bob.openRecoveryVerdict(sealed, 'expiry')).not.toBeNull()
-    expect(await bob.openRecoveryVerdict(sealed, 'expiry')).not.toBeNull()
+    expect(await bob.openRecoveryVerdict(sealed, 'expiry', requestKey)).not.toBeNull()
+    expect(await bob.openRecoveryVerdict(sealed, 'expiry', requestKey)).not.toBeNull()
     clock.mockReturnValue(270_000)
-    expect(await bob.openRecoveryVerdict(sealed, 'expiry')).toBeNull()
+    expect(await bob.openRecoveryVerdict(sealed, 'expiry', requestKey)).not.toBeNull()
+    expect(await bob.openRecoveryVerdict(sealed, 'expiry', new Uint8Array(32))).toBeNull()
   } finally {
     clock.mockRestore()
   }

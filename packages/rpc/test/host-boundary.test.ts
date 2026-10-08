@@ -76,6 +76,7 @@ describe('host invocation boundary', () => {
     const receiver = Object.freeze({
       epoch: 1,
       markBindingUnusable: () => {},
+      serialize: () => bytes,
       confirmationKey: async () => new Uint8Array(32),
       judgeVerdict: () => 'authoritative' as const,
       commit: bytes,
