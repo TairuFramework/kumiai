@@ -110,7 +110,7 @@ test('one access instance serves both ports and publishes replacement after save
   await buildRealCommit(group)
   const next = group.committer.handle
   await access.replace(next)
-  expect(saved).toHaveBeenCalledWith(next)
+  expect(saved).toHaveBeenCalledWith(next, undefined)
   expect(member.handle).toBe(next)
   expect(crypto.epoch()).toBe(Number(next.epoch))
 })

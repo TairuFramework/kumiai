@@ -44,5 +44,10 @@ test('operation results carry the epoch used by the handle', async () => {
   const result = await mls.processCommit(commit, {
     resolveLedgerEntries: group.resolveLedgerEntries,
   })
-  expect(result).toEqual({ advanced: true, epochBefore: epoch, epochAfter: epoch + 1 })
+  expect(result).toEqual({
+    applied: true,
+    advanced: true,
+    epochBefore: epoch,
+    epochAfter: epoch + 1,
+  })
 })

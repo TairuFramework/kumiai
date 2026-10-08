@@ -358,6 +358,7 @@ test('a responder floor refusal discards the candidate, requires renewal and inv
   })
   const before = s.bobGroup()
   vi.spyOn(s.responder, 'processCommit').mockResolvedValue({
+    applied: false,
     advanced: false,
     epochBefore: 1,
     epochAfter: 1,
@@ -401,9 +402,13 @@ test('an authoritative invalid refusal holds automatic recovery until explicit r
       events.push(event)
     },
   })
-  const process = vi
-    .spyOn(s.responder, 'processCommit')
-    .mockResolvedValue({ advanced: false, epochBefore: 1, epochAfter: 1, refusal: 'invalid' })
+  const process = vi.spyOn(s.responder, 'processCommit').mockResolvedValue({
+    applied: false,
+    advanced: false,
+    epochBefore: 1,
+    epochAfter: 1,
+    refusal: 'invalid',
+  })
   const requests = vi.spyOn(s.mls, 'createRecoveryRequest')
   try {
     await Promise.all([alice.resync(), bob.resync()])

@@ -112,7 +112,12 @@ describe('delayed ledger bootstrap', () => {
     const process = bob.mls.processCommit.bind(bob.mls)
     vi.spyOn(bob.mls, 'processCommit').mockImplementation(async (commit, context) => {
       if ((await bob.mls.readCommitHeader(commit))?.external) return process(commit, context)
-      return { advanced: false, epochBefore: bob.mls.epoch(), epochAfter: bob.mls.epoch() }
+      return {
+        applied: false,
+        advanced: false,
+        epochBefore: bob.mls.epoch(),
+        epochAfter: bob.mls.epoch(),
+      }
     })
     const competing = await publishCommit({
       hub,

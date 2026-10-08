@@ -14,6 +14,7 @@ import type {
   RecoveryVerdict,
   RosterEntry,
 } from '../../src/crypto.js'
+import { createMemoryHostDatabase, type MemoryHostDatabase } from './host-db.js'
 
 export type MemoryGroupMLS = GroupMLS & {
   epoch: () => number
@@ -70,6 +71,7 @@ export type MemoryGroupMLS = GroupMLS & {
 
 export type MemoryRecoveryBinding = { id: string; prefix: Array<unknown>; capability: string }
 export type MemoryGroupMLSOptions = {
+  hostDB?: MemoryHostDatabase
   binding?: MemoryRecoveryBinding
   recoveryBinding?: () => Promise<MemoryRecoveryBinding | null>
   groupID?: string
@@ -424,27 +426,27 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   /** The head this handle's group state attests to. Genesis until a commit moves it. */
   let ledgerHead = memoryLedgerHead([])
   /** Entry bodies by content id — what this member can serve, and what it can enact. */
-  const bodies = new Map<string, string>()
+  let bodies = new Map<string, string>()
   for (const token of options.bodies ?? []) bodies.set(memoryEntryID(token), token)
   // Hole-preserving leaf-slot model, keyed by ratchet-tree leaf index. Real ts-mls blanks a
   // removed leaf and fills the leftmost blank on add; a compact array cannot, and would hand out
   // position-indices the real port never does (more permissive — forbidden for a double).
-  const slots = new Map<number, string>()
+  let slots = new Map<number, string>()
   ;(options.members ?? (localDID != null ? [localDID] : [])).forEach((did, i) => {
     slots.set(i, did)
   })
 
-  const lowestFreeSlot = (): number => {
+  const lowestFreeSlot = (target = slots): number => {
     let i = 0
-    while (slots.has(i)) i++
+    while (target.has(i)) i++
     return i
   }
-  const slotAdd = (did: string): void => {
+  const slotAdd = (did: string, target = slots): void => {
     // The double never adds a DID it already holds (matches how buildCommit models adds).
-    if (![...slots.values()].includes(did)) slots.set(lowestFreeSlot(), did)
+    if (![...target.values()].includes(did)) target.set(lowestFreeSlot(target), did)
   }
-  const slotRemoveDID = (did: string): void => {
-    for (const [i, d] of slots) if (d === did) slots.delete(i)
+  const slotRemoveDID = (did: string, target = slots): void => {
+    for (const [i, d] of target) if (d === did) target.delete(i)
   }
   const slotHas = (did: string): boolean => [...slots.values()].includes(did)
   const occupiedDIDs = (): Array<string> =>
@@ -462,6 +464,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
    * openable by this peer and by nobody else — the hub holds every other input.
    */
   const groupID = options.groupID ?? 'memory-group'
+  const hostDB = options.hostDB ?? createMemoryHostDatabase()
   const confirmationKeyAt = (at: number, position: string, digest: string): Uint8Array =>
     sha256(concatBytes(recoverySecret, fromUTF(JSON.stringify([groupID, at, position, digest]))))
   const tagFor = (key: Uint8Array, requestID: string): string =>
@@ -701,14 +704,14 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       seen += 1
       const parsed = decodeMemoryCommit(commit)
       if (parsed == null) {
-        return { advanced: false, epochBefore: epoch, epochAfter: epoch }
+        return { applied: false, advanced: false, epochBefore: epoch, epochAfter: epoch }
       }
       // A Commit framed at another epoch is not this member's to apply: real MLS cannot
       // decrypt it at all. Ordinary history for a member walking the log — the late
       // joiner's own add-commit is exactly this — and NOT corruption. The blob riding it
       // is never opened, because the entries are never resolved.
       if (parsed.epoch !== epoch) {
-        return { advanced: false, epochBefore: epoch, epochAfter: epoch }
+        return { applied: false, advanced: false, epochBefore: epoch, epochAfter: epoch }
       }
       // Sender-data authorship and commit-content validity are separate in real MLS. A hub can
       // change ciphertext beyond the sampled prefix without breaking the sender-data read.
@@ -717,31 +720,12 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         (parsed.signerDID ?? parsed.committerDID) !== parsed.committerDID
       ) {
         return {
+          applied: false,
           advanced: false,
           epochBefore: epoch,
           epochAfter: epoch,
           refusal: 'invalid' as const,
         }
-      }
-      // A Commit that REMOVES this member is one it can never apply: the commit's path excludes
-      // the leaf it drops, so the removed member is handed nothing to derive the new epoch's
-      // secrets from. Its handle stops here, at the last epoch it holds — and that is what
-      // cutting a member off means. It keeps every secret it ever exported and every topic it
-      // ever derived; the per-epoch secret is what it cannot follow.
-      //
-      // `{ advanced: false }`, not a throw: the frame is well-formed and there is nothing to
-      // retry.
-      //
-      // THE TREE STILL LOSES THE LEAF, and this half was measured against real MLS rather than
-      // reasoned about. ts-mls does not throw on a self-removing commit: it applies the proposals
-      // to the tree — so `listMembers()` no longer holds the removed member — and leaves the
-      // epoch where it was, because there is no key material to move it. So the handle reports a
-      // CHANGED ROSTER AT AN UNCHANGED EPOCH, which is the one combination nothing else produces.
-      // A double that kept the stale roster was the more permissive one, and it hid a peer that
-      // re-anchored off that diff.
-      if (localDID != null && parsed.removes?.includes(localDID)) {
-        slotRemoveDID(localDID)
-        return { advanced: false, epochBefore: epoch, epochAfter: epoch }
       }
       // A member can never apply the frame that is its OWN commit: MLS merges a pending
       // commit, it does not process one, and the pending state is the only thing that could
@@ -749,36 +733,69 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       // and no amount of processing will get it back. An external commit is the exception
       // that proves it — the rejoining member adopts the handle its own rejoin derived.
       if (localDID != null && parsed.committerDID === localDID) {
-        return { advanced: false, epochBefore: epoch, epochAfter: epoch }
+        return { applied: false, advanced: false, epochBefore: epoch, epochAfter: epoch }
       }
       // Well-formed, and refused: the group's policy does not accept commits from this
       // committer. A refusal is NOT a throw — the peer read the commit, judged it, and
       // declined it, and there is nothing to retry.
       if (!acceptsCommitter(parsed.committerDID)) {
         return {
+          applied: false,
           advanced: false,
           epochBefore: epoch,
           epochAfter: epoch,
           refusal: 'policy' as const,
         }
       }
-      const missing = parsed.entryIDs.filter((id) => !bodies.has(id))
+      const nextBodies = new Map(bodies)
+      const missing = parsed.entryIDs.filter((id) => !nextBodies.has(id))
       if (missing.length > 0) {
         const tokens = (await context.resolveLedgerEntries?.(missing)) ?? []
         for (const token of tokens) {
           const id = memoryEntryID(token)
           // Content-addressed: a body binds to the id it hashes to, or it is ignored.
-          if (missing.includes(id)) bodies.set(id, token)
+          if (missing.includes(id)) nextBodies.set(id, token)
         }
-        const stillMissing = parsed.entryIDs.filter((id) => !bodies.has(id))
+        const stillMissing = parsed.entryIDs.filter((id) => !nextBodies.has(id))
         if (stillMissing.length > 0) {
           throw new MissingLedgerEntriesError(stillMissing)
         }
       }
-      commits += 1
       const epochBefore = epoch
-      enact(parsed)
-      return { advanced: true, epochBefore, epochAfter: epoch }
+      const nextSlots = new Map(slots)
+      for (const did of parsed.removes ?? []) slotRemoveDID(did, nextSlots)
+      for (const did of parsed.adds ?? []) slotAdd(did, nextSlots)
+      if (parsed.external) {
+        slotRemoveDID(parsed.committerDID, nextSlots)
+        slotAdd(parsed.committerDID, nextSlots)
+      }
+      const removed = localDID != null && ![...nextSlots.values()].includes(localDID)
+      // Self-removal adopts the tree and ledger but supplies no successor epoch secrets.
+      const epochAfter = removed ? epoch : epoch + 1
+      const nextLedger = [...ledger, ...parsed.entryIDs]
+      const nextHead = parsed.head ?? ledgerHead
+      const state = fromUTF(
+        JSON.stringify({
+          epoch: epochAfter,
+          slots: [...nextSlots],
+          ledger: nextLedger,
+          ledgerHead: nextHead,
+          bodies: [...nextBodies],
+        }),
+      )
+      const write = context.adoption?.({
+        epochAfter,
+        removed,
+        epochAuthenticator: sha256(concatBytes(recoverySecret, fromUTF(groupID), state)),
+      })
+      if (write != null) await hostDB.saveState(groupID, state, write)
+      bodies = nextBodies
+      slots = nextSlots
+      ledger = nextLedger
+      ledgerHead = nextHead
+      commits += 1
+      if (!removed) advance(epochAfter)
+      return { applied: true, advanced: !removed, epochBefore, epochAfter }
     },
     async isLedgerComplete() {
       return memoryLedgerHead(ledger) === ledgerHead
