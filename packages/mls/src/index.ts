@@ -70,6 +70,8 @@ export {
 } from './envelope-fold.js'
 export {
   CarryIdentityError,
+  DeviceRegistryCodecError,
+  type DeviceRegistryCodecErrorParams,
   LeafBindingError,
   type LeafBindingReason,
   LeafLapsedError,
@@ -240,6 +242,7 @@ export {
   registrySeed,
   revocationOf,
 } from './registry.js'
+export { decodeDeviceRegistry, encodeDeviceRegistry } from './registry-codec.js'
 export {
   adminCount,
   foldRoster,

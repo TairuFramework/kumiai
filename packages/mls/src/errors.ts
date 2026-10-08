@@ -1,3 +1,12 @@
+export type DeviceRegistryCodecErrorParams = { message: string; cause?: unknown }
+
+export class DeviceRegistryCodecError extends Error {
+  constructor(params: DeviceRegistryCodecErrorParams) {
+    super(params.message, { cause: params.cause })
+    this.name = 'DeviceRegistryCodecError'
+  }
+}
+
 export class CarryIdentityError extends Error {
   constructor() {
     super('Receive progress candidate does not retain the current epoch identity')
