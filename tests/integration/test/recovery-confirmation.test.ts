@@ -34,7 +34,6 @@ import { afterEach, beforeAll, expect, test, vi } from 'vitest'
 
 import {
   chat,
-  createMemoryAnchorStore,
   createMemoryAppCursorStore,
   createMemoryAppOutbox,
   createOperationHost,
@@ -200,7 +199,6 @@ async function setup(options: { third?: boolean; deadlineMs?: number } = {}) {
         },
       },
       ...operationHost,
-      anchorStore: createMemoryAnchorStore(),
       appCursorStore: createMemoryAppCursorStore(),
       onRecovery: (event) => {
         events.push(event)

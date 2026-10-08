@@ -3,7 +3,10 @@
   "compilerOptions": {
     "lib": ["es2025", "dom"],
     "types": ["node"],
-    "rootDir": ".",
+    "rootDir": "../..",
+    "paths": {
+      "@kumiai/rpc": ["../../packages/rpc/src/index.ts"]
+    },
     "noEmit": true
   },
   "include": ["./test/**/*"]

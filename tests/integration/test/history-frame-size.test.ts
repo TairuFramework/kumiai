@@ -17,7 +17,6 @@ import { expect, test, vi } from 'vitest'
 
 import {
   chat,
-  createMemoryAnchorStore,
   createMemoryAppCursorStore,
   createMemoryAppOutbox,
   createOperationHost,
@@ -96,7 +95,6 @@ test('a final frame one byte above the hub cap is rejected before journalling or
     mls,
     localDID: identity.id,
     ...host,
-    anchorStore: createMemoryAnchorStore(),
     appCursorStore: createMemoryAppCursorStore(),
     protocols: { chat },
     handlers: {

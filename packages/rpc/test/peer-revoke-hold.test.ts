@@ -1,8 +1,10 @@
+import { setImmediate } from 'node:timers/promises'
 import { expect, test, vi } from 'vitest'
 
 import { OperationOutcomeError, OperationRejectedError } from '../src/errors.js'
 import { commitTopic } from '../src/topic.js'
 import { FakeHub } from './fixtures/fake-hub.js'
+import { createMemoryHostDatabase } from './fixtures/host-db.js'
 import { buildLedgerCommit, makeMLSPeer, type TestPeer } from './fixtures/peer.js'
 
 function gate() {
@@ -20,6 +22,62 @@ async function close(member: TestPeer) {
   await member.peer.dispose()
   await member.peer.drained()
 }
+
+test('a delayed empty snapshot cannot release a newer revoke hold', async () => {
+  const hub = new FakeHub()
+  const database = createMemoryHostDatabase()
+  const control = database.control('alice')
+  const load = control.load.bind(control)
+  const snapshotPause = gate()
+  const buildPause = gate()
+  let delayNext = false
+  let snapshotHeld = false
+  let building = false
+  control.load = async () => {
+    const snapshot = await load()
+    if (delayNext) {
+      delayNext = false
+      snapshotHeld = true
+      await snapshotPause.promise
+    }
+    return snapshot
+  }
+  const member = makeMLSPeer(hub, 'alice', secret, {
+    database,
+    control,
+    onOutcome: () => {
+      delayNext = true
+    },
+  })
+  try {
+    await member.peer.commit(buildLedgerCommit(member, ['first']))
+    await vi.waitFor(() => expect(snapshotHeld).toBe(true))
+    const enqueued = member.peer.enqueue(
+      buildLedgerCommit(member, ['revoke'], {
+        revokes: true,
+        onBuild: async () => {
+          building = true
+          await buildPause.promise
+        },
+      }),
+    )
+    await setImmediate()
+    snapshotPause.release()
+    await enqueued
+    await vi.waitFor(() => expect(building).toBe(true))
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    await member.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'held' } })
+    await vi.advanceTimersByTimeAsync(20)
+    expect((await load()).operations.some((op) => op.revokes)).toBe(true)
+    expect(apps(hub)).toEqual([])
+  } finally {
+    vi.useRealTimers()
+    delayNext = false
+    snapshotPause.release()
+    buildPause.release()
+    await close(member)
+  }
+})
 
 test('durable revoke holds log sends through build and releases after adoption', async () => {
   const hub = new FakeHub()

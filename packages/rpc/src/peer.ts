@@ -1790,7 +1790,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       if (cursor.stranded) stranded = true
     }
   }
-  const operationDeps = (): OperationDeps => {
+  const operationDeps = (deferAccepted = false): OperationDeps => {
     if (control == null || build == null || adopt == null || mls == null || commitTopicID == null) {
       throw new Error('commit: this peer has no MLS port, so it has no group to commit to')
     }
@@ -1872,12 +1872,17 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       pullToHead: async () => {
         controlReplayed = true
         if (!(await ensureLedger(Date.now() + recoveryTimeoutMs))) {
+          if (deferAccepted) return
           throw new RecoveryRequiredError('commit: the ledger is incomplete')
         }
         await finalizeBootstrap(port)
         await reconcileCommits()
         assertLive()
-        if (stranded || anchorRecoveryPending || rejoinHeld || activeRecovery != null) {
+        // A moved acceptance can require this very recovery to settle its branch.
+        if (
+          !deferAccepted &&
+          (stranded || anchorRecoveryPending || rejoinHeld || activeRecovery != null)
+        ) {
           throw new RecoveryRequiredError('commit: group control requires recovery')
         }
       },
@@ -1897,9 +1902,15 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     let op = (await control.load()).operations[0]
     const before = await mls.readEpoch()
     while (!disposed && op != null && op.stage !== 'intent') {
-      const next = await stepOperation(operationDeps(), op)
+      const next = await stepOperation(operationDeps(op.stage === 'accepted'), op)
       await refreshControl()
-      if (next === op) throw new RecoveryRequiredError('An operation is awaiting settlement')
+      if (next === op) {
+        if (op.stage !== 'accepted')
+          throw new RecoveryRequiredError('An operation is awaiting settlement')
+        stranded = true
+        healRequested = true
+        break
+      }
       op = next ?? undefined
     }
     return (await mls.readEpoch()) !== before
@@ -1927,9 +1938,13 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             controlReplayed = true
             for (let attempt = 0; op != null && attempt < COMMIT_ATTEMPT_CEILING; attempt++) {
               assertLive()
-              const next = await stepOperation(operationDeps(), op)
+              const next = await stepOperation(operationDeps(op.stage === 'accepted'), op)
               await refreshControl()
               if (next === op) {
+                if (op.stage === 'accepted') {
+                  stranded = true
+                  healRequested = true
+                }
                 retry = true
                 break
               }
@@ -1948,7 +1963,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           operationRunning = false
           if (!disposed) {
             try {
-              await refreshControl()
+              await runSerial(refreshControl)
             } catch {
               retry = true
             }
@@ -2464,7 +2479,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             reconciledHead !== headBeforeRejoin ||
             (!anchorRecoveryPending &&
               control != null &&
-              (await control.load()).operations.some((op) => op.stage !== 'intent')) ||
+              (await control.load()).operations.some((op) => op.stage === 'built')) ||
             (anchorPending != null && !anchorRecoveryPending)
           ) {
             pendingRecovery = null

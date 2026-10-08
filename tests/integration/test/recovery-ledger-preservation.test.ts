@@ -27,7 +27,6 @@ import { afterEach, expect, test, vi } from 'vitest'
 
 import {
   chat,
-  createMemoryAnchorStore,
   createMemoryAppCursorStore,
   createMemoryAppOutbox,
   createOperationHost,
@@ -144,7 +143,6 @@ function recoveryPeer(params: {
     mls,
     localDID: identity.id,
     ...createOperationHost(access),
-    anchorStore: createMemoryAnchorStore(),
     appCursorStore: createMemoryAppCursorStore(),
     protocols: { chat },
     handlers: {

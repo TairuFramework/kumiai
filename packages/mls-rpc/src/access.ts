@@ -19,7 +19,12 @@ export type HandleAccess = {
     fn: (handle: GroupHandle, persist: (handle: GroupHandle) => Promise<void>) => Promise<TValue>,
     adoption?: AdoptionWriteFactory,
   ): Promise<TValue>
-  replace(next: GroupHandle, adoption?: AdoptionWriteFactory): Promise<void>
+  /** Check identity and carry progress under the replacement's persistence gate. */
+  replace(
+    next: GroupHandle,
+    adoption?: AdoptionWriteFactory,
+    prepare?: (current: GroupHandle) => Promise<boolean>,
+  ): Promise<void>
   open<TValue>(
     fn: (handle: GroupHandle, persistOpened: PersistOpened) => Promise<TValue>,
     persistOpened: PersistOpened,
@@ -79,8 +84,9 @@ export function simpleHandleAccess(params: SimpleHandleAccessParams): HandleAcce
         publishedAdmission = handle.sendAdmission()
         return result
       }),
-    replace: (next, adoption) =>
+    replace: (next, adoption, prepare) =>
       serialise(async () => {
+        if (prepare != null && !(await prepare(params.handle()))) return
         if (adoption != null && params.persist == null) {
           throw new ControlWriteNotCommittedError('adoption requires a persist callback')
         }

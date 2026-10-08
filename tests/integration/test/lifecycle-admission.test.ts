@@ -11,7 +11,6 @@ import { expect, test, vi } from 'vitest'
 
 import {
   chat,
-  createMemoryAnchorStore,
   createMemoryAppCursorStore,
   createMemoryAppOutbox,
   createOperationHost,
@@ -98,7 +97,6 @@ test('accepted adoption entries seal at the matching admission epoch once the de
     crypto,
     mls,
     ...host,
-    anchorStore: createMemoryAnchorStore(),
     appCursorStore: createMemoryAppCursorStore(),
     appOutbox: {
       ...appOutbox,

@@ -231,9 +231,11 @@ export async function createTransactionalAccess(
         publish(working, row.revision + 1)
         return result
       }),
-    replace: (next, adoption) =>
+    replace: (next, adoption, prepare) =>
       locked(async () => {
+        await store.settled()
         const row = store.snapshot()
+        if (prepare != null && !(await prepare(await restore(row)))) return
         const write = adoption?.({
           epochAfter: Number(next.epoch),
           removed: !next

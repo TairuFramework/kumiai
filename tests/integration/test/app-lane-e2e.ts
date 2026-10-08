@@ -339,33 +339,10 @@ export function makeMember(params: MakeMemberParams): Member {
     protocols: { chat },
     handlers: { chat: params.handlers ?? {} } as never,
     adopt: async (blob, expected, write) => {
-      const journal = JSON.parse(new TextDecoder().decode(blob)) as {
-        state: Array<number>
-        ledger: Array<string>
-      }
-      const state = decodeClientState(new Uint8Array(journal.state))
-      if (state == null) throw new Error('Invalid candidate state')
-      const equal = (a: Uint8Array, b: Uint8Array) =>
-        a.length === b.length && a.every((byte, i) => byte === b[i])
-      if (
-        state.groupContext.epoch === handle.epoch &&
-        equal(state.keySchedule.epochAuthenticator, handle.state.keySchedule.epochAuthenticator)
-      )
-        return 'noop'
-      if (
-        Number(handle.epoch) !== expected.epoch ||
-        expected.lineage !== 0 ||
-        !equal(handle.state.keySchedule.epochAuthenticator, expected.authenticatorBefore)
-      )
-        return 'moved'
-      const candidate = await restoreGroup({
-        state,
-        credential: handle.credential,
-        ledgerEntries: journal.ledger,
-        options: { resolveLedgerEntries: entrySlot.resolve },
+      const result = await adoptOperationCandidate(access, blob, expected, write, undefined, {
+        resolveLedgerEntries: entrySlot.resolve,
       })
-      await handle.carryReceiveProgress(candidate)
-      await access.replace(candidate, () => write)
+      if (result !== 'installed') return result
       const id = write.changes.putOutcomes?.[0]?.opID
       const obligation = (await control.load()).welcomes.find((row) => row.opID === id)
       if (id != null && obligation != null) deliveries.get(id)?.(obligation.welcome)
@@ -557,40 +534,60 @@ export function createOperationHost(access: HandleAccess) {
       if (build == null) throw new OperationRejectedError('No host builder')
       return build()
     },
-    adopt: async (
-      blob: Uint8Array,
-      expected: { epoch: number; authenticatorBefore: Uint8Array; lineage: number },
-      write: AdoptionWrite,
-    ): Promise<'installed' | 'noop' | 'moved'> => {
-      const journal = JSON.parse(new TextDecoder().decode(blob)) as {
-        state: Array<number>
-        ledger: Array<string>
-      }
-      const state = decodeClientState(new Uint8Array(journal.state))
-      if (state == null) throw new Error('Invalid candidate state')
-      const current = await access.read((group) => group)
-      const equal = (a: Uint8Array, b: Uint8Array) =>
-        a.length === b.length && a.every((byte, i) => byte === b[i])
-      if (
-        state.groupContext.epoch === current.epoch &&
-        equal(state.keySchedule.epochAuthenticator, current.state.keySchedule.epochAuthenticator)
-      )
-        return 'noop'
-      if (
-        Number(current.epoch) !== expected.epoch ||
-        expected.lineage !== 0 ||
-        !equal(current.state.keySchedule.epochAuthenticator, expected.authenticatorBefore)
-      )
-        return 'moved'
-      const candidate = await restoreGroup({
-        state,
-        credential: current.credential,
-        ledgerEntries: journal.ledger,
-      })
-      await current.carryReceiveProgress(candidate)
-      await store.save(candidate, write)
-      await access.replace(candidate)
-      return 'installed'
-    },
+    anchorStore: createMemoryAnchorStore(store.database.anchorStore('state')),
+    adopt: (blob: Uint8Array, expected: ExpectedOperationState, write: AdoptionWrite) =>
+      adoptOperationCandidate(access, blob, expected, write, store.save),
   }
+}
+
+type ExpectedOperationState = {
+  epoch: number
+  authenticatorBefore: Uint8Array
+  lineage: number
+}
+
+async function adoptOperationCandidate(
+  access: HandleAccess,
+  blob: Uint8Array,
+  expected: ExpectedOperationState,
+  write: AdoptionWrite,
+  persist?: StateStore['save'],
+  options?: Parameters<typeof restoreGroup>[0]['options'],
+): Promise<'installed' | 'noop' | 'moved'> {
+  const journal = JSON.parse(new TextDecoder().decode(blob)) as {
+    state: Array<number>
+    ledger: Array<string>
+  }
+  const state = decodeClientState(new Uint8Array(journal.state))
+  if (state == null) throw new Error('Invalid candidate state')
+  const credential = await access.read((handle) => handle.credential)
+  const candidate = await restoreGroup({
+    state,
+    credential,
+    ledgerEntries: journal.ledger,
+    options,
+  })
+  const equal = (a: Uint8Array, b: Uint8Array) =>
+    a.length === b.length && a.every((byte, i) => byte === b[i])
+  let result: 'installed' | 'noop' | 'moved' = 'moved'
+  await access.replace(candidate, persist == null ? () => write : undefined, async (current) => {
+    if (
+      state.groupContext.epoch === current.epoch &&
+      equal(state.keySchedule.epochAuthenticator, current.state.keySchedule.epochAuthenticator)
+    ) {
+      result = 'noop'
+      return false
+    }
+    if (
+      Number(current.epoch) !== expected.epoch ||
+      expected.lineage !== 0 ||
+      !equal(current.state.keySchedule.epochAuthenticator, expected.authenticatorBefore)
+    )
+      return false
+    await current.carryReceiveProgress(candidate)
+    await persist?.(candidate, write)
+    result = 'installed'
+    return true
+  })
+  return result
 }

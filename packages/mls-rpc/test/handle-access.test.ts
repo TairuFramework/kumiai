@@ -1,9 +1,83 @@
+import { setImmediate } from 'node:timers/promises'
+import type { GroupHandle } from '@kumiai/mls'
 import { expect, test, vi } from 'vitest'
 
 import { simpleHandleAccess } from '../src/access.js'
 import { createGroupCrypto } from '../src/crypto.js'
 import { createGroupMLS } from '../src/mls.js'
 import { buildRealCommit, createRealGroup } from './fixtures/real-group.js'
+
+test('replacement checks and carries under the same gate as persistence and sealing', async () => {
+  const group = await createRealGroup(0, 'prepared-replacement')
+  const member = group.committer
+  const old = member.handle
+  await buildRealCommit(group)
+  const next = member.handle
+  member.handle = old
+  let release = () => {}
+  const pause = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const phases: Array<string> = []
+  const access = simpleHandleAccess({
+    handle: () => member.handle,
+    adopt: (handle) => {
+      member.handle = handle
+    },
+    persist: async () => {
+      phases.push('persisted')
+    },
+  })
+  const crypto = createGroupCrypto({ access })
+  const replacing = access.replace(next, undefined, async (current: GroupHandle) => {
+    expect(current).toBe(old)
+    await current.carryReceiveProgress(next)
+    phases.push('carried')
+    await pause
+    return true
+  })
+  let sealed = false
+  const sealing = Promise.resolve(crypto.wrap(new Uint8Array([8]))).then((frame) => {
+    sealed = true
+    return frame
+  })
+  try {
+    await setImmediate()
+    expect(phases).toEqual(['carried'])
+    expect(sealed).toBe(false)
+    expect(member.handle).toBe(old)
+    release()
+    await replacing
+    expect(crypto.frameEpoch(await sealing)).toBe(Number(next.epoch))
+    expect(phases).toEqual(['carried', 'persisted', 'persisted'])
+  } finally {
+    release()
+    await Promise.all([replacing, sealing])
+  }
+})
+
+test('a replacement refused by the identity check never persists or installs', async () => {
+  const group = await createRealGroup(0, 'refused-replacement')
+  const member = group.committer
+  const old = member.handle
+  await buildRealCommit(group)
+  const next = member.handle
+  member.handle = old
+  let saves = 0
+  const access = simpleHandleAccess({
+    handle: () => member.handle,
+    adopt: (handle) => {
+      member.handle = handle
+    },
+    persist: () => {
+      saves += 1
+    },
+  })
+  await access.replace(next, undefined, async () => false)
+  expect(member.handle).toBe(old)
+  expect(saves).toBe(0)
+  expect(access.epoch()).toBe(Number(old.epoch))
+})
 
 test('admission stays synchronous at the old epoch through awaited adoption', async () => {
   const group = await createRealGroup(1, 'admission-adoption')

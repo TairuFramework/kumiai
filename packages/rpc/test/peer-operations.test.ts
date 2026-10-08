@@ -18,6 +18,50 @@ async function waitFor(check: () => Promise<boolean>): Promise<void> {
 }
 
 describe('durable peer operations', () => {
+  test('an accepted operation on a departed branch lets recovery run and settles unknown', async () => {
+    const hub = new FakeHub()
+    const database = createMemoryHostDatabase()
+    const seed = makeMLSPeer(hub, 'bob', secret, { database, members: ['alice', 'bob'] })
+    await seed.peer.resync()
+    const request = buildLedgerCommit(seed, ['departed'])
+    const stopAfterAcceptance = (): void => {
+      database.seam('after-apply', async () => {
+        if ((await seed.control.load()).operations[0]?.stage === 'accepted')
+          void seed.peer.dispose()
+        else stopAfterAcceptance()
+      })
+    }
+    stopAfterAcceptance()
+    await seed.peer.enqueue(request)
+    await waitFor(async () => (await seed.control.load()).operations[0]?.stage === 'accepted')
+    await seed.peer.dispose()
+    await seed.peer.drained()
+    seed.mls.adopt(seed.mls.buildCommit(['other-local-branch']))
+    const options = {
+      members: ['alice', 'bob'],
+      recovery: { timeoutMs: 200, deadlineMs: 1000, getDelayMs: () => 0 },
+    }
+    const alice = makeMLSPeer(hub, 'alice', secret, { ...options, epoch: 3 })
+    const bob = makeMLSPeer(hub, 'bob', secret, {
+      ...options,
+      database,
+      mls: seed.mls,
+      crypto: seed.crypto,
+      anchorStore: seed.anchorStore,
+    })
+    try {
+      await bob.peer.replay()
+      expect((await bob.peer.recover()).advanced).toBe(true)
+      expect((await bob.control.load()).operations).toEqual([])
+      expect(await bob.peer.outcomes()).toEqual([
+        expect.objectContaining({ opID: request.id, kind: 'unknown' }),
+      ])
+      expect(bob.mls.epoch()).toBe(4)
+    } finally {
+      await Promise.all([bob.peer.dispose(), alice.peer.dispose()])
+      await Promise.all([bob.peer.drained(), alice.peer.drained()])
+    }
+  })
   test.each(['intent', 'built', 'accepted'] as const)(
     'restart after %s was written resumes the operation once',
     async (stage) => {
