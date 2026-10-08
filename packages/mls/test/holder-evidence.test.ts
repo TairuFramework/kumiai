@@ -9,6 +9,7 @@ import type { ControllerBinding } from '../src/credential.js'
 import { LeafBindingError } from '../src/errors.js'
 import { makeMLSCredential } from '../src/group-credential.js'
 import {
+  CommitRejectedError,
   commitInvite,
   createInvite,
   createKeyPackageBundle,
@@ -327,4 +328,105 @@ test.each([
       controller: { ...f.binding, holderGrant: grant.capability },
     }),
   ).resolves.toBeDefined()
+})
+
+test.each(['key-package build', 'Add receipt'] as const)(
+  'holder grant not yet active at leaf issuance refused: %s',
+  async (path) => {
+    const f = await fixture()
+    const controller = createControllerIdentity({
+      seed: controllerSeed,
+      profile: 0,
+      log: [inception],
+    })
+    const holderGrant = stringifyToken(
+      await controller.signToken({
+        sub: controllerID,
+        aud: f.device.id,
+        act: 'authenticate',
+        res: 'kumiai/mls-leaf',
+        iat: 100,
+        nbf: 120,
+        exp: 1000,
+        cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: f.device.publicKey }),
+      }),
+    )
+    const binding = { ...f.binding, holderGrant }
+    if (path === 'key-package build') {
+      const building = createKeyPackageBundle(f.device, { controller: binding })
+      await expect(building).rejects.toBeInstanceOf(LeafBindingError)
+      await expect(building).rejects.toMatchObject({ reason: 'holder-evidence-mismatch' })
+      // Pinned verification also refuses nbf; this cause proves the structural gate ran.
+      await expect(building).rejects.toHaveProperty('cause', expect.any(LeafBindingError))
+      await expect(building).rejects.toMatchObject({
+        cause: { reason: 'holder-evidence-mismatch' },
+      })
+    } else {
+      const forged = await rawAdd(f.group, f.device, binding)
+      const processing = f.group.processMessage(forged.message)
+      await expect(processing).rejects.toBeInstanceOf(CommitRejectedError)
+      await expect(processing).rejects.toMatchObject({
+        reason: 'binding',
+        cause: { reason: 'holder-evidence-mismatch' },
+      })
+      await expect(processing).rejects.toHaveProperty('cause', expect.any(LeafBindingError))
+      await expect(processing).rejects.toHaveProperty('cause.cause', expect.any(LeafBindingError))
+      await expect(processing).rejects.toMatchObject({
+        cause: { cause: { reason: 'holder-evidence-mismatch' } },
+      })
+      expect(f.group.listMembers()).toHaveLength(1)
+    }
+  },
+)
+
+test('expired holder grant refused on renewal', async () => {
+  const f = await fixture()
+  const grant = await timedBinding({ identity: f.identity, iat: 10, exp: 50 })
+  const binding = {
+    ...(await timedBinding({
+      identity: f.identity,
+      issuer: f.holder,
+      parent: (await timedBinding({ identity: f.holder, iat: 100, exp: 1000 })).capability,
+      iat: 110,
+      exp: 200,
+    })),
+    holderGrant: grant.capability,
+  }
+  const epoch = f.group.epoch
+  const renewing = renewLeaf(f.group, binding)
+  await expect(renewing).rejects.toBeInstanceOf(LeafBindingError)
+  await expect(renewing).rejects.toMatchObject({ reason: 'holder-evidence-mismatch' })
+  expect(f.group.epoch).toBe(epoch)
+})
+
+test('expired holder grant refused on external replacement', async () => {
+  const f = await fixture()
+  const bundle = await rawBundle(f.group, f.device, f.evidenced)
+  const { invite } = await createInvite({
+    group: f.group,
+    identity: f.identity,
+    recipientDID: f.device.id,
+  })
+  const { newGroup: author } = await commitInvite(f.group, bundle.publicPackage, invite)
+  const grant = await timedBinding({ identity: f.identity, iat: 10, exp: 50 })
+  const binding = {
+    ...(await timedBinding({
+      identity: f.identity,
+      issuer: f.holder,
+      parent: (await timedBinding({ identity: f.holder, iat: 100, exp: 1000 })).capability,
+      iat: 110,
+      exp: 200,
+    })),
+    holderGrant: grant.capability,
+  }
+  const message = await lowLevelExternal({ group: author, identity: f.identity, binding })
+  const epoch = author.epoch
+  const processing = author.processMessage(message)
+  await expect(processing).rejects.toBeInstanceOf(CommitRejectedError)
+  await expect(processing).rejects.toMatchObject({
+    reason: 'binding',
+    cause: { reason: 'holder-evidence-mismatch' },
+  })
+  await expect(processing).rejects.toHaveProperty('cause', expect.any(LeafBindingError))
+  expect(author.epoch).toBe(epoch)
 })
