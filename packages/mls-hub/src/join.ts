@@ -9,7 +9,7 @@ import {
 
 /** A stable source namespace for retained packages and durable join receipts. */
 export type BundleSource = {
-  sourceID: string
+  readonly sourceID: string
   bundles(): Promise<Array<KeyPackageBundle>>
   /** Call only after the host saves the joined state and its joinRef. */
   consume(ref: string, groupID: string): Promise<void>

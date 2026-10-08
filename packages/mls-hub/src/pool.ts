@@ -62,7 +62,7 @@ export type KeyPackagePool = {
    * @throws {Error} a stored record belongs to the other port, or does not round-trip.
    */
   ensureStocked(): AsyncResult<{ minted: number; depth: number }, HubRetryableError>
-  sourceID: string
+  readonly sourceID: string
   /** Every retained bundle, `notAfter` descending, for `openWelcome`. */
   bundles(): Promise<Array<KeyPackageBundle>>
   consume(ref: string, groupID: string): Promise<void>

@@ -62,7 +62,7 @@ export type LastResortProvisioner = {
    * @throws {Error} a stored record belongs to the other port, or does not round-trip.
    */
   ensureProvisioned(): AsyncResult<{ rotated: boolean; ref: string }, HubRetryableError>
-  sourceID: string
+  readonly sourceID: string
   /** Every retained bundle, `notAfter` descending, for `openWelcome`. */
   bundles(): Promise<Array<KeyPackageBundle>>
   consume(ref: string, groupID: string): Promise<void>
