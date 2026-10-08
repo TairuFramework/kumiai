@@ -76,23 +76,67 @@ test('selfRemovalCommittedByAnotherMemberKeepsSender', async () => {
   expect(await commitSelfRemovals(result.newGroup)).toBeNull()
 })
 
-test('selfRemovalByOwnCommitRefused', async () => {
-  const { joined } = await pair()
-  await proposeSelfRemoval(joined)
-  const target = joined.state.privatePath.leafIndex
-  const snapshot = structuredClone(joined.state)
-  await expect(commitSelfRemovals(joined)).rejects.toMatchObject({
-    name: 'CommitRejectedError',
-    reason: 'invalid',
-    senderLeafIndex: target,
+test('leaversCommitEachOthersSelfRemoval', async () => {
+  const { author, joined } = await pair()
+  const epoch = author.epoch
+  const authorLeaf = author.state.privatePath.leafIndex
+  const joinedLeaf = joined.state.privatePath.leafIndex
+  const authorProposal = await proposeSelfRemoval(author)
+  const joinedProposal = await proposeSelfRemoval(joined)
+  await author.processMessage(joinedProposal.frame)
+  await joined.processMessage(authorProposal.frame)
+  expect(Object.values(author.state.unappliedProposals)).toHaveLength(2)
+  expect(Object.values(joined.state.unappliedProposals)).toHaveLength(2)
+
+  const result = await commitSelfRemovals(author)
+  if (result == null) throw new Error('Missing commit')
+  expect(result.epoch).toBe(epoch + 1n)
+  expect(result.newGroup.listMembers().map(({ id }) => id)).toEqual([author.credential.id])
+  let recorded: unknown
+  await expect(
+    joined.processMessage(result.commitMessage, {
+      commitPolicy: (incoming) => {
+        recorded = incoming
+        return 'accept'
+      },
+    }),
+  ).resolves.toBeNull()
+  expect(recorded).toMatchObject({
+    kind: 'commit',
+    senderLeafIndex: authorLeaf,
     proposals: [
       {
-        proposal: { proposalType: defaultProposalTypes.remove, remove: { removed: target } },
-        senderLeafIndex: target,
+        proposal: { proposalType: defaultProposalTypes.remove, remove: { removed: joinedLeaf } },
+        senderLeafIndex: joinedLeaf,
       },
     ],
-    cause: { message: 'Unauthorised Remove' },
   })
+  expect(joined.state.groupActiveState.kind).toBe('removedFromGroup')
+  expect(Object.values(result.newGroup.state.unappliedProposals)).toEqual([])
+
+  const reproposal = await proposeSelfRemoval(result.newGroup)
+  expect(reproposal.epoch).toBe(epoch + 1n)
+  expect(Object.values(result.newGroup.state.unappliedProposals)).toEqual([
+    {
+      proposal: { proposalType: defaultProposalTypes.remove, remove: { removed: authorLeaf } },
+      senderLeafIndex: authorLeaf,
+    },
+  ])
+  const snapshot = structuredClone(result.newGroup.state)
+  await expect(commitSelfRemovals(result.newGroup)).resolves.toBeNull()
+  expect(result.newGroup.state).toEqual(snapshot)
+  expect(result.newGroup.state.groupActiveState.kind).toBe('active')
+  await expect(result.newGroup.encrypt(new Uint8Array([1]))).rejects.toMatchObject({
+    name: 'UsageError',
+    message: 'Cannot send application message with unapplied proposals',
+  })
+})
+
+test('onlyOwnSelfRemovalReturnsNull', async () => {
+  const { joined } = await pair()
+  await proposeSelfRemoval(joined)
+  const snapshot = structuredClone(joined.state)
+  await expect(commitSelfRemovals(joined)).resolves.toBeNull()
   expect(joined.state).toEqual(snapshot)
 })
 

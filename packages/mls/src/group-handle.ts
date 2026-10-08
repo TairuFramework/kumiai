@@ -902,7 +902,11 @@ export class GroupHandle {
     )
   }
 
-  /** Author and retain an authenticated self-removal proposal under the handle mutex. */
+  /**
+   * Author and retain an authenticated self-removal proposal under the handle mutex.
+   * Once a member processes a pending self-removal, application encrypt throws until
+   * a commit lands. Callers should commit pending self-removals promptly.
+   */
   async proposeSelfRemoval(): Promise<{ frame: Uint8Array; epoch: bigint }> {
     return mutexFor(this).run(async () => {
       const senderLeafIndex = this.#state.privatePath.leafIndex
@@ -1493,6 +1497,7 @@ export class GroupHandle {
    * Process a received MLS message (Commit, Proposal, or application). Accepts
    * wire-form bytes (preferred, e.g. from commitInvite/removeMember) or a pre-decoded
    * ts-mls framed message (legacy). The runtime `instanceof` selects the decode path.
+   * A proposal from a past epoch is ignored (returns null, nothing persisted).
    * `persist` covers accepted commits and proposals, not application messages or their
    * receive ratchet. It runs under this handle's mutex and must not call back into it.
    * It must write atomically: rejection means nothing was stored. Host callbacks run

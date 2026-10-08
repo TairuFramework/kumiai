@@ -34,14 +34,23 @@ import { DEVICE_ENTRY_TYPE, type DeviceValue, type RevokedEffect } from './regis
 
 export type CommitResult = DeviceWriteResult
 
-/** Author a by-reference Remove for this handle's own leaf at its current epoch. */
+/**
+ * Author a by-reference Remove for this handle's own leaf at its current epoch.
+ * Once a member processes a pending self-removal, application encrypt throws until
+ * a commit lands. Callers should commit pending self-removals promptly.
+ */
 export async function proposeSelfRemoval(
   group: GroupHandle,
 ): Promise<{ frame: Uint8Array; epoch: bigint }> {
   return group.proposeSelfRemoval()
 }
 
-/** Commit pending self-removals without absorbing other pending proposals. */
+/**
+ * Commit other members' pending self-removals without absorbing other pending proposals.
+ * Returns null when only the committer's own self-removal (or none) is pending.
+ * Once a member processes a pending self-removal, application encrypt throws until
+ * a commit lands. Callers should commit pending self-removals promptly.
+ */
 export async function commitSelfRemovals(group: GroupHandle): Promise<CommitResult | null> {
   return mutexFor(group).run(async () => {
     const pendingProposals = Object.fromEntries(
@@ -49,7 +58,8 @@ export async function commitSelfRemovals(group: GroupHandle): Promise<CommitResu
         ([, { proposal, senderLeafIndex }]) =>
           isDefaultProposal(proposal) &&
           proposal.proposalType === defaultProposalTypes.remove &&
-          proposal.remove.removed === senderLeafIndex,
+          proposal.remove.removed === senderLeafIndex &&
+          senderLeafIndex !== group.state.privatePath.leafIndex,
       ),
     )
     if (Object.keys(pendingProposals).length === 0) return null
