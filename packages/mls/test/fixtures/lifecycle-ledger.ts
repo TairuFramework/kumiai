@@ -38,6 +38,7 @@ export async function bindingFor(
 ): Promise<ControllerBinding> {
   const signer =
     issuer?.identity ?? createControllerIdentity({ seed: controllerSeed, profile: 0, log: prefix })
+  const holderGrant = issuer == null ? undefined : await trustedGrant(identity, prefix)
   const capability = await mintLeafCapability({
     signer,
     controllerID,
@@ -50,7 +51,7 @@ export async function bindingFor(
     id: controllerID,
     prefix,
     capability,
-    ...(issuer == null ? {} : { holderGrant: await trustedGrant(identity, prefix) }),
+    ...(holderGrant == null ? {} : { holderGrant }),
   }
 }
 

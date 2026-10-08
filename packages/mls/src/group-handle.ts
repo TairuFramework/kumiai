@@ -1213,6 +1213,7 @@ export class GroupHandle {
       precomputedReject = true
       capture.reason = rejectionReason(error)
       if (error instanceof RevokeProofError) capture.proofError = error
+      if (error instanceof LeafBindingError) capture.bindingError = error
     }
     const combined: IncomingMessageCallback = (incoming) => {
       // A decode/fold failure is a hard reject even under a caller policy: the
@@ -1227,6 +1228,7 @@ export class GroupHandle {
       } catch (error) {
         capture.reason = rejectionReason(error)
         if (error instanceof RevokeProofError) capture.proofError = error
+        if (error instanceof LeafBindingError) capture.bindingError = error
         return 'reject'
       }
       if (callerPolicy != null) return callerPolicy(incoming)
@@ -1551,7 +1553,8 @@ export class GroupHandle {
           capture.rejected?.senderLeafIndex,
           capture.reason ?? 'policy',
         )
-        if (capture.proofError != null) rejection.cause = capture.proofError
+        const cause = capture.proofError ?? capture.bindingError
+        if (cause != null) rejection.cause = cause
         throw rejection
       }
       if (result.kind === 'newState') {

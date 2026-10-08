@@ -54,8 +54,8 @@ export async function leafCapabilityFixture(options: LeafCapabilityFixtureOption
       act: 'authenticate',
       res: 'kumiai/mls-leaf',
       cnf: audienceConfirmation({ alg: 'EdDSA', publicKey: device.publicKey }),
-      iat: 1000,
-      exp: 2000,
+      iat: childPayload.iat,
+      exp: childPayload.exp,
     }),
   )
   const credential = (capability = token, id: string = device.id): Credential => ({

@@ -125,6 +125,7 @@ type VerifyPinnedCapabilityParams = {
   trustedGrantLifetime?: number
   /** Refuse a delegated (chained) capability. */
   directOnly?: boolean
+  /** Verify as a trusted grant, using its configured lifetime and maximum. */
   trustedGrant?: boolean
 }
 
@@ -139,8 +140,8 @@ async function verifyPinnedCapability(params: VerifyPinnedCapabilityParams): Pro
   const token = readCapability(params.capability)
   const payload = token.payload
   const ceiling = params.trustedGrant ? MAX_TRUSTED_GRANT_LIFETIME : MAX_LEAF_LIFETIME
-  const leafLifetime = Math.min(params.leafLifetime ?? ceiling, ceiling)
-  assertCapabilityLifetime(payload, leafLifetime)
+  const lifetime = params.trustedGrant ? params.trustedGrantLifetime : params.leafLifetime
+  assertCapabilityLifetime(payload, Math.min(lifetime ?? ceiling, ceiling))
   if (normalizeDID(payload.sub) !== normalizeDID(params.controllerID)) {
     throw new LeafBindingError('subject-mismatch')
   }
@@ -224,7 +225,9 @@ export function checkHolderEvidence(
   trustedGrantLifetime = MAX_TRUSTED_GRANT_LIFETIME,
 ): string | undefined {
   const binding = parsed.controller
-  if (binding == null || readCapability(binding.capability).payload.cap === undefined) return
+  if (binding == null) return
+  const leafPayload = readCapability(binding.capability).payload
+  if (leafPayload.cap === undefined) return
   if (binding.holderGrant == null) throw new LeafBindingError('missing-holder-evidence')
   try {
     const grant = readCapability(binding.holderGrant).payload
@@ -232,6 +235,9 @@ export function checkHolderEvidence(
     assertCapabilityLifetime(grant, Math.min(trustedGrantLifetime, MAX_TRUSTED_GRANT_LIFETIME))
     if (
       grant.cap !== undefined ||
+      grant.iat > leafPayload.iat ||
+      grant.exp <= leafPayload.iat ||
+      (grant.nbf != null && grant.nbf > leafPayload.iat) ||
       normalizeDID(grant.aud) !== normalizeDID(parsed.id) ||
       !constantTimeEqual(capabilityKey(grant).publicKey, signaturePublicKey) ||
       !hasPermission({ act: MLS_LEAF_ACT, res: MLS_LEAF_RES }, grant)
@@ -286,7 +292,7 @@ export async function verifyLeafCredential(
           permission: { act: MLS_LEAF_ACT, res: MLS_LEAF_RES },
           leafKey: signaturePublicKey,
           denySet,
-          leafLifetime: deps.trustedGrantLifetime?.() ?? MAX_TRUSTED_GRANT_LIFETIME,
+          trustedGrantLifetime: deps.trustedGrantLifetime?.(),
           directOnly: true,
           trustedGrant: true,
         })

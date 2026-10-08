@@ -1,22 +1,21 @@
 import { audienceConfirmation } from '@kokuin/capability'
-import { createControllerIdentity } from '@kokuin/controller'
+import { createControllerIdentity, createRevoke } from '@kokuin/controller'
 import { stringifyToken } from '@kokuin/token'
-import { defaultCredentialTypes, encode, mlsMessageEncoder, nodeTypes } from 'ts-mls'
+import { defaultCredentialTypes, encode, mlsMessageEncoder } from 'ts-mls'
 import { afterEach, expect, test, vi } from 'vitest'
 
 import { verifyLeafCredential } from '../src/authentication.js'
 import type { ControllerBinding } from '../src/credential.js'
-import { parseMLSCredentialIdentity } from '../src/credential.js'
+import { LeafBindingError } from '../src/errors.js'
 import { makeMLSCredential } from '../src/group-credential.js'
-import { HISTORY_HORIZON, historySize } from '../src/history.js'
 import {
   commitInvite,
   createInvite,
   createKeyPackageBundle,
   processWelcome,
   renewLeaf,
+  revokeWithProof,
 } from '../src/index.js'
-import { decodeKeyPackage, encodeKeyPackage } from '../src/key-package-codec.js'
 import { controllerSeed, inception } from './fixtures/lifecycle-ledger.js'
 import {
   agent,
@@ -53,50 +52,6 @@ async function fixture() {
   }
   return { group, identity, holder, device, binding, evidenced }
 }
-
-test('binding format probe', async () => {
-  const f = await fixture()
-  const plain = makeMLSCredential(f.device, f.binding)
-  const evidence = makeMLSCredential(f.device, f.evidenced)
-  if (!('identity' in plain) || !('identity' in evidence)) throw new Error('Missing basic identity')
-  const bundle = await rawBundle(f.group, f.device, f.evidenced)
-  const plainEncoded = encodeKeyPackage({
-    ...bundle.publicPackage,
-    leafNode: { ...bundle.publicPackage.leafNode, credential: plain },
-  })
-  const encoded = encodeKeyPackage(bundle.publicPackage)
-  const decoded = decodeKeyPackage(encoded)
-  expect(decoded?.leafNode.credential).toEqual(bundle.publicPackage.leafNode.credential)
-  if (decoded == null || !('identity' in decoded.leafNode.credential))
-    throw new Error('Missing decoded credential')
-  expect(parseMLSCredentialIdentity(decoded.leafNode.credential.identity).controller).toMatchObject(
-    { holderGrant: f.evidenced.holderGrant },
-  )
-  const direct = await timedBinding({ identity: f.device, iat: 100, exp: 200 })
-  const directCredential = makeMLSCredential(f.device, direct)
-  if (!('identity' in directCredential)) throw new Error('Missing identity')
-  expect(parseMLSCredentialIdentity(directCredential.identity).controller).toEqual(direct)
-  const node = f.group.state.ratchetTree[0]
-  if (node?.nodeType !== nodeTypes.leaf) throw new Error('Missing leaf')
-  const historyWithout = historySize([{ ...node, leaf: { ...node.leaf, credential: plain } }], [])
-  const historyWith = historySize([{ ...node, leaf: { ...node.leaf, credential: evidence } }], [])
-  console.log(
-    JSON.stringify({
-      format: 'v1 controller.holderGrant optional compact token string',
-      grantBytes: f.evidenced.holderGrant.length,
-      credentialWithout: plain.identity.length,
-      credentialWith: evidence.identity.length,
-      increase: evidence.identity.length - plain.identity.length,
-      keyPackageBase64Without: plainEncoded.length,
-      keyPackageBase64Bytes: encoded.length,
-      historyWithout,
-      historyWith,
-      horizon: HISTORY_HORIZON,
-      parsedEvidenceRetained:
-        'holderGrant' in (parseMLSCredentialIdentity(evidence.identity).controller ?? {}),
-    }),
-  )
-})
 
 test.each(['build', 'receipt', 'Welcome'] as const)(
   'freshKeyMintedByTrustedGrantRefused: %s',
@@ -199,12 +154,24 @@ test.each(['aud', 'cnf'] as const)('holderGrantMustNameLeafKey: %s', async (clai
 
 test('deniedHolderGrantRefused', async () => {
   const f = await fixture()
-  const credential = makeMLSCredential(f.device, f.evidenced)
-  await expect(
-    verifyLeafCredential(credential, f.device.publicKey, {
-      deviceDenySet: () => new Set([f.device.id]),
-    }),
-  ).rejects.toMatchObject({ reason: 'denied-id' })
+  const revoke = createRevoke({
+    seed: controllerSeed,
+    profile: 0,
+    did: controllerID,
+    prior: inception.event,
+    target: f.device.id,
+    keyPosition: { gen: 0, seq: 0 },
+  })
+  const revoked = await revokeWithProof(f.group, { subject: f.device.id, log: [inception, revoke] })
+  if (revoked.status !== 'built') throw new Error(`Revocation was not built: ${revoked.status}`)
+  const group = revoked.result.newGroup
+  expect(group.currentDenySet().has(f.device.id)).toBe(true)
+  expect(group.currentDenySet().has(f.holder.id)).toBe(false)
+  const bundle = await rawBundle(group, f.device, f.evidenced)
+  const { invite } = await createInvite({ group, identity: f.identity, recipientDID: f.device.id })
+  await expect(commitInvite(group, bundle.publicPackage, invite)).rejects.toMatchObject({
+    reason: 'denied-id',
+  })
 })
 
 test('directCLeafUnchanged', async () => {
@@ -260,9 +227,12 @@ test('missing evidence refused on a forged update', async () => {
   })
   delete replacement.holderGrant
   const forged = await rawCommit({ group: f.group, binding: replacement })
-  await expect(
-    f.group.processMessage(encode(mlsMessageEncoder, forged.commit)),
-  ).rejects.toMatchObject({ reason: 'binding' })
+  const processing = f.group.processMessage(encode(mlsMessageEncoder, forged.commit))
+  await expect(processing).rejects.toMatchObject({
+    reason: 'binding',
+    cause: { reason: 'missing-holder-evidence' },
+  })
+  await expect(processing).rejects.toHaveProperty('cause', expect.any(LeafBindingError))
   expect(f.group.listMembers()).toHaveLength(1)
 })
 
@@ -297,5 +267,64 @@ test('external replacement refuses missing evidence', async () => {
     identity: f.identity,
     binding: replacement,
   })
-  await expect(author.processMessage(message)).rejects.toMatchObject({ reason: 'binding' })
+  const processing = author.processMessage(message)
+  await expect(processing).rejects.toMatchObject({
+    reason: 'binding',
+    cause: { reason: 'missing-holder-evidence' },
+  })
+  await expect(processing).rejects.toHaveProperty('cause', expect.any(LeafBindingError))
+})
+
+test.each(
+  ['key-package build', 'Add build', 'Add receipt', 'Welcome'].flatMap((path) =>
+    [
+      { validity: 'expired', iat: 10, exp: 50 },
+      { validity: 'expires at leaf issuance', iat: 10, exp: 110 },
+      { validity: 'issued after leaf', iat: 111, exp: 1000 },
+    ].map((grant) => ({ path, ...grant })),
+  ),
+)('expiredHolderGrantRefused: $validity / $path', async ({ path, iat, exp }) => {
+  const f = await fixture()
+  const grant = await timedBinding({ identity: f.device, iat, exp })
+  const binding = { ...f.binding, holderGrant: grant.capability }
+  if (path === 'key-package build') {
+    await expect(
+      createKeyPackageBundle(f.device, { controller: binding }).then(() => undefined),
+    ).rejects.toMatchObject({ reason: 'holder-evidence-mismatch' })
+  } else if (path === 'Add build') {
+    const bundle = await rawBundle(f.group, f.device, binding)
+    const { invite } = await createInvite({
+      group: f.group,
+      identity: f.identity,
+      recipientDID: f.device.id,
+    })
+    await expect(
+      commitInvite(f.group, bundle.publicPackage, invite).then(() => undefined),
+    ).rejects.toMatchObject({ reason: 'holder-evidence-mismatch' })
+  } else if (path === 'Add receipt') {
+    const forged = await rawAdd(f.group, f.device, binding)
+    const processing = f.group.processMessage(forged.message)
+    await expect(processing).rejects.toMatchObject({
+      reason: 'binding',
+      cause: { reason: 'holder-evidence-mismatch' },
+    })
+    await expect(processing).rejects.toHaveProperty('cause', expect.any(LeafBindingError))
+    expect(f.group.listMembers()).toHaveLength(1)
+  } else {
+    const boundary = await welcomeBoundary(f.group, f.device, binding)
+    await expect(boundary.process()).rejects.toMatchObject({ reason: 'holder-evidence-mismatch' })
+  }
+})
+
+test.each([
+  { iat: 110, exp: 111 },
+  { iat: 10, exp: 111 },
+])('holder grant valid at leaf issuance accepted: $iat/$exp', async ({ iat, exp }) => {
+  const f = await fixture()
+  const grant = await timedBinding({ identity: f.device, iat, exp })
+  await expect(
+    createKeyPackageBundle(f.device, {
+      controller: { ...f.binding, holderGrant: grant.capability },
+    }),
+  ).resolves.toBeDefined()
 })
