@@ -1,5 +1,5 @@
 ---
-"@kumiai/mls": patch
+"@kumiai/mls": minor
 ---
 
 Require controller-signed holder evidence for chained leaf capabilities and preserve it through credential parsing and renewal. Evidence must be valid when the leaf capability is issued. Refuse empty invite recipient credential IDs.
