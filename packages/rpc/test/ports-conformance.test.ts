@@ -4,7 +4,6 @@ import {
   type ConformanceMLSMember,
   testAnchorStoreConformance,
   testAppOutboxConformance,
-  testCommitJournalConformance,
   testGroupCryptoConformance,
   testGroupMLSConformance,
   testPendingGroupCryptoConformance,
@@ -19,7 +18,6 @@ import {
 } from '../src/crypto.js'
 import { createMemoryAnchorStore } from './fixtures/anchor.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
-import { createMemoryCommitJournal } from './fixtures/journal.js'
 import {
   createMemoryGroupMLS,
   encodeMemoryCommit,
@@ -245,9 +243,4 @@ const _outboxIsAPort = (outbox: AppOutbox): ConformanceAppOutbox => outbox
 testAnchorStoreConformance({
   label: 'rpc memory anchor store',
   createStore: createMemoryAnchorStore,
-})
-
-testCommitJournalConformance({
-  label: 'createMemoryCommitJournal',
-  createJournal: createMemoryCommitJournal,
 })

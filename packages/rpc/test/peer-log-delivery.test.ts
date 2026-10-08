@@ -133,11 +133,13 @@ describe('recovery ordering', { concurrent: false }, () => {
     const entered = deferred<void>()
     const bob = member(hub, 'bob')
     await flush()
-    const original = bob.journal.markAccepted.bind(bob.journal)
-    vi.spyOn(bob.journal, 'markAccepted').mockImplementation(async (...args) => {
+    const original = bob.control.apply.bind(bob.control)
+    vi.spyOn(bob.control, 'apply').mockImplementation(async (...args) => {
       await original(...args)
-      entered.resolve()
-      await gate.promise
+      if (args[0].putOperations?.[0]?.stage === 'accepted') {
+        entered.resolve()
+        await gate.promise
+      }
     })
     const committing = bob.peer.commit(buildLedgerCommit(bob, []))
     await entered.promise

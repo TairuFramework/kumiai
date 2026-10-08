@@ -225,9 +225,14 @@ test('an ambiguous same-number anchor record found at startup asks for confirmed
     },
   })
   await drainUntil(() => events.some((event) => event.phase === 'started'), 'recovery start')
-  await expect(again.peer.commit(buildLedgerCommit(again, []))).rejects.toThrow(
-    'app anchor requires confirmed recovery',
-  )
+  const committing = again.peer
+    .commit(buildLedgerCommit(again, []))
+    .catch((error: unknown) => error)
+  await vi.advanceTimersByTimeAsync(100)
+  expect(await committing).toMatchObject({
+    name: 'RecoveryRequiredError',
+    message: 'commit: app anchor requires confirmed recovery',
+  })
 })
 
 test('incomplete ledgers skip commit processing and later wakeups can retry', async () => {

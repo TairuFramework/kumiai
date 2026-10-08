@@ -6,7 +6,7 @@ import { createMemoryAnchorStore } from './fixtures/anchor.js'
 import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { createMemoryCommitJournal } from './fixtures/journal.js'
+import { createMemoryHostDatabase } from './fixtures/host-db.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
 import { makeMLSPeer } from './fixtures/peer.js'
 
@@ -164,14 +164,14 @@ describe('commit delivery during initialization', () => {
     const hub = new FakeHub()
     const recoverySecret = new Uint8Array(32).fill(0xa4)
     const mls = createMemoryGroupMLS({ recoverySecret, epoch: 1, localDID: 'bob' })
-    const journal = createMemoryCommitJournal()
+    const control = createMemoryHostDatabase().control('bob')
     let releaseRead = (): void => {}
     const readGate = new Promise<void>((resolve) => {
       releaseRead = resolve
     })
     let readResumed = false
-    const getJournal = journal.get.bind(journal)
-    const journalRead = vi.spyOn(journal, 'get').mockImplementation(async () => {
+    const getJournal = control.load.bind(control)
+    const journalRead = vi.spyOn(control, 'load').mockImplementation(async () => {
       await readGate
       readResumed = true
       return getJournal()
@@ -181,7 +181,7 @@ describe('commit delivery during initialization', () => {
     const epochReads = vi.spyOn(mls, 'readEpoch')
     const applies = vi.spyOn(mls, 'processCommit')
     const bootstraps = vi.spyOn(mls, 'bootstrapLedger')
-    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { mls, journal })
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { mls, control })
     try {
       await vi.waitFor(() => expect(journalRead).toHaveBeenCalled(), { timeout: 1000 })
       await bob.peer.dispose()
@@ -282,8 +282,8 @@ describe('commit delivery during initialization', () => {
     const hub = new FakeHub()
     const recoverySecret = new Uint8Array(32).fill(0xa7)
     const mls = createMemoryGroupMLS({ recoverySecret, epoch: 1, localDID: 'bob' })
-    const journal = createMemoryCommitJournal()
-    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { mls, journal })
+    const control = createMemoryHostDatabase().control('bob')
+    const bob = makeMLSPeer(hub, 'bob', recoverySecret, { mls, control })
     let releaseRead = (): void => {}
     const readGate = new Promise<void>((resolve) => {
       releaseRead = resolve
@@ -291,8 +291,8 @@ describe('commit delivery during initialization', () => {
     try {
       await bob.peer.replay()
       let readResumed = false
-      const getJournal = journal.get.bind(journal)
-      const journalRead = vi.spyOn(journal, 'get').mockImplementation(async () => {
+      const getJournal = control.load.bind(control)
+      const journalRead = vi.spyOn(control, 'load').mockImplementation(async () => {
         await readGate
         readResumed = true
         return getJournal()

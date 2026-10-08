@@ -1,20 +1,12 @@
 import { randomIdentity } from '@kokuin/token'
-import {
-  commitLedgerEntries,
-  createGroup,
-  decodeClientState,
-  encodeClientState,
-  type GroupHandle,
-  restoreGroup,
-  signLedgerEntry,
-} from '@kumiai/mls'
+import { commitLedgerEntries, createGroup, type GroupHandle, signLedgerEntry } from '@kumiai/mls'
 import {
   createGroupCrypto,
   createGroupMLS,
   createLedgerEntrySlot,
   simpleHandleAccess,
 } from '@kumiai/mls-rpc'
-import { createGroupPeer } from '@kumiai/rpc'
+import { createGroupPeer, digestAppliedCommit } from '@kumiai/rpc'
 import { expect, test, vi } from 'vitest'
 
 import {
@@ -22,7 +14,9 @@ import {
   createMemoryAnchorStore,
   createMemoryAppCursorStore,
   createMemoryAppOutbox,
-  createMemoryCommitJournal,
+  createOperationHost,
+  encodeJournal,
+  operationRequest,
   type Protocols,
 } from './app-lane-e2e.js'
 import { createGapHub } from './gap-hub.js'
@@ -98,11 +92,12 @@ test('accepted adoption entries seal at the matching admission epoch once the de
     seals.push(admission.epoch)
     return sealed
   })
+  const host = createOperationHost(access)
   const peer = createGroupPeer<Protocols>({
     hub: hub.connect(identity),
     crypto,
     mls,
-    journal: createMemoryCommitJournal(),
+    ...host,
     anchorStore: createMemoryAnchorStore(),
     appCursorStore: createMemoryAppCursorStore(),
     appOutbox: {
@@ -126,18 +121,6 @@ test('accepted adoption entries seal at the matching admission epoch once the de
         'chat/double': () => ({}),
       },
     },
-    adoptJournalled: async (blob) => {
-      const state = decodeClientState(blob)
-      if (state == null) throw new Error('Invalid journal state')
-      if (state.groupContext.epoch <= handle.epoch) return
-      await access.replace(
-        await restoreGroup({
-          state,
-          credential: handle.credential,
-          ledgerEntries: handle.ledgerTokens,
-        }),
-      )
-    },
   })
   try {
     await peer.resync()
@@ -149,17 +132,20 @@ test('accepted adoption entries seal at the matching admission epoch once the de
     })
     const result = await commitLedgerEntries(handle, [token])
     let adopted = false
-    const adoption = peer
-      .commit(async () => ({
-        commit: result.commitMessage,
-        bodies: [token],
-        kind: 'ledger',
-        journal: encodeClientState(result.newGroup.state),
-        onAccepted: () => access.replace(result.newGroup),
-      }))
-      .then(() => {
-        adopted = true
-      })
+    const request = operationRequest('ledger', { tokens: [token] })
+    host.builders.set(request.id, async () => ({
+      commit: result.commitMessage,
+      bodies: [token],
+      journal: encodeJournal(result.newGroup),
+      welcome: null,
+      epoch: Number(handle.epoch),
+      authenticatorBefore: handle.state.keySchedule.epochAuthenticator.slice(),
+      lineage: 0,
+      digest: digestAppliedCommit(result.commitMessage),
+    }))
+    const adoption = peer.commit(request).then(() => {
+      adopted = true
+    })
     await putEntered
     expect(adopted).toBe(false)
     expect(await appOutbox.list()).toEqual([])

@@ -19,7 +19,7 @@ import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit, publishedCommitDigest } from './fixtures/commits.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { createMemoryCommitJournal } from './fixtures/journal.js'
+import { createMemoryHostDatabase } from './fixtures/host-db.js'
 import {
   createMemoryGroupMLS,
   encodeMemoryCommit,
@@ -88,15 +88,16 @@ describe('a heal re-enacts by ledger membership', { concurrent: false }, () => {
 
     // Alice's journal survives her process. It is the only reason her commit is not lost — and
     // it is why, after she comes back, she is holding the very entry the group already has.
-    let dying = true
-    const journal = createMemoryCommitJournal({
-      onMarkAccepted: () => {
-        if (!dying) return
-        dying = false
-        throw new Error('the process died between the hub answering and the durable write')
-      },
+    const database = createMemoryHostDatabase()
+    const dead = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, database, recovery })
+    await dead.peer.resync()
+    database.seam('after-apply', () => {
+      database.seam('after-apply', () => {
+        database.seam('before-apply', () => {
+          throw new Error('the process died')
+        })
+      })
     })
-    const dead = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, journal, recovery })
     await bob.peer.resync()
 
     // Admin A commits `circle x -> Foo`. The hub ACCEPTS it — that is what defines this path —
@@ -133,7 +134,6 @@ describe('a heal re-enacts by ledger membership', { concurrent: false }, () => {
     // went on without her: she meets a frame framed ahead of her, and heals.
     const alice = makeMLSPeer(hub, 'alice', rs, {
       restartOf: dead,
-      journal,
       members,
       recovery,
     })

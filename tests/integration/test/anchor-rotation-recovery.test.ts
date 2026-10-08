@@ -1,11 +1,21 @@
 import { randomIdentity } from '@kokuin/token'
-import { commitInvite, commitLedgerEntries, signLedgerEntry } from '@kumiai/mls'
+import {
+  commitInvite,
+  commitLedgerEntries,
+  decodeClientState,
+  restoreGroup,
+  signLedgerEntry,
+} from '@kumiai/mls'
 import { createLedgerEntrySlot } from '@kumiai/mls-rpc'
 import {
   APP_TOPIC_LABEL,
   decodeHandshakeFrame,
   digestAppliedCommit,
+  encodeCommitFrame,
+  encodeHandshakeFrame,
+  encodeLedgerEntries,
   HANDSHAKE_KIND,
+  OperationRejectedError,
   protocolTopic,
   type RecoveryEvent,
   RecoveryRequiredError,
@@ -19,11 +29,14 @@ import {
   createEntryBodies,
   createFoundingGroup,
   createMemoryAnchorStore,
+  customOperation,
   encodeJournal,
   joinFromWelcome,
   type Member,
   makeMember,
   mintInvite,
+  operationIntent,
+  operationRequest,
   restoreMemberHandle,
 } from './app-lane-e2e.js'
 import { drainUntil } from './fixtures/drain.js'
@@ -165,18 +178,11 @@ test.each([false, true])(
     const { alice, bob, carolID, bobReceived } = state
     const epochBefore = Number(alice.handle().epoch)
     const build = buildRemoveCommit(alice, carolID.id)
-    await expect(
-      alice.peer.commit(async () => {
-        const pending = await build()
-        return {
-          ...pending,
-          onAccepted: async () => {
-            await pending.onAccepted()
-            throw new Error('notification failed')
-          },
-        }
-      }),
-    ).rejects.toThrow('notification failed')
+    alice.hostHooks.afterAdopt = async () => {
+      throw new Error('notification failed')
+    }
+    await expect(alice.peer.commit(build)).rejects.toThrow('notification failed')
+    alice.hostHooks.afterAdopt = undefined
     const anchorAfterThrow = alice.anchorStore.stored()
     expect(anchorAfterThrow?.epoch).toBe(epochBefore + 1)
     const sender = restart ? await state.restart(alice) : alice
@@ -208,19 +214,42 @@ test('fresh startup with a lost anchor secret resolves readiness before confirme
     value: 'deferred',
   })
   const abandoned = await commitLedgerEntries(bob.handle(), [deferredBody])
+  const deferred = operationRequest('ledger', { tokens: [deferredBody] })
+  const sealed = await bob.crypto.sealEntries(encodeLedgerEntries([deferredBody]))
+  const deferredPayload = encodeHandshakeFrame(
+    HANDSHAKE_KIND.commit,
+    encodeCommitFrame(abandoned.commitMessage, sealed.sealed),
+  )
+  const authenticatorBefore = bob.handle().state.keySchedule.epochAuthenticator.slice()
   let removedCommit: Uint8Array = new Uint8Array()
   const build = buildRemoveCommit(alice, carolID.id)
-  await alice.peer.commit(async () => {
-    const pending = await build()
-    removedCommit = pending.commit
-    return pending
-  })
+  await alice.peer.commit(
+    customOperation(alice, async () => {
+      const pending = await alice.build(operationIntent(build))
+      removedCommit = pending.commit
+      return pending
+    }),
+  )
   await bob.peer.resync()
   await bob.peer.dispose()
   await bob.peer.drained()
   // A host advances outside the peer after the rotation record was persisted.
-  const next = await buildLedgerCommit(alice, alice.identity, bob.identity.id, 'member')()
-  await next.onAccepted()
+  const next = await alice.build(
+    operationIntent(buildLedgerCommit(alice, alice.identity, bob.identity.id, 'member')),
+  )
+  const decoded = JSON.parse(new TextDecoder().decode(next.journal)) as {
+    state: Array<number>
+    ledger: Array<string>
+  }
+  const nextState = decodeClientState(new Uint8Array(decoded.state))
+  if (nextState == null) throw new Error('Invalid candidate')
+  await alice.adopt(
+    await restoreGroup({
+      state: nextState,
+      credential: alice.handle().credential,
+      ledgerEntries: decoded.ledger,
+    }),
+  )
   bob.entrySlot.install(async () => next.bodies)
   await bob.handle().processMessage(next.commit)
   await bob.adopt(bob.handle())
@@ -234,15 +263,32 @@ test('fresh startup with a lost anchor secret resolves readiness before confirme
       advance: digestAppliedCommit(removedCommit),
     },
   })
-  await bob.journal.put({
-    publishID: 'deferred-commit',
-    expectedHead: null,
-    epoch: epochBefore,
-    kind: 'ledger',
-    commit: abandoned.commitMessage,
-    bodies: [deferredBody],
-    journal: encodeJournal(abandoned.newGroup),
-  })
+  await bob.control.apply(
+    {
+      putOperations: [
+        {
+          ...deferred,
+          seq: 1,
+          enqueuedAt: Date.now(),
+          stage: 'built',
+          built: {
+            publishID: crypto.randomUUID(),
+            expectedHead: null,
+            epoch: epochBefore,
+            authenticatorBefore,
+            lineage: 0,
+            payload: deferredPayload,
+            payloadDigest: digestAppliedCommit(deferredPayload),
+            digest: digestAppliedCommit(abandoned.commitMessage),
+            bodies: [deferredBody],
+            journal: encodeJournal(abandoned.newGroup),
+            welcome: null,
+          },
+        },
+      ],
+    },
+    crypto.randomUUID(),
+  )
   await bob.appOutbox.put({
     seq: 0,
     protocol: 'chat',
@@ -277,13 +323,15 @@ test('fresh startup with a lost anchor secret resolves readiness before confirme
   readyResolvedBeforeRecovery = !events.some((event) => event.phase === 'succeeded')
   expect(readyResolvedBeforeRecovery).toBe(true)
   const buildForbidden = async () => {
-    throw new Error('must not build')
+    throw new OperationRejectedError('build gated until recovery')
   }
-  await expect(restarted.peer.commit(buildForbidden)).rejects.toBeInstanceOf(RecoveryRequiredError)
+  await expect(
+    restarted.peer.commit(customOperation(restarted, buildForbidden)),
+  ).rejects.toBeInstanceOf(RecoveryRequiredError)
   expect(restarted.peer.anchorEpoch()).toBe(original.epoch)
   expect(published).toEqual([])
   expect(Number(restarted.handle().epoch)).toBe(epochBefore + 2)
-  expect((await restarted.journal.get())?.publishID).toBe('deferred-commit')
+  expect((await restarted.control.load()).operations[0]?.id).toBe(deferred.id)
   release()
   await expect
     .poll(() => events.some((event) => event.phase === 'succeeded'), { timeout: 10_000 })
@@ -294,7 +342,10 @@ test('fresh startup with a lost anchor secret resolves readiness before confirme
   expect(restarted.peer.anchorEpoch()).toBe(Number(restarted.handle().epoch))
   expect((await restarted.anchorStore.load())?.pending).toBeUndefined()
   expect((await restarted.peer.replay()).reenact).toContain(deferredBody)
-  expect(await restarted.journal.get()).toBeNull()
+  expect(await restarted.peer.outcomes()).toContainEqual(
+    expect.objectContaining({ id: deferred.id, kind: 'unknown' }),
+  )
+  await expect.poll(async () => (await restarted.control.load()).operations.length).toBe(0)
   expect(events.filter((event) => event.phase === 'succeeded')).toHaveLength(1)
 })
 
@@ -407,8 +458,22 @@ test('losing the rotation secret in process forces automatic confirmed recovery 
   await drainUntil(() => Number(bob.handle().epoch) === epochBefore + 1, 'Bob handle epoch advance')
   expect(Number(bob.handle().epoch)).toBe(epochBefore + 1)
   // The host moves the handle outside the peer, making the recorded epoch's secret unavailable.
-  const next = await buildLedgerCommit(alice, alice.identity, bob.identity.id, 'member')()
-  await next.onAccepted()
+  const next = await alice.build(
+    operationIntent(buildLedgerCommit(alice, alice.identity, bob.identity.id, 'member')),
+  )
+  const decoded = JSON.parse(new TextDecoder().decode(next.journal)) as {
+    state: Array<number>
+    ledger: Array<string>
+  }
+  const nextState = decodeClientState(new Uint8Array(decoded.state))
+  if (nextState == null) throw new Error('Invalid candidate')
+  await alice.adopt(
+    await restoreGroup({
+      state: nextState,
+      credential: alice.handle().credential,
+      ledgerEntries: decoded.ledger,
+    }),
+  )
   bob.entrySlot.install(async () => next.bodies)
   await bob.handle().processMessage(next.commit)
   await bob.adopt(bob.handle())

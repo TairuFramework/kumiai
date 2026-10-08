@@ -193,17 +193,14 @@ describe('the bodies ride the commit', () => {
     // sealed for the members about to receive it — and a blob no member can open looks
     // exactly like a healthy commit until the first receiver fails to resolve it.
     await expect(
-      alice.peer.commit(async () => {
-        const commit = alice.mls.buildCommit([token])
-        alice.mls.adopt(commit)
-        return {
-          commit,
-          bodies: [token],
-          kind: 'ledger' as const,
-          journal: commit,
-          onAccepted: async () => {},
-        }
-      }),
+      alice.peer.commit(
+        buildLedgerCommit(alice, [token], {
+          transform: (built) => {
+            alice.mls.adopt(built.commit)
+            return built
+          },
+        }),
+      ),
     ).rejects.toThrow(/already advanced past the epoch/)
 
     await alice.peer.dispose()

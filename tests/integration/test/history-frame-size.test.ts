@@ -1,12 +1,18 @@
 import { randomIdentity } from '@kokuin/token'
-import { commitLedgerEntries, createGroup, encodeClientState, signLedgerEntry } from '@kumiai/mls'
+import { commitLedgerEntries, createGroup, signLedgerEntry } from '@kumiai/mls'
 import {
   createGroupCrypto,
   createGroupMLS,
   createLedgerEntrySlot,
   simpleHandleAccess,
 } from '@kumiai/mls-rpc'
-import { assertFrameFits, commitTopic, createGroupPeer, FrameTooLargeError } from '@kumiai/rpc'
+import {
+  assertFrameFits,
+  commitTopic,
+  createGroupPeer,
+  digestAppliedCommit,
+  FrameTooLargeError,
+} from '@kumiai/rpc'
 import { expect, test, vi } from 'vitest'
 
 import {
@@ -14,7 +20,9 @@ import {
   createMemoryAnchorStore,
   createMemoryAppCursorStore,
   createMemoryAppOutbox,
-  createMemoryCommitJournal,
+  createOperationHost,
+  encodeJournal,
+  operationRequest,
   type Protocols,
 } from './app-lane-e2e.js'
 import { createWireHub } from './log-hub-over-wire.js'
@@ -78,8 +86,8 @@ test('a final frame one byte above the hub cap is rejected before journalling or
   const mls = createGroupMLS({ access, identity, entrySlot: createLedgerEntrySlot() })
   const connection = hub.connect(identity)
   const publish = vi.spyOn(connection, 'publish')
-  const journal = createMemoryCommitJournal()
-  const put = vi.spyOn(journal, 'put')
+  const host = createOperationHost(access)
+  const put = vi.spyOn(host.control, 'apply')
   const peer = createGroupPeer<Protocols>({
     appOutbox: createMemoryAppOutbox(),
     appOutboxLimit: 128,
@@ -87,14 +95,13 @@ test('a final frame one byte above the hub cap is rejected before journalling or
     crypto,
     mls,
     localDID: identity.id,
-    journal,
+    ...host,
     anchorStore: createMemoryAnchorStore(),
     appCursorStore: createMemoryAppCursorStore(),
     protocols: { chat },
     handlers: {
       chat: { 'chat/changed': () => {}, 'chat/posted': () => {}, 'chat/double': () => ({}) },
     },
-    adoptJournalled: async () => {},
   })
   try {
     await peer.resync()
@@ -110,17 +117,20 @@ test('a final frame one byte above the hub cap is rejected before journalling or
       epoch: Number(group.epoch),
     })
     const before = publish.mock.calls.length
-    await expect(
-      peer.commit(async () => ({
-        commit: built.commitMessage,
-        bodies: [token],
-        kind: 'ledger',
-        journal: encodeClientState(built.newGroup.state),
-        onAccepted: async () => access.replace(built.newGroup),
-      })),
-    ).rejects.toBeInstanceOf(FrameTooLargeError)
-    expect(put).toHaveBeenCalledTimes(0)
-    expect(journal.slot()).toBeNull()
+    const request = operationRequest('ledger', { tokens: [token] })
+    host.builders.set(request.id, async () => ({
+      commit: built.commitMessage,
+      bodies: [token],
+      journal: encodeJournal(built.newGroup),
+      welcome: null,
+      epoch: Number(group.epoch),
+      authenticatorBefore: group.state.keySchedule.epochAuthenticator.slice(),
+      lineage: 0,
+      digest: digestAppliedCommit(built.commitMessage),
+    }))
+    await expect(peer.commit(request)).rejects.toBeInstanceOf(FrameTooLargeError)
+    expect(put).toHaveBeenCalledTimes(1)
+    expect((await host.control.load()).operations[0]?.stage).toBe('intent')
     expect(publish.mock.calls.length).toBe(before)
     const fetched = await connection.fetchTopic({
       subscriberDID: identity.id,

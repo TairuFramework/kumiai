@@ -40,6 +40,7 @@ export {
   type RecoveryPending,
 } from './mls.js'
 export {
+  buildRevokeProofOperation,
   type PublishRevokeProofParams,
   type PublishRevokeResult,
   publishRevokeProof,

@@ -19,13 +19,15 @@ import type { AnchorStore } from './anchor.js'
 import type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
 import type { AppDeliveryResumed, AppDeliveryStalled } from './app-lane.js'
 import type { AppOutbox } from './app-outbox.js'
-import type { CommitJournal, LaneResult, PendingCommit } from './commit.js'
+import type { HostBuilt, OperationDeps } from './control/operations.js'
+import type { ControlStore, Operation, OperationRequest, Outcome } from './control/types.js'
 import type {
   GroupCrypto,
   GroupMLS,
   OpenedRecoveryVerdict,
   RecoveryRefusalReason,
 } from './crypto.js'
+import type { LogPosition } from './cursor.js'
 import type { GroupProcedureHandlers } from './handlers.js'
 import type { ReceiveLaneEnded, SubscribeFailure } from './hub-mux.js'
 import type { AppOutboxCleared } from './log-delivery.js'
@@ -66,13 +68,7 @@ export const DEFAULT_APP_LOG_RETENTION_SECONDS = DEFAULT_COMMIT_LOG_RETENTION_SE
  */
 export const DEFAULT_COMMIT_DEADLINE_MS = 30_000
 
-/**
- * The MLS half of a peer: the lifecycle port, the durable journal, the restart-adopt hook, and the
- * durable anchor/cursor stores. They arrive together or not at all — each missing piece fails
- * SILENTLY: no journal loses a commit whose process died mid-acceptance; no anchor store re-seeds
- * at the live epoch and silently partitions from the group; no cursor store re-reads app history
- * from the hub's retention floor every restart. The type is what stops a host wiring only some.
- */
+/** MLS lifecycle and the host stores used by the durable control and app lanes. */
 export type GroupPeerMLSParams = {
   /** MLS lifecycle port. When provided, the peer runs the commit lane. */
   mls: GroupMLS
@@ -82,8 +78,13 @@ export type GroupPeerMLSParams = {
   appOutboxLimit: number
   /** Accepted events discarded after an applied local removal. Notices are not replayed. */
   onAppOutboxCleared?: (event: AppOutboxCleared) => void | Promise<void>
-  /** Durable single-slot journal. Written before every publish, cleared on both outcomes. */
-  journal: CommitJournal
+  control: ControlStore
+  /** Build against the current handle without adopting. */
+  build: (op: Operation) => Promise<HostBuilt>
+  /** Compare and adopt the candidate together with its control write. */
+  adopt: OperationDeps['adopt']
+  /** Deadline measured from durable enqueue. Defaults to 30 seconds. */
+  operationTimeoutMs?: number
   /**
    * Durable anchor slot. Records each advance before it runs and clears the record after resolution.
    * Persisted, not derived — see {@link anchor} for why it cannot be re-derived from the handle.
@@ -98,16 +99,6 @@ export type GroupPeerMLSParams = {
    * this peer can never hold again. See {@link "app-cursor".AppCursorStore}.
    */
   appCursorStore: AppCursorStore
-  /**
-   * Adopt a journalled commit now confirmed accepted — the restart half of
-   * {@link PendingCommit.onAccepted}: deserialize the post-commit handle, adopt it, deliver any
-   * Welcome it carried.
-   *
-   * MUST be idempotent, like `onAccepted`: the peer cannot tell an entry whose `onAccepted`
-   * already ran from one whose process died before it. The Welcome resend is at-least-once by
-   * design — see {@link PendingCommit.onAccepted}.
-   */
-  adoptJournalled: (journal: Uint8Array) => Promise<void>
 }
 
 export type StrandKind =
@@ -192,11 +183,6 @@ export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefini
    */
   appLogRetentionSeconds?: number
   /**
-   * How long `commit` rebases before giving up, in ms. Default 30s. Losing a compare-and-set is
-   * the expected path, not an error path.
-   */
-  commitDeadlineMs?: number
-  /**
    * Called when the app lane finds a gap below the hub's retention floor: frames published to a
    * topic this peer had a read position on, and aged out before it came back for them.
    *
@@ -208,6 +194,7 @@ export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefini
    */
   onAppWindowPruned?: (event: AppWindowPruned) => void | Promise<void>
   onStrand?: (observation: StrandObservation) => void | Promise<void>
+  onOutcome?: (outcome: Outcome) => void | Promise<void>
   onRecovery?: (event: RecoveryEvent) => void | Promise<void>
   onAppDeliveryStalled?: (event: AppDeliveryStalled) => void | Promise<void>
   onAppDeliveryResumed?: (event: AppDeliveryResumed) => void | Promise<void>
@@ -239,8 +226,10 @@ export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefini
       mls?: undefined
       appOutbox?: undefined
       appOutboxLimit?: undefined
-      journal?: undefined
-      adoptJournalled?: undefined
+      control?: undefined
+      build?: undefined
+      adopt?: undefined
+      operationTimeoutMs?: undefined
       anchorStore?: undefined
       appCursorStore?: undefined
     }
@@ -304,43 +293,18 @@ export type InternalSurface = {
 
 export type GroupPeer<Protocols extends Record<string, GroupProtocolDefinition>> = {
   protocol: <K extends keyof Protocols>(name: K) => ProtocolSurface<Protocols[K]>
-  /** Accept loss of one buffered sealed app frame, then resume the journal-first walk. */
+  /** Accept loss of one buffered sealed app frame, then resume the control-first walk. */
   dropAppFrame: (topicID: string, position: string) => Promise<void>
   /** Schedule an immediate app pull and wake matching delivery workers. No-op after disposal. */
   retryAppDelivery: (topicID?: string) => Promise<void>
-  /**
-   * Commit to the group, rebasing until it lands.
-   *
-   * Replays the journal, pulls the log to the end, calls `build()`, journals the result, and
-   * publishes conditionally on the head it pulled to. Lose (someone committed first): drop the
-   * pending commit untouched and call `build()` again against the now-current handle — expected,
-   * not an error. `build()` must read the host's live handle each attempt and have no side effects
-   * until `onAccepted` runs, since a losing attempt is discarded whole.
-   *
-   * Holds the commit mutex for its whole run, so two `build()` calls never race one handle.
-   * `holdLogSends` blocks submissions immediately, including prepared frames, until landing or known loss.
-   * Existing log submissions settle before the held commit is journalled or published.
-   *
-   * A RESULT means it landed and `onAccepted` ran; a THROW means it did not — stranded, ledger
-   * incomplete ({@link "commit".RecoveryRequiredError}), or deadline lost
-   * ({@link "commit".CommitDeadlineError}). Call {@link replay} after a throw to collect any
-   * undrained `lost` / `reenact` work.
-   */
-  commit: (
-    build: () => Promise<PendingCommit>,
-    options?: { holdLogSends?: true },
-  ) => Promise<LaneResult>
-  /**
-   * Replay the journal on its own, for startup: republish any pending commit under its original
-   * idempotency key and hand back what did not survive. The host's collector to call before
-   * anything else, and after a `commit()` that threw.
-   *
-   * Builds and publishes nothing, so an incomplete ledger is no hazard here — it retries the
-   * bootstrap and returns WITHOUT throwing, leaving the peer degraded until a responder answers.
-   * A `{}` result means "no orphaned work to re-issue", never "the peer is whole" — the
-   * completeness gate lives on `commit()`.
-   */
-  replay: () => Promise<LaneResult>
+  /** Persist an intent, then let the queue runner execute it. */
+  enqueue: (op: OperationRequest) => Promise<void>
+  outcomes: () => Promise<Array<Outcome>>
+  ack: (id: string) => Promise<void>
+  /** Enqueue, then wait in this process for a landed outcome. */
+  commit: (op: OperationRequest) => Promise<{ position: LogPosition }>
+  /** Retry control settlement and collect recovery entries awaiting re-enactment. */
+  replay: () => Promise<{ reenact?: Array<string> }>
   /**
    * Heal a peer the group has left behind: rejoin by external commit, refold the ledger, hand
    * back the entries the group's ledger does not already hold.

@@ -9,17 +9,13 @@ import {
   processWelcome,
 } from '@kumiai/mls'
 import * as adapter from '@kumiai/mls-rpc'
-import { createGroupMLS, createLedgerEntrySlot, simpleHandleAccess } from '@kumiai/mls-rpc'
-import { commitTopic } from '@kumiai/rpc'
-import { testCommitJournalConformance } from '@kumiai/rpc-conformance'
+import { createLedgerEntrySlot } from '@kumiai/mls-rpc'
+import { type AdoptionWrite, commitTopic } from '@kumiai/rpc'
+import { testControlStoreConformance } from '@kumiai/rpc-conformance'
 import { afterEach, expect, test, vi } from 'vitest'
 
-import {
-  createMemoryCommitJournal,
-  encodeJournal,
-  type Member,
-  makeMember,
-} from './app-lane-e2e.js'
+import { encodeJournal, type Member, makeMember } from './app-lane-e2e.js'
+import { createMemoryHostDatabase, type MemoryHostDatabase } from './host-db.js'
 import { createWireHub } from './log-hub-over-wire.js'
 
 const fixture = (await import(
@@ -110,7 +106,6 @@ test('publisher lands one proof commit and a duplicate is already revoked', asyn
       peer: s.member.peer,
       mls: s.mls,
       input: { subject: s.subject, log: s.log },
-      options: { serializeJournal: encodeJournal },
     })
     expect(result).toEqual({ status: 'committed', epoch: epoch + 1 })
     expect(s.member.handle().registry.devices.get(s.subject)?.status).toBe('revoked')
@@ -120,7 +115,6 @@ test('publisher lands one proof commit and a duplicate is already revoked', asyn
         peer: s.member.peer,
         mls: s.mls,
         input: { subject: s.subject, log: s.log },
-        options: { serializeJournal: encodeJournal },
       }),
     ).toEqual({ status: 'already-revoked' })
     expect(Number(s.member.handle().epoch)).toBe(epoch + 1)
@@ -133,7 +127,7 @@ test('publisher lands one proof commit and a duplicate is already revoked', asyn
   }
 })
 
-test('restart adopts the journalled derived state with its proof ledger entries', async () => {
+test('restart restores the adopted derived state with its proof ledger entries', async () => {
   expect(adapter).toHaveProperty('publishRevokeProof')
   const s = await setup()
   let replacement: Member | undefined
@@ -149,26 +143,19 @@ test('restart adopts the journalled derived state with its proof ledger entries'
       await remove(seq)
       delivered()
     }
-    const access = simpleHandleAccess({
-      handle: s.member.handle,
-      adopt: async () => {
-        throw new Error('crash before adoption')
-      },
-    })
-    const mls = createGroupMLS({
-      access,
-      identity: s.member.identity,
-      entrySlot: s.member.entrySlot,
-    })
+    s.member.hostHooks.afterAdopt = async () => {
+      throw new Error('crash after adoption')
+    }
     await expect(
       adapter.publishRevokeProof({
         peer: s.member.peer,
-        mls: mls,
+        mls: s.mls,
         input: { subject: s.subject, log: s.log },
-        options: { serializeJournal: encodeJournal },
       }),
-    ).rejects.toThrow('crash before adoption')
-    expect(s.member.journal.slot()?.holdsLogSends).toBe(true)
+    ).rejects.toThrow('crash after adoption')
+    expect((await s.member.control.load()).outcomes).toContainEqual(
+      expect.objectContaining({ kind: 'landed' }),
+    )
     await s.member.peer.dispose()
     await s.member.peer.drained()
     replacement = makeMember({
@@ -213,24 +200,22 @@ test('a lost epoch race rebuilds and serialises the proof against the winning re
   const derived: Array<GroupHandle> = []
   try {
     const epoch = Number(s.member.handle().epoch)
+    s.member.hostHooks.serializeJournal = async (candidate) => {
+      derived.push(candidate)
+      if (derived.length === 1) {
+        await adapter.publishRevokeProof({
+          peer: s.other.peer,
+          mls: s.other.mls,
+          input: { subject: s.subject, log: s.log },
+        })
+      }
+      return encodeJournal(candidate)
+    }
+
     const result = await adapter.publishRevokeProof({
       peer: s.member.peer,
       mls: s.mls,
       input: { subject: target, log: [...s.log, nextRev] },
-      options: {
-        serializeJournal: async (candidate) => {
-          derived.push(candidate)
-          if (derived.length === 1) {
-            await adapter.publishRevokeProof({
-              peer: s.other.peer,
-              mls: s.other.mls,
-              input: { subject: s.subject, log: s.log },
-              options: { serializeJournal: encodeJournal },
-            })
-          }
-          return encodeJournal(candidate)
-        },
-      },
     })
     expect(result).toEqual({ status: 'committed', epoch: epoch + 2 })
     expect(derived).toHaveLength(2)
@@ -255,23 +240,21 @@ test('a winning duplicate proof returns already revoked after the race', async (
   const s = await setup()
   let builds = 0
   try {
+    s.member.hostHooks.serializeJournal = async (candidate) => {
+      builds++
+      await adapter.publishRevokeProof({
+        peer: s.other.peer,
+        mls: s.other.mls,
+        input: { subject: s.subject, log: s.log },
+      })
+      return encodeJournal(candidate)
+    }
+
     expect(
       await adapter.publishRevokeProof({
         peer: s.member.peer,
         mls: s.mls,
         input: { subject: s.subject, log: s.log },
-        options: {
-          serializeJournal: async (candidate) => {
-            builds++
-            await adapter.publishRevokeProof({
-              peer: s.other.peer,
-              mls: s.other.mls,
-              input: { subject: s.subject, log: s.log },
-              options: { serializeJournal: encodeJournal },
-            })
-            return encodeJournal(candidate)
-          },
-        },
       }),
     ).toEqual({ status: 'already-revoked' })
     expect(builds).toBe(1)
@@ -284,9 +267,22 @@ test('a winning duplicate proof returns already revoked after the race', async (
   }
 })
 
-testCommitJournalConformance({
-  label: 'integration host journal',
-  createJournal: createMemoryCommitJournal,
+let controlDatabase: MemoryHostDatabase
+const controlHost = () => ({
+  control: controlDatabase.control('state'),
+  anchor: controlDatabase.anchorStore('state'),
+  saveState: (state: Uint8Array, write?: AdoptionWrite) =>
+    controlDatabase.saveState('state', state, write),
+  loadState: () => controlDatabase.loadState('state'),
+})
+testControlStoreConformance({
+  open: async () => {
+    controlDatabase = createMemoryHostDatabase()
+    return controlHost()
+  },
+  reopen: async () => controlHost(),
+  injectFailure: (point) => controlDatabase.failNext(point),
+  commitThenReject: () => controlDatabase.commitThenRejectNext('apply'),
 })
 
 test('non-building outcomes do not serialize or advance', async () => {
@@ -299,13 +295,13 @@ test('non-building outcomes do not serialize or advance', async () => {
     },
   }
   try {
+    s.member.hostHooks.serializeJournal = options.serializeJournal
     const epoch = s.member.handle().epoch
     expect(
       await adapter.publishRevokeProof({
         peer: s.member.peer,
         mls: s.mls,
         input: { subject: s.subject, log: [fixture.inception] },
-        options: options,
       }),
     ).toMatchObject({ status: 'not-provable', reason: 'no-rev' })
     const selfRev = events.createRevoke({
@@ -321,18 +317,16 @@ test('non-building outcomes do not serialize or advance', async () => {
         peer: s.member.peer,
         mls: s.mls,
         input: { subject: s.member.identity.id, log: [fixture.inception, selfRev] },
-        options: options,
       }),
     ).toEqual({ status: 'self-affected', subject: s.member.identity.id })
     expect(serializations).toBe(0)
     expect(s.member.handle().epoch).toBe(epoch)
-    expect(s.member.journal.slot()).toBeNull()
+    expect((await s.member.control.load()).operations).toEqual([])
     await expect(
       adapter.publishRevokeProof({
         peer: s.member.peer,
         mls: { ...s.mls },
         input: { subject: s.subject, log: s.log },
-        options: options,
       }),
     ).rejects.toThrow('adapter-created GroupMLS')
   } finally {
@@ -348,28 +342,24 @@ test('a serializer failure publishes nothing and the caller can rerun', async ()
   const s = await setup()
   try {
     const epoch = s.member.handle().epoch
+    s.member.hostHooks.serializeJournal = () => {
+      throw new Error('cannot persist journal')
+    }
     await expect(
       adapter.publishRevokeProof({
         peer: s.member.peer,
         mls: s.mls,
         input: { subject: s.subject, log: s.log },
-        options: {
-          serializeJournal: () => {
-            throw new Error('cannot persist journal')
-          },
-        },
       }),
     ).rejects.toThrow('cannot persist journal')
-    expect(s.member.journal.slot()).toBeNull()
+    expect((await s.member.control.load()).operations[0]?.stage).toBe('intent')
     expect(s.member.handle().epoch).toBe(epoch)
-    expect(
-      await adapter.publishRevokeProof({
-        peer: s.member.peer,
-        mls: s.mls,
-        input: { subject: s.subject, log: s.log },
-        options: { serializeJournal: encodeJournal },
-      }),
-    ).toEqual({ status: 'committed', epoch: Number(epoch) + 1 })
+    s.member.hostHooks.serializeJournal = encodeJournal
+    await s.member.peer.replay()
+    await expect.poll(() => s.member.handle().epoch).toBe(epoch + 1n)
+    expect((await s.member.control.load()).outcomes).toContainEqual(
+      expect.objectContaining({ kind: 'landed' }),
+    )
   } finally {
     await s.member.peer.dispose()
     await s.member.peer.drained()

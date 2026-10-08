@@ -9,10 +9,9 @@ import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
-import { createMemoryCommitJournal } from './fixtures/journal.js'
 import { createMemoryGroupMLS, memoryEntryID } from './fixtures/memory-group-mls.js'
 import { createMemoryAppOutbox } from './fixtures/outbox.js'
-import { adoptJournalledBlob, makeMLSPeer } from './fixtures/peer.js'
+import { makeMLSPeer, memoryOperationHost } from './fixtures/peer.js'
 
 const flush = (ms = 30) => new Promise((r) => setTimeout(r, ms))
 
@@ -52,12 +51,9 @@ function makeDurablePeer(hub: DurableFakeHub, localDID: string, recoverySecret: 
     hub,
     crypto,
     mls,
-    journal: createMemoryCommitJournal(),
     anchorStore: createMemoryAnchorStore(),
     appCursorStore: createMemoryAppCursorStore(),
-    adoptJournalled: async (blob) => {
-      adoptJournalledBlob(mls, blob)
-    },
+    ...memoryOperationHost(mls),
     localDID,
     protocols: { chat },
     handlers: { chat: {} } as never,

@@ -49,7 +49,7 @@ export type OperationDeps = {
     from: LogPosition | null,
     payloadDigest: string,
   ): Promise<{ found: LogPosition } | 'absent' | 'gap'>
-  appliedAt(epoch: number): AppliedCommit | undefined
+  appliedAt(epoch: number): Pick<AppliedCommit, 'digest'> | undefined
   pullToHead(): Promise<void>
   now(): number
   operationTimeoutMs: number

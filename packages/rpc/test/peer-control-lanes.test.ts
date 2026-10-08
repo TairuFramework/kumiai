@@ -11,14 +11,13 @@ import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { createMemoryCommitJournal } from './fixtures/journal.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
 import { createMemoryAppOutbox } from './fixtures/outbox.js'
 import {
-  adoptJournalledBlob,
   buildLedgerCommit,
   chat,
   makeMLSPeer,
+  memoryOperationHost,
   type Protocols,
 } from './fixtures/peer.js'
 
@@ -42,12 +41,9 @@ describe('control lane lifecycle', () => {
       hub,
       crypto,
       mls,
-      journal: createMemoryCommitJournal(),
       anchorStore: createMemoryAnchorStore(),
       appCursorStore: createMemoryAppCursorStore(),
-      adoptJournalled: async (blob) => {
-        adoptJournalledBlob(mls, blob)
-      },
+      ...memoryOperationHost(mls),
       localDID: 'alice',
       protocols: { chat },
       handlers: { chat: {} } as never,
@@ -108,12 +104,9 @@ describe('control lane lifecycle', () => {
       hub,
       crypto,
       mls,
-      journal: createMemoryCommitJournal(),
       anchorStore: createMemoryAnchorStore(),
       appCursorStore: createMemoryAppCursorStore(),
-      adoptJournalled: async (blob) => {
-        adoptJournalledBlob(mls, blob)
-      },
+      ...memoryOperationHost(mls),
       localDID: 'alice',
       protocols: { chat },
       handlers: { chat: {} } as never,
@@ -139,12 +132,9 @@ describe('control lane lifecycle', () => {
       hub,
       crypto,
       mls,
-      journal: createMemoryCommitJournal(),
       anchorStore: createMemoryAnchorStore(),
       appCursorStore: createMemoryAppCursorStore(),
-      adoptJournalled: async (blob) => {
-        adoptJournalledBlob(mls, blob)
-      },
+      ...memoryOperationHost(mls),
       localDID: 'alice',
       protocols: { chat },
       handlers: { chat: {} } as never,
@@ -177,12 +167,9 @@ describe('control lane lifecycle', () => {
       hub,
       crypto,
       mls,
-      journal: createMemoryCommitJournal(),
       anchorStore: createMemoryAnchorStore(),
       appCursorStore: createMemoryAppCursorStore(),
-      adoptJournalled: async (blob) => {
-        adoptJournalledBlob(mls, blob)
-      },
+      ...memoryOperationHost(mls),
       localDID: 'alice',
       protocols: { chat },
       handlers: { chat: {} } as never,
@@ -219,12 +206,9 @@ describe('control lane lifecycle', () => {
       hub,
       crypto,
       mls,
-      journal: createMemoryCommitJournal(),
       anchorStore: createMemoryAnchorStore(),
       appCursorStore: createMemoryAppCursorStore(),
-      adoptJournalled: async (blob) => {
-        adoptJournalledBlob(mls, blob)
-      },
+      ...memoryOperationHost(mls),
       localDID: 'alice',
       protocols: { chat },
       handlers: { chat: {} } as never,

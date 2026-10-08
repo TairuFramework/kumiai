@@ -9,7 +9,7 @@ import { publishCommit } from './fixtures/commits.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
+import { buildLedgerCommit, makeMLSPeer, seedBuiltOperation } from './fixtures/peer.js'
 
 describe('work resumed after disposal', () => {
   test('a blocked rebuild does not register a new epoch after disposal returns', async () => {
@@ -74,17 +74,7 @@ describe('work resumed after disposal', () => {
     const bob = makeMLSPeer(hub, 'bob', recoverySecret)
     await bob.peer.replay()
 
-    const commit = bob.mls.buildCommit([])
-    await bob.journal.put({
-      publishID: 'accepted-before-restart',
-      expectedHead: null,
-      epoch: 1,
-      acceptedAs: '000000000001',
-      commit,
-      bodies: [],
-      kind: 'ledger',
-      journal: commit,
-    })
+    await seedBuiltOperation(bob, buildLedgerCommit(bob, []), '000000000001')
     const readEpoch = bob.mls.readEpoch.bind(bob.mls)
     let releaseRead = (): void => {}
     const readGate = new Promise<void>((resolve) => {
@@ -104,7 +94,7 @@ describe('work resumed after disposal', () => {
       await expect(replay).rejects.toBeInstanceOf(PeerDisposedError)
       expect(readResumed).toBe(true)
       expect(bob.mls.epoch()).toBe(1)
-      expect(bob.journal.slot()?.acceptedAs).toBe('000000000001')
+      expect((await bob.control.load()).operations[0]?.stage).toBe('accepted')
       expect(
         hub.published.filter((message) => message.topicID === commitTopic(recoverySecret)),
       ).toEqual([])
@@ -125,17 +115,19 @@ describe('work resumed after disposal', () => {
     })
     let building = false
     try {
-      const build = buildLedgerCommit(alice, ['late=commit'])
-      const committing = alice.peer.commit(async () => {
-        building = true
-        await buildGate
-        return build()
-      })
+      const committing = alice.peer.commit(
+        buildLedgerCommit(alice, ['late=commit'], {
+          onBuild: async () => {
+            building = true
+            await buildGate
+          },
+        }),
+      )
       await vi.waitFor(() => expect(building).toBe(true))
       await alice.peer.dispose()
       releaseBuild()
       await expect(committing).rejects.toBeInstanceOf(PeerDisposedError)
-      expect(alice.journal.slot()).toBeNull()
+      expect((await alice.control.load()).operations[0]?.stage).toBe('intent')
       expect(
         hub.published.filter((message) => message.topicID === commitTopic(recoverySecret)),
       ).toEqual([])
@@ -167,7 +159,7 @@ describe('work resumed after disposal', () => {
       await alice.peer.dispose()
       releaseCheck()
       await expect(committing).rejects.toBeInstanceOf(PeerDisposedError)
-      expect(alice.journal.slot()).toBeNull()
+      expect((await alice.control.load()).operations[0]?.stage).toBe('intent')
     } finally {
       releaseCheck()
       await alice.peer.dispose()
@@ -196,7 +188,7 @@ describe('work resumed after disposal', () => {
       await alice.peer.dispose()
       releasePublish()
       await expect(committing).rejects.toBeInstanceOf(PeerDisposedError)
-      expect(alice.journal.slot()?.acceptedAs).toBeUndefined()
+      expect(((await alice.control.load()).operations[0] ?? null)?.stage).toBe('built')
       expect(alice.mls.epoch()).toBe(1)
       expect(hubPublish).toHaveBeenCalledTimes(1)
     } finally {
@@ -228,7 +220,7 @@ describe('work resumed after disposal', () => {
       releaseRead()
       await expect(committing).rejects.toBeInstanceOf(PeerDisposedError)
       expect(alice.mls.epoch()).toBe(1)
-      expect(alice.journal.slot()?.acceptedAs).toBeDefined()
+      expect(((await alice.control.load()).operations[0] ?? null)?.stage).toBe('accepted')
     } finally {
       releaseRead()
       await alice.peer.dispose()
@@ -246,12 +238,14 @@ describe('work resumed after disposal', () => {
     })
     let building = false
     try {
-      const build = buildLedgerCommit(alice, [])
-      const committing = alice.peer.commit(async () => {
-        building = true
-        await buildGate
-        return build()
-      })
+      const committing = alice.peer.commit(
+        buildLedgerCommit(alice, ['late=commit'], {
+          onBuild: async () => {
+            building = true
+            await buildGate
+          },
+        }),
+      )
       await vi.waitFor(() => expect(building).toBe(true))
       const dropping = alice.peer.dropAppFrame('unknown-topic', '000000000001')
       await new Promise((resolve) => setTimeout(resolve, 0))

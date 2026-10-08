@@ -122,7 +122,7 @@ describe('the member that authors a roster change rotates with the members that 
     await alice.peer.commit(buildInviteCommit(alice, 'dave'))
     await flush()
 
-    expect(alice.welcomes).toEqual(['dave'])
+    expect((await alice.control.load()).welcomes.map((row) => row.recipients)).toEqual([['dave']])
     expect(alice.mls.leaves()).toContain('dave')
     expect(bob.mls.leaves()).toContain('dave')
 
@@ -168,18 +168,19 @@ describe('a peer that adopts a journalled roster change reads its backlog and ro
 
     // The hub takes Bob's eviction of Carol and the process dies before he adopts it. The slot
     // carries the sequenceID it landed as, so the restart adopts straight out of it.
-    const build = buildRemoveCommit(bob, 'carol')
+
     await expect(
-      bob.peer.commit(async () => ({
-        ...(await build()),
-        onAccepted: async () => {
-          throw new Error('the process died here')
-        },
-      })),
+      bob.peer.commit(
+        buildRemoveCommit(bob, 'carol', {
+          onAdopt: async () => {
+            throw new Error('the process died here')
+          },
+        }),
+      ),
     ).rejects.toThrow('the process died here')
     expect(bob.mls.epoch()).toBe(1) // it never adopted
     expect(bob.peer.anchorEpoch()).toBe(1)
-    expect(bob.journal.slot()?.acceptedAs).toBeDefined()
+    expect(((await bob.control.load()).operations[0] ?? null)?.stage).toBe('accepted')
 
     await bob.peer.dispose()
     hub.detach('bob')
@@ -209,7 +210,7 @@ describe('a peer that adopts a journalled roster change reads its backlog and ro
     // And he took the anchor the roster change moved — the same one every member applying his
     // commit from the log reaches.
     expect(restarted.peer.anchorEpoch()).toBe(2)
-    expect(restarted.journal.slot()).toBeNull()
+    expect((await restarted.control.load()).operations[0] ?? null).toBeNull()
 
     await restarted.peer.dispose()
   })

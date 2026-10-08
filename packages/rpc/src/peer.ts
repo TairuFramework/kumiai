@@ -2,6 +2,8 @@ import type { ProtocolDefinition } from '@enkaku/protocol'
 import { normalizeDID } from '@kokuin/token'
 import { defaultJitter, encodeEventFrame } from '@kumiai/broadcast'
 import type { StoredMessage } from '@kumiai/hub-protocol'
+import { sha256 } from '@noble/hashes/sha2.js'
+import { toB64U } from '@sozai/codec'
 import { createRuntime } from '@sozai/runtime'
 
 import type { Anchor, AnchorSlot } from './anchor.js'
@@ -13,22 +15,16 @@ import {
   digestAppliedCommit,
   UNKNOWN_FRAME_VERSION,
 } from './classify.js'
-import {
-  CommitDeadlineError,
-  type CommitJournal,
-  isHeadMismatch,
-  JournalEpochError,
-  type LaneResult,
-  type LostCommit,
-  type PendingCommit,
-  RecoveryRequiredError,
-} from './commit.js'
+import { isHeadMismatch, RecoveryRequiredError } from './commit.js'
 import {
   type CommitFrame,
   decodeCommitFrame,
   encodeCommitFrame,
   isUnsupportedCommitFrameVersion,
 } from './commit-frame.js'
+import { enqueueOperation, type OperationDeps, stepOperation } from './control/operations.js'
+import { applyResolved } from './control/store.js'
+import type { OperationRequest, Outcome } from './control/types.js'
 import {
   type AppliedRecovery,
   type GroupMLS,
@@ -39,7 +35,7 @@ import {
   type RecoveryVerdict,
 } from './crypto.js'
 import { asLogPosition, assertForwardPage, type LogPosition } from './cursor.js'
-import { PeerDisposedError } from './errors.js'
+import { OperationOutcomeError, PeerDisposedError } from './errors.js'
 import { assertFrameFits } from './frame-size.js'
 import { adaptBusHandlers, type BusHandlerMaps } from './handlers.js'
 import {
@@ -48,13 +44,7 @@ import {
   HANDSHAKE_KIND,
   HANDSHAKE_VERSION,
 } from './handshake.js'
-import {
-  createHostBoundary,
-  wrapCommitBuild,
-  wrapPeerHost,
-  wrapPendingCommit,
-  wrapPendingRecovery,
-} from './host-boundary.js'
+import { createHostBoundary, wrapPeerHost, wrapPendingRecovery } from './host-boundary.js'
 import { notifyHost } from './host-notice.js'
 import { createHubMux, type HubMux } from './hub-mux.js'
 import { createLedgerEntryResolver, encodeLedgerEntries } from './ledger-entries.js'
@@ -221,38 +211,20 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     hub,
     crypto,
     mls,
-    journal: hostJournal,
-    adoptJournalled,
+    control,
+    build,
+    adopt,
     anchorStore,
     appCursorStore,
     protocols,
     handlers,
     suppress,
   } = params
-  let revokeHolds = 0
-  let heldJournalID: string | undefined
+  let revokeHeld = false
+  let rejoinHeld = false
+  let hasOperations = false
   const logSubmissions = new Set<Promise<unknown>>()
-  const journal: CommitJournal | undefined =
-    hostJournal == null
-      ? undefined
-      : {
-          get: async () => {
-            const entry = await hostJournal.get()
-            heldJournalID = entry?.holdsLogSends === true ? entry.publishID : undefined
-            return entry
-          },
-          put: async (entry) => {
-            await hostJournal.put(entry)
-            heldJournalID = entry.holdsLogSends === true ? entry.publishID : undefined
-          },
-          markAccepted: (publishID, sequenceID) => hostJournal.markAccepted(publishID, sequenceID),
-          clear: async (publishID) => {
-            await hostJournal.clear(publishID)
-            if (heldJournalID === publishID) heldJournalID = undefined
-            logDelivery?.trigger()
-          },
-        }
-  const logSendsHeld = (): boolean => revokeHolds > 0 || heldJournalID != null
+  const logSendsHeld = (): boolean => revokeHeld
   const settleLogSubmissions = async (): Promise<void> => {
     await Promise.allSettled([...logSubmissions])
   }
@@ -275,7 +247,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   const commitLogRetentionSeconds =
     params.commitLogRetentionSeconds ?? DEFAULT_COMMIT_LOG_RETENTION_SECONDS
   const appLogRetentionSeconds = params.appLogRetentionSeconds ?? DEFAULT_APP_LOG_RETENTION_SECONDS
-  const commitDeadlineMs = params.commitDeadlineMs ?? DEFAULT_COMMIT_DEADLINE_MS
+  const operationTimeoutMs = params.operationTimeoutMs ?? DEFAULT_COMMIT_DEADLINE_MS
   const mux: HubMux = createHubMux({
     hub,
     localDID,
@@ -447,7 +419,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     }
   }
 
-  // Live log pushes carry no authoritative bytes or position. One queued journal-first pull
+  // Live log pushes carry no authoritative bytes or position. One queued control-first pull
   // covers a burst; a failed pull retries without waiting for another hub delivery.
   let appPullNeeded = false
   let appPullActive = false
@@ -467,7 +439,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           await ready
           if (disposed) return
           await runSerial(async () => {
-            await replayJournal()
+            await settleOperations()
             await ensureLedger(Date.now() + recoveryTimeoutMs)
             await reconcileCommits()
           })
@@ -507,7 +479,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           if (disposed) return
           return runSerial(async () => {
             if (disposed) return
-            const replayed = await replayJournal()
+            const replayed = await settleOperations()
             if (mls != null && (await ensureLedger(Date.now() + recoveryTimeoutMs))) {
               ledgerReady = true
               await finalizeBootstrap(mls)
@@ -576,9 +548,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           queue: appOutboxAcceptance,
           ready: async () => {
             await ready
-            if (heldJournalID != null) {
+            if (revokeHeld) {
               await runSerial(async () => {
-                if (await replayJournal()) await rebuildEpoch()
+                if (await settleOperations()) await rebuildEpoch()
               })
             }
           },
@@ -591,6 +563,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             sealBarrier != null ||
             sealError != null ||
             activeRecovery != null ||
+            rejoinHeld ||
             !mls.sendAdmission().admissible,
           probe: async () => {
             if (commitTopicID == null) throw new Error('Commit topic is unavailable')
@@ -606,7 +579,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           },
           pull: async () => {
             await runSerial(async () => {
-              await replayJournal()
+              await settleOperations()
               await ensureLedger(Date.now() + recoveryTimeoutMs)
               await reconcileCommits()
             })
@@ -805,18 +778,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   }
 
   /**
-   * A commit this peer journalled that never landed and cannot re-issue itself: held until a lane
-   * operation with a return value can hand it to the host. Dropping it is the one thing that must
-   * not happen — for an invite it loses an invitation, for a remove it leaves an admin believing a
-   * member was evicted when they were not.
-   */
-  let lostCommit: LostCommit | undefined
-
-  /**
    * The ledger entries this peer held when it rejoined — snapshotted BEFORE the rejoined handle
    * replaces them, since a handle that rejoined by external commit holds an EMPTY ledger.
    *
-   * A lost anchor secret also defers journal bodies into this set. Other entries come from the
+   * A lost anchor secret also defers operation bodies into this set. Other entries come from the
    * peer's ledger: entries enacted on a discarded
    * branch, or kept while the group moved on. Filtering that against the group's authenticated
    * ledger is the membership rule as a set-difference: re-enact iff the group's ledger does not
@@ -884,7 +849,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   let commitTail: Promise<void> = Promise.resolve()
   const runSerial = <T>(fn: () => Promise<T>): Promise<T> => {
     const op = commitTail.then(async () => {
-      journalReplayed = false
+      controlReplayed = false
       appNoticeInSerial = true
       try {
         if (retryRecoveryAdoption != null) await retryRecoveryAdoption()
@@ -912,15 +877,15 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   }
 
   /**
-   * Whether the journal has been replayed in the lane operation now running. Cleared when an
-   * operation takes the mutex, set by `replayJournal`, required by `pullCommits`.
+   * Whether saved operations have been settled in the lane operation now running. Cleared when an
+   * operation takes the mutex, set by `settleOperations`, required by `pullCommits`.
    *
    * The ordering it enforces saves a group of one: a peer that pulls before it replays meets its
    * OWN un-merged commit in the log, which classifies as a heal — from a group that, at creation,
    * has nobody to answer. The following replay would adopt the commit anyway, so unguarded this
    * peer would spend a rendezvous and a recovery deadline asking the void for help, every restart.
    */
-  let journalReplayed = false
+  let controlReplayed = false
 
   // Recovery rendezvous state, keyed by requestID.
   const recoveryWaiters = new Map<string, (outcome: RendezvousOutcome) => void>()
@@ -971,7 +936,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         if (disposed) return
         await runSerial(async () => {
           if (disposed) return
-          await replayJournal()
+          await settleOperations()
           await reconcileCommits()
         })
         if (disposed || blocked()) return
@@ -1301,7 +1266,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       }
       for (const message of result.messages) {
         // A commit this peer landed moved its cursor to that frame's position on acceptance (the
-        // journal carries that across a restart); meeting its own commit here means the journal
+        // operation carries that across a restart); meeting its own commit here means its saved operation
         // was lost or never written.
         const position = asLogPosition(message.sequenceID)
         let frame: ReturnType<typeof decodeHandshakeFrame>
@@ -1596,9 +1561,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    */
   const pullCommits = async (): Promise<boolean> => {
     if (disposed) return false
-    if (!journalReplayed) {
+    if (!controlReplayed) {
       throw new Error(
-        'pullCommits: the journal must be replayed first in every lane operation, or a peer that crashed on its own commit heals from it instead of adopting it',
+        'pullCommits: saved operations must settle first in every lane operation, or a peer that crashed on its own commit heals from it instead of adopting it',
       )
     }
     if (mls == null || commitTopicID == null) return false
@@ -1664,7 +1629,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           if (disposed) return
           // A wakeup is a lane operation: step 0, the ledger invariant, then the pull. No return
           // value, so anything found is stashed for the next call that has one.
-          const replayed = await replayJournal()
+          const replayed = await settleOperations()
           if (mls != null && (await ensureLedger(Date.now() + recoveryTimeoutMs))) {
             await finalizeBootstrap(mls)
           }
@@ -1733,7 +1698,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     rendezvousUnsubscribe = mux.onInbound(rendezvousTopicID, onRendezvousMessage)
     if (anchorRecoveryPending) return
     // Then seed the cursor by READING the log — commits published before this peer subscribed are
-    // exactly the ones no push will bring it. A lane operation, so the journal replays AHEAD of
+    // exactly the ones no push will bring it. A lane operation, so the operation settles AHEAD of
     // it. Neither step rebuilds the epoch — buildEpoch runs next.
     await runSerial(async () => {
       if (disposed) return
@@ -1753,7 +1718,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           await params.appOutbox.putCommitCursor(null)
         }
       }
-      await replayJournal()
+      await settleOperations()
       if (disposed) return
       // A peer restored with an incomplete ledger was killed between rejoining and bootstrapping.
       // The invariant finds it here and at every later lane operation, with no memory of how it
@@ -1785,7 +1750,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     const { sealed: sealedEntries, epoch } = await crypto.sealEntries(encodeLedgerEntries(bodies))
     if (framedAt != null && epoch !== framedAt) {
       throw new Error(
-        'commit: the local group has already advanced past the epoch this commit was framed at. A commit is adopted in onAccepted, never before.',
+        'commit: the local group has already advanced past the epoch this commit was framed at. Build must leave the current handle unchanged until host adoption.',
       )
     }
     const payload = encodeHandshakeFrame(
@@ -1796,148 +1761,208 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     return { payload, epoch }
   }
 
-  /**
-   * Step 0 of every lane operation, strictly ahead of the pull. Settle any journalled commit:
-   * adopt it if the slot records it landed, else republish under its ORIGINAL publishID and
-   * expectedHead and let the store's idempotency decide — no responder, no network, no rendezvous.
-   *
-   * Ahead of the pull, load-bearing: a peer that pulls first meets its own un-merged commit in the
-   * log and must reason about a frame it produced and never adopted — the expensive path the
-   * journal exists to avoid.
-   *
-   * Returns whether it moved the epoch. Any loss is stashed, not thrown or called back: the host's
-   * to act on, and its action is to commit.
-   */
-  const replayJournal = async (): Promise<boolean> => {
-    journalReplayed = true
-    if (anchorRecoveryPending) return false
-    if (mls == null || journal == null || commitTopicID == null) return false
-    const entry = await journal.get()
-    if (disposed || entry == null) return false
-    if (entry.holdsLogSends === true) await settleLogSubmissions()
-    if (disposed) return false
-    const adoptIfLive = async (): Promise<void> => {
-      if (disposed) return
-      await adoptJournalled(entry.journal)
-    }
-
-    if (entry.acceptedAs != null) {
-      // It landed and this peer recorded that before adopting. Nothing to ask: no republish, no
-      // re-seal, no network. The recorded sequenceID is both the last position processed and the
-      // log's tip as of that frame — a stale tip is safe (loses a race and rebases), a WRONG one
-      // would win a race it had no right to.
-      const accepted = asLogPosition(entry.acceptedAs)
-      reconciledHead = accepted
-      commitLogHead = accepted
-      appliedByEpoch.set(entry.epoch, {
-        sequenceID: accepted,
-        digest: digestAppliedCommit(entry.commit),
-      })
-      // Through the seam: the adopt ratchets the handle, so this epoch's app frames are read
-      // first and the anchor is taken if the journalled commit moved the roster.
-      await advanceHandle({
-        port: mls,
-        ratchet: adoptIfLive,
-        identity: {
-          epochAfter: entry.epoch + 1,
-          forced: false,
-          advance: digestAppliedCommit(entry.commit),
-        },
-        floorPosition: accepted,
-      })
-      if (disposed) return false
-      await journal.clear(entry.publishID)
-      return true
-    }
-
-    // Republishing means RE-SEALING the bodies, sealable only under the host's current epoch —
-    // which equals the framed epoch only while `onAccepted` is the sole place the host adopts.
-    // Sealing anyway publishes a blob no member can open and wedges the lane for the whole group.
-    const handleEpoch = await mls.readEpoch()
-    if (disposed) return false
-    if (handleEpoch !== entry.epoch) {
-      throw new JournalEpochError(
-        `commit replay: the journalled commit was framed at epoch ${entry.epoch}, and this group is now at ${handleEpoch}. A commit is adopted in onAccepted, and nowhere else.`,
-      )
-    }
-
-    const { payload } = await frameCommit(entry.commit, entry.bodies, entry.epoch)
-    if (disposed) return false
-    let sequenceID: string
-    try {
-      sequenceID = (
-        await mux.publish({
-          topicID: commitTopicID,
-          payload,
-          retain: 'log',
-          expectedHead: entry.expectedHead,
-          publishID: entry.publishID,
-        })
-      ).sequenceID
-      if (disposed) return false
-    } catch (error) {
-      if (disposed) return false
-      if (!isHeadMismatch(error)) {
-        // Outcome UNKNOWN — the hub may have accepted and failed to say so. Leave the slot
-        // exactly as it is: the next lane operation asks again.
-        throw error
-      }
-      // It never landed and someone else's commit is at the head. There is no `build()` to call
-      // again — the process that held it is gone — so hand back what survived and clear the slot:
-      // the notice must not be lost, never the slot.
-      await journal.clear(entry.publishID)
-      if (disposed) return false
-      lostCommit =
-        entry.kind === 'ledger'
-          ? { kind: 'ledger', tokens: entry.bodies, journal: entry.journal }
-          : { kind: entry.kind, journal: entry.journal }
-      return false
-    }
-    // Accepted — just now, or by the process that published it and died; the store's dedup makes
-    // those indistinguishable, which is the point.
-    //
-    // Record acceptance BEFORE adopting, as `commit()` does: adopting moves the handle past the
-    // framed epoch, and a crash between the two would leave a journalled commit indistinguishable
-    // from a host that adopted out of band. Written first, replay is idempotent.
-    await journal.markAccepted(entry.publishID, sequenceID)
-    if (disposed) return false
-    // This peer's own accepted frame is BOTH the last thing it processed and the log's tip —
-    // otherwise a `commit()` right after a `replay()` would anchor on a stale tip.
-    const accepted = asLogPosition(sequenceID)
-    reconciledHead = accepted
-    commitLogHead = accepted
-    appliedByEpoch.set(entry.epoch, {
-      sequenceID: accepted,
-      digest: digestAppliedCommit(entry.commit),
+  const outcomeWaiters = new Map<
+    string,
+    Set<{ resolve: (outcome: Outcome) => void; reject: (error: unknown) => void }>
+  >()
+  const emitOutcome = (outcome: Outcome): void => {
+    hostOutbox.push(() => {
+      for (const waiter of outcomeWaiters.get(outcome.opID ?? outcome.id) ?? [])
+        waiter.resolve(outcome)
+      outcomeWaiters.delete(outcome.opID ?? outcome.id)
+      notifyHost((value) => params.onOutcome?.(value), outcome)
     })
-    await advanceHandle({
-      port: mls,
-      ratchet: adoptIfLive,
-      identity: {
-        epochAfter: entry.epoch + 1,
-        forced: false,
-        advance: digestAppliedCommit(entry.commit),
+  }
+  const refreshControl = async (): Promise<void> => {
+    if (control == null) return
+    const snapshot = await control.load()
+    hasOperations = snapshot.operations.length > 0
+    revokeHeld = snapshot.operations.some((op) => op.revokes)
+    rejoinHeld = snapshot.rejoin != null
+    for (const row of snapshot.applied) {
+      appliedByEpoch.set(row.epoch, { digest: row.digest, sequenceID: row.sequenceID })
+    }
+    const cursor = snapshot.cursor
+    if (cursor != null && cursor.epoch === (await mls?.readEpoch())) {
+      if (reconciledHead == null || reconciledHead < cursor.position)
+        reconciledHead = cursor.position
+      floor = { epoch: cursor.epoch, position: cursor.position, covered: true }
+      if (cursor.stranded) stranded = true
+    }
+  }
+  const operationDeps = (): OperationDeps => {
+    if (control == null || build == null || adopt == null || mls == null || commitTopicID == null) {
+      throw new Error('commit: this peer has no MLS port, so it has no group to commit to')
+    }
+    const port = mls
+    const topicID = commitTopicID
+    return {
+      control,
+      build: async (op) => {
+        assertLive()
+        return build(op)
       },
-      floorPosition: accepted,
-    })
-    if (disposed) return false
-    await journal.clear(entry.publishID)
-    return true
+      adopt: async (journal, expected, write) => {
+        assertLive()
+        const op = (await control.load()).operations[0]
+        if (op?.stage !== 'accepted') throw new Error('Missing accepted operation')
+        let result: 'installed' | 'noop' | 'moved'
+        if ((await port.readEpoch()) !== expected.epoch) {
+          result = await adopt(journal, expected, write)
+        } else {
+          const skipped = Symbol('adoption did not install')
+          result = 'moved'
+          try {
+            await advanceHandle({
+              port,
+              identity: { epochAfter: expected.epoch + 1, forced: false, advance: op.built.digest },
+              floorPosition: op.acceptedAs,
+              ratchet: async () => {
+                assertLive()
+                result = await adopt(journal, expected, { ...write, anchorLanded: op.built.digest })
+                if (result !== 'installed') throw skipped
+              },
+            })
+          } catch (error) {
+            if (error !== skipped) throw error
+          }
+        }
+        if (result === 'installed') {
+          reconciledHead = op.acceptedAs
+          commitLogHead = op.acceptedAs
+        }
+        return result
+      },
+      frame: async (built) => {
+        assertLive()
+        const { payload } = await frameCommit(built.commit, built.bodies, built.epoch)
+        return { payload, publishID: newPublishID(), expectedHead: commitLogHead }
+      },
+      publish: async (payload, publishID, expectedHead) => {
+        assertLive()
+        if (revokeHeld) await settleLogSubmissions()
+        assertLive()
+        return mux.publish({ topicID, payload, publishID, expectedHead, retain: 'log' })
+      },
+      searchLog: async (from, digest) => {
+        let after = from
+        for (;;) {
+          assertLive()
+          const page = checkedFetchResult(
+            await mux.fetchTopic({
+              topicID,
+              ...(after == null ? {} : { after }),
+              limit: COMMIT_FETCH_LIMIT,
+            }),
+          )
+          // A found payload is affirmative evidence even when older rows were pruned.
+          for (const row of page.messages) {
+            if (toB64U(sha256(row.payload)) === digest)
+              return { found: asLogPosition(row.sequenceID) }
+          }
+          if (page.gap) return 'gap'
+          if (page.messages.length < COMMIT_FETCH_LIMIT) return 'absent'
+          assertForwardPage(after, page.messages)
+          const last = page.messages.at(-1)
+          if (last == null) return 'absent'
+          after = asLogPosition(last.sequenceID)
+        }
+      },
+      appliedAt: (epoch) => appliedByEpoch.get(epoch),
+      pullToHead: async () => {
+        controlReplayed = true
+        if (!(await ensureLedger(Date.now() + recoveryTimeoutMs))) {
+          throw new RecoveryRequiredError('commit: the ledger is incomplete')
+        }
+        await finalizeBootstrap(port)
+        await reconcileCommits()
+        assertLive()
+        if (stranded || anchorRecoveryPending || rejoinHeld || activeRecovery != null) {
+          throw new RecoveryRequiredError('commit: group control requires recovery')
+        }
+      },
+      now: Date.now,
+      operationTimeoutMs,
+      newID: newPublishID,
+      emit: emitOutcome,
+    }
   }
 
-  /**
-   * Hand the host what a lane operation found and cannot act on itself — this operation's or an
-   * earlier wakeup's: work that survived a commit that did not, which only the host can re-issue.
-   */
-  const takeLost = (): LaneResult => {
-    const lost = lostCommit
-    lostCommit = undefined
-    const reenact = pendingReenact
-    pendingReenact = []
-    return {
-      ...(lost != null ? { lost } : {}),
-      ...(reenact.length > 0 ? { reenact } : {}),
+  /** Saved payloads settle before any pull can encounter our own unmerged commit. */
+  const settleOperations = async (): Promise<boolean> => {
+    controlReplayed = true
+    if (control == null || mls == null || commitTopicID == null || anchorRecoveryPending)
+      return false
+    await refreshControl()
+    let op = (await control.load()).operations[0]
+    const before = await mls.readEpoch()
+    while (!disposed && op != null && op.stage !== 'intent') {
+      const next = await stepOperation(operationDeps(), op)
+      await refreshControl()
+      if (next === op) throw new RecoveryRequiredError('An operation is awaiting settlement')
+      op = next ?? undefined
     }
+    return (await mls.readEpoch()) !== before
+  }
+
+  let operationTimer: ReturnType<typeof setTimeout> | undefined
+  let operationRunning = false
+  let operationBackoff = 1000
+  const scheduleOperations = (delay = 0): void => {
+    if (disposed || control == null || !hasOperations || operationTimer != null || operationRunning)
+      return
+    const start = (): void => {
+      operationTimer = undefined
+      operationRunning = true
+      void (async () => {
+        let retry = false
+        try {
+          await ready
+          assertLive()
+          if (activeRecovery != null) await activeRecovery
+          await runSerial(async () => {
+            let op = (await control.load()).operations[0]
+            if (op == null) return
+            const before = await mls?.readEpoch()
+            controlReplayed = true
+            for (let attempt = 0; op != null && attempt < COMMIT_ATTEMPT_CEILING; attempt++) {
+              assertLive()
+              const next = await stepOperation(operationDeps(), op)
+              await refreshControl()
+              if (next === op) {
+                retry = true
+                break
+              }
+              op = next ?? undefined
+            }
+            if (op != null) retry = true
+            if (!disposed && (await mls?.readEpoch()) !== before) await rebuildEpoch()
+          })
+          if (!retry) operationBackoff = 1000
+        } catch (error) {
+          retry = true
+          for (const listeners of outcomeWaiters.values()) {
+            for (const waiter of listeners) waiter.reject(error)
+          }
+        } finally {
+          operationRunning = false
+          if (!disposed) {
+            try {
+              await refreshControl()
+            } catch {
+              retry = true
+            }
+            if (hasOperations) {
+              scheduleOperations(retry ? operationBackoff : 0)
+              if (retry) operationBackoff = Math.min(operationBackoff * 2, 15_000)
+            }
+          }
+          void healIfRequested()
+        }
+      })().catch(() => {})
+    }
+    if (delay === 0) start()
+    else operationTimer = setTimeout(start, delay)
   }
 
   const repairRejoin = async (): Promise<void> => {
@@ -2077,205 +2102,70 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     })
   }
 
-  /**
-   * Commit to the group, rebasing until it lands or the deadline passes. Runs under the commit
-   * mutex for its whole life, so `build()` never races another `build()` on this device.
-   */
-  const commit = async (
-    buildInput: () => Promise<PendingCommit>,
-    options?: { holdLogSends?: true },
-  ): Promise<LaneResult> => {
-    if (options?.holdLogSends === true) revokeHolds++
+  const enqueue = async (request: OperationRequest): Promise<void> => {
+    await ready
+    assertLive()
+    await runSerial(async () => {
+      assertLive()
+      await enqueueOperation(operationDeps(), request)
+      await refreshControl()
+    })
+    scheduleOperations()
+  }
+  const outcomes = async (): Promise<Array<Outcome>> => {
+    await ready
+    assertLive()
+    return control == null ? [] : (await control.load()).outcomes
+  }
+  const ack = async (id: string): Promise<void> => {
+    await ready
+    assertLive()
+    await runSerial(async () => {
+      if (control != null) await applyResolved(control, { deleteOutcomes: [id] }, newPublishID())
+    })
+  }
+  const commit = async (request: OperationRequest): Promise<{ position: LogPosition }> => {
+    let resolve!: (outcome: Outcome) => void
+    let reject!: (error: unknown) => void
+    const waiting = new Promise<Outcome>((yes, no) => {
+      resolve = yes
+      reject = no
+    })
+    // Disposal can reject this while enqueue is still in a host call.
+    void waiting.catch(() => {})
+    const waiter = { resolve, reject }
+    const listeners = outcomeWaiters.get(request.id) ?? new Set()
+    listeners.add(waiter)
+    outcomeWaiters.set(request.id, listeners)
     try {
-      return await commitHeld(buildInput, options)
+      await enqueue(request)
+      if (anchorRecoveryPending)
+        throw new RecoveryRequiredError('commit: app anchor requires confirmed recovery')
+      if (stranded) throw new RecoveryRequiredError('commit: group control requires recovery')
+      const outcome = await waiting
+      if (outcome.kind !== 'landed') throw new OperationOutcomeError({ outcome })
+      return { position: outcome.position }
     } finally {
-      if (options?.holdLogSends === true) revokeHolds--
-      logDelivery?.trigger()
+      listeners.delete(waiter)
+      if (listeners.size === 0) outcomeWaiters.delete(request.id)
     }
   }
-
-  const commitHeld = async (
-    buildInput: () => Promise<PendingCommit>,
-    options?: { holdLogSends?: true },
-  ): Promise<LaneResult> => {
-    const build = wrapCommitBuild(boundary, buildInput)
+  const replay = async (): Promise<{ reenact?: Array<string> }> => {
     await ready
     assertLive()
-    if (anchorRecoveryPending)
-      throw new RecoveryRequiredError('commit: app anchor requires confirmed recovery')
-    if (activeRecovery != null) await activeRecovery
-    if (mls == null || journal == null || commitTopicID == null) {
-      throw new Error('commit: this peer has no MLS port, so it has no group to commit to')
-    }
-    const slot = journal
-    const topicID = commitTopicID
-    const op = runSerial(async () => {
-      assertLive()
-      // 0. Replay the journal, ahead of the pull.
-      if (await replayJournal()) await rebuildEpoch()
-      assertLive()
-      // 0.5. Refuse on an incomplete ledger. A rejoin whose bootstrap never finished leaves a
-      //      reset roster: the fold sees only the genesis creator as admin, every promotion since
-      //      is invisible. `ensureLedger` repairs it in place when a responder answers; when none
-      //      does, the peer must publish and advance NOTHING.
-      //
-      //      THROWS rather than returning, since `commit()` returns only when the commit LANDED —
-      //      `recover()` answers `advanced: false` instead because its contract carries that flag;
-      //      `commit()`'s does not. NO heal is scheduled: this peer holds its leaf, so a rejoin
-      //      would rotate the tree for nothing — the gather that just failed IS the repair,
-      //      re-running at the head of the next lane operation.
-      if (!(await ensureLedger(Date.now() + recoveryTimeoutMs))) {
-        assertLive()
-        throw new RecoveryRequiredError(
-          'commit: the ledger is incomplete, so this handle rejoined the group and its bootstrap has not completed — its roster has reset, and a commit built now would be judged against a group whose admins it cannot see. It must finish bootstrapping its ledger before it can commit again.',
-        )
-      }
-      await finalizeBootstrap(mls)
-      assertLive()
-
-      const deadline = Date.now() + commitDeadlineMs
-      for (let attempt = 0; attempt < COMMIT_ATTEMPT_CEILING; attempt++) {
-        // 1. Pull the log to the end: every frame processed, and the tip to race at learned from
-        //    the store's own reply.
-        await reconcileCommits()
-        assertLive()
-
-        // The pull found positive evidence this peer is off the group's line, which stands
-        // whether or not a following heal lands. Unwind rather than race: on the `ahead` path the
-        // pull already took the live tip, so a commit here would win at an epoch it never caught
-        // up to. Gating on `stranded`, not `healRequested`, is what survives a heal that found no
-        // responder.
-        if (stranded || anchorRecoveryPending) {
-          throw new RecoveryRequiredError(
-            'commit: the log holds a frame this peer cannot reconcile with — its own un-merged commit, or a commit from an epoch ahead of it. It must recover before it can commit again.',
-          )
-        }
-
-        // 2. Build against the host's CURRENT handle, adopting nothing. `build` closes over that
-        //    handle, so a rebased retry frames at the rebased epoch.
-        const pending = wrapPendingCommit(boundary, await build())
-        assertLive()
-
-        // 3. Journal BEFORE publishing, durably: from here to the hub's answer is the crash
-        //    window, and the slot is the only thing that survives it.
-        //
-        //    Anchor on the log's TIP, not the cursor: the cursor names the last frame PROCESSED,
-        //    which need not be one the head can ever name.
-        const publishID = newPublishID()
-        const expectedHead = commitLogHead
-        const { payload, epoch: framedEpoch } = await frameCommit(
-          pending.commit,
-          pending.bodies,
-          crypto.frameEpoch(pending.commit),
-        )
-        assertLive()
-        if (options?.holdLogSends === true) await settleLogSubmissions()
-        assertLive()
-        await slot.put({
-          publishID,
-          expectedHead,
-          // The framed epoch, and the only one its bodies can be sealed under. A replay at any
-          // other epoch with no recorded acceptance knows the host adopted where it must not have.
-          epoch: framedEpoch,
-          commit: pending.commit,
-          bodies: pending.bodies,
-          kind: pending.kind,
-          journal: pending.journal,
-          ...(options?.holdLogSends === true ? { holdsLogSends: true } : {}),
-        })
-        assertLive()
-
-        // 4. Publish, conditional on the head the pull reached.
-        let sequenceID: string
-        try {
-          sequenceID = (
-            await mux.publish({ topicID, payload, retain: 'log', expectedHead, publishID })
-          ).sequenceID
-          assertLive()
-        } catch (error) {
-          if (disposed) throw new PeerDisposedError('Peer is disposed', { cause: error })
-          if (!isHeadMismatch(error)) {
-            // Unknown outcome: the frame may be in the log. The slot STAYS — the next lane
-            // operation replays it and asks the store which it was.
-            throw error
-          }
-          // 6. Lost the compare-and-set: someone committed first — expected, not an error. Drop
-          //    the pending commit untouched, clear the slot, and go back to step 1.
-          await slot.clear(publishID)
-          assertLive()
-          if (Date.now() >= deadline) {
-            // The last lost compare-and-set, carried: it is the proximate reason this attempt
-            // restarted, and the deadline only names how many such losses ran out the clock.
-            throw new CommitDeadlineError(
-              `commit: still rebasing after ${commitDeadlineMs}ms and ${attempt + 1} attempts`,
-              { cause: error },
-            )
-          }
-          continue
-        }
-
-        // 5. Accepted. Record it in the slot BEFORE the host adopts, while the group is still at
-        //    the framed epoch — an entry carrying its acceptance can be adopted on restart; one
-        //    carrying none at a later epoch is a host that adopted outside `onAccepted`. Recorded
-        //    after the adopt, the two would be indistinguishable.
-        await slot.markAccepted(publishID, sequenceID)
-        assertLive()
-
-        // The commit is the group's now — this frame is both the last position processed and the
-        // log's new tip.
-        const accepted = asLogPosition(sequenceID)
-        reconciledHead = accepted
-        commitLogHead = accepted
-        // A commit this peer made and adopted was enacted at that epoch, like an applied one —
-        // without it a second commit at an epoch this peer OWNS would read as history.
-        appliedByEpoch.set(framedEpoch, {
-          sequenceID: accepted,
-          digest: digestAppliedCommit(pending.commit),
-        })
-        // The host adopts here, and adopting ratchets the handle — through the seam, exactly as
-        // an applied commit does. A member never processes its own commit, so the apply site
-        // never runs for the roster change this peer just made: without this, the author of a
-        // Remove keeps publishing to a topic the removed member still holds, and the author of an
-        // Add sits on a topic the new member's handle cannot derive — silently, and no restart
-        // heals it.
-        await advanceHandle({
-          port: mls,
-          ratchet: () => pending.onAccepted(),
-          identity: {
-            epochAfter: framedEpoch + 1,
-            forced: false,
-            advance: digestAppliedCommit(pending.commit),
-          },
-          floorPosition: accepted,
-        })
-        assertLive()
-        await slot.clear(publishID)
-        assertLive()
-        await rebuildEpoch()
-        assertLive()
-        return takeLost()
-      }
-      throw new CommitDeadlineError(
-        `commit: gave up after ${COMMIT_ATTEMPT_CEILING} attempts inside its deadline`,
-      )
-    })
-    // A heal the pull asked for runs once this operation released the lane, never inside it: the
-    // host is told its commit did not land, and the peer repairs itself.
-    void op.catch(() => {}).then(() => healIfRequested())
-    return op
-  }
-
-  const replay = async (): Promise<LaneResult> => {
-    await ready
-    assertLive()
-    return runSerial(async () => {
-      if (await replayJournal()) await rebuildEpoch()
-      if (mls != null && (await ensureLedger(Date.now() + recoveryTimeoutMs))) {
+    const result = await runSerial(async () => {
+      if (await settleOperations()) await rebuildEpoch()
+      if (mls != null && (await ensureLedger(Date.now() + recoveryTimeoutMs)))
         await finalizeBootstrap(mls)
-      }
       assertLive()
-      return takeLost()
+      const reenact = pendingReenact
+      pendingReenact = []
+      return reenact.length === 0 ? {} : { reenact }
     })
+    if (operationTimer != null) clearTimeout(operationTimer)
+    operationTimer = undefined
+    scheduleOperations()
+    return result
   }
 
   /**
@@ -2366,7 +2256,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       return { advanced: false }
     }
     try {
-      // 0. Replay the journal ahead of everything, as every lane operation does: a peer holding a
+      // 0. Settle saved operations ahead of everything, as every lane operation does: a peer holding a
       //    commit whose fate it never learned settles that first, and may find nothing left to heal.
       const started = await runSerial(async () => {
         if (recoveryGeneration !== generation && !stranded && !healRequested) return false
@@ -2376,7 +2266,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             phase: 'started',
           }),
         )
-        if (await replayJournal()) await rebuildEpoch()
+        if (await settleOperations()) await rebuildEpoch()
         assertLive()
         if (await ensureLedger(Date.now() + recoveryTimeoutMs)) await finalizeBootstrap(port)
         assertLive()
@@ -2388,7 +2278,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       let prepared = false
       while (Date.now() < deadline) {
         const publication = await runSerial(async () => {
-          if (await replayJournal()) await rebuildEpoch()
+          if (await settleOperations()) await rebuildEpoch()
           // 1. Pull to the end. It may resolve the strand outright, and a heal it no longer needs
           //    must NOT run: the external commit would rotate the tree for the whole group. Rebuild
           //    if it moved the epoch, before anything is framed: the peer that lost a heal race
@@ -2452,7 +2342,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             ...new Set([
               ...(inFlightEntries ?? awaitingBootstrap?.entries ?? []),
               ...(await port.getLedger()),
-              ...(anchorRecoveryPending ? ((await journal?.get())?.bodies ?? []) : []),
+              ...(anchorRecoveryPending
+                ? ((await control?.load())?.operations.flatMap((op) =>
+                    op.stage === 'intent' ? [] : op.built.bodies,
+                  ) ?? [])
+                : []),
             ]),
           ]
           assertLive()
@@ -2568,7 +2462,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           if (
             (await port.readEpoch()) !== epochBeforeRejoin ||
             reconciledHead !== headBeforeRejoin ||
-            (!anchorRecoveryPending && journal != null && (await journal.get()) != null) ||
+            (!anchorRecoveryPending &&
+              control != null &&
+              (await control.load()).operations.some((op) => op.stage !== 'intent')) ||
             (anchorPending != null && !anchorRecoveryPending)
           ) {
             pendingRecovery = null
@@ -2621,8 +2517,26 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             const accepted = asLogPosition(sequenceID)
             reconciledHead = accepted
             commitLogHead = accepted
-            const deferred = await journal?.get()
-            if (deferred != null) await journal?.clear(deferred.publishID)
+            if (control != null) {
+              const deferred = (await control.load()).operations.filter(
+                (op) => op.stage !== 'intent',
+              )
+              const unknown: Array<Outcome> = deferred.map((op) => ({
+                id: op.id,
+                opID: op.id,
+                at: Date.now(),
+                kind: 'unknown',
+              }))
+              if (unknown.length > 0) {
+                await applyResolved(
+                  control,
+                  { deleteOperations: deferred.map((op) => op.id), putOutcomes: unknown },
+                  newPublishID(),
+                )
+                for (const outcome of unknown) emitOutcome(outcome)
+                await refreshControl()
+              }
+            }
             healRequested = false
             // The one place the commit gate is released: the rejoin landed, so this peer's leaf is
             // back in the tree and the stale-epoch fork it guards is closed. A bootstrap that still
@@ -2733,7 +2647,15 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * and the next pull raises it again if the heal did not settle it.
    */
   const healIfRequested = async (): Promise<void> => {
-    if (disposed || !healRequested || activeRecovery != null || renewalHeld() || refusalHeld) return
+    if (
+      disposed ||
+      !healRequested ||
+      activeRecovery != null ||
+      rejoinHeld ||
+      renewalHeld() ||
+      refusalHeld
+    )
+      return
     healRequested = false
     try {
       await runRecovery('automatic')
@@ -2785,7 +2707,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     // with no roster change yet must. A member booting over a handle it was just added to seeds
     // at its own add epoch — the same epoch every existing member rotates to on applying that
     // add, so the two agree with no exchange between them.
-    await journal?.get()
+    await refreshControl()
     const stored = await anchorStore?.load()
     if (disposed) return
     if (stored != null) {
@@ -2809,7 +2731,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       try {
         await runSerial(async () => {
           if (disposed) return
-          await replayJournal()
+          await settleOperations()
           if (disposed) return
           await ensureLedger(Date.now() + recoveryTimeoutMs)
           if (disposed) return
@@ -2825,11 +2747,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   // A failed init rejects every public call, but must not raise an unhandled rejection before the
   // first is made.
   const settled = ready.catch(() => {})
-  // The seed pull runs inside init, where the crash victim whose journal was lost meets its own
+  // The seed pull runs inside init, where the crash victim whose operation was lost meets its own
   // un-merged commit. Its heal waits for init to finish, since every lane operation (`recover()`
   // included) waits on `ready`.
   void settled.then(() => {
     logDelivery?.trigger()
+    scheduleOperations()
     void healIfRequested()
   })
   const withReady = async <T>(fn: () => T | Promise<T>): Promise<T> => {
@@ -2913,13 +2836,16 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         assertLive()
         await appLane.dropFrame(topicID, position)
         assertLive()
-        await replayJournal()
+        await settleOperations()
         await ensureLedger(Date.now() + recoveryTimeoutMs)
         await reconcileCommits()
       })
       await healIfRequested()
       assertLive()
     },
+    enqueue,
+    outcomes,
+    ack,
     commit,
     replay,
     recover,
@@ -2954,6 +2880,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     dispose: () => {
       if (disposePromise != null) return disposePromise
       disposed = true
+      if (operationTimer != null) clearTimeout(operationTimer)
+      for (const listeners of outcomeWaiters.values()) {
+        for (const waiter of listeners) waiter.reject(new PeerDisposedError('Peer is disposed'))
+      }
+      outcomeWaiters.clear()
       appOutboxAcceptance?.close()
       logDelivery?.close()
       clearRecoveryRetry()
@@ -2967,7 +2898,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       appPullTimer = undefined
       // Synchronous and FIRST, before anything is awaited: a lane op that already passed its own
       // `assertLive` can be running inside `runSerial`, past the point this `dispose()` can reach
-      // it — awaiting the commit mutex here is unsafe (`build()`/`onAccepted()` are host-supplied
+      // it — awaiting the commit mutex here is unsafe (`build()`/`adopt()` are host-supplied
       // and unbounded, and a host calling `dispose()` from inside one would self-deadlock). This
       // closes the mux's three routes to the wire immediately, so whatever the op does next, it
       // cannot land a write. `mux.dispose()` — the full teardown — stays LAST, unchanged.

@@ -11,7 +11,7 @@ import { APP_TOPIC_LABEL, commitTopic, protocolTopic, rendezvousTopic } from '..
 import { publishCommit, publishedCommitDigest } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
-import { makeMLSPeer } from './fixtures/peer.js'
+import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
 import { controlRecoveryClock, drainUntil } from './fixtures/recovery-clock.js'
 
 const flush = (ms = 30) => new Promise((r) => setTimeout(r, ms))
@@ -259,7 +259,7 @@ describe('recovery rendezvous', { concurrent: false }, () => {
     void recovery.catch(() => {})
     try {
       await drainUntil(() => sealing.mock.calls.length > 0, 'recovery seal call')
-      const committing = bob.peer.commit(build)
+      const committing = bob.peer.commit(buildLedgerCommit(bob, [], { onBuild: build }))
       void committing.catch(() => {})
       await setImmediate()
       expect(build).not.toHaveBeenCalled()

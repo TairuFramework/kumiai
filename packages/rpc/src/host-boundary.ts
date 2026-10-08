@@ -1,7 +1,6 @@
 import type { GatherOptions } from '@kumiai/broadcast'
 
 import type { AnchorStore } from './anchor.js'
-import type { PendingCommit } from './commit.js'
 import type { GroupCrypto, GroupMLS, PendingAppFrames, PendingRecovery } from './crypto.js'
 import { PeerDisposedError } from './errors.js'
 import type { GroupPeerMLSParams, GroupPeerParams } from './peer-types.js'
@@ -30,14 +29,6 @@ export const pendingRecoveryHostMembers = {
   commit: 'data',
   onAccepted: 'host',
 } as const satisfies HostMembers<PendingRecovery>
-
-export const pendingCommitHostMembers = {
-  commit: 'data',
-  bodies: 'data',
-  kind: 'data',
-  journal: 'data',
-  onAccepted: 'host',
-} as const satisfies HostMembers<PendingCommit>
 
 export const cryptoHostMembers = {
   epoch: 'host',
@@ -94,13 +85,15 @@ export const peerHostFields = {
   runtime: 'runtime',
   crypto: 'crypto',
   mls: 'mls',
-  journal: 'port',
+  control: 'port',
+  build: 'callback',
+  adopt: 'callback',
+  operationTimeoutMs: 'data',
   anchorStore: 'port',
   appCursorStore: 'port',
   appOutbox: 'port',
   appOutboxLimit: 'data',
   onAppOutboxCleared: 'callback',
-  adoptJournalled: 'callback',
   handlers: 'handlers',
   recovery: 'recovery',
   localDID: 'data',
@@ -108,10 +101,10 @@ export const peerHostFields = {
   suppress: 'data',
   commitLogRetentionSeconds: 'data',
   appLogRetentionSeconds: 'data',
-  commitDeadlineMs: 'data',
   onAppWindowPruned: 'callback',
   onStrand: 'callback',
   onRecovery: 'callback',
+  onOutcome: 'callback',
   onAppDeliveryStalled: 'callback',
   onAppDeliveryResumed: 'callback',
   onSubscribeFailed: 'callback',
@@ -260,10 +253,6 @@ function selectHostMembers<TValue extends object>(
   return view as TValue
 }
 
-export function wrapPendingCommit(boundary: HostBoundary, value: PendingCommit): PendingCommit {
-  return selectHostMembers(boundary, value, pendingCommitHostMembers)
-}
-
 export function wrapPendingRecovery(
   boundary: HostBoundary,
   value: PendingRecovery,
@@ -315,21 +304,8 @@ export function wrapPeerHost<TParams extends object>(
   return view
 }
 
-// Nested publisher callbacks, including serializeJournal, drain with the build invocation.
-// Journal bytes must restore the derived handle and its ledger through adoptJournalled.
-export const commitBuildHostMembers = { build: 'host' } as const satisfies HostMembers<{
-  build: () => Promise<PendingCommit>
-}>
-
-export function wrapCommitBuild(
-  boundary: HostBoundary,
-  build: () => Promise<PendingCommit>,
-): () => Promise<PendingCommit> {
-  return selectHostMembers(boundary, { build }, commitBuildHostMembers).build
-}
-
 // Invoked inside the wrapped build; the whole serializer promise belongs to that host call.
-// Its bytes must let adoptJournalled restore the derived state INCLUDING its ledger.
+// Its bytes must let host adoption restore the candidate including its ledger.
 export const journalSerializationHostMembers = {
   serializeJournal: 'host',
 } as const satisfies HostMembers<{

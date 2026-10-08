@@ -6,10 +6,9 @@ import { createMemoryAnchorStore } from './fixtures/anchor.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { createMemoryCommitJournal } from './fixtures/journal.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
 import { createMemoryAppOutbox } from './fixtures/outbox.js'
-import { adoptJournalledBlob } from './fixtures/peer.js'
+import { memoryOperationHost } from './fixtures/peer.js'
 
 const room = defineGroupProtocol({
   'room/posted': { type: 'event', retain: 'log', data: { type: 'object' } },
@@ -35,7 +34,6 @@ async function startPeerWithLocalDID(localDID: string) {
     members: [localDID],
     onAdvance: (e) => crypto.setEpoch(e),
   })
-  const journal = createMemoryCommitJournal()
   const anchorStore = createMemoryAnchorStore()
   const appCursorStore = createMemoryAppCursorStore()
   const peer = createGroupPeer<Protocols>({
@@ -44,12 +42,9 @@ async function startPeerWithLocalDID(localDID: string) {
     hub,
     crypto,
     mls,
-    journal,
     anchorStore,
     appCursorStore,
-    adoptJournalled: async (blob) => {
-      adoptJournalledBlob(mls, blob)
-    },
+    ...memoryOperationHost(mls),
     localDID,
     protocols: { room },
     handlers: { room: {} } as never,

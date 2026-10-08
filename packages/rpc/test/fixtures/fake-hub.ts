@@ -59,6 +59,10 @@ export type FakeHubOptions = {
  * back its own frames, which push never gives it.
  */
 export class FakeHub implements LogHub {
+  forgetPublishRecords(): void {
+    this.#publishRecords.clear()
+  }
+
   #sequence = 0
   #topics = new Map<string, Set<string>>()
   #sinks = new Map<string, Set<Sink>>()

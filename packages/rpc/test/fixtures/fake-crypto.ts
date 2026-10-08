@@ -30,6 +30,7 @@ export type FakeCryptoOptions = {
 }
 
 export type FakeCrypto = GroupCrypto & {
+  restart: () => FakeCrypto
   setEpoch: (n: number) => void
   saveState: () => Uint8Array
   forceUnnamedSender: () => () => void
@@ -447,6 +448,7 @@ export function createFakeCrypto(options: FakeCryptoOptions = {}): FakeCrypto {
   }
 
   return {
+    restart: () => createFakeCrypto({ ...options, state: saveState() }),
     epoch: () => epoch,
     // `label` is the CALLER's, taken as given and never defaulted or ignored here — a fake that
     // fell back to a default for an omitted label would hide the exact caller mistake the port's

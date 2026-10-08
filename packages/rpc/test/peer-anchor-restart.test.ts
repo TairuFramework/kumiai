@@ -9,10 +9,9 @@ import { createMemoryAppCursorStore, type MemoryAppCursorStore } from './fixture
 import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto, type FakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { createMemoryCommitJournal } from './fixtures/journal.js'
 import { createMemoryGroupMLS, type MemoryGroupMLS } from './fixtures/memory-group-mls.js'
 import { createMemoryAppOutbox } from './fixtures/outbox.js'
-import { adoptJournalledBlob, makeMLSPeer } from './fixtures/peer.js'
+import { makeMLSPeer, memoryOperationHost } from './fixtures/peer.js'
 
 const flush = () => new Promise((r) => setTimeout(r, 50))
 
@@ -78,12 +77,9 @@ function makeRoomPeer(
     hub,
     crypto,
     mls,
-    journal: createMemoryCommitJournal(),
     anchorStore,
     appCursorStore,
-    adoptJournalled: async (blob) => {
-      adoptJournalledBlob(mls, blob)
-    },
+    ...memoryOperationHost(mls),
     localDID,
     protocols: { room },
     handlers: { room: handlers } as never,

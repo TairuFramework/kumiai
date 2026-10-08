@@ -9,7 +9,7 @@ import {
   signLedgerEntry,
 } from '@kumiai/mls'
 import { createLedgerEntrySlot, deriveRecoverySecret } from '@kumiai/mls-rpc'
-import { commitTopic, protocolTopic, type RecoveryEvent } from '@kumiai/rpc'
+import { commitTopic, digestAppliedCommit, protocolTopic, type RecoveryEvent } from '@kumiai/rpc'
 import { afterEach, expect, test, vi } from 'vitest'
 
 import {
@@ -17,6 +17,7 @@ import {
   buildRemoveCommit,
   createEntryBodies,
   createFoundingGroup,
+  customOperation,
   encodeJournal,
   joinFromWelcome,
   type Member,
@@ -168,22 +169,27 @@ test.each([
     let bob = initial.bob
     const topic = commitTopic(await deriveRecoverySecret(alice.handle()))
     const commit = (value: string) =>
-      alice.peer.commit(async () => {
-        const token = await signLedgerEntry(alice.identity, {
-          groupID: alice.handle().groupID,
-          type: 'note',
-          subject: alice.identity.id,
-          value,
-        })
-        const result = await commitLedgerEntries(alice.handle(), [token])
-        return {
-          commit: result.commitMessage,
-          bodies: [token],
-          kind: 'ledger',
-          journal: encodeJournal(result.newGroup),
-          onAccepted: () => alice.adopt(result.newGroup),
-        }
-      })
+      alice.peer.commit(
+        customOperation(alice, async () => {
+          const token = await signLedgerEntry(alice.identity, {
+            groupID: alice.handle().groupID,
+            type: 'note',
+            subject: alice.identity.id,
+            value,
+          })
+          const result = await commitLedgerEntries(alice.handle(), [token])
+          return {
+            commit: result.commitMessage,
+            bodies: [token],
+            welcome: null,
+            epoch: Number(alice.handle().epoch),
+            authenticatorBefore: alice.handle().state.keySchedule.epochAuthenticator.slice(),
+            lineage: 0,
+            digest: digestAppliedCommit(result.commitMessage),
+            journal: encodeJournal(result.newGroup),
+          }
+        }),
+      )
     await commit('floor')
     await vi.waitFor(() => expect(bob.handle().epoch).toBe(alice.handle().epoch))
     hub.log.unsubscribe?.(bob.identity.id, topic)

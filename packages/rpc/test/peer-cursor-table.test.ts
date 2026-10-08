@@ -419,7 +419,7 @@ describe('a peer that must recover before it can commit', { concurrent: false },
     )
     // Nothing was published, and nothing was journalled: the commit did not happen.
     expect(hub.published.filter((m) => m.topicID === commitTopic(rs))).toHaveLength(1)
-    expect(alice.journal.slot()).toBeNull()
+    expect((await alice.control.load()).operations[0]?.stage).toBe('intent')
 
     await alice.peer.dispose()
   })

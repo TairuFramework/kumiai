@@ -18,14 +18,15 @@ describe('resync() takes the commit mutex', () => {
       releaseBuild = resolve
     })
 
-    const build = buildLedgerCommit(alice, [])
-    const committing = alice.peer.commit(async () => {
-      order.push('build-start')
-      await buildGate
-      const pending = await build()
-      order.push('build-end')
-      return pending
-    })
+    const committing = alice.peer.commit(
+      buildLedgerCommit(alice, ['late=commit'], {
+        onBuild: async () => {
+          order.push('build-start')
+          await buildGate
+          order.push('build-end')
+        },
+      }),
+    )
     await flush()
 
     const resyncing = alice.peer.resync().then(() => {

@@ -19,30 +19,35 @@ import {
   signLedgerEntry,
 } from '@kumiai/mls'
 import {
+  buildRevokeProofOperation,
   createGroupCrypto,
   createGroupMLS,
   type GroupMLSParams,
+  type HandleAccess,
   type LedgerEntrySlot,
   simpleHandleAccess,
 } from '@kumiai/mls-rpc'
 import type {
+  AdoptionWrite,
   Anchor,
   AnchorSlot,
   AnchorStore,
   AppCursorStore,
   AppOutbox,
-  CommitJournal,
+  ControlStore,
   GroupMLS,
   GroupPeer,
   GroupProtocolDefinition,
-  JournalEntry,
+  HostBuilt,
+  Operation,
+  OperationRequest,
   PendingAppFrame,
-  PendingCommit,
   RecoveryEvent,
 } from '@kumiai/rpc'
-import { createGroupPeer } from '@kumiai/rpc'
+import { createGroupPeer, digestAppliedCommit, OperationRejectedError } from '@kumiai/rpc'
 import { createMemoryAppOutbox } from '@kumiai/rpc-conformance'
 
+import { createMemoryHostDatabase, type MemoryHostDatabase } from './host-db.js'
 import type { WireHub } from './log-hub-over-wire.js'
 
 export { createMemoryAppOutbox }
@@ -67,11 +72,17 @@ export type Protocols = { chat: typeof chat }
 // all real, and a host has to put its anchor, cursor and journal somewhere.
 // ---------------------------------------------------------------------------
 
-export function createMemoryAnchorStore(): AnchorStore & { stored: () => Anchor | null } {
+export function createMemoryAnchorStore(
+  backing?: AnchorStore,
+): AnchorStore & { stored: () => Anchor | null } {
   let slot: AnchorSlot | null = null
   return {
-    load: async () => slot,
+    load: async () => {
+      if (backing != null) slot = await backing.load()
+      return slot
+    },
     save: async (next: AnchorSlot) => {
+      await backing?.save(next)
       slot = next
     },
     stored: () => slot?.anchor ?? null,
@@ -106,39 +117,37 @@ export function encodeJournal(derived: GroupHandle): Uint8Array {
   )
 }
 
-export function createMemoryCommitJournal(): CommitJournal & { slot: () => JournalEntry | null } {
-  let entry: JournalEntry | null = null
-  return {
-    put: async (next: JournalEntry) => {
-      entry = next
-    },
-    markAccepted: async (publishID: string, sequenceID: string) => {
-      if (entry?.publishID !== publishID) return
-      entry = { ...entry, acceptedAs: sequenceID }
-    },
-    get: async () => entry,
-    clear: async (publishID: string) => {
-      if (entry?.publishID !== publishID) return
-      entry = null
-    },
-    slot: () => entry,
-  }
-}
-
 /**
  * The host's durable MLS state, in memory: the serialized ClientState plus the ledger
  * tokens needed to rebuild the roster. A restart is `restoreGroup` over exactly this.
  */
 export type StateStore = {
-  save: (handle: GroupHandle) => void
+  database: MemoryHostDatabase
+  control: ControlStore
+  save: (handle: GroupHandle, write?: AdoptionWrite) => Promise<void>
   saveOpened: (state: Uint8Array, ledger: Array<string>) => void
   saved: () => { state: Uint8Array; ledger: Array<string> } | null
 }
 
 export function createMemoryStateStore(): StateStore {
+  const database = createMemoryHostDatabase()
+  const control = database.control('state')
   let blob: { state: Uint8Array; ledger: Array<string> } | null = null
   return {
-    save: (handle) => {
+    database,
+    control,
+    save: async (handle, write) => {
+      try {
+        await database.saveState('state', encodeJournal(handle), write)
+      } catch (error) {
+        if (
+          !(error instanceof Error) ||
+          error.name !== 'StorageOutcomeUnknownError' ||
+          write == null ||
+          (await control.lastMutation()) !== write.mutationID
+        )
+          throw error
+      }
       blob = { state: encodeClientState(handle.state), ledger: [...handle.ledgerTokens] }
     },
     saveOpened: (state, ledger) => {
@@ -153,15 +162,24 @@ export function createMemoryStateStore(): StateStore {
 // ---------------------------------------------------------------------------
 
 export type Member = {
+  hostHooks: {
+    afterAdopt?: (next: GroupHandle) => void | Promise<void>
+    serializeJournal?: (next: GroupHandle) => Uint8Array | Promise<Uint8Array>
+  }
   identity: OwnIdentity
   mls: GroupMLS
+  crypto: ReturnType<typeof createGroupCrypto>
   peer: GroupPeer<Protocols>
   handle: () => GroupHandle
   adopt: (handle: GroupHandle) => Promise<void>
   anchorStore: ReturnType<typeof createMemoryAnchorStore>
   appOutbox: AppOutbox
   appCursorStore: ReturnType<typeof createMemoryAppCursorStore>
-  journal: ReturnType<typeof createMemoryCommitJournal>
+  control: ControlStore
+  build: (op: Operation) => Promise<HostBuilt>
+  builders: Map<string, (op: Operation) => Promise<HostBuilt>>
+  signers: Map<string, OwnIdentity>
+  deliveries: Map<string, (welcome: Uint8Array) => void>
   stateStore: StateStore
   pendingStore?: Map<string, PendingAppFrame>
   entrySlot: LedgerEntrySlot
@@ -195,10 +213,11 @@ export type MakeMemberParams = {
 export function makeMember(params: MakeMemberParams): Member {
   const { hub, identity, entrySlot, restartOf } = params
   let handle = params.group
-  const anchorStore = restartOf?.anchorStore ?? createMemoryAnchorStore()
+  const hostHooks: Member['hostHooks'] = {}
   const appCursorStore = restartOf?.appCursorStore ?? createMemoryAppCursorStore()
-  const journal = restartOf?.journal ?? createMemoryCommitJournal()
   const stateStore = restartOf?.stateStore ?? createMemoryStateStore()
+  const anchorStore =
+    restartOf?.anchorStore ?? createMemoryAnchorStore(stateStore.database.anchorStore('state'))
   const pendingStore =
     restartOf?.pendingStore ??
     (params.durablePending ? new Map<string, PendingAppFrame>() : undefined)
@@ -207,13 +226,14 @@ export function makeMember(params: MakeMemberParams): Member {
   const adoptHandle = async (next: GroupHandle) => {
     await params.beforeAdopt?.(next)
     handle = next
+    await hostHooks.afterAdopt?.(next)
   }
-  stateStore.save(handle)
+  void stateStore.save(handle)
 
   const access = simpleHandleAccess({
     handle: getHandle,
     adopt: adoptHandle,
-    persist: (next) => stateStore.save(next),
+    persist: (next, write) => stateStore.save(next, write),
   })
   const adopt = (next: GroupHandle) => access.replace(next)
   const pending =
@@ -237,6 +257,70 @@ export function makeMember(params: MakeMemberParams): Member {
     recoveryBinding: params.recoveryBinding,
   })
 
+  const control = stateStore.control
+  const builders = restartOf?.builders ?? new Map<string, (op: Operation) => Promise<HostBuilt>>()
+  const signers = restartOf?.signers ?? new Map([[identity.id, identity]])
+  const deliveries = restartOf?.deliveries ?? new Map<string, (welcome: Uint8Array) => void>()
+  const build = async (op: Operation): Promise<HostBuilt> => {
+    const custom = builders.get(op.id)
+    if (custom != null) return custom(op)
+    const body = decodeOperationBody(op.body) as {
+      type: string
+      target?: string
+      tokens?: Array<string>
+      material?: InviteMaterial
+      subject?: string
+      value?: string
+      signer?: string
+    }
+    let committed: { commitMessage: Uint8Array; newGroup: GroupHandle }
+    let bodies: Array<string> = []
+    let welcome: HostBuilt['welcome'] = null
+    const current = handle
+    if (body.type === 'invite' && body.material != null) {
+      const result = await commitInvite(
+        current,
+        body.material.bundle.publicPackage,
+        body.material.invite,
+      )
+      committed = result
+      bodies = body.material.invite.ledgerEntries
+      welcome = { bytes: result.welcomeMessage, recipients: [body.material.invite.recipientDID] }
+    } else if (body.type === 'remove' && body.target != null) {
+      const leaf = current.findMemberLeafIndex(body.target)
+      if (leaf == null) throw new OperationRejectedError('Already removed')
+      committed = await removeMember(current, leaf)
+    } else if (body.type === 'role' && body.subject != null && body.value != null) {
+      bodies = [
+        await signLedgerEntry(signers.get(body.signer ?? identity.id) ?? identity, {
+          type: ROLE_ENTRY_TYPE,
+          groupID: current.groupID,
+          subject: body.subject,
+          value: body.value,
+        }),
+      ]
+      committed = await commitLedgerEntries(current, bodies)
+    } else if (body.type === 'revoke-proof') {
+      return buildRevokeProofOperation({
+        mls,
+        op,
+        options: { serializeJournal: hostHooks.serializeJournal ?? encodeJournal },
+      })
+    } else {
+      bodies = body.tokens ?? []
+      committed = await commitLedgerEntries(current, bodies)
+    }
+    return {
+      commit: committed.commitMessage,
+      bodies,
+      journal: encodeJournal(committed.newGroup),
+      welcome,
+      epoch: Number(current.epoch),
+      authenticatorBefore: current.state.keySchedule.epochAuthenticator.slice(),
+      lineage: 0,
+      digest: digestAppliedCommit(committed.commitMessage),
+    }
+  }
   const connection = hub.connect(identity)
   const appOutbox = restartOf?.appOutbox ?? createMemoryAppOutbox()
   const peer = createGroupPeer<Protocols>({
@@ -246,44 +330,65 @@ export function makeMember(params: MakeMemberParams): Member {
     hub: connection,
     crypto,
     mls,
-    journal,
+    control,
+    build,
     anchorStore,
     appCursorStore,
     appOutbox,
     localDID: identity.id,
     protocols: { chat },
     handlers: { chat: params.handlers ?? {} } as never,
-    adoptJournalled: async (blob: Uint8Array) => {
-      // The journalled blob is the serialized POST-commit handle. Adopting it is
-      // idempotent, as the contract demands: a handle already past that commit's epoch
-      // has adopted it, and a repeat is a no-op.
+    adopt: async (blob, expected, write) => {
       const journal = JSON.parse(new TextDecoder().decode(blob)) as {
         state: Array<number>
         ledger: Array<string>
       }
       const state = decodeClientState(new Uint8Array(journal.state))
-      if (state == null || state.groupContext.epoch <= handle.epoch) return
-      await adopt(
-        await restoreGroup({
-          state,
-          credential: handle.credential,
-          ledgerEntries: journal.ledger,
-          options: { resolveLedgerEntries: entrySlot.resolve },
-        }),
+      if (state == null) throw new Error('Invalid candidate state')
+      const equal = (a: Uint8Array, b: Uint8Array) =>
+        a.length === b.length && a.every((byte, i) => byte === b[i])
+      if (
+        state.groupContext.epoch === handle.epoch &&
+        equal(state.keySchedule.epochAuthenticator, handle.state.keySchedule.epochAuthenticator)
       )
+        return 'noop'
+      if (
+        Number(handle.epoch) !== expected.epoch ||
+        expected.lineage !== 0 ||
+        !equal(handle.state.keySchedule.epochAuthenticator, expected.authenticatorBefore)
+      )
+        return 'moved'
+      const candidate = await restoreGroup({
+        state,
+        credential: handle.credential,
+        ledgerEntries: journal.ledger,
+        options: { resolveLedgerEntries: entrySlot.resolve },
+      })
+      await handle.carryReceiveProgress(candidate)
+      await access.replace(candidate, () => write)
+      const id = write.changes.putOutcomes?.[0]?.opID
+      const obligation = (await control.load()).welcomes.find((row) => row.opID === id)
+      if (id != null && obligation != null) deliveries.get(id)?.(obligation.welcome)
+      return 'installed'
     },
   })
 
   return {
+    hostHooks,
     identity,
     mls,
+    crypto,
     peer,
     handle: getHandle,
     adopt,
     anchorStore,
     appCursorStore,
     appOutbox,
-    journal,
+    control,
+    build,
+    builders,
+    deliveries,
+    signers,
     stateStore,
     pendingStore,
     entrySlot,
@@ -358,92 +463,64 @@ export async function mintInvite(params: {
   return { invite, bundle }
 }
 
-/**
- * A host's `build()` for an invite commit: produce the commit against the CURRENT handle
- * and adopt NOTHING until the hub accepts it. The Welcome rides `onAccepted`, since a
- * Welcome for a commit that lost the compare-and-set names an epoch that never existed.
- */
+export function encodeOperationBody(body: unknown): Uint8Array {
+  return new TextEncoder().encode(
+    JSON.stringify(body, (_key, value) =>
+      value instanceof Uint8Array
+        ? { bytes: [...value] }
+        : typeof value === 'bigint'
+          ? { bigint: value.toString() }
+          : value,
+    ),
+  )
+}
+function decodeOperationBody(body: Uint8Array): unknown {
+  return JSON.parse(new TextDecoder().decode(body), (_key, value) =>
+    value?.bytes != null
+      ? new Uint8Array(value.bytes)
+      : value?.bigint != null
+        ? BigInt(value.bigint)
+        : value,
+  )
+}
+export function operationRequest(
+  kind: OperationRequest['kind'],
+  body: unknown,
+  revokes = false,
+): OperationRequest {
+  return { id: crypto.randomUUID(), kind, revokes, body: encodeOperationBody(body) }
+}
 export function buildInviteCommit(
   member: Member,
   material: InviteMaterial,
   deliverWelcome: (welcome: Uint8Array) => void,
-): () => Promise<PendingCommit> {
-  return async () => {
-    const committed = await commitInvite(
-      member.handle(),
-      material.bundle.publicPackage,
-      material.invite,
-    )
-    return {
-      commit: committed.commitMessage,
-      bodies: material.invite.ledgerEntries,
-      kind: 'invite',
-      journal: encodeJournal(committed.newGroup),
-      onAccepted: async () => {
-        await member.adopt(committed.newGroup)
-        deliverWelcome(committed.welcomeMessage)
-      },
-    }
-  }
+): OperationRequest {
+  const request = operationRequest('invite', { type: 'invite', material })
+  member.deliveries.set(request.id, deliverWelcome)
+  return request
 }
-
-/** A host's `build()` for a remove. The eviction happens only when the host adopts. */
-export function buildRemoveCommit(member: Member, victimDID: string): () => Promise<PendingCommit> {
-  return async () => {
-    const leafIndex = member.handle().findMemberLeafIndex(victimDID)
-    if (leafIndex == null) throw new Error(`no leaf for ${victimDID}`)
-    const committed = await removeMember(member.handle(), leafIndex)
-    return {
-      commit: committed.commitMessage,
-      bodies: [],
-      kind: 'remove',
-      journal: encodeJournal(committed.newGroup),
-      onAccepted: async () => {
-        await member.adopt(committed.newGroup)
-      },
-    }
-  }
+export function buildRemoveCommit(_member: Member, victimDID: string): OperationRequest {
+  return operationRequest('remove', { type: 'remove', target: victimDID }, true)
 }
-
-/**
- * A host's `build()` for a commit that is NEUTRAL FOR THE APP-LANE ANCHOR: it carries a genuine
- * `kumiai.role` entry — granting or demoting `subject`'s permission — but adds or removes no MLS
- * leaf, so the app-lane anchor, which rotates only on membership change, does not move and the
- * group stays on one topic across it.
- *
- * That is what makes it the right advance for the drain scenarios below. A commit that added or
- * removed a member would rotate the anchor, and a frame published mid-walk would land on a
- * different topic from the one the walk had already pulled — which is a different scenario, and
- * not the one where the log GROWS under a walk that has already read it.
- *
- * It also carries real ledger bodies, so the entry seal is exercised on the way: the commit's
- * blob is sealed under the epoch it is framed at and opened from inside the applying peer's own
- * apply of it.
- */
 export function buildLedgerCommit(
   member: Member,
   identity: OwnIdentity,
   subject: string,
   value: string,
-): () => Promise<PendingCommit> {
-  return async () => {
-    const token = await signLedgerEntry(identity, {
-      type: ROLE_ENTRY_TYPE,
-      groupID: member.handle().groupID,
-      subject,
-      value,
-    })
-    const committed = await commitLedgerEntries(member.handle(), [token])
-    return {
-      commit: committed.commitMessage,
-      bodies: [token],
-      kind: 'ledger',
-      journal: encodeJournal(committed.newGroup),
-      onAccepted: async () => {
-        await member.adopt(committed.newGroup)
-      },
-    }
-  }
+): OperationRequest {
+  member.signers.set(identity.id, identity)
+  return operationRequest('ledger', { type: 'role', subject, value, signer: identity.id })
+}
+export function customOperation(
+  member: Member,
+  builder: (op: Operation) => Promise<HostBuilt>,
+): OperationRequest {
+  const request = operationRequest('ledger', { tokens: [] })
+  member.builders.set(request.id, builder)
+  return request
+}
+export function operationIntent(request: OperationRequest): Operation {
+  return { ...request, seq: 1, enqueuedAt: Date.now(), stage: 'intent' }
 }
 
 export async function joinFromWelcome(params: {
@@ -467,4 +544,53 @@ export async function joinFromWelcome(params: {
 
 export function newIdentity(): OwnIdentity {
   return randomIdentity()
+}
+
+export function createOperationHost(access: HandleAccess) {
+  const store = createMemoryStateStore()
+  const builders = new Map<string, () => Promise<HostBuilt>>()
+  return {
+    builders,
+    control: store.control,
+    build: async (op: Operation) => {
+      const build = builders.get(op.id)
+      if (build == null) throw new OperationRejectedError('No host builder')
+      return build()
+    },
+    adopt: async (
+      blob: Uint8Array,
+      expected: { epoch: number; authenticatorBefore: Uint8Array; lineage: number },
+      write: AdoptionWrite,
+    ): Promise<'installed' | 'noop' | 'moved'> => {
+      const journal = JSON.parse(new TextDecoder().decode(blob)) as {
+        state: Array<number>
+        ledger: Array<string>
+      }
+      const state = decodeClientState(new Uint8Array(journal.state))
+      if (state == null) throw new Error('Invalid candidate state')
+      const current = await access.read((group) => group)
+      const equal = (a: Uint8Array, b: Uint8Array) =>
+        a.length === b.length && a.every((byte, i) => byte === b[i])
+      if (
+        state.groupContext.epoch === current.epoch &&
+        equal(state.keySchedule.epochAuthenticator, current.state.keySchedule.epochAuthenticator)
+      )
+        return 'noop'
+      if (
+        Number(current.epoch) !== expected.epoch ||
+        expected.lineage !== 0 ||
+        !equal(current.state.keySchedule.epochAuthenticator, expected.authenticatorBefore)
+      )
+        return 'moved'
+      const candidate = await restoreGroup({
+        state,
+        credential: current.credential,
+        ledgerEntries: journal.ledger,
+      })
+      await current.carryReceiveProgress(candidate)
+      await store.save(candidate, write)
+      await access.replace(candidate)
+      return 'installed'
+    },
+  }
 }

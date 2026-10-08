@@ -30,7 +30,7 @@ import {
   createMemoryAnchorStore,
   createMemoryAppCursorStore,
   createMemoryAppOutbox,
-  createMemoryCommitJournal,
+  createOperationHost,
   type Protocols,
 } from './app-lane-e2e.js'
 import { drainUntil } from './fixtures/drain.js'
@@ -143,14 +143,13 @@ function recoveryPeer(params: {
     crypto: createGroupCrypto({ access }),
     mls,
     localDID: identity.id,
-    journal: createMemoryCommitJournal(),
+    ...createOperationHost(access),
     anchorStore: createMemoryAnchorStore(),
     appCursorStore: createMemoryAppCursorStore(),
     protocols: { chat },
     handlers: {
       chat: { 'chat/changed': () => {}, 'chat/posted': () => {}, 'chat/double': () => ({}) },
     },
-    adoptJournalled: async () => {},
     onRecovery,
     recovery: { timeoutMs: 100, deadlineMs: params.deadlineMs ?? 1000, getDelayMs: () => 0 },
   })

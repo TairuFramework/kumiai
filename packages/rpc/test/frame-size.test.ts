@@ -7,7 +7,7 @@ import { createHubMux } from '../src/hub-mux.js'
 import { assertFrameFits, FrameTooLargeError } from '../src/index.js'
 import { encodeRecoveryReply } from '../src/recovery.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
+import { buildLedgerCommit, intent, makeMLSPeer } from './fixtures/peer.js'
 
 test('measures final base64 at the hub boundary', () => {
   const rows = [786431, 786432, 786433].map((rawBytes) => {
@@ -34,24 +34,25 @@ test('frameCapBeforeSideEffects', async () => {
     const member = makeMLSPeer(hub, 'did:key:alice', new Uint8Array(32).fill(31))
     try {
       await member.peer.replay()
-      const pending = await buildLedgerCommit(member, [])()
+      const request = buildLedgerCommit(member, [])
+      const pending = await member.buildOperation(intent(request))
       member.crypto.sealEntries = async () => ({
         sealed: new Uint8Array(rawFrameBytes - pending.commit.length - 9),
         epoch: member.mls.epoch(),
       })
       const before = hub.published.length
-      const error = await member.peer
-        .commit(async () => pending)
-        .then(
-          () => null,
-          (reason: unknown) => reason,
-        )
+      const error = await member.peer.commit(request).then(
+        () => null,
+        (reason: unknown) => reason,
+      )
       if (rawFrameBytes === 786_432) {
         expect(error).toBeNull()
-        expect(member.journal.puts()).toBe(1)
+        expect((await member.control.load()).outcomes).toHaveLength(1)
         expect(hub.published.at(-1)?.payload.length).toBe(786_432)
       } else {
-        expect(member.journal.puts()).toBe(0)
+        expect((await member.control.load()).operations.every((op) => op.stage === 'intent')).toBe(
+          true,
+        )
         expect(hub.published.length - before).toBe(0)
         expect(error).toMatchObject({ name: 'FrameTooLargeError' })
       }
@@ -91,7 +92,7 @@ test('app sizing uses the sealed payload', async () => {
     await vi.waitFor(() => expect(wrap).toHaveBeenCalled())
     expect(hub.published.length).toBe(before)
     expect(await member.appOutbox.list()).toMatchObject([{ lastAttempt: null }])
-    expect(member.journal.puts()).toBe(0)
+    expect((await member.control.load()).operations.every((op) => op.stage === 'intent')).toBe(true)
   } finally {
     await member.peer.dispose()
   }

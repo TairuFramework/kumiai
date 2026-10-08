@@ -189,6 +189,11 @@ describe('durable retained drain', () => {
     const alice = makeMLSPeer(hub, 'alice', recoverySecret, { epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, {
       epoch: 1,
+      handlers: {
+        'chat/posted': () => {
+          throw new Error('handler paused')
+        },
+      },
       crypto: createFakeCrypto({ epoch: 1, localDID: 'bob', pending: store.port }),
     })
     await flush()
@@ -202,8 +207,8 @@ describe('durable retained drain', () => {
     )
     expect(bob.mls.epoch()).toBe(1)
     store.setFail(false)
-    await bob.peer.commit(buildLedgerCommit(bob, []))
-    expect(bob.mls.epoch()).toBe(3)
+    await bob.peer.replay()
+    await expect.poll(() => bob.mls.epoch()).toBe(3)
     expect(store.records.size).toBe(1)
     await alice.peer.dispose()
     await bob.peer.dispose()

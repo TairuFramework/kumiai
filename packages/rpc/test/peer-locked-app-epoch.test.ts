@@ -5,8 +5,7 @@ import { encodeAppAAD } from '../src/app-aad.js'
 import { APP_TOPIC_LABEL, commitTopic, protocolTopic } from '../src/topic.js'
 import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { createFakeCrypto, type FakeCrypto, fakeEpochSecret } from './fixtures/fake-crypto.js'
-import { createMemoryCommitJournal } from './fixtures/journal.js'
-import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
+import { buildLedgerCommit, makeMLSPeer, seedBuiltOperation } from './fixtures/peer.js'
 
 const flush = (ms = 50) => new Promise((r) => setTimeout(r, ms))
 
@@ -99,25 +98,26 @@ describe('app delivery, anchors and sealing ignore the epoch hint', () => {
     async (offset) => {
       const hub = new DurableFakeHub()
       const secret = new Uint8Array(32).fill(0xc4)
-      const journal = createMemoryCommitJournal()
       const alice = makeMLSPeer(hub, 'alice', secret, {
         epoch: 1,
-        journal,
         crypto: lie(createFakeCrypto({ epoch: 1, localDID: 'alice' }), offset),
       })
       await flush()
 
-      const build = buildLedgerCommit(alice, ['token'])
       await expect(
-        alice.peer.commit(async () => ({
-          ...(await build()),
-          onAccepted: async () => {
-            throw new Error('the process died here')
-          },
-        })),
+        alice.peer.commit(
+          buildLedgerCommit(alice, ['token'], {
+            onAdopt: async () => {
+              throw new Error('the process died here')
+            },
+          }),
+        ),
       ).rejects.toThrow('the process died here')
 
-      expect(journal.slot()?.epoch).toBe(1)
+      expect((await alice.control.load()).operations[0]).toMatchObject({
+        stage: 'accepted',
+        built: { epoch: 1 },
+      })
       await alice.peer.dispose()
     },
   )
@@ -131,20 +131,11 @@ describe('app delivery, anchors and sealing ignore the epoch hint', () => {
       await flush()
       await first.peer.dispose()
 
-      const commit = first.mls.buildCommit(['token'])
-      const journal = createMemoryCommitJournal({
-        slot: {
-          publishID: 'never-landed',
-          expectedHead: null,
-          epoch: 1,
-          commit,
-          bodies: ['token'],
-          kind: 'ledger',
-          journal: commit,
-        },
+      await seedBuiltOperation(first, buildLedgerCommit(first, ['token']))
+      const second = makeMLSPeer(hub, 'alice', secret, {
+        restartOf: first,
+        crypto: lie(createFakeCrypto({ epoch: 1, localDID: 'alice' }), offset),
       })
-      lie(first.crypto, offset)
-      const second = makeMLSPeer(hub, 'alice', secret, { restartOf: first, journal })
       await flush(200)
 
       expect(hub.published.filter((m) => m.topicID === commitTopic(secret))).toHaveLength(1)

@@ -8,7 +8,7 @@ import type { SubscribeFailure } from '../src/hub-mux.js'
 import { PeerDisposedError } from '../src/index.js'
 import { createFakeCrypto, type FakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { createMemoryCommitJournal, type MemoryCommitJournal } from './fixtures/journal.js'
+import { createMemoryHostDatabase } from './fixtures/host-db.js'
 import { createMemoryGroupMLS, type MemoryGroupMLS } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, buildRemoveCommit, makeMLSPeer } from './fixtures/peer.js'
 import { createRecordingHub } from './fixtures/recording-hub.js'
@@ -337,20 +337,16 @@ describe('dispose against a commit delivery queued behind a lane operation', {
       openGate = resolve
     })
     let gateArmed = false
-    const real = createMemoryCommitJournal()
-    const journal: MemoryCommitJournal = {
+    const alice = makeMLSPeer(recorder.hub, 'alice', rs, { epoch: 1, members })
+    const real = createMemoryHostDatabase().control('bob')
+    const control = {
       ...real,
-      async get() {
-        if (gateArmed) {
-          gateArmed = false
-          await gate
-        }
-        return await real.get()
+      load: async () => {
+        if (gateArmed) await gate
+        return real.load()
       },
     }
-
-    const alice = makeMLSPeer(fake, 'alice', rs, { epoch: 1, members })
-    const bob = makeMLSPeer(recorder.hub, 'bob', rs, { epoch: 1, members, journal })
+    const bob = makeMLSPeer(recorder.hub, 'bob', rs, { epoch: 1, members, control })
     await flush()
 
     // Armed only now: bob's init seed replays the journal too, and gating THAT would stop him ever

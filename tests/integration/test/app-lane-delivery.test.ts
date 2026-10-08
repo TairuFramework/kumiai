@@ -160,11 +160,11 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
       }),
     )
     // `lost` is how the lane reports a commit that did not land. Absent means accepted.
-    expect(addResult.lost).toBeUndefined()
+    expect(addResult.position).toBeTypeOf('string')
     await flush()
 
     const removeResult = await alice.peer.commit(buildRemoveCommit(alice, bobID.id))
-    expect(removeResult.lost).toBeUndefined()
+    expect(removeResult.position).toBeTypeOf('string')
     await flush()
 
     expect(alice.handle().epoch).toBe(4n)
@@ -265,7 +265,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     const topicAsMember = protocolTopic(bobSecretAsMember, Number(bob.handle().epoch), 'chat')
 
     const removal = await alice.peer.commit(buildRemoveCommit(alice, bobID.id))
-    expect(removal.lost).toBeUndefined()
+    expect(removal.position).toBeTypeOf('string')
     await flush()
     expect(alice.handle().epoch).toBe(2n)
 
@@ -471,7 +471,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     const advanced = await alice.peer.commit(
       buildLedgerCommit(alice, aliceID, `did:key:subject-${Date.now()}`, 'member'),
     )
-    expect(advanced.lost).toBeUndefined()
+    expect(advanced.position).toBeTypeOf('string')
     await flush()
     expect(alice.handle().epoch).toBe(2n)
 
@@ -564,7 +564,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
       const result = await alice.peer.commit(
         buildLedgerCommit(alice, aliceID, `did:key:subject-${value[0]}-${index}`, value[1]),
       )
-      expect(result.lost).toBeUndefined()
+      expect(result.position).toBeTypeOf('string')
       await flush()
       await alice.peer
         .protocol('chat')
@@ -748,7 +748,7 @@ describe('app-lane delivery across a roster rotation, end to end', () => {
     const result = await alice.peer.commit(
       buildLedgerCommit(alice, aliceID, 'did:key:subject-after-restart', 'member'),
     )
-    expect(result.lost).toBeUndefined()
+    expect(result.position).toBeTypeOf('string')
     await flush()
     expect(alice.handle().epoch).toBe(2n)
 

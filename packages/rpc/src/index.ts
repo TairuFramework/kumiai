@@ -24,14 +24,7 @@ export {
 } from './classify.js'
 export {
   CommitDeadlineError,
-  type CommitJournal,
-  type CommitKind,
   isHeadMismatch,
-  type JournalEntry,
-  JournalEpochError,
-  type LaneResult,
-  type LostCommit,
-  type PendingCommit,
   RecoveryRequiredError,
 } from './commit.js'
 export {
@@ -42,6 +35,7 @@ export {
   isUnsupportedCommitFrameVersion,
   UnsupportedCommitFrameVersionError,
 } from './commit-frame.js'
+export type { HostBuilt, OperationDeps } from './control/operations.js'
 export { applyChanges, applyResolved, controlSettled, pruneWindow } from './control/store.js'
 export type {
   AdoptionWrite,

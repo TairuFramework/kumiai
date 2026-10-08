@@ -224,7 +224,7 @@ describe('heal strand', { concurrent: false }, () => {
         expect(commitFrames(hub, rs)).toBe(framesBefore)
         expect(hub.head(commitTopic(rs))).toBe(headBefore)
         expect(bob.mls.epoch()).toBe(staleEpoch)
-        expect(bob.journal.slot()).toBeNull()
+        expect((await bob.control.load()).operations[0]?.stage).toBe('intent')
 
         await bob.peer.dispose()
       })

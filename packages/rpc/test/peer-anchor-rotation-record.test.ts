@@ -11,10 +11,10 @@ import { DurableFakeHub } from './fixtures/durable-fake-hub.js'
 import { fakeEpochSecret } from './fixtures/fake-crypto.js'
 import { encodeMemoryCommit, memoryEntryID } from './fixtures/memory-group-mls.js'
 import {
-  adoptJournalledBlob,
   buildInviteCommit,
   buildLedgerCommit,
   buildRemoveCommit,
+  intent,
   makeMLSPeer,
 } from './fixtures/peer.js'
 
@@ -56,18 +56,16 @@ describe('recovery ordering', { concurrent: false }, () => {
     })
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { members })
     await Promise.all([alice.peer.replay(), bob.peer.replay()])
-    const build = buildRemoveCommit(bob, 'carol')
+
     await expect(
-      bob.peer.commit(async () => {
-        const pending = await build()
-        return {
-          ...pending,
-          onAccepted: async () => {
-            await pending.onAccepted()
+      bob.peer.commit(
+        buildRemoveCommit(bob, 'carol', {
+          onAdopt: async (adopt) => {
+            await adopt()
             throw new Error('adoption notification failed')
           },
-        }
-      }),
+        }),
+      ),
     ).rejects.toThrow('adoption notification failed')
     const epochBefore = 1
     const anchorAfterThrow = bob.anchorStore.stored()
@@ -93,18 +91,16 @@ describe('recovery ordering', { concurrent: false }, () => {
     })
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { members })
     await Promise.all([alice.peer.replay(), bob.peer.replay()])
-    const build = buildInviteCommit(bob, 'dave')
+
     await expect(
-      bob.peer.commit(async () => {
-        const pending = await build()
-        return {
-          ...pending,
-          onAccepted: async () => {
-            await pending.onAccepted()
+      bob.peer.commit(
+        buildInviteCommit(bob, 'dave', {
+          onAdopt: async (adopt) => {
+            await adopt()
             throw new Error('adopted')
           },
-        }
-      }),
+        }),
+      ),
     ).rejects.toThrow('adopted')
     expect(bob.peer.anchorEpoch()).toBe(2)
     await expect.poll(() => alice.peer.anchorEpoch()).toBe(2)
@@ -138,7 +134,10 @@ describe('recovery ordering', { concurrent: false }, () => {
           advance: digestAppliedCommit(commit),
         },
       })
-      if (landed) bob.mls.adopt(commit)
+      if (landed) {
+        bob.mls.adopt(commit)
+        await bob.database.saveState('bob', bob.mls.serializeState())
+      }
       const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob })
       await restarted.peer.replay()
       expect(restarted.peer.anchorEpoch()).toBe(landed ? 2 : 1)
@@ -316,14 +315,13 @@ describe('recovery ordering', { concurrent: false }, () => {
       epoch: 1,
       external: true,
     })
-    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toThrow(
-      'earlier anchor rotation is unresolved',
-    )
+    await bob.peer.resync()
     expect(processes).toBe(1)
     expect((await bob.anchorStore.load())?.pending).toEqual(pending)
     message.payload = original
     refuse = false
-    await bob.peer.commit(buildLedgerCommit(bob, []))
+    await bob.peer.replay()
+    await expect.poll(() => bob.mls.epoch()).toBe(3)
     expect(processes).toBe(2)
     expect(bob.mls.epoch()).toBe(3)
     expect(bob.peer.anchorEpoch()).toBe(2)
@@ -370,19 +368,20 @@ describe('recovery ordering', { concurrent: false }, () => {
     const hub = new DurableFakeHub()
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { members })
     await bob.peer.replay()
-    const pending = await buildRemoveCommit(bob, 'carol')()
+    const pending = await bob.buildOperation(intent(buildRemoveCommit(bob, 'carol')))
     await expect(
-      bob.peer.commit(async () => ({
-        ...pending,
-        onAccepted: async () => {
-          throw new Error('durable replacement not adopted')
-        },
-      })),
+      bob.peer.commit(
+        buildRemoveCommit(bob, 'carol', {
+          onAdopt: async () => {
+            throw new Error('durable replacement not adopted')
+          },
+        }),
+      ),
     ).rejects.toThrow('durable replacement not adopted')
     expect(bob.mls.epoch()).toBe(1)
     expect((await bob.anchorStore.load())?.pending).toMatchObject({ epochBefore: 1, epochAfter: 2 })
     await bob.peer.dispose()
-    bob.mls.adopt(pending.commit)
+    await bob.database.saveState('bob', pending.journal)
     const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob })
     await restarted.peer.replay()
     expect(restarted.peer.anchorEpoch()).toBe(2)
@@ -407,9 +406,9 @@ describe('recovery ordering', { concurrent: false }, () => {
       onRecovery: (event) => {
         events.push(event)
       },
-      adoptJournalled: (blob) => {
+      adopt: async (blob, expected, write) => {
         adoptsAt.push(bob.mls.epoch())
-        adoptJournalledBlob(bob.mls, blob)
+        return bob.mls.adoptOperation(blob, expected, write)
       },
     })
     await Promise.all([alice.peer.replay(), bob.peer.replay()])
@@ -440,8 +439,8 @@ describe('recovery ordering', { concurrent: false }, () => {
     await expect.poll(() => events.some((event) => event.phase === 'succeeded')).toBe(true)
     expect(events.find((event) => event.phase === 'started')?.trigger).toBe('automatic')
     expect(exported).not.toContain(3)
-    expect(bob.peer.anchorEpoch()).toBe(4)
-    expect(alice.peer.anchorEpoch()).toBe(4)
+    await expect.poll(() => bob.peer.anchorEpoch()).toBe(5)
+    await expect.poll(() => alice.peer.anchorEpoch()).toBe(5)
     await expect.poll(() => seen).toContainEqual({ text: 'after coordinated repair' })
     await Promise.all([alice.peer.dispose(), bob.peer.dispose()])
   })

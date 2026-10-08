@@ -2,16 +2,13 @@ import { stdout } from 'node:process'
 import { createSigningIdentity } from '@kokuin/token'
 import { afterEach, describe, expect, expectTypeOf, test, vi } from 'vitest'
 
-import type { PendingCommit } from '../src/commit.js'
 import type { PendingRecovery } from '../src/crypto.js'
 import { PeerDisposedError } from '../src/errors.js'
 import {
   createHostBoundary,
   peerHostFields,
-  pendingCommitHostMembers,
   pendingRecoveryHostMembers,
   wrapPeerHost,
-  wrapPendingCommit,
   wrapPendingRecovery,
 } from '../src/host-boundary.js'
 import { notifyHost } from '../src/host-notice.js'
@@ -94,9 +91,7 @@ describe('host invocation boundary', () => {
         }
       },
     })
-    const commit = wrapPendingCommit(boundary, receiver)
     const recovery = wrapPendingRecovery(boundary, receiver)
-    expect(commit.commit).toBe(bytes)
     expect(recovery.commit).toBe(bytes)
     const accepting = recovery.onAccepted()
     boundary.close()
@@ -109,7 +104,7 @@ describe('host invocation boundary', () => {
     pause.release()
     await accepting
     await drain
-    expect(() => commit.onAccepted()).toThrow(PeerDisposedError)
+    expect(() => recovery.onAccepted()).toThrow(PeerDisposedError)
     expect(calls).toBe(1)
     expect(inspected).toBe(0)
   })
@@ -146,7 +141,6 @@ describe('host invocation boundary', () => {
       >
     >()
     expectTypeOf(pendingRecoveryHostMembers).toMatchTypeOf<Record<keyof PendingRecovery, string>>()
-    expectTypeOf(pendingCommitHostMembers).toMatchTypeOf<Record<keyof PendingCommit, string>>()
     expect(peerHostFields.hub).toBe('transport')
     expect(peerHostFields.runtime).toBe('runtime')
     expect(peerHostFields.protocols).toBe('data')
@@ -158,7 +152,6 @@ describe('host invocation boundary', () => {
     expect(pendingRecoveryHostMembers.epoch).toBe('data')
     expect(pendingRecoveryHostMembers.confirmationKey).toBe('host')
     expect(pendingRecoveryHostMembers.judgeVerdict).toBe('host')
-    expect(pendingCommitHostMembers.onAccepted).toBe('host')
   })
 
   test('counts a notice even though notifyHost abandons its promise and swallows errors', async () => {

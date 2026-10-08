@@ -21,6 +21,7 @@ import {
   createGroupPeer,
   decodeHandshakeFrame,
   decodeRecoveryConfirmRequest,
+  digestAppliedCommit,
   encodeHandshakeFrame,
   encodeRecoveryConfirmRequest,
   encodeRecoveryVerdict,
@@ -36,8 +37,9 @@ import {
   createMemoryAnchorStore,
   createMemoryAppCursorStore,
   createMemoryAppOutbox,
-  createMemoryCommitJournal,
+  createOperationHost,
   encodeJournal,
+  operationRequest,
   type Protocols,
 } from './app-lane-e2e.js'
 import { drainUntil } from './fixtures/drain.js'
@@ -158,6 +160,7 @@ async function setup(options: { third?: boolean; deadlineMs?: number } = {}) {
     identity: aliceID,
     entrySlot: createLedgerEntrySlot(),
   })
+  const aliceHost = createOperationHost(aliceAccess)
   const bobMLS = createGroupMLS({ access: bobAccess, identity: bobID, entrySlot: bobSlot })
   const aliceConnection = hub.connect(aliceID)
   const bobConnection = hub.connect(bobID)
@@ -178,6 +181,7 @@ async function setup(options: { third?: boolean; deadlineMs?: number } = {}) {
     mls: typeof aliceMLS,
     connection: typeof aliceConnection,
   ) {
+    const operationHost = access === aliceAccess ? aliceHost : createOperationHost(access)
     return createGroupPeer<Protocols>({
       appOutbox: createMemoryAppOutbox(),
       appOutboxLimit: 128,
@@ -195,10 +199,9 @@ async function setup(options: { third?: boolean; deadlineMs?: number } = {}) {
           },
         },
       },
-      journal: createMemoryCommitJournal(),
+      ...operationHost,
       anchorStore: createMemoryAnchorStore(),
       appCursorStore: createMemoryAppCursorStore(),
-      adoptJournalled: async () => {},
       onRecovery: (event) => {
         events.push(event)
       },
@@ -240,6 +243,7 @@ async function setup(options: { third?: boolean; deadlineMs?: number } = {}) {
   })
   await Promise.all([alice.resync(), bob.resync(), carol?.resync()])
   return {
+    aliceHost,
     alice,
     bob,
     carol,
@@ -403,16 +407,22 @@ test('stale GroupInfo is superseded and retried without adopting the stale candi
   })
   // Alice rotates through her lane, so her walker holds the applied record the stale external
   // commit is judged against.
-  await s.alice.commit(async () => {
+  const request = operationRequest('invite', { material: offered.invite })
+  const host = s.aliceHost
+  host.builders.set(request.id, async () => {
     const rotated = await commitInvite(source, material.publicPackage, offered.invite)
     return {
       commit: rotated.commitMessage,
       bodies: offered.invite.ledgerEntries,
-      kind: 'invite',
+      welcome: null,
+      epoch: Number(source.epoch),
+      authenticatorBefore: source.state.keySchedule.epochAuthenticator.slice(),
+      lineage: 0,
+      digest: digestAppliedCommit(rotated.commitMessage),
       journal: encodeJournal(rotated.newGroup),
-      onAccepted: () => s.aliceAccess.replace(rotated.newGroup),
     }
   })
+  await s.alice.commit(request)
   const seal = s.aliceMLS.sealGroupInfo.bind(s.aliceMLS)
   vi.spyOn(s.aliceMLS, 'sealGroupInfo')
     .mockImplementationOnce((request) => stalePort.sealGroupInfo(request))

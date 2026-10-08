@@ -12,6 +12,7 @@ export type MemoryAnchorStore = AnchorStore & {
 export type MemoryAnchorStoreOptions = {
   /** Pre-seed the slot: a peer that already anchored and is now booting over that state. */
   anchor?: Anchor | null
+  backing?: AnchorStore
 }
 
 /**
@@ -27,10 +28,16 @@ export function createMemoryAnchorStore(options: MemoryAnchorStoreOptions = {}):
 
   return {
     async load() {
+      if (options.backing != null) slot = await options.backing.load()
       return slot
     },
     async save(next: AnchorSlot) {
-      if (next.anchor !== slot?.anchor) captures += 1
+      await options.backing?.save(next)
+      if (
+        next.anchor.epoch !== slot?.anchor.epoch ||
+        !next.anchor.secret.every((value, index) => value === slot?.anchor.secret[index])
+      )
+        captures += 1
       saves += 1
       slot = next
     },

@@ -1,6 +1,5 @@
 import { describe, expect, test, vi } from 'vitest'
 
-import { RecoveryRequiredError } from '../src/commit.js'
 import { PeerDisposedError } from '../src/errors.js'
 import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import type { RecoveryEvent, StrandObservation } from '../src/peer.js'
@@ -586,7 +585,7 @@ describe('recovery lifecycle', { concurrent: false }, () => {
     await carol.peer.dispose()
   })
 
-  test('a strand observer that disposes the peer cannot change the walk result', async () => {
+  test('a strand observer that disposes the peer rejects its in-process operation wait', async () => {
     const hub = new FakeHub()
     const rs = secret(0xbd)
     let bob: ReturnType<typeof makeMLSPeer>
@@ -603,7 +602,7 @@ describe('recovery lifecycle', { concurrent: false }, () => {
     await publishCommit({ hub, senderDID: 'bob', recoverySecret: rs, epoch: 3 })
     await expect(
       bob.peer.commit(buildLedgerCommit(bob, ['role:alice=admin'])),
-    ).rejects.toBeInstanceOf(RecoveryRequiredError)
+    ).rejects.toBeInstanceOf(PeerDisposedError)
     expect(strands).toHaveLength(1)
     await bob.peer.dispose()
   })

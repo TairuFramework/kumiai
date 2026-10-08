@@ -5,6 +5,7 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { concatBytes } from '@noble/hashes/utils.js'
 import { fromB64U, fromUTF, toB64U, toUTF } from '@sozai/codec'
 
+import type { AdoptionWrite, ControlStore } from '../../src/control/types.js'
 import type {
   CommitContext,
   CommitHeader,
@@ -17,6 +18,15 @@ import type {
 import { createMemoryHostDatabase, type MemoryHostDatabase } from './host-db.js'
 
 export type MemoryGroupMLS = GroupMLS & {
+  control: () => ControlStore
+  serializeState: () => Uint8Array
+  restoreState: (state: Uint8Array) => void
+  authenticator: () => Uint8Array
+  adoptOperation: (
+    blob: Uint8Array,
+    expected: { epoch: number; authenticatorBefore: Uint8Array; lineage: number },
+    write: AdoptionWrite,
+  ) => Promise<'installed' | 'noop' | 'moved'>
   epoch: () => number
   /** Commits APPLIED — the ones this member was at the epoch to apply. */
   commits: () => number
@@ -71,6 +81,7 @@ export type MemoryGroupMLS = GroupMLS & {
 
 export type MemoryRecoveryBinding = { id: string; prefix: Array<unknown>; capability: string }
 export type MemoryGroupMLSOptions = {
+  storageID?: string
   hostDB?: MemoryHostDatabase
   binding?: MemoryRecoveryBinding
   recoveryBinding?: () => Promise<MemoryRecoveryBinding | null>
@@ -464,6 +475,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
    * openable by this peer and by nobody else — the hub holds every other input.
    */
   const groupID = options.groupID ?? 'memory-group'
+  const storageID = options.storageID ?? groupID
   const hostDB = options.hostDB ?? createMemoryHostDatabase()
   const confirmationKeyAt = (at: number, position: string, digest: string): Uint8Array =>
     sha256(concatBytes(recoverySecret, fromUTF(JSON.stringify([groupID, at, position, digest]))))
@@ -596,6 +608,31 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     advance(epoch + 1)
   }
 
+  const serializeState = (): Uint8Array =>
+    fromUTF(JSON.stringify({ epoch, slots: [...slots], ledger, ledgerHead, bodies: [...bodies] }))
+  const restoreState = (state: Uint8Array): void => {
+    const value = JSON.parse(toUTF(state)) as {
+      epoch: number
+      slots: Array<[number, string]>
+      ledger: Array<string>
+      ledgerHead: string
+      bodies: Array<[string, string]>
+    }
+    slots = new Map(value.slots)
+    ledger = value.ledger
+    ledgerHead = value.ledgerHead
+    bodies = new Map(value.bodies)
+    advance(value.epoch)
+  }
+  const authenticator = (): Uint8Array =>
+    sha256(
+      concatBytes(
+        recoverySecret,
+        fromUTF(groupID),
+        fromUTF(JSON.stringify({ epoch, slots: [...slots], ledger, ledgerHead })),
+      ),
+    )
+
   const ledgerTokens = (): Array<string> =>
     ledger.flatMap((id) => {
       const token = bodies.get(id)
@@ -603,6 +640,32 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     })
 
   return {
+    control: () => hostDB.control(storageID),
+    serializeState,
+    restoreState,
+    authenticator,
+    adoptOperation: async (blob, expected, write) => {
+      const candidate = JSON.parse(toUTF(blob)) as { epoch: number }
+      if (candidate.epoch === epoch && toB64U(blob) === toB64U(serializeState())) return 'noop'
+      if (
+        expected.epoch !== epoch ||
+        expected.lineage !== 0 ||
+        toB64U(expected.authenticatorBefore) !== toB64U(authenticator())
+      )
+        return 'moved'
+      try {
+        await hostDB.saveState(storageID, blob, write)
+      } catch (error) {
+        if (
+          !(error instanceof Error) ||
+          error.name !== 'StorageOutcomeUnknownError' ||
+          (await hostDB.control(storageID).lastMutation()) !== write.mutationID
+        )
+          throw error
+      }
+      restoreState(blob)
+      return 'installed'
+    },
     epoch: () => epoch,
     commits: () => commits,
     seen: () => seen,
@@ -788,7 +851,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         removed,
         epochAuthenticator: sha256(concatBytes(recoverySecret, fromUTF(groupID), state)),
       })
-      if (write != null) await hostDB.saveState(groupID, state, write)
+      await hostDB.saveState(storageID, state, write)
       bodies = nextBodies
       slots = nextSlots
       ledger = nextLedger

@@ -11,7 +11,7 @@ import { createMemoryAnchorStore } from './fixtures/anchor.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { createMemoryCommitJournal } from './fixtures/journal.js'
+import { createMemoryHostDatabase } from './fixtures/host-db.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
 import { buildLedgerCommit, makeMLSPeer } from './fixtures/peer.js'
 
@@ -35,46 +35,43 @@ async function pausedDrain(peer: { drained(): Promise<void> }) {
 
 describe('peer host drain', { concurrent: false }, () => {
   test('drainedWaitsForInFlightJournalPut', async () => {
-    for (const path of ['build', 'journal.put', 'onAccepted']) {
+    for (const path of ['build', 'apply', 'adopt']) {
       const pause = gate()
-      const journal = createMemoryCommitJournal()
       let entered = false
-      let hostCallsAfterDispose = 0
       let disposed = false
-      const put = journal.put
-      journal.put = async (entry) => {
+      let hostCallsAfterDispose = 0
+      const database = createMemoryHostDatabase()
+      const control = database.control('alice')
+      const apply = control.apply
+      control.apply = async (changes, id) => {
         if (disposed) hostCallsAfterDispose++
-        if (path === 'journal.put') {
+        if (path === 'apply' && changes.putOperations?.[0]?.stage === 'built') {
           entered = true
           await pause.promise
         }
-        return put(entry)
+        await apply(changes, id)
       }
-      const clear = journal.clear
-      journal.clear = async (id) => {
-        if (disposed) hostCallsAfterDispose++
-        return clear(id)
-      }
-      const member = makeMLSPeer(new FakeHub(), 'alice', new Uint8Array(32).fill(0x73), { journal })
-      const build = buildLedgerCommit(member, ['role:alice=member'])
-      const operation = member.peer.commit(async () => {
-        if (path === 'build') {
-          entered = true
-          await pause.promise
-        }
-        const pending = await build()
-        return {
-          ...pending,
-          onAccepted: async () => {
-            if (disposed) hostCallsAfterDispose++
-            if (path === 'onAccepted') {
-              entered = true
-              await pause.promise
-            }
-            await pending.onAccepted()
-          },
-        }
+      const member = makeMLSPeer(new FakeHub(), 'alice', new Uint8Array(32).fill(0x73), {
+        database,
+        control,
       })
+      const request = buildLedgerCommit(member, ['role:alice=member'], {
+        onBuild: async () => {
+          if (path === 'build') {
+            entered = true
+            await pause.promise
+          }
+        },
+        onAdopt: async (adopt) => {
+          if (disposed) hostCallsAfterDispose++
+          if (path === 'adopt') {
+            entered = true
+            await pause.promise
+          }
+          return adopt()
+        },
+      })
+      const operation = member.peer.commit(request)
       const owned = operation.catch(() => {})
       await vi.waitFor(() => expect(entered).toBe(true))
       disposed = true
@@ -83,7 +80,6 @@ describe('peer host drain', { concurrent: false }, () => {
       pause.release()
       await drain.promise
       await owned
-      await new Promise((resolve) => setTimeout(resolve, 0))
       expect(hostCallsAfterDispose).toBe(0)
     }
   })
@@ -373,38 +369,37 @@ describe('peer host drain', { concurrent: false }, () => {
   test('portCallAfterDisposeRejects', async () => {
     const pause = gate()
     const hub = new FakeHub()
-    const journal = createMemoryCommitJournal()
-    const markAccepted = journal.markAccepted
+    const database = createMemoryHostDatabase()
+    const control = database.control('alice')
+    const apply = control.apply
     let entered = false
-    journal.markAccepted = async (...args) => {
-      entered = true
-      await pause.promise
-      return markAccepted(...args)
+    control.apply = async (changes, id) => {
+      await apply(changes, id)
+      if (changes.putOperations?.[0]?.stage === 'accepted') {
+        entered = true
+        await pause.promise
+      }
     }
-    const member = makeMLSPeer(hub, 'alice', new Uint8Array(32).fill(0x76), { journal })
-    const readEpoch = vi.spyOn(member.mls, 'readEpoch')
-    const pending = await buildLedgerCommit(member, ['role:alice=member'])()
-    const onAccepted = vi.spyOn(pending, 'onAccepted')
-    const operation = member.peer.commit(async () => pending)
+    const member = makeMLSPeer(hub, 'alice', new Uint8Array(32).fill(0x76), { database, control })
+    const adopted = vi.spyOn(member.mls, 'adoptOperation')
+    const operation = member.peer.commit(buildLedgerCommit(member, ['role:alice=member']))
     const owned = operation.catch(() => {})
     await vi.waitFor(() => expect(entered).toBe(true))
-    const readsBeforeDispose = readEpoch.mock.calls.length
     await member.peer.dispose()
     const drain = await pausedDrain(member.peer)
     pause.release()
     await expect(operation).rejects.toBeInstanceOf(PeerDisposedError)
     await owned
     await drain.promise
-    expect(readEpoch).toHaveBeenCalledTimes(readsBeforeDispose)
-    expect(onAccepted).not.toHaveBeenCalled()
-    expect(journal.slot()).not.toBeNull()
+    expect(adopted).not.toHaveBeenCalled()
+    expect((await control.load()).operations[0]?.stage).toBe('accepted')
     const replacement = makeMLSPeer(hub, 'alice', new Uint8Array(32).fill(0x76), {
       restartOf: member,
     })
     await replacement.peer.replay()
-    expect(journal.slot()).toBeNull()
-    expect(member.mls.epoch()).toBe(2)
-    expect(await member.mls.getLedger()).toEqual(['role:alice=member'])
+    expect((await replacement.control.load()).operations).toEqual([])
+    expect(replacement.mls.epoch()).toBe(2)
+    expect(await replacement.mls.getLedger()).toEqual(['role:alice=member'])
     await replacement.peer.dispose()
     await replacement.peer.drained()
   })
@@ -413,21 +408,22 @@ describe('peer host drain', { concurrent: false }, () => {
     const pause = gate()
     const hub = new FakeHub()
     const secret = new Uint8Array(32).fill(0x76)
-    const journal = createMemoryCommitJournal()
-    const markAccepted = journal.markAccepted
+    const database = createMemoryHostDatabase()
+    const control = database.control('alice')
+    const apply = control.apply
     let entered = false
-    journal.markAccepted = async (...args) => {
-      entered = true
-      await pause.promise
-      return markAccepted(...args)
+    control.apply = async (changes, id) => {
+      await apply(changes, id)
+      if (changes.putOperations?.[0]?.stage === 'accepted') {
+        entered = true
+        await pause.promise
+      }
     }
-    const member = makeMLSPeer(hub, 'alice', secret, { journal })
-    await member.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'survived' } })
-    const operation = member.peer.commit(buildLedgerCommit(member, ['proof']), {
-      holdLogSends: true,
-    })
+    const member = makeMLSPeer(hub, 'alice', secret, { database, control })
+    const operation = member.peer.commit(buildLedgerCommit(member, ['proof'], { revokes: true }))
     const observed = operation.catch(() => {})
     await vi.waitFor(() => expect(entered).toBe(true))
+    await member.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'survived' } })
     await member.peer.dispose()
     const drain = await pausedDrain(member.peer)
     pause.release()
@@ -435,12 +431,12 @@ describe('peer host drain', { concurrent: false }, () => {
     await observed
     await drain.promise
     expect(await member.appOutbox.list()).toHaveLength(1)
-    expect(journal.slot()?.holdsLogSends).toBe(true)
+    expect((await control.load()).operations[0]?.revokes).toBe(true)
     const replacement = makeMLSPeer(hub, 'alice', secret, { restartOf: member })
     try {
       await replacement.peer.replay()
       await vi.waitFor(async () => expect(await replacement.appOutbox.list()).toEqual([]))
-      expect(replacement.journal.slot()).toBeNull()
+      expect((await replacement.control.load()).operations).toEqual([])
       expect(hub.published.filter((frame) => frame.logPosition != null)).toHaveLength(2)
       expect(replacement.mls.epoch()).toBe(2)
     } finally {

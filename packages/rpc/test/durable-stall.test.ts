@@ -880,7 +880,7 @@ describe('durable storage stall', () => {
     expect(bob.mls.epoch()).toBe(1)
     expect(bob.appCursorStore.stored(topicID)).toBeNull()
 
-    const journalRead = vi.spyOn(bob.journal, 'get')
+    const journalRead = vi.spyOn(bob.control, 'load')
     await bob.peer.dropAppFrame(topicID, first.sequenceID)
     expect(journalRead).toHaveBeenCalled()
     expect(bob.mls.epoch()).toBe(2)
@@ -923,12 +923,16 @@ describe('durable storage stall', () => {
       releaseBuild = resolve
     })
     const stopped = new Error('stop before publishing')
-    const commit = bob.peer.commit(async () => {
-      enterBuild?.()
-      await held
-      throw stopped
-    })
-    const rejected = expect(commit).rejects.toBe(stopped)
+    const commit = bob.peer.commit(
+      buildLedgerCommit(bob, [], {
+        onBuild: async () => {
+          enterBuild?.()
+          await held
+          throw stopped
+        },
+      }),
+    )
+    const rejected = expect(commit).rejects.toMatchObject({ name: 'PeerDisposedError' })
     await building
     expect(stalled).not.toHaveBeenCalled()
     const disposing = bob.peer.dispose()

@@ -3,7 +3,10 @@ import type { LogHub } from '@kumiai/hub-tunnel'
 import type { AppWindowPruned } from '../../src/app-cursor.js'
 import type { AppDeliveryResumed, AppDeliveryStalled } from '../../src/app-lane.js'
 import type { AppOutbox } from '../../src/app-outbox.js'
-import type { PendingCommit } from '../../src/commit.js'
+import { digestAppliedCommit } from '../../src/classify.js'
+import type { HostBuilt, OperationDeps } from '../../src/control/operations.js'
+import type { ControlStore, Operation, OperationRequest, Outcome } from '../../src/control/types.js'
+import { OperationRejectedError } from '../../src/errors.js'
 import type { SubscribeFailure } from '../../src/hub-mux.js'
 import type { AppOutboxCleared } from '../../src/log-delivery.js'
 import {
@@ -16,12 +19,8 @@ import type { GroupProtocolDefinition } from '../../src/protocol.js'
 import { createMemoryAnchorStore, type MemoryAnchorStore } from './anchor.js'
 import { createMemoryAppCursorStore, type MemoryAppCursorStore } from './app-cursor.js'
 import { createFakeCrypto, type FakeCrypto } from './fake-crypto.js'
-import { createMemoryCommitJournal, type MemoryCommitJournal } from './journal.js'
-import {
-  createMemoryGroupMLS,
-  decodeMemoryCommit,
-  type MemoryGroupMLS,
-} from './memory-group-mls.js'
+import { createMemoryHostDatabase, type MemoryHostDatabase } from './host-db.js'
+import { createMemoryGroupMLS, type MemoryGroupMLS } from './memory-group-mls.js'
 import { createMemoryAppOutbox } from './outbox.js'
 
 /**
@@ -38,26 +37,15 @@ export const chat = {
 
 export type Protocols = { chat: typeof chat }
 
-/**
- * The host's opaque journal blob, modelled: the serialized post-commit handle. For the
- * memory port that is just the commit bytes — a fixed value that can be adopted from
- * nothing but itself, which is exactly the property the real blob has.
- *
- * Adopting it is IDEMPOTENT, as the contract demands: a handle already past that commit's
- * epoch has adopted it, and a repeat is a no-op. Replay cannot tell an entry whose
- * `onAccepted` ran from one whose process died before it, and it runs both.
- */
-export function adoptJournalledBlob(mls: MemoryGroupMLS, blob: Uint8Array): void {
-  const parsed = decodeMemoryCommit(blob)
-  if (parsed == null || parsed.epoch !== mls.epoch()) return
-  mls.adopt(blob)
-}
-
 export type TestPeer = {
   peer: GroupPeer<Protocols>
   crypto: FakeCrypto
   mls: MemoryGroupMLS
-  journal: MemoryCommitJournal
+  database: MemoryHostDatabase
+  control: ControlStore
+  buildOptions: Map<string, LedgerCommitOptions>
+  initialState: Uint8Array
+  buildOperation: (op: Operation) => Promise<HostBuilt>
   anchorStore: MemoryAnchorStore
   appOutbox: AppOutbox
   appCursorStore: MemoryAppCursorStore
@@ -74,28 +62,15 @@ export type MakeMLSPeerOptions = {
   bodies?: Array<string>
   /** The members this handle's tree holds a leaf for. A responder seals only to those. */
   members?: Array<string>
-  /**
-   * A RESTART: a new peer over everything a dead one left behind — its handle, its crypto, its
-   * journal, its anchor store, its Welcome record — carried as one.
-   *
-   * It is one option and not five because a restart needs ALL of them and a host cannot be told
-   * which: hand-copying the list is how a piece goes missing, and each piece goes missing
-   * quietly. A journal left behind loses the commit whose process died in the acceptance window.
-   * An anchor store left behind re-seeds the anchor at the live epoch and partitions the peer
-   * from its own group — it derives its own topics, sees nobody, and nothing reports it. A cursor
-   * store left behind re-reads the app history from the hub's oldest retained frame, re-delivers
-   * it, and cannot see a pruned window. Naming the dead peer instead of its parts is what makes
-   * those unwritable.
-   *
-   * Any option below still overrides what this carries — a restart onto a DIFFERENT journal is a
-   * real scenario, and saying so explicitly is the point.
-   */
+  /** Restart over the durable database and app stores. */
   restartOf?: TestPeer
   /** Reuse an existing group state without a restart — a peer built over a handle made here. */
   mls?: MemoryGroupMLS
   crypto?: FakeCrypto
-  /** Reuse an existing journal — durability across a restart is exactly this. */
-  journal?: MemoryCommitJournal
+  database?: MemoryHostDatabase
+  control?: ControlStore
+  build?: (op: Operation) => Promise<HostBuilt>
+  adopt?: OperationDeps['adopt']
   /**
    * Reuse an existing anchor store. The store must OUTLIVE the peer: the anchor is persisted
    * state a rebooted handle can never re-export, so a restart that does not carry the store
@@ -111,28 +86,22 @@ export type MakeMLSPeerOptions = {
   /** The host's notice that an app topic's retention floor passed this peer's read position. */
   onAppWindowPruned?: (event: AppWindowPruned) => void
   onStrand?: (observation: StrandObservation) => void | Promise<void>
+  onOutcome?: (outcome: Outcome) => void | Promise<void>
   onRecovery?: (event: RecoveryEvent) => void | Promise<void>
   onAppDeliveryStalled?: (event: AppDeliveryStalled) => void
   onAppDeliveryResumed?: (event: AppDeliveryResumed) => void
   /** The host's notice that a subscribe was refused or exhausted its retries. */
   onSubscribeFailed?: (failure: SubscribeFailure) => void
-  /**
-   * The host's adoption of a journalled post-commit handle, overridden. The default adopts
-   * the blob and nothing else, which is the whole of what a `ledger` commit's handle carries.
-   * A `remove`'s handle carries one thing more — the member's leaf is already gone from it —
-   * and only a host that models that can tell an eviction that happened from one that did not.
-   */
-  adoptJournalled?: (blob: Uint8Array) => void
   welcomes?: Array<string>
   /** The host's own app-protocol handlers. Without them the app lane delivers to nobody. */
   handlers?: Record<string, unknown>
-  commitDeadlineMs?: number
+  operationTimeoutMs?: number
   /** The group's commit policy: a committer this refuses is well-formed and not applied. */
   acceptsCommitter?: (committerDID: string) => boolean
   recovery?: { timeoutMs?: number; getDelayMs?: () => number; deadlineMs?: number }
 }
 
-/** A member of the group at `epoch`, wired with a durable journal, as a host must be. */
+/** A member of the group at `epoch`, wired with durable control, as a host must be. */
 export function makeMLSPeer(
   hub: LogHub,
   localDID: string,
@@ -141,24 +110,54 @@ export function makeMLSPeer(
 ): TestPeer {
   const epoch = options.epoch ?? 1
   const restartOf = options.restartOf
-  const crypto = options.crypto ?? restartOf?.crypto ?? createFakeCrypto({ epoch, localDID })
+  const database = options.database ?? restartOf?.database ?? createMemoryHostDatabase()
+  const control =
+    options.control ?? (options.mls != null ? options.mls.control() : database.control(localDID))
+  const crypto =
+    options.crypto ?? restartOf?.crypto.restart() ?? createFakeCrypto({ epoch, localDID })
   const mls =
     options.mls ??
-    restartOf?.mls ??
     createMemoryGroupMLS({
+      hostDB: database,
+      storageID: localDID,
       recoverySecret,
       epoch,
-      // The member's own identity: it is what the commits it BUILDS are signed by, and what
-      // it compares a commit's author against. A double with no identity cannot model the
-      // one question this lane asks of a frame — "did I write this?".
       localDID,
       ...(options.bodies != null ? { bodies: options.bodies } : {}),
       ...(options.members != null ? { members: options.members } : {}),
       ...(options.acceptsCommitter != null ? { acceptsCommitter: options.acceptsCommitter } : {}),
       onAdvance: (e) => crypto.setEpoch(e),
     })
-  const journal = options.journal ?? restartOf?.journal ?? createMemoryCommitJournal()
-  const anchorStore = options.anchorStore ?? restartOf?.anchorStore ?? createMemoryAnchorStore()
+  const initialState = restartOf?.initialState ?? mls.serializeState()
+  const restore =
+    restartOf == null
+      ? Promise.resolve()
+      : database.loadState(localDID).then((state) => {
+          mls.restoreState(state ?? initialState)
+          crypto.setEpoch(mls.epoch())
+        })
+  const readEpoch = mls.readEpoch.bind(mls)
+  mls.readEpoch = async () => {
+    await restore
+    return readEpoch()
+  }
+  const exportSecret = crypto.exportSecret.bind(crypto)
+  crypto.exportSecret = async (label) => {
+    await restore
+    return exportSecret(label)
+  }
+  const buildOptions = new Map<string, LedgerCommitOptions>()
+  const buildOperation = async (op: Operation): Promise<HostBuilt> => {
+    const hooks = buildOptions.get(op.id)
+    await hooks?.onBuild?.()
+    hooks?.framedAt?.push(mls.epoch())
+    const built = await buildMemoryOperation(mls, op)
+    return hooks?.transform == null ? built : hooks.transform(built)
+  }
+  const anchorStore =
+    options.anchorStore ??
+    restartOf?.anchorStore ??
+    createMemoryAnchorStore({ backing: database.anchorStore(localDID) })
   const appCursorStore =
     options.appCursorStore ?? restartOf?.appCursorStore ?? createMemoryAppCursorStore()
   const appOutbox = options.appOutbox ?? restartOf?.appOutbox ?? createMemoryAppOutbox()
@@ -167,7 +166,16 @@ export function makeMLSPeer(
     hub,
     crypto,
     mls,
-    journal,
+    control,
+    build: options.build ?? buildOperation,
+    adopt:
+      options.adopt ??
+      ((blob, expected, write) => {
+        const id = write.changes.putOutcomes?.[0]?.opID
+        const hook = id == null ? undefined : buildOptions.get(id)?.onAdopt
+        const adopt = () => mls.adoptOperation(blob, expected, write)
+        return hook == null ? adopt() : hook(adopt)
+      }),
     anchorStore,
     appCursorStore,
     appOutbox,
@@ -178,6 +186,7 @@ export function makeMLSPeer(
     ...(options.onAppWindowPruned != null ? { onAppWindowPruned: options.onAppWindowPruned } : {}),
     ...(options.onStrand != null ? { onStrand: options.onStrand } : {}),
     ...(options.onRecovery != null ? { onRecovery: options.onRecovery } : {}),
+    ...(options.onOutcome != null ? { onOutcome: options.onOutcome } : {}),
     ...(options.onAppDeliveryStalled != null
       ? { onAppDeliveryStalled: options.onAppDeliveryStalled }
       : {}),
@@ -185,112 +194,158 @@ export function makeMLSPeer(
       ? { onAppDeliveryResumed: options.onAppDeliveryResumed }
       : {}),
     ...(options.onSubscribeFailed != null ? { onSubscribeFailed: options.onSubscribeFailed } : {}),
-    // The restart half of onAccepted, over the same blob — and idempotent, as it must be.
-    adoptJournalled: async (blob) => {
-      if (options.adoptJournalled != null) {
-        options.adoptJournalled(blob)
-        return
-      }
-      adoptJournalledBlob(mls, blob)
-    },
     localDID,
     protocols: { chat },
     handlers: { chat: options.handlers ?? {} } as never,
-    ...(options.commitDeadlineMs != null ? { commitDeadlineMs: options.commitDeadlineMs } : {}),
+    ...(options.operationTimeoutMs != null
+      ? { operationTimeoutMs: options.operationTimeoutMs }
+      : {}),
     ...(options.recovery != null ? { recovery: options.recovery } : {}),
   })
-  return { peer, crypto, mls, journal, anchorStore, appCursorStore, appOutbox, welcomes }
+  return {
+    peer,
+    crypto,
+    mls,
+    database,
+    control,
+    initialState,
+    buildOptions,
+    buildOperation,
+    anchorStore,
+    appCursorStore,
+    appOutbox,
+    welcomes,
+  }
 }
 
 export type LedgerCommitOptions = {
   /** Records the epoch each attempt framed at: a rebased retry must frame at the new one. */
   framedAt?: Array<number>
+  onAdopt?: (
+    adopt: () => Promise<'installed' | 'noop' | 'moved'>,
+  ) => Promise<'installed' | 'noop' | 'moved'>
+  revokes?: boolean
+  transform?: (built: HostBuilt) => HostBuilt | Promise<HostBuilt>
   /** Runs inside build(), before the commit is produced. */
   onBuild?: () => void | Promise<void>
 }
 
-/**
- * A host's `build()` for a ledger commit: produce a commit against the CURRENT handle and
- * adopt NOTHING. It is a closure over the live handle, so a retry after a rebase frames at
- * the epoch the rebase reached.
- */
+function operation(
+  member: TestPeer,
+  kind: OperationRequest['kind'],
+  body: { tokens: Array<string>; target?: string },
+  options: LedgerCommitOptions,
+): OperationRequest {
+  const id = crypto.randomUUID()
+  member.buildOptions.set(id, options)
+  return {
+    id,
+    kind,
+    revokes: options.revokes ?? kind === 'remove',
+    body: new TextEncoder().encode(JSON.stringify(body)),
+  }
+}
+
 export function buildLedgerCommit(
   member: TestPeer,
   tokens: Array<string>,
   options: LedgerCommitOptions = {},
-): () => Promise<PendingCommit> {
-  return async () => {
-    await options.onBuild?.()
-    options.framedAt?.push(member.mls.epoch())
-    const commit = member.mls.buildCommit(tokens)
-    return {
-      commit,
-      bodies: tokens,
-      kind: 'ledger',
-      journal: commit,
-      onAccepted: async () => {
-        adoptJournalledBlob(member.mls, commit)
-      },
-    }
-  }
+): OperationRequest {
+  return operation(member, 'ledger', { tokens }, options)
 }
-
-/**
- * A host's `build()` for a remove. The eviction happens when — and only when — the host
- * adopts the post-commit handle, which it does in `onAccepted` and nowhere else. A remove
- * that never lands therefore leaves the member exactly where they were, and the notice the
- * peer hands back is the ONLY thing that tells the admin so.
- *
- * The Remove rides the COMMIT, so the author adopting it and every member applying it from the
- * log drop the same leaf. An eviction the author kept to itself would be one no other member ever
- * enacted — and a test built on one could only ever exercise an author whose roster nobody else
- * agreed had changed.
- */
 export function buildRemoveCommit(
   member: TestPeer,
   victimDID: string,
   options: LedgerCommitOptions = {},
-): () => Promise<PendingCommit> {
-  return async () => {
-    await options.onBuild?.()
-    options.framedAt?.push(member.mls.epoch())
-    const commit = member.mls.buildCommit([], { removes: [victimDID] })
-    return {
-      commit,
-      bodies: [],
-      kind: 'remove',
-      journal: commit,
-      onAccepted: async () => {
-        adoptJournalledBlob(member.mls, commit)
-      },
-    }
-  }
+): OperationRequest {
+  return operation(member, 'remove', { tokens: [], target: victimDID }, options)
 }
-
-/**
- * A host's `build()` for an invite. Its Welcome lives in `onAccepted` and nowhere else —
- * it is not in `bodies`, and the peer has no way to produce one. The Add rides the commit, as a
- * Remove does: every member reads the new leaf out of the frame, and the author out of the
- * post-commit handle it adopts.
- */
 export function buildInviteCommit(
   member: TestPeer,
   inviteeDID: string,
   options: LedgerCommitOptions = {},
-): () => Promise<PendingCommit> {
-  return async () => {
-    await options.onBuild?.()
-    options.framedAt?.push(member.mls.epoch())
-    const commit = member.mls.buildCommit([], { adds: [inviteeDID] })
-    return {
-      commit,
-      bodies: [],
-      kind: 'invite',
-      journal: commit,
-      onAccepted: async () => {
-        adoptJournalledBlob(member.mls, commit)
-        member.welcomes.push(inviteeDID)
-      },
-    }
+): OperationRequest {
+  return operation(member, 'invite', { tokens: [], target: inviteeDID }, options)
+}
+
+export async function buildMemoryOperation(mls: MemoryGroupMLS, op: Operation): Promise<HostBuilt> {
+  const body = JSON.parse(new TextDecoder().decode(op.body)) as {
+    tokens: Array<string>
+    target?: string
   }
+  if (op.kind === 'invite' && body.target != null && mls.leaves().includes(body.target))
+    throw new OperationRejectedError('Already a member')
+  if (op.kind === 'remove' && body.target != null && !mls.leaves().includes(body.target))
+    throw new OperationRejectedError('Already removed')
+  const before = mls.serializeState()
+  const epoch = mls.epoch()
+  const authenticatorBefore = mls.authenticator()
+  const commit = mls.buildCommit(body.tokens, {
+    ...(op.kind === 'invite' && body.target != null ? { adds: [body.target] } : {}),
+    ...(op.kind === 'remove' && body.target != null ? { removes: [body.target] } : {}),
+  })
+  mls.adopt(commit)
+  const journal = mls.serializeState()
+  mls.restoreState(before)
+  return {
+    commit,
+    bodies: body.tokens,
+    journal,
+    epoch,
+    authenticatorBefore,
+    lineage: 0,
+    digest: digestAppliedCommit(commit),
+    welcome:
+      op.kind === 'invite' && body.target != null
+        ? { bytes: new TextEncoder().encode(body.target), recipients: [body.target] }
+        : null,
+  }
+}
+
+export function memoryOperationHost(mls: MemoryGroupMLS) {
+  return {
+    control: mls.control(),
+    build: (op: Operation) => buildMemoryOperation(mls, op),
+    adopt: (
+      blob: Uint8Array,
+      expected: Parameters<OperationDeps['adopt']>[1],
+      write: Parameters<OperationDeps['adopt']>[2],
+    ) => mls.adoptOperation(blob, expected, write),
+  }
+}
+export function intent(request: OperationRequest): Operation {
+  return { ...request, seq: 1, enqueuedAt: Date.now(), stage: 'intent' }
+}
+
+export async function seedBuiltOperation(
+  member: TestPeer,
+  request: OperationRequest,
+  acceptedAs?: string,
+) {
+  const op = intent(request)
+  const built = await member.buildOperation(op)
+  const { encodeHandshakeFrame, HANDSHAKE_KIND } = await import('../../src/handshake.js')
+  const { encodeCommitFrame } = await import('../../src/commit-frame.js')
+  const { encodeLedgerEntries } = await import('../../src/ledger-entries.js')
+  const { sha256 } = await import('@noble/hashes/sha2.js')
+  const { toB64U } = await import('@sozai/codec')
+  const { asLogPosition } = await import('../../src/cursor.js')
+  const sealed = await member.crypto.sealEntries(encodeLedgerEntries(built.bodies))
+  const payload = encodeHandshakeFrame(
+    HANDSHAKE_KIND.commit,
+    encodeCommitFrame(built.commit, sealed.sealed),
+  )
+  const saved = {
+    ...built,
+    payload,
+    payloadDigest: toB64U(sha256(payload)),
+    publishID: crypto.randomUUID(),
+    expectedHead: null,
+  }
+  const row: Operation =
+    acceptedAs == null
+      ? { ...op, stage: 'built', built: saved }
+      : { ...op, stage: 'accepted', built: saved, acceptedAs: asLogPosition(acceptedAs) }
+  await member.control.apply({ putOperations: [row] }, crypto.randomUUID())
+  return row
 }
