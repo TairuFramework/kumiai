@@ -15,6 +15,8 @@
  */
 import { describe, expect, test } from 'vitest'
 
+import type { ConformanceAdoptionWrite } from './control-store.js'
+
 /** The `CommitHeader` of `@kumiai/rpc`, re-declared structurally. */
 export type ConformanceCommitHeader = {
   epoch: number
@@ -24,6 +26,12 @@ export type ConformanceCommitHeader = {
 
 /** The `CommitContext` of `@kumiai/rpc`, re-declared structurally. */
 export type ConformanceCommitContext = {
+  /** Suite writes omit positions so host-specific position brands remain assignable. */
+  adoption?: (staged: {
+    epochAfter: number
+    removed: boolean
+    epochAuthenticator: Uint8Array
+  }) => ConformanceAdoptionWrite<never>
   senderDID?: string
   resolveLedgerEntries?: (ids: Array<string>) => Promise<Array<string>>
 }
@@ -54,6 +62,7 @@ export type ConformanceSendAdmission =
   | { epoch: number; admissible: true }
   | { epoch: number; admissible: false; reason: 'lapsed' }
 export type ConformanceProcessCommitResult = {
+  applied: boolean
   advanced: boolean
   epochBefore: number
   epochAfter: number
@@ -226,6 +235,62 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
   }
 
   describe(`GroupMLS conformance — ${label}`, () => {
+    test('adoption factories see the staged epoch and self-removal before saving', async () => {
+      await withGroup(1, 'adoption-staged', async (group) => {
+        const member = memberAt(group.members, 0)
+        let calls = 0
+        const before = await member.mls.readEpoch()
+        const commit = await group.buildCommit()
+        const adoption = (staged: {
+          epochAfter: number
+          removed: boolean
+          epochAuthenticator: Uint8Array
+        }) => {
+          calls++
+          expect(staged.epochAfter).toBe(before + 1)
+          expect(staged.removed).toBe(false)
+          expect(staged.epochAuthenticator.length).toBeGreaterThan(0)
+          return { mutationID: crypto.randomUUID(), changes: {} }
+        }
+        await member.mls.processCommit(commit.commit, { ...commit.context, adoption })
+        expect(calls).toBe(1)
+        await member.mls.processCommit(commit.commit, { ...commit.context, adoption })
+        expect(calls).toBe(1)
+        const removal = await group.buildCommit({ removes: 0 })
+        await member.mls.processCommit(removal.commit, {
+          ...removal.context,
+          adoption: (staged) => {
+            calls++
+            expect(staged.epochAfter).toBe(before + 1)
+            expect(staged.removed).toBe(true)
+            return { mutationID: crypto.randomUUID(), changes: {} }
+          },
+        })
+        expect(calls).toBe(2)
+      })
+    })
+    test('processCommit reports applied separately from epoch advancement', async () => {
+      await withGroup(2, 'process-commit-applied', async (group) => {
+        const member = memberAt(group.members, 0)
+        const advance = await group.buildCommit()
+        expect(await member.mls.processCommit(advance.commit, advance.context)).toMatchObject({
+          applied: true,
+          advanced: true,
+        })
+        expect(await member.mls.processCommit(advance.commit, advance.context)).toMatchObject({
+          applied: false,
+          advanced: false,
+        })
+        const removal = await group.buildCommit({ removes: 0 })
+        const epoch = await member.mls.readEpoch()
+        expect(await member.mls.processCommit(removal.commit, removal.context)).toMatchObject({
+          applied: true,
+          advanced: false,
+          epochBefore: epoch,
+          epochAfter: epoch,
+        })
+      })
+    })
     test('send admission is synchronous and follows only accepted epoch advances', async () => {
       await withGroup(1, 'send-admission', async (group) => {
         const member = memberAt(group.members, 0)
@@ -253,21 +318,25 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const member = memberAt(group.members, index)
           expect(await member.mls.readEpoch()).toBe(epoch)
           expect(await member.mls.processCommit(future.commit, future.context)).toEqual({
+            applied: false,
             advanced: false,
             epochBefore: epoch,
             epochAfter: epoch,
           })
           expect(await member.mls.processCommit(first.commit, first.context)).toEqual({
+            applied: true,
             advanced: true,
             epochBefore: epoch,
             epochAfter: epoch + 1,
           })
           expect(await member.mls.processCommit(first.commit, first.context)).toEqual({
+            applied: false,
             advanced: false,
             epochBefore: epoch + 1,
             epochAfter: epoch + 1,
           })
           expect(await member.mls.processCommit(new Uint8Array([0]), {})).toEqual({
+            applied: false,
             advanced: false,
             epochBefore: epoch + 1,
             epochAfter: epoch + 1,

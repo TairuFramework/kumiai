@@ -295,7 +295,12 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
         }
       })
       if (!eligible.eligible) {
-        return { advanced: false, epochBefore: eligible.epoch, epochAfter: eligible.epoch }
+        return {
+          applied: false,
+          advanced: false,
+          epochBefore: eligible.epoch,
+          epochAfter: eligible.epoch,
+        }
       }
       const ids = readCommitEntryIDs(commit)
       const tokens = ids.length === 0 ? [] : await context.resolveLedgerEntries?.(ids)
@@ -331,14 +336,16 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
             throw ignored
           }
           return {
+            applied: result.applied,
             advanced: result.advanced,
             epochBefore: result.epochBefore,
             epochAfter: result.epochAfter,
           }
-        })
+        }, context.adoption)
       } catch (error) {
         if (error === ignored && refusedEpoch != null)
           return {
+            applied: false,
             advanced: false,
             epochBefore: refusedEpoch,
             epochAfter: refusedEpoch,

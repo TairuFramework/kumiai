@@ -73,7 +73,7 @@ test('an epoch move during pre-resolution reports the new epoch without applying
       senderDID: group.committer.identity.id,
       resolveLedgerEntries: resolver,
     }),
-  ).resolves.toEqual({ advanced: false, epochBefore: moved, epochAfter: moved })
+  ).resolves.toEqual({ applied: false, advanced: false, epochBefore: moved, epochAfter: moved })
   expect(member.handle).toBe(group.committer.handle)
 })
 

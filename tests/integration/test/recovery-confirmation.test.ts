@@ -651,7 +651,13 @@ test.each(['policy', 'invalid'] as const)(
     const process = s.aliceMLS.processCommit.bind(s.aliceMLS)
     vi.spyOn(s.aliceMLS, 'processCommit').mockImplementation(async () => {
       const epoch = await s.aliceMLS.readEpoch()
-      return { advanced: false, epochBefore: epoch, epochAfter: epoch, refusal: reason }
+      return {
+        applied: false,
+        advanced: false,
+        epochBefore: epoch,
+        epochAfter: epoch,
+        refusal: reason,
+      }
     })
     expect(await s.bob.recover()).toEqual({ advanced: false, reenact: [] })
     expect(s.bobGroup()).toBe(s.initial)

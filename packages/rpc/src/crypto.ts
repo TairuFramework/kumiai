@@ -1,3 +1,5 @@
+import type { AdoptionWriteFactory } from './control/types.js'
+
 /**
  * Consumer-supplied MLS crypto port: epoch number, epoch-bound domain-separated exported secrets
  * (`exportSecret`), byte-level encrypt/decrypt (`wrap`/`unwrap`), and the ledger-entry seal
@@ -156,6 +158,8 @@ export type RecoveryVerdict = {
 )
 export type OpenedRecoveryVerdict = { signer: string; verdict: RecoveryVerdict }
 export type ProcessCommitResult = {
+  /** The state was adopted and saved, including self-removal without an epoch advance. */
+  applied: boolean
   advanced: boolean
   epochBefore: number
   epochAfter: number
@@ -328,6 +332,8 @@ export type CommitHeader = {
 
 /** Context delivered alongside a received Commit on the raw handshake lane. */
 export type CommitContext = {
+  /** Built from the staged state and committed with the adoption's state save. */
+  adoption?: AdoptionWriteFactory
   /**
    * The hub-authenticated publisher of the frame — the transport sender, NOT the
    * MLS committer. Auxiliary (logging, rate-limiting), not an authorization boundary.
@@ -446,16 +452,16 @@ export type GroupMLS = {
    */
   readCommitHeader(commit: Uint8Array): Promise<CommitHeader | null>
   /**
-   * Apply a received Commit and durably persist the result, returning whether the epoch advanced
-   * (the signal to resync the app lane). Must be durable before it resolves.
+   * Apply a received Commit and durably persist the result with `context.adoption` when supplied.
+   * Reports adoption separately from epoch advancement: self-removal is applied without advancing.
    *
-   * A frame it cannot apply has `advanced: false` and equal before/after epochs, NEVER a throw:
+   * A frame it cannot apply has `applied: false`, `advanced: false` and equal before/after epochs:
    * a throw leaves the cursor put
    * and re-reads the frame, wedging the lane on it forever (a late joiner would wedge on its own
    * add-commit, the first frame it reads). A Commit at another epoch, or one policy refuses, is
    * also `{ advanced: false }`.
    *
-   * Throws for exactly ONE outcome: a Commit it SHOULD apply but can't, because the ledger
+   * Storage and resolver failures propagate without adopting state. Also throws when the ledger
    * entries it names won't resolve from the Commit's own frame — the only place they ride. The
    * lane does NOT retry (no member at that epoch could resolve them either) and treats it as
    * POISON: cursor advances, never re-read. This distinguishes that case from a port that broke

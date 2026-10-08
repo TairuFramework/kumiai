@@ -1,5 +1,10 @@
 import type { GroupHandle } from '@kumiai/mls'
-import type { PendingAppFrame, SendAdmission } from '@kumiai/rpc'
+import type {
+  AdoptionWrite,
+  AdoptionWriteFactory,
+  PendingAppFrame,
+  SendAdmission,
+} from '@kumiai/rpc'
 
 type PersistOpened = (stagedState: Uint8Array, record: PendingAppFrame) => Promise<void>
 
@@ -11,8 +16,9 @@ export type HandleAccess = {
   read<TValue>(fn: (handle: GroupHandle) => TValue | Promise<TValue>): Promise<TValue>
   mutate<TValue>(
     fn: (handle: GroupHandle, persist: (handle: GroupHandle) => Promise<void>) => Promise<TValue>,
+    adoption?: AdoptionWriteFactory,
   ): Promise<TValue>
-  replace(next: GroupHandle): Promise<void>
+  replace(next: GroupHandle, adoption?: AdoptionWriteFactory): Promise<void>
   open<TValue>(
     fn: (handle: GroupHandle, persistOpened: PersistOpened) => Promise<TValue>,
     persistOpened: PersistOpened,
@@ -22,7 +28,7 @@ export type HandleAccess = {
 export type SimpleHandleAccessParams = {
   handle: () => GroupHandle
   adopt: (next: GroupHandle) => void | Promise<void>
-  persist?: (handle: GroupHandle) => void | Promise<void>
+  persist?: (handle: GroupHandle, write?: AdoptionWrite) => void | Promise<void>
 }
 
 export function simpleHandleAccess(params: SimpleHandleAccessParams): HandleAccess {
@@ -41,30 +47,37 @@ export function simpleHandleAccess(params: SimpleHandleAccessParams): HandleAcce
       release()
     }
   }
-  const save = async (handle: GroupHandle): Promise<void> => {
-    await params.persist?.(handle)
+  const save = async (handle: GroupHandle, adoption?: AdoptionWriteFactory): Promise<void> => {
+    const write = adoption?.({
+      epochAfter: Number(handle.epoch),
+      removed: !handle
+        .listMembers()
+        .some((member) => member.leafIndex === handle.state.privatePath.leafIndex),
+      epochAuthenticator: handle.state.keySchedule.epochAuthenticator.slice(),
+    })
+    await params.persist?.(handle, write)
   }
 
   return {
     epoch: () => publishedAdmission.epoch,
     admission: () => publishedAdmission,
     read: (fn) => serialise(async () => await fn(params.handle())),
-    mutate: (fn) =>
+    mutate: (fn, adoption) =>
       serialise(async () => {
         const handle = params.handle()
         let saved = false
         const persist = async (current: GroupHandle): Promise<void> => {
-          await save(current)
+          await save(current, adoption)
           saved = true
         }
         const result = await fn(handle, persist)
-        if (!saved) await save(handle)
+        if (!saved) await save(handle, adoption)
         publishedAdmission = handle.sendAdmission()
         return result
       }),
-    replace: (next) =>
+    replace: (next, adoption) =>
       serialise(async () => {
-        await save(next)
+        await save(next, adoption)
         await params.adopt(next)
         publishedAdmission = next.sendAdmission()
         next.confirmAdopted()

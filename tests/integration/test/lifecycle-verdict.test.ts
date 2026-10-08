@@ -376,6 +376,7 @@ test('the real commit port propagates binding and lapse refusals without advanci
       binding,
     })
     expect(await s.mls.processCommit(commit, {})).toEqual({
+      applied: false,
       advanced: false,
       epochBefore: before,
       epochAfter: before,

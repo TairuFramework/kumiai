@@ -5,7 +5,12 @@ import {
   type GroupOptions,
   restoreGroup,
 } from '@kumiai/mls'
-import type { PendingAppFrame } from '@kumiai/rpc'
+import {
+  type AdoptionWrite,
+  applyChanges,
+  type ControlSnapshot,
+  type PendingAppFrame,
+} from '@kumiai/rpc'
 
 import type { HandleAccess } from '../../src/access.js'
 import type { RealMember } from './real-group.js'
@@ -17,7 +22,13 @@ export class RevisionConflictError extends Error {
   }
 }
 
-export type StoredRow = { state: Uint8Array; ledger: Array<string>; revision: number }
+export type StoredRow = {
+  state: Uint8Array
+  ledger: Array<string>
+  revision: number
+  control: ControlSnapshot
+  mutationID: string | null
+}
 
 /**
  * A host's durable group row plus pending table. Every write is conditional on the revision the
@@ -31,6 +42,7 @@ export type TransactionalStore = {
     state: Uint8Array,
     ledger: Array<string>,
     record?: PendingAppFrame,
+    write?: AdoptionWrite,
   ): Promise<void>
   records: Map<string, PendingAppFrame>
   /** Resolves once every write issued so far has settled: a read after it sees them. */
@@ -48,7 +60,21 @@ export type TransactionalStore = {
 
 export function createTransactionalStore(handle: GroupHandle): TransactionalStore {
   return storeOver(
-    { state: encodeClientState(handle.state), ledger: handle.ledgerTokens, revision: 0 },
+    {
+      state: encodeClientState(handle.state),
+      ledger: handle.ledgerTokens,
+      revision: 0,
+      mutationID: null,
+      control: {
+        operations: [],
+        rejoin: null,
+        outcomes: [],
+        welcomes: [],
+        applied: [],
+        responses: [],
+        cursor: null,
+      },
+    },
     new Map(),
   )
 }
@@ -67,19 +93,25 @@ function storeOver(initial: StoredRow, records: Map<string, PendingAppFrame>): T
       await tail
       return storeOver({ ...row, state: row.state.slice() }, records)
     },
-    save: (expected, state, ledger, record) => {
-      const write = tail.then(async () => {
+    save: (expected, state, ledger, record, write) => {
+      const saving = tail.then(async () => {
         await store.beforeWrite?.()
         if (row.revision !== expected) throw new RevisionConflictError(expected, row.revision)
         // One transaction: the state row and the pending row together. A duplicate frame ID keeps
         // its first record; the key is still consumed once, by this state.
-        row = { state: state.slice(), ledger, revision: expected + 1 }
+        row = {
+          state: state.slice(),
+          ledger,
+          revision: expected + 1,
+          control: write == null ? row.control : applyChanges(row.control, write.changes),
+          mutationID: write?.mutationID ?? row.mutationID,
+        }
         if (record != null && !store.records.has(record.frame.id)) {
           store.records.set(record.frame.id, record)
         }
       })
-      tail = write.catch(() => {})
-      return write
+      tail = saving.catch(() => {})
+      return saving
     },
   }
   return store
@@ -150,26 +182,55 @@ export async function createTransactionalAccess(
     epoch: () => publishedAdmission.epoch,
     admission: () => publishedAdmission,
     read: (fn) => locked(async () => await fn(live)),
-    mutate: (fn) =>
+    mutate: (fn, adoption) =>
       locked(async () => {
         await store.settled()
         const row = store.snapshot()
         const working = await restore(row)
+        const save = async (current: GroupHandle) => {
+          const write = adoption?.({
+            epochAfter: Number(current.epoch),
+            removed: !current
+              .listMembers()
+              .some((entry) => entry.leafIndex === current.state.privatePath.leafIndex),
+            epochAuthenticator: current.state.keySchedule.epochAuthenticator.slice(),
+          })
+          await store.save(
+            row.revision,
+            encodeClientState(current.state),
+            current.ledgerTokens,
+            undefined,
+            write,
+          )
+        }
         let saved = false
         const result = await fn(working, async (current) => {
-          await store.save(row.revision, encodeClientState(current.state), current.ledgerTokens)
+          await save(current)
           saved = true
         })
         if (!saved) {
-          await store.save(row.revision, encodeClientState(working.state), working.ledgerTokens)
+          await save(working)
         }
         publish(working, row.revision + 1)
         return result
       }),
-    replace: (next) =>
+    replace: (next, adoption) =>
       locked(async () => {
         const row = store.snapshot()
-        await store.save(row.revision, encodeClientState(next.state), next.ledgerTokens)
+        const write = adoption?.({
+          epochAfter: Number(next.epoch),
+          removed: !next
+            .listMembers()
+            .some((entry) => entry.leafIndex === next.state.privatePath.leafIndex),
+          epochAuthenticator: next.state.keySchedule.epochAuthenticator.slice(),
+        })
+        await store.save(
+          row.revision,
+          encodeClientState(next.state),
+          next.ledgerTokens,
+          undefined,
+          write,
+        )
         publish(next, row.revision + 1)
         next.confirmAdopted()
       }),

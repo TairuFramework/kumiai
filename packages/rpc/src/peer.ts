@@ -1494,7 +1494,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
               port,
               ratchet: async () => {
                 if (disposed) {
-                  return { advanced: false, epochBefore: framedEpoch, epochAfter: framedEpoch }
+                  return {
+                    applied: false,
+                    advanced: false,
+                    epochBefore: framedEpoch,
+                    epochAfter: framedEpoch,
+                  }
                 }
                 const result = await port.processCommit(commitFrame.commit, {
                   senderDID: message.senderDID,
