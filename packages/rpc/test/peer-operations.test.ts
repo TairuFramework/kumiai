@@ -1,5 +1,5 @@
 import { HeadMismatchError } from '@kumiai/hub-protocol'
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 import { OperationOutcomeError } from '../src/errors.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
@@ -218,6 +218,66 @@ describe('durable peer operations', () => {
     await waitFor(async () => (await restarted.peer.outcomes()).length === 1)
     expect(await restarted.peer.outcomes()).toEqual([expect.objectContaining({ kind: 'landed' })])
     await restarted.peer.dispose()
+  })
+
+  test('restart loses an absent operation past its original positive deadline', async () => {
+    let now = 1000
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now)
+    const hub = new FakeHub()
+    const database = createMemoryHostDatabase()
+    const seed = makeMLSPeer(hub, 'alice', secret, { database, operationTimeoutMs: 1000 })
+    let restarted: ReturnType<typeof makeMLSPeer> | undefined
+    try {
+      await seed.peer.resync()
+      database.seam('after-apply', () => {
+        database.seam('after-apply', () => {
+          void seed.peer.dispose()
+        })
+      })
+      const request = buildLedgerCommit(seed, [])
+      await seed.peer.enqueue(request)
+      await waitFor(async () => (await seed.control.load()).operations[0]?.stage === 'built')
+      await seed.peer.dispose()
+      await seed.peer.drained()
+      expect((await seed.control.load()).operations[0]).toMatchObject({
+        id: request.id,
+        stage: 'built',
+        enqueuedAt: 1000,
+      })
+      now = 2001
+      let mismatched = false
+      const view = {
+        publish: async (params: Parameters<FakeHub['publish']>[0]) => {
+          if (params.topicID === commitTopic(secret) && !mismatched) {
+            mismatched = true
+            throw new HeadMismatchError('Race lost')
+          }
+          return hub.publish(params)
+        },
+        subscribe: hub.subscribe.bind(hub),
+        unsubscribe: hub.unsubscribe.bind(hub),
+        receive: hub.receive.bind(hub),
+        fetchTopic: hub.fetchTopic.bind(hub),
+      }
+      restarted = makeMLSPeer(view, 'alice', secret, {
+        restartOf: seed,
+        operationTimeoutMs: 1000,
+      })
+      const peer = restarted.peer
+      await waitFor(async () => (await peer.outcomes()).length === 1)
+      expect(await peer.outcomes()).toEqual([
+        expect.objectContaining({ id: request.id, opID: request.id, kind: 'lost', at: 2001 }),
+      ])
+      expect((await restarted.control.load()).operations).toEqual([])
+      expect(restarted.mls.epoch()).toBe(1)
+      expect(hub.published.filter((row) => row.topicID === commitTopic(secret))).toEqual([])
+    } finally {
+      await seed.peer.dispose()
+      await seed.peer.drained()
+      await restarted?.peer.dispose()
+      await restarted?.peer.drained()
+      clock.mockRestore()
+    }
   })
 
   test('commit rejects with the durable lost outcome', async () => {

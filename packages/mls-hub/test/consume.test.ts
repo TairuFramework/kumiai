@@ -124,6 +124,37 @@ describe('consume', () => {
     }
   })
 
+  test.each([null, { groupID: 'group:other' }])(
+    'source rejects an ambiguous consume with receipt %j',
+    async (receipt) => {
+      const hub = createTestHub()
+      try {
+        const inner = createMemoryKeyPackagePoolStore()
+        await inner.put(hub.identity.id, record)
+        if (receipt != null) await inner.consume(record.ref, receipt.groupID)
+        const error = new Error('commit acknowledgement lost')
+        error.name = 'StorageOutcomeUnknownError'
+        const pool = createKeyPackagePool({
+          sourceID: 'ordinary',
+          identity: hub.identity,
+          client: hub.client,
+          store: {
+            ...inner,
+            async consume() {
+              throw error
+            },
+          },
+        })
+
+        await expect(pool.consume(record.ref, 'group:consumed')).rejects.toBe(error)
+        expect(await pool.receipt(record.ref)).toEqual(receipt)
+        expect(await inner.list(hub.identity.id)).toEqual(receipt == null ? [record] : [])
+      } finally {
+        await hub.dispose()
+      }
+    },
+  )
+
   test('receipted ref is alreadyJoined without decrypt', async () => {
     const hub = createTestHub()
     try {

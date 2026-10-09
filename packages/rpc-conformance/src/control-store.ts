@@ -9,7 +9,7 @@ export type ConformanceControlSnapshot<Position extends string = string> = {
   welcomes: Array<ConformanceWelcomeObligation>
   applied: Array<ConformanceAppliedCommit> // newest 64 epochs
   responses: Array<ConformanceExternalResponse<Position>> // responder outcomes, newest 64 epochs
-  cursor: ConformanceCommitCursor<Position> | null // {position, epoch, stranded?, fork?}
+  cursor: ConformanceControlCommitCursor<Position> | null // {position, epoch, stranded?, fork?}
 }
 /**
  * Durable with the strand. A detected conflict, not a proven divergence point: the framed epoch is
@@ -34,7 +34,7 @@ export type ConformanceControlChanges<Position extends string = string> = {
   deleteAppliedBelow?: number // drops rows at epoch < n, before puts
   putResponses?: Array<ConformanceExternalResponse<Position>>
   deleteResponsesBelow?: number // by `epoch`
-  cursor?: ConformanceCommitCursor<Position> | null
+  cursor?: ConformanceControlCommitCursor<Position> | null
 }
 /** Control changes committed with an adoption's state save (D5). */
 export type ConformanceAdoptionWrite<Position extends string = string> = {
@@ -158,7 +158,7 @@ export type ConformanceExternalResponse<Position extends string = string> = {
   reason?: ConformanceRecoveryRefusal
   epochAfter?: number
 }
-export type ConformanceCommitCursor<Position extends string = string> = {
+export type ConformanceControlCommitCursor<Position extends string = string> = {
   position: Position | null
   epoch: number
   stranded?: true
@@ -255,7 +255,7 @@ export function testControlStoreConformance(params: ControlStoreConformanceParam
   describe('ControlStore conformance', () => {
     test('an initial strand persists without inventing a processed log position', async () => {
       const host = await params.open()
-      const cursor: ConformanceCommitCursor = {
+      const cursor: ConformanceControlCommitCursor = {
         position: null,
         epoch: 4,
         stranded: true,

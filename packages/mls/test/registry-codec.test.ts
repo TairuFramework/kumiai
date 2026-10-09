@@ -126,6 +126,23 @@ describe('device registry codec', () => {
     expect(() => decodeDeviceRegistry(bytes)).toThrow('unsupported device-registry version 2')
   })
 
+  test.each(['devices', 'controllers'] as const)('rejects duplicate %s keys', (field) => {
+    const registry = populatedRegistry()
+    const devices = [...registry.devices]
+    const controllers = [...registry.controllers]
+    const body = {
+      devices: field === 'devices' ? [...devices, ...devices.slice(0, 1)] : devices,
+      controllers:
+        field === 'controllers' ? [...controllers, ...controllers.slice(0, 1)] : controllers,
+    }
+    const encoded = new TextEncoder().encode(JSON.stringify(body))
+    const bytes = new Uint8Array(encoded.length + 1)
+    bytes[0] = 1
+    bytes.set(encoded, 1)
+
+    expect(() => decodeDeviceRegistry(bytes)).toThrow(DeviceRegistryCodecError)
+  })
+
   test.each([
     null,
     {},

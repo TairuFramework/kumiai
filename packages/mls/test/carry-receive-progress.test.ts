@@ -17,12 +17,13 @@ async function fixture(groupID: string) {
   const alice = randomIdentity()
   const bob = randomIdentity()
   const tokens = new Map<string, string>()
-  const resolveLedgerEntries = async (ids: Array<string>) =>
-    ids.map((id) => {
+  const resolveLedgerEntries = async (ids: Array<string>) => {
+    return ids.map((id) => {
       const token = tokens.get(id)
       if (token == null) throw new Error(`unknown ledger entry ${id}`)
       return token
     })
+  }
   const buildInvite = async (group: GroupHandle, recipientDID: string) => {
     const { invite } = await mls.createInvite({
       group,
