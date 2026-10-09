@@ -1,4 +1,4 @@
-import { encodeMultibase } from '@kokuin/token'
+import { encodeMultibase, normalizeDID } from '@kokuin/token'
 import { x25519 } from '@noble/curves/ed25519.js'
 import { hmac } from '@noble/hashes/hmac.js'
 import { sha256 } from '@noble/hashes/sha2.js'
@@ -437,6 +437,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   const acceptsCommitter = options.acceptsCommitter ?? (() => true)
   const serveLedger = options.serveLedger ?? ((ledger: Array<string>) => ledger)
   let recoveryAuthenticator: string | undefined
+  let epochIdentity: string | undefined
   let epoch = options.epoch ?? 0
   let commits = 0
   let seen = 0
@@ -531,6 +532,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
 
   const advance = (to: number): void => {
     recoveryAuthenticator = undefined
+    epochIdentity = undefined
     epoch = to
     options.onAdvance?.(epoch)
   }
@@ -603,7 +605,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     return info
   }
 
-  const enact = (parsed: MemoryCommit): void => {
+  const enact = (parsed: MemoryCommit, commit: Uint8Array): void => {
+    const nextIdentity = toB64U(sha256(concatBytes(authenticator(), commit)))
     ledger.push(...parsed.entryIDs)
     // The head is the committer's, not this receiver's: a handle whose ledger is incomplete
     // must stay visibly incomplete rather than re-anchor on its own truncated fold. A commit
@@ -627,6 +630,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       slotAdd(parsed.committerDID)
     }
     advance(epoch + 1)
+    epochIdentity = nextIdentity
   }
 
   const serializeState = (): Uint8Array =>
@@ -638,6 +642,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         ledgerHead,
         bodies: [...bodies],
         recoveryAuthenticator,
+        epochIdentity,
       }),
     )
   const restoreState = (state: Uint8Array): void => {
@@ -648,6 +653,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       ledgerHead: string
       bodies: Array<[string, string]>
       recoveryAuthenticator?: string
+      epochIdentity?: string
     }
     slots = new Map(value.slots)
     ledger = value.ledger
@@ -655,9 +661,11 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     bodies = new Map(value.bodies)
     advance(value.epoch)
     recoveryAuthenticator = value.recoveryAuthenticator
+    epochIdentity = value.epochIdentity
   }
-  const authenticator = (): Uint8Array =>
-    recoveryAuthenticator == null
+  const authenticator = (): Uint8Array => {
+    const identity = recoveryAuthenticator ?? epochIdentity
+    return identity == null
       ? sha256(
           concatBytes(
             recoverySecret,
@@ -665,7 +673,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
             fromUTF(JSON.stringify({ epoch, slots: [...slots], ledgerHead })),
           ),
         )
-      : fromB64U(recoveryAuthenticator)
+      : fromB64U(identity)
+  }
 
   const ledgerTokens = (): Array<string> =>
     ledger.flatMap((id) => {
@@ -720,6 +729,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       },
       judgeVerdict: ({ signer, verdict }) => {
         if (
+          (localDID != null && normalizeDID(signer) === normalizeDID(localDID)) ||
           tuple == null ||
           !isRecoveryVerdict(verdict) ||
           verdict.groupID !== groupID ||
@@ -882,7 +892,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       if (parsed == null || parsed.epoch !== epoch) {
         throw new Error("adopt: not a commit framed at this member's current epoch")
       }
-      enact(parsed)
+      enact(parsed, commit)
     },
     evict(did: string) {
       slotRemoveDID(did)
@@ -1014,6 +1024,9 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         const removed = localDID != null && ![...nextSlots.values()].includes(localDID)
         // Self-removal adopts the tree and ledger but supplies no successor epoch secrets.
         const epochAfter = removed ? epoch : epoch + 1
+        const nextIdentity = toB64U(
+          removed ? authenticator() : sha256(concatBytes(authenticator(), commit)),
+        )
         const nextLedger = [...ledger, ...parsed.entryIDs]
         const nextHead = parsed.head ?? ledgerHead
         const state = fromUTF(
@@ -1023,12 +1036,13 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
             ledger: nextLedger,
             ledgerHead: nextHead,
             bodies: [...nextBodies],
+            epochIdentity: nextIdentity,
           }),
         )
         const write = context.adoption?.({
           epochAfter,
           removed,
-          epochAuthenticator: sha256(concatBytes(recoverySecret, fromUTF(groupID), state)),
+          epochAuthenticator: fromB64U(nextIdentity),
         })
         try {
           await hostDB.saveState(storageID, state, write)
@@ -1052,6 +1066,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         ledgerHead = nextHead
         commits += 1
         if (!removed) advance(epochAfter)
+        epochIdentity = nextIdentity
         return { applied: true, advanced: !removed, epochBefore, epochAfter }
       }),
     async isLedgerComplete() {

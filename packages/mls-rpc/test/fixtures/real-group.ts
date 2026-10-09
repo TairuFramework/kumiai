@@ -14,7 +14,14 @@ import {
   removeMember,
   renewLeaf,
 } from '@kumiai/mls'
-import { decode, encode, mlsMessageDecoder, mlsMessageEncoder, wireformats } from 'ts-mls'
+import {
+  createCommit,
+  decode,
+  encode,
+  mlsMessageDecoder,
+  mlsMessageEncoder,
+  wireformats,
+} from 'ts-mls'
 
 import { type HandleAccess, simpleHandleAccess } from '../../src/access.js'
 import { createGroupMLS, createLedgerEntrySlot, type LedgerEntrySlot } from '../../src/mls.js'
@@ -24,6 +31,15 @@ export type RealMember = {
   identity: OwnIdentity
   handle: GroupHandle
   slot: LedgerEntrySlot
+}
+
+export async function buildRealRotation(handle: GroupHandle): Promise<Uint8Array> {
+  const result = await createCommit({
+    context: handle.context,
+    state: handle.state,
+    extraProposals: [],
+  })
+  return encode(mlsMessageEncoder, result.commit)
 }
 
 export async function createRealBoundRecovery(

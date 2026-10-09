@@ -1,4 +1,4 @@
-import { decodeClientState, encodeClientState, restoreGroup } from '@kumiai/mls'
+import { confirmationTag, decodeClientState, encodeClientState, restoreGroup } from '@kumiai/mls'
 import {
   type GroupCrypto,
   type GroupMLS,
@@ -20,6 +20,7 @@ import { createGroupMLS } from '../src/mls.js'
 import {
   buildRealCommit,
   buildRealExternalCommit,
+  buildRealRotation,
   createRealBoundRecovery,
   createRealGroup,
   sealRealRecoveryVerdict,
@@ -198,6 +199,12 @@ testGroupMLSConformance({
     const stores = group.members.map((member) => createTransactionalStore(member.handle))
     return {
       groupID: group.committer.handle.groupID,
+      confirmationTag,
+      buildRotation: async (index) => {
+        const member = group.members[index]
+        if (member == null) throw new Error('missing member')
+        return await buildRealRotation(member.handle)
+      },
       pauseNextSave: (index, pause) => {
         const store = stores[index]
         if (store == null) throw new Error('missing store')

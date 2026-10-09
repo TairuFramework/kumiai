@@ -169,6 +169,9 @@ export type ConformanceCommit = {
 
 export type ConformanceMLSGroup = {
   groupID: string
+  /** Build an empty rotation without adopting it or changing membership. */
+  buildRotation: (member: number) => Promise<Uint8Array>
+  confirmationTag: (key: Uint8Array, requestID: string) => string
   /** Authenticated malformed payloads bypass the sender port's shape guard. */
   sealVerdictPayload: (
     member: number,
@@ -176,9 +179,8 @@ export type ConformanceMLSGroup = {
     verdict: Record<string, unknown>,
   ) => Promise<Uint8Array>
   /**
-   * The ports under test. The COMMITTER is not among them: every Commit here is authored by a
-   * member outside this list, so `processCommit` is only ever asked about a RECEIVED commit —
-   * which is the case the port's contract is about, and the case the memory double got wrong.
+   * The ports under test. The regular committer is outside this list. Rotation clauses use
+   * another listed member's commit, so `processCommit` still receives another member's frame.
    */
   members: Array<ConformanceMLSMember>
   pauseNextSave: (member: number, pause: () => Promise<void>) => void
@@ -258,6 +260,47 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
   }
 
   describe(`GroupMLS conformance — ${label}`, () => {
+    test('competing empty rotations retain distinct epoch identities', async () => {
+      await withGroup(3, 'competing-rotations', async (group) => {
+        const alice = memberAt(group.members, 0)
+        const bob = memberAt(group.members, 1)
+        const carol = memberAt(group.members, 2)
+        const before = await bob.mls.readRecoverySource()
+        expect((await alice.mls.readRecoverySource()).authenticator).toEqual(before.authenticator)
+        const roster = await bob.mls.rosterEntries()
+        const ledger = await bob.mls.getLedger()
+        const aliceCommit = await group.buildRotation(0)
+        const bobCommit = await group.buildRotation(1)
+        expect(aliceCommit).not.toEqual(bobCommit)
+        const stagedAuthenticators: Array<Uint8Array> = []
+        for (const [member, commit] of [
+          [alice, bobCommit],
+          [bob, aliceCommit],
+          [carol, aliceCommit],
+        ] as const) {
+          expect(
+            await member.mls.processCommit(commit, {
+              adoption: (staged) => {
+                stagedAuthenticators.push(staged.epochAuthenticator.slice())
+                return { mutationID: crypto.randomUUID(), changes: {} }
+              },
+            }),
+          ).toMatchObject({ applied: true, epochAfter: before.epoch + 1 })
+          expect(await member.mls.rosterEntries()).toEqual(roster)
+          expect(await member.mls.getLedger()).toEqual(ledger)
+        }
+        const aliceSource = await alice.mls.readRecoverySource()
+        const bobSource = await bob.mls.readRecoverySource()
+        expect(aliceSource.epoch).toBe(bobSource.epoch)
+        expect(aliceSource.authenticator).not.toEqual(bobSource.authenticator)
+        expect(await carol.mls.readRecoverySource()).toEqual(bobSource)
+        expect(stagedAuthenticators).toEqual([
+          aliceSource.authenticator,
+          bobSource.authenticator,
+          bobSource.authenticator,
+        ])
+      })
+    })
     test('recovery source identity is a detached snapshot of the locked epoch', async () => {
       await withGroup(1, 'recovery-source', async (group) => {
         const member = memberAt(group.members, 0)
@@ -761,6 +804,58 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
      * being a way back in is the RESPONDER, and only the responder.
      */
     describe('the recovery round trip', () => {
+      test.each(['confirmed', 'refused', 'superseded'] as const)(
+        'requester-signed %s verdicts are advisory for live and restored candidates',
+        async (kind) => {
+          await withGroup(2, `self-verdict-${kind}`, async (group) => {
+            const alice = memberAt(group.members, 0)
+            const bob = memberAt(group.members, 1)
+            const requestID = `self-verdict-${kind}`
+            const { request, requestKey } = await bob.mls.createRecoveryRequest(requestID)
+            const pending = await bob.mls.applyRecovery(
+              await alice.mls.sealGroupInfo(request),
+              requestID,
+              requestKey,
+            )
+            if (pending == null || 'renewalRequired' in pending) throw new Error('No candidate')
+            const key = await pending.confirmationKey('position', 'digest')
+            const tuple = {
+              groupID: group.groupID,
+              requestID,
+              position: 'position',
+              commitDigest: 'digest',
+            }
+            const verdict: ConformanceRecoveryVerdict =
+              kind === 'confirmed'
+                ? {
+                    ...tuple,
+                    verdict: kind,
+                    epoch: pending.epoch,
+                    tag: group.confirmationTag(key, requestID),
+                  }
+                : kind === 'refused'
+                  ? { ...tuple, verdict: kind, reason: 'policy' }
+                  : { ...tuple, verdict: kind }
+            const self = await bob.mls.openRecoveryVerdict(
+              await bob.mls.sealRecoveryVerdict(request, verdict),
+              requestID,
+              requestKey,
+            )
+            const other = await bob.mls.openRecoveryVerdict(
+              await alice.mls.sealRecoveryVerdict(request, verdict),
+              requestID,
+              requestKey,
+            )
+            if (self == null || other == null) throw new Error('No verdict')
+            expect(self.signer).toBe(bob.did)
+            const restored = await bob.mls.restoreRecovery(pending.serialize(), requestKey)
+            for (const candidate of [pending, restored]) {
+              expect(candidate.judgeVerdict(other)).toBe('authoritative')
+              expect(candidate.judgeVerdict(self)).toBe('advisory')
+            }
+          })
+        },
+      )
       test('verified requests name their signed identity, group and request without disclosing a private key', async () => {
         await withGroup(2, 'verify-recovery-request', async (group) => {
           const alice = memberAt(group.members, 0)
