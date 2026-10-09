@@ -129,9 +129,9 @@ tests/e2e  (new, private) DeviceDriver, hub fixture, scenarios
 | `mls` | Spec P phase 2: version-2 lossless pending-proposal sender codec, configurable retention propagated through every constructor/recovery, `commitKeyRotation`. Group-model changes from Spec I: bound creator in an unanchored group, Welcome admission for co-devices, role bootstrap/migration, revocation as ordered ledger evidence in unanchored groups, structured policy errors. |
 | `rpc` | Spec P phase 2: opened epoch on pending records and every inbound application handler context (with supporting broadcast metadata); app attempt IDs, client `{sequenceID}` result and proof-time `remove(seq, outcome?)`; strict `decodeAppEntry`. Landed P2a `ControlStore` owns control/cursor; no CommitJournal. |
 | `hub-client` | Phase 2 reconnecting HTTP hub, scoped/buffered views, ack backoff and discovery fetch. Preserve retention on reconnect/retry. Buffer injects inspectEpoch/currentEpoch/onEpochChanged; no MLS/registry import. Automatic `/info` integration remains BLOCKED (Risks). |
-| `mls-rpc` | Phase 2 registry over memory `GroupStateStore`: staged CAS, identity/lineage, lease, deferred burn, receive batching, admission/epoch notifications; existing HandleAccess gains seal/receive/lineage and recovery replacement mode. `MLSEncryptor` extraction; credential/token serialisation uses the lossless MLS codec. Hozon storage/projections remain adapters. |
+| `mls-rpc` | Phase 2 registry over memory `GroupStateStore`: staged CAS, identity/lineage, confirmed lower-epoch recovery with separate tombstone floor, lease, deferred burn, receive batching, admission/epoch notifications. Registry owns joinRef clearing and durable pending saves/ambiguity; HandleAccess gains seal/receive/lineage and recovery mode. `MLSEncryptor` extraction; credential/token serialisation uses the lossless MLS codec. Hozon storage/projections remain adapters. |
 | `mls-hub` | Landed P2a openWelcome/consume/receipt and Welcome epoch admission are prerequisites. Joined state plus joinRef saves before consume; genuine readmission atomically resets control/anchor (Spec P D3). |
-| `rpc-store` (new) | Phase 3 Hozon impls of `GroupStateStore`, `ControlStore`, `AnchorStore`, `AppCursorStore`, `AppOutbox` on sqlite, postgres and expo. MLS state, `AdoptionWrite` control changes and the anchor landed mark share one adoption transaction (Spec P2a). Coordinated outbox hooks and group deletion share transactions with host rows. Passes `rpc-conformance`, extended per Spec P r6. |
+| `rpc-store` (new) | Phase 3 Hozon impls of `GroupStateStore`, `ControlStore`, `AnchorStore`, `AppCursorStore`, `AppOutbox` on sqlite, postgres and expo. MLS state, `AdoptionWrite` control changes and the anchor landed mark share one adoption transaction (Spec P2a). Coordinated outbox hooks and deletion share transactions with host rows and one root mutation gate. Negative ambiguity reads require a backend completion barrier. Passes `rpc-conformance`, extended per Spec P r7. |
 | `client` (new) | Phase 4 Device: identity/group verbs, one peer per group, inventory/pending/control restore, source-scoped Welcome consume sweep, rotation scheduling and stop/drain deletion; key-package provisioning and wake. |
 | `hub-server` or a new `hub-authz` | The membership `authorize` policy and its state ingestion (Spec H decides placement). |
 | `messaging` (new) | Phase 5 protocols, Messenger, MessageStore memory/Hozon impls; consumes phase-2 opened epoch and proof outcomes. Hooks atomically record acceptance/publication/failure with outbox writes. |
@@ -274,12 +274,12 @@ Identity details are settled in Spec I; this section fixes the shape.
   (`store-delegation`). Embedded leaf proofs: built at link time, carried in the leaf, verified by
   the mls embedded resolver without external fetches.
 - **Restore.** Inventory includes credential and ordered signed ledger. The host restores live
-  groups, sweeps joinRef through its owning source's consume, then CAS-clears it. Peers restore
-  pending receives and replay P2a operations/rejoins/outcomes/Welcomes in P2a startup order.
+  groups and sweeps joinRef through its owning source's consume. It calls registry.clearJoinRef with that exact ref (Spec P D3).
+  Peers restore pending receives and replay P2a operations/rejoins/outcomes/Welcomes in P2a startup order.
   Tombstones never start peers; terminal removed groups only serve control outcomes/Welcomes.
 - **Rotation/deletion.** Client schedules one rotation per epoch identity outside the registry gate.
   New sends reject rotation-required; accepted entries wait. Deletion blocks owner creation,
-  disposes/drains the peer, then takes registry/outbox gates before the atomic tombstone/status
+  disposes/drains the peer, then takes their shared root mutation gate before the atomic tombstone/status
   transaction (Spec P D3). Unsettled control refuses deletion; explicit abandon/ack remains the escape.
 
 ### Errors
@@ -383,7 +383,9 @@ messenger.events                                        // message | message:sta
 - **Attempt identity.** Each app seal gets a fresh publishID and anchor segment. Persist only
   attempt metadata, never app ciphertext/acknowledgement proof. In-process handoff retries retain
   exact bytes/ID in memory. Restart or identity/segment invalidation reseals unproven entries with
-  new IDs; receivers dedup message identity. There is no app 365-day ambiguity rule. P2a control and
+  new IDs; receivers dedup message identity. Unproven acknowledgements and both proof paths retain
+  authenticator/lineage identity, including same-number recovery. Already-proven removal outcomes stay frozen (Spec P D6).
+  There is no app 365-day ambiguity rule. P2a control and
   rejoin payloads retain exact durable-byte replay (`packages/rpc/src/control/types.ts:75`,
   `packages/rpc/src/control/types.ts:103`).
 - **Publish status.** `pending → accepted → published (position known)`. Coordinated put commits
@@ -511,9 +513,10 @@ existing testcontainers setup), a capturing `WakeSender`, a mock Expo push endpo
 
 Each phase gets its own plan and branch. The e2e suite grows with each phase.
 
-0. **Spec P: transactional persistence (draft r6).** Phase-2 contracts, identity-aware state CAS,
+0. **Spec P: transactional persistence (draft r7).** Phase-2 contracts, identity-aware state CAS,
    atomic pending/adoption/Welcome reset, lossless codec prerequisite, lease/rotation, opened-epoch
-   metadata, app attempts/proof outcomes and coordinated outbox contracts. Landed P2a owns control.
+   metadata, identity-bound app proof and coordinated outbox contracts. Memory doubles model unfinished COMMIT and completion barriers.
+   Confirmed recovery may lower current epoch while preserving the tombstone floor. Landed P2a owns control.
 1. **Lift audit (probe).** Verdicts copied above. G1 codec prerequisite is specified in P r6;
    automatic `/info` integration remains separately BLOCKED.
 2. **rpc/mls/mls-rpc/rpc-conformance/hub-client port and runtime additions on memory doubles.**

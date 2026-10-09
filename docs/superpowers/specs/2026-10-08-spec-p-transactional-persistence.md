@@ -1,7 +1,7 @@
 # Spec P: transactional persistence — design
 
 Date: 2026-10-08
-Status: draft r6
+Status: draft r7
 Parent: [client host, messaging protocol and multi-device e2e](2026-10-08-client-messaging-e2e-design.md)
 (phase 0)
 
@@ -79,6 +79,13 @@ prefixed with `../`, `node_modules/` or `tests/`. Destinations in Decisions are 
   `rpc/src/log-delivery.ts:194`). Extend existing restart/race tests, rather than count new coverage
   (`rpc/test/peer-log-delivery.test.ts:554`, `rpc/test/peer-log-delivery.test.ts:669`,
   `rpc/test/peer-log-delivery.test.ts:1093`).
+- Certification and acknowledged-entry skipping compare epoch numbers only
+  (`rpc/src/log-delivery.ts:92`, `rpc/src/log-delivery.ts:146`). The no-new-head proof also lacks identity
+  (`rpc/src/log-delivery.ts:194`). Forced recovery recaptures the anchor (`rpc/src/peer.ts:440`).
+- Recovery builds from responder GroupInfo (`mls-rpc/src/recovery.ts:146`, `mls/src/group-welcome.ts:328`),
+  then installs through `access.replace` (`mls-rpc/src/mls.ts:218`). No local-epoch lower bound applies there.
+- HandleAccess lacks record metadata mutation (`mls-rpc/src/access.ts:12`). Durable crypto requires
+  host `pending.persistOpened` (`mls-rpc/src/crypto.ts:97`, `mls-rpc/src/crypto.ts:179`).
 - Handles are memory-backed (`mls/src/group-handle.ts:367`). Restore takes state, credential and
   ledger tokens separately and re-verifies tokens (`mls/src/group-create.ts:155`,
   `mls/src/group-create.ts:174`). Tokens preserve repeated enactments (`mls/src/group-handle.ts:493`).
@@ -111,6 +118,9 @@ prefixed with `../`, `node_modules/` or `tests/`. Destinations in Decisions are 
   (`../hozon/packages/postgres/src/index.ts:61`, `../hozon/packages/postgres/src/index.ts:73`).
   Spare connection capacity is not guaranteed. Expo serialises connection access and plain begin
   (`../hozon/packages/expo/src/driver.ts:53`, `../hozon/packages/expo/src/driver.ts:72`).
+- Postgres transport errors reject queries without backend-completion evidence
+  (`../hozon/node_modules/postgres/src/connection.js:381`). Hozon's catch runs rollback hooks and rethrows
+  (`../hozon/packages/db/src/db.ts:275`); that catch alone cannot prove a lost COMMIT rolled back.
 - `rpc-conformance`: AppOutbox 3 cases (`rpc-conformance/src/app-outbox.ts:25`), ControlStore 9
   (`rpc-conformance/src/control-store.ts:256`), AnchorStore 1 (`rpc-conformance/src/anchor-store.ts:27`),
   pending crypto 8 (`rpc-conformance/src/pending-group-crypto.ts:73`). ControlStore replaces the
@@ -125,6 +135,33 @@ A device's Hozon database is written by one live process. Within it, each group 
 `GroupHandleRegistry` instance, which serialises that group's writes behind a per-group mutex. CAS
 versions catch bugs and displaced handles; they are not a multi-process protocol. Two processes on
 one database are unsupported and not detected.
+
+**Shared storage gate (r7 decision).** Export this Hozon-free port from rpc:
+
+```ts
+export type GroupMutationGate = {
+  run<TValue>(groupID: string, work: () => Promise<TValue>): Promise<TValue>
+  holdUntil(groupID: string, completion: Promise<void>): void
+}
+// Phase 3 rpc-store: one WeakMap entry per canonical root HozonDB object.
+export function getGroupMutationGate(db: HozonDB): GroupMutationGate
+```
+
+Independently constructed state/outbox adapters obtain that same gate from the same root object.
+MemoryDatabase owns the equivalent gate. Factories never create a private per-adapter gate.
+Registry operations enter `store.mutationGate.run` across preparation, persistence and ambiguity resolution.
+State methods called there do not reacquire it. Coordinated outbox methods acquire it internally.
+ControlStore.apply also enters it; lastMutation performs resolver work outside it.
+Conformance direct state writes also enter the gate. Reentrant acquisition is refused.
+
+Deletion enters the registry's gate after lifecycle drain; its transaction writes outbox rows directly.
+Hooks use transaction stores, never public outbox methods. Keep the gate held through failed barrier/read retries.
+
+`holdUntil` registers a completion latch before the current `run` releases; later runs await it.
+The completion promise resolves only after D2's barrier, retrying failures internally.
+On ambiguous `ControlStore.apply`, the adapter registers that latch and rejects to the peer.
+Its background completion barrier survives peer cancellation; `lastMutation` bypasses the gate and performs D2's barrier/read.
+The peer still classifies the result. Deletion cannot overtake an unresolved control transaction.
 
 ### D2. Transactions and ambiguous outcomes
 
@@ -145,14 +182,41 @@ one database are unsupported and not detected.
 - **Ambiguous outcome.** A root transaction that rejects after its callback completed (a connection
   lost during `COMMIT`) may have committed; the supported failure model treats postgres COMMIT
   transport loss as ambiguous.
-  SQLite/Expo are treated as in-process known outcomes, pending phase 3 provider verification.
-  This is a required model, not an already-tested cross-provider guarantee (r6 decision).
+  SQLite/Expo count as known only after COMMIT/ROLLBACK completion is established (r7 decision).
+  Otherwise they use the same completion barrier. Phase 3 verifies each provider's failure paths.
   Each port names its owner:
   - `GroupStateStore` rejects with `StorageOutcomeUnknownError`; the registry resolves it (D3). This
     includes adoption saves carrying P2a's `AdoptionWrite`, whose `mutationID` is the `writeID`.
   - P2a's `ControlStore.apply` (no state change) is resolved by the peer through `lastMutation()`.
+    The adapter's `lastMutation()` completes the barrier before returning a negative marker (r7 decision).
   - The coordinated outbox resolves it internally (D7), so `AppOutbox`'s "a rejection leaves storage
     unchanged" contract (`rpc/src/app-outbox.ts:26`) still holds.
+
+**Completion barrier (r7 decision).** A negative ordinary read never proves rollback.
+Every state/open/Welcome/delete, control apply and coordinated-outbox transaction first upserts
+`groupOwner(groupID PRIMARY KEY, lockValue)` and executes unconditional `UPDATE lockValue = lockValue`.
+Keep that row across deletion. An initially absent state/meta/control row still has this locking path.
+
+After an ambiguous rejection, retain the application mutation gate and sequence reservation.
+Run a fresh root transaction: upsert/update the same owner row, then read markers in subsequent statements.
+Return its result only after that root transaction completes. The barrier never changes logical mutation markers.
+On postgres, use READ COMMITTED. The conflicting insert/update waits for the original transaction to finish.
+The subsequent SELECT then observes its final outcome, including a late commit.
+This follows [PostgreSQL's update and snapshot rules](https://www.postgresql.org/docs/current/transaction-iso.html#XACT-READ-COMMITTED), checked 2026-10-09.
+Do not reuse a pre-lock snapshot. Retry serialization, connection or barrier failures without releasing writers.
+
+SQLite uses the same first-write barrier before reading, acquiring its writer lock under
+[SQLite's transaction rules](https://www.sqlite.org/lang_transaction.html), checked 2026-10-09.
+Hozon node-sqlite uses Kysely's SQLite driver (`../hozon/packages/node-sqlite/src/index.ts:44`),
+which awaits BEGIN/COMMIT/ROLLBACK (`../hozon/node_modules/kysely/dist/dialect/sqlite/sqlite-driver.js:26`).
+Expo awaits those statements under its connection mutex (`../hozon/packages/expo/src/driver.ts:66`,
+`../hozon/packages/expo/src/driver.ts:75`, `../hozon/packages/expo/src/driver.ts:79`).
+Successful connection acquisition alone is insufficient after a failed rollback.
+Quarantine an uncertain connection until completion or verified disposal, then use a clean root transaction.
+Retry busy/locked failures outside the transaction. No timeout or negative read releases a writer.
+
+P2a's peer remains the control ambiguity owner. This refines `lastMutation()` completion semantics;
+it changes neither its signature nor P2a's confirmed-recovery/source-check contract.
 
 ### D3. `GroupStateStore` and registry
 
@@ -197,7 +261,8 @@ export type GroupStateRecord = {
   version: number                 // starts at 1, increases across tombstones
   writeID: string                 // fresh per write; adoption.mutationID when present
   deleted: boolean
-  epoch: number                   // tombstone keeps the last live admission floor
+  epoch: number                   // current MLS epoch; tombstone uses admissionFloor
+  admissionFloor: number          // highest installed epoch; never decreases
   state: Uint8Array               // version-2 encodeClientState output; empty when deleted
   credential: { id: string; groupID: string } | null
   ledger: Array<string>           // signed tokens in enactment order, repeats kept
@@ -209,10 +274,13 @@ export type GroupStateRecord = {
 export type GroupStateCAS = { expected: { version: number } | null }
 export type GroupStateWrite = GroupStateCAS & (
   | { kind: 'state'; adoption?: AdoptionWrite }
+  | { kind: 'recovery'; adoption: AdoptionWrite }
   | { kind: 'welcome' }
 )
 export type GroupStateStore = {
+  mutationGate: GroupMutationGate
   load(groupID: string): Promise<GroupStateRecord | null> // includes tombstones
+  resolveWrite(groupID: string): Promise<GroupStateRecord | null> // D2 barrier, then load
   list(): Promise<Array<Pick<GroupStateRecord, 'groupID' | 'version' | 'epoch' | 'deleted'>>>
   save(record: GroupStateRecord, write: GroupStateWrite): Promise<void>
   saveOpened(record: GroupStateRecord, write: GroupStateCAS, pending: PendingAppFrame): Promise<void>
@@ -235,19 +303,38 @@ Redeclaration breaks ambiguity recognition (`rpc/src/control/store.ts:105`).
 **Store rules:**
 
 - **CAS.** `expected: null` means absent, never tombstoned. Otherwise the stored version must match.
-  `record.version` must exceed the prior version; lower epoch or lineage conflicts. A miss writes
-  nothing and throws `GroupStateConflictError`. Map postgres serialization failures to that conflict.
+  `record.version` must exceed the prior version. Lower lineage or admissionFloor conflicts.
+  Lower epoch conflicts except authenticated, confirmed recovery below. A miss writes no logical rows
+  and throws `GroupStateConflictError`. Map postgres mutation serialization failures to that conflict.
+- **Lower-epoch recovery (r7 decision).** `kind: 'recovery'` may install a lower or equal epoch with
+  a different authenticator. Require a live source, expected version and lineage exactly incremented by one.
+  The registry enters this mode only from P2a's confirmed candidate after its read-only source re-check.
+  The transaction verifies the stored rejoin is `confirmed`, its source matches the current epoch/authenticator/lineage,
+  and `adoption.changes.putRejoin` advances that same rejoin to `adopted` with the candidate's `epochAfter`.
+
+  Candidate authentication and authoritative verdict verification remain the MLS/peer's responsibility
+  (`mls-rpc/src/mls.ts:181`, `rpc/src/peer.ts:2712`). Never grant this exception to an ordinary state/open save.
+  Persist state/control/anchor/marker together. Reset current HWM/progress to the candidate identity;
+  retain P2a's identity-checked historical carry. A candidate matching the installed identity is an idempotent no-op.
+  P2a stores verified confirmation, then re-checks source before adoption
+  (`rpc/src/control/rejoin.ts:127`, `rpc/src/control/rejoin.ts:154`). No P2a recovery amendment is required.
+  Recovery's `onAccepted` passes `access.replace(data.group, write, undefined, 'recovery')`
+  at the existing replacement call (`mls-rpc/src/mls.ts:218`). Registry maps that mode to the recovery store write.
+- **Admission floor (r7 decision).** Set `admissionFloor = max(prior admissionFloor, candidate epoch)`.
+  Lower recovery preserves it. Tombstones set `epoch = admissionFloor`; Welcome requires strictly greater
+  than that tombstone epoch. Live Welcome still compares current epoch, as binding P2a D4 requires
+  (`mls-hub/src/admission.ts:7`, `mls-hub/src/admission.ts:8`). This adds no P2a admission amendment.
 - **Identity (r6 decision).** Epoch identity is `(groupID, epoch, epochAuthenticator)`; lineage identifies
   ownership, not the epoch secret. Same identity/same lineage retains max HWM and merged sender/receive
   progress. Only after both checks may `mergeReceiveSecretTree` run (`mls/src/secret-tree.ts:17`).
   Never merge by epoch number alone.
 - A newer epoch resets HWM to the candidate's own sender generation. Recovery may keep the number
   while changing authenticator: reset HWM, bump lineage, discard old current-tree progress.
-  Welcome replacement requires a strictly higher authenticated epoch. A replacement proposing the
+  Live Welcome replacement requires a strictly higher authenticated current epoch. A replacement proposing the
   same identity is an idempotent no-op, not a new lineage with reusable keys. Recovery/Welcome bumps
-  lineage by one; ordinary commits keep it. Tombstones retain epoch/lineage, with HWM zero, empty
+  lineage by one; ordinary commits keep it. Tombstones retain admissionFloor/lineage, with HWM zero, empty
   state/authenticator/ledger and null credential/joinRef.
-- `save(kind: 'state')` co-commits any `AdoptionWrite`, its mutation marker and matching anchor landed
+- `save(kind: 'state' | 'recovery')` co-commits any `AdoptionWrite`, its mutation marker and matching anchor landed
   mark. `record.writeID === adoption.mutationID`. Keep P2a's carry into retained historical epochs.
   Current-state same-identity merging supplements that carry; it does not replace it.
 - **Welcome save (r6 decision).** `save(record, {expected, kind: 'welcome'})` is the atomic
@@ -261,16 +348,16 @@ Redeclaration breaks ambiguity recognition (`rpc/src/control/store.ts:105`).
   insertion is a no-op. List in `(segment, position)` order, using rpc's numeric-position comparison
   (`rpc/src/crypto.ts:226`). Every read/write owns defensive copies of bytes and nested values.
 - **Ambiguity.** The resolving writer stays paused; other access throws `GroupStateUncertainError`.
-  Block subsequent writes until `load` succeeds.
+  Block subsequent writes until `resolveWrite` completes D2's barrier and returns the final record (r7 decision).
   Matching `writeID`: install the committed record and resolve. Expected version/absence: reject
   with the original error, known uncommitted. Anything else: conflict, invalidate and reload.
-  Failed reads retry at 100 ms, doubling to a 15 s cap. Do not expose uncertain state.
+  Failed barriers/reads retry at 100 ms, doubling to a 15 s cap. Do not expose uncertain state.
 - `delete` stores a tombstone, removes pending, applied/responses/cursor, anchor, app cursor/outbox
   and outbox meta rows, and awaits `onDelete` in one transaction. Retain the tombstone's write marker.
   Refuse operations, rejoin, unacked outcomes or Welcomes with canonical `GroupControlUnsettledError`
   (`rpc/src/control/store.ts:57`). Deletion does not abandon control work automatically.
 
-**Construction and runtime surface (r6 decision):**
+**Construction and runtime surface (r6 decision; r7 handoffs):**
 
 ```ts
 // Phase 3, rpc-store. Uses stores obtained from the root callback's tx.
@@ -285,17 +372,20 @@ export function createGroupHandleRegistry(params: {
   restore: (record: GroupStateRecord) => Promise<GroupHandle>
 }): GroupHandleRegistry
 export type GroupHandleRegistry = {
-  access(groupID: string): HandleAccess
+  access(groupID: string): RegistryHandleAccess
   seed(group: GroupHandle, params: {
     replace?: boolean
     joinRef: GroupStateRecord['joinRef']
   }): Promise<void>
+  clearJoinRef(groupID: string, expectedJoinRef: NonNullable<GroupStateRecord['joinRef']>): Promise<void>
   delete(groupID: string): Promise<void> // host must stop/drain its peer first
   onAdmissionChanged(listener: (groupID: string, value: SendAdmission) => void): () => void
   onEpochChanged(listener: (groupID: string) => void): () => void
   dispose(): Promise<void> // cancels timers, awaits writes and flushes dirty receives
 }
-// Add to HandleAccess; retain read/mutate/replace/open and AdoptionWriteFactory.
+export type RegistryHandleAccess = HandleAccess & { pending: PendingAppFrames }
+// Add to HandleAccess; retain read/mutate and AdoptionWriteFactory.
+pending?: PendingAppFrames
 lineage(): number
 seal<TValue>(fn: (handle: GroupHandle) => Promise<TValue>): Promise<TValue>
 receive<TValue>(fn: (handle: GroupHandle) => Promise<{
@@ -304,6 +394,16 @@ receive<TValue>(fn: (handle: GroupHandle) => Promise<{
 // Fourth replace argument defaults to 'adoption'. Recovery explicitly passes 'recovery'.
 replace(next: GroupHandle, adoption?: AdoptionWriteFactory,
   prepare?: (current: GroupHandle) => Promise<boolean>, kind?: 'adoption' | 'recovery'): Promise<void>
+// Make the external fallback optional. Registry access supplies its own atomic writer.
+open<TValue>(fn: (handle: GroupHandle, persistOpened: (
+  stagedState: Uint8Array, record: PendingAppFrame
+) => Promise<void>) => Promise<TValue>, persistOpened?: (
+  stagedState: Uint8Array, record: PendingAppFrame
+) => Promise<void>): Promise<TValue>
+// New durable createGroupCrypto overload; retain simple access's external pending overload.
+export function createGroupCrypto(params: GroupCryptoParams & {
+  access: RegistryHandleAccess; pending?: never
+}): GroupCrypto & { pending: PendingAppFrames }
 ```
 
 - `restore` rejects mismatched groupID, epoch, credential or authenticator. The registry derives
@@ -315,6 +415,17 @@ replace(next: GroupHandle, adoption?: AdoptionWriteFactory,
 - One per-group gate spans preparation, save and ambiguity resolution. Durable mutation/open,
   commit replacement, Welcome seed and deletion stage from the current cache; install after commit.
   Retry durable-open CAS at most eight times on fresh clones. Merge only matching identities/lineages.
+- **Registry durable open (r7 decision).** `createGroupCrypto({access: registry.access(groupID)})` uses
+  access-owned pending persistence/list/completion. Refuse an external pending adapter on registry access.
+  `open` stages on a current clone. Its internal callback builds a full record from `stagedState`,
+  current credential/ledger/metadata, fresh writeID and next CAS version, then calls `store.saveOpened`.
+  The registry resolves `StorageOutcomeUnknownError` through `resolveWrite` before the callback returns.
+  Install the clone and return plaintext only after proven commit. Known rollback leaves the live key unspent.
+  Crypto wraps a resolved storage failure as `AppFrameStorageError`; it must not hide ambiguity from the registry.
+  Registry pending `list` delegates to `store.listPending(groupID)`; `complete` enters the same gate.
+  Completion ambiguity resolves internally after D2's barrier by pending-row presence; absent means success.
+  Simple access still requires the external fallback for durable open. Without it, reject before decrypting.
+  This replaces today's required callback wiring (`mls-rpc/src/access.ts:28`, `mls-rpc/src/crypto.ts:209`).
 - `wrap` moves from `access.mutate` to `access.seal`; each callback seals at most one application
   frame. Non-durable unwrap uses `receive`, counting only accepted opens. Receives install immediately
   and flush at 64 frames or 250 ms. Losing unflushed live progress permits replay after restart.
@@ -327,17 +438,30 @@ replace(next: GroupHandle, adoption?: AdoptionWriteFactory,
   if displaced. An owning peer's next call sees its successful recovery's new lineage; external
   Welcome seed retires the old access owner. Creation-time crypto pinning would strand that peer.
 - Publish runtime snapshots/notifications only after committed installation. Admission subscription
-  immediately supplies loaded groups; epoch subscription fires on later epoch/availability changes.
+  immediately supplies loaded groups; epoch subscription fires on identity/lineage/availability changes,
+  including same-number recovery (r7 decision).
   Contain listener errors. Host schedules work outside the registry gate.
 - `list()` drives host restore. Tombstones never start peers. After live restore, the host consumes
-  each source-scoped `joinRef`, then clears it through a CAS state save. Never clear before consume.
+  each source-scoped `joinRef`, then calls `registry.clearJoinRef(groupID, consumedRef)` (r7 decision).
+  Under the gate, require the exact sourceID/ref; an already-null ref succeeds without writing.
+  A different non-null ref conflicts. Save current owner state with null joinRef, fresh writeID and
+  next version; preserve identity/lineage/HWM and install the updated cached record after commit.
+  The registry owns ambiguity through `resolveWrite`, as for every state save. Never clear before consume.
+  A crash after consume repeats its source receipt check, then clears through this operation.
   Restore pending into the peer before P2a replay. Keep P2a's startup order and terminal-removal rule.
 
 **Retention, lease and rotation:**
 
 ```ts
-// Add to mls GroupOptions and createMlsContext's optional third parameter.
-keyRetention?: Partial<KeyRetentionConfig>
+// mls exports. Add keyRetention?: Partial<KeyRetentionConfig> to GroupOptions.
+export type MlsContextOptions = { keyRetention?: Partial<KeyRetentionConfig> }
+export function createMlsContext(
+  cipherSuite: MlsContext['cipherSuite'], anchor?: GroupAnchor, options?: MlsContextOptions
+): MlsContext
+// Host example (r7 decision):
+createMlsContext(cipherSuite, anchor, { keyRetention: {
+  retainKeysForGenerations: 1000, maximumForwardRatchetSteps: 1000,
+} })
 // rpc SendAdmission; mls's leaf admission remains its existing lapsed check.
 export type SendAdmission =
   | { epoch: number; admissible: true }
@@ -353,6 +477,8 @@ const ROTATE_AT = 500
   Preserve other client defaults. Registry sealing requires generation retention and forward steps
   both at least 1000; reject weaker host configuration at access creation. Client/smoke fixtures set
   both to 1000. Ordinary mls callers keep defaults; historical epoch retention remains unchanged.
+  The third parameter is the options object above, not a bare retention config (r7 decision).
+  Its fields are ts-mls's existing names (`node_modules/ts-mls/dist/src/keyRetentionConfig.d.ts:3`).
 - Carry configuration through create, restore, Welcome, external join, clone and `deriveGroup`, and
   both fresh and deserialised recovery (`mls-rpc/src/recovery.ts:166`, `mls-rpc/src/mls.ts:471`).
 - **Lease.** Read the own application chain's next generation `g` (unexpanded means 0).
@@ -383,8 +509,8 @@ const ROTATE_AT = 500
 **Deletion lifecycle (r6 decision).** Later client, and phase 2 fixtures, block peer creation/seed
 under the group's lifecycle gate. Call `peer.dispose()`, then `peer.drained()` before registry deletion.
 Drain is already the owner-replacement contract (`rpc/src/peer-types.ts:364`). Wait for acceptance,
-delivery, invoked handlers, network submissions and ambiguous outbox mutations to settle. Then take
-registry/outbox mutation gates and perform the delete transaction. Never await drain inside a peer
+delivery, invoked handlers, network submissions and ambiguous outbox mutations to settle. Then enter
+the shared root mutation gate once and perform the delete transaction (r7 decision). Never await drain inside a peer
 callback. Unsettled control still refuses deletion; resume a peer to settle or explicitly abandon/ack
 before retrying. On failure, keep the group stopped until restored. This prevents a late put from
 recreating rows. No timeout authorises deletion with outstanding work.
@@ -488,20 +614,32 @@ export type AppAttempt = {
 // AppOutboxEntry.lastAttempt: AppAttempt | null; other fields unchanged.
 // AppOutbox.remove(seq: number, outcome?: AppPublicationOutcome): Promise<void>
 export type LogFrame = { topicID: string; payload: Uint8Array; publishID: string }
+export type AppEpochIdentity = {
+  epoch: number; authenticator: Uint8Array; lineage: number // group-bound, defensive copy
+}
 export type SealedLogFrame = LogFrame & {
   floor: EpochFloor
+  identity: AppEpochIdentity
   segment: number
   sealVersion: number              // local invalidation generation; never persisted
 }
 // LogDeliveryParams:
+identity: () => AppEpochIdentity | null
 sealVersion: () => number
 publish: (frame: LogFrame) => Promise<PublishOutcome> | null
 remove: (seq: number, outcome?: AppPublicationOutcome) => Promise<void>
 // Keep proof fields and add the accepted app occurrence:
 type Publication = {
-  epoch: number; floor: LogPosition | null; acknowledged: number
+  identity: AppEpochIdentity; sealVersion: number
+  floor: LogPosition | null; acknowledged: number
   publishID: string; segment: number; sequenceID: string
 }
+type PublicationWalk = {
+  started: number; identity: AppEpochIdentity | null; sealVersion: number
+}
+// createLogDelivery's proof surface (r7 decision):
+beginWalk(): PublicationWalk
+certify(identity: AppEpochIdentity, walk: PublicationWalk): void
 ```
 
 - Each successful seal gets a fresh random `publishID`; persist attempt metadata before transport
@@ -511,13 +649,29 @@ type Publication = {
 - **Retry bytes (r6 decision).** Keep one prepared `{frame, updatedEntry}` in a memory map by seq
   until acknowledgement or invalidation. Failed put/publish or a null handoff retries those exact
   bytes/ID, not another seal/counter increment. The map never survives restart.
-  After acknowledgement, store `Publication` and discard prepared bytes. Delivery keeps proof logic.
+  After acknowledgement, store `Publication` with the sealed identity/version and discard prepared bytes.
 - **Invalidation (r6 decision).** Increment peer `sealVersion` on every installed MLS epoch
   identity/lineage change and anchor-topic change, including same-number recovery. Capture it with
   each seal; re-check before handoff.
-  Invalidate stale prepared frames on a mismatch and reseal. An ordinary floor-position change
-  alone does not invalidate identical bytes. Delivered-entry resends use the same rule with a
+  Invalidate stale prepared frames and unproven publications on a mismatch, then reseal (r7 decision).
+  An ordinary floor-position change alone does not invalidate identical bytes. Delivered-entry resends use the same rule with a
   worker-local retry slot, since their `seq: -1` cannot share the outbox map.
+- **Identity-bound proof (r7 decision).** Compare authenticator bytes and lineage, never epoch alone.
+  Peer snapshots identity from `mls.readRecoverySource()` after committed installation
+  (`rpc/src/crypto.ts:427`, `mls-rpc/src/mls.ts:285`). Capture identity/version before sealing;
+  read source before and after sealing and require unchanged identity, including lineage.
+  The returned frame binds that exact seal identity. Check identity/version immediately before handoff, with no intervening await.
+  Suspend the snapshot during adoption/anchor recapture; publish refreshed identity/version before releasing the peer seal barrier.
+
+  Publication acknowledgement retains the frame's identity/version, including when recovery overlaps the await.
+  A stale acknowledgement cannot suppress resealing or certify an occurrence under the replacement identity.
+
+  `beginWalk` captures acknowledgement counter, identity and version before fetching.
+  `certify` requires publication, walk, covered identity and current snapshot to agree, plus the existing acknowledgement cutoff.
+  A walk crossing identity/topic invalidation proves nothing from its old token; schedule a fresh walk/probe.
+  Apply the same before/after snapshot checks to the no-new-head probe proof
+  (`rpc/src/log-delivery.ts:194`). Preserve existing floor/coverage/hold requirements on both proof paths.
+  Already-proven entries bypass invalidation and retain their frozen removal outcome.
 - Old-epoch acknowledged but unproven publications reseal. Restart discards all publication evidence
   and reseals with new IDs. No 365-day ambiguity horizon is needed for app attempt recovery.
 - **Status.** `pending` until first atomic put; `accepted` when it commits; `published` only at proof.
@@ -568,17 +722,21 @@ payload and derive own author from the host identity; a decode error rolls back 
 - Serialise each outbox from transaction entry through ambiguous read-back. Unknown remove skips
   its hook and succeeds; retry after reopen cannot write status twice. Replacement may change only
   `lastAttempt`; different protocol, prc or data throws `OutboxReplacementError`, changing nothing.
-- On ambiguous COMMIT, read meta from a fresh root transaction. Equal mutationID resolves;
-  otherwise reject as known uncommitted. Failed reads retry 100 ms, doubling to 15 s; keep the
-  caller pending and later mutations paused. Acceptance retains its sequence reservation meanwhile.
+- On ambiguous COMMIT, use a fresh root transaction. Complete D2's owner-row barrier,
+  then read meta in a subsequent statement (r7 decision).
+  Equal mutationID resolves. The exact previous marker/absence proves rollback only after this barrier.
+  Any other marker violates ownership; keep writers blocked until reconciliation, rather than declaring rollback.
+  Failed barriers/reads retry 100 ms, doubling to 15 s. Keep caller and later mutations paused.
+  Acceptance retains its sequence reservation meanwhile.
 - Messaging correlates by `(groupID, ownAuthor, payload.id)`, never seq. Sequences can restart after
   reopening an empty inventory (`rpc/src/app-outbox.ts:73`). `onPut` inserts accepted once;
   outcome-bearing `onRemove` writes published/position once; `onClear/onDelete` fail unpublished rows.
   Generic removal without an outcome removes the row without claiming publication.
-- D3 deletion must share this adapter's mutation gate and drain before deleting its rows/meta.
+- D3 deletion shares the root's `getGroupMutationGate(db)` through its state store (r7 decision).
+  Drain first, then enter that gate once. The delete transaction invokes only tx stores/hooks.
   Peer disposal alone does not justify bypassing unresolved transactions.
 
-**Shared memory transaction (r6 decision), test support in `rpc-conformance`:**
+**Shared memory transaction (r6 decision). Factories/completion barrier (r7 decision), test support in `rpc-conformance`:**
 
 ```ts
 export type MemoryStoreRows = Record<string, Map<string, unknown>>
@@ -587,10 +745,24 @@ export type MemoryTransaction = {
   onCommit(fn: () => void): void
 }
 export type MemoryDatabase = {
+  mutationGate: GroupMutationGate
   transact<TValue>(fn: (tx: MemoryTransaction) => Promise<TValue>): Promise<TValue>
+  completionBarrier(groupID: string): Promise<void>
   snapshot(): MemoryStoreRows
 }
 export function createMemoryTransaction(params: { rows: MemoryStoreRows }): MemoryDatabase
+export function createMemoryGroupStateStore(params: {
+  db: MemoryDatabase
+  onDelete?: (tx: MemoryTransaction, groupID: string) => Promise<void>
+}): GroupStateStore
+export function createMemoryCoordinatedOutbox(params: {
+  db: MemoryDatabase; groupID: string
+  hooks: {
+    onPut(tx: MemoryTransaction, entry: AppOutboxEntry): Promise<void>
+    onRemove(tx: MemoryTransaction, entry: AppOutboxEntry, outcome?: AppPublicationOutcome): Promise<void>
+    onClear(tx: MemoryTransaction, entries: Array<AppOutboxEntry>): Promise<void>
+  }
+}): AppOutbox
 ```
 
 Clone all maps/values at transaction entry; expose only the clone during the callback. Atomically
@@ -601,11 +773,19 @@ of committed rows, including while a callback is held. Test adapters share one `
 for state/control/anchor/pending/outbox/meta and opaque host side rows; do not construct separate
 memory databases per adapter. Factories take `{db: MemoryDatabase, ...}` with the same group/hook
 parameters as their Hozon counterparts, substituting `MemoryTransaction` for `StoreProvider`.
-Use row namespaces `state`, `control`, `anchor`, `pending`, `appCursor`, `outbox` and `outboxMeta`.
-State/control/anchor/meta keys are groupID; compound keys use JSON arrays `[groupID, id/topicID/seq]`.
+Use row namespaces `groupOwner`, `state`, `control`, `anchor`, `pending`, `appCursor`, `outbox` and `outboxMeta`.
+Owner/state/control/anchor/meta keys are groupID; compound keys use JSON arrays `[groupID, id/topicID/seq]`.
 Host side rows use a separate namespace. Future memory MessageStore uses that same database.
-Commit-then-reject injection happens after publication; reopen wraps the same committed rows,
-with every runtime cache discarded.
+Reopen wraps the same committed rows, with every runtime cache discarded.
+
+**Unfinished commit faults (r7 decision).** Keep commit-then-reject, and add rejection before backend completion.
+The transaction callback has completed but its private rows/hooks remain unpublished and its owner lock remains held.
+Reject `transact` with `StorageOutcomeUnknownError` while retaining that pending transaction separately from the caller promise.
+`snapshot` may show previous rows/absence. `completionBarrier` and later transactions wait for backend settlement.
+The fault controller then publishes the saved clone/hooks exactly once (`commit`) or discards them (`rollback`).
+Only then may the barrier finish and the adapter classify markers. Callback failure remains a known rollback.
+Memory resolvers must use this barrier, including initially absent owner/state/meta rows.
+A negative snapshot alone must fail conformance. Doubles are no more permissive than the provider contract.
 
 ### D8. Provider guarantees (phase 3 gate)
 
@@ -618,7 +798,8 @@ applies. Hozon does not configure transaction isolation (`../hozon/packages/db/s
 | CAS conditional plain UPDATE affected count | required | READ COMMITTED; stricter serialization failure maps to conflict | required; no RETURNING (`../hozon/packages/expo/src/driver.ts:104`) |
 | Transaction execution | one-connection serialisation | concurrent when pool capacity permits (`../hozon/packages/postgres/src/index.ts:73`) | connection mutex (`../hozon/packages/expo/src/driver.ts:53`) |
 | Root call inside transaction | must not await; connection is held | independent transaction when pool capacity permits; must not await either | must not await; connection is held |
-| Supported ambiguous COMMIT model | known in-process outcome | transport loss can be ambiguous | known in-process outcome |
+| Supported ambiguous COMMIT model | known only with completed COMMIT/ROLLBACK; otherwise barrier | transport loss can be ambiguous | known only with completed COMMIT/ROLLBACK; otherwise barrier |
+| Negative ambiguity result, r7 | writer lock, then final marker read | owner-row conflict wait, then fresh READ COMMITTED statement | connection completion plus writer lock, then final marker read |
 
 ## Phase 2 implementation order and exit criteria
 
@@ -648,9 +829,25 @@ export type BufferedEpochInspection = {
   currentEpoch: () => number | null
   onEpochChanged: (listener: () => void) => () => void
 }
+// hub-client constructor (r7 decision); PeerScopedHubViewParams = {hub: MailboxHub; peerDID: string}.
+export type BufferedPeerHubViewParams = PeerScopedHubViewParams & {
+  groupID: string
+  epochs: BufferedEpochInspection
+  reconnectTimeoutMs?: number
+  logger?: { warn(message: string, context?: Record<string, unknown>): void }
+}
+export type BufferedPeerHubView = MailboxHub & { dispose(): void }
+export function createBufferedPeerHubView(params: BufferedPeerHubViewParams): BufferedPeerHubView
 ```
 
-Keep malformed/unknown-epoch passthrough, notification wake/revisit and disposal unsubscribe.
+The lifted constructor replaces its registry dependency with `epochs`
+(`../kubun/packages/plugin-p2p/src/hub/buffered-peer-hub-view.ts:33`).
+Decode the envelope, then pass ciphertext to `epochs.inspectEpoch`, as the existing buffer does
+(`../kubun/packages/plugin-p2p/src/hub/buffered-peer-hub-view.ts:47`).
+Keep malformed/unknown-epoch passthrough, notification wake/revisit and disposal unsubscribe
+(`../kubun/packages/plugin-p2p/src/hub/buffered-peer-hub-view.ts:51`,
+`../kubun/packages/plugin-p2p/src/hub/buffered-peer-hub-view.ts:110`,
+`../kubun/packages/plugin-p2p/src/hub/buffered-peer-hub-view.ts:235`).
 Inspection is an unauthenticated prefilter (`mls/src/group-info.ts:17`). Bind registry notifications
 in the host fixture in phase 2, later in client. Automatic `/info` integration remains BLOCKED in the
 umbrella Risks; smoke uses injected server DID, not a new production endpoint.
@@ -675,6 +872,7 @@ phase 3 runs real-store boundaries; phase 6 arms, reports, blocks and kills a ch
 | Welcome readmission, between state/control/anchor writes | `save(kind: 'welcome')` | injected failure | neither state/reset/anchor changes; old runtime not installed; 2/3 |
 | Welcome readmission committed, before peer restart | `save(kind: 'welcome')` | after | unknown outcomes preserved; reset anchor recaptured at join; 2/3/6 |
 | Deletion committed, before restart | `delete` | after | tombstone/rows 2/3; failed messages 5; SIGKILL 6 |
+| COMMIT rejected, backend unfinished | root transaction and D2 barrier | raw read shows previous/absent marker, then backend commits or rolls back | no premature rejection/release; 2 memory / 3 providers |
 
 Control/rejoin/Welcome-delivery seams remain owned by P2a. Its in-process Welcome crash reconstruction
 is existing coverage (`tests/integration/test/welcome-after-crash.test.ts:179`), not child-process coverage.
@@ -682,26 +880,111 @@ is existing coverage (`tests/integration/test/welcome-after-crash.test.ts:179`),
 ## Conformance additions
 
 Phase 2 fixtures provide reopen (same committed rows, new runtime), second-write failure,
-commit-then-reject, clock control and opaque side-row inspection. Generation tests use real MLS.
+commit-then-reject, unfinished-commit faults, clock control and opaque side-row inspection. Generation tests use real MLS.
 Phase 3 supplies those fixtures on every provider, plus a separate-connection postgres visibility
 barrier. Expo uses a node shim or records BLOCKED with its reason. Phase 6 supplies the kill harness.
+
+**Harness/factory contract (r7 decision), rpc-conformance exports:**
+
+```ts
+export type PersistencePorts = {
+  groupID: string
+  state: GroupStateStore; registry: GroupHandleRegistry
+  control: ControlStore; anchor: AnchorStore; outbox: AppOutbox; cursor: AppCursorStore
+}
+export type PendingCommitFault = {
+  rejected: Promise<void>             // caller's root promise rejected, backend still holds owner lock
+  barrierWaiting: Promise<void>       // resolver reached the completion barrier
+  finish(outcome: 'commit' | 'rollback'): Promise<void>
+}
+export type PersistenceFaults = {
+  failNext(point: 'after-first-write' | 'before-commit' | 'status-read'): void
+  commitThenReject(): void
+  rejectCommitPending(): PendingCommitFault // arms the next mutation
+}
+export type PersistenceFixture<TPorts> = {
+  ports: TPorts
+  reopen(): Promise<TPorts>
+  faults: PersistenceFaults
+  inspectRows(): Promise<MemoryStoreRows> // logical committed rows; deliberately bypasses barrier
+  setTime(now: number): void
+  advanceTime(ms: number): Promise<void>
+  close(): Promise<void>
+}
+export type ConformanceTransaction = { onCommit(fn: () => void): void }
+export type ConformanceOutboxHooks<TTx extends ConformanceTransaction> = {
+  onPut(tx: TTx, entry: AppOutboxEntry): Promise<void>
+  onRemove(tx: TTx, entry: AppOutboxEntry, outcome?: AppPublicationOutcome): Promise<void>
+  onClear(tx: TTx, entries: Array<AppOutboxEntry>): Promise<void>
+}
+export type PersistenceConformanceParams<TPorts, TTx extends ConformanceTransaction> = {
+  label: string
+  createFixture(id: string, hooks?: {
+    outbox?: ConformanceOutboxHooks<TTx>
+    onDelete?: (tx: TTx, groupID: string) => Promise<void>
+  }): Promise<PersistenceFixture<TPorts>>
+}
+// TTx is MemoryTransaction in phase 2; StoreProvider in phase 3. Both expose onCommit.
+// Extend the existing ControlStore harness with the same completion faults.
+export type ControlStoreConformanceParams = {
+  open(): Promise<ConformanceControlHost>
+  reopen(): Promise<ConformanceControlHost>
+  injectFailure(point: 'mid-apply' | 'mid-save'): void
+  commitThenReject(): void
+  faults: PersistenceFaults
+  inspectRows(): Promise<MemoryStoreRows>
+  close(): Promise<void>
+}
+export function testGroupStateStoreConformance<TTx extends ConformanceTransaction>(
+  params: PersistenceConformanceParams<PersistencePorts, TTx>
+): void
+export function testCoordinatedOutboxConformance<TTx extends ConformanceTransaction>(
+  params: PersistenceConformanceParams<PersistencePorts, TTx>
+): void
+export function testAppOutboxConformance<TTx extends ConformanceTransaction>(
+  params: PersistenceConformanceParams<{outbox: AppOutbox}, TTx>
+): void
+export function testAppCursorStoreConformance<TTx extends ConformanceTransaction>(
+  params: PersistenceConformanceParams<{cursor: AppCursorStore}, TTx>
+): void
+```
+
+These signatures replace AppOutbox's synchronous `createOutbox/failNextPut` fixture
+(`rpc-conformance/src/app-outbox.ts:18`). Retain its cases with the new fault driver.
+ControlStore's existing factory remains, with the additions above (`rpc-conformance/src/control-store.ts:175`).
+Its `commitThenReject` method forwards to the same fault controller.
+Each factory creates an isolated database and all ports over its one root/gate, with supplied hooks.
+Use `MemoryTransaction` for memory hooks and `StoreProvider` for Hozon hooks; absent hooks are no-ops.
+`reopen` discards runtime state, waits for backend settlement and rebuilds ports over the same rows.
+Faults/clock follow the rebuilt ports. `inspectRows` normalises provider rows for the same assertions.
+`after-first-write` fails between coupled logical writes; owner-row locking statements do not count.
+Suites close fixtures in finally blocks. Conformance type mirrors retain every normative field/signature above;
+they follow the existing structural mirror approach (`rpc-conformance/src/control-store.ts:168`).
+Canonical port names in this block denote those structural `Conformance*` mirrors, not imports from mls-rpc.
 
 | Suite / phase | Case | Assertion / existing coverage |
 |---|---|---|
 | codec/registry, 2 | lossless sender | zero, one, absent survive clone/save/reopen; malformed sidecar refused; version 1 throws; regression fails on current codec |
-| `testGroupStateStoreConformance`, 2 memory / 3 providers | CAS/version | wrong expected, lower/equal version, lower epoch/lineage and tombstone-as-absent all conflict without changes |
-| | ambiguous saves | commit-then-reject for insert/state/Welcome/delete exposes exact writeID; registry resolves committed/uncommitted before another writer |
+| `testGroupStateStoreConformance`, 2 memory / 3 providers | CAS/version | wrong expected, lower/equal version, ordinary lower epoch, lower lineage/floor and tombstone-as-absent conflict without logical changes |
+| | confirmed lower recovery | real source at 4, responder at 1, candidate at 2: confirmation/source check permits atomic adoption; version/lineage increase, floor stays 4, candidate HWM resets; reopen at 2; tombstone refuses Welcome at/below 4 |
+| | refused lower recovery | unconfirmed/refused candidate, stale source/version, absent/tombstoned source or missing adopted co-write changes nothing |
+| | ambiguous saves | commit-then-reject for insert/state/open/Welcome/joinRef-clear/delete exposes exact writeID; registry resolves committed/uncommitted before another writer |
+| | negative read, late completion | unfinished insert/state/open/Welcome/delete shows previous/absent rows; barrier and next writer stay pending; late commit resolves/install once, rollback alone rejects unchanged; initially absent owner covered |
 | | adoption co-commit | reuse P2a case (`rpc-conformance/src/control-store.ts:321`), now against D3 stores/providers; state/control/anchor/marker all commit or roll back |
 | | Welcome reset atomic/reopen | failure in reset or anchor clear rolls back state; success preserves outcomes/Welcomes, settles open work unknown, clears applied/responses/cursor/anchor; restart joins once |
 | | identity/HWM | same identity/lineage preserves max HWM; different-authenticator same-number recovery resets and bumps lineage; no cross-identity tree merge |
 | | atomic open and duplicate | second-write failure changes neither state nor pending; same-frame CAS retry leaves one row; extend existing key-unspent case (`rpc-conformance/src/pending-group-crypto.ts:137`) |
 | | pending reopen | numeric `(segment, position)` order, epoch retained, unknown/double completion succeeds; extend existing case (`rpc-conformance/src/pending-group-crypto.ts:177`) |
+| | owner handoffs | consume then clearJoinRef then seal/reserve works without stale CAS; stale ref conflicts; ambiguous clear/open/completion resolves before cache/payload publication; registry crypto needs no external pending callback |
 | | delete | stopped/drained owner; atomic tombstone/row cleanup/hook; epoch/lineage floor survives; stale write fails; no late put recreates rows |
 | | unsettled delete | operations, rejoin, outcomes and Welcomes each refuse; reuse predicate/host tests (`rpc/test/control-store.test.ts:253`) |
+| P2a ControlStore, 2 / 3 | negative marker barrier | state-free apply rejects before backend completion; lastMutation stays pending despite raw previous marker; late commit resolves once, rollback alone returns previous marker; deletion cannot overtake |
 | `testAppOutboxConformance`, 2 / 3 | attempt/outcome | all attempt fields round-trip; outcome reaches remove; unknown removal remains harmless |
 | `testCoordinatedOutboxConformance`, 2 memory / 3 Hozon | rollback/visibility | hook failure rolls back both rows; onCommit fires before resolution; postgres independent reader sees neither row before commit |
 | | ambiguous mutations | put, same-data replacement, remove, clear commit-then-reject resolve iff committed; failed status read keeps caller/later writer paused |
+| | negative read, late completion | put (initially absent meta), replacement, remove and clear reject root before backend settles; raw negative read cannot release reservation/gate; late commit succeeds once with side rows, rollback rejects unchanged |
 | | overlap/removal/replacement | B waits through A's readback; repeated remove skips hook; changed protocol/prc/data rejects unchanged |
+| | shared deletion gate | construct state/outbox independently over one root; delete waits through pending put/barrier, then atomically clears rows/meta; no later recreation |
 | | root-only constructor, 3 | transaction-scoped provider refused |
 | `testAppCursorStoreConformance`, 2 / 3 | durable per topic | reopen saved position; other topics remain null |
 | pending/group crypto, 2 | opened epoch | extend record and narrowed unwrap types together; stored epoch equals authenticated unwrap epoch |
@@ -714,6 +997,7 @@ barrier. Expo uses a node shim or records BLOCKED with its reason. Phase 6 suppl
 | | tombstone Welcome floor | reuse comparison (`mls-hub/test/admission.test.ts:10`); add delete/save/rejoin integration |
 | rpc delivery tests, 2 | retry bytes/restart | failed or null handoff retries byte-exact with same ID; reconstruction reseals/new ID; extend restart test (`rpc/test/peer-log-delivery.test.ts:554`) |
 | | acknowledgement/proof | extend overtaken-epoch restart (`rpc/test/peer-log-delivery.test.ts:1093`); acknowledgement never removes; proof freezes correct segment/sequenceID through failed removal |
+| | same-number recovery proof | A at E acknowledged before or during recovery to B at E; B walk and no-new-head probe cannot prove A; reseal/new ID under B before published outcome; old walk token cannot certify B; already-proven A retries its frozen outcome |
 | `hub-conformance`, 2 | dedup scope/expiry | same ID on two topics appends on both; purge just before cutoff dedups, at cutoff appends; retry does not refresh timestamp; real hub-store and memory |
 | hub-client, 2 | retention/buffer | reconnect and retry preserve retention; injected epoch notifications wake held frames; disposal unsubscribes |
 | client/messaging, 4/5 | lifecycle/status | rotation scheduling, Welcome consume sweep, deletion fails accepted messages; published status/position co-commit with removal |
@@ -769,3 +1053,23 @@ superseded by P2a. Read current Decisions and binding P2a instead.
   - provider ambiguity is a supported phase-3 model. Alternative: assert untested exclusivity of postgres ambiguous outcomes.
   Existing P2a tests are reuse/extensions. Real-store, MessageStore and child-process gaps remain
   explicitly assigned to phases 3, 5 and 6. No code implementation or test pass is claimed by r6.
+- **Blind review r6**, 2026-10-09. Verified all four findings against today's source. Resolved in draft r7:
+  - Completion barrier on a retained per-group owner row, including absent-row insert conflicts (r7 decision).
+    Alternative: negative SELECT proves rollback, or postgres-only `pg_xact_status` without a portable barrier.
+  - SQLite/Expo require completed COMMIT/ROLLBACK or a clean writer-lock barrier (r7 decision).
+    Alternative: assume every in-process rejection is known rollback despite failed transaction cleanup.
+  - Memory faults retain an unfinished backend transaction across rejection and negative read (r7 decision).
+    Alternative: only inject commit-then-reject after publishing rows, hiding late commits.
+  - Publications, acknowledgement and both proof paths bind authenticator/lineage and sealVersion (r7 decision).
+    Alternative: invalidate prepared frames only and certify acknowledged publications by epoch number.
+    Already-proven removal outcomes remain frozen.
+  - Confirmed, source-checked recovery may lower current epoch; admissionFloor remains monotonic for tombstones (r7 decision).
+    Alternative: unconditional epoch monotonicity, an unchecked recovery flag, or weakening Welcome tombstone admission.
+    P2a remains binding; neither recovery confirmation nor live Welcome admission is amended.
+  - Owner-mediated clearJoinRef and registry-owned saveOpened/pending wiring resolve their own CAS/cache ambiguity (r7 decision).
+    Alternative: host metadata saves behind the registry or an external pending writer without ownership/version context.
+  - State/outbox adapters share the canonical root gate; deletion drains then acquires it once (r7 decision).
+    Alternative: per-adapter mutexes or disposal alone authorises deletion with unresolved writers.
+  - Explicit memory factories, generic hook/fault/reopen harnesses, retention options and buffered `epochs` constructor (r7 decision).
+    Alternative: infer signatures from prose, pass bare retention, or retain the buffer's concrete registry dependency.
+  Phase 2 models each contract/fault on doubles. Provider verification remains phase 3; no implementation/test pass is claimed.
