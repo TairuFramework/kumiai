@@ -56,6 +56,7 @@ export type {
   StagedAdoption,
   WelcomeObligation,
 } from './control/types.js'
+export { deliverObligations } from './control/welcome.js'
 export {
   type AppFrameRef,
   AppFrameStorageError,

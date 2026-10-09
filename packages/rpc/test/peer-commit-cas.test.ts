@@ -104,13 +104,12 @@ describe('operation compare and set', () => {
     await member.peer.dispose()
   })
 
-  test('an accepted invite persists its complete Welcome obligation', async () => {
+  test('an accepted invite delivers its complete Welcome obligation', async () => {
     const member = makeMLSPeer(new FakeHub(), 'alice', secret)
     const request = buildInviteCommit(member, 'dave')
     await member.peer.commit(request)
-    expect((await member.control.load()).welcomes).toEqual([
-      { opID: request.id, welcome: fromUTF('dave'), recipients: ['dave'] },
-    ])
+    expect((await member.control.load()).welcomes).toEqual([])
+    expect(member.welcomes).toEqual([request.id])
     await member.peer.dispose()
   })
 

@@ -20,7 +20,13 @@ import type { AppCursorStore, AppWindowPruned } from './app-cursor.js'
 import type { AppDeliveryResumed, AppDeliveryStalled } from './app-lane.js'
 import type { AppOutbox } from './app-outbox.js'
 import type { HostBuilt, OperationDeps } from './control/operations.js'
-import type { ControlStore, Operation, OperationRequest, Outcome } from './control/types.js'
+import type {
+  ControlStore,
+  Operation,
+  OperationRequest,
+  Outcome,
+  WelcomeObligation,
+} from './control/types.js'
 import type {
   GroupCrypto,
   GroupMLS,
@@ -83,6 +89,8 @@ export type GroupPeerMLSParams = {
   build: (op: Operation) => Promise<HostBuilt>
   /** Compare and adopt the candidate together with its control write. */
   adopt: OperationDeps['adopt']
+  /** Resolves once the transport durably accepts the complete invitation artifact. */
+  deliverWelcome: (obligation: WelcomeObligation) => Promise<void>
   /** Deadline measured from durable enqueue. Defaults to 30 seconds. */
   operationTimeoutMs?: number
   /**
@@ -229,6 +237,7 @@ export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefini
       control?: undefined
       build?: undefined
       adopt?: undefined
+      deliverWelcome?: undefined
       operationTimeoutMs?: undefined
       anchorStore?: undefined
       appCursorStore?: undefined
