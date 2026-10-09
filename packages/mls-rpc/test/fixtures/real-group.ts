@@ -130,7 +130,11 @@ export type RealGroup = {
   resolveLedgerEntries: (ids: Array<string>) => Promise<Array<string>>
 }
 
-export async function createRealGroup(size: number, groupID: string): Promise<RealGroup> {
+export async function createRealGroup(
+  size: number,
+  groupID: string,
+  identities: Array<OwnIdentity> = [],
+): Promise<RealGroup> {
   const bodies = new Map<string, string>()
   const resolveLedgerEntries = async (ids: Array<string>) =>
     ids.map((id) => {
@@ -160,7 +164,7 @@ export async function createRealGroup(size: number, groupID: string): Promise<Re
 
   const members: Array<RealMember> = []
   for (let index = 0; index < size; index++) {
-    const identity = randomIdentity()
+    const identity = identities[index] ?? randomIdentity()
     const slot = makeSlot()
     const { invite } = await createInvite({
       group: committer.handle,

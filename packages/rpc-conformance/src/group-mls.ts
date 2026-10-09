@@ -169,6 +169,10 @@ export type ConformanceCommit = {
 
 export type ConformanceMLSGroup = {
   groupID: string
+  /** Restore a fresh port from this member's durable state. */
+  restartMember: (member: number) => Promise<ConformanceMLSMember>
+  /** A separate group containing the same local identity. */
+  otherGroupMember: (member: number) => Promise<ConformanceMLSMember>
   /** Build an empty rotation without adopting it or changing membership. */
   buildRotation: (member: number) => Promise<Uint8Array>
   confirmationTag: (key: Uint8Array, requestID: string) => string
@@ -869,6 +873,97 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           expect(await alice.mls.verifyRecoveryRequest(new Uint8Array([0]))).toBeNull()
         })
       })
+      test('recovery replies cannot be opened by the same identity in another group', async () => {
+        await withGroup(2, 'cross-group-replies', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const bob = memberAt(group.members, 1)
+          const other = await group.otherGroupMember(1)
+          expect(other.did).toBe(bob.did)
+          const { request, requestKey } = await bob.mls.createRecoveryRequest('cross-group')
+          const info = await alice.mls.sealGroupInfo(request)
+          const ledger = await alice.mls.sealLedger(request)
+          expect(await bob.mls.applyRecovery(info, 'cross-group', requestKey)).not.toBeNull()
+          expect(await bob.mls.openSealedLedger(ledger, 'cross-group', requestKey)).toEqual(
+            await alice.mls.getLedger(),
+          )
+          expect(await other.mls.applyRecovery(info, 'cross-group', requestKey)).toBeNull()
+          expect(await other.mls.openSealedLedger(ledger, 'cross-group', requestKey)).toBeNull()
+        })
+      })
+      test('bootstrap and restart preserve the identity of an ordinary committed epoch', async () => {
+        await withGroup(1, 'bootstrap-epoch-identity', async (group) => {
+          const member = memberAt(group.members, 0)
+          const { commit, context } = await group.buildCommit()
+          expect((await member.mls.processCommit(commit, context)).advanced).toBe(true)
+          const before = await member.mls.readRecoverySource()
+          const roster = await member.mls.rosterEntries()
+          const ledger = await member.mls.getLedger()
+          await member.mls.bootstrapLedger(ledger)
+          const restarted = await group.restartMember(0)
+          expect(await restarted.mls.readRecoverySource()).toEqual(before)
+          expect(await restarted.mls.rosterEntries()).toEqual(roster)
+          expect(await restarted.mls.getLedger()).toEqual(ledger)
+        })
+      })
+      test('restoration rejects altered request-key bytes even when the public key is unchanged', async () => {
+        await withGroup(2, 'altered-request-key', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const bob = memberAt(group.members, 1)
+          const { request, requestKey } = await bob.mls.createRecoveryRequest('altered-key')
+          const pending = await bob.mls.applyRecovery(
+            await alice.mls.sealGroupInfo(request),
+            'altered-key',
+            requestKey,
+          )
+          if (pending == null || 'renewalRequired' in pending) throw new Error('No candidate')
+          const bytes = pending.serialize()
+          const altered = requestKey.slice()
+          altered[0] = (altered[0] as number) ^ 7
+          altered[31] = (altered[31] as number) ^ 128
+          await expect(bob.mls.restoreRecovery(bytes, altered)).rejects.toThrow()
+          expect((await bob.mls.restoreRecovery(bytes, requestKey)).commit).toEqual(pending.commit)
+        })
+      })
+      test('an epoch read waits for recovery adoption persistence and returns the installed epoch', async () => {
+        await withGroup(2, 'recovery-epoch-lock', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const bob = memberAt(group.members, 1)
+          const { request, requestKey } = await bob.mls.createRecoveryRequest('locked-epoch')
+          const pending = await bob.mls.applyRecovery(
+            await alice.mls.sealGroupInfo(request),
+            'locked-epoch',
+            requestKey,
+          )
+          if (pending == null || 'renewalRequired' in pending) throw new Error('No candidate')
+          let entered!: () => void
+          let release!: () => void
+          const saving = new Promise<void>((resolve) => {
+            entered = resolve
+          })
+          const gate = new Promise<void>((resolve) => {
+            release = resolve
+          })
+          group.pauseNextSave(1, async () => {
+            entered()
+            await gate
+          })
+          const adoption = pending.onAccepted(() => ({ mutationID: 'locked-epoch', changes: {} }))
+          await saving
+          let settled = false
+          const reading = bob.mls.readEpoch().then((epoch) => {
+            settled = true
+            return epoch
+          })
+          try {
+            await new Promise<void>((resolve) => setTimeout(resolve, 0))
+            expect(settled).toBe(false)
+          } finally {
+            release()
+            await adoption
+          }
+          expect(await reading).toBe(pending.epoch)
+        })
+      })
       test('a source read waits for recovery adoption persistence and returns the installed identity', async () => {
         await withGroup(2, 'recovery-source-lock', async (group) => {
           const alice = memberAt(group.members, 0)
@@ -1065,6 +1160,9 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
             changes: { deleteRejoin: true },
           }))
           expect(await bob.mls.readEpoch()).toBe(pending.epoch)
+          expect((await bob.mls.readRecoverySource()).authenticator).toEqual(
+            (await alice.mls.readRecoverySource()).authenticator,
+          )
         })
       })
       test('sealed verdicts retain request keys, separate domains and bind the complete tuple', async () => {

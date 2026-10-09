@@ -117,7 +117,11 @@ test('a last-resort Welcome replaces held state three epochs ahead and repeats a
     await db
       .anchorStore(held.groupID)
       .save({ anchor: { epoch, secret: new Uint8Array(32).fill(1) } })
-    await db.seed(joined.groupID, encodeClientState(joined.state), { replace: true })
+    const heldVersion = await db.loadVersion(joined.groupID)
+    await db.seed(joined.groupID, encodeClientState(joined.state), {
+      replace: true,
+      expectedVersion: heldVersion,
+    })
     await source.consume(ref, joined.groupID)
     const stateBytes = await db.loadState(joined.groupID)
     const state = stateBytes == null ? undefined : decodeClientState(stateBytes)

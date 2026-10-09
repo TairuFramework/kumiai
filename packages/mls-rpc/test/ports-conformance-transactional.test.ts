@@ -178,6 +178,39 @@ testGroupMLSConformance({
     )
     return {
       groupID: group.committer.handle.groupID,
+      restartMember: async (index) => {
+        const member = group.members[index]
+        const store = stores[index]
+        if (member == null || store == null) throw new Error('missing member')
+        const host = await createTransactionalAccess(member, await store.fork())
+        return {
+          did: member.identity.id,
+          mls: createGroupMLS({
+            access: host.access,
+            identity: member.identity,
+            entrySlot: member.slot,
+          }),
+        }
+      },
+      otherGroupMember: async (index) => {
+        const member = group.members[index]
+        if (member == null) throw new Error('missing member')
+        const other = await createRealGroup(1, `other-${id}`, [member.identity])
+        const joined = other.members[0]
+        if (joined == null) throw new Error('missing other member')
+        const host = await createTransactionalAccess(
+          joined,
+          createTransactionalStore(joined.handle),
+        )
+        return {
+          did: joined.identity.id,
+          mls: createGroupMLS({
+            access: host.access,
+            identity: joined.identity,
+            entrySlot: joined.slot,
+          }),
+        }
+      },
       confirmationTag,
       buildRotation: async (index) => {
         const host = hosts[index]

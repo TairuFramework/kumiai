@@ -205,6 +205,20 @@ testGroupMLSConformance({
 
     return {
       groupID: id,
+      restartMember: async (index) => {
+        const member = members[index]
+        const database = databases[index]
+        if (member == null || database == null) throw new Error('missing member')
+        const state = await database.loadState(id)
+        if (state == null) throw new Error('missing state')
+        const mls = createMemoryGroupMLS({ groupID: id, hostDB: database, localDID: member.did })
+        mls.restoreState(state)
+        return { did: member.did, mls }
+      },
+      otherGroupMember: async (index) => {
+        const did = didAt(index)
+        return { did, mls: createMemoryGroupMLS({ groupID: `${id}-other`, localDID: did }) }
+      },
       confirmationTag: (key, requestID) => encodeMultibase(hmac(sha256, key, fromUTF(requestID))),
       buildRotation: async (index) => {
         const member = members[index]
