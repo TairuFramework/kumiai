@@ -33,6 +33,7 @@ import {
 import { type MLSCredentialIdentity, parseMLSCredentialIdentity } from './credential.js'
 import { createEmbeddedControllerResolver } from './embedded-resolver.js'
 import { LeafBindingError } from './errors.js'
+import { type DeviceRegistry, denySetOf, mayReadmitResetDevice } from './registry.js'
 
 export { MLS_LEAF_ACT, MLS_LEAF_RES } from './capability.js'
 
@@ -105,6 +106,8 @@ function matchesLeafKey(parsed: MLSCredentialIdentity, signaturePublicKey: Uint8
 
 export type DIDAuthenticationDependencies = {
   deviceDenySet?: () => ReadonlySet<string>
+  /** Registry context permits authenticated post-reset subject admission. */
+  deviceRegistry?: () => DeviceRegistry | undefined
   leafLifetime?: () => number | undefined
   trustedGrantLifetime?: () => number | undefined
   /**
@@ -294,11 +297,26 @@ export async function verifyLeafCredential(
   }
   const parsed = parseMLSCredentialIdentity((credential as { identity: Uint8Array }).identity)
   if (!matchesLeafKey(parsed, signaturePublicKey)) throw new LeafBindingError('identity-change')
-  const denySet = deps.deviceDenySet?.() ?? EMPTY_DENY
-  if (isDenied(denySet, parsed.id)) throw new LeafBindingError('denied-id')
+  const registry = deps.deviceRegistry?.()
+  const denied = deps.deviceDenySet?.() ?? (registry == null ? EMPTY_DENY : denySetOf(registry))
+  if (isDenied(denied, parsed.id) && (registry == null || !mayReadmitResetDevice(registry, parsed)))
+    throw new LeafBindingError('denied-id')
+  // Exempt only this holder; every issuer remains subject to the full deny set.
+  const denySet = isDenied(denied, parsed.id)
+    ? new Set([...denied].filter((did) => normalizeDID(did) !== normalizeDID(parsed.id)))
+    : denied
   if (parsed.controller == null) return
+  if (registry != null) {
+    const folded = foldLog(parsed.controller.id, parsed.controller.prefix)
+    if (!folded.ok) throw new LeafBindingError('controller-mismatch')
+    if (
+      (folded.states.at(-1)?.gen ?? 0) <
+      (registry.controllers.get(normalizeDID(parsed.controller.id))?.genFloor ?? 0)
+    )
+      throw new LeafBindingError('generation-floor')
+  }
   try {
-    // The holder grant below is still verified against the full deny set.
+    // The holder grant does not inherit the leaf capability's issuer exception.
     const leafDenySet =
       deps.mayKeepDeniedIssuer?.(credential, signaturePublicKey) &&
       hasHolderEvidence(parsed, signaturePublicKey, denySet, deps.trustedGrantLifetime?.())

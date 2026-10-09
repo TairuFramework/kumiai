@@ -293,6 +293,10 @@
     - clean-mls-catalog
     - export-mls-helpers
     - self-removal
+"@kumiai/mls@0.10.3":
+  dir: packages/mls
+  intents:
+    - soft-jeans-kneel
 "@kumiai/mls@0.5.0":
   dir: packages/mls
   intents:
