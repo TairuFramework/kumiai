@@ -50,7 +50,7 @@ describe('hub log paging', () => {
     lane.dispose()
   })
 
-  test('the commit walk rejects a repeated full page after its cursor', async () => {
+  test('the commit walk stops on a repeated full page after its cursor', async () => {
     class RepeatingHub extends DurableFakeHub {
       fetches = 0
       armed = false
@@ -69,10 +69,10 @@ describe('hub log paging', () => {
     const bob = makeMLSPeer(hub, 'bob', secret)
     await bob.peer.protocol('chat').to('alice')
     hub.armed = true
-    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toThrow(
-      /non-increasing log positions/,
-    )
-    expect(hub.fetches).toBe(2)
+    await bob.peer.enqueue(buildLedgerCommit(bob, []))
+    await expect.poll(() => hub.fetches).toBe(2)
+    expect((await bob.control.load()).operations[0]?.stage).toBe('intent')
+    expect(hub.published).toEqual([])
     await bob.peer.dispose()
   })
 })

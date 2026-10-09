@@ -104,15 +104,16 @@ describe('app delivery, anchors and sealing ignore the epoch hint', () => {
       })
       await flush()
 
-      await expect(
-        alice.peer.commit(
-          buildLedgerCommit(alice, ['token'], {
-            onAdopt: async () => {
-              throw new Error('the process died here')
-            },
-          }),
-        ),
-      ).rejects.toThrow('the process died here')
+      await alice.peer.enqueue(
+        buildLedgerCommit(alice, ['token'], {
+          onAdopt: async () => {
+            throw new Error('the process died here')
+          },
+        }),
+      )
+      await expect
+        .poll(async () => (await alice.control.load()).operations[0]?.stage)
+        .toBe('accepted')
 
       expect((await alice.control.load()).operations[0]).toMatchObject({
         stage: 'accepted',

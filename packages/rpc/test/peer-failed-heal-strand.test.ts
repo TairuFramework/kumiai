@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
-import { RecoveryRequiredError } from '../src/commit.js'
 import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import type { RecoveryEvent } from '../src/peer.js'
 import { commitTopic } from '../src/topic.js'
@@ -203,7 +202,7 @@ describe('heal strand', { concurrent: false }, () => {
 
   describe('a heal trigger under a failed heal', () => {
     for (const trigger of triggers) {
-      test(`${trigger.name}: no responder — commit() refuses, and nothing lands`, async () => {
+      test(`${trigger.name}: no responder -- the intent waits, and nothing lands`, async () => {
         const hub = new FakeHub()
         const rs = new Uint8Array(32).fill(0x61)
         const { bob, staleEpoch } = await trigger.arm(hub, rs, false)
@@ -215,12 +214,9 @@ describe('heal strand', { concurrent: false }, () => {
         const headBefore = hub.head(commitTopic(rs))
         const framesBefore = commitFrames(hub, rs)
 
-        await expect(bob.peer.commit(buildLedgerCommit(bob, ['role:zoe=admin']))).rejects.toThrow(
-          RecoveryRequiredError,
-        )
+        await bob.peer.enqueue(buildLedgerCommit(bob, ['role:zoe=admin']))
 
-        // Belief, not the absence of an error: nothing was published to the log, the head did not
-        // move, the peer did not advance onto its own branch, and nothing was journalled.
+        // The stored intent cannot publish or advance the group while stranded.
         expect(commitFrames(hub, rs)).toBe(framesBefore)
         expect(hub.head(commitTopic(rs))).toBe(headBefore)
         expect(bob.mls.epoch()).toBe(staleEpoch)
@@ -234,8 +230,7 @@ describe('heal strand', { concurrent: false }, () => {
         const rs = new Uint8Array(32).fill(0x62)
         const { bob, responder, staleEpoch } = await trigger.arm(hub, rs, true)
 
-        // The control column: with a responder the heal lands, the strand clears, and the very
-        // commit that was refused above now goes through.
+        // A responder lets recovery clear the strand before the operation builds.
         expect(responder).toBeDefined()
         const carol = responder as TestPeer
         expect(bob.mls.epoch()).toBeGreaterThan(staleEpoch)

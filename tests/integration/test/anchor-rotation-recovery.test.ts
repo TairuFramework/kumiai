@@ -19,7 +19,6 @@ import {
   OperationRejectedError,
   protocolTopic,
   type RecoveryEvent,
-  RecoveryRequiredError,
 } from '@kumiai/rpc'
 import { testAnchorStoreConformance } from '@kumiai/rpc-conformance'
 import { afterEach, expect, test, vi } from 'vitest'
@@ -182,7 +181,7 @@ test.each([false, true])(
     alice.hostHooks.afterAdopt = async () => {
       throw new Error('notification failed')
     }
-    await expect(alice.peer.commit(build)).rejects.toThrow('notification failed')
+    await expect(alice.peer.commit(build)).resolves.toMatchObject({})
     alice.hostHooks.afterAdopt = undefined
     const anchorAfterThrow = alice.anchorStore.stored()
     expect(anchorAfterThrow?.epoch).toBe(epochBefore + 1)
@@ -328,7 +327,7 @@ test('fresh startup with a lost anchor secret settles the saved build before con
     throw new OperationRejectedError('build gated until recovery')
   }
   const gated = customOperation(restarted, buildForbidden)
-  await expect(restarted.peer.commit(gated)).rejects.toBeInstanceOf(RecoveryRequiredError)
+  await restarted.peer.enqueue(gated)
   expect(restarted.peer.anchorEpoch()).toBe(original.epoch)
   expect(published).toEqual([])
   expect(Number(restarted.handle().epoch)).toBe(epochBefore + 2)
@@ -371,8 +370,9 @@ test('persisted but not adopted repairs from the durable handle before a queued 
   const { alice, bob, carolID, bobReceived } = state
   const epochBefore = Number(alice.handle().epoch)
   refused = true
-  await expect(alice.peer.commit(buildRemoveCommit(alice, carolID.id))).rejects.toThrow(
-    'adoption unavailable',
+  await expect(alice.peer.commit(buildRemoveCommit(alice, carolID.id))).resolves.toMatchObject({})
+  expect((await alice.control.load()).outcomes).toContainEqual(
+    expect.objectContaining({ kind: 'landed' }),
   )
   expect(Number(alice.handle().epoch)).toBe(epochBefore)
   expect((await alice.anchorStore.load())?.pending).toMatchObject({
@@ -407,9 +407,7 @@ test('a failed anchor save repairs before the restarted worker seals and reaches
     if (refused && slot.pending == null) throw new Error('anchor save unavailable')
     await save(slot)
   }
-  await expect(alice.peer.commit(buildRemoveCommit(alice, carolID.id))).rejects.toThrow(
-    'anchor save unavailable',
-  )
+  await expect(alice.peer.commit(buildRemoveCommit(alice, carolID.id))).resolves.toMatchObject({})
   expect(Number(alice.handle().epoch)).toBe(epochBefore + 1)
   expect(alice.anchorStore.stored()?.epoch).toBe(epochBefore)
   expect((await alice.anchorStore.load())?.pending?.epochAfter).toBe(epochBefore + 1)

@@ -11,7 +11,7 @@ import {
   commitTopic,
   createGroupPeer,
   digestAppliedCommit,
-  FrameTooLargeError,
+  OperationOutcomeError,
 } from '@kumiai/rpc'
 import { expect, test, vi } from 'vitest'
 
@@ -71,7 +71,7 @@ test('horizon history and a 64 KiB consumer entry fit the real hub with the fina
   }
 }, 600_000)
 
-test('a final frame one byte above the hub cap is rejected before journalling or publication', async () => {
+test('a final frame one byte above the hub cap settles rejected before publishing', async () => {
   const hub = createWireHub()
   const identity = randomIdentity()
   let group = (await createGroup(identity, 'frame-cap-side-effects')).group
@@ -126,9 +126,15 @@ test('a final frame one byte above the hub cap is rejected before journalling or
       lineage: 0,
       digest: digestAppliedCommit(built.commitMessage),
     }))
-    await expect(peer.commit(request)).rejects.toBeInstanceOf(FrameTooLargeError)
-    expect(put).toHaveBeenCalledTimes(1)
-    expect((await host.control.load()).operations[0]?.stage).toBe('intent')
+    await expect(peer.commit(request)).rejects.toMatchObject({
+      name: OperationOutcomeError.name,
+      outcome: { opID: request.id, kind: 'rejected', reason: expect.stringContaining('exceeds') },
+    })
+    expect(put).toHaveBeenCalledTimes(2)
+    expect((await host.control.load()).operations).toEqual([])
+    expect((await host.control.load()).outcomes).toEqual([
+      expect.objectContaining({ opID: request.id, kind: 'rejected' }),
+    ])
     expect(publish.mock.calls.length).toBe(before)
     const fetched = await connection.fetchTopic({
       subscriberDID: identity.id,

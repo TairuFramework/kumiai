@@ -58,6 +58,7 @@ export function sourceRecheck(scan: SourceScan, record: RejoinRecord): 'pass' | 
 
 export type RejoinDeps = {
   control: ControlStore
+  signal?: AbortSignal
   publish(
     payload: Uint8Array,
     publishID: string,
@@ -87,11 +88,11 @@ export async function stepRejoin(
   record: RejoinRecord,
 ): Promise<RejoinRecord | null> {
   const save = async (next: RejoinRecord): Promise<RejoinRecord> => {
-    await applyResolved(deps.control, { putRejoin: next }, deps.newID())
+    await applyResolved(deps.control, { putRejoin: next }, deps.newID(), undefined, deps.signal)
     return next
   }
   const discard = async (reason: Parameters<RejoinDeps['discarded']>[0]): Promise<null> => {
-    await applyResolved(deps.control, { deleteRejoin: true }, deps.newID())
+    await applyResolved(deps.control, { deleteRejoin: true }, deps.newID(), undefined, deps.signal)
     deps.discarded(reason, record)
     return null
   }
@@ -129,7 +130,13 @@ export async function stepRejoin(
           kind: 'refused',
           reason: verdict.refusal,
         }
-        await applyResolved(deps.control, { putRejoin: next, putOutcomes: [outcome] }, deps.newID())
+        await applyResolved(
+          deps.control,
+          { putRejoin: next, putOutcomes: [outcome] },
+          deps.newID(),
+          undefined,
+          deps.signal,
+        )
         deps.emit(outcome)
         return next
       }
@@ -201,6 +208,8 @@ export async function stepRejoin(
       },
     },
     deps.newID(),
+    undefined,
+    deps.signal,
   )
   if (tokens.length > 0) deps.emit(outcome)
   return null

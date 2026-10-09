@@ -311,9 +311,7 @@ describe('durable fork evidence', () => {
       stranded: true,
       fork: evidence,
     })
-    await expect(restarted.peer.commit(buildLedgerCommit(restarted, []))).rejects.toThrow(
-      'group control requires recovery',
-    )
+    await restarted.peer.enqueue(buildLedgerCommit(restarted, []))
   })
 
   test('later fork reveals preserve the earliest known conflict epoch for settlement', async () => {

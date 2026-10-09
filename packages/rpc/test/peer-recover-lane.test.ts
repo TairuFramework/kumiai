@@ -7,7 +7,6 @@ import type {
 import { describe, expect, test } from 'vitest'
 
 import { classifyCommit } from '../src/classify.js'
-import { RecoveryRequiredError } from '../src/commit.js'
 import {
   decodeHandshakeFrame,
   encodeHandshakeFrame,
@@ -94,6 +93,7 @@ describe('a heal re-enacts by ledger membership', { concurrent: false }, () => {
     database.seam('after-apply', () => {
       database.seam('after-apply', () => {
         database.seam('before-apply', () => {
+          void dead.peer.dispose()
           throw new Error('the process died')
         })
       })
@@ -102,9 +102,10 @@ describe('a heal re-enacts by ledger membership', { concurrent: false }, () => {
 
     // Admin A commits `circle x -> Foo`. The hub ACCEPTS it — that is what defines this path —
     // and she dies before adopting it.
-    await expect(dead.peer.commit(buildLedgerCommit(dead, ['circle:x=Foo']))).rejects.toThrow(
-      /the process died/,
-    )
+    await dead.peer.enqueue(buildLedgerCommit(dead, ['circle:x=Foo']))
+    await expect
+      .poll(() => hub.published.filter((row) => row.topicID === commitTopic(rs)).length)
+      .toBe(1)
     await bob.peer.resync()
     expect(bob.mls.fold().get('circle:x')).toBe('Foo')
     expect(dead.mls.epoch()).toBe(1) // she never adopted it
@@ -485,36 +486,33 @@ describe('recover() is a compare-and-set loop of its own', { concurrent: false }
 })
 
 describe('the lane is never re-entered', { concurrent: false }, () => {
-  test('a heal triggered while commit() is pulling does not deadlock: it unwinds, then heals', async () => {
+  test('a heal triggered by an operation releases the lane and unblocks commit()', async () => {
     controlRecoveryClock(5)
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x55)
 
-    // Alice's own commit, in the log, un-merged: her pull will meet it and ask to heal — from
-    // INSIDE commit(), which is holding the very mutex the heal needs.
+    // The operation runner releases the mutex before recovery handles the own-unmerged frame.
     await publishCommit({ hub, senderDID: 'alice', recoverySecret: rs, epoch: 1 })
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 1, members, recovery })
     await bob.peer.resync()
 
     const alice = makeMLSPeer(hub, 'alice', rs, { epoch: 1, members, recovery })
-    // The commit unwinds rather than waiting: the trigger RECORDS, the pull finishes, the lane
-    // is released, and the heal runs behind it as its own operation. A peer that awaited the
-    // heal here would wait on a queue containing itself, and this call would never return.
-    await expect(alice.peer.commit(buildLedgerCommit(alice, ['circle:x=Alice']))).rejects.toThrow(
-      RecoveryRequiredError,
-    )
+    // The outcome wait releases the lane so the heal can run and unblock the intent.
+    await expect(
+      alice.peer.commit(buildLedgerCommit(alice, ['circle:x=Alice'])),
+    ).resolves.toMatchObject({})
     await drainUntil(
       () =>
         alice.mls.epoch() === bob.mls.epoch() &&
         bob.mls.leaves().filter((did) => did === 'alice').length === 1,
-      'alice heals behind the unwound commit',
+      'alice heals before the queued operation lands',
     )
 
-    // The heal ran, on its own lane operation, after commit() let go.
+    // Recovery and the queued operation both completed without re-entering the lane.
     expect(alice.mls.epoch()).toBe(bob.mls.epoch())
     expect(bob.mls.leaves().filter((did) => did === 'alice')).toHaveLength(1)
 
-    // And the host's re-issued commit — the SECOND commit of the heal — lands.
+    // A later host operation also lands after recovery.
     await alice.peer.commit(buildLedgerCommit(alice, ['circle:x=Alice']))
     await bob.peer.resync()
     expect(bob.mls.fold().get('circle:x')).toBe('Alice')
@@ -713,7 +711,7 @@ async function starveBootstrap(
   return { aliceMLS, aliceCrypto, bob }
 }
 
-describe('commit() refuses on an incomplete ledger', { concurrent: false }, () => {
+describe('operations wait on an incomplete ledger', { concurrent: false }, () => {
   test('nothing is published and the epoch does not advance', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x5a)
@@ -734,17 +732,12 @@ describe('commit() refuses on an incomplete ledger', { concurrent: false }, () =
     const rejoinedEpoch = alice.mls.epoch()
     const before = hub.published.filter((m) => m.topicID === commitTopic(rs)).length
 
-    // The refusal. It THROWS — a return would be a false success — and it does so before `build`
-    // is ever called.
+    // The intent waits without building against an incomplete ledger.
     const framedAt: Array<number> = []
-    await expect(
-      alice.peer.commit(buildLedgerCommit(alice, ['role:eve=admin'], { framedAt })),
-    ).rejects.toThrow(RecoveryRequiredError)
+    await alice.peer.enqueue(buildLedgerCommit(alice, ['role:eve=admin'], { framedAt }))
     await flush(200)
 
-    // Not a silent commit-against-a-reset-handle: no new frame on the commit log, the epoch is
-    // exactly where the rejoin left it, and `build()` was never called. Returning without
-    // throwing is not evidence — this asserts the peer published and advanced nothing.
+    // Enqueue persists work without building, publishing, or advancing an incomplete group.
     expect(hub.published.filter((m) => m.topicID === commitTopic(rs)).length).toBe(before)
     expect(alice.mls.epoch()).toBe(rejoinedEpoch)
     expect(framedAt).toEqual([])

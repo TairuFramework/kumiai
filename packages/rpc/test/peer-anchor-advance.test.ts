@@ -170,15 +170,14 @@ describe('a peer that adopts a journalled roster change reads its backlog and ro
     // The hub takes Bob's eviction of Carol and the process dies before he adopts it. The slot
     // carries the sequenceID it landed as, so the restart adopts straight out of it.
 
-    await expect(
-      bob.peer.commit(
-        buildRemoveCommit(bob, 'carol', {
-          onAdopt: async () => {
-            throw new Error('the process died here')
-          },
-        }),
-      ),
-    ).rejects.toThrow('the process died here')
+    await bob.peer.enqueue(
+      buildRemoveCommit(bob, 'carol', {
+        onAdopt: async () => {
+          throw new Error('the process died here')
+        },
+      }),
+    )
+    await expect.poll(async () => (await bob.control.load()).operations[0]?.stage).toBe('accepted')
     expect(bob.mls.epoch()).toBe(1) // it never adopted
     expect(bob.peer.anchorEpoch()).toBe(1)
     expect(((await bob.control.load()).operations[0] ?? null)?.stage).toBe('accepted')

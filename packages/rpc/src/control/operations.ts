@@ -4,6 +4,7 @@ import { toB64U } from '@sozai/codec'
 import { isHeadMismatch } from '../commit.js'
 import { asLogPosition, type LogPosition } from '../cursor.js'
 import { OperationRejectedError } from '../errors.js'
+import { FrameTooLargeError } from '../frame-size.js'
 import { applyResolved, pruneWindow } from './store.js'
 import type {
   AdoptionWrite,
@@ -36,6 +37,7 @@ export type PublishOutcome = { sequenceID: string }
 
 export type OperationDeps = {
   control: ControlStore
+  signal?: AbortSignal
   build(op: Operation): Promise<HostBuilt>
   adopt(
     journal: Uint8Array,
@@ -73,7 +75,7 @@ export async function enqueueOperation(
     enqueuedAt: deps.now(),
     stage: 'intent',
   }
-  await applyResolved(deps.control, { putOperations: [op] }, deps.newID())
+  await applyResolved(deps.control, { putOperations: [op] }, deps.newID(), undefined, deps.signal)
   return op
 }
 
@@ -100,6 +102,8 @@ async function settle(deps: OperationDeps, op: Operation, outcome: Outcome): Pro
     deps.control,
     { deleteOperations: [op.id], putOutcomes: [outcome] },
     deps.newID(),
+    undefined,
+    deps.signal,
   )
   deps.emit(outcome)
   return null
@@ -123,6 +127,8 @@ async function accept(
           }),
     },
     deps.newID(),
+    undefined,
+    deps.signal,
   )
   return next
 }
@@ -132,17 +138,22 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
   if (op.stage === 'intent') {
     await deps.pullToHead()
     let built: HostBuilt
+    let framed: Awaited<ReturnType<OperationDeps['frame']>>
     try {
       built = await deps.build(op)
+      framed = await deps.frame(built)
     } catch (error) {
       if (
         !(error instanceof OperationRejectedError) &&
-        !(error instanceof Error && error.name === 'OperationRejectedError')
+        !(error instanceof FrameTooLargeError) &&
+        !(
+          error instanceof Error &&
+          ['OperationRejectedError', 'FrameTooLargeError'].includes(error.name)
+        )
       )
         throw error
       return await settle(deps, op, { ...base, kind: 'rejected', reason: error.message })
     }
-    const framed = await deps.frame(built)
     const next: Operation = {
       ...op,
       stage: 'built',
@@ -158,7 +169,13 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
         welcome: built.welcome,
       },
     }
-    await applyResolved(deps.control, { putOperations: [next] }, deps.newID())
+    await applyResolved(
+      deps.control,
+      { putOperations: [next] },
+      deps.newID(),
+      undefined,
+      deps.signal,
+    )
     return next
   }
 
@@ -177,7 +194,13 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
         }
         const { built: _built, ...intent } = op
         const next: Operation = { ...intent, stage: 'intent' }
-        await applyResolved(deps.control, { putOperations: [next] }, deps.newID())
+        await applyResolved(
+          deps.control,
+          { putOperations: [next] },
+          deps.newID(),
+          undefined,
+          deps.signal,
+        )
         return next
       }
       position = found.found
@@ -255,7 +278,7 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
     missing.cursor = changes.cursor
   }
   if (Object.keys(missing).length !== 0) {
-    await applyResolved(deps.control, missing, deps.newID())
+    await applyResolved(deps.control, missing, deps.newID(), undefined, deps.signal)
     if (missing.putOutcomes != null) deps.emit(outcome)
   }
   return null

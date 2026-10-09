@@ -181,7 +181,7 @@ describe('the bodies ride the commit', () => {
     await alice.peer.dispose()
   })
 
-  test('a build() that adopts cannot seal the bodies, and is told so', async () => {
+  test('a build() that adopts cannot publish bodies at its stale epoch', async () => {
     const hub = new FakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x25)
     const alice = makeMLSPeer(hub, 'alice', recoverySecret)
@@ -192,16 +192,17 @@ describe('the bodies ride the commit', () => {
     // the group past the epoch its own commit is framed at, so its bodies can no longer be
     // sealed for the members about to receive it — and a blob no member can open looks
     // exactly like a healthy commit until the first receiver fails to resolve it.
-    await expect(
-      alice.peer.commit(
-        buildLedgerCommit(alice, [token], {
-          transform: (built) => {
-            alice.mls.adopt(built.commit)
-            return built
-          },
-        }),
-      ),
-    ).rejects.toThrow(/already advanced past the epoch/)
+    await alice.peer.enqueue(
+      buildLedgerCommit(alice, [token], {
+        transform: (built) => {
+          alice.mls.adopt(built.commit)
+          return built
+        },
+      }),
+    )
+    await expect.poll(() => alice.mls.epoch()).toBe(2)
+    expect((await alice.control.load()).operations[0]?.stage).toBe('intent')
+    expect(hub.published.filter((row) => row.topicID === commitTopic(recoverySecret))).toEqual([])
 
     await alice.peer.dispose()
   })

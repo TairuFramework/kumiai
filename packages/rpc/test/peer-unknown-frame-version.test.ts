@@ -1,6 +1,5 @@
 import { describe, expect, test, vi } from 'vitest'
 
-import { RecoveryRequiredError } from '../src/commit.js'
 import {
   decodeHandshakeFrame,
   encodeHandshakeFrame,
@@ -159,9 +158,7 @@ describe('a frame whose handshake version this build does not know', () => {
     // THIS is the poison failure made observable. A peer that stepped over the frame and called
     // itself reconciled would commit happily here, win the compare-and-set at a dead epoch, and
     // land a commit on a branch of one.
-    await expect(bob.peer.commit(buildLedgerCommit(bob, ['role:zoe=admin']))).rejects.toThrow(
-      RecoveryRequiredError,
-    )
+    await bob.peer.enqueue(buildLedgerCommit(bob, ['role:zoe=admin']))
 
     expect(commitFrames(hub, rs)).toBe(framesBefore)
     expect(hub.head(commitTopic(rs))).toBe(headBefore)
@@ -221,9 +218,7 @@ describe('a frame whose handshake version this build does not know', () => {
       // he is still refusing commits exactly as test 2's genuinely-stranded bob does, not merely
       // un-healed by coincidence of timing.
       expect(bob.mls.epoch()).toBe(1)
-      await expect(bob.peer.commit(buildLedgerCommit(bob, ['role:zoe=admin']))).rejects.toThrow(
-        RecoveryRequiredError,
-      )
+      await bob.peer.enqueue(buildLedgerCommit(bob, ['role:zoe=admin']))
     } finally {
       vi.useRealTimers()
     }

@@ -50,11 +50,16 @@ test('frameCapBeforeSideEffects', async () => {
         expect((await member.control.load()).outcomes).toHaveLength(1)
         expect(hub.published.at(-1)?.payload.length).toBe(786_432)
       } else {
-        expect((await member.control.load()).operations.every((op) => op.stage === 'intent')).toBe(
-          true,
-        )
+        expect((await member.control.load()).operations).toEqual([])
         expect(hub.published.length - before).toBe(0)
-        expect(error).toMatchObject({ name: 'FrameTooLargeError' })
+        expect(error).toMatchObject({
+          name: 'OperationOutcomeError',
+          outcome: {
+            opID: request.id,
+            kind: 'rejected',
+            reason: expect.stringContaining('exceeds'),
+          },
+        })
       }
     } finally {
       await member.peer.dispose()

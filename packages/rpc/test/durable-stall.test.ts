@@ -5,7 +5,6 @@ import { encodeAppAAD } from '../src/app-aad.js'
 import type { AppDeliveryResumed, AppDeliveryStalled } from '../src/app-lane.js'
 import { createAppLane } from '../src/app-lane.js'
 import type { PendingAppFrame } from '../src/crypto.js'
-import { isAppFrameStorageError } from '../src/crypto.js'
 import { adaptBusHandlers } from '../src/handlers.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { createMemoryAppCursorStore } from './fixtures/app-cursor.js'
@@ -73,9 +72,8 @@ describe('durable storage stall', () => {
     hub.detach('bob')
     const frame = await publish(hub, createFakeCrypto({ epoch: 1, localDID: 'alice' }), 'retry')
     await alice.peer.commit(buildLedgerCommit(alice, []))
-    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toSatisfy(
-      isAppFrameStorageError,
-    )
+    await bob.peer.retryAppDelivery(topicID)
+    await vi.waitFor(() => expect(stalled).toHaveBeenCalledTimes(1))
     expect(stalled).toHaveBeenCalledTimes(1)
     store.setFail(false)
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
@@ -863,12 +861,10 @@ describe('durable storage stall', () => {
     const sender = createFakeCrypto({ epoch: 1, localDID: 'alice' })
     const first = await publish(hub, sender, 'first')
     await alice.peer.commit(buildLedgerCommit(alice, []))
-    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toSatisfy(
-      isAppFrameStorageError,
-    )
-    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toSatisfy(
-      isAppFrameStorageError,
-    )
+    await bob.peer.retryAppDelivery(topicID)
+    await vi.waitFor(() => expect(notices).toHaveBeenCalledTimes(1))
+    await bob.peer.retryAppDelivery(topicID)
+    await vi.waitFor(() => expect(notices).toHaveBeenCalledTimes(1))
     expect(notices).toHaveBeenCalledTimes(1)
     expect(notices).toHaveBeenCalledWith({
       groupID: expect.any(String),
@@ -894,9 +890,8 @@ describe('durable storage stall', () => {
     })
 
     const second = await publish(hub, createFakeCrypto({ epoch: 2, localDID: 'alice' }), 'second')
-    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toSatisfy(
-      isAppFrameStorageError,
-    )
+    await bob.peer.retryAppDelivery(topicID)
+    await vi.waitFor(() => expect(notices).toHaveBeenCalledTimes(2))
     expect(notices).toHaveBeenCalledTimes(2)
     expect(notices.mock.calls[1]?.[0]).toMatchObject({ position: second.sequenceID })
     await alice.peer.dispose()
@@ -963,9 +958,8 @@ describe('durable storage stall', () => {
     hub.detach('bob')
     await publish(hub, createFakeCrypto({ epoch: 1, localDID: 'alice' }), 'resume')
     await alice.peer.commit(buildLedgerCommit(alice, []))
-    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toSatisfy(
-      isAppFrameStorageError,
-    )
+    await bob.peer.retryAppDelivery(topicID)
+    await vi.waitFor(() => expect(stalled).toHaveBeenCalledTimes(1))
     expect(stalled).toHaveBeenCalledTimes(1)
 
     store.setFail(false)
@@ -1003,10 +997,12 @@ describe('durable storage stall', () => {
     const held = new Promise<void>((resolve) => {
       release = resolve
     })
+    const stalled = vi.fn()
     const handler = vi.fn(async () => held)
     const bob = makeMLSPeer(hub, 'bob', secret, {
       crypto: createFakeCrypto({ epoch: 1, localDID: 'bob', pending: store.port }),
       handlers: { 'chat/posted': handler },
+      onAppDeliveryStalled: stalled,
     })
     await bob.peer.protocol('chat').to('alice')
     const sender = createFakeCrypto({ epoch: 1, localDID: 'alice' })
@@ -1018,9 +1014,8 @@ describe('durable storage stall', () => {
     await expect(bob.peer.dropAppFrame(topicID, frame.sequenceID)).rejects.toThrow(/pending/)
     store.setFail(true)
     const behind = await publish(hub, sender, 'behind')
-    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toSatisfy(
-      isAppFrameStorageError,
-    )
+    await bob.peer.retryAppDelivery(topicID)
+    await vi.waitFor(() => expect(stalled).toHaveBeenCalledTimes(1))
     await expect(bob.peer.dropAppFrame(topicID, behind.sequenceID)).rejects.toThrow(
       /earlier.*pending/,
     )

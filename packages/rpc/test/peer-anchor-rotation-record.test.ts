@@ -2,7 +2,6 @@ import { describe, expect, test } from 'vitest'
 
 import type { AnchorSlot } from '../src/anchor.js'
 import { digestAppliedCommit } from '../src/classify.js'
-import { RecoveryRequiredError } from '../src/commit.js'
 import { landedChanges } from '../src/control/operations.js'
 import type { PendingRecovery } from '../src/crypto.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
@@ -41,9 +40,8 @@ describe('recovery ordering', { concurrent: false }, () => {
     })
     await bob.peer.replay()
     reject = true
-    await expect(bob.peer.commit(buildRemoveCommit(bob, 'carol'))).rejects.toThrow(
-      'slot unavailable',
-    )
+    await bob.peer.enqueue(buildRemoveCommit(bob, 'carol'))
+    await expect.poll(async () => (await bob.control.load()).operations[0]?.stage).toBe('accepted')
     expect(bob.mls.epoch()).toBe(1)
     await bob.peer.dispose()
   })
@@ -67,7 +65,7 @@ describe('recovery ordering', { concurrent: false }, () => {
           },
         }),
       ),
-    ).rejects.toThrow('adoption notification failed')
+    ).resolves.toMatchObject({})
     const epochBefore = 1
     const anchorAfterThrow = bob.anchorStore.stored()
     expect(anchorAfterThrow?.epoch).toBe(epochBefore + 1)
@@ -102,7 +100,7 @@ describe('recovery ordering', { concurrent: false }, () => {
           },
         }),
       ),
-    ).rejects.toThrow('adopted')
+    ).resolves.toMatchObject({})
     expect(bob.peer.anchorEpoch()).toBe(2)
     await expect.poll(() => alice.peer.anchorEpoch()).toBe(2)
     await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'added' } })
@@ -295,9 +293,8 @@ describe('recovery ordering', { concurrent: false }, () => {
       return process(...args)
     }
     await publishCommit({ hub, senderDID: 'alice', recoverySecret, epoch: 1, removes: ['carol'] })
-    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toThrow(
-      'resolver unavailable',
-    )
+    await bob.peer.enqueue(buildLedgerCommit(bob, []))
+    await expect.poll(() => processes).toBe(1)
     const pending = (await bob.anchorStore.load())?.pending
     expect(pending).toMatchObject({
       epochBefore: 1,
@@ -352,9 +349,7 @@ describe('recovery ordering', { concurrent: false }, () => {
       })
       await bob.peer.replay()
       refuse = true
-      await expect(bob.peer.commit(buildRemoveCommit(bob, 'carol'))).rejects.toThrow(
-        'resolved slot unavailable',
-      )
+      await expect(bob.peer.commit(buildRemoveCommit(bob, 'carol'))).resolves.toMatchObject({})
       expect(written.stored()?.epoch).toBe(1)
       expect((await written.load())?.pending?.epochAfter).toBe(2)
       expect(bob.peer.anchorEpoch()).toBe(1)
@@ -374,15 +369,14 @@ describe('recovery ordering', { concurrent: false }, () => {
     const bob = makeMLSPeer(hub, 'bob', recoverySecret, { members })
     await bob.peer.replay()
     const pending = await bob.buildOperation(intent(buildRemoveCommit(bob, 'carol')))
-    await expect(
-      bob.peer.commit(
-        buildRemoveCommit(bob, 'carol', {
-          onAdopt: async () => {
-            throw new Error('durable replacement not adopted')
-          },
-        }),
-      ),
-    ).rejects.toThrow('durable replacement not adopted')
+    await bob.peer.enqueue(
+      buildRemoveCommit(bob, 'carol', {
+        onAdopt: async () => {
+          throw new Error('durable replacement not adopted')
+        },
+      }),
+    )
+    await expect.poll(async () => (await bob.control.load()).operations[0]?.stage).toBe('accepted')
     expect(bob.mls.epoch()).toBe(1)
     expect((await bob.anchorStore.load())?.pending).toMatchObject({ epochBefore: 1, epochAfter: 2 })
     await bob.peer.dispose()
@@ -439,9 +433,7 @@ describe('recovery ordering', { concurrent: false }, () => {
       }
       return exportSecret(label)
     }
-    await expect(bob.peer.commit(buildRemoveCommit(bob, 'carol'))).rejects.toThrow(
-      'capture interrupted',
-    )
+    await expect(bob.peer.commit(buildRemoveCommit(bob, 'carol'))).resolves.toMatchObject({})
     await expect.poll(() => alice.mls.epoch()).toBe(2)
     hub.detach('bob')
     await alice.peer.commit(buildLedgerCommit(alice, []))
@@ -449,9 +441,7 @@ describe('recovery ordering', { concurrent: false }, () => {
     await bob.peer
       .protocol('chat')
       .dispatch('chat/posted', { data: { text: 'after coordinated repair' } })
-    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toBeInstanceOf(
-      RecoveryRequiredError,
-    )
+    await bob.peer.enqueue(buildLedgerCommit(bob, []))
     expect(adoptsAt).not.toContain(3)
     hub.reattach('bob')
     await expect.poll(() => events.some((event) => event.phase === 'succeeded')).toBe(true)

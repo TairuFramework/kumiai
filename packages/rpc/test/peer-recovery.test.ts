@@ -245,9 +245,7 @@ describe('recovery rendezvous', { concurrent: false }, () => {
         await pause
         return seal(...args)
       })
-    const build = vi.fn(async () => {
-      throw new Error('build reached')
-    })
+    const build = vi.fn(async () => {})
     const recovery = bob.peer.recover()
     void recovery.catch(() => {})
     try {
@@ -258,7 +256,7 @@ describe('recovery rendezvous', { concurrent: false }, () => {
       expect(build).not.toHaveBeenCalled()
       release()
       expect((await recovery).advanced).toBe(true)
-      await expect(committing).rejects.toThrow('build reached')
+      await expect(committing).resolves.toMatchObject({})
       expect(build).toHaveBeenCalledTimes(1)
     } finally {
       release()

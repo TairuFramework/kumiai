@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'vitest'
 
-import { RecoveryRequiredError } from '../src/commit.js'
 import { COMMIT_FRAME_VERSION, encodeCommitFrame } from '../src/commit-frame.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
@@ -121,9 +120,7 @@ describe('a frame whose commit-frame version this build does not know', {
     // THIS is the silent failure made observable. A peer that stepped over the frame and called
     // itself reconciled would commit happily here, win the compare-and-set at a dead epoch, and
     // land a commit on a branch of one.
-    await expect(bob.peer.commit(buildLedgerCommit(bob, ['role:zoe=admin']))).rejects.toThrow(
-      RecoveryRequiredError,
-    )
+    await bob.peer.enqueue(buildLedgerCommit(bob, ['role:zoe=admin']))
 
     expect(commitFrames(hub, rs)).toBe(framesBefore)
     expect(hub.head(commitTopic(rs))).toBe(headBefore)

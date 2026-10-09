@@ -183,6 +183,7 @@ describe('durable retained drain', () => {
   })
 
   test('a storage fault before a commit stops the walk until the frame opens', async () => {
+    const stalled = vi.fn()
     const hub = new DurableFakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x91)
     const store = pendingStore()
@@ -195,6 +196,7 @@ describe('durable retained drain', () => {
         },
       },
       crypto: createFakeCrypto({ epoch: 1, localDID: 'bob', pending: store.port }),
+      onAppDeliveryStalled: stalled,
     })
     await flush()
     hub.detach('bob')
@@ -202,9 +204,8 @@ describe('durable retained drain', () => {
     await flush()
     await alice.peer.commit(buildLedgerCommit(alice, []))
     store.setFail(true)
-    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toSatisfy(
-      isAppFrameStorageError,
-    )
+    await bob.peer.enqueue(buildLedgerCommit(bob, []))
+    await vi.waitFor(() => expect(stalled).toHaveBeenCalledTimes(1))
     expect(bob.mls.epoch()).toBe(1)
     store.setFail(false)
     await bob.peer.replay()
@@ -215,6 +216,7 @@ describe('durable retained drain', () => {
   })
 
   test('a failed final drain after rotation still rebuilds the new app topic', async () => {
+    const stalled = vi.fn()
     const hub = new DurableFakeHub()
     const recoverySecret = new Uint8Array(32).fill(0x92)
     const store = pendingStore()
@@ -227,6 +229,7 @@ describe('durable retained drain', () => {
       epoch: 1,
       members: ['alice', 'bob', 'carol'],
       crypto: createFakeCrypto({ epoch: 1, localDID: 'bob', pending: store.port }),
+      onAppDeliveryStalled: stalled,
       handlers: { 'chat/changed': (context: { data: unknown }) => void seen.push(context.data) },
     })
     await flush()
@@ -236,9 +239,8 @@ describe('durable retained drain', () => {
     await alice.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'new topic' } })
     await flush()
     store.setFail(true)
-    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toSatisfy(
-      isAppFrameStorageError,
-    )
+    await bob.peer.enqueue(buildLedgerCommit(bob, []))
+    await vi.waitFor(() => expect(stalled).toHaveBeenCalledTimes(1))
     expect(bob.mls.epoch()).toBe(2)
     expect(bob.peer.anchorEpoch()).toBe(2)
     hub.reattach('bob')

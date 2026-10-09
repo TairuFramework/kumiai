@@ -1,4 +1,8 @@
-import { ControlWriteNotCommittedError, StorageOutcomeUnknownError } from '../errors.js'
+import {
+  ControlWriteNotCommittedError,
+  PeerDisposedError,
+  StorageOutcomeUnknownError,
+} from '../errors.js'
 import type { ControlChanges, ControlSnapshot, ControlStore, Outcome } from './types.js'
 
 function putRows<Row, Key>(
@@ -90,8 +94,8 @@ export async function applyResolved(
   store: ControlStore,
   changes: ControlChanges,
   mutationID: string,
-  sleep: (delay: number) => Promise<void> = (delay) =>
-    new Promise((resolve) => setTimeout(resolve, delay)),
+  sleep?: (delay: number) => Promise<void>,
+  signal?: AbortSignal,
 ): Promise<void> {
   try {
     await store.apply(changes, mutationID)
@@ -105,16 +109,49 @@ export async function applyResolved(
   }
   let delay = 100
   for (;;) {
+    signal?.throwIfAborted()
     let last: string | null
     try {
-      last = await store.lastMutation()
-    } catch {
-      await sleep(delay)
+      last = await abortable(store.lastMutation(), signal)
+    } catch (error) {
+      signal?.throwIfAborted()
+      if (
+        error instanceof PeerDisposedError ||
+        (error instanceof Error && error.name === 'PeerDisposedError')
+      )
+        throw error
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        await abortable(
+          sleep?.(delay) ??
+            new Promise<void>((resolve) => {
+              timer = setTimeout(resolve, delay)
+            }),
+          signal,
+        )
+      } finally {
+        if (timer != null) clearTimeout(timer)
+      }
       delay = Math.min(delay * 2, 15_000)
       continue
     }
     if (last !== mutationID) throw new ControlWriteNotCommittedError()
     return
+  }
+}
+
+async function abortable<TValue>(promise: Promise<TValue>, signal?: AbortSignal): Promise<TValue> {
+  if (signal == null) return await promise
+  let onAbort!: () => void
+  const aborted = new Promise<never>((_resolve, reject) => {
+    onAbort = () => reject(signal.reason)
+    signal.addEventListener('abort', onAbort, { once: true })
+    if (signal.aborted) onAbort()
+  })
+  try {
+    return await Promise.race([promise, aborted])
+  } finally {
+    signal.removeEventListener('abort', onAbort)
   }
 }
 

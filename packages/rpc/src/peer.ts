@@ -25,7 +25,7 @@ import {
   stepOperation,
 } from './control/operations.js'
 import { type RejoinDeps, rejoinBarrier, type SourceScan, stepRejoin } from './control/rejoin.js'
-import { applyResolved, pruneWindow } from './control/store.js'
+import { applyResolved as applyControlResolved, pruneWindow } from './control/store.js'
 import type {
   AdoptionWriteFactory,
   AppliedCommit,
@@ -218,6 +218,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   input: GroupPeerParams<Protocols>,
 ): GroupPeer<Protocols> {
   const boundary = createHostBoundary()
+  const controlAbort = new AbortController()
+  const applyResolved: typeof applyControlResolved = (store, changes, mutationID) =>
+    applyControlResolved(store, changes, mutationID, undefined, controlAbort.signal)
   const params = wrapPeerHost(boundary, input)
   const {
     hub,
@@ -369,6 +372,16 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
 
   let anchorCapture: { advance: string | undefined; anchor: Anchor } | undefined
   let epochNeedsBuild = false
+  let anchorSaveFailed = false
+  const saveResolvedAnchor = async (slot: AnchorSlot): Promise<void> => {
+    try {
+      await anchorStore?.save(slot)
+      anchorSaveFailed = false
+    } catch (error) {
+      anchorSaveFailed = true
+      throw error
+    }
+  }
   const captureAnchor = async (advance?: string): Promise<void> => {
     const captured =
       anchorCapture != null && anchorCapture.advance === advance
@@ -382,7 +395,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       mux.retainTopic(protocolTopic(secret, epoch, name), { retention: appLogRetentionSeconds })
     }
     mux.retainTopic(inboxTopic(secret, epoch, localDID), { retention: appLogRetentionSeconds })
-    await anchorStore?.save({ anchor: anchorCapture.anchor })
+    await saveResolvedAnchor({ anchor: anchorCapture.anchor })
     if (disposed) return
     anchor = { secret, epoch }
     anchorCapture = undefined
@@ -394,7 +407,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
 
   /** The rotation resolved without moving the anchor: drop the record and keep the anchor. */
   const keepAnchor = async (): Promise<void> => {
-    await anchorStore?.save({ anchor })
+    await saveResolvedAnchor({ anchor })
     if (disposed) return
     anchorPending = undefined
     sealError = undefined
@@ -1853,17 +1866,25 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     string,
     Set<{ resolve: (outcome: Outcome) => void; reject: (error: unknown) => void }>
   >()
+  const resolveOutcomeWaiters = (outcome: Outcome): void => {
+    for (const waiter of outcomeWaiters.get(outcome.opID ?? outcome.id) ?? [])
+      waiter.resolve(outcome)
+    outcomeWaiters.delete(outcome.opID ?? outcome.id)
+  }
   const emitOutcome = (outcome: Outcome): void => {
     hostOutbox.push(() => {
-      for (const waiter of outcomeWaiters.get(outcome.opID ?? outcome.id) ?? [])
-        waiter.resolve(outcome)
-      outcomeWaiters.delete(outcome.opID ?? outcome.id)
+      resolveOutcomeWaiters(outcome)
       notifyHost((value) => params.onOutcome?.(value), outcome)
     })
   }
   const refreshControl = async (): Promise<void> => {
     if (control == null) return
     const snapshot = await control.load()
+    // A host can fail after committing adoption but before the runner emits its outcome.
+    for (const outcome of snapshot.outcomes) {
+      if (outcomeWaiters.has(outcome.opID ?? outcome.id))
+        hostOutbox.push(() => resolveOutcomeWaiters(outcome))
+    }
     hasOperations = snapshot.operations.length > 0
     revokeHold = revokeHeld(snapshot)
     rejoinHeld = snapshot.rejoin != null
@@ -2013,6 +2034,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       await deliverObligations(
         {
           control,
+          signal: controlAbort.signal,
           deliverWelcome: async (obligation) => {
             assertLive()
             await deliverWelcome(obligation)
@@ -2041,6 +2063,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     const topicID = commitTopicID
     return {
       control,
+      signal: controlAbort.signal,
       build: async (op) => {
         assertLive()
         return build(op)
@@ -2233,11 +2256,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             if (!disposed && (await mls?.readEpoch()) !== before) await rebuildEpoch()
           })
           if (!retry) operationBackoff = 1000
-        } catch (error) {
+        } catch {
           retry = true
-          for (const listeners of outcomeWaiters.values()) {
-            for (const waiter of listeners) waiter.reject(error)
-          }
         } finally {
           operationRunning = false
           if (!disposed) {
@@ -2468,9 +2488,6 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     outcomeWaiters.set(request.id, listeners)
     try {
       await enqueue(request)
-      if (anchorRecoveryPending)
-        throw new RecoveryRequiredError('commit: app anchor requires confirmed recovery')
-      if (stranded) throw new RecoveryRequiredError('commit: group control requires recovery')
       const outcome = await waiting
       if (outcome.kind !== 'landed') throw new OperationOutcomeError({ outcome })
       return { position: outcome.position }
@@ -2642,6 +2659,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     const rendezvous = rendezvousTopicID
     return {
       control,
+      signal: controlAbort.signal,
       runSerial,
       now: Date.now,
       newID: newPublishID,
@@ -3067,10 +3085,28 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     }
     await removalEffect()
     if (disposed || locallyRemoved) return
-    if (stored != null) {
-      if (mls != null) await resolveAnchorRotation({ port: mls, initial: true })
-    } else {
-      await captureAnchor()
+    let anchorBackoff = 100
+    while (!disposed) {
+      try {
+        if (stored != null) {
+          if (mls != null) await resolveAnchorRotation({ port: mls, initial: true })
+        } else {
+          await captureAnchor()
+        }
+        break
+      } catch (error) {
+        if (disposed) return
+        if (!anchorSaveFailed) throw error
+        // Keep the captured secret and send barrier until the idempotent save is known.
+        await Promise.race([
+          new Promise<void>((resolve) => {
+            pendingRestoreTimer = setTimeout(resolve, anchorBackoff)
+          }),
+          pendingRestoreAborted,
+        ])
+        pendingRestoreTimer = undefined
+        anchorBackoff = Math.min(anchorBackoff * 2, 15_000)
+      }
     }
     if (disposed) return
     await restorePending()
@@ -3270,6 +3306,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     dispose: () => {
       if (disposePromise != null) return disposePromise
       disposed = true
+      controlAbort.abort(new PeerDisposedError('Peer is disposed'))
       if (operationTimer != null) clearTimeout(operationTimer)
       if (welcomeTimer != null) clearTimeout(welcomeTimer)
       for (const listeners of outcomeWaiters.values()) {

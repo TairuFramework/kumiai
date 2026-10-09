@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'vitest'
 
-import { RecoveryRequiredError } from '../src/commit.js'
 import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import { commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
@@ -398,7 +397,7 @@ describe('a hostile commit cannot make an honest peer do expensive work', {
 })
 
 describe('a peer that must recover before it can commit', { concurrent: false }, () => {
-  test('is told so, and the commit does not happen', async () => {
+  test('keeps the operation pending until recovery or disposal', async () => {
     const hub = new FakeHub()
     const rs = new Uint8Array(32).fill(0x48)
 
@@ -412,12 +411,8 @@ describe('a peer that must recover before it can commit', { concurrent: false },
     await flush(120)
     expect(alice.mls.epoch()).toBe(1)
 
-    // Her host commits anyway. The lane will not race a head it has not reconciled to, and it
-    // will not silently do nothing: it unwinds and says why.
-    await expect(alice.peer.commit(buildLedgerCommit(alice, ['signed-token: a']))).rejects.toThrow(
-      RecoveryRequiredError,
-    )
-    // Nothing was published, and nothing was journalled: the commit did not happen.
+    // The durable intent waits for recovery without racing an unreconciled head.
+    await alice.peer.enqueue(buildLedgerCommit(alice, ['signed-token: a']))
     expect(hub.published.filter((m) => m.topicID === commitTopic(rs))).toHaveLength(1)
     expect((await alice.control.load()).operations[0]?.stage).toBe('intent')
 

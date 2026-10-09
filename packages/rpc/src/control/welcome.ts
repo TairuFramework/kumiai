@@ -4,7 +4,11 @@ import { applyResolved } from './store.js'
 import type { ControlSnapshot, ControlStore, WelcomeObligation } from './types.js'
 
 export async function deliverObligations(
-  deps: { control: ControlStore; deliverWelcome(obligation: WelcomeObligation): Promise<void> },
+  deps: {
+    signal?: AbortSignal
+    control: ControlStore
+    deliverWelcome(obligation: WelcomeObligation): Promise<void>
+  },
   snapshot: ControlSnapshot,
 ): Promise<void> {
   const failures: Array<unknown> = []
@@ -15,6 +19,8 @@ export async function deliverObligations(
         deps.control,
         { deleteWelcomes: [obligation.opID] },
         toB64U(crypto.getRandomValues(new Uint8Array(16))),
+        undefined,
+        deps.signal,
       )
     } catch (error) {
       failures.push(error)

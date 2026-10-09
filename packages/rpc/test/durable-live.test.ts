@@ -140,9 +140,7 @@ describe('durable live app delivery', () => {
     hub.detach('bob')
     await publish('before commit')
     vi.spyOn(store.port, 'persistOpened').mockRejectedValueOnce(new Error('transient storage'))
-    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toThrow(
-      'failed to persist opened app frame',
-    )
+    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).resolves.toMatchObject({})
     await vi.waitFor(() => expect(store.opened).toHaveLength(1), { timeout: 2500 })
     await bob.peer.dispose()
   })

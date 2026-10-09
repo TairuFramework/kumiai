@@ -152,7 +152,7 @@ test('restart restores the adopted derived state with its proof ledger entries',
         mls: s.mls,
         input: { subject: s.subject, log: s.log },
       }),
-    ).rejects.toThrow('crash after adoption')
+    ).resolves.toMatchObject({})
     expect((await s.member.control.load()).outcomes).toContainEqual(
       expect.objectContaining({ kind: 'landed' }),
     )
@@ -338,24 +338,33 @@ test('non-building outcomes do not serialize or advance', async () => {
   }
 })
 
-test('a serializer failure publishes nothing and the caller can rerun', async () => {
+test('a serializer failure keeps the caller waiting until the same operation retries', async () => {
   const s = await setup()
   try {
     const epoch = s.member.handle().epoch
+    let failures = 0
     s.member.hostHooks.serializeJournal = () => {
+      failures++
       throw new Error('cannot persist journal')
     }
-    await expect(
-      adapter.publishRevokeProof({
+    let settled = false
+    const publishing = adapter
+      .publishRevokeProof({
         peer: s.member.peer,
         mls: s.mls,
         input: { subject: s.subject, log: s.log },
-      }),
-    ).rejects.toThrow('cannot persist journal')
+      })
+      .finally(() => {
+        settled = true
+      })
+    void publishing.catch(() => {})
+    await expect.poll(() => failures).toBeGreaterThan(0)
+    expect(settled).toBe(false)
     expect((await s.member.control.load()).operations[0]?.stage).toBe('intent')
     expect(s.member.handle().epoch).toBe(epoch)
     s.member.hostHooks.serializeJournal = encodeJournal
     await s.member.peer.replay()
+    await publishing
     await expect.poll(() => s.member.handle().epoch).toBe(epoch + 1n)
     expect((await s.member.control.load()).outcomes).toContainEqual(
       expect.objectContaining({ kind: 'landed' }),

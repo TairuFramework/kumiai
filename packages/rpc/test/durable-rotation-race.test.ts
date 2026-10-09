@@ -26,7 +26,8 @@ describe('durable app rotation', () => {
       return originalExport(label, length)
     })
     await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, removes: ['carol'] })
-    await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toThrow('export failed')
+    await bob.peer.enqueue(buildLedgerCommit(bob, []))
+    await expect(bob.peer.replay()).rejects.toThrow('export failed')
     const before = hub.published.length
     await bob.peer.protocol('chat').dispatch('chat/posted', {
       data: { text: 'must not leave' },
