@@ -383,7 +383,15 @@ export type Outcome = { id: string; opID: string | null; at: number } & (
 - `openWelcome` reads the Welcome's refs without decrypting (`mls/src/welcome-refs.ts:13-27`). A
   receipted ref returns `{alreadyJoined: groupID}`.
 - At startup, the host consumes every `joinRef` still set on a group it holds, then clears it.
-- **Admission against held state.** A Welcome for a group the host already holds, or has
+- **Spec P r9 admission amendment (r9 decision), 2026-10-09.** Every installed Welcome, ordinary or last-resort, records a durable spent digest per group.
+  The joined-state transaction checks and appends that digest with joinRef, control reset and anchor clear.
+  Admission refuses spent digests before epoch comparison, even after lower-epoch recovery. D3 deletion retains them in the tombstone for the group's lifetime.
+  Spec P D3 defines digest derivation, required seed/save plumbing and atomic conflict/ambiguity handling.
+  Package receipts do not replace this guard; last-resort consume remains a no-op (`mls-hub/src/provisioner.ts:253`, checked 2026-10-09).
+  Today's live comparator checks current epoch only (`mls-hub/src/admission.ts:8`, checked 2026-10-09).
+  Rejected alternative: a highest-epoch-ever live admission floor, which would reject legitimate Welcomes on the lower branch.
+  Conformance/integration add A3 install/advance → confirmed B2 recovery → refused A3 replay, and deleted-group replay refusal.
+- **Admission against held state, after the spent check.** An unspent Welcome for a group the host already holds, or has
   tombstoned, is judged by its authenticated epoch, not by group ID:
   - none held: join;
   - live, at or above the Welcome's epoch: `alreadyJoined`;

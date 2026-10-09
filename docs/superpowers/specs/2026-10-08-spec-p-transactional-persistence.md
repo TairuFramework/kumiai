@@ -1,18 +1,19 @@
 # Spec P: transactional persistence — design
 
 Date: 2026-10-08
-Status: draft r8
+Status: draft r9
 Parent: [client host, messaging protocol and multi-device e2e](2026-10-08-client-messaging-e2e-design.md)
 (phase 0)
 
 Spec P fixes the contracts phase 2 implements on memory doubles. P2a crash-safe control has
-landed on `feat/spec-p-phase-2` and is binding. This spec adds no second control journal.
+landed on `feat/spec-p-phase-2` and is binding, with the explicit r9 D4 admission amendment below.
+This spec adds no second control journal.
 
 ## Scope and handoff
 
 | Phase | Work |
 |---|---|
-| 2 | `rpc`, `mls`, `mls-rpc`, `rpc-conformance` and `hub-client` contracts and runtime additions. Version-2 state and recovery codecs first. Registry over `GroupStateStore`, shared memory stores, extracted tunnel encryptor, D4 metadata, D6 attempts/outcomes, D7 decoding and outcome-aware hook fixtures. Both contract suites against real crypto/MLS/HTTP and doubles. Real HTTP hub plus in-process two-device group-peer smoke. |
+| 2 | `rpc`, `mls`, `mls-rpc`, `mls-hub`, `rpc-conformance` and `hub-client` contracts and runtime additions. Version-2 state and recovery codecs first. Registry over `GroupStateStore`, spent-Welcome admission, codec-injected shared memory stores, extracted tunnel encryptor, D4 metadata, D6 attempts/outcomes, D7 decoding and outcome-aware hook fixtures. Both contract suites against real crypto/MLS/HTTP and doubles. Real HTTP hub plus in-process two-device group-peer smoke. |
 | 3 | `rpc-store`: Hozon stores, coordinated outbox, state/control/anchor co-commit, tombstones and hooks. Provider discriminator and outcome-aware hook prerequisites in Hozon. sqlite/postgres/expo conformance, persistence and provider failure tests. |
 | 4 and 5 | `client` ownership, Welcome inventory/consume wiring, rotation scheduling, deletion orchestration; `messaging` hooks, `MessageStore`, status events and deduplication. Phase 2 tests these contracts with host fixtures, without creating either package. |
 | 6 | Child-process driver and every SIGKILL seam. In-process reconstruction is not kill-a-process evidence. |
@@ -64,6 +65,11 @@ prefixed with `../`, `node_modules/` or `tests/`. Destinations in Decisions are 
   `mls-hub/src/join.ts:31`). `consume/receipt` and admission comparison are landed
   (`mls-hub/src/join.ts:11`, `mls-hub/src/admission.ts:7`). Atomic readmission reset exists in the host
   fixture (`rpc/test/fixtures/host-db.ts:105`, `rpc/test/fixtures/host-db.ts:115`).
+- **Welcome replay gap, checked 2026-10-09.** Live admission compares only current epoch (`mls-hub/src/admission.ts:8`).
+  Last-resort consume writes no receipt (`mls-hub/src/provisioner.ts:253`); repeats reopen (`mls-hub/test/join.test.ts:320`).
+  Welcome reconstruction derives the original encryption secret and creates a fresh tree
+  (`node_modules/ts-mls/dist/src/clientState.js:603`, `node_modules/ts-mls/dist/src/clientState.js:607`).
+  Thus A3 replay after lower recovery to B2 can reinstate spent sender generations. Lineage does not change MLS secrets.
 
 ### Publication and handle state today
 
@@ -118,6 +124,10 @@ prefixed with `../`, `node_modules/` or `tests/`. Destinations in Decisions are 
   (`../hozon/packages/postgres/src/index.ts:61`, `../hozon/packages/postgres/src/index.ts:73`).
   Spare connection capacity is not guaranteed. Expo serialises connection access and plain begin
   (`../hozon/packages/expo/src/driver.ts:53`, `../hozon/packages/expo/src/driver.ts:72`).
+- **At-rest gap, checked 2026-10-09.** Hozon parameters supply adapter/logger/prefix, without an implicit encryption contract
+  (`../hozon/packages/db/src/db.ts:72`). Node-sqlite opens stock `DatabaseSync` (`../hozon/packages/node-sqlite/src/index.ts:36`).
+  Expo opens `expo-sqlite` (`../hozon/packages/expo/src/index.ts:23`); postgres constructs its client separately (`../hozon/packages/postgres/src/index.ts:73`).
+  Kubun generates and persists an outbox key (`../kubun/packages/store-p2p/src/ops/app-outbox.ts:274`); this spec does not adopt that policy.
 - Postgres transport errors reject queries without backend-completion evidence
   (`../hozon/node_modules/postgres/src/connection.js:381`). Hozon's catch runs rollback hooks and rethrows
   (`../hozon/packages/db/src/db.ts:275`); that catch alone cannot prove a lost COMMIT rolled back.
@@ -318,12 +328,13 @@ export type GroupStateRecord = {
   epochAuthenticator: Uint8Array  // empty when deleted
   lineage: number                 // starts at 0; never decreases, tombstones included
   joinRef: { sourceID: string; ref: string } | null
+  spentWelcomeDigests: Array<string> // sorted unique; retained across recovery and tombstones (r9 decision)
 }
 export type GroupStateCAS = { expected: { version: number } | null }
 export type GroupStateWrite = GroupStateCAS & (
   | { kind: 'state'; adoption?: AdoptionWrite }
   | { kind: 'recovery'; adoption: AdoptionWrite }
-  | { kind: 'welcome' }
+  | { kind: 'welcome'; welcomeDigest: string }
 )
 export type GroupStateStore = {
   mutationGate: GroupMutationGate
@@ -343,7 +354,30 @@ export class GroupStateUncertainError extends Error { override name = 'GroupStat
 export class DisplacedGroupHandleError extends Error { override name = 'DisplacedGroupHandleError' }
 ```
 
-Phase 3 encrypts state bytes, P2a rejoin secrets and app plaintext at rest.
+**Host at-rest codec (r9 decision).** Export this Hozon-free port from rpc:
+
+```ts
+export type AtRestCodec = {
+  seal(plaintext: Uint8Array, aad: Uint8Array): Promise<Uint8Array>
+  open(ciphertext: Uint8Array, aad: Uint8Array): Promise<Uint8Array>
+}
+```
+
+State, coordinated-outbox and control factories require `atRest: AtRestCodec`. The host owns keys, provisioning, rotation, retention and destruction.
+Kumiai never generates or stores at-rest keys. Reconstructed adapters receive a codec capable of opening all retained records.
+Deletion never destroys host keys implicitly; remaining groups and tombstones can still require them.
+
+Seal state bytes, complete pending frames, outbox payloads and the serialised control snapshot before storage.
+Control encryption includes operation bodies/journals and rejoin candidate/requestKey. Ports and transaction hooks still receive logical plaintext values.
+AAD is `UTF8(JSON.stringify(['kumiai/at-rest/v1', groupID, namespace, recordID]))`.
+Namespaces are `state`, `pending`, `outbox` and `control`. Record IDs are groupID for state/control, frame.id for pending, and String(seq) for outbox.
+Queryable keys, CAS versions and mutation markers may remain clear. Authenticated open must reject altered ciphertext or AAD, without plaintext fallback.
+Seal failure rolls back the coupled transaction. Open failure exposes no handle or payload and never rewrites ciphertext as plaintext.
+
+Phase 2 shared memory doubles require an injected deterministic authenticated test codec. Their committed rows contain sealed bytes, with no plaintext shadow copies.
+Phase 3 uses the same contract on every Hozon provider. Provider encryption may supplement it.
+Rejected alternative: SQLCipher/provider encryption as the only mechanism; Expo and postgres have different adapter paths, cited above.
+
 New errors use `(message?: string, options?: ErrorOptions)` inherited from `Error`.
 Canonical errors already have explicit names (`rpc/src/errors.ts:16`, `rpc/src/errors.ts:24`).
 Redeclaration breaks ambiguity recognition (`rpc/src/control/store.ts:105`).
@@ -370,8 +404,35 @@ Redeclaration breaks ambiguity recognition (`rpc/src/control/store.ts:105`).
   at the existing replacement call (`mls-rpc/src/mls.ts:218`). Registry maps that mode to the recovery store write.
 - **Admission floor (r7 decision).** Set `admissionFloor = max(prior admissionFloor, candidate epoch)`.
   Lower recovery preserves it. Tombstones set `epoch = admissionFloor`; Welcome requires strictly greater
-  than that tombstone epoch. Live Welcome still compares current epoch, as binding P2a D4 requires
-  (`mls-hub/src/admission.ts:7`, `mls-hub/src/admission.ts:8`). This adds no P2a admission amendment.
+  than that tombstone epoch. Unspent live Welcomes still compare current epoch (`mls-hub/src/admission.ts:7`, `mls-hub/src/admission.ts:8`).
+  The spent-digest check below amends P2a D4 admission (r9 decision).
+- **Spent Welcome admission (r9 decision), amendment to P2a D4.** Every installed Welcome, ordinary or last-resort, adds its durable digest per group.
+  The welcome transaction checks the stored set, then appends the digest with joined state, joinRef, control reset and anchor clear.
+  A spent digest returns `refused` before epoch comparison. The store independently rejects attempted installation with `GroupStateConflictError`.
+  Recovery, ordinary saves, opens, joinRef clearing and deletion preserve the set exactly. Welcome saves add exactly one previously unspent digest.
+  Retain digests for the group's lifetime, including D3 tombstones and later admissions. Never prune them by epoch, lineage or package retention.
+  Known rollback spends nothing; ambiguous commits resolve joined state and spent digest together through D2's barrier.
+  Source receipts remain consume bookkeeping, not this guard. A receipted ordinary repeat never installs state; a tombstoned group remains deleted.
+  Rejected alternative: a highest-epoch-ever live admission floor, which would reject legitimate unspent Welcomes on the lower branch.
+
+  Proposed phase-2 `mls.digestWelcome(welcome: ProcessWelcomeParams['welcome']): string` returns lowercase-hex SHA-256 of
+  `UTF8('kumiai/welcome-spent/v1') || u32(encryptedGroupInfo.length) || encryptedGroupInfo`, length big-endian.
+  Both framed bytes and legacy objects use this core; reject malformed framing. Exclude invitation, tree, source/ref and recipient-list packaging.
+  The Welcome contains cipherSuite/secrets/encryptedGroupInfo (`node_modules/ts-mls/dist/src/welcome.js:14`).
+  Recipient decryption binds encryptedGroupInfo (`node_modules/ts-mls/dist/src/welcome.js:43`), so reordering/pruning recipients cannot evade this digest.
+  Extend `mls-hub.openWelcome` to return `welcomeDigest` with every authenticated `joined` result. Only the verified groupID scopes its spent set.
+  Extend `judgeWelcomeAdmission` with held `spentWelcomeDigests` and a required `welcomeDigest`; check spent first, retaining its existing result union.
+- **Other historic-state paths, checked 2026-10-09.** Recovery restore can reconstruct a saved candidate (`mls-rpc/src/mls.ts:464`).
+  P2a rechecks source epoch/authenticator/lineage before adoption (`rpc/src/control/rejoin.ts:39`, `rpc/src/control/rejoin.ts:154`).
+  D3 co-commits that rejoin's `confirmed` → `adopted` transition with the lineage increment; `adopted` only bootstraps/settles (`rpc/src/control/rejoin.ts:203`).
+  Pre-commit replay retries the same transaction. Post-commit replay preserves current progress as a same-identity no-op or fails the old source check.
+  Later lower recovery cannot restore the old source lineage. Never relabel an old candidate with a new rejoin/source to bypass this check.
+  This safety requires D3's lineage plumbing; today's real source still reports zero (`mls-rpc/src/mls.ts:289`).
+  Fresh recovery from historic GroupInfo creates an external update path (`mls/src/group-welcome.ts:328`, `node_modules/ts-mls/dist/src/createCommit.js:267`).
+  Its path secret is random (`node_modules/ts-mls/dist/src/updatePath.js:26`); its epoch secret tree is newly derived (`node_modules/ts-mls/dist/src/createCommit.js:294`).
+  Old confirmation cannot confirm a new candidate: judgement binds requestID, position, commitDigest and tag (`mls-rpc/src/recovery.ts:228`).
+  Own journals also carry expected source identity/lineage (`rpc/src/control/operations.ts:235`); ordinary state/open saves cannot lower epoch.
+  Registry restore loads only the current committed record. These paths retain their source/CAS/progress guards; none gains Welcome's fresh seed/reset exception.
 - **Identity (r6 decision).** Epoch identity is `(groupID, epoch, epochAuthenticator)`; lineage identifies
   ownership, not the epoch secret. Same identity/same lineage retains max HWM and merged sender/receive
   progress. Only after both checks may `mergeReceiveSecretTree` run (`mls/src/secret-tree.ts:17`).
@@ -380,17 +441,18 @@ Redeclaration breaks ambiguity recognition (`rpc/src/control/store.ts:105`).
   while changing authenticator: reset HWM, bump lineage, discard old current-tree progress.
   Live Welcome replacement requires a strictly higher authenticated current epoch. A replacement proposing the
   same identity is an idempotent no-op, not a new lineage with reusable keys. Recovery/Welcome bumps
-  lineage by one; ordinary commits keep it. Tombstones retain admissionFloor/lineage, with HWM zero, empty
+  lineage by one; ordinary commits keep it. Tombstones retain admissionFloor/lineage/spentWelcomeDigests, with HWM zero, empty
   state/authenticator/ledger and null credential/joinRef.
 - `save(kind: 'state' | 'recovery')` co-commits any `AdoptionWrite`, its mutation marker and matching anchor landed
   mark. `record.writeID === adoption.mutationID`. Keep P2a's carry into retained historical epochs.
   Current-state same-identity merging supplements that carry; it does not replace it.
-- **Welcome save (r6 decision).** `save(record, {expected, kind: 'welcome'})` is the atomic
+- **Welcome save (r6 decision; r9 digest).** `save(record, {expected, kind: 'welcome', welcomeDigest})` is the atomic
   seed/readmission operation. With the old peer stopped/drained, apply
   `readmissionChanges(txControlSnapshot)` (`rpc/src/control/store.ts:67`) and clear the anchor slot
   in the state-save transaction. Set control's mutation marker to `record.writeID`.
   Operations/rejoin become `unknown`; applied/responses/cursor clear; outcomes/Welcomes survive.
-  Initial join uses the same method with absent control. Tombstone admission keeps its epoch floor.
+  Initial Welcome join uses the same method with absent control. Include `welcomeDigest` and the appended spent set (r9 decision).
+  Tombstone admission keeps both its epoch floor and spent digests.
   This is not `AdoptionWrite.anchorLanded`, which only marks an advance (`rpc/src/control/types.ts:43`).
 - `saveOpened` co-writes the CAS state and pending record. Duplicate `(groupID, pending.frame.id)`
   insertion is a no-op. List in `(segment, position)` order, using rpc's numeric-position comparison
@@ -401,7 +463,7 @@ Redeclaration breaks ambiguity recognition (`rpc/src/control/store.ts:105`).
   with the original error, known uncommitted. Anything else: conflict, invalidate and reload.
   Failed barriers/reads retry at 100 ms, doubling to a 15 s cap. Do not expose uncertain state.
 - `delete` stores a tombstone, removes pending, applied/responses/cursor, anchor, app cursor/outbox
-  and outbox meta rows, and awaits `onDelete` in one transaction. Retain the tombstone's write marker.
+  and outbox meta rows, and awaits `onDelete` in one transaction. Retain its write marker and spent digests (r9 decision).
   Refuse operations, rejoin, unacked outcomes or Welcomes with canonical `GroupControlUnsettledError`
   (`rpc/src/control/store.ts:57`). Deletion does not abandon control work automatically.
 
@@ -411,6 +473,7 @@ Redeclaration breaks ambiguity recognition (`rpc/src/control/store.ts:105`).
 // Phase 3, rpc-store. Uses stores obtained from the root callback's tx.
 export function createGroupStateStore(params: {
   db: HozonDB
+  atRest: AtRestCodec               // required host codec (r9 decision)
   onDelete?: (tx: StoreProvider, groupID: string) => Promise<void>
 }): GroupStateStore
 
@@ -424,6 +487,7 @@ export type GroupHandleRegistry = {
   seed(group: GroupHandle, params: {
     replace?: boolean
     joinRef: GroupStateRecord['joinRef']
+    welcomeDigest: string | null    // null only for locally created genesis (r9 decision)
   }): Promise<void>
   clearJoinRef(groupID: string, expectedJoinRef: NonNullable<GroupStateRecord['joinRef']>): Promise<void>
   delete(groupID: string): Promise<void> // host must stop/drain its peer first
@@ -465,10 +529,13 @@ export function createGroupCrypto(params: GroupCryptoParams & {
 
 - `restore` rejects mismatched groupID, epoch, credential or authenticator. The registry derives
   saved bytes/credential/ledger from the handle. Clones use the version-2 codec and retained options.
-  Seed returns without writing for a held live epoch at/above the candidate. Live newer Welcome
+  Seed checks the spent digest first, including tombstones; a spent digest conflicts without writing (r9 decision).
+  Otherwise seed returns without writing for a held live epoch at/above the candidate. Live newer Welcome
   requires `replace: true`; absent/tombstoned joins use the welcome save. At/below a tombstone floor
   or unauthorised replacement throws `GroupStateConflictError`. Existing version/lineage are loaded
   under the gate, never supplied as guessed insert defaults.
+  Null digest requires local genesis at epoch 0, absent storage, null joinRef and no replacement.
+  That seed uses `kind: 'state'` with an empty spent set. Every Welcome seed requires the authenticated open result's digest.
 - One per-group gate spans preparation, save and ambiguity resolution. Durable mutation/open,
   commit replacement, Welcome seed and deletion stage from the current cache; install after commit.
   Retry durable-open CAS at most eight times on fresh clones. Merge only matching identities/lineages.
@@ -808,6 +875,7 @@ export type CoordinatedOutboxHooks = {
 export function createCoordinatedOutbox(params: {
   db: HozonDB
   groupID: string
+  atRest: AtRestCodec
   hooks: CoordinatedOutboxHooks
 }): AppOutbox
 // New rpc exports:
@@ -863,15 +931,17 @@ export type MemoryDatabase = {
 }
 export function createMemoryTransaction(params: { rows: MemoryStoreRows }): MemoryDatabase
 // Shared adapters (r8 decision). Canonical names below denote conformance structural mirrors.
-export function createMemoryControlStore(params: { db: MemoryDatabase; groupID: string }): ControlStore
+export function createMemoryControlStore(params: { db: MemoryDatabase; groupID: string; atRest: AtRestCodec }): ControlStore
 export function createMemoryAnchorStore(params: { db: MemoryDatabase; groupID: string }): AnchorStore
 export function createMemoryAppCursorStore(params: { db: MemoryDatabase; groupID: string }): AppCursorStore
 export function createMemoryGroupStateStore(params: {
   db: MemoryDatabase
+  atRest: AtRestCodec
   onDelete?: (tx: MemoryTransaction, groupID: string) => Promise<void>
 }): GroupStateStore
 export function createMemoryCoordinatedOutbox(params: {
   db: MemoryDatabase; groupID: string
+  atRest: AtRestCodec
   hooks: {
     onPut(tx: MemoryTransaction, entry: AppOutboxEntry): Promise<void>
     onRemove(tx: MemoryTransaction, entry: AppOutboxEntry, outcome?: AppPublicationOutcome): Promise<void>
@@ -892,7 +962,7 @@ parameters as their Hozon counterparts, substituting `MemoryTransaction` for `St
 **Shared factory binding (r8 decision).** Phase 3 rpc-store exports:
 
 ```ts
-export function createControlStore(params: { db: HozonDB; groupID: string }): ControlStore
+export function createControlStore(params: { db: HozonDB; groupID: string; atRest: AtRestCodec }): ControlStore
 export function createAnchorStore(params: { db: HozonDB; groupID: string }): AnchorStore
 export function createAppCursorStore(params: { db: HozonDB; groupID: string }): AppCursorStore
 ```
@@ -902,7 +972,7 @@ Anchor/cursor saves resolve internally; control apply retains P2a's peer-owned r
 Shared memory adapters read/write MemoryDatabase rows exclusively; no private control/anchor/cursor state participates in persistence fixtures.
 Retain the existing no-argument `createMemoryControlStore<Position>(): MemoryControlStore<Position>` as a legacy overload
 (`rpc-conformance/src/memory-control-store.ts:68`). It keeps standalone tests compatible and is excluded from shared persistence fixtures.
-The `{db, groupID}` overload returns only the ControlStore port; state and anchor use their separate shared factories.
+The `{db, groupID, atRest}` overload returns only the ControlStore port; state and anchor use their separate shared factories (r9 decision).
 No P2a port signature or no-argument call changes. Hozon factories refuse non-root scope with `NonRootProviderError` as D2 specifies.
 Use row namespaces `groupOwner`, `state`, `control`, `anchor`, `pending`, `appCursor`, `outbox` and `outboxMeta`.
 Owner/state/control/anchor/meta keys are groupID; compound keys use JSON arrays `[groupID, id/topicID/seq]`.
@@ -938,7 +1008,8 @@ applies. Hozon does not configure transaction isolation (`../hozon/packages/db/s
 ## Phase 2 implementation order and exit criteria
 
 1. MLS version-2 codec, P2a recovery serializer adaptation and source-tree/rejoin regression. Retention propagation and rotation builder.
-2. D3 port, explicit shared state/control/anchor/cursor factories, outcome-aware hooks, async registry/access and lineage plumbing. Reuse P2a co-commit.
+2. D3 port, spent-Welcome admission, codec-injected shared state/control/outbox factories, shared anchor/cursor, outcome-aware hooks, async registry/access and lineage plumbing.
+   Reuse P2a co-commit. Phase 2 includes digest plumbing and the P2a D4 admission amendment (r9 decision).
 3. D4 pending/handler migration, including optional broadcast metadata and directed stamped headers.
 4. D6 entry/publication/removal shapes, prepared-byte retries, terminal proof settlement and memory-hub dedup parity.
 5. D7 rpc decoder/error exports and coordinated memory contract fixtures; no production rpc-store adapter.
@@ -948,6 +1019,7 @@ applies. Hozon does not configure transaction isolation (`../hozon/packages/db/s
 7. In-process e2e smoke: standalone devices, real MLS ports/registry on shared memory host stores,
    real HTTP hub, explicit server DID, invite/join, retained send, opened epoch and proof outcome.
    Include non-admin rotation/resume and state/pending replay by rebuilding runtime over stored rows.
+   Include A3 install/advance, confirmed lower recovery to B2, refused A3 replay, and deletion/reopen/refused Welcome replay (r9 decision).
    This driver is a test host over GroupPeer/registry; it depends on neither Device nor Messenger.
 
 Phase 2 ships no `client`, `messaging`, MessageStore schema, Hozon adapter or child-process driver.
@@ -1004,8 +1076,8 @@ phase 3 runs real-store boundaries; phase 6 arms, reports, blocks and kills a ch
 | Hub acknowledgement, before publication bookkeeping | app hub `publish` | after | new ID/status assertions over existing restart; 2/5/6 |
 | Proof, before published-status/removal | `AppOutbox.remove(seq, outcome)` | before | outcome contract 2; atomic MessageStore 5/6 |
 | Lease reserved, before seal | `save` raising HWM | after | 2/3/6 |
-| Joined state saved, before key consume | `save(kind: 'welcome')` | after | P2a prerequisite; extend through new store 2/3/6 |
-| Welcome readmission, between state/control/anchor writes | `save(kind: 'welcome')` | injected failure | neither state/reset/anchor changes; old runtime not installed; 2/3 |
+| Joined state saved, before key consume | `save(kind: 'welcome')` | after | state and spent digest committed together; replay cannot install again; consume resumes; 2/3/6 |
+| Welcome readmission, between state/digest/control/anchor writes | `save(kind: 'welcome')` | injected failure | neither state/digest/reset/anchor changes; old runtime not installed; 2/3 |
 | Welcome readmission committed, before peer restart | `save(kind: 'welcome')` | after | unknown outcomes preserved; reset anchor recaptured at join; 2/3/6 |
 | Deletion committed, before restart | `delete` | after | tombstone/rows 2/3; failed messages 5; SIGKILL 6 |
 | COMMIT rejected, backend unfinished | root transaction and D2 barrier | raw read shows previous/absent marker, then backend commits or rolls back | no premature rejection/release; 2 memory / 3 providers |
@@ -1025,6 +1097,9 @@ barrier. Expo uses a node shim or records BLOCKED with its reason. Phase 6 suppl
 **Harness/factory contract (r7 decision). Hook counts and shared anchor fixture (r8 decision), rpc-conformance exports:**
 
 ```ts
+export type RawStoredRecord = {
+  groupID: string; namespace: string; recordID: string; bytes: Uint8Array
+}
 export type PersistencePorts = {
   groupID: string
   state: GroupStateStore; registry: GroupHandleRegistry
@@ -1045,6 +1120,8 @@ export type PersistenceFixture<TPorts> = {
   reopen(): Promise<TPorts>
   faults: PersistenceFaults
   inspectRows(): Promise<MemoryStoreRows> // logical committed rows; deliberately bypasses barrier
+  inspectRawBytes(): Promise<Array<RawStoredRecord>> // before codec.open; no logical decoding (r9 decision)
+  atRest: AtRestCodec                // same injected codec across reopen
   setTime(now: number): void
   advanceTime(ms: number): Promise<void>
   close(): Promise<void>
@@ -1074,6 +1151,8 @@ export type ControlStoreConformanceParams = {
   commitThenReject(): void
   faults: PersistenceFaults
   inspectRows(): Promise<MemoryStoreRows>
+  inspectRawBytes(): Promise<Array<RawStoredRecord>>
+  atRest: AtRestCodec
   close(): Promise<void>
 }
 export function testGroupStateStoreConformance<TTx extends ConformanceTransaction>(
@@ -1098,8 +1177,10 @@ These signatures replace AppOutbox's synchronous `createOutbox/failNextPut` fixt
 ControlStore's existing factory remains, with the additions above (`rpc-conformance/src/control-store.ts:175`).
 Its `commitThenReject` method forwards to the same fault controller.
 AnchorStore's one-case harness gains the shared fault/reopen fixture (`rpc-conformance/src/anchor-store.ts:20`).
-Retain its round-trip case. Shared fixtures construct control/anchor/cursor through D7's explicit `{db, groupID}` factories (r8 decision).
+Retain its round-trip case. Shared fixtures use D7's explicit factories, including required control `atRest` (r9 decision).
 Each factory creates an isolated database and all ports over its one root/gate, with supplied hooks.
+State/control/outbox share a host-supplied codec. Phase 2 fixtures inject a deterministic authenticated test codec (r9 decision).
+Identity/plaintext codecs cannot satisfy these fixtures.
 Use `MemoryTransaction` for memory hooks and `StoreProvider` for Hozon hooks; absent hooks are no-ops.
 Memory exports Hozon-free structural mirrors of D2's settlement/options types (r8 decision).
 Hook assertions register both queues and count each invocation, including ambiguous delete and outbox mutations.
@@ -1107,10 +1188,16 @@ While outcome remains uncertain, both counts stay zero. Confirmed commit runs ea
 Confirmed rollback reverses those counts. Resolver retries, disposal, reopen and repeated remove never duplicate hooks in the surviving process.
 `reopen` waits for backend/resolver/hook settlement, discards runtime state and rebuilds ports over the same rows.
 Faults/clock follow the rebuilt ports. `inspectRows` normalises provider rows for the same assertions.
+`inspectRawBytes` reads committed physical byte values, including duplicate copies, before codec opening or logical normalisation (r9 decision).
+Scan those bytes for non-empty plaintext and distinctive plaintext spans from state, pending frames, outbox payloads and control secrets.
+Logical port round-trips alone cannot pass encryption conformance. Open stored ciphertext with another group, namespace or record ID's AAD: rejection is required.
+Swap ciphertext between physical record identities and assert adapter reads reject too. Reopen with the same host codec preserves logical state and payloads.
 `after-first-write` fails between coupled logical writes; owner-row locking statements do not count.
 Suites close fixtures in finally blocks. Conformance type mirrors retain every normative field/signature above;
 they follow the existing structural mirror approach (`rpc-conformance/src/control-store.ts:168`).
 Canonical port names in this block denote those structural `Conformance*` mirrors, not imports from mls-rpc.
+Ordinary receipts can short-circuit open (`mls-hub/src/join.ts:50`). Test spent admission/seed directly and wire replay before consume.
+After consume, assert receipt-only handling never installs state.
 
 | Suite / phase | Case | Assertion / existing coverage |
 |---|---|---|
@@ -1119,6 +1206,11 @@ Canonical port names in this block denote those structural `Conformance*` mirror
 | `testGroupStateStoreConformance`, 2 memory / 3 providers | CAS/version | wrong expected, lower/equal version, ordinary lower epoch, lower lineage/floor and tombstone-as-absent conflict without logical changes |
 | | confirmed lower recovery | real source at 4, responder at 1, candidate at 2: confirmation/source check permits atomic adoption; version/lineage increase, floor stays 4, candidate HWM resets; reopen at 2; tombstone refuses Welcome at/below 4 |
 | | refused lower recovery | unconfirmed/refused candidate, stale source/version, absent/tombstoned source or missing adopted co-write changes nothing |
+| | spent Welcome after lower recovery, r9 | install A3 (ordinary and last-resort), seal, advance A4, recover onto B2, reopen, replay A3: admission refused and seed/save conflict; B2, HWM, lineage, control/anchor and spent set unchanged; unspent B3 remains admissible despite floor 4 |
+| | deleted-group Welcome replay, r9 | install, stop/drain, settle control, delete, reopen: spent digest remains in tombstone; replay is refused without state/rows/peer resurrection; spent check precedes epoch floor; unspent Welcome above floor can join and retains prior digests |
+| | spent digest atomicity, r9 | failed welcome transaction spends nothing; ambiguous commit resolves state/digest together; state/open/recovery/clearJoinRef/delete cannot remove prior digests; recipient/source/invitation repackaging retains digest |
+| | recovery candidate replay, r9 | confirmed candidate retry across ambiguous commit installs once; after seal/advance/lower recovery, restored old candidate cannot reinstall via stale source lineage; same-current-identity retry preserves HWM/progress |
+| | at-rest state/pending, r9 | raw stored bytes contain no state/pending plaintext or distinctive spans; logical reopen succeeds with host codec; wrong-AAD open and cross-record ciphertext swaps reject |
 | | ambiguous saves | commit-then-reject for insert/state/open/Welcome/joinRef-clear/delete exposes exact writeID; registry resolves committed/uncommitted before another writer |
 | | negative read, late completion | unfinished insert/state/open/Welcome/delete shows previous/absent rows; barrier and next writer stay pending; late commit resolves/install once, rollback alone rejects unchanged; initially absent owner covered |
 | | adoption co-commit | reuse P2a case (`rpc-conformance/src/control-store.ts:321`), now against D3 stores/providers; state/control/anchor/marker all commit or roll back |
@@ -1127,12 +1219,14 @@ Canonical port names in this block denote those structural `Conformance*` mirror
 | | atomic open and duplicate | second-write failure changes neither state nor pending; same-frame CAS retry leaves one row; extend existing key-unspent case (`rpc-conformance/src/pending-group-crypto.ts:137`) |
 | | pending reopen | numeric `(segment, position)` order, epoch retained, unknown/double completion succeeds; extend existing case (`rpc-conformance/src/pending-group-crypto.ts:177`) |
 | | owner handoffs | consume then clearJoinRef then seal/reserve works without stale CAS; stale ref conflicts; ambiguous clear/open/completion resolves before cache/payload publication; registry crypto needs no external pending callback |
-| | delete | stopped/drained owner; atomic tombstone/row cleanup/hook; epoch/lineage floor survives; stale write fails; no late put recreates rows |
+| | delete | stopped/drained owner; atomic tombstone/row cleanup/hook; epoch/lineage floor and spent digests survive; stale write fails; no late put recreates rows |
 | | independent save versus lifecycle | absent/existing anchor and per-topic cursor save receives ambiguous rejection; dispose/drain/delete and Welcome replacement stay pending; late commit/rollback settles first; delete removes anchor/cursor rows, Welcome clears anchor and new-topic cursor stays null; reopen never installs an old anchor into new admission |
 | | unsettled delete | operations, rejoin, outcomes and Welcomes each refuse; reuse predicate/host tests (`rpc/test/control-store.test.ts:253`) |
 | P2a ControlStore, 2 / 3 | negative marker barrier | state-free apply rejects before backend completion; lastMutation stays pending despite raw previous marker; late commit resolves once, rollback alone returns previous marker; deletion cannot overtake |
+| | at-rest control, r9 | raw snapshot contains no operation body/journal or rejoin candidate/requestKey plaintext; same-codec reopen round-trips; wrong AAD rejects |
 | `testAppOutboxConformance`, 2 / 3 | attempt/outcome | all attempt fields round-trip; outcome reaches remove; unknown removal remains harmless |
 | `testCoordinatedOutboxConformance`, 2 memory / 3 Hozon | rollback/visibility | hook failure rolls back both rows; commit/rollback hooks select exactly one queue; commit hooks precede resolution; postgres independent reader sees neither row before commit |
+| | at-rest outbox, r9 | raw stored bytes contain no payload plaintext or distinctive spans; hooks/list still see logical payloads; same-codec reopen succeeds; wrong-AAD open and record swaps reject |
 | | ambiguous mutations | put, same-data replacement, remove, clear and group delete commit-then-reject resolve iff committed; each registered commit hook fires once before success, rollback hooks never; failed barrier/status read leaves hooks/caller/later writer pending |
 | | negative read, late completion | put (initially absent meta), replacement, remove, clear and delete reject root before backend settles; raw negative read runs neither hook queue nor releases gate; late commit runs commit hooks once, rollback runs rollback hooks once and rejects unchanged |
 | | overlap/removal/replacement | B waits through A's readback; repeated remove skips hook; changed protocol/prc/data rejects unchanged |
@@ -1159,6 +1253,7 @@ Canonical port names in this block denote those structural `Conformance*` mirror
 | hub-client, 2 | retention/buffer | reconnect and retry preserve retention; injected epoch notifications wake held frames; disposal unsubscribes |
 | client/messaging, 4/5 | lifecycle/status | rotation scheduling, Welcome consume sweep, deletion fails accepted messages; published status/position co-commit with removal |
 | e2e, 2 then 6 | smoke/kill | real HTTP with injected DID in 2; every crash seam on child devices in 6 |
+| integration, 2 memory / 3 providers | spent Welcome across branches/deletion, r9 | real MLS/openWelcome/registry: install A3, seal, advance A4, confirm lower B2 recovery, replay A3 refused after reconstruction; separately delete/reopen and replay installed Welcome refused; exercise ordinary and last-resort sources, including ordinary replay before consume |
 
 ## Umbrella amendments
 
@@ -1176,6 +1271,8 @@ Applied in this revision, not deferred to another reconciliation step:
   here but remains an implementation prerequisite; automatic `/info` integration stays BLOCKED.
 - r8: P2a recovery-codec adaptation, asynchronous access, committed membership/numeric receive runtime,
   explicit shared factories, all-writer lifecycle barriers, terminal proof settlement and outcome-aware Hozon hooks.
+- r9: lifetime spent-Welcome digests, atomic installation/tombstone retention and explicit P2a D4 admission amendment.
+  Required host at-rest codec in state/control/outbox factories, deterministic memory codec and raw-byte/wrong-AAD conformance.
 
 ## Review log
 
@@ -1224,7 +1321,7 @@ superseded by P2a. Read current Decisions and binding P2a instead.
     Already-proven removal outcomes remain frozen.
   - Confirmed, source-checked recovery may lower current epoch; admissionFloor remains monotonic for tombstones (r7 decision).
     Alternative: unconditional epoch monotonicity, an unchecked recovery flag, or weakening Welcome tombstone admission.
-    P2a remains binding; neither recovery confirmation nor live Welcome admission is amended.
+    P2a recovery confirmation remains binding. The r9 spent-digest amendment below supersedes the live Welcome admission statement.
   - Owner-mediated clearJoinRef and registry-owned saveOpened/pending wiring resolve their own CAS/cache ambiguity (r7 decision).
     Alternative: host metadata saves behind the registry or an external pending writer without ownership/version context.
   - State/outbox adapters share the canonical root gate; deletion drains then acquires it once (r7 decision).
@@ -1262,5 +1359,22 @@ superseded by P2a. Read current Decisions and binding P2a instead.
      Evidence: `rpc-conformance/src/memory-control-store.ts:68`.
      Rejected alternative: reuse private legacy maps in shared fixtures, or infer Hozon constructor signatures from prose.
      Phase 2 shared doubles/harness; phase 3 Hozon factories. P2a ports stay unchanged.
+
+  No unresolved findings. No implementation or test pass is claimed by this documentation revision.
+
+- **Blind review r8**, 2026-10-09. Verified both findings against today's source. Resolved in draft r9:
+  1. **Blocker:** every installed ordinary/last-resort Welcome co-writes a per-group spent digest with joined state (r9 decision).
+     Admission refuses spent digests regardless of current epoch; recovery and D3 deletion retain them, including tombstones. This amends P2a D4.
+     Evidence: `mls-hub/src/admission.ts:8`, `mls-hub/src/provisioner.ts:253`, `mls-hub/test/join.test.ts:320`, `node_modules/ts-mls/dist/src/clientState.js:603`.
+     Rejected alternative: highest-epoch-ever live admission floor, which rejects legitimate Welcomes on the lower branch.
+     Conformance/integration cover A3 → A4 → confirmed B2 → refused A3 replay and deleted-group replay, with ordinary and last-resort sources.
+     Recovery candidate replay remains source/lineage-checked and atomically marked adopted (`rpc/src/control/rejoin.ts:39`, `rpc/src/control/rejoin.ts:168`).
+     Specified replay/progress regression; no recovery confirmation exception is introduced.
+  2. **Medium:** required host `AtRestCodec` in state/coordinated-outbox/control factories; host owns all at-rest key lifecycle (r9 decision).
+     Kumiai never generates or stores at-rest keys. AAD binds group, namespace and record identity; memory doubles inject a deterministic test codec.
+     Evidence: `../hozon/packages/db/src/db.ts:72`, `../hozon/packages/node-sqlite/src/index.ts:36`, `../hozon/packages/expo/src/index.ts:23`, `../hozon/packages/postgres/src/index.ts:73`.
+     Rejected alternative: SQLCipher/provider encryption as the only mechanism; Expo and postgres differ.
+     Raw-storage conformance excludes plaintext state, pending frames, outbox payloads and control secrets; wrong-AAD opening and ciphertext swaps reject.
+     Phase 2 models encrypted rows on doubles; phase 3 implements/verifies every provider.
 
   No unresolved findings. No implementation or test pass is claimed by this documentation revision.
