@@ -141,6 +141,7 @@ export type ControlChanges = {
   putOutcomes?: Array<Outcome>; deleteOutcomes?: Array<string>
   putWelcomes?: Array<WelcomeObligation>; deleteWelcomes?: Array<string>
   putApplied?: Array<AppliedCommit>; deleteAppliedFrom?: number   // drops rows at epoch >= n, before puts
+  deleteAppliedBelow?: number   // drops rows at epoch < n, before puts
   putResponses?: Array<ExternalResponse>; deleteResponsesBelow?: number   // by `epoch`
   cursor?: CommitCursor | null
 }
@@ -174,7 +175,8 @@ export type ControlStore = {
   at 15 s; equal means committed, anything else means not. It stays paused until that read
   succeeds.
 - **`applied` and `responses` windows.** The peer keeps the newest 64 epochs of each, by framed
-  epoch, and prunes older rows (`deleteResponsesBelow` for responses) in the same `apply`.
+  epoch, and `pruneWindow` prunes older rows (`deleteAppliedBelow` for applied rows,
+  `deleteResponsesBelow` for responses) in the same `apply`.
 - **Secrets.** `RejoinRecord.requestKey` and the candidate blob are secrets: the Hozon implementation
   encrypts them at rest (Spec P).
 - **Isolation.** Spec P's provider and transaction rules (its D2 and D8) apply unchanged.
@@ -245,7 +247,10 @@ The host supplies `build(op)` and `adopt(journal, expected, write)`.
   trees are strictly newer and a copy is enough. Skipping it would reuse sender generations. Today
   `mls-rpc` refuses opens at earlier epochs (`mls-rpc/src/crypto.ts:188`), so the earlier-epoch
   copy is a no-op until P2b; it is specified now so P2b need not revisit `adopt`. `mls` provides this as
-  `carryReceiveProgress(candidate, current)`. Rebuilding the commit at adoption is not an option:
+  `current.carryReceiveProgress(candidate)`. Its carry identity check compares the candidate's
+  retained `resumptionPsk` at `E` with the current state's `resumptionPsk`, in constant time.
+  ts-mls history retains no `epochAuthenticator`; both values derive from `epoch_secret`, so the
+  resumption PSK witnesses the same epoch identity. Rebuilding the commit at adoption is not an option:
   update paths use fresh randomness (`ts-mls/dist/src/updatePath.js:26`), so the bytes would differ
   from the accepted ones.
 
@@ -277,9 +282,10 @@ Each operation moves through its stages as follows. Every arrow is one `apply` u
      branch contains it. The `applied` rows and the cursor are left alone. The peer pulls the log
      and compares the `applied` row at `built.epoch` (rows are keyed by the commit's framed epoch,
      as the classifier keys them today, `rpc/src/peer.ts:1560`):
-     - same `digest`: the commit was already adopted from the log. Write `landed` and delete the
-       operation;
-     - a different digest, or a log that does not show the commit on this device's branch: fork
+     - same `digest` AND `payloadDigest`: the commit was already adopted from the log. Write
+       `landed` and delete the operation;
+     - a different digest, a matching digest with a different payload digest, or a log that does
+       not show the commit on this device's branch: fork
        evidence. The operation stays `accepted`, the device strands (D5), and the rejoin's final
        `apply` (D6) settles it as `unknown` (D5).
 
@@ -357,7 +363,7 @@ export type Outcome = { id: string; opID: string | null; at: number } & (
 - `processWelcomeFromSources` splits into `openWelcome(sources, welcome)`, which decrypts without
   releasing and returns the verified `groupID`, and `consume(ref, groupID)`. The host calls
   `consume` only after it has saved the joined group, with `joinRef` set (Spec P).
-- **`consume` is one source transaction:** it deletes the private package and writes the receipt
+- **Ordinary `consume` is one source transaction:** it deletes the private package and writes the receipt
   `{ref, groupID}`, scoped to the owning source. On an ambiguous outcome it reads the receipt back.
   A crash leaves either the package or the receipt, never neither. Today's ports cannot express this
   (`KeyPackagePoolStore` has only `list`, `put` and `delete`, `mls-hub/src/pool-store.ts:53-57`;
@@ -393,7 +399,8 @@ export type Outcome = { id: string; opID: string | null; at: number } & (
   - tombstone: accepted only above the tombstone's epoch floor (Spec P).
 
   This moves from Spec P's deleted D5.
-- **Last-resort packages** are never consumed (`mls-hub/src/provisioner.ts:65`). Their repeats go
+- **Last-resort packages** are never consumed (`mls-hub/src/provisioner.ts:65`): `consume` is a
+  no-op that writes no receipt, and `receipt(ref)` returns `null`. Their repeats go
   through the same admission rules. `processWelcomeOnce` dedups by group ID alone
   (`mls/src/group-welcome.ts:184-194`) and would discard a genuine re-admission, so it is not used,
   as Kubun already avoids it (`kubun/packages/plugin-p2p/src/groups/manager.ts:690-704`).

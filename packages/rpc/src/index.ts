@@ -36,7 +36,13 @@ export {
   UnsupportedCommitFrameVersionError,
 } from './commit-frame.js'
 export type { HostBuilt, OperationDeps } from './control/operations.js'
-export { applyChanges, applyResolved, controlSettled, pruneWindow } from './control/store.js'
+export {
+  applyChanges,
+  applyResolved,
+  controlSettled,
+  pruneWindow,
+  readmissionChanges,
+} from './control/store.js'
 export type {
   AdoptionWrite,
   AdoptionWriteFactory,

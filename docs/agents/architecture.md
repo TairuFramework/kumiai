@@ -43,16 +43,38 @@ overview: https://github.com/TairuFramework/kigu/blob/main/docs/stack.md
 ## What a host wires
 
 `createGroupPeer` takes two ports and four durable stores, plus `appOutboxLimit`.
-The type requires these stores alongside the `mls` port because they preserve commit, rotation, cursor and send state.
+The type requires these stores alongside the `mls` port and the host's `build`, `adopt` and
+`deliverWelcome` callbacks because they preserve control, rotation, cursor and send state.
 
 | | |
 | --- | --- |
 | `GroupCrypto` | `epoch`, `exportSecret`, `wrap`, `unwrap`, `frameEpoch`, `frameAAD`, `sealEntries`, `openEntries`; optional `pending` for durable app delivery |
 | `GroupMLS` | commit lifecycle, synchronous `sendAdmission`, recovery preparation and confirmed adoption, verdicts, roster and commit headers |
-| `CommitJournal` | single slot preserving commits and revoke holds across the acceptance crash window |
+| `ControlStore` | FIFO operations, a durable rejoin record, outcomes, Welcome obligations, the newest 64 epochs of applied commits and external responses, and the commit cursor |
 | `AnchorStore` | the anchor and one unresolved advance, repaired before another advance or startup delivery |
 | `AppOutbox` | durable ordered log acceptance, encrypted by the host, bounded by `appOutboxLimit` |
 | `AppCursorStore` | the read position; without it the drain re-reads history forever |
+
+The control store, MLS state and anchor slot share one host database. Every own, incoming or
+recovery adoption commits its `AdoptionWrite` with the state save, including the last mutation ID
+and any matching anchor landed mark. A failed transaction leaves the live handle and all three
+stores unchanged. The host resolves ambiguous state saves; the peer resolves state-free control
+applies by reading `lastMutation()`, with backoff capped at 15 seconds.
+
+`build(op)` produces a speculative candidate, exact commit bytes and a complete invitation artifact.
+`adopt(journal, expected, write)` compares the source identity, preserves ratchet progress and saves
+the candidate with its control changes. Outcomes remain durable until `ack(id)`. Welcome delivery
+is at least once and independent of adoption; undelivered obligations survive recovery. Recovery
+persists the rejoin's exact payload, candidate, stages and explicit request key, and adopts only
+after confirmation. Hosts encrypt the candidate and request key at rest.
+
+For Welcome re-admission, stop and drain the peer before `seed({replace: true})`. In one root
+transaction, compare-and-set the stored version, install the joined state and apply
+`readmissionChanges(snapshot)`: open operations and the rejoin become `unknown` outcomes and are
+deleted; applied rows, external responses and the commit cursor are cleared. Clear the anchor slot
+in that transaction too. Keep prior outcomes and Welcome obligations. Restart captures the anchor
+at the joined epoch. `controlSettled(snapshot)` gates host deletion; explicit `abandon()` accepts
+loss of open control and undelivered Welcomes before deletion.
 
 `onAppWindowPruned` is optional and reports the fetch's `gap` on every page with a cursor.
 The notice carries that fetch's exclusive cursor and `oldest: string | null`, null for an empty retained window.

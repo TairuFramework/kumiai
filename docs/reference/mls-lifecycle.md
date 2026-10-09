@@ -87,10 +87,14 @@ Adoption calls `confirmAdopted()` once. Repeated calls emit nothing further.
 A speculative handle owns its authentication state and emits no early control events.
 Restore and Welcome project revocations and floors silently. Hosts read `revocationOf` afterwards.
 
-`publishRevokeProof(peer, mls, input, { serializeJournal })` publishes one ordinary lane commit with `holdLogSends: true`.
-The required host `serializeJournal(derived)` blob must restore MLS state AND the derived ledger entries through `adoptJournalled`.
-It rebuilds after a lost epoch race and returns `committed`, `already-revoked`, `self-affected` or `not-provable`.
-Another member publishes a self-affected proof. A thrown lane failure requires a host retry on reconnect.
+`publishRevokeProof({peer, mls, input})` submits a durable ledger operation with `revokes: true`.
+The host routes its build through `buildRevokeProofOperation({mls, op, options: {serializeJournal}})`.
+The candidate blob must restore MLS state AND the derived ledger entries. The host's
+`adopt(journal, expected, write)` preserves ratchet progress and co-commits the state and control
+changes; the source identity check prevents installing a candidate over a different branch.
+The queue rebuilds after a lost epoch race and resumes stored work on restart. The helper returns
+`committed`, `already-revoked`, `self-affected` or `not-provable`; another member publishes a
+self-affected proof. Durable outcomes remain available until acknowledged.
 For `detached`, obtain a log through the recorded head. For `needs-reset`, publish the reset first.
 For `too-large`, use shorter reset prefixes or create a new group when ledger proofs alone fill the horizon.
 The send hold and durable handover contract are in [the app lane](./app-lane.md).
@@ -105,10 +109,10 @@ A reset shortens renewed prefixes to `[icp, reset, ...]`, but never compacts ear
 A group whose ledger alone fills the horizon needs a new group.
 
 Consumer entries have only the whole-frame bound, not the history horizon.
-Every RPC-owned frame passes `assertFrameFits` before journalling or publishing.
+Every RPC-owned frame passes `assertFrameFits` before storing its built payload or publishing.
 For n bytes, `4 * ceil(n / 3) <= 1,048,576` must hold.
-An oversized frame throws `FrameTooLargeError` without a journal or publish.
-A host publishing a Welcome through a hub checks its final framed bytes inside `build()`, before returning `PendingCommit`.
+An oversized frame throws `FrameTooLargeError` before a built payload is stored or published.
+A host publishing a Welcome through a hub checks its final framed bytes inside `build(op)`, before returning `HostBuilt`.
 Large consumer ledgers can therefore block invites, Welcomes and GroupInfo replies, ending recovery as `no-responder`.
 
 ## Recovery and trust residuals
@@ -121,9 +125,16 @@ It must return promptly without waiting for user interaction.
 Lifecycle GroupInfo replies include a ledger covered by the attestation digest and checked against the authenticated head.
 A handle with an incomplete ledger processes no commits. It re-requests the ledger at every lane operation and on its own 1 to 60 second backoff.
 
-Hub acceptance alone never authorises recovery adoption.
+Hub acceptance alone never authorises recovery adoption. The control store retains a durable
+rejoin record with the exact framed payload, candidate, source identity, publication position,
+verdict and stage. Its request key is explicit: `createRecoveryRequest()` returns it, and reply,
+ledger and verdict readers receive it from the caller. Encrypt that key and the candidate at rest.
+Restart restores the candidate with `restoreRecovery(candidate, requestKey)`, re-checks the source
+and confirms the verdict before adoption. Recovery adoption co-commits its control changes with
+the MLS state, and startup finishes the adopted record's remaining effects.
 `PendingRecovery.epoch` names the target epoch, and `confirmationKey(position, commitDigest)` binds its speculative exporter key.
-`onAccepted` is idempotent. Verdicts bind the group, request, publication position and commit digest.
+`onAccepted(write)` is idempotent and carries the adoption's control write. Verdicts bind the group,
+request, publication position and commit digest.
 A valid confirmation wins over superseded and refusal. Superseded wins over refusal after a bounded settle round.
 Outside lifecycle groups, refusals and superseded require a source-tree signer. Confirmation uses the target-epoch tag.
 
