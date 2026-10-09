@@ -283,6 +283,8 @@ export function decodeMemoryCommit(commit: Uint8Array): MemoryCommit | null {
 /** The sealed GroupInfo, modelled. It carries the group's epoch and its AUTHENTICATED
  *  ledger head — and no ledger, which is the whole reason bootstrap exists. */
 type MemoryGroupInfo = {
+  authenticator: string
+  groupID: string
   to: string
   requestID: string
   epoch: number
@@ -343,7 +345,7 @@ export function sealMemoryRecoveryVerdict(
   const to = JSON.parse(toUTF(request)) as MemoryRecoveryRequest
   return sealToKey(
     fromB64U(to.ephemeralKey),
-    sealContext(SEAL_DOMAIN.verdict, to.requesterDID, to.requestID),
+    sealContext(SEAL_DOMAIN.verdict, to.groupID, to.requesterDID, to.requestID),
     fromUTF(JSON.stringify({ signer, verdict })),
   )
 }
@@ -368,13 +370,18 @@ function xorWith(bytes: Uint8Array, pad: Uint8Array): Uint8Array {
 }
 
 /**
- * The bytes a reply is bound to: the KIND of answer, the group member it is for, and the
+ * The bytes a reply is bound to: the KIND of answer, its group and member, and the
  * request it answers. Bound into the key and into the tag, so a reply for another member, for
  * another request, or to another question does not open at all — it is never a field compared
  * after decryption.
  */
-function sealContext(domain: string, requesterDID: string, requestID: string): Uint8Array {
-  return fromUTF(`${domain}|${requesterDID}|${requestID}`)
+function sealContext(
+  domain: string,
+  groupID: string,
+  requesterDID: string,
+  requestID: string,
+): Uint8Array {
+  return fromUTF(JSON.stringify([domain, groupID, requesterDID, requestID]))
 }
 
 /**
@@ -574,7 +581,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   const sealReply = (domain: string, to: MemoryRecoveryRequest, payload: Uint8Array): Uint8Array =>
     sealToKey(
       fromB64U(to.ephemeralKey),
-      sealContext(domain, to.requesterDID, to.requestID),
+      sealContext(domain, to.groupID, to.requesterDID, to.requestID),
       payload,
     )
 
@@ -584,7 +591,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     requestID: string,
     requestKey: Uint8Array,
   ): Uint8Array | null => {
-    return openWithKey(requestKey, sealContext(domain, localDID ?? '', requestID), sealed)
+    return openWithKey(requestKey, sealContext(domain, groupID, localDID ?? '', requestID), sealed)
   }
 
   const open = (
@@ -601,7 +608,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       return null
     }
     if (typeof info?.to !== 'string' || typeof info?.epoch !== 'number') return null
-    if (info.requestID !== requestID) return null
+    if (info.groupID !== groupID || info.to !== (localDID ?? '') || info.requestID !== requestID)
+      return null
     return info
   }
 
@@ -704,8 +712,9 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     return {
       serialize: () =>
         sealToKey(
-          x25519.getPublicKey(requestKey),
-          sealContext('candidate', localDID ?? '', groupID),
+          // Hash before X25519 clamps bits, so every persisted key byte matters.
+          x25519.getPublicKey(sha256(requestKey)),
+          sealContext('candidate', groupID, localDID ?? '', groupID),
           fromUTF(JSON.stringify({ info, requestID, candidateBinding, tuple })),
         ),
       commit,
@@ -751,7 +760,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
           )
         }
         accepted ??= serialise(async () => {
-          const authenticator = sha256(concatBytes(requestKey, commit))
+          const authenticator = sha256(concatBytes(fromB64U(info.authenticator), commit))
           const stored = await hostDB.loadState(storageID)
           if (stored != null) {
             const value = JSON.parse(toUTF(stored)) as {
@@ -899,9 +908,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     },
     readRecoverySource: () =>
       serialise(async () => ({ epoch, authenticator: authenticator(), lineage: 0 })),
-    async readEpoch(): Promise<number> {
-      return epoch
-    },
+    readEpoch: () => serialise(async () => epoch),
     prepareRecovery: prepare,
     async verifyRecoveryRequest(request) {
       try {
@@ -1096,6 +1103,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
             ledgerHead,
             bodies: [...nextBodies],
             recoveryAuthenticator,
+            epochIdentity,
           }),
         )
         await hostDB.saveState(storageID, state)
@@ -1158,8 +1166,10 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         to,
         fromUTF(
           JSON.stringify({
+            authenticator: toB64U(authenticator()),
             to: to.requesterDID,
             requestID: to.requestID,
+            groupID,
             epoch,
             members: occupiedDIDs(),
             // The AUTHENTICATED head, and no ledger with it. This is what the rejoined handle
@@ -1214,8 +1224,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     },
     async restoreRecovery(bytes, requestKey) {
       const opened = openWithKey(
-        requestKey,
-        sealContext('candidate', localDID ?? '', groupID),
+        sha256(requestKey),
+        sealContext('candidate', groupID, localDID ?? '', groupID),
         bytes,
       )
       if (opened == null) throw new Error('Invalid recovery candidate')
@@ -1225,7 +1235,11 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         candidateBinding?: MemoryRecoveryBinding
         tuple?: { position: string; commitDigest: string; tag: string }
       }
-      if (snapshot.info?.to !== (localDID ?? '') || snapshot.info.requestID !== snapshot.requestID)
+      if (
+        snapshot.info?.groupID !== groupID ||
+        snapshot.info.to !== (localDID ?? '') ||
+        snapshot.info.requestID !== snapshot.requestID
+      )
         throw new Error('Invalid recovery candidate')
       return makePending(
         snapshot.info,

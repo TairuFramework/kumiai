@@ -4,11 +4,14 @@ import type { AdoptionWrite, ControlSnapshot, ControlStore } from '../../src/con
 import { GroupControlUnsettledError, StorageOutcomeUnknownError } from '../../src/errors.js'
 
 type GroupRecord = {
+  version: number
   state: Uint8Array | null
   anchorSlot: AnchorSlot | null
   control: ControlSnapshot
   mutationID: string | null
 }
+
+type SeedOptions = { replace?: false } | { replace: true; expectedVersion: number }
 
 type WritePoint = 'apply' | 'save' | 'anchor' | 'seed'
 type FailurePoint = 'mid-apply' | 'mid-save' | 'mid-anchor' | 'mid-seed'
@@ -17,7 +20,8 @@ export type MemoryHostDatabase = {
   control(groupID: string): ControlStore
   anchorStore(groupID: string): AnchorStore
   saveState(groupID: string, state: Uint8Array, write?: AdoptionWrite): Promise<void>
-  seed(groupID: string, state: Uint8Array, options?: { replace?: boolean }): Promise<void>
+  seed(groupID: string, state: Uint8Array, options?: SeedOptions): Promise<void>
+  loadVersion(groupID: string): Promise<number>
   loadState(groupID: string): Promise<Uint8Array | null>
   delete(groupID: string): Promise<void>
   failNext(point: FailurePoint): void
@@ -27,6 +31,7 @@ export type MemoryHostDatabase = {
 
 function emptyRecord(): GroupRecord {
   return {
+    version: 0,
     state: null,
     anchorSlot: null,
     mutationID: null,
@@ -43,6 +48,7 @@ function emptyRecord(): GroupRecord {
 }
 
 export function createMemoryHostDatabase(): MemoryHostDatabase {
+  let version = 0
   const groups = new Map<string, GroupRecord>()
   const seams = new Map<string, () => void | Promise<void>>()
   let failure: FailurePoint | undefined
@@ -65,6 +71,7 @@ export function createMemoryHostDatabase(): MemoryHostDatabase {
       failure = undefined
       throw new Error('Injected transaction failure')
     }
+    if (point === 'save' || point === 'seed') next.version = ++version
     groups.set(groupID, next)
     if (ambiguous === point) {
       ambiguous = undefined
@@ -93,11 +100,15 @@ export function createMemoryHostDatabase(): MemoryHostDatabase {
         })
       },
     }),
+    loadVersion: async (groupID) => read(groupID).version,
     loadState: async (groupID) => read(groupID).state?.slice() ?? null,
     seed: async (groupID, state, options) => {
       const ownedState = state.slice()
       const replace = options?.replace === true
+      const expectedVersion = options?.replace === true ? options.expectedVersion : undefined
       await transact(groupID, 'seed', (next) => {
+        if (replace && next.version !== expectedVersion)
+          throw new Error('Group state version is stale')
         if (next.state != null && !replace) throw new Error('Group state already exists')
         next.state = ownedState
         if (replace) {

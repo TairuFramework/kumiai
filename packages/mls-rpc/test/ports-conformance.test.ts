@@ -23,6 +23,7 @@ import {
   buildRealRotation,
   createRealBoundRecovery,
   createRealGroup,
+  persistedTestAccess,
   sealRealRecoveryVerdict,
 } from './fixtures/real-group.js'
 import { createTransactionalStore } from './fixtures/transactional-access.js'
@@ -199,6 +200,53 @@ testGroupMLSConformance({
     const stores = group.members.map((member) => createTransactionalStore(member.handle))
     return {
       groupID: group.committer.handle.groupID,
+      restartMember: async (index) => {
+        const member = group.members[index]
+        const store = stores[index]
+        if (member == null || store == null) throw new Error('missing member')
+        const row = store.snapshot()
+        const state = decodeClientState(row.state)
+        if (state == null) throw new Error('bad stored state')
+        let handle = await restoreGroup({
+          state,
+          credential: member.handle.credential,
+          ledgerEntries: row.ledger,
+          options: { resolveLedgerEntries: member.slot.resolve },
+        })
+        return {
+          did: member.identity.id,
+          mls: createGroupMLS({
+            identity: member.identity,
+            entrySlot: member.slot,
+            access: persistedTestAccess({
+              handle: () => handle,
+              adopt: (next) => {
+                handle = next
+              },
+            }),
+          }),
+        }
+      },
+      otherGroupMember: async (index) => {
+        const member = group.members[index]
+        if (member == null) throw new Error('missing member')
+        const other = await createRealGroup(1, `other-${id}`, [member.identity])
+        const joined = other.members[0]
+        if (joined == null) throw new Error('missing other member')
+        return {
+          did: joined.identity.id,
+          mls: createGroupMLS({
+            identity: joined.identity,
+            entrySlot: joined.slot,
+            access: persistedTestAccess({
+              handle: () => joined.handle,
+              adopt: (next) => {
+                joined.handle = next
+              },
+            }),
+          }),
+        }
+      },
       confirmationTag,
       buildRotation: async (index) => {
         const member = group.members[index]

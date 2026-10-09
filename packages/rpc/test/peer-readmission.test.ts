@@ -155,9 +155,12 @@ test('a failed replacement leaves the state, control and anchor together on the 
   const slot = { anchor: { epoch: 1, secret: new Uint8Array([2]) } }
   await db.anchorStore('bob').save(slot)
   db.failNext('mid-seed')
-  await expect(db.seed('bob', new Uint8Array([4]), { replace: true })).rejects.toThrow(
-    'Injected transaction failure',
-  )
+  await expect(
+    db.seed('bob', new Uint8Array([4]), {
+      replace: true,
+      expectedVersion: await db.loadVersion('bob'),
+    }),
+  ).rejects.toThrow('Injected transaction failure')
   expect(await db.loadState('bob')).toEqual(new Uint8Array([1]))
   expect(await db.control('bob').load()).toEqual(before)
   expect(await db.anchorStore('bob').load()).toEqual(slot)
@@ -199,9 +202,12 @@ test('a crash after Welcome replacement commits the reset and restart captures t
   seed.database.seam('after-seed', () => {
     throw new Error('process crashed after Welcome replacement')
   })
-  await expect(seed.database.seed('bob', state, { replace: true })).rejects.toThrow(
-    'process crashed after Welcome replacement',
-  )
+  await expect(
+    seed.database.seed('bob', state, {
+      replace: true,
+      expectedVersion: await seed.database.loadVersion('bob'),
+    }),
+  ).rejects.toThrow('process crashed after Welcome replacement')
   expect(await seed.database.loadState('bob')).toEqual(state)
   expectReset(before, await seed.control.load())
   expect(await seed.anchorStore.load()).toBeNull()
@@ -217,4 +223,41 @@ test('a crash after Welcome replacement commits the reset and restart captures t
   expect(again.welcomes).toEqual(['accepted'])
   expect((await seed.control.load()).welcomes).toEqual([])
   await again.peer.protocol('chat').dispatch('chat/changed', { data: { readmitted: true } })
+})
+
+test('a delayed Welcome replacement rejects a stale version without resetting newer state or control', async () => {
+  const db = createMemoryHostDatabase()
+  const stateAt = (epoch: number) =>
+    createMemoryGroupMLS({ localDID: 'bob', epoch }).serializeState()
+  await db.seed('bob', stateAt(1))
+  const expectedVersion = await db.loadVersion('bob')
+  let entered!: () => void
+  let release!: () => void
+  const enteredSeed = new Promise<void>((resolve) => {
+    entered = resolve
+  })
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  db.seam('before-seed', async () => {
+    entered()
+    await gate
+  })
+  const stale = db.seed('bob', stateAt(4), { replace: true, expectedVersion })
+  const rejected = expect(stale).rejects.toThrow('stale')
+  await enteredSeed
+  const newer = stateAt(5)
+  await db.seed('bob', newer, { replace: true, expectedVersion })
+  const currentVersion = await db.loadVersion('bob')
+  const slot = { anchor: { epoch: 5, secret: new Uint8Array([5]) } }
+  await db.anchorStore('bob').save(slot)
+  await db.control('bob').apply({ putOperations: unsettled().operations }, 'new-control')
+  const control = await db.control('bob').load()
+  release()
+  await rejected
+  expect(await db.loadState('bob')).toEqual(newer)
+  expect(await db.loadVersion('bob')).toBe(currentVersion)
+  expect(await db.control('bob').load()).toEqual(control)
+  expect(await db.control('bob').lastMutation()).toBe('new-control')
+  expect(await db.anchorStore('bob').load()).toEqual(slot)
 })
