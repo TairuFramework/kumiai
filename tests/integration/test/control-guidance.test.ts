@@ -61,3 +61,112 @@ test.each(['rpc', 'mls-rpc', 'version-band-0-11'])(
     expect(doc).toMatch(/renewal.*same recovery attempt/)
   },
 )
+
+test('host build guidance distinguishes permanent refusals from transient failures', async () => {
+  const doc = await guidance('packages/rpc/README.md')
+  expect(doc).toMatch(/throw.*OperationRejectedError.*rejected/)
+  expect(doc).toMatch(/rejected.*release.*revoke hold/)
+  expect(doc).toMatch(/plain.*Error.*transient.*retried.*intent.*queued/)
+})
+
+test.each(['docs/reference/mls-lifecycle.md', 'packages/mls-rpc/src/mls.ts'])(
+  '%s bounds binding callbacks per preparation round rather than whole recovery attempt',
+  async (path) => {
+    const doc = await guidance(path)
+    expect(doc).not.toMatch(/at most once per attempt/)
+    expect(doc).toMatch(/once per.*prepareRecovery/)
+    expect(doc).toMatch(/two.*calls.*same.*attempt/)
+    expect(doc).toMatch(/refusal.*another.*round.*deadline/)
+  },
+)
+
+test.each([
+  [
+    'mls-rpc',
+    [
+      'createRecoveryPending',
+      'RecoveryPending',
+      'publishRevokeProof',
+      'options',
+      'buildRevokeProofOperation',
+      'persist',
+      'AdoptionWrite',
+      'replace',
+      'prepare',
+    ],
+  ],
+  [
+    'rpc',
+    [
+      'commit(build',
+      'OperationRequest',
+      'LaneResult',
+      'PendingCommit',
+      'CommitJournal',
+      'CommitKind',
+      'JournalEntry',
+      'JournalEpochError',
+      'LostCommit',
+      'adoptJournalled',
+      'commitDeadlineMs',
+      'operationTimeoutMs',
+      'getCommitCursor',
+      'putCommitCursor',
+      'AppliedCommit',
+      'CommitCursor',
+      'createRecoveryRequest',
+      'requestKey',
+      'applyRecovery',
+      'openSealedLedger',
+      'openRecoveryVerdict',
+      'onAccepted',
+      'serialize',
+      'readRecoverySource',
+      'restoreRecovery',
+      'applied',
+    ],
+  ],
+  [
+    'rpc-conformance',
+    [
+      'testCommitJournalConformance',
+      'ConformanceCommitJournal',
+      'ConformanceJournalEntry',
+      'ConformanceCommitCursor',
+      'testControlStoreConformance',
+      'ConformanceGroupMLS',
+      'requestKey',
+      'onAccepted',
+      'serialize',
+      'applied',
+      'readRecoverySource',
+      'restoreRecovery',
+      'buildRotation',
+      'confirmationTag',
+      'pauseNextSave',
+    ],
+  ],
+  [
+    'mls-hub',
+    [
+      'processWelcomeFromSources',
+      'ProcessWelcomeFromSourcesParams',
+      'ProcessWelcomeFromSourcesResult',
+      'openWelcome',
+      'joinRef',
+      'releaseError',
+      'BundleSource',
+      'sourceID',
+      'consume',
+      'receipt',
+      'KeyPackagePoolParams',
+      'LastResortProvisionerParams',
+      'KeyPackagePoolStore',
+      'LastResortStore',
+    ],
+  ],
+] as const)('%s release guidance names the breaking exported surface', async (name, symbols) => {
+  const doc = await guidance(`.changeset/crash-safe-control-${name}.md`)
+  expect(doc).toContain('Breaking')
+  for (const symbol of symbols) expect(doc).toContain(symbol)
+})

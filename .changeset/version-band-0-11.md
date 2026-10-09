@@ -27,3 +27,9 @@ with explicit recovery keys. All fourteen publishable packages move together.
 Recovery restores the durable rejoin record and its candidate and request key. Confirmed adoption
 co-commits the required `AdoptionWrite` with MLS state; binding, lapse and floor refusals retry
 renewal within the same recovery attempt and original deadline.
+
+Breaking host migrations are detailed in the package intents for `mls-rpc`, `rpc`,
+`rpc-conformance` and `mls-hub`: durable operation requests replace callback commits and journals,
+adoption writes must co-commit with MLS state, recovery keys are explicit, and Welcome opening
+is separated from post-save consumption. The `mls` exported surface is additive; the other nine
+packages' exported surfaces are unchanged.
