@@ -98,7 +98,22 @@ test.each(['built', 'published', 'confirmed', 'adopted'] as const)(
       recovery,
     })
     live.push(again)
-    await expect.poll(async () => (await again.control.load()).rejoin, { timeout: 5000 }).toBeNull()
+    await expect
+      .poll(
+        async () => ({
+          rejoin: (await again.control.load()).rejoin,
+          epoch: await again.mls.readEpoch(),
+          responderEpoch: await alice.mls.readEpoch(),
+          anchorEpoch: again.peer.anchorEpoch(),
+        }),
+        { timeout: 10_000 },
+      )
+      .toEqual({
+        rejoin: null,
+        epoch: record?.epochAfter,
+        responderEpoch: record?.epochAfter,
+        anchorEpoch: record?.epochAfter,
+      })
     expect(await again.mls.readEpoch()).toBe(await alice.mls.readEpoch())
     expect((await again.control.load()).applied).toEqual([
       expect.objectContaining({

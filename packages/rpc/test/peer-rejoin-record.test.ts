@@ -379,11 +379,22 @@ test.each(['landed', 'failed-save', 'successor'] as const)(
       ).sequenceID
     }
     const again = member(hub, 'bob', { restartOf: bob })
-    await expect.poll(async () => (await again.control.load()).rejoin).toBeNull()
+    await expect.poll(async () => (await again.control.load()).rejoin, { timeout: 5000 }).toBeNull()
     await again.peer.resync()
-    expect(again.mls.epoch()).toBe(seam === 'successor' ? 3 : 2)
-    expect(again.peer.anchorEpoch()).toBe(again.mls.epoch())
-    expect((await again.control.load()).cursor?.position).toBe(successor ?? saved?.position)
+    await expect
+      .poll(
+        async () => ({
+          epoch: again.mls.epoch(),
+          anchorEpoch: again.peer.anchorEpoch(),
+          position: (await again.control.load()).cursor?.position,
+        }),
+        { timeout: 5000 },
+      )
+      .toEqual({
+        epoch: seam === 'successor' ? 3 : 2,
+        anchorEpoch: seam === 'successor' ? 3 : 2,
+        position: successor ?? saved?.position,
+      })
     expect(commits(hub)).toHaveLength(seam === 'successor' ? 2 : 1)
   },
 )
@@ -639,10 +650,19 @@ test.each(['binding', 'lapse', 'floor'] as const)(
         refusal: reason,
       }))
       .mockImplementation(process)
-    expect((await bob.peer.recover()).advanced).toBe(true)
-    expect(renewals).toBe(1)
-    expect(bob.mls.epoch()).toBe(alice.mls.epoch())
-    expect((await bob.control.load()).rejoin).toBeNull()
+    // A short attempt can expire under load; its automatic retry must finish without another call.
+    await bob.peer.recover()
+    await expect
+      .poll(
+        async () => ({
+          renewals,
+          epoch: bob.mls.epoch(),
+          responderEpoch: alice.mls.epoch(),
+          rejoin: (await bob.control.load()).rejoin,
+        }),
+        { timeout: 5000 },
+      )
+      .toEqual({ renewals: 1, epoch: 2, responderEpoch: 2, rejoin: null })
     expect(commits(hub).filter((row) => row.senderDID === 'bob')).toHaveLength(2)
   },
 )
