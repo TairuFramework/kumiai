@@ -981,6 +981,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       const blocked = () =>
         stranded ||
         locallyRemoved ||
+        (rejoinPosition != null && request.position >= rejoinPosition) ||
         (pendingRecovery != null && request.position >= pendingRecovery.position)
       if (blocked()) return
       let record = commitOutcomes.get(request.position)

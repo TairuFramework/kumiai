@@ -508,3 +508,29 @@ test('a moved accepted operation matches incoming adoption by payload digest', a
   expect((await bob.control.load()).applied).toEqual([row])
   expect((await bob.control.load()).cursor?.position).toBe(asLogPosition(result.sequenceID))
 })
+
+test('a moved acceptance with rewrapped payload stays accepted and strands the peer', async () => {
+  const hub = new FakeHub()
+  const bob = member(hub, { adopt: async () => 'moved' })
+  await bob.peer.replay()
+  const result = await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
+  await vi.waitFor(() => expect(bob.mls.epoch()).toBe(2))
+  const op = await seedBuiltOperation(bob, buildLedgerCommit(bob, []), result.sequenceID)
+  if (op.stage !== 'accepted') throw new Error('Missing acceptance')
+  const snapshot = await bob.control.load()
+  const row = snapshot.applied[0]
+  if (row == null) throw new Error('Missing incoming adoption')
+  expect(op.built.payloadDigest).not.toBe(row.payloadDigest)
+  const accepted = { ...op, built: { ...op.built, epoch: 1, digest: row.digest } }
+  await bob.control.apply({ putOperations: [accepted] }, 'rewrapped-acceptance')
+  await bob.peer.replay()
+  expect(await bob.control.load()).toMatchObject({
+    operations: [accepted],
+    outcomes: [],
+    applied: snapshot.applied,
+    cursor: snapshot.cursor,
+  })
+  await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toThrow(
+    'group control requires recovery',
+  )
+})

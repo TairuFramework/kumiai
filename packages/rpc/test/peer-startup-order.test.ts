@@ -1,6 +1,8 @@
 import { afterEach, expect, test, vi } from 'vitest'
 
 import { asLogPosition } from '../src/cursor.js'
+import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
+import { decodeRecoveryVerdict, encodeRecoveryConfirmRequest } from '../src/recovery.js'
 import { APP_TOPIC_LABEL, commitTopic, rendezvousTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
@@ -17,6 +19,7 @@ const peers: Array<TestPeer> = []
 afterEach(async () => {
   await Promise.all(peers.map(({ peer }) => peer.dispose()))
   await Promise.all(peers.splice(0).map(({ peer }) => peer.drained()))
+  vi.useRealTimers()
   vi.restoreAllMocks()
 })
 
@@ -233,5 +236,79 @@ test.each(['built', 'published', 'confirmed'] as const)(
     })
     expect((await again.control.load()).cursor).toBeNull()
     expect(strands).not.toHaveBeenCalled()
+  },
+)
+
+test.each(['published', 'confirmed'] as const)(
+  'restart gates saved confirmation responses at and beyond a %s rejoin barrier',
+  async (stage) => {
+    const hub = new FakeHub()
+    const seed = makeMLSPeer(hub, 'bob', secret, {
+      members: ['bob', 'carol'],
+      acceptsCommitter: () => false,
+    })
+    peers.push(seed)
+    await seed.peer.replay()
+    for (let index = 0; index < 3; index++) {
+      await publishCommit({
+        hub,
+        senderDID: 'carol',
+        recoverySecret: secret,
+        epoch: 1,
+        external: true,
+        adds: [`member-${index}`],
+      })
+    }
+    await vi.waitFor(async () => expect((await seed.control.load()).responses).toHaveLength(3))
+    const responses = (await seed.control.load()).responses
+    const barrier = responses[1]
+    if (barrier == null) throw new Error('Missing barrier position')
+    const rejoin = await buildRejoinRecord(seed)
+    await seed.peer.dispose()
+    await seed.peer.drained()
+    await seed.control.apply(
+      { putRejoin: { ...rejoin, stage, position: barrier.position } },
+      'responder-rejoin-barrier',
+    )
+    vi.useFakeTimers()
+    const again = makeMLSPeer(hub, 'bob', secret, {
+      restartOf: seed,
+      members: ['bob', 'carol'],
+      recovery: { getDelayMs: () => 0 },
+    })
+    peers.push(again)
+    await again.peer.replay()
+    const requester = makeMLSPeer(hub, 'carol', secret, { members: ['bob', 'carol'] })
+    peers.push(requester)
+    for (const [index, response] of responses.entries()) {
+      const requestID = `barrier-confirmation-${index}`
+      const { request } = await requester.mls.createRecoveryRequest(requestID)
+      await hub.publish({
+        senderDID: 'carol',
+        topicID: rendezvousTopic(secret),
+        payload: encodeHandshakeFrame(
+          HANDSHAKE_KIND.recoveryConfirmRequest,
+          encodeRecoveryConfirmRequest({
+            requestID,
+            request,
+            position: response.position,
+            commitDigest: response.digest,
+          }),
+        ),
+      })
+    }
+    await vi.advanceTimersByTimeAsync(100)
+    const verdicts = hub.published.filter(
+      (message) =>
+        message.senderDID === 'bob' &&
+        message.topicID === rendezvousTopic(secret) &&
+        decodeHandshakeFrame(message.payload).kind === HANDSHAKE_KIND.recoveryVerdict,
+    )
+    expect(
+      verdicts.map(
+        (message) => decodeRecoveryVerdict(decodeHandshakeFrame(message.payload).payload).requestID,
+      ),
+    ).toEqual(['barrier-confirmation-0'])
+    expect((await again.control.load()).rejoin).toMatchObject({ stage, position: barrier.position })
   },
 )

@@ -54,7 +54,7 @@ export type OperationDeps = {
     from: LogPosition | null,
     payloadDigest: string,
   ): Promise<{ found: LogPosition } | 'absent' | 'gap'>
-  appliedAt(epoch: number): Pick<AppliedCommit, 'digest'> | undefined
+  appliedAt(epoch: number): Pick<AppliedCommit, 'digest' | 'payloadDigest'> | undefined
   pullToHead(): Promise<void>
   now(): number
   operationTimeoutMs: number
@@ -221,7 +221,9 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
   }
   if (result === 'moved') {
     await deps.pullToHead()
-    if (deps.appliedAt(op.built.epoch)?.digest !== op.built.digest) return op
+    const applied = deps.appliedAt(op.built.epoch)
+    if (applied?.digest !== op.built.digest || applied.payloadDigest !== op.built.payloadDigest)
+      return op
     const settled = await deps.control.load()
     if (
       !settled.operations.some((row) => row.id === op.id) &&
