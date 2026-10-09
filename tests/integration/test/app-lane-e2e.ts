@@ -43,6 +43,7 @@ import type {
   OperationRequest,
   PendingAppFrame,
   RecoveryEvent,
+  WelcomeObligation,
 } from '@kumiai/rpc'
 import { createGroupPeer, digestAppliedCommit, OperationRejectedError } from '@kumiai/rpc'
 import { createMemoryAppOutbox } from '@kumiai/rpc-conformance'
@@ -285,7 +286,14 @@ export function makeMember(params: MakeMemberParams): Member {
       )
       committed = result
       bodies = body.material.invite.ledgerEntries
-      welcome = { bytes: result.welcomeMessage, recipients: [body.material.invite.recipientDID] }
+      welcome = {
+        bytes: encodeOperationBody({
+          welcome: result.welcomeMessage,
+          invite: body.material.invite,
+          ratchetTree: result.newGroup.state.ratchetTree,
+        }),
+        recipients: [body.material.invite.recipientDID],
+      }
     } else if (body.type === 'remove' && body.target != null) {
       const leaf = current.findMemberLeafIndex(body.target)
       if (leaf == null) throw new OperationRejectedError('Already removed')
@@ -338,15 +346,14 @@ export function makeMember(params: MakeMemberParams): Member {
     localDID: identity.id,
     protocols: { chat },
     handlers: { chat: params.handlers ?? {} } as never,
-    adopt: async (blob, expected, write) => {
-      const result = await adoptOperationCandidate(access, blob, expected, write, undefined, {
+    adopt: (blob, expected, write) =>
+      adoptOperationCandidate(access, blob, expected, write, undefined, {
         resolveLedgerEntries: entrySlot.resolve,
-      })
-      if (result !== 'installed') return result
-      const id = write.changes.putOutcomes?.[0]?.opID
-      const obligation = (await control.load()).welcomes.find((row) => row.opID === id)
-      if (id != null && obligation != null) deliveries.get(id)?.(obligation.welcome)
-      return 'installed'
+      }),
+    deliverWelcome: async (obligation) => {
+      const deliver = deliveries.get(obligation.opID)
+      if (deliver == null) throw new Error('Invitation transport unavailable')
+      deliver(obligation.welcome)
     },
   })
 
@@ -473,7 +480,10 @@ export function buildInviteCommit(
   deliverWelcome: (welcome: Uint8Array) => void,
 ): OperationRequest {
   const request = operationRequest('invite', { type: 'invite', material })
-  member.deliveries.set(request.id, deliverWelcome)
+  member.deliveries.set(request.id, (artifact) => {
+    const decoded = decodeOperationBody(artifact) as { welcome: Uint8Array }
+    deliverWelcome(decoded.welcome)
+  })
   return request
 }
 export function buildRemoveCommit(_member: Member, victimDID: string): OperationRequest {
@@ -524,11 +534,16 @@ export function newIdentity(): OwnIdentity {
 }
 
 export function createOperationHost(access: HandleAccess) {
+  const welcomes: Array<WelcomeObligation> = []
   const store = createMemoryStateStore()
   const builders = new Map<string, () => Promise<HostBuilt>>()
   return {
     builders,
+    welcomes,
     control: store.control,
+    deliverWelcome: async (obligation: WelcomeObligation) => {
+      welcomes.push(structuredClone(obligation))
+    },
     build: async (op: Operation) => {
       const build = builders.get(op.id)
       if (build == null) throw new OperationRejectedError('No host builder')

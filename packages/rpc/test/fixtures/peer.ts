@@ -5,7 +5,13 @@ import type { AppDeliveryResumed, AppDeliveryStalled } from '../../src/app-lane.
 import type { AppOutbox } from '../../src/app-outbox.js'
 import { digestAppliedCommit } from '../../src/classify.js'
 import type { HostBuilt, OperationDeps } from '../../src/control/operations.js'
-import type { ControlStore, Operation, OperationRequest, Outcome } from '../../src/control/types.js'
+import type {
+  ControlStore,
+  Operation,
+  OperationRequest,
+  Outcome,
+  WelcomeObligation,
+} from '../../src/control/types.js'
 import { OperationRejectedError } from '../../src/errors.js'
 import type { SubscribeFailure } from '../../src/hub-mux.js'
 import type { AppOutboxCleared } from '../../src/log-delivery.js'
@@ -92,6 +98,7 @@ export type MakeMLSPeerOptions = {
   onAppDeliveryResumed?: (event: AppDeliveryResumed) => void
   /** The host's notice that a subscribe was refused or exhausted its retries. */
   onSubscribeFailed?: (failure: SubscribeFailure) => void
+  deliverWelcome?: (obligation: WelcomeObligation) => Promise<void>
   welcomes?: Array<string>
   /** The host's own app-protocol handlers. Without them the app lane delivers to nobody. */
   handlers?: Record<string, unknown>
@@ -168,6 +175,11 @@ export function makeMLSPeer(
     mls,
     control,
     build: options.build ?? buildOperation,
+    deliverWelcome:
+      options.deliverWelcome ??
+      (async (row) => {
+        welcomes.push(row.opID)
+      }),
     adopt:
       options.adopt ??
       ((blob, expected, write) => {
@@ -303,9 +315,14 @@ export async function buildMemoryOperation(mls: MemoryGroupMLS, op: Operation): 
 }
 
 export function memoryOperationHost(mls: MemoryGroupMLS) {
+  const welcomes: Array<WelcomeObligation> = []
   return {
+    welcomes,
     control: mls.control(),
     build: (op: Operation) => buildMemoryOperation(mls, op),
+    deliverWelcome: async (obligation: WelcomeObligation) => {
+      welcomes.push(structuredClone(obligation))
+    },
     adopt: (
       blob: Uint8Array,
       expected: Parameters<OperationDeps['adopt']>[1],

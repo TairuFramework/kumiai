@@ -25,6 +25,7 @@ import {
 import { enqueueOperation, type OperationDeps, stepOperation } from './control/operations.js'
 import { applyResolved } from './control/store.js'
 import type { OperationRequest, Outcome } from './control/types.js'
+import { deliverObligations } from './control/welcome.js'
 import {
   type AppliedRecovery,
   type GroupMLS,
@@ -214,6 +215,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     control,
     build,
     adopt,
+    deliverWelcome,
     anchorStore,
     appCursorStore,
     protocols,
@@ -1790,6 +1792,36 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       if (cursor.stranded) stranded = true
     }
   }
+  let welcomeTimer: ReturnType<typeof setTimeout> | undefined
+  let welcomeBackoff = 1000
+  const deliverPendingWelcomes = async (): Promise<void> => {
+    if (disposed || control == null || deliverWelcome == null) return
+    if (welcomeTimer != null) clearTimeout(welcomeTimer)
+    welcomeTimer = undefined
+    try {
+      await deliverObligations(
+        {
+          control,
+          deliverWelcome: async (obligation) => {
+            assertLive()
+            await deliverWelcome(obligation)
+            // Disposal after transport acceptance leaves the obligation for the next owner.
+            assertLive()
+          },
+        },
+        await control.load(),
+      )
+      welcomeBackoff = 1000
+    } catch {
+      if (disposed) return
+      welcomeTimer = setTimeout(() => {
+        welcomeTimer = undefined
+        void runSerial(deliverPendingWelcomes).catch(() => {})
+      }, welcomeBackoff)
+      welcomeBackoff = Math.min(welcomeBackoff * 2, 15_000)
+    }
+  }
+
   const operationDeps = (deferAccepted = false): OperationDeps => {
     if (control == null || build == null || adopt == null || mls == null || commitTopicID == null) {
       throw new Error('commit: this peer has no MLS port, so it has no group to commit to')
@@ -1903,6 +1935,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     const before = await mls.readEpoch()
     while (!disposed && op != null && op.stage !== 'intent') {
       const next = await stepOperation(operationDeps(op.stage === 'accepted'), op)
+      if (next !== op && next?.stage === 'accepted') await deliverPendingWelcomes()
       await refreshControl()
       if (next === op) {
         if (op.stage !== 'accepted')
@@ -1939,6 +1972,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             for (let attempt = 0; op != null && attempt < COMMIT_ATTEMPT_CEILING; attempt++) {
               assertLive()
               const next = await stepOperation(operationDeps(op.stage === 'accepted'), op)
+              if (next !== op && next?.stage === 'accepted') await deliverPendingWelcomes()
               await refreshControl()
               if (next === op) {
                 if (op.stage === 'accepted') {
@@ -2715,6 +2749,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   }
 
   const ready = (async () => {
+    await runSerial(deliverPendingWelcomes)
+    if (disposed) return
     // Settle the app-lane anchor BEFORE the seed pull: a roster change the seed pull applies must
     // be able to rotate it off whatever lands here rather than have a later seed overwrite it.
     //
@@ -2899,6 +2935,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       if (disposePromise != null) return disposePromise
       disposed = true
       if (operationTimer != null) clearTimeout(operationTimer)
+      if (welcomeTimer != null) clearTimeout(welcomeTimer)
       for (const listeners of outcomeWaiters.values()) {
         for (const waiter of listeners) waiter.reject(new PeerDisposedError('Peer is disposed'))
       }

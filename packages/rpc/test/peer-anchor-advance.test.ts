@@ -122,7 +122,8 @@ describe('the member that authors a roster change rotates with the members that 
     await alice.peer.commit(buildInviteCommit(alice, 'dave'))
     await flush()
 
-    expect((await alice.control.load()).welcomes.map((row) => row.recipients)).toEqual([['dave']])
+    expect((await alice.control.load()).welcomes).toEqual([])
+    expect(alice.welcomes).toHaveLength(1)
     expect(alice.mls.leaves()).toContain('dave')
     expect(bob.mls.leaves()).toContain('dave')
 
