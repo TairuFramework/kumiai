@@ -1,7 +1,7 @@
 # Spec P: transactional persistence — design
 
 Date: 2026-10-08
-Status: draft r7
+Status: draft r8
 Parent: [client host, messaging protocol and multi-device e2e](2026-10-08-client-messaging-e2e-design.md)
 (phase 0)
 
@@ -12,8 +12,8 @@ landed on `feat/spec-p-phase-2` and is binding. This spec adds no second control
 
 | Phase | Work |
 |---|---|
-| 2 | `rpc`, `mls`, `mls-rpc`, `rpc-conformance` and `hub-client` contracts and runtime additions. Version-2 state codec first. Registry over `GroupStateStore`, memory stores, D4 metadata, D6 attempts/outcomes, D7 decoding and shared transaction fixtures. Both contract suites against real crypto/MLS/HTTP and doubles. Real HTTP hub plus in-process two-device group-peer smoke. |
-| 3 | `rpc-store`: Hozon stores, coordinated outbox, state/control/anchor co-commit, tombstones and hooks. Provider discriminator prerequisite in Hozon. sqlite/postgres/expo conformance, persistence and provider failure tests. |
+| 2 | `rpc`, `mls`, `mls-rpc`, `rpc-conformance` and `hub-client` contracts and runtime additions. Version-2 state and recovery codecs first. Registry over `GroupStateStore`, shared memory stores, extracted tunnel encryptor, D4 metadata, D6 attempts/outcomes, D7 decoding and outcome-aware hook fixtures. Both contract suites against real crypto/MLS/HTTP and doubles. Real HTTP hub plus in-process two-device group-peer smoke. |
+| 3 | `rpc-store`: Hozon stores, coordinated outbox, state/control/anchor co-commit, tombstones and hooks. Provider discriminator and outcome-aware hook prerequisites in Hozon. sqlite/postgres/expo conformance, persistence and provider failure tests. |
 | 4 and 5 | `client` ownership, Welcome inventory/consume wiring, rotation scheduling, deletion orchestration; `messaging` hooks, `MessageStore`, status events and deduplication. Phase 2 tests these contracts with host fixtures, without creating either package. |
 | 6 | Child-process driver and every SIGKILL seam. In-process reconstruction is not kill-a-process evidence. |
 
@@ -147,10 +147,10 @@ export type GroupMutationGate = {
 export function getGroupMutationGate(db: HozonDB): GroupMutationGate
 ```
 
-Independently constructed state/outbox adapters obtain that same gate from the same root object.
+Independently constructed state/control/anchor/cursor/outbox adapters obtain that same gate from the same root object.
 MemoryDatabase owns the equivalent gate. Factories never create a private per-adapter gate.
 Registry operations enter `store.mutationGate.run` across preparation, persistence and ambiguity resolution.
-State methods called there do not reacquire it. Coordinated outbox methods acquire it internally.
+State methods called there do not reacquire it. Coordinated outbox, anchor-save and cursor-save methods acquire it internally.
 ControlStore.apply also enters it; lastMutation performs resolver work outside it.
 Conformance direct state writes also enter the gate. Reentrant acquisition is refused.
 
@@ -167,6 +167,7 @@ The peer still classifies the result. Deletion cannot overtake an unresolved con
 
 - Every multi-store write is one `db.withTransaction` on the **root** provider, and every store it
   writes is taken from that callback's `tx`. Each callback awaits every write it starts.
+  Phase 3 persistence uses D2's outcome-aware overload below.
 - Code holding a `tx` never awaits network, timers, another group's mutex, or a store taken from the
   root provider: on node-sqlite and expo the root store waits for the connection the transaction
   holds, so awaiting it deadlocks (`../hozon/node_modules/kysely/dist/driver/runtime-driver.js:49`,
@@ -191,9 +192,18 @@ The peer still classifies the result. Deletion cannot overtake an unresolved con
     The adapter's `lastMutation()` completes the barrier before returning a negative marker (r7 decision).
   - The coordinated outbox resolves it internally (D7), so `AppOutbox`'s "a rejection leaves storage
     unchanged" contract (`rpc/src/app-outbox.ts:26`) still holds.
+  - **Independent anchor/cursor saves (r8 decision).** Their adapters resolve ambiguity internally before settling the save promise.
+    Each save records an adapter-private mutationID beside its slot/topic row, within the root transaction.
+    D2's barrier precedes readback. Matching mutationID succeeds; the exact previous marker/absence rejects as known rollback.
+    Other markers or failed reads keep the caller and group gate paused, using D3's retry backoff.
+    Peer cancellation never cancels this resolver. Public `AnchorStore`/`AppCursorStore` signatures stay unchanged
+    (`rpc/src/anchor.ts:28`, `rpc/src/app-cursor.ts:30`).
+    Today anchor rejection escapes (`rpc/src/peer.ts:376`), and drain counts promise settlement (`rpc/src/host-boundary.ts:149`).
+    Kubun writes the anchor independently (`../kubun/packages/plugin-p2p/src/groups/anchor-store.ts:35`).
+    Phase 2 implements the shared doubles/cases; phase 3 implements and verifies provider saves.
 
 **Completion barrier (r7 decision).** A negative ordinary read never proves rollback.
-Every state/open/Welcome/delete, control apply and coordinated-outbox transaction first upserts
+Every state/open/Welcome/delete, control apply, anchor save, cursor save and coordinated-outbox transaction first upserts
 `groupOwner(groupID PRIMARY KEY, lockValue)` and executes unconditional `UPDATE lockValue = lockValue`.
 Keep that row across deletion. An initially absent state/meta/control row still has this locking path.
 
@@ -217,6 +227,32 @@ Retry busy/locked failures outside the transaction. No timeout or negative read 
 
 P2a's peer remains the control ambiguity owner. This refines `lastMutation()` completion semantics;
 it changes neither its signature nor P2a's confirmed-recovery/source-check contract.
+
+**Outcome-aware hooks (r8 decision), phase-3 Hozon prerequisite.** Today Hozon runs rollback hooks on every transaction rejection
+and commit hooks only on success (`../hozon/packages/db/src/db.ts:275`, `../hozon/packages/db/src/db.ts:286`).
+Marker readback cannot recover discarded hooks. Add this optional root `withTransaction` overload option:
+
+```ts
+export type TransactionHookSettlement = {
+  settle(outcome: 'committed' | 'rolled-back'): void
+}
+export type OutcomeAwareTransactionOptions = {
+  onUnknown(settlement: TransactionHookSettlement): void
+}
+// Root withTransaction(fn, options?) retains its existing Promise/result and tx hook API.
+```
+
+Shared persistence adapters always supply `onUnknown`, including memory adapters' `transact` calls.
+Known commit runs commit hooks before resolution. Known rollback runs rollback hooks before rejection.
+Uncertain completion retains both queues and calls `onUnknown` before rejecting, without running either queue.
+Each persistence adapter retains the settlement token with its write/mutationID until its existing resolver proves the outcome.
+After D2's barrier/marker check, `settle` runs only the matching queue, exactly once, before success or known-rollback becomes observable.
+Repeated settlement is idempotent. Contradictory settlement is an ownership error. Hook exceptions remain contained.
+Barrier/read failure, peer disposal and negative raw reads never settle hooks.
+`resolveWrite`/`lastMutation` settle retained tokens before returning. Control's background latch shares that idempotent settlement before releasing writers.
+Registry installation and outbox resolution follow hook settlement. No committed marker may resolve success with its hook missing.
+Phase 2 mirrors this overload/token in MemoryDatabase and asserts commit/rollback counts. Hozon implementation and provider fault tests remain phase 3.
+Hooks remain process-local; phase 5 restores status from durable rows after process death.
 
 ### D3. `GroupStateStore` and registry
 
@@ -247,6 +283,18 @@ It breaks self-removal filtering and changes policy attribution (`mls/src/group-
 - Round-trip tests cover zero, one and genuinely absent senders; a zero-sender test must fail on
   the current codec. Clone/save/reopen with real MLS must preserve the same proposal ref and sender.
   Include malformed sidecar and version-1 refusal tests.
+- **P2a recovery codec (r8 decision), phase 2.** The current serializer subtracts private-state length from the whole envelope
+  (`mls-rpc/src/recovery-codec.ts:36`, `mls-rpc/src/recovery-codec.ts:38`). Restore appends private state
+  (`mls-rpc/src/recovery-codec.ts:87`, `mls-rpc/src/recovery-codec.ts:92`). Version 2 invalidates both splices, even with no proposals.
+  Store `sourceState = encodeClientState({...snapshot.state, ratchetTree: snapshot.sourceTree})` in the encrypted candidate JSON.
+  Decode sourceState independently and take its ratchetTree; never splice private bytes or depend on envelope offsets.
+  Bump the recovery candidate version to 2 and AAD to `kumiai/recovery-candidate/v2`.
+  Refuse version-1 candidates under the same flag-day policy.
+  Keep P2a's opaque candidate/requestKey and confirmation/source-check contracts unchanged.
+  Extend the exact-state/source-tree test (`mls-rpc/test/recovery-codec.test.ts:65`) with a source tree differing from the candidate's.
+  Cover empty proposals and zero/one/absent senders, plus reconstruction from a persisted rejoin candidate/requestKey.
+  Bound verdict judgement and idempotent adoption still pass (`mls-rpc/test/recovery-codec.test.ts:90`, `mls-rpc/test/recovery-codec.test.ts:99`).
+  This adaptation lands with G1, before registry or recovery uses the version-2 envelope.
 - Correct the backlog's broad audit claim here, without editing it: no other valid falsy scalar in
   this installed ClientState graph is affected. Own leaf index, epoch and generation are required
   encodings (`node_modules/ts-mls/dist/src/privateKeyPath.js:7`,
@@ -357,7 +405,7 @@ Redeclaration breaks ambiguity recognition (`rpc/src/control/store.ts:105`).
   Refuse operations, rejoin, unacked outcomes or Welcomes with canonical `GroupControlUnsettledError`
   (`rpc/src/control/store.ts:57`). Deletion does not abandon control work automatically.
 
-**Construction and runtime surface (r6 decision; r7 handoffs):**
+**Construction and runtime surface (r6 decision; r7 handoffs). Async access and membership runtime (r8 decision):**
 
 ```ts
 // Phase 3, rpc-store. Uses stores obtained from the root callback's tx.
@@ -372,7 +420,7 @@ export function createGroupHandleRegistry(params: {
   restore: (record: GroupStateRecord) => Promise<GroupHandle>
 }): GroupHandleRegistry
 export type GroupHandleRegistry = {
-  access(groupID: string): RegistryHandleAccess
+  access(groupID: string): Promise<RegistryHandleAccess> // loads/restores/validates before returning (r8 decision)
   seed(group: GroupHandle, params: {
     replace?: boolean
     joinRef: GroupStateRecord['joinRef']
@@ -380,16 +428,25 @@ export type GroupHandleRegistry = {
   clearJoinRef(groupID: string, expectedJoinRef: NonNullable<GroupStateRecord['joinRef']>): Promise<void>
   delete(groupID: string): Promise<void> // host must stop/drain its peer first
   onAdmissionChanged(listener: (groupID: string, value: SendAdmission) => void): () => void
-  onEpochChanged(listener: (groupID: string) => void): () => void
+  onEpochChanged(listener: (groupID: string, snapshot: GroupRuntimeSnapshot | null) => void): () => void
   dispose(): Promise<void> // cancels timers, awaits writes and flushes dirty receives
 }
-export type RegistryHandleAccess = HandleAccess & { pending: PendingAppFrames }
+export type GroupRuntimeSnapshot = {
+  epoch: number; authenticator: Uint8Array; lineage: number
+  members: ReadonlySet<string>        // normalised DIDs, copied from committed membership
+  available: boolean                // local member usable; lapse alone does not remove membership
+}
+export type GroupEpochRuntime = {
+  snapshot(): GroupRuntimeSnapshot | null
+  onEpochChanged(listener: (snapshot: GroupRuntimeSnapshot | null) => void): () => void
+}
+export type RegistryHandleAccess = HandleAccess & { pending: PendingAppFrames; runtime: GroupEpochRuntime }
 // Add to HandleAccess; retain read/mutate and AdoptionWriteFactory.
 pending?: PendingAppFrames
 lineage(): number
 seal<TValue>(fn: (handle: GroupHandle) => Promise<TValue>): Promise<TValue>
 receive<TValue>(fn: (handle: GroupHandle) => Promise<{
-  result: TValue; accepted: boolean
+  result: TValue; accepted: number   // non-negative integer open count, including batches (r8 decision)
 }>): Promise<TValue>
 // Fourth replace argument defaults to 'adoption'. Recovery explicitly passes 'recovery'.
 replace(next: GroupHandle, adoption?: AdoptionWriteFactory,
@@ -415,7 +472,7 @@ export function createGroupCrypto(params: GroupCryptoParams & {
 - One per-group gate spans preparation, save and ambiguity resolution. Durable mutation/open,
   commit replacement, Welcome seed and deletion stage from the current cache; install after commit.
   Retry durable-open CAS at most eight times on fresh clones. Merge only matching identities/lineages.
-- **Registry durable open (r7 decision).** `createGroupCrypto({access: registry.access(groupID)})` uses
+- **Registry durable open (r7 decision).** `createGroupCrypto({access: await registry.access(groupID)})` uses
   access-owned pending persistence/list/completion. Refuse an external pending adapter on registry access.
   `open` stages on a current clone. Its internal callback builds a full record from `stagedState`,
   current credential/ledger/metadata, fresh writeID and next CAS version, then calls `store.saveOpened`.
@@ -427,7 +484,7 @@ export function createGroupCrypto(params: GroupCryptoParams & {
   Simple access still requires the external fallback for durable open. Without it, reject before decrypting.
   This replaces today's required callback wiring (`mls-rpc/src/access.ts:28`, `mls-rpc/src/crypto.ts:209`).
 - `wrap` moves from `access.mutate` to `access.seal`; each callback seals at most one application
-  frame. Non-durable unwrap uses `receive`, counting only accepted opens. Receives install immediately
+  frame. Non-durable unwrap uses `receive`, returning count 1 for an accepted open. Receives install immediately
   and flush at 64 frames or 250 ms. Losing unflushed live progress permits replay after restart.
   Simple access implements seal/receive with its existing per-mutation persistence, without leases.
 - **Lineage plumbing (r6 decision).** Recovery source and every host build read `access.lineage()`
@@ -438,8 +495,11 @@ export function createGroupCrypto(params: GroupCryptoParams & {
   if displaced. An owning peer's next call sees its successful recovery's new lineage; external
   Welcome seed retires the old access owner. Creation-time crypto pinning would strand that peer.
 - Publish runtime snapshots/notifications only after committed installation. Admission subscription
-  immediately supplies loaded groups; epoch subscription fires on identity/lineage/availability changes,
-  including same-number recovery (r7 decision).
+  immediately supplies loaded groups; epoch subscription fires on identity/lineage/membership/availability changes,
+  including same-number recovery (r7 decision). The committed membership handoff extends that contract (r8 decision).
+  The group-bound runtime immediately supplies its current snapshot on subscription (r8 decision).
+  Snapshot getters/listeners receive defensive copies, including authenticator and normalised member sets.
+  Retired, deleted or disposed access publishes null; uncertain adoption exposes no staged membership.
   Contain listener errors. Host schedules work outside the registry gate.
 - `list()` drives host restore. Tombstones never start peers. After live restore, the host consumes
   each source-scoped `joinRef`, then calls `registry.clearJoinRef(groupID, consumedRef)` (r7 decision).
@@ -449,6 +509,44 @@ export function createGroupCrypto(params: GroupCryptoParams & {
   The registry owns ambiguity through `resolveWrite`, as for every state save. Never clear before consume.
   A crash after consume repeats its source receipt check, then clears through this operation.
   Restore pending into the peer before P2a replay. Keep P2a's startup order and terminal-removal rule.
+
+**Cold access (r8 decision), phase 2.** `access` awaits load, restore, identity checks and retention validation under the group gate.
+Concurrent access calls share that load. Missing/tombstoned records reject with `DisplacedGroupHandleError`; invalid restore/configuration publishes nothing.
+No HandleAccess exists before successful loading, so epoch/lineage/admission getters never fabricate pre-load values.
+Subscriptions omit unloaded groups. Successful loading publishes the validated snapshot/admission before returning access.
+The current synchronous simple access already receives a handle (`mls-rpc/src/access.ts:40`). Its signature stays synchronous.
+All registry callers await access before constructing crypto, peers, buffers or encryptors.
+
+**Tunnel encryptor extraction (r8 decision), phase 2.** Export the existing Encryptor adapter from mls-rpc with this group-bound constructor:
+
+```ts
+export type MLSEncryptorParams = {
+  access: Pick<RegistryHandleAccess, 'seal' | 'receive' | 'runtime'>
+  peerDID: string
+  role: 'dialer' | 'listener'
+}
+export class MLSEncryptor implements Encryptor {
+  constructor(params: MLSEncryptorParams)
+  encrypt(plaintext: Uint8Array): Promise<Uint8Array>
+  decrypt(ciphertext: Uint8Array): Promise<Uint8Array>
+  trackPublish(hub: MailboxHub): MailboxHub
+  clear(): void
+  watchPeerRemoval(dispose: () => Promise<void>): () => void
+}
+```
+
+`seal`, `receive` and runtime belong to the same loaded access owner. Encryption uses `access.seal` and D3's lease/admission guard.
+Decryption uses `access.receive` in chunks of at most 64. Add the exact successful-open count to the flush budget.
+This preserves source batching (`../kubun/packages/plugin-p2p/src/groups/mls-encryptor.ts:194`,
+`../kubun/packages/plugin-p2p/src/groups/mls-encryptor.ts:243`). Boolean coercion is forbidden.
+Adapt the removal watcher to committed snapshots, rather than retaining its old callback arguments
+(`../kubun/packages/plugin-p2p/src/groups/mls-encryptor.ts:149`). Identical snapshots are no-ops.
+A sequential `E + 1`, same-lineage update with usable local membership and peer membership keeps the tunnel open.
+Null/unavailable snapshots, missing peer membership, non-sequential epochs or changed lineage close it once.
+Same-number authenticator replacement also closes it. Unsubscribe disables later closes.
+Keep sender/publisher checks, stale outstanding-reply handling and failed-publish retirement
+(`../kubun/packages/plugin-p2p/src/groups/mls-encryptor.ts:105`, `../kubun/packages/plugin-p2p/src/groups/mls-encryptor.ts:201`,
+`../kubun/packages/plugin-p2p/src/groups/mls-encryptor.ts:211`). No Kubun registry dependency remains.
 
 **Retention, lease and rotation:**
 
@@ -475,7 +573,7 @@ const ROTATE_AT = 500
 - Context overlays supplied retention on ts-mls defaults through `clientConfig.keyRetentionConfig`
   (`node_modules/ts-mls/dist/src/mlsContext.d.ts:9`, `node_modules/ts-mls/dist/src/clientConfig.d.ts:7`).
   Preserve other client defaults. Registry sealing requires generation retention and forward steps
-  both at least 1000; reject weaker host configuration at access creation. Client/smoke fixtures set
+  both at least 1000; reject weaker host configuration before asynchronous access resolves. Client/smoke fixtures set
   both to 1000. Ordinary mls callers keep defaults; historical epoch retention remains unchanged.
   The third parameter is the options object above, not a bare retention config (r7 decision).
   Its fields are ts-mls's existing names (`node_modules/ts-mls/dist/src/keyRetentionConfig.d.ts:3`).
@@ -509,11 +607,12 @@ const ROTATE_AT = 500
 **Deletion lifecycle (r6 decision).** Later client, and phase 2 fixtures, block peer creation/seed
 under the group's lifecycle gate. Call `peer.dispose()`, then `peer.drained()` before registry deletion.
 Drain is already the owner-replacement contract (`rpc/src/peer-types.ts:364`). Wait for acceptance,
-delivery, invoked handlers, network submissions and ambiguous outbox mutations to settle. Then enter
+delivery, invoked handlers, network submissions, frozen proof removals and every adapter's ambiguity resolver to settle. Then enter
 the shared root mutation gate once and perform the delete transaction (r7 decision). Never await drain inside a peer
 callback. Unsettled control still refuses deletion; resume a peer to settle or explicitly abandon/ack
 before retrying. On failure, keep the group stopped until restored. This prevents a late put from
 recreating rows. No timeout authorises deletion with outstanding work.
+Welcome replacement uses this same stop/drain-before-gate order. A save's rejected raw root promise never authorises lifecycle handoff (r8 decision).
 
 ### D4. Opened epoch on pending records and handlers
 
@@ -679,6 +778,16 @@ certify(identity: AppEpochIdentity, walk: PublicationWalk): void
   outcome when proven and retry the identical removal after failures, even if the epoch changes.
 - D7 writes published status/position with removal. The sender records the proven occurrence;
   receivers keep their first durable occurrence. `clear` and deletion fail unpublished messages.
+- **Terminal proof settlement (r8 decision), phase 2 runtime.** Self-removal settles every frozen proof before clearing remaining entries.
+  Known rollback retains the proof and retries identical `remove(seq, outcome)`; ambiguity stays inside D7's resolver.
+  Clear never overtakes an unsettled proven removal. The current removed branch clears proof first
+  (`rpc/src/log-delivery.ts:102`); close cancels retries (`rpc/src/log-delivery.ts:280`, `rpc/src/peer.ts:3341`).
+  Disposal stops sending/walking and new certification immediately, but preserves the frozen removals in a storage-only finaliser.
+  Before closing the host boundary, register that finaliser as counted work with a scoped remover for those seq/outcome pairs only.
+  Its retries survive closure; it cannot accept, seal, publish or clear. `dispose()` never awaits it inside a host callback.
+  `drained()` waits for finaliser success, including retry timers, before owner deletion or Welcome replacement.
+  In-flight removal joins that finaliser; committed retries skip hooks as D7 requires. No timeout discards proof or authorises cleanup.
+  Proof remains memory-only under D6's restart model. Phase 2 uses opaque status rows; phase 5 wires MessageStore status.
 - **Hub double.** Re-key dedup by `(topicID, publishID)`; retain original acceptance timestamps.
   `purge` expires at the real store's inclusive 365-day cutoff (`hub-store/src/store.ts:497`).
   Trimming/acknowledging frames does not expire dedup; retries do not extend its timestamp.
@@ -743,14 +852,20 @@ export type MemoryStoreRows = Record<string, Map<string, unknown>>
 export type MemoryTransaction = {
   rows: MemoryStoreRows
   onCommit(fn: () => void): void
+  onRollback(fn: () => void): void
 }
 export type MemoryDatabase = {
   mutationGate: GroupMutationGate
-  transact<TValue>(fn: (tx: MemoryTransaction) => Promise<TValue>): Promise<TValue>
+  transact<TValue>(fn: (tx: MemoryTransaction) => Promise<TValue>,
+    options?: OutcomeAwareTransactionOptions): Promise<TValue>
   completionBarrier(groupID: string): Promise<void>
   snapshot(): MemoryStoreRows
 }
 export function createMemoryTransaction(params: { rows: MemoryStoreRows }): MemoryDatabase
+// Shared adapters (r8 decision). Canonical names below denote conformance structural mirrors.
+export function createMemoryControlStore(params: { db: MemoryDatabase; groupID: string }): ControlStore
+export function createMemoryAnchorStore(params: { db: MemoryDatabase; groupID: string }): AnchorStore
+export function createMemoryAppCursorStore(params: { db: MemoryDatabase; groupID: string }): AppCursorStore
 export function createMemoryGroupStateStore(params: {
   db: MemoryDatabase
   onDelete?: (tx: MemoryTransaction, groupID: string) => Promise<void>
@@ -767,12 +882,28 @@ export function createMemoryCoordinatedOutbox(params: {
 
 Clone all maps/values at transaction entry; expose only the clone during the callback. Atomically
 publish it on success, then run commit hooks before resolving. Callback rejection discards the
-clone/hooks; commit-hook exceptions are contained after publication.
+clone, runs rollback hooks and discards commit hooks; hook exceptions are contained.
 Serialise root transactions; disallow reentrant transactions. `snapshot` returns a defensive copy
 of committed rows, including while a callback is held. Test adapters share one `MemoryDatabase`
 for state/control/anchor/pending/outbox/meta and opaque host side rows; do not construct separate
 memory databases per adapter. Factories take `{db: MemoryDatabase, ...}` with the same group/hook
 parameters as their Hozon counterparts, substituting `MemoryTransaction` for `StoreProvider`.
+
+**Shared factory binding (r8 decision).** Phase 3 rpc-store exports:
+
+```ts
+export function createControlStore(params: { db: HozonDB; groupID: string }): ControlStore
+export function createAnchorStore(params: { db: HozonDB; groupID: string }): AnchorStore
+export function createAppCursorStore(params: { db: HozonDB; groupID: string }): AppCursorStore
+```
+
+Each adapter binds all operations to groupID, obtains the canonical root gate, and follows D2's owner-row/barrier rules.
+Anchor/cursor saves resolve internally; control apply retains P2a's peer-owned resolution. Co-writes use tx rows, never public adapters.
+Shared memory adapters read/write MemoryDatabase rows exclusively; no private control/anchor/cursor state participates in persistence fixtures.
+Retain the existing no-argument `createMemoryControlStore<Position>(): MemoryControlStore<Position>` as a legacy overload
+(`rpc-conformance/src/memory-control-store.ts:68`). It keeps standalone tests compatible and is excluded from shared persistence fixtures.
+The `{db, groupID}` overload returns only the ControlStore port; state and anchor use their separate shared factories.
+No P2a port signature or no-argument call changes. Hozon factories refuse non-root scope with `NonRootProviderError` as D2 specifies.
 Use row namespaces `groupOwner`, `state`, `control`, `anchor`, `pending`, `appCursor`, `outbox` and `outboxMeta`.
 Owner/state/control/anchor/meta keys are groupID; compound keys use JSON arrays `[groupID, id/topicID/seq]`.
 Host side rows use a separate namespace. Future memory MessageStore uses that same database.
@@ -782,8 +913,10 @@ Reopen wraps the same committed rows, with every runtime cache discarded.
 The transaction callback has completed but its private rows/hooks remain unpublished and its owner lock remains held.
 Reject `transact` with `StorageOutcomeUnknownError` while retaining that pending transaction separately from the caller promise.
 `snapshot` may show previous rows/absence. `completionBarrier` and later transactions wait for backend settlement.
-The fault controller then publishes the saved clone/hooks exactly once (`commit`) or discards them (`rollback`).
-Only then may the barrier finish and the adapter classify markers. Callback failure remains a known rollback.
+The fault controller publishes the saved clone (`commit`) or discards it (`rollback`), retaining both hook queues (r8 decision).
+Only then may the barrier finish and the adapter classify markers. D2's retained token settles hooks before caller/gate release.
+Commit-then-reject also retains hooks until resolution; it cannot run rollback hooks merely because the root rejected.
+Callback failure with completed rollback remains known and runs rollback hooks once.
 Memory resolvers must use this barrier, including initially absent owner/state/meta rows.
 A negative snapshot alone must fail conformance. Doubles are no more permissive than the provider contract.
 
@@ -800,15 +933,16 @@ applies. Hozon does not configure transaction isolation (`../hozon/packages/db/s
 | Root call inside transaction | must not await; connection is held | independent transaction when pool capacity permits; must not await either | must not await; connection is held |
 | Supported ambiguous COMMIT model | known only with completed COMMIT/ROLLBACK; otherwise barrier | transport loss can be ambiguous | known only with completed COMMIT/ROLLBACK; otherwise barrier |
 | Negative ambiguity result, r7 | writer lock, then final marker read | owner-row conflict wait, then fresh READ COMMITTED statement | connection completion plus writer lock, then final marker read |
+| Outcome-aware hooks, r8 | retained token; barrier selects one hook queue | retained token; barrier selects one hook queue | retained token; barrier selects one hook queue |
 
 ## Phase 2 implementation order and exit criteria
 
-1. MLS version-2 codec and regression. Retention propagation and rotation builder.
-2. D3 port, shared memory transaction/store, registry/access and lineage plumbing. Reuse P2a co-commit.
+1. MLS version-2 codec, P2a recovery serializer adaptation and source-tree/rejoin regression. Retention propagation and rotation builder.
+2. D3 port, explicit shared state/control/anchor/cursor factories, outcome-aware hooks, async registry/access and lineage plumbing. Reuse P2a co-commit.
 3. D4 pending/handler migration, including optional broadcast metadata and directed stamped headers.
-4. D6 entry/publication/removal shapes, prepared-byte retries, proof outcome and memory-hub dedup parity.
+4. D6 entry/publication/removal shapes, prepared-byte retries, terminal proof settlement and memory-hub dedup parity.
 5. D7 rpc decoder/error exports and coordinated memory contract fixtures; no production rpc-store adapter.
-6. Hub-client lifts per the audit, keeping epoch inspection injected. Preserve subscription retention
+6. MLSEncryptor extraction with committed membership snapshots/numeric receive counts. Hub-client lifts keep epoch inspection injected. Preserve subscription retention
    on first subscribe, reconnect and same-connection retry. The source drops options on replay
    (`../kubun/packages/plugin-p2p/src/hub/hub-like.ts:529`, `../kubun/packages/plugin-p2p/src/hub/hub-like.ts:608`).
 7. In-process e2e smoke: standalone devices, real MLS ports/registry on shared memory host stores,
@@ -849,7 +983,9 @@ Keep malformed/unknown-epoch passthrough, notification wake/revisit and disposal
 `../kubun/packages/plugin-p2p/src/hub/buffered-peer-hub-view.ts:110`,
 `../kubun/packages/plugin-p2p/src/hub/buffered-peer-hub-view.ts:235`).
 Inspection is an unauthenticated prefilter (`mls/src/group-info.ts:17`). Bind registry notifications
-in the host fixture in phase 2, later in client. Automatic `/info` integration remains BLOCKED in the
+through the loaded access's group-bound runtime in phase 2, later in client (r8 decision).
+`currentEpoch` returns null for null/unavailable snapshots; notification payloads wake the buffer without implying peer removal.
+Automatic `/info` integration remains BLOCKED in the
 umbrella Risks; smoke uses injected server DID, not a new production endpoint.
 
 ## Crash seams
@@ -873,6 +1009,8 @@ phase 3 runs real-store boundaries; phase 6 arms, reports, blocks and kills a ch
 | Welcome readmission committed, before peer restart | `save(kind: 'welcome')` | after | unknown outcomes preserved; reset anchor recaptured at join; 2/3/6 |
 | Deletion committed, before restart | `delete` | after | tombstone/rows 2/3; failed messages 5; SIGKILL 6 |
 | COMMIT rejected, backend unfinished | root transaction and D2 barrier | raw read shows previous/absent marker, then backend commits or rolls back | no premature rejection/release; 2 memory / 3 providers |
+| Anchor/cursor save rejected, backend unfinished | `AnchorStore.save` / `AppCursorStore.save` | disposal/drain then delete or Welcome replacement | late commit/rollback settles first; no deleted rows or old-admission anchor reappear; 2/3 |
+| Proven removal rolled back, terminal cleanup requested | `remove(seq, outcome)` | self-removal or dispose/drain/delete | frozen proof settles before clear/delete; published never failed by that cleanup; 2 status double / 5 MessageStore |
 
 Control/rejoin/Welcome-delivery seams remain owned by P2a. Its in-process Welcome crash reconstruction
 is existing coverage (`tests/integration/test/welcome-after-crash.test.ts:179`), not child-process coverage.
@@ -884,7 +1022,7 @@ commit-then-reject, unfinished-commit faults, clock control and opaque side-row 
 Phase 3 supplies those fixtures on every provider, plus a separate-connection postgres visibility
 barrier. Expo uses a node shim or records BLOCKED with its reason. Phase 6 supplies the kill harness.
 
-**Harness/factory contract (r7 decision), rpc-conformance exports:**
+**Harness/factory contract (r7 decision). Hook counts and shared anchor fixture (r8 decision), rpc-conformance exports:**
 
 ```ts
 export type PersistencePorts = {
@@ -911,7 +1049,10 @@ export type PersistenceFixture<TPorts> = {
   advanceTime(ms: number): Promise<void>
   close(): Promise<void>
 }
-export type ConformanceTransaction = { onCommit(fn: () => void): void }
+export type ConformanceTransaction = {
+  onCommit(fn: () => void): void
+  onRollback(fn: () => void): void
+}
 export type ConformanceOutboxHooks<TTx extends ConformanceTransaction> = {
   onPut(tx: TTx, entry: AppOutboxEntry): Promise<void>
   onRemove(tx: TTx, entry: AppOutboxEntry, outcome?: AppPublicationOutcome): Promise<void>
@@ -924,7 +1065,7 @@ export type PersistenceConformanceParams<TPorts, TTx extends ConformanceTransact
     onDelete?: (tx: TTx, groupID: string) => Promise<void>
   }): Promise<PersistenceFixture<TPorts>>
 }
-// TTx is MemoryTransaction in phase 2; StoreProvider in phase 3. Both expose onCommit.
+// TTx is MemoryTransaction in phase 2; StoreProvider in phase 3. Both expose onCommit/onRollback.
 // Extend the existing ControlStore harness with the same completion faults.
 export type ControlStoreConformanceParams = {
   open(): Promise<ConformanceControlHost>
@@ -947,15 +1088,24 @@ export function testAppOutboxConformance<TTx extends ConformanceTransaction>(
 export function testAppCursorStoreConformance<TTx extends ConformanceTransaction>(
   params: PersistenceConformanceParams<{cursor: AppCursorStore}, TTx>
 ): void
+export function testAnchorStoreConformance<TTx extends ConformanceTransaction>(
+  params: PersistenceConformanceParams<PersistencePorts, TTx>
+): void
 ```
 
 These signatures replace AppOutbox's synchronous `createOutbox/failNextPut` fixture
 (`rpc-conformance/src/app-outbox.ts:18`). Retain its cases with the new fault driver.
 ControlStore's existing factory remains, with the additions above (`rpc-conformance/src/control-store.ts:175`).
 Its `commitThenReject` method forwards to the same fault controller.
+AnchorStore's one-case harness gains the shared fault/reopen fixture (`rpc-conformance/src/anchor-store.ts:20`).
+Retain its round-trip case. Shared fixtures construct control/anchor/cursor through D7's explicit `{db, groupID}` factories (r8 decision).
 Each factory creates an isolated database and all ports over its one root/gate, with supplied hooks.
 Use `MemoryTransaction` for memory hooks and `StoreProvider` for Hozon hooks; absent hooks are no-ops.
-`reopen` discards runtime state, waits for backend settlement and rebuilds ports over the same rows.
+Memory exports Hozon-free structural mirrors of D2's settlement/options types (r8 decision).
+Hook assertions register both queues and count each invocation, including ambiguous delete and outbox mutations.
+While outcome remains uncertain, both counts stay zero. Confirmed commit runs each commit hook once, rollback hooks zero, before caller/next-writer release.
+Confirmed rollback reverses those counts. Resolver retries, disposal, reopen and repeated remove never duplicate hooks in the surviving process.
+`reopen` waits for backend/resolver/hook settlement, discards runtime state and rebuilds ports over the same rows.
 Faults/clock follow the rebuilt ports. `inspectRows` normalises provider rows for the same assertions.
 `after-first-write` fails between coupled logical writes; owner-row locking statements do not count.
 Suites close fixtures in finally blocks. Conformance type mirrors retain every normative field/signature above;
@@ -965,6 +1115,7 @@ Canonical port names in this block denote those structural `Conformance*` mirror
 | Suite / phase | Case | Assertion / existing coverage |
 |---|---|---|
 | codec/registry, 2 | lossless sender | zero, one, absent survive clone/save/reopen; malformed sidecar refused; version 1 throws; regression fails on current codec |
+| recovery codec, 2 | v2 source-tree/rejoin | full candidate/source state round-trip with different trees, no proposals and zero/one/absent senders; saved candidate/requestKey restores bound verdict and adopts once; v1 candidate refused |
 | `testGroupStateStoreConformance`, 2 memory / 3 providers | CAS/version | wrong expected, lower/equal version, ordinary lower epoch, lower lineage/floor and tombstone-as-absent conflict without logical changes |
 | | confirmed lower recovery | real source at 4, responder at 1, candidate at 2: confirmation/source check permits atomic adoption; version/lineage increase, floor stays 4, candidate HWM resets; reopen at 2; tombstone refuses Welcome at/below 4 |
 | | refused lower recovery | unconfirmed/refused candidate, stale source/version, absent/tombstoned source or missing adopted co-write changes nothing |
@@ -977,19 +1128,23 @@ Canonical port names in this block denote those structural `Conformance*` mirror
 | | pending reopen | numeric `(segment, position)` order, epoch retained, unknown/double completion succeeds; extend existing case (`rpc-conformance/src/pending-group-crypto.ts:177`) |
 | | owner handoffs | consume then clearJoinRef then seal/reserve works without stale CAS; stale ref conflicts; ambiguous clear/open/completion resolves before cache/payload publication; registry crypto needs no external pending callback |
 | | delete | stopped/drained owner; atomic tombstone/row cleanup/hook; epoch/lineage floor survives; stale write fails; no late put recreates rows |
+| | independent save versus lifecycle | absent/existing anchor and per-topic cursor save receives ambiguous rejection; dispose/drain/delete and Welcome replacement stay pending; late commit/rollback settles first; delete removes anchor/cursor rows, Welcome clears anchor and new-topic cursor stays null; reopen never installs an old anchor into new admission |
 | | unsettled delete | operations, rejoin, outcomes and Welcomes each refuse; reuse predicate/host tests (`rpc/test/control-store.test.ts:253`) |
 | P2a ControlStore, 2 / 3 | negative marker barrier | state-free apply rejects before backend completion; lastMutation stays pending despite raw previous marker; late commit resolves once, rollback alone returns previous marker; deletion cannot overtake |
 | `testAppOutboxConformance`, 2 / 3 | attempt/outcome | all attempt fields round-trip; outcome reaches remove; unknown removal remains harmless |
-| `testCoordinatedOutboxConformance`, 2 memory / 3 Hozon | rollback/visibility | hook failure rolls back both rows; onCommit fires before resolution; postgres independent reader sees neither row before commit |
-| | ambiguous mutations | put, same-data replacement, remove, clear commit-then-reject resolve iff committed; failed status read keeps caller/later writer paused |
-| | negative read, late completion | put (initially absent meta), replacement, remove and clear reject root before backend settles; raw negative read cannot release reservation/gate; late commit succeeds once with side rows, rollback rejects unchanged |
+| `testCoordinatedOutboxConformance`, 2 memory / 3 Hozon | rollback/visibility | hook failure rolls back both rows; commit/rollback hooks select exactly one queue; commit hooks precede resolution; postgres independent reader sees neither row before commit |
+| | ambiguous mutations | put, same-data replacement, remove, clear and group delete commit-then-reject resolve iff committed; each registered commit hook fires once before success, rollback hooks never; failed barrier/status read leaves hooks/caller/later writer pending |
+| | negative read, late completion | put (initially absent meta), replacement, remove, clear and delete reject root before backend settles; raw negative read runs neither hook queue nor releases gate; late commit runs commit hooks once, rollback runs rollback hooks once and rejects unchanged |
 | | overlap/removal/replacement | B waits through A's readback; repeated remove skips hook; changed protocol/prc/data rejects unchanged |
 | | shared deletion gate | construct state/outbox independently over one root; delete waits through pending put/barrier, then atomically clears rows/meta; no later recreation |
 | | root-only constructor, 3 | transaction-scoped provider refused |
 | `testAppCursorStoreConformance`, 2 / 3 | durable per topic | reopen saved position; other topics remain null |
+| | ambiguous save | commit-then-reject resolves once; unfinished save remains pending through barrier/read failures; late rollback rejects unchanged |
+| `testAnchorStoreConformance`, 2 / 3 | ambiguous save/lifecycle | first insert and replacement hold save/drain/gate through pending COMMIT; late commit/rollback resolves before deletion/readmission; no stale slot/secret survives cleanup |
 | pending/group crypto, 2 | opened epoch | extend record and narrowed unwrap types together; stored epoch equals authenticated unwrap epoch |
 | rpc handler tests, 2 | every D4 path | durable replay, retained drain, live log/ephemeral, anycast request and directed kinds expose original epoch; spoofed wire/header epoch cannot win |
 | registry real-MLS tests, 2 | lease/restart | reserve, reconstruct, seal at or above HWM; no generation repeats; failed reservations prevent sealing |
+| | cold access | fresh registry awaits async load/restore before returning access or publishing getters; concurrent calls share load; weak retention and missing/tombstoned records reject without admission |
 | | blocked restore | lapsed, removed, suspended and pending-proposal restores keep control/receive usable; deferred burn completes before an eligible same-identity seal |
 | | rotation | 500 admission trigger, rejected new acceptance, held accepted queue; non-admin rotation resumes; restarts/unpublished seals obey the bound |
 | | overtaking/derivation | raw MLS context tests (outside the registry 500 guard) retain an earlier key after generation 600; derive invite/remove/rotation and fresh/restored recovery retain 1000/1000 |
@@ -998,6 +1153,8 @@ Canonical port names in this block denote those structural `Conformance*` mirror
 | rpc delivery tests, 2 | retry bytes/restart | failed or null handoff retries byte-exact with same ID; reconstruction reseals/new ID; extend restart test (`rpc/test/peer-log-delivery.test.ts:554`) |
 | | acknowledgement/proof | extend overtaken-epoch restart (`rpc/test/peer-log-delivery.test.ts:1093`); acknowledgement never removes; proof freezes correct segment/sequenceID through failed removal |
 | | same-number recovery proof | A at E acknowledged before or during recovery to B at E; B walk and no-new-head probe cannot prove A; reseal/new ID under B before published outcome; old walk token cannot certify B; already-proven A retries its frozen outcome |
+| | terminal proof | proof then removal rollback then self-removal retries frozen outcome before clear; disposal cancels send retries but drain waits proof finaliser before delete/Welcome replacement; published hook once, no failed hook for proven seq; unproven rows fail normally |
+| MLSEncryptor, 2 | runtime/batch | 64 successful opens flush as 64, mixed batches count exact successes; rotation E+1 with peer retained stays open; committed removal/unavailability, epoch jump and same-number recovery close once; rollback/staged membership never closes; unsubscribe disables watcher |
 | `hub-conformance`, 2 | dedup scope/expiry | same ID on two topics appends on both; purge just before cutoff dedups, at cutoff appends; retry does not refresh timestamp; real hub-store and memory |
 | hub-client, 2 | retention/buffer | reconnect and retry preserve retention; injected epoch notifications wake held frames; disposal unsubscribes |
 | client/messaging, 4/5 | lifecycle/status | rotation scheduling, Welcome consume sweep, deletion fails accepted messages; published status/position co-commit with removal |
@@ -1017,6 +1174,8 @@ Applied in this revision, not deferred to another reconciliation step:
 - Phases: scope above. Opened-epoch exposure belongs to phase 2; messaging consumes it in phase 5.
 - Lift table: copy the audit's 5 MOVE, 6 EXTRACT, 8 REIMPLEMENT, 1 BLOCKED verdicts. G1 is specified
   here but remains an implementation prerequisite; automatic `/info` integration stays BLOCKED.
+- r8: P2a recovery-codec adaptation, asynchronous access, committed membership/numeric receive runtime,
+  explicit shared factories, all-writer lifecycle barriers, terminal proof settlement and outcome-aware Hozon hooks.
 
 ## Review log
 
@@ -1073,3 +1232,35 @@ superseded by P2a. Read current Decisions and binding P2a instead.
   - Explicit memory factories, generic hook/fault/reopen harnesses, retention options and buffered `epochs` constructor (r7 decision).
     Alternative: infer signatures from prose, pass bare retention, or retain the buffer's concrete registry dependency.
   Phase 2 models each contract/fault on doubles. Provider verification remains phase 3; no implementation/test pass is claimed.
+- **Blind review r7**, 2026-10-09. Verified all seven findings against source. Resolved in draft r8:
+
+  1. Full version-2 sourceState in the encrypted recovery candidate; candidate version/AAD 2; source-tree/rejoin regression (r8 decision).
+     Evidence: `mls-rpc/src/recovery-codec.ts:36`, `mls-rpc/src/recovery-codec.ts:87`.
+     Rejected alternative: envelope-length subtraction/private-state splice, or exposing new codec internals just for that splice.
+     Phase 2, with G1. P2a candidate/requestKey, confirmation and source checks stay binding.
+  2. Independent anchor/cursor saves share the gate/owner row and resolve internally before promise settlement (r8 decision).
+     Evidence: `rpc/src/peer.ts:376`, `rpc/src/host-boundary.ts:149`, `../kubun/packages/plugin-p2p/src/groups/anchor-store.ts:35`.
+     Rejected alternative: peer retry/drain alone, or rejection releasing a writer while its backend transaction remains pending.
+     Phase 2 doubles and late-commit deletion/readmission cases; phase 3 provider implementation.
+  3. Frozen proven removals settle before terminal clear; disposal retains a counted storage-only finaliser and drain waits it (r8 decision).
+     Evidence: `rpc/src/log-delivery.ts:102`, `rpc/src/log-delivery.ts:280`, `rpc/src/peer.ts:3341`.
+     Rejected alternative: clear/delete fails a proven row after cancelling retries, or adding a durable publication-proof journal.
+     Phase 2 rpc/status doubles; phase 5 MessageStore hooks. P2a removal/control lifecycle stays binding.
+  4. Outcome-aware hook queues survive uncertain rejection; a resolver-held token selects exactly one queue after the barrier (r8 decision).
+     Evidence: `../hozon/packages/db/src/db.ts:275`, `../hozon/packages/db/src/db.ts:286`.
+     Rejected alternative: treat every rejection as rollback, or report row-only success after losing the event hook.
+     Phase 3 Hozon prerequisite/provider tests; phase 2 hook model and commit/rollback-count conformance.
+  5. Registry access awaits load/restore/validation; no pre-load epoch/lineage/admission getters exist (r8 decision).
+     Evidence: synchronous simple access starts with an available handle (`mls-rpc/src/access.ts:40`).
+     Rejected alternative: mandatory preload, fabricated cold snapshots, or delayed validation at first seal.
+     Phase 2 registry/callers; simple access stays synchronous.
+  6. Explicit group-bound MLSEncryptor constructor, committed membership snapshots and numeric receive counts (r8 decision).
+     Evidence: `../kubun/packages/plugin-p2p/src/groups/mls-encryptor.ts:149`, `../kubun/packages/plugin-p2p/src/groups/mls-encryptor.ts:243`.
+     Rejected alternative: groupID-only watcher events or boolean batch counts. Ordinary rotation keeps a surviving peer tunnel open.
+     Phase 2 extraction/runtime/tests; phase 4 client binds the same ports.
+  7. Explicit shared control/anchor/cursor factories bind `{db, groupID}`; legacy no-argument control factory stays isolated (r8 decision).
+     Evidence: `rpc-conformance/src/memory-control-store.ts:68`.
+     Rejected alternative: reuse private legacy maps in shared fixtures, or infer Hozon constructor signatures from prose.
+     Phase 2 shared doubles/harness; phase 3 Hozon factories. P2a ports stay unchanged.
+
+  No unresolved findings. No implementation or test pass is claimed by this documentation revision.
