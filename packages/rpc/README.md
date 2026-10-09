@@ -180,22 +180,52 @@ real gap.
 
 ## What a host must supply for the commit lane
 
-`mls`, `journal`, `anchorStore`, `appCursorStore` and `adoptJournalled` arrive **together or not at
-all** — the params type is a union, so a host cannot wire a subset. Each missing piece is a silent
-failure:
+`mls`, `control`, `anchorStore`, `appCursorStore`, `appOutbox`, `appOutboxLimit`, `build`, `adopt`
+and `deliverWelcome` arrive together — the params type requires the complete commit lane.
+The stores preserve different durable state:
 
 | | Without it |
 | --- | --- |
-| `journal` — durable single slot, written before every publish, cleared on both outcomes | every commit whose process died in the acceptance window is silently lost |
+| `control` — FIFO operations, rejoin, outcomes, Welcome obligations, applied commits, external responses and commit cursor | accepted control work and branch evidence are lost on restart |
 | `anchorStore` — one slot, overwritten on every rotation, read once at construction | the peer re-seeds the anchor at its live epoch on the next restart and silently partitions from its own group, deriving topics no member that stayed up is on |
 | `appCursorStore` — a read position per topic, written as each drain finishes | the peer re-reads its app history from the hub's oldest retained frame every restart, re-delivers what it already delivered, and has nowhere to notice the retention floor passing it |
 
 Neither the anchor nor the cursor can be re-derived. The anchor sits at an epoch the live handle then
 runs past, and MLS ratchets forward, so a rebooted handle can never re-export it.
 
-`adoptJournalled` is the restart half of a pending commit's `onAccepted`, and must be idempotent: the
-peer cannot tell an entry whose `onAccepted` already ran from one whose process died before it, so a
-Welcome goes out again — at-least-once, by design.
+The control store, MLS state and anchor slot share one host database. `build(op)` is speculative;
+it returns the commit, candidate blob, entry bodies and complete invitation artifact. The peer
+stores the exact framed payload before publishing and retries those same bytes after a crash.
+`adopt(journal, expected, write)` is idempotent, compares the source identity and preserves sender
+and receiver ratchet progress. It commits `AdoptionWrite.changes`, `mutationID` and any matching
+anchor landed mark in the same transaction as the MLS state. Incoming and recovery adoptions use
+that same transaction contract. The host resolves ambiguous state saves; the peer resolves an
+ambiguous state-free `control.apply` through `lastMutation()`, pausing until read-back succeeds.
+
+`enqueue(request)` resolves once the intent is durable. `commit(request)` also waits for a landed
+outcome in the current process. `outcomes()` reads durable results; `ack(id)` removes one after the
+host handles it. Operation deadlines start at `enqueuedAt`, so restarting does not extend them.
+Any unsettled operation with `revokes: true` holds retained app sends. The peer retains the newest
+64 epochs of applied commits and external responses for replay and fork detection.
+
+`deliverWelcome(obligation)` resolves when the delivery transport durably accepts the complete
+artifact. Delivery is at least once and independent of local adoption; an obligation survives a
+rejoin. Hosts must make repeated delivery safe.
+
+Recovery uses a durable rejoin record with its exact payload, serialised candidate, explicit
+request key and stages through confirmed adoption. Restart restores that record, verifies the
+source and confirmation, and co-commits adoption with control. Encrypt the request key and
+candidate at rest.
+
+For an authenticated Welcome newer than held state, stop and drain the peer before replacing the
+group. The host's `seed({replace: true})` compare-and-sets the stored version and, in one root
+transaction, installs the joined state, applies `readmissionChanges(snapshot)` and clears the
+anchor slot. Open operations and rejoin become `unknown` outcomes; applied commits, responses and
+the commit cursor are cleared. Existing outcomes and Welcome obligations remain. A new peer
+captures the anchor at the joined epoch. An equal or older Welcome is `alreadyJoined`.
+
+`controlSettled(snapshot)` must be true before host deletion. `abandon()` explicitly accepts loss
+of open operations, rejoin and undelivered Welcomes; outcomes still need acknowledgement.
 
 The hub is asked to retain both the commit log and the app log for **28 days** by default. Two days
 below the reference hub ceiling, deliberately, so an upward override has somewhere to go: a hub
@@ -209,8 +239,9 @@ rebuild its membership but not its messages.
 `GroupPeerParams.onStrand` reports when the commit walk finds evidence that this peer is stranded.
 One observation marks one stranded episode; further frames stay silent unless they provide strictly
 stronger evidence. A successful recovery, including a bootstrap completed later, ends the episode.
-The next strand starts a new one. A failed attempt leaves the episode open. The state is in memory,
-so restarting a peer can produce a new observation for the same strand.
+The next strand starts a new one. A failed attempt leaves the episode open. The strand and fork
+evidence are durable in the commit cursor; notification deduplication is in memory, so restarting
+a peer can produce a new observation for the same strand.
 
 Each `StrandObservation` names the stable commit-topic `groupID`, the frame's log `position`, the
 peer's `localEpoch`, a `kind`, and a `confidence`. `claimedEpoch` comes from the cleartext header;
@@ -222,6 +253,7 @@ peer's `localEpoch`, a `kind`, and a `confidence`. `claimedEpoch` comes from the
 | `fork-losing` | `observed` | This peer enacted different commit bytes at that epoch and is on the branch that loses the log-position tiebreak. The other commit is not authenticated. |
 | `ahead` | `claimed` | A frame's cleartext epoch is ahead of this peer. A commit-topic publisher can forge that claim. |
 | `unknown-version` | `claimed` | A frame's handshake or commit-frame version cannot be read by this build. Its epoch and commit bytes are unavailable. |
+| `retention-gap` | `observed` | The hub reports a gap beyond the covered commit cursor. The peer cannot prove the missing range contained no membership changes. |
 
 `GroupPeerParams.onRecovery` reports `started` and exactly one terminal event (`succeeded` or
 `failed`) for each attempt. The event's `attemptID`, `groupID` and `trigger` (`automatic` or
@@ -237,7 +269,8 @@ that disposes the peer then ends the attempt with `failed` (`disposed`).
 Automatic healing and calls to `recover()` share one in-flight attempt. Joiners get its result or
 error; they do not start another attempt. Owed `reenact` entries are kept until the first
 `recover()`, `commit()` or `replay()` that drains them. A direct `recover()` can therefore return
-entries stashed by an earlier automatic heal. Each entry is handed out once.
+entries stashed by an earlier automatic heal. Durable `reenact` outcomes also retain the tokens
+until the host acknowledges them.
 
 `onStrand` and terminal `onRecovery` notices run after the producing commit-lane operation settles.
 `started` is dispatched earlier. None is awaited; throws and rejections are swallowed. `onAppWindowPruned`

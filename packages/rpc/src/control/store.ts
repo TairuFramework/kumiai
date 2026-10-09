@@ -1,5 +1,5 @@
 import { ControlWriteNotCommittedError, StorageOutcomeUnknownError } from '../errors.js'
-import type { ControlChanges, ControlSnapshot, ControlStore } from './types.js'
+import type { ControlChanges, ControlSnapshot, ControlStore, Outcome } from './types.js'
 
 function putRows<Row, Key>(
   rows: Array<Row>,
@@ -57,6 +57,28 @@ export function controlSettled(snapshot: ControlSnapshot): boolean {
     snapshot.outcomes.length === 0 &&
     snapshot.welcomes.length === 0
   )
+}
+
+/** The host co-commits this reset with the joined state and a cleared anchor slot. */
+export function readmissionChanges(snapshot: ControlSnapshot): ControlChanges {
+  const at = Date.now()
+  const outcomes: Array<Outcome> = snapshot.operations.map(({ id }) => ({
+    id,
+    opID: id,
+    at,
+    kind: 'unknown',
+  }))
+  if (snapshot.rejoin != null) {
+    outcomes.push({ id: snapshot.rejoin.id, opID: null, at, kind: 'unknown' })
+  }
+  return {
+    deleteOperations: snapshot.operations.map(({ id }) => id),
+    deleteRejoin: true,
+    putOutcomes: outcomes,
+    deleteAppliedFrom: 0,
+    deleteResponsesBelow: Math.max(0, ...snapshot.responses.map(({ epoch }) => epoch)) + 1,
+    cursor: null,
+  }
 }
 
 /** The sole writer must remain paused until the ambiguous write has been read back. */

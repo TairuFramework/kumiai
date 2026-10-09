@@ -65,7 +65,8 @@ if ('joined' in opened) {
   const { group } = opened.joined
   const admission = judgeWelcomeAdmission(await host.held(group.groupID), Number(group.epoch))
   if (admission === 'join' || admission === 'replace') {
-    await host.save(group, opened.joinRef, { replace: admission === 'replace' })
+    if (admission === 'replace') await host.stopAndDrainPeer(group.groupID)
+    await host.seed(group, opened.joinRef, { replace: admission === 'replace' })
   } else if (admission === 'alreadyJoined') {
     await host.saveJoinRef(group.groupID, opened.joinRef)
   }
@@ -78,6 +79,14 @@ if ('joined' in opened) {
 }
 
 ```
+
+For `replace`, the host compare-and-sets the stored version and uses one root transaction to
+install the joined state and `joinRef`, apply rpc's `readmissionChanges(snapshot)` and clear the
+anchor slot. Open operations and the rejoin record become `unknown` outcomes and are deleted;
+applied commits, external responses and the commit cursor are cleared. Keep prior outcomes and
+Welcome obligations. Restart the peer as a fresh join so it captures the anchor at the joined
+epoch. A held group at E accepts a last-resort Welcome at E + 3 this way; one at E is
+`alreadyJoined`. A tombstone permits a join only above its epoch floor.
 
 `bundles()` throws if any retained record fails to decode, rather than skipping it and serving the
 rest — so one corrupt retired record blocks every join from that source. Deliberate within a single

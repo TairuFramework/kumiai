@@ -1,5 +1,5 @@
 import type { AnchorSlot, AnchorStore } from '../../src/anchor.js'
-import { applyChanges, controlSettled } from '../../src/control/store.js'
+import { applyChanges, controlSettled, readmissionChanges } from '../../src/control/store.js'
 import type { AdoptionWrite, ControlSnapshot, ControlStore } from '../../src/control/types.js'
 import { GroupControlUnsettledError, StorageOutcomeUnknownError } from '../../src/errors.js'
 
@@ -10,13 +10,14 @@ type GroupRecord = {
   mutationID: string | null
 }
 
-type WritePoint = 'apply' | 'save' | 'anchor'
-type FailurePoint = 'mid-apply' | 'mid-save' | 'mid-anchor'
+type WritePoint = 'apply' | 'save' | 'anchor' | 'seed'
+type FailurePoint = 'mid-apply' | 'mid-save' | 'mid-anchor' | 'mid-seed'
 
 export type MemoryHostDatabase = {
   control(groupID: string): ControlStore
   anchorStore(groupID: string): AnchorStore
   saveState(groupID: string, state: Uint8Array, write?: AdoptionWrite): Promise<void>
+  seed(groupID: string, state: Uint8Array, options?: { replace?: boolean }): Promise<void>
   loadState(groupID: string): Promise<Uint8Array | null>
   delete(groupID: string): Promise<void>
   failNext(point: FailurePoint): void
@@ -93,6 +94,18 @@ export function createMemoryHostDatabase(): MemoryHostDatabase {
       },
     }),
     loadState: async (groupID) => read(groupID).state?.slice() ?? null,
+    seed: async (groupID, state, options) => {
+      const ownedState = state.slice()
+      const replace = options?.replace === true
+      await transact(groupID, 'seed', (next) => {
+        if (next.state != null && !replace) throw new Error('Group state already exists')
+        next.state = ownedState
+        if (replace) {
+          next.control = applyChanges(next.control, readmissionChanges(next.control))
+          next.anchorSlot = null
+        }
+      })
+    },
     saveState: async (groupID, state, write) => {
       const ownedState = state.slice()
       const ownedWrite = structuredClone(write)
