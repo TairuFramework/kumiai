@@ -12,6 +12,7 @@ import {
   restoreGroup,
 } from '@kumiai/mls'
 import { createLedgerEntrySlot } from '@kumiai/mls-rpc'
+import type { WelcomeObligation } from '@kumiai/rpc'
 import { afterEach, expect, test, vi } from 'vitest'
 
 import { judgeWelcomeAdmission } from '../../../packages/mls-hub/src/admission.js'
@@ -97,10 +98,12 @@ test('Welcome after crash: restart delivers the complete invitation after accept
   const ctx = await setup()
   let restarted: ReturnType<typeof makeMember> | undefined
   try {
-    let artifact: Uint8Array | undefined
-    const request = buildInviteCommit(ctx.member, ctx.material, () => {})
-    ctx.member.deliveries.set(request.id, (bytes) => {
-      artifact = bytes
+    let staleDeliveries = 0
+    const request = buildInviteCommit(ctx.member, ctx.material, () => {
+      throw new Error('Dead process callback invoked')
+    })
+    ctx.member.deliveries.set(request.id, () => {
+      staleDeliveries++
     })
     const stopAtAccepted = () => {
       ctx.member.stateStore.database.seam('after-apply', async () => {
@@ -117,7 +120,7 @@ test('Welcome after crash: restart delivers the complete invitation after accept
     await ctx.member.peer.dispose()
     await ctx.member.peer.drained()
     await ctx.member.disconnect()
-    expect(artifact).toBeUndefined()
+    expect(staleDeliveries).toBe(0)
     restarted = makeMember({
       hub: ctx.hub,
       identity: ctx.member.identity,
@@ -126,6 +129,34 @@ test('Welcome after crash: restart delivers the complete invitation after accept
       restartOf: ctx.member,
     })
     await restarted.peer.resync()
+    expect(staleDeliveries).toBe(0)
+    const pending = (await restarted.control.load()).welcomes
+    expect(pending).toHaveLength(1)
+    await restarted.peer.dispose()
+    await restarted.peer.drained()
+    await restarted.disconnect()
+    const inboxes = new Map<string, Array<Uint8Array>>()
+    const restartParams = {
+      hub: ctx.hub,
+      identity: ctx.member.identity,
+      group: await restoreMemberHandle(ctx.member, ctx.entrySlot),
+      entrySlot: ctx.entrySlot,
+      restartOf: ctx.member,
+      deliverWelcome: async (obligation: WelcomeObligation) => {
+        for (const recipient of obligation.recipients) {
+          const inbox = inboxes.get(recipient) ?? []
+          inbox.push(obligation.welcome.slice())
+          inboxes.set(recipient, inbox)
+        }
+      },
+    }
+    restarted = makeMember(restartParams)
+    await restarted.peer.resync()
+    expect(staleDeliveries).toBe(0)
+    expect([...inboxes.keys()]).toEqual([ctx.invitee.id])
+    expect(inboxes.get(ctx.invitee.id)).toHaveLength(1)
+    const artifact = inboxes.get(ctx.invitee.id)?.[0]
+    expect(artifact).toEqual(pending[0]?.welcome)
     expect(artifact).toBeInstanceOf(Uint8Array)
     if (artifact == null) throw new Error('No invitation after restart')
     const opened = await openWelcome([ctx.source], {

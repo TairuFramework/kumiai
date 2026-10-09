@@ -204,6 +204,7 @@ export type MakeMemberParams = {
   handlers?: Record<string, unknown>
   /** Carry a dead member's durable state forward — this is what a restart IS. */
   restartOf?: Member
+  deliverWelcome?: (obligation: WelcomeObligation) => Promise<void>
   beforeAdopt?: (next: GroupHandle) => void | Promise<void>
   durablePending?: boolean
   recoveryBinding?: GroupMLSParams['recoveryBinding']
@@ -261,7 +262,7 @@ export function makeMember(params: MakeMemberParams): Member {
   const control = stateStore.control
   const builders = restartOf?.builders ?? new Map<string, (op: Operation) => Promise<HostBuilt>>()
   const signers = restartOf?.signers ?? new Map([[identity.id, identity]])
-  const deliveries = restartOf?.deliveries ?? new Map<string, (welcome: Uint8Array) => void>()
+  const deliveries = new Map<string, (welcome: Uint8Array) => void>()
   const build = async (op: Operation): Promise<HostBuilt> => {
     const custom = builders.get(op.id)
     if (custom != null) return custom(op)
@@ -350,11 +351,13 @@ export function makeMember(params: MakeMemberParams): Member {
       adoptOperationCandidate(access, blob, expected, write, undefined, {
         resolveLedgerEntries: entrySlot.resolve,
       }),
-    deliverWelcome: async (obligation) => {
-      const deliver = deliveries.get(obligation.opID)
-      if (deliver == null) throw new Error('Invitation transport unavailable')
-      deliver(obligation.welcome)
-    },
+    deliverWelcome:
+      params.deliverWelcome ??
+      (async (obligation) => {
+        const deliver = deliveries.get(obligation.opID)
+        if (deliver == null) throw new Error('Invitation transport unavailable')
+        deliver(obligation.welcome)
+      }),
   })
 
   return {

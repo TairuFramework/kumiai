@@ -163,4 +163,39 @@ describe('durable Welcome obligations', () => {
       await member.peer.drained()
     }
   })
+
+  test('an unavailable recipient does not block later obligations or their deletion', async () => {
+    const hub = new FakeHub()
+    const member = makeMLSPeer(hub, 'alice', secret)
+    await member.peer.resync()
+    const later = { ...obligation, opID: crypto.randomUUID(), recipients: ['carol'] }
+    await member.control.apply({ putWelcomes: [obligation, later] }, crypto.randomUUID())
+    await member.peer.dispose()
+    await member.peer.drained()
+    let unavailable = true
+    const attempts: Array<string> = []
+    const restarted = makeMLSPeer(hub, 'alice', secret, {
+      restartOf: member,
+      deliverWelcome: async (row) => {
+        attempts.push(row.opID)
+        if (row.opID === obligation.opID && unavailable) throw new Error('transport unavailable')
+        restarted.welcomes.push(row.opID)
+      },
+    })
+    try {
+      await restarted.peer.resync()
+      expect(restarted.welcomes).toEqual([later.opID])
+      expect((await restarted.control.load()).welcomes).toEqual([obligation])
+      expect(attempts).toEqual([obligation.opID, later.opID])
+      unavailable = false
+      await vi.waitFor(async () => expect((await restarted.control.load()).welcomes).toEqual([]), {
+        timeout: 3000,
+      })
+      expect(restarted.welcomes).toEqual([later.opID, obligation.opID])
+      expect(attempts).toEqual([obligation.opID, later.opID, obligation.opID])
+    } finally {
+      await restarted.peer.dispose()
+      await restarted.peer.drained()
+    }
+  })
 })
