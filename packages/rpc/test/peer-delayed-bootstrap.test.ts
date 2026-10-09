@@ -136,8 +136,8 @@ describe('delayed ledger bootstrap', () => {
       if (pending == null || 'renewalRequired' in pending) return pending
       return {
         ...pending,
-        onAccepted: async () => {
-          await pending.onAccepted()
+        onAccepted: async (write) => {
+          await pending.onAccepted(write)
           if (rejectionPending) {
             rejectionPending = false
             throw error
@@ -177,8 +177,8 @@ describe('delayed ledger bootstrap', () => {
       if (pending == null || 'renewalRequired' in pending) return pending
       return {
         ...pending,
-        onAccepted: async () => {
-          await pending.onAccepted()
+        onAccepted: async (write) => {
+          await pending.onAccepted(write)
           if (rejectionPending) {
             rejectionPending = false
             throw error
@@ -269,11 +269,11 @@ describe('delayed ledger bootstrap', () => {
       if (pending == null || 'renewalRequired' in pending) return pending
       return {
         ...pending,
-        onAccepted: async () => {
+        onAccepted: async (write) => {
           spy ??= vi
             .spyOn(BroadcastClient.prototype, 'dispose')
             .mockImplementationOnce(() => Promise.reject(error))
-          await pending.onAccepted()
+          await pending.onAccepted(write)
         },
       }
     })

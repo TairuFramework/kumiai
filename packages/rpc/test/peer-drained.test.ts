@@ -249,10 +249,10 @@ describe('peer host drain', { concurrent: false }, () => {
       if (pending == null || 'renewalRequired' in pending) return pending
       return {
         ...pending,
-        onAccepted: async () => {
+        onAccepted: async (write) => {
           accepting = true
           await pause.promise
-          await pending.onAccepted()
+          await pending.onAccepted(write)
         },
       }
     }

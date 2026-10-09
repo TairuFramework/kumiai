@@ -8,11 +8,7 @@ export type ConformanceAppOutboxEntry = {
   lastAttempt: { epoch: number; floor: string | null; attempts: number } | null
 }
 
-export type ConformanceCommitCursor = { position: string | null; epoch: number; stranded?: true }
-
 export type ConformanceAppOutbox = {
-  getCommitCursor(): Promise<ConformanceCommitCursor | null>
-  putCommitCursor(cursor: ConformanceCommitCursor | null): Promise<void>
   put(entry: ConformanceAppOutboxEntry): Promise<void>
   list(): Promise<Array<ConformanceAppOutboxEntry>>
   remove(seq: number): Promise<void>
@@ -26,22 +22,6 @@ export type AppOutboxConformanceParams = {
 
 export function testAppOutboxConformance(params: AppOutboxConformanceParams): void {
   describe(`AppOutbox conformance — ${params.label}`, () => {
-    test('commit cursor writes are durable, isolated from entries and copied on read', async () => {
-      const outbox = params.createOutbox()
-      expect(await outbox.getCommitCursor()).toBeNull()
-      const cursor = { position: '000000000004', epoch: 3 }
-      await outbox.putCommitCursor(cursor)
-      cursor.epoch = 9
-      const read = await outbox.getCommitCursor()
-      expect(read).toEqual({ position: '000000000004', epoch: 3 })
-      if (read != null) read.epoch = 10
-      await outbox.clear()
-      expect(await outbox.getCommitCursor()).toEqual({ position: '000000000004', epoch: 3 })
-      await outbox.putCommitCursor({ position: null, epoch: 3, stranded: true })
-      expect(await outbox.getCommitCursor()).toEqual({ position: null, epoch: 3, stranded: true })
-      await outbox.putCommitCursor(null)
-      expect(await outbox.getCommitCursor()).toBeNull()
-    })
     test('put is durable on resolution, replaces by sequence and lists ascending', async () => {
       const outbox = params.createOutbox()
       const entry: ConformanceAppOutboxEntry = {

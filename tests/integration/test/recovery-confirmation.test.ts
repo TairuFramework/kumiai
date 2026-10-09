@@ -10,12 +10,7 @@ import {
   processWelcome,
   removeMember,
 } from '@kumiai/mls'
-import {
-  createGroupCrypto,
-  createGroupMLS,
-  createLedgerEntrySlot,
-  simpleHandleAccess,
-} from '@kumiai/mls-rpc'
+import { createGroupCrypto, createGroupMLS, createLedgerEntrySlot } from '@kumiai/mls-rpc'
 import {
   commitTopic,
   createGroupPeer,
@@ -34,6 +29,7 @@ import { afterEach, beforeAll, expect, test, vi } from 'vitest'
 
 import {
   chat,
+  createDurableHandleAccess,
   createMemoryAppCursorStore,
   createMemoryAppOutbox,
   createOperationHost,
@@ -142,13 +138,13 @@ async function setup(options: { third?: boolean; deadlineMs?: number } = {}) {
     ).group
   }
   const initial = bobGroup
-  const aliceAccess = simpleHandleAccess({
+  const aliceAccess = createDurableHandleAccess({
     handle: () => aliceGroup,
     adopt: (next) => {
       aliceGroup = next
     },
   })
-  const bobAccess = simpleHandleAccess({
+  const bobAccess = createDurableHandleAccess({
     handle: () => bobGroup,
     adopt: (next) => {
       bobGroup = next
@@ -214,7 +210,7 @@ async function setup(options: { third?: boolean; deadlineMs?: number } = {}) {
   const carolAccess =
     carolGroup == null
       ? undefined
-      : simpleHandleAccess({
+      : createDurableHandleAccess({
           handle: () => {
             if (carolGroup == null) throw new Error('No carol')
             return carolGroup
@@ -391,7 +387,7 @@ test('stale GroupInfo is superseded and retried without adopting the stale candi
   const s = await setup({ deadlineMs: 10_000 })
   const source = s.aliceGroup()
   const stalePort = createGroupMLS({
-    access: simpleHandleAccess({ handle: () => source, adopt: () => {} }),
+    access: createDurableHandleAccess({ handle: () => source, adopt: () => {} }),
     identity: s.aliceID,
     entrySlot: createLedgerEntrySlot(),
   })
@@ -427,9 +423,10 @@ test('stale GroupInfo is superseded and retried without adopting the stale candi
     .mockImplementation(seal)
   const adopted: Array<number> = []
   const replace = s.bobAccess.replace.bind(s.bobAccess)
-  vi.spyOn(s.bobAccess, 'replace').mockImplementation(async (group) => {
+  vi.spyOn(s.bobAccess, 'replace').mockImplementation(async (...args) => {
+    const [group] = args
     adopted.push(Number(group.epoch))
-    await replace(group)
+    await replace(...args)
   })
   let supersededOpened = false
   const open = s.bobMLS.openRecoveryVerdict.bind(s.bobMLS)

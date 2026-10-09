@@ -3,6 +3,7 @@ import { describe, expect, test } from 'vitest'
 import type { AnchorSlot } from '../src/anchor.js'
 import { digestAppliedCommit } from '../src/classify.js'
 import { RecoveryRequiredError } from '../src/commit.js'
+import { landedChanges } from '../src/control/operations.js'
 import type { PendingRecovery } from '../src/crypto.js'
 import { APP_TOPIC_LABEL, protocolTopic } from '../src/topic.js'
 import { createMemoryAnchorStore } from './fixtures/anchor.js'
@@ -136,7 +137,11 @@ describe('recovery ordering', { concurrent: false }, () => {
       })
       if (landed) {
         bob.mls.adopt(commit)
-        await bob.database.saveState('bob', bob.mls.serializeState())
+        await bob.database.saveState('bob', bob.mls.serializeState(), {
+          mutationID: 'landed-rotation',
+          changes: {},
+          anchorLanded: digestAppliedCommit(commit),
+        })
       }
       const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob })
       await restarted.peer.replay()
@@ -194,8 +199,8 @@ describe('recovery ordering', { concurrent: false }, () => {
       pendingRecovery = candidate
       return {
         ...candidate,
-        onAccepted: async () => {
-          await candidate.onAccepted()
+        onAccepted: async (write) => {
+          await candidate.onAccepted(write)
           if (throwOnce) {
             throwOnce = false
             throw new Error('rejoin notification failed')
@@ -352,7 +357,7 @@ describe('recovery ordering', { concurrent: false }, () => {
       )
       expect(written.stored()?.epoch).toBe(1)
       expect((await written.load())?.pending?.epochAfter).toBe(2)
-      expect(bob.peer.anchorEpoch()).toBe(2)
+      expect(bob.peer.anchorEpoch()).toBe(1)
       if (restart) await bob.peer.dispose()
       refuse = false
       const current = restart ? makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob }) : bob
@@ -381,7 +386,20 @@ describe('recovery ordering', { concurrent: false }, () => {
     expect(bob.mls.epoch()).toBe(1)
     expect((await bob.anchorStore.load())?.pending).toMatchObject({ epochBefore: 1, epochAfter: 2 })
     await bob.peer.dispose()
-    await bob.database.saveState('bob', pending.journal)
+    const op = (await bob.control.load()).operations[0]
+    if (op?.stage !== 'accepted') throw new Error('Missing accepted operation')
+    await bob.database.saveState('bob', pending.journal, {
+      mutationID: 'committed-replacement',
+      anchorLanded: op.built.digest,
+      changes: landedChanges(op, op.acceptedAs, {
+        epoch: op.built.epoch,
+        digest: op.built.digest,
+        payloadDigest: op.built.payloadDigest,
+        sequenceID: op.acceptedAs,
+        opID: op.id,
+        removed: false,
+      }),
+    })
     const restarted = makeMLSPeer(hub, 'bob', recoverySecret, { restartOf: bob })
     await restarted.peer.replay()
     expect(restarted.peer.anchorEpoch()).toBe(2)
@@ -439,8 +457,8 @@ describe('recovery ordering', { concurrent: false }, () => {
     await expect.poll(() => events.some((event) => event.phase === 'succeeded')).toBe(true)
     expect(events.find((event) => event.phase === 'started')?.trigger).toBe('automatic')
     expect(exported).not.toContain(3)
-    await expect.poll(() => bob.peer.anchorEpoch()).toBe(5)
-    await expect.poll(() => alice.peer.anchorEpoch()).toBe(5)
+    await expect.poll(() => bob.peer.anchorEpoch()).toBe(4)
+    await expect.poll(() => alice.peer.anchorEpoch()).toBe(4)
     await expect.poll(() => seen).toContainEqual({ text: 'after coordinated repair' })
     await Promise.all([alice.peer.dispose(), bob.peer.dispose()])
   })

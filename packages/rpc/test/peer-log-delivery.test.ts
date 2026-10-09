@@ -1155,8 +1155,8 @@ describe('recovery ordering', { concurrent: false }, () => {
       if (pending == null || 'renewalRequired' in pending) return pending
       return {
         ...pending,
-        onAccepted: async () => {
-          await pending.onAccepted()
+        onAccepted: async (write) => {
+          await pending.onAccepted(write)
           if (!failed) {
             failed = true
             throw new Error('persist failed after adoption')

@@ -2,13 +2,14 @@ import { afterEach, expect, test, vi } from 'vitest'
 
 import { digestAppliedCommit } from '../src/classify.js'
 import { decodeCommitFrame } from '../src/commit-frame.js'
+import { asLogPosition } from '../src/cursor.js'
 import { decodeHandshakeFrame, encodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import type { RecoveryEvent, StrandObservation } from '../src/peer.js'
 import { encodeRecoveryConfirmRequest } from '../src/recovery.js'
 import { APP_TOPIC_LABEL, commitTopic, rendezvousTopic } from '../src/topic.js'
-import { publishCommit } from './fixtures/commits.js'
+import { publishCommit, publishedCommitDigest } from './fixtures/commits.js'
 import { FakeHub } from './fixtures/fake-hub.js'
-import { createMemoryAppOutbox } from './fixtures/outbox.js'
+import { createMemoryHostDatabase } from './fixtures/host-db.js'
 import {
   buildLedgerCommit,
   type MakeMLSPeerOptions,
@@ -37,27 +38,32 @@ function member(hub: FakeHub, options: MakeMLSPeerOptions = {}) {
 test('a mismatched durable commit cursor is discarded before the first fetch', async () => {
   controlRecoveryClock()
   const hub = new FakeHub()
-  const store = createMemoryAppOutbox()
-  await store.putCommitCursor({ position: 'stale-position', epoch: 8 })
+  const database = createMemoryHostDatabase()
+  const store = database.control('bob')
+  await store.apply(
+    { cursor: { position: asLogPosition('stale-position'), epoch: 8 } },
+    'stale-cursor',
+  )
   const fetch = vi.spyOn(hub, 'fetchTopic')
-  const bob = member(hub, { appOutbox: store, epoch: 1 })
+  const bob = member(hub, { database, epoch: 1 })
   await bob.peer.resync()
   const calls = fetch.mock.calls
     .map(([params]) => params)
     .filter((params) => params.topicID === commitTopic(secret))
   expect(calls.length).toBeGreaterThan(0)
   expect(calls[0]?.after).toBeUndefined()
-  expect(await store.getCommitCursor()).toBeNull()
+  expect((await store.load()).cursor).toBeNull()
 })
 
 test('a restart at the same epoch rediscovers a strand the durable cursor never stepped over', async () => {
   controlRecoveryClock()
   const hub = new FakeHub()
-  const store = createMemoryAppOutbox()
+  const database = createMemoryHostDatabase()
+  const store = database.control('bob')
   const recovery = { timeoutMs: 50, deadlineMs: 100, getDelayMs: () => 60_000 }
   const strands: Array<StrandObservation> = []
   const bob = member(hub, {
-    appOutbox: store,
+    database,
     members: ['alice', 'bob'],
     recovery,
     onStrand: (observation) => {
@@ -67,11 +73,11 @@ test('a restart at the same epoch rediscovers a strand the durable cursor never 
   await bob.peer.resync()
   const applied = await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 1 })
   await drainUntil(async () => (await bob.mls.readEpoch()) === 2, 'applied commit')
-  expect(await store.getCommitCursor()).toEqual({ position: applied.sequenceID, epoch: 2 })
+  expect((await store.load()).cursor).toEqual({ position: applied.sequenceID, epoch: 2 })
   const ahead = await publishCommit({ hub, senderDID: 'alice', recoverySecret: secret, epoch: 5 })
   await drainUntil(() => strands.length === 1, 'ahead strand')
   expect(strands[0]).toMatchObject({ position: ahead.sequenceID, kind: 'ahead' })
-  expect(await store.getCommitCursor()).toEqual({
+  expect((await store.load()).cursor).toEqual({
     position: applied.sequenceID,
     epoch: 2,
     stranded: true,
@@ -112,10 +118,11 @@ test('a losing fork strand survives a restart through the durable cursor', async
     entries: ['role:alice=admin'],
   })
   hub.hideFrom('bob', winner.sequenceID)
-  const store = createMemoryAppOutbox()
+  const database = createMemoryHostDatabase()
+  const store = database.control('bob')
   const strands: Array<StrandObservation> = []
   const bob = member(hub, {
-    appOutbox: store,
+    database,
     members,
     recovery,
     onStrand: (observation) => {
@@ -123,7 +130,7 @@ test('a losing fork strand survives a restart through the durable cursor', async
     },
   })
   await vi.waitFor(() => expect(bob.mls.epoch()).toBe(2))
-  expect(await store.getCommitCursor()).toEqual({ position: loser.sequenceID, epoch: 2 })
+  expect((await store.load()).cursor).toEqual({ position: loser.sequenceID, epoch: 2 })
   hub.revealTo('bob', winner.sequenceID)
   await hub.publish({
     senderDID: 'zoe',
@@ -131,7 +138,16 @@ test('a losing fork strand survives a restart through the durable cursor', async
     payload: new Uint8Array([0]),
   })
   await vi.waitFor(() => expect(strands.map((strand) => strand.kind)).toEqual(['fork-losing']))
-  expect(await store.getCommitCursor()).toMatchObject({ epoch: 2, stranded: true })
+  expect((await store.load()).cursor).toEqual({
+    position: loser.sequenceID,
+    epoch: 2,
+    stranded: true,
+    fork: {
+      conflictEpoch: 1,
+      sharedPosition: null,
+      frameDigest: publishedCommitDigest(hub, winner.sequenceID),
+    },
+  })
   await bob.peer.dispose()
   await bob.peer.drained()
   peers.splice(peers.indexOf(bob), 1)
@@ -157,11 +173,12 @@ test('a rejoin that lands on the stranded epoch number clears the strand', async
   peers.push(carol)
   await carol.peer.resync()
   // Bob stranded on a losing branch one epoch past the group: the rejoin lands on epoch 3 again.
-  const store = createMemoryAppOutbox()
-  await store.putCommitCursor({ position: null, epoch: 3, stranded: true })
+  const database = createMemoryHostDatabase()
+  const store = database.control('bob')
+  await store.apply({ cursor: { position: null, epoch: 3, stranded: true } }, 'stranded-cursor')
   const events: Array<RecoveryEvent> = []
   const bob = member(hub, {
-    appOutbox: store,
+    database,
     epoch: 3,
     members,
     recovery,
@@ -171,7 +188,7 @@ test('a rejoin that lands on the stranded epoch number clears the strand', async
   })
   await drainUntil(() => events.some((event) => event.phase === 'succeeded'), 'rejoin')
   expect(await bob.mls.readEpoch()).toBe(3)
-  expect((await store.getCommitCursor())?.stranded).toBeUndefined()
+  expect((await store.load()).cursor?.stranded).toBeUndefined()
   await bob.peer.commit(buildLedgerCommit(bob, []))
   expect(await bob.mls.readEpoch()).toBe(4)
 })
@@ -193,7 +210,7 @@ test('a rejoin that lands on the same epoch number captures a new app anchor', a
   expect(exportSecret).toHaveBeenCalledWith(APP_TOPIC_LABEL)
 })
 
-test('an ambiguous same-number anchor record found at startup asks for confirmed recovery', async () => {
+test('an unlanded same-number anchor record found at startup keeps the anchor', async () => {
   controlRecoveryClock()
   const hub = new FakeHub()
   const recovery = { timeoutMs: 50, deadlineMs: 100, getDelayMs: () => 60_000 }
@@ -224,15 +241,11 @@ test('an ambiguous same-number anchor record found at startup asks for confirmed
       events.push(event)
     },
   })
-  await drainUntil(() => events.some((event) => event.phase === 'started'), 'recovery start')
-  const committing = again.peer
-    .commit(buildLedgerCommit(again, []))
-    .catch((error: unknown) => error)
-  await vi.advanceTimersByTimeAsync(100)
-  expect(await committing).toMatchObject({
-    name: 'RecoveryRequiredError',
-    message: 'commit: app anchor requires confirmed recovery',
-  })
+  await again.peer.replay()
+  expect((await again.anchorStore.load())?.pending).toBeUndefined()
+  expect(again.peer.anchorEpoch()).toBe(1)
+  await again.peer.commit(buildLedgerCommit(again, []))
+  expect(events).toEqual([])
 })
 
 test('incomplete ledgers skip commit processing and later wakeups can retry', async () => {

@@ -1,13 +1,25 @@
 import type { LogHub } from '@kumiai/hub-tunnel'
+import { sha256 } from '@noble/hashes/sha2.js'
+import { toB64U } from '@sozai/codec'
 
 import type { AppWindowPruned } from '../../src/app-cursor.js'
 import type { AppDeliveryResumed, AppDeliveryStalled } from '../../src/app-lane.js'
 import type { AppOutbox } from '../../src/app-outbox.js'
 import { digestAppliedCommit } from '../../src/classify.js'
+import { encodeCommitFrame } from '../../src/commit-frame.js'
 import type { HostBuilt, OperationDeps } from '../../src/control/operations.js'
-import type { ControlStore, Operation, OperationRequest, Outcome } from '../../src/control/types.js'
+import type {
+  ControlStore,
+  Operation,
+  OperationRequest,
+  Outcome,
+  RejoinRecord,
+} from '../../src/control/types.js'
+import { asLogPosition } from '../../src/cursor.js'
 import { OperationRejectedError } from '../../src/errors.js'
+import { encodeHandshakeFrame, HANDSHAKE_KIND } from '../../src/handshake.js'
 import type { SubscribeFailure } from '../../src/hub-mux.js'
+import { encodeLedgerEntries } from '../../src/ledger-entries.js'
 import type { AppOutboxCleared } from '../../src/log-delivery.js'
 import {
   createGroupPeer,
@@ -157,7 +169,8 @@ export function makeMLSPeer(
   const anchorStore =
     options.anchorStore ??
     restartOf?.anchorStore ??
-    createMemoryAnchorStore({ backing: database.anchorStore(localDID) })
+    createMemoryAnchorStore({ backing: mls.anchorStore() })
+  anchorStore.connect(mls.anchorStore())
   const appCursorStore =
     options.appCursorStore ?? restartOf?.appCursorStore ?? createMemoryAppCursorStore()
   const appOutbox = options.appOutbox ?? restartOf?.appOutbox ?? createMemoryAppOutbox()
@@ -324,12 +337,6 @@ export async function seedBuiltOperation(
 ) {
   const op = intent(request)
   const built = await member.buildOperation(op)
-  const { encodeHandshakeFrame, HANDSHAKE_KIND } = await import('../../src/handshake.js')
-  const { encodeCommitFrame } = await import('../../src/commit-frame.js')
-  const { encodeLedgerEntries } = await import('../../src/ledger-entries.js')
-  const { sha256 } = await import('@noble/hashes/sha2.js')
-  const { toB64U } = await import('@sozai/codec')
-  const { asLogPosition } = await import('../../src/cursor.js')
   const sealed = await member.crypto.sealEntries(encodeLedgerEntries(built.bodies))
   const payload = encodeHandshakeFrame(
     HANDSHAKE_KIND.commit,
@@ -348,4 +355,42 @@ export async function seedBuiltOperation(
       : { ...op, stage: 'accepted', built: saved, acceptedAs: asLogPosition(acceptedAs) }
   await member.control.apply({ putOperations: [row] }, crypto.randomUUID())
   return row
+}
+
+export async function buildRejoinRecord(member: TestPeer): Promise<RejoinRecord> {
+  const id = crypto.randomUUID()
+  const { request, requestKey } = await member.mls.createRecoveryRequest(id)
+  const pending = await member.mls.applyRecovery(
+    await member.mls.sealGroupInfo(request),
+    id,
+    requestKey,
+  )
+  if (pending == null || 'renewalRequired' in pending) throw new Error('Missing recovery candidate')
+  const { sealed } = await member.crypto.sealEntries(encodeLedgerEntries([]))
+  const payload = encodeHandshakeFrame(
+    HANDSHAKE_KIND.commit,
+    encodeCommitFrame(pending.commit, sealed),
+  )
+  return {
+    id,
+    stage: 'built',
+    publishID: crypto.randomUUID(),
+    expectedHead: null,
+    payload,
+    payloadDigest: toB64U(sha256(payload)),
+    requestID: id,
+    request,
+    requestKey,
+    candidate: pending.serialize(),
+    source: {
+      epoch: member.mls.epoch(),
+      authenticator: member.mls.authenticator(),
+      lineage: 0,
+      head: null,
+    },
+    digest: digestAppliedCommit(pending.commit),
+    epochAfter: pending.epoch,
+    ledgerBefore: await member.mls.getLedger(),
+    conflictEpoch: null,
+  }
 }

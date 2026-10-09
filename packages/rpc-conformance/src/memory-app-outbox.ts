@@ -1,13 +1,8 @@
-import type {
-  ConformanceAppOutbox,
-  ConformanceAppOutboxEntry,
-  ConformanceCommitCursor,
-} from './app-outbox.js'
+import type { ConformanceAppOutbox, ConformanceAppOutboxEntry } from './app-outbox.js'
 
 export type MemoryAppOutbox = ConformanceAppOutbox & { failNextPut(): void }
 
 export function createMemoryAppOutbox(): MemoryAppOutbox {
-  let cursor: ConformanceCommitCursor | null = null
   let refusePut = false
   const rows = new Map<number, ConformanceAppOutboxEntry>()
   const copy = (entry: ConformanceAppOutboxEntry): ConformanceAppOutboxEntry => ({
@@ -16,10 +11,6 @@ export function createMemoryAppOutbox(): MemoryAppOutbox {
     lastAttempt: entry.lastAttempt == null ? null : { ...entry.lastAttempt },
   })
   return {
-    getCommitCursor: async () => (cursor == null ? null : { ...cursor }),
-    putCommitCursor: async (value) => {
-      cursor = value == null ? null : { ...value }
-    },
     put: async (entry) => {
       if (refusePut) {
         refusePut = false

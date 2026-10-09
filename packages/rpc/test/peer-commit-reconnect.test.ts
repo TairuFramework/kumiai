@@ -51,7 +51,7 @@ function makeDurablePeer(hub: DurableFakeHub, localDID: string, recoverySecret: 
     hub,
     crypto,
     mls,
-    anchorStore: createMemoryAnchorStore(),
+    anchorStore: createMemoryAnchorStore({ backing: mls.anchorStore() }),
     appCursorStore: createMemoryAppCursorStore(),
     ...memoryOperationHost(mls),
     localDID,

@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import type { RecoveryVerdict } from '../src/crypto.js'
+import { asLogPosition } from '../src/cursor.js'
 import {
   confirmationTag,
   createRecoveryCache,
+  responseOutcome,
   waitForRecoveryConfirmation,
 } from '../src/recovery-confirmation.js'
 import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
@@ -26,6 +28,21 @@ describe('recovery ordering', { concurrent: false }, () => {
     expect(cache.get('1024')).toBeUndefined()
     expect(release).toHaveBeenCalledTimes(1025)
     expect(vi.getTimerCount()).toBe(0)
+  })
+
+  test('response keys are derived only at the adopted epoch', async () => {
+    const port = createMemoryGroupMLS({ epoch: 3, localDID: 'alice' })
+    const derive = vi.spyOn(port, 'confirmationKey')
+    expect(
+      await responseOutcome(port, {
+        position: asLogPosition('accepted'),
+        digest: 'commit',
+        epoch: 1,
+        epochAfter: 2,
+        kind: 'applied',
+      }),
+    ).toBeUndefined()
+    expect(derive).not.toHaveBeenCalled()
   })
 
   test.each([false, true])(

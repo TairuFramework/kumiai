@@ -2,6 +2,7 @@ import { encodeMultibase } from '@kokuin/token'
 import { hmac } from '@noble/hashes/hmac.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 
+import type { ExternalResponse } from './control/types.js'
 import type {
   GroupMLS,
   OpenedRecoveryVerdict,
@@ -14,6 +15,25 @@ export type RecoveryCommitOutcome = { commitDigest: string } & (
   | { kind: 'superseded' }
   | { kind: 'refused'; reason: RecoveryRefusalReason }
 )
+
+/** An adopted response can be confirmed only at its saved epoch. */
+export async function responseOutcome(
+  port: GroupMLS,
+  response: ExternalResponse,
+): Promise<RecoveryCommitOutcome | undefined> {
+  const commitDigest = response.digest
+  if (response.kind === 'superseded') return { kind: 'superseded', commitDigest }
+  if (response.kind === 'refused') {
+    return { kind: 'refused', commitDigest, reason: response.reason ?? 'invalid' }
+  }
+  if ((await port.readEpoch()) !== response.epochAfter) return
+  const derived = await port.confirmationKey(response.position, response.digest)
+  if (derived.epoch !== response.epochAfter) {
+    derived.key.fill(0)
+    return
+  }
+  return { kind: 'applied', commitDigest, ...derived }
+}
 
 export function confirmationTag(key: Uint8Array, requestID: string): string {
   return encodeMultibase(hmac(sha256, key, new TextEncoder().encode(requestID)))

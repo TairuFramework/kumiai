@@ -523,8 +523,19 @@ export function newIdentity(): OwnIdentity {
   return randomIdentity()
 }
 
-export function createOperationHost(access: HandleAccess) {
+const operationStores = new WeakMap<HandleAccess, StateStore>()
+
+export function createDurableHandleAccess(
+  params: Pick<Parameters<typeof simpleHandleAccess>[0], 'handle' | 'adopt'>,
+): HandleAccess {
   const store = createMemoryStateStore()
+  const access = simpleHandleAccess({ ...params, persist: store.save })
+  operationStores.set(access, store)
+  return access
+}
+
+export function createOperationHost(access: HandleAccess) {
+  const store = operationStores.get(access) ?? createMemoryStateStore()
   const builders = new Map<string, () => Promise<HostBuilt>>()
   return {
     builders,

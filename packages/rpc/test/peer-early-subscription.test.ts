@@ -74,7 +74,7 @@ for (const scenario of ['acknowledged', 'delayed', 'two epochs', 'expired'] as c
       fake.reattach('bob')
       fake.redeliver('bob')
       await captureStarted
-      expect(bob.peer.anchorEpoch()).toBe(2)
+      expect(bob.peer.anchorEpoch()).toBe(1)
       expect(retains).toEqual([
         { topicID, retention: 2_419_200 },
         { topicID: selfInbox, retention: 2_419_200 },
@@ -94,6 +94,7 @@ for (const scenario of ['acknowledged', 'delayed', 'two epochs', 'expired'] as c
       release()
       await bob.peer.replay()
       await flush()
+      expect(bob.peer.anchorEpoch()).toBe(2)
       expect(bob.mls.epoch()).toBe(scenario === 'two epochs' ? 3 : 2)
       expect(retains).toHaveLength(2)
       if (scenario === 'two epochs' || scenario === 'expired') {

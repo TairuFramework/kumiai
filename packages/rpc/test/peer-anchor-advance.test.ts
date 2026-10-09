@@ -234,6 +234,7 @@ describe('an ephemeral dispatch lands on the segment that contains its seal epoc
     const recoverySecret = new Uint8Array(32).fill(0x95)
 
     let raceTheRotation: (() => Promise<void>) | null = null
+    let racingDispatch: Promise<void> | undefined
     const written = createMemoryAnchorStore()
     const anchorStore: MemoryAnchorStore = {
       ...written,
@@ -253,13 +254,15 @@ describe('an ephemeral dispatch lands on the segment that contains its seal epoc
     })
     await flush()
 
-    // The anchor store's write is the window: the anchor and the handle are already at epoch 2 and
-    // the lane Alice still holds was built for the segment anchored at 1.
+    // The handle is at epoch 2; sealing waits for the anchor save to resolve.
     raceTheRotation = async () => {
-      await alice.peer.protocol('chat').dispatch('chat/changed', { data: { text: 'mid-rotation' } })
+      racingDispatch = alice.peer
+        .protocol('chat')
+        .dispatch('chat/changed', { data: { text: 'mid-rotation' } })
     }
     await publishCommit({ hub, senderDID: 'admin', recoverySecret, epoch: 1, removes: ['carol'] })
     await flush()
+    await racingDispatch
 
     expect(alice.peer.anchorEpoch()).toBe(2)
     expect(raceTheRotation).toBeNull() // the race did run

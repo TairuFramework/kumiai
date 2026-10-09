@@ -42,6 +42,8 @@ export function testAnchorStoreConformance(params: AnchorStoreConformanceParams)
       const retried = { ...pending, forced: false, advance: 'digest-two' }
       await store.save({ anchor, pending: retried })
       expect(await store.load()).toEqual({ anchor, pending: retried })
+      await store.save({ anchor, pending: { ...retried, landed: true } })
+      expect(await store.load()).toEqual({ anchor, pending: { ...retried, landed: true } })
       const rotated = { secret: new Uint8Array([4, 5, 6]), epoch: 9 }
       await store.save({ anchor: rotated })
       expect(await store.load()).toEqual({ anchor: rotated })

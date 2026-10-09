@@ -159,7 +159,7 @@ export type ConformanceExternalResponse<Position extends string = string> = {
   epochAfter?: number
 }
 export type ConformanceCommitCursor<Position extends string = string> = {
-  position: Position
+  position: Position | null
   epoch: number
   stranded?: true
   fork?: ConformanceForkEvidence<Position>
@@ -253,6 +253,19 @@ function records(): ConformanceControlChanges {
 
 export function testControlStoreConformance(params: ControlStoreConformanceParams): void {
   describe('ControlStore conformance', () => {
+    test('an initial strand persists without inventing a processed log position', async () => {
+      const host = await params.open()
+      const cursor: ConformanceCommitCursor = {
+        position: null,
+        epoch: 4,
+        stranded: true,
+        fork: { conflictEpoch: 3, sharedPosition: null, frameDigest: 'competing-frame' },
+      }
+      await host.control.apply({ cursor }, 'initial-strand')
+      const reopened = await params.reopen()
+      expect((await reopened.control.load()).cursor).toEqual(cursor)
+      expect(await reopened.control.lastMutation()).toBe('initial-strand')
+    })
     test('all or nothing: a failed apply leaves every record and mutation unchanged after reopen', async () => {
       const host = await params.open()
       await host.control.apply(records(), 'baseline')

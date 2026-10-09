@@ -19,20 +19,10 @@ export type AppOutboxEntry = {
 }
 
 /**
- * The last processed commit-log position at `epoch`. `stranded` records that the peer must rejoin:
- * the strand that raised it is otherwise memory-only, and a restart at the same epoch could not
- * rediscover a fork it already stepped past. `position` is null when no position is durable yet.
- */
-export type CommitCursor = { position: string | null; epoch: number; stranded?: true }
-
-/**
  * Owned by one live peer per group. Writes are durable before resolution.
  * Hosts encrypt plaintext at rest and clear it on leave/deletion, choosing physical erasure policy.
  */
 export type AppOutbox = {
-  getCommitCursor(): Promise<CommitCursor | null>
-  /** Durable after the paired MLS state. Null discards an unusable cursor. */
-  putCommitCursor(cursor: CommitCursor | null): Promise<void>
   /** Atomic insert or replace by seq. A rejection leaves storage unchanged. */
   put(entry: AppOutboxEntry): Promise<void>
   /** Ascending sequence order. */

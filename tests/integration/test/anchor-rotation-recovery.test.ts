@@ -261,6 +261,7 @@ test('fresh startup with a lost anchor secret resolves readiness before confirme
       rosterBefore,
       forced: false,
       advance: digestAppliedCommit(removedCommit),
+      landed: true,
     },
   })
   await bob.control.apply(

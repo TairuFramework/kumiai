@@ -69,7 +69,7 @@ function makeRoomPeer(
       members: MEMBERS,
       onAdvance: (e) => crypto.setEpoch(e),
     })
-  const anchorStore = options.anchorStore ?? createMemoryAnchorStore()
+  const anchorStore = options.anchorStore ?? createMemoryAnchorStore({ backing: mls.anchorStore() })
   const appCursorStore = options.appCursorStore ?? createMemoryAppCursorStore()
   const peer = createGroupPeer<Protocols>({
     appOutbox: createMemoryAppOutbox(),

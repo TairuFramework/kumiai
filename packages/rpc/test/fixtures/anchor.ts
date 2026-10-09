@@ -1,6 +1,8 @@
 import type { Anchor, AnchorSlot, AnchorStore } from '../../src/anchor.js'
 
 export type MemoryAnchorStore = AnchorStore & {
+  /** Bind a standalone test slot to the host's adoption database before peer startup. */
+  connect: (backing: AnchorStore) => void
   /** What the store holds right now, or null. A restart keeps it: that is the whole point. */
   stored: () => Anchor | null
   /** All durable slot writes, including rotation records. */
@@ -25,14 +27,23 @@ export function createMemoryAnchorStore(options: MemoryAnchorStoreOptions = {}):
   let slot: AnchorSlot | null = options.anchor == null ? null : { anchor: options.anchor }
   let saves = 0
   let captures = 0
+  let backing = options.backing
+  let connected = Promise.resolve()
 
   return {
+    connect(next) {
+      if (backing != null) return
+      backing = next
+      if (slot != null) connected = next.save(slot)
+    },
     async load() {
-      if (options.backing != null) slot = await options.backing.load()
+      await connected
+      if (backing != null) slot = await backing.load()
       return slot
     },
     async save(next: AnchorSlot) {
-      await options.backing?.save(next)
+      await connected
+      await backing?.save(next)
       if (
         next.anchor.epoch !== slot?.anchor.epoch ||
         !next.anchor.secret.every((value, index) => value === slot?.anchor.secret[index])

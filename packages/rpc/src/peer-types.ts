@@ -301,6 +301,8 @@ export type GroupPeer<Protocols extends Record<string, GroupProtocolDefinition>>
   enqueue: (op: OperationRequest) => Promise<void>
   outcomes: () => Promise<Array<Outcome>>
   ack: (id: string) => Promise<void>
+  /** Settle open control as unknown and discard undelivered Welcomes before host deletion. */
+  abandon: () => Promise<void>
   /** Enqueue, then wait in this process for a landed outcome. */
   commit: (op: OperationRequest) => Promise<{ position: LogPosition }>
   /** Retry control settlement and collect recovery entries awaiting re-enactment. */

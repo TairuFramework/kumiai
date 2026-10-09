@@ -122,7 +122,7 @@ describe('recovery rendezvous', { concurrent: false }, () => {
       await Promise.all([alice.peer.dispose(), bob.peer.dispose()])
     }
   })
-  test('a later historical reread preserves the originally applied confirmation outcome', async () => {
+  test('a historical reread preserves the durable response without confirming a past epoch', async () => {
     controlRecoveryClock()
     const hub = new FakeHub()
     const secret = new Uint8Array(32).fill(0x43)
@@ -150,8 +150,13 @@ describe('recovery rendezvous', { concurrent: false }, () => {
         payload: encodeHandshakeFrame(HANDSHAKE_KIND.recoveryRequest, new Uint8Array([0])),
       })
       await alice.peer.resync()
+      expect((await alice.control.load()).responses).toContainEqual(
+        expect.objectContaining({ position: original.position, kind: 'applied', epochAfter: 2 }),
+      )
+      const key = vi.spyOn(alice.mls, 'confirmationKey')
+      const verify = vi.spyOn(alice.mls, 'verifyRecoveryRequest')
       const requestID = 'historical-retransmit'
-      const { request, requestKey } = await bob.mls.createRecoveryRequest(requestID)
+      const { request } = await bob.mls.createRecoveryRequest(requestID)
       await hub.publish({
         senderDID: 'bob',
         topicID: rendezvousTopic(secret),
@@ -160,29 +165,17 @@ describe('recovery rendezvous', { concurrent: false }, () => {
           encodeRecoveryConfirmRequest({ ...original, requestID, request }),
         ),
       })
-      await drainUntil(
-        () =>
-          hub.published.some((message) => {
-            const frame = decodeHandshakeFrame(message.payload)
-            return (
-              frame.kind === HANDSHAKE_KIND.recoveryVerdict &&
-              decodeRecoveryVerdict(frame.payload).requestID === requestID
-            )
-          }),
-        'confirmation verdict publication',
-      )
-      const response = hub.published.find((message) => {
+      await drainUntil(() => verify.mock.calls.length > 0, 'historical request verification')
+      await vi.advanceTimersByTimeAsync(100)
+      const responses = hub.published.filter((message) => {
         const frame = decodeHandshakeFrame(message.payload)
         return (
           frame.kind === HANDSHAKE_KIND.recoveryVerdict &&
           decodeRecoveryVerdict(frame.payload).requestID === requestID
         )
       })
-      if (response == null) throw new Error('No historical verdict')
-      const { sealed } = decodeRecoveryVerdict(decodeHandshakeFrame(response.payload).payload)
-      expect(await bob.mls.openRecoveryVerdict(sealed, requestID, requestKey)).toMatchObject({
-        verdict: { verdict: 'confirmed' },
-      })
+      expect(responses).toEqual([])
+      expect(key).not.toHaveBeenCalled()
     } finally {
       await Promise.all([alice.peer.dispose(), bob.peer.dispose()])
     }

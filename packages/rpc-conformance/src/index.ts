@@ -28,13 +28,13 @@ export {
   type AppOutboxConformanceParams,
   type ConformanceAppOutbox,
   type ConformanceAppOutboxEntry,
-  type ConformanceCommitCursor,
   testAppOutboxConformance,
 } from './app-outbox.js'
 export {
   type ConformanceAdoptionWrite,
   type ConformanceAppliedCommit,
   type ConformanceBuiltCommit,
+  type ConformanceCommitCursor,
   type ConformanceControlChanges,
   type ConformanceControlHost,
   type ConformanceControlSnapshot,

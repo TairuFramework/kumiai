@@ -5,6 +5,7 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { concatBytes } from '@noble/hashes/utils.js'
 import { fromB64U, fromUTF, toB64U, toUTF } from '@sozai/codec'
 
+import type { AnchorStore } from '../../src/anchor.js'
 import type { AdoptionWrite, ControlStore } from '../../src/control/types.js'
 import type {
   CommitContext,
@@ -20,6 +21,7 @@ import { createMemoryHostDatabase, type MemoryHostDatabase } from './host-db.js'
 
 export type MemoryGroupMLS = GroupMLS & {
   control: () => ControlStore
+  anchorStore: () => AnchorStore
   serializeState: () => Uint8Array
   restoreState: (state: Uint8Array) => void
   authenticator: () => Uint8Array
@@ -714,7 +716,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         }
         accepted ??= (async () => {
           const authenticator = sha256(concatBytes(requestKey, commit))
-          const stored = await hostDB.loadState(groupID)
+          const stored = await hostDB.loadState(storageID)
           if (stored != null) {
             const value = JSON.parse(toUTF(stored)) as {
               epoch: number
@@ -759,7 +761,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
               recoveryAuthenticator: write == null ? undefined : toB64U(authenticator),
             }),
           )
-          await hostDB.saveState(groupID, state, write)
+          await hostDB.saveState(storageID, state, write)
           ledger = []
           ledgerHead = info.head
           slots = nextSlots
@@ -776,6 +778,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
 
   return {
     control: () => hostDB.control(storageID),
+    anchorStore: () => hostDB.anchorStore(storageID),
     serializeState,
     restoreState,
     authenticator,
@@ -986,7 +989,22 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         removed,
         epochAuthenticator: sha256(concatBytes(recoverySecret, fromUTF(groupID), state)),
       })
-      await hostDB.saveState(storageID, state, write)
+      try {
+        await hostDB.saveState(storageID, state, write)
+      } catch (error) {
+        if (
+          !(error instanceof Error) ||
+          error.name !== 'StorageOutcomeUnknownError' ||
+          write == null ||
+          (await hostDB.control(storageID).lastMutation()) !== write.mutationID
+        )
+          throw error
+        const committed = await hostDB.loadState(storageID)
+        if (committed == null) throw error
+        restoreState(committed)
+        commits += 1
+        return { applied: true, advanced: !removed, epochBefore, epochAfter }
+      }
       bodies = nextBodies
       slots = nextSlots
       ledger = nextLedger

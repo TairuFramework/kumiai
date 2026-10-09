@@ -193,11 +193,7 @@ export type CommitClassifierState = {
    * log carried it at. The digest is the fork test; the sequenceID is only the tiebreak between two
    * commits that genuinely differ.
    *
-   * In memory, DELIBERATELY. A restarted peer holds none and reads history as history: it can
-   * MISS a fork but can never invent one — the safe direction, since a missed fork is
-   * re-detected by the trim (`ahead` triggers on the next published frame), while inventing
-   * forks would turn every late joiner/rejoiner/re-seeded peer into a recovery storm on first
-   * pull. Durability needs a store; not built, since fork RESOLUTION isn't built either.
+   * Rebuilt from the ControlStore's retained window on restart. An absent row is history.
    */
   appliedByEpoch: ReadonlyMap<number, AppliedCommit>
 }

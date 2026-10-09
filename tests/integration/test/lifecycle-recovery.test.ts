@@ -22,7 +22,6 @@ import {
   createGroupMLS,
   createLedgerEntrySlot,
   type HandleAccess,
-  simpleHandleAccess,
 } from '@kumiai/mls-rpc'
 import {
   commitTopic,
@@ -37,6 +36,7 @@ import { afterEach, expect, test, vi } from 'vitest'
 
 import {
   chat,
+  createDurableHandleAccess,
   createMemoryAppCursorStore,
   createMemoryAppOutbox,
   createOperationHost,
@@ -71,6 +71,7 @@ type Setup = {
   mls: GroupMLS
   responder: GroupMLS
   access: HandleAccess
+  aliceAccess: HandleAccess
   aliceGroup: () => GroupHandle
   bobGroup: () => GroupHandle
   installAlice: (next: GroupHandle) => void
@@ -115,20 +116,21 @@ async function setup(
       options: { resolveLedgerEntries: slot.resolve },
     })
   ).group
-  const access = simpleHandleAccess({
+  const access = createDurableHandleAccess({
     handle: () => bobGroup,
     adopt: (next) => {
       bobGroup = next
     },
   })
   const mls = createGroupMLS({ access, identity: bob, entrySlot: slot, recoveryBinding: host })
+  const aliceAccess = createDurableHandleAccess({
+    handle: () => aliceGroup,
+    adopt: (next) => {
+      aliceGroup = next
+    },
+  })
   const responder = createGroupMLS({
-    access: simpleHandleAccess({
-      handle: () => aliceGroup,
-      adopt: (next) => {
-        aliceGroup = next
-      },
-    }),
+    access: aliceAccess,
     identity: alice,
     entrySlot: createLedgerEntrySlot(),
   })
@@ -139,6 +141,7 @@ async function setup(
     mls,
     responder,
     access,
+    aliceAccess,
     aliceGroup: () => aliceGroup,
     bobGroup: () => bobGroup,
     installAlice: (next: GroupHandle) => {
@@ -342,7 +345,7 @@ test('a responder floor refusal discards the candidate, requires renewal and inv
   const s = await setup(host)
   const hub = createWireHub()
   const events: Array<RecoveryEvent> = []
-  const aliceAccess = simpleHandleAccess({ handle: s.aliceGroup, adopt: s.installAlice })
+  const aliceAccess = s.aliceAccess
   const alice = recoveryPeer({ hub, identity: s.alice, access: aliceAccess, mls: s.responder })
   const bob = recoveryPeer({
     hub,
@@ -387,7 +390,7 @@ test('an authoritative invalid refusal holds automatic recovery until explicit r
   const alice = recoveryPeer({
     hub,
     identity: s.alice,
-    access: simpleHandleAccess({ handle: s.aliceGroup, adopt: s.installAlice }),
+    access: s.aliceAccess,
     mls: s.responder,
   })
   const bob = recoveryPeer({
@@ -430,7 +433,7 @@ test('renewal-required suppresses subsequent automatic triggers and explicit rec
   const s = await setup(host, { aliceExp: 350 })
   const hub = createWireHub()
   const events: Array<RecoveryEvent> = []
-  const aliceAccess = simpleHandleAccess({ handle: s.aliceGroup, adopt: s.installAlice })
+  const aliceAccess = s.aliceAccess
   const aliceMLS = createGroupMLS({
     access: aliceAccess,
     identity: s.alice,
@@ -553,7 +556,7 @@ test('standard group preparation never calls the lifecycle binding host', async 
   const group = (await createGroup(identity, 'standard-recovery')).group
   const host = vi.fn(async () => null)
   const mls = createGroupMLS({
-    access: simpleHandleAccess({ handle: () => group, adopt: () => {} }),
+    access: createDurableHandleAccess({ handle: () => group, adopt: () => {} }),
     identity,
     entrySlot: createLedgerEntrySlot(),
     recoveryBinding: host,
@@ -666,7 +669,7 @@ test('a lifecycle GroupInfo reply requires a requester leaf in the responder tre
     })
   ).group
   const mls = createGroupMLS({
-    access: simpleHandleAccess({ handle: () => group, adopt: () => {} }),
+    access: createDurableHandleAccess({ handle: () => group, adopt: () => {} }),
     identity: outsider,
     entrySlot: createLedgerEntrySlot(),
   })
@@ -692,7 +695,7 @@ test('a reply-ledger floor ends peer recovery without publication and holds late
   vi.spyOn(Date, 'now').mockReturnValue(150_000)
   const hub = createWireHub()
   const events: Array<RecoveryEvent> = []
-  const aliceAccess = simpleHandleAccess({ handle: s.aliceGroup, adopt: s.installAlice })
+  const aliceAccess = s.aliceAccess
   const alicePeer = recoveryPeer({
     hub,
     identity: s.alice,
@@ -774,7 +777,7 @@ async function ineligibleReply(s: Setup, kind: 'leafless' | 'revoked' | 'issuer'
   return createGroupMLS({
     identity,
     entrySlot: createLedgerEntrySlot(),
-    access: simpleHandleAccess({
+    access: createDurableHandleAccess({
       handle: () => handle,
       adopt: () => {
         throw new Error('Unexpected adoption')
@@ -824,7 +827,7 @@ test('an ineligible attestation cannot impose a renewal-required peer hold', asy
     identity: s.alice,
     mls: responder,
     deadlineMs: 100,
-    access: simpleHandleAccess({ handle: s.aliceGroup, adopt: s.installAlice }),
+    access: s.aliceAccess,
   })
   const bobPeer = recoveryPeer({
     hub,

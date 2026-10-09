@@ -222,6 +222,12 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
   if (result === 'moved') {
     await deps.pullToHead()
     if (deps.appliedAt(op.built.epoch)?.digest !== op.built.digest) return op
+    const settled = await deps.control.load()
+    if (
+      !settled.operations.some((row) => row.id === op.id) &&
+      settled.outcomes.some((row) => row.opID === op.id && row.kind === 'landed')
+    )
+      return null
     // Acceptance never moves this device's applied rows or cursor.
     return await settle(deps, op, outcome)
   }
@@ -243,7 +249,7 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
   ) {
     missing.putApplied = [...(missing.putApplied ?? []), applied]
   }
-  if (current.cursor == null || current.cursor.position < op.acceptedAs) {
+  if (current.cursor?.position == null || current.cursor.position < op.acceptedAs) {
     missing.cursor = changes.cursor
   }
   if (Object.keys(missing).length !== 0) {

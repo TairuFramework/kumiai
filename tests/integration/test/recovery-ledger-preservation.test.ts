@@ -20,13 +20,13 @@ import {
   createGroupMLS,
   createLedgerEntrySlot,
   type HandleAccess,
-  simpleHandleAccess,
 } from '@kumiai/mls-rpc'
 import { createGroupPeer, type GroupMLS, type RecoveryEvent } from '@kumiai/rpc'
 import { afterEach, expect, test, vi } from 'vitest'
 
 import {
   chat,
+  createDurableHandleAccess,
   createMemoryAppCursorStore,
   createMemoryAppOutbox,
   createOperationHost,
@@ -94,20 +94,21 @@ async function setup(
       options: { resolveLedgerEntries: slot.resolve },
     })
   ).group
-  const access = simpleHandleAccess({
+  const access = createDurableHandleAccess({
     handle: () => bobGroup,
     adopt: (next) => {
       bobGroup = next
     },
   })
   const mls = createGroupMLS({ access, identity: bob, entrySlot: slot, recoveryBinding: host })
+  const aliceAccess = createDurableHandleAccess({
+    handle: () => aliceGroup,
+    adopt: (next) => {
+      aliceGroup = next
+    },
+  })
   const responder = createGroupMLS({
-    access: simpleHandleAccess({
-      handle: () => aliceGroup,
-      adopt: (next) => {
-        aliceGroup = next
-      },
-    }),
+    access: aliceAccess,
     identity: alice,
     entrySlot: createLedgerEntrySlot(),
   })
@@ -118,6 +119,7 @@ async function setup(
     mls,
     responder,
     access,
+    aliceAccess,
     aliceGroup: () => aliceGroup,
     bobGroup: () => bobGroup,
     installAlice: (next: GroupHandle) => {
@@ -236,7 +238,7 @@ test('peer recovery and restore retain authenticated revocations, reset history 
   const alice = recoveryPeer({
     hub,
     identity: s.alice,
-    access: simpleHandleAccess({ handle: s.aliceGroup, adopt: s.installAlice }),
+    access: s.aliceAccess,
     mls: s.responder,
   })
   const bob = recoveryPeer({ hub, identity: s.bob, access: s.access, mls: s.mls })

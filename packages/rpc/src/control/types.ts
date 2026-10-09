@@ -147,7 +147,7 @@ export type ExternalResponse = {
   epochAfter?: number
 }
 export type CommitCursor = {
-  position: LogPosition
+  position: LogPosition | null
   epoch: number
   stranded?: true
   fork?: ForkEvidence

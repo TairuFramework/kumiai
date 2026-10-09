@@ -8,13 +8,8 @@ import { createRuntime } from '@sozai/runtime'
 
 import type { Anchor, AnchorSlot } from './anchor.js'
 import { type AppDeliveryResumed, type AppDeliveryStalled, createAppLane } from './app-lane.js'
-import { type CommitCursor, createAppOutboxAcceptance } from './app-outbox.js'
-import {
-  type AppliedCommit,
-  classifyCommit,
-  digestAppliedCommit,
-  UNKNOWN_FRAME_VERSION,
-} from './classify.js'
+import { createAppOutboxAcceptance } from './app-outbox.js'
+import { classifyCommit, digestAppliedCommit, UNKNOWN_FRAME_VERSION } from './classify.js'
 import { isHeadMismatch, RecoveryRequiredError } from './commit.js'
 import {
   type CommitFrame,
@@ -22,14 +17,24 @@ import {
   encodeCommitFrame,
   isUnsupportedCommitFrameVersion,
 } from './commit-frame.js'
+import { appliedRows, forkEvidence } from './control/forks.js'
 import {
   enqueueOperation,
   type OperationDeps,
   revokeHeld,
   stepOperation,
 } from './control/operations.js'
-import { applyResolved } from './control/store.js'
-import type { OperationRequest, Outcome } from './control/types.js'
+import { applyResolved, pruneWindow } from './control/store.js'
+import type {
+  AdoptionWriteFactory,
+  AppliedCommit,
+  CommitCursor,
+  ControlSnapshot,
+  ExternalResponse,
+  ForkEvidence,
+  OperationRequest,
+  Outcome,
+} from './control/types.js'
 import {
   type AppliedRecovery,
   type GroupMLS,
@@ -40,7 +45,7 @@ import {
   type RecoveryVerdict,
 } from './crypto.js'
 import { asLogPosition, assertForwardPage, type LogPosition } from './cursor.js'
-import { OperationOutcomeError, PeerDisposedError } from './errors.js'
+import { OperationOutcomeError, PeerDisposedError, PeerRemovedError } from './errors.js'
 import { assertFrameFits } from './frame-size.js'
 import { adaptBusHandlers, type BusHandlerMaps } from './handlers.js'
 import {
@@ -93,6 +98,7 @@ import {
   confirmationTag,
   createRecoveryCache,
   type RecoveryCommitOutcome,
+  responseOutcome,
   waitForRecoveryConfirmation,
 } from './recovery-confirmation.js'
 import { detectRosterChange } from './roster.js'
@@ -156,12 +162,9 @@ type PendingAnchorRotation = NonNullable<AnchorSlot['pending']>
 
 type ResolveAnchorRotationParams = {
   port: GroupMLS
-  /** The owning advance has settled, so an unmoved epoch means it did not land. */
+  /** A completed refusal can clear its unlanded rotation while the peer stays live. */
   knownUnlanded?: boolean
-  /** Startup with no advance in flight: an unmoved epoch settles unless it may hide a landing. */
   initial?: boolean
-  /** The owning advance succeeded: a rejoin onto its old epoch number still counts as landed. */
-  landed?: boolean
 }
 
 /** Identifies one handle advance, so a retry of the same advance reuses its rotation record. */
@@ -227,6 +230,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   } = params
   let revokeHold = false
   let rejoinHeld = false
+  let rejoinPosition: LogPosition | null = null
   let hasOperations = false
   const logSubmissions = new Set<Promise<unknown>>()
   const logSendsHeld = (): boolean => revokeHold
@@ -358,31 +362,38 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     releaseSealBarrier = undefined
   }
 
-  /** The advance whose anchor rotation was last captured, so a retry never captures it twice. */
-  let capturedAdvance: string | undefined
+  let anchorCapture: { advance: string | undefined; anchor: Anchor } | undefined
+  let epochNeedsBuild = false
   const captureAnchor = async (advance?: string): Promise<void> => {
-    const { secret, epoch } = await crypto.exportSecret(APP_TOPIC_LABEL)
+    const captured =
+      anchorCapture != null && anchorCapture.advance === advance
+        ? anchorCapture.anchor
+        : await crypto.exportSecret(APP_TOPIC_LABEL)
+    const { secret, epoch } = captured
     if (disposed) return
+    anchorCapture = { advance, anchor: { secret, epoch } }
+    // Retain before the save can wait, so frames at the new anchor are buffered meanwhile.
     for (const name of Object.keys(protocols)) {
       mux.retainTopic(protocolTopic(secret, epoch, name), { retention: appLogRetentionSeconds })
     }
     mux.retainTopic(inboxTopic(secret, epoch, localDID), { retention: appLogRetentionSeconds })
+    await anchorStore?.save({ anchor: anchorCapture.anchor })
+    if (disposed) return
     anchor = { secret, epoch }
-    // Marked with the anchor, before persistence can fail, so a retry never captures it twice.
-    if (advance != null) capturedAdvance = advance
+    anchorCapture = undefined
     anchorPending = undefined
     sealError = undefined
     finishSealBarrier()
-    await anchorStore?.save({ anchor })
     appLane.reset()
   }
 
   /** The rotation resolved without moving the anchor: drop the record and keep the anchor. */
   const keepAnchor = async (): Promise<void> => {
+    await anchorStore?.save({ anchor })
+    if (disposed) return
     anchorPending = undefined
     sealError = undefined
     finishSealBarrier()
-    await anchorStore?.save({ anchor })
   }
   const requireAnchorRecovery = (): void => {
     anchorRecoveryPending = true
@@ -391,24 +402,15 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   }
 
   const resolveAnchorRotation = async (params: ResolveAnchorRotationParams): Promise<void> => {
-    const { port, knownUnlanded = false, initial = false, landed = false } = params
+    const { port, knownUnlanded = false, initial = false } = params
     const record = anchorPending
     if (record == null) return
+    const stored = await anchorStore?.load()
+    if (stored?.pending?.advance === record.advance) record.landed = stored.pending.landed
     const epoch = await port.readEpoch()
     assertLive()
-    // A rejoin from a losing branch can land on its old epoch number, so the number alone cannot
-    // say whether it landed. Only the advance that resolved knows — unless that advance already
-    // captured its anchor, and this record is a retry opened at the epoch it landed on.
-    const sameNumber = record.epochAfter === record.epochBefore
-    const landedHere = sameNumber && landed && record.advance !== capturedAdvance
-    if (epoch === record.epochBefore && !landedHere) {
+    if (!record.landed) {
       if (!knownUnlanded && !initial) return
-      if (sameNumber && !knownUnlanded) {
-        // Found at startup with nothing to tell the two states apart: recover rather than keep an
-        // anchor that may belong to the losing branch.
-        requireAnchorRecovery()
-        return
-      }
       await keepAnchor()
       return
     }
@@ -532,8 +534,18 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     note: (name, topicID, message, failure) => appLane.note(name, topicID, message, failure),
     requestAppPull,
   })
-  const { buildEpoch, teardownEpoch, rebuildEpoch, epochSettled, surfaceFor, sealForSegment } =
-    epochRuntime
+  const {
+    buildEpoch,
+    teardownEpoch,
+    rebuildEpoch: rebuildEpochRuntime,
+    epochSettled,
+    surfaceFor,
+    sealForSegment,
+  } = epochRuntime
+  const rebuildEpoch = async (): Promise<void> => {
+    await rebuildEpochRuntime()
+    epochNeedsBuild = anchorPending != null
+  }
 
   const appOutboxAcceptance =
     mls == null
@@ -679,27 +691,64 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * it was, so a restart re-reads an ahead frame; a losing fork was applied before its winner was
    * seen, so only the flag carries it across a restart.
    */
-  const persistStrand = async (): Promise<void> => {
-    if (mls == null || params.appOutbox == null) return
+  const persistStrand = async (fork?: ForkEvidence): Promise<void> => {
+    if (mls == null || control == null) return
     const epoch = await mls.readEpoch()
-    if (durableCursor?.stranded === true && durableCursor.epoch === epoch) return
+    if (durableCursor?.stranded === true && durableCursor.epoch === epoch && fork == null) return
     const cursor: CommitCursor = {
       position: durableCursor?.epoch === epoch ? durableCursor.position : null,
       epoch,
       stranded: true,
+      ...(fork != null
+        ? { fork }
+        : durableCursor?.fork != null
+          ? { fork: durableCursor.fork }
+          : {}),
     }
-    await params.appOutbox.putCommitCursor(cursor)
+    await applyResolved(control, { cursor }, newPublishID())
     durableCursor = cursor
   }
-  const saveCommitCursor = async (position: LogPosition): Promise<void> => {
+  const saveCommitCursor = async (
+    position: LogPosition,
+    response?: ExternalResponse,
+  ): Promise<void> => {
     if (mls == null) return
-    if (stranded) await persistStrand()
-    else if (params.appOutbox != null) {
-      const cursor: CommitCursor = { position, epoch: await mls.readEpoch() }
-      await params.appOutbox.putCommitCursor(cursor)
-      durableCursor = cursor
+    if (control != null) {
+      const epoch = await mls.readEpoch()
+      const cursor: CommitCursor = stranded
+        ? {
+            position: durableCursor?.epoch === epoch ? durableCursor.position : null,
+            epoch,
+            stranded: true,
+            ...(durableCursor?.fork == null ? {} : { fork: durableCursor.fork }),
+          }
+        : {
+            position:
+              durableCursor?.position != null && durableCursor.position > position
+                ? durableCursor.position
+                : position,
+            epoch,
+          }
+      const snapshot = await control.load()
+      await applyResolved(
+        control,
+        {
+          ...pruneWindow(
+            snapshot,
+            Math.max(
+              response?.epoch ?? 0,
+              ...snapshot.applied.map((row) => row.epoch),
+              ...snapshot.responses.map((row) => row.epoch),
+            ),
+          ),
+          cursor,
+          ...(response == null ? {} : { putResponses: [response] }),
+        },
+        newPublishID(),
+      )
+      await refreshControl()
     }
-    reconciledHead = position
+    if (reconciledHead == null || reconciledHead < position) reconciledHead = position
   }
 
   /**
@@ -719,9 +768,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * one epoch, which the hub can only produce by showing different logs to different members. The
    * same commit re-served at a new position is not, however the log came to carry it twice.
    *
-   * An epoch with NO record is history, not a fork — a late joiner, rejoiner or re-seeded peer all
-   * walk commits from epochs they never held. In memory, deliberately: a restart drops the record,
-   * so a peer with no record reads history as history — it can MISS a fork, never invent one.
+   * An epoch with no retained row is history, including epochs outside the durable window.
    */
   const appliedByEpoch = new Map<number, AppliedCommit>()
 
@@ -857,6 +904,13 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       controlReplayed = false
       appNoticeInSerial = true
       try {
+        if (epochNeedsBuild && mls != null && !locallyRemoved) {
+          await resolveAnchorRotation({ port: mls })
+          if (anchorPending == null && epochRuntime.hasInboxLane()) {
+            await rebuildEpoch()
+            epochNeedsBuild = false
+          }
+        }
         if (retryRecoveryAdoption != null) await retryRecoveryAdoption()
         return await fn()
       } finally {
@@ -899,16 +953,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   const inFlightBootstraps = new Set<Promise<void>>()
   const suppressedRequests = new Set<string>()
   const confirmationWaiters = new Map<string, ConfirmationWaiter>()
-  const commitOutcomes = createRecoveryCache<RecoveryCommitOutcome>((outcome) => {
-    if (outcome.kind === 'applied') outcome.key.fill(0)
-  })
-  const recordCommitOutcome = (position: string, outcome: RecoveryCommitOutcome): void => {
-    if (commitOutcomes.get(position) != null) {
-      if (outcome.kind === 'applied') outcome.key.fill(0)
-      return
-    }
-    commitOutcomes.set(position, outcome, Date.now() + recoveryDeadlineMs)
-  }
+  const commitOutcomes = new Map<string, ExternalResponse>()
   const verdictCache = createRecoveryCache<Promise<Uint8Array>>()
   const verdictTimers = new Set<ReturnType<typeof setTimeout>>()
   /**
@@ -921,7 +966,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   const pendingLedgerReplies = new Set<ReturnType<typeof setTimeout>>()
 
   const handleRecoveryConfirmRequest = (request: RecoveryConfirmRequest): void => {
-    if (mls == null || rendezvousTopicID == null || disposed) return
+    if (mls == null || rendezvousTopicID == null || disposed || stranded || locallyRemoved) return
     const port = mls
     const topicID = rendezvousTopicID
     void (async () => {
@@ -933,7 +978,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         normalizeDID(verified.requesterDID) === localDID
       )
         return
-      const blocked = () => pendingRecovery != null && request.position >= pendingRecovery.position
+      const blocked = () =>
+        stranded ||
+        locallyRemoved ||
+        (pendingRecovery != null && request.position >= pendingRecovery.position)
       if (blocked()) return
       let record = commitOutcomes.get(request.position)
       if (record == null) {
@@ -947,7 +995,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         if (disposed || blocked()) return
         record = commitOutcomes.get(request.position)
       }
-      if (record == null || record.value.commitDigest !== request.commitDigest) return
+      if (record == null || record.digest !== request.commitDigest) return
       const cacheKey = JSON.stringify([
         verified.requesterDID,
         request.requestID,
@@ -957,6 +1005,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       ])
       let cached = verdictCache.get(cacheKey)
       if (cached == null) {
+        const outcome = await responseOutcome(port, record)
+        if (outcome == null) return
         const verdict = verdictForOutcome(
           {
             groupID: verified.groupID,
@@ -964,33 +1014,39 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             position: request.position,
             commitDigest: request.commitDigest,
           },
-          record.value,
+          outcome,
         )
+        if (outcome.kind === 'applied') outcome.key.fill(0)
         const sealed = port
           .sealRecoveryVerdict(request.request, verdict)
           .catch((error: unknown) => {
             if (verdictCache.get(cacheKey)?.value === sealed) verdictCache.delete(cacheKey)
             throw error
           })
-        verdictCache.set(cacheKey, sealed, record.expiresAt)
-        cached = { value: sealed, expiresAt: record.expiresAt }
+        const expiresAt = Date.now() + recoveryDeadlineMs
+        verdictCache.set(cacheKey, sealed, expiresAt)
+        cached = { value: sealed, expiresAt }
       }
       const sealed = await cached.value
       const expiresAt = cached.expiresAt
       if (disposed || blocked() || expiresAt <= Date.now()) return
+      const response = record
+      const confirmable = async () =>
+        response.kind !== 'applied' || (await port.readEpoch()) === response.epochAfter
+      if (!(await confirmable())) return
       const timer = setTimeout(
         () => {
           verdictTimers.delete(timer)
-          if (disposed || blocked() || expiresAt <= Date.now()) return
-          void mux
-            .publish({
+          void (async () => {
+            if (disposed || blocked() || expiresAt <= Date.now() || !(await confirmable())) return
+            await mux.publish({
               topicID,
               payload: encodeHandshakeFrame(
                 HANDSHAKE_KIND.recoveryVerdict,
                 encodeRecoveryVerdict(request.requestID, sealed),
               ),
             })
-            .catch(() => {})
+          })().catch(() => {})
         },
         Math.max(0, Math.min(getReplyDelayMs(), recoveryTimeoutMs, expiresAt - Date.now())),
       )
@@ -1154,20 +1210,17 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         releaseSealBarrier = resolve
       })
     const observe = async (): Promise<void> => {
+      await refreshControl()
+      await removalEffect()
       const epoch = await port.readEpoch()
-      const roster = (await port.rosterEntries()).map((entry) => normalizeDID(entry.did))
-      if (rosterBefore.includes(localDID) && !roster.includes(localDID)) {
-        locallyRemoved = true
-        logDelivery?.removed()
-      }
+      if (epoch !== epochBefore) epochNeedsBuild = true
       if (epoch === identity.epochAfter && epoch !== record.epochBefore && floorPosition != null)
         floor = { epoch, position: floorPosition, covered: true }
     }
     try {
       const advanced = await ratchet()
-      if (floorPosition != null) await saveCommitCursor(floorPosition)
       await observe()
-      await resolveAnchorRotation({ port, knownUnlanded: true, landed: true })
+      await resolveAnchorRotation({ port, knownUnlanded: true })
       if (confirmedRecovery && anchorPending == null) anchorRecoveryPending = false
       return advanced
     } catch (error) {
@@ -1206,7 +1259,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * end, so it DOES record one — the `stranded` flag, not a withheld tip, then stops `commit()`.
    */
   const walkCommits = async (port: GroupMLS, topicID: string): Promise<boolean> => {
-    if (anchorRecoveryPending) return false
+    if (anchorRecoveryPending || locallyRemoved) return false
     let advancedEpoch = false
     const started = logDelivery?.beginWalk() ?? 0
     let covered = true
@@ -1274,6 +1327,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         // operation carries that across a restart); meeting its own commit here means its saved operation
         // was lost or never written.
         const position = asLogPosition(message.sequenceID)
+        if (rejoinPosition != null && position >= rejoinPosition) return advancedEpoch
         let frame: ReturnType<typeof decodeHandshakeFrame>
         try {
           frame = decodeHandshakeFrame(message.payload)
@@ -1427,12 +1481,20 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             break
           }
           if (disposition.row === 'fork') {
-            if (header?.external && disposition.branch !== 'losing' && !stranded)
-              recordCommitOutcome(position, { commitDigest, kind: 'superseded' })
             // Two commits at one epoch. The lower-sequenceID branch wins; the loser rejoins onto it
             // (a heal). The winner just steps over the frame.
-            if (disposition.branch === 'losing') stranded = true
-            await saveCommitCursor(position)
+            if (disposition.branch === 'losing') {
+              stranded = true
+              if (control != null && header != null) {
+                await persistStrand(forkEvidence(await control.load(), header.epoch, commitDigest))
+              }
+            }
+            await saveCommitCursor(
+              position,
+              header?.external && disposition.branch !== 'losing' && !stranded
+                ? { position, digest: commitDigest, kind: 'superseded', epoch: header.epoch }
+                : undefined,
+            )
             if (disposition.branch === 'losing') {
               healRequested = true
               observeStrand({
@@ -1456,6 +1518,18 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           if (disposed) return false
           const framedEpoch = localEpoch
           const anchorEpochBefore = anchor.epoch
+          const snapshot = await control?.load()
+          const adoption =
+            snapshot == null
+              ? undefined
+              : adoptionWrite({
+                  snapshot,
+                  epoch: framedEpoch,
+                  digest: commitDigest,
+                  payloadDigest: toB64U(sha256(message.payload)),
+                  position,
+                  external: header?.external === true,
+                })
           let applied: ProcessCommitResult
           try {
             // Through the seam, like every other site that ratchets the handle: it reads this
@@ -1473,6 +1547,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
                 }
                 const result = await port.processCommit(commitFrame.commit, {
                   senderDID: message.senderDID,
+                  ...(adoption == null ? {} : { adoption }),
                   // The resolver, not the bodies: the blob opens only if the port asks for entries
                   // this commit names, and only for a commit it applies — framed at this peer's
                   // epoch, the epoch the blob is sealed under, making body delivery atomic with the
@@ -1483,10 +1558,6 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
                     crypto.openEntries,
                   ),
                 })
-                if (header?.external && result.advanced && !stranded) {
-                  const derived = await port.confirmationKey(position, commitDigest)
-                  recordCommitOutcome(position, { kind: 'applied', commitDigest, ...derived })
-                }
                 return result
               },
               // A REJOIN rotates the anchor too, from a member the roster diff cannot see: an
@@ -1520,10 +1591,35 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             // Retrying only delays that. The one case where this peer really is the broken one
             // announces itself later: the next commit is then framed AHEAD of this peer's, which
             // heals it.
-            await saveCommitCursor(position)
+            await saveCommitCursor(
+              position,
+              header?.external
+                ? {
+                    position,
+                    digest: commitDigest,
+                    epoch: framedEpoch,
+                    kind: 'refused',
+                    reason: 'invalid',
+                  }
+                : undefined,
+            )
             break
           }
           if (disposed) return false
+          if (applied.applied && snapshot != null && control != null) {
+            const settled = await control.load()
+            for (const op of snapshot.operations) {
+              if (
+                op.stage !== 'accepted' ||
+                op.built.payloadDigest !== toB64U(sha256(message.payload))
+              )
+                continue
+              const outcome = settled.outcomes.find(
+                (row) => row.opID === op.id && row.kind === 'landed',
+              )
+              if (outcome != null) emitOutcome(outcome)
+            }
+          }
           if (!applied.advanced && applied.epochBefore !== framedEpoch) {
             advancedEpoch = true
             localEpoch = applied.epochBefore
@@ -1531,19 +1627,25 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           }
           if (applied.advanced) {
             advancedEpoch = true
-            // The fork check's record; the only place it is written from the log.
-            appliedByEpoch.set(framedEpoch, { sequenceID: position, digest: commitDigest })
             if (header?.external) logDelivery?.rejoined(anchorEpochBefore)
           }
-          if (header?.external && !applied.advanced && !stranded)
-            recordCommitOutcome(position, {
-              kind: 'refused',
-              commitDigest,
-              reason: applied.refusal ?? 'invalid',
-            })
           // `{ advanced: false }` here is the port REFUSING a well-formed commit at this peer's own
           // epoch from another member: poison on the same terms as an unresolvable one.
-          await saveCommitCursor(position)
+          if (!applied.applied) {
+            await saveCommitCursor(
+              position,
+              header?.external
+                ? {
+                    position,
+                    digest: commitDigest,
+                    kind: 'refused',
+                    epoch: framedEpoch,
+                    reason: applied.refusal ?? 'invalid',
+                  }
+                : undefined,
+            )
+          }
+          if (locallyRemoved) return advancedEpoch
           break
         }
       }
@@ -1565,7 +1667,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * epoch (or whose log held no commits at all) would otherwise never read a thing.
    */
   const pullCommits = async (): Promise<boolean> => {
-    if (disposed) return false
+    if (disposed || locallyRemoved) return false
     if (!controlReplayed) {
       throw new Error(
         'pullCommits: saved operations must settle first in every lane operation, or a peer that crashed on its own commit heals from it instead of adopting it',
@@ -1701,43 +1803,6 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       retention: commitLogRetentionSeconds,
     })
     rendezvousUnsubscribe = mux.onInbound(rendezvousTopicID, onRendezvousMessage)
-    if (anchorRecoveryPending) return
-    // Then seed the cursor by READING the log — commits published before this peer subscribed are
-    // exactly the ones no push will bring it. A lane operation, so the operation settles AHEAD of
-    // it. Neither step rebuilds the epoch — buildEpoch runs next.
-    await runSerial(async () => {
-      if (disposed) return
-      if (params.appOutbox != null) {
-        const cursor = await params.appOutbox.getCommitCursor()
-        if (cursor != null && cursor.epoch === (await mls.readEpoch())) {
-          durableCursor = cursor
-          if (cursor.position != null) {
-            reconciledHead = asLogPosition(cursor.position)
-            floor = { epoch: cursor.epoch, position: reconciledHead, covered: true }
-          }
-          if (cursor.stranded === true) {
-            stranded = true
-            healRequested = true
-          }
-        } else if (cursor != null) {
-          await params.appOutbox.putCommitCursor(null)
-        }
-      }
-      await settleOperations()
-      if (disposed) return
-      // A peer restored with an incomplete ledger was killed between rejoining and bootstrapping.
-      // The invariant finds it here and at every later lane operation, with no memory of how it
-      // got there.
-      const ledgerReady = await ensureLedger(Date.now() + recoveryTimeoutMs)
-      if (disposed) return
-      if (ledgerReady) {
-        await finalizeBootstrap(mls)
-        if (disposed) return
-      }
-      await pullCommits()
-    }).catch(() => {
-      // a failed seed leaves the cursor put; the next wakeup replays and pulls again
-    })
   }
 
   /**
@@ -1784,16 +1849,135 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     hasOperations = snapshot.operations.length > 0
     revokeHold = revokeHeld(snapshot)
     rejoinHeld = snapshot.rejoin != null
-    for (const row of snapshot.applied) {
-      appliedByEpoch.set(row.epoch, { digest: row.digest, sequenceID: row.sequenceID })
-    }
+    rejoinPosition =
+      snapshot.rejoin != null && ['published', 'confirmed'].includes(snapshot.rejoin.stage)
+        ? (snapshot.rejoin.position ?? null)
+        : null
+    appliedByEpoch.clear()
+    for (const [epoch, row] of appliedRows(snapshot)) appliedByEpoch.set(epoch, row)
+    commitOutcomes.clear()
+    for (const response of snapshot.responses) commitOutcomes.set(response.position, response)
     const cursor = snapshot.cursor
+    durableCursor = cursor
     if (cursor != null && cursor.epoch === (await mls?.readEpoch())) {
-      if (reconciledHead == null || reconciledHead < cursor.position)
+      if (cursor.position != null && (reconciledHead == null || reconciledHead < cursor.position))
         reconciledHead = cursor.position
       floor = { epoch: cursor.epoch, position: cursor.position, covered: true }
-      if (cursor.stranded) stranded = true
+      if (cursor.stranded) {
+        if (!stranded) healRequested = true
+        stranded = true
+      }
     }
+  }
+
+  const unknownChanges = (snapshot: ControlSnapshot) => {
+    const outcomes: Array<Outcome> = snapshot.operations.map((op) => ({
+      id: op.id,
+      opID: op.id,
+      at: Date.now(),
+      kind: 'unknown',
+    }))
+    if (snapshot.rejoin != null)
+      outcomes.push({
+        id: snapshot.rejoin.id,
+        opID: null,
+        at: Date.now(),
+        kind: 'unknown',
+      })
+    return {
+      deleteOperations: snapshot.operations.map((op) => op.id),
+      ...(snapshot.rejoin == null ? {} : { deleteRejoin: true as const }),
+      putOutcomes: outcomes,
+    }
+  }
+
+  const removalEffect = async (): Promise<void> => {
+    if (control == null) return
+    const snapshot = await control.load()
+    if (!snapshot.applied.at(-1)?.removed) return
+    if (snapshot.operations.length > 0 || snapshot.rejoin != null) {
+      const changes = unknownChanges(snapshot)
+      await applyResolved(control, changes, newPublishID())
+      for (const outcome of changes.putOutcomes) emitOutcome(outcome)
+      await refreshControl()
+    }
+    if (!locallyRemoved) {
+      locallyRemoved = true
+      logDelivery?.removed()
+    }
+  }
+
+  const adoptionWrite = (input: {
+    snapshot: ControlSnapshot
+    epoch: number
+    digest: string
+    payloadDigest: string
+    position: LogPosition
+    external: boolean
+  }): AdoptionWriteFactory => {
+    const { snapshot, epoch, digest, payloadDigest, position, external } = input
+    const matches = snapshot.operations.filter(
+      (op) => op.stage === 'accepted' && op.built.payloadDigest === payloadDigest,
+    )
+    const mutationID = newPublishID()
+    return (staged) => ({
+      mutationID,
+      ...(!staged.removed ? { anchorLanded: digest } : {}),
+      changes: {
+        ...pruneWindow(snapshot, epoch),
+        putApplied: [
+          {
+            epoch,
+            digest,
+            payloadDigest,
+            sequenceID: position,
+            opID: matches[0]?.id ?? null,
+            removed: staged.removed,
+          },
+        ],
+        cursor: {
+          position: stranded
+            ? (snapshot.cursor?.position ?? null)
+            : snapshot.cursor?.position != null && snapshot.cursor.position > position
+              ? snapshot.cursor.position
+              : position,
+          epoch: staged.epochAfter,
+          ...(stranded
+            ? {
+                stranded: true,
+                ...(snapshot.cursor?.fork == null ? {} : { fork: snapshot.cursor.fork }),
+              }
+            : {}),
+        },
+        ...(matches.length === 0
+          ? {}
+          : {
+              deleteOperations: matches.map((op) => op.id),
+              putOutcomes: matches.map(
+                (op): Outcome => ({
+                  id: op.id,
+                  opID: op.id,
+                  at: Date.now(),
+                  kind: 'landed',
+                  position,
+                }),
+              ),
+            }),
+        ...(external
+          ? {
+              putResponses: [
+                {
+                  position,
+                  digest,
+                  epoch,
+                  kind: 'applied' as const,
+                  epochAfter: staged.epochAfter,
+                },
+              ],
+            }
+          : {}),
+      },
+    })
   }
   const operationDeps = (deferAccepted = false): OperationDeps => {
     if (control == null || build == null || adopt == null || mls == null || commitTopicID == null) {
@@ -1901,7 +2085,13 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   /** Saved payloads settle before any pull can encounter our own unmerged commit. */
   const settleOperations = async (): Promise<boolean> => {
     controlReplayed = true
-    if (control == null || mls == null || commitTopicID == null || anchorRecoveryPending)
+    if (
+      control == null ||
+      mls == null ||
+      commitTopicID == null ||
+      anchorRecoveryPending ||
+      locallyRemoved
+    )
       return false
     await refreshControl()
     let op = (await control.load()).operations[0]
@@ -1921,11 +2111,34 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     return (await mls.readEpoch()) !== before
   }
 
+  const settleRejoinPublication = async (): Promise<void> => {
+    if (control == null || mls == null || commitTopicID == null) return
+    const record = (await control.load()).rejoin
+    if (record?.stage !== 'built') return
+    const found = await operationDeps().searchLog(record.expectedHead, record.payloadDigest)
+    if (typeof found !== 'object') return
+    await applyResolved(
+      control,
+      {
+        putRejoin: { ...record, stage: 'published', position: found.found },
+      },
+      newPublishID(),
+    )
+    await refreshControl()
+  }
+
   let operationTimer: ReturnType<typeof setTimeout> | undefined
   let operationRunning = false
   let operationBackoff = 1000
   const scheduleOperations = (delay = 0): void => {
-    if (disposed || control == null || !hasOperations || operationTimer != null || operationRunning)
+    if (
+      disposed ||
+      locallyRemoved ||
+      control == null ||
+      !hasOperations ||
+      operationTimer != null ||
+      operationRunning
+    )
       return
     const start = (): void => {
       operationTimer = undefined
@@ -2127,6 +2340,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     assertLive()
     await runSerial(async () => {
       assertLive()
+      if (locallyRemoved) throw new PeerRemovedError('Peer was removed')
       // A host write may persist the intent before its promise settles.
       if (request.revokes) revokeHold = true
       try {
@@ -2147,6 +2361,21 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     assertLive()
     await runSerial(async () => {
       if (control != null) await applyResolved(control, { deleteOutcomes: [id] }, newPublishID())
+    })
+  }
+  const abandon = async (): Promise<void> => {
+    await ready
+    assertLive()
+    await runSerial(async () => {
+      if (control == null) return
+      const snapshot = await control.load()
+      const changes = {
+        ...unknownChanges(snapshot),
+        deleteWelcomes: snapshot.welcomes.map((row) => row.opID),
+      }
+      await applyResolved(control, changes, newPublishID())
+      await refreshControl()
+      for (const outcome of changes.putOutcomes) emitOutcome(outcome)
     })
   }
   const commit = async (request: OperationRequest): Promise<{ position: LogPosition }> => {
@@ -2178,6 +2407,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   const replay = async (): Promise<{ reenact?: Array<string> }> => {
     await ready
     assertLive()
+    if (locallyRemoved) return {}
     const result = await runSerial(async () => {
       if (await settleOperations()) await rebuildEpoch()
       if (mls != null && (await ensureLedger(Date.now() + recoveryTimeoutMs)))
@@ -2411,6 +2641,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           if (verified == null) throw new Error('The recovery request did not verify')
           return {
             pending,
+            payloadDigest: toB64U(sha256(payload)),
             sequenceID,
             commitDigest,
             key,
@@ -2427,6 +2658,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         if ('advanced' in publication) return publication
         const {
           pending,
+          payloadDigest,
           sequenceID,
           commitDigest,
           key,
@@ -2512,7 +2744,33 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
               ratchet: async () => {
                 let accepted = false
                 try {
-                  await pending.onAccepted()
+                  const snapshot = await control?.load()
+                  const write =
+                    snapshot == null
+                      ? undefined
+                      : adoptionWrite({
+                          snapshot,
+                          epoch: rejoinedAtEpoch ?? pending.epoch - 1,
+                          digest: digestAppliedCommit(pending.commit),
+                          payloadDigest,
+                          position: asLogPosition(sequenceID),
+                          external: true,
+                        })
+                  await pending.onAccepted(
+                    write == null
+                      ? undefined
+                      : (staged) => {
+                          const adoption = write(staged)
+                          // A confirmed rejoin releases the strand in its adoption transaction.
+                          if (adoption.changes.cursor != null) {
+                            adoption.changes.cursor = {
+                              position: asLogPosition(sequenceID),
+                              epoch: staged.epochAfter,
+                            }
+                          }
+                          return adoption
+                        },
+                  )
                   accepted = true
                 } finally {
                   // A callback can throw after replacing the handle. Observe the ratchet so
@@ -2521,13 +2779,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
                   // adoption counts even when the number did not move.
                   if (accepted || (await port.readEpoch()) !== epochBeforeRejoin) {
                     awaitingBootstrap = { attemptID, trigger, entries: inFlight }
-                    // Adoption enacted these bytes even if persistence rejected afterward.
-                    if (rejoinedAtEpoch != null) {
-                      appliedByEpoch.set(rejoinedAtEpoch, {
-                        sequenceID,
-                        digest: digestAppliedCommit(pending.commit),
-                      })
-                    }
+                    await refreshControl()
                     stranded = false
                     rejoinRuntimeNeedsBuild = true
                   }
@@ -2632,6 +2884,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     attempt = (async (): Promise<{ advanced: boolean }> => {
       await ready
       assertLive()
+      if (locallyRemoved) throw new PeerRemovedError('Peer was removed')
       if (mls == null || commitTopicID == null || rendezvousTopicID == null) {
         return { advanced: false }
       }
@@ -2677,6 +2930,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   const healIfRequested = async (): Promise<void> => {
     if (
       disposed ||
+      locallyRemoved ||
       !healRequested ||
       activeRecovery != null ||
       rejoinHeld ||
@@ -2725,22 +2979,16 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   }
 
   const ready = (async () => {
-    // Settle the app-lane anchor BEFORE the seed pull: a roster change the seed pull applies must
-    // be able to rotate it off whatever lands here rather than have a later seed overwrite it.
-    //
-    // A stored anchor is RESTORED, never recomputed — see {@link anchor} for why (a rebooted
-    // handle can never re-export an earlier epoch's secret).
-    //
-    // An empty store is first boot, and only first boot: seed at the initial epoch, as a group
-    // with no roster change yet must. A member booting over a handle it was just added to seeds
-    // at its own add epoch — the same epoch every existing member rotates to on applying that
-    // add, so the two agree with no exchange between them.
     await refreshControl()
     const stored = await anchorStore?.load()
     if (disposed) return
     if (stored != null) {
       anchor = stored.anchor
       anchorPending = stored.pending
+    }
+    await removalEffect()
+    if (disposed || locallyRemoved) return
+    if (stored != null) {
       if (mls != null) await resolveAnchorRotation({ port: mls, initial: true })
     } else {
       await captureAnchor()
@@ -2750,7 +2998,31 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     if (disposed) return
     await initControlLanes()
     if (disposed) return
+    await refreshControl()
+    const startupCursor = (await control?.load())?.cursor
+    if (
+      control != null &&
+      startupCursor != null &&
+      startupCursor.epoch !== (await mls?.readEpoch())
+    ) {
+      await applyResolved(control, { cursor: null }, newPublishID())
+      durableCursor = null
+    }
+    // Saved acceptances settle before the walker can meet our own unmerged commit.
+    await runSerial(async () => {
+      if (disposed) return
+      await settleRejoinPublication()
+      await settleOperations()
+      if (disposed || locallyRemoved || anchorRecoveryPending) return
+      const ledgerReady = await ensureLedger(Date.now() + recoveryTimeoutMs)
+      if (disposed) return
+      if (ledgerReady && mls != null) await finalizeBootstrap(mls)
+      if (disposed) return
+      await pullCommits()
+    }).catch(() => {})
+    if (disposed || locallyRemoved) return
     await buildEpoch()
+    epochNeedsBuild = anchorPending != null
     if (disposed) return
     if (anchorRecoveryPending) return
     // The seed pull precedes the app listeners. Read once more after registration to close
@@ -2778,11 +3050,15 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   // The seed pull runs inside init, where the crash victim whose operation was lost meets its own
   // un-merged commit. Its heal waits for init to finish, since every lane operation (`recover()`
   // included) waits on `ready`.
-  void settled.then(() => {
-    logDelivery?.trigger()
-    scheduleOperations()
-    void healIfRequested()
-  })
+  void ready.then(
+    () => {
+      // Deliver durable Welcome obligations here, including terminal groups.
+      logDelivery?.trigger()
+      scheduleOperations()
+      if (!locallyRemoved) void healIfRequested()
+    },
+    () => {},
+  )
   const withReady = async <T>(fn: () => T | Promise<T>): Promise<T> => {
     await ready
     assertLive()
@@ -2793,6 +3069,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     withReady(async () => {
       await epochSettled()
       assertLive()
+      if (locallyRemoved) throw new PeerRemovedError('Peer was removed')
       return fn()
     })
   /** {@link withEpoch}'s wait, abandoned when `signal` aborts. */
@@ -2874,6 +3151,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     enqueue,
     outcomes,
     ack,
+    abandon,
     commit,
     replay,
     recover,
@@ -2889,6 +3167,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       // resync interleaves with an inbound-commit rebuild and runs two teardown/build cycles over
       // one set of runtimes. Safe to wrap only because `rebuildEpoch` takes no lock itself and
       // this is a top-level entry — `runSerial` is not reentrant.
+      if (locallyRemoved) throw new PeerRemovedError('Peer was removed')
       await runSerial(() => rebuildEpoch())
       assertLive()
     },
