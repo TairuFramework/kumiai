@@ -52,6 +52,13 @@ Ordinary state writes retain lineage; only authorised recovery/Welcome replaceme
 State/control/coordinated-outbox/anchor factories require a host at-rest codec with group/record AAD. The host owns all at-rest keys and their lifecycle.
 Kumiai never generates or stores those keys. Phase 2 memory doubles inject a deterministic test codec; conformance inspects raw bytes and rejects wrong AAD.
 
+**Spec P r11 amendments (r11 decision), 2026-10-09.** Unpublished handshake builds have a per-epoch budget of 64, below the configured receiver window of 1000.
+Compare the prospective reserved generation against the highest hub-confirmed own handshake generation, or 0 at epoch start. New epochs reset the budget.
+Over-budget builds fail before building/reserving with terminal `HandshakeBudgetExhaustedError`, surfaced through typed host failure and durable rejected `errorName`.
+Recovery uses existing P2a device readmission: fresh leaf and handshake chain. No automatic rebuild or rotation re-enqueue follows exhaustion.
+Conformance doubles enforce the same forward window as real ts-mls. Shared fixtures expose physical-record mutation/swaps and a transaction-bound side-row writer.
+Memory fixtures bind these in phase 2; phase-3 providers bind raw tables and transaction stores. Commit/rollback/late-fault cases read both outbox and side row.
+
 - `@kumiai/mls` has signed-ledger roles (`roster.ts`: `admin | member`, only admins grant,
   zero-admin entries dropped). Roles persist after the subject's removal. Authority resolves through
   `controller ?? device` for registered devices (`registry.ts`); admission checks the added device's
@@ -135,11 +142,11 @@ tests/e2e  (new, private) DeviceDriver, hub fixture, scenarios
 | Package | Change |
 |---|---|
 | `mls` | Spec P phase 2: version-2 lossless pending-proposal sender codec, configurable retention propagated through every constructor/recovery, non-mutating `commitKeyRotation` and private control builders exposing consumed handshake generations (r10 decision). Group-model changes from Spec I: bound creator in an unanchored group, Welcome admission for co-devices, role bootstrap/migration, revocation as ordered ledger evidence in unanchored groups, structured policy errors. |
-| `rpc` | Spec P phase 2: opened epoch on pending records and every inbound application handler context (with supporting broadcast metadata); app attempt IDs, client `{sequenceID}` result and proof-time `remove(seq, outcome?)`; strict `decodeAppEntry`. Landed P2a `ControlStore` owns control/cursor; no CommitJournal. |
+| `rpc` | Spec P phase 2: opened epoch on pending records and every inbound application handler context (with supporting broadcast metadata); app attempt IDs, client `{sequenceID}` result and proof-time `remove(seq, outcome?)`; strict `decodeAppEntry`. Landed P2a `ControlStore` owns control/cursor; no CommitJournal. Canonical HandshakeBudgetExhaustedError, built handshakeGeneration and terminal rejected errorName identify budget exhaustion (r11 decision). |
 | `hub-client` | Phase 2 reconnecting HTTP hub, scoped/buffered views, ack backoff and discovery fetch. Preserve retention on reconnect/retry. Buffer injects inspectEpoch/currentEpoch/onEpochChanged; no MLS/registry import. Automatic `/info` integration remains BLOCKED (Risks). |
-| `mls-rpc` | Phase 2 registry over memory `GroupStateStore`: asynchronous load/validated access, staged CAS, identity/lineage, confirmed lower-epoch recovery with separate tombstone floor, application lease/deferred burn and durable handshake reservations. Every installed epoch appends its authenticator; recovery/candidate/seed guard and lifetime tombstones preserve the spent set (r10 decision). Registry owns joinRef clearing and durable pending saves/ambiguity; HandleAccess gains seal/receive/buildControl/lineage and recovery mode. `MLSEncryptor` extraction uses committed membership snapshots and numeric receive counts (r8 decision). P2a recovery candidates encode complete version-2 sourceState; credential/token serialisation uses the lossless MLS codec (r8 decision). Hozon storage/projections remain adapters. |
+| `mls-rpc` | Phase 2 registry over memory `GroupStateStore`: asynchronous load/validated access, staged CAS, identity/lineage, confirmed lower-epoch recovery with separate tombstone floor, application lease/deferred burn and durable handshake reservations capped by unpublished budget 64 (r11 decision). Every installed epoch appends its authenticator; recovery/candidate/seed guard and lifetime tombstones preserve the spent set (r10 decision). Registry owns joinRef clearing and durable pending saves/ambiguity; HandleAccess gains seal/receive/buildControl/lineage and recovery mode. `MLSEncryptor` extraction uses committed membership snapshots and numeric receive counts (r8 decision). P2a recovery candidates encode complete version-2 sourceState; credential/token serialisation uses the lossless MLS codec (r8 decision). Hozon storage/projections remain adapters. |
 | `mls-hub` | Landed P2a openWelcome/consume/receipt are prerequisites. Phase 2 publishes the complete nested openWelcome union (authenticator in joined.group.state.keySchedule), single-options judgeWelcomeAdmission and structural mirrors (r10 decision). Spent-first admission guards joined state/authenticator/joinRef save before consume; genuine readmission atomically resets control/anchor (Spec P D3). No Welcome digest. |
-| `rpc-store` (new) | Phase 3 Hozon impls of `GroupStateStore`, `ControlStore`, `AnchorStore`, `AppCursorStore`, `AppOutbox` on sqlite, postgres and expo. MLS state, `AdoptionWrite` control changes and the anchor landed mark share one adoption transaction (Spec P2a). All writers share one root mutation gate and backend completion barrier, including independent anchor/cursor saves (r8 decision). Explicit factories and outcome-aware Hozon hook settlement are prerequisites (r8 decision). State/control/coordinated-outbox/anchor factories require host `atRest`; raw-byte/wrong-AAD cases cover anchor.secret (r10 decision). Passes `rpc-conformance`, extended per Spec P r10, including forbidden lineage changes. |
+| `rpc-store` (new) | Phase 3 Hozon impls of `GroupStateStore`, `ControlStore`, `AnchorStore`, `AppCursorStore`, `AppOutbox` on sqlite, postgres and expo. MLS state, `AdoptionWrite` control changes and the anchor landed mark share one adoption transaction (Spec P2a). All writers share one root mutation gate and backend completion barrier, including independent anchor/cursor saves (r8 decision). Explicit factories and outcome-aware Hozon hook settlement are prerequisites (r8 decision). State/control/coordinated-outbox/anchor factories require host `atRest`; raw-byte/wrong-AAD cases cover anchor.secret (r10 decision). Passes `rpc-conformance`, extended per Spec P r11, including forbidden lineage changes, physical corruption/swaps and atomic side-row visibility (r11 decision). |
 | `client` (new) | Phase 4 Device: identity/group verbs, one peer per group, inventory/pending/control restore, source-scoped Welcome consume sweep, rotation scheduling and stop/drain deletion; key-package provisioning and wake. |
 | `hub-server` or a new `hub-authz` | The membership `authorize` policy and its state ingestion (Spec H decides placement). |
 | `messaging` (new) | Phase 5 protocols, Messenger, MessageStore memory/Hozon impls; consumes phase-2 opened epoch and proof outcomes. Hooks atomically record acceptance/publication/failure with outbox writes. |
@@ -293,6 +300,7 @@ Identity details are settled in Spec I; this section fixes the shape.
 - **Rotation/deletion.** Client schedules one rotation per epoch identity outside the registry gate.
   Private control builds expose and durably reserve their handshake generation before HostBuilt returns (r10 decision).
   A poison-head mismatch rebuild merges reserved source handshake HWM and uses a higher generation, including after restart.
+  Enforce the unpublished handshake budget of 64 before building/reserving (r11 decision). Terminal exhaustion stops scheduling and requires fresh-leaf device readmission.
   New sends reject rotation-required; accepted entries wait. Deletion blocks owner creation,
   disposes/drains the peer, then takes their shared root mutation gate before the atomic tombstone/status
   transaction (Spec P D3). Drain includes frozen proof removals and every adapter's ambiguity resolver (r8 decision).
@@ -497,6 +505,7 @@ existing testcontainers setup), a capturing `WakeSender`, a mock Expo push endpo
    - install, delete and reconstruct a group, then replay its Welcome: refused, tombstone and spent epoch set preserved (r10 decision);
      both replay cases cover ordinary and last-resort sources, including replay before ordinary consume;
    - poison/refused frame advances hub head without MLS advancement; rotation rebuilds use strictly increasing handshake generations, including after restart (r10 decision);
+   - post-reservation crashes burn generations 0–63; peer decrypts the next commit at 64; separate unpublished exhaustion refuses build 65 without reservation, then fresh-leaf readmission restores builds (r11 decision);
    - matching-CAS ordinary state write increases lineage with unchanged identity, or any write decreases lineage: refused on doubles and real stores (r10 decision);
    - raw storage exposes no anchor.secret; wrong-AAD anchor opens and ciphertext swaps reject (r10 decision);
    - a truncated controller log offered for a known controller: refused;
@@ -539,7 +548,7 @@ existing testcontainers setup), a capturing `WakeSender`, a mock Expo push endpo
 
 Each phase gets its own plan and branch. The e2e suite grows with each phase.
 
-0. **Spec P: transactional persistence (draft r10).** Phase-2 contracts, identity-aware state CAS,
+0. **Spec P: transactional persistence (draft r11).** Phase-2 contracts, identity-aware state CAS,
    atomic pending/adoption/Welcome reset, lossless codec prerequisite, lease/rotation, opened-epoch
    metadata, identity-bound app proof and coordinated outbox contracts. Memory doubles model unfinished COMMIT, completion barriers and retained hook queues.
    Recovery sourceState encoding, async access, tunnel runtime and shared factory signatures belong to phase 2 (r8 decision).
@@ -547,6 +556,8 @@ Each phase gets its own plan and branch. The e2e suite grows with each phase.
    Spent-epoch admission amends P2a D4; every installed epoch appends its authenticator, retained across recovery/deletion (r10 decision).
    Complete Welcome signatures/mirrors, durable handshake reservations and forbidden lineage-change cases are binding (r10 decision).
    Host-injected at-rest codec, raw-byte checks and wrong-AAD rejection apply to state/control/outbox/anchor stores (r10 decision).
+   Handshake budget 64, terminal typed readmission state and real/double receiver-window parity are binding (r11 decision).
+   Shared fixtures specify physical mutation/swaps and transactional side-row writes/inspection (r11 decision).
 1. **Lift audit (probe).** Verdicts copied above. G1 codec prerequisite is specified in P r6;
    automatic `/info` integration remains separately BLOCKED.
 2. **rpc/mls/mls-rpc/mls-hub/rpc-conformance/hub-client port and runtime additions on memory doubles.**
@@ -558,11 +569,13 @@ Each phase gets its own plan and branch. The e2e suite grows with each phase.
    real MLS, invite/join, send/epoch/proof, rotation/resume and memory-store runtime reconstruction.
    Required deterministic test codec, including anchor raw-byte/wrong-AAD checks; exact/alternate Welcome and spent-candidate refusal after recovery/deletion (r10 decision).
    Poison-head mismatch rotation rebuild/restart uses strictly increasing handshake generations; doubles reject unauthorised lineage changes (r10 decision).
+   Handshake budget boundary/exhaustion and forward-window parity run on real MLS and doubles; memory side-row/corruption fixtures cover commit/rollback/late faults (r11 decision).
 3. **rpc-store.** Hozon state/control/anchor/pending/cursor/outbox implementations, coordinated hooks,
    tombstone deletion, root-provider discriminator and outcome-aware hook prerequisites (r8 decision). Provider conformance on sqlite,
    postgres and expo (node shim or explicit BLOCKED reason); state/control/anchor atomicity and
    commit ambiguity verified here. e2e devices on sqlite; restart restores groups.
    State/control/coordinated-outbox/anchor factories require the host codec; provider encryption alone does not satisfy the contract (r10 decision).
+   Provider fixtures bind physical mutation/swaps to raw tables and writeSideRow to the supplied transaction; read both rows after commit/rollback/late faults (r11 decision).
 4. **Spec I and Spec H, then mls group changes, client and hub policy/server changes.**
    Gated on published kokuin stores. Client wires ownership, inventory/pending/control restore,
    Welcome consume sweep, rotation scheduling and deletion draining. e2e scenarios 2, 3, 4, 6 and

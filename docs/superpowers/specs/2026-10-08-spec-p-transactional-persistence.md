@@ -1,12 +1,12 @@
 # Spec P: transactional persistence — design
 
 Date: 2026-10-08
-Status: draft r10
+Status: draft r11
 Parent: [client host, messaging protocol and multi-device e2e](2026-10-08-client-messaging-e2e-design.md)
 (phase 0)
 
 Spec P fixes the contracts phase 2 implements on memory doubles. P2a crash-safe control has
-landed on `feat/spec-p-phase-2` and is binding, with the explicit r10 D4 admission amendment below.
+landed on `feat/spec-p-phase-2` and is binding, with the r10 D4 admission and r11 terminal-budget amendments below.
 This spec adds no second control journal.
 
 ## Scope and handoff
@@ -116,6 +116,9 @@ prefixed with `../`, `node_modules/` or `tests/`. Destinations in Decisions are 
   ts-mls discards the advanced protection tree (`node_modules/ts-mls/dist/src/createCommit.js:77`); commits consume the handshake chain
   (`node_modules/ts-mls/dist/src/secretTree.js:237`). Head mismatch can rebuild without changing MLS identity (`rpc/src/control/operations.ts:194`).
   Application reservations alone do not protect that rebuild.
+- **Handshake forward-window gap (r11 decision), checked 2026-10-09.** Unbounded unpublished reservations can strand receivers at generation zero.
+  ts-mls rejects jumps exceeding `maximumForwardRatchetSteps` (`node_modules/ts-mls/dist/src/secretTree.js:104`).
+  D3's required receiver configuration is 1000 steps. Today's context omits that override (`mls/src/group-context.ts:59`), leaving the default 200.
 - Default retention is 10 skipped keys/200 forward steps (`node_modules/ts-mls/dist/src/keyRetentionConfig.js:2`).
   Context construction omits `clientConfig` (`mls/src/group-context.ts:59`); derivation makes a fresh
   default context (`mls/src/group-handle.ts:1758`). Recovery restore also omits retention
@@ -689,6 +692,8 @@ export type SendAdmission =
 const RESERVE = 16
 const RENEW_BELOW = 4
 const ROTATE_AT = 500
+// rpc export, shared by real access and doubles (r11 decision).
+export const HANDSHAKE_BURN_BUDGET = 64
 ```
 
 - Context overlays supplied retention on ts-mls defaults through `clientConfig.keyRetentionConfig`
@@ -698,6 +703,11 @@ const ROTATE_AT = 500
   both to 1000. Ordinary mls callers keep defaults; historical epoch retention remains unchanged.
   The third parameter is the options object above, not a bare retention config (r7 decision).
   Its fields are ts-mls's existing names (`node_modules/ts-mls/dist/src/keyRetentionConfig.d.ts:3`).
+- **Receiver window (r11 decision).** The handshake budget relies on `maximumForwardRatchetSteps: 1000` in the host example above.
+  Configure every receiver through `createMlsContext`'s `clientConfig.keyRetentionConfig` overlay, including peer/conformance doubles.
+  The configuration path is `node_modules/ts-mls/dist/src/mlsContext.d.ts:9` and `node_modules/ts-mls/dist/src/clientConfig.d.ts:7`.
+  The real receiver enforces it at `node_modules/ts-mls/dist/src/secretTree.js:104`.
+  Require `HANDSHAKE_BURN_BUDGET < maximumForwardRatchetSteps`. Doubles enforce the same configured forward window as real ts-mls, never a more permissive one.
 - Carry configuration through create, restore, Welcome, external join, clone and `deriveGroup`, and
   both fresh and deserialised recovery (`mls-rpc/src/recovery.ts:166`, `mls-rpc/src/mls.ts:471`).
 - **Lease.** Read the own application chain's next generation `g` (unexpanded means 0).
@@ -705,6 +715,12 @@ const ROTATE_AT = 500
   `min(500, max(g, senderHWM) + 16)` with state unchanged. At the capped final lease, one to three
   remaining generations may be used without another reservation. Seal only below 500.
 - **Handshake reservation (r10 decision).** `buildControl` serialises every private rotation/control commit build under the same owner gate.
+  **Unpublished budget (r11 decision).** Let `reservedHandshakeGeneration = max(own handshake next generation, handshakeHWM)`.
+  Let `publishedHandshakeGeneration` be the highest handshake generation known published by this device in the current epoch identity, or 0 at epoch start.
+  Only a hub-confirmed own commit establishes publication. Use P2a's durable accepted build, matched by source epoch/authenticator, never speculative bytes or head movement.
+  D5 carries its generation through `HostBuilt`/`BuiltCommit`. P2a settles accepted work before fresh builds (`rpc/src/peer.ts:2196`), so fresh-epoch builds start with baseline 0.
+  Before staging or invoking the builder, require `reservedHandshakeGeneration - publishedHandshakeGeneration <= HANDSHAKE_BURN_BUDGET`.
+  A build exceeding this budget throws canonical `HandshakeBudgetExhaustedError`, with no builder invocation, reservation or ciphertext.
   Stage a source clone at `max(own handshake next generation, handshakeHWM)` before invoking the non-mutating builder.
   Ratchet only the handshake chain, discarding skipped send keys. No application empty-frame burn substitutes for this advance.
   The builder reports the exact consumed `handshakeGeneration`; require it to match the staged source generation.
@@ -714,7 +730,12 @@ const ROTATE_AT = 500
   Install the committed source metadata, not the speculative next-epoch candidate. The later adoption alone installs/spends that candidate epoch.
   After failure, head mismatch or restart, merge the reserved handshake HWM into the current source before any rebuild.
   Never reset it while identity/lineage stays the same. Exact-byte P2a replay of an already-built operation consumes no new generation.
-  A rejected/oversized/unpublished build after reservation still burns its generation. The application 500 bound does not cap control-handshake reservations.
+  A rejected/oversized/unpublished build after reservation still burns its generation. This separate budget caps handshake burns; the application 500 bound remains independent (r11 decision).
+  `handshakeHWM` is exclusive; the budget compares the prospective consumed generation, not that ceiling.
+  With baseline 0, generations 0–64 are allowed; the next build at 65 fails before reservation (r11 decision).
+  A new epoch identity resets the budget and published baseline. Same-epoch reconstruction, failure and outcome acknowledgement never reset it.
+  Exhaustion is terminal for that operation. The host uses existing P2a device readmission: fresh leaf, fresh handshake chain and D3's atomic Welcome reset.
+  No automatic rebuild or rotation re-enqueue follows exhaustion (r11 decision). Rejected alternative: unbounded reservation; peers cannot follow.
   Simple access advances and persists source handshake progress before returning too; durable control builds require its persist callback.
   Externally authored recovery commits retain their existing framing; they consume no local member handshake generation.
 - **Deferred burn (r6 decision).** Restore always succeeds for valid lapsed, removed, suspended or
@@ -733,6 +754,7 @@ const ROTATE_AT = 500
 - Phase 2 smoke host, later `client`, enqueues one P2a `rotation` per epoch identity outside the gate.
   Build against current state; coalesce notifications, reuse an unsettled rotation after restart,
   re-check admission before building, and retry a rejected/lost rotation only while still required.
+  `HandshakeBudgetExhaustedError` stops those retries and exposes readmission-required state to the host (r11 decision).
   P2a's revoke hold remains independent and retains its existing retained-log scope.
 - The bound is per epoch identity/lineage, not epoch number. No seal reaches generation 500; lease
   burns and failed/unpublished seals count. Different-authenticator same-number recovery starts fresh.
@@ -791,7 +813,7 @@ export type WithGroupMetadata<THandler> = THandler extends (context: infer TCont
 - This changes no Enkaku wire payload schema. Migrate all adapters/doubles together, including
   integrations. Run both contract suites and repo-wide `pnpm turbo run test:types`.
 
-### D5. Commits (landed P2a prerequisite; rotation addition)
+### D5. Commits (landed P2a prerequisite; rotation and terminal-budget additions)
 
 P2a D2–D6 owns operations, exact control replay, adoption, Welcome obligations/admission, removal
 and rejoin. Its `ControlStore`, `AdoptionWrite`, consume/receipt and revoke hold are prerequisites.
@@ -827,8 +849,25 @@ P2a frames/persists `built` only after the host build returns (`rpc/src/control/
 Head mismatch returns an absent build to intent (`rpc/src/control/operations.ts:194`); the next build must use the reserved source HWM.
 Rejected alternative: public framing for member commits, which exposes commit contents to the relay.
 
+**Terminal budget plumbing (r11 decision).** Add required `handshakeGeneration: number` to rpc's `HostBuilt` and `BuiltCommit`, including conformance mirrors.
+Persist it with exact built bytes. Accepted records supply the publication baseline only for their matching source identity.
+Export canonical `HandshakeBudgetExhaustedError` from rpc and re-export it from mls-rpc:
+
+```ts
+export class HandshakeBudgetExhaustedError extends Error { override name = 'HandshakeBudgetExhaustedError' }
+// Extend only Outcome's rejected arm, retaining reason and the existing base fields.
+{ kind: 'rejected'; reason: string; errorName?: 'HandshakeBudgetExhaustedError' }
+```
+
+The error inherits `(message?: string, options?: ErrorOptions)`. The runner catches it as terminal, including explicit-name recognition.
+Settle by deleting the intent and persisting the rejected outcome with `errorName: 'HandshakeBudgetExhaustedError'` before emitting.
+Today's runner only classifies two build errors (`rpc/src/control/operations.ts:147`); add this classification, rather than letting its retry loop rebuild.
+Direct `buildControl` and `peer.commit` callers receive the canonical typed error. Enqueue/outcomes/events retain the identifiable `errorName`, including after reopen.
+Other rejected outcomes retain their existing `OperationOutcomeError` behaviour (`rpc/src/peer.ts:2510`, `rpc/src/errors.ts:34`).
+The host stops automatic scheduling and requests device readmission. Saved built operations still replay exact bytes without another reservation.
+
 The host converts this result to P2a `HostBuilt`: `commit = commitMessage`, `bodies = []`,
-`welcome = null`, journal is the serialised candidate, and source identity uses D3 lineage.
+`welcome = null`, `handshakeGeneration = result.handshakeGeneration`, journal is the serialised candidate, and source identity uses D3 lineage (r11 decision).
 Use operation `{id, kind: 'rotation', revokes: false, body: new Uint8Array()}`.
 A now-unneeded rotation is `OperationRejectedError`, settled by P2a. Rotation leaves the app anchor
 unchanged unless another roster/forced-recovery change occurs (`rpc/src/peer.ts:440`).
@@ -1051,7 +1090,7 @@ Shared memory adapters read/write MemoryDatabase rows exclusively; no private co
 Retain the existing no-argument `createMemoryControlStore<Position>(): MemoryControlStore<Position>` as a legacy overload
 (`rpc-conformance/src/memory-control-store.ts:68`). It keeps standalone tests compatible and is excluded from shared persistence fixtures.
 The `{db, groupID, atRest}` overload returns only the ControlStore port; state and anchor use their separate shared factories (r9 decision).
-No P2a port signature or no-argument call changes. Hozon factories refuse non-root scope with `NonRootProviderError` as D2 specifies.
+The legacy no-argument call stays unchanged. D5 adds r11 control metadata. Hozon factories refuse non-root scope with `NonRootProviderError` as D2 specifies.
 Use row namespaces `groupOwner`, `state`, `control`, `anchor`, `pending`, `appCursor`, `outbox` and `outboxMeta`.
 Owner/state/control/anchor/meta keys are groupID; compound keys use JSON arrays `[groupID, id/topicID/seq]`.
 Host side rows use a separate namespace. Future memory MessageStore uses that same database.
@@ -1088,9 +1127,11 @@ applies. Hozon does not configure transaction isolation (`../hozon/packages/db/s
 1. MLS version-2 codec, P2a recovery serializer adaptation and source-tree/rejoin regression. Retention propagation and rotation/control builders exposing handshake generations (r10 decision).
 2. D3 port, spent-epoch admission, codec-injected shared state/control/outbox/anchor factories, shared cursor, outcome-aware hooks, async registry/access and lineage plumbing.
    Reuse P2a co-commit. Include spent-authenticator plumbing, durable handshake reservations and the P2a D4 admission amendment (r10 decision).
+   Include the 64-generation handshake budget, terminal error/outcome plumbing and receiver-window parity (r11 decision).
 3. D4 pending/handler migration, including optional broadcast metadata and directed stamped headers.
 4. D6 entry/publication/removal shapes, prepared-byte retries, terminal proof settlement and memory-hub dedup parity.
 5. D7 rpc decoder/error exports and coordinated memory contract fixtures; no production rpc-store adapter.
+   Shared fixtures expose physical-record mutation/swaps and transaction-bound side-row writes (r11 decision).
 6. MLSEncryptor extraction with committed membership snapshots/numeric receive counts. Hub-client lifts keep epoch inspection injected. Preserve subscription retention
    on first subscribe, reconnect and same-connection retry. The source drops options on replay
    (`../kubun/packages/plugin-p2p/src/hub/hub-like.ts:529`, `../kubun/packages/plugin-p2p/src/hub/hub-like.ts:608`).
@@ -1099,6 +1140,7 @@ applies. Hozon does not configure transaction isolation (`../hozon/packages/db/s
    Include non-admin rotation/resume and state/pending replay by rebuilding runtime over stored rows.
    Include A3 install/advance, confirmed lower recovery to B2, exact/alternate A3 refusal, and deletion/reopen/refused Welcome replay (r10 decision).
    Poison-head mismatch rotation rebuilds use strictly increasing handshake generations, including after reconstruction (r10 decision).
+   Exhaust the handshake budget deterministically; verify peer decryption at the boundary and typed refusal beyond it (r11 decision).
    This driver is a test host over GroupPeer/registry; it depends on neither Device nor Messenger.
 
 Phase 2 ships no `client`, `messaging`, MessageStore schema, Hozon adapter or child-process driver.
@@ -1170,7 +1212,7 @@ is existing coverage (`tests/integration/test/welcome-after-crash.test.ts:179`),
 ## Conformance additions
 
 Phase 2 fixtures provide reopen (same committed rows, new runtime), second-write failure,
-commit-then-reject, unfinished-commit faults, clock control and opaque side-row inspection. Generation tests use real MLS.
+commit-then-reject, unfinished-commit faults, clock control, physical-record mutation/swaps and transactional side-row writes/inspection (r11 decision). Generation tests use real MLS.
 Phase 3 supplies those fixtures on every provider, plus a separate-connection postgres visibility
 barrier. Expo uses a node shim or records BLOCKED with its reason. Phase 6 supplies the kill harness.
 
@@ -1178,7 +1220,12 @@ barrier. Expo uses a node shim or records BLOCKED with its reason. Phase 6 suppl
 
 ```ts
 export type RawStoredRecord = {
-  groupID: string; namespace: string; recordID: string; bytes: Uint8Array
+  groupID: string; namespace: string; recordID: string; key: string; bytes: Uint8Array // physical key, r11 decision
+}
+export type StoredRecordMutations = { // test-only physical operations (r11 decision)
+  mutateStoredRecord(namespace: string, key: string,
+    mutate: (bytes: Uint8Array) => Uint8Array): Promise<void>
+  swapStoredRecords(namespace: string, keyA: string, keyB: string): Promise<void>
 }
 export type PersistencePorts = {
   groupID: string
@@ -1195,12 +1242,13 @@ export type PersistenceFaults = {
   commitThenReject(): void
   rejectCommitPending(): PendingCommitFault // arms the next mutation
 }
-export type PersistenceFixture<TPorts> = {
+export type PersistenceFixture<TPorts> = StoredRecordMutations & {
   ports: TPorts
   reopen(): Promise<TPorts>
   faults: PersistenceFaults
   inspectRows(): Promise<MemoryStoreRows> // logical committed rows; deliberately bypasses barrier
   inspectRawBytes(): Promise<Array<RawStoredRecord>> // before codec.open; no logical decoding (r9 decision)
+  inspectSideRow(key: string): Promise<Uint8Array | null> // committed bytes; bypasses barrier (r11 decision)
   atRest: AtRestCodec                // same injected codec across reopen
   setTime(now: number): void
   advanceTime(ms: number): Promise<void>
@@ -1217,6 +1265,7 @@ export type ConformanceOutboxHooks<TTx extends ConformanceTransaction> = {
 }
 export type PersistenceConformanceParams<TPorts, TTx extends ConformanceTransaction> = {
   label: string
+  writeSideRow(tx: TTx, key: string, bytes: Uint8Array): Promise<void> // awaited inside supplied hook (r11 decision)
   createFixture(id: string, hooks?: {
     outbox?: ConformanceOutboxHooks<TTx>
     onDelete?: (tx: TTx, groupID: string) => Promise<void>
@@ -1224,7 +1273,7 @@ export type PersistenceConformanceParams<TPorts, TTx extends ConformanceTransact
 }
 // TTx is MemoryTransaction in phase 2; StoreProvider in phase 3. Both expose onCommit/onRollback.
 // Extend the existing ControlStore harness with the same completion faults.
-export type ControlStoreConformanceParams = {
+export type ControlStoreConformanceParams = StoredRecordMutations & {
   open(): Promise<ConformanceControlHost>
   reopen(): Promise<ConformanceControlHost>
   injectFailure(point: 'mid-apply' | 'mid-save'): void
@@ -1290,14 +1339,41 @@ Confirmed rollback reverses those counts. Resolver retries, disposal, reopen and
 `reopen` waits for backend/resolver/hook settlement, discards runtime state and rebuilds ports over the same rows.
 Faults/clock follow the rebuilt ports. `inspectRows` normalises provider rows for the same assertions.
 `inspectRawBytes` reads committed physical byte values, including duplicate copies, before codec opening or logical normalisation (r9 decision).
+Its `key` addresses the physical byte slot, using D7's row key for single-copy records, distinct from the AAD `recordID` (r11 decision).
+When providers duplicate a byte value, expose each physical copy with a distinct key addressing that copy.
 Scan those bytes for non-empty plaintext and distinctive spans from state, pending frames, outbox payloads, control secrets and `AnchorSlot.anchor.secret` (r10 decision).
 Logical port round-trips alone cannot pass encryption conformance. Open stored ciphertext with another group, namespace or record ID's AAD: rejection is required.
 Swap ciphertext between physical record identities and assert adapter reads reject too. Reopen with the same host codec preserves logical state and payloads.
+
+**Physical mutation binding (r11 decision).** `mutateStoredRecord` replaces only the addressed committed byte value, using defensive input/output copies.
+`swapStoredRecords` atomically exchanges the two addressed byte values. Both preserve keys, unencrypted metadata and mutation markers.
+Missing namespace/key rejects without changes; a throwing mutation callback leaves bytes unchanged. Neither operation calls the codec or logical adapters.
+Phase 2 binds these operations to shared MemoryDatabase records. Phase 3 binds them to each provider's raw tables/columns.
+
+Bindings remain valid after reopen. Run mutations only with backend/resolvers idle; reopen before adapter reads to discard cached plaintext.
+Each encryption fixture supplies two valid physical record identities for its swap cases, seeded through normal adapters in the same database.
+Use mutation for byte corruption and cross-namespace substitution; use swaps for same-namespace record/group identity substitutions.
+`testGroupStateStoreConformance` uses both operations for state/pending encryption cases. ControlStore's harness uses both for at-rest control.
+`testCoordinatedOutboxConformance` and `testAnchorStoreConformance` use both for their at-rest cases, including anchor adoption copies.
+
+**Side-row binding (r11 decision).** Suites call `params.writeSideRow(tx, key, bytes)` inside coordinated-outbox and deletion hooks, awaiting the write before returning.
+The writer upserts copied opaque bytes in namespace `sideRows`, on that exact supplied transaction.
+Phase 2 writes `tx.rows.sideRows`. Phase 3 uses a test side-row store obtained from `tx.getStore`, sharing its raw transaction.
+It never opens a root transaction or publishes a separate map. `inspectRows` includes committed `sideRows`; `inspectSideRow` returns copied bytes or null.
+Inspection never resolves ambiguity. Phase-2 snapshots and the independent postgres reader expose prior committed rows while an injected COMMIT remains unfinished.
+
+`testCoordinatedOutboxConformance` uses the writer in rollback/visibility, ambiguous mutations, negative-read/late-completion and shared-deletion-gate cases.
+After known commit, read outbox and side row and assert both new values. After rollback, both retain their exact prior values/absence.
+During an unfinished COMMIT, both remain prior despite callback completion. After late commit/rollback settlement, every provider's fixture reads both and verifies atomic visibility.
+Cover put/replacement/remove/clear/delete using a side-row marker per hook, alongside the existing hook-count assertions.
+Postgres additionally reads both through the independent connection before commit. Hook counts alone cannot pass these visibility cases.
+
 `after-first-write` fails between coupled logical writes; owner-row locking statements do not count.
 Suites close fixtures in finally blocks. Conformance type mirrors retain every normative field/signature above;
 they follow the existing structural mirror approach (`rpc-conformance/src/control-store.ts:168`).
 Canonical port names in this block denote those structural `Conformance*` mirrors, not imports from mls-rpc.
 The state-record mirror includes `spentEpochAuthenticators` and `handshakeHWM`; the Welcome mirrors above preserve the exact nested union and options shape (r10 decision).
+Built/outcome mirrors preserve `handshakeGeneration` and rejected `errorName`; fixture mirrors retain physical mutations and the side-row writer (r11 decision).
 Ordinary receipts can short-circuit open (`mls-hub/src/join.ts:50`). Test spent admission/seed directly and wire replay before consume.
 After consume, assert receipt-only handling never installs state.
 
@@ -1314,7 +1390,7 @@ After consume, assert receipt-only handling never installs state.
 | | deleted-group Welcome replay, r10 | install, stop/drain, settle control, delete, reopen: spent authenticator remains in tombstone; exact/alternate replay refused without resurrection; spent check precedes floor; unspent Welcome above floor joins and retains prior set |
 | | spent epoch atomicity/growth, r10 | genesis/Welcome/own commit/received commit/recovery each append installed authenticator with state; failed coupled save spends nothing; ambiguous commit resolves both together; ordinary progress/open/clearJoinRef/delete retain prior set; v2 record codec round-trips unique sorted byte arrays across reopen/tombstones |
 | | recovery candidate replay, r10 | confirmed candidate retry across ambiguous commit resolves writeID and installs once; any newly attempted spent candidate, including same-current identity or current-source relabelling, refused before epoch comparison; both HWMs/progress unchanged; adopted replay never reinstalls candidate |
-| | at-rest state/pending, r9 | raw stored bytes contain no state/pending plaintext or distinctive spans; logical reopen succeeds with host codec; wrong-AAD open and cross-record ciphertext swaps reject |
+| | at-rest state/pending, r9/r11 | raw stored bytes contain no state/pending plaintext or distinctive spans; logical reopen succeeds with host codec; mutateStoredRecord corruption/cross-namespace substitution and swapStoredRecords cross-record/group substitution reject on adapter reads after reopen |
 | | ambiguous saves | commit-then-reject for insert/state/open/Welcome/joinRef-clear/delete exposes exact writeID; registry resolves committed/uncommitted before another writer |
 | | negative read, late completion | unfinished insert/state/open/Welcome/delete shows previous/absent rows; barrier and next writer stay pending; late commit resolves/install once, rollback alone rejects unchanged; initially absent owner covered |
 | | adoption co-commit | reuse P2a case (`rpc-conformance/src/control-store.ts:321`), now against D3 stores/providers; state/control/anchor/marker all commit or roll back |
@@ -1327,19 +1403,19 @@ After consume, assert receipt-only handling never installs state.
 | | independent save versus lifecycle | absent/existing anchor and per-topic cursor save receives ambiguous rejection; dispose/drain/delete and Welcome replacement stay pending; late commit/rollback settles first; delete removes anchor/cursor rows, Welcome clears anchor and new-topic cursor stays null; reopen never installs an old anchor into new admission |
 | | unsettled delete | operations, rejoin, outcomes and Welcomes each refuse; reuse predicate/host tests (`rpc/test/control-store.test.ts:253`) |
 | P2a ControlStore, 2 / 3 | negative marker barrier | state-free apply rejects before backend completion; lastMutation stays pending despite raw previous marker; late commit resolves once, rollback alone returns previous marker; deletion cannot overtake |
-| | at-rest control, r9 | raw snapshot contains no operation body/journal or rejoin candidate/requestKey plaintext; same-codec reopen round-trips; wrong AAD rejects |
+| | at-rest control, r9/r11 | raw snapshot contains no operation body/journal or rejoin candidate/requestKey plaintext; same-codec reopen round-trips; mutateStoredRecord corruption/substitution and swapStoredRecords reject on adapter reads after reopen |
 | `testAppOutboxConformance`, 2 / 3 | attempt/outcome | all attempt fields round-trip; outcome reaches remove; unknown removal remains harmless |
-| `testCoordinatedOutboxConformance`, 2 memory / 3 Hozon | rollback/visibility | hook failure rolls back both rows; commit/rollback hooks select exactly one queue; commit hooks precede resolution; postgres independent reader sees neither row before commit |
-| | at-rest outbox, r9 | raw stored bytes contain no payload plaintext or distinctive spans; hooks/list still see logical payloads; same-codec reopen succeeds; wrong-AAD open and record swaps reject |
+| `testCoordinatedOutboxConformance`, 2 memory / 3 Hozon | rollback/visibility, r11 | hooks await writeSideRow on supplied tx; outbox plus inspectSideRow show both new values after commit, exact prior values/absence after hook failure/rollback; commit/rollback hooks select exactly one queue before resolution; postgres independent reader sees neither change before commit |
+| | at-rest outbox, r9/r11 | raw stored bytes contain no payload plaintext or distinctive spans; hooks/list still see logical payloads; same-codec reopen succeeds; mutateStoredRecord corruption/substitution and swapStoredRecords reject on adapter reads after reopen |
 | | ambiguous mutations | put, same-data replacement, remove, clear and group delete commit-then-reject resolve iff committed; each registered commit hook fires once before success, rollback hooks never; failed barrier/status read leaves hooks/caller/later writer pending |
-| | negative read, late completion | put (initially absent meta), replacement, remove, clear and delete reject root before backend settles; raw negative read runs neither hook queue nor releases gate; late commit runs commit hooks once, rollback runs rollback hooks once and rejects unchanged |
+| | negative read, late completion, r11 | put (initially absent meta), replacement, remove, clear and delete hooks await writeSideRow; pending COMMIT leaves outbox/side row prior, queues zero and gate held; late commit exposes both changes and commit hooks once; late rollback keeps both prior and runs rollback hooks once |
 | | overlap/removal/replacement | B waits through A's readback; repeated remove skips hook; changed protocol/prc/data rejects unchanged |
 | | shared deletion gate | construct state/outbox independently over one root; delete waits through pending put/barrier, then atomically clears rows/meta; no later recreation |
 | | root-only constructor, 3 | transaction-scoped provider refused |
 | `testAppCursorStoreConformance`, 2 / 3 | durable per topic | reopen saved position; other topics remain null |
 | | ambiguous save | commit-then-reject resolves once; unfinished save remains pending through barrier/read failures; late rollback rejects unchanged |
 | `testAnchorStoreConformance`, 2 / 3 | ambiguous save/lifecycle | first insert and replacement hold save/drain/gate through pending COMMIT; late commit/rollback resolves before deletion/readmission; no stale slot/secret survives cleanup |
-| | at-rest anchor, r10 | inspect all physical copies after save and adoption landed co-write: no AnchorSlot.anchor.secret plaintext or distinctive spans; same-codec reopen round-trips full slot; wrong group/namespace/record AAD and swapped ciphertext reject |
+| | at-rest anchor, r10/r11 | inspect all physical copies after save and adoption landed co-write: no AnchorSlot.anchor.secret plaintext or distinctive spans; same-codec reopen round-trips full slot; mutateStoredRecord corruption/substitution and swapStoredRecords reject on adapter reads after reopen |
 | pending/group crypto, 2 | opened epoch | extend record and narrowed unwrap types together; stored epoch equals authenticated unwrap epoch |
 | rpc handler tests, 2 | every D4 path | durable replay, retained drain, live log/ephemeral, anycast request and directed kinds expose original epoch; spoofed wire/header epoch cannot win |
 | registry real-MLS tests, 2 | lease/restart | reserve, reconstruct, seal at or above HWM; no generation repeats; failed reservations prevent sealing |
@@ -1347,6 +1423,9 @@ After consume, assert receipt-only handling never installs state.
 | | blocked restore | lapsed, removed, suspended and pending-proposal restores keep control/receive usable; deferred burn completes before an eligible same-identity seal |
 | | rotation | 500 admission trigger, rejected new acceptance, held accepted queue; non-admin rotation resumes; restarts/unpublished seals obey the bound |
 | | handshake reservation/rebuild, r10 | poison/refused frame advances hub head without MLS advancement; rotation publish head-mismatches, absence returns to intent; rebuilds have strictly increasing authenticated handshake generations, also across restart; failed/unfinished reservation exposes no build/publication; exact saved replay uses identical bytes |
+| | handshake budget boundary, r11 | baseline 0: post-reservation crashes/rebuilds burn generations 0–63, including reconstruction; next commit at 64 publishes and an untouched peer decrypts/adopts; new epoch resets budget |
+| | handshake budget exhaustion, r11 | separate unpublished run reserves generations 0–64; attempted 65 throws HandshakeBudgetExhaustedError before builder/save, with unchanged HWM/version/source bytes and no publication; terminal rejected errorName survives reopen and peer.commit rejects typed error; no automatic rebuild/re-enqueue; fresh-leaf readmission restores builds |
+| | receiver-window parity, r11 | real ts-mls and every peer double use configured 1000-step window; direct ratchet/receive test accepts the boundary and rejects a jump above 1000; doubles never accept a jump real ts-mls rejects |
 | | overtaking/derivation | raw MLS context tests (outside the registry 500 guard) retain an earlier key after generation 600; derive invite/remove/rotation and fresh/restored recovery retain 1000/1000 |
 | | ordinary adoption progress | intervening seal/open remains spent after ordinary replacement; same-identity state save merges both chains; extend P2a historical carry test (`mls/test/carry-receive-progress.test.ts:80`); recovery/Welcome candidates still refuse spent identity |
 | | tombstone Welcome floor | reuse comparison (`mls-hub/test/admission.test.ts:10`); add delete/save/rejoin integration |
@@ -1380,6 +1459,8 @@ Applied in this revision, not deferred to another reconciliation step:
 - r10: lifetime spent epoch authenticators replace r9 Welcome digests; every epoch installation appends atomically, with tombstone retention and explicit P2a D4 amendment.
   Complete Welcome union/options and structural mirrors; durable handshake reservations protect rotation/control rebuilds across restart.
   Host at-rest codec includes anchor factories/namespaces/secrets. Doubles and real stores reject unauthorised lineage changes.
+- r11: per-epoch unpublished handshake budget 64, below the configured receiver window 1000; terminal typed exhaustion requires device readmission, without automatic rebuild.
+  Shared conformance binds physical mutation/swaps and a transactional side-row writer on memory and provider fixtures.
 
 ## Review log
 
@@ -1509,5 +1590,24 @@ The r9 digest rulings are historical too, superseded by r10's spent epoch identi
   5. **Low:** publish complete openWelcome nested result and single-options judgeWelcomeAdmission signatures, with structural mirrors (r10 decision).
      The authenticator rides joined.group.state.keySchedule; seed derives it from that authenticated handle. No digest field remains.
      Evidence: `mls-hub/src/join.ts:26`, `mls/src/group-welcome.ts:45`, `mls-hub/src/admission.ts:2`.
+
+  No unresolved findings. Implementation and executable conformance remain phase 2/3 work; this revision claims no implementation or test pass.
+
+- **Blind review r10**, 2026-10-09. Read the findings first and verified cited code against source. Decided rulings applied in draft r11:
+  1. **High:** unbounded unpublished handshake reservations exceed the real receiver's forward window (r11 decision).
+     Require `reservedHandshakeGeneration - publishedHandshakeGeneration <= HANDSHAKE_BURN_BUDGET`, with budget 64 and epoch-start baseline 0.
+     Only hub-confirmed own commits advance that baseline; new epochs reset it. The required receiver configuration is 1000 steps.
+     Evidence: `rpc/src/control/operations.ts:194`, `node_modules/ts-mls/dist/src/secretTree.js:104`, `node_modules/ts-mls/dist/src/clientConfig.d.ts:7`.
+     D3 requires that configuration; today's context still omits the override (`mls/src/group-context.ts:59`), using the default 200.
+     Check before building/reserving. Exhaustion becomes terminal `HandshakeBudgetExhaustedError`, with durable identifiable rejected outcome and typed host failure.
+     Existing P2a device readmission supplies a fresh leaf/handshake chain. No automatic rebuild; outcome acknowledgement/restart never resets the budget.
+     Conformance burns 0–63 then decrypts commit 64, rejects build 65 without reserving, tests readmission/reset and enforces real/double forward-window parity.
+     Rejected alternative: unbounded reservation; peers cannot follow.
+  2. **Medium:** inspectors and hook-only transactions cannot express ciphertext corruption or atomic side-row visibility (r11 decision).
+     Add exact `mutateStoredRecord`/`swapStoredRecords` signatures, physical keys, transaction-bound `writeSideRow` and committed `inspectSideRow`.
+     Evidence: `../hozon/packages/db/src/db.ts:31`, `../hozon/packages/db/src/db.ts:208`, `rpc-conformance/src/control-store.ts:168`.
+     Bind phase-2 memory records and phase-3 provider raw tables. State/pending/control/outbox/anchor suites test adapter rejection after corruption/swaps.
+     Coordinated-outbox cases read both durable rows after commit, rollback and unfinished late-commit/rollback faults, retaining hook-count assertions.
+     Rejected alternative: codec-only corruption checks or hook counts without a second transactional write.
 
   No unresolved findings. Implementation and executable conformance remain phase 2/3 work; this revision claims no implementation or test pass.
