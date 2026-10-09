@@ -9,6 +9,7 @@ import {
 import { createLedgerEntrySlot } from '@kumiai/mls-rpc'
 import {
   APP_TOPIC_LABEL,
+  commitTopic,
   decodeHandshakeFrame,
   digestAppliedCommit,
   encodeCommitFrame,
@@ -430,72 +431,106 @@ test('a failed anchor save repairs before the restarted worker seals and reaches
   expect((await restarted.anchorStore.load())?.pending).toBeUndefined()
 })
 
-test('losing the rotation secret in process forces automatic confirmed recovery before sealing', async () => {
-  const nativeTimeout = globalThis.setTimeout
-  vi.useFakeTimers({
-    toFake: ['Date', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
-    shouldClearNativeTimers: true,
-  })
-  const timedTimeout = globalThis.setTimeout
-  vi.spyOn(globalThis, 'setTimeout').mockImplementation((callback, delay, ...args) => {
-    return delay === 0
-      ? nativeTimeout(callback, delay, ...args)
-      : timedTimeout(callback, delay, ...args)
-  })
-  const { alice, bob, carolID, received, events } = await setup({ deadlineMs: 10_000 })
-  const epochBefore = Number(bob.handle().epoch)
-  const handle = bob.handle()
-  const exportSecret = handle.exportSecret.bind(handle)
-  const exported: Array<number> = []
-  handle.exportSecret = async (label, context, length) => {
-    if (label === APP_TOPIC_LABEL) {
-      exported.push(Number(handle.epoch))
-      if (Number(handle.epoch) === epochBefore + 1) throw new Error('anchor export interrupted')
+test.each([false, true])(
+  'losing the rotation secret holds sealing until confirmed recovery, unwalked source commit=%s',
+  async (unwalked) => {
+    const nativeTimeout = globalThis.setTimeout
+    vi.useFakeTimers({
+      toFake: ['Date', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
+      shouldClearNativeTimers: true,
+    })
+    const timedTimeout = globalThis.setTimeout
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation((callback, delay, ...args) => {
+      return delay === 0
+        ? nativeTimeout(callback, delay, ...args)
+        : timedTimeout(callback, delay, ...args)
+    })
+    const { hub, alice, bob, carolID, received, events } = await setup({ deadlineMs: 10_000 })
+    const epochBefore = Number(bob.handle().epoch)
+    const handle = bob.handle()
+    const exportSecret = handle.exportSecret.bind(handle)
+    const exported: Array<number> = []
+    handle.exportSecret = async (label, context, length) => {
+      if (label === APP_TOPIC_LABEL) {
+        exported.push(Number(handle.epoch))
+        if (Number(handle.epoch) === epochBefore + 1) throw new Error('anchor export interrupted')
+      }
+      return exportSecret(label, context, length)
     }
-    return exportSecret(label, context, length)
-  }
-  await alice.peer.commit(buildRemoveCommit(alice, carolID.id))
-  await drainUntil(
-    async () => (await bob.anchorStore.load())?.pending?.epochAfter === epochBefore + 1,
-    'pending anchor rotation',
-  )
-  expect(await bob.anchorStore.load()).toMatchObject({ pending: { epochAfter: epochBefore + 1 } })
-  await drainUntil(() => Number(bob.handle().epoch) === epochBefore + 1, 'Bob handle epoch advance')
-  expect(Number(bob.handle().epoch)).toBe(epochBefore + 1)
-  // The host moves the handle outside the peer, making the recorded epoch's secret unavailable.
-  const next = await alice.build(
-    operationIntent(buildLedgerCommit(alice, alice.identity, bob.identity.id, 'member')),
-  )
-  const decoded = JSON.parse(new TextDecoder().decode(next.journal)) as {
-    state: Array<number>
-    ledger: Array<string>
-  }
-  const nextState = decodeClientState(new Uint8Array(decoded.state))
-  if (nextState == null) throw new Error('Invalid candidate')
-  await alice.adopt(
-    await restoreGroup({
-      state: nextState,
-      credential: alice.handle().credential,
-      ledgerEntries: decoded.ledger,
-    }),
-  )
-  bob.entrySlot.install(async () => next.bodies)
-  await bob.handle().processMessage(next.commit)
-  await bob.adopt(bob.handle())
-  await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'in process repair' } })
-  await alice.peer.commit(buildLedgerCommit(alice, alice.identity, bob.identity.id, 'member'))
-  await drainUntil(
-    () => events.some((event) => event.phase === 'succeeded'),
-    'recovery success event',
-  )
-  expect(events.some((event) => event.phase === 'succeeded')).toBe(true)
-  expect(events.find((event) => event.phase === 'started')?.trigger).toBe('automatic')
-  expect(exported).not.toContain(epochBefore + 2)
-  expect(topic(bob)).toBe(topic(alice))
-  expect(bob.peer.anchorEpoch()).toBe(epochBefore + 4)
-  await drainUntil(
-    () => received.some((message) => (message as { text: string }).text === 'in process repair'),
-    'in-process repair delivery',
-  )
-  expect(received).toContainEqual({ text: 'in process repair' })
-})
+    await alice.peer.commit(buildRemoveCommit(alice, carolID.id))
+    await drainUntil(
+      async () => (await bob.anchorStore.load())?.pending?.epochAfter === epochBefore + 1,
+      'pending anchor rotation',
+    )
+    expect(await bob.anchorStore.load()).toMatchObject({ pending: { epochAfter: epochBefore + 1 } })
+    await drainUntil(
+      () => Number(bob.handle().epoch) === epochBefore + 1,
+      'Bob handle epoch advance',
+    )
+    expect(Number(bob.handle().epoch)).toBe(epochBefore + 1)
+    // The host moves the handle outside the peer, making the recorded epoch's secret unavailable.
+    const next = await alice.build(
+      operationIntent(buildLedgerCommit(alice, alice.identity, bob.identity.id, 'member')),
+    )
+    const decoded = JSON.parse(new TextDecoder().decode(next.journal)) as {
+      state: Array<number>
+      ledger: Array<string>
+    }
+    const nextState = decodeClientState(new Uint8Array(decoded.state))
+    if (nextState == null) throw new Error('Invalid candidate')
+    await alice.adopt(
+      await restoreGroup({
+        state: nextState,
+        credential: alice.handle().credential,
+        ledgerEntries: decoded.ledger,
+      }),
+    )
+    bob.entrySlot.install(async () => next.bodies)
+    await bob.handle().processMessage(next.commit)
+    await bob.adopt(bob.handle())
+    await bob.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'in process repair' } })
+    if (unwalked) {
+      let confirmed = false
+      const apply = bob.control.apply.bind(bob.control)
+      vi.spyOn(bob.control, 'apply').mockImplementation(async (changes, id) => {
+        if (changes.putRejoin?.stage === 'confirmed') confirmed = true
+        await apply(changes, id)
+      })
+      await alice.peer.commit(buildLedgerCommit(alice, alice.identity, bob.identity.id, 'member'))
+      await drainUntil(
+        () => events.some((event) => event.phase === 'failed' && event.reason === 'unconfirmed'),
+        'source re-check invalidation',
+      )
+      expect(confirmed).toBe(true)
+      expect(events.some((event) => event.phase === 'succeeded')).toBe(false)
+      expect(Number(bob.handle().epoch)).toBe(epochBefore + 2)
+      expect(bob.peer.anchorEpoch()).toBe(epochBefore)
+      expect(exported).not.toContain(epochBefore + 2)
+      expect((await bob.control.load()).rejoin).toBeNull()
+      expect(await bob.appOutbox.list()).toHaveLength(1)
+      expect(received).toEqual([])
+      return
+    }
+    const wake = hub.connect(randomIdentity())
+    await wake.publish({
+      senderDID: alice.identity.id,
+      topicID: commitTopic(await bob.mls.exportRecoverySecret()),
+      payload: new Uint8Array([0]),
+      retain: 'log',
+    })
+    await drainUntil(
+      () => events.some((event) => event.phase === 'succeeded'),
+      'recovery success event',
+    )
+    expect(events.some((event) => event.phase === 'succeeded')).toBe(true)
+    expect(events.find((event) => event.phase === 'started')?.trigger).toBe('automatic')
+    expect(exported).not.toContain(epochBefore + 2)
+    expect(topic(bob)).toBe(topic(alice))
+    expect(bob.peer.anchorEpoch()).toBe(epochBefore + 3)
+    await drainUntil(
+      () => received.some((message) => (message as { text: string }).text === 'in process repair'),
+      'in-process repair delivery',
+    )
+    expect(received).toContainEqual({ text: 'in process repair' })
+  },
+)

@@ -348,7 +348,7 @@ test('a reply time floor prevents an external commit and asks the host at most o
   expect(host).toHaveBeenCalledTimes(1)
 })
 
-test('a responder floor refusal discards the candidate, requires renewal and invalidates the refused binding', async () => {
+test('a responder floor refusal attempts renewal and invalidates the refused binding', async () => {
   let offered: ControllerBinding | null = null
   const host = vi.fn(async () => offered)
   const s = await setup(host)
@@ -380,12 +380,13 @@ test('a responder floor refusal discards the candidate, requires renewal and inv
       expect.objectContaining({ phase: 'failed', reason: 'renewal-required' }),
     )
     expect(s.bobGroup()).toBe(before)
+    expect(host).toHaveBeenCalledTimes(1)
     offered = s.cached
     expect(await s.mls.prepareRecovery()).toBe('renewal-required')
-    expect(host).toHaveBeenCalledTimes(1)
+    expect(host).toHaveBeenCalledTimes(2)
     offered = await fixture.timedBinding({ identity: s.bob, iat: 150, exp: 250 })
     expect(await s.mls.prepareRecovery()).toBe('ready')
-    expect(host).toHaveBeenCalledTimes(2)
+    expect(host).toHaveBeenCalledTimes(3)
   } finally {
     await Promise.all([alice.dispose(), bob.dispose()])
     await hub.dispose()

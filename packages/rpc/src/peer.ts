@@ -1264,7 +1264,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * `own-unmerged` stops early and takes no tip; `ahead` steps over its frame and drains to the
    * end, so it DOES record one — the `stranded` flag, not a withheld tip, then stops `commit()`.
    */
-  const walkCommits = async (port: GroupMLS, topicID: string): Promise<boolean> => {
+  const walkCommits = async (
+    port: GroupMLS,
+    topicID: string,
+    forRecovery = false,
+  ): Promise<boolean> => {
     if (anchorRecoveryPending || locallyRemoved) return false
     let advancedEpoch = false
     const started = logDelivery?.beginWalk() ?? 0
@@ -1315,13 +1319,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           kind: 'retention-gap',
           confidence: 'claimed',
         })
-        return advancedEpoch
       }
       // A short page may carry a one-shot fork reveal below the cursor. Only a full page loops.
       if (result.messages.length === COMMIT_FETCH_LIMIT) {
         assertForwardPage(pageAfter, result.messages)
       }
       if (result.messages.length === 0) {
+        // An empty gap ends at head; retained frames still require classification.
+        if (gap && result.head != null) reconciledHead = asLogPosition(result.head)
         // Drained. The tip an EMPTY page reports is not redundant: a topic keeps its head when
         // its frames age out, so anchoring on the cursor here would compare-and-set against
         // `null` on a topic whose head is real, and lose forever.
@@ -1461,6 +1466,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
               kind: 'own-unmerged',
               confidence: 'authenticated',
             })
+            // Only a fresh recovery build abandons this positively classified frame.
+            if (forRecovery) {
+              reconciledHead = position
+              break
+            }
             return advancedEpoch
           }
           if (disposition.row === 'ahead') {
@@ -1651,6 +1661,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
                 : undefined,
             )
           }
+          if (applied.applied && (reconciledHead == null || reconciledHead < position))
+            reconciledHead = position
           if (locallyRemoved) return advancedEpoch
           break
         }
@@ -1672,7 +1684,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * nothing further is coming to prompt them, so a peer whose backlog is entirely at its current
    * epoch (or whose log held no commits at all) would otherwise never read a thing.
    */
-  const pullCommits = async (): Promise<boolean> => {
+  const pullCommits = async (forRecovery = false): Promise<boolean> => {
     if (disposed || locallyRemoved) return false
     if (!controlReplayed) {
       throw new Error(
@@ -1689,7 +1701,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     if (disposed) return false
     const anchorBefore = anchor
     try {
-      const advanced = await walkCommits(mls, commitTopicID)
+      const advanced = await walkCommits(mls, commitTopicID, forRecovery)
       if (disposed) return false
       await appLane.deliver()
       if (disposed) return false
@@ -1719,8 +1731,8 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   }
 
   /** Pull the commit log, and rebuild the app lane if the pull moved the epoch. */
-  const reconcileCommits = async (): Promise<void> => {
-    const advanced = await pullCommits()
+  const reconcileCommits = async (forRecovery = false): Promise<void> => {
+    const advanced = await pullCommits(forRecovery)
     if (!disposed && advanced) await rebuildEpoch()
   }
 
@@ -2823,7 +2835,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             if (outcome.kind === 'publish-failed') throw outcome.error
             if (outcome.kind === 'timeout')
               return failed(outcome.atDeadline ? 'deadline' : 'no-responder')
-            await reconcileCommits()
+            await reconcileCommits(true)
             let pending: AppliedRecovery
             try {
               pending = await port.applyRecovery(outcome.sealed, requestID, requestKey)
@@ -2834,9 +2846,6 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             if (pending == null) return null
             if ('renewalRequired' in pending) return failed('renewal-required')
             pending = wrapPendingRecovery(boundary, pending)
-            // A stranded walk has already abandoned this prefix; only subsequent frames can move its source.
-            if (stranded || anchorRecoveryPending || !floor.covered)
-              reconciledHead = await readCommitHead(commits)
             const source = await port.readRecoverySource()
             const ledgerBefore = [
               ...new Set([
@@ -2913,7 +2922,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         if (next?.stage === 'refused')
           return failed('refused', { refusal: next.refusal, ...rejoinFailureDetails })
         if (next == null) {
-          if (rejoinDiscarded === 'renewal') return failed('renewal-required', rejoinFailureDetails)
+          if (rejoinDiscarded === 'renewal') {
+            prepared = false
+            continue
+          }
           if (rejoinDiscarded === 'invalidated') {
             if (!healRequested) inFlightEntries = null
             return failed('unconfirmed', { advisory: [] }, healRequested)

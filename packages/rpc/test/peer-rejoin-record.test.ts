@@ -6,7 +6,9 @@ import { asLogPosition } from '../src/cursor.js'
 import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
 import { commitTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
+import { createFakeCrypto } from './fixtures/fake-crypto.js'
 import { FakeHub } from './fixtures/fake-hub.js'
+import { createMemoryGroupMLS } from './fixtures/memory-group-mls.js'
 import {
   buildLedgerCommit,
   buildRejoinRecord,
@@ -489,3 +491,158 @@ test('anchor recovery still settles a saved build before writing the rejoin reco
     expect.objectContaining({ opID: op.id, kind: 'unknown' }),
   )
 })
+
+test('anchor-gated recovery re-checks an unwalked source commit on every fresh candidate', async () => {
+  const { hub, alice, bob } = await setup()
+  const topicID = commitTopic(secret)
+  const p0 = (
+    await hub.publish({ senderDID: 'other', topicID, payload: new Uint8Array([0]), retain: 'log' })
+  ).sequenceID
+  await alice.peer.resync()
+  await bob.peer.resync()
+  await bob.peer.dispose()
+  await bob.peer.drained()
+  const slot = await bob.anchorStore.load()
+  if (slot == null) throw new Error('Missing anchor')
+  await bob.anchorStore.save({
+    anchor: slot.anchor,
+    pending: {
+      epochBefore: 1,
+      epochAfter: 3,
+      rosterBefore: ['alice', 'bob'],
+      forced: true,
+      advance: 'unresolved-rotation',
+      landed: true,
+    },
+  })
+  const p1 = (await publishCommit({ hub, senderDID: 'carol', recoverySecret: secret, epoch: 1 }))
+    .sequenceID
+  await alice.peer.resync()
+  expect(alice.mls.epoch()).toBe(2)
+  const built: Array<RejoinRecord> = []
+  const failures: Array<string> = []
+  const confirmed: Array<RejoinRecord> = []
+  const apply = bob.control.apply.bind(bob.control)
+  vi.spyOn(bob.control, 'apply').mockImplementation(async (changes, id) => {
+    if (changes.putRejoin?.stage === 'built') built.push(changes.putRejoin)
+    if (changes.putRejoin?.stage === 'confirmed') confirmed.push(changes.putRejoin)
+    return apply(changes, id)
+  })
+  const again = member(hub, 'bob', {
+    restartOf: bob,
+    control: bob.control,
+    onRecovery: (event) => {
+      if (event.phase === 'failed') failures.push(event.reason)
+    },
+  })
+  await expect.poll(() => failures.length, { timeout: 4000 }).toBeGreaterThanOrEqual(2)
+  expect(built.length).toBeGreaterThanOrEqual(2)
+  expect(confirmed.length).toBeGreaterThanOrEqual(2)
+  expect(built[0]?.expectedHead).toBe(p1)
+  expect(built.every((record) => record.source.head === p0)).toBe(true)
+  expect(failures.every((reason) => reason === 'unconfirmed')).toBe(true)
+  expect(again.mls.epoch()).toBe(1)
+  expect((await again.control.load()).applied).toEqual([])
+  expect((await again.control.load()).responses).toEqual([])
+  expect((await again.control.load()).rejoin).toBeNull()
+})
+
+test('a classified own-unmerged strand permits recovery after walking the retained suffix', async () => {
+  const { hub, alice, bob } = await setup()
+  await bob.peer.dispose()
+  await bob.peer.drained()
+  const examined = (
+    await publishCommit({ hub, senderDID: 'bob', recoverySecret: secret, epoch: 1 })
+  ).sequenceID
+  const tip = (await publishCommit({ hub, senderDID: 'dave', recoverySecret: secret, epoch: 1 }))
+    .sequenceID
+  await alice.peer.resync()
+  const built: Array<RejoinRecord> = []
+  const apply = bob.control.apply.bind(bob.control)
+  vi.spyOn(bob.control, 'apply').mockImplementation(async (changes, id) => {
+    if (changes.putRejoin?.stage === 'built') built.push(changes.putRejoin)
+    return apply(changes, id)
+  })
+  const again = member(hub, 'bob', { restartOf: bob, control: bob.control })
+  await expect.poll(() => again.mls.epoch()).toBe(3)
+  await expect.poll(async () => (await again.control.load()).rejoin).toBeNull()
+  expect(built).toHaveLength(1)
+  expect(built[0]?.expectedHead).toBe(tip)
+  expect(examined < tip).toBe(true)
+  expect(built[0]?.source.head).toBe(tip)
+  expect(built[0]?.source.epoch).toBe(2)
+})
+
+test.each([false, true])(
+  'a retention gap permits recovery with retained suffix: %s',
+  async (suffix) => {
+    const { hub, alice, bob } = await setup()
+    const topicID = commitTopic(secret)
+    await hub.publish({ senderDID: 'other', topicID, payload: new Uint8Array([0]), retain: 'log' })
+    await alice.peer.resync()
+    await bob.peer.resync()
+    await bob.peer.dispose()
+    await bob.peer.drained()
+    const removed = (
+      await publishCommit({ hub, senderDID: 'carol', recoverySecret: secret, epoch: 1 })
+    ).sequenceID
+    await alice.peer.resync()
+    hub.trim(topicID, '999999999999')
+    const retained = suffix
+      ? (await publishCommit({ hub, senderDID: 'dave', recoverySecret: secret, epoch: 1 }))
+          .sequenceID
+      : null
+    const built: Array<RejoinRecord> = []
+    const apply = bob.control.apply.bind(bob.control)
+    vi.spyOn(bob.control, 'apply').mockImplementation(async (changes, id) => {
+      if (changes.putRejoin?.stage === 'built') built.push(changes.putRejoin)
+      return apply(changes, id)
+    })
+    const again = member(hub, 'bob', { restartOf: bob, control: bob.control })
+    await expect.poll(() => again.mls.epoch()).toBe(3)
+    await expect.poll(async () => (await again.control.load()).rejoin).toBeNull()
+    expect(built).toHaveLength(1)
+    expect(built[0]?.source.head).toBe(retained ?? removed)
+    expect(built[0]?.source.epoch).toBe(suffix ? 2 : 1)
+  },
+)
+
+test.each(['binding', 'lapse', 'floor'] as const)(
+  'a %s refusal refreshes the binding and retries without another recover call',
+  async (reason) => {
+    const hub = new FakeHub()
+    const alice = member(hub, 'alice')
+    const crypto = createFakeCrypto({ epoch: 1, localDID: 'bob' })
+    const binding = { id: 'controller', prefix: [], capability: 'original' }
+    let renewals = 0
+    const mls = createMemoryGroupMLS({
+      recoverySecret: secret,
+      localDID: 'bob',
+      members: ['alice', 'bob'],
+      binding,
+      recoveryBinding: async () => {
+        renewals += 1
+        return { ...binding, capability: 'renewed' }
+      },
+      onAdvance: (epoch) => crypto.setEpoch(epoch),
+    })
+    const bob = member(hub, 'bob', { mls, crypto })
+    await alice.peer.replay()
+    await bob.peer.replay()
+    const process = alice.mls.processCommit.bind(alice.mls)
+    vi.spyOn(alice.mls, 'processCommit')
+      .mockImplementationOnce(async () => ({
+        applied: false,
+        advanced: false,
+        epochBefore: 1,
+        epochAfter: 1,
+        refusal: reason,
+      }))
+      .mockImplementation(process)
+    expect((await bob.peer.recover()).advanced).toBe(true)
+    expect(renewals).toBe(1)
+    expect(bob.mls.epoch()).toBe(alice.mls.epoch())
+    expect((await bob.control.load()).rejoin).toBeNull()
+    expect(commits(hub).filter((row) => row.senderDID === 'bob')).toHaveLength(2)
+  },
+)

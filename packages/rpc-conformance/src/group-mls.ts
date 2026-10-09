@@ -181,6 +181,7 @@ export type ConformanceMLSGroup = {
    * which is the case the port's contract is about, and the case the memory double got wrong.
    */
   members: Array<ConformanceMLSMember>
+  pauseNextSave: (member: number, pause: () => Promise<void>) => void
   setEpochHintOffset: (offset: number) => void
   /** The DID of the member that authors the commits, for the committer clauses. */
   committerDID: string
@@ -771,6 +772,53 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
             requesterDID: bob.did,
           })
           expect(await alice.mls.verifyRecoveryRequest(new Uint8Array([0]))).toBeNull()
+        })
+      })
+      test('a source read waits for recovery adoption persistence and returns the installed identity', async () => {
+        await withGroup(2, 'recovery-source-lock', async (group) => {
+          const alice = memberAt(group.members, 0)
+          const bob = memberAt(group.members, 1)
+          const before = await bob.mls.readRecoverySource()
+          const { request, requestKey } = await bob.mls.createRecoveryRequest('locked-source')
+          const pending = await bob.mls.applyRecovery(
+            await alice.mls.sealGroupInfo(request),
+            'locked-source',
+            requestKey,
+          )
+          if (pending == null || 'renewalRequired' in pending) throw new Error('No candidate')
+          let entered!: () => void
+          let release!: () => void
+          const saving = new Promise<void>((resolve) => {
+            entered = resolve
+          })
+          const gate = new Promise<void>((resolve) => {
+            release = resolve
+          })
+          group.pauseNextSave(1, async () => {
+            entered()
+            await gate
+          })
+          const adoption = pending.onAccepted(() => ({
+            mutationID: 'locked-source',
+            changes: { deleteRejoin: true },
+          }))
+          await saving
+          let settled = false
+          const reading = bob.mls.readRecoverySource().then((source) => {
+            settled = true
+            return source
+          })
+          try {
+            await new Promise<void>((resolve) => setTimeout(resolve, 0))
+            expect(settled).toBe(false)
+          } finally {
+            release()
+            await adoption
+          }
+          const source = await reading
+          expect(source.epoch).toBe(pending.epoch)
+          expect(source.authenticator).not.toEqual(before.authenticator)
+          expect(source).toEqual(await bob.mls.readRecoverySource())
         })
       })
       test('a serialized candidate restores bound judgement and accepts once', async () => {

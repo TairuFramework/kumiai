@@ -164,10 +164,12 @@ testGroupMLSConformance({
     // while the same clause against real MLS (whose invites enact role entries) does real work.
     // A conformance clause exercised on one side only is the thing these suites exist to prevent.
     const ledgerTokens = [`ledger-a-${id}`, `ledger-b-${id}`]
-    const members = dids.map((did) => ({
+    const databases = dids.map(() => createMemoryHostDatabase())
+    const members = dids.map((did, index) => ({
       did,
       mls: createMemoryGroupMLS({
         groupID: id,
+        hostDB: databases[index],
         localDID: did,
         members: roster,
         epoch: 0,
@@ -200,6 +202,11 @@ testGroupMLSConformance({
 
     return {
       groupID: id,
+      pauseNextSave: (index, pause) => {
+        const database = databases[index]
+        if (database == null) throw new Error('missing database')
+        database.seam('before-save', pause)
+      },
       sealVerdictPayload: async (index, request, verdict) => {
         const member = members[index]
         if (member == null) throw new Error('missing member')
@@ -319,4 +326,42 @@ test('ambiguous recovery save reads back committed state without another write',
 testAnchorStoreConformance({
   label: 'rpc memory anchor store',
   createStore: createMemoryAnchorStore,
+})
+
+test('a failed bootstrap save leaves the live and durable ledger incomplete until a persisted retry', async () => {
+  const groupID = 'bootstrap-save-failure'
+  const hostDB = createMemoryHostDatabase()
+  const options = { groupID, localDID: 'bob', members: ['alice', 'bob'], hostDB }
+  const requester = createMemoryGroupMLS(options)
+  const responder = createMemoryGroupMLS({ groupID, localDID: 'alice', members: ['alice', 'bob'] })
+  responder.adopt(responder.buildCommit(['persisted-ledger']))
+  const { request, requestKey } = await requester.createRecoveryRequest('bootstrap')
+  const pending = await requester.applyRecovery(
+    await responder.sealGroupInfo(request),
+    'bootstrap',
+    requestKey,
+  )
+  if (pending == null || 'renewalRequired' in pending) throw new Error('No candidate')
+  await pending.onAccepted(() => ({ mutationID: 'bootstrap-adoption', changes: {} }))
+  const adopted = await hostDB.loadState(groupID)
+  expect(await requester.isLedgerComplete()).toBe(false)
+  hostDB.failNext('mid-save')
+  await expect(requester.bootstrapLedger(['persisted-ledger'])).rejects.toThrow(
+    'Injected transaction failure',
+  )
+  expect(await requester.isLedgerComplete()).toBe(false)
+  expect(await requester.getLedger()).toEqual([])
+  expect(await hostDB.loadState(groupID)).toEqual(adopted)
+  const afterFailure = createMemoryGroupMLS(options)
+  if (adopted == null) throw new Error('Missing state')
+  afterFailure.restoreState(adopted)
+  expect(await afterFailure.isLedgerComplete()).toBe(false)
+  await requester.bootstrapLedger(['persisted-ledger'])
+  const saved = await hostDB.loadState(groupID)
+  if (saved == null) throw new Error('Missing state')
+  const restarted = createMemoryGroupMLS(options)
+  restarted.restoreState(saved)
+  expect(await restarted.isLedgerComplete()).toBe(true)
+  expect(await restarted.getLedger()).toEqual(['persisted-ledger'])
+  expect(await restarted.readRecoverySource()).toEqual(await requester.readRecoverySource())
 })

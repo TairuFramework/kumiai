@@ -167,13 +167,24 @@ testGroupMLSConformance({
   createGroup: async (size, id) => {
     const group = await createRealGroup(size, `tx-mls-conformance-${id}`)
     let hintOffset = 0
+    const stores = group.members.map((member) => createTransactionalStore(member.handle))
     const hosts = await Promise.all(
-      group.members.map((member) =>
-        createTransactionalAccess(member, createTransactionalStore(member.handle)),
-      ),
+      group.members.map((member, index) => {
+        const store = stores[index]
+        if (store == null) throw new Error('missing store')
+        return createTransactionalAccess(member, store)
+      }),
     )
     return {
       groupID: group.committer.handle.groupID,
+      pauseNextSave: (index, pause) => {
+        const store = stores[index]
+        if (store == null) throw new Error('missing store')
+        store.beforeWrite = async () => {
+          store.beforeWrite = undefined
+          await pause()
+        }
+      },
       sealVerdictPayload: async (index, request, verdict) => {
         const member = group.members[index]
         if (member == null) throw new Error('missing member')

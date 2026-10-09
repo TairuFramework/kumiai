@@ -490,6 +490,20 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     sha256(concatBytes(recoverySecret, fromUTF(JSON.stringify([groupID, at, position, digest]))))
   const tagFor = (key: Uint8Array, requestID: string): string =>
     encodeMultibase(hmac(sha256, key, fromUTF(requestID)))
+  let tail: Promise<void> = Promise.resolve()
+  const serialise = async <TValue>(fn: () => Promise<TValue>): Promise<TValue> => {
+    const previous = tail
+    let release: () => void = () => {}
+    tail = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    await previous
+    try {
+      return await fn()
+    } finally {
+      release()
+    }
+  }
   let failRecoveryAdopt = false
   let binding = options.binding
   let preparedBinding = binding
@@ -726,7 +740,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
             new ControlWriteNotCommittedError('Recovery requires an adoption write factory'),
           )
         }
-        accepted ??= (async () => {
+        accepted ??= serialise(async () => {
           const authenticator = sha256(concatBytes(requestKey, commit))
           const stored = await hostDB.loadState(storageID)
           if (stored != null) {
@@ -790,7 +804,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
           advance(info.epoch + 1)
           recoveryAuthenticator = toB64U(authenticator)
           binding = candidateBinding
-        })().catch((error: unknown) => {
+        }).catch((error: unknown) => {
           accepted = undefined
           throw error
         })
@@ -805,28 +819,29 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     serializeState,
     restoreState,
     authenticator,
-    adoptOperation: async (blob, expected, write) => {
-      const candidate = JSON.parse(toUTF(blob)) as { epoch: number }
-      if (candidate.epoch === epoch && toB64U(blob) === toB64U(serializeState())) return 'noop'
-      if (
-        expected.epoch !== epoch ||
-        expected.lineage !== 0 ||
-        toB64U(expected.authenticatorBefore) !== toB64U(authenticator())
-      )
-        return 'moved'
-      try {
-        await hostDB.saveState(storageID, blob, write)
-      } catch (error) {
+    adoptOperation: (blob, expected, write) =>
+      serialise(async () => {
+        const candidate = JSON.parse(toUTF(blob)) as { epoch: number }
+        if (candidate.epoch === epoch && toB64U(blob) === toB64U(serializeState())) return 'noop'
         if (
-          !(error instanceof Error) ||
-          error.name !== 'StorageOutcomeUnknownError' ||
-          (await hostDB.control(storageID).lastMutation()) !== write.mutationID
+          expected.epoch !== epoch ||
+          expected.lineage !== 0 ||
+          toB64U(expected.authenticatorBefore) !== toB64U(authenticator())
         )
-          throw error
-      }
-      restoreState(blob)
-      return 'installed'
-    },
+          return 'moved'
+        try {
+          await hostDB.saveState(storageID, blob, write)
+        } catch (error) {
+          if (
+            !(error instanceof Error) ||
+            error.name !== 'StorageOutcomeUnknownError' ||
+            (await hostDB.control(storageID).lastMutation()) !== write.mutationID
+          )
+            throw error
+        }
+        restoreState(blob)
+        return 'installed'
+      }),
     epoch: () => epoch,
     commits: () => commits,
     seen: () => seen,
@@ -872,9 +887,8 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     evict(did: string) {
       slotRemoveDID(did)
     },
-    async readRecoverySource() {
-      return { epoch, authenticator: authenticator(), lineage: 0 }
-    },
+    readRecoverySource: () =>
+      serialise(async () => ({ epoch, authenticator: authenticator(), lineage: 0 })),
     async readEpoch(): Promise<number> {
       return epoch
     },
@@ -926,141 +940,153 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         ...(isExternal ? { external: true } : {}),
       }
     },
-    async processCommit(commit: Uint8Array, context: CommitContext) {
-      lastSender = context.senderDID
-      seen += 1
-      const parsed = decodeMemoryCommit(commit)
-      if (parsed == null) {
-        return { applied: false, advanced: false, epochBefore: epoch, epochAfter: epoch }
-      }
-      // A Commit framed at another epoch is not this member's to apply: real MLS cannot
-      // decrypt it at all. Ordinary history for a member walking the log — the late
-      // joiner's own add-commit is exactly this — and NOT corruption. The blob riding it
-      // is never opened, because the entries are never resolved.
-      if (parsed.epoch !== epoch) {
-        return { applied: false, advanced: false, epochBefore: epoch, epochAfter: epoch }
-      }
-      // Sender-data authorship and commit-content validity are separate in real MLS. A hub can
-      // change ciphertext beyond the sampled prefix without breaking the sender-data read.
-      if (
-        parsed.invalidContent === true ||
-        (parsed.signerDID ?? parsed.committerDID) !== parsed.committerDID
-      ) {
-        return {
-          applied: false,
-          advanced: false,
-          epochBefore: epoch,
-          epochAfter: epoch,
-          refusal: 'invalid' as const,
+    processCommit: (commit: Uint8Array, context: CommitContext) =>
+      serialise(async () => {
+        lastSender = context.senderDID
+        seen += 1
+        const parsed = decodeMemoryCommit(commit)
+        if (parsed == null) {
+          return { applied: false, advanced: false, epochBefore: epoch, epochAfter: epoch }
         }
-      }
-      // A member can never apply the frame that is its OWN commit: MLS merges a pending
-      // commit, it does not process one, and the pending state is the only thing that could
-      // have carried it. A member that meets its own commit in the log has lost that state,
-      // and no amount of processing will get it back. An external commit is the exception
-      // that proves it — the rejoining member adopts the handle its own rejoin derived.
-      if (localDID != null && parsed.committerDID === localDID) {
-        return { applied: false, advanced: false, epochBefore: epoch, epochAfter: epoch }
-      }
-      // Well-formed, and refused: the group's policy does not accept commits from this
-      // committer. A refusal is NOT a throw — the peer read the commit, judged it, and
-      // declined it, and there is nothing to retry.
-      if (!acceptsCommitter(parsed.committerDID)) {
-        return {
-          applied: false,
-          advanced: false,
-          epochBefore: epoch,
-          epochAfter: epoch,
-          refusal: 'policy' as const,
+        // A Commit framed at another epoch is not this member's to apply: real MLS cannot
+        // decrypt it at all. Ordinary history for a member walking the log — the late
+        // joiner's own add-commit is exactly this — and NOT corruption. The blob riding it
+        // is never opened, because the entries are never resolved.
+        if (parsed.epoch !== epoch) {
+          return { applied: false, advanced: false, epochBefore: epoch, epochAfter: epoch }
         }
-      }
-      const nextBodies = new Map(bodies)
-      const missing = parsed.entryIDs.filter((id) => !nextBodies.has(id))
-      if (missing.length > 0) {
-        const tokens = (await context.resolveLedgerEntries?.(missing)) ?? []
-        for (const token of tokens) {
-          const id = memoryEntryID(token)
-          // Content-addressed: a body binds to the id it hashes to, or it is ignored.
-          if (missing.includes(id)) nextBodies.set(id, token)
-        }
-        const stillMissing = parsed.entryIDs.filter((id) => !nextBodies.has(id))
-        if (stillMissing.length > 0) {
-          throw new MissingLedgerEntriesError(stillMissing)
-        }
-      }
-      const epochBefore = epoch
-      const nextSlots = new Map(slots)
-      for (const did of parsed.removes ?? []) slotRemoveDID(did, nextSlots)
-      for (const did of parsed.adds ?? []) slotAdd(did, nextSlots)
-      if (parsed.external) {
-        slotRemoveDID(parsed.committerDID, nextSlots)
-        slotAdd(parsed.committerDID, nextSlots)
-      }
-      const removed = localDID != null && ![...nextSlots.values()].includes(localDID)
-      // Self-removal adopts the tree and ledger but supplies no successor epoch secrets.
-      const epochAfter = removed ? epoch : epoch + 1
-      const nextLedger = [...ledger, ...parsed.entryIDs]
-      const nextHead = parsed.head ?? ledgerHead
-      const state = fromUTF(
-        JSON.stringify({
-          epoch: epochAfter,
-          slots: [...nextSlots],
-          ledger: nextLedger,
-          ledgerHead: nextHead,
-          bodies: [...nextBodies],
-        }),
-      )
-      const write = context.adoption?.({
-        epochAfter,
-        removed,
-        epochAuthenticator: sha256(concatBytes(recoverySecret, fromUTF(groupID), state)),
-      })
-      try {
-        await hostDB.saveState(storageID, state, write)
-      } catch (error) {
+        // Sender-data authorship and commit-content validity are separate in real MLS. A hub can
+        // change ciphertext beyond the sampled prefix without breaking the sender-data read.
         if (
-          !(error instanceof Error) ||
-          error.name !== 'StorageOutcomeUnknownError' ||
-          write == null ||
-          (await hostDB.control(storageID).lastMutation()) !== write.mutationID
+          parsed.invalidContent === true ||
+          (parsed.signerDID ?? parsed.committerDID) !== parsed.committerDID
+        ) {
+          return {
+            applied: false,
+            advanced: false,
+            epochBefore: epoch,
+            epochAfter: epoch,
+            refusal: 'invalid' as const,
+          }
+        }
+        // A member can never apply the frame that is its OWN commit: MLS merges a pending
+        // commit, it does not process one, and the pending state is the only thing that could
+        // have carried it. A member that meets its own commit in the log has lost that state,
+        // and no amount of processing will get it back. An external commit is the exception
+        // that proves it — the rejoining member adopts the handle its own rejoin derived.
+        if (localDID != null && parsed.committerDID === localDID) {
+          return { applied: false, advanced: false, epochBefore: epoch, epochAfter: epoch }
+        }
+        // Well-formed, and refused: the group's policy does not accept commits from this
+        // committer. A refusal is NOT a throw — the peer read the commit, judged it, and
+        // declined it, and there is nothing to retry.
+        if (!acceptsCommitter(parsed.committerDID)) {
+          return {
+            applied: false,
+            advanced: false,
+            epochBefore: epoch,
+            epochAfter: epoch,
+            refusal: 'policy' as const,
+          }
+        }
+        const nextBodies = new Map(bodies)
+        const missing = parsed.entryIDs.filter((id) => !nextBodies.has(id))
+        if (missing.length > 0) {
+          const tokens = (await context.resolveLedgerEntries?.(missing)) ?? []
+          for (const token of tokens) {
+            const id = memoryEntryID(token)
+            // Content-addressed: a body binds to the id it hashes to, or it is ignored.
+            if (missing.includes(id)) nextBodies.set(id, token)
+          }
+          const stillMissing = parsed.entryIDs.filter((id) => !nextBodies.has(id))
+          if (stillMissing.length > 0) {
+            throw new MissingLedgerEntriesError(stillMissing)
+          }
+        }
+        const epochBefore = epoch
+        const nextSlots = new Map(slots)
+        for (const did of parsed.removes ?? []) slotRemoveDID(did, nextSlots)
+        for (const did of parsed.adds ?? []) slotAdd(did, nextSlots)
+        if (parsed.external) {
+          slotRemoveDID(parsed.committerDID, nextSlots)
+          slotAdd(parsed.committerDID, nextSlots)
+        }
+        const removed = localDID != null && ![...nextSlots.values()].includes(localDID)
+        // Self-removal adopts the tree and ledger but supplies no successor epoch secrets.
+        const epochAfter = removed ? epoch : epoch + 1
+        const nextLedger = [...ledger, ...parsed.entryIDs]
+        const nextHead = parsed.head ?? ledgerHead
+        const state = fromUTF(
+          JSON.stringify({
+            epoch: epochAfter,
+            slots: [...nextSlots],
+            ledger: nextLedger,
+            ledgerHead: nextHead,
+            bodies: [...nextBodies],
+          }),
         )
-          throw error
-        const committed = await hostDB.loadState(storageID)
-        if (committed == null) throw error
-        restoreState(committed)
+        const write = context.adoption?.({
+          epochAfter,
+          removed,
+          epochAuthenticator: sha256(concatBytes(recoverySecret, fromUTF(groupID), state)),
+        })
+        try {
+          await hostDB.saveState(storageID, state, write)
+        } catch (error) {
+          if (
+            !(error instanceof Error) ||
+            error.name !== 'StorageOutcomeUnknownError' ||
+            write == null ||
+            (await hostDB.control(storageID).lastMutation()) !== write.mutationID
+          )
+            throw error
+          const committed = await hostDB.loadState(storageID)
+          if (committed == null) throw error
+          restoreState(committed)
+          commits += 1
+          return { applied: true, advanced: !removed, epochBefore, epochAfter }
+        }
+        bodies = nextBodies
+        slots = nextSlots
+        ledger = nextLedger
+        ledgerHead = nextHead
         commits += 1
+        if (!removed) advance(epochAfter)
         return { applied: true, advanced: !removed, epochBefore, epochAfter }
-      }
-      bodies = nextBodies
-      slots = nextSlots
-      ledger = nextLedger
-      ledgerHead = nextHead
-      commits += 1
-      if (!removed) advance(epochAfter)
-      return { applied: true, advanced: !removed, epochBefore, epochAfter }
-    },
+      }),
     async isLedgerComplete() {
       return memoryLedgerHead(ledger) === ledgerHead
     },
     async getLedger() {
       return ledgerTokens()
     },
-    async bootstrapLedger(tokens: Array<string>) {
-      // The gate, and nothing below it touches the handle until the check has passed: the
-      // head is recomputed over the gathered ids IN THE ORDER GIVEN and compared against the
-      // one this handle's own group state carries. A rejected ledger writes nothing.
-      const entryIDs = tokens.map(memoryEntryID)
-      if (memoryLedgerHead(entryIDs) !== ledgerHead) {
-        throw new LedgerIncompleteError(
-          'bootstrapLedger: the gathered ledger does not fold to the head this group attests to',
+    bootstrapLedger: (tokens: Array<string>) =>
+      serialise(async () => {
+        // The gate, and nothing below it touches the handle until the check has passed: the
+        // head is recomputed over the gathered ids IN THE ORDER GIVEN and compared against the
+        // one this handle's own group state carries. A rejected ledger writes nothing.
+        const entryIDs = tokens.map(memoryEntryID)
+        if (memoryLedgerHead(entryIDs) !== ledgerHead) {
+          throw new LedgerIncompleteError(
+            'bootstrapLedger: the gathered ledger does not fold to the head this group attests to',
+          )
+        }
+        const nextBodies = new Map(bodies)
+        for (const token of tokens) nextBodies.set(memoryEntryID(token), token)
+        const state = fromUTF(
+          JSON.stringify({
+            epoch,
+            slots: [...slots],
+            ledger: entryIDs,
+            ledgerHead,
+            bodies: [...nextBodies],
+            recoveryAuthenticator,
+          }),
         )
-      }
-      for (const token of tokens) bodies.set(memoryEntryID(token), token)
-      // A REPLACEMENT, not an append: a list that reproduces the authenticated head is the
-      // group's entire ledger, in order.
-      ledger = entryIDs
-      await hostDB.saveState(storageID, serializeState())
-    },
+        await hostDB.saveState(storageID, state)
+        bodies = nextBodies
+        ledger = entryIDs
+      }),
     async createRecoveryRequest(requestID: string) {
       const requesterDID = localDID ?? ''
       const privateKey = x25519.utils.randomSecretKey()
