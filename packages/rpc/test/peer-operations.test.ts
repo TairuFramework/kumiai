@@ -133,7 +133,8 @@ describe('durable peer operations', () => {
       const restarted = makeMLSPeer(hub, 'alice', secret, { restartOf: seed })
       await waitFor(async () => (await restarted.peer.outcomes()).length === 1)
       expect(await restarted.peer.outcomes()).toEqual([expect.objectContaining({ kind: 'landed' })])
-      expect((await restarted.control.load()).welcomes).toHaveLength(1)
+      expect((await restarted.control.load()).welcomes).toEqual([])
+      expect(restarted.welcomes).toEqual([request.id])
       expect(hub.published.filter((row) => row.topicID === commitTopic(secret))).toHaveLength(1)
       await restarted.peer.dispose()
     },

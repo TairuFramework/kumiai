@@ -36,6 +36,7 @@ import type {
   OperationRequest,
   Outcome,
 } from './control/types.js'
+import { deliverObligations } from './control/welcome.js'
 import {
   type AppliedRecovery,
   type GroupMLS,
@@ -223,6 +224,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     control,
     build,
     adopt,
+    deliverWelcome,
     anchorStore,
     appCursorStore,
     protocols,
@@ -1983,6 +1985,36 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       },
     })
   }
+  let welcomeTimer: ReturnType<typeof setTimeout> | undefined
+  let welcomeBackoff = 1000
+  const deliverPendingWelcomes = async (): Promise<void> => {
+    if (disposed || control == null || deliverWelcome == null) return
+    if (welcomeTimer != null) clearTimeout(welcomeTimer)
+    welcomeTimer = undefined
+    try {
+      await deliverObligations(
+        {
+          control,
+          deliverWelcome: async (obligation) => {
+            assertLive()
+            await deliverWelcome(obligation)
+            // Disposal after transport acceptance leaves the obligation for the next owner.
+            assertLive()
+          },
+        },
+        await control.load(),
+      )
+      welcomeBackoff = 1000
+    } catch {
+      if (disposed) return
+      welcomeTimer = setTimeout(() => {
+        welcomeTimer = undefined
+        void runSerial(deliverPendingWelcomes).catch(() => {})
+      }, welcomeBackoff)
+      welcomeBackoff = Math.min(welcomeBackoff * 2, 15_000)
+    }
+  }
+
   const operationDeps = (deferAccepted = false): OperationDeps => {
     if (control == null || build == null || adopt == null || mls == null || commitTopicID == null) {
       throw new Error('commit: this peer has no MLS port, so it has no group to commit to')
@@ -2114,6 +2146,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     const before = await mls.readEpoch()
     while (!disposed && op != null && op.stage !== 'intent') {
       const next = await stepOperation(operationDeps(op.stage === 'accepted'), op)
+      if (next !== op && next?.stage === 'accepted') await deliverPendingWelcomes()
       await refreshControl()
       if (next === op) {
         if (op.stage !== 'accepted')
@@ -2172,6 +2205,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             for (let attempt = 0; op != null && attempt < COMMIT_ATTEMPT_CEILING; attempt++) {
               assertLive()
               const next = await stepOperation(operationDeps(op.stage === 'accepted'), op)
+              if (next !== op && next?.stage === 'accepted') await deliverPendingWelcomes()
               await refreshControl()
               if (next === op) {
                 if (op.stage === 'accepted') {
@@ -3064,15 +3098,18 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   // The seed pull runs inside init, where the crash victim whose operation was lost meets its own
   // un-merged commit. Its heal waits for init to finish, since every lane operation (`recover()`
   // included) waits on `ready`.
-  void ready.then(
-    () => {
-      // Deliver durable Welcome obligations here, including terminal groups.
-      logDelivery?.trigger()
-      scheduleOperations()
-      if (!locallyRemoved) void healIfRequested()
-    },
-    () => {},
-  )
+  void ready
+    .then(
+      async () => {
+        await runSerial(deliverPendingWelcomes)
+        if (disposed || locallyRemoved) return
+        logDelivery?.trigger()
+        scheduleOperations()
+        void healIfRequested()
+      },
+      () => {},
+    )
+    .catch(() => {})
   const withReady = async <T>(fn: () => T | Promise<T>): Promise<T> => {
     await ready
     assertLive()
@@ -3202,6 +3239,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       if (disposePromise != null) return disposePromise
       disposed = true
       if (operationTimer != null) clearTimeout(operationTimer)
+      if (welcomeTimer != null) clearTimeout(welcomeTimer)
       for (const listeners of outcomeWaiters.values()) {
         for (const waiter of listeners) waiter.reject(new PeerDisposedError('Peer is disposed'))
       }

@@ -90,6 +90,7 @@ export const peerHostFields = {
   control: 'port',
   build: 'callback',
   adopt: 'callback',
+  deliverWelcome: 'callback',
   operationTimeoutMs: 'data',
   anchorStore: 'port',
   appCursorStore: 'port',

@@ -441,43 +441,62 @@ test('adoptions retain exactly the newest 64 epochs of rows and responses', asyn
   expect((await again.control.load()).applied).toEqual(snapshot.applied)
 })
 
-test('terminal removal turns a pending rejoin unknown while retaining Welcome obligations', async () => {
-  const hub = new FakeHub()
-  const bob = member(hub)
-  await bob.peer.replay()
-  const rejoin = await buildRejoinRecord(bob)
-  await bob.peer.dispose()
-  await bob.peer.drained()
-  await bob.control.apply(
-    {
-      putRejoin: rejoin,
-      putWelcomes: [{ opID: rejoin.id, welcome: rejoin.payload, recipients: ['carol'] }],
-      putApplied: [
-        {
-          epoch: 1,
-          digest: rejoin.digest,
-          payloadDigest: rejoin.payloadDigest,
-          sequenceID: '000000000001',
-          opID: null,
-          removed: true,
-        },
-      ],
-    },
-    'terminal-rejoin',
-  )
-  const again = member(hub, { restartOf: bob })
-  expect(await again.peer.outcomes()).toEqual([
-    expect.objectContaining({
-      id: rejoin.id,
-      opID: null,
-      kind: 'unknown',
-    }),
-  ])
-  expect(await again.control.load()).toMatchObject({
-    rejoin: null,
-    welcomes: [{ opID: rejoin.id }],
-  })
-})
+test.each([false, true])(
+  'terminal removal settles a pending rejoin before Welcome delivery, accepted=%s',
+  async (accepted) => {
+    const hub = new FakeHub()
+    const bob = member(hub)
+    await bob.peer.replay()
+    const rejoin = await buildRejoinRecord(bob)
+    await bob.peer.dispose()
+    await bob.peer.drained()
+    await bob.control.apply(
+      {
+        putRejoin: rejoin,
+        putWelcomes: [{ opID: rejoin.id, welcome: rejoin.payload, recipients: ['carol'] }],
+        putApplied: [
+          {
+            epoch: 1,
+            digest: rejoin.digest,
+            payloadDigest: rejoin.payloadDigest,
+            sequenceID: '000000000001',
+            opID: null,
+            removed: true,
+          },
+        ],
+      },
+      'terminal-rejoin',
+    )
+    const settledBeforeDelivery = vi.fn()
+    const subscribe = vi.spyOn(hub, 'subscribe')
+    const again = member(hub, {
+      restartOf: bob,
+      deliverWelcome: async () => {
+        settledBeforeDelivery(await bob.control.load())
+        if (!accepted) throw new Error('Invitation transport unavailable')
+      },
+    })
+    const exported = vi.spyOn(again.crypto, 'exportSecret')
+    const outcome = { id: rejoin.id, opID: null, kind: 'unknown' }
+    expect(await again.peer.outcomes()).toEqual([expect.objectContaining(outcome)])
+    await vi.waitFor(() => expect(settledBeforeDelivery).toHaveBeenCalledTimes(1))
+    expect(settledBeforeDelivery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rejoin: null,
+        outcomes: [expect.objectContaining(outcome)],
+        welcomes: [expect.objectContaining({ opID: rejoin.id })],
+      }),
+    )
+    await vi.waitFor(async () => {
+      expect(await again.control.load()).toMatchObject({
+        rejoin: null,
+        welcomes: accepted ? [] : [{ opID: rejoin.id }],
+      })
+    })
+    expect(exported).not.toHaveBeenCalled()
+    expect(subscribe).not.toHaveBeenCalled()
+  },
+)
 
 test('a moved accepted operation matches incoming adoption by payload digest', async () => {
   const hub = new FakeHub()
