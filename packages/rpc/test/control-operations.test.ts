@@ -68,7 +68,9 @@ function setup() {
     build: vi.fn(async () => structuredClone(hostBuilt)),
     frame: vi.fn(async () => ({ payload, publishID, expectedHead: head })),
     publish: vi.fn(async () => ({ sequenceID: position })),
-    searchLog: vi.fn(async () => 'absent' as const),
+    searchLog: vi.fn(async (_from, _digest, position) => {
+      return position == null ? ('absent' as const) : { found: position }
+    }),
     adopt: vi.fn(async (_journal, _expected, write) => {
       await store.saveState(new Uint8Array([5]), write)
       return 'installed' as const

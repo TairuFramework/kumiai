@@ -55,6 +55,7 @@ export type OperationDeps = {
   searchLog(
     from: LogPosition | null,
     payloadDigest: string,
+    position?: LogPosition,
   ): Promise<{ found: LogPosition } | 'absent' | 'gap'>
   appliedAt(epoch: number): Pick<AppliedCommit, 'digest' | 'payloadDigest'> | undefined
   pullToHead(): Promise<void>
@@ -184,6 +185,8 @@ export async function stepOperation(deps: OperationDeps, op: Operation): Promise
     try {
       const result = await deps.publish(op.built.payload, op.built.publishID, op.built.expectedHead)
       position = asLogPosition(result.sequenceID)
+      const verified = await deps.searchLog(op.built.expectedHead, op.built.payloadDigest, position)
+      if (typeof verified !== 'object' || verified.found !== position) return op
     } catch (error) {
       if (!isHeadMismatch(error)) return op
       const found = await deps.searchLog(op.built.expectedHead, op.built.payloadDigest)
