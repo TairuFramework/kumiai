@@ -55,7 +55,7 @@ H renews T's trusted grant at least once per `trustedGrantLifetime`.
 Lifecycle `kumiai.device` entries allow proven `revoke`, `reset`, `clock` and advisory `beacon`.
 They reject `register`, `add`, `label` and capability-authorised revocation.
 Other groups retain device management with registry/tree controller agreement and issuer/subject pins.
-Denied DIDs cannot enter as bound or floating leaves, or issue leaf capabilities.
+Terminally denied DIDs cannot enter as bound or floating leaves, or issue leaf capabilities.
 
 The ledger is the only revocation authority.
 A proven revoke verifies authority-signed controller events against the group's recorded log.
@@ -69,8 +69,20 @@ An evidenced child keeps T as its issuer until it renews:
 - On the commit path, including survivor checks and authentication of the committer's path leaf, it passes only with the credential and key already in the tree at that leaf.
 - A Welcome or external joiner has no earlier tree, so it accepts any evidenced child in the tree it receives. A denied-issuer leaf without valid evidence is still refused.
 - Entry checks keep refusing a denied T: no Add, update or external replacement may carry a new capability T issued.
-A revoked record is permanent, including for a subject without a leaf.
-An un-revoke in H's log cannot remove it. A replacement agent needs a new DID.
+Subject and cascade revocations are permanent, including for a subject without a leaf.
+An un-revoke in H's log cannot remove them. A replacement agent needs a new DID.
+Reset-only removal permits re-entry through Add and Welcome with valid binding evidence at or above the current generation floor.
+Direct H grants and chained capabilities with the holder's own H-signed grant follow the same rule.
+The live registry projects current tree bindings onto the full ordered ledger fold.
+Accepted re-entry restores an active registry binding while the leaf remains in the tree.
+If that leaf later leaves without a ledger revocation, its record returns to reset-revoked on every member and after reconstruction.
+Until accepted re-entry, the removed device confers no authority.
+
+This projection cannot distinguish a legitimately re-admitted leaf that later lapsed from a leaf inserted after its post-reset capability expired.
+A malicious member holding D's genuine post-reset key package can therefore present an expired D as active to a device that adopts that member's tree: a Welcome joiner, or an existing member that externally rejoins from the malicious member's GroupInfo.
+That device is on a fork the existing members reject. Ordinary Add/commit paths still enforce admission expiry.
+The ledger records no readmission operation, so a joining or rejoining device has no authenticated admission history to resolve this ambiguity.
+A later subject revocation makes a reset-removed device terminally denied.
 
 Mandatory gates run before caller policy: asynchronous entry/proof preparation, synchronous proposal checks, then survivor path checks before adoption.
 Caller policy cannot override a failed lifecycle gate.

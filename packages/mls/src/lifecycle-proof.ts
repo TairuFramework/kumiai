@@ -14,7 +14,13 @@ import { RevokeProofError } from './errors.js'
 import type { GroupHandle } from './group-handle.js'
 import { controllerLogSize, HISTORY_HORIZON, historySize } from './history.js'
 import type { VerifiedLedgerEntry } from './ledger.js'
-import { type DeviceRegistry, type DeviceValue, denySetOf, type RevokedEffect } from './registry.js'
+import {
+  type DeviceRegistry,
+  type DeviceValue,
+  denySetOf,
+  isResetOnly,
+  type RevokedEffect,
+} from './registry.js'
 
 export { controllerLogSize, HISTORY_HORIZON } from './history.js'
 
@@ -247,7 +253,8 @@ export async function verifyLifecycleProof(
   const authenticated = authenticateLifecycleProof(controller, verified, group.registry)
   const revoked: Array<RevokedEffect> = []
   if (value.op === 'revoke') {
-    if (group.registry.devices.get(subject)?.status === 'revoked')
+    const record = group.registry.devices.get(subject)
+    if (record?.status === 'revoked' && !isResetOnly(record))
       throw new RevokeProofError('effects-mismatch')
     revoked.push({ did: subject })
   } else if (value.op === 'reset') {

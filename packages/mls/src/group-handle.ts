@@ -6,10 +6,12 @@ import {
   createApplicationMessage,
   createProposal,
   decode,
+  defaultCredentialTypes,
   defaultProposalTypes,
   encode,
   type IncomingMessageAction,
   type IncomingMessageCallback,
+  isDefaultCredential,
   type LeafNode,
   type MlsContext,
   type MlsFramedMessage,
@@ -77,6 +79,7 @@ import {
   denySetOf,
   foldControl,
   isDeviceValue,
+  mayReadmitResetDevice,
   revocationOf,
 } from './registry.js'
 import type { RosterState } from './roster.js'
@@ -323,6 +326,38 @@ export type HeldLedgerEntry = {
 /** A held entry paired with its content id — one position in the ledger log. */
 export type LedgerLogEntry = HeldLedgerEntry & { entryID: string }
 
+/** Project tree re-admissions from the full ledger fold, never a previous projection.
+ * A lapsed re-admitted leaf and a leaf inserted after expiry are indistinguishable here;
+ * a genuine expired post-reset package can activate a leaf for a Welcome joiner or an
+ * external rejoiner adopting a fork existing members reject. Ordinary commit admission
+ * still enforces expiry.
+ */
+function registryWithTreeBindings(
+  registry: DeviceRegistry,
+  tree: ClientState['ratchetTree'],
+): DeviceRegistry {
+  const devices = new Map(registry.devices)
+  for (const node of tree) {
+    if (
+      node?.nodeType !== nodeTypes.leaf ||
+      !isDefaultCredential(node.leaf.credential) ||
+      node.leaf.credential.credentialType !== defaultCredentialTypes.basic
+    )
+      continue
+    const parsed = parseMLSCredentialIdentity(node.leaf.credential.identity)
+    if (!mayReadmitResetDevice(registry, parsed)) continue
+    const did = normalizeDID(parsed.id)
+    const record = devices.get(did)
+    if (record == null) continue
+    devices.set(did, {
+      controller: record.controller,
+      status: 'active',
+      ...(record.label == null ? {} : { label: record.label }),
+    })
+  }
+  return { ...registry, devices }
+}
+
 /**
  * Project a held ledger into BOTH the roster and the device registry in one ordered pass
  * (see {@link foldControl}), so a role entry's authority resolves against the registry-so-far.
@@ -399,11 +434,12 @@ export class GroupHandle {
     )
     const folded = foldLedgerControl(this.#ledger, anchor, this.groupID)
     this.#roster = folded.roster
-    this.#registry = folded.registry
+    this.#registry = registryWithTreeBindings(folded.registry, this.#state.ratchetTree)
     // Authentication reads only this handle's registry and lifetime limits.
     const denyHolder = deviceDenyHolderFor(this.#context)
     if (denyHolder != null) {
       denyHolder.provider = () => this.currentDenySet()
+      denyHolder.registry = () => (anchor.controller == null ? undefined : this.registry)
       denyHolder.leafLifetime =
         anchor.controller == null ? undefined : (anchor.leafLifetime ?? 86_400)
       denyHolder.trustedGrantLifetime =
@@ -621,7 +657,7 @@ export class GroupHandle {
       }
       const folded = foldLedgerControl(this.#ledger, this.#anchor, this.groupID)
       this.#roster = folded.roster
-      this.#registry = folded.registry
+      this.#registry = registryWithTreeBindings(folded.registry, this.#state.ratchetTree)
       this.#admission = this.#computeAdmission()
       if (this.#pendingControlEvents != null) {
         this.emitControlEvents(appended.filter(({ entry }) => entry.type === DEVICE_ENTRY_TYPE))
@@ -757,7 +793,7 @@ export class GroupHandle {
         log.map(({ entryID, token, verified }) => [entryID, { token, verified }]),
       )
       this.#roster = folded.roster
-      this.#registry = folded.registry
+      this.#registry = registryWithTreeBindings(folded.registry, this.#state.ratchetTree)
       this.#admission = this.#computeAdmission()
       try {
         await opts?.persist?.(this)
@@ -1278,7 +1314,8 @@ export class GroupHandle {
         this.#entryBodies.set(entryID, { token, verified })
       }
       this.#roster = candidateRoster
-      this.#registry = candidateRegistry
+      const folded = foldLedgerControl(this.#ledger, this.#anchor, this.groupID)
+      this.#registry = registryWithTreeBindings(folded.registry, this.#state.ratchetTree)
       this.#admission = this.#computeAdmission()
       const emit = () => {
         this.#notifyAccepted(
@@ -1560,6 +1597,8 @@ export class GroupHandle {
                 try {
                   await verifyLeafCredential(credential, key, {
                     deviceDenySet: () => this.currentDenySet(),
+                    deviceRegistry: () =>
+                      this.#anchor.controller == null ? undefined : this.registry,
                     // MLS re-validates the committer's path leaf after its proposals are judged:
                     // an evidenced child keeps a denied issuer only with the credential it
                     // already holds at that leaf.
