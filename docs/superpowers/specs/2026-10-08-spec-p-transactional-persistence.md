@@ -1,12 +1,12 @@
 # Spec P: transactional persistence — design
 
 Date: 2026-10-08
-Status: draft r12
+Status: draft r13
 Parent: [client host, messaging protocol and multi-device e2e](2026-10-08-client-messaging-e2e-design.md)
 (phase 0)
 
 Spec P fixes the contracts phase 2 implements on memory doubles. P2a crash-safe control has
-landed on `feat/spec-p-phase-2` and is binding, with the r10 admission, r11 budget and r12 terminal-settlement amendments below.
+landed on `feat/spec-p-phase-2` and is binding, with the r10–r13 amendments below.
 This spec adds no second control journal.
 
 ## Scope and handoff
@@ -57,6 +57,11 @@ prefixed with `../`, `node_modules/` or `tests/`. Destinations in Decisions are 
   (`rpc/src/control/operations.ts:101`). Rejoin persists its request key and candidate
   (`rpc/src/control/types.ts:110`, `rpc/src/control/types.ts:117`); request creation/restore pass keys
   explicitly (`mls-rpc/src/mls.ts:386`, `mls-rpc/src/mls.ts:464`). The old memory-map comment is stale.
+- **Terminal pending gap (r13 decision), checked 2026-10-09.** `deliver()` schedules workers without awaiting handlers (`rpc/src/app-lane.ts:878`).
+  `advanceHandle` awaits that scheduling (`rpc/src/peer.ts:1206`). Terminal startup exits before pending restoration (`rpc/src/peer.ts:3111`, `rpc/src/peer.ts:3137`).
+- **Recovery removal gap (r13 decision), checked 2026-10-09.** Recovery without `conflictEpoch` keeps displaced applied rows (`rpc/src/control/rejoin.ts:171`).
+  Rows sort by epoch (`rpc/src/control/store.ts:37`). Removal detection reads the last row (`rpc/src/peer.ts:1946`).
+  `AppliedCommit` has no lineage today (`rpc/src/control/types.ts:133`).
 - Anchor persistence precedes memory publication (`rpc/src/peer.ts:398`, `rpc/src/peer.ts:410`).
   Adoption co-commits `pending.landed` (`rpc/src/control/types.ts:43`), checked during resolution
   (`rpc/src/peer.ts:426`). The independent revoke hold derives from unsettled operations
@@ -384,14 +389,16 @@ The host owns keys, provisioning, rotation, retention and destruction.
 Kumiai never generates or stores at-rest keys. Reconstructed adapters receive a codec capable of opening all retained records.
 Deletion never destroys host keys implicitly; remaining groups and tombstones can still require them.
 
-Seal state bytes, complete pending frames, outbox payloads, the serialised control snapshot and complete anchor slots before storage (r10 decision).
+Seal state bytes, complete pending frames, the serialised control snapshot and complete anchor slots before storage (r10 decision).
+Seal complete outbox entries and settlement obligations, including their required `topicID` fields (r13 decision).
 Control encryption includes operation bodies/journals and rejoin candidate/requestKey. Ports and transaction hooks still receive logical plaintext values.
 Anchor encryption includes `AnchorSlot.anchor.secret`, pending metadata and the landed mark, including adoption co-writes (r10 decision).
 The secret feeds app topic derivation (`rpc/src/anchor.ts:6`, `rpc/src/peer-epoch.ts:262`);
 the current Kubun adapter writes it directly (`../kubun/packages/plugin-p2p/src/groups/anchor-store.ts:35`).
 AAD is `UTF8(JSON.stringify(['kumiai/at-rest/v1', groupID, namespace, recordID]))`.
-Namespaces are `state`, `pending`, `outbox`, `control` and `anchor` (r10 decision).
+Namespaces are `state`, `pending`, `outbox`, `control`, `anchor` and `outboxMeta` (r13 decision).
 Record IDs are groupID for state/control/anchor, frame.id for pending, and String(seq) for outbox.
+Settlement record IDs are `JSON.stringify(['settlement', seq])` within `outboxMeta` (r13 decision).
 Queryable keys, CAS versions and mutation markers may remain clear. Authenticated open must reject altered ciphertext or AAD, without plaintext fallback.
 Seal failure rolls back the coupled transaction. Open failure exposes no handle or payload and never rewrites ciphertext as plaintext.
 
@@ -430,6 +437,11 @@ Redeclaration breaks ambiguity recognition (`rpc/src/control/store.ts:105`).
   (`rpc/src/control/rejoin.ts:127`, `rpc/src/control/rejoin.ts:154`). These guards remain binding alongside the spent-epoch refusal.
   Recovery's `onAccepted` passes `access.replace(data.group, write, undefined, 'recovery')`
   at the existing replacement call (`mls-rpc/src/mls.ts:218`). Registry maps that mode to the recovery store write.
+- **Displaced applied rows (r13 decision), amendment to P2a D5/D6.** Recovery retires displaced control rows in its state-installation transaction.
+  Remove prior applied rows whose framed epoch is at or above the recovered epoch, or whose lineage differs from the installed lineage.
+  Retirement precedes insertion of the recovery's own applied row, including when `conflictEpoch === null`.
+  Read prior rows for P2a outcome settlement before retiring them. Retain durable outcomes and Welcome obligations.
+  Rollback restores state and rows together. Ambiguity resolves both through D2's barrier.
 - **Admission floor (r7 decision).** Set `admissionFloor = max(prior admissionFloor, candidate epoch)`.
   Lower recovery preserves it. Tombstones set `epoch = admissionFloor`; Welcome requires strictly greater
   than that tombstone epoch. Unspent live Welcomes still compare current epoch (`mls-hub/src/admission.ts:7`, `mls-hub/src/admission.ts:8`).
@@ -591,11 +603,16 @@ export type GroupEpochRuntime = {
   snapshot(): GroupRuntimeSnapshot | null
   onEpochChanged(listener: (snapshot: GroupRuntimeSnapshot | null) => void): () => void
 }
-export type RegistryHandleAccess = HandleAccess & { pending: PendingAppFrames; runtime: GroupEpochRuntime }
+export type RegistryHandleAccess = HandleAccess & {
+  pending: PendingAppFrames; runtime: GroupEpochRuntime
+  stateVersion(): number              // committed GroupStateRecord.version (r13 decision)
+}
 // Add to GroupPeerMLSParams; required for registry-backed durable peers (r12 decision).
 captureAnchor: (params: {
   anchor: Omit<Anchor, 'ordinal'>; topicIDs: Array<string>; captureID: string
 }) => Promise<AnchorSlot>
+// Same loaded owning access supplies the certification version (r13 decision).
+stateVersion: () => number
 // Add to HandleAccess; retain read/mutate and AdoptionWriteFactory.
 pending?: PendingAppFrames
 lineage(): number
@@ -675,7 +692,7 @@ export function createGroupCrypto(params: GroupCryptoParams & {
   next version; preserve identity/lineage/both HWMs/spent set and install the updated cached record after commit.
   The registry owns ambiguity through `resolveWrite`, as for every state save. Never clear before consume.
   A crash after consume repeats its source receipt check, then clears through this operation.
-  Restore pending into the peer before P2a replay. Keep P2a's startup order and terminal-removal rule.
+  Restore pending into the peer before P2a replay. Apply D5's terminal pending-drain amendment before terminal clearing (r13 decision).
 
 **Cold access (r8 decision), phase 2.** `access` awaits load, restore, identity checks and retention validation under the group gate.
 Concurrent access calls share that load. Missing/tombstoned records reject with `DisplacedGroupHandleError`; invalid restore/configuration publishes nothing.
@@ -816,7 +833,7 @@ export const HANDSHAKE_BURN_BUDGET = 64
 **Deletion lifecycle (r6 decision).** Later client, and phase 2 fixtures, block peer creation/seed
 under the group's lifecycle gate. Call `peer.dispose()`, then `peer.drained()` before registry deletion.
 Drain is already the owner-replacement contract (`rpc/src/peer-types.ts:364`). Wait for acceptance,
-delivery, invoked handlers, network submissions, frozen proof removals and every adapter's ambiguity resolver to settle. Then enter
+delivery, terminal pending drain, invoked handlers, network submissions, frozen proof removals and every adapter's ambiguity resolver to settle (r13 decision). Then enter
 the shared root mutation gate once and perform the delete transaction (r7 decision). Never await drain inside a peer
 callback. Unsettled control still refuses deletion; resume a peer to settle or explicitly abandon/ack
 before retrying. On failure, keep the group stopped until restored. This prevents a late put from
@@ -929,6 +946,26 @@ Incoming commits skip state persistence only for **`applied: false`**, never mer
 `advanced: false`. Self-removal is applied and saved without epoch advancement
 (`rpc/src/crypto.ts:160`, `mls-rpc/test/adoption-write.test.ts:75`).
 
+**Terminal detection (r13 decision), amendment to P2a D5.** Add required `lineage: number` to `AppliedCommit` and its conformance mirror.
+Every adoption stamps its row with the installed state's lineage, including recovery and same-epoch self-removal.
+`StagedAdoption` exposes that required lineage to the write factory. State saves reject applied-row lineage mismatches.
+Removal detection selects the latest applied adoption on the current lineage, ordered by `sequenceID` using rpc's numeric-position comparator.
+It never selects the numerically highest epoch. D3 retires displaced rows atomically before the recovered row is inserted.
+The control snapshot codec round-trips lineage inside the encrypted `control` namespace. Live and restart detection use the same rule.
+
+**Terminal pending drain (r13 decision), amendment to P2a startup/removal.** Terminal startup detects removal before normal pending restoration.
+It then restores every durably opened pending record and awaits its handler and durable completion before terminal clearing or deletion.
+Live self-removal runs the same drain, including records opened before the removal committed and handlers already running.
+After detection, the peer blocks new opens, decryption and publication until the drain finishes.
+The drain uses persisted plaintext, sender, opened epoch and frame metadata. It performs no new opens, decryption or publication.
+Unopened frames do not gate this drain. It needs no epoch rebuild, anchor capture or retained fetch.
+Awaiting `appLane.deliver()` alone does not await handler settlement.
+
+Handlers keep their at-least-once contract and existing retry/completion rules. Handler or completion failure retains pending records and delays clearing.
+Handler execution and waiting occur outside the commit/app-lane mutexes and shared mutation gate.
+Lifecycle drain counts this work. Disposal or a timeout never authorises erasing an undrained opened record.
+After pending drain and D6 frozen publication settlement, terminal clearing proceeds. The terminal peer then serves only control outcomes and Welcome obligations.
+
 ### D6. Outgoing attempts and publication status
 
 **App outboxes only:** restart reseals every unproven plaintext entry. Store no app ciphertext or
@@ -940,9 +977,9 @@ app attempt that also landed; the umbrella's first-durable-occurrence ordering s
 ```ts
 // Reuse rpc's landed client result, not hub-protocol's store PublishResult (G2).
 export type PublishOutcome = { sequenceID: string } // rpc/src/control/operations.ts:36
-export type AppPublicationOutcome = { segment: number; position: string }
+export type AppPublicationOutcome = { segment: number; topicID: string; position: string } // r13 decision
 export type AppSettlementObligation = { // durable certified result, not acknowledgement evidence (r12 decision)
-  sequenceID: string; attemptID: string; outcome: 'published'
+  sequenceID: string; attemptID: string; topicID: string; outcome: 'published' // r13 decision
 }
 export type AppAttempt = {
   epoch: number                    // MLS seal/proof epoch
@@ -950,11 +987,21 @@ export type AppAttempt = {
   attempts: number
   publishID: string
   segment: number                  // captured local anchor ordinal at seal (r12 decision)
+  topicID: string                   // exact sealed message-lane topic, persisted (r13 decision)
 }
 // AppOutboxEntry.lastAttempt: AppAttempt | null; other fields unchanged.
 // AppOutbox.remove(seq: number, outcome?: AppPublicationOutcome): Promise<void>
-// Required AppOutbox additions, including doubles (r12 decision):
-recordSettlement(seq: number, obligation: AppSettlementObligation): Promise<void>
+export type AppSettlementExpected = { // certification snapshot before waiting for the gate (r13 decision)
+  identity: AppEpochIdentity
+  stateVersion: number              // committed GroupStateRecord.version, not sealVersion
+  attemptID: string
+}
+export type AppSettlementResult = // r13 decision
+  | { recorded: true }
+  | { recorded: false; reason: 'identity-changed' | 'state-version-changed' | 'attempt-changed' | 'entry-missing' }
+// Required AppOutbox additions, including doubles (r13 decision):
+recordSettlement(seq: number, obligation: AppSettlementObligation,
+  expected: AppSettlementExpected): Promise<AppSettlementResult>
 loadSettlement(seq: number): Promise<AppSettlementObligation | null>
 export type LogFrame = { topicID: string; payload: Uint8Array; publishID: string }
 export type AppEpochIdentity = {
@@ -968,16 +1015,18 @@ export type SealedLogFrame = LogFrame & {
 }
 // LogDeliveryParams:
 identity: () => AppEpochIdentity | null
+stateVersion: () => number | null // coherent committed version from owning access, unavailable during adoption (r13 decision)
 sealVersion: () => number
 publish: (frame: LogFrame) => Promise<PublishOutcome> | null
 remove: (seq: number, outcome?: AppPublicationOutcome) => Promise<void>
-recordSettlement: (seq: number, obligation: AppSettlementObligation) => Promise<void>
+recordSettlement: (seq: number, obligation: AppSettlementObligation,
+  expected: AppSettlementExpected) => Promise<AppSettlementResult> // r13 decision
 loadSettlement: (seq: number) => Promise<AppSettlementObligation | null>
 // Keep proof fields and add the accepted app occurrence:
 type Publication = {
   identity: AppEpochIdentity; sealVersion: number
   floor: LogPosition | null; acknowledged: number
-  publishID: string; segment: number; sequenceID: string
+  publishID: string; segment: number; topicID: string; sequenceID: string // r13 decision
 }
 type PublicationWalk = {
   started: number; identity: AppEpochIdentity | null; sealVersion: number
@@ -988,7 +1037,9 @@ certify(identity: AppEpochIdentity, walk: PublicationWalk): Promise<void> // awa
 ```
 
 - Each successful seal gets a fresh random `publishID`; persist attempt metadata before transport
-  handoff. Publish that ID to the frame's sealed topic. `segment` never substitutes for MLS epoch.
+  handoff. Persist `lastAttempt.topicID = frame.topicID` from that seal (r13 decision).
+  Publication, obligation and removal outcome retain that exact message-lane topic. Never re-derive it from a later anchor or ordinal.
+  Publish that ID to the frame's sealed topic. `segment` never substitutes for MLS epoch.
   Mux already returns sequenceID (`rpc/src/hub-mux.ts:777`). HTTP remains `{sequenceID}`; no fabricated
   `deduped` field (`hub-protocol/src/protocol.ts:49`, `hub-protocol/src/types.ts:77`).
 - **Retry bytes (r6 decision).** Keep one prepared `{frame, updatedEntry}` in a memory map by seq
@@ -1021,25 +1072,41 @@ certify(identity: AppEpochIdentity, walk: PublicationWalk): Promise<void> // awa
   Entries with a settlement obligation settle their frozen result first, without resealing or recertifying (r12 decision).
   No 365-day ambiguity horizon is needed for app attempt recovery.
 - **Status.** `pending` until first atomic put; `accepted` when it commits; `published` only at proof.
-  `remove(seq, {segment, position: sequenceID})` names the publication proof certified. Freeze that
+  `remove(seq, {segment, topicID, position: sequenceID})` names the publication proof certified (r13 decision). Freeze that
   outcome when proven and retry the identical removal after failures, even if the epoch changes.
 - D7 writes published status/position with removal. The sender records the proven occurrence;
   receivers keep their first durable occurrence. `clear` and deletion fail unpublished messages.
-- **Durable settlement (r12 decision).** Certification records `{sequenceID, attemptID, outcome: 'published'}` in `outboxMeta`.
-  It acquires `recordSettlement`'s shared gate before freezing the outcome. Freeze and obligation persistence form one gate-owned action.
-  `certify` resolves only after obligation commit. Evidence waiting for that gate remains unproven.
+- **Durable settlement (r13 decision).** Certification records `{sequenceID, attemptID, topicID, outcome: 'published'}` in `outboxMeta`.
+  Both proof paths capture `{identity, stateVersion, attemptID}` when checking proof, before waiting for `recordSettlement`'s internally acquired gate.
+  Identity and committed version come from the same owning-access snapshot, with no intervening await.
+  The host binds `GroupPeerMLSParams.stateVersion` to `access.stateVersion()` on the same loaded registry access as its MLS port.
+  The peer forwards it to LogDelivery, suspending version/identity snapshots during adoption or uncertain installation.
+  `stateVersion` is `GroupStateRecord.version` at certification, not the version at sealing or the peer's `sealVersion`.
   The row key binds groupID and outbox seq. `sequenceID` is the certified hub position, and `attemptID` is `lastAttempt.publishID`.
-  `recordSettlement` validates that exact stored attempt and persists before any removal or terminal state/control adoption may commit.
 
-  Both proof paths await it. Certification and terminal adoption share the group gate, with terminal adoption ordered behind the obligation write.
+  After acquiring the shared gate, `recordSettlement` reads current committed state and entry inside its transaction.
+  Require a live group, matching epoch/authenticator/lineage, exact state version and stored attemptID.
+  Require `expected.attemptID === obligation.attemptID === lastAttempt.publishID` and `obligation.topicID === lastAttempt.topicID`.
+  A mismatch returns `{recorded: false, reason}` without changing rows, mutation markers or hooks. The evidence remains unproven.
+  The caller discards stale evidence and requests a fresh proof. No external gate wrapper or post-write validation substitutes for this check.
+  Freeze only after `{recorded: true}` proves obligation commit. Evidence waiting for the gate remains unproven.
+
+  Both proof paths await this result. If settlement acquires the gate first, terminal adoption waits behind its validated obligation write.
+  If recovery installs a replacement first, settlement revalidates against that state and records nothing for the stale proof.
   Known obligation-write rollback retries while retaining that gate. Unknown outcomes use D2's barrier and D7's marker resolver before releasing it.
-  No terminal writer passes a frozen proof awaiting this write. Publication acknowledgement alone never creates an obligation.
-  Exact duplicate obligations succeed without another hook. Missing entries or conflicting attempts/results reject without changing rows.
+  Terminal adoption never overtakes a validated settlement holding the gate. Publication acknowledgement alone never creates an obligation.
+  With a valid binding, exact duplicate obligations return `{recorded: true}` without another hook.
+  Missing entries or changed attempts return `{recorded: false, reason}`. Conflicting certified results reject without changing rows.
 
-  Once obligated, an entry cannot replace `lastAttempt`. Reconstruct its frozen outcome as `{segment: lastAttempt.segment, position: obligation.sequenceID}`.
+  Once obligated, an entry cannot replace `lastAttempt`.
+  Reconstruct its frozen outcome as `{segment: lastAttempt.segment, topicID: obligation.topicID, position: obligation.sequenceID}` (r13 decision).
   The obligation contains no ciphertext, proof transcript or durable acknowledgement cache. It survives identity invalidation and process death.
   Removal deletes the obligation with its entry, in the published-status transaction. No independent cleanup deletes it.
   Restart loads obligations before resealing or terminal clearing. Terminal clear reports `published` for obligated entries and fails only the remainder.
+- **Occurrence codec (r13 decision).** Outbox persistence requires `AppAttempt.topicID`. Obligation persistence requires `AppSettlementObligation.topicID`.
+  Both round-trip through reconstruction and defensive copies. Missing fields reject without inferring a topic from protocol, ordinal or current secrets.
+  These fields belong to outbox codecs, outside the MLS ClientState v2 envelope. D3's host codec seals both complete records with distinct AAD.
+  Hooks persist the occurrence's `topicID` with segment/position. Restart settlement and receipt watermarks use that persisted topicID.
 - **Terminal proof settlement (r8 decision), phase 2 runtime.** Self-removal settles every frozen proof before clearing remaining entries.
   Known rollback retains the proof and retries identical `remove(seq, outcome)`; ambiguity stays inside D7's resolver.
   Clear never overtakes an unsettled proven removal. The current removed branch clears proof first
@@ -1093,7 +1160,9 @@ payload and derive own author from the host identity; a decode error rolls back 
   await applicable hooks, then write fresh `mutationID` to group outbox meta. Resolve after commit/hooks.
   Cursor stays in `ControlStore`; adoption writes remain co-committed with state.
 - **Obligation rows (r12 decision).** `recordSettlement` uses the canonical gate and mutation marker, resolving storage ambiguity internally.
-  Its known rollback retains the certification gate through retry. It runs no message-status hook.
+  D6's expected binding is checked inside that gate/transaction before any write (r13 decision).
+  Binding refusal returns `recorded: false` unchanged. A validated write's known rollback retains the gate through retry.
+  It runs no message-status hook.
   `loadSettlement` reads the committed row. A present obligation overrides outcome-free removal and supplies the frozen published outcome.
   Conflicting explicit removal outcomes reject unchanged. Remove co-deletes entry/obligation and awaits `onRemove(tx, entry, frozenOutcome)`.
   `clear` reads entries and obligations in its transaction. It calls outcome-bearing `onRemove` for obligated entries, then `onClear` for the remainder.
@@ -1217,8 +1286,11 @@ applies. Hozon does not configure transaction isolation (`../hozon/packages/db/s
    Reuse P2a co-commit. Include spent-authenticator plumbing, durable handshake reservations and the P2a D4 admission amendment (r10 decision).
    Include the 64-generation handshake budget, terminal error/outcome plumbing and receiver-window parity (r11 decision).
    Include atomic local anchor ordinal capture and the gated durable ControlStore baseline reader (r12 decision).
+   Include recovery's atomic displaced-row retirement and lineage-stamped latest-adoption terminal detection (r13 decision).
 3. D4 pending/handler migration, including optional broadcast metadata and directed stamped headers.
+   Terminal startup/live removal restore and await opened pending handlers/completions before clearing (r13 decision).
 4. D6 entry/publication/removal shapes, prepared-byte retries, durable settlement obligations and terminal proof settlement (r12 decision).
+   Carry persisted message-lane topicID and gate-owned expected identity/version/attempt validation (r13 decision).
    Preserve memory-hub dedup parity.
 5. D7 rpc decoder/error exports and coordinated memory contract fixtures; no production rpc-store adapter.
    Shared fixtures expose physical-record mutation/swaps and transaction-bound side-row writes (r11 decision).
@@ -1282,6 +1354,7 @@ phase 3 runs real-store boundaries; phase 6 arms, reports, blocks and kills a ch
 |---|---|---|---|
 | Decrypt, before ratchet-plus-pending save | `GroupStateStore.saveOpened` | before | extend pending crypto failure case; 2/3/6 |
 | Saved pending, before host message write | `saveOpened` | after | pending reopen exists; MessageStore integration 5/6 |
+| Saved pending, self-removal committed, before handler | terminal state/control save | kill before handler settlement | restart restores every opened record and awaits handlers/completions before clearing; no opens/decryption/publication; live path also drains; 2 reconstruction / 3 provider / 5 ingestion / 6 SIGKILL (r13 decision) |
 | Host message persisted, before completion | `MessageStore.put` | after | 5/6 |
 | Pending complete, before cursor advance | `completePending` | after | completion ordered today; durable provider/kill 3/6 |
 | Accepted outbox, before publish | `AppOutbox.put(lastAttempt: null)` | after | extend existing restart; coordinated message write 5/6 |
@@ -1297,6 +1370,7 @@ phase 3 runs real-store boundaries; phase 6 arms, reports, blocks and kills a ch
 | Anchor/cursor save rejected, backend unfinished | `AnchorStore.save` / `AppCursorStore.save` | disposal/drain then delete or Welcome replacement | late commit/rollback settles first; no deleted rows or old-admission anchor reappear; 2/3 |
 | Proven removal rolled back, terminal cleanup requested | `remove(seq, outcome)` | self-removal or dispose/drain/delete | frozen proof settles before clear/delete; published never failed by that cleanup; 2 status double / 5 MessageStore |
 | Certified obligation pending, terminal adoption queued | `recordSettlement` | rollback or unfinished COMMIT | gate holds terminal state/control adoption until obligation commit; 2/3 (r12 decision) |
+| Certification checks A, recovery to B queued ahead | `recordSettlement(seq, obligation, expected)` | wait for shared gate | re-check after B installs returns recorded false, writes nothing and leaves A evidence unproven; 2/3 (r13 decision) |
 | Certified, remove rolled back, terminal adoption committed | self-removal state/control save | kill before remove retry | obligation survives; restart terminal clear reports published once and co-deletes entry/obligation, never failed; 2 reconstruction / 3 provider / 5 status / 6 SIGKILL (r12 decision) |
 
 Control/rejoin/Welcome-delivery seams remain owned by P2a. Its in-process Welcome crash reconstruction
@@ -1384,7 +1458,7 @@ export function testCoordinatedOutboxConformance<TTx extends ConformanceTransact
   params: PersistenceConformanceParams<PersistencePorts, TTx>
 ): void
 export function testAppOutboxConformance<TTx extends ConformanceTransaction>(
-  params: PersistenceConformanceParams<{outbox: AppOutbox}, TTx>
+  params: PersistenceConformanceParams<PersistencePorts, TTx> // expected binding needs committed state (r13 decision)
 ): void
 export function testAppCursorStoreConformance<TTx extends ConformanceTransaction>(
   params: PersistenceConformanceParams<{cursor: AppCursorStore}, TTx>
@@ -1435,6 +1509,7 @@ Faults/clock follow the rebuilt ports. `inspectRows` normalises provider rows fo
 Its `key` addresses the physical byte slot, using D7's row key for single-copy records, distinct from the AAD `recordID` (r11 decision).
 When providers duplicate a byte value, expose each physical copy with a distinct key addressing that copy.
 Scan those bytes for non-empty plaintext and distinctive spans from state, pending frames, outbox payloads, control secrets and `AnchorSlot.anchor.secret` (r10 decision).
+Include persisted outgoing topicIDs in outbox and outboxMeta settlement bytes (r13 decision).
 Logical port round-trips alone cannot pass encryption conformance. Open stored ciphertext with another group, namespace or record ID's AAD: rejection is required.
 Swap ciphertext between physical record identities and assert adapter reads reject too. Reopen with the same host codec preserves logical state and payloads.
 
@@ -1468,6 +1543,8 @@ Canonical port names in this block denote those structural `Conformance*` mirror
 The state-record mirror includes `spentEpochAuthenticators` and `handshakeHWM`; the Welcome mirrors above preserve the exact nested union and options shape (r10 decision).
 State/anchor mirrors retain `anchorOrdinal`, `anchorOrdinals`, captured ordinal/captureID and capture signatures (r12 decision).
 Registry/access mirrors retain `loadControl` and the baseline callback argument. Outbox mirrors retain the obligation type and record/load methods (r12 decision).
+Registry mirrors retain `stateVersion`. Outbox mirrors retain expected binding/result and required topicID on attempts, obligations and outcomes (r13 decision).
+AppliedCommit and StagedAdoption mirrors retain installed lineage (r13 decision).
 Built/outcome mirrors preserve `handshakeGeneration` and rejected `errorName`; fixture mirrors retain physical mutations and the side-row writer (r11 decision).
 Ordinary receipts can short-circuit open (`mls-hub/src/join.ts:50`). Test spent admission/seed directly and wire replay before consume.
 After consume, assert receipt-only handling never installs state.
@@ -1480,6 +1557,7 @@ After consume, assert receipt-only handling never installs state.
 | | forbidden lineage changes, r10 | matching CAS/new version, unchanged epoch/authenticator, ordinary kind 'state' with increased lineage and reset progress: conflict; any lineage decrease, including recovery/Welcome/open/delete, conflicts; bytes, both HWMs, spent set, control/anchor unchanged; doubles and real stores |
 | | forbidden same-number identity replacement (r12 decision) | stored E4/authA, unspent E4/authB, matching CAS/new version, unchanged lineage: ordinary kind 'state' save and saveOpened/open replacement each reject; state bytes/version/writeID, sender/receive progress, both HWMs, floor/lineage/spent set, ordinal/map, pending/control/anchor/cursor/outbox/meta/side rows and hook counts all unchanged; real stores and every double; only authorised recovery can replace |
 | | confirmed lower recovery | real source at 4, responder at 1, unspent candidate at 2: confirmation/source check permits atomic adoption; version/lineage increase, floor stays 4, both candidate HWMs reset; reopen at 2; tombstone refuses Welcome at/below 4 |
+| | recovery row retirement (r13 decision) | prior applied rows at/above recovered epoch or off installed lineage disappear with state installation, before recovery-row put; conflictEpoch null included; coupled failure rolls back state/rows, ambiguous commit resolves both; outcomes/Welcomes retained |
 | | refused lower recovery | unconfirmed/refused candidate, stale source/version, absent/tombstoned source or missing adopted co-write changes nothing |
 | | spent Welcome after lower recovery, r10 | install A3 (ordinary and last-resort), seal, advance A4, recover onto B2, reopen, replay A3: admission refused and seed/save conflict; B2, both HWMs, lineage, control/anchor and spent set unchanged; unspent B3 remains admissible despite floor 4 |
 | | alternate A3 representation, r10 | after A3 → A4 → B2, author produces valid alternate A3 using changed signed GroupInfo extensions and regenerated recipient encryption: same authenticator, different bytes; admission refused, seed/save conflict, never merge; ordinary and last-resort, after restart |
@@ -1501,15 +1579,17 @@ After consume, assert receipt-only handling never installs state.
 | | unsettled delete | operations, rejoin, outcomes and Welcomes each refuse; reuse predicate/host tests (`rpc/test/control-store.test.ts:253`) |
 | P2a ControlStore, 2 / 3 | negative marker barrier | state-free apply rejects before backend completion; lastMutation stays pending despite raw previous marker; late commit resolves once, rollback alone returns previous marker; deletion cannot overtake |
 | | at-rest control, r9/r11 | raw snapshot contains no operation body/journal or rejoin candidate/requestKey plaintext; same-codec reopen round-trips; mutateStoredRecord corruption/substitution and swapStoredRecords reject on adapter reads after reopen |
+| | lower recovery then removal (r13 decision) | A4 has non-removal applied rows at 2 and 3; confirmed recovery to B2 with conflictEpoch null retires displaced rows; self-removal at B2 is latest on current lineage and terminal detection succeeds live and after restart; epoch sorting cannot mask it |
 | `testAppOutboxConformance`, 2 / 3 | attempt/outcome | all attempt fields round-trip; outcome reaches remove; unknown removal remains harmless |
-| | settlement obligation (r12 decision) | certified sequenceID/attemptID/published round-trips and copies defensively; matching duplicate idempotent, wrong/missing attempt conflicts; obligated lastAttempt cannot change; entry removal co-deletes obligation; generic remove honours its published outcome |
+| | settlement obligation (r13 decision) | certified sequenceID/attemptID/topicID/published round-trips and copies defensively; valid-binding duplicate idempotent; missing entry, wrong attempt/topic, identity/lineage or state version returns recorded false unchanged; obligated lastAttempt cannot change; entry removal co-deletes obligation; generic remove honours its published outcome |
 | `testCoordinatedOutboxConformance`, 2 memory / 3 Hozon | rollback/visibility, r11 | hooks await writeSideRow on supplied tx; outbox plus inspectSideRow show both new values after commit, exact prior values/absence after hook failure/rollback; commit/rollback hooks select exactly one queue before resolution; postgres independent reader sees neither change before commit |
-| | at-rest outbox, r9/r11 | raw stored bytes contain no payload plaintext or distinctive spans; hooks/list still see logical payloads; same-codec reopen succeeds; mutateStoredRecord corruption/substitution and swapStoredRecords reject on adapter reads after reopen |
+| | at-rest outbox/settlement (r13 decision) | raw outbox/outboxMeta bytes contain no payload/topicID plaintext or distinctive spans; required topicIDs round-trip with the host codec; missing topicID refuses decoding; wrong-AAD opens, physical corruption/substitution and swaps reject through adapters after reopen; hooks receive the persisted topic |
 | | ambiguous mutations | put, same-data replacement, remove, clear and group delete commit-then-reject resolve iff committed; each registered commit hook fires once before success, rollback hooks never; failed barrier/status read leaves hooks/caller/later writer pending |
 | | negative read, late completion, r11 | put (initially absent meta), replacement, remove, clear and delete hooks await writeSideRow; pending COMMIT leaves outbox/side row prior, queues zero and gate held; late commit exposes both changes and commit hooks once; late rollback keeps both prior and runs rollback hooks once |
 | | overlap/removal/replacement | B waits through A's readback; repeated remove skips hook; changed protocol/prc/data rejects unchanged |
 | | shared deletion gate | construct state/outbox independently over one root; delete waits through pending put/barrier, then atomically clears rows/meta; no later recreation |
-| | settlement/terminal gate (r12 decision) | blocked or rolled-back obligation write holds terminal adoption pending; known/late commit persists exact obligation before state/control terminal commit; no publication-status hook during obligation write; ambiguous retries never lose or duplicate settlement |
+| | settlement owns gate first (r13 decision) | settlement validates A while owning the gate; queued recovery/terminal adoption waits through blocked or rolled-back obligation write; known/late commit persists exact obligation before state/control adoption; no publication-status hook during obligation write; ambiguity never loses or duplicates settlement |
+| | recovery owns gate first (r13 decision) | certification checks A and captures identity/stateVersion/attemptID; recovery installing B is queued ahead on the gate; recordSettlement acquires afterward, returns recorded false and changes no outbox/meta/side row or hook count; A evidence remains unproven; test both proof paths and version-only/attempt changes |
 | | reconstructed terminal clear (r12 decision) | certify, remove rolls back, terminal adoption commits, discard runtime before retry, rebuild terminal peer: obligated entry publishes its frozen ordinal/sequenceID once, never fails; remaining entries fail; entry/obligation/status co-commit; clear rollback retains all rows |
 | | root-only constructor, 3 | transaction-scoped provider refused |
 | `testAppCursorStoreConformance`, 2 / 3 | durable per topic | reopen saved position; other topics remain null |
@@ -1532,10 +1612,12 @@ After consume, assert receipt-only handling never installs state.
 | | ordinary adoption progress | intervening seal/open remains spent after ordinary replacement; same-identity state save merges both chains; extend P2a historical carry test (`mls/test/carry-receive-progress.test.ts:80`); recovery/Welcome candidates still refuse spent identity |
 | | tombstone Welcome floor | reuse comparison (`mls-hub/test/admission.test.ts:10`); add delete/save/rejoin integration |
 | rpc delivery tests, 2 | retry bytes/restart | failed or null handoff retries byte-exact with same ID; reconstruction reseals/new ID; extend restart test (`rpc/test/peer-log-delivery.test.ts:554`) |
+| | terminal opened pending (r13 decision) | saveOpened commits, self-removal state/control commits, kill before handler; restart restores all opened records and delivers each once-or-more before clearing; hold handler settlement to prove clearing waits; retry handler/completion failure; no opens/decryption/publication; live self-removal obeys the same order; phase 2 reconstructs, phase 6 kills |
 | | acknowledgement/proof | extend overtaken-epoch restart (`rpc/test/peer-log-delivery.test.ts:1093`); acknowledgement never removes; proof freezes correct segment/sequenceID through failed removal |
 | | same-number recovery proof | A at E acknowledged before or during recovery to B at E; B walk and no-new-head probe cannot prove A; reseal/new ID under B before published outcome; old walk token cannot certify B; already-proven A retries its frozen outcome |
 | | terminal proof | proof then removal rollback then self-removal retries frozen outcome before clear; disposal cancels send retries but drain waits proof finaliser before delete/Welcome replacement; published hook once, no failed hook for proven seq; unproven rows fail normally |
 | | terminal proof restart (r12 decision) | certify and persist obligation, removal rolls back, self-removal state/control commits, kill before retry; restart runs terminal clear without sealing/probing, reports published at the frozen ordinal/sequenceID, deletes obligation with entry and never reports failed; phase 2 reconstructs, phase 6 actually kills |
+| | frozen topic after recapture (r13 decision) | certify on anchor A, remove rolls back, replace anchor with B, reconstruct and settle A: outcome/MessageStore occurrence/receipt watermark keep A's sealed message-lane topicID and ordinal/position; no derivation from B or retained ordinal map; multiple protocol/inbox topics share A's ordinal |
 | MLSEncryptor, 2 | runtime/batch | 64 successful opens flush as 64, mixed batches count exact successes; rotation E+1 with peer retained stays open; committed removal/unavailability, epoch jump and same-number recovery close once; rollback/staged membership never closes; unsubscribe disables watcher |
 | `hub-conformance`, 2 | dedup scope/expiry | same ID on two topics appends on both; purge just before cutoff dedups, at cutoff appends; retry does not refresh timestamp; real hub-store and memory |
 | hub-client, 2 | retention/buffer | reconnect and retry preserve retention; injected epoch notifications wake held frames; disposal unsubscribes |
@@ -1567,6 +1649,9 @@ Applied in this revision, not deferred to another reconciliation step:
 - r12: durable local anchor ordinals order messages/read watermarks across lower recovery. Peer receipts compare anchor/position only within one anchor.
   Certified outbox-meta obligations survive terminal restart. Registry builds read accepted handshake baselines under the shared gate.
   Ordinary same-number different-authenticator state/open writes conflict, with every coupled row unchanged (r12 decision).
+- r13: terminal startup/live removal await opened pending handlers before clearing. Recovery retires displaced applied rows atomically.
+  Terminal detection uses the latest adoption on the current lineage. Settlement revalidates expected identity/version/attempt inside the gate.
+  Outgoing occurrences and obligations persist sealed topicID for restart settlement and receipts, including codec/at-rest coverage (r13 decision).
 
 ## Review log
 
@@ -1735,5 +1820,25 @@ The r8 memory-only certified-proof claim is superseded by r12's minimal settleme
   4. **Medium:** conformance missed ordinary same-number identity replacement. State and open paths reject matching-CAS E4/authA → unspent E4/authB (r12 decision).
      Every coupled logical row remains unchanged. Only confirmed, source-checked recovery permits this transition.
      Evidence: `mls-rpc/src/mls.ts:218`, `mls-rpc/src/access.ts:87`.
+
+  No unresolved or impossible rulings. Implementation and executable conformance remain phase 2/3 work; this revision claims no implementation or test pass.
+
+- **Blind review r12**, 2026-10-09. Read the findings first and verified cited code. Decided rulings applied in draft r13:
+  1. **High:** terminal startup and live self-removal restore every opened pending record and await handlers/completions before clearing (r13 decision).
+     No new opens, decryption or publication. Handler execution remains at least once. P2a's startup order carries the amendment.
+     Evidence: `rpc/src/app-lane.ts:878`, `rpc/src/peer.ts:1206`, `rpc/src/peer.ts:3111`.
+     Conformance: saveOpened → self-removal commits → kill before handler → restart delivers once-or-more before terminal clearing.
+  2. **High:** recovery atomically retires displaced applied rows at/above the recovered epoch or off its lineage (r13 decision).
+     Terminal detection selects the latest applied adoption on the current lineage, never the highest epoch row.
+     Evidence: `rpc/src/control/rejoin.ts:171`, `rpc/src/control/store.ts:37`, `rpc/src/peer.ts:1946`.
+     Conformance: A4 with non-removal rows at 2/3 → confirmed B2 with conflictEpoch null → B2 self-removal detects terminal live/after restart.
+  3. **High:** recordSettlement receives expected identity/stateVersion/attemptID and revalidates inside its acquired gate (r13 decision).
+     Mismatch returns recorded false with reason, writes nothing and leaves evidence unproven. Gate-first settlement retains its existing ordering.
+     Evidence: D1's non-reentrant gate and D6's former two-argument signature could not express the required handoff.
+     Conformance covers recovery installing B queued ahead of A's settlement, plus settlement owning the gate first.
+  4. **Medium:** outgoing occurrences and obligations persist the sealed message-lane topicID (r13 decision).
+     Restart outcomes, MessageStore occurrences and receipt watermarks use that field. Required-field codecs and encrypted outbox/outboxMeta records cover it.
+     Evidence: `rpc/src/peer.ts:394`, `rpc/src/topic.ts:43`, `rpc/src/app-lane.ts:530`.
+     Conformance settles A after anchor B replacement/restart without deriving A's topic from B or a shared ordinal.
 
   No unresolved or impossible rulings. Implementation and executable conformance remain phase 2/3 work; this revision claims no implementation or test pass.

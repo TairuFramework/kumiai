@@ -59,6 +59,12 @@ Recovery uses existing P2a device readmission: fresh leaf and handshake chain. N
 Conformance doubles enforce the same forward window as real ts-mls. Shared fixtures expose physical-record mutation/swaps and a transaction-bound side-row writer.
 Memory fixtures bind these in phase 2; phase-3 providers bind raw tables and transaction stores. Commit/rollback/late-fault cases read both outbox and side row.
 
+**Spec P r13 amendments (r13 decision), 2026-10-09.** Terminal startup and live self-removal await all durably opened pending handlers/completions before clearing.
+That drain uses persisted plaintext and performs no new opens, decryption or publication. Handler execution remains at least once.
+Recovery retires displaced applied rows atomically. Terminal detection uses the latest adoption on the current lineage, never the highest epoch row.
+Settlement revalidates expected identity/stateVersion/attemptID after acquiring the shared gate. Mismatch records nothing and leaves the evidence unproven.
+Outgoing occurrences and settlement obligations persist the sealed message-lane topicID. Restart settlement and receipts use that field, covered by persistence codecs and at-rest encryption.
+
 - `@kumiai/mls` has signed-ledger roles (`roster.ts`: `admin | member`, only admins grant,
   zero-admin entries dropped). Roles persist after the subject's removal. Authority resolves through
   `controller ?? device` for registered devices (`registry.ts`); admission checks the added device's
@@ -142,11 +148,11 @@ tests/e2e  (new, private) DeviceDriver, hub fixture, scenarios
 | Package | Change |
 |---|---|
 | `mls` | Spec P phase 2: version-2 lossless pending-proposal sender codec, configurable retention propagated through every constructor/recovery, non-mutating `commitKeyRotation` and private control builders exposing consumed handshake generations (r10 decision). Group-model changes from Spec I: bound creator in an unanchored group, Welcome admission for co-devices, role bootstrap/migration, revocation as ordered ledger evidence in unanchored groups, structured policy errors. |
-| `rpc` | Spec P phase 2: opened epoch on pending records and every inbound application handler context (with supporting broadcast metadata); app attempt IDs, client `{sequenceID}` result and proof-time `remove(seq, outcome?)`; strict `decodeAppEntry`. Landed P2a `ControlStore` owns control/cursor; no CommitJournal. Canonical HandshakeBudgetExhaustedError, built handshakeGeneration and terminal rejected errorName identify budget exhaustion (r11 decision). |
+| `rpc` | Spec P phase 2: opened epoch on pending records and every inbound application handler context (with supporting broadcast metadata); app attempt IDs, client `{sequenceID}` result and proof-time `remove(seq, outcome?)`; strict `decodeAppEntry`. Landed P2a `ControlStore` owns control/cursor; no CommitJournal. Canonical HandshakeBudgetExhaustedError, built handshakeGeneration and terminal rejected errorName identify budget exhaustion (r11 decision). Terminal pending drain, lineage-aware removal, gated settlement binding and persisted occurrence topicID follow r13 (r13 decision). |
 | `hub-client` | Phase 2 reconnecting HTTP hub, scoped/buffered views, ack backoff and discovery fetch. Preserve retention on reconnect/retry. Buffer injects inspectEpoch/currentEpoch/onEpochChanged; no MLS/registry import. Automatic `/info` integration remains BLOCKED (Risks). |
 | `mls-rpc` | Phase 2 registry over memory `GroupStateStore`: asynchronous load/validated access, staged CAS, identity/lineage, confirmed lower-epoch recovery with separate tombstone floor, application lease/deferred burn and durable handshake reservations capped by unpublished budget 64 (r11 decision). Every installed epoch appends its authenticator; recovery/candidate/seed guard and lifetime tombstones preserve the spent set (r10 decision). Registry owns joinRef clearing and durable pending saves/ambiguity; HandleAccess gains seal/receive/buildControl/lineage and recovery mode. `MLSEncryptor` extraction uses committed membership snapshots and numeric receive counts (r8 decision). P2a recovery candidates encode complete version-2 sourceState; credential/token serialisation uses the lossless MLS codec (r8 decision). Hozon storage/projections remain adapters. |
 | `mls-hub` | Landed P2a openWelcome/consume/receipt are prerequisites. Phase 2 publishes the complete nested openWelcome union (authenticator in joined.group.state.keySchedule), single-options judgeWelcomeAdmission and structural mirrors (r10 decision). Spent-first admission guards joined state/authenticator/joinRef save before consume; genuine readmission atomically resets control/anchor (Spec P D3). No Welcome digest. |
-| `rpc-store` (new) | Phase 3 Hozon impls of `GroupStateStore`, `ControlStore`, `AnchorStore`, `AppCursorStore`, `AppOutbox` on sqlite, postgres and expo. MLS state, `AdoptionWrite` control changes and the anchor landed mark share one adoption transaction (Spec P2a). All writers share one root mutation gate and backend completion barrier, including independent anchor/cursor saves (r8 decision). Explicit factories and outcome-aware Hozon hook settlement are prerequisites (r8 decision). State/control/coordinated-outbox/anchor factories require host `atRest`; raw-byte/wrong-AAD cases cover anchor.secret (r10 decision). Passes `rpc-conformance`, extended per Spec P r11, including forbidden lineage changes, physical corruption/swaps and atomic side-row visibility (r11 decision). |
+| `rpc-store` (new) | Phase 3 Hozon impls of `GroupStateStore`, `ControlStore`, `AnchorStore`, `AppCursorStore`, `AppOutbox` on sqlite, postgres and expo. MLS state, `AdoptionWrite` control changes and the anchor landed mark share one adoption transaction (Spec P2a). All writers share one root mutation gate and backend completion barrier, including independent anchor/cursor saves (r8 decision). Explicit factories and outcome-aware Hozon hook settlement are prerequisites (r8 decision). State/control/coordinated-outbox/anchor factories require host `atRest`; raw-byte/wrong-AAD cases cover anchor.secret (r10 decision). Passes `rpc-conformance` through Spec P r13, including displaced-row retirement, settlement binding and encrypted occurrence topicID (r13 decision). |
 | `client` (new) | Phase 4 Device: identity/group verbs, one peer per group, inventory/pending/control restore, source-scoped Welcome consume sweep, rotation scheduling and stop/drain deletion; key-package provisioning and wake. |
 | `hub-server` or a new `hub-authz` | The membership `authorize` policy and its state ingestion (Spec H decides placement). |
 | `messaging` (new) | Phase 5 protocols, Messenger, MessageStore memory/Hozon impls; consumes phase-2 opened epoch and proof outcomes. Hooks atomically record acceptance/publication/failure with outbox writes. |
@@ -296,14 +302,16 @@ Identity details are settled in Spec I; this section fixes the shape.
   groups through awaited registry.access and sweeps joinRef through its owning source's consume (r8 decision).
   It calls registry.clearJoinRef with that exact ref (Spec P D3).
   Peers restore pending receives and replay P2a operations/rejoins/outcomes/Welcomes in P2a startup order.
-  Tombstones never start peers; terminal removed groups only serve control outcomes/Welcomes.
+  Tombstones never start peers. Terminal removed groups restore and await every opened pending handler/completion before clearing (r13 decision).
+  That drain performs no new opens, decryption or publication. Afterwards, terminal peers serve only control outcomes/Welcomes.
+  Live self-removal uses the same order. Detection selects the latest applied adoption on the current lineage after atomic recovery retirement.
 - **Rotation/deletion.** Client schedules one rotation per epoch identity outside the registry gate.
   Private control builds expose and durably reserve their handshake generation before HostBuilt returns (r10 decision).
   A poison-head mismatch rebuild merges reserved source handshake HWM and uses a higher generation, including after restart.
   Enforce the unpublished handshake budget of 64 before building/reserving (r11 decision). Terminal exhaustion stops scheduling and requires fresh-leaf device readmission.
   New sends reject rotation-required; accepted entries wait. Deletion blocks owner creation,
   disposes/drains the peer, then takes their shared root mutation gate before the atomic tombstone/status
-  transaction (Spec P D3). Drain includes frozen proof removals and every adapter's ambiguity resolver (r8 decision).
+  transaction (Spec P D3). Drain includes terminal opened pending handlers, frozen proof removals and every adapter's ambiguity resolver (r13 decision).
   Welcome replacement uses the same lifecycle order. Unsettled control refuses deletion; explicit abandon/ack remains the escape.
   Tombstones retain all spent epoch authenticators; exact/alternate Welcome replay cannot resurrect a deleted group (r10 decision).
 
@@ -401,6 +409,7 @@ messenger.events                                        // message | message:sta
 - **Order (r12 decision).** Per device, a message keeps `(local anchor ordinal, hub position)` for its first durable MessageStore occurrence.
   GroupState's durable counter increases at every initial/rotation/recovery anchor capture, never decreases, and survives tombstones.
   Each captured anchor records its ordinal. Late frames from an older anchor retain that anchor's ordinal.
+  Each durable incoming or outgoing occurrence also keeps its authenticated message-lane `topicID` for receipts (r13 decision).
   Lower recovery A4 → B2 therefore orders a new B2 capture after A4, independent of MLS epoch number.
   Local read watermarks compare `(ordinal, position)`. An A4 read watermark cannot cover a later B2 message.
   MLS, hub and broadcast frame formats stay unchanged. The ordinal is local metadata; only the receipt payload gains anchor/position.
@@ -409,23 +418,27 @@ messenger.events                                        // message | message:sta
   delivery can precede an older retained pull, and epoch retries or rejoin resends can publish the
   same plaintext twice, so devices may disagree on the relative order of such a message; accepted
   (chat apps order per device). Pending local messages sort last until their own position is known.
-- **Attempt identity.** Each app seal gets a fresh publishID and anchor segment. Persist only
+- **Attempt identity.** Each app seal gets a fresh publishID, anchor segment and sealed message-lane topicID (r13 decision). Persist only
   attempt metadata, never app ciphertext/acknowledgement proof. In-process handoff retries retain
   exact bytes/ID in memory. Restart or identity/segment invalidation reseals unproven entries with
   new IDs; receivers dedup message identity. Unproven acknowledgements and both proof paths retain
   authenticator/lineage identity, including same-number recovery. Already-proven removal outcomes stay frozen (Spec P D6).
   Their minimal outbox-meta settlement obligations survive restart and settle without resealing (r12 decision).
+  Attempt and obligation codecs require topicID, with no missing-field derivation. The host codec seals complete outbox entries and obligations (r13 decision).
   There is no app 365-day ambiguity rule. P2a control and
   rejoin payloads retain exact durable-byte replay (`packages/rpc/src/control/types.ts:75`,
   `packages/rpc/src/control/types.ts:103`).
 - **Publish status.** `pending → accepted → published (position known)`. Coordinated put commits
   outbox/message rows together before acceptance resolves. Publication returns client `{sequenceID}`;
   store-only deduped is not part of that HTTP result (`packages/hub-protocol/src/protocol.ts:49`).
-  Acknowledgement is not proof. rpc freezes the certified publication's segment/sequenceID and calls
-  `remove(seq, {segment, position})`, the new optional outcome parameter. Published status/position
+  Acknowledgement is not proof. rpc freezes the certified publication's segment/topicID/sequenceID and calls
+  `remove(seq, {segment, topicID, position})`, the new optional outcome parameter (r13 decision). Published status/position
   commits with removal; failed removal retries the same outcome, including through self-removal and disposal drain (r8 decision).
-  Certification first persists `{sequenceID, attemptID, outcome: 'published'}` under the shared gate (r12 decision).
-  Terminal state/control adoption waits behind that write. Restart terminal clear reports published for obligated entries and co-deletes their obligations.
+  Certification calls `recordSettlement(seq, obligation, {identity, stateVersion, attemptID})` before freezing (r13 decision).
+  The obligation is `{sequenceID, attemptID, topicID, outcome: 'published'}`. Gate-owned validation checks current identity/lineage/version and stored attempt before persisting.
+  Mismatch returns `{recorded: false, reason}`, writes nothing and leaves evidence unproven. Recovery queued ahead therefore invalidates the old proof.
+  Settlement owning the gate first orders terminal adoption behind its write. Restart terminal clear reports published for obligated entries and co-deletes their obligations.
+  Frozen outcomes and MessageStore occurrences retain the persisted topicID even after anchor replacement.
   Clear/deletion follows frozen proof settlement, then fails remaining unpublished messages in its transaction (r8 decision).
   Hooks correlate by message identity decoded from entry.data, not seq.
   Ambiguous commit retains both hook queues; barrier-proven settlement runs exactly one queue before caller resolution (r8 decision).
@@ -437,6 +450,7 @@ messenger.events                                        // message | message:sta
   logs the conflict and **consumes the frame successfully**. Throwing would block the durable
   worker, which retries its first failed record.
 - **Receipts (r12 decision).** `upTo` names a message. The transmitted watermark is `{anchor, position}`, with `anchor` its authenticated message-lane topicID.
+  Use the occurrence's persisted topicID, including restart-settled outgoing messages. Never re-derive it from the current anchor or local ordinal (r13 decision).
   Two watermarks per `(member device, group, anchor)`, `delivered` and `read`, advance monotonically within that anchor only.
   `read` implies `delivered` for the same anchor. Positions from different anchors are incomparable; no device exchanges its local ordinal.
   A superseded-anchor receipt updates only that anchor. It covers no replacement-anchor message and never advances the receiver's local read watermark.
@@ -517,6 +531,12 @@ existing testcontainers setup), a capturing `WakeSender`, a mock Expo push endpo
    - install Welcome A3, advance A4, confirm lower recovery B2, reconstruct: exact/alternate A3 (same authenticator, different bytes) both refused (r10 decision);
    - A4 message/read watermark `(3,10)`, lower recovery B2, then B2 message `(4,20)`: B2 sorts later and remains unread (r12 decision);
      late A4 frames retain ordinal 3; superseded-A4 receipts never cover B2, including after reconstruction;
+   - A4 with applied non-removal rows at 2 and 3, confirmed lower recovery B2 with conflictEpoch null, self-removal at B2 (r13 decision);
+     recovery retires displaced rows atomically; terminal detection succeeds live and after restart;
+   - certification checks A, recovery installing B queues ahead on the gate, then settlement returns recorded false without writes (r13 decision);
+     retain the inverse ordering where settlement owns the gate first and adoption waits;
+   - certify on A, removal fails, replace anchor with B and restart settlement (r13 decision);
+     published occurrence and receipt watermark retain A's sealed message-lane topicID, without deriving it from B or the ordinal map;
    - install, delete and reconstruct a group, then replay its Welcome: refused, tombstone and spent epoch set preserved (r10 decision);
      both replay cases cover ordinary and last-resort sources, including replay before ordinary consume;
    - poison/refused frame advances hub head without MLS advancement; rotation rebuilds use strictly increasing handshake generations, including after restart (r10 decision);
@@ -535,6 +555,8 @@ existing testcontainers setup), a capturing `WakeSender`, a mock Expo push endpo
    - after decrypt, before the atomic ratchet-plus-pending save;
    - after that save has committed, before message persist ("after" a save always means after its
      transaction commits, not after the write call returns);
+   - saveOpened commits, self-removal commits, kill before handler (r13 decision);
+     restart delivers every opened pending message once-or-more and awaits handler/completion before terminal clearing, without opens/decryption/publication;
    - after message persist, before pending-frame completion;
    - after pending completion, before cursor advance;
    - after outbox accept, before publish;

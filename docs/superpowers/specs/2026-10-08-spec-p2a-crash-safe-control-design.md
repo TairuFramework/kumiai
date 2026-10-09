@@ -458,10 +458,13 @@ export type Outcome = { id: string; opID: string | null; at: number } & (
     it does not delete the group. The group stays **terminal**: startup on it runs only Welcome
     delivery and outcome serving;
 
-    **Spec P r12 amendment (r12 decision).** Certification durably records `{sequenceID, attemptID, outcome: 'published'}` in outbox meta before terminal state/control adoption.
-    The shared group gate orders terminal adoption behind that obligation write, including rollback retries and uncertain outcomes.
+    **Spec P r12/r13 amendment (r13 decision).** Certification passes expected `{identity, stateVersion, attemptID}` to `recordSettlement`.
+    After acquiring the shared gate, it revalidates current identity/lineage/version and stored attempt. Mismatch records nothing and leaves evidence unproven.
+    A valid binding durably records `{sequenceID, attemptID, topicID, outcome: 'published'}` in outbox meta.
+    Settlement owning the gate first orders terminal adoption behind that write, including rollback retries and uncertain outcomes.
     Restart removal clearing reads obligations first. It reports published for those entries and deletes each obligation with its entry.
-    Only remaining unproven entries fail. Certify → remove rollback → terminal adoption → kill → restart therefore preserves published status.
+    Only remaining unproven entries fail. Frozen settlement keeps the sealed message-lane topicID for receipts after restart or anchor replacement.
+    Certify → remove rollback → terminal adoption → kill → restart therefore preserves published status.
     Current evidence: in-memory proofs at `rpc/src/log-delivery.ts:45`, and terminal startup at `rpc/src/peer.ts:3111`, checked 2026-10-09.
   - **host deletion** (Spec P `delete`) is refused while the control store holds an operation, a
     rejoin record, an unacked outcome or an undelivered Welcome obligation. So a tombstone never
@@ -482,6 +485,22 @@ export type Outcome = { id: string; opID: string | null; at: number } & (
   1. load the anchor slot and `ControlStore`;
   2. run the removal effect. A removed group stops here, then runs only Welcome delivery and
      outcome serving;
+
+     **Spec P r13 startup/removal amendment (r13 decision).** After removal detection, restore every durably opened pending record before terminal clearing or deletion.
+     Await each handler's settlement and durable completion. Scheduling workers through `appLane.deliver()` is insufficient.
+     Live self-removal drains the same records before clearing, including handlers already running. Handler execution remains at least once.
+
+     Use persisted plaintext/metadata, with no new opens, decryption or publication. Unopened frames never gate this drain.
+     Handler/completion failures retain records and retry. Lifecycle drain waits this work outside peer mutexes and the mutation gate.
+     Then settle frozen publication obligations and clear. Only afterwards does the terminal peer serve Welcome obligations and control outcomes.
+
+     Recovery also retires displaced applied rows in the state-installation transaction, before inserting its own row.
+     Retire prior rows at/above the recovered epoch or off the installed lineage, including `conflictEpoch === null`.
+     Read rows for existing outcome settlement first. Outcomes/Welcomes survive retirement. Rollback and ambiguity cover state and retirement together.
+     AppliedCommit and StagedAdoption gain required installed `lineage`. Terminal detection uses the latest adoption on that lineage, ordered by numeric `sequenceID`.
+     This supersedes D5's highest-epoch removal test and D5/D6's displaced-row retention. Spec P D3/D5 define codec and conformance requirements.
+     Evidence checked 2026-10-09: `rpc/src/app-lane.ts:878`, `rpc/src/peer.ts:1206, 1946, 3111`, `rpc/src/control/rejoin.ts:171`, `rpc/src/control/store.ts:37`.
+
   3. resolve the anchor (`rpc/src/peer.ts:2783`), using the landed mark;
   4. restore pending app records (`restorePending`), so replay drains them;
   5. subscribe the control topics, and nothing else. Today `initControlLanes` also restores the
