@@ -736,10 +736,10 @@ integration suites green, and repo-wide `turbo run test:types`.
    `plugin-p2p` moves to `enqueue` and `outcomes`, and its registry merge extends to every retained
    epoch (`kubun/packages/plugin-p2p/src/groups/group-handle-registry.ts:570`).
 
-## Spec P r14 amendments
+## Spec P r16 amendments
 
 These changes supersede this historical baseline, including its trust assumption, interfaces, crash/tests and risks.
-[Spec P r15](2026-10-08-spec-p-transactional-persistence.md) is normative for signatures and conformance, including the r15 additions below.
+[Spec P r16](2026-10-08-spec-p-transactional-persistence.md) is normative for signatures and conformance, including the r16 decisions below.
 Baseline source citations refer to the pre-landing snapshot; new citations below were verified on feat/spec-p-phase-2.
 
 - **Trust/fork halt (r14 decision).** Trust the strongly consistent hub for ordering/CAS and availability, never confidentiality/authenticity.
@@ -751,7 +751,7 @@ Baseline source citations refer to the pre-landing snapshot; new citations below
   authenticated sealed GroupInfo, Remove own old leaf + ExternalInit, fresh leaf/tree/generation-zero chains, normal policy and exact-commit confirmation.
   Unknown versions hold, never trigger a bypass. Fork recovery requires persisted host authorisation for a chosen target or already admitted successor;
   application owns hub/topic coordination, which ReInit does not carry. Retain exact external attempts; same-epoch head moves retry bytes,
-  changed epoch requires fresh GroupInfo. Drop lower-epoch candidate approval/source-prefix scans. R15 supplies the capture-head contract below.
+  changed epoch requires fresh GroupInfo. Drop lower-epoch candidate approval/source-prefix scans. R16 supplies retained recovery trust and handle-independent request/authentication/candidate-restoration signatures.
 - **Capture-head binding (r15 decision).** The sealed, signed reply attests required `captureHead` alongside the exact GroupInfo digest.
   Spec P D1 defines its encoding and v1/missing-field refusal. Initial external CAS uses `expectedHead = captureHead`.
   After exact-acceptance search, complete mismatch reconciliation either retries identical bytes/ID or discards unadopted after a valid epoch move.
@@ -759,7 +759,7 @@ Baseline source citations refer to the pre-landing snapshot; new citations below
   General encrypted poison-only retry after secret loss is impossible with this field alone. Spec P adds conformance for both branches.
 - **Database loss (r15 decision).** Total loss needs no spent set only when every ordinary/last-resort Welcome private key is also lost.
   KeyPackage sources MUST share group state's provider/transaction/loss boundary. Current host-injected stores require that contract change.
-  Before startup after rollback, the host MUST call `declareRestoredFromBackup()`. Durable holds survive partial declaration/restart.
+  Before startup after rollback, `declareRestoredFromBackup()` writes device restore-work in one transaction (r16 decision).
   Every restored group needs fresh-leaf external resync into a new incarnation before sends. Fork/admission policy still applies.
   Discard restored unused/last-resort packages, rotate and revoke hub copies where supported. Current hubs leave undecryptable stale invitation copies.
   Every restored outbox entry fails with a durable `database-restored` event, including settlement obligations, overriding normal published settlement.
@@ -768,13 +768,13 @@ Baseline source citations refer to the pre-landing snapshot; new citations below
   Every epoch-keyed namespace/order/watermark binds incarnation. No lineage/floor, in-place replacement exception, recovery HWM/progress merge,
   displaced-row retirement or local ordinal machinery. Old outcomes/Welcomes remain under n; new control/anchor/cursors start fresh.
   Spent authenticators survive at group level; installation appends atomically, Welcome/seed/resync refuses exact/alternate spent identities.
-  Tombstones admit unspent authenticated Welcomes without an epoch floor; a fork halt requires manual recovery. Source consume/receipt stays external.
+  Tombstones admit unspent Welcomes without an epoch floor; fork halts require manual recovery. Ordinary consumption co-commits installation (r16 decision).
 - **Commit-once (r14 decision).** D3/operations.ts no longer returns absent mismatch to intent at unchanged epoch
   (`packages/rpc/src/control/operations.ts:194`). Save exact payload/ID/candidate/journal before handoff. Search/reconcile first;
   unchanged incarnation/epoch/authenticator republishes identical bytes/ID at refreshed head. Build again only after epoch change.
   Keep candidate/keys/referenced proposals; preserve ordinary ratchet progress; omitted proposals need reproposal; control builders use empty proposals.
   Delete handshake reservations/budget/error/baseline/staging-clone rules. Lost/unknown/deadline/ack retain the source-epoch slot.
-  Deadline stops new handoffs: found acceptance lands, complete absence loses, gaps/uncertain acceptance/fork-touched work yields unknown.
+  Deadline stops handoffs: proven first-valid acceptance lands, superseded/complete absence loses, incomplete coverage/fork-touched work yields unknown (r16 decision).
 - **Transactions/fairness (r14 decision).** Every durable transition writes all affected namespaces/opted-in effects in one group transaction.
   Build/publish/fetch/confirm stay outside short transactions; remove internal cross-store commit-order seams.
   Defaults: 64 streaming frames, 2 ms coalescing bound, 8 ms work budget; idle lone frames start immediately.
@@ -789,6 +789,25 @@ Baseline source citations refer to the pre-landing snapshot; new citations below
   Keep v2 sender-zero/sourceState codecs refusing v1, all-namespace host at-rest seal/open(aad), raw-byte/wrong-AAD/mutation/swap/side-row tests.
   Phase 2 supplies memory contracts, both suites, mls-rpc/hub-client and real HTTP smoke with injected DID;
   phase 3 supplies sqlite/postgres providers with explicit group transaction scope. Old fork-healing crash rows become halt/manual-recovery rows.
+
+- **First-valid occurrence (r16 decision).** `packages/rpc/src/peer.ts:2128` must not return a match before prefix coverage/validation.
+  `packages/rpc/src/control/operations.ts:192`, `:235` require persisted first-valid proof before acceptance/adoption or Welcome release.
+  Earlier valid competitor at the framed epoch means lost/superseded; cursor/state follows it. Incomplete coverage holds/unknown.
+  Any commit-topic publisher can replay bytes under another publishID. Later proven losers are superseded, not fork evidence.
+  Conformance: competitor wins CAS, own exact payload replayed later; never adopt/release Welcome.
+- **Welcome package transaction (r16 decision).** Installation spans group + device package/receipt namespaces, burning ordinary private material atomically.
+  Only package-pool rows require device serialisation. Concurrent cross-group Welcomes admit exactly one, including ambiguous COMMIT.
+  Last-resort packages remain reusable; spent authenticators protect replay. Remove incarnation joinRef obligations/clear API.
+  Hub-copy cleanup uses device retry rows surviving retirement/tombstones. Restart completes supported cleanup without making a key reusable.
+  Current hub cannot eagerly revoke ordinary copies; unsupported removal retains the fetch/expiry residual.
+- **Recovery/restore boundary (r16 decision).** Every epoch installation co-writes retained group trust: genesis anchor, signer tree/membership and spent set.
+  State unreadable/trust intact permits automatic resync without a source handle. Trust unreadable too halts/events; manual re-invite required.
+  DevicePersistence owns groups/packages/last-resort/trust/cleanup/restore-work; registry receives provider identity and package adapters explicitly.
+  Startup idempotently invalidates/rotates packages, queues revocation retries, holds each group for resync and fails restored outbox before deleting work.
+  Hozon root/scope/barrier and deferred rollback-hook settlement remain phase-3 prerequisites (`../hozon/packages/db/src/db.ts:275`).
+- **Consumer adapters (r16 decision).** Spec P defines registry HandleAccess mutate/replace/open, crypto/MLS adapters and incarnation/version expectations.
+  Pre-open references lack procedure; staging derives authenticated procedure/idempotency keys and commits malformed plaintext as consumed-key poison.
+  Handler registration uses the public policy union/completion runner; conformance uses concrete TPorts, mixed-result crypto and metadata/retention propagation.
 
 ## Out of scope (P2b)
 

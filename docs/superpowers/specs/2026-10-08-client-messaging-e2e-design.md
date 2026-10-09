@@ -1,7 +1,7 @@
 # Client host, messaging protocol and multi-device e2e — design
 
 Date: 2026-10-08
-Status: approved r6 (2026-10-08), reconciled with Spec P draft r14 (2026-10-09)
+Status: approved r6 (2026-10-08), reconciled with Spec P draft r16 (2026-10-10)
 
 This is the umbrella design. Three sub-specs must be written and approved before the phases that
 depend on them:
@@ -42,7 +42,7 @@ message-only push wake. See [Deferred](#deferred).
 ## Context
 
 Identity/hub context retains the 2026-10-08 reviews. Spec P port/publication claims below were
-rechecked on 2026-10-09; each carries current source evidence.
+rechecked for r16 on 2026-10-10; each carries current source evidence.
 
 **Spec P r14 model (r14 decision).** The hub is a strongly consistent DS trusted for ordering/CAS and availability,
 never confidentiality/authenticity. Fork evidence durably halts all sends/control, keeps history and emits `group:fork`;
@@ -51,14 +51,18 @@ split views evade local detection ([RFC 9750 §5.2](https://www.rfc-editor.org/r
 Stranded devices without fork evidence automatically external-resync; the host alone selects manual fork recovery routing.
 Recovery/readmission installs a new local incarnation and tombstones the previous record atomically.
 Epoch state, control, anchors, pending/outbox/cursors and local order belong to that incarnation.
-The group-level spent-authenticator set survives every incarnation and tombstone.
+Group-level recovery trust (genesis anchor, last-known signer tree/membership and spent authenticators) survives every incarnation/tombstone (r16 decision).
 Unpublished abandoned entries fail with a durable machine-readable event. Hosts may retry programmatically. No automatic reseal occurs.
 
 Control builds persist exact bytes, ID and candidate before publication.
 Head-only mismatch reconciles the log, then republishes those bytes when incarnation/epoch/authenticator still match.
 Only epoch advancement permits another private build. No handshake reservations, budgets or baseline readers remain.
+Exact bytes alone prove occurrence: adoption/Welcome release requires the first valid commit at its framed epoch over a fully covered prefix (r16 decision).
+Earlier valid competitor means lost/superseded; incomplete coverage holds/unknown. This covers replay by any commit-topic publisher. See Spec P D4.
 
-Every durable group transition uses one group-scoped provider transaction.
+Every durable group transition uses one provider transaction. Welcome installation also burns the ordinary device-pool private package/receipt atomically (r16 decision).
+Only device package rows serialise across groups. DevicePersistence also owns last-resort stores, recovery trust, cleanup rows and durable restore-work.
+The registry receives provider identity/package adapters explicitly. Backup declaration commits restore-work before startup idempotently invalidates/rotates/queues retries/holds groups/fails outbox.
 Adaptive batches default to 64 frames, 2 ms maximum coalescing delay and 8 ms staging work.
 An idle lone frame starts immediately. Burst batches release the group scope and interleave control, other lanes and enqueue work.
 Ready control and another lane complete within three total A/B/control batches, including the active A batch. Groups have independent scheduling.
@@ -156,9 +160,9 @@ tests/e2e  (new, private) DeviceDriver, hub fixture, scenarios
 | `rpc` | Spec P phase 2: incarnation-scoped ControlStore, commit-once queue, durable fork halt/manual recovery, stranded resync, fair adaptive batches, opened epoch/idempotency metadata and transactional handler opt-in. App attempts, durable status events, proof-time settlements and strict decodeAppEntry. Terminal opened-handler drain remains. |
 | `hub-client` | Phase 2 reconnecting HTTP hub, scoped/buffered views, ack backoff and discovery fetch. Preserve retention on reconnect/retry. Buffer injects inspectEpoch/currentEpoch/onEpochChanged; no MLS/registry import. Automatic `/info` integration remains BLOCKED (Risks). |
 | `mls-rpc` | Phase 2 registry over group transaction memory stores: awaited validated access, monotonic incarnations, spent admission, application leases/rotation and atomic open/adoption/switch. Resync installs a new incarnation; recovery never merges old progress. Extract MLSEncryptor over committed membership snapshots. Recovery v2 stores complete sourceState. |
-| `mls-hub` | Landed openWelcome/consume/receipt remain. Spent-first admission uses authenticated group state. Newer live Welcome or any unspent Welcome after tombstone starts the next incarnation. Group install commits before external source consume. |
+| `mls-hub` | (r16 decision) Open prepares without consumption. Installation atomically consumes ordinary device-pool private keys/receipt with group state. Last-resort replay uses spent authenticators. Hub-copy cleanup uses device rows surviving retirement. |
 | `rpc-store` (new) | Phase 3 group-scoped Hozon transactions across every kumiai namespace and opted-in host effects. Explicit root scope and outcome-aware hooks. sqlite/postgres conformance, Expo support or explicit blocked reason. Host at-rest codec covers anchors, cursors, topicIDs, spent set and durable events. |
-| `client` (new) | Phase 4 Device: identity/group verbs, one peer per active incarnation, halt-first safety/control/pending restore and manual target selection, Welcome consume sweep, rotation and lifecycle drain. Retired outcomes/Welcomes/status events remain serviceable. Key-package provisioning and wake. |
+| `client` (new) | Phase 4 Device: identity/group verbs, one peer per active incarnation, halt-first safety/control/pending restore and manual target selection, device hub-cleanup sweep, restore-work, rotation and lifecycle drain (r16 decision). Retired outcomes/Welcomes/status events remain serviceable. Key-package provisioning and wake. |
 | `hub-server` or a new `hub-authz` | The membership `authorize` policy and its state ingestion (Spec H decides placement). |
 | `messaging` (new) | Phase 5 protocols, Messenger and MessageStore. Use the common idempotent or transactional handler model for ingestion and status effects. Incarnation-aware local order/read watermarks and per-anchor peer receipts. Failed-outbox events permit host retry. |
 | `tests/e2e` (new, private) | Driver protocol and implementations, hub fixture, scenarios. |
@@ -180,7 +184,7 @@ Verdicts copied from [phase 1 lift audit](2026-10-08-lift-audit.md), checked 202
 | `hub/http-client.ts` | MOVE | Generic HTTP factory; declare Enkaku dependencies (`../kubun/packages/plugin-p2p/src/hub/http-client.ts:33`). |
 | `hub/peer-scoped-hub-view.ts` | MOVE | Mailbox filtering, retention and lifecycle (`../kubun/packages/plugin-p2p/src/hub/peer-scoped-hub-view.ts:51`). |
 | `hub/sender-scoped-hub-view.ts` | MOVE | Include companion DeviceHub receive/filter type (`../kubun/packages/plugin-p2p/src/hub/sender-scoped-hub-view.ts:44`). |
-| `hub/hub-like.ts` | MOVE | Reconnecting core; substitute logger, preserve retention replay (`../kubun/packages/plugin-p2p/src/hub/hub-like.ts:183`, `../kubun/packages/plugin-p2p/src/hub/hub-like.ts:529`). |
+| `hub/hub-like.ts` | MOVE | Reconnecting core; substitute logger, add retention replay (r16 decision) (`../kubun/packages/plugin-p2p/src/hub/hub-like.ts:183`, `../kubun/packages/plugin-p2p/src/hub/hub-like.ts:529`). |
 | `hub/ack-backoff.ts` | MOVE | Generic utilities; take @sozai/log logger (`../kubun/packages/plugin-p2p/src/hub/ack-backoff.ts:11`). |
 | `groups/mls-encryptor.ts` | EXTRACT | Inject registry runtime access/notifications; use Spec P lease constants (`../kubun/packages/plugin-p2p/src/groups/mls-encryptor.ts:72`). |
 | `groups/admin-roster.ts` | EXTRACT | Positioned convenience over existing foldRoster (`../kubun/packages/plugin-p2p/src/groups/admin-roster.ts:2`, `../kubun/packages/plugin-p2p/src/groups/admin-roster.ts:56`). |
@@ -222,7 +226,8 @@ Verdicts copied from [phase 1 lift audit](2026-10-08-lift-audit.md), checked 202
 const device = await createDevice({
   identity,            // device keypair
   db,                  // Hozon provider: rpc-store + kokuin stores + mls-hub stores
-  atRest,              // required host codec for all persisted group namespaces
+  atRest,              // required host codec for all persisted group/device namespaces
+  restoredFromBackup?,  // (r16 decision) declare durable restore-work before enabling startup
   hub: { url },        // reconnecting hub-client
   wake?: { token, platform },
   logger?,
@@ -242,7 +247,7 @@ device.devices.link(newDeviceDID)     // controller side; returns the grants
 device.devices.revoke(deviceDID)
 device.peer(groupID): GroupPeer       // protocols attach here
 device.events                         // group:joined | group:removed | roster:changed
-                                      // | epoch:changed | incarnation:changed | group:fork | outbox:failed | device:revoked
+                                      // | epoch:changed | incarnation:changed | group:fork | group:recovery-unavailable | outbox:failed | device:revoked
 await device.dispose()
 ```
 
@@ -253,17 +258,21 @@ Identity details are settled in Spec I; this section fixes the shape.
 - **Invite/join.** The admin enqueues a P2a invite. Its Welcome obligation delivers the complete invitation at least once.
   The invitee opens without consuming and derives the authenticated groupID/epoch/authenticator.
   Spent authenticators refuse exact and alternate representations across incarnations and tombstones.
-  A single group transition installs joined state, spent authenticator, joinRef, control and anchor.
+  One group/device transaction installs state/trust/spent/control/anchor and burns the ordinary package/private record with its receipt (r16 decision).
   Initial join starts incarnation 1. Newer live Welcome starts the next incarnation after peer stop/drain.
   A tombstone accepts any unspent authenticated Welcome into the next incarnation, without an epoch floor.
-  Only then consume the source package/receipt and clear joinRef through the registry.
-  Receipt-only repeats never install state. Last-resort sources still require spent admission.
+  Concurrent cross-group Welcomes on one ordinary package admit exactly one, including ambiguous commit (r16 decision).
+  Receipt/private-key checks happen inside installation. Last-resort packages remain reusable; spent authenticators protect replay.
+  Device cleanup rows retry hub-copy removal after restart/retirement; no incarnation joinRef obligation remains.
   Inviting a controller adds every device it currently grants (Spec I).
 - **Fault detection/fork halt (r14 decision).** Retain digest divergence, ahead, own-unmerged, unknown-version and retention-gap observations with confidence.
-  Either divergence branch or a host same-epoch authenticator mismatch co-writes halt/evidence/stable event. No sends (including signals),
+  Unexplained divergence or a host same-epoch authenticator mismatch co-writes halt/evidence/stable event.
+  Later competitors proven superseded by first-valid prefix validation do not establish a fork (r16 decision). No sends (including signals),
   new opens, control or automatic recovery resume after restart or event ack. Unsupported versions hold rather than trigger a resync bypass.
-- **Stranded recovery (r14 decision).** Without fork evidence, retention/unprocessable gaps or lost MLS state automatically request sealed,
+- **Stranded recovery (r14 decision).** Without fork evidence, retention/unprocessable gaps or lost MLS state with intact trust automatically request sealed,
   authenticated GroupInfo and resync via Remove(own old leaf)+ExternalInit. Fresh leaf/secret tree starts at generation zero.
+  (r16 decision) Lost state uses retained group trust through handle-independent request/authentication/candidate restoration APIs.
+  Lost trust too halts with group:recovery-unavailable; automatic recovery is impossible, manual re-invite required.
   Publish exact durable external bytes with CAS; retry them at unchanged epoch, fetch fresh GroupInfo before rebuilding at a new epoch.
   Normal replacement policy/holder evidence and exact-external-commit confirmation remain. No separate lower-epoch candidate approval/source-prefix scan.
 - **Manual fork recovery (r14 decision).** Host calls recover with a registered targetID or already admitted successor.
@@ -319,7 +328,8 @@ Identity details are settled in Spec I; this section fixes the shape.
   (`store-delegation`). Embedded leaf proofs: built at link time, carried in the leaf, verified by
   the mls embedded resolver without external fetches.
 - **Restore.** Inventory includes incarnation, credentials and ordered signed ledger.
-  Load durable fork halt before enabling sends/control/recovery. Await validated registry access; lost MLS bytes use stranded recovery only with lifetime metadata. Consume each owning source joinRef, then clear the exact ref.
+  Load safety holds before network work. Lost MLS bytes need retained recovery trust; unreadable trust halts/events (r16 decision).
+  Registry startup processes durable restore-work idempotently and drains device hub-cleanup rows independently of incarnation inventory.
   Restore opened records and P2a stages before normal delivery. Tombstones never start peers.
   Storage-only workers serve retired outcomes, Welcomes and durable status events.
   A terminal incarnation restores and awaits every opened handler/completion before clearing.
@@ -332,7 +342,7 @@ Identity details are settled in Spec I; this section fixes the shape.
   Drain includes opened handlers, settlements, network submissions and ambiguous backend completion.
   The deletion transaction tombstones/clears transport state and co-writes opted-in host effects.
   Unsettled control refuses deletion. Explicit abandon/ack remains the escape.
-  Host history and spent authenticators survive deletion.
+  Host history, recovery trust/spent authenticators and device cleanup rows survive deletion (r16 decision).
 
 ### Errors
 
@@ -548,7 +558,10 @@ existing testcontainers setup), a capturing `WakeSender`, a mock Expo push endpo
      superseded-anchor receipts cannot cover B2. History stays intact;
    - either fork divergence branch halts durably with stable event, live and after restart; no auto recovery, even after ack;
    - host same-epoch authenticator mismatch reports a fork; consistent split views without comparison remain a detection limitation;
-   - stranded retention gap/lost MLS state automatically external-resyncs into a fresh incarnation/generation-zero chains;
+   - stranded retention gap/lost state with intact trust automatically resyncs; unreadable trust halts/events, manual re-invite only (r16 decision);
+   - competitor wins CAS, own payload replayed later under another ID: no adoption/Welcome, cursor follows winner (r16 decision);
+   - concurrent cross-group Welcomes on one ordinary package admit/burn exactly one, even under ambiguous COMMIT (r16 decision);
+   - declared backup restore resumes device restore-work, invalidates/rotates packages, queues cleanup, holds groups and fails all outbox (r16 decision);
    - manual chosen-target recovery persists authorisation, keeps halt on refusal and switches only after exact external acceptance;
    - stale GroupInfo must fail ordering before adoption; its capture-head binding is an explicit phase-2 unresolved gate;
    - old applied non-removal rows cannot mask self-removal in the new incarnation;
@@ -586,7 +599,8 @@ existing testcontainers setup), a capturing `WakeSender`, a mock Expo push endpo
    - manual recovery authorisation committed before external publish: restart resumes only the selected target;
    - incarnation switch committed before peer restart: isolated new state, old tombstone and failure events;
    - application lease committed before seal: reserved generations are skipped after restart;
-   - joined incarnation committed before source consume, and Welcome delivery before obligation deletion;
+   - Welcome install atomically burns ordinary package; retirement before hub cleanup still completes retry after restart (r16 decision);
+   - Welcome delivery before obligation deletion;
    - COMMIT rejected with backend unfinished: negative read cannot release the group gate;
    - deletion committed before restart.
    Spec P/P2a stage replay covers remaining external publication/confirmation/bootstrap seams.
@@ -606,16 +620,17 @@ existing testcontainers setup), a capturing `WakeSender`, a mock Expo push endpo
 
 Each phase gets its own plan and branch. The e2e suite grows with each phase.
 
-0. **Spec P: transactional persistence (draft r14).** Strongly consistent DS, durable fork halt/manual recovery, automatic stranded resync;
+0. **Spec P: transactional persistence (draft r16).** Strongly consistent DS, durable fork halt/manual recovery, automatic stranded resync;
    incarnation monotonicity, commit-once and one group transaction per durable transition.
    Fair adaptive batching, durable-only lanes and transactional-or-idempotent handlers are binding (r14 decision).
    Keep v2 codecs, spent authenticators, application leases, at-rest codec, certified settlements and completion barriers.
-   P2a's consolidated r14 amendments replace its earlier persistence notes.
+   P2a's consolidated r16 amendments replace its earlier persistence notes.
 1. **Lift audit (probe).** Verdicts copied above. The codec prerequisite remains until implemented/tested.
    Automatic /info integration remains separately blocked.
 2. **rpc/mls/mls-rpc/mls-hub/rpc-conformance/hub-client on memory doubles.**
    Follow Spec P: codecs, group transaction coordinator, incarnations/spent admission, fork halt/manual recovery, stranded resync and commit-once control,
-   fair batching/handlers, application leases/rotation, settlement/events, encryptor and hub-client lifts.
+   DevicePersistence/package adapters, retained recovery trust, restore-work, atomic Welcome burn and device cleanup (r16 decision).
+   Fair batching/handlers, application leases/rotation, settlement/events, encryptor and hub-client lifts.
    Broadcast changes only forward authenticated metadata.
    Both contract suites cover real implementations and doubles. Run repository-wide type tests.
    No client/messaging/Hozon provider or child-process driver.
@@ -628,7 +643,7 @@ Each phase gets its own plan and branch. The e2e suite grows with each phase.
    Expo uses a node shim or an explicit blocked reason. SQLite e2e devices reconstruct from durable rows.
 4. **Spec I and Spec H, then mls group changes, client and hub policy/server changes.**
    Gated on published kokuin stores. Client wires ownership, inventory/pending/control restore,
-   Welcome consume sweep, rotation scheduling and deletion draining. e2e scenarios 2, 3, 4, 6 and
+   device cleanup sweep, restore-work, rotation scheduling and deletion draining (r16 decision). e2e scenarios 2, 3, 4, 6 and
    identity/hub cases of 7.
 5. **messaging.** Consume phase-2 epoch/incarnation/proof metadata and failed-send events.
    MessageStore uses the shared transactional-or-idempotent handler/effect model for ingestion and status. e2e scenarios 1, 5 and messaging cases of 7.
@@ -651,10 +666,13 @@ Recorded in `docs/agents/plans/backlog/` when this spec is approved:
 
 ## Risks
 
-- **GroupInfo freshness binding unresolved.** Current CAS compares only head; the sealed reply does not bind GroupInfo to its capture head
-  (`packages/mls/src/recovery.ts:566`, `packages/hub-store/src/store.ts:226`). Spec P requires stale-epoch rejection but does not invent that binding.
-- **Complete local database loss.** Automatic MLS-state recovery needs retained/restored credential and lifetime spent-authenticator metadata;
-  resetting a previously known group's spent set is unsafe and is not authorised.
+- **GroupInfo/own-commit validation (r16 decision).** Spec P binds captureHead and requires first-valid covered-prefix adoption.
+  Current ports need those changes (`packages/mls/src/recovery.ts:566`, `packages/rpc/src/peer.ts:2128`, `packages/hub-store/src/store.ts:226`).
+  Missing capture-epoch validation secrets prevent encrypted poison classification; proven absence permits fresh GroupInfo, uncertain acceptance holds.
+- **Loss/restore (r16 decision).** Total loss is safe only when every Welcome private key is lost too; missing trust requires manual re-invite.
+  Declared rollback uses durable DevicePersistence restore-work and fresh-incarnation resync. Undeclared rollback is outside the model.
+- **Hub cleanup limit (r16 decision).** Current upload/fetch/status APIs cannot eagerly revoke an ordinary package copy.
+  Cleanup retries survive retirement; unsupported removal retains the expiry/fetch residual. Locally burned keys never return.
 
 - **Automatic discovery integration BLOCKED.** Fetch requests origin `/info`
   (`../kubun/packages/plugin-p2p/src/hub/server-did.ts:53`), but kumiai mounts default `/hub`
