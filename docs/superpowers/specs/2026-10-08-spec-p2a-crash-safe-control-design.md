@@ -457,6 +457,12 @@ export type Outcome = { id: string; opID: string | null; at: number } & (
     today's removal path runs: `locallyRemoved` and outbox clearing (`rpc/src/log-delivery.ts:272-278`);
     it does not delete the group. The group stays **terminal**: startup on it runs only Welcome
     delivery and outcome serving;
+
+    **Spec P r12 amendment (r12 decision).** Certification durably records `{sequenceID, attemptID, outcome: 'published'}` in outbox meta before terminal state/control adoption.
+    The shared group gate orders terminal adoption behind that obligation write, including rollback retries and uncertain outcomes.
+    Restart removal clearing reads obligations first. It reports published for those entries and deletes each obligation with its entry.
+    Only remaining unproven entries fail. Certify → remove rollback → terminal adoption → kill → restart therefore preserves published status.
+    Current evidence: in-memory proofs at `rpc/src/log-delivery.ts:45`, and terminal startup at `rpc/src/peer.ts:3111`, checked 2026-10-09.
   - **host deletion** (Spec P `delete`) is refused while the control store holds an operation, a
     rejoin record, an unacked outcome or an undelivered Welcome obligation. So a tombstone never
     carries control records, and no worker has to serve one. A host that must delete anyway calls

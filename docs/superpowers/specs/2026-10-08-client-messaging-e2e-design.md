@@ -371,7 +371,7 @@ Two protocols attach per group via `device.peer(groupID)`, so they derive two to
 | Protocol | Item | Kind | Retention | Payload |
 |---|---|---|---|---|
 | `kumiai.messaging` | `message` | event | `log` | `{id (ULID), sentAt, body: {type: 'text', text}, replyTo?: {author, id}}` |
-| `kumiai.messaging.signals` | `receipt` | event | `ephemeral` | `{upTo: {author, id}, kind: 'delivered' \| 'read', at}` |
+| `kumiai.messaging.signals` | `receipt` | event | `ephemeral` | `{upTo: {author, id}, watermark: {anchor, position}, kind: 'delivered' \| 'read', at}` (r12 decision) |
 | `kumiai.messaging.signals` | `typing` | event | `ephemeral` | `{active: boolean, at}` |
 
 - **Author** is the MLS-authenticated sender (`ctx.message.payload.iss`), never a payload field.
@@ -380,8 +380,7 @@ Two protocols attach per group via `device.peer(groupID)`, so they derive two to
 - **Message identity** is `(groupID, author, id)`. Content is fixed at `send()`; re-sealing after an
   epoch change re-encrypts the same plaintext.
 - **Epoch.** The handler records the authenticated epoch the frame opened in. Pending decrypted
-  records persist that epoch so a durable restore keeps it (Spec P; `frame.segment` is the app
-  anchor epoch, not the opened epoch).
+  records persist that epoch so a durable restore keeps it. `frame.segment` is the captured anchor's local ordinal (r12 decision).
 - **Authorship holds on every delivery path** (Codex r3): live delivery refuses unnamed senders,
   catch-up uses the opened sender, durable restore uses the atomically persisted sender, and
   cross-topic replay fails AAD binding.
@@ -399,9 +398,14 @@ messenger.events                                        // message | message:sta
 
 ### Semantics
 
-- **Order.** Per device, a message's position is the hub `(segment, position)` of the occurrence
-  whose **durable acceptance into `MessageStore` came first** on that device; topic rotation orders
-  by segment. Later occurrences are deduplicated by `(groupID, author, id)` and never move it. Live
+- **Order (r12 decision).** Per device, a message keeps `(local anchor ordinal, hub position)` for its first durable MessageStore occurrence.
+  GroupState's durable counter increases at every initial/rotation/recovery anchor capture, never decreases, and survives tombstones.
+  Each captured anchor records its ordinal. Late frames from an older anchor retain that anchor's ordinal.
+  Lower recovery A4 → B2 therefore orders a new B2 capture after A4, independent of MLS epoch number.
+  Local read watermarks compare `(ordinal, position)`. An A4 read watermark cannot cover a later B2 message.
+  MLS, hub and broadcast frame formats stay unchanged. The ordinal is local metadata; only the receipt payload gains anchor/position.
+
+  Later occurrences are deduplicated by `(groupID, author, id)` and never move it. Live
   delivery can precede an older retained pull, and epoch retries or rejoin resends can publish the
   same plaintext twice, so devices may disagree on the relative order of such a message; accepted
   (chat apps order per device). Pending local messages sort last until their own position is known.
@@ -410,6 +414,7 @@ messenger.events                                        // message | message:sta
   exact bytes/ID in memory. Restart or identity/segment invalidation reseals unproven entries with
   new IDs; receivers dedup message identity. Unproven acknowledgements and both proof paths retain
   authenticator/lineage identity, including same-number recovery. Already-proven removal outcomes stay frozen (Spec P D6).
+  Their minimal outbox-meta settlement obligations survive restart and settle without resealing (r12 decision).
   There is no app 365-day ambiguity rule. P2a control and
   rejoin payloads retain exact durable-byte replay (`packages/rpc/src/control/types.ts:75`,
   `packages/rpc/src/control/types.ts:103`).
@@ -419,6 +424,8 @@ messenger.events                                        // message | message:sta
   Acknowledgement is not proof. rpc freezes the certified publication's segment/sequenceID and calls
   `remove(seq, {segment, position})`, the new optional outcome parameter. Published status/position
   commits with removal; failed removal retries the same outcome, including through self-removal and disposal drain (r8 decision).
+  Certification first persists `{sequenceID, attemptID, outcome: 'published'}` under the shared gate (r12 decision).
+  Terminal state/control adoption waits behind that write. Restart terminal clear reports published for obligated entries and co-deletes their obligations.
   Clear/deletion follows frozen proof settlement, then fails remaining unpublished messages in its transaction (r8 decision).
   Hooks correlate by message identity decoded from entry.data, not seq.
   Ambiguous commit retains both hook queues; barrier-proven settlement runs exactly one queue before caller resolution (r8 decision).
@@ -429,11 +436,17 @@ messenger.events                                        // message | message:sta
   Content is immutable: a second put with the same key and different content keeps the first row,
   logs the conflict and **consumes the frame successfully**. Throwing would block the durable
   worker, which retries its first failed record.
-- **Receipts.** `upTo` names a message; receipts compare by that message's position on the
-  receiving device. Two watermarks per `(member device, group)`, `delivered` and `read`, each
-  monotonic; `read` implies `delivered`. A receipt whose `upTo` is unknown or still pending is held
+- **Receipts (r12 decision).** `upTo` names a message. The transmitted watermark is `{anchor, position}`, with `anchor` its authenticated message-lane topicID.
+  Two watermarks per `(member device, group, anchor)`, `delivered` and `read`, advance monotonically within that anchor only.
+  `read` implies `delivered` for the same anchor. Positions from different anchors are incomparable; no device exchanges its local ordinal.
+  A superseded-anchor receipt updates only that anchor. It covers no replacement-anchor message and never advances the receiver's local read watermark.
+
+  Local `markRead` advances `(ordinal, position)` and emits separate receipts for each anchor covered by that local prefix.
+  Receivers keep the transmitted tuple, even when their first occurrence of `upTo` belongs to another anchor.
+  A receipt whose `upTo` is unknown or still pending is held
   until the message has a position: at most 100 held receipts per group (on overflow the oldest
-  held receipt is evicted), each dropped after 10 minutes. Per-user state is the maximum over that controller's devices. A member can misreport its
+  held receipt is evicted), each dropped after 10 minutes. Per-user state takes the maximum over that controller's devices separately within each anchor.
+  There is no cross-anchor maximum. A member can misreport its
   own receipts; accepted.
 - **Typing.** State per `(member device, group)` keeps the latest `at`; an update with an older
   `at` is ignored and an equal `at` replaces (last arrival wins), so a stale `active: false` cannot clear a newer `active: true`. Expires locally
@@ -502,6 +515,8 @@ existing testcontainers setup), a capturing `WakeSender`, a mock Expo push endpo
    - a frame replayed from another group or topic: rejected;
    - a replayed frame in the same group: deduplicated;
    - install Welcome A3, advance A4, confirm lower recovery B2, reconstruct: exact/alternate A3 (same authenticator, different bytes) both refused (r10 decision);
+   - A4 message/read watermark `(3,10)`, lower recovery B2, then B2 message `(4,20)`: B2 sorts later and remains unread (r12 decision);
+     late A4 frames retain ordinal 3; superseded-A4 receipts never cover B2, including after reconstruction;
    - install, delete and reconstruct a group, then replay its Welcome: refused, tombstone and spent epoch set preserved (r10 decision);
      both replay cases cover ordinary and last-resort sources, including replay before ordinary consume;
    - poison/refused frame advances hub head without MLS advancement; rotation rebuilds use strictly increasing handshake generations, including after restart (r10 decision);
@@ -525,6 +540,8 @@ existing testcontainers setup), a capturing `WakeSender`, a mock Expo push endpo
    - after outbox accept, before publish;
    - after hub acknowledgement, before publication bookkeeping;
    - after proof, before published-status/outbox removal;
+   - certify and persist settlement obligation, remove rolls back, terminal state/control adoption commits, kill before retry (r12 decision);
+     restart terminal clear reports published once, never failed, and deletes the obligation with its entry;
    - lease reserved, before seal;
    - handshake generation reserved, before control built persistence/publication (r10 decision);
    - joined state saved, before source consume;
@@ -548,7 +565,7 @@ existing testcontainers setup), a capturing `WakeSender`, a mock Expo push endpo
 
 Each phase gets its own plan and branch. The e2e suite grows with each phase.
 
-0. **Spec P: transactional persistence (draft r11).** Phase-2 contracts, identity-aware state CAS,
+0. **Spec P: transactional persistence (draft r12).** Phase-2 contracts, identity-aware state CAS,
    atomic pending/adoption/Welcome reset, lossless codec prerequisite, lease/rotation, opened-epoch
    metadata, identity-bound app proof and coordinated outbox contracts. Memory doubles model unfinished COMMIT, completion barriers and retained hook queues.
    Recovery sourceState encoding, async access, tunnel runtime and shared factory signatures belong to phase 2 (r8 decision).
@@ -558,6 +575,8 @@ Each phase gets its own plan and branch. The e2e suite grows with each phase.
    Host-injected at-rest codec, raw-byte checks and wrong-AAD rejection apply to state/control/outbox/anchor stores (r10 decision).
    Handshake budget 64, terminal typed readmission state and real/double receiver-window parity are binding (r11 decision).
    Shared fixtures specify physical mutation/swaps and transactional side-row writes/inspection (r11 decision).
+   Durable local anchor ordinals preserve lower-recovery order/read watermarks; peer receipts compare only within one anchor (r12 decision).
+   Minimal certified settlement obligations preserve published status through terminal restart (r12 decision).
 1. **Lift audit (probe).** Verdicts copied above. G1 codec prerequisite is specified in P r6;
    automatic `/info` integration remains separately BLOCKED.
 2. **rpc/mls/mls-rpc/mls-hub/rpc-conformance/hub-client port and runtime additions on memory doubles.**
