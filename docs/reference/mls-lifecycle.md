@@ -158,6 +158,18 @@ Renewal-required waits for a fresh grant and host `recover()`, or a ratchet. Aut
 Unconfirmed attempts retain queued entries and retry on backoff, reporting advisory verdicts.
 A later rejoin removes any orphan leaf left by a lost confirmation.
 
+`onRecovery` reports `invalidated` when the source re-check rejects a confirmed rejoin.
+`blockingPosition` identifies the blocking source-epoch frame, or is `null` for a gap or source-identity change.
+`anchorRecovery` records whether anchor recovery held the peer at invalidation. Retry behaviour is unchanged.
+Repeated `invalidated` failures with `anchorRecovery: true` and the same non-null `blockingPosition` identify an anchor-gated livelock.
+The anchor gate prevents walking that source prefix. Newer GroupInfo and host `recover()` calls cannot reconcile it.
+
+For manual repair, stop the peer and await `drained()`.
+An authorised administrator removes the device's leaf and re-invites it with a fresh key package.
+The device verifies and installs the newer Welcome through authenticated Welcome re-admission (D4).
+That transaction resets control and anchor, settling open operations and the old rejoin as `unknown`.
+It preserves existing outcomes and undelivered Welcome obligations. Consume the key package after persistence, then restart the peer.
+
 Revocation is eventually consistent: the agent can read until its proof lands.
 A stolen T can issue children until its grant expires or the group records its revocation.
 A rejoiner with a known revocation rejects that signer.

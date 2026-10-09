@@ -603,6 +603,12 @@ export type RejoinRecord = {
   A same-number rejoin no longer needs `requireAnchorRecovery` at startup; the live paths that call
   it for an unexpected epoch are unchanged (`rpc/src/peer.ts:410-414`).
 
+**Known limitation:** an unresolved anchor gate can leave a source-epoch commit unwalked, invalidating every confirmed rejoin at the same position.
+`onRecovery` exposes repeated `invalidated` failures with `anchorRecovery: true` and the same non-null `blockingPosition`.
+Stop and drain the peer. An authorised administrator removes its leaf and re-invites it with a fresh key package.
+Install the newer authenticated Welcome through D4 re-admission, resetting control and anchor with open work settled as `unknown`, then restart.
+Automatic reconciliation requires a durable anchor-recovery hold across intermediate authenticated adoptions. Advancing `source.head` without processing the prefix is unsafe.
+
 ### D7. Errors
 
 - `OperationRejectedError`: `build` refused. It becomes a `rejected` outcome.

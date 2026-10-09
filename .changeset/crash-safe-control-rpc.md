@@ -8,3 +8,7 @@ Recovery resumes a durable rejoin record containing the exact payload, candidate
 Confirmed adoption co-commits the required `AdoptionWrite` with MLS state. Binding, lapse and floor
 refusals retry renewal within the same recovery attempt and original deadline; only unavailable
 usable bindings end as `renewal-required`.
+
+Recovery failures now distinguish `invalidated` source re-checks from `unconfirmed` attempts.
+Invalidations include `blockingPosition` and `anchorRecovery` so hosts can identify anchor-gated
+livelock. Retry behaviour is unchanged. Document authenticated Welcome re-admission as manual repair.

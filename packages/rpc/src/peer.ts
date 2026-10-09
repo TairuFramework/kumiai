@@ -2664,13 +2664,19 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       now: Date.now,
       newID: newPublishID,
       emit: emitOutcome,
-      discarded: (reason, record) => {
+      discarded: (reason, record, blockingPosition) => {
         inFlightEntries = record.ledgerBefore
         rejoinDiscarded = reason
         pendingRecovery = null
         if (reason === 'absent' || reason === 'gap') healRequested = true
-        if (reason === 'invalidated')
+        if (reason === 'invalidated') {
+          rejoinFailureDetails = {
+            advisory: [],
+            blockingPosition: blockingPosition ?? null,
+            anchorRecovery: anchorRecoveryPending,
+          }
           healRequested = stranded || anchorRecoveryPending || !floor.covered
+        }
       },
       publish: async (payload, publishID, expectedHead) => {
         assertLive()
@@ -2795,6 +2801,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       if (
         retry &&
         (reason === 'unconfirmed' ||
+          reason === 'invalidated' ||
           reason === 'no-responder' ||
           reason === 'deadline' ||
           reason === 'error' ||
@@ -2946,7 +2953,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           }
           if (rejoinDiscarded === 'invalidated') {
             if (!healRequested) inFlightEntries = null
-            return failed('unconfirmed', { advisory: [] }, healRequested)
+            return failed('invalidated', rejoinFailureDetails, healRequested)
           }
           if (rejoinDiscarded === 'unconfirmed') return failed('unconfirmed', rejoinFailureDetails)
         }

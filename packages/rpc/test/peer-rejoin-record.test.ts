@@ -4,6 +4,7 @@ import { type SourceScan, sourceRecheck } from '../src/control/rejoin.js'
 import type { RejoinRecord } from '../src/control/types.js'
 import { asLogPosition } from '../src/cursor.js'
 import { decodeHandshakeFrame, HANDSHAKE_KIND } from '../src/handshake.js'
+import type { RecoveryEvent } from '../src/peer-types.js'
 import { commitTopic } from '../src/topic.js'
 import { publishCommit } from './fixtures/commits.js'
 import { createFakeCrypto } from './fixtures/fake-crypto.js'
@@ -157,7 +158,13 @@ test('published restart cannot adopt when every confirmation is withheld', async
       return publish({ ...params, payload: new Uint8Array([0]) })
     return publish(params)
   })
-  const again = member(hub, 'bob', { restartOf: bob })
+  const events: Array<RecoveryEvent> = []
+  const again = member(hub, 'bob', {
+    restartOf: bob,
+    onRecovery: (event) => {
+      events.push(event)
+    },
+  })
   await expect
     .poll(() =>
       hub.published.some((row) => {
@@ -174,6 +181,8 @@ test('published restart cannot adopt when every confirmation is withheld', async
     .toBe(true)
   expect(again.mls.epoch()).toBe(1)
   expect((await again.control.load()).applied).toEqual([])
+  await expect.poll(() => events.some((event) => event.phase === 'failed')).toBe(true)
+  expect(events).toContainEqual(expect.objectContaining({ phase: 'failed', reason: 'unconfirmed' }))
 })
 
 test('abandon while a confirmation opens cannot resurrect or adopt the rejoin', async () => {
@@ -301,16 +310,18 @@ test.each([
             },
           ],
   }
-  expect(sourceRecheck(scan, record)).toBe(expected)
+  expect(sourceRecheck(scan, record)).toEqual(
+    expected === 'pass' ? { kind: 'pass' } : { kind: 'fail', blockingPosition: '000000000002' },
+  )
   if (frame != null) {
     // Neither an already reconciled frame nor a successor can invalidate this source.
     record.source.head = asLogPosition('000000000002')
-    expect(sourceRecheck(scan, record)).toBe('pass')
+    expect(sourceRecheck(scan, record)).toEqual({ kind: 'pass' })
     record.source.head = null
     const scanned = scan.frames[0]
     if (scanned == null) throw new Error('Missing scan frame')
     scanned.position = record.position
-    expect(sourceRecheck(scan, record)).toBe('pass')
+    expect(sourceRecheck(scan, record)).toEqual({ kind: 'pass' })
   }
 })
 
@@ -324,7 +335,7 @@ test.each(['gap', 'epoch', 'authenticator', 'lineage'] as const)(
     else if (changed === 'authenticator')
       scan.current.authenticator[0] = (scan.current.authenticator[0] ?? 0) ^ 1
     else scan.current[changed] += 1
-    expect(sourceRecheck(scan, record)).toBe('fail')
+    expect(sourceRecheck(scan, record)).toEqual({ kind: 'fail', blockingPosition: null })
   },
 )
 
@@ -337,11 +348,26 @@ test('a confirmed rejoin is invalidated if the source moves before restart', asy
   expect(saved?.stage).toBe('confirmed')
   bob.mls.adopt(bob.mls.buildCommit(['new-source']))
   await bob.database.saveState('bob', bob.mls.serializeState())
-  const again = member(hub, 'bob', { restartOf: bob })
+  const events: Array<RecoveryEvent> = []
+  const again = member(hub, 'bob', {
+    restartOf: bob,
+    onRecovery: (event) => {
+      events.push(event)
+    },
+  })
   await expect.poll(async () => (await again.control.load()).rejoin).toBeNull()
   expect(again.mls.epoch()).toBe(2)
   expect(await again.mls.getLedger()).toEqual(['new-source'])
   expect((await again.control.load()).applied).toEqual([])
+  await expect.poll(() => events.some((event) => event.phase === 'failed')).toBe(true)
+  expect(events).toContainEqual(
+    expect.objectContaining({
+      phase: 'failed',
+      reason: 'invalidated',
+      anchorRecovery: false,
+      blockingPosition: null,
+    }),
+  )
   await new Promise((resolve) => setTimeout(resolve, 1100))
   expect(commits(hub)).toHaveLength(1)
 })
@@ -531,7 +557,7 @@ test('anchor-gated recovery re-checks an unwalked source commit on every fresh c
   await alice.peer.resync()
   expect(alice.mls.epoch()).toBe(2)
   const built: Array<RejoinRecord> = []
-  const failures: Array<string> = []
+  const failures: Array<RecoveryEvent> = []
   const confirmed: Array<RejoinRecord> = []
   const apply = bob.control.apply.bind(bob.control)
   vi.spyOn(bob.control, 'apply').mockImplementation(async (changes, id) => {
@@ -543,7 +569,7 @@ test('anchor-gated recovery re-checks an unwalked source commit on every fresh c
     restartOf: bob,
     control: bob.control,
     onRecovery: (event) => {
-      if (event.phase === 'failed') failures.push(event.reason)
+      if (event.phase === 'failed') failures.push(event)
     },
   })
   await expect.poll(() => failures.length, { timeout: 4000 }).toBeGreaterThanOrEqual(2)
@@ -551,7 +577,16 @@ test('anchor-gated recovery re-checks an unwalked source commit on every fresh c
   expect(confirmed.length).toBeGreaterThanOrEqual(2)
   expect(built[0]?.expectedHead).toBe(p1)
   expect(built.every((record) => record.source.head === p0)).toBe(true)
-  expect(failures.every((reason) => reason === 'unconfirmed')).toBe(true)
+  for (const failure of failures) {
+    expect(failure).toMatchObject({
+      phase: 'failed',
+      reason: 'invalidated',
+      anchorRecovery: true,
+      blockingPosition: p1,
+      advisory: [],
+    })
+  }
+  expect(new Set(failures.map((event) => event.attemptID)).size).toBeGreaterThanOrEqual(2)
   expect(again.mls.epoch()).toBe(1)
   expect((await again.control.load()).applied).toEqual([])
   expect((await again.control.load()).responses).toEqual([])

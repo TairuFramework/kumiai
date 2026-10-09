@@ -259,10 +259,23 @@ peer's `localEpoch`, a `kind`, and a `confidence`. `claimedEpoch` comes from the
 
 `GroupPeerParams.onRecovery` reports `started` and exactly one terminal event (`succeeded` or
 `failed`) for each attempt. The event's `attemptID`, `groupID` and `trigger` (`automatic` or
-`consumer`) stay the same. A failure has reason `no-responder`, `deadline`, `bootstrap-failed`,
-`disposed` or `error`; `error` includes the thrown value. Success means both the rejoin and ledger
+`consumer`) stay the same. Failure reasons include `no-responder`, `renewal-required`, `refused`,
+`unconfirmed`, `invalidated`, `deadline`, `bootstrap-failed`, `disposed` and `error`.
+`error` includes the thrown value. Success means both the rejoin and ledger
 bootstrap completed. If a rejoin landed but bootstrap failed, a later lane operation can finish it
 and emit `bootstrapped` with that failed attempt's ID. This closes the stranded episode.
+
+`invalidated` means the source re-check rejected a confirmed rejoin. Retry behaviour is unchanged.
+Its `blockingPosition` identifies the blocking source-epoch frame, or is `null` for a gap or source-identity change.
+Its `anchorRecovery` records whether anchor recovery held the peer at invalidation.
+Repeated `invalidated` failures with `anchorRecovery: true` and the same non-null `blockingPosition` identify an anchor-gated livelock.
+Newer GroupInfo and further `recover()` calls cannot reconcile the unwalked source prefix.
+
+For manual repair, stop the peer and await `drained()`.
+An authorised administrator removes the device's leaf and re-invites it with a fresh key package.
+The device verifies and installs the newer Welcome through authenticated Welcome re-admission (D4).
+That transaction resets control and anchor, settling open operations and the old rejoin as `unknown`.
+It preserves existing outcomes and undelivered Welcome obligations. Consume the key package after persistence, then restart the peer.
 
 `started` is dispatched asynchronously as the attempt begins, before any rendezvous reply or
 terminal event is required. It can arrive while the attempt is waiting on a port call; an observer

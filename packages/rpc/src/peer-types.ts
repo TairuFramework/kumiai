@@ -139,6 +139,7 @@ export type RecoveryFailureReason =
   | 'renewal-required'
   | 'refused'
   | 'unconfirmed'
+  | 'invalidated'
   | 'bootstrap-failed'
   | 'deadline'
   | 'disposed'
@@ -162,6 +163,10 @@ export type RecoveryFailureDetails = {
   refusal?: RecoveryRefusalReason
   responder?: string
   advisory?: Array<OpenedRecoveryVerdict>
+  /** On invalidation, the source-epoch frame blocking adoption, or null for a gap/source change. */
+  blockingPosition?: LogPosition | null
+  /** Whether anchor recovery held the peer when the rejoin was invalidated. */
+  anchorRecovery?: boolean
 }
 
 export type GroupPeerParams<Protocols extends Record<string, GroupProtocolDefinition>> = {

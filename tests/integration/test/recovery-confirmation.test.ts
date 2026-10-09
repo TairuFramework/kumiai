@@ -625,7 +625,12 @@ test('a ratchet of the old handle while pending invalidates adoption on revalida
   expect((await pending).advanced).toBe(false)
   expect(s.bobGroup()).toBe(oldRatchet)
   expect(s.events).toContainEqual(
-    expect.objectContaining({ phase: 'failed', reason: 'unconfirmed' }),
+    expect.objectContaining({
+      phase: 'failed',
+      reason: 'invalidated',
+      anchorRecovery: false,
+      blockingPosition: null,
+    }),
   )
 })
 

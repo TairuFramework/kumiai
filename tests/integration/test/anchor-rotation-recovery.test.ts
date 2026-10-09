@@ -495,9 +495,21 @@ test.each([false, true])(
         await apply(changes, id)
       })
       await alice.peer.commit(buildLedgerCommit(alice, alice.identity, bob.identity.id, 'member'))
+      const blockingPosition = (await alice.control.load()).applied.find(
+        (row) => row.epoch === epochBefore + 2,
+      )?.sequenceID
+      expect(blockingPosition).toBeDefined()
       await drainUntil(
-        () => events.some((event) => event.phase === 'failed' && event.reason === 'unconfirmed'),
+        () => events.some((event) => event.phase === 'failed'),
         'source re-check invalidation',
+      )
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          phase: 'failed',
+          reason: 'invalidated',
+          anchorRecovery: true,
+          blockingPosition,
+        }),
       )
       expect(confirmed).toBe(true)
       expect(events.some((event) => event.phase === 'succeeded')).toBe(false)

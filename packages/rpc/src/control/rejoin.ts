@@ -31,8 +31,12 @@ export function rejoinBarrier(record: RejoinRecord | null): LogPosition | null {
     : null
 }
 
+export type SourceRecheck =
+  | { kind: 'pass' }
+  | { kind: 'fail'; blockingPosition: LogPosition | null }
+
 /** Only a possible source-epoch ratchet below the barrier invalidates the candidate. */
-export function sourceRecheck(scan: SourceScan, record: RejoinRecord): 'pass' | 'fail' {
+export function sourceRecheck(scan: SourceScan, record: RejoinRecord): SourceRecheck {
   const { current, gap, frames } = scan
   const source = record.source
   if (
@@ -42,7 +46,7 @@ export function sourceRecheck(scan: SourceScan, record: RejoinRecord): 'pass' | 
     current.authenticator.length !== source.authenticator.length ||
     !current.authenticator.every((byte, i) => byte === source.authenticator[i])
   )
-    return 'fail'
+    return { kind: 'fail', blockingPosition: null }
   for (const frame of frames) {
     if (source.head != null && frame.position <= source.head) continue
     if (record.position != null && frame.position >= record.position) continue
@@ -51,9 +55,9 @@ export function sourceRecheck(scan: SourceScan, record: RejoinRecord): 'pass' | 
       !(frame.header.external && frame.digest === record.digest) &&
       !frame.responded
     )
-      return 'fail'
+      return { kind: 'fail', blockingPosition: frame.position }
   }
-  return 'pass'
+  return { kind: 'pass' }
 }
 
 export type RejoinDeps = {
@@ -80,6 +84,7 @@ export type RejoinDeps = {
   discarded(
     reason: 'absent' | 'gap' | 'invalidated' | 'renewal' | 'superseded' | 'unconfirmed',
     record: RejoinRecord,
+    blockingPosition?: LogPosition | null,
   ): void
 }
 
@@ -91,9 +96,12 @@ export async function stepRejoin(
     await applyResolved(deps.control, { putRejoin: next }, deps.newID(), undefined, deps.signal)
     return next
   }
-  const discard = async (reason: Parameters<RejoinDeps['discarded']>[0]): Promise<null> => {
+  const discard = async (
+    reason: Parameters<RejoinDeps['discarded']>[0],
+    blockingPosition?: LogPosition | null,
+  ): Promise<null> => {
     await applyResolved(deps.control, { deleteRejoin: true }, deps.newID(), undefined, deps.signal)
-    deps.discarded(reason, record)
+    deps.discarded(reason, record, blockingPosition)
     return null
   }
   if (record.stage === 'refused') return record
@@ -144,8 +152,8 @@ export async function stepRejoin(
     })
   }
   if (record.stage === 'confirmed') {
-    if (sourceRecheck(await deps.scan(record), record) === 'fail')
-      return await discard('invalidated')
+    const checked = sourceRecheck(await deps.scan(record), record)
+    if (checked.kind === 'fail') return await discard('invalidated', checked.blockingPosition)
     const position = record.position
     if (position == null) throw new Error('Confirmed rejoin has no position')
     const snapshot = await deps.control.load()
