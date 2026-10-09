@@ -98,16 +98,22 @@ describe('GroupHandle.carryReceiveProgress', () => {
   })
 
   test('evicted epoch not resurrected', async () => {
-    const { aliceGroup, candidate } = await fixture('carry-evicted')
-    const retained = structuredClone(candidate.state.historicalReceiverData.get(0n))
-    expect(retained).toBeDefined()
-    const epochs = [...candidate.state.historicalReceiverData.keys()]
+    const { aliceGroup, candidate: built, earlierSender } = await fixture('carry-evicted')
+    const candidate = await restore(built)
+    const frame = await earlierSender.encrypt(utf8.encode('earlier'))
+    expect(candidate.state.historicalReceiverData.has(0n)).toBe(true)
+    await expect(aliceGroup.decrypt(frame)).resolves.toMatchObject({
+      payload: utf8.encode('earlier'),
+    })
     aliceGroup.state.historicalReceiverData.delete(0n)
+    await expect(aliceGroup.decrypt(frame)).rejects.toThrow()
 
     await aliceGroup.carryReceiveProgress(candidate)
-    expect([...candidate.state.historicalReceiverData.keys()]).toEqual(epochs)
-    expect(candidate.state.historicalReceiverData.get(0n)).toEqual(retained)
+    await expect(candidate.decrypt(frame)).rejects.toThrow()
+    expect([...candidate.state.historicalReceiverData.keys()]).toEqual([1n])
     expect(aliceGroup.state.historicalReceiverData.has(0n)).toBe(false)
+    const adopted = await restore(candidate)
+    await expect(adopted.decrypt(frame)).rejects.toThrow()
   })
 
   test('carries earlier retained epoch progress without adding absent epochs', async () => {

@@ -35,10 +35,11 @@ export function createMemoryRecordStore<R extends StoredRecord>(
 } {
   type Snapshot = {
     byOwner: Map<string, Map<string, R>>
+    deletedByOwner: Map<string, Set<string>>
     receipts: Map<string, { groupID: string }>
   }
   const state = new Map<string, Snapshot>([
-    ['current', { byOwner: new Map(), receipts: new Map() }],
+    ['current', { byOwner: new Map(), deletedByOwner: new Map(), receipts: new Map() }],
   ])
   const current = (): Snapshot => state.get('current') as Snapshot
   const store = {
@@ -55,7 +56,19 @@ export function createMemoryRecordStore<R extends StoredRecord>(
       records.set(record.ref, { ...record })
     },
     async delete(ownerDID: string, ref: string): Promise<void> {
-      current().byOwner.get(ownerDID)?.delete(ref)
+      const held = current()
+      const records = held.byOwner.get(ownerDID)
+      if (records?.has(ref) !== true) return
+      if (!reusable) {
+        // A saved join may still owe consume after pruning removes its private material.
+        let deleted = held.deletedByOwner.get(ownerDID)
+        if (deleted == null) {
+          deleted = new Set()
+          held.deletedByOwner.set(ownerDID, deleted)
+        }
+        deleted.add(ref)
+      }
+      records.delete(ref)
     },
     async consume(ref: string, groupID: string): Promise<void> {
       if (reusable) return
@@ -67,21 +80,28 @@ export function createMemoryRecordStore<R extends StoredRecord>(
             throw new Error('mls-hub: key package already consumed for another group')
           return
         }
-        const owners = [...held.byOwner].filter(([, records]) => records.has(ref))
+        const owners = [...new Set([...held.byOwner.keys(), ...held.deletedByOwner.keys()])].filter(
+          (ownerDID) =>
+            held.byOwner.get(ownerDID)?.has(ref) || held.deletedByOwner.get(ownerDID)?.has(ref),
+        )
         if (owners.length !== 1) {
           throw new Error(
             'mls-hub: consume requires a ref held by exactly one owner in this source',
           )
         }
-        const [ownerDID, records] = owners[0] as [string, Map<string, R>]
+        const ownerDID = owners[0] as string
         const byOwner = new Map(held.byOwner)
-        const stagedRecords = new Map(records)
+        const stagedRecords = new Map(held.byOwner.get(ownerDID))
         stagedRecords.delete(ref)
         byOwner.set(ownerDID, stagedRecords)
+        const deletedByOwner = new Map(held.deletedByOwner)
+        const deleted = new Set(deletedByOwner.get(ownerDID))
+        deleted.delete(ref)
+        deletedByOwner.set(ownerDID, deleted)
         const receipts = new Map(held.receipts)
         receipts.set(ref, { groupID })
         // Publish the staged deletion and receipt together, with no intervening await.
-        state.set('current', { byOwner, receipts })
+        state.set('current', { byOwner, deletedByOwner, receipts })
       })
     },
     async receipt(ref: string): Promise<{ groupID: string } | null> {
