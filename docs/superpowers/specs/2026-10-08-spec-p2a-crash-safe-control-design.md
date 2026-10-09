@@ -4,8 +4,7 @@ Date: 2026-10-08
 Status: draft r6
 Parent: [client host, messaging protocol and multi-device e2e](2026-10-08-client-messaging-e2e-design.md)
 Siblings:
-- [Spec P, transactional persistence](2026-10-08-spec-p-transactional-persistence.md) (its D5 moves
-  here).
+- [Spec P, transactional persistence](2026-10-08-spec-p-transactional-persistence.md) (control baseline amended by Spec P r14).
 - [Spec P2b, epoch views and the lifecycle package](2026-10-08-spec-p2-group-lifecycle-design.md),
   which builds on this spec.
 
@@ -20,6 +19,9 @@ coupling, with P2a's crash suite as its regression net.
 
 Split from the combined P2 draft at r3, after three blind review rounds; that draft's review log
 records the findings carried here.
+
+Apply [Spec P r14 amendments](#spec-p-r14-amendments) before reading this historical baseline.
+Its automatic fork healing and separate source-prefix admission are superseded; only non-fork stranding recovers automatically.
 
 ## Context
 
@@ -383,16 +385,6 @@ export type Outcome = { id: string; opID: string | null; at: number } & (
 - `openWelcome` reads the Welcome's refs without decrypting (`mls/src/welcome-refs.ts:13-27`). A
   receipted ref returns `{alreadyJoined: groupID}`.
 - At startup, the host consumes every `joinRef` still set on a group it holds, then clears it.
-- **Spec P r10 admission amendment, replacing r9 (r10 decision), 2026-10-09.** Each group durably retains the authenticator of every epoch this device has held.
-  Genesis, ordinary/last-resort Welcome, own commit, received commit and recovery append with installed state in the same transaction.
-  Welcome admission, recovery candidates and seed refuse spent authenticators before epoch comparison; never merge candidate progress.
-  Recovery retains the set; D3 deletion retains it in the tombstone for the group's lifetime. Growth is one authenticator per held epoch, like receipts.
-  Joined-state installation appends with joinRef, control reset and anchor clear. Spec P D3 defines the v2 field, complete signatures and atomic conflict/ambiguity handling.
-  The authenticator rides joined.group.state.keySchedule. It subsumes exact replay; no Welcome digest derivation or field remains.
-  Package receipts do not replace this guard; last-resort consume remains a no-op (`mls-hub/src/provisioner.ts:253`, checked 2026-10-09).
-  Today's live comparator checks current epoch only (`mls-hub/src/admission.ts:8`, checked 2026-10-09).
-  Rejected alternative: artifact digest; alternate valid representations change bytes while preserving secrets. The live highest-ever epoch floor remains rejected too.
-  Conformance/integration cover A3 → A4 → confirmed B2, exact/alternate A3 refusal (same authenticator, different bytes), and deleted-group replay refusal.
 - **Admission against held state, after the spent check.** An unspent Welcome for a group the host already holds, or has
   tombstoned, is judged by its authenticated epoch, not by group ID:
   - none held: join;
@@ -458,14 +450,6 @@ export type Outcome = { id: string; opID: string | null; at: number } & (
     it does not delete the group. The group stays **terminal**: startup on it runs only Welcome
     delivery and outcome serving;
 
-    **Spec P r12/r13 amendment (r13 decision).** Certification passes expected `{identity, stateVersion, attemptID}` to `recordSettlement`.
-    After acquiring the shared gate, it revalidates current identity/lineage/version and stored attempt. Mismatch records nothing and leaves evidence unproven.
-    A valid binding durably records `{sequenceID, attemptID, topicID, outcome: 'published'}` in outbox meta.
-    Settlement owning the gate first orders terminal adoption behind that write, including rollback retries and uncertain outcomes.
-    Restart removal clearing reads obligations first. It reports published for those entries and deletes each obligation with its entry.
-    Only remaining unproven entries fail. Frozen settlement keeps the sealed message-lane topicID for receipts after restart or anchor replacement.
-    Certify → remove rollback → terminal adoption → kill → restart therefore preserves published status.
-    Current evidence: in-memory proofs at `rpc/src/log-delivery.ts:45`, and terminal startup at `rpc/src/peer.ts:3111`, checked 2026-10-09.
   - **host deletion** (Spec P `delete`) is refused while the control store holds an operation, a
     rejoin record, an unacked outcome or an undelivered Welcome obligation. So a tombstone never
     carries control records, and no worker has to serve one. A host that must delete anyway calls
@@ -485,21 +469,6 @@ export type Outcome = { id: string; opID: string | null; at: number } & (
   1. load the anchor slot and `ControlStore`;
   2. run the removal effect. A removed group stops here, then runs only Welcome delivery and
      outcome serving;
-
-     **Spec P r13 startup/removal amendment (r13 decision).** After removal detection, restore every durably opened pending record before terminal clearing or deletion.
-     Await each handler's settlement and durable completion. Scheduling workers through `appLane.deliver()` is insufficient.
-     Live self-removal drains the same records before clearing, including handlers already running. Handler execution remains at least once.
-
-     Use persisted plaintext/metadata, with no new opens, decryption or publication. Unopened frames never gate this drain.
-     Handler/completion failures retain records and retry. Lifecycle drain waits this work outside peer mutexes and the mutation gate.
-     Then settle frozen publication obligations and clear. Only afterwards does the terminal peer serve Welcome obligations and control outcomes.
-
-     Recovery also retires displaced applied rows in the state-installation transaction, before inserting its own row.
-     Retire prior rows at/above the recovered epoch or off the installed lineage, including `conflictEpoch === null`.
-     Read rows for existing outcome settlement first. Outcomes/Welcomes survive retirement. Rollback and ambiguity cover state and retirement together.
-     AppliedCommit and StagedAdoption gain required installed `lineage`. Terminal detection uses the latest adoption on that lineage, ordered by numeric `sequenceID`.
-     This supersedes D5's highest-epoch removal test and D5/D6's displaced-row retention. Spec P D3/D5 define codec and conformance requirements.
-     Evidence checked 2026-10-09: `rpc/src/app-lane.ts:878`, `rpc/src/peer.ts:1206, 1946, 3111`, `rpc/src/control/rejoin.ts:171`, `rpc/src/control/store.ts:37`.
 
   3. resolve the anchor (`rpc/src/peer.ts:2783`), using the landed mark;
   4. restore pending app records (`restorePending`), so replay drains them;
@@ -767,23 +736,49 @@ integration suites green, and repo-wide `turbo run test:types`.
    `plugin-p2p` moves to `enqueue` and `outcomes`, and its registry merge extends to every retained
    epoch (`kubun/packages/plugin-p2p/src/groups/group-handle-registry.ts:570`).
 
-## Spec P amendments
+## Spec P r14 amendments
 
-Applied in Spec P r5. Reconciled API by API:
+These changes supersede this historical baseline, including its trust assumption, interfaces, crash/tests and risks.
+[Spec P r14](2026-10-08-spec-p-transactional-persistence.md) is normative for signatures and conformance.
+Baseline source citations refer to the pre-landing snapshot; new citations below were verified on feat/spec-p-phase-2.
 
-- D5 (commits, intents, adoption, Welcome) is removed. P2a's D3, D4 and D6 replace it. Its Welcome
-  admission rules, tombstone floor included, move to P2a D4.
-- `GroupStateStore` keeps `epochAuthenticator`, `lineage` and `joinRef` (now `{sourceID, ref}`),
-  and its state save gains the `AdoptionWrite` (P2a D2): control changes and the anchor landed mark,
-  committed in the same root transaction as the state.
-- Removed from `GroupStateStore`: intents, `WelcomeObligation`, `putWelcome` / `listWelcomes` /
-  `clearWelcome`, and `GroupStateWrite.putWelcome`. `delete` (Spec P D3,
-  `GroupStateStore.delete`) is refused while the group's control store holds unsettled records,
-  and then removes its `applied` rows, `responses` and cursor (P2a D5). It no longer deletes Welcome
-  obligations itself.
-- The commit cursor leaves `AppOutbox` for `ControlStore`.
-- The crash seams and conformance rows for D5 (intents, Welcome obligations, `onJoined`) move here.
-  Spec P's tombstone-floor row stays, and P2a's `mls-hub` re-admission row covers the Welcome side.
+- **Trust/fork halt (r14 decision).** Trust the strongly consistent hub for ordering/CAS and availability, never confidentiality/authenticity.
+  Either fork branch durably halts sends (including ephemeral) and control, keeps history and co-writes a machine-readable `group:fork` event.
+  Restart and event ack cannot lift the halt. Remove losing-fork automatic recovery (`packages/rpc/src/peer.ts:1512`) and exclude forks
+  from the automatic trigger (`packages/rpc/src/peer.ts:3053`); no winner-continuation, automatic fork settlement or reenactment.
+  Expose epoch authenticators for host out-of-band comparison; consistently isolated split views cannot be detected locally.
+- **Stranded/manual recovery (r14 decision).** Non-fork retention/unprocessable gaps and lost MLS state automatically external-resync:
+  authenticated sealed GroupInfo, Remove own old leaf + ExternalInit, fresh leaf/tree/generation-zero chains, normal policy and exact-commit confirmation.
+  Unknown versions hold, never trigger a bypass. Fork recovery requires persisted host authorisation for a chosen target or already admitted successor;
+  application owns hub/topic coordination, which ReInit does not carry. Retain exact external attempts; same-epoch head moves retry bytes,
+  changed epoch requires fresh GroupInfo. Drop lower-epoch candidate approval/source-prefix scans. Stale GroupInfo/head binding remains
+  an explicit unresolved phase-2 gate: CAS checks head (`packages/hub-store/src/store.ts:226`), not MLS epoch,
+  and the reply has no capture-head binding (`packages/mls/src/recovery.ts:566`).
+- **Incarnations/admission (r14 decision).** Successful same-group recovery/readmission atomically tombstones n and installs n+1.
+  Every epoch-keyed namespace/order/watermark binds incarnation. No lineage/floor, in-place replacement exception, recovery HWM/progress merge,
+  displaced-row retirement or local ordinal machinery. Old outcomes/Welcomes remain under n; new control/anchor/cursors start fresh.
+  Spent authenticators survive at group level; installation appends atomically, Welcome/seed/resync refuses exact/alternate spent identities.
+  Tombstones admit unspent authenticated Welcomes without an epoch floor; a fork halt requires manual recovery. Source consume/receipt stays external.
+- **Commit-once (r14 decision).** D3/operations.ts no longer returns absent mismatch to intent at unchanged epoch
+  (`packages/rpc/src/control/operations.ts:194`). Save exact payload/ID/candidate/journal before handoff. Search/reconcile first;
+  unchanged incarnation/epoch/authenticator republishes identical bytes/ID at refreshed head. Build again only after epoch change.
+  Keep candidate/keys/referenced proposals; preserve ordinary ratchet progress; omitted proposals need reproposal; control builders use empty proposals.
+  Delete handshake reservations/budget/error/baseline/staging-clone rules. Lost/unknown/deadline/ack retain the source-epoch slot.
+  Deadline stops new handoffs: found acceptance lands, complete absence loses, gaps/uncertain acceptance/fork-touched work yields unknown.
+- **Transactions/fairness (r14 decision).** Every durable transition writes all affected namespaces/opted-in effects in one group transaction.
+  Build/publish/fetch/confirm stay outside short transactions; remove internal cross-store commit-order seams.
+  Defaults: 64 streaming frames, 2 ms coalescing bound, 8 ms work budget; idle lone frames start immediately.
+  Release scope between batches and interleave control, other lanes and enqueue. A/B/control fixture completes low-rate B/control
+  within three total batches including active A. No cross-group scheduler lock. Completion barriers retain one coordinator and both hook queues.
+- **Handlers/terminal (r14 decision).** Default at-least-once handlers run outside transactions with stable idempotency keys.
+  Opt-in handlers co-write effect/completion/cursor through the group transaction, without network I/O, for exactly-once effects in a shared DB.
+  MessageStore is one such handler. Live/restarted self-removal drains every opened handler/completion before terminal clearing, without new opens.
+  Ephemeral requests/responses/signals create no outbox/pending persistence or transactions; they use pre-reserved application leases.
+- **Outbox/retained gates (r14 decision).** Switch fails unpublished entries with durable status/events and original retry data; no automatic reseal.
+  Certified entries settle published, preserving sealed topicID and inside-gate identity/version/attempt revalidation. Host history survives.
+  Keep v2 sender-zero/sourceState codecs refusing v1, all-namespace host at-rest seal/open(aad), raw-byte/wrong-AAD/mutation/swap/side-row tests.
+  Phase 2 supplies memory contracts, both suites, mls-rpc/hub-client and real HTTP smoke with injected DID;
+  phase 3 supplies sqlite/postgres providers with explicit group transaction scope. Old fork-healing crash rows become halt/manual-recovery rows.
 
 ## Out of scope (P2b)
 

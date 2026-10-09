@@ -1,7 +1,7 @@
 # Client host, messaging protocol and multi-device e2e — design
 
 Date: 2026-10-08
-Status: approved r6 (2026-10-08)
+Status: approved r6 (2026-10-08), reconciled with Spec P draft r14 (2026-10-09)
 
 This is the umbrella design. Three sub-specs must be written and approved before the phases that
 depend on them:
@@ -44,26 +44,31 @@ message-only push wake. See [Deferred](#deferred).
 Identity/hub context retains the 2026-10-08 reviews. Spec P port/publication claims below were
 rechecked on 2026-10-09; each carries current source evidence.
 
-**Spec P r10 amendments (r10 decision), 2026-10-09.** Every installed epoch co-writes its authenticator into the group's durable spent set.
-Genesis, ordinary/last-resort Welcome, own/received commit and recovery all contribute. Welcome/candidate/seed admission refuses spent authenticators before epoch comparison, never merges.
-Recovery and deletion retain the lifetime set, including tombstones. Growth is one authenticator per held epoch, like receipts. This explicitly amends P2a D4.
-Private rotation/control builds reserve consumed handshake generations durably; every rebuild merges the source handshake HWM, including after restart.
-Ordinary state writes retain lineage; only authorised recovery/Welcome replacement increments it. No path decreases it.
-State/control/coordinated-outbox/anchor factories require a host at-rest codec with group/record AAD. The host owns all at-rest keys and their lifecycle.
-Kumiai never generates or stores those keys. Phase 2 memory doubles inject a deterministic test codec; conformance inspects raw bytes and rejects wrong AAD.
+**Spec P r14 model (r14 decision).** The hub is a strongly consistent DS trusted for ordering/CAS and availability,
+never confidentiality/authenticity. Fork evidence durably halts all sends/control, keeps history and emits `group:fork`;
+there is no automatic fork recovery. Exposed epoch authenticators support host out-of-band comparison because consistent
+split views evade local detection ([RFC 9750 §5.2](https://www.rfc-editor.org/rfc/rfc9750.html#section-5.2)).
+Stranded devices without fork evidence automatically external-resync; the host alone selects manual fork recovery routing.
+Recovery/readmission installs a new local incarnation and tombstones the previous record atomically.
+Epoch state, control, anchors, pending/outbox/cursors and local order belong to that incarnation.
+The group-level spent-authenticator set survives every incarnation and tombstone.
+Unpublished abandoned entries fail with a durable machine-readable event. Hosts may retry programmatically. No automatic reseal occurs.
 
-**Spec P r11 amendments (r11 decision), 2026-10-09.** Unpublished handshake builds have a per-epoch budget of 64, below the configured receiver window of 1000.
-Compare the prospective reserved generation against the highest hub-confirmed own handshake generation, or 0 at epoch start. New epochs reset the budget.
-Over-budget builds fail before building/reserving with terminal `HandshakeBudgetExhaustedError`, surfaced through typed host failure and durable rejected `errorName`.
-Recovery uses existing P2a device readmission: fresh leaf and handshake chain. No automatic rebuild or rotation re-enqueue follows exhaustion.
-Conformance doubles enforce the same forward window as real ts-mls. Shared fixtures expose physical-record mutation/swaps and a transaction-bound side-row writer.
-Memory fixtures bind these in phase 2; phase-3 providers bind raw tables and transaction stores. Commit/rollback/late-fault cases read both outbox and side row.
+Control builds persist exact bytes, ID and candidate before publication.
+Head-only mismatch reconciles the log, then republishes those bytes when incarnation/epoch/authenticator still match.
+Only epoch advancement permits another private build. No handshake reservations, budgets or baseline readers remain.
 
-**Spec P r13 amendments (r13 decision), 2026-10-09.** Terminal startup and live self-removal await all durably opened pending handlers/completions before clearing.
-That drain uses persisted plaintext and performs no new opens, decryption or publication. Handler execution remains at least once.
-Recovery retires displaced applied rows atomically. Terminal detection uses the latest adoption on the current lineage, never the highest epoch row.
-Settlement revalidates expected identity/stateVersion/attemptID after acquiring the shared gate. Mismatch records nothing and leaves the evidence unproven.
-Outgoing occurrences and settlement obligations persist the sealed message-lane topicID. Restart settlement and receipts use that field, covered by persistence codecs and at-rest encryption.
+Every durable group transition uses one group-scoped provider transaction.
+Adaptive batches default to 64 frames, 2 ms maximum coalescing delay and 8 ms staging work.
+An idle lone frame starts immediately. Burst batches release the group scope and interleave control, other lanes and enqueue work.
+Ready control and another lane complete within three total A/B/control batches, including the active A batch. Groups have independent scheduling.
+
+Ephemeral RPC/signals create no outbox/pending records or transactions. They use previously reserved application keys.
+Default durable handlers run outside transactions, at least once, with a stable idempotency key.
+Opt-in handlers receive the group transaction and co-write effects with completion/cursor advancement, without network I/O.
+MessageStore uses that same transactional-or-idempotent boundary.
+Self-removal drains opened handlers before clearing. Certified settlement obligations retain the sealed topicID.
+All persisted namespaces use the host at-rest codec. Completion barriers and outcome-aware hooks cover ambiguous commits.
 
 - `@kumiai/mls` has signed-ledger roles (`roster.ts`: `admin | member`, only admins grant,
   zero-admin entries dropped). Roles persist after the subject's removal. Authority resolves through
@@ -134,7 +139,7 @@ mls ─ mls-rpc (+ GroupHandleRegistry, MLSEncryptor, mls-state codec)
           │
 rpc ──────┤  ports: GroupCrypto, GroupMLS, stores
           │
-rpc-store  (new) Hozon impls of rpc stores + GroupStateStore
+rpc-store  (new) Hozon group persistence + transaction-bound rpc stores
 hub-client (+ reconnecting LogHub/MailboxHub over HTTP, scoped and buffered views)
 mls-hub    (key-package pool / provisioner)
           │
@@ -147,15 +152,15 @@ tests/e2e  (new, private) DeviceDriver, hub fixture, scenarios
 
 | Package | Change |
 |---|---|
-| `mls` | Spec P phase 2: version-2 lossless pending-proposal sender codec, configurable retention propagated through every constructor/recovery, non-mutating `commitKeyRotation` and private control builders exposing consumed handshake generations (r10 decision). Group-model changes from Spec I: bound creator in an unanchored group, Welcome admission for co-devices, role bootstrap/migration, revocation as ordered ledger evidence in unanchored groups, structured policy errors. |
-| `rpc` | Spec P phase 2: opened epoch on pending records and every inbound application handler context (with supporting broadcast metadata); app attempt IDs, client `{sequenceID}` result and proof-time `remove(seq, outcome?)`; strict `decodeAppEntry`. Landed P2a `ControlStore` owns control/cursor; no CommitJournal. Canonical HandshakeBudgetExhaustedError, built handshakeGeneration and terminal rejected errorName identify budget exhaustion (r11 decision). Terminal pending drain, lineage-aware removal, gated settlement binding and persisted occurrence topicID follow r13 (r13 decision). |
+| `mls` | Spec P phase 2: lossless v2 state/recovery codecs, propagated retention and non-mutating non-admin key rotation. Private controls use commit-once; external resync replaces the old leaf with fresh chains. Spec I supplies bound creators, co-device admission, role migration, ordered revocation evidence and policy errors. |
+| `rpc` | Spec P phase 2: incarnation-scoped ControlStore, commit-once queue, durable fork halt/manual recovery, stranded resync, fair adaptive batches, opened epoch/idempotency metadata and transactional handler opt-in. App attempts, durable status events, proof-time settlements and strict decodeAppEntry. Terminal opened-handler drain remains. |
 | `hub-client` | Phase 2 reconnecting HTTP hub, scoped/buffered views, ack backoff and discovery fetch. Preserve retention on reconnect/retry. Buffer injects inspectEpoch/currentEpoch/onEpochChanged; no MLS/registry import. Automatic `/info` integration remains BLOCKED (Risks). |
-| `mls-rpc` | Phase 2 registry over memory `GroupStateStore`: asynchronous load/validated access, staged CAS, identity/lineage, confirmed lower-epoch recovery with separate tombstone floor, application lease/deferred burn and durable handshake reservations capped by unpublished budget 64 (r11 decision). Every installed epoch appends its authenticator; recovery/candidate/seed guard and lifetime tombstones preserve the spent set (r10 decision). Registry owns joinRef clearing and durable pending saves/ambiguity; HandleAccess gains seal/receive/buildControl/lineage and recovery mode. `MLSEncryptor` extraction uses committed membership snapshots and numeric receive counts (r8 decision). P2a recovery candidates encode complete version-2 sourceState; credential/token serialisation uses the lossless MLS codec (r8 decision). Hozon storage/projections remain adapters. |
-| `mls-hub` | Landed P2a openWelcome/consume/receipt are prerequisites. Phase 2 publishes the complete nested openWelcome union (authenticator in joined.group.state.keySchedule), single-options judgeWelcomeAdmission and structural mirrors (r10 decision). Spent-first admission guards joined state/authenticator/joinRef save before consume; genuine readmission atomically resets control/anchor (Spec P D3). No Welcome digest. |
-| `rpc-store` (new) | Phase 3 Hozon impls of `GroupStateStore`, `ControlStore`, `AnchorStore`, `AppCursorStore`, `AppOutbox` on sqlite, postgres and expo. MLS state, `AdoptionWrite` control changes and the anchor landed mark share one adoption transaction (Spec P2a). All writers share one root mutation gate and backend completion barrier, including independent anchor/cursor saves (r8 decision). Explicit factories and outcome-aware Hozon hook settlement are prerequisites (r8 decision). State/control/coordinated-outbox/anchor factories require host `atRest`; raw-byte/wrong-AAD cases cover anchor.secret (r10 decision). Passes `rpc-conformance` through Spec P r13, including displaced-row retirement, settlement binding and encrypted occurrence topicID (r13 decision). |
-| `client` (new) | Phase 4 Device: identity/group verbs, one peer per group, inventory/pending/control restore, source-scoped Welcome consume sweep, rotation scheduling and stop/drain deletion; key-package provisioning and wake. |
+| `mls-rpc` | Phase 2 registry over group transaction memory stores: awaited validated access, monotonic incarnations, spent admission, application leases/rotation and atomic open/adoption/switch. Resync installs a new incarnation; recovery never merges old progress. Extract MLSEncryptor over committed membership snapshots. Recovery v2 stores complete sourceState. |
+| `mls-hub` | Landed openWelcome/consume/receipt remain. Spent-first admission uses authenticated group state. Newer live Welcome or any unspent Welcome after tombstone starts the next incarnation. Group install commits before external source consume. |
+| `rpc-store` (new) | Phase 3 group-scoped Hozon transactions across every kumiai namespace and opted-in host effects. Explicit root scope and outcome-aware hooks. sqlite/postgres conformance, Expo support or explicit blocked reason. Host at-rest codec covers anchors, cursors, topicIDs, spent set and durable events. |
+| `client` (new) | Phase 4 Device: identity/group verbs, one peer per active incarnation, halt-first safety/control/pending restore and manual target selection, Welcome consume sweep, rotation and lifecycle drain. Retired outcomes/Welcomes/status events remain serviceable. Key-package provisioning and wake. |
 | `hub-server` or a new `hub-authz` | The membership `authorize` policy and its state ingestion (Spec H decides placement). |
-| `messaging` (new) | Phase 5 protocols, Messenger, MessageStore memory/Hozon impls; consumes phase-2 opened epoch and proof outcomes. Hooks atomically record acceptance/publication/failure with outbox writes. |
+| `messaging` (new) | Phase 5 protocols, Messenger and MessageStore. Use the common idempotent or transactional handler model for ingestion and status effects. Incarnation-aware local order/read watermarks and per-anchor peer receipts. Failed-outbox events permit host retry. |
 | `tests/e2e` (new, private) | Driver protocol and implementations, hub fixture, scenarios. |
 
 New public packages join the shared version band. New transport, event, HTTP and logging
@@ -179,13 +184,13 @@ Verdicts copied from [phase 1 lift audit](2026-10-08-lift-audit.md), checked 202
 | `hub/ack-backoff.ts` | MOVE | Generic utilities; take @sozai/log logger (`../kubun/packages/plugin-p2p/src/hub/ack-backoff.ts:11`). |
 | `groups/mls-encryptor.ts` | EXTRACT | Inject registry runtime access/notifications; use Spec P lease constants (`../kubun/packages/plugin-p2p/src/groups/mls-encryptor.ts:72`). |
 | `groups/admin-roster.ts` | EXTRACT | Positioned convenience over existing foldRoster (`../kubun/packages/plugin-p2p/src/groups/admin-roster.ts:2`, `../kubun/packages/plugin-p2p/src/groups/admin-roster.ts:56`). |
-| `groups/group-handle-registry.ts` | REIMPLEMENT | Generic registry over D3; Kubun projections/controller transactions stay (`../kubun/packages/plugin-p2p/src/groups/group-handle-registry.ts:1731`, `../kubun/packages/plugin-p2p/src/groups/group-handle-registry.ts:2091`). |
-| `groups/mls-state.ts` | BLOCKED | G1 sender-zero preservation; Spec P r6 defines the codec prerequisite, cleared only when implemented/tested. Row mappings stay Kubun (`../kubun/packages/plugin-p2p/src/groups/mls-state.ts:39`). |
+| `groups/group-handle-registry.ts` | REIMPLEMENT | Generic registry over Spec P group persistence; Kubun projections/controller transactions stay (`../kubun/packages/plugin-p2p/src/groups/group-handle-registry.ts:1731`, `../kubun/packages/plugin-p2p/src/groups/group-handle-registry.ts:2091`). |
+| `groups/mls-state.ts` | BLOCKED | G1 sender-zero preservation; Spec P D5 defines the codec prerequisite, cleared only when implemented/tested. Row mappings stay Kubun (`../kubun/packages/plugin-p2p/src/groups/mls-state.ts:39`). |
 | `groups/group-crypto.ts` | REIMPLEMENT | Integrate registry into existing mls-rpc crypto; ownAgents guard stays host-side (`../kubun/packages/plugin-p2p/src/groups/group-crypto.ts:173`). |
 | `groups/group-handle-access.ts` | REIMPLEMENT | Current HandleAccess including adoption/prepare; source mutate refuses (`../kubun/packages/plugin-p2p/src/groups/group-handle-access.ts:30`). |
 | `groups/commit-journal.ts` | REIMPLEMENT | Superseded. Implement ControlStore in phase 3, never lift the legacy slot (`../kubun/packages/plugin-p2p/src/groups/commit-journal.ts:16`, `packages/rpc/src/control/types.ts:45`). |
 | `groups/anchor-store.ts` | REIMPLEMENT | Keep landed mark and state/control/anchor co-commit (`../kubun/packages/plugin-p2p/src/groups/anchor-store.ts:19`). |
-| `groups/app-cursor-store.ts` | REIMPLEMENT | Group-owned topic cursors; D3 deletes rows atomically (`../kubun/packages/plugin-p2p/src/groups/app-cursor-store.ts:19`). |
+| `groups/app-cursor-store.ts` | REIMPLEMENT | Incarnation-scoped topic cursors share group transactions (`../kubun/packages/plugin-p2p/src/groups/app-cursor-store.ts:19`). |
 | `hub/buffered-peer-hub-view.ts` | EXTRACT | Inject inspectEpoch/currentEpoch/onEpochChanged; unsubscribe on dispose (`../kubun/packages/plugin-p2p/src/hub/buffered-peer-hub-view.ts:45`, `../kubun/packages/plugin-p2p/src/hub/buffered-peer-hub-view.ts:233`). |
 | `hub/server-did.ts` | EXTRACT | Fetch only; persisted cache/change events stay Kubun. `/info` integration separately BLOCKED (`../kubun/packages/plugin-p2p/src/hub/server-did.ts:52`). |
 | `groups/manager.ts` | REIMPLEMENT | Keep domain file; re-express generic group workflows in client (`../kubun/packages/plugin-p2p/src/groups/manager.ts:455`). |
@@ -217,7 +222,7 @@ Verdicts copied from [phase 1 lift audit](2026-10-08-lift-audit.md), checked 202
 const device = await createDevice({
   identity,            // device keypair
   db,                  // Hozon provider: rpc-store + kokuin stores + mls-hub stores
-  atRest,              // required host codec forwarded to state/control/outbox/anchor factories (r10 decision)
+  atRest,              // required host codec for all persisted group namespaces
   hub: { url },        // reconnecting hub-client
   wake?: { token, platform },
   logger?,
@@ -229,11 +234,15 @@ device.groups.join()                  // also automatic on incoming welcome
 device.groups.remove(groupID, did)
 device.groups.setRole(groupID, did, 'admin' | 'member')
 device.groups.leave(groupID)
+device.groups.epochAuthenticator(groupID) // committed epoch/authenticator for host comparison
+device.groups.reportFork(groupID, evidence) // durable halt, including out-of-band mismatch
+device.groups.recover(groupID, { mode: 'resync', targetID }) // explicit chosen hub/commit topic
+// or { mode: 'successor', successor: { groupID, incarnation } }, already joined by the application
 device.devices.link(newDeviceDID)     // controller side; returns the grants
 device.devices.revoke(deviceDID)
 device.peer(groupID): GroupPeer       // protocols attach here
 device.events                         // group:joined | group:removed | roster:changed
-                                      // | epoch:changed | device:revoked
+                                      // | epoch:changed | incarnation:changed | group:fork | outbox:failed | device:revoked
 await device.dispose()
 ```
 
@@ -241,17 +250,28 @@ await device.dispose()
 
 Identity details are settled in Spec I; this section fixes the shape.
 
-- **Invite/join.** The admin fetches key packages and enqueues a P2a invite operation. Its durable
-  Welcome obligation publishes the complete invitation to each device's public discovery topic.
-  The invitee uses landed `openWelcome` (`packages/mls-hub/src/join.ts:26`, `packages/mls-hub/src/join.ts:31`).
-  The r10 contract uses joined.group.state.keySchedule.epochAuthenticator for spent-first admission, then atomic state/authenticator/source-scoped joinRef save before consume (r10 decision).
-  judgeWelcomeAdmission takes one options object; Spec P publishes its signature, the full openWelcome union and structural mirrors.
-  Repeated receipts return alreadyJoined (`packages/mls-hub/src/join.ts:50`). Genuine readmission stops/drains the old peer;
-  Spec P D3 atomically installs joined state and resets control/anchor, retaining outcomes/Welcomes.
-  Exact and alternate A3 bytes after A4 → confirmed lower B2 recovery are refused by the same authenticator (r10 decision).
-  An unspent lower-branch Welcome remains eligible against current epoch.
-  Inviting a controller adds every
-  device it currently grants (Spec I).
+- **Invite/join.** The admin enqueues a P2a invite. Its Welcome obligation delivers the complete invitation at least once.
+  The invitee opens without consuming and derives the authenticated groupID/epoch/authenticator.
+  Spent authenticators refuse exact and alternate representations across incarnations and tombstones.
+  A single group transition installs joined state, spent authenticator, joinRef, control and anchor.
+  Initial join starts incarnation 1. Newer live Welcome starts the next incarnation after peer stop/drain.
+  A tombstone accepts any unspent authenticated Welcome into the next incarnation, without an epoch floor.
+  Only then consume the source package/receipt and clear joinRef through the registry.
+  Receipt-only repeats never install state. Last-resort sources still require spent admission.
+  Inviting a controller adds every device it currently grants (Spec I).
+- **Fault detection/fork halt (r14 decision).** Retain digest divergence, ahead, own-unmerged, unknown-version and retention-gap observations with confidence.
+  Either divergence branch or a host same-epoch authenticator mismatch co-writes halt/evidence/stable event. No sends (including signals),
+  new opens, control or automatic recovery resume after restart or event ack. Unsupported versions hold rather than trigger a resync bypass.
+- **Stranded recovery (r14 decision).** Without fork evidence, retention/unprocessable gaps or lost MLS state automatically request sealed,
+  authenticated GroupInfo and resync via Remove(own old leaf)+ExternalInit. Fresh leaf/secret tree starts at generation zero.
+  Publish exact durable external bytes with CAS; retry them at unchanged epoch, fetch fresh GroupInfo before rebuilding at a new epoch.
+  Normal replacement policy/holder evidence and exact-external-commit confirmation remain. No separate lower-epoch candidate approval/source-prefix scan.
+- **Manual fork recovery (r14 decision).** Host calls recover with a registered targetID or already admitted successor.
+  The application supplies hub/topic routing; ReInit carries no routing ([RFC 9420 §12.1.5](https://www.rfc-editor.org/rfc/rfc9420.html#section-12.1.5)).
+  Same-group resync atomically tombstones n/installs n+1; a successor is admitted separately before retiring the halted source.
+  Authorisation/target persists; failed/refused attempts keep the halt. Drain opened records first. Copy no epoch state.
+  Old operations become unknown; outcomes/Welcomes remain under n. Certified entries publish; other outbox entries fail with durable events.
+  History stays and hosts may retry failed sends programmatically; no automatic reseal.
 - **Device link.** The controller issues the new device a leaf-binding capability and, if it may
   manage co-devices, a leaf-key-pinned `manage` capability on `kumiai/devices`. The new device
   receives them out of band (direct handoff in tests, a QR code on a phone) and calls
@@ -298,22 +318,21 @@ Identity details are settled in Spec I; this section fixes the shape.
   truncation, and store controller logs (`store-controller`) and grants/revocations
   (`store-delegation`). Embedded leaf proofs: built at link time, carried in the leaf, verified by
   the mls embedded resolver without external fetches.
-- **Restore.** Inventory includes credential and ordered signed ledger. The host restores live
-  groups through awaited registry.access and sweeps joinRef through its owning source's consume (r8 decision).
-  It calls registry.clearJoinRef with that exact ref (Spec P D3).
-  Peers restore pending receives and replay P2a operations/rejoins/outcomes/Welcomes in P2a startup order.
-  Tombstones never start peers. Terminal removed groups restore and await every opened pending handler/completion before clearing (r13 decision).
-  That drain performs no new opens, decryption or publication. Afterwards, terminal peers serve only control outcomes/Welcomes.
-  Live self-removal uses the same order. Detection selects the latest applied adoption on the current lineage after atomic recovery retirement.
-- **Rotation/deletion.** Client schedules one rotation per epoch identity outside the registry gate.
-  Private control builds expose and durably reserve their handshake generation before HostBuilt returns (r10 decision).
-  A poison-head mismatch rebuild merges reserved source handshake HWM and uses a higher generation, including after restart.
-  Enforce the unpublished handshake budget of 64 before building/reserving (r11 decision). Terminal exhaustion stops scheduling and requires fresh-leaf device readmission.
-  New sends reject rotation-required; accepted entries wait. Deletion blocks owner creation,
-  disposes/drains the peer, then takes their shared root mutation gate before the atomic tombstone/status
-  transaction (Spec P D3). Drain includes terminal opened pending handlers, frozen proof removals and every adapter's ambiguity resolver (r13 decision).
-  Welcome replacement uses the same lifecycle order. Unsettled control refuses deletion; explicit abandon/ack remains the escape.
-  Tombstones retain all spent epoch authenticators; exact/alternate Welcome replay cannot resurrect a deleted group (r10 decision).
+- **Restore.** Inventory includes incarnation, credentials and ordered signed ledger.
+  Load durable fork halt before enabling sends/control/recovery. Await validated registry access; lost MLS bytes use stranded recovery only with lifetime metadata. Consume each owning source joinRef, then clear the exact ref.
+  Restore opened records and P2a stages before normal delivery. Tombstones never start peers.
+  Storage-only workers serve retired outcomes, Welcomes and durable status events.
+  A terminal incarnation restores and awaits every opened handler/completion before clearing.
+  It performs no new opens/decryption/publication. Live self-removal uses the same drain.
+- **Rotation/deletion.** Schedule one rotation per source identity outside the group gate.
+  Save a private build once. A poison-head mismatch republishes identical bytes/ID after reconciliation.
+  Epoch advancement permits rebuilding. Deadline/outcome ack cannot free the same-epoch commit-once slot.
+  New sends reject rotation-required. Accepted entries wait.
+  Deletion blocks owner creation and disposes/drains the peer before its group transaction.
+  Drain includes opened handlers, settlements, network submissions and ambiguous backend completion.
+  The deletion transaction tombstones/clears transport state and co-writes opted-in host effects.
+  Unsettled control refuses deletion. Explicit abandon/ack remains the escape.
+  Host history and spent authenticators survive deletion.
 
 ### Errors
 
@@ -376,11 +395,14 @@ Until phase 4 the e2e hub fixture runs with allow-any and the gap is documented 
 
 Two protocols attach per group via `device.peer(groupID)`, so they derive two topics.
 
-| Protocol | Item | Kind | Retention | Payload |
-|---|---|---|---|---|
-| `kumiai.messaging` | `message` | event | `log` | `{id (ULID), sentAt, body: {type: 'text', text}, replyTo?: {author, id}}` |
-| `kumiai.messaging.signals` | `receipt` | event | `ephemeral` | `{upTo: {author, id}, watermark: {anchor, position}, kind: 'delivered' \| 'read', at}` (r12 decision) |
-| `kumiai.messaging.signals` | `typing` | event | `ephemeral` | `{active: boolean, at}` |
+| Protocol | Item | Kind | Retention | Local durability | Payload |
+|---|---|---|---|---|---|
+| `kumiai.messaging` | `message` | event | `log` | group transaction, outbox/pending/completion | `{id (ULID), sentAt, body: {type: 'text', text}, replyTo?: {author, id}}` |
+| `kumiai.messaging.signals` | `receipt` | event | `ephemeral` | none | `{upTo: {author, id}, watermark: {anchor, position}, kind: 'delivered' \| 'read', at}` |
+| `kumiai.messaging.signals` | `typing` | event | `ephemeral` | none | `{active: boolean, at}` |
+
+RPC request/response, stream and channel lanes are also ephemeral with no local transport persistence or group transactions.
+Durable host actions such as markRead are separate from sending/receiving the ephemeral signal.
 
 - **Author** is the MLS-authenticated sender (`ctx.message.payload.iss`), never a payload field.
   There is no application-level signature: live authorship is MLS's, and pre-link history is out of
@@ -388,7 +410,7 @@ Two protocols attach per group via `device.peer(groupID)`, so they derive two to
 - **Message identity** is `(groupID, author, id)`. Content is fixed at `send()`; re-sealing after an
   epoch change re-encrypts the same plaintext.
 - **Epoch.** The handler records the authenticated epoch the frame opened in. Pending decrypted
-  records persist that epoch so a durable restore keeps it. `frame.segment` is the captured anchor's local ordinal (r12 decision).
+  records persist epoch and local incarnation. `frame.segment` is the authenticated app-anchor capture epoch.
 - **Authorship holds on every delivery path** (Codex r3): live delivery refuses unnamed senders,
   catch-up uses the opened sender, durable restore uses the atomically persisted sender, and
   cross-topic replay fails AAD binding.
@@ -401,67 +423,60 @@ await messenger.send(groupID, text)                     // returns a pending Mes
 messenger.list(groupID, { before?, limit })
 messenger.markRead(groupID, { author, id })
 messenger.setTyping(groupID, active)
-messenger.events                                        // message | message:status | receipt | typing
+messenger.events                                        // message | message:status | outbox:failed | receipt | typing
 ```
 
 ### Semantics
 
-- **Order (r12 decision).** Per device, a message keeps `(local anchor ordinal, hub position)` for its first durable MessageStore occurrence.
-  GroupState's durable counter increases at every initial/rotation/recovery anchor capture, never decreases, and survives tombstones.
-  Each captured anchor records its ordinal. Late frames from an older anchor retain that anchor's ordinal.
-  Each durable incoming or outgoing occurrence also keeps its authenticated message-lane `topicID` for receipts (r13 decision).
-  Lower recovery A4 → B2 therefore orders a new B2 capture after A4, independent of MLS epoch number.
-  Local read watermarks compare `(ordinal, position)`. An A4 read watermark cannot cover a later B2 message.
-  MLS, hub and broadcast frame formats stay unchanged. The ordinal is local metadata; only the receipt payload gains anchor/position.
+- **Order (r14 decision).** First durable occurrence keeps `(incarnation, anchor epoch, hub position)`.
+  Compare positions numerically within the message lane. Late old-anchor frames retain their anchor epoch.
+  A4 in incarnation n precedes B2 in n+1. Old local read watermarks cannot mark B2 read.
+  Incarnation retirement accepts no new opens and never deletes history already handed to MessageStore.
+  Each occurrence also persists its authenticated message-lane topicID for receipts.
+  Later occurrences dedup by `(groupID, author, id)` and never move the first.
+  Live delivery can precede retained pull, so devices may disagree on duplicate occurrence order.
+  Pending local messages sort last until positioned. Local incarnation numbers never appear in peer receipts.
+- **Attempt identity.** Every app seal has a fresh publishID, source identity, anchor epoch and sealed topicID.
+  Same-process handoff retries retain exact bytes/ID in memory.
+  Restart or epoch/topic invalidation reseals unproven entries only in the active incarnation.
+  Incarnation switching atomically fails abandoned entries and emits durable machine-readable events.
+  Hosts may retry programmatically. Kumiai does not reseal them automatically.
+  App ciphertext and acknowledgement proof are not persisted.
+  P2a controls persist exact bytes/ID/candidate and republish them after head-only mismatch.
+- **Publish status.** `pending → accepted → published`, or `accepted → failed`.
+  Acknowledgement is not proof. The client result stays `{sequenceID}`.
+  Certification persists `{sequenceID, attemptID, topicID, outcome: 'published'}`.
+  Settlement revalidates expected incarnation/epoch/authenticator/stateVersion/attemptID inside the group gate and transaction.
+  A mismatch writes nothing. Both proof paths use this check.
+  Removal writes status/effects with entry/obligation deletion in one transaction.
+  Terminal clearing and incarnation switching report published for certified obligations and fail only unproven entries.
+  Frozen occurrences retain original incarnation/anchor epoch/topicID/position after restart.
+  Hosts opt into the shared transactional effect boundary or consume durable status events idempotently.
+  Failure events retain entry data, stable event ID, reason and destination incarnation until ack.
+  Host messages correlate by semantic identity, never outbox seq.
+  Ambiguous commit completion settles one retained hook queue before callers resume.
+- **Ingestion (r14 decision).** Default handlers run outside transactions, at least once, with a stable frame idempotency key.
+  MessageStore.put is idempotent on `(groupID, author, id)`.
+  Opt-in transactional handlers receive the group transaction and co-write MessageStore effect, pending completion and cursor.
+  They perform no network I/O. This gives exactly-once durable effects when the store shares the provider.
+  A same-key/different-content put keeps the first row, logs the conflict and consumes the frame successfully.
+  Completion and contiguous cursor advancement always share one transaction.
+- **Batching (r14 decision).** Group defaults are 64 frames, 2 ms maximum coalescing delay and 8 ms staging work.
+  An idle lone message starts immediately. Catch-up batches amortise commits and release the group scope.
+  Interleave other lanes, control adoption and enqueue work. Ready control and a low-rate lane complete within three total A/B/control batches, including active A.
+  Other groups schedule independently.
+- **Receipts.** `upTo` names a message. The watermark is `{anchor, position}`, where anchor is its persisted authenticated message-lane topicID.
+  Never derive that topic from the current anchor.
+  Delivered/read watermarks advance only within `(member device, group, anchor)`.
+  Read implies delivered on the same anchor. Different anchors' positions are incomparable.
+  A superseded-anchor receipt covers no replacement anchor or new incarnation's local read watermark.
+  Local markRead uses `(incarnation, anchor epoch, position)` and sends separate receipts for covered anchors.
+  Receivers retain the transmitted tuple even when their first occurrence of upTo used another anchor.
+  Unknown/pending upTo receipts remain in memory, at most 100 per group, expiring after 10 minutes.
+  Overflow evicts the oldest. Per-user maxima combine co-devices separately within each anchor.
+  Receipt/typing handlers persist no transport records and use no group transaction.
+  Members may misreport their own receipts.
 
-  Later occurrences are deduplicated by `(groupID, author, id)` and never move it. Live
-  delivery can precede an older retained pull, and epoch retries or rejoin resends can publish the
-  same plaintext twice, so devices may disagree on the relative order of such a message; accepted
-  (chat apps order per device). Pending local messages sort last until their own position is known.
-- **Attempt identity.** Each app seal gets a fresh publishID, anchor segment and sealed message-lane topicID (r13 decision). Persist only
-  attempt metadata, never app ciphertext/acknowledgement proof. In-process handoff retries retain
-  exact bytes/ID in memory. Restart or identity/segment invalidation reseals unproven entries with
-  new IDs; receivers dedup message identity. Unproven acknowledgements and both proof paths retain
-  authenticator/lineage identity, including same-number recovery. Already-proven removal outcomes stay frozen (Spec P D6).
-  Their minimal outbox-meta settlement obligations survive restart and settle without resealing (r12 decision).
-  Attempt and obligation codecs require topicID, with no missing-field derivation. The host codec seals complete outbox entries and obligations (r13 decision).
-  There is no app 365-day ambiguity rule. P2a control and
-  rejoin payloads retain exact durable-byte replay (`packages/rpc/src/control/types.ts:75`,
-  `packages/rpc/src/control/types.ts:103`).
-- **Publish status.** `pending → accepted → published (position known)`. Coordinated put commits
-  outbox/message rows together before acceptance resolves. Publication returns client `{sequenceID}`;
-  store-only deduped is not part of that HTTP result (`packages/hub-protocol/src/protocol.ts:49`).
-  Acknowledgement is not proof. rpc freezes the certified publication's segment/topicID/sequenceID and calls
-  `remove(seq, {segment, topicID, position})`, the new optional outcome parameter (r13 decision). Published status/position
-  commits with removal; failed removal retries the same outcome, including through self-removal and disposal drain (r8 decision).
-  Certification calls `recordSettlement(seq, obligation, {identity, stateVersion, attemptID})` before freezing (r13 decision).
-  The obligation is `{sequenceID, attemptID, topicID, outcome: 'published'}`. Gate-owned validation checks current identity/lineage/version and stored attempt before persisting.
-  Mismatch returns `{recorded: false, reason}`, writes nothing and leaves evidence unproven. Recovery queued ahead therefore invalidates the old proof.
-  Settlement owning the gate first orders terminal adoption behind its write. Restart terminal clear reports published for obligated entries and co-deletes their obligations.
-  Frozen outcomes and MessageStore occurrences retain the persisted topicID even after anchor replacement.
-  Clear/deletion follows frozen proof settlement, then fails remaining unpublished messages in its transaction (r8 decision).
-  Hooks correlate by message identity decoded from entry.data, not seq.
-  Ambiguous commit retains both hook queues; barrier-proven settlement runs exactly one queue before caller resolution (r8 decision).
-  Phase 2 shares one memory transaction and opaque host rows; real MessageStore wiring lands in 5.
-- **Ingestion.** At-least-once handler execution; `MessageStore.put` is idempotent on
-  `(groupID, author, id)` and durable before the handler resolves, so rows are never lost or
-  duplicated. A duplicate resolves successfully so pending completion and the cursor advance.
-  Content is immutable: a second put with the same key and different content keeps the first row,
-  logs the conflict and **consumes the frame successfully**. Throwing would block the durable
-  worker, which retries its first failed record.
-- **Receipts (r12 decision).** `upTo` names a message. The transmitted watermark is `{anchor, position}`, with `anchor` its authenticated message-lane topicID.
-  Use the occurrence's persisted topicID, including restart-settled outgoing messages. Never re-derive it from the current anchor or local ordinal (r13 decision).
-  Two watermarks per `(member device, group, anchor)`, `delivered` and `read`, advance monotonically within that anchor only.
-  `read` implies `delivered` for the same anchor. Positions from different anchors are incomparable; no device exchanges its local ordinal.
-  A superseded-anchor receipt updates only that anchor. It covers no replacement-anchor message and never advances the receiver's local read watermark.
-
-  Local `markRead` advances `(ordinal, position)` and emits separate receipts for each anchor covered by that local prefix.
-  Receivers keep the transmitted tuple, even when their first occurrence of `upTo` belongs to another anchor.
-  A receipt whose `upTo` is unknown or still pending is held
-  until the message has a position: at most 100 held receipts per group (on overflow the oldest
-  held receipt is evicted), each dropped after 10 minutes. Per-user state takes the maximum over that controller's devices separately within each anchor.
-  There is no cross-anchor maximum. A member can misreport its
-  own receipts; accepted.
 - **Typing.** State per `(member device, group)` keeps the latest `at`; an update with an older
   `at` is ignored and an equal `at` replaces (last arrival wins), so a stale `active: false` cannot clear a newer `active: true`. Expires locally
   5 s after `at`. Arrival with `at` older than 5 s, or more than 5 s in the future, is ignored.
@@ -497,8 +512,8 @@ interface DeviceDriver {
 - **Child-process**: a node child process, over the Enkaku stdio transport.
 - **Crash points** follow arm → trigger → boundary reached → SIGKILL. The test arms a named point,
   triggers the action, the process blocks at the boundary and reports it, and the driver kills it.
-  Boundaries inside `rpc` and `mls-rpc` (pending completion, cursor advance, acknowledgement
-  bookkeeping, control apply) need wrapping stores/hub clients that pause before or after atomic calls.
+  Boundaries inside `rpc` and `mls-rpc` (group transition commit, handler completion, acknowledgement
+  bookkeeping, control publish) need wrapping stores/hub clients that pause before or after atomic calls.
   Spec P and P2a list the seams; no production pause hooks.
 - **Simulator (future)**: the Expo app in `tests/e2e-expo` embeds the same agent over HTTP. Scenarios
   run unchanged.
@@ -528,21 +543,28 @@ existing testcontainers setup), a capturing `WakeSender`, a mock Expo push endpo
    - a payload claiming a different author has no effect (author is `iss`);
    - a frame replayed from another group or topic: rejected;
    - a replayed frame in the same group: deduplicated;
-   - install Welcome A3, advance A4, confirm lower recovery B2, reconstruct: exact/alternate A3 (same authenticator, different bytes) both refused (r10 decision);
-   - A4 message/read watermark `(3,10)`, lower recovery B2, then B2 message `(4,20)`: B2 sorts later and remains unread (r12 decision);
-     late A4 frames retain ordinal 3; superseded-A4 receipts never cover B2, including after reconstruction;
-   - A4 with applied non-removal rows at 2 and 3, confirmed lower recovery B2 with conflictEpoch null, self-removal at B2 (r13 decision);
-     recovery retires displaced rows atomically; terminal detection succeeds live and after restart;
-   - certification checks A, recovery installing B queues ahead on the gate, then settlement returns recorded false without writes (r13 decision);
-     retain the inverse ordering where settlement owns the gate first and adoption waits;
-   - certify on A, removal fails, replace anchor with B and restart settlement (r13 decision);
-     published occurrence and receipt watermark retain A's sealed message-lane topicID, without deriving it from B or the ordinal map;
-   - install, delete and reconstruct a group, then replay its Welcome: refused, tombstone and spent epoch set preserved (r10 decision);
-     both replay cases cover ordinary and last-resort sources, including replay before ordinary consume;
-   - poison/refused frame advances hub head without MLS advancement; rotation rebuilds use strictly increasing handshake generations, including after restart (r10 decision);
-   - post-reservation crashes burn generations 0–63; peer decrypts the next commit at 64; separate unpublished exhaustion refuses build 65 without reservation, then fresh-leaf readmission restores builds (r11 decision);
-   - matching-CAS ordinary state write increases lineage with unchanged identity, or any write decreases lineage: refused on doubles and real stores (r10 decision);
-   - raw storage exposes no anchor.secret; wrong-AAD anchor opens and ciphertext swaps reject (r10 decision);
+   - A3 → A4 in n, host-selected external-resync B2 in n+1, then restart: exact/alternate spent A3 Welcomes both refuse;
+   - A4 order/read watermark (n,4,10), then B2 (n+1,2,20): B2 sorts later and remains unread;
+     superseded-anchor receipts cannot cover B2. History stays intact;
+   - either fork divergence branch halts durably with stable event, live and after restart; no auto recovery, even after ack;
+   - host same-epoch authenticator mismatch reports a fork; consistent split views without comparison remain a detection limitation;
+   - stranded retention gap/lost MLS state automatically external-resyncs into a fresh incarnation/generation-zero chains;
+   - manual chosen-target recovery persists authorisation, keeps halt on refusal and switches only after exact external acceptance;
+   - stale GroupInfo must fail ordering before adoption; its capture-head binding is an explicit phase-2 unresolved gate;
+   - old applied non-removal rows cannot mask self-removal in the new incarnation;
+   - switch mid-transaction rolls back old tombstone, new state, spent append, failed statuses and events together;
+   - switch fails old unpublished entries with durable events, without automatic reseal. Certified entries remain published;
+   - certification checks A, adoption/switch queues ahead, then settlement revalidation refuses stale proof;
+     inverse ordering persists the obligation before adoption;
+   - certify on anchor A, removal fails, rotate to B and restart: settlement keeps A's persisted topicID/occurrence;
+   - delete/reconstruct then replay exact/alternate spent Welcome: refusal without resurrection;
+     unspent Welcome can start another incarnation without a prior epoch floor;
+   - poison frame advances hub head only: control retries identical bytes/ID/handshake generation, also across restart;
+     real receivers apply. Outcome ack/deadline cannot permit a second private build at the same epoch;
+   - ordinary lower epoch or same-number authenticator replacement refuses every coupled write;
+   - raw storage exposes no plaintext, anchor secret or topicID. Wrong-AAD opening and physical swaps reject;
+   - sustained burst on lane A: low-rate B and ready control adoption complete within three total A/B/control batches;
+   - ephemeral RPC/signals persist nothing and open no group transaction;
    - a truncated controller log offered for a known controller: refused;
    - a false controller binding in a leaf: refused;
    - a revoked manager device attempting `addDevice` after the revocation evidence is enacted in the
@@ -551,28 +573,25 @@ existing testcontainers setup), a capturing `WakeSender`, a mock Expo push endpo
    - same author reusing an `id` with different content: first row kept, conflict logged;
    - hub (phase 4): authentic-but-unauthorized membership statement, stale statement, revoked
      device on an already-open channel: all refused.
-8. Child-process crash points, each followed by restart and a no-loss, no-duplicate assertion:
-   - after decrypt, before the atomic ratchet-plus-pending save;
-   - after that save has committed, before message persist ("after" a save always means after its
-     transaction commits, not after the write call returns);
-   - saveOpened commits, self-removal commits, kill before handler (r13 decision);
-     restart delivers every opened pending message once-or-more and awaits handler/completion before terminal clearing, without opens/decryption/publication;
-   - after message persist, before pending-frame completion;
-   - after pending completion, before cursor advance;
-   - after outbox accept, before publish;
-   - after hub acknowledgement, before publication bookkeeping;
-   - after proof, before published-status/outbox removal;
-   - certify and persist settlement obligation, remove rolls back, terminal state/control adoption commits, kill before retry (r12 decision);
-     restart terminal clear reports published once, never failed, and deletes the obligation with its entry;
-   - lease reserved, before seal;
-   - handshake generation reserved, before control built persistence/publication (r10 decision);
-   - joined state saved, before source consume;
-   - Welcome readmission committed, before peer restart (state/control/anchor reset);
-   - group deletion committed, before restart;
-   - P2a intent/built/accepted and state/control/anchor co-commit seams, plus rejoin and Welcome delivery.
-   Plus hub restart (durable delivery), device restart (groups restored), and a message published
-   twice (epoch retry) observed by two receivers, including across topic rotation: each keeps one
-   row.
+8. Child-process crash points, followed by restart and no-loss/no-duplicate-effect assertions:
+   - inside a group transition or N-frame open batch: all coupled rows/effects commit or none;
+   - opened records committed, before default handlers, and after an external handler effect before completion;
+     redelivery keeps the same idempotency key;
+   - transactional handler effect/completion/cursor before or after commit: exactly-once durable effect;
+   - self-removal committed, before opened handlers settle: terminal restart drains them before clearing;
+   - exact control build committed before publication, and remote acceptance before local settlement;
+   - accepted outbox before publish, acknowledgement before proof, certified obligation before removal;
+     terminal/switch restart retains published status and sealed topicID;
+   - fork halt committed before event emission: restart remains halted and replays the event without auto recovery;
+   - manual recovery authorisation committed before external publish: restart resumes only the selected target;
+   - incarnation switch committed before peer restart: isolated new state, old tombstone and failure events;
+   - application lease committed before seal: reserved generations are skipped after restart;
+   - joined incarnation committed before source consume, and Welcome delivery before obligation deletion;
+   - COMMIT rejected with backend unfinished: negative read cannot release the group gate;
+   - deletion committed before restart.
+   Spec P/P2a stage replay covers remaining external publication/confirmation/bootstrap seams.
+   There is no completion/cursor split seam or handshake-reservation seam.
+   Also test durable hub restart and duplicated app publication across rotation. Each receiver keeps one message row.
 
 ### Rules
 
@@ -587,42 +606,32 @@ existing testcontainers setup), a capturing `WakeSender`, a mock Expo push endpo
 
 Each phase gets its own plan and branch. The e2e suite grows with each phase.
 
-0. **Spec P: transactional persistence (draft r12).** Phase-2 contracts, identity-aware state CAS,
-   atomic pending/adoption/Welcome reset, lossless codec prerequisite, lease/rotation, opened-epoch
-   metadata, identity-bound app proof and coordinated outbox contracts. Memory doubles model unfinished COMMIT, completion barriers and retained hook queues.
-   Recovery sourceState encoding, async access, tunnel runtime and shared factory signatures belong to phase 2 (r8 decision).
-   Confirmed recovery may lower current epoch while preserving the tombstone floor. Landed P2a owns control.
-   Spent-epoch admission amends P2a D4; every installed epoch appends its authenticator, retained across recovery/deletion (r10 decision).
-   Complete Welcome signatures/mirrors, durable handshake reservations and forbidden lineage-change cases are binding (r10 decision).
-   Host-injected at-rest codec, raw-byte checks and wrong-AAD rejection apply to state/control/outbox/anchor stores (r10 decision).
-   Handshake budget 64, terminal typed readmission state and real/double receiver-window parity are binding (r11 decision).
-   Shared fixtures specify physical mutation/swaps and transactional side-row writes/inspection (r11 decision).
-   Durable local anchor ordinals preserve lower-recovery order/read watermarks; peer receipts compare only within one anchor (r12 decision).
-   Minimal certified settlement obligations preserve published status through terminal restart (r12 decision).
-1. **Lift audit (probe).** Verdicts copied above. G1 codec prerequisite is specified in P r6;
-   automatic `/info` integration remains separately BLOCKED.
-2. **rpc/mls/mls-rpc/mls-hub/rpc-conformance/hub-client port and runtime additions on memory doubles.**
-   Follow Spec P's implementation order: state/recovery codecs, retention/rotation, async registry/access, D4 metadata,
-   D6 attempts/outcomes/terminal proof settlement, D7 decoder/shared transaction fixtures, encryptor and hub-client lifts (r8 decision). D4 includes only
-   necessary optional metadata forwarding through broadcast. Both contract suites cover real
-   implementations and affected doubles; repo-wide type tests pass. No client/messaging/Hozon adapters.
-   e2e: allow-any real HTTP hub, injected server DID, in-process two-device group-peer smoke with
-   real MLS, invite/join, send/epoch/proof, rotation/resume and memory-store runtime reconstruction.
-   Required deterministic test codec, including anchor raw-byte/wrong-AAD checks; exact/alternate Welcome and spent-candidate refusal after recovery/deletion (r10 decision).
-   Poison-head mismatch rotation rebuild/restart uses strictly increasing handshake generations; doubles reject unauthorised lineage changes (r10 decision).
-   Handshake budget boundary/exhaustion and forward-window parity run on real MLS and doubles; memory side-row/corruption fixtures cover commit/rollback/late faults (r11 decision).
-3. **rpc-store.** Hozon state/control/anchor/pending/cursor/outbox implementations, coordinated hooks,
-   tombstone deletion, root-provider discriminator and outcome-aware hook prerequisites (r8 decision). Provider conformance on sqlite,
-   postgres and expo (node shim or explicit BLOCKED reason); state/control/anchor atomicity and
-   commit ambiguity verified here. e2e devices on sqlite; restart restores groups.
-   State/control/coordinated-outbox/anchor factories require the host codec; provider encryption alone does not satisfy the contract (r10 decision).
-   Provider fixtures bind physical mutation/swaps to raw tables and writeSideRow to the supplied transaction; read both rows after commit/rollback/late faults (r11 decision).
+0. **Spec P: transactional persistence (draft r14).** Strongly consistent DS, durable fork halt/manual recovery, automatic stranded resync;
+   incarnation monotonicity, commit-once and one group transaction per durable transition.
+   Fair adaptive batching, durable-only lanes and transactional-or-idempotent handlers are binding (r14 decision).
+   Keep v2 codecs, spent authenticators, application leases, at-rest codec, certified settlements and completion barriers.
+   P2a's consolidated r14 amendments replace its earlier persistence notes.
+1. **Lift audit (probe).** Verdicts copied above. The codec prerequisite remains until implemented/tested.
+   Automatic /info integration remains separately blocked.
+2. **rpc/mls/mls-rpc/mls-hub/rpc-conformance/hub-client on memory doubles.**
+   Follow Spec P: codecs, group transaction coordinator, incarnations/spent admission, fork halt/manual recovery, stranded resync and commit-once control,
+   fair batching/handlers, application leases/rotation, settlement/events, encryptor and hub-client lifts.
+   Broadcast changes only forward authenticated metadata.
+   Both contract suites cover real implementations and doubles. Run repository-wide type tests.
+   No client/messaging/Hozon provider or child-process driver.
+   HTTP smoke uses injected server DID, real MLS, standalone devices, invite/join, send/proof and rotation.
+   Reconstruct memory runtimes for live/restart fork halt, automatic/manual resync, incarnation switches, spent refusal, commit-once and crash/batch/handler cases.
+   Establish the GroupInfo freshness/head binding before claiming the stale-epoch refusal gate passes.
+3. **rpc-store.** sqlite/postgres group transactions with explicit scope and outcome-aware provider hooks.
+   Bind all namespace and host side-row writes to the supplied provider transaction.
+   Verify CAS, completion barriers, late COMMIT, encrypted physical rows, wrong AAD and fairness.
+   Expo uses a node shim or an explicit blocked reason. SQLite e2e devices reconstruct from durable rows.
 4. **Spec I and Spec H, then mls group changes, client and hub policy/server changes.**
    Gated on published kokuin stores. Client wires ownership, inventory/pending/control restore,
    Welcome consume sweep, rotation scheduling and deletion draining. e2e scenarios 2, 3, 4, 6 and
    identity/hub cases of 7.
-5. **messaging.** Consume phase-2 opened epoch/proof outcomes; MessageStore, coordinated acceptance/
-   publication/failure hooks and status events. e2e scenarios 1, 5 and messaging cases of 7.
+5. **messaging.** Consume phase-2 epoch/incarnation/proof metadata and failed-send events.
+   MessageStore uses the shared transactional-or-idempotent handler/effect model for ingestion and status. e2e scenarios 1, 5 and messaging cases of 7.
    Expo bundle check joins CI. Handler epoch exposure is already phase 2, not a phase-5 port change.
 6. **Child-process driver and scenario 8.** SIGKILL/restart at Spec P/P2a seams. Earlier in-process
    reconstruction/failure tests do not establish child-process crash coverage.
@@ -641,6 +650,11 @@ Recorded in `docs/agents/plans/backlog/` when this spec is approved:
   registration) with conformance cases covering topic rotation and membership changes.
 
 ## Risks
+
+- **GroupInfo freshness binding unresolved.** Current CAS compares only head; the sealed reply does not bind GroupInfo to its capture head
+  (`packages/mls/src/recovery.ts:566`, `packages/hub-store/src/store.ts:226`). Spec P requires stale-epoch rejection but does not invent that binding.
+- **Complete local database loss.** Automatic MLS-state recovery needs retained/restored credential and lifetime spent-authenticator metadata;
+  resetting a previously known group's spent set is unsafe and is not authorised.
 
 - **Automatic discovery integration BLOCKED.** Fetch requests origin `/info`
   (`../kubun/packages/plugin-p2p/src/hub/server-did.ts:53`), but kumiai mounts default `/hub`
