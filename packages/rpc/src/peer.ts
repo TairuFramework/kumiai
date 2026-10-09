@@ -22,7 +22,12 @@ import {
   encodeCommitFrame,
   isUnsupportedCommitFrameVersion,
 } from './commit-frame.js'
-import { enqueueOperation, type OperationDeps, stepOperation } from './control/operations.js'
+import {
+  enqueueOperation,
+  type OperationDeps,
+  revokeHeld,
+  stepOperation,
+} from './control/operations.js'
 import { applyResolved } from './control/store.js'
 import type { OperationRequest, Outcome } from './control/types.js'
 import {
@@ -220,11 +225,11 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     handlers,
     suppress,
   } = params
-  let revokeHeld = false
+  let revokeHold = false
   let rejoinHeld = false
   let hasOperations = false
   const logSubmissions = new Set<Promise<unknown>>()
-  const logSendsHeld = (): boolean => revokeHeld
+  const logSendsHeld = (): boolean => revokeHold
   const settleLogSubmissions = async (): Promise<void> => {
     await Promise.allSettled([...logSubmissions])
   }
@@ -548,7 +553,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           queue: appOutboxAcceptance,
           ready: async () => {
             await ready
-            if (revokeHeld) {
+            if (revokeHold) {
               await runSerial(async () => {
                 if (await settleOperations()) await rebuildEpoch()
               })
@@ -1777,7 +1782,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     if (control == null) return
     const snapshot = await control.load()
     hasOperations = snapshot.operations.length > 0
-    revokeHeld = snapshot.operations.some((op) => op.revokes)
+    revokeHold = revokeHeld(snapshot)
     rejoinHeld = snapshot.rejoin != null
     for (const row of snapshot.applied) {
       appliedByEpoch.set(row.epoch, { digest: row.digest, sequenceID: row.sequenceID })
@@ -1840,7 +1845,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       },
       publish: async (payload, publishID, expectedHead) => {
         assertLive()
-        if (revokeHeld) await settleLogSubmissions()
+        if (revokeHold) await settleLogSubmissions()
         assertLive()
         return mux.publish({ topicID, payload, publishID, expectedHead, retain: 'log' })
       },
@@ -2122,8 +2127,13 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     assertLive()
     await runSerial(async () => {
       assertLive()
-      await enqueueOperation(operationDeps(), request)
-      await refreshControl()
+      // A host write may persist the intent before its promise settles.
+      if (request.revokes) revokeHold = true
+      try {
+        await enqueueOperation(operationDeps(), request)
+      } finally {
+        await refreshControl()
+      }
     })
     scheduleOperations()
   }

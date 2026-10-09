@@ -9,11 +9,16 @@ import type {
   AdoptionWrite,
   AppliedCommit,
   ControlChanges,
+  ControlSnapshot,
   ControlStore,
   Operation,
   OperationRequest,
   Outcome,
 } from './types.js'
+
+export function revokeHeld(snapshot: ControlSnapshot): boolean {
+  return snapshot.operations.some((op) => op.revokes)
+}
 
 export type HostBuilt = {
   commit: Uint8Array

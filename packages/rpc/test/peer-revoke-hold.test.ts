@@ -1,6 +1,7 @@
 import { setImmediate } from 'node:timers/promises'
 import { expect, test, vi } from 'vitest'
 
+import { revokeHeld } from '../src/control/operations.js'
 import { OperationOutcomeError, OperationRejectedError } from '../src/errors.js'
 import { commitTopic } from '../src/topic.js'
 import { FakeHub } from './fixtures/fake-hub.js'
@@ -22,6 +23,78 @@ async function close(member: TestPeer) {
   await member.peer.dispose()
   await member.peer.drained()
 }
+
+test('the revoke hold derives from unsettled operations, not retained outcomes', async () => {
+  const database = createMemoryHostDatabase()
+  const control = database.control('alice')
+  const ordinary = {
+    id: crypto.randomUUID(),
+    kind: 'ledger' as const,
+    revokes: false,
+    body: new Uint8Array([1]),
+    seq: 1,
+    enqueuedAt: Date.now(),
+    stage: 'intent' as const,
+  }
+  const revoke = { ...ordinary, id: crypto.randomUUID(), seq: 2, revokes: true }
+  await control.apply({ putOperations: [ordinary] }, crypto.randomUUID())
+  expect(revokeHeld(await control.load())).toBe(false)
+  await control.apply({ putOperations: [revoke] }, crypto.randomUUID())
+  expect(revokeHeld(await control.load())).toBe(true)
+  await control.apply(
+    {
+      deleteOperations: [revoke.id],
+      putOutcomes: [
+        { id: revoke.id, opID: revoke.id, at: Date.now(), kind: 'rejected', reason: 'Refused' },
+      ],
+    },
+    crypto.randomUUID(),
+  )
+  expect(revokeHeld(await control.load())).toBe(false)
+})
+
+test('a durable revoke holds sends before its enqueue storage call returns', async () => {
+  const hub = new FakeHub()
+  const member = makeMLSPeer(hub, 'alice', secret)
+  const pause = gate()
+  let persisted = false
+  await member.peer.outcomes()
+  member.database.seam('after-apply', async () => {
+    persisted = true
+    await pause.promise
+  })
+  const enqueued = member.peer.enqueue(buildLedgerCommit(member, ['proof'], { revokes: true }))
+  try {
+    await vi.waitFor(() => expect(persisted).toBe(true))
+    expect((await member.control.load()).operations.some((op) => op.revokes)).toBe(true)
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    await member.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'held' } })
+    await vi.advanceTimersByTimeAsync(20)
+    expect(apps(hub)).toEqual([])
+  } finally {
+    vi.useRealTimers()
+    pause.release()
+    await enqueued
+    await close(member)
+  }
+})
+
+test('a failed revoke enqueue releases the hold when no intent was persisted', async () => {
+  const hub = new FakeHub()
+  const member = makeMLSPeer(hub, 'alice', secret)
+  try {
+    await member.peer.outcomes()
+    member.database.failNext('mid-apply')
+    await expect(
+      member.peer.enqueue(buildLedgerCommit(member, ['proof'], { revokes: true })),
+    ).rejects.toThrow('Injected transaction failure')
+    expect((await member.control.load()).operations).toEqual([])
+    await member.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'released' } })
+    await vi.waitFor(() => expect(apps(hub)).toHaveLength(1))
+  } finally {
+    await close(member)
+  }
+})
 
 test('a delayed empty snapshot cannot release a newer revoke hold', async () => {
   const hub = new FakeHub()
@@ -187,18 +260,36 @@ test('unknown publication restores the hold before startup delivery', async () =
 test('a rejected build settles the revoke and releases sends', async () => {
   const hub = new FakeHub()
   const member = makeMLSPeer(hub, 'alice', secret)
-  await expect(
+  const pause = gate()
+  let building = false
+  const rejected = expect(
     member.peer.commit(
       buildLedgerCommit(member, [], {
         revokes: true,
-        onBuild: () => {
+        onBuild: async () => {
+          building = true
+          await pause.promise
           throw new OperationRejectedError('Cannot build')
         },
       }),
     ),
   ).rejects.toBeInstanceOf(OperationOutcomeError)
-  expect((await member.control.load()).operations).toEqual([])
-  await member.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'released' } })
-  await vi.waitFor(() => expect(apps(hub)).toHaveLength(1))
-  await close(member)
+  try {
+    await vi.waitFor(() => expect(building).toBe(true))
+    await member.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'held' } })
+    expect(apps(hub)).toEqual([])
+    pause.release()
+    await rejected
+    const snapshot = await member.control.load()
+    expect(snapshot.operations).toEqual([])
+    expect(snapshot.outcomes[0]?.kind).toBe('rejected')
+    await vi.waitFor(() => expect(apps(hub)).toHaveLength(1))
+    const released = apps(hub)[0]
+    if (released == null) throw new Error('Missing released app frame')
+    expect(member.crypto.frameEpoch(released.payload)).toBe(1)
+  } finally {
+    pause.release()
+    await rejected
+    await close(member)
+  }
 })
