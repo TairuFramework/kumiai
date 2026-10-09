@@ -326,7 +326,7 @@ export type HeldLedgerEntry = {
 /** A held entry paired with its content id — one position in the ledger log. */
 export type LedgerLogEntry = HeldLedgerEntry & { entryID: string }
 
-/** Project tree re-admissions from the full ledger fold, never a previous projection.
+/** Project lifecycle tree re-admissions from the full ledger fold, never a previous projection.
  * A lapsed re-admitted leaf and a leaf inserted after expiry are indistinguishable here;
  * a genuine expired post-reset package can activate a leaf for a Welcome joiner or an
  * external rejoiner adopting a fork existing members reject. Ordinary commit admission
@@ -335,7 +335,9 @@ export type LedgerLogEntry = HeldLedgerEntry & { entryID: string }
 function registryWithTreeBindings(
   registry: DeviceRegistry,
   tree: ClientState['ratchetTree'],
+  anchor: GroupAnchor,
 ): DeviceRegistry {
+  if (anchor.controller == null) return registry
   const devices = new Map(registry.devices)
   for (const node of tree) {
     if (
@@ -344,7 +346,13 @@ function registryWithTreeBindings(
       node.leaf.credential.credentialType !== defaultCredentialTypes.basic
     )
       continue
-    const parsed = parseMLSCredentialIdentity(node.leaf.credential.identity)
+    let parsed: ReturnType<typeof parseMLSCredentialIdentity>
+    try {
+      parsed = parseMLSCredentialIdentity(node.leaf.credential.identity)
+    } catch {
+      // An unparseable leaf cannot supply reset re-admission evidence.
+      continue
+    }
     if (!mayReadmitResetDevice(registry, parsed)) continue
     const did = normalizeDID(parsed.id)
     const record = devices.get(did)
@@ -434,7 +442,11 @@ export class GroupHandle {
     )
     const folded = foldLedgerControl(this.#ledger, anchor, this.groupID)
     this.#roster = folded.roster
-    this.#registry = registryWithTreeBindings(folded.registry, this.#state.ratchetTree)
+    this.#registry = registryWithTreeBindings(
+      folded.registry,
+      this.#state.ratchetTree,
+      this.#anchor,
+    )
     // Authentication reads only this handle's registry and lifetime limits.
     const denyHolder = deviceDenyHolderFor(this.#context)
     if (denyHolder != null) {
@@ -657,7 +669,11 @@ export class GroupHandle {
       }
       const folded = foldLedgerControl(this.#ledger, this.#anchor, this.groupID)
       this.#roster = folded.roster
-      this.#registry = registryWithTreeBindings(folded.registry, this.#state.ratchetTree)
+      this.#registry = registryWithTreeBindings(
+        folded.registry,
+        this.#state.ratchetTree,
+        this.#anchor,
+      )
       this.#admission = this.#computeAdmission()
       if (this.#pendingControlEvents != null) {
         this.emitControlEvents(appended.filter(({ entry }) => entry.type === DEVICE_ENTRY_TYPE))
@@ -793,7 +809,11 @@ export class GroupHandle {
         log.map(({ entryID, token, verified }) => [entryID, { token, verified }]),
       )
       this.#roster = folded.roster
-      this.#registry = registryWithTreeBindings(folded.registry, this.#state.ratchetTree)
+      this.#registry = registryWithTreeBindings(
+        folded.registry,
+        this.#state.ratchetTree,
+        this.#anchor,
+      )
       this.#admission = this.#computeAdmission()
       try {
         await opts?.persist?.(this)
@@ -1315,7 +1335,11 @@ export class GroupHandle {
       }
       this.#roster = candidateRoster
       const folded = foldLedgerControl(this.#ledger, this.#anchor, this.groupID)
-      this.#registry = registryWithTreeBindings(folded.registry, this.#state.ratchetTree)
+      this.#registry = registryWithTreeBindings(
+        folded.registry,
+        this.#state.ratchetTree,
+        this.#anchor,
+      )
       this.#admission = this.#computeAdmission()
       const emit = () => {
         this.#notifyAccepted(
