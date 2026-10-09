@@ -1,19 +1,19 @@
 # Spec P: transactional persistence — design
 
 Date: 2026-10-08
-Status: draft r9
+Status: draft r10
 Parent: [client host, messaging protocol and multi-device e2e](2026-10-08-client-messaging-e2e-design.md)
 (phase 0)
 
 Spec P fixes the contracts phase 2 implements on memory doubles. P2a crash-safe control has
-landed on `feat/spec-p-phase-2` and is binding, with the explicit r9 D4 admission amendment below.
+landed on `feat/spec-p-phase-2` and is binding, with the explicit r10 D4 admission amendment below.
 This spec adds no second control journal.
 
 ## Scope and handoff
 
 | Phase | Work |
 |---|---|
-| 2 | `rpc`, `mls`, `mls-rpc`, `mls-hub`, `rpc-conformance` and `hub-client` contracts and runtime additions. Version-2 state and recovery codecs first. Registry over `GroupStateStore`, spent-Welcome admission, codec-injected shared memory stores, extracted tunnel encryptor, D4 metadata, D6 attempts/outcomes, D7 decoding and outcome-aware hook fixtures. Both contract suites against real crypto/MLS/HTTP and doubles. Real HTTP hub plus in-process two-device group-peer smoke. |
+| 2 | `rpc`, `mls`, `mls-rpc`, `mls-hub`, `rpc-conformance` and `hub-client` contracts and runtime additions. Version-2 state and recovery codecs first. Registry over `GroupStateStore`, spent-epoch admission, application/handshake reservations, codec-injected shared memory stores including anchors, extracted tunnel encryptor, D4 metadata, D6 attempts/outcomes, D7 decoding and outcome-aware hook fixtures. Both contract suites against real crypto/MLS/HTTP and doubles. Real HTTP hub plus in-process two-device group-peer smoke. |
 | 3 | `rpc-store`: Hozon stores, coordinated outbox, state/control/anchor co-commit, tombstones and hooks. Provider discriminator and outcome-aware hook prerequisites in Hozon. sqlite/postgres/expo conformance, persistence and provider failure tests. |
 | 4 and 5 | `client` ownership, Welcome inventory/consume wiring, rotation scheduling, deletion orchestration; `messaging` hooks, `MessageStore`, status events and deduplication. Phase 2 tests these contracts with host fixtures, without creating either package. |
 | 6 | Child-process driver and every SIGKILL seam. In-process reconstruction is not kill-a-process evidence. |
@@ -70,6 +70,10 @@ prefixed with `../`, `node_modules/` or `tests/`. Destinations in Decisions are 
   Welcome reconstruction derives the original encryption secret and creates a fresh tree
   (`node_modules/ts-mls/dist/src/clientState.js:603`, `node_modules/ts-mls/dist/src/clientState.js:607`).
   Thus A3 replay after lower recovery to B2 can reinstate spent sender generations. Lineage does not change MLS secrets.
+- **Alternate Welcome representation (r10 decision), checked 2026-10-09.** The author encrypts joiner secrets for recipients
+  (`node_modules/ts-mls/dist/src/createCommit.js:143`). Signed GroupInfo extensions are separate from GroupContext
+  (`node_modules/ts-mls/dist/src/groupInfo.js:12`). Different valid Welcome bytes can therefore install the same epoch authenticator and secrets.
+  An artifact digest cannot identify spent epoch secrets.
 
 ### Publication and handle state today
 
@@ -108,6 +112,10 @@ prefixed with `../`, `node_modules/` or `tests/`. Destinations in Decisions are 
   P2a's carry copies current progress into candidate history; it does not implement current-state
   leases/merging (`mls/src/group-handle.ts:910`, `mls/src/group-handle.ts:929`). Recovery and revoke
   build still report lineage zero (`mls-rpc/src/mls.ts:289`, `mls-rpc/src/revoke.ts:60`).
+- **Handshake rebuild gap (r10 decision), checked 2026-10-09.** The helper creates private commits (`mls/src/group-commit.ts:333`).
+  ts-mls discards the advanced protection tree (`node_modules/ts-mls/dist/src/createCommit.js:77`); commits consume the handshake chain
+  (`node_modules/ts-mls/dist/src/secretTree.js:237`). Head mismatch can rebuild without changing MLS identity (`rpc/src/control/operations.ts:194`).
+  Application reservations alone do not protect that rebuild.
 - Default retention is 10 skipped keys/200 forward steps (`node_modules/ts-mls/dist/src/keyRetentionConfig.js:2`).
   Context construction omits `clientConfig` (`mls/src/group-context.ts:59`); derivation makes a fresh
   default context (`mls/src/group-handle.ts:1758`). Recovery restore also omits retention
@@ -303,7 +311,8 @@ It breaks self-removal filtering and changes policy attribution (`mls/src/group-
   Keep P2a's opaque candidate/requestKey and confirmation/source-check contracts unchanged.
   Extend the exact-state/source-tree test (`mls-rpc/test/recovery-codec.test.ts:65`) with a source tree differing from the candidate's.
   Cover empty proposals and zero/one/absent senders, plus reconstruction from a persisted rejoin candidate/requestKey.
-  Bound verdict judgement and idempotent adoption still pass (`mls-rpc/test/recovery-codec.test.ts:90`, `mls-rpc/test/recovery-codec.test.ts:99`).
+  Preserve bound verdict judgement (`mls-rpc/test/recovery-codec.test.ts:90`). Revise the restored-acceptance case (`mls-rpc/test/recovery-codec.test.ts:99`):
+  repeated resolution of one committed write remains idempotent; a newly restored spent candidate refuses installation (r10 decision).
   This adaptation lands with G1, before registry or recovery uses the version-2 envelope.
 - Correct the backlog's broad audit claim here, without editing it: no other valid falsy scalar in
   this installed ClientState graph is affected. Own leaf index, epoch and generation are required
@@ -324,17 +333,18 @@ export type GroupStateRecord = {
   state: Uint8Array               // version-2 encodeClientState output; empty when deleted
   credential: { id: string; groupID: string } | null
   ledger: Array<string>           // signed tokens in enactment order, repeats kept
-  senderHWM: number               // exclusive reservation ceiling for this epoch identity
+  senderHWM: number               // exclusive application reservation ceiling for this epoch identity
+  handshakeHWM: number            // exclusive handshake reservation ceiling (r10 decision)
   epochAuthenticator: Uint8Array  // empty when deleted
   lineage: number                 // starts at 0; never decreases, tombstones included
   joinRef: { sourceID: string; ref: string } | null
-  spentWelcomeDigests: Array<string> // sorted unique; retained across recovery and tombstones (r9 decision)
+  spentEpochAuthenticators: Array<Uint8Array> // every held epoch; retained across recovery/tombstones (r10 decision)
 }
 export type GroupStateCAS = { expected: { version: number } | null }
 export type GroupStateWrite = GroupStateCAS & (
   | { kind: 'state'; adoption?: AdoptionWrite }
   | { kind: 'recovery'; adoption: AdoptionWrite }
-  | { kind: 'welcome'; welcomeDigest: string }
+  | { kind: 'welcome' }
 )
 export type GroupStateStore = {
   mutationGate: GroupMutationGate
@@ -354,7 +364,7 @@ export class GroupStateUncertainError extends Error { override name = 'GroupStat
 export class DisplacedGroupHandleError extends Error { override name = 'DisplacedGroupHandleError' }
 ```
 
-**Host at-rest codec (r9 decision).** Export this Hozon-free port from rpc:
+**Host at-rest codec (r9 decision; anchors r10 decision).** Export this Hozon-free port from rpc:
 
 ```ts
 export type AtRestCodec = {
@@ -363,14 +373,19 @@ export type AtRestCodec = {
 }
 ```
 
-State, coordinated-outbox and control factories require `atRest: AtRestCodec`. The host owns keys, provisioning, rotation, retention and destruction.
+State, coordinated-outbox, control and anchor factories require `atRest: AtRestCodec` (r10 decision).
+The host owns keys, provisioning, rotation, retention and destruction.
 Kumiai never generates or stores at-rest keys. Reconstructed adapters receive a codec capable of opening all retained records.
 Deletion never destroys host keys implicitly; remaining groups and tombstones can still require them.
 
-Seal state bytes, complete pending frames, outbox payloads and the serialised control snapshot before storage.
+Seal state bytes, complete pending frames, outbox payloads, the serialised control snapshot and complete anchor slots before storage (r10 decision).
 Control encryption includes operation bodies/journals and rejoin candidate/requestKey. Ports and transaction hooks still receive logical plaintext values.
+Anchor encryption includes `AnchorSlot.anchor.secret`, pending metadata and the landed mark, including adoption co-writes (r10 decision).
+The secret feeds app topic derivation (`rpc/src/anchor.ts:6`, `rpc/src/peer-epoch.ts:262`);
+the current Kubun adapter writes it directly (`../kubun/packages/plugin-p2p/src/groups/anchor-store.ts:35`).
 AAD is `UTF8(JSON.stringify(['kumiai/at-rest/v1', groupID, namespace, recordID]))`.
-Namespaces are `state`, `pending`, `outbox` and `control`. Record IDs are groupID for state/control, frame.id for pending, and String(seq) for outbox.
+Namespaces are `state`, `pending`, `outbox`, `control` and `anchor` (r10 decision).
+Record IDs are groupID for state/control/anchor, frame.id for pending, and String(seq) for outbox.
 Queryable keys, CAS versions and mutation markers may remain clear. Authenticated open must reject altered ciphertext or AAD, without plaintext fallback.
 Seal failure rolls back the coupled transaction. Open failure exposes no handle or payload and never rewrites ciphertext as plaintext.
 
@@ -388,6 +403,9 @@ Redeclaration breaks ambiguity recognition (`rpc/src/control/store.ts:105`).
   `record.version` must exceed the prior version. Lower lineage or admissionFloor conflicts.
   Lower epoch conflicts except authenticated, confirmed recovery below. A miss writes no logical rows
   and throws `GroupStateConflictError`. Map postgres mutation serialization failures to that conflict.
+- **Authorised lineage changes (r10 decision).** Ordinary `kind: 'state'` and `saveOpened` writes retain lineage, even with matching CAS and newer versions.
+  Only authenticated recovery or Welcome replacement increments it, exactly once. Deletion retains it; no path decreases it.
+  Matching epoch/authenticator never authorises an ordinary lineage increase or progress reset.
 - **Lower-epoch recovery (r7 decision).** `kind: 'recovery'` may install a lower or equal epoch with
   a different authenticator. Require a live source, expected version and lineage exactly incremented by one.
   The registry enters this mode only from P2a's confirmed candidate after its read-only source re-check.
@@ -396,63 +414,96 @@ Redeclaration breaks ambiguity recognition (`rpc/src/control/store.ts:105`).
 
   Candidate authentication and authoritative verdict verification remain the MLS/peer's responsibility
   (`mls-rpc/src/mls.ts:181`, `rpc/src/peer.ts:2712`). Never grant this exception to an ordinary state/open save.
-  Persist state/control/anchor/marker together. Reset current HWM/progress to the candidate identity;
-  retain P2a's identity-checked historical carry. A candidate matching the installed identity is an idempotent no-op.
+  Refuse a candidate whose authenticator is already spent before epoch comparison; never merge or install it (r10 decision).
+  Persist state/control/anchor/marker and the appended spent authenticator together. Reset both HWMs/progress to the candidate identity;
+  retain P2a's identity-checked historical carry. An already-committed write resolves through writeID, without reinstalling its candidate.
   P2a stores verified confirmation, then re-checks source before adoption
-  (`rpc/src/control/rejoin.ts:127`, `rpc/src/control/rejoin.ts:154`). No P2a recovery amendment is required.
+  (`rpc/src/control/rejoin.ts:127`, `rpc/src/control/rejoin.ts:154`). These guards remain binding alongside the spent-epoch refusal.
   Recovery's `onAccepted` passes `access.replace(data.group, write, undefined, 'recovery')`
   at the existing replacement call (`mls-rpc/src/mls.ts:218`). Registry maps that mode to the recovery store write.
 - **Admission floor (r7 decision).** Set `admissionFloor = max(prior admissionFloor, candidate epoch)`.
   Lower recovery preserves it. Tombstones set `epoch = admissionFloor`; Welcome requires strictly greater
   than that tombstone epoch. Unspent live Welcomes still compare current epoch (`mls-hub/src/admission.ts:7`, `mls-hub/src/admission.ts:8`).
-  The spent-digest check below amends P2a D4 admission (r9 decision).
-- **Spent Welcome admission (r9 decision), amendment to P2a D4.** Every installed Welcome, ordinary or last-resort, adds its durable digest per group.
-  The welcome transaction checks the stored set, then appends the digest with joined state, joinRef, control reset and anchor clear.
-  A spent digest returns `refused` before epoch comparison. The store independently rejects attempted installation with `GroupStateConflictError`.
-  Recovery, ordinary saves, opens, joinRef clearing and deletion preserve the set exactly. Welcome saves add exactly one previously unspent digest.
-  Retain digests for the group's lifetime, including D3 tombstones and later admissions. Never prune them by epoch, lineage or package retention.
-  Known rollback spends nothing; ambiguous commits resolve joined state and spent digest together through D2's barrier.
-  Source receipts remain consume bookkeeping, not this guard. A receipted ordinary repeat never installs state; a tombstoned group remains deleted.
-  Rejected alternative: a highest-epoch-ever live admission floor, which would reject legitimate unspent Welcomes on the lower branch.
+  The spent-epoch check below amends P2a D4 admission (r10 decision).
+- **Spent epoch identities (r10 decision), amendment to P2a D4.** Each group retains every epoch authenticator this device has held.
+  This includes genesis, ordinary/last-resort Welcome, own commit, received commit and recovery, regardless of application sends.
+  Every save installing a new epoch appends its authenticator in the same transaction as state and any control/anchor changes.
+  Same-identity progress saves, opens and joinRef clearing preserve the set exactly. Recovery and deletion retain all prior entries.
+  Welcome admission, recovery candidates and seed refuse any joined/candidate authenticator already in the set before epoch comparison.
+  Refusal never merges progress. The store independently conflicts on a spent candidate or a transition reinstalling a spent epoch.
+  Ordinary same-identity state saves remain valid; they preserve progress rather than admitting a candidate.
+  Retain the set for the group's lifetime, including D3 tombstones and later admissions. Never prune by epoch, lineage or package retention.
+  Growth is one authenticator per held epoch, accepted in the same growth class as receipts.
+  Known rollback spends nothing. Ambiguous commits resolve state and the appended authenticator together through D2's barrier.
+  Source receipts remain consume bookkeeping. A receipted ordinary repeat never installs state; a tombstoned group remains deleted.
+  Exact replay and alternate valid representations share an authenticator, so no `welcomeDigest` or digest derivation remains.
+  Rejected alternative: artifact digest; repackaging can preserve secrets while changing bytes. The live highest-ever epoch floor remains rejected too.
 
-  Proposed phase-2 `mls.digestWelcome(welcome: ProcessWelcomeParams['welcome']): string` returns lowercase-hex SHA-256 of
-  `UTF8('kumiai/welcome-spent/v1') || u32(encryptedGroupInfo.length) || encryptedGroupInfo`, length big-endian.
-  Both framed bytes and legacy objects use this core; reject malformed framing. Exclude invitation, tree, source/ref and recipient-list packaging.
-  The Welcome contains cipherSuite/secrets/encryptedGroupInfo (`node_modules/ts-mls/dist/src/welcome.js:14`).
-  Recipient decryption binds encryptedGroupInfo (`node_modules/ts-mls/dist/src/welcome.js:43`), so reordering/pruning recipients cannot evade this digest.
-  Extend `mls-hub.openWelcome` to return `welcomeDigest` with every authenticated `joined` result. Only the verified groupID scopes its spent set.
-  Extend `judgeWelcomeAdmission` with held `spentWelcomeDigests` and a required `welcomeDigest`; check spent first, retaining its existing result union.
+  **Version-2 record fields (r10 decision).** Replace `spentWelcomeDigests` with required `spentEpochAuthenticators` in persistence serialisation.
+  Include required `handshakeHWM` too. Both fields round-trip independently of the MLS ClientState payload.
+  Store sorted, unique byte arrays in lexicographic byte order, with defensive copies. Live records and tombstones round-trip the complete set.
+  State-namespace encryption covers this metadata. No missing-field fallback to an empty set or digest migration is safe.
+  The MLS ClientState v2 envelope above remains lossless state encoding; this lifetime set belongs to the group record, outside recovery snapshots.
+  The record supplied to save must contain exactly the prior set plus the installed authenticator; reject omissions or unrelated additions.
+
+  **Welcome plumbing (r10 decision), phase-2 mls-hub exports:**
+
+  ```ts
+  export type OpenWelcomeParams = Omit<ProcessWelcomeParams, 'keyPackageBundle'>
+  export type JoinedWelcome = {
+    group: GroupHandle             // group.state.keySchedule.epochAuthenticator carries the authenticated identity
+    credential: MemberCredential
+    sourceErrors?: Array<Error>
+  }
+  export type OpenWelcomeResult =
+    | { joined: JoinedWelcome; joinRef: { sourceID: string; ref: string } }
+    | { alreadyJoined: string }
+  export function openWelcome(sources: Array<BundleSource>, welcome: OpenWelcomeParams): Promise<OpenWelcomeResult>
+  export type WelcomeAdmissionParams = {
+    held: { epoch: number; deleted: boolean; spentEpochAuthenticators: Array<Uint8Array> } | null
+    welcome: { epoch: number; epochAuthenticator: Uint8Array }
+  }
+  export function judgeWelcomeAdmission(params: WelcomeAdmissionParams): 'join' | 'alreadyJoined' | 'replace' | 'refused'
+  ```
+
+  Preserve the nested union (`mls-hub/src/join.ts:26`) and joined group/state (`mls/src/group-welcome.ts:45`).
+  The comparator replaces today's positional arguments (`mls-hub/src/admission.ts:2`) with the single options object above.
+  The host supplies `welcome` from `Number(joined.group.epoch)` and `joined.group.state.keySchedule.epochAuthenticator`.
+  Only the authenticated groupID selects held storage. Compare authenticator bytes first, then apply the existing epoch/deletion result rules.
+  Seed derives that same authenticator from the handle and rechecks the durable set under the gate.
 - **Other historic-state paths, checked 2026-10-09.** Recovery restore can reconstruct a saved candidate (`mls-rpc/src/mls.ts:464`).
   P2a rechecks source epoch/authenticator/lineage before adoption (`rpc/src/control/rejoin.ts:39`, `rpc/src/control/rejoin.ts:154`).
   D3 co-commits that rejoin's `confirmed` → `adopted` transition with the lineage increment; `adopted` only bootstraps/settles (`rpc/src/control/rejoin.ts:203`).
-  Pre-commit replay retries the same transaction. Post-commit replay preserves current progress as a same-identity no-op or fails the old source check.
+  Pre-commit replay retries only an unspent candidate. Post-commit replay resolves the committed write or follows `adopted`, without reinstalling candidate state (r10 decision).
+  Any new candidate installation with a spent authenticator is refused, even with a current source or the same installed identity.
   Later lower recovery cannot restore the old source lineage. Never relabel an old candidate with a new rejoin/source to bypass this check.
   This safety requires D3's lineage plumbing; today's real source still reports zero (`mls-rpc/src/mls.ts:289`).
+  Remove the candidate's current-authenticator early success (`mls-rpc/src/mls.ts:212`); it must not bypass spent-candidate refusal (r10 decision).
   Fresh recovery from historic GroupInfo creates an external update path (`mls/src/group-welcome.ts:328`, `node_modules/ts-mls/dist/src/createCommit.js:267`).
   Its path secret is random (`node_modules/ts-mls/dist/src/updatePath.js:26`); its epoch secret tree is newly derived (`node_modules/ts-mls/dist/src/createCommit.js:294`).
   Old confirmation cannot confirm a new candidate: judgement binds requestID, position, commitDigest and tag (`mls-rpc/src/recovery.ts:228`).
   Own journals also carry expected source identity/lineage (`rpc/src/control/operations.ts:235`); ordinary state/open saves cannot lower epoch.
   Registry restore loads only the current committed record. These paths retain their source/CAS/progress guards; none gains Welcome's fresh seed/reset exception.
 - **Identity (r6 decision).** Epoch identity is `(groupID, epoch, epochAuthenticator)`; lineage identifies
-  ownership, not the epoch secret. Same identity/same lineage retains max HWM and merged sender/receive
+  ownership, not the epoch secret. Ordinary same-identity/same-lineage saves retain both max HWMs and merged sender/receive
   progress. Only after both checks may `mergeReceiveSecretTree` run (`mls/src/secret-tree.ts:17`).
   Never merge by epoch number alone.
-- A newer epoch resets HWM to the candidate's own sender generation. Recovery may keep the number
-  while changing authenticator: reset HWM, bump lineage, discard old current-tree progress.
-  Live Welcome replacement requires a strictly higher authenticated current epoch. A replacement proposing the
-  same identity is an idempotent no-op, not a new lineage with reusable keys. Recovery/Welcome bumps
-  lineage by one; ordinary commits keep it. Tombstones retain admissionFloor/lineage/spentWelcomeDigests, with HWM zero, empty
+- A new, unspent epoch resets both HWMs to the candidate's own application/handshake generations (r10 decision).
+  Recovery may keep the number while changing authenticator: reset both HWMs, bump lineage, discard old current-tree progress.
+  Live Welcome replacement requires a strictly higher authenticated current epoch. A spent replacement identity is refused, never merged (r10 decision).
+  Recovery/Welcome bumps lineage by one; ordinary commits keep it.
+  Tombstones retain admissionFloor/lineage/spentEpochAuthenticators, with both HWMs zero, empty
   state/authenticator/ledger and null credential/joinRef.
 - `save(kind: 'state' | 'recovery')` co-commits any `AdoptionWrite`, its mutation marker and matching anchor landed
   mark. `record.writeID === adoption.mutationID`. Keep P2a's carry into retained historical epochs.
   Current-state same-identity merging supplements that carry; it does not replace it.
-- **Welcome save (r6 decision; r9 digest).** `save(record, {expected, kind: 'welcome', welcomeDigest})` is the atomic
+- **Welcome save (r6 decision; r10 spent identity).** `save(record, {expected, kind: 'welcome'})` is the atomic
   seed/readmission operation. With the old peer stopped/drained, apply
   `readmissionChanges(txControlSnapshot)` (`rpc/src/control/store.ts:67`) and clear the anchor slot
   in the state-save transaction. Set control's mutation marker to `record.writeID`.
   Operations/rejoin become `unknown`; applied/responses/cursor clear; outcomes/Welcomes survive.
-  Initial Welcome join uses the same method with absent control. Include `welcomeDigest` and the appended spent set (r9 decision).
-  Tombstone admission keeps both its epoch floor and spent digests.
+  Initial Welcome join uses the same method with absent control. Include the appended spent authenticator set (r10 decision).
+  Tombstone admission keeps both its epoch floor and spent set.
   This is not `AdoptionWrite.anchorLanded`, which only marks an advance (`rpc/src/control/types.ts:43`).
 - `saveOpened` co-writes the CAS state and pending record. Duplicate `(groupID, pending.frame.id)`
   insertion is a no-op. List in `(segment, position)` order, using rpc's numeric-position comparison
@@ -463,7 +514,7 @@ Redeclaration breaks ambiguity recognition (`rpc/src/control/store.ts:105`).
   with the original error, known uncommitted. Anything else: conflict, invalidate and reload.
   Failed barriers/reads retry at 100 ms, doubling to a 15 s cap. Do not expose uncertain state.
 - `delete` stores a tombstone, removes pending, applied/responses/cursor, anchor, app cursor/outbox
-  and outbox meta rows, and awaits `onDelete` in one transaction. Retain its write marker and spent digests (r9 decision).
+  and outbox meta rows, and awaits `onDelete` in one transaction. Retain its write marker and spent authenticator set (r10 decision).
   Refuse operations, rejoin, unacked outcomes or Welcomes with canonical `GroupControlUnsettledError`
   (`rpc/src/control/store.ts:57`). Deletion does not abandon control work automatically.
 
@@ -487,7 +538,6 @@ export type GroupHandleRegistry = {
   seed(group: GroupHandle, params: {
     replace?: boolean
     joinRef: GroupStateRecord['joinRef']
-    welcomeDigest: string | null    // null only for locally created genesis (r9 decision)
   }): Promise<void>
   clearJoinRef(groupID: string, expectedJoinRef: NonNullable<GroupStateRecord['joinRef']>): Promise<void>
   delete(groupID: string): Promise<void> // host must stop/drain its peer first
@@ -509,6 +559,9 @@ export type RegistryHandleAccess = HandleAccess & { pending: PendingAppFrames; r
 pending?: PendingAppFrames
 lineage(): number
 seal<TValue>(fn: (handle: GroupHandle) => Promise<TValue>): Promise<TValue>
+buildControl<TValue>(fn: (source: GroupHandle) => Promise<{
+  result: TValue; handshakeGeneration: number // source-epoch generation consumed by private commit (r10 decision)
+}>): Promise<TValue>
 receive<TValue>(fn: (handle: GroupHandle) => Promise<{
   result: TValue; accepted: number   // non-negative integer open count, including batches (r8 decision)
 }>): Promise<TValue>
@@ -529,15 +582,16 @@ export function createGroupCrypto(params: GroupCryptoParams & {
 
 - `restore` rejects mismatched groupID, epoch, credential or authenticator. The registry derives
   saved bytes/credential/ledger from the handle. Clones use the version-2 codec and retained options.
-  Seed checks the spent digest first, including tombstones; a spent digest conflicts without writing (r9 decision).
+  Seed checks the candidate authenticator against the spent set first, including tombstones; a match conflicts without writing (r10 decision).
   Otherwise seed returns without writing for a held live epoch at/above the candidate. Live newer Welcome
   requires `replace: true`; absent/tombstoned joins use the welcome save. At/below a tombstone floor
   or unauthorised replacement throws `GroupStateConflictError`. Existing version/lineage are loaded
   under the gate, never supplied as guessed insert defaults.
-  Null digest requires local genesis at epoch 0, absent storage, null joinRef and no replacement.
-  That seed uses `kind: 'state'` with an empty spent set. Every Welcome seed requires the authenticated open result's digest.
+  Local genesis requires epoch 0, absent storage, null joinRef and no replacement.
+  That seed uses `kind: 'state'` and spends the genesis authenticator. Every Welcome seed derives identity from the authenticated joined handle (r10 decision).
 - One per-group gate spans preparation, save and ambiguity resolution. Durable mutation/open,
   commit replacement, Welcome seed and deletion stage from the current cache; install after commit.
+  Recovery replacement checks the spent set before `prepare` or any progress carry/merge (r10 decision).
   Retry durable-open CAS at most eight times on fresh clones. Merge only matching identities/lineages.
 - **Registry durable open (r7 decision).** `createGroupCrypto({access: await registry.access(groupID)})` uses
   access-owned pending persistence/list/completion. Refuse an external pending adapter on registry access.
@@ -572,7 +626,7 @@ export function createGroupCrypto(params: GroupCryptoParams & {
   each source-scoped `joinRef`, then calls `registry.clearJoinRef(groupID, consumedRef)` (r7 decision).
   Under the gate, require the exact sourceID/ref; an already-null ref succeeds without writing.
   A different non-null ref conflicts. Save current owner state with null joinRef, fresh writeID and
-  next version; preserve identity/lineage/HWM and install the updated cached record after commit.
+  next version; preserve identity/lineage/both HWMs/spent set and install the updated cached record after commit.
   The registry owns ambiguity through `resolveWrite`, as for every state save. Never clear before consume.
   A crash after consume repeats its source receipt check, then clears through this operation.
   Restore pending into the peer before P2a replay. Keep P2a's startup order and terminal-removal rule.
@@ -650,6 +704,19 @@ const ROTATE_AT = 500
   Burn to persisted HWM before any real seal. With fewer than four left, CAS reserve
   `min(500, max(g, senderHWM) + 16)` with state unchanged. At the capped final lease, one to three
   remaining generations may be used without another reservation. Seal only below 500.
+- **Handshake reservation (r10 decision).** `buildControl` serialises every private rotation/control commit build under the same owner gate.
+  Stage a source clone at `max(own handshake next generation, handshakeHWM)` before invoking the non-mutating builder.
+  Ratchet only the handshake chain, discarding skipped send keys. No application empty-frame burn substitutes for this advance.
+  The builder reports the exact consumed `handshakeGeneration`; require it to match the staged source generation.
+  Before returning ciphertext/HostBuilt, CAS-save the source identity with `handshakeHWM = max(prior HWM, handshakeGeneration + 1)`.
+  Reserve in the same state transaction pattern as the application HWM. Preserve lineage, application HWM, spent set and receive progress.
+  Resolve ambiguity through D2/D3 before releasing the build; failed reservations expose no ciphertext and permit no publication.
+  Install the committed source metadata, not the speculative next-epoch candidate. The later adoption alone installs/spends that candidate epoch.
+  After failure, head mismatch or restart, merge the reserved handshake HWM into the current source before any rebuild.
+  Never reset it while identity/lineage stays the same. Exact-byte P2a replay of an already-built operation consumes no new generation.
+  A rejected/oversized/unpublished build after reservation still burns its generation. The application 500 bound does not cap control-handshake reservations.
+  Simple access advances and persists source handshake progress before returning too; durable control builds require its persist callback.
+  Externally authored recovery commits retain their existing framing; they consume no local member handshake generation.
 - **Deferred burn (r6 decision).** Restore always succeeds for valid lapsed, removed, suspended or
   pending-proposal state. Do not call `encrypt(empty)` until its application-send prerequisites hold.
   Encrypt currently rejects lapse (`mls/src/group-handle.ts:992`); ts-mls rejects pending proposals
@@ -736,6 +803,7 @@ export type CommitKeyRotationResult = {
   commitMessage: Uint8Array
   newGroup: GroupHandle
   epoch: bigint
+  handshakeGeneration: number      // consumed generation in source epoch (r10 decision)
 }
 export function commitKeyRotation(group: GroupHandle): Promise<CommitKeyRotationResult>
 ```
@@ -748,6 +816,16 @@ The empty-proposal path requests an update path (`node_modules/ts-mls/dist/src/c
 Proposal-free receiving policy already accepts (`mls/src/policy.ts:342`); the ledger builder rejects
 empty lists (`mls/src/group-commit.ts:397`). The helper defaults to admin and clears its pending
 proposal input (`mls/src/group-commit.ts:200`, `mls/src/group-commit.ts:279`), so both choices must be explicit.
+
+**Build persistence (r10 decision).** Keep the helper non-mutating and commits privately framed.
+Expose the consumed handshake generation on rotation and every private control-commit builder's result.
+Derive it from the source handshake chain, including unexpanded generation zero, or retain the advanced protection-tree progress.
+The current ts-mls return discards that tree (`node_modules/ts-mls/dist/src/createCommit.js:77`); returning only the next epoch is insufficient.
+The host builds through `access.buildControl`, returning `{result: built, handshakeGeneration}` from its callback.
+No callback may publish or expose speculative ciphertext before that access operation resolves its reservation.
+P2a frames/persists `built` only after the host build returns (`rpc/src/control/operations.ts:143`, `rpc/src/control/operations.ts:160`).
+Head mismatch returns an absent build to intent (`rpc/src/control/operations.ts:194`); the next build must use the reserved source HWM.
+Rejected alternative: public framing for member commits, which exposes commit contents to the relay.
 
 The host converts this result to P2a `HostBuilt`: `commit = commitMessage`, `bodies = []`,
 `welcome = null`, journal is the serialised candidate, and source identity uses D3 lineage.
@@ -932,7 +1010,7 @@ export type MemoryDatabase = {
 export function createMemoryTransaction(params: { rows: MemoryStoreRows }): MemoryDatabase
 // Shared adapters (r8 decision). Canonical names below denote conformance structural mirrors.
 export function createMemoryControlStore(params: { db: MemoryDatabase; groupID: string; atRest: AtRestCodec }): ControlStore
-export function createMemoryAnchorStore(params: { db: MemoryDatabase; groupID: string }): AnchorStore
+export function createMemoryAnchorStore(params: { db: MemoryDatabase; groupID: string; atRest: AtRestCodec }): AnchorStore // r10 decision
 export function createMemoryAppCursorStore(params: { db: MemoryDatabase; groupID: string }): AppCursorStore
 export function createMemoryGroupStateStore(params: {
   db: MemoryDatabase
@@ -963,7 +1041,7 @@ parameters as their Hozon counterparts, substituting `MemoryTransaction` for `St
 
 ```ts
 export function createControlStore(params: { db: HozonDB; groupID: string; atRest: AtRestCodec }): ControlStore
-export function createAnchorStore(params: { db: HozonDB; groupID: string }): AnchorStore
+export function createAnchorStore(params: { db: HozonDB; groupID: string; atRest: AtRestCodec }): AnchorStore // r10 decision
 export function createAppCursorStore(params: { db: HozonDB; groupID: string }): AppCursorStore
 ```
 
@@ -1007,9 +1085,9 @@ applies. Hozon does not configure transaction isolation (`../hozon/packages/db/s
 
 ## Phase 2 implementation order and exit criteria
 
-1. MLS version-2 codec, P2a recovery serializer adaptation and source-tree/rejoin regression. Retention propagation and rotation builder.
-2. D3 port, spent-Welcome admission, codec-injected shared state/control/outbox factories, shared anchor/cursor, outcome-aware hooks, async registry/access and lineage plumbing.
-   Reuse P2a co-commit. Phase 2 includes digest plumbing and the P2a D4 admission amendment (r9 decision).
+1. MLS version-2 codec, P2a recovery serializer adaptation and source-tree/rejoin regression. Retention propagation and rotation/control builders exposing handshake generations (r10 decision).
+2. D3 port, spent-epoch admission, codec-injected shared state/control/outbox/anchor factories, shared cursor, outcome-aware hooks, async registry/access and lineage plumbing.
+   Reuse P2a co-commit. Include spent-authenticator plumbing, durable handshake reservations and the P2a D4 admission amendment (r10 decision).
 3. D4 pending/handler migration, including optional broadcast metadata and directed stamped headers.
 4. D6 entry/publication/removal shapes, prepared-byte retries, terminal proof settlement and memory-hub dedup parity.
 5. D7 rpc decoder/error exports and coordinated memory contract fixtures; no production rpc-store adapter.
@@ -1019,7 +1097,8 @@ applies. Hozon does not configure transaction isolation (`../hozon/packages/db/s
 7. In-process e2e smoke: standalone devices, real MLS ports/registry on shared memory host stores,
    real HTTP hub, explicit server DID, invite/join, retained send, opened epoch and proof outcome.
    Include non-admin rotation/resume and state/pending replay by rebuilding runtime over stored rows.
-   Include A3 install/advance, confirmed lower recovery to B2, refused A3 replay, and deletion/reopen/refused Welcome replay (r9 decision).
+   Include A3 install/advance, confirmed lower recovery to B2, exact/alternate A3 refusal, and deletion/reopen/refused Welcome replay (r10 decision).
+   Poison-head mismatch rotation rebuilds use strictly increasing handshake generations, including after reconstruction (r10 decision).
    This driver is a test host over GroupPeer/registry; it depends on neither Device nor Messenger.
 
 Phase 2 ships no `client`, `messaging`, MessageStore schema, Hozon adapter or child-process driver.
@@ -1076,8 +1155,9 @@ phase 3 runs real-store boundaries; phase 6 arms, reports, blocks and kills a ch
 | Hub acknowledgement, before publication bookkeeping | app hub `publish` | after | new ID/status assertions over existing restart; 2/5/6 |
 | Proof, before published-status/removal | `AppOutbox.remove(seq, outcome)` | before | outcome contract 2; atomic MessageStore 5/6 |
 | Lease reserved, before seal | `save` raising HWM | after | 2/3/6 |
-| Joined state saved, before key consume | `save(kind: 'welcome')` | after | state and spent digest committed together; replay cannot install again; consume resumes; 2/3/6 |
-| Welcome readmission, between state/digest/control/anchor writes | `save(kind: 'welcome')` | injected failure | neither state/digest/reset/anchor changes; old runtime not installed; 2/3 |
+| Handshake generation reserved, before built persistence/publication | source `save` raising handshakeHWM | after | restart/rebuild skips consumed generation; exact saved replay stays byte-identical; 2/3/6 (r10 decision) |
+| Joined state saved, before key consume | `save(kind: 'welcome')` | after | state and spent authenticator committed together; replay cannot install again; consume resumes; 2/3/6 |
+| Welcome readmission, between state/spent-set/control/anchor writes | `save(kind: 'welcome')` | injected failure | neither state/spent-set/reset/anchor changes; old runtime not installed; 2/3 |
 | Welcome readmission committed, before peer restart | `save(kind: 'welcome')` | after | unknown outcomes preserved; reset anchor recaptured at join; 2/3/6 |
 | Deletion committed, before restart | `delete` | after | tombstone/rows 2/3; failed messages 5; SIGKILL 6 |
 | COMMIT rejected, backend unfinished | root transaction and D2 barrier | raw read shows previous/absent marker, then backend commits or rolls back | no premature rejection/release; 2 memory / 3 providers |
@@ -1170,6 +1250,27 @@ export function testAppCursorStoreConformance<TTx extends ConformanceTransaction
 export function testAnchorStoreConformance<TTx extends ConformanceTransaction>(
   params: PersistenceConformanceParams<PersistencePorts, TTx>
 ): void
+
+// Welcome structural mirrors (r10 decision). TGroup is the fixture's actual joined handle.
+export type ConformanceWelcomeGroup = {
+  groupID: string
+  epoch: bigint
+  state: { keySchedule: { epochAuthenticator: Uint8Array } }
+}
+export type ConformanceOpenWelcomeResult<TGroup extends ConformanceWelcomeGroup> =
+  | { joined: {
+      group: TGroup
+      credential: { id: string; groupID: string }
+      sourceErrors?: Array<Error>
+    }; joinRef: { sourceID: string; ref: string } }
+  | { alreadyJoined: string }
+export type ConformanceWelcomeAdmissionParams = {
+  held: { epoch: number; deleted: boolean; spentEpochAuthenticators: Array<Uint8Array> } | null
+  welcome: { epoch: number; epochAuthenticator: Uint8Array }
+}
+export type ConformanceJudgeWelcomeAdmission = (
+  params: ConformanceWelcomeAdmissionParams
+) => 'join' | 'alreadyJoined' | 'replace' | 'refused'
 ```
 
 These signatures replace AppOutbox's synchronous `createOutbox/failNextPut` fixture
@@ -1177,9 +1278,9 @@ These signatures replace AppOutbox's synchronous `createOutbox/failNextPut` fixt
 ControlStore's existing factory remains, with the additions above (`rpc-conformance/src/control-store.ts:175`).
 Its `commitThenReject` method forwards to the same fault controller.
 AnchorStore's one-case harness gains the shared fault/reopen fixture (`rpc-conformance/src/anchor-store.ts:20`).
-Retain its round-trip case. Shared fixtures use D7's explicit factories, including required control `atRest` (r9 decision).
+Retain its round-trip case. Shared fixtures use D7's explicit factories, including required control/anchor `atRest` (r10 decision).
 Each factory creates an isolated database and all ports over its one root/gate, with supplied hooks.
-State/control/outbox share a host-supplied codec. Phase 2 fixtures inject a deterministic authenticated test codec (r9 decision).
+State/control/outbox/anchor share a host-supplied codec. Phase 2 fixtures inject a deterministic authenticated test codec (r10 decision).
 Identity/plaintext codecs cannot satisfy these fixtures.
 Use `MemoryTransaction` for memory hooks and `StoreProvider` for Hozon hooks; absent hooks are no-ops.
 Memory exports Hozon-free structural mirrors of D2's settlement/options types (r8 decision).
@@ -1189,13 +1290,14 @@ Confirmed rollback reverses those counts. Resolver retries, disposal, reopen and
 `reopen` waits for backend/resolver/hook settlement, discards runtime state and rebuilds ports over the same rows.
 Faults/clock follow the rebuilt ports. `inspectRows` normalises provider rows for the same assertions.
 `inspectRawBytes` reads committed physical byte values, including duplicate copies, before codec opening or logical normalisation (r9 decision).
-Scan those bytes for non-empty plaintext and distinctive plaintext spans from state, pending frames, outbox payloads and control secrets.
+Scan those bytes for non-empty plaintext and distinctive spans from state, pending frames, outbox payloads, control secrets and `AnchorSlot.anchor.secret` (r10 decision).
 Logical port round-trips alone cannot pass encryption conformance. Open stored ciphertext with another group, namespace or record ID's AAD: rejection is required.
 Swap ciphertext between physical record identities and assert adapter reads reject too. Reopen with the same host codec preserves logical state and payloads.
 `after-first-write` fails between coupled logical writes; owner-row locking statements do not count.
 Suites close fixtures in finally blocks. Conformance type mirrors retain every normative field/signature above;
 they follow the existing structural mirror approach (`rpc-conformance/src/control-store.ts:168`).
 Canonical port names in this block denote those structural `Conformance*` mirrors, not imports from mls-rpc.
+The state-record mirror includes `spentEpochAuthenticators` and `handshakeHWM`; the Welcome mirrors above preserve the exact nested union and options shape (r10 decision).
 Ordinary receipts can short-circuit open (`mls-hub/src/join.ts:50`). Test spent admission/seed directly and wire replay before consume.
 After consume, assert receipt-only handling never installs state.
 
@@ -1204,22 +1306,24 @@ After consume, assert receipt-only handling never installs state.
 | codec/registry, 2 | lossless sender | zero, one, absent survive clone/save/reopen; malformed sidecar refused; version 1 throws; regression fails on current codec |
 | recovery codec, 2 | v2 source-tree/rejoin | full candidate/source state round-trip with different trees, no proposals and zero/one/absent senders; saved candidate/requestKey restores bound verdict and adopts once; v1 candidate refused |
 | `testGroupStateStoreConformance`, 2 memory / 3 providers | CAS/version | wrong expected, lower/equal version, ordinary lower epoch, lower lineage/floor and tombstone-as-absent conflict without logical changes |
-| | confirmed lower recovery | real source at 4, responder at 1, candidate at 2: confirmation/source check permits atomic adoption; version/lineage increase, floor stays 4, candidate HWM resets; reopen at 2; tombstone refuses Welcome at/below 4 |
+| | forbidden lineage changes, r10 | matching CAS/new version, unchanged epoch/authenticator, ordinary kind 'state' with increased lineage and reset progress: conflict; any lineage decrease, including recovery/Welcome/open/delete, conflicts; bytes, both HWMs, spent set, control/anchor unchanged; doubles and real stores |
+| | confirmed lower recovery | real source at 4, responder at 1, unspent candidate at 2: confirmation/source check permits atomic adoption; version/lineage increase, floor stays 4, both candidate HWMs reset; reopen at 2; tombstone refuses Welcome at/below 4 |
 | | refused lower recovery | unconfirmed/refused candidate, stale source/version, absent/tombstoned source or missing adopted co-write changes nothing |
-| | spent Welcome after lower recovery, r9 | install A3 (ordinary and last-resort), seal, advance A4, recover onto B2, reopen, replay A3: admission refused and seed/save conflict; B2, HWM, lineage, control/anchor and spent set unchanged; unspent B3 remains admissible despite floor 4 |
-| | deleted-group Welcome replay, r9 | install, stop/drain, settle control, delete, reopen: spent digest remains in tombstone; replay is refused without state/rows/peer resurrection; spent check precedes epoch floor; unspent Welcome above floor can join and retains prior digests |
-| | spent digest atomicity, r9 | failed welcome transaction spends nothing; ambiguous commit resolves state/digest together; state/open/recovery/clearJoinRef/delete cannot remove prior digests; recipient/source/invitation repackaging retains digest |
-| | recovery candidate replay, r9 | confirmed candidate retry across ambiguous commit installs once; after seal/advance/lower recovery, restored old candidate cannot reinstall via stale source lineage; same-current-identity retry preserves HWM/progress |
+| | spent Welcome after lower recovery, r10 | install A3 (ordinary and last-resort), seal, advance A4, recover onto B2, reopen, replay A3: admission refused and seed/save conflict; B2, both HWMs, lineage, control/anchor and spent set unchanged; unspent B3 remains admissible despite floor 4 |
+| | alternate A3 representation, r10 | after A3 → A4 → B2, author produces valid alternate A3 using changed signed GroupInfo extensions and regenerated recipient encryption: same authenticator, different bytes; admission refused, seed/save conflict, never merge; ordinary and last-resort, after restart |
+| | deleted-group Welcome replay, r10 | install, stop/drain, settle control, delete, reopen: spent authenticator remains in tombstone; exact/alternate replay refused without resurrection; spent check precedes floor; unspent Welcome above floor joins and retains prior set |
+| | spent epoch atomicity/growth, r10 | genesis/Welcome/own commit/received commit/recovery each append installed authenticator with state; failed coupled save spends nothing; ambiguous commit resolves both together; ordinary progress/open/clearJoinRef/delete retain prior set; v2 record codec round-trips unique sorted byte arrays across reopen/tombstones |
+| | recovery candidate replay, r10 | confirmed candidate retry across ambiguous commit resolves writeID and installs once; any newly attempted spent candidate, including same-current identity or current-source relabelling, refused before epoch comparison; both HWMs/progress unchanged; adopted replay never reinstalls candidate |
 | | at-rest state/pending, r9 | raw stored bytes contain no state/pending plaintext or distinctive spans; logical reopen succeeds with host codec; wrong-AAD open and cross-record ciphertext swaps reject |
 | | ambiguous saves | commit-then-reject for insert/state/open/Welcome/joinRef-clear/delete exposes exact writeID; registry resolves committed/uncommitted before another writer |
 | | negative read, late completion | unfinished insert/state/open/Welcome/delete shows previous/absent rows; barrier and next writer stay pending; late commit resolves/install once, rollback alone rejects unchanged; initially absent owner covered |
 | | adoption co-commit | reuse P2a case (`rpc-conformance/src/control-store.ts:321`), now against D3 stores/providers; state/control/anchor/marker all commit or roll back |
 | | Welcome reset atomic/reopen | failure in reset or anchor clear rolls back state; success preserves outcomes/Welcomes, settles open work unknown, clears applied/responses/cursor/anchor; restart joins once |
-| | identity/HWM | same identity/lineage preserves max HWM; different-authenticator same-number recovery resets and bumps lineage; no cross-identity tree merge |
+| | identity/HWM | ordinary same identity/lineage preserves both max HWMs; unspent different-authenticator same-number recovery resets both and bumps lineage; no cross-identity tree merge |
 | | atomic open and duplicate | second-write failure changes neither state nor pending; same-frame CAS retry leaves one row; extend existing key-unspent case (`rpc-conformance/src/pending-group-crypto.ts:137`) |
 | | pending reopen | numeric `(segment, position)` order, epoch retained, unknown/double completion succeeds; extend existing case (`rpc-conformance/src/pending-group-crypto.ts:177`) |
 | | owner handoffs | consume then clearJoinRef then seal/reserve works without stale CAS; stale ref conflicts; ambiguous clear/open/completion resolves before cache/payload publication; registry crypto needs no external pending callback |
-| | delete | stopped/drained owner; atomic tombstone/row cleanup/hook; epoch/lineage floor and spent digests survive; stale write fails; no late put recreates rows |
+| | delete | stopped/drained owner; atomic tombstone/row cleanup/hook; epoch/lineage floor and spent authenticators survive; stale write fails; no late put recreates rows |
 | | independent save versus lifecycle | absent/existing anchor and per-topic cursor save receives ambiguous rejection; dispose/drain/delete and Welcome replacement stay pending; late commit/rollback settles first; delete removes anchor/cursor rows, Welcome clears anchor and new-topic cursor stays null; reopen never installs an old anchor into new admission |
 | | unsettled delete | operations, rejoin, outcomes and Welcomes each refuse; reuse predicate/host tests (`rpc/test/control-store.test.ts:253`) |
 | P2a ControlStore, 2 / 3 | negative marker barrier | state-free apply rejects before backend completion; lastMutation stays pending despite raw previous marker; late commit resolves once, rollback alone returns previous marker; deletion cannot overtake |
@@ -1235,14 +1339,16 @@ After consume, assert receipt-only handling never installs state.
 | `testAppCursorStoreConformance`, 2 / 3 | durable per topic | reopen saved position; other topics remain null |
 | | ambiguous save | commit-then-reject resolves once; unfinished save remains pending through barrier/read failures; late rollback rejects unchanged |
 | `testAnchorStoreConformance`, 2 / 3 | ambiguous save/lifecycle | first insert and replacement hold save/drain/gate through pending COMMIT; late commit/rollback resolves before deletion/readmission; no stale slot/secret survives cleanup |
+| | at-rest anchor, r10 | inspect all physical copies after save and adoption landed co-write: no AnchorSlot.anchor.secret plaintext or distinctive spans; same-codec reopen round-trips full slot; wrong group/namespace/record AAD and swapped ciphertext reject |
 | pending/group crypto, 2 | opened epoch | extend record and narrowed unwrap types together; stored epoch equals authenticated unwrap epoch |
 | rpc handler tests, 2 | every D4 path | durable replay, retained drain, live log/ephemeral, anycast request and directed kinds expose original epoch; spoofed wire/header epoch cannot win |
 | registry real-MLS tests, 2 | lease/restart | reserve, reconstruct, seal at or above HWM; no generation repeats; failed reservations prevent sealing |
 | | cold access | fresh registry awaits async load/restore before returning access or publishing getters; concurrent calls share load; weak retention and missing/tombstoned records reject without admission |
 | | blocked restore | lapsed, removed, suspended and pending-proposal restores keep control/receive usable; deferred burn completes before an eligible same-identity seal |
 | | rotation | 500 admission trigger, rejected new acceptance, held accepted queue; non-admin rotation resumes; restarts/unpublished seals obey the bound |
+| | handshake reservation/rebuild, r10 | poison/refused frame advances hub head without MLS advancement; rotation publish head-mismatches, absence returns to intent; rebuilds have strictly increasing authenticated handshake generations, also across restart; failed/unfinished reservation exposes no build/publication; exact saved replay uses identical bytes |
 | | overtaking/derivation | raw MLS context tests (outside the registry 500 guard) retain an earlier key after generation 600; derive invite/remove/rotation and fresh/restored recovery retain 1000/1000 |
-| | same-identity adoption | intervening seal/open remains spent after replacement; extend P2a historical carry test (`mls/test/carry-receive-progress.test.ts:80`) |
+| | ordinary adoption progress | intervening seal/open remains spent after ordinary replacement; same-identity state save merges both chains; extend P2a historical carry test (`mls/test/carry-receive-progress.test.ts:80`); recovery/Welcome candidates still refuse spent identity |
 | | tombstone Welcome floor | reuse comparison (`mls-hub/test/admission.test.ts:10`); add delete/save/rejoin integration |
 | rpc delivery tests, 2 | retry bytes/restart | failed or null handoff retries byte-exact with same ID; reconstruction reseals/new ID; extend restart test (`rpc/test/peer-log-delivery.test.ts:554`) |
 | | acknowledgement/proof | extend overtaken-epoch restart (`rpc/test/peer-log-delivery.test.ts:1093`); acknowledgement never removes; proof freezes correct segment/sequenceID through failed removal |
@@ -1253,7 +1359,7 @@ After consume, assert receipt-only handling never installs state.
 | hub-client, 2 | retention/buffer | reconnect and retry preserve retention; injected epoch notifications wake held frames; disposal unsubscribes |
 | client/messaging, 4/5 | lifecycle/status | rotation scheduling, Welcome consume sweep, deletion fails accepted messages; published status/position co-commit with removal |
 | e2e, 2 then 6 | smoke/kill | real HTTP with injected DID in 2; every crash seam on child devices in 6 |
-| integration, 2 memory / 3 providers | spent Welcome across branches/deletion, r9 | real MLS/openWelcome/registry: install A3, seal, advance A4, confirm lower B2 recovery, replay A3 refused after reconstruction; separately delete/reopen and replay installed Welcome refused; exercise ordinary and last-resort sources, including ordinary replay before consume |
+| integration, 2 memory / 3 providers | spent epochs across branches/deletion, r10 | real MLS/openWelcome/registry: A3 → A4 → confirmed B2; exact and alternate A3 share authenticator and both refuse after reconstruction; spent epochs reached by own/received commit or recovery also refuse as Welcome/candidate/seed; delete/reopen retains guard; ordinary and last-resort, including replay before consume |
 
 ## Umbrella amendments
 
@@ -1271,14 +1377,16 @@ Applied in this revision, not deferred to another reconciliation step:
   here but remains an implementation prerequisite; automatic `/info` integration stays BLOCKED.
 - r8: P2a recovery-codec adaptation, asynchronous access, committed membership/numeric receive runtime,
   explicit shared factories, all-writer lifecycle barriers, terminal proof settlement and outcome-aware Hozon hooks.
-- r9: lifetime spent-Welcome digests, atomic installation/tombstone retention and explicit P2a D4 admission amendment.
-  Required host at-rest codec in state/control/outbox factories, deterministic memory codec and raw-byte/wrong-AAD conformance.
+- r10: lifetime spent epoch authenticators replace r9 Welcome digests; every epoch installation appends atomically, with tombstone retention and explicit P2a D4 amendment.
+  Complete Welcome union/options and structural mirrors; durable handshake reservations protect rotation/control rebuilds across restart.
+  Host at-rest codec includes anchor factories/namespaces/secrets. Doubles and real stores reject unauthorised lineage changes.
 
 ## Review log
 
 Entries r1–r3 are historical review findings, not current API instructions. Their intent/journal,
 `onJoined` before release, operation-envelope IDs and lost-work reconciliation solutions were
 superseded by P2a. Read current Decisions and binding P2a instead.
+The r9 digest rulings are historical too, superseded by r10's spent epoch identities.
 
 - **Codex r1 (historical).** Adoptable journal blob; proof distinct from acknowledgement; app restart
   resealing; lease burn budget; coordinated remove/clear, message identity and ambiguity ownership.
@@ -1321,7 +1429,7 @@ superseded by P2a. Read current Decisions and binding P2a instead.
     Already-proven removal outcomes remain frozen.
   - Confirmed, source-checked recovery may lower current epoch; admissionFloor remains monotonic for tombstones (r7 decision).
     Alternative: unconditional epoch monotonicity, an unchecked recovery flag, or weakening Welcome tombstone admission.
-    P2a recovery confirmation remains binding. The r9 spent-digest amendment below supersedes the live Welcome admission statement.
+    P2a recovery confirmation remains binding. The r10 spent-epoch amendment supersedes the live Welcome admission statement.
   - Owner-mediated clearJoinRef and registry-owned saveOpened/pending wiring resolve their own CAS/cache ambiguity (r7 decision).
     Alternative: host metadata saves behind the registry or an external pending writer without ownership/version context.
   - State/outbox adapters share the canonical root gate; deletion drains then acquires it once (r7 decision).
@@ -1378,3 +1486,28 @@ superseded by P2a. Read current Decisions and binding P2a instead.
      Phase 2 models encrypted rows on doubles; phase 3 implements/verifies every provider.
 
   No unresolved findings. No implementation or test pass is claimed by this documentation revision.
+
+- **Blind review r9**, 2026-10-09. Source-checked findings and decided rulings applied in draft r10:
+  1. **Blocker:** Welcome digests identify artifacts, not spent secrets. Retain every held epoch authenticator per group (r10 decision).
+     Genesis, Welcome, own/received commit and recovery append atomically with installed state; recovery and lifetime tombstones retain the set.
+     Welcome/candidate/seed admission refuses spent authenticators before epoch comparison, never merges; exact and alternate A3 representations both refuse.
+     Growth is one authenticator per held epoch, accepted in the same growth class as receipts. Version-2 record metadata and mirrors carry the set.
+     Evidence: `node_modules/ts-mls/dist/src/createCommit.js:143`, `node_modules/ts-mls/dist/src/groupInfo.js:12`, `node_modules/ts-mls/dist/src/clientState.js:603`.
+     Rejected alternative: artifact digest; repackaging escapes it. Remove welcomeDigest derivation/plumbing and amend P2a D4.
+  2. **High:** speculative private commits reuse source handshake generations on rebuild (r10 decision).
+     Builders expose the consumed generation; access durably reserves its exclusive handshake HWM before returning ciphertext/HostBuilt.
+     Every rebuild merges the reserved source HWM, including after restart. Poison-head mismatch conformance requires strictly increasing generations.
+     Evidence: `mls/src/group-commit.ts:333`, `node_modules/ts-mls/dist/src/createCommit.js:77`, `node_modules/ts-mls/dist/src/secretTree.js:237`, `rpc/src/control/operations.ts:194`.
+     Rejected alternative: public framing for member commits, which exposes commit contents to the relay.
+  3. **Medium:** anchor secrets join the host at-rest codec contract (r10 decision).
+     Both anchor factories require atRest; encrypted anchor namespace/AAD covers the full slot and adoption co-writes.
+     Raw-byte, wrong-AAD and ciphertext-swap cases cover AnchorSlot.anchor.secret on doubles and real stores.
+     Evidence: `rpc/src/anchor.ts:6`, `rpc/src/peer-epoch.ts:262`, `../kubun/packages/plugin-p2p/src/groups/anchor-store.ts:35`.
+  4. **Medium:** negative conformance rejects ordinary kind 'state' lineage increases despite matching CAS and unchanged identity (r10 decision).
+     All lineage decreases conflict too. Only authorised recovery/Welcome replacement increments; progress and coupled rows remain unchanged on refusal.
+     Run on doubles and real stores. Evidence: same-epoch progress merging covers both chains (`mls/src/secret-tree.ts:17`, `mls/src/secret-tree.ts:35`).
+  5. **Low:** publish complete openWelcome nested result and single-options judgeWelcomeAdmission signatures, with structural mirrors (r10 decision).
+     The authenticator rides joined.group.state.keySchedule; seed derives it from that authenticated handle. No digest field remains.
+     Evidence: `mls-hub/src/join.ts:26`, `mls/src/group-welcome.ts:45`, `mls-hub/src/admission.ts:2`.
+
+  No unresolved findings. Implementation and executable conformance remain phase 2/3 work; this revision claims no implementation or test pass.

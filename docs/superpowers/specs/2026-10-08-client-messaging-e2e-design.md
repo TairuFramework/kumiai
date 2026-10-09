@@ -44,9 +44,12 @@ message-only push wake. See [Deferred](#deferred).
 Identity/hub context retains the 2026-10-08 reviews. Spec P port/publication claims below were
 rechecked on 2026-10-09; each carries current source evidence.
 
-**Spec P r9 amendments (r9 decision), 2026-10-09.** Every installed ordinary/last-resort Welcome co-writes a durable spent digest with joined state.
-Admission refuses spent digests regardless of current epoch; recovery and deletion retain them, including tombstones. This explicitly amends P2a D4.
-State/control/coordinated-outbox factories require a host at-rest codec with group/record AAD. The host owns all at-rest keys and their lifecycle.
+**Spec P r10 amendments (r10 decision), 2026-10-09.** Every installed epoch co-writes its authenticator into the group's durable spent set.
+Genesis, ordinary/last-resort Welcome, own/received commit and recovery all contribute. Welcome/candidate/seed admission refuses spent authenticators before epoch comparison, never merges.
+Recovery and deletion retain the lifetime set, including tombstones. Growth is one authenticator per held epoch, like receipts. This explicitly amends P2a D4.
+Private rotation/control builds reserve consumed handshake generations durably; every rebuild merges the source handshake HWM, including after restart.
+Ordinary state writes retain lineage; only authorised recovery/Welcome replacement increments it. No path decreases it.
+State/control/coordinated-outbox/anchor factories require a host at-rest codec with group/record AAD. The host owns all at-rest keys and their lifecycle.
 Kumiai never generates or stores those keys. Phase 2 memory doubles inject a deterministic test codec; conformance inspects raw bytes and rejects wrong AAD.
 
 - `@kumiai/mls` has signed-ledger roles (`roster.ts`: `admin | member`, only admins grant,
@@ -131,12 +134,12 @@ tests/e2e  (new, private) DeviceDriver, hub fixture, scenarios
 
 | Package | Change |
 |---|---|
-| `mls` | Spec P phase 2: version-2 lossless pending-proposal sender codec, configurable retention propagated through every constructor/recovery, `commitKeyRotation`. Group-model changes from Spec I: bound creator in an unanchored group, Welcome admission for co-devices, role bootstrap/migration, revocation as ordered ledger evidence in unanchored groups, structured policy errors. |
+| `mls` | Spec P phase 2: version-2 lossless pending-proposal sender codec, configurable retention propagated through every constructor/recovery, non-mutating `commitKeyRotation` and private control builders exposing consumed handshake generations (r10 decision). Group-model changes from Spec I: bound creator in an unanchored group, Welcome admission for co-devices, role bootstrap/migration, revocation as ordered ledger evidence in unanchored groups, structured policy errors. |
 | `rpc` | Spec P phase 2: opened epoch on pending records and every inbound application handler context (with supporting broadcast metadata); app attempt IDs, client `{sequenceID}` result and proof-time `remove(seq, outcome?)`; strict `decodeAppEntry`. Landed P2a `ControlStore` owns control/cursor; no CommitJournal. |
 | `hub-client` | Phase 2 reconnecting HTTP hub, scoped/buffered views, ack backoff and discovery fetch. Preserve retention on reconnect/retry. Buffer injects inspectEpoch/currentEpoch/onEpochChanged; no MLS/registry import. Automatic `/info` integration remains BLOCKED (Risks). |
-| `mls-rpc` | Phase 2 registry over memory `GroupStateStore`: asynchronous load/validated access, staged CAS, identity/lineage, confirmed lower-epoch recovery with separate tombstone floor, lease and deferred burn. Registry owns joinRef clearing and durable pending saves/ambiguity; HandleAccess gains seal/receive/lineage and recovery mode. `MLSEncryptor` extraction uses committed membership snapshots and numeric receive counts (r8 decision). P2a recovery candidates encode complete version-2 sourceState; credential/token serialisation uses the lossless MLS codec (r8 decision). Hozon storage/projections remain adapters. |
-| `mls-hub` | Landed P2a openWelcome/consume/receipt are prerequisites. Phase 2 adds Welcome digest plumbing and spent-first admission (r9 decision). Joined state, spent digest and joinRef save before consume; genuine readmission atomically resets control/anchor (Spec P D3). |
-| `rpc-store` (new) | Phase 3 Hozon impls of `GroupStateStore`, `ControlStore`, `AnchorStore`, `AppCursorStore`, `AppOutbox` on sqlite, postgres and expo. MLS state, `AdoptionWrite` control changes and the anchor landed mark share one adoption transaction (Spec P2a). All writers share one root mutation gate and backend completion barrier, including independent anchor/cursor saves (r8 decision). Explicit factories and outcome-aware Hozon hook settlement are prerequisites (r8 decision). State/control/coordinated-outbox factories require host `atRest` (r9 decision). Passes `rpc-conformance`, extended per Spec P r9. |
+| `mls-rpc` | Phase 2 registry over memory `GroupStateStore`: asynchronous load/validated access, staged CAS, identity/lineage, confirmed lower-epoch recovery with separate tombstone floor, application lease/deferred burn and durable handshake reservations. Every installed epoch appends its authenticator; recovery/candidate/seed guard and lifetime tombstones preserve the spent set (r10 decision). Registry owns joinRef clearing and durable pending saves/ambiguity; HandleAccess gains seal/receive/buildControl/lineage and recovery mode. `MLSEncryptor` extraction uses committed membership snapshots and numeric receive counts (r8 decision). P2a recovery candidates encode complete version-2 sourceState; credential/token serialisation uses the lossless MLS codec (r8 decision). Hozon storage/projections remain adapters. |
+| `mls-hub` | Landed P2a openWelcome/consume/receipt are prerequisites. Phase 2 publishes the complete nested openWelcome union (authenticator in joined.group.state.keySchedule), single-options judgeWelcomeAdmission and structural mirrors (r10 decision). Spent-first admission guards joined state/authenticator/joinRef save before consume; genuine readmission atomically resets control/anchor (Spec P D3). No Welcome digest. |
+| `rpc-store` (new) | Phase 3 Hozon impls of `GroupStateStore`, `ControlStore`, `AnchorStore`, `AppCursorStore`, `AppOutbox` on sqlite, postgres and expo. MLS state, `AdoptionWrite` control changes and the anchor landed mark share one adoption transaction (Spec P2a). All writers share one root mutation gate and backend completion barrier, including independent anchor/cursor saves (r8 decision). Explicit factories and outcome-aware Hozon hook settlement are prerequisites (r8 decision). State/control/coordinated-outbox/anchor factories require host `atRest`; raw-byte/wrong-AAD cases cover anchor.secret (r10 decision). Passes `rpc-conformance`, extended per Spec P r10, including forbidden lineage changes. |
 | `client` (new) | Phase 4 Device: identity/group verbs, one peer per group, inventory/pending/control restore, source-scoped Welcome consume sweep, rotation scheduling and stop/drain deletion; key-package provisioning and wake. |
 | `hub-server` or a new `hub-authz` | The membership `authorize` policy and its state ingestion (Spec H decides placement). |
 | `messaging` (new) | Phase 5 protocols, Messenger, MessageStore memory/Hozon impls; consumes phase-2 opened epoch and proof outcomes. Hooks atomically record acceptance/publication/failure with outbox writes. |
@@ -201,7 +204,7 @@ Verdicts copied from [phase 1 lift audit](2026-10-08-lift-audit.md), checked 202
 const device = await createDevice({
   identity,            // device keypair
   db,                  // Hozon provider: rpc-store + kokuin stores + mls-hub stores
-  atRest,              // required host codec forwarded to state/control/outbox factories (r9 decision)
+  atRest,              // required host codec forwarded to state/control/outbox/anchor factories (r10 decision)
   hub: { url },        // reconnecting hub-client
   wake?: { token, platform },
   logger?,
@@ -228,10 +231,12 @@ Identity details are settled in Spec I; this section fixes the shape.
 - **Invite/join.** The admin fetches key packages and enqueues a P2a invite operation. Its durable
   Welcome obligation publishes the complete invitation to each device's public discovery topic.
   The invitee uses landed `openWelcome` (`packages/mls-hub/src/join.ts:26`, `packages/mls-hub/src/join.ts:31`).
-  The r9 contract adds an authenticated result's digest, spent-first admission, then atomic state/digest/source-scoped joinRef save before consume (r9 decision).
+  The r10 contract uses joined.group.state.keySchedule.epochAuthenticator for spent-first admission, then atomic state/authenticator/source-scoped joinRef save before consume (r10 decision).
+  judgeWelcomeAdmission takes one options object; Spec P publishes its signature, the full openWelcome union and structural mirrors.
   Repeated receipts return alreadyJoined (`packages/mls-hub/src/join.ts:50`). Genuine readmission stops/drains the old peer;
   Spec P D3 atomically installs joined state and resets control/anchor, retaining outcomes/Welcomes.
-  A3 replay after A4 → confirmed lower B2 recovery is refused; an unspent lower-branch Welcome remains eligible against current epoch.
+  Exact and alternate A3 bytes after A4 → confirmed lower B2 recovery are refused by the same authenticator (r10 decision).
+  An unspent lower-branch Welcome remains eligible against current epoch.
   Inviting a controller adds every
   device it currently grants (Spec I).
 - **Device link.** The controller issues the new device a leaf-binding capability and, if it may
@@ -286,11 +291,13 @@ Identity details are settled in Spec I; this section fixes the shape.
   Peers restore pending receives and replay P2a operations/rejoins/outcomes/Welcomes in P2a startup order.
   Tombstones never start peers; terminal removed groups only serve control outcomes/Welcomes.
 - **Rotation/deletion.** Client schedules one rotation per epoch identity outside the registry gate.
+  Private control builds expose and durably reserve their handshake generation before HostBuilt returns (r10 decision).
+  A poison-head mismatch rebuild merges reserved source handshake HWM and uses a higher generation, including after restart.
   New sends reject rotation-required; accepted entries wait. Deletion blocks owner creation,
   disposes/drains the peer, then takes their shared root mutation gate before the atomic tombstone/status
   transaction (Spec P D3). Drain includes frozen proof removals and every adapter's ambiguity resolver (r8 decision).
   Welcome replacement uses the same lifecycle order. Unsettled control refuses deletion; explicit abandon/ack remains the escape.
-  Tombstones retain spent Welcome digests; replay cannot resurrect a deleted group (r9 decision).
+  Tombstones retain all spent epoch authenticators; exact/alternate Welcome replay cannot resurrect a deleted group (r10 decision).
 
 ### Errors
 
@@ -486,9 +493,12 @@ existing testcontainers setup), a capturing `WakeSender`, a mock Expo push endpo
    - a payload claiming a different author has no effect (author is `iss`);
    - a frame replayed from another group or topic: rejected;
    - a replayed frame in the same group: deduplicated;
-   - install Welcome A3, advance A4, confirm lower recovery B2, reconstruct, replay A3: refused without reinstalling spent keys (r9 decision);
-   - install, delete and reconstruct a group, then replay its Welcome: refused, tombstone preserved (r9 decision);
+   - install Welcome A3, advance A4, confirm lower recovery B2, reconstruct: exact/alternate A3 (same authenticator, different bytes) both refused (r10 decision);
+   - install, delete and reconstruct a group, then replay its Welcome: refused, tombstone and spent epoch set preserved (r10 decision);
      both replay cases cover ordinary and last-resort sources, including replay before ordinary consume;
+   - poison/refused frame advances hub head without MLS advancement; rotation rebuilds use strictly increasing handshake generations, including after restart (r10 decision);
+   - matching-CAS ordinary state write increases lineage with unchanged identity, or any write decreases lineage: refused on doubles and real stores (r10 decision);
+   - raw storage exposes no anchor.secret; wrong-AAD anchor opens and ciphertext swaps reject (r10 decision);
    - a truncated controller log offered for a known controller: refused;
    - a false controller binding in a leaf: refused;
    - a revoked manager device attempting `addDevice` after the revocation evidence is enacted in the
@@ -507,6 +517,7 @@ existing testcontainers setup), a capturing `WakeSender`, a mock Expo push endpo
    - after hub acknowledgement, before publication bookkeeping;
    - after proof, before published-status/outbox removal;
    - lease reserved, before seal;
+   - handshake generation reserved, before control built persistence/publication (r10 decision);
    - joined state saved, before source consume;
    - Welcome readmission committed, before peer restart (state/control/anchor reset);
    - group deletion committed, before restart;
@@ -528,13 +539,14 @@ existing testcontainers setup), a capturing `WakeSender`, a mock Expo push endpo
 
 Each phase gets its own plan and branch. The e2e suite grows with each phase.
 
-0. **Spec P: transactional persistence (draft r9).** Phase-2 contracts, identity-aware state CAS,
+0. **Spec P: transactional persistence (draft r10).** Phase-2 contracts, identity-aware state CAS,
    atomic pending/adoption/Welcome reset, lossless codec prerequisite, lease/rotation, opened-epoch
    metadata, identity-bound app proof and coordinated outbox contracts. Memory doubles model unfinished COMMIT, completion barriers and retained hook queues.
    Recovery sourceState encoding, async access, tunnel runtime and shared factory signatures belong to phase 2 (r8 decision).
    Confirmed recovery may lower current epoch while preserving the tombstone floor. Landed P2a owns control.
-   Spent-Welcome admission amends P2a D4; lifetime digests survive lower recovery and deletion (r9 decision).
-   Host-injected at-rest codec, raw-byte checks and wrong-AAD rejection apply to state/control/outbox stores (r9 decision).
+   Spent-epoch admission amends P2a D4; every installed epoch appends its authenticator, retained across recovery/deletion (r10 decision).
+   Complete Welcome signatures/mirrors, durable handshake reservations and forbidden lineage-change cases are binding (r10 decision).
+   Host-injected at-rest codec, raw-byte checks and wrong-AAD rejection apply to state/control/outbox/anchor stores (r10 decision).
 1. **Lift audit (probe).** Verdicts copied above. G1 codec prerequisite is specified in P r6;
    automatic `/info` integration remains separately BLOCKED.
 2. **rpc/mls/mls-rpc/mls-hub/rpc-conformance/hub-client port and runtime additions on memory doubles.**
@@ -544,12 +556,13 @@ Each phase gets its own plan and branch. The e2e suite grows with each phase.
    implementations and affected doubles; repo-wide type tests pass. No client/messaging/Hozon adapters.
    e2e: allow-any real HTTP hub, injected server DID, in-process two-device group-peer smoke with
    real MLS, invite/join, send/epoch/proof, rotation/resume and memory-store runtime reconstruction.
-   Required deterministic test codec and raw-byte/wrong-AAD conformance; Welcome replay after lower recovery/deletion integration cases (r9 decision).
+   Required deterministic test codec, including anchor raw-byte/wrong-AAD checks; exact/alternate Welcome and spent-candidate refusal after recovery/deletion (r10 decision).
+   Poison-head mismatch rotation rebuild/restart uses strictly increasing handshake generations; doubles reject unauthorised lineage changes (r10 decision).
 3. **rpc-store.** Hozon state/control/anchor/pending/cursor/outbox implementations, coordinated hooks,
    tombstone deletion, root-provider discriminator and outcome-aware hook prerequisites (r8 decision). Provider conformance on sqlite,
    postgres and expo (node shim or explicit BLOCKED reason); state/control/anchor atomicity and
    commit ambiguity verified here. e2e devices on sqlite; restart restores groups.
-   State/control/coordinated-outbox factories require the host codec; provider encryption alone does not satisfy the contract (r9 decision).
+   State/control/coordinated-outbox/anchor factories require the host codec; provider encryption alone does not satisfy the contract (r10 decision).
 4. **Spec I and Spec H, then mls group changes, client and hub policy/server changes.**
    Gated on published kokuin stores. Client wires ownership, inventory/pending/control restore,
    Welcome consume sweep, rotation scheduling and deletion draining. e2e scenarios 2, 3, 4, 6 and
