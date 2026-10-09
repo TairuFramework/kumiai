@@ -1,5 +1,11 @@
 # @kumiai/mls
 
+## 0.10.4
+
+### Patch Changes
+
+- Restrict tree binding projection to lifecycle groups and skip unparseable leaf identities during reset re-admission projection.
+
 ## 0.10.3
 
 ### Patch Changes
