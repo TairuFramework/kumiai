@@ -121,7 +121,7 @@ tests/e2e  (new, private) DeviceDriver, hub fixture, scenarios
 | `rpc` | Expose the authenticated epoch to handlers; report a publication's log position and status to the publisher. |
 | `hub-client` | Reconnecting `LogHub`/`MailboxHub` over HTTP, peer- and sender-scoped views, ack backoff, hub server-DID discovery fetch. The buffered peer view takes injected epoch inspection and change notifications; `hub-client` never imports `mls` or the registry. |
 | `mls-rpc` | `GroupHandleRegistry` core (per-group mutex, epoch cache with change events, restore, displacement/lineage tracking, receive-tree merge) over the `GroupStateStore` port; `MLSEncryptor`; mls-state codec. Storage and projections are adapters. |
-| `rpc-store` (new) | Hozon impls of `GroupStateStore`, `CommitJournal`, `AnchorStore`, `AppCursorStore`, `AppOutbox` on sqlite, postgres and expo. Passes `rpc-conformance`, extended per Spec P. |
+| `rpc-store` (new) | Hozon impls of `GroupStateStore`, `ControlStore`, `AnchorStore`, `AppCursorStore`, `AppOutbox` on sqlite, postgres and expo. MLS state, `AdoptionWrite` control changes and the anchor landed mark share one adoption transaction (Spec P2a). Passes `rpc-conformance`, extended per Spec P. |
 | `client` (new) | `Device` orchestrator: identity layer, group verbs, one `GroupPeer` per group, restore, key-package provisioning via `mls-hub`, wake registration. |
 | `hub-server` or a new `hub-authz` | The membership `authorize` policy and its state ingestion (Spec H decides placement). |
 | `messaging` (new) | Two protocols and `Messenger`; `MessageStore` port with memory and Hozon impls. |

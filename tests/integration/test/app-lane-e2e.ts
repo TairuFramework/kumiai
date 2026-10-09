@@ -70,7 +70,7 @@ export type Protocols = { chat: typeof chat }
 // ---------------------------------------------------------------------------
 // Host-side durable stores. These are the HOST's storage, not doubles of any
 // component under test: the peer, the hub, the MLS handles and the crypto are
-// all real, and a host has to put its anchor, cursor and journal somewhere.
+// all real, and a host has to put its anchor, cursor and control records somewhere.
 // ---------------------------------------------------------------------------
 
 export function createMemoryAnchorStore(
@@ -110,10 +110,14 @@ export function createMemoryAppCursorStore(): AppCursorStore & {
 }
 
 export function encodeJournal(derived: GroupHandle): Uint8Array {
+  return encodeStoredState(encodeClientState(derived.state), derived.ledgerTokens)
+}
+
+function encodeStoredState(state: Uint8Array, ledger: Array<string>): Uint8Array {
   return new TextEncoder().encode(
     JSON.stringify({
-      state: Array.from(encodeClientState(derived.state)),
-      ledger: derived.ledgerTokens,
+      state: Array.from(state),
+      ledger,
     }),
   )
 }
@@ -126,14 +130,13 @@ export type StateStore = {
   database: MemoryHostDatabase
   control: ControlStore
   save: (handle: GroupHandle, write?: AdoptionWrite) => Promise<void>
-  saveOpened: (state: Uint8Array, ledger: Array<string>) => void
-  saved: () => { state: Uint8Array; ledger: Array<string> } | null
+  saveOpened: (state: Uint8Array, ledger: Array<string>) => Promise<void>
+  saved: () => Promise<{ state: Uint8Array; ledger: Array<string> } | null>
 }
 
 export function createMemoryStateStore(): StateStore {
   const database = createMemoryHostDatabase()
   const control = database.control('state')
-  let blob: { state: Uint8Array; ledger: Array<string> } | null = null
   return {
     database,
     control,
@@ -149,12 +152,17 @@ export function createMemoryStateStore(): StateStore {
         )
           throw error
       }
-      blob = { state: encodeClientState(handle.state), ledger: [...handle.ledgerTokens] }
     },
-    saveOpened: (state, ledger) => {
-      blob = { state: state.slice(), ledger: [...ledger] }
+    saveOpened: (state, ledger) => database.saveState('state', encodeStoredState(state, ledger)),
+    saved: async () => {
+      const blob = await database.loadState('state')
+      if (blob == null) return null
+      const saved = JSON.parse(new TextDecoder().decode(blob)) as {
+        state: Array<number>
+        ledger: Array<string>
+      }
+      return { state: new Uint8Array(saved.state), ledger: saved.ledger }
     },
-    saved: () => blob,
   }
 }
 
@@ -243,7 +251,7 @@ export function makeMember(params: MakeMemberParams): Member {
       ? undefined
       : {
           persistOpened: async (state: Uint8Array, record: PendingAppFrame) => {
-            stateStore.saveOpened(state, handle.ledgerTokens)
+            await stateStore.saveOpened(state, handle.ledgerTokens)
             pendingStore.set(record.frame.id, record)
           },
           list: async () => [...pendingStore.values()],
@@ -388,7 +396,7 @@ export async function restoreMemberHandle(
   member: Member,
   entrySlot: LedgerEntrySlot,
 ): Promise<GroupHandle> {
-  const saved = member.stateStore.saved()
+  const saved = await member.stateStore.saved()
   if (saved == null) throw new Error('nothing persisted')
   const state = decodeClientState(saved.state) as ClientState
   return await restoreGroup({

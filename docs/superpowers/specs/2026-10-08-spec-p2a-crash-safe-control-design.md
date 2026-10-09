@@ -393,9 +393,13 @@ export type Outcome = { id: string; opID: string | null; at: number } & (
     one root transaction installs the joined state and resets control: open operations and a
     rejoin record become `unknown` outcomes and are deleted; `applied`, `responses` and the cursor
     are cleared; the anchor slot is cleared. Outcomes and Welcome obligations are kept. The peer
-    then starts as for a fresh join, capturing the anchor at the joined epoch. Today a stale cursor
-    is dropped on an epoch mismatch (`rpc/src/peer.ts:1740-1747`); P2a has no such rule, so the
-    reset is explicit;
+    then starts as for a fresh join, capturing the anchor at the joined epoch. P2a startup also
+    clears only the cursor when its epoch differs from `GroupMLS.readEpoch()`, then walks from the
+    oldest retained frame. A position paired with a different MLS epoch cannot seed a covered
+    range for the current handle. Ordinary co-committed adoptions prevent this epoch mismatch;
+    the fallback is defensive for state replaced outside that contract. This fallback does not
+    reset operations, rejoin or the anchor, nor settle old-branch work: re-admission still requires
+    the explicit atomic reset above;
   - tombstone: accepted only above the tombstone's epoch floor (Spec P).
 
   This moves from Spec P's deleted D5.

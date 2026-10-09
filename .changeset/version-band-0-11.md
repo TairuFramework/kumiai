@@ -23,3 +23,7 @@ on its own does not move anyone else.
 This band introduces durable operation queues and outcomes, co-committed adoption writes,
 Welcome obligations and epoch-based re-admission, fork-aware replay, and durable rejoin records
 with explicit recovery keys. All fourteen publishable packages move together.
+
+Recovery restores the durable rejoin record and its candidate and request key. Confirmed adoption
+co-commits the required `AdoptionWrite` with MLS state; binding, lapse and floor refusals retry
+renewal within the same recovery attempt and original deadline.
