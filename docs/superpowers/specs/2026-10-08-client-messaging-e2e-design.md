@@ -41,7 +41,8 @@ message-only push wake. See [Deferred](#deferred).
 
 ## Context
 
-Checked against source on 2026-10-08 by two Codex reviews (file:line evidence in their records).
+Identity/hub context retains the 2026-10-08 reviews. Spec P port/publication claims below were
+rechecked on 2026-10-09; each carries current source evidence.
 
 - `@kumiai/mls` has signed-ledger roles (`roster.ts`: `admin | member`, only admins grant,
   zero-admin entries dropped). Roles persist after the subject's removal. Authority resolves through
@@ -57,26 +58,34 @@ Checked against source on 2026-10-08 by two Codex reviews (file:line evidence in
   requires a role entry naming the joining device (`group-welcome.ts`), which `addDevice` does not
   supply. **So a multi-user group of controller-bound devices needs mls changes** (Spec I).
 - `@kumiai/rpc` `createGroupPeer` takes ports `GroupCrypto`, `GroupMLS` and stores `AnchorStore`,
-  `AppOutbox`, `AppCursorStore`, `CommitJournal`. Retention is `log` or `ephemeral`; only events may
-  be `log`; there is no per-publication TTL. One protocol derives one topic; differently named
-  protocols derive different topics.
+  `AppOutbox`, `AppCursorStore`, `ControlStore` (`packages/rpc/src/peer-types.ts:78`).
+  P2a adoption carries state/control/anchor changes via `AdoptionWrite`
+  (`packages/rpc/src/control/types.ts:39`). Only events may be log-retained
+  (`packages/rpc/src/protocol.ts:21`); app topics derive from protocol name
+  (`packages/rpc/src/peer-epoch.ts:262`).
 - For log procedures with an outbox configured, rpc dispatch resolves once the outbox durably
   accepts the plaintext, before hub publication. Outbox entries are re-sealed after epoch changes.
   Publication acknowledgement tracking is in memory, and the app lane skips the publisher's own
-  echo. The sender learns neither its log position nor publication success today.
+  echo (`packages/rpc/src/app-outbox.ts:113`, `packages/rpc/src/log-delivery.ts:43`,
+  `packages/rpc/src/app-lane.ts:789`). Delivery currently discards the publish result and removes
+  without an outcome (`packages/rpc/src/log-delivery.ts:179`, `packages/rpc/src/app-outbox.ts:30`).
 - Handlers see the MLS-authenticated sender at `ctx.message.payload.iss`. The opened epoch is not
-  exposed to handlers consistently.
-- Ephemeral (mailbox) publications queue for existing subscribers other than the publisher, whether
-  or not they are online, and expire after the hub's mailbox TTL.
-- App-lane epoch retries and external-rejoin resends republish the same plaintext; publication
-  evidence is in memory. The hub deduplicates publications by a supplied `publishID`, but app
-  publishes omit it today.
+  exposed consistently (`packages/rpc/src/handlers.ts:19`, `packages/rpc/src/handlers.ts:83`).
+- Ephemeral (mailbox) publications queue for existing subscribers other than the publisher
+  (`packages/hub-store/src/store.ts:236`), including offline subscribers. Frames are age-bounded by
+  requested/default retention (`packages/hub-store/src/store.ts:522`), and the final ack frees them
+  (`packages/hub-server/src/memoryStore.ts:190`).
+- App-lane retries reseal plaintext; publication evidence stays in memory
+  (`packages/rpc/src/log-delivery.ts:43`, `packages/rpc/src/log-delivery.ts:147`). App publishes omit
+  IDs (`packages/rpc/src/peer.ts:656`); P2a control/rejoin replay uses persisted exact payloads and IDs
+  (`packages/rpc/src/control/types.ts:75`, `packages/rpc/src/control/types.ts:103`).
 - `verifyManagementCapability` takes no deny set and has no revocation hook; `bindingOfDID` reads
   the tree and returns an externally revoked device while its leaf remains. Survivor checks use
   only revocations folded from the group ledger. A synchronous `commitPolicy` can veto with
   preloaded state.
-- Pending decrypted records (`frame`, plaintext, sender) carry no opened epoch.
-- Hozon combines stores in one transaction only when they come from the same transaction provider.
+- Pending records carry frame/plaintext/sender but no opened epoch (`packages/rpc/src/crypto.ts:190`).
+- Hozon combines stores in one transaction only when they come from the same transaction provider
+  (`../hozon/packages/db/src/db.ts:208`, `../hozon/packages/db/src/db.ts:218`).
 - Welcome and key-package traffic uses the public, secretless `discoveryTopic(memberDID)`.
 - `hub-server` `createHub` `authorize` defaults to allow-any-authenticated. The hook sees the
   authenticated DID and topic, never bodies; coarse `receive` gets only the DID, `receive/deliver`
@@ -117,14 +126,15 @@ tests/e2e  (new, private) DeviceDriver, hub fixture, scenarios
 
 | Package | Change |
 |---|---|
-| `mls` | Group-model changes from Spec I: bound creator in an unanchored group, Welcome admission for co-devices, role bootstrap/migration, revocation as ordered ledger evidence in unanchored groups, structured policy errors. |
-| `rpc` | Expose the authenticated epoch to handlers; report a publication's log position and status to the publisher. |
-| `hub-client` | Reconnecting `LogHub`/`MailboxHub` over HTTP, peer- and sender-scoped views, ack backoff, hub server-DID discovery fetch. The buffered peer view takes injected epoch inspection and change notifications; `hub-client` never imports `mls` or the registry. |
-| `mls-rpc` | `GroupHandleRegistry` core (per-group mutex, epoch cache with change events, restore, displacement/lineage tracking, receive-tree merge) over the `GroupStateStore` port; `MLSEncryptor`; mls-state codec. Storage and projections are adapters. |
-| `rpc-store` (new) | Hozon impls of `GroupStateStore`, `ControlStore`, `AnchorStore`, `AppCursorStore`, `AppOutbox` on sqlite, postgres and expo. MLS state, `AdoptionWrite` control changes and the anchor landed mark share one adoption transaction (Spec P2a). Passes `rpc-conformance`, extended per Spec P. |
-| `client` (new) | `Device` orchestrator: identity layer, group verbs, one `GroupPeer` per group, restore, key-package provisioning via `mls-hub`, wake registration. |
+| `mls` | Spec P phase 2: version-2 lossless pending-proposal sender codec, configurable retention propagated through every constructor/recovery, `commitKeyRotation`. Group-model changes from Spec I: bound creator in an unanchored group, Welcome admission for co-devices, role bootstrap/migration, revocation as ordered ledger evidence in unanchored groups, structured policy errors. |
+| `rpc` | Spec P phase 2: opened epoch on pending records and every inbound application handler context (with supporting broadcast metadata); app attempt IDs, client `{sequenceID}` result and proof-time `remove(seq, outcome?)`; strict `decodeAppEntry`. Landed P2a `ControlStore` owns control/cursor; no CommitJournal. |
+| `hub-client` | Phase 2 reconnecting HTTP hub, scoped/buffered views, ack backoff and discovery fetch. Preserve retention on reconnect/retry. Buffer injects inspectEpoch/currentEpoch/onEpochChanged; no MLS/registry import. Automatic `/info` integration remains BLOCKED (Risks). |
+| `mls-rpc` | Phase 2 registry over memory `GroupStateStore`: staged CAS, identity/lineage, lease, deferred burn, receive batching, admission/epoch notifications; existing HandleAccess gains seal/receive/lineage and recovery replacement mode. `MLSEncryptor` extraction; credential/token serialisation uses the lossless MLS codec. Hozon storage/projections remain adapters. |
+| `mls-hub` | Landed P2a openWelcome/consume/receipt and Welcome epoch admission are prerequisites. Joined state plus joinRef saves before consume; genuine readmission atomically resets control/anchor (Spec P D3). |
+| `rpc-store` (new) | Phase 3 Hozon impls of `GroupStateStore`, `ControlStore`, `AnchorStore`, `AppCursorStore`, `AppOutbox` on sqlite, postgres and expo. MLS state, `AdoptionWrite` control changes and the anchor landed mark share one adoption transaction (Spec P2a). Coordinated outbox hooks and group deletion share transactions with host rows. Passes `rpc-conformance`, extended per Spec P r6. |
+| `client` (new) | Phase 4 Device: identity/group verbs, one peer per group, inventory/pending/control restore, source-scoped Welcome consume sweep, rotation scheduling and stop/drain deletion; key-package provisioning and wake. |
 | `hub-server` or a new `hub-authz` | The membership `authorize` policy and its state ingestion (Spec H decides placement). |
-| `messaging` (new) | Two protocols and `Messenger`; `MessageStore` port with memory and Hozon impls. |
+| `messaging` (new) | Phase 5 protocols, Messenger, MessageStore memory/Hozon impls; consumes phase-2 opened epoch and proof outcomes. Hooks atomically record acceptance/publication/failure with outbox writes. |
 | `tests/e2e` (new, private) | Driver protocol and implementations, hub fixture, scenarios. |
 
 New public packages join the shared version band. New transport, event, HTTP and logging
@@ -133,16 +143,32 @@ ingest), its `processCommit` override and all of `sync/`, `context/`, `peer/` st
 
 ### Lift classification
 
-All paths under `kubun/packages/plugin-p2p/src/`.
+Verdicts copied from [phase 1 lift audit](2026-10-08-lift-audit.md), checked 2026-10-09:
+5 MOVE, 6 EXTRACT, 8 REIMPLEMENT, 1 BLOCKED. Candidate paths are under
+`../kubun/packages/plugin-p2p/src/`; source evidence uses that same prefix.
 
-| Class | Files | Treatment |
+| File | Verdict | Treatment / source checked today |
 |---|---|---|
-| Generic as is | `groups/mls-codec.ts`, `util/mutex.ts`, `hub/http-client.ts`, `hub/peer-scoped-hub-view.ts`, `hub/sender-scoped-hub-view.ts` | Move. |
-| Generic, Kubun logger types | `hub/hub-like.ts`, `hub/ack-backoff.ts` | Move; take a `@sozai/log` logger. |
-| Generic core, local deps | `groups/mls-encryptor.ts`, `groups/admin-roster.ts` | Extract the core; inject the deps. |
-| Schema/provider coupled | `groups/group-handle-registry.ts`, `mls-state.ts`, `group-crypto.ts`, `group-handle-access.ts`, `commit-journal.ts`, `anchor-store.ts`, `app-cursor-store.ts` | Re-implement behind kumiai ports (Spec P); Kubun keeps thin adapters over `store-p2p` rows. |
-| Mixed | `hub/buffered-peer-hub-view.ts` (imports MLS parsing and the registry), `hub/server-did.ts` (resolver persistence and events are Kubun-specific) | Lift with injected epoch inspection; lift only the discovery fetch. |
-| Domain-coupled | `groups/manager.ts`, `groups/group-peer-manager.ts` | Not lifted as files. Individual workflows (create, invite, join, remove, per-group peer lifecycle) are re-expressed in `client`. |
+| `groups/mls-codec.ts` | EXTRACT | Reuse existing MLS/crypto; preserve AAD/sender assertions, no duplicate codec (`../kubun/packages/plugin-p2p/src/groups/mls-codec.ts:14`). |
+| `util/mutex.ts` | EXTRACT | Consolidate acquisition/deadline additions into existing MLS mutex (`../kubun/packages/plugin-p2p/src/util/mutex.ts:43`, `packages/mls/src/mutex.ts:15`). |
+| `hub/http-client.ts` | MOVE | Generic HTTP factory; declare Enkaku dependencies (`../kubun/packages/plugin-p2p/src/hub/http-client.ts:33`). |
+| `hub/peer-scoped-hub-view.ts` | MOVE | Mailbox filtering, retention and lifecycle (`../kubun/packages/plugin-p2p/src/hub/peer-scoped-hub-view.ts:51`). |
+| `hub/sender-scoped-hub-view.ts` | MOVE | Include companion DeviceHub receive/filter type (`../kubun/packages/plugin-p2p/src/hub/sender-scoped-hub-view.ts:44`). |
+| `hub/hub-like.ts` | MOVE | Reconnecting core; substitute logger, preserve retention replay (`../kubun/packages/plugin-p2p/src/hub/hub-like.ts:183`, `../kubun/packages/plugin-p2p/src/hub/hub-like.ts:529`). |
+| `hub/ack-backoff.ts` | MOVE | Generic utilities; take @sozai/log logger (`../kubun/packages/plugin-p2p/src/hub/ack-backoff.ts:11`). |
+| `groups/mls-encryptor.ts` | EXTRACT | Inject registry runtime access/notifications; use Spec P lease constants (`../kubun/packages/plugin-p2p/src/groups/mls-encryptor.ts:72`). |
+| `groups/admin-roster.ts` | EXTRACT | Positioned convenience over existing foldRoster (`../kubun/packages/plugin-p2p/src/groups/admin-roster.ts:2`, `../kubun/packages/plugin-p2p/src/groups/admin-roster.ts:56`). |
+| `groups/group-handle-registry.ts` | REIMPLEMENT | Generic registry over D3; Kubun projections/controller transactions stay (`../kubun/packages/plugin-p2p/src/groups/group-handle-registry.ts:1731`, `../kubun/packages/plugin-p2p/src/groups/group-handle-registry.ts:2091`). |
+| `groups/mls-state.ts` | BLOCKED | G1 sender-zero preservation; Spec P r6 defines the codec prerequisite, cleared only when implemented/tested. Row mappings stay Kubun (`../kubun/packages/plugin-p2p/src/groups/mls-state.ts:39`). |
+| `groups/group-crypto.ts` | REIMPLEMENT | Integrate registry into existing mls-rpc crypto; ownAgents guard stays host-side (`../kubun/packages/plugin-p2p/src/groups/group-crypto.ts:173`). |
+| `groups/group-handle-access.ts` | REIMPLEMENT | Current HandleAccess including adoption/prepare; source mutate refuses (`../kubun/packages/plugin-p2p/src/groups/group-handle-access.ts:30`). |
+| `groups/commit-journal.ts` | REIMPLEMENT | Superseded. Implement ControlStore in phase 3, never lift the legacy slot (`../kubun/packages/plugin-p2p/src/groups/commit-journal.ts:16`, `packages/rpc/src/control/types.ts:45`). |
+| `groups/anchor-store.ts` | REIMPLEMENT | Keep landed mark and state/control/anchor co-commit (`../kubun/packages/plugin-p2p/src/groups/anchor-store.ts:19`). |
+| `groups/app-cursor-store.ts` | REIMPLEMENT | Group-owned topic cursors; D3 deletes rows atomically (`../kubun/packages/plugin-p2p/src/groups/app-cursor-store.ts:19`). |
+| `hub/buffered-peer-hub-view.ts` | EXTRACT | Inject inspectEpoch/currentEpoch/onEpochChanged; unsubscribe on dispose (`../kubun/packages/plugin-p2p/src/hub/buffered-peer-hub-view.ts:45`, `../kubun/packages/plugin-p2p/src/hub/buffered-peer-hub-view.ts:233`). |
+| `hub/server-did.ts` | EXTRACT | Fetch only; persisted cache/change events stay Kubun. `/info` integration separately BLOCKED (`../kubun/packages/plugin-p2p/src/hub/server-did.ts:52`). |
+| `groups/manager.ts` | REIMPLEMENT | Keep domain file; re-express generic group workflows in client (`../kubun/packages/plugin-p2p/src/groups/manager.ts:455`). |
+| `groups/group-peer-manager.ts` | REIMPLEMENT | Keep domain file; re-express ownership/drain/control workflows in client (`../kubun/packages/plugin-p2p/src/groups/group-peer-manager.ts:1470`). |
 
 ## Group model
 
@@ -193,11 +219,14 @@ await device.dispose()
 
 Identity details are settled in Spec I; this section fixes the shape.
 
-- **Invite.** A group admin fetches the invitee's key packages from the hub (`mls-hub` pool),
-  commits, and publishes each welcome to the invitee device's public discovery topic
-  (`discoveryTopic(deviceDID)`, the existing pre-group path). Each invitee device joins via
-  `processWelcomeFromSources`, idempotently. Inviting a controller adds every device it currently
-  grants.
+- **Invite/join.** The admin fetches key packages and enqueues a P2a invite operation. Its durable
+  Welcome obligation publishes the complete invitation to each device's public discovery topic.
+  The invitee uses landed `openWelcome`, saves state plus source-scoped joinRef, then calls consume
+  (`packages/mls-hub/src/join.ts:26`, `packages/mls-hub/src/join.ts:31`). Repeated receipts return
+  alreadyJoined (`packages/mls-hub/src/join.ts:50`). Genuine readmission stops/drains the old peer;
+  Spec P D3 atomically installs joined state and resets control/anchor, retaining outcomes/Welcomes.
+  Inviting a controller adds every
+  device it currently grants (Spec I).
 - **Device link.** The controller issues the new device a leaf-binding capability and, if it may
   manage co-devices, a leaf-key-pinned `manage` capability on `kumiai/devices`. The new device
   receives them out of band (direct handoff in tests, a QR code on a phone) and calls
@@ -244,9 +273,14 @@ Identity details are settled in Spec I; this section fixes the shape.
   truncation, and store controller logs (`store-controller`) and grants/revocations
   (`store-delegation`). Embedded leaf proofs: built at link time, carried in the leaf, verified by
   the mls embedded resolver without external fetches.
-- **Restore.** On start, `GroupHandleRegistry` restores every group from `rpc-store`, completes
-  pending receives, recovers the commit journal (`lost/reenact`), and each peer resumes from its
-  cursor.
+- **Restore.** Inventory includes credential and ordered signed ledger. The host restores live
+  groups, sweeps joinRef through its owning source's consume, then CAS-clears it. Peers restore
+  pending receives and replay P2a operations/rejoins/outcomes/Welcomes in P2a startup order.
+  Tombstones never start peers; terminal removed groups only serve control outcomes/Welcomes.
+- **Rotation/deletion.** Client schedules one rotation per epoch identity outside the registry gate.
+  New sends reject rotation-required; accepted entries wait. Deletion blocks owner creation,
+  disposes/drains the peer, then takes registry/outbox gates before the atomic tombstone/status
+  transaction (Spec P D3). Unsettled control refuses deletion; explicit abandon/ack remains the escape.
 
 ### Errors
 
@@ -346,22 +380,20 @@ messenger.events                                        // message | message:sta
   delivery can precede an older retained pull, and epoch retries or rejoin resends can publish the
   same plaintext twice, so devices may disagree on the relative order of such a message; accepted
   (chat apps order per device). Pending local messages sort last until their own position is known.
-- **Attempt identity.** Each publication attempt carries a durable `publishID`; the hub already
-  deduplicates by `(topicID, publishID)`, so no hub change is needed. That dedup record expires
-  after 365 days in `hub-store`; an attempt still ambiguous past that horizon is abandoned and the
-  message is re-sent under a new attempt ID (receivers dedup it by message identity). Spec P persists each attempt's ID, topic,
-  ciphertext and acknowledgement, and replays the **same** attempt after an ambiguous crash.
-  Re-sealing after an epoch change or a deliberate rejoin resend creates a **new** attempt ID under
-  the same message identity.
-- **Publish status.** `message:status` goes `pending → accepted → published (position known)`.
-  rpc reserves the outbox sequence inside acceptance, then calls `AppOutbox.put`. A coordinated
-  `put(entry)` adapter writes the outbox entry, the message row and their correlation using stores
-  obtained from the **same transaction**, and resolves only after the outer transaction commits;
-  sharing a database with ordinary store instances is not enough, and a nested transactional
-  callback resolves before the outer commit. The reservation is held until then. No `AppOutbox`
-  signature change is needed. The memory doubles share one in-memory transaction. Position/status
-  is persisted after the hub acknowledges; an acknowledgement lost to a crash is recovered by
-  replaying the same attempt.
+- **Attempt identity.** Each app seal gets a fresh publishID and anchor segment. Persist only
+  attempt metadata, never app ciphertext/acknowledgement proof. In-process handoff retries retain
+  exact bytes/ID in memory. Restart or identity/segment invalidation reseals unproven entries with
+  new IDs; receivers dedup message identity. There is no app 365-day ambiguity rule. P2a control and
+  rejoin payloads retain exact durable-byte replay (`packages/rpc/src/control/types.ts:75`,
+  `packages/rpc/src/control/types.ts:103`).
+- **Publish status.** `pending → accepted → published (position known)`. Coordinated put commits
+  outbox/message rows together before acceptance resolves. Publication returns client `{sequenceID}`;
+  store-only deduped is not part of that HTTP result (`packages/hub-protocol/src/protocol.ts:49`).
+  Acknowledgement is not proof. rpc freezes the certified publication's segment/sequenceID and calls
+  `remove(seq, {segment, position})`, the new optional outcome parameter. Published status/position
+  commits with removal; failed removal retries the same outcome. Clear/deletion fails unpublished
+  messages in its transaction. Hooks correlate by message identity decoded from entry.data, not seq.
+  Phase 2 shares one memory transaction and opaque host rows; real MessageStore wiring lands in 5.
 - **Ingestion.** At-least-once handler execution; `MessageStore.put` is idempotent on
   `(groupID, author, id)` and durable before the handler resolves, so rows are never lost or
   duplicated. A duplicate resolves successfully so pending completion and the cursor advance.
@@ -410,8 +442,8 @@ interface DeviceDriver {
 - **Crash points** follow arm → trigger → boundary reached → SIGKILL. The test arms a named point,
   triggers the action, the process blocks at the boundary and reports it, and the driver kills it.
   Boundaries inside `rpc` and `mls-rpc` (pending completion, cursor advance, acknowledgement
-  bookkeeping, journal put) need injectable seams: optional test-only hooks on the ports or a
-  wrapping store that pauses before or after a named write. Spec P lists each seam.
+  bookkeeping, control apply) need wrapping stores/hub clients that pause before or after atomic calls.
+  Spec P and P2a list the seams; no production pause hooks.
 - **Simulator (future)**: the Expo app in `tests/e2e-expo` embeds the same agent over HTTP. Scenarios
   run unchanged.
 
@@ -455,8 +487,13 @@ existing testcontainers setup), a capturing `WakeSender`, a mock Expo push endpo
    - after message persist, before pending-frame completion;
    - after pending completion, before cursor advance;
    - after outbox accept, before publish;
-   - after hub acknowledgement, before status persist and outbox removal;
-   - mid-commit, after journal put.
+   - after hub acknowledgement, before publication bookkeeping;
+   - after proof, before published-status/outbox removal;
+   - lease reserved, before seal;
+   - joined state saved, before source consume;
+   - Welcome readmission committed, before peer restart (state/control/anchor reset);
+   - group deletion committed, before restart;
+   - P2a intent/built/accepted and state/control/anchor co-commit seams, plus rejoin and Welcome delivery.
    Plus hub restart (durable delivery), device restart (groups restored), and a message published
    twice (epoch retry) observed by two receivers, including across topic rotation: each keeps one
    row.
@@ -474,31 +511,31 @@ existing testcontainers setup), a capturing `WakeSender`, a mock Expo push endpo
 
 Each phase gets its own plan and branch. The e2e suite grows with each phase.
 
-0. **Spec P: transactional persistence.** The `GroupStateStore` contract: versioned/CAS writes,
-   sender-generation reservation, atomic state plus pending decrypted frame, pending list/complete,
-   transaction visibility, recovery from an ambiguous write, inventory and deletion. The persisted
-   inventory includes credentials and ordered signed ledger tokens. Idempotent Welcome and commit
-   adoption; journal `lost/reenact` recovery. Pending decrypted records persist the authenticated
-   opened epoch. Outgoing side: durable attempt identity for app publishes, recovery of an
-   ambiguous publication (acknowledged by the hub but not recorded), the coordinated
-   `MessageStore`↔outbox acceptance adapter (shared transaction provider, correlation, rollback,
-   after-commit visibility) and durable publication status. The list of crash-point seams. The
-   conformance cases added to `rpc-conformance`.
-1. **Lift audit (probe).** Confirm the classification table file by file and fix port signatures
-   against Spec P. BLOCKED is a valid outcome for any candidate.
-2. **`hub-client` and `mls-rpc` additions,** plus the `rpc` port changes Spec P requires (opened
-   epoch on pending records, attempt identity, crash-point seams), on memory doubles that pass the
-   conformance suites.
-   e2e: hub fixture (allow-any), in-process driver, a two-device group-peer smoke test over the real
-   HTTP hub.
-3. **`rpc-store`.** Passes `rpc-conformance` on sqlite and postgres, real impls and doubles. e2e:
-   devices on sqlite; restart restores groups.
-4. **Spec I and Spec H, then `mls` changes, `client`, the hub policy and the `hub-server` changes Spec H lists.** Implementation is gated
-   on the kokuin stores being published. e2e: scenarios 2, 3, 4, 6, and the identity and hub cases
-   of 7.
-5. **`messaging`,** including handler exposure of the opened epoch and the publish-status events. e2e: scenarios 1, 5, and
-   the messaging cases of 7. The Expo bundle check joins CI.
-6. **Child-process driver and scenario 8.**
+0. **Spec P: transactional persistence (draft r6).** Phase-2 contracts, identity-aware state CAS,
+   atomic pending/adoption/Welcome reset, lossless codec prerequisite, lease/rotation, opened-epoch
+   metadata, app attempts/proof outcomes and coordinated outbox contracts. Landed P2a owns control.
+1. **Lift audit (probe).** Verdicts copied above. G1 codec prerequisite is specified in P r6;
+   automatic `/info` integration remains separately BLOCKED.
+2. **rpc/mls/mls-rpc/rpc-conformance/hub-client port and runtime additions on memory doubles.**
+   Follow Spec P's implementation order: codec, retention/rotation, registry/access, D4 metadata,
+   D6 attempts/outcomes, D7 decoder/shared transaction fixtures, hub-client lifts. D4 includes only
+   necessary optional metadata forwarding through broadcast. Both contract suites cover real
+   implementations and affected doubles; repo-wide type tests pass. No client/messaging/Hozon adapters.
+   e2e: allow-any real HTTP hub, injected server DID, in-process two-device group-peer smoke with
+   real MLS, invite/join, send/epoch/proof, rotation/resume and memory-store runtime reconstruction.
+3. **rpc-store.** Hozon state/control/anchor/pending/cursor/outbox implementations, coordinated hooks,
+   tombstone deletion and root-provider discriminator prerequisite. Provider conformance on sqlite,
+   postgres and expo (node shim or explicit BLOCKED reason); state/control/anchor atomicity and
+   commit ambiguity verified here. e2e devices on sqlite; restart restores groups.
+4. **Spec I and Spec H, then mls group changes, client and hub policy/server changes.**
+   Gated on published kokuin stores. Client wires ownership, inventory/pending/control restore,
+   Welcome consume sweep, rotation scheduling and deletion draining. e2e scenarios 2, 3, 4, 6 and
+   identity/hub cases of 7.
+5. **messaging.** Consume phase-2 opened epoch/proof outcomes; MessageStore, coordinated acceptance/
+   publication/failure hooks and status events. e2e scenarios 1, 5 and messaging cases of 7.
+   Expo bundle check joins CI. Handler epoch exposure is already phase 2, not a phase-5 port change.
+6. **Child-process driver and scenario 8.** SIGKILL/restart at Spec P/P2a seams. Earlier in-process
+   reconstruction/failure tests do not establish child-process crash coverage.
 
 Kubun adoption is out of scope: a separate spec in the Kubun repo once these packages publish.
 
@@ -515,6 +552,12 @@ Recorded in `docs/agents/plans/backlog/` when this spec is approved:
 
 ## Risks
 
+- **Automatic discovery integration BLOCKED.** Fetch requests origin `/info`
+  (`../kubun/packages/plugin-p2p/src/hub/server-did.ts:53`), but kumiai mounts default `/hub`
+  (`packages/hub-http/src/plugin.ts:41`, `packages/hub-http/src/plugin.ts:80`); server composition
+  installs no `/info` producer (`packages/hub-http/src/server.ts:39`). Before claiming URL-only
+  connection, provide an endpoint or injected discovery strategy. Phase-2 smoke injects server DID.
+  This does not block the fetch-file extraction.
 - **Lift drag.** The coupled registry is re-implemented, not moved; Kubun keeps adapters.
 - **Kokuin publication.** Phase 4 implementation blocks until both stores publish.
 - **mls group-model changes.** Touch policy and Welcome admission; reviewed blind, with both
