@@ -393,6 +393,51 @@ test('a responder floor refusal attempts renewal and invalidates the refused bin
   }
 })
 
+test('expired binding then floor refusal can call the host twice in one recovery attempt', async () => {
+  let offered: ControllerBinding | null = null
+  const host = vi.fn(async () => offered)
+  const s = await setup(host, { aliceExp: 500 })
+  vi.spyOn(Date, 'now').mockReturnValue(250_000)
+  offered = await fixture.timedBinding({ identity: s.bob, iat: 250, exp: 350 })
+  const hub = createWireHub()
+  const events: Array<RecoveryEvent> = []
+  const alice = recoveryPeer({ hub, identity: s.alice, access: s.aliceAccess, mls: s.responder })
+  const bob = recoveryPeer({
+    hub,
+    identity: s.bob,
+    access: s.access,
+    mls: s.mls,
+    onRecovery: (event) => {
+      events.push(event)
+    },
+  })
+  vi.spyOn(s.responder, 'processCommit').mockResolvedValue({
+    applied: false,
+    advanced: false,
+    epochBefore: 1,
+    epochAfter: 1,
+    refusal: 'floor',
+  })
+  try {
+    await Promise.all([alice.resync(), bob.resync()])
+    expect((await bob.recover()).advanced).toBe(false)
+    expect(host).toHaveBeenCalledTimes(2)
+    const started = events.filter((event) => event.phase === 'started')
+    const failed = events.filter((event) => event.phase === 'failed')
+    expect(started).toHaveLength(1)
+    expect(failed).toEqual([
+      expect.objectContaining({
+        attemptID: started[0]?.attemptID,
+        reason: 'renewal-required',
+      }),
+    ])
+  } finally {
+    await Promise.all([alice.dispose(), bob.dispose()])
+    await Promise.all([alice.drained(), bob.drained()])
+    await hub.dispose()
+  }
+})
+
 test('an authoritative invalid refusal holds automatic recovery until explicit recover', async () => {
   const s = await setup()
   const hub = createWireHub()

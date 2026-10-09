@@ -42,14 +42,24 @@ epoch hint after a successful save.
 For a *received* commit there is nothing to adopt: ts-mls's `processMessage` advances the handle in
 place. A host that treated every commit as adopt-later would double-apply received ones.
 
-Migrating from 0.9: build one adapter from the old `handle` / `adopt` / `persist` parameters and pass
-it to both factories in their place.
+Migrating from 0.9: build one adapter and pass it to both factories. Replace the old one-argument
+`persist(handle)` callback with one that forwards the adoption write:
 
 ```ts
-const access = simpleHandleAccess({ handle: () => handle, adopt, persist })
+const access = simpleHandleAccess({
+  handle: () => handle,
+  adopt,
+  persist: (current, write) => store.save(current, write),
+})
 const crypto = createGroupCrypto({ access, pending })
 const mls = createGroupMLS({ access, identity, entrySlot })
 ```
+
+`store.save(current, write)` must use one root transaction to save the encoded MLS state and
+ledger entries, apply `write.changes`, record `write.mutationID` as the control store's last
+mutation, and mark the matching pending anchor landed using `write.anchorLanded`. A failed
+transaction leaves all of these unchanged. Ordinary saves can omit `write`; ignoring a supplied
+write loses adoption bookkeeping on restart even if the MLS state was saved.
 
 ### A host's own `HandleAccess`
 

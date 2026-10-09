@@ -5,12 +5,14 @@ import {
   createGroup,
   createInvite,
   createKeyPackageBundle,
+  decodeClientState,
   type GroupHandle,
   processWelcome,
+  restoreGroup,
 } from '@kumiai/mls'
 import * as adapter from '@kumiai/mls-rpc'
 import { createLedgerEntrySlot } from '@kumiai/mls-rpc'
-import { type AdoptionWrite, commitTopic } from '@kumiai/rpc'
+import { type AdoptionWrite, commitTopic, PeerDisposedError } from '@kumiai/rpc'
 import { testControlStoreConformance } from '@kumiai/rpc-conformance'
 import { afterEach, expect, test, vi } from 'vitest'
 
@@ -127,50 +129,70 @@ test('publisher lands one proof commit and a duplicate is already revoked', asyn
   }
 })
 
-test('restart restores the adopted derived state with its proof ledger entries', async () => {
-  expect(adapter).toHaveProperty('publishRevokeProof')
+test('restart restores co-committed revoke proof state before volatile adoption or anchor repair', async () => {
   const s = await setup()
   let replacement: Member | undefined
   try {
+    await s.member.peer.replay()
     const before = [...s.member.handle().ledgerTokens]
-    await s.member.peer.protocol('chat').dispatch('chat/posted', { data: { text: 'after revoke' } })
-    let delivered = (): void => {}
-    const delivery = new Promise<void>((resolve) => {
-      delivered = resolve
+    const epoch = s.member.handle().epoch
+    const credential = structuredClone(s.member.handle().credential)
+    let crashed = false
+    s.member.stateStore.database.seam('after-save', () => {
+      crashed = true
+      void s.member.peer.dispose()
+      throw new Error('Crash after adoption transaction')
     })
-    const remove = s.member.appOutbox.remove
-    s.member.appOutbox.remove = async (seq) => {
-      await remove(seq)
-      delivered()
-    }
-    s.member.hostHooks.afterAdopt = async () => {
-      throw new Error('crash after adoption')
-    }
     await expect(
       adapter.publishRevokeProof({
         peer: s.member.peer,
         mls: s.mls,
         input: { subject: s.subject, log: s.log },
       }),
-    ).resolves.toMatchObject({})
-    expect((await s.member.control.load()).outcomes).toContainEqual(
-      expect.objectContaining({ kind: 'landed' }),
-    )
+    ).rejects.toBeInstanceOf(PeerDisposedError)
     await s.member.peer.dispose()
     await s.member.peer.drained()
+    await s.member.disconnect()
+    expect(crashed).toBe(true)
+    expect(s.member.handle().epoch).toBe(epoch)
+    expect(s.member.handle().registry.devices.get(s.subject)?.status).not.toBe('revoked')
+    expect((await s.member.stateStore.database.anchorStore('state').load())?.pending).toMatchObject(
+      { landed: true, epochAfter: Number(epoch + 1n) },
+    )
+    const saved = await s.member.stateStore.saved()
+    if (saved == null) throw new Error('Missing persisted revoke state')
+    const state = decodeClientState(saved.state)
+    if (state == null) throw new Error('Invalid persisted revoke state')
+    const entrySlot = createLedgerEntrySlot()
+    const restored = await restoreGroup({
+      state,
+      credential,
+      ledgerEntries: saved.ledger,
+      options: { resolveLedgerEntries: entrySlot.resolve },
+    })
+    expect(restored.epoch).toBe(epoch + 1n)
+    expect(restored.ledgerTokens.length).toBeGreaterThan(before.length)
+    expect(restored.registry.devices.get(s.subject)?.status).toBe('revoked')
+    expect(restored.findMemberLeafIndex(s.subject)).toBeUndefined()
+    expect(await restored.isLedgerComplete()).toBe(true)
+    const persisted = await s.member.control.load()
+    expect(persisted.operations).toEqual([])
+    expect(persisted.outcomes).toEqual([expect.objectContaining({ kind: 'landed' })])
     replacement = makeMember({
       hub: s.hub,
       identity: s.member.identity,
-      group: s.member.handle(),
-      entrySlot: s.member.entrySlot,
+      group: restored,
+      entrySlot,
       restartOf: s.member,
     })
     await replacement.peer.replay()
-    expect(replacement.handle().ledgerTokens.length).toBeGreaterThan(before.length)
+    expect(replacement.handle().epoch).toBe(epoch + 1n)
     expect(replacement.handle().registry.devices.get(s.subject)?.status).toBe('revoked')
     expect(await replacement.handle().isLedgerComplete()).toBe(true)
-    await delivery
-    expect(await replacement.appOutbox.list()).toEqual([])
+    expect((await replacement.control.load()).outcomes).toEqual(persisted.outcomes)
+    expect(
+      (await replacement.stateStore.database.anchorStore('state').load())?.pending,
+    ).toBeUndefined()
   } finally {
     if (replacement != null) {
       await replacement.peer.dispose()

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { randomIdentity } from '@kokuin/token'
 import {
   commitInvite,
@@ -10,6 +11,15 @@ import {
   removeMember,
   restoreGroup,
 } from '@kumiai/mls'
+import { deriveEntryKey, sealEntries } from '@kumiai/mls-rpc'
+import {
+  asLogPosition,
+  digestAppliedCommit,
+  encodeCommitFrame,
+  encodeHandshakeFrame,
+  encodeLedgerEntries,
+  HANDSHAKE_KIND,
+} from '@kumiai/rpc'
 import { expect, test } from 'vitest'
 
 import { judgeWelcomeAdmission } from '../../../packages/mls-hub/src/admission.js'
@@ -59,13 +69,47 @@ test('a last-resort Welcome replaces held state three epochs ahead and repeats a
       invite: firstInvite,
       welcome: first.welcomeMessage,
       ratchetTree: group.state.ratchetTree,
+      options: { resolveLedgerEntries },
     }
     const opened = await openWelcome([source], firstWelcome)
     if (!('joined' in opened)) throw new Error('Expected initial join')
     const held = opened.joined.group
+    const oldBranchMember = randomIdentity()
+    const oldBundle = await createKeyPackageBundle(oldBranchMember)
+    const oldInvite = await invite(oldBranchMember.id)
+    const oldEpoch = Number(group.epoch)
+    const oldCommit = await commitInvite(group, oldBundle.publicPackage, oldInvite)
+    const oldPayload = encodeHandshakeFrame(
+      HANDSHAKE_KIND.commit,
+      encodeCommitFrame(
+        oldCommit.commitMessage,
+        sealEntries(await deriveEntryKey(group), encodeLedgerEntries(oldInvite.ledgerEntries)),
+      ),
+    )
+    group = oldCommit.newGroup
+    await held.processMessage(oldCommit.commitMessage)
     const epoch = Number(held.epoch)
     const db = createMemoryHostDatabase()
-    await db.saveState(held.groupID, encodeClientState(held.state))
+    const oldPosition = asLogPosition('00000000000000000001')
+    const oldApplied = {
+      epoch: oldEpoch,
+      digest: digestAppliedCommit(oldCommit.commitMessage),
+      payloadDigest: createHash('sha256').update(oldPayload).digest('base64url'),
+      sequenceID: oldPosition,
+      opID: null,
+      removed: false,
+    }
+    await db.saveState(held.groupID, encodeClientState(held.state), {
+      mutationID: 'old-branch-adoption',
+      changes: {
+        putApplied: [oldApplied],
+        putResponses: [
+          { position: oldPosition, digest: oldApplied.digest, kind: 'superseded', epoch: oldEpoch },
+        ],
+        cursor: { position: oldPosition, epoch },
+      },
+    })
+    expect((await db.control(held.groupID).load()).applied).toEqual([oldApplied])
     await source.consume(ref, held.groupID)
     const repeated = await openWelcome([source], firstWelcome)
     if (!('joined' in repeated)) throw new Error('Last-resort repeat must reach epoch admission')
@@ -135,6 +179,9 @@ test('a last-resort Welcome replaces held state three epochs ahead and repeats a
     expect(restored.findMemberLeafIndex(hub.identity.id)).toBeDefined()
     const control = await db.control(joined.groupID).load()
     expect(control.operations).toEqual([])
+    expect(control.applied).toEqual([])
+    expect(control.responses).toEqual([])
+    expect(control.cursor).toBeNull()
     expect(control.outcomes).toEqual([
       { id: 'open-remove', opID: 'open-remove', at: expect.any(Number), kind: 'unknown' },
     ])

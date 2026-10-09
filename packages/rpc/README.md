@@ -198,6 +198,12 @@ runs past, and MLS ratchets forward, so a rebooted handle can never re-export it
 The control store, MLS state and anchor slot share one host database. `build(op)` is speculative;
 it returns the commit, candidate blob, entry bodies and complete invitation artifact. The peer
 stores the exact framed payload before publishing and retries those same bytes after a crash.
+For a permanent host build refusal, throw the exported `OperationRejectedError(reason)`.
+The operation settles as `rejected`; this releases its revoke hold (other unsettled revokes
+still hold sends) and lets subsequent operations run. A plain `Error` is treated as transient
+and retried, leaving the intent queued and its revoke hold in place. Use that for temporary
+storage or service failures, not an unauthorised operation.
+
 `adopt(journal, expected, write)` is idempotent, compares the source identity and preserves sender
 and receiver ratchet progress. It commits `AdoptionWrite.changes`, `mutationID` and any matching
 anchor landed mark in the same transaction as the MLS state. Incoming and recovery adoptions use

@@ -119,7 +119,12 @@ Large consumer ledgers can therefore block invites, Welcomes and GroupInfo repli
 
 `prepareRecovery()` returns `ready` or `renewal-required` before requesting GroupInfo.
 The cached binding must pass wall-clock expiry, known tree time, generation floor, identity and horizon checks.
-`recoveryBinding({ groupID, controllerID, current })` supplies a fresh binding at most once per attempt, or returns `null`.
+`recoveryBinding({ groupID, controllerID, current })` supplies a fresh binding or returns `null`.
+It is called at most once per `prepareRecovery()` round and its following `applyRecovery` reply
+validation combined. An expired cached binding followed by a fresh binding and an authoritative
+floor refusal can cause two host calls in the same recovery attempt. A binding, lapse or floor
+refusal starts another preparation round under the original deadline, so the whole attempt has
+no fixed one-call or two-call bound.
 It must return promptly without waiting for user interaction.
 `applyRecovery` returns `PendingRecovery | { renewalRequired: true } | null`.
 Lifecycle GroupInfo replies include a ledger covered by the attestation digest and checked against the authenticated head.

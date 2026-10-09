@@ -113,7 +113,12 @@ export type GroupMLSParams = {
    * here for every restore of that group: the commit and rendezvous topics follow the choice.
    */
   recoverySecret?: (handle: GroupHandle) => Promise<Uint8Array>
-  /** Fresh own-leaf binding, at most once per attempt. Return null without waiting on the user. */
+  /**
+   * Fresh own-leaf binding, at most once per `prepareRecovery()` round and its following reply
+   * validation combined. Expiry then a floor refusal can cause two calls in the same attempt;
+   * each binding/lapse/floor refusal starts another round under the original deadline.
+   * No fixed call bound per attempt. Return null without waiting on the user.
+   */
   recoveryBinding?: RecoveryBinding
 }
 
