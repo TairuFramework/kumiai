@@ -13,6 +13,11 @@ Recovery failures now distinguish `invalidated` source re-checks from `unconfirm
 Invalidations include `blockingPosition` and `anchorRecovery` so hosts can identify anchor-gated
 livelock. Retry behaviour is unchanged. Document authenticated Welcome re-admission as manual repair.
 
+Verify returned commit positions against the retained payload before adoption. Search absence requires
+coverage through the reported head. Concurrent replay preserves adopted rejoins through durable
+reenact settlement. Refresh re-emits durable outcomes once per peer instance, including after anchor
+repair failures. Committed intents remain scheduled when their post-write refresh fails.
+
 Breaking changes from 0.10:
 
 - Replace `commit(build, {holdLogSends})` with `commit(OperationRequest)`, returning `{position}`.

@@ -1866,12 +1866,16 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     string,
     Set<{ resolve: (outcome: Outcome) => void; reject: (error: unknown) => void }>
   >()
+  const emittedOutcomes = new Map<string, string>()
   const resolveOutcomeWaiters = (outcome: Outcome): void => {
     for (const waiter of outcomeWaiters.get(outcome.opID ?? outcome.id) ?? [])
       waiter.resolve(outcome)
     outcomeWaiters.delete(outcome.opID ?? outcome.id)
   }
   const emitOutcome = (outcome: Outcome): void => {
+    const fingerprint = JSON.stringify(outcome, Object.keys(outcome).sort())
+    if (emittedOutcomes.get(outcome.id) === fingerprint) return
+    emittedOutcomes.set(outcome.id, fingerprint)
     hostOutbox.push(() => {
       resolveOutcomeWaiters(outcome)
       notifyHost((value) => params.onOutcome?.(value), outcome)
@@ -1880,10 +1884,10 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   const refreshControl = async (): Promise<void> => {
     if (control == null) return
     const snapshot = await control.load()
-    // A host can fail after committing adoption but before the runner emits its outcome.
-    for (const outcome of snapshot.outcomes) {
-      if (outcomeWaiters.has(outcome.opID ?? outcome.id))
-        hostOutbox.push(() => resolveOutcomeWaiters(outcome))
+    // Adoption can commit before anchor repair throws and skips the runner's notification.
+    for (const outcome of snapshot.outcomes) emitOutcome(outcome)
+    for (const id of emittedOutcomes.keys()) {
+      if (!snapshot.outcomes.some((outcome) => outcome.id === id)) emittedOutcomes.delete(id)
     }
     hasOperations = snapshot.operations.length > 0
     revokeHold = revokeHeld(snapshot)
@@ -2110,7 +2114,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         assertLive()
         return mux.publish({ topicID, payload, publishID, expectedHead, retain: 'log' })
       },
-      searchLog: async (from, digest) => {
+      searchLog: async (from, digest, position) => {
         let after = from
         for (;;) {
           assertLive()
@@ -2123,14 +2127,19 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           )
           // A found payload is affirmative evidence even when older rows were pruned.
           for (const row of page.messages) {
-            if (toB64U(sha256(row.payload)) === digest)
+            if (
+              (position == null || row.sequenceID === position) &&
+              toB64U(sha256(row.payload)) === digest
+            )
               return { found: asLogPosition(row.sequenceID) }
           }
           if (page.gap) return 'gap'
-          if (page.messages.length < COMMIT_FETCH_LIMIT) return 'absent'
           assertForwardPage(after, page.messages)
           const last = page.messages.at(-1)
-          if (last == null) return 'absent'
+          const covered = last?.sequenceID ?? after
+          if (page.head == null) return covered == null ? 'absent' : 'gap'
+          if (covered != null && covered >= page.head) return 'absent'
+          if (last == null) return 'gap'
           after = asLogPosition(last.sequenceID)
         }
       },
@@ -2427,18 +2436,26 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   const enqueue = async (request: OperationRequest): Promise<void> => {
     await ready
     assertLive()
-    await runSerial(async () => {
-      assertLive()
-      if (locallyRemoved) throw new PeerRemovedError('Peer was removed')
-      // A host write may persist the intent before its promise settles.
-      if (request.revokes) revokeHold = true
-      try {
-        await enqueueOperation(operationDeps(), request)
-      } finally {
-        await refreshControl()
-      }
-    })
-    scheduleOperations()
+    try {
+      await runSerial(async () => {
+        assertLive()
+        if (locallyRemoved) throw new PeerRemovedError('Peer was removed')
+        // A host write may persist the intent before its promise settles.
+        if (request.revokes) revokeHold = true
+        try {
+          await enqueueOperation(operationDeps(), request)
+        } finally {
+          try {
+            await refreshControl()
+          } catch {
+            // A failed read cannot unschedule an intent that may already be durable.
+            hasOperations = true
+          }
+        }
+      })
+    } finally {
+      scheduleOperations()
+    }
   }
   const outcomes = async (): Promise<Array<Outcome>> => {
     await ready
@@ -2450,6 +2467,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     assertLive()
     await runSerial(async () => {
       if (control != null) await applyResolved(control, { deleteOutcomes: [id] }, newPublishID())
+      emittedOutcomes.delete(id)
     })
   }
   const abandon = async (): Promise<void> => {
@@ -2500,13 +2518,13 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     await ready
     assertLive()
     if (locallyRemoved) return {}
-    const record = (await control?.load())?.rejoin
-    if (record?.stage === 'confirmed' && activeRecovery == null) {
-      await runSerial(async () => {
+    await runSerial(async () => {
+      const record = (await control?.load())?.rejoin
+      if (record?.stage === 'confirmed' && activeRecovery == null) {
         await stepRejoin(rejoinDeps(Date.now() + recoveryDeadlineMs), record)
         await refreshControl()
-      })
-    }
+      }
+    })
     const result = await runSerial(async () => {
       if (await settleOperations()) await rebuildEpoch()
       if (mls != null && (await ensureLedger(Date.now() + recoveryTimeoutMs)))

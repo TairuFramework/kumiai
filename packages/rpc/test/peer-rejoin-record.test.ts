@@ -459,6 +459,47 @@ test('ledger bootstrap before the final apply survives restart and emits reenact
   ).toEqual(reenact)
 })
 
+test('concurrent replay of a confirmed rejoin durably settles reenact exactly once', async () => {
+  const hub = new FakeHub()
+  const alice = member(hub, 'alice', { epoch: 2 })
+  const bob = member(hub, 'bob', {
+    recovery: { timeoutMs: 200, deadlineMs: 2000, getDelayMs: () => 60_000 },
+  })
+  await alice.peer.replay()
+  await bob.peer.replay()
+  bob.mls.adopt(bob.mls.buildCommit(['discarded-branch']))
+  await bob.database.saveState('bob', bob.mls.serializeState())
+  const apply = bob.control.apply.bind(bob.control)
+  const writes: Array<RejoinRecord['stage'] | 'settled'> = []
+  vi.spyOn(bob.control, 'apply').mockImplementation(async (changes, id) => {
+    await apply(changes, id)
+    if (changes.putRejoin?.stage === 'confirmed') bob.database.failNext('mid-save')
+    if (changes.putRejoin != null) writes.push(changes.putRejoin.stage)
+    if (changes.deleteRejoin) writes.push('settled')
+  })
+  await expect(bob.peer.recover()).rejects.toThrow('Injected transaction failure')
+  const record = (await bob.control.load()).rejoin
+  expect(record).toMatchObject({ stage: 'confirmed', ledgerBefore: ['discarded-branch'] })
+  expect(record?.verdict).toBeInstanceOf(Uint8Array)
+  const results = await Promise.all([bob.peer.replay(), bob.peer.replay()])
+  expect(results.flatMap((result) => result.reenact ?? [])).toEqual(['discarded-branch'])
+  const snapshot = await bob.control.load()
+  expect(snapshot.rejoin).toBeNull()
+  expect(snapshot.cursor?.stranded).toBeUndefined()
+  expect(snapshot.outcomes).toEqual([
+    expect.objectContaining({ id: record?.id, kind: 'reenact', tokens: ['discarded-branch'] }),
+  ])
+  expect(writes.filter((stage) => stage === 'settled')).toHaveLength(1)
+  await bob.peer.replay()
+  expect((await bob.control.load()).outcomes).toEqual(snapshot.outcomes)
+  await bob.peer.dispose()
+  await bob.peer.drained()
+  const again = member(hub, 'bob', { restartOf: bob })
+  await again.peer.replay()
+  expect((await again.control.load()).outcomes).toEqual(snapshot.outcomes)
+  expect((await again.control.load()).cursor?.stranded).toBeUndefined()
+})
+
 test('an ambiguous recovery state save is read back without a second adoption', async () => {
   const { bob, alice, hub } = await setup()
   bob.database.commitThenRejectNext('save')
