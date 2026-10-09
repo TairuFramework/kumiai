@@ -117,8 +117,10 @@ retained with the cursor behind it even if a commit fetch omits the matching com
 peer reaches that epoch, or an operator can explicitly discard it with `dropAppFrame`. A forged
 far-future claim can hold delivery until that drop; `onAppDeliveryStalled` reports the wait once with
 `reason: 'future-epoch'`. A frame below the current epoch remains refused.
-The existing commit-applied-before-anchor-saved crash window can still leave a restarted peer on
-a stale app topic.
+The peer persists a pending rotation before adoption and co-commits its landed mark in the same
+transaction as the new MLS state and control changes. At startup, anchor repair uses the target
+epoch's exporter before replay or delivery. If a host advances past that target outside the peer,
+the exporter is gone and a confirmed forced rejoin is required before app sends resume.
 
 App-frame AAD is `[0x01, intent, ...UTF8(topicID)]`, where intent is `0x01` for log and `0x00`
 for ephemeral. `frameAAD` reads this cleartext routing hint; only `unwrap` with the full expected

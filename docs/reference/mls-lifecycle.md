@@ -133,8 +133,9 @@ Restart restores the candidate with `restoreRecovery(candidate, requestKey)`, re
 and confirms the verdict before adoption. Recovery adoption co-commits its control changes with
 the MLS state, and startup finishes the adopted record's remaining effects.
 `PendingRecovery.epoch` names the target epoch, and `confirmationKey(position, commitDigest)` binds its speculative exporter key.
-`onAccepted(write)` is idempotent and carries the adoption's control write. Verdicts bind the group,
-request, publication position and commit digest.
+`onAccepted(write)` is idempotent and takes a required `AdoptionWriteFactory`. Its staged summary
+produces the `AdoptionWrite` co-committed with MLS state. Verdicts bind the group, request,
+publication position and commit digest.
 A valid confirmation wins over superseded and refusal. Superseded wins over refusal after a bounded settle round.
 Outside lifecycle groups, refusals and superseded require a source-tree signer. Confirmation uses the target-epoch tag.
 
@@ -145,7 +146,11 @@ Neither the signer nor its chain issuer may be revoked, and its generation must 
 Its leaf must remain live at `max(treeTime(pending), now - 300 seconds)`, with the known time floor.
 A failed signer gate makes the verdict advisory.
 
-Binding, lapse and floor refusals call `PendingRecovery.markBindingUnusable()` and end as `renewal-required`.
+Binding, lapse and floor refusals call `PendingRecovery.markBindingUnusable()`, discard the
+refused rejoin record and retry renewal within the same recovery attempt and original deadline.
+The peer runs `prepareRecovery()` again before requesting fresh GroupInfo. It ends as
+`renewal-required` only when a fresh usable binding is unavailable (during preparation or reply
+validation); repeated renewal retries can instead exhaust the attempt's deadline.
 The adapter keeps an in-memory, identity-keyed 16-entry set. Ratchets do not clear it.
 A restart clears the set, costing one extra refused attempt.
 Policy and invalid refusals end as `refused`, including `refusal` and `responder`, until the host calls `recover()`.

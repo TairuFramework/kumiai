@@ -419,9 +419,11 @@ export function createCoordinatedOutbox(params: {
 }): AppOutbox
 ```
 
-- `put`, `remove`, `clear` and `putCommitCursor` each run one root transaction: read the affected
+- `put`, `remove` and `clear` each run one root transaction: read the affected
   entries from the `tx` outbox, write the outbox, await the hook, and write a fresh `mutationID` to
   the group's outbox meta row.
+- The commit cursor belongs to `ControlStore`, not the outbox. Adoption cursor changes travel in
+  `AdoptionWrite` and commit in the same root transaction as MLS state (Spec P2a D2/D5).
 - **Serialised.** The adapter runs one mutation at a time per outbox, from transaction entry through
   outcome resolution. rpc does call it concurrently (`accept` reservations,
   `rpc/src/app-outbox.ts:119-128`, and delivery's replacements and removals,

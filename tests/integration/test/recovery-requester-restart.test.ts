@@ -77,6 +77,7 @@ test.each(['built', 'published', 'confirmed', 'adopted'] as const)(
     if (stage === 'adopted')
       bob.stateStore.database.seam('after-save', () => {
         void bob.peer.dispose()
+        throw new Error('Crash after adoption transaction')
       })
     await expect(bob.peer.recover()).rejects.toThrow()
     await bob.peer.dispose()
@@ -84,10 +85,14 @@ test.each(['built', 'published', 'confirmed', 'adopted'] as const)(
     const record: RejoinRecord | null = (await bob.control.load()).rejoin
     expect(record?.stage).toBe(stage)
     vi.mocked(bob.control.apply).mockRestore()
+    const restored = await restoreMemberHandle(bob, bob.entrySlot)
+    expect(Number(restored.epoch)).toBe(
+      stage === 'adopted' ? record?.epochAfter : record?.source.epoch,
+    )
     const again = makeMember({
       hub,
       identity: bob.identity,
-      group: await restoreMemberHandle(bob, bob.entrySlot),
+      group: restored,
       entrySlot: bob.entrySlot,
       restartOf: bob,
       recovery,

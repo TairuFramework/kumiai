@@ -178,6 +178,10 @@ Minimal readiness installs control lanes and holds sealing, commits and walk adv
 Ordinary peer-owned advances close the anchor crash gap. Hosts that advance outside the peer can still require coordinated recovery.
 
 Recovery adopts only after a member confirms the published external commit.
+The durable rejoin record in `ControlStore` retains the exact payload, candidate and request key.
+Restored candidates re-check their source and confirmation; adoption co-commits the required
+`AdoptionWrite` with MLS state. Binding, lapse and floor refusals invalidate the binding and retry
+renewal within the same recovery attempt, under its original deadline.
 A retention gap strands immediately as `retention-gap`, leaving the cursor and queued entries unchanged.
 `renewal-required` and `refused` hold recovery until the host changes inputs and calls `recover()`.
 A ratchet also clears renewal-required. `unconfirmed`, no-responder and deadline retry on backoff.
@@ -185,13 +189,16 @@ The [lifecycle contract](./mls-lifecycle.md#recovery-and-trust-residuals) define
 
 ## Revoke hold and peer ownership
 
-`commit(build, { holdLogSends: true })` takes a synchronous hold until landing or known-unlanded resolution.
+An `OperationRequest` with `revokes: true`, submitted through `enqueue(request)` or `commit(request)`,
+holds retained sends until the operation settles. `enqueue` resolves once its intent is durable;
+`commit` also waits for its landed outcome in the current process.
 No queued log frame is submitted during the hold, even if sealed or durably prepared earlier.
-The held commit waits for already submitted log publications to settle before journalling or publishing.
-`JournalEntry.holdsLogSends` preserves this ordering across restart. Hosts must store and return the flag unchanged.
+Before publishing the held operation, the peer waits for already submitted log publications to settle.
+`ControlStore` retains `ControlSnapshot.operations`, including `revokes`, across restart. The peer recomputes the hold from all
+unsettled operations before delivery starts; settling one revoke does not release another's hold.
 Ephemeral and directed sends remain outside this hold.
 
-One live `GroupPeer` owns the group's outbox, commit journal and anchor slot on one designated commit hub.
+One live `GroupPeer` owns the group's outbox, control store and anchor slot on one designated commit hub.
 Other hubs are failover candidates. Shared stores across simultaneous peers can overwrite sequences and rotation records.
 All log sends, commits, recovery and revoke runs use the owning peer.
 A host switches ownership by calling `dispose()`, awaiting `drained()`, then constructing the replacement.
@@ -202,20 +209,27 @@ New host calls after disposal reject synchronously. Parked hub receive/close wor
 WARNING: never await `drained()` inside that peer's counted callback or port invocation, because it would wait on itself.
 
 Acceptance effects must be recoverable from the current durable handle, including effects missed after a crash or rejected callback.
-Journal replay alone cannot restore them once adoption cleared the journal.
+Operation replay alone cannot restore them once adoption settled the operation.
 The host can persist a dirty mark with handle advances and reconcile effects from current state.
 Persisted notices can be lost on crash or dispose. Notices are not replayed, so hosts recover required state from stores at startup.
 
 
 ## Durable commit cursor
 
-`AppOutbox.getCommitCursor()` and `putCommitCursor()` store `{ position, epoch, stranded? }` separately from queued entries.
-`position` is null when no position is durable yet. The host stores the record as given.
-Each write must be durable before resolution. Clearing entries preserves the cursor. Group deletion clears both.
-The peer writes a cursor only after MLS state for its paired epoch is durable.
-Hosts must finish MLS persistence before successful commit processing or adoption returns.
+`ControlStore.load()` returns `ControlSnapshot.cursor`, storing `{ position, epoch, stranded?, fork? }`.
+The control store shares the host database with MLS state and the anchor slot.
+`position` is null when no position is durable yet.
+An adoption writes its cursor, applied row, outcomes and matching anchor landed mark through
+`AdoptionWrite` in the same transaction as the new MLS state. State-free cursor changes use
+atomic `ControlStore.apply(changes, mutationID)`; ambiguous writes resolve through `lastMutation()`.
+Hosts must resolve ambiguous state saves before successful commit processing or adoption returns.
+Clearing app outbox entries preserves the commit cursor. Group deletion requires settled control.
 Startup seeds the commit walk only when the stored epoch equals `GroupMLS.readEpoch()`.
-An epoch mismatch discards the cursor and starts from the oldest retained frame.
+An epoch mismatch clears only the cursor and starts from the oldest retained frame: a position
+paired with another MLS epoch cannot establish a covered range for the current handle.
+This fallback does not reset operations, rejoin, outcomes, Welcome obligations or the anchor.
+Welcome re-admission instead stops and drains the peer, then atomically installs joined state,
+applies `readmissionChanges(snapshot)` and clears the anchor slot before starting a new peer.
 A matching cursor lets undelivered entries resume without a recovery rejoin, costing at most one duplicate per entry.
 A stranded peer keeps the durable position before the frame that stranded it and records `stranded: true`.
 A restart at the same epoch then re-raises the strand and heals, including after a losing fork it had already stepped past.
