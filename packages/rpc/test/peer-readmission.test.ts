@@ -122,6 +122,20 @@ test('re-admission forgets the old branch and retains outcomes and Welcome oblig
   expect(applyChanges(after, readmissionChanges(after))).toEqual(after)
 })
 
+test('re-admission clears large response snapshots with repeated epochs', () => {
+  const before = unsettled()
+  before.responses = Array.from({ length: 200_000 }, (_, index) => ({
+    position: asLogPosition(String(index)),
+    digest: `refused-${index}`,
+    kind: 'refused',
+    epoch: index === 100_000 ? 9 : 7,
+  }))
+  const changes = readmissionChanges(before)
+  expect(changes.deleteResponsesBelow).toBe(10)
+  expectReset(before, applyChanges(before, changes))
+  expect(before.responses).toHaveLength(200_000)
+})
+
 test('a failed replacement leaves the state, control and anchor together on the old branch', async () => {
   const db = createMemoryHostDatabase()
   const before = unsettled()

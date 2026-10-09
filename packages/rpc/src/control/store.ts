@@ -71,12 +71,16 @@ export function readmissionChanges(snapshot: ControlSnapshot): ControlChanges {
   if (snapshot.rejoin != null) {
     outcomes.push({ id: snapshot.rejoin.id, opID: null, at, kind: 'unknown' })
   }
+  let newestResponseEpoch = 0
+  for (const { epoch } of snapshot.responses) {
+    newestResponseEpoch = Math.max(newestResponseEpoch, epoch)
+  }
   return {
     deleteOperations: snapshot.operations.map(({ id }) => id),
     deleteRejoin: true,
     putOutcomes: outcomes,
     deleteAppliedFrom: 0,
-    deleteResponsesBelow: Math.max(0, ...snapshot.responses.map(({ epoch }) => epoch)) + 1,
+    deleteResponsesBelow: newestResponseEpoch + 1,
     cursor: null,
   }
 }
