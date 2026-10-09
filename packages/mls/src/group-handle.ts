@@ -927,9 +927,13 @@ export class GroupHandle {
       const history = new Map(candidate.#state.historicalReceiverData)
       // Independent buffers survive subsequent ratchets zeroing consumed secrets on the live handle.
       history.set(epoch, { ...retained, secretTree: structuredClone(this.#state.secretTree) })
-      for (const [earlierEpoch, receiver] of this.#state.historicalReceiverData) {
-        const target = history.get(earlierEpoch)
-        if (earlierEpoch < epoch && target != null) {
+      for (const [earlierEpoch, target] of history) {
+        if (earlierEpoch >= epoch) continue
+        const receiver = this.#state.historicalReceiverData.get(earlierEpoch)
+        if (receiver == null) {
+          // A snapshot must not restore secrets the live handle has evicted.
+          history.delete(earlierEpoch)
+        } else {
           history.set(earlierEpoch, {
             ...target,
             secretTree: structuredClone(receiver.secretTree),

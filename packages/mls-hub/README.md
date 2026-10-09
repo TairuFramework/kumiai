@@ -151,6 +151,22 @@ Ordinary consumption atomically deletes the package and writes the receipt. Last
 Repeated last-resort Welcomes reopen and pass through epoch admission.
 Receipts survive package pruning. Ambiguous writes reject with `StorageOutcomeUnknownError`, prompting receipt read-back.
 
+Ordinary package deletion retains the owner and ref without private material until `consume` writes its receipt.
+This includes pruning and `release`: a saved join with an outstanding `joinRef` must remain consumable after either deletion.
+Store adapters persist this metadata durably and include it when checking that a ref belongs to exactly one owner.
+Unknown refs still reject consumption. Unconsumed deletion metadata has no expiry because a saved join may resume arbitrarily late.
+
+WARNING: ordinary package reuse is detected at consumption, after the host has saved the joined state.
+`openWelcome` authenticates without reserving or consuming the package. Receipts exist only after the host calls `consume`.
+Two genuine Welcomes for different groups naming the same ordinary package can therefore both return joined states before either consumption.
+Both groups can be saved. The first consumption succeeds, and the second rejects because its group differs from the receipt.
+
+Replaying either Welcome then returns `alreadyJoined` with the first consumed group, even for the second Welcome's group.
+The helper cannot prevent that second save with these ports.
+Hosts must serialise open, admission, save and consume for each package ref within its source.
+Hosts must finish consuming saved `joinRef`s at startup before admitting further Welcomes.
+Serialisation through successful consumption closes this window within that host. There is no cross-host reservation protocol.
+
 The two ports are not interchangeable, and wiring one store to both mixes secret material held
 under different lifecycles: an ordinary package is single-use and released on join, a last-resort
 package is reused by every inviter until it rotates. Each record carries a `kind` — `'ordinary'` or

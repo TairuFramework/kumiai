@@ -58,4 +58,27 @@ describe('createMemoryKeyPackagePoolStore', () => {
 
     expect((await store.list(ALICE))[0]?.privatePackage).toBe('priv-a')
   })
+
+  test('deleted refs remain consumable without admitting unknown refs', async () => {
+    const store = createMemoryKeyPackagePoolStore()
+    await store.put(ALICE, record('a'))
+    await store.delete(BOB, 'a')
+    await store.delete(ALICE, 'a')
+    expect(await store.list(ALICE)).toEqual([])
+    expect(await store.receipt('a')).toBeNull()
+    await expect(store.consume('missing', 'group:a')).rejects.toThrow('exactly one owner')
+    await store.consume('a', 'group:a')
+    expect(await store.receipt('a')).toEqual({ groupID: 'group:a' })
+    await expect(store.consume('a', 'group:b')).rejects.toThrow('another group')
+  })
+
+  test('a deleted ref still participates in source ownership ambiguity', async () => {
+    const store = createMemoryKeyPackagePoolStore()
+    await store.put(ALICE, record('a'))
+    await store.delete(ALICE, 'a')
+    await store.put(BOB, record('a'))
+    await expect(store.consume('a', 'group:a')).rejects.toThrow('exactly one owner')
+    expect(await store.list(BOB)).toEqual([record('a')])
+    expect(await store.receipt('a')).toBeNull()
+  })
 })

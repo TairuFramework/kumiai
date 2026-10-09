@@ -51,12 +51,16 @@ export type KeyPackageRecord = {
  * Give each source its own store namespace for `consume` and `receipt`.
  * An adapter rejects ambiguous writes with `StorageOutcomeUnknownError`.
  * Receipts outlive package pruning and must not alias stored state.
+ * Deletion atomically removes private material and retains the owner and ref until consumption writes a receipt.
+ * This deletion metadata survives restarts.
+ * `consume` accepts such deleted refs, still requiring exactly one owner in the source.
  *
  * `list` need not order: the pool sorts what it gets.
  */
 export type KeyPackagePoolStore = {
   list(ownerDID: string): Promise<Array<KeyPackageRecord>>
   put(ownerDID: string, record: KeyPackageRecord): Promise<void>
+  /** Remove private material, retaining owner/ref metadata for a saved join's later consume. */
   delete(ownerDID: string, ref: string): Promise<void>
   /** Source-scoped transaction: package deletion and receipt, all or nothing. */
   consume(ref: string, groupID: string): Promise<void>
