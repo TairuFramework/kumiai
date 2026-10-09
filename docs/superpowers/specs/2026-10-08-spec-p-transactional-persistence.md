@@ -1,7 +1,7 @@
 # Spec P: transactional persistence — design
 
 Date: 2026-10-08
-Status: draft r14 (2026-10-09)
+Status: draft r15 (2026-10-09)
 Parent: [client host, messaging protocol and multi-device e2e](2026-10-08-client-messaging-e2e-design.md)
 Control baseline: [Spec P2a](2026-10-08-spec-p2a-crash-safe-control-design.md), superseded where amended here.
 
@@ -65,23 +65,87 @@ Create a fresh leaf and external commit with `Remove(own old leaf) + ExternalIni
 [RFC 9420 §12.4.3.2](https://www.rfc-editor.org/rfc/rfc9420.html#section-12.4.3.2).
 A reused leaf index does not reuse secrets: the candidate has a fresh secret tree, generations from zero and no old history.
 A removed device cannot use resync to bypass admission; absence of its matching old leaf requires a new invitation.
-Lost MLS bytes are not a resync input. Retain/restore the device credential, host policy and lifetime metadata.
-If the whole database, including the spent set, is lost, safe automatic recovery requires host restoration of that metadata;
-never infer an empty spent set for a previously known group.
+Lost MLS bytes are not a resync input. Retain/restore the device credential and host policy.
+Surviving stores retain lifetime metadata. Total loss and backup restore follow the distinct rules below.
 
-Persist the external attempt's exact bytes/ID, candidate, request key and target before publishing with compare-and-set.
-On mismatch search/reconcile first. At the same GroupInfo epoch retry identical bytes; after epoch advancement
-obtain fresh authenticated GroupInfo and build at that new epoch. Never adopt a stale-epoch external commit.
-**Unresolved binding:** CAS compares head, not MLS epoch. The current sealed reply has no GroupInfo capture-head binding
-(`packages/mls/src/recovery.ts:566`). Phase 2 must establish that freshness binding before claiming stale-epoch ordering refusal;
-this draft does not invent a wire protocol for it. CAS alone cannot establish it or defeat a split-view DS.
-See [RFC 9750 §5.2.2 and §5.3](https://www.rfc-editor.org/rfc/rfc9750.html#section-5.3).
+**GroupInfo capture head (r15 decision).** The responder reconciles a complete commit-log prefix before capturing its reply.
+Under its group owner gate, capture the committed MLS snapshot and that prefix's cursor together.
+`captureHead: string | null` names this commit topic's log position where the exported GroupInfo epoch is current.
+Null means an empty prefix. Neither a delivery cursor nor an unreconciled hub head qualifies.
+
+Add required `captureHead` to the signed responder attestation's JWT payload.
+Its encoding is a JSON string containing the exact log position, or explicit JSON null.
+The JWT payload uses base64url-encoded canonical UTF-8 JSON, with `captureHead` sorted before `groupID`
+(`node_modules/@kokuin/token/lib/utils.js:11`, `node_modules/@sozai/codec/lib/index.js:183`).
+It lives inside the length-framed UTF-8 attestation token, before GroupInfo in the sealed plaintext.
+Existing framing remains: `u32(tokenLength) || token || GroupInfo`, or lifecycle `u32(tokenLength) || token || u32(GroupInfoLength) || GroupInfo || ledger`.
+Lengths remain big-endian. The existing signature binds the field, group, request and exact GroupInfo digest together.
+HPKE seals that signed token using the existing group/member/request authentication boundary (`packages/mls/src/recovery.ts:261`, `:566`, `:618`).
+This recovery-reply wire change stays within the 0.x band and requires coordinated producer/consumer updates.
+Use GroupInfo reply version 2 and HPKE info/AAD domains `kumiai/mls/recovery/v2` / `kumiai/mls/recovery-aad/v2`.
+The outer frame remains `u8(version) || enc(32 bytes) || ciphertext`. Ledger-only replies keep their existing format.
+Refuse v1, missing/wrong-type `captureHead`, invalid positions and failed attestation verification before building any external attempt.
+
+Persist `captureHead` with the exact external bytes/ID, candidate, request key and target before publication.
+Initial publication MUST set `expectedHead = captureHead`, including explicit null. Search for exact acceptance before any retry.
+On mismatch with proven absence, reconcile `(captureHead, currentHead]` completely using normal MLS validation.
+If no valid commit advanced the epoch, update only `expectedHead` and republish identical bytes/ID/candidate (commit-once).
+Non-commit, invalid and poison frames alone do not invalidate GroupInfo. Repeat reconciliation after every further mismatch.
+If a valid commit advanced the epoch, discard the attempt unadopted and request fresh authenticated GroupInfo.
+Under r14's honest ordering assumption, this refuses stale-epoch publication/adoption. It cannot defeat a split-view hub.
+See [RFC 9750 §5.3](https://www.rfc-editor.org/rfc/rfc9750.html#section-5.3).
+
+**Reconciliation limit (r15 decision).** Proof requires validation state for the capture epoch, including necessary secrets and referenced proposals.
+GroupInfo supplies no old receiver secrets. The external candidate has only fresh post-commit secrets and empty history
+(`packages/mls/src/group-welcome.ts:226`, `node_modules/ts-mls/dist/src/createCommit.js:291`).
+After losing those secrets, a well-formed encrypted commit cannot generally be distinguished from an invalid encrypted frame.
+Do not infer poison-only absence. If the prefix is incomplete, unsupported or unclassifiable, and absence of the exact attempt is proven,
+discard the attempt unadopted and request fresh authenticated GroupInfo (r15 decision). This is safe at the same epoch:
+external commits are publicly framed (no handshake ratchet), and each attempt derives every secret from its own fresh
+KeyPackage and ExternalInit (`node_modules/ts-mls/dist/src/createCommit.js:234`), so a new attempt reuses no key material.
+Never discard while acceptance is unknown (gap/unresolved search): hold until proven accepted or absent.
 Keep bound confirmation/refusal of the exact external commit's application and normal MLS validation.
-Unconfirmed/superseded attempts may build afresh only from GroupInfo at a changed epoch; at the same epoch retain/hold the exact attempt.
 A responder verdict does not choose a fork or authorise replacement of the old record in place.
 Remove P2a's separate lower-epoch candidate-admission/source-prefix algorithm.
 Persisted accepted/confirmed stages replay the same attempt; an adopted stage never reinstalls its candidate.
 Policy refusal remains durable until host action; transport/no-responder failures retry with backoff while stranded.
+
+**Total database loss (r15 decision).** Losing the spent set is safe only when all prior Welcome-decryption material is also lost.
+KeyPackage init/HPKE private keys MUST share group state's provider, transaction scope and loss/restore boundary, or derive only from it.
+This includes ordinary packages, retained last-resort packages and every recoverable copy. A separately surviving store is forbidden.
+A new empty store may start without the spent set only under this condition. Old Welcomes then remain undecryptable.
+Retained signing credentials alone cannot recreate these independently generated keys (`node_modules/ts-mls/dist/src/keyPackage.js:62`).
+Recover through fresh external resync, or a fresh invitation when replacement admission refuses. Partial metadata loss still refuses.
+
+Today ordinary `KeyPackageRecord.privatePackage` and `LastResortRecord.privatePackage` hold `encodePrivateKeyPackage` output
+(`packages/mls-hub/src/pool-store.ts:24`, `packages/mls-hub/src/store.ts:21`, `packages/mls/src/key-package-codec.ts:91`).
+The pool/provisioner writes host-injected stores before upload (`packages/mls-hub/src/pool.ts:117`, `packages/mls-hub/src/provisioner.ts:135`).
+MLS generates bundles and accepts private material at Welcome processing. It does not persist those packages itself
+(`packages/mls/src/group-credential.ts:71`, `packages/mls/src/group-welcome.ts:95`).
+These source ports currently impose no shared provider scope. Phase 2/3 MUST add that contract and shared-provider adapters.
+Separate source namespaces and consume transactions may remain, but their provider/loss boundary MUST match group persistence.
+
+**Backup restore (r15 decision).** The host MUST call `declareRestoredFromBackup()` before registry access, peer startup or network work.
+Persist the declaration before processing restored groups. An unfinished declaration keeps startup held across restart.
+Every restored group remains held until external-commit resync installs a new incarnation and fresh leaf before any send, including ephemeral sends.
+Restored MLS state is recovery metadata, never a send source. Preserve fork halts and replacement/admission policy.
+Fork-halted groups still require manual recovery authorisation. Removed devices still require a fresh invitation.
+Discard all restored unused KeyPackages and all retained last-resort private packages, then mint fresh replacements before advertising availability.
+Never resume an old pending package upload. Revoke their hub copies where supported and persist retries for failed revocation.
+The current hub offers upload/fetch/status, without revocation (`packages/hub-protocol/src/protocol.ts:193`, `:241`, `:262`).
+Replace its last-resort slot. Old ordinary copies can remain until fetched/expired, and already fetched copies cannot be recalled.
+Welcomes built from those copies fail because local private keys were discarded. This leaves an invitation availability residual.
+
+Each group transaction records its restore hold and fails every restored outbox entry with a stable-ID `database-restored` event.
+This includes restored settlement obligations. This restore-specific failure rule supersedes D6's normal settlement exception.
+Failure describes local abandonment, not proof of remote non-delivery.
+Events retain original entry data and replay until acknowledged. No restored entry is published or automatically resealed.
+Declaration completion requires proven package invalidation and every group hold/failure transaction. Failure/ambiguity keeps startup held.
+Each successful resync clears only its group's restore hold in the D2 switch transaction. Other groups remain held.
+Normal installations initialise `restorePending` to false. Ordinary seed/adopt cannot clear a declared restore hold.
+An undeclared backup restore is outside the model: rolled-back spent sets and ratchets cannot reveal their own lost future.
+They can admit old Welcomes or reuse keys/generations. This rollback rule applies
+[RFC 9750 §6.6's state-loss reinitialisation guidance](https://www.rfc-editor.org/rfc/rfc9750.html#section-6.6).
 
 **Manual fork recovery (r14 decision).** Only a host invocation authorises resync onto a chosen hub/commit topic,
 or retirement in favour of an already admitted successor group. Persist that authorisation/target so restart can resume
@@ -101,7 +165,8 @@ Stale owners/ports cannot silently follow a new incarnation and throw `Displaced
 
 **Spent set.** The only cryptographic state carried between incarnations is the group-level spent-epoch-authenticator set.
 Genesis, Welcome, own/received commit and resync append each installed authenticator in its installation transaction.
-Progress saves, tombstones and deletion retain the sorted, unique defensive byte copies. Missing-set restore refuses.
+Progress saves, tombstones and deletion retain the sorted, unique defensive byte copies.
+Missing sets in surviving/restored stores refuse. Only D1's total-loss condition permits a new empty set (r15 decision).
 Welcome/seed/resync admission refuses spent authenticators before epoch comparison, including a valid alternate
 Welcome representation with different bytes but the same authenticator. Completed mutation replay resolves its marker,
 not candidate admission. No silent empty-set fallback or current-identity reinstall exception.
@@ -306,11 +371,13 @@ trim/ack/retries do not refresh it. Refused CAS claims no durable ID; accepted r
 Every factory requires host `AtRestCodec.seal/open(bytes, aad)`. Host owns all key lifecycle; kumiai stores no at-rest key.
 Seal every persisted namespace, including lifetime/spent set, state, control, anchors/secrets, pending, cursors, outbox/meta,
 events/obligations, recovery targets and topicIDs, including retained retired records.
+KeyPackage private material and backup-restore declarations/holds also require at-rest protection in the shared provider (r15 decision).
 Queryable group/incarnation/sequence keys, revisions/locks/mutation markers may remain clear.
 Topic locator is a digest; actual topicID exists only inside sealed values.
 AAD is UTF-8 JSON of `['kumiai/at-rest/v1', groupID, incarnationOrNull, namespace, recordID]`:
 lifetime uses null; state/control/anchor use fixed slots; pending uses frame ID; cursor uses topic digest;
 outbox uses String(seq); metadata/event IDs use tagged tuples. Physical duplicates retain logical AAD identity.
+Device-scoped KeyPackage/declaration records use ownerDID, null incarnation, distinct namespaces and sourceID/ref or declaration ID (r15 decision).
 Seal failure rolls back the whole transition; open failure exposes no handle/payload or plaintext fallback.
 Memory persists sealed bytes without a plaintext shadow map. Provider encryption alone cannot satisfy this contract.
 
@@ -332,9 +399,9 @@ Use only supplied transaction stores, await every started write, CAS through pla
 Nested inline transactions cannot supply completion boundaries.
 
 **Remaining external seams.** Welcome installation co-writes state/spent set/joinRef/control/anchor;
-then ordinary package consume deletes the package and writes its receipt in the source's own transaction.
+then ordinary package consume deletes the package and writes its receipt in a source-namespace transaction on that same provider (r15 decision).
 After successful consume/receipt, clear the exact sourceID/ref through a group transition. Different non-null ref conflicts;
-already-null clear succeeds. Last-resort consume remains a no-op. No cross-provider atomicity is claimed.
+already-null clear succeeds. Last-resort consume remains a no-op. Installation and consume remain separate transactions.
 Control publication/confirmation and Welcome delivery remain network seams. Deliver Welcomes at least once and delete obligations
 only after transport acceptance. Revoke holds cover retained submissions; D1 fork halt additionally covers ephemeral sends.
 
@@ -368,6 +435,7 @@ export type JoinRef = { sourceID: string; ref: string }
 export type GroupLifetime = {
   groupID: string; latestIncarnation: number; activeIncarnation: number | null
   revision: number; mutationID: string; spentEpochAuthenticators: Array<Uint8Array>
+  restorePending: boolean // (r15 decision) cleared only by fresh-incarnation resync
 }
 export type GroupStateRecord = GroupKey & { version: number } & (
   | { deleted: true }
@@ -466,7 +534,7 @@ export type GroupEpochRuntime = {
 }
 export type SendAdmission =
   | { epoch: number; admissible: true }
-  | { epoch: number; admissible: false; reason: 'lapsed' | 'rotation-required' | 'stranded' | 'fork-halted' | 'terminal' }
+  | { epoch: number; admissible: false; reason: 'lapsed' | 'rotation-required' | 'stranded' | 'fork-halted' | 'terminal' | 'backup-restored' }
 export type RegistryHandleAccess = {
   key: GroupKey
   runtime: GroupEpochRuntime
@@ -481,6 +549,7 @@ export type RegistryHandleAccess = {
   pending: PendingAppFrames
 }
 export type GroupHandleRegistry = {
+  declareRestoredFromBackup(): Promise<void> // (r15 decision) before access/startup, durable holds and package invalidation
   access(groupID: string): Promise<RegistryHandleAccess>
   seed(group: GroupHandle, params: { replace?: boolean; joinRef: JoinRef | null }): Promise<GroupKey>
   switchIncarnation(candidate: GroupHandle, params: {
@@ -543,7 +612,11 @@ export type HostBuilt = Pick<BuiltCommit,
 ```
 
 `RejoinRecord.source` is `{key: GroupKey; stateVersion: number; identity: EpochIdentity | null}`;
-its target is `{targetID: string; topicID: string; groupInfoEpoch: number; groupInfoAuthenticator: Uint8Array}`.
+its target is `{targetID: string; topicID: string; groupInfoEpoch: number; groupInfoAuthenticator: Uint8Array; captureHead: LogPosition | null}` (r15 decision).
+The authenticated `captureHead` and original search origin never change. Only a proven head-only retry refreshes `expectedHead`.
+MLS `SealGroupInfoParams` requires `captureHead: string | null`; `RecoveryGroupInfo` returns it after authentication (r15 decision).
+The GroupMLS responder port becomes `sealGroupInfo(request: Uint8Array, captureHead: LogPosition | null)`.
+Its pending recovery result carries `captureHead` through framing, persistence and replay, without importing rpc types into MLS.
 Drop conflictEpoch and the source-prefix scan; retain exact payload, requestKey, candidate and bound external verdict stages.
 RejoinRecord adds `trigger: 'automatic' | 'manual'` and `authorisationID: string | null`; a manual attempt requires its matching durable authorisation.
 `StagedAdoption` adds incarnation. Control adapters, applied rows/responses/cursor and outcomes bind GroupKey.
@@ -568,6 +641,7 @@ export type PersistenceEvent = AppStatusEvent | GroupSafetyEvent
 export type RecoveryTarget = { id: string; commitTopicID: string; hub: LogHub & MailboxHub }
 export type ResyncProof = {
   targetID: string; topicID: string; groupInfoEpoch: number
+  captureHead: LogPosition | null // (r15 decision) authenticated reply's immutable head
   position: LogPosition; payloadDigest: string; verdict: Uint8Array
 }
 export type ManualRecovery =
@@ -629,7 +703,7 @@ export type AppSettlementResult =
 export type AppStatusEvent = GroupKey & { id: string; entry: AppOutboxEntry } & (
   | { kind: 'accepted' }
   | { kind: 'published'; occurrence: AppPublicationOutcome }
-  | { kind: 'failed'; reason: 'incarnation-abandoned' | 'removed' | 'deleted'; nextIncarnation?: number }
+  | { kind: 'failed'; reason: 'incarnation-abandoned' | 'removed' | 'deleted' | 'database-restored'; nextIncarnation?: number }
 )
 export type AppOutbox = {
   put(entry: AppOutboxEntry): Promise<void>
@@ -757,7 +831,7 @@ Standalone legacy memory control factories may remain for isolated tests, but ne
 
 ## Source checks
 
-Verified 2026-10-09 on feat/spec-p-phase-2. These are implementation boundaries, not r14 completion claims.
+Reverified for r15 on 2026-10-09, feat/spec-p-phase-2. These are implementation boundaries, not r15 completion claims.
 
 | Boundary | Current source |
 |---|---|
@@ -769,6 +843,10 @@ Verified 2026-10-09 on feat/spec-p-phase-2. These are implementation boundaries,
 | Divergence/ahead/own-unmerged classifier and strand observations | `packages/rpc/src/classify.ts:255`, `:282`, `packages/rpc/src/peer-types.ts:112` |
 | Losing forks currently heal; shared automatic recovery trigger | `packages/rpc/src/peer.ts:1512`, `:3053` |
 | Existing resync wrapper, producer, sealed reply and replacement gate | `packages/mls/src/group-welcome.ts:203`, `packages/mls-rpc/src/recovery.ts:144`, `packages/mls/src/recovery.ts:538`, `packages/mls/src/lifecycle.ts:445` |
+| Current reply v1, attestation layout/authentication and missing captureHead | `packages/mls/src/recovery.ts:35`, `:251`, `:261`, `:566`, `:618`, `:711`, `packages/rpc/src/peer.ts:1092`, `packages/mls-rpc/src/mls.ts:397` |
+| KeyPackage secrets generated independently, encoded and held in host source stores | `node_modules/ts-mls/dist/src/keyPackage.js:62`, `packages/mls/src/group-credential.ts:71`, `packages/mls/src/key-package-codec.ts:91`, `packages/mls-hub/src/pool.ts:117`, `packages/mls-hub/src/provisioner.ts:135`, `packages/mls-hub/src/pool-store.ts:24`, `packages/mls-hub/src/store.ts:21` |
+| Welcome private-key input and restored bundles | `packages/mls/src/group-welcome.ts:95`, `packages/mls-hub/src/records.ts:161` |
+| Hub KeyPackage surface has no revocation, last-resort upload replaces its slot | `packages/hub-protocol/src/protocol.ts:193`, `:241`, `:262`, `packages/hub-client/src/client.ts:186` |
 | Fresh resync tree/history and zero generations | `node_modules/ts-mls/dist/src/createCommit.js:289`, `node_modules/ts-mls/dist/src/secretTree.js:241` |
 | Ordinary adoption progress carry | `packages/mls/src/group-handle.ts:910` |
 | Current v1 codec and recovery source-tree splice | `packages/mls/src/codec.ts:25`, `packages/mls-rpc/src/recovery-codec.ts:36` |
@@ -779,7 +857,8 @@ Verified 2026-10-09 on feat/spec-p-phase-2. These are implementation boundaries,
 Supplied Probe Resync reports a fresh generation-zero replacement accepted by a real member; its assembled integration run was blocked.
 Probe C reports identical-byte retry/application with real ts-mls and memory/SQL hubs. D4 applies its proposal/key/progress conditions,
 using incarnation for source ownership. Neither probe was rerun for this documentation rewrite.
-Neither establishes a GroupInfo capture-head binding; the freshness gate above remains open.
+Neither exercised capture-head binding or database-loss recovery. R15 specifies their contracts and required conformance, without claiming implementation.
+Capture-epoch secret loss prevents classifying encrypted poison; with proven absence the attempt is discarded and fresh GroupInfo requested (r15 decision).
 
 ## Crash seams
 
@@ -798,6 +877,7 @@ Phase 6 kills children. After means proven transaction commit, never callback co
 | COMMIT rejected while backend unfinished | raw negative reads release nothing; barrier selects final rows and one hook queue |
 | Application lease committed, before seal | restart skips its entire reserved range; no sender generation repeats |
 | Welcome transport accepted, before obligation deletion | delivery repeats at least once; consume receipt/spent admission prevents reinstall |
+| Restore declaration committed, before package invalidation or group failure transactions finish | startup remains held after reconstruction. Resume invalidation/holds/events before resync or any send (r15 decision). |
 
 There is no pending-complete/cursor seam, state/control/anchor split seam or handshake-reservation seam.
 Remaining external P2a publish/confirm/bootstrap/Welcome seams use its stage replay; fork-healing seams are replaced by durable halt/manual recovery.
@@ -811,11 +891,15 @@ Keep each meaningful existing case. Replace cases tied solely to removed mechani
 |---|---|---|
 | codec / 2 | lossless sender | zero/one/absent clone/save/reopen, malformed sidecar and v1 refusal. Zero regression fails against current codec. |
 | recovery codec / 2 | complete sourceState | differing source/candidate trees, empty proposals and zero/one/absent senders. Persisted candidate/key restores bound verdict. V1 refuses. |
+| recovery reply / 2 | authenticated captureHead (r15 decision) | Responder exports the reconciled snapshot/cursor pair. String/null round-trip in attestation; missing/wrong-type head, tampering, invalid position and v1 refuse before build. Restart retains original captureHead and initial CAS head. |
 | persistence / 2,3 | CAS and monotonicity | Stale revision/version, tombstone-as-absent, lower epoch, same-number different authenticator or same-identity progress/ceiling regression reject unchanged. Non-root factories refuse. |
 | | incarnation switch atomicity/isolation | Source A4 in n to accepted external-resync state in n+1. Mid-write rollback changes neither record. Commit tombstones n and installs n+1 with fresh progress/anchor/cursors/control. Old applied rows cannot mask new-incarnation self-removal. |
 | | source/candidate guards | stale incarnation/version/source, unaccepted/refused/spent resync result reject. Ambiguous successful switch resolves once. Adopted replay never reinstalls. |
 | | spent authenticators across incarnations | A3 to A4 to fresh resync in n+1, reconstruct, exact and alternate valid A3 both refuse for ordinary/last-resort sources. Same authenticator/different bytes cannot evade admission. |
 | | lifetime/tombstone admission | every installation appends once. Rollback spends nothing. Delete/reopen keeps set. Unspent Welcome below an abandoned incarnation's epoch can create the next incarnation. Receipt-only replay never installs. |
+| | total database loss (r15 decision) | Lose group/spent state and all ordinary/last-resort private records together. Exact/alternate old Welcomes cannot decrypt/install, despite retained signing identity and hub copies. Fresh resync/invitation succeeds. Separately surviving key stores violate/refuse the provider-scope contract. |
+| | declared backup restore (r15 decision) | Restore an older snapshot, declare before startup. All groups hold durable/ephemeral sends across restart; discard/rotate restored ordinary and retained last-resort keys. Only fresh-leaf external resync switches each group once and enables sends. Missing old leaf refuses. Test revocation support/failure and current-hub residual. |
+| | restore outbox/crash (r15 decision) | All restored entries, including certified obligations, fail with database-restored events retaining data. Mid-write rollback exposes none; committed events replay until ack. Crash during declaration/invalidation/holds keeps startup blocked. No restored publish/reseal. Undeclared rollback is explicitly outside the guarantee. |
 | | failed-outbox event | switch atomically fails each unproven old entry/status and persists incarnation-abandoned event. Restart replays same ID/data until ack. No automatic reseal. Certified entries remain published. |
 | | order/read isolation | A4 occurrence (n,4,10) precedes resynced occurrence (n+1,2,20). Prior local watermark leaves it unread. Host history stays. Old-anchor peer receipt covers no new anchor. |
 | | open N, crash mid-batch | all N key advances/pending records commit or none. Rollback leaves keys usable and emits no plaintext/ack. Duplicate frame creates one pending record. |
@@ -836,7 +920,8 @@ Keep each meaningful existing case. Replace cases tied solely to removed mechani
 | safety / 2,3 | fork halt live/restart | either divergence branch and host same-epoch authenticator mismatch co-write halt/evidence/event; no sends (including ephemeral), opens, control or automatic resync after commit/restart. Ack does not clear halt. Rollback/ambiguity releases nothing. History stays. |
 | | strand signals / detection limits | ahead/gap/own-unmerged/unknown-version preserve confidence; settle saved own commit first. Missing history/consistent split view does not claim local detection; host can compare exposed authenticator and report divergence. |
 | | stranded automatic resync | retention gap/lost MLS state with no fork obtains sealed authenticated GroupInfo; Remove+ExternalInit accepted, one matching fresh leaf, generation 0 and new incarnation after restart. Unknown version is held, not skipped. |
-| | stale GroupInfo | intervening epoch makes external CAS fail; fetch fresh GroupInfo before fresh build. Same-epoch head-only mismatch retries exact bytes. No stale candidate install. |
+| | stale GroupInfo (r15 decision) | Valid commit lands after capture, before external publish. expectedHead=captureHead refuses. Reconcile, discard unadopted and request fresh GroupInfo. Old candidate never installs, including after restart. |
+| | capture-head poison retry (r15 decision) | Poison/non-commit/invalid frames after capture change head without valid epoch advancement. Proven complete reconciliation republishes identical payload/ID/candidate at refreshed head. Real member applies it; bound confirmation installs a fresh incarnation. Unclassifiable encrypted prefix with proven absence: attempt discarded unadopted, fresh GroupInfo requested, new attempt (fresh KeyPackage) lands; unknown acceptance holds. |
 | | manual recovery | no automatic action while halted; chosen target/authorisation reopens across restart, validated resync switches once, refused attempt preserves halt. Already admitted successor permits source retirement without copying state or coordinating routing. |
 | registry / 2 | cold access/leases | concurrent cold load validated before access. Lease reserve/restart/failed seal never reuse generation. Lapsed/removed/suspended/proposals defer burn without blocking control. |
 | | rotation/retention | 500 bound, rejection/hold/resume, non-admin empty rotation, 1000 retention/window through every constructor/derive/recovery. Real/double forward-window parity. Ordinary adoption preserves sender/receive history, no evicted epoch resurrection. |
@@ -855,7 +940,7 @@ Keep each meaningful existing case. Replace cases tied solely to removed mechani
 
 | Phase | Deliverable / gate |
 |---|---|
-| 2 | MLS state/recovery v2 codecs first. Memory group coordinator, registry/incarnations/spent admission, durable fork halt/manual recovery and automatic stranded resync with freshness-binding gate, commit-once runner, fair adaptive batching and handler metadata/policies. Application leases/rotation, encrypted namespaces, durable settlements/events and mutation/side-row/fault fixtures. hub-client lifts and mls-rpc encryptor. Both contract suites on real MLS and doubles. Real HTTP smoke with injected DID. |
+| 2 | MLS state/recovery v2 codecs first. Memory group coordinator, registry/incarnations/spent admission, durable fork halt/manual recovery and automatic stranded resync with authenticated captureHead, commit-once runner, fair adaptive batching and handler metadata/policies. Shared-provider KeyPackage contract, total-loss/declared-restore holds and conformance (r15 decision). Application leases/rotation, encrypted namespaces, durable settlements/events and mutation/side-row/fault fixtures. hub-client lifts and mls-rpc encryptor. Both contract suites on real MLS and doubles. Real HTTP smoke with injected DID. |
 | 3 | rpc-store sqlite/postgres providers and Expo support or explicit blocked reason. Explicit group transaction scope, root discriminator and outcome-aware Hozon hooks. Provider CAS/barrier/late-COMMIT/raw-encryption/side-row tests. SQLite device reconstruction. |
 | 4 | client ownership, identity/Spec I, Spec H/hub policy, inventory/consume, lifecycle and rotation scheduling. |
 | 5 | messaging protocols/MessageStore, transactional or idempotent handlers, durable status events, programmatic failed-send retry and per-anchor receipts. Expo bundle CI. |
@@ -889,3 +974,5 @@ baseline readers and build staging clone rules.
 Group transactions remove internal cross-store ordering and the chat-only D7 special case.
 The strongly consistent DS decision replaces automatic fork healing with durable halt/manual recovery; stranded devices still resync automatically.
 Spent authenticators, authenticated at-rest storage, publication obligations, provider ambiguity and external replay seams remain.
+
+- r15 (r15 decision): authenticated GroupInfo captureHead, stale-epoch CAS refusal and proven identical-byte poison retry. Total-loss KeyPackage co-storage and explicit backup-restore resync/rotation/outbox failure. Unclassifiable encrypted prefix: discard on proven absence, request fresh GroupInfo.

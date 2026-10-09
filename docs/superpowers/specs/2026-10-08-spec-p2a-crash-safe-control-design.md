@@ -739,7 +739,7 @@ integration suites green, and repo-wide `turbo run test:types`.
 ## Spec P r14 amendments
 
 These changes supersede this historical baseline, including its trust assumption, interfaces, crash/tests and risks.
-[Spec P r14](2026-10-08-spec-p-transactional-persistence.md) is normative for signatures and conformance.
+[Spec P r15](2026-10-08-spec-p-transactional-persistence.md) is normative for signatures and conformance, including the r15 additions below.
 Baseline source citations refer to the pre-landing snapshot; new citations below were verified on feat/spec-p-phase-2.
 
 - **Trust/fork halt (r14 decision).** Trust the strongly consistent hub for ordering/CAS and availability, never confidentiality/authenticity.
@@ -751,9 +751,19 @@ Baseline source citations refer to the pre-landing snapshot; new citations below
   authenticated sealed GroupInfo, Remove own old leaf + ExternalInit, fresh leaf/tree/generation-zero chains, normal policy and exact-commit confirmation.
   Unknown versions hold, never trigger a bypass. Fork recovery requires persisted host authorisation for a chosen target or already admitted successor;
   application owns hub/topic coordination, which ReInit does not carry. Retain exact external attempts; same-epoch head moves retry bytes,
-  changed epoch requires fresh GroupInfo. Drop lower-epoch candidate approval/source-prefix scans. Stale GroupInfo/head binding remains
-  an explicit unresolved phase-2 gate: CAS checks head (`packages/hub-store/src/store.ts:226`), not MLS epoch,
-  and the reply has no capture-head binding (`packages/mls/src/recovery.ts:566`).
+  changed epoch requires fresh GroupInfo. Drop lower-epoch candidate approval/source-prefix scans. R15 supplies the capture-head contract below.
+- **Capture-head binding (r15 decision).** The sealed, signed reply attests required `captureHead` alongside the exact GroupInfo digest.
+  Spec P D1 defines its encoding and v1/missing-field refusal. Initial external CAS uses `expectedHead = captureHead`.
+  After exact-acceptance search, complete mismatch reconciliation either retries identical bytes/ID or discards unadopted after a valid epoch move.
+  Stale GroupInfo never installs. GroupInfo has no capture-epoch receiver secrets, so unavailable validation state holds the attempt unadopted.
+  General encrypted poison-only retry after secret loss is impossible with this field alone. Spec P adds conformance for both branches.
+- **Database loss (r15 decision).** Total loss needs no spent set only when every ordinary/last-resort Welcome private key is also lost.
+  KeyPackage sources MUST share group state's provider/transaction/loss boundary. Current host-injected stores require that contract change.
+  Before startup after rollback, the host MUST call `declareRestoredFromBackup()`. Durable holds survive partial declaration/restart.
+  Every restored group needs fresh-leaf external resync into a new incarnation before sends. Fork/admission policy still applies.
+  Discard restored unused/last-resort packages, rotate and revoke hub copies where supported. Current hubs leave undecryptable stale invitation copies.
+  Every restored outbox entry fails with a durable `database-restored` event, including settlement obligations, overriding normal published settlement.
+  Undeclared backup restore is outside the model. Spec P defines total-loss/restore/crash conformance.
 - **Incarnations/admission (r14 decision).** Successful same-group recovery/readmission atomically tombstones n and installs n+1.
   Every epoch-keyed namespace/order/watermark binds incarnation. No lineage/floor, in-place replacement exception, recovery HWM/progress merge,
   displaced-row retirement or local ordinal machinery. Old outcomes/Welcomes remain under n; new control/anchor/cursors start fresh.
