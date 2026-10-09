@@ -1,5 +1,11 @@
 # @kumiai/mls
 
+## 0.10.3
+
+### Patch Changes
+
+- Allow reset-removed devices to rejoin with valid post-reset binding evidence while keeping subject and cascade revocations terminal.
+
 ## 0.10.2
 
 ### Patch Changes
