@@ -1,3 +1,4 @@
+import { encodeMultibase } from '@kokuin/token'
 import {
   type ConformanceAppOutbox,
   type ConformanceCryptoMember,
@@ -8,7 +9,9 @@ import {
   testGroupMLSConformance,
   testPendingGroupCryptoConformance,
 } from '@kumiai/rpc-conformance'
-import { toUTF } from '@sozai/codec'
+import { hmac } from '@noble/hashes/hmac.js'
+import { sha256 } from '@noble/hashes/sha2.js'
+import { fromUTF, toUTF } from '@sozai/codec'
 import { expect, test } from 'vitest'
 
 import type { AppOutbox } from '../src/app-outbox.js'
@@ -202,6 +205,12 @@ testGroupMLSConformance({
 
     return {
       groupID: id,
+      confirmationTag: (key, requestID) => encodeMultibase(hmac(sha256, key, fromUTF(requestID))),
+      buildRotation: async (index) => {
+        const member = members[index]
+        if (member == null) throw new Error('missing member')
+        return member.mls.buildCommit()
+      },
       pauseNextSave: (index, pause) => {
         const database = databases[index]
         if (database == null) throw new Error('missing database')
@@ -249,6 +258,52 @@ testGroupMLSConformance({
 
 testAppOutboxConformance({ label: 'createMemoryAppOutbox', createOutbox: createMemoryAppOutbox })
 const _outboxIsAPort = (outbox: AppOutbox): ConformanceAppOutbox => outbox
+
+test.each([
+  ['did:peer:4zRequester', 'did:peer:4zRequester:zDocument'],
+  ['did:peer:4zRequester:zDocument', 'did:peer:4zRequester'],
+])('recovery rejects normalized local signer %s as %s', async (localDID, signer) => {
+  const options = { groupID: 'normalized-verdict', members: ['alice', localDID] }
+  const requester = createMemoryGroupMLS({ ...options, localDID })
+  const responder = createMemoryGroupMLS({ ...options, localDID: 'alice' })
+  const { request, requestKey } = await requester.createRecoveryRequest('normalized')
+  const pending = await requester.applyRecovery(
+    await responder.sealGroupInfo(request),
+    'normalized',
+    requestKey,
+  )
+  if (pending == null || 'renewalRequired' in pending) throw new Error('No candidate')
+  const key = await pending.confirmationKey('position', 'digest')
+  const tuple = {
+    groupID: options.groupID,
+    requestID: 'normalized',
+    position: 'position',
+    commitDigest: 'digest',
+  }
+  const restored = await requester.restoreRecovery(pending.serialize(), requestKey)
+  for (const candidate of [pending, restored]) {
+    expect(
+      candidate.judgeVerdict({
+        signer,
+        verdict: {
+          ...tuple,
+          verdict: 'confirmed',
+          epoch: pending.epoch,
+          tag: encodeMultibase(hmac(sha256, key, fromUTF('normalized'))),
+        },
+      }),
+    ).toBe('advisory')
+    expect(
+      candidate.judgeVerdict({
+        signer,
+        verdict: { ...tuple, verdict: 'refused', reason: 'policy' },
+      }),
+    ).toBe('advisory')
+    expect(candidate.judgeVerdict({ signer, verdict: { ...tuple, verdict: 'superseded' } })).toBe(
+      'advisory',
+    )
+  }
+})
 
 test('ambiguous recovery save reads back committed state without another write', async () => {
   const groupID = 'ambiguous-recovery'

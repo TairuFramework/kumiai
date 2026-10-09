@@ -20,21 +20,24 @@ depend on both.
 - `simpleHandleAccess({ handle, adopt, persist? })` — serialised access to a live handle; the
   `HandleAccess` type for a host that brings its own.
 - `createGroupCrypto({ access, entryLabel?, runtime?, pending? })` — `GroupCrypto` over that access.
-- `createGroupMLS({ access, identity, entrySlot, recoverySecret? })` — `GroupMLS` over the same
-  access.
+- `createGroupMLS({ access, identity, entrySlot, recoverySecret?, recoveryBinding? })` — `GroupMLS`
+  over the same access.
 - `applyCommit({ handle, commit, entrySlot, ownDID, persist?, ... })` — apply a received Commit inside the host's own
   transaction (see below).
 - `createLedgerEntrySlot()` — the per-commit ledger-entry resolver seam (see below).
 - `deriveEntryKey`, `sealEntries`, `openEntries`, `ENTRY_SEAL_LABEL` — the ledger-entry seal.
-- `createRecoveryPending`, `deriveRecoverySecret`, `RECOVERY_LABEL` — recovery request keys and the
-  default recovery secret.
+- `deriveRecoverySecret`, `RECOVERY_LABEL` — the default recovery secret.
+  `GroupMLS.createRecoveryRequest` returns explicit request keys. `applyRecovery` creates candidates,
+  and `restoreRecovery(candidate, requestKey)` restores them.
 
 ## Share one access instance
 
 Both factories take the same `access` instance. The adapter reads the current handle through
 `handle: () => GroupHandle`, because authored commits and recovery replace it wholesale. A host
-adopts an authored commit through `access.replace(next)` after acceptance. The adapter saves before
-publishing the replacement and publishes its synchronous epoch hint after a successful save.
+adopts an authored commit through `access.replace(next, adoption, prepare)` after acceptance.
+The `prepare(current)` callback checks source identity and carries ratchet progress under the
+replacement gate. The adapter saves before publishing the replacement and publishes its synchronous
+epoch hint after a successful save.
 
 For a *received* commit there is nothing to adopt: ts-mls's `processMessage` advances the handle in
 place. A host that treated every commit as adopt-later would double-apply received ones.
@@ -52,12 +55,19 @@ const mls = createGroupMLS({ access, identity, entrySlot })
 
 A host with its own handle store implements the port instead:
 
-- `read(fn)` lends the handle for the callback only. `mutate(fn)` serialises with every other
-  operation and resolves after the state is stored; `fn`'s `persist` argument goes to
-  `processMessage` and `bootstrapLedger`. `replace(next)` stores before publishing. A transactional
-  host may restore a fresh handle per mutation, discard it on rollback, and publish on commit.
+- `read(fn)` lends the handle for the callback only. `mutate(fn, adoption?)` serialises with every other
+  operation and resolves after the state is stored. `fn`'s `persist` argument goes to
+  `processMessage` and `bootstrapLedger`. `replace(next, adoption?, prepare?)` stores before publishing.
+  A transactional host may restore a fresh handle per mutation, discard it on rollback, and publish on commit.
+- An `AdoptionWriteFactory` receives `{ epochAfter, removed, epochAuthenticator }` from the staged handle.
+  Invoke it before saving, including self-removal. Commit its `AdoptionWrite` atomically with the state.
+  `processCommit(commit, context)` supplies it as `context.adoption`. Live and restored recovery candidates require
+  `onAccepted(adoption)` and reject calls without a factory.
+- `replace` runs `prepare(current)` under the same gate as persistence. A false result skips saving and publishing.
 - `epoch()` is a synchronous hint. Publish it only after the outermost successful commit, and restore
   it on rollback. No port decision reads it: every one uses an epoch read under the lock.
+- `admission()` publishes synchronous send admission with the epoch after mutation, open or replacement resolves.
+  During adoption it describes the epoch being left.
 - `open(fn, persistOpened)` is the durable open. `fn` stages the open and hands its state and record
   to the callback it is given. A host may capture them, release its lock, and then call
   `persistOpened` to write both in one transaction guarded by the state row's revision, publishing
@@ -78,7 +88,7 @@ record and resolves for an unknown id. Deduplicate inserts by `record.frame.id`.
 const access = simpleHandleAccess({
   handle: () => handle,
   adopt: (next) => { handle = next },
-  persist: (current) => store.save(current),
+  persist: (current, write) => store.save(current, write),
 })
 const crypto = createGroupCrypto({
   access,
@@ -133,7 +143,7 @@ let handle = group
 const access = simpleHandleAccess({
   handle: () => handle,
   adopt: (next) => { handle = next },
-  persist: (current) => store.save(current),
+  persist: (current, write) => store.save(current, write),
 })
 const crypto = createGroupCrypto({ access })
 const mls = createGroupMLS({
@@ -146,12 +156,24 @@ const mls = createGroupMLS({
 Passing anything else means a commit resolves its entries against whatever resolver the handle
 happened to be born with.
 
-The optional adapter `persist` callback receives the tentative state after an accepted commit,
-the bootstrapped handle, or an ordinary ratchet operation. Writes must
-be atomic: rejection must leave storage unchanged, since the in-memory handle rolls back and no
-control notifications fire. Received-message and bootstrap persist runs under the handle mutex;
-it must not call back into that handle. Recovery persists the rejoined handle before adoption. If
-adoption throws, storage already holds the new handle and a restart loads it.
+The optional adapter `persist(current, write?)` callback receives the staged handle and any
+`AdoptionWrite`. An adoption requires persistence. `simpleHandleAccess` rejects an adoption factory
+without `persist` using `ControlWriteNotCommittedError`.
+Ordinary ratchet and bootstrap saves can omit the write.
+
+An adoption's root transaction saves the state, `write.changes`, and `write.mutationID` as the
+control store's last mutation.
+It also marks the pending anchor landed when `write.anchorLanded` matches its advance.
+A known failed transaction leaves storage and the live handle unchanged. Notifications follow successful persistence.
+Received-message and bootstrap persistence runs under the handle mutex. It must not call back into that handle.
+Recovery saves the rejoined handle before publishing it. If publishing fails, restart loads the stored handle.
+
+The host registry owns ambiguous adoption saves. Use `mutationID` as the state save's write identity
+and mark the group uncertain. Block opens, seals and bootstrap until read-back settles the save.
+Reload the committed handle before returning a settled result to the peer.
+`simpleHandleAccess` supplies serialisation and write forwarding. The host supplies this ambiguity
+resolution in its persistence and registry layer. The peer resolves only state-free
+`ControlStore.apply` ambiguity through `lastMutation()`, with backoff capped at 15 seconds.
 
 ## Applying a commit inside a host transaction
 
@@ -167,12 +189,25 @@ const result = await applyCommit({
   resolveLedgerEntries: (ids) => resolved(ids), // must not take the handle lock
   entrySlot,
   ownDID: identity.id,
-  persist,
+  persist: async (staged) => {
+    const write = adoption?.({
+      epochAfter: Number(staged.epoch),
+      removed: !staged.listMembers().some(
+        (member) => member.leafIndex === staged.state.privatePath.leafIndex,
+      ),
+      epochAuthenticator: staged.state.keySchedule.epochAuthenticator.slice(),
+    })
+    await store.save(staged, write)
+  },
 })
 if (result.applied) {
   // write result.rosterAfter, result.surfacedEntries, ... and commit
 }
 ```
+
+Here `adoption` is the incoming `CommitContext.adoption` factory. `store.save` participates in the
+host's root transaction. It commits the state and adoption write together with any projections.
+The host publishes only after that transaction settles.
 
 It refuses non-Commit bytes, a frame at another epoch, and this member's own authenticated commit
 before any resolver or mutation runs. `applied` means the handle took the commit's state; `advanced`

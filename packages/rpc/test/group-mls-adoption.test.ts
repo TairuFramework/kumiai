@@ -7,6 +7,71 @@ import { createMemoryHostDatabase } from './fixtures/host-db.js'
 import { createMemoryGroupMLS, memoryEntryID } from './fixtures/memory-group-mls.js'
 
 test.each([false, true])(
+  'competing rotation prevents own candidate settlement (restart %s)',
+  async (restart) => {
+    const groupID = `competing-adoption-${restart}`
+    const hostDB = createMemoryHostDatabase()
+    const options = { groupID, members: ['alice', 'bob'] }
+    const alice = createMemoryGroupMLS({ ...options, localDID: 'alice' })
+    let bob = createMemoryGroupMLS({ ...options, hostDB, localDID: 'bob' })
+    const source = await bob.readRecoverySource()
+    const expected = {
+      epoch: source.epoch,
+      authenticatorBefore: source.authenticator,
+      lineage: source.lineage,
+    }
+    const before = bob.serializeState()
+    const ownCommit = bob.buildCommit()
+    bob.adopt(ownCommit)
+    const candidate = bob.serializeState()
+    const ownAuthenticator = bob.authenticator()
+    bob.restoreState(before)
+    const otherCommit = alice.buildCommit()
+    expect(ownCommit).not.toEqual(otherCommit)
+    await bob.processCommit(otherCommit, {})
+    if (restart) {
+      const saved = await hostDB.loadState(groupID)
+      if (saved == null) throw new Error('missing saved state')
+      bob = createMemoryGroupMLS({ ...options, hostDB, localDID: 'bob' })
+      bob.restoreState(saved)
+    }
+    const current = bob.serializeState()
+    const write = { mutationID: 'wrong-branch', changes: { deleteOperations: ['rotation'] } }
+    expect(await bob.adoptOperation(candidate, expected, write)).toBe('moved')
+    expect(bob.authenticator()).not.toEqual(ownAuthenticator)
+    expect(bob.serializeState()).toEqual(current)
+    expect(await hostDB.loadState(groupID)).toEqual(current)
+    expect(await hostDB.control(groupID).lastMutation()).toBeNull()
+  },
+)
+
+test('own rotation identity survives installation and idempotent replay after restart', async () => {
+  const groupID = 'rotation-replay'
+  const hostDB = createMemoryHostDatabase()
+  const options = { groupID, hostDB, localDID: 'bob', members: ['alice', 'bob'] }
+  const bob = createMemoryGroupMLS(options)
+  const source = await bob.readRecoverySource()
+  const expected = {
+    epoch: source.epoch,
+    authenticatorBefore: source.authenticator,
+    lineage: source.lineage,
+  }
+  const before = bob.serializeState()
+  bob.adopt(bob.buildCommit())
+  const candidate = bob.serializeState()
+  const authenticator = bob.authenticator()
+  bob.restoreState(before)
+  const write = { mutationID: 'own-branch', changes: {} }
+  expect(await bob.adoptOperation(candidate, expected, write)).toBe('installed')
+  const saved = await hostDB.loadState(groupID)
+  if (saved == null) throw new Error('missing saved state')
+  const restored = createMemoryGroupMLS(options)
+  restored.restoreState(saved)
+  expect(restored.authenticator()).toEqual(authenticator)
+  expect(await restored.adoptOperation(candidate, expected, write)).toBe('noop')
+})
+
+test.each([false, true])(
   'memory MLS co-commits staged state and control (removal %s)',
   async (removed) => {
     const hostDB = createMemoryHostDatabase()

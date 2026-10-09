@@ -1,4 +1,4 @@
-import { decodeClientState, encodeClientState } from '@kumiai/mls'
+import { confirmationTag, decodeClientState, encodeClientState } from '@kumiai/mls'
 import { isAppFrameStorageError, type PendingAppFrame } from '@kumiai/rpc'
 import {
   testGroupCryptoConformance,
@@ -14,6 +14,7 @@ import { createGroupMLS } from '../src/mls.js'
 import {
   buildRealCommit,
   buildRealExternalCommit,
+  buildRealRotation,
   createRealBoundRecovery,
   createRealGroup,
   sealRealRecoveryVerdict,
@@ -177,6 +178,12 @@ testGroupMLSConformance({
     )
     return {
       groupID: group.committer.handle.groupID,
+      confirmationTag,
+      buildRotation: async (index) => {
+        const host = hosts[index]
+        if (host == null) throw new Error('missing host')
+        return await host.access.read(buildRealRotation)
+      },
       pauseNextSave: (index, pause) => {
         const store = stores[index]
         if (store == null) throw new Error('missing store')
