@@ -32,6 +32,7 @@ import type {
   ControlSnapshot,
   ExternalResponse,
   ForkEvidence,
+  Operation,
   OperationRequest,
   Outcome,
 } from './control/types.js'
@@ -695,15 +696,17 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     if (mls == null || control == null) return
     const epoch = await mls.readEpoch()
     if (durableCursor?.stranded === true && durableCursor.epoch === epoch && fork == null) return
+    // A later reveal must not discard rows already known to be affected by this strand.
+    const previous = durableCursor?.fork
+    const evidence =
+      previous != null && (fork == null || previous.conflictEpoch <= fork.conflictEpoch)
+        ? previous
+        : fork
     const cursor: CommitCursor = {
       position: durableCursor?.epoch === epoch ? durableCursor.position : null,
       epoch,
       stranded: true,
-      ...(fork != null
-        ? { fork }
-        : durableCursor?.fork != null
-          ? { fork: durableCursor.fork }
-          : {}),
+      ...(evidence == null ? {} : { fork: evidence }),
     }
     await applyResolved(control, { cursor }, newPublishID())
     durableCursor = cursor
@@ -2083,6 +2086,18 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     }
   }
 
+  const strandAccepted = async (op: Operation & { stage: 'accepted' }): Promise<void> => {
+    stranded = true
+    healRequested = true
+    const snapshot = await control?.load()
+    const row = snapshot?.applied.find((row) => row.epoch === op.built.epoch)
+    await persistStrand(
+      snapshot != null && row != null
+        ? forkEvidence(snapshot, op.built.epoch, op.built.digest)
+        : undefined,
+    )
+  }
+
   /** Saved payloads settle before any pull can encounter our own unmerged commit. */
   const settleOperations = async (): Promise<boolean> => {
     controlReplayed = true
@@ -2103,8 +2118,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       if (next === op) {
         if (op.stage !== 'accepted')
           throw new RecoveryRequiredError('An operation is awaiting settlement')
-        stranded = true
-        healRequested = true
+        await strandAccepted(op)
         break
       }
       op = next ?? undefined
@@ -2161,8 +2175,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
               await refreshControl()
               if (next === op) {
                 if (op.stage === 'accepted') {
-                  stranded = true
-                  healRequested = true
+                  await strandAccepted(op)
                 }
                 retry = true
                 break

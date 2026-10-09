@@ -528,7 +528,11 @@ test('a moved acceptance with rewrapped payload stays accepted and strands the p
     operations: [accepted],
     outcomes: [],
     applied: snapshot.applied,
-    cursor: snapshot.cursor,
+    cursor: {
+      ...snapshot.cursor,
+      stranded: true,
+      fork: { conflictEpoch: 1, sharedPosition: null, frameDigest: row.digest },
+    },
   })
   await expect(bob.peer.commit(buildLedgerCommit(bob, []))).rejects.toThrow(
     'group control requires recovery',
