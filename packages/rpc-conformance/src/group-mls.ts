@@ -85,7 +85,7 @@ export type ConformancePendingRecovery = {
   judgeVerdict: (opened: ConformanceOpenedRecoveryVerdict) => 'authoritative' | 'advisory'
   commit: Uint8Array
   serialize: () => Uint8Array
-  onAccepted(write?: ConformanceCommitContext['adoption']): Promise<void>
+  onAccepted(write: NonNullable<ConformanceCommitContext['adoption']>): Promise<void>
 }
 
 export type ConformanceRestoredPendingRecovery = Omit<ConformancePendingRecovery, 'onAccepted'> & {
@@ -122,6 +122,7 @@ export type ConformanceGroupMLS = {
   ) => Promise<ConformanceOpenedRecoveryVerdict | null>
   sendAdmission: () => ConformanceSendAdmission
   readEpoch: () => Promise<number>
+  readRecoverySource: () => Promise<{ epoch: number; authenticator: Uint8Array; lineage: number }>
   rosterEntries: () => Promise<Array<ConformanceRosterEntry>>
   readCommitHeader: (commit: Uint8Array) => Promise<ConformanceCommitHeader | null>
   processCommit: (
@@ -256,6 +257,23 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
   }
 
   describe(`GroupMLS conformance — ${label}`, () => {
+    test('recovery source identity is a detached snapshot of the locked epoch', async () => {
+      await withGroup(1, 'recovery-source', async (group) => {
+        const member = memberAt(group.members, 0)
+        const source = await member.mls.readRecoverySource()
+        expect(source.epoch).toBe(await member.mls.readEpoch())
+        expect(source.authenticator.length).toBeGreaterThan(0)
+        expect(source.lineage).toBeGreaterThanOrEqual(0)
+        const original = source.authenticator.slice()
+        source.authenticator.fill(0)
+        expect((await member.mls.readRecoverySource()).authenticator).toEqual(original)
+        const commit = await group.buildCommit()
+        await member.mls.processCommit(commit.commit, commit.context)
+        const next = await member.mls.readRecoverySource()
+        expect(next.epoch).toBe(source.epoch + 1)
+        expect(next.authenticator).not.toEqual(original)
+      })
+    })
     test('adoption factories see the staged epoch and self-removal before saving', async () => {
       await withGroup(1, 'adoption-staged', async (group) => {
         const member = memberAt(group.members, 0)
@@ -804,6 +822,7 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           const pending = await bob.mls.applyRecovery(reply, 'required-write', requestKey)
           if (pending == null || 'renewalRequired' in pending) throw new Error('No candidate')
           const bytes = pending.serialize()
+          await expect(Reflect.apply(pending.onAccepted, pending, [])).rejects.toThrow()
           const restored = await bob.mls.restoreRecovery(bytes, requestKey)
           const before = await bob.mls.readEpoch()
           await expect(Reflect.apply(restored.onAccepted, restored, [])).rejects.toThrow()
@@ -894,8 +913,14 @@ export function testGroupMLSConformance(params: GroupMLSConformanceParams): void
           })
           expect((await alice.mls.confirmationKey('position', 'other')).key).not.toEqual(key)
           expect((await alice.mls.confirmationKey('other', 'digest')).key).not.toEqual(key)
-          await pending.onAccepted()
-          await pending.onAccepted()
+          await pending.onAccepted(() => ({
+            mutationID: crypto.randomUUID(),
+            changes: { deleteRejoin: true },
+          }))
+          await pending.onAccepted(() => ({
+            mutationID: crypto.randomUUID(),
+            changes: { deleteRejoin: true },
+          }))
           expect(await bob.mls.readEpoch()).toBe(pending.epoch)
         })
       })

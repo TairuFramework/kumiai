@@ -55,6 +55,7 @@ describe('durable peer operations', () => {
       expect((await bob.control.load()).operations).toEqual([])
       expect(await bob.peer.outcomes()).toEqual([
         expect.objectContaining({ opID: request.id, kind: 'unknown' }),
+        expect.objectContaining({ opID: null, kind: 'reenact', tokens: ['other-local-branch'] }),
       ])
       expect(bob.mls.epoch()).toBe(4)
     } finally {

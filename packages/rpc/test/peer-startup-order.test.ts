@@ -229,7 +229,9 @@ test.each(['built', 'published', 'confirmed'] as const)(
     const strands = vi.fn()
     const again = makeMLSPeer(hub, 'bob', secret, { restartOf: seed, onStrand: strands })
     peers.push(again)
-    await again.peer.replay()
+    if (stage === 'confirmed')
+      vi.spyOn(again.mls, 'restoreRecovery').mockRejectedValue(new Error('Pause adoption'))
+    await again.peer.outcomes()
     expect((await again.control.load()).rejoin).toMatchObject({
       stage: stage === 'built' ? 'published' : stage,
       position: published.sequenceID,
@@ -277,7 +279,9 @@ test.each(['published', 'confirmed'] as const)(
       recovery: { getDelayMs: () => 0 },
     })
     peers.push(again)
-    await again.peer.replay()
+    if (stage === 'confirmed')
+      vi.spyOn(again.mls, 'restoreRecovery').mockRejectedValue(new Error('Pause adoption'))
+    await again.peer.outcomes()
     const requester = makeMLSPeer(hub, 'carol', secret, { members: ['bob', 'carol'] })
     peers.push(requester)
     for (const [index, response] of responses.entries()) {

@@ -149,7 +149,10 @@ async function acceptRecovery(
   await expect(
     fixture.responder.processCommit(pending.commit, { senderDID: fixture.bob.id }),
   ).resolves.toMatchObject({ advanced: true })
-  await pending.onAccepted()
+  await pending.onAccepted(() => ({
+    mutationID: crypto.randomUUID(),
+    changes: { deleteRejoin: true },
+  }))
   expect(fixture.member().bindingOfDID(fixture.bob.id)?.holderGrant).toBe(
     fixture.binding.holderGrant,
   )

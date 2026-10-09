@@ -221,3 +221,40 @@ test('restored adoption survives a crash with its control changes and no second 
     { id: 'rejoin-result', kind: 'reenact', opID: null, at: 123, tokens: ['before'] },
   ])
 })
+
+test('live acceptance requires a write and restart retains its co-committed changes exactly once', async () => {
+  const s = await setup()
+  const store = createTransactionalStore(s.member.handle)
+  const first = await createTransactionalAccess(s.member, store)
+  const port = createGroupMLS({
+    access: first.access,
+    identity: s.member.identity,
+    entrySlot: s.member.slot,
+  })
+  const live = await port.applyRecovery(s.sealed, 'candidate-request', s.requestKey)
+  if (live == null || 'renewalRequired' in live) throw new Error('Expected candidate')
+  const bytes = live.serialize()
+  await expect(Reflect.apply(live.onAccepted, live, [])).rejects.toThrow()
+  expect(store.snapshot().revision).toBe(0)
+  await live.onAccepted(() => ({
+    mutationID: 'live-rejoin',
+    changes: {
+      putOutcomes: [{ id: 'live-result', opID: null, at: 123, kind: 'reenact', tokens: ['owed'] }],
+    },
+  }))
+  const restartedStore = await store.fork()
+  const restartedAccess = await createTransactionalAccess(s.member, restartedStore)
+  const restarted = createGroupMLS({
+    access: restartedAccess.access,
+    identity: s.member.identity,
+    entrySlot: s.member.slot,
+  })
+  await (await restarted.restoreRecovery(bytes, s.requestKey)).onAccepted(() => {
+    throw new Error('Already committed')
+  })
+  expect(restartedStore.snapshot().revision).toBe(1)
+  expect(restartedStore.snapshot().mutationID).toBe('live-rejoin')
+  expect(restartedStore.snapshot().control.outcomes).toEqual([
+    { id: 'live-result', opID: null, at: 123, kind: 'reenact', tokens: ['owed'] },
+  ])
+})

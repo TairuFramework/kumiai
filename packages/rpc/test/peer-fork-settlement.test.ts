@@ -424,14 +424,122 @@ describe('durable fork evidence', () => {
     },
   )
 
-  test.todo('Task 12: rejoin uses stored fork evidence after a crash before its build')
-  test.todo('Task 12: a forged lower-position conflict heals without asserting which operation won')
-  test.todo(
-    'Task 12: rejoin settles a losing-branch invite as unknown and its roster decides membership',
-  )
-  test.todo(
-    'Task 12: rejoin adoption overwrites an own landed row only after settling its operation as unknown',
-  )
-  test.todo('Task 12: fork loser restart and winner reveal produce unknown and reenact outcomes')
-  test.todo('Task 12: final rejoin apply retains its row at or above the conflict epoch')
+  async function healStoredFork(
+    options: { acceptedInvite?: boolean; collision?: boolean; reenact?: boolean } = {},
+  ) {
+    const hub = new FakeHub()
+    const alice = makeMLSPeer(hub, 'alice', secret, {
+      members: ['alice', 'bob'],
+      recovery: { timeoutMs: 30, deadlineMs: 300, getDelayMs: () => 0 },
+    })
+    peers.push(alice)
+    const bob = member(hub, {
+      epoch: 2,
+      recovery: { timeoutMs: 30, deadlineMs: 300, getDelayMs: () => 0 },
+      adopt: async () => 'moved',
+    })
+    await alice.peer.replay()
+    await bob.peer.replay()
+    const rows = options.collision
+      ? [applied(1, 'own')]
+      : [applied(0, 'older'), applied(1, 'own'), applied(2, 'later')]
+    const accepted = { ...operation('invite', 1, 'accepted'), kind: 'invite' as const }
+    if (options.acceptedInvite) {
+      bob.mls.adopt(bob.mls.buildCommit([], { adds: ['dave'] }))
+      await bob.database.saveState('bob', bob.mls.serializeState())
+    }
+    if (options.reenact) {
+      bob.mls.adopt(bob.mls.buildCommit(['branch-token']))
+      await bob.database.saveState('bob', bob.mls.serializeState())
+    }
+    await bob.control.apply(
+      {
+        putApplied: rows,
+        putOutcomes: rows.flatMap((row) => (row.opID == null ? [] : [landed(row.opID, row.epoch)])),
+        ...(options.acceptedInvite ? { putOperations: [accepted] } : {}),
+        cursor: {
+          position: null,
+          epoch: bob.mls.epoch(),
+          stranded: true,
+          fork: { conflictEpoch: 1, sharedPosition: null, frameDigest: 'withheld-competitor' },
+        },
+      },
+      'stored-fork',
+    )
+    await bob.peer.dispose()
+    await bob.peer.drained()
+    const restarted = member(hub, {
+      restartOf: bob,
+      recovery: { timeoutMs: 30, deadlineMs: 300, getDelayMs: () => 0 },
+      adopt: async () => 'moved',
+    })
+    await expect
+      .poll(
+        async () => {
+          const snapshot = await restarted.control.load()
+          return (
+            snapshot.rejoin == null &&
+            snapshot.outcomes.some(
+              (outcome) => outcome.opID === 'own' && outcome.kind === 'unknown',
+            )
+          )
+        },
+        { timeout: 5000 },
+      )
+      .toBe(true)
+    return { hub, alice, restarted, snapshot: await restarted.control.load() }
+  }
+
+  test('rejoin uses stored fork evidence after a crash before its build', async () => {
+    const { snapshot } = await healStoredFork()
+    expect(snapshot.outcomes).toEqual([
+      landed('older', 0),
+      expect.objectContaining({ opID: 'own', kind: 'unknown' }),
+      expect.objectContaining({ opID: 'later', kind: 'unknown' }),
+    ])
+    expect(snapshot.cursor?.fork).toBeUndefined()
+  })
+  test('a forged lower-position conflict heals without asserting which operation won', async () => {
+    const { snapshot } = await healStoredFork()
+    expect(
+      snapshot.outcomes
+        .filter((outcome) => outcome.opID !== 'older')
+        .map((outcome) => outcome.kind),
+    ).toEqual(['unknown', 'unknown'])
+  })
+  test('rejoin settles a losing-branch invite as unknown and its roster decides membership', async () => {
+    const { restarted, snapshot } = await healStoredFork({ acceptedInvite: true })
+    expect(snapshot.operations).toEqual([])
+    expect(restarted.mls.leaves()).not.toContain('dave')
+    expect(snapshot.outcomes).toContainEqual(
+      expect.objectContaining({ opID: 'invite', kind: 'unknown' }),
+    )
+    expect(await restarted.mls.rosterEntries()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ did: 'alice' }),
+        expect.objectContaining({ did: 'bob' }),
+      ]),
+    )
+  })
+  test('rejoin adoption overwrites an own landed row only after settling its operation as unknown', async () => {
+    const { snapshot } = await healStoredFork({ collision: true })
+    expect(snapshot.applied).toEqual([expect.objectContaining({ epoch: 1, opID: null })])
+    expect(snapshot.outcomes).toEqual([expect.objectContaining({ opID: 'own', kind: 'unknown' })])
+  })
+  test('fork loser restart and winner reveal produce unknown and reenact outcomes', async () => {
+    const { snapshot } = await healStoredFork({ reenact: true })
+    expect(snapshot.outcomes).toContainEqual(
+      expect.objectContaining({ kind: 'reenact', tokens: ['branch-token'] }),
+    )
+    expect(snapshot.outcomes).toContainEqual(
+      expect.objectContaining({ opID: 'own', kind: 'unknown' }),
+    )
+  })
+  test('final rejoin apply retains its row at or above the conflict epoch', async () => {
+    const { snapshot, restarted } = await healStoredFork()
+    const rows = snapshot.applied
+    expect(rows).toEqual([applied(0, 'older'), expect.objectContaining({ epoch: 1, opID: null })])
+    await restarted.peer.replay()
+    expect((await restarted.control.load()).applied).toEqual(rows)
+  })
 })

@@ -220,7 +220,7 @@ describe('recovery lifecycle', { concurrent: false }, () => {
     await bob.peer.dispose()
   })
 
-  test('a new ledger entry after a failed pre-adoption attempt is reenacted once', async () => {
+  test('a queued ledger entry after a failed publish waits for rejoin and lands once', async () => {
     const hub = new FakeHub()
     const rs = secret(0xcb)
     const bob = makeMLSPeer(hub, 'bob', rs, { epoch: 2, members })
@@ -242,7 +242,8 @@ describe('recovery lifecycle', { concurrent: false }, () => {
     await expect(alice.peer.recover()).rejects.toThrow('rejoin publish failed')
     const newer = 'circle:new=Alice'
     await alice.peer.commit(buildLedgerCommit(alice, [newer]))
-    expect(await alice.peer.recover()).toEqual({ advanced: true, reenact: [newer] })
+    expect(await alice.peer.recover()).toEqual({ advanced: true, reenact: [] })
+    expect(await alice.mls.getLedger()).toEqual([newer])
     expect(await alice.peer.replay()).toEqual({})
     await alice.peer.dispose()
     await bob.peer.dispose()

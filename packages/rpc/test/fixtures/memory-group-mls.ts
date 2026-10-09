@@ -436,6 +436,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   const localDID = options.localDID
   const acceptsCommitter = options.acceptsCommitter ?? (() => true)
   const serveLedger = options.serveLedger ?? ((ledger: Array<string>) => ledger)
+  let recoveryAuthenticator: string | undefined
   let epoch = options.epoch ?? 0
   let commits = 0
   let seen = 0
@@ -515,6 +516,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   }
 
   const advance = (to: number): void => {
+    recoveryAuthenticator = undefined
     epoch = to
     options.onAdvance?.(epoch)
   }
@@ -614,7 +616,16 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
   }
 
   const serializeState = (): Uint8Array =>
-    fromUTF(JSON.stringify({ epoch, slots: [...slots], ledger, ledgerHead, bodies: [...bodies] }))
+    fromUTF(
+      JSON.stringify({
+        epoch,
+        slots: [...slots],
+        ledger,
+        ledgerHead,
+        bodies: [...bodies],
+        recoveryAuthenticator,
+      }),
+    )
   const restoreState = (state: Uint8Array): void => {
     const value = JSON.parse(toUTF(state)) as {
       epoch: number
@@ -622,21 +633,25 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       ledger: Array<string>
       ledgerHead: string
       bodies: Array<[string, string]>
+      recoveryAuthenticator?: string
     }
     slots = new Map(value.slots)
     ledger = value.ledger
     ledgerHead = value.ledgerHead
     bodies = new Map(value.bodies)
     advance(value.epoch)
+    recoveryAuthenticator = value.recoveryAuthenticator
   }
   const authenticator = (): Uint8Array =>
-    sha256(
-      concatBytes(
-        recoverySecret,
-        fromUTF(groupID),
-        fromUTF(JSON.stringify({ epoch, slots: [...slots], ledger, ledgerHead })),
-      ),
-    )
+    recoveryAuthenticator == null
+      ? sha256(
+          concatBytes(
+            recoverySecret,
+            fromUTF(groupID),
+            fromUTF(JSON.stringify({ epoch, slots: [...slots], ledgerHead })),
+          ),
+        )
+      : fromB64U(recoveryAuthenticator)
 
   const ledgerTokens = (): Array<string> =>
     ledger.flatMap((id) => {
@@ -650,7 +665,6 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     requestKey: Uint8Array,
     candidateBinding?: MemoryRecoveryBinding,
     boundCommit?: { position: string; commitDigest: string; tag: string },
-    requireWrite = false,
   ): PendingRecovery {
     const candidateBindingID = candidateBinding == null ? undefined : bindingID(candidateBinding)
     let accepted: Promise<void> | undefined
@@ -707,11 +721,9 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         return info.members.includes(signer) ? 'authoritative' : 'advisory'
       },
       onAccepted: (factory) => {
-        if (requireWrite && typeof factory !== 'function') {
+        if (typeof factory !== 'function') {
           return Promise.reject(
-            new ControlWriteNotCommittedError(
-              'Restored recovery requires an adoption write factory',
-            ),
+            new ControlWriteNotCommittedError('Recovery requires an adoption write factory'),
           )
         }
         accepted ??= (async () => {
@@ -733,6 +745,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
               slots = new Map(value.slots)
               bodies = new Map(value.bodies)
               advance(value.epoch)
+              recoveryAuthenticator = value.recoveryAuthenticator
               binding = candidateBinding
               return
             }
@@ -741,12 +754,12 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
             failRecoveryAdopt = false
             throw new Error('the process died in the acceptance window')
           }
-          const nextSlots = new Map(slots)
+          const nextSlots = new Map(info.members.map((did, index) => [index, did]))
           if (localDID != null) {
             slotRemoveDID(localDID, nextSlots)
             slotAdd(localDID, nextSlots)
           }
-          const write = factory?.({
+          const write = factory({
             epochAfter: info.epoch + 1,
             removed: false,
             epochAuthenticator: authenticator,
@@ -758,14 +771,24 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
               ledger: [],
               ledgerHead: info.head,
               bodies: [...bodies],
-              recoveryAuthenticator: write == null ? undefined : toB64U(authenticator),
+              recoveryAuthenticator: toB64U(authenticator),
             }),
           )
-          await hostDB.saveState(storageID, state, write)
+          try {
+            await hostDB.saveState(storageID, state, write)
+          } catch (error) {
+            if (
+              !(error instanceof Error) ||
+              error.name !== 'StorageOutcomeUnknownError' ||
+              (await hostDB.control(storageID).lastMutation()) !== write.mutationID
+            )
+              throw error
+          }
           ledger = []
           ledgerHead = info.head
           slots = nextSlots
           advance(info.epoch + 1)
+          recoveryAuthenticator = toB64U(authenticator)
           binding = candidateBinding
         })().catch((error: unknown) => {
           accepted = undefined
@@ -848,6 +871,9 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
     },
     evict(did: string) {
       slotRemoveDID(did)
+    },
+    async readRecoverySource() {
+      return { epoch, authenticator: authenticator(), lineage: 0 }
     },
     async readEpoch(): Promise<number> {
       return epoch
@@ -1033,6 +1059,7 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
       // A REPLACEMENT, not an append: a list that reproduces the authenticated head is the
       // group's entire ledger, in order.
       ledger = entryIDs
+      await hostDB.saveState(storageID, serializeState())
     },
     async createRecoveryRequest(requestID: string) {
       const requesterDID = localDID ?? ''
@@ -1165,7 +1192,6 @@ export function createMemoryGroupMLS(options: MemoryGroupMLSOptions = {}): Memor
         requestKey,
         snapshot.candidateBinding,
         snapshot.tuple,
-        true,
       )
     },
     exportRecoverySecret() {

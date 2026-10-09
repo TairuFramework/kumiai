@@ -5,6 +5,7 @@ import {
   createGroup,
   createInvite,
   createKeyPackageBundle,
+  encodeClientState,
   exportGroupInfo,
   type GroupHandle,
   joinGroupExternal,
@@ -17,6 +18,7 @@ import { decode, encode, mlsMessageDecoder, mlsMessageEncoder, wireformats } fro
 
 import { type HandleAccess, simpleHandleAccess } from '../../src/access.js'
 import { createGroupMLS, createLedgerEntrySlot, type LedgerEntrySlot } from '../../src/mls.js'
+import { createTransactionalStore } from './transactional-access.js'
 
 export type RealMember = {
   identity: OwnIdentity
@@ -26,7 +28,7 @@ export type RealMember = {
 
 export async function createRealBoundRecovery(
   makeAccess: (member: RealMember) => Promise<HandleAccess> = async (member) =>
-    simpleHandleAccess({
+    persistedTestAccess({
       handle: () => member.handle,
       adopt: (next) => {
         member.handle = next
@@ -285,5 +287,22 @@ export async function sealRealRecoveryVerdict(
     request: new TextDecoder().decode(request),
     plaintext: new TextEncoder().encode(stringifyToken(token)),
     requireMember: false,
+  })
+}
+
+export function persistedTestAccess(
+  params: Pick<Parameters<typeof simpleHandleAccess>[0], 'handle' | 'adopt'>,
+): HandleAccess {
+  const store = createTransactionalStore(params.handle())
+  return simpleHandleAccess({
+    ...params,
+    persist: (handle, write) =>
+      store.save(
+        store.snapshot().revision,
+        encodeClientState(handle.state),
+        handle.ledgerTokens,
+        undefined,
+        write,
+      ),
   })
 }

@@ -55,6 +55,7 @@ export const mlsHostMembers = {
   openRecoveryVerdict: 'host',
   sendAdmission: 'host',
   readEpoch: 'host',
+  readRecoverySource: 'host',
   rosterEntries: 'host',
   readCommitHeader: 'host',
   processCommit: 'host',

@@ -371,7 +371,7 @@ export type PendingRecovery = {
    * Adopt the confirmed handle once. Repeated calls share the same acceptance.
    * Standard groups still need ledger bootstrap after adoption.
    */
-  onAccepted(write?: AdoptionWriteFactory): Promise<void>
+  onAccepted(write: AdoptionWriteFactory): Promise<void>
   /** Sealed restorable candidate, including verdict and binding evidence. */
   serialize(): Uint8Array
 }
@@ -423,6 +423,8 @@ export type GroupMLS = {
   sendAdmission(): SendAdmission
   /** Read the current handle epoch under the host's handle lock. */
   readEpoch(): Promise<number>
+  /** Read the source identity under the host handle lock. */
+  readRecoverySource(): Promise<{ epoch: number; authenticator: Uint8Array; lineage: number }>
   /**
    * The leaves this handle's ratchet tree currently holds, one {@link RosterEntry} per leaf, in
    * ascending `leafIndex` order. Purely local: reads no secret, advances nothing.

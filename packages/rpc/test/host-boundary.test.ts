@@ -94,7 +94,10 @@ describe('host invocation boundary', () => {
     })
     const recovery = wrapPendingRecovery(boundary, receiver)
     expect(recovery.commit).toBe(bytes)
-    const accepting = recovery.onAccepted()
+    const accepting = recovery.onAccepted(() => ({
+      mutationID: crypto.randomUUID(),
+      changes: { deleteRejoin: true },
+    }))
     boundary.close()
     let settled = false
     const drain = boundary.drained(Promise.resolve()).then(() => {
@@ -105,7 +108,12 @@ describe('host invocation boundary', () => {
     pause.release()
     await accepting
     await drain
-    expect(() => recovery.onAccepted()).toThrow(PeerDisposedError)
+    expect(() =>
+      recovery.onAccepted(() => ({
+        mutationID: crypto.randomUUID(),
+        changes: { deleteRejoin: true },
+      })),
+    ).toThrow(PeerDisposedError)
     expect(calls).toBe(1)
     expect(inspected).toBe(0)
   })

@@ -94,7 +94,7 @@ describe('recovery ordering', { concurrent: false }, () => {
       await receive({ ...binding, verdict: 'superseded' })
       if (confirm) {
         await receive({ ...binding, verdict: 'confirmed', epoch: pending.epoch, tag })
-        expect(await outcome).toEqual({ kind: 'confirmed', position, epoch: pending.epoch })
+        expect(await outcome).toMatchObject({ kind: 'confirmed', position, epoch: pending.epoch })
         expect(vi.getTimerCount()).toBe(0)
       } else {
         await vi.advanceTimersByTimeAsync(80)

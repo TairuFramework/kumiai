@@ -87,7 +87,7 @@ export function createRecoveryCache<TValue>(release: (value: TValue) => void = (
 }
 
 export type ConfirmationOutcome =
-  | { kind: 'confirmed'; position: string; epoch: number }
+  | { kind: 'confirmed'; position: string; epoch: number; sealed: Uint8Array }
   | { kind: 'superseded' }
   | { kind: 'refused'; refusal: RecoveryRefusalReason; responder: string }
   | { kind: 'unconfirmed'; advisory: Array<OpenedRecoveryVerdict> }
@@ -183,7 +183,7 @@ export function waitForRecoveryConfirmation(
               return
             }
             if (verdict.verdict === 'confirmed') {
-              finish({ kind: 'confirmed', position, epoch: pending.epoch })
+              finish({ kind: 'confirmed', position, epoch: pending.epoch, sealed })
               return
             }
             if (verdict.verdict === 'superseded') best = { kind: 'superseded' }

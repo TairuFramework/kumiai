@@ -12,8 +12,10 @@ import {
   registrySeed,
   revokeWithProof,
 } from '@kumiai/mls'
-import { createGroupMLS, createLedgerEntrySlot, simpleHandleAccess } from '@kumiai/mls-rpc'
+import { createGroupMLS, createLedgerEntrySlot } from '@kumiai/mls-rpc'
 import { afterEach, expect, test, vi } from 'vitest'
+
+import { createDurableHandleAccess } from './app-lane-e2e.js'
 
 const fixture = (await import(
   new URL('../../../packages/mls/test/fixtures/lifecycle-pipeline.ts', import.meta.url).href
@@ -72,7 +74,7 @@ async function setup(
   const responder = createGroupMLS({
     identity: bob,
     entrySlot: createLedgerEntrySlot(),
-    access: simpleHandleAccess({
+    access: createDurableHandleAccess({
       handle: () => responderGroup,
       adopt: () => {
         throw new Error('Unexpected adoption')
@@ -82,7 +84,7 @@ async function setup(
   const mls = createGroupMLS({
     identity,
     entrySlot: createLedgerEntrySlot(),
-    access: simpleHandleAccess({
+    access: createDurableHandleAccess({
       handle: () => group,
       adopt: (next: GroupHandle) => {
         group = next
@@ -169,8 +171,14 @@ test('pending verdicts bind the epoch, position, digest and tag, and adoption is
     expect(pending.judgeVerdict({ ...opened, verdict: { ...verdict, ...change } })).toBe('advisory')
   }
   expect(pending.judgeVerdict({ ...opened, signer: fixture.agent(81).id })).toBe('advisory')
-  await pending.onAccepted()
-  await pending.onAccepted()
+  await pending.onAccepted(() => ({
+    mutationID: crypto.randomUUID(),
+    changes: { deleteRejoin: true },
+  }))
+  await pending.onAccepted(() => ({
+    mutationID: crypto.randomUUID(),
+    changes: { deleteRejoin: true },
+  }))
   expect(await s.mls.readEpoch()).toBe(pending.epoch)
 })
 
@@ -290,7 +298,7 @@ test('a lifecycle GroupInfo signer revoked in the known ledger is refused', asyn
   const removed = await revokeWithProof(s.group(), { subject: s.bob.id, log: [inception, rev] })
   if (removed.status !== 'built') throw new Error('Expected proof commit')
   // Keep the responder's old tree while installing the accepted proof on the requester.
-  const access = simpleHandleAccess({
+  const access = createDurableHandleAccess({
     handle: () => removed.result.newGroup,
     adopt: () => {
       throw new Error('Unexpected adoption')
@@ -414,7 +422,7 @@ test('caller rejection and a replacement without a prior leaf propagate policy a
   const mls = createGroupMLS({
     identity: s.identity,
     entrySlot: createLedgerEntrySlot(),
-    access: simpleHandleAccess({
+    access: createDurableHandleAccess({
       handle: () => rejector,
       adopt: () => {
         throw new Error('Unexpected adoption')

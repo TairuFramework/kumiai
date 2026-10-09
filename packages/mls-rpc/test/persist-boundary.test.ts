@@ -3,7 +3,12 @@ import { expect, test, vi } from 'vitest'
 
 import { simpleHandleAccess } from '../src/access.js'
 import { createGroupMLS } from '../src/mls.js'
-import { buildRealCommit, buildRealExternalCommit, createRealGroup } from './fixtures/real-group.js'
+import {
+  buildRealCommit,
+  buildRealExternalCommit,
+  createRealGroup,
+  persistedTestAccess,
+} from './fixtures/real-group.js'
 
 test('a refused commit does not save unchanged state', async () => {
   const group = await createRealGroup(1, 'rpc-refused-save')
@@ -126,12 +131,20 @@ test('recovery persists before adoption and bootstrap retries after a failed per
   const sealed = await responder.sealGroupInfo(request)
   const pending = await requester.applyRecovery(sealed, requestID, requestKey)
   if (pending == null || 'renewalRequired' in pending) throw new Error('expected recovery')
-  await expect(pending.onAccepted()).rejects.toThrow('disk failed')
+  await expect(
+    pending.onAccepted(() => ({
+      mutationID: crypto.randomUUID(),
+      changes: { deleteRejoin: true },
+    })),
+  ).rejects.toThrow('disk failed')
   expect(adopt).not.toHaveBeenCalled()
   expect(member.handle).toBe(old)
   expect(member.handle.epoch).toBe(old.epoch)
   fail = false
-  await pending.onAccepted()
+  await pending.onAccepted(() => ({
+    mutationID: crypto.randomUUID(),
+    changes: { deleteRejoin: true },
+  }))
   expect(adopt).toHaveBeenCalledOnce()
   expect(member.handle).not.toBe(old)
   const rejoined = member.handle
@@ -153,7 +166,7 @@ test('an explicit recovery key remains usable after the former retention deadlin
   const member = group.members[0]
   if (member == null) throw new Error('missing member')
   const requester = createGroupMLS({
-    access: simpleHandleAccess({
+    access: persistedTestAccess({
       handle: () => member.handle,
       adopt: (next) => {
         member.handle = next
@@ -186,7 +199,7 @@ test('accepting an older recovery cannot delete a replacement request key', asyn
   const member = group.members[0]
   if (member == null) throw new Error('missing member')
   const requester = createGroupMLS({
-    access: simpleHandleAccess({
+    access: persistedTestAccess({
       handle: () => member.handle,
       adopt: (next) => {
         member.handle = next
@@ -212,6 +225,9 @@ test('accepting an older recovery cannot delete a replacement request key', asyn
   const { request: replacement, requestKey: replacementKey } =
     await requester.createRecoveryRequest(id)
   const replacementReply = await responder.sealGroupInfo(replacement)
-  await firstPending.onAccepted()
+  await firstPending.onAccepted(() => ({
+    mutationID: crypto.randomUUID(),
+    changes: { deleteRejoin: true },
+  }))
   expect(await requester.applyRecovery(replacementReply, id, replacementKey)).not.toBeNull()
 })

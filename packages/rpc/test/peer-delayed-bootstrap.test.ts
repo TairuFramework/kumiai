@@ -309,7 +309,7 @@ describe('delayed ledger bootstrap', () => {
     await bob.peer.dispose()
   })
 
-  test('a second rejoin keeps the first snapshot and supersedes its pending bootstrap', async () => {
+  test('a recovery call resumes the adopted record and keeps its first snapshot', async () => {
     const state = await setup(0xc2)
     const { hub, rs, alice, bob, events } = state
     expect(await alice.peer.recover()).toEqual({ advanced: false, reenact: [] })
@@ -318,7 +318,7 @@ describe('delayed ledger bootstrap', () => {
       if (
         params.topicID === rendezvousTopic(rs) &&
         params.senderDID === 'alice' &&
-        decodeHandshakeFrame(params.payload).kind === HANDSHAKE_KIND.recoveryRequest
+        decodeHandshakeFrame(params.payload).kind === HANDSHAKE_KIND.ledgerRequest
       ) {
         state.stopLying()
       }
@@ -332,14 +332,14 @@ describe('delayed ledger bootstrap', () => {
     await bob.peer.dispose()
   })
 
-  test('after two failed bootstraps the later attempt owns delayed completion', async () => {
+  test('two failed bootstraps retain the adopted record for delayed completion', async () => {
     const state = await setup(0xc5)
     const { alice, bob, events } = state
     expect(await alice.peer.recover()).toEqual({ advanced: false, reenact: [] })
     const firstID = events[0]?.attemptID
     expect(await alice.peer.recover()).toEqual({ advanced: false, reenact: [] })
     const secondID = events[2]?.attemptID
-    expect(secondID).not.toBe(firstID)
+    expect(secondID).toBe(firstID)
     state.stopLying()
     expect(await alice.peer.replay()).toEqual({ reenact: [owed] })
     expect(events.map((e) => e.phase)).toEqual([

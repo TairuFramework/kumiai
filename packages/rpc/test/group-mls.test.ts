@@ -158,7 +158,10 @@ describe('GroupMLS port', () => {
       external: true,
     })
 
-    await pending?.onAccepted()
+    await pending?.onAccepted(() => ({
+      mutationID: crypto.randomUUID(),
+      changes: { deleteRejoin: true },
+    }))
     expect(stranded.epoch()).toBe(3)
     // The rejoined handle holds the group's authenticated head and an EMPTY ledger. That is a
     // roster reset, and it reads as incomplete until the ledger is bootstrapped.
@@ -190,7 +193,10 @@ describe('GroupMLS port', () => {
     )
     if (pending == null || 'renewalRequired' in pending)
       throw new Error('Expected pending recovery')
-    await pending.onAccepted()
+    await pending.onAccepted(() => ({
+      mutationID: crypto.randomUUID(),
+      changes: { deleteRejoin: true },
+    }))
 
     // Every token in this list is perfectly well-formed. The DEMOTION is simply missing —
     // which is exactly what a signature does not protect and what the head chain does.

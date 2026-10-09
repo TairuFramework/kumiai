@@ -5,7 +5,7 @@ import { describe, expect, test } from 'vitest'
 import { type HandleAccess, simpleHandleAccess } from '../src/access.js'
 import { createGroupCrypto } from '../src/crypto.js'
 import { createGroupMLS } from '../src/mls.js'
-import { createRealGroup, type RealGroup } from './fixtures/real-group.js'
+import { createRealGroup, persistedTestAccess, type RealGroup } from './fixtures/real-group.js'
 import {
   createTransactionalAccess,
   createTransactionalStore,
@@ -318,7 +318,7 @@ test('a bootstrap whose host callback throws after the write still publishes the
   group.committer.handle = (await commitLedgerEntries(group.committer.handle, [note])).newGroup
   // Rejoin through recovery, which leaves the ledger incomplete until a bootstrap.
   const requester = createGroupMLS({
-    access: simpleHandleAccess({
+    access: persistedTestAccess({
       handle: () => member.handle,
       adopt: (next) => {
         member.handle = next
@@ -339,7 +339,10 @@ test('a bootstrap whose host callback throws after the write still publishes the
     requestKey,
   )
   if (recovered == null || 'renewalRequired' in recovered) throw new Error('expected recovery')
-  await recovered.onAccepted()
+  await recovered.onAccepted(() => ({
+    mutationID: crypto.randomUUID(),
+    changes: { deleteRejoin: true },
+  }))
 
   const store = createTransactionalStore(member.handle)
   const host = await createTransactionalAccess(member, store, {

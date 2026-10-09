@@ -172,7 +172,6 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
     requestID: string,
     requestKey: Uint8Array,
     boundCommit?: BoundRecoveryCommit,
-    requireWrite = false,
   ): RecoveryCandidate {
     const judge = createVerdictJudge({
       group: data.group,
@@ -194,12 +193,10 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
           { ...data, state: data.group.state, requestID, boundCommit: judge.boundCommit() },
           requestKey,
         ),
-      onAccepted: (write?: AdoptionWriteFactory) => {
-        if (requireWrite && typeof write !== 'function') {
+      onAccepted: (write: AdoptionWriteFactory) => {
+        if (typeof write !== 'function') {
           return Promise.reject(
-            new ControlWriteNotCommittedError(
-              'Restored recovery requires an adoption write factory',
-            ),
+            new ControlWriteNotCommittedError('Recovery requires an adoption write factory'),
           )
         }
         if (accepted == null) {
@@ -279,6 +276,13 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
     },
     async prepareRecovery(): Promise<'ready' | 'renewal-required'> {
       return await access.read((group) => recovery.prepare(group))
+    },
+    async readRecoverySource() {
+      return await access.read((group) => ({
+        epoch: Number(group.epoch),
+        authenticator: group.state.keySchedule.epochAuthenticator.slice(),
+        lineage: 0,
+      }))
     },
     async readEpoch(): Promise<number> {
       return await access.read((group) => Number(group.epoch))
@@ -487,7 +491,6 @@ export function createGroupMLS(params: GroupMLSParams): GroupMLS {
         snapshot.requestID,
         requestKey,
         snapshot.boundCommit,
-        true,
       )
       if (snapshot.boundCommit?.tag != null) {
         await candidate.confirmationKey(

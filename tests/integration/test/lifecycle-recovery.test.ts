@@ -210,7 +210,10 @@ test('recovery reuses a valid cached binding without consulting the host', async
   if (pending == null || 'renewalRequired' in pending) throw new Error('Expected pending recovery')
   expect(s.bobGroup().epoch).toBe(1n)
   await s.aliceGroup().processMessage(pending.commit)
-  await pending.onAccepted()
+  await pending.onAccepted(() => ({
+    mutationID: crypto.randomUUID(),
+    changes: { deleteRejoin: true },
+  }))
   expect(s.bobGroup().epoch).toBe(s.aliceGroup().epoch)
   expect(host).toHaveBeenCalledTimes(0)
 })
@@ -263,7 +266,10 @@ test('recovery replaces an expired cached binding with one host call', async () 
   expect(retained.replyLedger).toHaveLength(1)
   expect(retained.signer).toBe(s.alice.id)
   await s.aliceGroup().processMessage(pending.commit)
-  await pending.onAccepted()
+  await pending.onAccepted(() => ({
+    mutationID: crypto.randomUUID(),
+    changes: { deleteRejoin: true },
+  }))
   expect(host).toHaveBeenCalledTimes(1)
   expect(host).toHaveBeenCalledWith({
     groupID: 'lifecycle-recovery',
@@ -322,7 +328,10 @@ test('a tree-lapsed present leaf can external-renew with a fresh binding', async
   const pending = await buildRecovery(s)
   if (pending == null || 'renewalRequired' in pending) throw new Error('Expected pending recovery')
   await s.aliceGroup().processMessage(pending.commit)
-  await pending.onAccepted()
+  await pending.onAccepted(() => ({
+    mutationID: crypto.randomUUID(),
+    changes: { deleteRejoin: true },
+  }))
   expect(s.bobGroup().sendAdmission().admissible).toBe(true)
 })
 

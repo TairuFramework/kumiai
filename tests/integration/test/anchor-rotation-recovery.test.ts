@@ -197,7 +197,7 @@ test.each([false, true])(
   },
 )
 
-test('fresh startup with a lost anchor secret resolves readiness before confirmed recovery', async () => {
+test('fresh startup with a lost anchor secret settles the saved build before confirmed recovery', async () => {
   const state = await setup({ deadlineMs: 10_000, adminBob: true })
   const { alice, bob, carolID, received, events, hub } = state
   const original = bob.anchorStore.stored()
@@ -326,9 +326,8 @@ test('fresh startup with a lost anchor secret resolves readiness before confirme
   const buildForbidden = async () => {
     throw new OperationRejectedError('build gated until recovery')
   }
-  await expect(
-    restarted.peer.commit(customOperation(restarted, buildForbidden)),
-  ).rejects.toBeInstanceOf(RecoveryRequiredError)
+  const gated = customOperation(restarted, buildForbidden)
+  await expect(restarted.peer.commit(gated)).rejects.toBeInstanceOf(RecoveryRequiredError)
   expect(restarted.peer.anchorEpoch()).toBe(original.epoch)
   expect(published).toEqual([])
   expect(Number(restarted.handle().epoch)).toBe(epochBefore + 2)
@@ -342,11 +341,16 @@ test('fresh startup with a lost anchor secret resolves readiness before confirme
   await expect.poll(() => received, { timeout: 10_000 }).toContainEqual({ text: 'held' })
   expect(restarted.peer.anchorEpoch()).toBe(Number(restarted.handle().epoch))
   expect((await restarted.anchorStore.load())?.pending).toBeUndefined()
-  expect((await restarted.peer.replay()).reenact).toContain(deferredBody)
-  expect(await restarted.peer.outcomes()).toContainEqual(
-    expect.objectContaining({ id: deferred.id, kind: 'unknown' }),
+  expect((await restarted.peer.replay()).reenact ?? []).not.toContain(deferredBody)
+  // The saved publish is absent. D3 retains its intent; the recovered member cannot rebuild an admin commit.
+  expect((await restarted.control.load()).operations).toEqual([
+    expect.objectContaining({ id: deferred.id, stage: 'intent', body: deferred.body }),
+    expect.objectContaining({ id: gated.id, stage: 'intent', body: gated.body }),
+  ])
+  expect(await restarted.mls.getLedger()).not.toContain(deferredBody)
+  expect(await restarted.peer.outcomes()).not.toContainEqual(
+    expect.objectContaining({ opID: deferred.id, kind: 'unknown' }),
   )
-  await expect.poll(async () => (await restarted.control.load()).operations.length).toBe(0)
   expect(events.filter((event) => event.phase === 'succeeded')).toHaveLength(1)
 })
 

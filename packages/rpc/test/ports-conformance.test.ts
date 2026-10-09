@@ -243,7 +243,7 @@ testGroupMLSConformance({
 testAppOutboxConformance({ label: 'createMemoryAppOutbox', createOutbox: createMemoryAppOutbox })
 const _outboxIsAPort = (outbox: AppOutbox): ConformanceAppOutbox => outbox
 
-test('ambiguous recovery save publishes committed state on retry without another write', async () => {
+test('ambiguous recovery save reads back committed state without another write', async () => {
   const groupID = 'ambiguous-recovery'
   const hostDB = createMemoryHostDatabase()
   let saves = 0
@@ -287,8 +287,8 @@ test('ambiguous recovery save publishes committed state on retry without another
     },
   })
   hostDB.commitThenRejectNext('save')
-  await expect(restored.onAccepted(factory)).rejects.toThrow('outcome unknown')
-  expect(await requester.readEpoch()).toBe(1)
+  await restored.onAccepted(factory)
+  expect(await requester.readEpoch()).toBe(7)
   const stored = await hostDB.loadState(groupID)
   if (stored == null) throw new Error('Missing committed state')
   expect(JSON.parse(toUTF(stored)).epoch).toBe(7)

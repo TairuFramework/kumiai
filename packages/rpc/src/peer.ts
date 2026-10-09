@@ -10,7 +10,7 @@ import type { Anchor, AnchorSlot } from './anchor.js'
 import { type AppDeliveryResumed, type AppDeliveryStalled, createAppLane } from './app-lane.js'
 import { createAppOutboxAcceptance } from './app-outbox.js'
 import { classifyCommit, digestAppliedCommit, UNKNOWN_FRAME_VERSION } from './classify.js'
-import { isHeadMismatch, RecoveryRequiredError } from './commit.js'
+import { RecoveryRequiredError } from './commit.js'
 import {
   type CommitFrame,
   decodeCommitFrame,
@@ -24,6 +24,7 @@ import {
   revokeHeld,
   stepOperation,
 } from './control/operations.js'
+import { type RejoinDeps, rejoinBarrier, type SourceScan, stepRejoin } from './control/rejoin.js'
 import { applyResolved, pruneWindow } from './control/store.js'
 import type {
   AdoptionWriteFactory,
@@ -35,6 +36,7 @@ import type {
   Operation,
   OperationRequest,
   Outcome,
+  RejoinRecord,
 } from './control/types.js'
 import { deliverObligations } from './control/welcome.js'
 import {
@@ -788,7 +790,6 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   let refusalHeld = false
   let pendingRecovery: { position: string; commitDigest: string; pending: PendingRecovery } | null =
     null
-  let retryRecoveryAdoption: (() => Promise<void>) | null = null
   let recoveryRetryTimer: ReturnType<typeof setTimeout> | undefined
   let recoveryBackoff = 1000
   const clearRecoveryRetry = (): void => {
@@ -916,7 +917,6 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
             epochNeedsBuild = false
           }
         }
-        if (retryRecoveryAdoption != null) await retryRecoveryAdoption()
         return await fn()
       } finally {
         appNoticeInSerial = false
@@ -1855,10 +1855,16 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     hasOperations = snapshot.operations.length > 0
     revokeHold = revokeHeld(snapshot)
     rejoinHeld = snapshot.rejoin != null
-    rejoinPosition =
-      snapshot.rejoin != null && ['published', 'confirmed'].includes(snapshot.rejoin.stage)
-        ? (snapshot.rejoin.position ?? null)
-        : null
+    rejoinPosition = rejoinBarrier(snapshot.rejoin)
+    refusalHeld = snapshot.rejoin?.stage === 'refused'
+    if (snapshot.rejoin?.stage === 'adopted' && awaitingBootstrap == null) {
+      awaitingBootstrap = {
+        attemptID: snapshot.rejoin.id,
+        trigger: 'automatic',
+        entries: snapshot.rejoin.ledgerBefore,
+      }
+      rejoinRuntimeNeedsBuild = true
+    }
     appliedByEpoch.clear()
     for (const [epoch, row] of appliedRows(snapshot)) appliedByEpoch.set(epoch, row)
     commitOutcomes.clear()
@@ -2131,14 +2137,15 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
   }
 
   /** Saved payloads settle before any pull can encounter our own unmerged commit. */
-  const settleOperations = async (): Promise<boolean> => {
+  const settleOperations = async (forRecovery = false): Promise<boolean> => {
     controlReplayed = true
     if (
       control == null ||
       mls == null ||
       commitTopicID == null ||
-      anchorRecoveryPending ||
-      locallyRemoved
+      (anchorRecoveryPending && !forRecovery) ||
+      locallyRemoved ||
+      rejoinHeld
     )
       return false
     await refreshControl()
@@ -2163,15 +2170,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     if (control == null || mls == null || commitTopicID == null) return
     const record = (await control.load()).rejoin
     if (record?.stage !== 'built') return
-    const found = await operationDeps().searchLog(record.expectedHead, record.payloadDigest)
-    if (typeof found !== 'object') return
-    await applyResolved(
-      control,
-      {
-        putRejoin: { ...record, stage: 'published', position: found.found },
-      },
-      newPublishID(),
-    )
+    await stepRejoin(rejoinDeps(Date.now() + recoveryDeadlineMs), record)
     await refreshControl()
   }
 
@@ -2184,6 +2183,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       locallyRemoved ||
       control == null ||
       !hasOperations ||
+      rejoinHeld ||
       operationTimer != null ||
       operationRunning
     )
@@ -2198,6 +2198,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
           assertLive()
           if (activeRecovery != null) await activeRecovery
           await runSerial(async () => {
+            if (rejoinHeld) return
             let op = (await control.load()).operations[0]
             if (op == null) return
             const before = await mls?.readEpoch()
@@ -2259,7 +2260,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     }
   }
 
-  const finalizeBootstrap = async (port: GroupMLS): Promise<void> => {
+  const finalizeBootstrap = async (port: GroupMLS, announce = true): Promise<void> => {
     assertLive()
     if (awaitingBootstrap == null) return
     const { attemptID, trigger, entries } = awaitingBootstrap
@@ -2268,6 +2269,14 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     const held = new Set(await port.getLedger())
     assertLive()
     const owed = entries.filter((token) => !held.has(token))
+    const record = (await control?.load())?.rejoin
+    if (record?.stage === 'adopted') {
+      const deps = rejoinDeps(Date.now() + recoveryTimeoutMs)
+      await stepRejoin({ ...deps, bootstrapLedger: async () => true }, record)
+      await refreshControl()
+      stranded = false
+      healRequested = false
+    }
     if (owed.length > 0) pendingReenact = [...pendingReenact, ...owed]
     awaitingBootstrap = null
     inFlightEntries = null
@@ -2279,7 +2288,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     closeEpisode()
     // As on a rejoin that bootstraps at once: frames sent before the subscription woke nothing.
     requestAppPull()
-    if (commitTopicID != null) {
+    if (announce && commitTopicID != null) {
       emitRecovery({ phase: 'bootstrapped', groupID: commitTopicID, attemptID, trigger })
     }
   }
@@ -2423,6 +2432,12 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       }
       await applyResolved(control, changes, newPublishID())
       await refreshControl()
+      pendingRecovery = null
+      awaitingBootstrap = null
+      inFlightEntries = null
+      healRequested = false
+      clearRecoveryRetry()
+      recoveryGeneration += 1
       for (const outcome of changes.putOutcomes) emitOutcome(outcome)
     })
   }
@@ -2456,6 +2471,13 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
     await ready
     assertLive()
     if (locallyRemoved) return {}
+    const record = (await control?.load())?.rejoin
+    if (record?.stage === 'confirmed' && activeRecovery == null) {
+      await runSerial(async () => {
+        await stepRejoin(rejoinDeps(Date.now() + recoveryDeadlineMs), record)
+        await refreshControl()
+      })
+    }
     const result = await runSerial(async () => {
       if (await settleOperations()) await rebuildEpoch()
       if (mls != null && (await ensureLedger(Date.now() + recoveryTimeoutMs)))
@@ -2536,196 +2558,119 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
    * mutex, so either nesting deadlocks. The re-enactment a heal owes is a SUBSEQUENT `commit()` the
    * host makes once this releases the lane.
    */
-  const attemptBody = async (
-    trigger: RecoveryTrigger,
-    generation: number,
-    port: GroupMLS,
-    commits: string,
-    rendezvous: string,
-  ): Promise<{ advanced: boolean }> => {
-    assertLive()
-    const attemptID = newPublishID()
-    const base = { groupID: commits, attemptID, trigger }
-    const failed = (
-      reason: RecoveryFailureReason,
-      details: RecoveryFailureDetails = {},
-    ): { advanced: false } => {
-      if (reason === 'renewal-required') renewalRequiredEpoch = crypto.epoch()
-      if (reason === 'refused') refusalHeld = true
-      if (reason === 'renewal-required' || reason === 'refused') clearRecoveryRetry()
-      if (reason === 'unconfirmed' || reason === 'no-responder' || reason === 'deadline')
-        retryRecovery()
-      emitRecovery({ ...base, phase: 'failed', reason, ...details })
-      return { advanced: false }
-    }
-    try {
-      // 0. Settle saved operations ahead of everything, as every lane operation does: a peer holding a
-      //    commit whose fate it never learned settles that first, and may find nothing left to heal.
-      const started = await runSerial(async () => {
-        if (recoveryGeneration !== generation && !stranded && !healRequested) return false
-        queueMicrotask(() =>
-          notifyHost<RecoveryEvent>((value) => params.onRecovery?.(value), {
-            ...base,
-            phase: 'started',
-          }),
-        )
-        if (await settleOperations()) await rebuildEpoch()
-        assertLive()
-        if (await ensureLedger(Date.now() + recoveryTimeoutMs)) await finalizeBootstrap(port)
-        assertLive()
-        return true
-      })
-      if (!started) return { advanced: true }
-
-      const deadline = Date.now() + recoveryDeadlineMs
-      let prepared = false
-      while (Date.now() < deadline) {
-        const publication = await runSerial(async () => {
-          if (await settleOperations()) await rebuildEpoch()
-          // 1. Pull to the end. It may resolve the strand outright, and a heal it no longer needs
-          //    must NOT run: the external commit would rotate the tree for the whole group. Rebuild
-          //    if it moved the epoch, before anything is framed: the peer that lost a heal race
-          //    applies the winner's commit HERE.
-          if (!anchorRecoveryPending) {
-            healRequested = false
-            await reconcileCommits()
+  const scanRejoinSource = async (record: RejoinRecord): Promise<SourceScan> => {
+    if (mls == null || control == null || commitTopicID == null)
+      throw new Error('Missing recovery ports')
+    const current = await mls.readRecoverySource()
+    const responses = (await control.load()).responses
+    const frames: SourceScan['frames'] = []
+    let after = record.source.head
+    let gap = false
+    for (;;) {
+      assertLive()
+      const page = checkedFetchResult(
+        await mux.fetchTopic({
+          topicID: commitTopicID,
+          ...(after == null ? {} : { after }),
+          limit: COMMIT_FETCH_LIMIT,
+        }),
+      )
+      gap ||= page.gap
+      for (const row of page.messages) {
+        const position = asLogPosition(row.sequenceID)
+        if (record.position != null && position >= record.position) return { current, gap, frames }
+        if (after != null && position <= after) continue
+        let commit: Uint8Array | null = null
+        try {
+          const handshake = decodeHandshakeFrame(row.payload)
+          if (handshake.kind === HANDSHAKE_KIND.commit) {
+            const frame = decodeCommitFrame(handshake.payload)
+            commit = frame.commit
           }
-          assertLive()
-
-          // 2. The head to race at, from the store's own reply.
-          const expectedHead = await readCommitHead(commits)
-          assertLive()
-
-          // 3. Mint a request and rendezvous for a sealed GroupInfo. Fresh request per attempt: the
-          //    ephemeral key is minted with it, and a reply to an already-used request is unopenable.
-          if (!prepared) {
-            prepared = true
-            if ((await port.prepareRecovery()) === 'renewal-required')
-              return failed('renewal-required')
-            assertLive()
-          }
-          const requestID = newPublishID()
-          const { request, requestKey } = await port.createRecoveryRequest(
-            requestID,
-            Math.max(0, deadline - Date.now()),
-          )
-          assertLive()
-          const outcome = await requestGroupInfo(request, requestID, rendezvous, deadline)
-          if (outcome.kind === 'disposed' || disposed)
-            throw new PeerDisposedError('Peer is disposed')
-          if (outcome.kind === 'publish-failed') throw outcome.error
-          if (outcome.kind === 'timeout') {
-            // Nobody answered. Heal REQUIRES another online member that can seal a GroupInfo;
-            // without one it cannot work. The peer stays degraded and asks again later.
-            return failed(outcome.atDeadline ? 'deadline' : 'no-responder')
-          }
-
-          // 4. Open it and BUILD the external commit, adopting nothing. Bytes this peer cannot open
-          //    are a hub-injected or misaddressed reply: ask again.
-          // The reply may include an advance that landed between the pull and the head read.
-          await reconcileCommits()
-          assertLive()
-          let pending: AppliedRecovery
-          try {
-            pending = await port.applyRecovery(outcome.sealed, requestID, requestKey)
-            if (pending != null && !('renewalRequired' in pending)) {
-              pending = wrapPendingRecovery(boundary, pending)
-            }
-          } catch {
-            pending = null
-          }
-          assertLive()
-          if (pending == null) return null
-          if ('renewalRequired' in pending) return failed('renewal-required')
-
-          // 5. The entries this peer holds, snapshotted BEFORE the rejoined handle replaces them —
-          //    the last moment they can be read. Kept across a failed attempt, so a retry filters
-          //    the same entries rather than snapshotting the empty ledger a failed bootstrap left.
-          inFlightEntries = [
-            ...new Set([
-              ...(inFlightEntries ?? awaitingBootstrap?.entries ?? []),
-              ...(await port.getLedger()),
-              ...(anchorRecoveryPending
-                ? ((await control?.load())?.operations.flatMap((op) =>
-                    op.stage === 'intent' ? [] : op.built.bodies,
-                  ) ?? [])
-                : []),
-            ]),
-          ]
-          assertLive()
-          const inFlight = inFlightEntries
-
-          // 6. Publish the external commit, compare-and-set at the head: it changes the ratchet
-          //    tree, so it races like any commit.
-          const publishID = newPublishID()
-          const epochBeforeRejoin = await port.readEpoch()
-          const headBeforeRejoin = reconciledHead
-          const { payload } = await frameCommit(pending.commit, [], null)
-          assertLive()
-          let sequenceID: string
-          try {
-            sequenceID = (
-              await mux.publish({
-                topicID: commits,
-                payload,
-                retain: 'log',
-                expectedHead,
-                publishID,
-              })
-            ).sequenceID
-          } catch (error) {
-            if (disposed) throw new PeerDisposedError('Peer is disposed', { cause: error })
-            if (!isHeadMismatch(error)) throw error
-            // Lost the race — the likely outcome. DISCARD THE GROUPINFO, not merely the commit: it
-            // describes a tree the winning commit already changed, so a commit rebuilt from it is
-            // one no member at the new epoch can apply. Re-request and rebuild from a fresh one.
-            return null
-          }
-          assertLive()
-          const commitDigest = digestAppliedCommit(pending.commit)
-          pendingRecovery = { position: sequenceID, commitDigest, pending }
-          const key = await pending.confirmationKey(sequenceID, commitDigest)
-          const verified = await port.verifyRecoveryRequest(request)
-          if (verified == null) throw new Error('The recovery request did not verify')
-          return {
-            pending,
-            payloadDigest: toB64U(sha256(payload)),
-            sequenceID,
-            commitDigest,
-            key,
-            requestID,
-            request,
-            requestKey,
-            groupID: verified.groupID,
-            epochBeforeRejoin,
-            headBeforeRejoin,
-            inFlight,
-          }
+        } catch {
+          /* Unparseable frames cannot move the source. */
+        }
+        const header = commit == null ? null : await mls.readCommitHeader(commit)
+        const digest = commit == null ? null : digestAppliedCommit(commit)
+        frames.push({
+          position,
+          header,
+          digest,
+          responded: responses.some(
+            (response) => response.position === position && response.digest === digest,
+          ),
         })
-        if (publication == null) continue
-        if ('advanced' in publication) return publication
-        const {
-          pending,
-          payloadDigest,
-          sequenceID,
-          commitDigest,
-          key,
-          requestID,
-          request,
-          requestKey,
-          groupID,
-          epochBeforeRejoin,
-          headBeforeRejoin,
-          inFlight,
-        } = publication
-        const confirmation = await waitForRecoveryConfirmation({
+      }
+      if (page.messages.length < COMMIT_FETCH_LIMIT) return { current, gap, frames }
+      assertForwardPage(after, page.messages)
+      const last = page.messages.at(-1)
+      if (last == null) return { current, gap, frames }
+      after = asLogPosition(last.sequenceID)
+    }
+  }
+
+  const recoveryCandidate = async (record: RejoinRecord): Promise<PendingRecovery> => {
+    if (pendingRecovery?.commitDigest === record.digest) return pendingRecovery.pending
+    if (mls == null) throw new Error('Missing recovery port')
+    return wrapPendingRecovery(
+      boundary,
+      await mls.restoreRecovery(record.candidate, record.requestKey),
+    )
+  }
+
+  let currentRecoveryAttemptID: string | null = null
+  let currentRecoveryTrigger: RecoveryTrigger = 'automatic'
+  let rejoinDiscarded: Parameters<RejoinDeps['discarded']>[0] | null = null
+  let rejoinFailureDetails: RecoveryFailureDetails = {}
+  const rejoinDeps = (deadline: number): RejoinDeps => {
+    if (control == null || mls == null || commitTopicID == null || rendezvousTopicID == null)
+      throw new Error('Missing recovery ports')
+    const port = mls
+    const commits = commitTopicID
+    const rendezvous = rendezvousTopicID
+    return {
+      control,
+      runSerial,
+      now: Date.now,
+      newID: newPublishID,
+      emit: emitOutcome,
+      discarded: (reason, record) => {
+        inFlightEntries = record.ledgerBefore
+        rejoinDiscarded = reason
+        pendingRecovery = null
+        if (reason === 'absent' || reason === 'gap') healRequested = true
+        if (reason === 'invalidated')
+          healRequested = stranded || anchorRecoveryPending || !floor.covered
+      },
+      publish: async (payload, publishID, expectedHead) => {
+        assertLive()
+        const result = await mux.publish({
+          topicID: commits,
+          payload,
+          publishID,
+          expectedHead,
+          retain: 'log',
+        })
+        assertLive()
+        return result
+      },
+      searchLog: (from, digest) => operationDeps().searchLog(from, digest),
+      confirm: async (record) => {
+        const position = record.position
+        if (position == null) throw new Error('Published rejoin has no position')
+        const pending = await recoveryCandidate(record)
+        pendingRecovery = { position, commitDigest: record.digest, pending }
+        const key = await pending.confirmationKey(position, record.digest)
+        const verified = await port.verifyRecoveryRequest(record.request)
+        if (verified == null) throw new Error('The recovery request did not verify')
+        const verdict = await waitForRecoveryConfirmation({
           port,
           pending,
-          groupID,
-          requestID,
-          requestKey,
-          position: sequenceID,
-          commitDigest,
+          groupID: verified.groupID,
+          requestID: record.requestID,
+          requestKey: record.requestKey,
+          position,
+          commitDigest: record.digest,
           key,
           deadline,
           timeoutMs: recoveryTimeoutMs,
@@ -2736,181 +2681,245 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
               payload: encodeHandshakeFrame(
                 HANDSHAKE_KIND.recoveryConfirmRequest,
                 encodeRecoveryConfirmRequest({
-                  requestID,
-                  request,
-                  position: sequenceID,
-                  commitDigest,
+                  requestID: record.requestID,
+                  request: record.request,
+                  position,
+                  commitDigest: record.digest,
                 }),
               ),
             }),
         })
         assertLive()
-        if (confirmation.kind !== 'confirmed') {
-          if (
-            confirmation.kind === 'refused' &&
-            ['binding', 'lapse', 'floor'].includes(confirmation.refusal)
-          ) {
-            pending.markBindingUnusable()
-            pendingRecovery = null
-            return failed('renewal-required')
-          }
-          pendingRecovery = null
-          if (confirmation.kind === 'superseded') continue
-          if (confirmation.kind === 'refused') {
-            return failed('refused', {
-              refusal: confirmation.refusal,
-              responder: confirmation.responder,
-            })
-          }
-          if (confirmation.kind === 'error') throw confirmation.error
-          if (confirmation.kind === 'disposed') throw new PeerDisposedError('Peer is disposed')
-          return failed('unconfirmed', { advisory: confirmation.advisory })
-        }
-        return await runSerial(async () => {
-          if (
-            (await port.readEpoch()) !== epochBeforeRejoin ||
-            reconciledHead !== headBeforeRejoin ||
-            (!anchorRecoveryPending &&
-              control != null &&
-              (await control.load()).operations.some((op) => op.stage === 'built')) ||
-            (anchorPending != null && !anchorRecoveryPending)
-          ) {
-            pendingRecovery = null
-            return failed('unconfirmed', { advisory: [] })
-          }
-
-          // Keep the confirmed adoption across ambiguous host failures for the next lane operation.
-          const rejoinedAtEpoch = (await port.readCommitHeader(pending.commit))?.epoch
-          assertLive()
-          retryRecoveryAdoption = async () => {
-            // Through the seam, like every other site that ratchets the handle — and it rotates
-            // ANYWAY: this is the rejoin, which no roster diff can see (see {@link anchor}). The
-            // anchor is the POST-commit epoch: the handle advances inside the seam and only then is
-            // the anchor captured, exactly where an applying member lands.
-            await advanceHandle({
-              port,
-              ratchet: async () => {
-                let accepted = false
-                try {
-                  const snapshot = await control?.load()
-                  const write =
-                    snapshot == null
-                      ? undefined
-                      : adoptionWrite({
-                          snapshot,
-                          epoch: rejoinedAtEpoch ?? pending.epoch - 1,
-                          digest: digestAppliedCommit(pending.commit),
-                          payloadDigest,
-                          position: asLogPosition(sequenceID),
-                          external: true,
-                        })
-                  await pending.onAccepted(
-                    write == null
-                      ? undefined
-                      : (staged) => {
-                          const adoption = write(staged)
-                          // A confirmed rejoin releases the strand in its adoption transaction.
-                          if (adoption.changes.cursor != null) {
-                            adoption.changes.cursor = {
-                              position: asLogPosition(sequenceID),
-                              epoch: staged.epochAfter,
-                            }
-                          }
-                          return adoption
-                        },
-                  )
-                  accepted = true
-                } finally {
-                  // A callback can throw after replacing the handle. Observe the ratchet so
-                  // bootstrap survives it, while a pre-adoption failure keeps the pending retry.
-                  // A rejoin from a losing branch can land on its old epoch number, so a resolved
-                  // adoption counts even when the number did not move.
-                  if (accepted || (await port.readEpoch()) !== epochBeforeRejoin) {
-                    awaitingBootstrap = { attemptID, trigger, entries: inFlight }
-                    await refreshControl()
-                    stranded = false
-                    rejoinRuntimeNeedsBuild = true
-                  }
-                }
-              },
-              identity: {
-                epochAfter: pending.epoch,
-                forced: true,
-                advance: digestAppliedCommit(pending.commit),
-                recovery: true,
-              },
-              floorPosition: asLogPosition(sequenceID),
-            })
-            assertLive()
-            const accepted = asLogPosition(sequenceID)
-            reconciledHead = accepted
-            commitLogHead = accepted
-            if (control != null) {
-              const deferred = (await control.load()).operations.filter(
-                (op) => op.stage !== 'intent',
-              )
-              const unknown: Array<Outcome> = deferred.map((op) => ({
-                id: op.id,
-                opID: op.id,
-                at: Date.now(),
-                kind: 'unknown',
-              }))
-              if (unknown.length > 0) {
-                await applyResolved(
-                  control,
-                  { deleteOperations: deferred.map((op) => op.id), putOutcomes: unknown },
-                  newPublishID(),
-                )
-                for (const outcome of unknown) emitOutcome(outcome)
-                await refreshControl()
-              }
+        if (verdict.kind === 'refused' && ['binding', 'lapse', 'floor'].includes(verdict.refusal))
+          pending.markBindingUnusable()
+        rejoinFailureDetails =
+          verdict.kind === 'refused'
+            ? { refusal: verdict.refusal, responder: verdict.responder }
+            : verdict.kind === 'unconfirmed'
+              ? { advisory: verdict.advisory }
+              : {}
+        return verdict
+      },
+      scan: scanRejoinSource,
+      adopt: async (record, write) => {
+        const pending = await recoveryCandidate(record)
+        try {
+          await advanceHandle({
+            port,
+            ratchet: () => pending.onAccepted(write),
+            identity: {
+              epochAfter: record.epochAfter,
+              forced: true,
+              advance: record.digest,
+              recovery: true,
+            },
+            floorPosition: record.position,
+          })
+        } finally {
+          const saved = (await control.load()).rejoin
+          if (saved?.stage === 'adopted') {
+            awaitingBootstrap = {
+              attemptID: currentRecoveryAttemptID ?? record.id,
+              trigger: currentRecoveryTrigger,
+              entries: record.ledgerBefore,
             }
-            healRequested = false
-            // The one place the commit gate is released: the rejoin landed, so this peer's leaf is
-            // back in the tree and the stale-epoch fork it guards is closed. A bootstrap that still
-            // fails below is `commit()`'s own ledger-completeness check to handle.
-            await rebuildEpoch()
-            rejoinRuntimeNeedsBuild = false
-            assertLive()
-            pendingRecovery = null
-            retryRecoveryAdoption = null
+            rejoinRuntimeNeedsBuild = true
           }
-          await retryRecoveryAdoption()
+        }
+        assertLive()
+        await refreshControl()
+        reconciledHead = record.position ?? reconciledHead
+        commitLogHead = record.position ?? commitLogHead
+        healRequested = false
+        pendingRecovery = null
+        await rebuildEpoch()
+        rejoinRuntimeNeedsBuild = false
+      },
+      bootstrapLedger: () => ensureLedger(deadline),
+      getLedger: () => port.getLedger(),
+    }
+  }
 
-          // 8. Bootstrap: REQUIRED, not a formality. Until it runs, the ledger is empty against a
-          //    live head — every admin promoted since genesis is invisible and the next commit is
-          //    rejected. Failure here is a persistent degraded state, NOT a heal.
-          if (!(await ensureLedger(deadline))) {
+  const attemptBody = async (
+    trigger: RecoveryTrigger,
+    generation: number,
+    port: GroupMLS,
+    commits: string,
+    rendezvous: string,
+  ): Promise<{ advanced: boolean }> => {
+    assertLive()
+    currentRecoveryTrigger = trigger
+    const controlStore = control
+    if (controlStore == null) throw new Error('Missing control store')
+    const attemptID =
+      awaitingBootstrap?.attemptID ?? (await controlStore.load()).rejoin?.id ?? newPublishID()
+    currentRecoveryAttemptID = attemptID
+    const base = { groupID: commits, attemptID, trigger }
+    const failed = (
+      reason: RecoveryFailureReason,
+      details: RecoveryFailureDetails = {},
+      retry = true,
+    ): { advanced: false } => {
+      if (reason === 'renewal-required') renewalRequiredEpoch = crypto.epoch()
+      if (reason === 'renewal-required' || reason === 'refused') clearRecoveryRetry()
+      if (
+        retry &&
+        (reason === 'unconfirmed' ||
+          reason === 'no-responder' ||
+          reason === 'deadline' ||
+          reason === 'error' ||
+          reason === 'bootstrap-failed')
+      )
+        retryRecovery()
+      emitRecovery({ ...base, phase: 'failed', reason, ...details })
+      return { advanced: false }
+    }
+    try {
+      const started = await runSerial(async () => {
+        if (recoveryGeneration !== generation && !stranded && !healRequested && !rejoinHeld)
+          return false
+        queueMicrotask(() =>
+          notifyHost<RecoveryEvent>((value) => params.onRecovery?.(value), {
+            ...base,
+            phase: 'started',
+          }),
+        )
+        if (await settleOperations(true)) await rebuildEpoch()
+        if ((await controlStore.load()).rejoin == null) {
+          if (await ensureLedger(Date.now() + recoveryTimeoutMs)) await finalizeBootstrap(port)
+          assertLive()
+        }
+        return true
+      })
+      if (!started) return { advanced: true }
+      const deadline = Date.now() + recoveryDeadlineMs
+      let prepared = false
+      while (Date.now() < deadline) {
+        if (recoveryGeneration !== generation) return { advanced: false }
+        let record = (await controlStore.load()).rejoin
+        if (record?.stage === 'refused') return failed('refused', { refusal: record.refusal })
+        if (record == null) {
+          const built = await runSerial(async () => {
+            if (await settleOperations(true)) await rebuildEpoch()
+            if (!anchorRecoveryPending) {
+              healRequested = false
+              await reconcileCommits()
+            }
             assertLive()
-            awaitingBootstrap = { attemptID, trigger, entries: inFlight }
-            healRequested = true
-            bootstrapHealRequested = true
-            return failed('bootstrap-failed')
-          }
-          assertLive()
-
-          // 9. Re-enact by MEMBERSHIP, never by the failure that brought this peer here: keep only
-          //    entries the group's ledger does NOT hold. An entry it DOES hold was enacted for
-          //    everyone, and appending it again puts it at the END of the log where the fold is
-          //    last-write-wins — it would win, silently reverting whatever a later admin wrote over
-          //    the same subject.
-          const held = new Set(await port.getLedger())
-          assertLive()
-          const reenact = inFlight.filter((token) => !held.has(token))
-          inFlightEntries = null
-          awaitingBootstrap = null
-          bootstrapHealRequested = false
-          if (reenact.length > 0) pendingReenact = [...pendingReenact, ...reenact]
-          recoveryGeneration += 1
+            const expectedHead = await readCommitHead(commits)
+            if (!prepared) {
+              prepared = true
+              if ((await port.prepareRecovery()) === 'renewal-required')
+                return failed('renewal-required')
+            }
+            const requestID = newPublishID()
+            const { request, requestKey } = await port.createRecoveryRequest(
+              requestID,
+              Math.max(0, deadline - Date.now()),
+            )
+            const outcome = await requestGroupInfo(request, requestID, rendezvous, deadline)
+            assertLive()
+            if (outcome.kind === 'disposed') throw new PeerDisposedError('Peer is disposed')
+            if (outcome.kind === 'publish-failed') throw outcome.error
+            if (outcome.kind === 'timeout')
+              return failed(outcome.atDeadline ? 'deadline' : 'no-responder')
+            await reconcileCommits()
+            let pending: AppliedRecovery
+            try {
+              pending = await port.applyRecovery(outcome.sealed, requestID, requestKey)
+            } catch {
+              pending = null
+            }
+            assertLive()
+            if (pending == null) return null
+            if ('renewalRequired' in pending) return failed('renewal-required')
+            pending = wrapPendingRecovery(boundary, pending)
+            // A stranded walk has already abandoned this prefix; only subsequent frames can move its source.
+            if (stranded || anchorRecoveryPending || !floor.covered)
+              reconciledHead = await readCommitHead(commits)
+            const source = await port.readRecoverySource()
+            const ledgerBefore = [
+              ...new Set([
+                ...(inFlightEntries ?? awaitingBootstrap?.entries ?? []),
+                ...(await port.getLedger()),
+                ...(anchorRecoveryPending
+                  ? (await controlStore.load()).operations.flatMap((op) =>
+                      op.stage === 'intent' ? [] : op.built.bodies,
+                    )
+                  : []),
+              ]),
+            ]
+            const { payload } = await frameCommit(pending.commit, [], null)
+            const record: RejoinRecord = {
+              id: newPublishID(),
+              stage: 'built',
+              publishID: newPublishID(),
+              expectedHead,
+              payload,
+              payloadDigest: toB64U(sha256(payload)),
+              requestID,
+              request,
+              requestKey,
+              candidate: pending.serialize(),
+              source: { ...source, head: reconciledHead },
+              digest: digestAppliedCommit(pending.commit),
+              epochAfter: pending.epoch,
+              ledgerBefore,
+              conflictEpoch: (await controlStore.load()).cursor?.fork?.conflictEpoch ?? null,
+            }
+            await applyResolved(controlStore, { putRejoin: record }, newPublishID())
+            inFlightEntries = ledgerBefore
+            assertLive()
+            pendingRecovery = { position: '', commitDigest: record.digest, pending }
+            await refreshControl()
+            return record
+          })
+          if (built == null) continue
+          if ('advanced' in built) return built
+          record = built
+        }
+        if (record.stage === 'adopted') {
+          const complete = await runSerial(async () => {
+            awaitingBootstrap = { attemptID, trigger, entries: record.ledgerBefore }
+            const complete = await ensureLedger(deadline)
+            assertLive()
+            if (!complete) return false
+            await finalizeBootstrap(port, false)
+            return true
+          })
+          if (!complete) return failed('bootstrap-failed')
           clearRecoveryRetry()
           recoveryBackoff = 1000
-          closeEpisode()
-          // A push only wakes a pull, and frames published to the rejoined segment before its
-          // subscription existed woke nothing.
-          requestAppPull()
           emitRecovery({ ...base, phase: 'succeeded' })
           return { advanced: true }
-        })
+        }
+        rejoinDiscarded = null
+        rejoinFailureDetails = {}
+        const advanceRecord = async (): Promise<RejoinRecord | null> => {
+          const current = (await controlStore.load()).rejoin
+          return current?.id === record.id
+            ? await stepRejoin(rejoinDeps(deadline), current)
+            : current
+        }
+        const next =
+          record.stage === 'published'
+            ? await stepRejoin(rejoinDeps(deadline), record)
+            : await runSerial(advanceRecord)
+        assertLive()
+        await runSerial(refreshControl)
+        if (recoveryGeneration !== generation) return { advanced: false }
+        if (next?.stage === 'adopted')
+          awaitingBootstrap = { attemptID, trigger, entries: record.ledgerBefore }
+        if (next?.stage === 'refused')
+          return failed('refused', { refusal: next.refusal, ...rejoinFailureDetails })
+        if (next == null) {
+          if (rejoinDiscarded === 'renewal') return failed('renewal-required', rejoinFailureDetails)
+          if (rejoinDiscarded === 'invalidated') {
+            if (!healRequested) inFlightEntries = null
+            return failed('unconfirmed', { advisory: [] }, healRequested)
+          }
+          if (rejoinDiscarded === 'unconfirmed') return failed('unconfirmed', rejoinFailureDetails)
+        }
       }
       return failed('deadline')
     } catch (error) {
@@ -2918,6 +2927,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         emitRecovery({ ...base, phase: 'failed', reason: 'disposed' })
         throw error instanceof PeerDisposedError ? error : new PeerDisposedError('Peer is disposed')
       }
+      retryRecovery()
       emitRecovery({ ...base, phase: 'failed', reason: 'error', error })
       throw error
     }
@@ -2942,8 +2952,9 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       try {
         return await attemptBody(trigger, generation, port, commits, rendezvous)
       } finally {
-        if (retryRecoveryAdoption == null) pendingRecovery = null
+        pendingRecovery = null
         if (activeRecovery === attempt) activeRecovery = null
+        scheduleOperations()
         flushHostOutbox()
       }
     })()
@@ -2961,6 +2972,15 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
 
   const recover = async (): Promise<{ advanced: boolean; reenact: Array<string> }> => {
     renewalRequiredEpoch = null
+    await ready
+    if (control != null && (await control.load()).rejoin?.stage === 'refused') {
+      await runSerial(async () => {
+        if ((await control.load()).rejoin?.stage === 'refused') {
+          await applyResolved(control, { deleteRejoin: true }, newPublishID())
+          await refreshControl()
+        }
+      })
+    }
     refusalHeld = false
     clearRecoveryRetry()
     const { advanced } = await runRecovery('consumer')
@@ -2981,7 +3001,6 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
       locallyRemoved ||
       !healRequested ||
       activeRecovery != null ||
-      rejoinHeld ||
       renewalHeld() ||
       refusalHeld
     )
@@ -3104,6 +3123,7 @@ export function createGroupPeer<Protocols extends Record<string, ProtocolDefinit
         await runSerial(deliverPendingWelcomes)
         if (disposed || locallyRemoved) return
         logDelivery?.trigger()
+        if ((await control?.load())?.rejoin != null && !refusalHeld) healRequested = true
         scheduleOperations()
         void healIfRequested()
       },
