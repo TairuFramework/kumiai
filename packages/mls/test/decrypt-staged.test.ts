@@ -143,7 +143,7 @@ describe('GroupHandle.decryptStaged', () => {
   test.each(['not-json-garbage', JSON.stringify({ id: '' })])(
     'an unnamed sender fails before persistence and does not consume the frame (%s)',
     async (identity) => {
-      const { alice, receiver, sealed } = await fixture('staged-unnamed')
+      const { alice, receiver, sealed, restore } = await fixture('staged-unnamed')
       const tree = receiver.state.ratchetTree
       const aliceLeaf = receiver.listMembers().find((member) => member.id === alice.id)?.leafIndex
       if (aliceLeaf == null) throw new Error('missing sender leaf')
@@ -160,9 +160,11 @@ describe('GroupHandle.decryptStaged', () => {
       credential.identity = utf8.encode(identity)
       const persist = vi.fn(async () => {})
       const before = encodeClientState(receiver.state)
+      const restored = await restore(before)
 
-      await expect(receiver.decryptStaged(sealed, {}, persist)).rejects.toThrow('sender')
+      await expect(restored.decryptStaged(sealed, {}, persist)).rejects.toThrow('sender')
       expect(persist).not.toHaveBeenCalled()
+      expect(encodeClientState(restored.state)).toEqual(before)
       expect(encodeClientState(receiver.state)).toEqual(before)
       credential.identity = originalIdentity
       await expect(receiver.decrypt(sealed)).resolves.toMatchObject({ senderDID: alice.id })
