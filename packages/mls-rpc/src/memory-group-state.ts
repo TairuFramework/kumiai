@@ -36,7 +36,7 @@ type TransactionBinding = {
   owners: OwnerQueues
   attempt: OwnerAttempt
   changes: number
-  opensStarted: number
+  requiredReadsAdmitted: number
   writer: CoordinatorWriter
 }
 const transactionEntries = new WeakMap<MemoryTransaction['rows'], TransactionBinding>()
@@ -125,7 +125,7 @@ export function bindMemoryOwner(
     owners,
     attempt,
     changes: 0,
-    opensStarted: 0,
+    requiredReadsAdmitted: 0,
     writer: new CoordinatorWriter({ tx, entry, attempt }),
   })
 }
@@ -173,6 +173,13 @@ export function memoryCallback<TValue>(tx: MemoryTransaction, work: () => TValue
   return entry === undefined ? work() : entry.callback(work)
 }
 
+export function memoryReadAdmitted(tx: MemoryTransaction, required = true): void {
+  const binding = transactionBinding(tx.rows)
+  if (binding === undefined) return
+  binding.attempt.assertLive()
+  if (required) binding.requiredReadsAdmitted++
+}
+
 export async function memoryRequired<TValue>(
   tx: MemoryTransaction,
   work: () => Promise<TValue>,
@@ -180,15 +187,16 @@ export async function memoryRequired<TValue>(
 ): Promise<TValue> {
   const binding = transactionBinding(tx.rows)
   const changes = binding?.changes
-  const opensStarted = binding?.opensStarted
+  const requiredReadsAdmitted = binding?.requiredReadsAdmitted
   try {
     return await work()
   } catch (error) {
     if (
       binding !== undefined &&
-      (binding.changes !== changes || (required && binding.opensStarted !== opensStarted))
+      (binding.changes !== changes ||
+        (required && binding.requiredReadsAdmitted !== requiredReadsAdmitted))
     )
-      binding.entry.fail(error)
+      binding.entry.fail(binding.attempt, error)
     throw error
   }
 }
@@ -199,10 +207,11 @@ export async function memorySeal(
   address: StoredAddress,
   value: unknown,
 ): Promise<Uint8Array> {
+  const binding = transactionBinding(tx.rows)
   try {
     return await memoryCallback(tx, () => sealRecord(atRest, address, value))
   } catch (error) {
-    transactionBinding(tx.rows)?.entry.fail(error)
+    binding?.entry.fail(binding.attempt, error)
     throw error
   }
 }
@@ -213,20 +222,7 @@ export function memoryOpen(
   address: StoredAddress,
   bytes: Uint8Array,
 ): Promise<unknown> {
-  const binding = transactionBinding(tx.rows)
-  return memoryCallback(tx, () => {
-    return openRecord(
-      {
-        open(ciphertext, aad) {
-          if (binding !== undefined) binding.opensStarted++
-          return atRest.open(ciphertext, aad)
-        },
-        seal: (plaintext, aad) => atRest.seal(plaintext, aad),
-      },
-      address,
-      bytes,
-    )
-  })
+  return memoryCallback(tx, () => openRecord(atRest, address, bytes))
 }
 
 export function memoryOperation<TArgs extends Array<unknown>, TValue>(
@@ -237,14 +233,19 @@ export function memoryOperation<TArgs extends Array<unknown>, TValue>(
   const binding = transactionBinding(tx.rows)
   return (...args) => {
     try {
-      const owned = decodeStoredValue(encodeStoredValue(args)) as TArgs
+      const owned = memoryCallback(tx, () => decodeStoredValue(encodeStoredValue(args)) as TArgs)
       const run = async () => {
         const changes = binding?.changes
+        const requiredReadsAdmitted = binding?.requiredReadsAdmitted
         try {
           if (target !== undefined) assertMemoryWrite(tx, target)
           return await operation(...owned)
         } catch (error) {
-          if (binding !== undefined && binding.changes !== changes) binding.entry.fail(error)
+          if (
+            binding !== undefined &&
+            (binding.changes !== changes || binding.requiredReadsAdmitted !== requiredReadsAdmitted)
+          )
+            binding.entry.fail(binding.attempt, error)
           throw error
         }
       }
@@ -316,11 +317,14 @@ export function createUnlockedGroupStateStores(params: {
     }
     return {
       async load(): Promise<TValue | null> {
-        const bytes = tx.rows[namespace]?.get(key)
-        if (bytes === undefined) return null
         const value = await memoryRequired(
           tx,
           async () => {
+            const rows = tx.rows[namespace]
+            if (rows === undefined) return null
+            memoryReadAdmitted(tx, params.requiredOpen)
+            const bytes = rows.get(key)
+            if (bytes === undefined) return null
             if (!(bytes instanceof Uint8Array))
               throw new GroupStateConflictError('Unreadable sealed row')
             const value = (await memoryOpen(tx, atRest, address, bytes)) as TValue

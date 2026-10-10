@@ -9,6 +9,7 @@ import {
   assertMemoryWrite,
   memoryOpen,
   memoryOperation,
+  memoryReadAdmitted,
   memoryRequired,
   memorySeal,
 } from './memory-group-state.js'
@@ -61,9 +62,11 @@ export function memoryDeviceTable<TValue>(params: DeviceTableParams) {
     async load(recordID: string): Promise<TValue | null> {
       const location = address(recordID)
       const key = physicalRecordKey(location)
-      const bytes = map().get(key)
-      if (bytes === undefined) return null
       const value = await memoryRequired(tx, async () => {
+        const rows = map()
+        memoryReadAdmitted(tx)
+        const bytes = rows.get(key)
+        if (bytes === undefined) return null
         if (!(bytes instanceof Uint8Array))
           throw new GroupStateConflictError('Unreadable device row')
         const stored = await memoryOpen(tx, atRest, location, bytes)

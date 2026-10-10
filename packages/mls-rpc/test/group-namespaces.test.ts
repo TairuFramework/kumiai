@@ -341,61 +341,73 @@ for (const mode of ['real-mls', 'double'] as const) {
       { protocol: 'other-protocol' },
       { prc: 'other-procedure' },
       { data: new Uint8Array([9]) },
-    ])('rejects overlapping immutable outbox replacement %j', async (replacement) => {
-      const { groups } = await setup()
-      await groups.transition(
-        await nextChange(groups, groupID, 'overlapping-outbox'),
-        async (stores) => {
-          const [, second] = await Promise.all([
-            stores.incarnation(1).outbox.put([entry]),
-            stores
-              .incarnation(1)
-              .outbox.put([{ ...entry, ...replacement }])
-              .catch((error: unknown) => error),
-          ])
-          expect(second).toMatchObject({ name: 'OutboxReplacementError' })
-          expect(await stores.incarnation(1).outbox.list()).toEqual([entry])
-        },
-      )
-      expect(await groups.ports(key).outbox.list()).toEqual([entry])
+    ])('rolls back overlapping immutable outbox replacement %j', async (replacement) => {
+      const { db, groups } = await setup()
+      const before = db.snapshot()
+      await expect(
+        groups.transition(
+          await nextChange(groups, groupID, 'overlapping-outbox'),
+          async (stores) => {
+            const [, second] = await Promise.all([
+              stores.incarnation(1).outbox.put([entry]),
+              stores
+                .incarnation(1)
+                .outbox.put([{ ...entry, ...replacement }])
+                .catch((error: unknown) => error),
+            ])
+            expect(second).toMatchObject({ name: 'OutboxReplacementError' })
+            expect(await stores.incarnation(1).outbox.list()).toEqual([entry])
+          },
+        ),
+      ).rejects.toThrow('Transaction is rollback-only')
+      expect(db.snapshot()).toEqual(before)
+      expect(await groups.ports(key).outbox.list()).toEqual([])
     })
 
-    test('rejects overlapping conflicting settlement puts and retains the first value', async () => {
-      const { groups } = await setup()
-      await groups.transition(
-        await nextChange(groups, groupID, 'overlapping-settlement'),
-        async (stores) => {
-          const [, second] = await Promise.all([
-            stores.incarnation(1).meta.putSettlement(7, obligation),
-            stores
-              .incarnation(1)
-              .meta.putSettlement(7, { ...obligation, attemptID: 'other-attempt' })
-              .catch((error: unknown) => error),
-          ])
-          expect(second).toMatchObject({ name: 'GroupStateConflictError' })
-          expect(await stores.incarnation(1).meta.loadSettlement(7)).toEqual(obligation)
-        },
-      )
-      expect(await groups.ports(key).outbox.loadSettlement(7)).toEqual(obligation)
+    test('rolls back overlapping conflicting settlement puts after a required read', async () => {
+      const { db, groups } = await setup()
+      const before = db.snapshot()
+      await expect(
+        groups.transition(
+          await nextChange(groups, groupID, 'overlapping-settlement'),
+          async (stores) => {
+            const [, second] = await Promise.all([
+              stores.incarnation(1).meta.putSettlement(7, obligation),
+              stores
+                .incarnation(1)
+                .meta.putSettlement(7, { ...obligation, attemptID: 'other-attempt' })
+                .catch((error: unknown) => error),
+            ])
+            expect(second).toMatchObject({ name: 'GroupStateConflictError' })
+            expect(await stores.incarnation(1).meta.loadSettlement(7)).toEqual(obligation)
+          },
+        ),
+      ).rejects.toThrow('Transaction is rollback-only')
+      expect(db.snapshot()).toEqual(before)
+      expect(await groups.ports(key).outbox.loadSettlement(7)).toBeNull()
     })
 
-    test('rejects overlapping conflicting event puts and retains the first value', async () => {
-      const { groups } = await setup()
-      await groups.transition(
-        await nextChange(groups, groupID, 'overlapping-event'),
-        async (stores) => {
-          const [, second] = await Promise.all([
-            stores.incarnation(1).meta.putEvents([event]),
-            stores
-              .incarnation(1)
-              .meta.putEvents([{ ...event, entry: { ...entry, status: 'failed' } }])
-              .catch((error: unknown) => error),
-          ])
-          expect(second).toMatchObject({ name: 'GroupStateConflictError' })
-          expect(await stores.incarnation(1).meta.events()).toEqual([event])
-        },
-      )
-      expect(await groups.ports(key).outbox.events()).toEqual([event])
+    test('rolls back overlapping conflicting event puts after a required read', async () => {
+      const { db, groups } = await setup()
+      const before = db.snapshot()
+      await expect(
+        groups.transition(
+          await nextChange(groups, groupID, 'overlapping-event'),
+          async (stores) => {
+            const [, second] = await Promise.all([
+              stores.incarnation(1).meta.putEvents([event]),
+              stores
+                .incarnation(1)
+                .meta.putEvents([{ ...event, entry: { ...entry, status: 'failed' } }])
+                .catch((error: unknown) => error),
+            ])
+            expect(second).toMatchObject({ name: 'GroupStateConflictError' })
+            expect(await stores.incarnation(1).meta.events()).toEqual([event])
+          },
+        ),
+      ).rejects.toThrow('Transaction is rollback-only')
+      expect(db.snapshot()).toEqual(before)
+      expect(await groups.ports(key).outbox.events()).toEqual([])
     })
 
     test('keeps overlapping identical puts idempotent across store instances', async () => {
@@ -450,30 +462,34 @@ for (const mode of ['real-mls', 'double'] as const) {
       )
     })
 
-    test('fences an overlapping anchor write behind lifetime retirement', async () => {
-      const { groups } = await setup()
-      await groups.transition(
-        await nextChange(groups, groupID, 'overlapping-retirement'),
-        async (stores) => {
-          const life = await stores.lifetime.load()
-          if (life === null) throw new Error('Missing lifetime')
-          const [, second] = await Promise.all([
-            stores.lifetime.save({
-              ...life,
-              activeIncarnation: null,
-              revision: 2,
-              mutationID: 'overlapping-retirement',
-            }),
-            stores
-              .incarnation(1)
-              .anchor.save(anchor)
-              .catch((error: unknown) => error),
-          ])
-          expect(second).toMatchObject({ name: 'DisplacedGroupHandleError' })
-          expect(await stores.incarnation(1).anchor.load()).toBeNull()
-        },
-      )
-      expect((await groups.load(groupID))?.activeIncarnation).toBeNull()
+    test('rolls back retirement when an overlapping anchor write fails after a required read', async () => {
+      const { db, groups } = await setup()
+      const before = db.snapshot()
+      await expect(
+        groups.transition(
+          await nextChange(groups, groupID, 'overlapping-retirement'),
+          async (stores) => {
+            const life = await stores.lifetime.load()
+            if (life === null) throw new Error('Missing lifetime')
+            const [, second] = await Promise.all([
+              stores.lifetime.save({
+                ...life,
+                activeIncarnation: null,
+                revision: 2,
+                mutationID: 'overlapping-retirement',
+              }),
+              stores
+                .incarnation(1)
+                .anchor.save(anchor)
+                .catch((error: unknown) => error),
+            ])
+            expect(second).toMatchObject({ name: 'DisplacedGroupHandleError' })
+            expect(await stores.incarnation(1).anchor.load()).toBeNull()
+          },
+        ),
+      ).rejects.toThrow('Transaction is rollback-only')
+      expect(db.snapshot()).toEqual(before)
+      expect((await groups.load(groupID))?.activeIncarnation).toBe(1)
     })
 
     test('serialises every store operation behind an unrelated namespace seal', async () => {

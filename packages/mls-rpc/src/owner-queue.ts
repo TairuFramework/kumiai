@@ -43,7 +43,7 @@ export type OwnerEntry = {
   operation<T>(attempt: OwnerAttempt, run: (attempt: OwnerAttempt) => Promise<T>): Promise<T>
   coordinator(attempt: OwnerAttempt): CoordinatorToken
   coordinate<T>(token: CoordinatorToken, run: (attempt: OwnerAttempt) => Promise<T>): Promise<T>
-  fail(error: unknown): void
+  fail(attempt: OwnerAttempt, error: unknown): void
   readonly rollbackOnly: boolean
   callback<T>(fn: () => T): T
   trackBackend(promise: Promise<unknown>): void
@@ -373,7 +373,8 @@ export function createOwnerQueues(options?: {
           }
           return reserve(attempt, run)
         },
-        fail(_error) {
+        fail(attempt, _error) {
+          if (attempt !== currentAttempt.attempt || attempt.revoked) return
           fatal = true
         },
         get rollbackOnly() {

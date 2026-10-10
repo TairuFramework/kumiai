@@ -8,6 +8,7 @@ import {
   registerMemoryTransactionRows,
 } from './memory-group-state.js'
 import { groupOwnerKey } from './memory-incarnation-stores.js'
+import { ownerEntryFailureSignal } from './owner-queue.js'
 import { PersistencePhaseError, StorageOutcomeUnknownError } from './persistence-errors.js'
 import type {
   MemoryDatabase,
@@ -586,7 +587,14 @@ export function createMemoryTransaction(params: { rows: MemoryStoreRows }): Memo
       } finally {
         owner.active = false
         if (!retained) releaseBackend()
-        if (disposed) await memoryTransactionEntry(rows)?.backendSettled()
+        if (disposed) {
+          const entry = memoryTransactionEntry(rows)
+          if (
+            entry !== undefined &&
+            (entry.kind !== 'read' || ownerEntryFailureSignal(entry)?.aborted)
+          )
+            await entry.backendSettled()
+        }
       }
     },
   }

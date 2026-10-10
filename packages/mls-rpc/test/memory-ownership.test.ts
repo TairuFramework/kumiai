@@ -5,11 +5,17 @@ import { createMemoryDevicePersistence } from '../src/memory-device-persistence.
 import {
   createMemoryGroupCoordinator,
   createMemoryGroupPersistence,
+  memoryGroupOwnerQueues,
 } from '../src/memory-group-persistence.js'
-import { memoryRequired, memoryTransactionEntry } from '../src/memory-group-state.js'
+import {
+  bindMemoryOwner,
+  memoryRequired,
+  memoryTransactionEntry,
+} from '../src/memory-group-state.js'
 import { memoryRecordTable } from '../src/memory-incarnation-stores.js'
 import { createMemoryTransaction } from '../src/memory-transaction.js'
-import { createOwnerQueues } from '../src/owner-queue.js'
+import { createOwnerQueues, type OwnerEntry } from '../src/owner-queue.js'
+import { physicalRecordKey, topicLocator } from '../src/persistence-codec.js'
 import { GroupStateConflictError, PersistencePhaseError } from '../src/persistence-errors.js'
 import type { MemoryTransaction } from '../src/persistence-types.js'
 import { deferred } from '../src/runtime.js'
@@ -78,6 +84,110 @@ for (const mode of ['real-mls', 'double'] as const) {
         id: groupID,
         mode,
         ownershipContext: withPort ? createAsyncLocalOwnershipContext() : undefined,
+      })
+
+      test('a revoked attempt late seal failure cannot poison its retry', async () => {
+        const fixture = await createStorageFixture(options())
+        const db = createMemoryTransaction({ rows: await fixture.inspectRows() })
+        const owners = createOwnerQueues({ ownershipContext: options().ownershipContext })
+        const latch = fixture.holdNextSeal()
+        fixture.failNextSeal(new Error('obsolete seal failed'))
+        const reason = new PersistencePhaseError('Retry the attempt')
+        const recorded = deferred<void>()
+        try {
+          await owners.run('transition', { groupID, ownerDID: null }, async (entry) => {
+            await entry.enter('prepare')
+            await entry.enter('work')
+            const oldAttempt = entry.attempt()
+            const fail = entry.fail
+            entry.fail = (...args) => {
+              fail(...args)
+              recorded.resolve()
+            }
+            const first = observed(
+              db.transact({ groupID, devicePackages: false }, async (tx) => {
+                bindMemoryOwner(tx, entry, owners)
+                await fixture
+                  .constructGroupStores(tx, key)
+                  .incarnation(1)
+                  .cursor.save('obsolete', '1')
+              }),
+            )
+            await within(latch.reached)
+            oldAttempt.revoke(reason)
+            expect(await within(first)).toBe(reason)
+            await entry.enter('outcome')
+            await entry.enter('work')
+            expect(entry.attempt()).not.toBe(oldAttempt)
+            expect(entry.rollbackOnly).toBe(false)
+            await db.transact({ groupID, devicePackages: false }, async (tx) => {
+              bindMemoryOwner(tx, entry, owners)
+              await fixture.constructGroupStores(tx, key).incarnation(1).cursor.save('retry', '2')
+              latch.release()
+              await within(recorded.promise)
+              expect(entry.rollbackOnly).toBe(false)
+              await entry.enter('outcome')
+            })
+            entry.settle('committed')
+          })
+          const cursor = async (topicID: string) =>
+            physicalRecordKey({
+              ...key,
+              namespace: 'cursor',
+              recordID: await topicLocator(topicID),
+            })
+          expect(db.snapshot().cursor?.has(await cursor('retry'))).toBe(true)
+          expect(db.snapshot().cursor?.has(await cursor('obsolete'))).toBe(false)
+        } finally {
+          latch.release()
+          await fixture.close()
+        }
+      })
+
+      test('argument getters reject synchronous root reentrancy before a root can queue', async () => {
+        const fixture = await createStorageFixture(options())
+        const device = fixture.ports.device
+        const captured = deferred<void>()
+        const finish = deferred<void>()
+        let nested: Promise<unknown> | undefined
+        let entered = false
+        try {
+          const transition = observed(
+            device.transition(
+              { mutationID: 'argument-getter', expectedRevision: 1, group: null },
+              async (stores) => {
+                await Promise.resolve()
+                await stores.restore.save({
+                  get id() {
+                    nested = observed(device.load())
+                    return 'argument-getter'
+                  },
+                  stage: 'groups',
+                  remainingGroups: [],
+                })
+                captured.resolve()
+                await finish.promise
+              },
+            ),
+          )
+          await within(captured.promise)
+          if (nested === undefined) throw new Error('Argument getter was not called')
+          const next = fixture.readWith(async () => {
+            entered = true
+          })
+          try {
+            expect(await within(nested)).toMatchObject({ name: 'ReentrantOwnershipError' })
+            expect(entered).toBe(false)
+          } finally {
+            finish.resolve()
+            expect(await within(transition)).toBeUndefined()
+            await within(next)
+          }
+          expect(entered).toBe(true)
+        } finally {
+          finish.resolve()
+          await fixture.close()
+        }
       })
 
       test('effect callables are captured once before finalise', async () => {
@@ -235,6 +345,61 @@ for (const mode of ['real-mls', 'double'] as const) {
         }
       })
 
+      test.each(['device-package', 'trust', 'cursor'] as const)(
+        'a caught invalid non-byte required row rolls back all work (%s)',
+        async (namespace) => {
+          const fixture = await createStorageFixture(options())
+          const device = fixture.ports.device
+          const before = await fixture.inspectRows()
+          let caught: unknown
+          let rollbackOnly: boolean | undefined
+          try {
+            await expect(
+              device.transition(
+                {
+                  mutationID: 'invalid-required-row',
+                  expectedRevision: 1,
+                  group: await nextChange(device.groups, groupID, 'invalid-required-row'),
+                },
+                async (stores) => {
+                  const entry = memoryTransactionEntry(stores.tx.rows)
+                  if (entry === undefined || stores.group === null)
+                    throw new Error('Missing group transaction entry')
+                  const rows = stores.tx.rows[namespace]
+                  const rowID = rows?.keys().next().value
+                  if (rows === undefined || rowID === undefined)
+                    throw new Error('Missing required record')
+                  rows.set(rowID, { invalid: 'non-byte row' })
+                  const load: () => Promise<unknown> | undefined =
+                    namespace === 'device-package'
+                      ? () => stores.ordinary('source-1').list(device.ownerDID)
+                      : namespace === 'trust'
+                        ? () => stores.group?.trust.load()
+                        : () => stores.group?.incarnation(1).cursor.load('topic-secret')
+                  caught = await observed(Promise.resolve().then<unknown>(load))
+                  expect(caught).toBeInstanceOf(GroupStateConflictError)
+                  await stores.restore.save({
+                    id: 'after-invalid-row',
+                    stage: 'groups',
+                    remainingGroups: [],
+                  })
+                  rollbackOnly = entry.rollbackOnly
+                },
+              ),
+            ).rejects.toThrow(new GroupStateConflictError('Transaction is rollback-only'))
+            expect(rollbackOnly).toBe(true)
+            expect(caught).toMatchObject({
+              message:
+                namespace === 'device-package' ? 'Unreadable device row' : 'Unreadable sealed row',
+            })
+            expect(await fixture.inspectRows()).toEqual(before)
+            expect(await device.load()).toMatchObject({ revision: 1 })
+          } finally {
+            await fixture.close()
+          }
+        },
+      )
+
       test('a caught codec phase error during a required open makes the transition rollback-only', async () => {
         const fixture = await createStorageFixture(options())
         const openError = new PersistencePhaseError('codec open failed')
@@ -281,6 +446,67 @@ for (const mode of ['real-mls', 'double'] as const) {
           expect(refusal).toBeInstanceOf(GroupStateConflictError)
           expect(await groups.ports(key).cursor.load('after-load-refusal')).toBe('6')
         } finally {
+          await fixture.close()
+        }
+      })
+
+      test('a failed device Read rejects within 2000 ms while tracked completion stays pending', async () => {
+        const fixture = await createStorageFixture(options())
+        const before = await fixture.inspectRows()
+        const db = createMemoryTransaction({ rows: before })
+        const codec = createDeterministicAtRestCodec({ key: new Uint8Array(32).fill(98) })
+        const backend = deferred<void>()
+        const registered = deferred<void>()
+        const readError = new Error('device read failed')
+        let fail = true
+        let completed = false
+        let captured: OwnerEntry | undefined
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const device = createMemoryDevicePersistence({
+          db,
+          providerID: fixture.ports.device.providerID,
+          ownerDID: fixture.ports.device.ownerDID,
+          ownershipContext: options().ownershipContext,
+          atRest: {
+            seal: codec.seal,
+            open(bytes, aad) {
+              if (!fail) return codec.open(bytes, aad)
+              fail = false
+              captured = memoryGroupOwnerQueues(db)?.current()
+              if (captured === undefined) throw new Error('Missing Read entry')
+              captured.trackBackend(
+                backend.promise.then(() => {
+                  completed = true
+                }),
+              )
+              registered.resolve()
+              throw readError
+            },
+          },
+        })
+        const read = observed(device.load())
+        try {
+          await within(registered.promise)
+          expect(await within(device.load())).toMatchObject({ revision: 1 })
+          expect(captured?.phase).toBe('released')
+          const timeout = Symbol('Read waited for tracked completion')
+          const result = await Promise.race([
+            read,
+            new Promise<symbol>((resolve) => {
+              timer = setTimeout(() => resolve(timeout), 2000)
+            }),
+          ])
+          expect(result).toBe(readError)
+          expect(completed).toBe(false)
+          backend.resolve()
+          await captured?.backendSettled()
+          expect(completed).toBe(true)
+          expect(await within(device.load())).toMatchObject({ revision: 1 })
+          expect(db.snapshot()).toEqual(before)
+        } finally {
+          clearTimeout(timer)
+          backend.resolve()
+          await read
           await fixture.close()
         }
       })

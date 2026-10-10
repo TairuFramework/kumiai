@@ -306,7 +306,7 @@ describe('runtime-neutral owner operations', { timeout: 2000 }, () => {
         ).rejects.toThrow('no rows changed')
         expect(entry.rollbackOnly).toBe(false)
         const failing = entry.operation(entry.attempt(), async () => {
-          entry.fail(reason)
+          entry.fail(entry.attempt(), reason)
           throw reason
         })
         if (mode === 'caught') await expect(failing).rejects.toBe(reason)

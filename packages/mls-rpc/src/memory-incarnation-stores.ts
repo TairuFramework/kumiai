@@ -4,6 +4,7 @@ import {
   createUnlockedGroupStateStores,
   memoryOpen,
   memoryOperation,
+  memoryReadAdmitted,
   memoryRequired,
   memorySeal,
 } from './memory-group-state.js'
@@ -78,9 +79,11 @@ export function memoryRecordTable<TValue>(params: {
     async load(recordID: string): Promise<TValue | null> {
       const location = address(recordID)
       const id = physicalRecordKey(location)
-      const bytes = map().get(id)
-      if (bytes === undefined) return null
       const value = await memoryRequired(tx, async () => {
+        const rows = map()
+        memoryReadAdmitted(tx)
+        const bytes = rows.get(id)
+        if (bytes === undefined) return null
         if (!(bytes instanceof Uint8Array))
           throw new GroupStateConflictError('Unreadable sealed row')
         return (await memoryOpen(tx, atRest, location, bytes)) as TValue
